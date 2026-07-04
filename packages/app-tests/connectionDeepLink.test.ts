@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { parseConnectionDeepLink } from "../../apps/desktop/src/lib/connectionDeepLink.ts";
+import { parseConnectionDeepLink } from "../../apps/desktop/src/lib/connection/connectionDeepLink.ts";
 
 test("parses dbx connection deep link query fields", () => {
   const draft = parseConnectionDeepLink("dbx://connection/new?type=postgres&host=db.internal&port=15432&user=app&database=orders&name=Orders");

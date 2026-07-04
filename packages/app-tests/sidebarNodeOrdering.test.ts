@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { sortSidebarTreeChildrenForParent } from "../../apps/desktop/src/lib/sidebarNodeOrdering.ts";
+import { sortSidebarTreeChildrenForParent } from "../../apps/desktop/src/lib/sidebar/sidebarNodeOrdering.ts";
 import type { TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 test("reorders cached MongoDB collections alphabetically", () => {

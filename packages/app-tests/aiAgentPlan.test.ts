@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildAiAgentPlan } from "../../apps/desktop/src/lib/aiAgentPlan.ts";
-import type { AiAction, AiAssistantMode } from "../../apps/desktop/src/lib/ai.ts";
+import { buildAiAgentPlan } from "../../apps/desktop/src/lib/ai/aiAgentPlan.ts";
+import type { AiAction, AiAssistantMode } from "../../apps/desktop/src/lib/ai/ai.ts";
 import type { ConnectionConfig } from "../../apps/desktop/src/types/database.ts";
 
 function conn(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {

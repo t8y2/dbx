@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { sidebarTypeSearchNextQuery } from "../../apps/desktop/src/lib/sidebarTypeSearch.ts";
+import { sidebarTypeSearchNextQuery } from "../../apps/desktop/src/lib/sidebar/sidebarTypeSearch.ts";
 
 test("starts sidebar search from printable keys", () => {
   assert.equal(sidebarTypeSearchNextQuery("", { key: "e" }), "e");

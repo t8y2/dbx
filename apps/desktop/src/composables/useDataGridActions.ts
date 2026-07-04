@@ -3,16 +3,16 @@ import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { buildTableSelectSql, quoteTableIdentifier } from "@/lib/tableSelectSql";
-import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/tableEditing";
-import { tableMetaForDataTab } from "@/lib/tableDataTabMeta";
-import * as api from "@/lib/api";
+import { buildTableSelectSql, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
+import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
+import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
+import * as api from "@/lib/backend/api";
 import type { QueryTab } from "@/types/database";
 import { useToast } from "@/composables/useToast";
-import { effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/jdbcDialect";
-import { applyMongoFindSort } from "@/lib/mongoShellCommand";
-import { uuid } from "@/lib/utils";
-import type { DataGridSortMode } from "@/lib/dataGridSort";
+import { effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
+import { applyMongoFindSort } from "@/lib/mongo/mongoShellCommand";
+import { uuid } from "@/lib/common/utils";
+import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 
 const DATA_TAB_METADATA_TTL_MS = 30_000;
 
@@ -33,7 +33,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
     const tableMeta = tableMetaForDataTab(tab);
     const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : (tableMeta?.primaryKeys ?? []);
-    const useRowId = usesSyntheticRowIdKey(effectiveDbType, primaryKeys);
+    const useRowId = usesSyntheticRowIdKey(effectiveDbType, primaryKeys, tableMeta?.tableType);
     return buildTableSelectSql({
       databaseType: effectiveDbType,
       schema: tableMeta?.schema,

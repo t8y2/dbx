@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { selectedTreeNodesInVisibleOrder, treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "../../apps/desktop/src/lib/sidebarTreeSelection.ts";
+import { selectedTreeNodesInVisibleOrder, treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "../../apps/desktop/src/lib/sidebar/sidebarTreeSelection.ts";
 import type { TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 const nodes: TreeNode[] = [

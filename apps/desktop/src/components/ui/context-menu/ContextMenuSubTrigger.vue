@@ -5,7 +5,7 @@ import type { HTMLAttributes } from "vue";
 import { reactiveOmit } from "@vueuse/core";
 import { ChevronRightIcon } from "@lucide/vue";
 import { ContextMenuSubTrigger, useForwardProps } from "reka-ui";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/common/utils";
 
 const props = defineProps<ContextMenuSubTriggerProps & { class?: HTMLAttributes["class"]; inset?: boolean }>();
 

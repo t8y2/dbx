@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import type { ColumnInfo } from "../../apps/desktop/src/types/database.ts";
-import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableDataCopy, tableClipboardMatchesTarget, tableDataCopyColumnOptions } from "../../apps/desktop/src/lib/tableClipboard.ts";
+import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableDataCopy, tableClipboardMatchesTarget, tableDataCopyColumnOptions } from "../../apps/desktop/src/lib/table/tableClipboard.ts";
 
 test("table clipboard entries must match the paste target context", () => {
   const target = { connectionId: "c1", database: "app", schema: "public" };

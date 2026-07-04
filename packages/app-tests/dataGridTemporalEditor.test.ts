@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { stepTemporalInputValue } from "../../apps/desktop/src/lib/dataGridTemporalEditor.ts";
+import { stepTemporalInputValue } from "../../apps/desktop/src/lib/dataGrid/dataGridTemporalEditor.ts";
 
 test("steps datetime date and time parts", () => {
   assert.equal(stepTemporalInputValue("2025-07-01 13:41:49", "datetime", "day", 1), "2025-07-02 13:41:49");

@@ -11,15 +11,15 @@ import { Switch } from "@/components/ui/switch";
 import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import RedisJsonTree from "./RedisJsonTree.vue";
-import * as api from "@/lib/api";
-import type { RedisKeyInfo, RedisValue } from "@/lib/api";
+import * as api from "@/lib/backend/api";
+import type { RedisKeyInfo, RedisValue } from "@/lib/backend/api";
 import { useToast } from "@/composables/useToast";
 import { useTheme } from "@/composables/useTheme";
 import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle";
-import { createRedisShikiJsonHighlighter, type RedisJsonHighlighter } from "@/lib/redisJsonHighlighter";
-import { copyToClipboard } from "@/lib/clipboard";
-import { formatTtl } from "@/lib/ttlFormat";
-import { canEditRedisMemberDetail, clampRedisMemberDetailSheetWidth, formatRedisMemberDetail, getRedisMemberSelectionKey } from "@/lib/redisValuePresentation";
+import { createRedisShikiJsonHighlighter, type RedisJsonHighlighter } from "@/lib/redis/redisJsonHighlighter";
+import { copyToClipboard } from "@/lib/common/clipboard";
+import { formatTtl } from "@/lib/common/ttlFormat";
+import { canEditRedisMemberDetail, clampRedisMemberDetailSheetWidth, formatRedisMemberDetail, getRedisMemberSelectionKey } from "@/lib/redis/redisValuePresentation";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -213,11 +213,12 @@ function escapeHtml(value: string): string {
 const deleteDetails = computed(() => {
   const pending = pendingDelete.value;
   if (!pending) return "";
-  if (pending.kind === "key") return t("dangerDialog.redisKeyDetails", { key: props.keyDisplay });
-  if (pending.kind === "hash") return t("dangerDialog.redisHashFieldDetails", { key: props.keyDisplay, field: pending.field });
-  if (pending.kind === "list") return t("dangerDialog.redisListItemDetails", { key: props.keyDisplay, index: pending.index });
-  if (pending.kind === "zset") return t("dangerDialog.redisSetMemberDetails", { key: props.keyDisplay, member: pending.member });
-  return t("dangerDialog.redisSetMemberDetails", { key: props.keyDisplay, member: pending.member });
+  const key = formatValue(props.keyDisplay);
+  if (pending.kind === "key") return t("dangerDialog.redisKeyDetails", { key });
+  if (pending.kind === "hash") return t("dangerDialog.redisHashFieldDetails", { key, field: formatValue(pending.field) });
+  if (pending.kind === "list") return t("dangerDialog.redisListItemDetails", { key, index: pending.index });
+  if (pending.kind === "zset") return t("dangerDialog.redisSetMemberDetails", { key, member: formatValue(pending.member) });
+  return t("dangerDialog.redisSetMemberDetails", { key, member: formatValue(pending.member) });
 });
 
 const isBinaryStringValue = computed(() => data.value?.key_type === "string" && data.value?.value_is_binary);
@@ -465,7 +466,7 @@ async function copyInsertStatement() {
 }
 
 function copyMember(value: unknown) {
-  void copyText(formatRedisMemberDetail(value).text);
+  void copyText(formatRedisMemberDetail(value).rawText);
 }
 
 function selectMember(title: string, value: unknown, context: RedisMemberContext) {
@@ -581,12 +582,12 @@ function startResizeZsetColumns(event: PointerEvent) {
 }
 
 function startEditMember() {
-  memberEditValue.value = selectedMemberDetail.value.text;
+  memberEditValue.value = selectedMemberDetail.value.rawText;
   isEditingMember.value = true;
 }
 
 function cancelEditMember() {
-  memberEditValue.value = selectedMemberDetail.value.text;
+  memberEditValue.value = selectedMemberDetail.value.rawText;
   isEditingMember.value = false;
 }
 
@@ -815,7 +816,7 @@ onBeforeUnmount(() => {
       <!-- Header -->
       <div class="shrink-0 border-b bg-background">
         <div class="flex h-9 items-center gap-2 px-4">
-          <span class="dbx-editor-font-family min-w-0 flex-1 truncate text-sm font-semibold">{{ data.key_display }}</span>
+          <span class="dbx-editor-font-family min-w-0 flex-1 truncate text-sm font-semibold">{{ formatValue(data.key_display) }}</span>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" @click="load"><RefreshCw class="h-3.5 w-3.5" /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" @click="copyValue"><Copy class="h-3.5 w-3.5" /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('redis.copyInsertStatement')" @click="copyInsertStatement"><Terminal class="h-3.5 w-3.5" /></Button>
@@ -906,7 +907,7 @@ onBeforeUnmount(() => {
               @click="viewMember(`#${row.index}`, row.value, { kind: 'list', index: row.index })"
             >
               <div class="px-3 py-1.5 text-xs text-muted-foreground border-r">{{ row.index }}</div>
-              <div class="px-3 py-1.5 truncate">{{ row.value }}</div>
+              <div class="px-3 py-1.5 truncate">{{ formatValue(row.value) }}</div>
               <div class="flex items-center justify-center gap-1">
                 <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100" :title="t('redis.viewMember')" @click.stop="viewMember(`#${row.index}`, row.value, { kind: 'list', index: row.index })"><Eye class="w-3 h-3" /></Button>
                 <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100" :title="t('redis.copyMember')" @click.stop="copyMember(row.value)"><Copy class="w-3 h-3" /></Button>
@@ -946,7 +947,7 @@ onBeforeUnmount(() => {
               :style="{ height: `${REDIS_COLLECTION_ROW_HEIGHT}px` }"
               @click="viewMember(t('redis.member'), row.value, { kind: 'set', member: String(row.value) })"
             >
-              <div class="px-3 py-1.5 truncate">{{ row.value }}</div>
+              <div class="px-3 py-1.5 truncate">{{ formatValue(row.value) }}</div>
               <div class="flex items-center justify-center gap-1">
                 <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100" :title="t('redis.viewMember')" @click.stop="viewMember(t('redis.member'), row.value, { kind: 'set', member: String(row.value) })"><Eye class="w-3 h-3" /></Button>
                 <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100" :title="t('redis.copyMember')" @click.stop="copyMember(row.value)"><Copy class="w-3 h-3" /></Button>
@@ -1004,8 +1005,8 @@ onBeforeUnmount(() => {
               :class="{ 'bg-accent/60': isSelectedMember(String(row.value.field), row.value.value) }"
               @click="viewMember(String(row.value.field), row.value.value, { kind: 'hash', field: String(row.value.field) })"
             >
-              <div class="px-3 py-1.5 text-blue-500 truncate border-r">{{ row.value.field }}</div>
-              <div class="px-3 py-1.5 truncate text-muted-foreground">{{ row.value.value }}</div>
+              <div class="px-3 py-1.5 text-blue-500 truncate border-r">{{ formatValue(row.value.field) }}</div>
+              <div class="px-3 py-1.5 truncate text-muted-foreground">{{ formatValue(row.value.value) }}</div>
               <div class="flex items-center justify-center gap-1">
                 <Button
                   variant="ghost"
@@ -1071,8 +1072,8 @@ onBeforeUnmount(() => {
               <div class="px-3 py-1.5 text-muted-foreground text-xs border-r min-w-0 truncate" :title="String(row.value.score)">
                 {{ row.value.score }}
               </div>
-              <div class="px-3 py-1.5 min-w-0 truncate" :title="String(row.value.member)">
-                {{ row.value.member }}
+              <div class="px-3 py-1.5 min-w-0 truncate" :title="formatValue(row.value.member)">
+                {{ formatValue(row.value.member) }}
               </div>
               <div class="flex items-center justify-center gap-1">
                 <Button
@@ -1156,7 +1157,7 @@ onBeforeUnmount(() => {
         <div class="absolute inset-y-0 left-0 z-10 w-2 -translate-x-1 cursor-col-resize border-l border-transparent hover:border-primary/60" @pointerdown.prevent="startResizeMemberSheet" />
         <SheetHeader class="border-b px-5 py-4 pr-12">
           <SheetTitle class="flex items-center gap-2">
-            <span class="truncate">{{ selectedMemberTitle || t("redis.memberDetail") }}</span>
+            <span class="truncate">{{ selectedMemberTitle ? formatValue(selectedMemberTitle) : t("redis.memberDetail") }}</span>
             <Badge variant="outline" class="shrink-0 text-xs">{{ selectedMemberDetail.format.toUpperCase() }}</Badge>
           </SheetTitle>
         </SheetHeader>
@@ -1218,7 +1219,7 @@ onBeforeUnmount(() => {
             <Pencil class="h-4 w-4" />
             {{ t("redis.editMember") }}
           </Button>
-          <Button variant="outline" @click="copyText(selectedMemberDetail.text)">
+          <Button variant="outline" @click="copyText(selectedMemberDetail.rawText)">
             <Copy class="h-4 w-4" />
             {{ t("redis.copyMember") }}
           </Button>

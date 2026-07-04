@@ -2,8 +2,8 @@
 import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { AlertCircle, Braces, GitBranch, Table2, FileText } from "@lucide/vue";
-import type { ParsedExplainPlan, ExplainPlanNode } from "@/lib/explainPlan";
-import { flattenExplainPlanNodes } from "@/lib/explainPlan";
+import type { ParsedExplainPlan, ExplainPlanNode } from "@/lib/diagram/explainPlan";
+import { flattenExplainPlanNodes } from "@/lib/diagram/explainPlan";
 import { Button } from "@/components/ui/button";
 import ExplainPlanNodeTree from "./ExplainPlanNodeTree.vue";
 

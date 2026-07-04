@@ -159,8 +159,11 @@ public final class CassandraAgent extends AbstractJdbcAgent {
         });
     }
 
-    private static String buildUrl(ConnectParams params) {
-        return "jdbc:cassandra://" + params.getHost() + ":" + params.getPort() + "/" + params.getDatabase();
+    static String buildUrl(ConnectParams params) {
+        String baseUrl = "jdbc:cassandra://" + params.getHost() + ":" + params.getPort();
+        String keyspace = coalesce(params.getDatabase()).trim();
+        // Cassandra rejects an empty keyspace path; omit it so DBX can connect first and list keyspaces.
+        return keyspace.isEmpty() ? baseUrl : baseUrl + "/" + keyspace;
     }
 
     private static List<String> targetColumns(String options) {

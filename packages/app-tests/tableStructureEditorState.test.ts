@@ -17,7 +17,7 @@ import {
   parseExtraToColumnExtra,
   rehydrateColumnDraftsFromMetadata,
   toColumnNames,
-} from "../../apps/desktop/src/lib/tableStructureEditorState.ts";
+} from "../../apps/desktop/src/lib/table/tableStructureEditorState.ts";
 import type { ColumnInfo, IndexInfo } from "../../apps/desktop/src/types/database.ts";
 
 const columns: ColumnInfo[] = [

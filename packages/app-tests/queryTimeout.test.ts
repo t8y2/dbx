@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { DEFAULT_QUERY_TIMEOUT_SECS, frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "../../apps/desktop/src/lib/queryTimeout.ts";
+import { DEFAULT_QUERY_TIMEOUT_SECS, frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "../../apps/desktop/src/lib/sql/queryTimeout.ts";
 
 test("queryTimeoutSecsForConnection falls back to the default timeout", () => {
   assert.equal(queryTimeoutSecsForConnection(undefined), DEFAULT_QUERY_TIMEOUT_SECS);

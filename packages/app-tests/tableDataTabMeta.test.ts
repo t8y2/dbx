@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { tableMetaForDataTab } from "../../apps/desktop/src/lib/tableDataTabMeta.ts";
+import { tableMetaForDataTab } from "../../apps/desktop/src/lib/table/tableDataTabMeta.ts";
 import type { QueryTab } from "../../apps/desktop/src/types/database.ts";
 
 function tab(overrides: Partial<QueryTab> = {}): QueryTab {

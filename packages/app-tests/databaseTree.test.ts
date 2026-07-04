@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { buildDatabaseTreeNodes, sortSidebarNames } from "../../apps/desktop/src/lib/databaseTree.ts";
+import { buildDatabaseTreeNodes, sortSidebarNames } from "../../apps/desktop/src/lib/database/databaseTree.ts";
 
 test("数据库节点按自然名称排序", () => {
   const nodes = buildDatabaseTreeNodes("conn-1", [{ name: "db10" }, { name: "db2" }, { name: "campaign_data" }, { name: "cms" }, { name: "mk_campaign" }]);

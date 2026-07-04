@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { autoMapImportColumns, normalizeImportColumnName } from "../../apps/desktop/src/lib/tableImport.ts";
+import { autoMapImportColumns, normalizeImportColumnName } from "../../apps/desktop/src/lib/table/tableImport.ts";
 
 test("normalizes import column names for matching", () => {
   assert.equal(normalizeImportColumnName(" User ID "), "user id");

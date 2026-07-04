@@ -627,7 +627,7 @@ async fn wait_for_duckdb_task_with_interrupt(
 }
 
 #[cfg(feature = "duckdb-bundled")]
-fn duckdb_execute_for_database(
+pub(crate) fn duckdb_execute_for_database(
     con: &duckdb::Connection,
     attached_names: &[String],
     database: Option<&str>,
@@ -1015,9 +1015,33 @@ pub async fn do_execute(
                 }
             }
         }
+        #[cfg(feature = "duckdb-bundled")]
+        PoolKind::DuckDbWorker(client) => {
+            let client = client.clone();
+            if let Some(ref execution_id) = options.execution_id {
+                let cancel_client = client.clone();
+                state.running_queries.register_interrupt(execution_id, move || {
+                    let cancel_client = cancel_client.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = cancel_client.cancel().await {
+                            log::warn!("Failed to cancel DuckDB worker query: {error}");
+                        }
+                    });
+                });
+            }
+            let sql = sql.to_string();
+            let database = database.map(str::to_string);
+            let max_rows = options.max_rows;
+            drop(connections);
+            client.execute(database, sql, max_rows, cancel_token, query_timeout).await
+        }
         #[cfg(not(feature = "duckdb-bundled"))]
         PoolKind::DuckDb(_) => {
             return Err("DuckDB support is not compiled in this build".to_string());
+        }
+        #[cfg(not(feature = "duckdb-bundled"))]
+        PoolKind::DuckDbWorker(_) => {
+            return Err("DuckDB worker support is not compiled in this build".to_string());
         }
         PoolKind::Mysql(p, mode) => {
             let p = p.clone();
@@ -2045,6 +2069,7 @@ pub async fn execute_statements_in_transaction(
             PoolKind::MessageQueue | PoolKind::Nacos => TxPath::None,
             #[cfg(feature = "duckdb-bundled")]
             PoolKind::DuckDb(_)
+            | PoolKind::DuckDbWorker(_)
             | PoolKind::Redis(_)
             | PoolKind::MongoDb(_)
             | PoolKind::Elasticsearch(_)
@@ -2054,6 +2079,7 @@ pub async fn execute_statements_in_transaction(
             | PoolKind::ExternalDriver { .. } => TxPath::None,
             #[cfg(not(feature = "duckdb-bundled"))]
             PoolKind::DuckDb(_)
+            | PoolKind::DuckDbWorker(_)
             | PoolKind::Redis(_)
             | PoolKind::MongoDb(_)
             | PoolKind::Elasticsearch(_)

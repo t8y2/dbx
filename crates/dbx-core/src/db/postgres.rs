@@ -2706,14 +2706,9 @@ pub async fn list_triggers(pool: &Pool, schema: &str, table: &str) -> Result<Vec
         .collect())
 }
 
-pub async fn list_functions(pool: &Pool, schema: &str) -> Result<Vec<FunctionInfo>, String> {
-    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    // Use pg_proc + pg_get_functiondef() instead of information_schema.routines
-    // for reliable function definition retrieval (information_schema.routines.routine_definition
-    // is NULL for non-SQL functions like plpgsql)
-    let stmt = client
-        .prepare_cached(
-            "SELECT p.proname, \
+fn postgres_functions_sql(has_proc_prokind: bool) -> &'static str {
+    if has_proc_prokind {
+        return "SELECT p.proname, \
                     CASE p.prokind WHEN 'f' THEN 'FUNCTION' WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END, \
                     COALESCE(pg_get_function_result(p.oid), ''), \
                     pg_get_functiondef(p.oid), \
@@ -2721,10 +2716,29 @@ pub async fn list_functions(pool: &Pool, schema: &str) -> Result<Vec<FunctionInf
              FROM pg_proc p \
              JOIN pg_namespace n ON n.oid = p.pronamespace \
              WHERE n.nspname = $1 AND p.prokind IN ('f', 'p') \
-             ORDER BY p.proname",
-        )
-        .await
-        .map_err(|e| e.to_string())?;
+             ORDER BY p.proname";
+    }
+
+    // PostgreSQL 10 and older do not have pg_proc.prokind; procedures were
+    // introduced with prokind, so the legacy path can only return functions.
+    "SELECT p.proname, \
+                    'FUNCTION', \
+                    COALESCE(pg_get_function_result(p.oid), ''), \
+                    pg_get_functiondef(p.oid), \
+                    COALESCE(pg_get_function_arguments(p.oid), '') \
+             FROM pg_proc p \
+             JOIN pg_namespace n ON n.oid = p.pronamespace \
+             WHERE n.nspname = $1 AND NOT p.proisagg AND NOT p.proiswindow \
+             ORDER BY p.proname"
+}
+
+pub async fn list_functions(pool: &Pool, schema: &str) -> Result<Vec<FunctionInfo>, String> {
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    // Use pg_proc + pg_get_functiondef() instead of information_schema.routines
+    // for reliable function definition retrieval (information_schema.routines.routine_definition
+    // is NULL for non-SQL functions like plpgsql)
+    let has_proc_prokind = postgres_proc_has_prokind(&client).await?;
+    let stmt = client.prepare_cached(postgres_functions_sql(has_proc_prokind)).await.map_err(|e| e.to_string())?;
     let rows = client.query(&stmt, &[&schema]).await.map_err(|e| e.to_string())?;
 
     Ok(rows
@@ -3465,6 +3479,25 @@ mod tests {
         assert!(sql.contains("NOT p.proiswindow"));
         assert!(sql.contains("pg_get_function_arguments(p.oid) AS signature"));
         assert!(sql.contains("'FUNCTION' AS object_type"));
+        assert!(!sql.contains("'PROCEDURE'"));
+    }
+
+    #[test]
+    fn postgres_functions_sql_uses_proc_kind_when_available() {
+        let sql = postgres_functions_sql(true);
+        assert!(sql.contains("p.prokind IN ('f', 'p')"));
+        assert!(sql.contains("WHEN 'p' THEN 'PROCEDURE'"));
+        assert!(!sql.contains("p.proisagg"));
+        assert!(!sql.contains("p.proiswindow"));
+    }
+
+    #[test]
+    fn legacy_postgres_functions_sql_avoids_proc_kind_column() {
+        let sql = postgres_functions_sql(false);
+        assert!(!sql.contains("p.prokind"));
+        assert!(sql.contains("NOT p.proisagg"));
+        assert!(sql.contains("NOT p.proiswindow"));
+        assert!(sql.contains("'FUNCTION'"));
         assert!(!sql.contains("'PROCEDURE'"));
     }
 

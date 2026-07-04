@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { canExecuteWithoutSelectedDatabase, requiresSqlFileTargetDatabaseSelection, supportsConnectionLevelDatabaseBootstrap } from "../../apps/desktop/src/lib/connectionLevelDatabaseBootstrap.ts";
+import { canExecuteWithoutSelectedDatabase, requiresSqlFileTargetDatabaseSelection, supportsConnectionLevelDatabaseBootstrap } from "../../apps/desktop/src/lib/connection/connectionLevelDatabaseBootstrap.ts";
 import type { ConnectionConfig } from "../../apps/desktop/src/types/database.ts";
 
 function connection(dbType: ConnectionConfig["db_type"], driverProfile?: string): Pick<ConnectionConfig, "db_type" | "driver_profile"> {

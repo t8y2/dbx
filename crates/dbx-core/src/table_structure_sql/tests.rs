@@ -139,6 +139,35 @@ fn builds_mysql_unsigned_integer_column_with_length_before_attribute() {
 }
 
 #[test]
+fn dameng_integer_column_omits_mysql_display_width() {
+    let mut age = column("age");
+    age.data_type = "integer(11)".to_string();
+    let mut amount = column("amount");
+    amount.data_type = "number(10,0)".to_string();
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Dameng),
+        schema: Some("SYSDBA".to_string()),
+        table_name: "users".to_string(),
+        columns: vec![age, amount],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"SYSDBA\".\"users\" ADD (\"age\" integer);",
+            "ALTER TABLE \"SYSDBA\".\"users\" ADD (\"amount\" number(10,0));",
+        ]
+    );
+}
+
+#[test]
 fn builds_highgo_foreign_key_changes_with_postgres_syntax() {
     let mut old_fk = foreign_key("orders_user_id_fkey", "user_id", "users", "id");
     old_fk.marked_for_drop = true;

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onBeforeUnmount } from "vue";
-import { uuid } from "@/lib/utils";
+import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { RefreshCw, RefreshCcw, Loader2, Trash2, Plus, Save, ChevronLeft, ChevronRight, Table2, Braces, X, Columns3, Check, Search, Wrench, Filter } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
@@ -12,10 +12,10 @@ import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ErrorBanner from "@/components/ui/ErrorBanner.vue";
 import DataGrid from "@/components/grid/DataGrid.vue";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
-import * as api from "@/lib/api";
+import * as api from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { clampSearchSplitWidth } from "@/lib/dataGridSearchSplit";
-import { documentViewerFontStyle } from "@/lib/documentViewerFontStyle";
+import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
+import { documentViewerFontStyle } from "@/lib/document/documentViewerFontStyle";
 import {
   buildDocumentFilterCondition,
   combineDocumentFilterConditions,
@@ -27,9 +27,9 @@ import {
   documentStoreProviderFor,
   type DocumentFilterMode,
   type DocumentFilterRule,
-} from "@/lib/documentStoreProvider";
-import { buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, parseMongoDocumentInputValue, type MongoInputValue } from "@/lib/mongoDocumentValues";
-import { normalizeResultPageSize } from "@/lib/paginationPageSize";
+} from "@/lib/app/documentStoreProvider";
+import { buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, parseMongoDocumentInputValue, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
+import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { useSettingsStore } from "@/stores/settingsStore";
 import JsonEditNode from "./JsonEditNode.vue";
 import type { EditNode } from "@/types/editor";

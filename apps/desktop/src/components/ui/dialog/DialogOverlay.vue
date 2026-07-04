@@ -3,8 +3,8 @@ import type { DialogOverlayProps } from "reka-ui";
 import type { HTMLAttributes } from "vue";
 import { reactiveOmit } from "@vueuse/core";
 import { DialogOverlay } from "reka-ui";
-import { cn } from "@/lib/utils";
-import { isTauriRuntime } from "@/lib/tauriRuntime";
+import { cn } from "@/lib/common/utils";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 
 const props = defineProps<DialogOverlayProps & { class?: HTMLAttributes["class"] }>();
 

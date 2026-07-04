@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { canActivateExistingDataTableTab } from "../../apps/desktop/src/lib/dataTabActivation.ts";
+import { canActivateExistingDataTableTab } from "../../apps/desktop/src/lib/tabs/dataTabActivation.ts";
 import type { QueryTab } from "../../apps/desktop/src/types/database.ts";
 
 function dataTab(overrides: Partial<QueryTab> = {}): QueryTab {

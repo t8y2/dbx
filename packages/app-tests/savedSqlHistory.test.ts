@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { rankSavedSqlHistory, savedSqlHistoryScore, savedSqlMatchesHistoryScope } from "../../apps/desktop/src/lib/savedSqlHistory.ts";
+import { rankSavedSqlHistory, savedSqlHistoryScore, savedSqlMatchesHistoryScope } from "../../apps/desktop/src/lib/savedSql/savedSqlHistory.ts";
 import type { SavedSqlFile } from "../../apps/desktop/src/types/database.ts";
 
 function file(input: Partial<SavedSqlFile> & Pick<SavedSqlFile, "id" | "name" | "connectionId" | "database">): SavedSqlFile {

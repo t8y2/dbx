@@ -9,7 +9,8 @@ use uuid::Uuid;
 use crate::ai::{AiChatMessage, AiConfig, AiConversation, AiProvider};
 use crate::connection_secrets::{
     MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_SECRET_PREFIX,
-    MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, MQ_TOKEN_SIGNING_SECRET_PREFIX,
+    MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, MQ_TOKEN_SIGNING_SECRET_PREFIX, NACOS_AUTH_PASSWORD_KEY,
+    NACOS_AUTH_SECRET_PREFIX,
 };
 use crate::db::sqlite::{connect_path_create_if_missing, SqliteHandle};
 use crate::history::{HistoryEntry, MAX_HISTORY};
@@ -19,6 +20,9 @@ use crate::saved_sql::{SavedSqlFile, SavedSqlFolder, SavedSqlLibrary};
 const SSH_TUNNEL_SECRET_PREFIX: &str = "ssh_tunnels.";
 const TRANSPORT_LAYER_SECRET_PREFIX: &str = "transport_layers.";
 const STORAGE_DB_FILE_NAME: &str = "dbx.db";
+const APP_STATE_EDITOR_SETTINGS_KEY: &str = "editor_settings";
+const APP_STATE_OPEN_TABS_KEY: &str = "open_tabs";
+const APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY: &str = "saved_sql_editor_positions";
 const USER_DATA_TABLES: &[&str] = &[
     "connections",
     "connection_secrets",
@@ -118,6 +122,8 @@ pub struct DesktopSettings {
     #[serde(default)]
     pub debug_logging_enabled: bool,
     #[serde(default)]
+    pub duckdb_worker_process_isolation: bool,
+    #[serde(default)]
     pub saved_sql_sync_dir: Option<String>,
     #[serde(default)]
     pub driver_store_dir: Option<String>,
@@ -141,6 +147,7 @@ impl Default for DesktopSettings {
             quit_on_close: false,
             close_action_prompted: false,
             debug_logging_enabled: false,
+            duckdb_worker_process_isolation: false,
             saved_sql_sync_dir: None,
             driver_store_dir: None,
             plugin_store_dir: None,
@@ -218,6 +225,10 @@ const SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS app_settings (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         settings_json TEXT NOT NULL
+    )",
+    "CREATE TABLE IF NOT EXISTS app_state (
+        key TEXT PRIMARY KEY,
+        value_json TEXT NOT NULL
     )",
     "CREATE TABLE IF NOT EXISTS schema_cache (
         cache_key TEXT PRIMARY KEY,
@@ -505,6 +516,18 @@ fn scrub_mq_token_signing_secret(config: &mut ConnectionConfig) {
     scrub_json_secret(signing, "key");
 }
 
+fn scrub_nacos_auth_secrets(config: &mut ConnectionConfig) {
+    if config.db_type != DatabaseType::Nacos {
+        return;
+    }
+    let Some(auth) = nacos_auth_object_mut(config.external_config.as_mut()) else {
+        return;
+    };
+    if auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword") {
+        scrub_json_secret(auth, "password");
+    }
+}
+
 fn delete_secret_prefix_in_tx(
     tx: &rusqlite::Transaction<'_>,
     connection_id: &str,
@@ -784,6 +807,10 @@ impl Storage {
             "debug_logging_enabled".to_string(),
             serde_json::Value::Bool(desktop_settings.debug_logging_enabled),
         );
+        settings.insert(
+            "duckdb_worker_process_isolation".to_string(),
+            serde_json::Value::Bool(desktop_settings.duckdb_worker_process_isolation),
+        );
         match desktop_settings.saved_sql_sync_dir.as_ref().filter(|path| !path.trim().is_empty()) {
             Some(path) => {
                 settings.insert("saved_sql_sync_dir".to_string(), serde_json::Value::String(path.clone()));
@@ -844,6 +871,10 @@ impl Storage {
                 .get("debug_logging_enabled")
                 .and_then(|value| value.as_bool())
                 .unwrap_or_else(|| DesktopSettings::default().debug_logging_enabled),
+            duckdb_worker_process_isolation: settings
+                .get("duckdb_worker_process_isolation")
+                .and_then(|value| value.as_bool())
+                .unwrap_or_else(|| DesktopSettings::default().duckdb_worker_process_isolation),
             saved_sql_sync_dir: settings
                 .get("saved_sql_sync_dir")
                 .and_then(|value| value.as_str())
@@ -894,6 +925,53 @@ impl Storage {
         Ok(array.iter().filter_map(|item| item.as_str().map(|value| value.to_string())).collect())
     }
 
+    async fn save_app_state_value(&self, key: &str, value: &serde_json::Value) -> Result<(), String> {
+        let key = key.to_string();
+        let value_json = serde_json::to_string(value).map_err(|e| e.to_string())?;
+        self.with_conn(move |conn| {
+            conn.execute("INSERT OR REPLACE INTO app_state (key, value_json) VALUES (?1, ?2)", params![key, value_json])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    async fn load_app_state_value(&self, key: &str) -> Result<Option<serde_json::Value>, String> {
+        let key = key.to_string();
+        let json: Option<String> = self
+            .with_conn(move |conn| {
+                conn.query_row("SELECT value_json FROM app_state WHERE key = ?1", [key], |row| row.get(0))
+                    .optional()
+                    .map_err(|e| e.to_string())
+            })
+            .await?;
+        json.map(|value| serde_json::from_str(&value).map_err(|e| e.to_string())).transpose()
+    }
+
+    pub async fn save_editor_settings(&self, settings: &serde_json::Value) -> Result<(), String> {
+        self.save_app_state_value(APP_STATE_EDITOR_SETTINGS_KEY, settings).await
+    }
+
+    pub async fn load_editor_settings(&self) -> Result<Option<serde_json::Value>, String> {
+        self.load_app_state_value(APP_STATE_EDITOR_SETTINGS_KEY).await
+    }
+
+    pub async fn save_open_tabs_state(&self, state: &serde_json::Value) -> Result<(), String> {
+        self.save_app_state_value(APP_STATE_OPEN_TABS_KEY, state).await
+    }
+
+    pub async fn load_open_tabs_state(&self) -> Result<Option<serde_json::Value>, String> {
+        self.load_app_state_value(APP_STATE_OPEN_TABS_KEY).await
+    }
+
+    pub async fn save_saved_sql_editor_positions(&self, positions: &serde_json::Value) -> Result<(), String> {
+        self.save_app_state_value(APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY, positions).await
+    }
+
+    pub async fn load_saved_sql_editor_positions(&self) -> Result<Option<serde_json::Value>, String> {
+        self.load_app_state_value(APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY).await
+    }
+
     pub async fn load_or_create_local_device_secret(&self) -> Result<String, String> {
         let mut settings = self.load_app_settings_json().await?;
         if let Some(secret) = settings.get("local_device_secret").and_then(|value| value.as_str()) {
@@ -933,6 +1011,35 @@ impl Storage {
         };
         credentials.remove(account);
         settings.insert("webdav_passwords".to_string(), serde_json::Value::Object(credentials));
+        self.save_app_settings_json(&settings).await
+    }
+
+    pub async fn save_webdav_sync_secrets_preference(
+        &self,
+        enabled: bool,
+        blob: Option<&serde_json::Value>,
+    ) -> Result<(), String> {
+        let mut settings = self.load_app_settings_json().await?;
+        settings.insert("webdav_sync_secrets_enabled".to_string(), serde_json::Value::Bool(enabled));
+        if let Some(blob) = blob {
+            settings.insert("webdav_sync_secrets_passphrase".to_string(), blob.clone());
+        }
+        self.save_app_settings_json(&settings).await
+    }
+
+    pub async fn load_webdav_sync_secrets_enabled(&self) -> Result<bool, String> {
+        let settings = self.load_app_settings_json().await?;
+        Ok(settings.get("webdav_sync_secrets_enabled").and_then(serde_json::Value::as_bool).unwrap_or(false))
+    }
+
+    pub async fn load_webdav_sync_secrets_passphrase_blob(&self) -> Result<Option<serde_json::Value>, String> {
+        let settings = self.load_app_settings_json().await?;
+        Ok(settings.get("webdav_sync_secrets_passphrase").cloned())
+    }
+
+    pub async fn delete_webdav_sync_secrets_passphrase_blob(&self) -> Result<(), String> {
+        let mut settings = self.load_app_settings_json().await?;
+        settings.remove("webdav_sync_secrets_passphrase");
         self.save_app_settings_json(&settings).await
     }
 }
@@ -1031,6 +1138,7 @@ impl Storage {
                 sanitized.connection_string = None;
                 scrub_mq_auth_secrets(&mut sanitized);
                 scrub_mq_token_signing_secret(&mut sanitized);
+                scrub_nacos_auth_secrets(&mut sanitized);
                 let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
 
                 tx.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", params![config_id, json])
@@ -1067,6 +1175,7 @@ impl Storage {
                 sanitized.connection_string = None;
                 scrub_mq_auth_secrets(&mut sanitized);
                 scrub_mq_token_signing_secret(&mut sanitized);
+                scrub_nacos_auth_secrets(&mut sanitized);
                 let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
 
                 tx.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", params![config_id, json])
@@ -1124,6 +1233,7 @@ impl Storage {
                 }
                 persist_mq_auth_secrets_in_tx(&tx, &config)?;
                 persist_mq_token_signing_secret_in_tx(&tx, &config)?;
+                persist_nacos_auth_secrets_in_tx(&tx, &config)?;
             }
 
             if configs.is_empty() {
@@ -1210,11 +1320,14 @@ impl Storage {
             config.connection_string = self.get_secret(&id, "connection_string").await?;
             let needs_mq_auth_rewrite = self.hydrate_mq_auth_secrets(&id, &mut config).await?;
             let needs_mq_token_signing_rewrite = self.hydrate_mq_token_signing_secret(&id, &mut config).await?;
-            let needs_mq_secret_rewrite = needs_mq_auth_rewrite || needs_mq_token_signing_rewrite;
-            if needs_mq_secret_rewrite {
+            let needs_nacos_auth_rewrite = self.hydrate_nacos_auth_secret(&id, &mut config).await?;
+            let needs_external_secret_rewrite =
+                needs_mq_auth_rewrite || needs_mq_token_signing_rewrite || needs_nacos_auth_rewrite;
+            if needs_external_secret_rewrite {
                 let mut sanitized = config.clone().canonicalized();
                 scrub_mq_auth_secrets(&mut sanitized);
                 scrub_mq_token_signing_secret(&mut sanitized);
+                scrub_nacos_auth_secrets(&mut sanitized);
                 let sanitized_json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
                 let update_id = id.clone();
                 self.with_conn(move |conn| {
@@ -1274,6 +1387,24 @@ impl Storage {
         };
 
         hydrate_mq_json_secret(self, connection_id, MQ_TOKEN_SIGNING_KEY, signing, "key").await
+    }
+
+    async fn hydrate_nacos_auth_secret(
+        &self,
+        connection_id: &str,
+        config: &mut ConnectionConfig,
+    ) -> Result<bool, String> {
+        if config.db_type != DatabaseType::Nacos {
+            return Ok(false);
+        }
+        let Some(auth) = nacos_auth_object_mut(config.external_config.as_mut()) else {
+            return Ok(false);
+        };
+        if auth.get("kind").and_then(serde_json::Value::as_str) != Some("usernamePassword") {
+            return Ok(false);
+        }
+
+        hydrate_mq_json_secret(self, connection_id, NACOS_AUTH_PASSWORD_KEY, auth, "password").await
     }
 }
 
@@ -2092,6 +2223,45 @@ fn persist_mq_token_signing_secret_in_tx(
     persist_json_secret_if_present_in_tx(tx, &config.id, MQ_TOKEN_SIGNING_KEY, signing, "key")
 }
 
+fn persist_nacos_auth_secrets_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionConfig) -> Result<(), String> {
+    if config.db_type != DatabaseType::Nacos {
+        delete_secret_prefix_in_tx(tx, &config.id, NACOS_AUTH_SECRET_PREFIX)?;
+        return Ok(());
+    }
+
+    let Some(auth) = nacos_auth_object(config.external_config.as_ref()) else {
+        delete_secret_prefix_in_tx(tx, &config.id, NACOS_AUTH_SECRET_PREFIX)?;
+        return Ok(());
+    };
+
+    if auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword") {
+        replace_nacos_auth_secret_in_tx(tx, &config.id, NACOS_AUTH_PASSWORD_KEY, auth, "password")?;
+    } else {
+        delete_secret_prefix_in_tx(tx, &config.id, NACOS_AUTH_SECRET_PREFIX)?;
+    }
+
+    Ok(())
+}
+
+fn replace_nacos_auth_secret_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    connection_id: &str,
+    key: &str,
+    auth: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<(), String> {
+    let current = auth.get(field).and_then(serde_json::Value::as_str).filter(|secret| !secret.is_empty());
+    let existing = if current.is_none() { get_secret_in_tx(tx, connection_id, key)? } else { None };
+    delete_secret_prefix_in_tx(tx, connection_id, NACOS_AUTH_SECRET_PREFIX)?;
+    match current {
+        Some(secret) => persist_secret_in_tx(tx, connection_id, key, secret),
+        None => match existing {
+            Some(secret) => persist_secret_in_tx(tx, connection_id, key, &secret),
+            None => Ok(()),
+        },
+    }
+}
+
 fn persist_json_secret_if_present_in_tx(
     tx: &rusqlite::Transaction<'_>,
     connection_id: &str,
@@ -2153,6 +2323,16 @@ fn mq_token_signing_object_mut(
     value?.get_mut("tokenSigning")?.as_object_mut()
 }
 
+fn nacos_auth_object(value: Option<&serde_json::Value>) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    value?.get("auth")?.as_object()
+}
+
+fn nacos_auth_object_mut(
+    value: Option<&mut serde_json::Value>,
+) -> Option<&mut serde_json::Map<String, serde_json::Value>> {
+    value?.get_mut("auth")?.as_object_mut()
+}
+
 fn is_api_key_auth_kind(kind: &str) -> bool {
     matches!(kind, "apiKey" | "api_key" | "apikey")
 }
@@ -2183,7 +2363,9 @@ fn map_from_sql_err(err: serde_json::Error) -> rusqlite::Error {
 #[cfg(test)]
 mod tests {
     use super::{maybe_import_user_data_db, DataDbImportResult, DesktopIconTheme, DesktopSettings, Storage};
-    use crate::connection_secrets::{MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY};
+    use crate::connection_secrets::{
+        MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
+    };
     use crate::models::connection::{ConnectionConfig, DatabaseType};
     use crate::saved_sql::SavedSqlFile;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2254,6 +2436,63 @@ mod tests {
         }
     }
 
+    fn nacos_connection(id: &str, password: &str) -> ConnectionConfig {
+        ConnectionConfig {
+            id: id.to_string(),
+            name: "Nacos".to_string(),
+            db_type: DatabaseType::Nacos,
+            driver_profile: None,
+            driver_label: None,
+            url_params: None,
+            host: "127.0.0.1".to_string(),
+            port: 8848,
+            username: "nacos".to_string(),
+            password: String::new(),
+            database: None,
+            visible_databases: None,
+            visible_schemas: None,
+            attached_databases: Vec::new(),
+            color: None,
+            transport_layers: Vec::new(),
+            connect_timeout_secs: 30,
+            query_timeout_secs: 300,
+            idle_timeout_secs: 600,
+            keepalive_interval_secs: crate::models::connection::default_keepalive_interval_secs(),
+            ssl: false,
+            ca_cert_path: String::new(),
+            client_cert_path: String::new(),
+            client_key_path: String::new(),
+            sysdba: false,
+            oracle_connection_type: None,
+            connection_string: None,
+            redis_connection_mode: None,
+            redis_sentinel_master: String::new(),
+            redis_sentinel_nodes: String::new(),
+            redis_sentinel_username: String::new(),
+            redis_sentinel_password: String::new(),
+            redis_sentinel_tls: false,
+            redis_cluster_nodes: String::new(),
+            redis_key_separator: ":".to_string(),
+            redis_scan_page_size: None,
+            etcd_endpoints: String::new(),
+            gbase_server: String::new(),
+            informix_server: String::new(),
+            external_config: Some(serde_json::json!({
+                "namespace": "public",
+                "group": "DEFAULT_GROUP",
+                "auth": {
+                    "kind": "usernamePassword",
+                    "username": "nacos",
+                    "password": password
+                }
+            })),
+            jdbc_driver_class: None,
+            jdbc_driver_paths: Vec::new(),
+            one_time: false,
+            read_only: false,
+        }
+    }
+
     async fn raw_connection_json(storage: &Storage, id: &str) -> String {
         let id = id.to_string();
         storage
@@ -2284,6 +2523,10 @@ mod tests {
 
     fn mq_token_signing_key(config: &ConnectionConfig) -> Option<&str> {
         config.external_config.as_ref()?.get("tokenSigning")?.get("key")?.as_str()
+    }
+
+    fn nacos_auth_password(config: &ConnectionConfig) -> Option<&str> {
+        config.external_config.as_ref()?.get("auth")?.get("password")?.as_str()
     }
 
     async fn create_data_dir_with_connection(name: &str, connection_id: &str, token: &str) -> std::path::PathBuf {
@@ -2486,6 +2729,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn save_connections_moves_nacos_auth_password_to_secret_table_and_restores_it() {
+        let path = temp_db_path("nacos-auth-secret");
+        let storage = Storage::open(&path).await.unwrap();
+
+        storage.save_connections(&[nacos_connection("nacos", "nacos-secret")]).await.unwrap();
+
+        let raw_json = raw_connection_json(&storage, "nacos").await;
+        assert!(!raw_json.contains("nacos-secret"));
+        let persisted: ConnectionConfig = serde_json::from_str(&raw_json).unwrap();
+        assert_eq!(nacos_auth_password(&persisted), Some(""));
+        assert_eq!(
+            storage.get_secret("nacos", NACOS_AUTH_PASSWORD_KEY).await.unwrap().as_deref(),
+            Some("nacos-secret")
+        );
+
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(nacos_auth_password(&loaded[0]), Some("nacos-secret"));
+    }
+
+    #[tokio::test]
+    async fn load_connections_migrates_legacy_nacos_auth_password_out_of_config_json() {
+        let path = temp_db_path("nacos-auth-legacy-migration");
+        let storage = Storage::open(&path).await.unwrap();
+        insert_raw_connection(&storage, &nacos_connection("nacos", "legacy-nacos-secret")).await;
+
+        let loaded = storage.load_connections().await.unwrap();
+
+        assert_eq!(nacos_auth_password(&loaded[0]), Some("legacy-nacos-secret"));
+        assert_eq!(
+            storage.get_secret("nacos", NACOS_AUTH_PASSWORD_KEY).await.unwrap().as_deref(),
+            Some("legacy-nacos-secret")
+        );
+        let raw_json = raw_connection_json(&storage, "nacos").await;
+        assert!(!raw_json.contains("legacy-nacos-secret"));
+        let persisted: ConnectionConfig = serde_json::from_str(&raw_json).unwrap();
+        assert_eq!(nacos_auth_password(&persisted), Some(""));
+    }
+
+    #[tokio::test]
     async fn desktop_settings_default_to_background_enabled() {
         let path = temp_db_path("desktop-settings-default");
         let storage = Storage::open(&path).await.unwrap();
@@ -2520,6 +2803,7 @@ mod tests {
                 quit_on_close: true,
                 close_action_prompted: false,
                 debug_logging_enabled: true,
+                duckdb_worker_process_isolation: false,
                 saved_sql_sync_dir: None,
                 driver_store_dir: Some("/tmp/dbx-drivers".to_string()),
                 plugin_store_dir: Some("/tmp/dbx-plugins".to_string()),
@@ -2538,6 +2822,7 @@ mod tests {
                 quit_on_close: true,
                 close_action_prompted: false,
                 debug_logging_enabled: true,
+                duckdb_worker_process_isolation: false,
                 saved_sql_sync_dir: None,
                 driver_store_dir: Some("/tmp/dbx-drivers".to_string()),
                 plugin_store_dir: Some("/tmp/dbx-plugins".to_string()),
@@ -2634,6 +2919,53 @@ mod tests {
             vec!["conn-1".to_string(), "conn-1:db:main".to_string()]
         );
         assert_eq!(storage.load_password_hash().await.unwrap(), Some("hash-3".to_string()));
+    }
+
+    #[tokio::test]
+    async fn app_state_roundtrips_without_polluting_app_settings() {
+        let path = temp_db_path("app-state-roundtrip");
+        let storage = Storage::open(&path).await.unwrap();
+
+        storage.save_password_hash("hash-4").await.unwrap();
+        storage
+            .save_desktop_settings(&DesktopSettings {
+                icon_theme: DesktopIconTheme::Black,
+                ..DesktopSettings::default()
+            })
+            .await
+            .unwrap();
+
+        storage.save_editor_settings(&serde_json::json!({ "openTabsRestoreMode": "pinned" })).await.unwrap();
+        storage
+            .save_open_tabs_state(&serde_json::json!({
+                "tabs": [{ "id": "tab-1", "title": "Pinned", "connectionId": "pg", "database": "app", "sql": "select 1", "pinned": true }],
+                "activeTabId": "tab-1"
+            }))
+            .await
+            .unwrap();
+        storage
+            .save_saved_sql_editor_positions(&serde_json::json!([{ "savedSqlId": "file-1", "updatedAt": 1 }]))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            storage.load_editor_settings().await.unwrap(),
+            Some(serde_json::json!({ "openTabsRestoreMode": "pinned" }))
+        );
+        assert_eq!(
+            storage.load_open_tabs_state().await.unwrap().and_then(|value| value.get("activeTabId").cloned()),
+            Some(serde_json::json!("tab-1"))
+        );
+        assert_eq!(
+            storage.load_saved_sql_editor_positions().await.unwrap(),
+            Some(serde_json::json!([{ "savedSqlId": "file-1", "updatedAt": 1 }]))
+        );
+        assert_eq!(storage.load_password_hash().await.unwrap(), Some("hash-4".to_string()));
+        assert_eq!(
+            storage.load_desktop_settings().await.unwrap(),
+            DesktopSettings { icon_theme: DesktopIconTheme::Black, ..DesktopSettings::default() }
+        );
+        assert_eq!(storage.load_app_settings_json().await.unwrap().get("open_tabs"), None);
     }
 
     #[tokio::test]

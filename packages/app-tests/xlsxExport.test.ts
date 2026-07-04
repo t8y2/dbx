@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildXlsxWorkbook } from "../../apps/desktop/src/lib/xlsxExport.ts";
+import { buildXlsxWorkbook } from "../../apps/desktop/src/lib/export/xlsxExport.ts";
 
 test("builds an xlsx workbook zip with worksheet data", () => {
   const workbook = buildXlsxWorkbook({

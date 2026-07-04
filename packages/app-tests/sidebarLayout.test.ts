@@ -14,7 +14,7 @@ import {
   emptyLayout,
   remapSidebarLayoutConnectionIds,
   collapseAllGroups,
-} from "../../apps/desktop/src/lib/sidebarLayout.ts";
+} from "../../apps/desktop/src/lib/sidebar/sidebarLayout.ts";
 import type { ConnectionConfig, SidebarLayout } from "../../apps/desktop/src/types/database.ts";
 
 function conn(id: string, name?: string): ConnectionConfig {

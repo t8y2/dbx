@@ -552,6 +552,15 @@ async fn main() {
         .route("/cloud-sync/webdav/password-status", post(routes::cloud_sync::webdav_password_status))
         .route("/cloud-sync/webdav/save-password", post(routes::cloud_sync::save_webdav_saved_password))
         .route("/cloud-sync/webdav/forget-password", post(routes::cloud_sync::forget_webdav_saved_password))
+        .route("/cloud-sync/webdav/sync-secrets-status", post(routes::cloud_sync::webdav_sync_secrets_status))
+        .route(
+            "/cloud-sync/webdav/save-sync-secrets-preference",
+            post(routes::cloud_sync::save_webdav_sync_secrets_preference),
+        )
+        .route(
+            "/cloud-sync/webdav/forget-sync-secrets-passphrase",
+            post(routes::cloud_sync::forget_webdav_sync_secrets_passphrase),
+        )
         .route("/cloud-sync/webdav/upload", post(routes::cloud_sync::webdav_sync_upload))
         .route("/cloud-sync/webdav/download", post(routes::cloud_sync::webdav_sync_download));
 

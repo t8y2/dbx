@@ -2,7 +2,7 @@
 import type { Component, HTMLAttributes } from "vue";
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { Check, ChevronDown } from "@lucide/vue";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/common/utils";
 
 export interface LightDropdownMenuItem {
   label: string;

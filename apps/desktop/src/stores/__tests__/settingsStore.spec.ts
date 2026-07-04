@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeEditorSettings } from "@/stores/settingsStore";
+import { normalizeDesktopSettings, normalizeEditorSettings } from "@/stores/settingsStore";
 
 describe("normalizeEditorSettings", () => {
   it("enables automatic table aliases by default", () => {
@@ -30,6 +30,12 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({}).updateDownloadSource).toBe("official");
   });
 
+  it("preserves explicit editor themes from saved settings", () => {
+    expect(normalizeEditorSettings({ theme: "xcode" }).theme).toBe("xcode");
+    expect(normalizeEditorSettings({ theme: "one-dark" }).theme).toBe("one-dark");
+    expect(normalizeEditorSettings({ theme: "custom" }).theme).toBe("custom");
+  });
+
   it("restores all open tabs on launch by default", () => {
     expect(normalizeEditorSettings({}).openTabsRestoreMode).toBe("all");
   });
@@ -49,5 +55,17 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ updateDownloadSource: "cnb" }).updateDownloadSource).toBe("cnb");
     expect(normalizeEditorSettings({ updateDownloadSource: "atomgit" }).updateDownloadSource).toBe("atomgit");
     expect(normalizeEditorSettings({ updateDownloadSource: "mirror" as any }).updateDownloadSource).toBe("official");
+  });
+
+  it("defaults data grid search to row filtering and preserves highlight mode", () => {
+    expect(normalizeEditorSettings({}).dataGridSearchMode).toBe("filter");
+    expect(normalizeEditorSettings({ dataGridSearchMode: "highlight" }).dataGridSearchMode).toBe("highlight");
+    expect(normalizeEditorSettings({ dataGridSearchMode: "invalid" as any }).dataGridSearchMode).toBe("filter");
+  });
+});
+
+describe("normalizeDesktopSettings", () => {
+  it("defaults DuckDB worker process isolation to disabled for old settings", () => {
+    expect(normalizeDesktopSettings({}).duckdb_worker_process_isolation).toBe(false);
   });
 });

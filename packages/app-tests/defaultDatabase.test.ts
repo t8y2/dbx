@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { TREE_SCHEMA_DEFAULT_DATABASE_SELECT_VALUE, decodeSelectableDatabaseValue, encodeSelectableDatabaseValue, formatDatabaseLabel, isDefaultDatabase, resolveDefaultDatabase } from "../../apps/desktop/src/lib/defaultDatabase.ts";
+import { TREE_SCHEMA_DEFAULT_DATABASE_SELECT_VALUE, decodeSelectableDatabaseValue, encodeSelectableDatabaseValue, formatDatabaseLabel, isDefaultDatabase, resolveDefaultDatabase } from "../../apps/desktop/src/lib/database/defaultDatabase.ts";
 
 test("优先使用连接上已保存的默认数据库", () => {
   assert.equal(resolveDefaultDatabase({ database: "analytics" }, ["app", "analytics"]), "analytics");

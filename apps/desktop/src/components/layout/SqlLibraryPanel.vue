@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, reactive, ref } from "vue";
+import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
 import { ArrowDownWideNarrow, Download, FileInput, FilePlus, FileText, FolderCog, FolderClosed, FolderOpen, FolderPlus, Library, LocateFixed, Pencil, Search, Trash2, Upload, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
@@ -7,14 +8,14 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import CustomContextMenu, { type ContextMenuItem as CtxMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { useToast } from "@/composables/useToast";
-import { isTauriRuntime } from "@/lib/tauriRuntime";
-import * as api from "@/lib/api";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import * as api from "@/lib/backend/api";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { focusSidebarRenameInput } from "@/lib/sidebarRenameFocus";
-import { savedSqlFolderBranchFileCount } from "@/lib/savedSqlFolderCounts";
+import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
+import { savedSqlFolderBranchFileCount } from "@/lib/savedSql/savedSqlFolderCounts";
 import type { SavedSqlFile, SavedSqlFolder } from "@/types/database";
 
 const { t } = useI18n();
@@ -467,6 +468,7 @@ const lastClickedItemIndex = ref<number | null>(null); // Unified index for both
 // Active item state (single selection highlight, like left sidebar)
 const activeItemId = ref<string | null>(null);
 const activeItemType = ref<"file" | "folder" | null>(null);
+const activeSavedSqlId = computed(() => queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId)?.savedSqlId ?? null);
 
 // Unified item list for selection, matching the currently rendered order.
 const allSelectableItems = computed(() => {
@@ -505,11 +507,47 @@ function isFolderSelected(folderId: string): boolean {
 }
 
 function isFileActive(fileId: string): boolean {
-  return activeItemType.value === "file" && activeItemId.value === fileId;
+  return (activeItemType.value === "file" && activeItemId.value === fileId) || activeSavedSqlId.value === fileId;
 }
 
 function isFolderActive(folderId: string): boolean {
   return activeItemType.value === "folder" && activeItemId.value === folderId;
+}
+
+function selectionRowClass(selected: boolean, active: boolean): string {
+  if (selected) return "bg-primary/15 text-foreground ring-1 ring-primary/35 shadow-[inset_3px_0_0_var(--primary)]";
+  if (active) return "bg-primary/12 text-foreground ring-1 ring-primary/30 shadow-[inset_3px_0_0_var(--primary)]";
+  return "hover:bg-accent";
+}
+
+function fileRowClass(fileId: string): string {
+  return selectionRowClass(isFileSelected(fileId), isFileActive(fileId));
+}
+
+function folderRowClass(folderId: string): string {
+  return selectionRowClass(isFolderSelected(folderId), isFolderActive(folderId));
+}
+
+function fileMetaClass(fileId: string): string {
+  return isFileSelected(fileId) || isFileActive(fileId) ? "text-foreground/70" : "text-muted-foreground";
+}
+
+function isFileDirty(file: SavedSqlFile): boolean {
+  return queryStore.tabs.some((tab) => tab.savedSqlId === file.id && queryStore.isTabDirty(tab));
+}
+
+function fileTitleLabel(file: SavedSqlFile): string {
+  return isFileDirty(file) ? `* ${file.name}` : file.name;
+}
+
+function fileTitleStyle(file: SavedSqlFile): CSSProperties | undefined {
+  if (!isFileDirty(file)) return undefined;
+  return {
+    fontStyle: "italic",
+    fontWeight: 700,
+    transform: "skewX(-8deg)",
+    transformOrigin: "left center",
+  };
 }
 
 const renamingTarget = ref<{ type: "folder" | "file"; id: string } | null>(null);
@@ -1135,7 +1173,7 @@ function showDropInside(targetId: string) {
                 <div
                   v-if="item.type === 'folder'"
                   class="relative flex items-center gap-1 rounded px-2 py-1.5 text-[13px] cursor-pointer group"
-                  :class="[isFolderSelected(item.item.id) ? 'bg-primary/10' : isFolderActive(item.item.id) ? 'bg-accent' : 'hover:bg-accent', isDraggingItem(item.item.id) ? 'opacity-50' : '']"
+                  :class="[folderRowClass(item.item.id), isDraggingItem(item.item.id) ? 'opacity-50' : '']"
                   @mousedown="handleDragMouseDown($event, item.item.id, 'folder')"
                   @click="handleFolderClick(item.item, $event)"
                   @contextmenu.capture="contextTarget = item.item"
@@ -1154,7 +1192,7 @@ function showDropInside(targetId: string) {
                 <div
                   v-else
                   class="relative flex items-center gap-1 rounded px-2 py-1.5 text-[13px] cursor-pointer group"
-                  :class="[isDraggingItem(item.item.id) ? 'opacity-50' : isFileSelected(item.item.id) ? 'bg-primary/10' : isFileActive(item.item.id) ? 'bg-accent' : 'hover:bg-accent']"
+                  :class="[fileRowClass(item.item.id), isDraggingItem(item.item.id) ? 'opacity-50' : '']"
                   @mousedown="handleDragMouseDown($event, item.item.id, 'file')"
                   @click="handleFileClick(item.item, $event)"
                   @contextmenu.capture="contextTarget = item.item"
@@ -1164,8 +1202,9 @@ function showDropInside(targetId: string) {
                   "
                 >
                   <FileText class="h-3.5 w-3.5 text-blue-400 shrink-0" />
-                  <span class="dbx-sql-library-drag-label min-w-0 flex-1 truncate" :title="item.item.name">{{ item.item.name }}</span>
-                  <span class="min-w-0 max-w-[45%] shrink truncate text-[13px] text-muted-foreground" :title="getConnectionLabel(item.item.connectionId)">[{{ getConnectionLabel(item.item.connectionId) }}]</span>
+                  <span v-if="isFileDirty(item.item)" aria-hidden="true" class="dirty-sql-library-marker">*</span>
+                  <span class="dbx-sql-library-drag-label min-w-0 flex-1 truncate" :title="fileTitleLabel(item.item)" :style="fileTitleStyle(item.item)">{{ item.item.name }}</span>
+                  <span class="min-w-0 max-w-[45%] shrink truncate text-[13px]" :class="fileMetaClass(item.item.id)" :title="getConnectionLabel(item.item.connectionId)">[{{ getConnectionLabel(item.item.connectionId) }}]</span>
                 </div>
               </div>
             </div>
@@ -1177,7 +1216,7 @@ function showDropInside(targetId: string) {
                   v-if="row.type === 'folder'"
                   class="relative flex items-center gap-1 rounded py-1.5 pr-2 text-[13px] cursor-pointer group"
                   :style="{ paddingLeft: `${8 + row.depth * 16}px` }"
-                  :class="[showDropInside(row.folder.id) ? 'ring-1 ring-primary/50 bg-primary/5' : isFolderSelected(row.folder.id) ? 'bg-primary/10' : isFolderActive(row.folder.id) ? 'bg-accent' : 'hover:bg-accent', isDraggingItem(row.folder.id) ? 'opacity-50' : '']"
+                  :class="[showDropInside(row.folder.id) ? 'ring-1 ring-primary/50 bg-primary/5' : folderRowClass(row.folder.id), isDraggingItem(row.folder.id) ? 'opacity-50' : '']"
                   @mousedown="handleDragMouseDown($event, row.folder.id, 'folder')"
                   @mousemove="updateDropTarget($event, row.folder.id, 'folder')"
                   @mouseleave="clearDropTarget(row.folder.id)"
@@ -1213,7 +1252,7 @@ function showDropInside(targetId: string) {
                   v-else
                   class="relative flex items-center gap-1 rounded py-1.5 pr-2 text-[13px] cursor-pointer group"
                   :style="{ paddingLeft: `${8 + row.depth * 16}px` }"
-                  :class="[isDraggingItem(row.file.id) ? 'opacity-50' : isFileSelected(row.file.id) ? 'bg-primary/10' : isFileActive(row.file.id) ? 'bg-accent' : 'hover:bg-accent']"
+                  :class="[fileRowClass(row.file.id), isDraggingItem(row.file.id) ? 'opacity-50' : '']"
                   @mousedown="handleDragMouseDown($event, row.file.id, 'file')"
                   @mousemove="updateDropTarget($event, row.file.id, 'file')"
                   @mouseleave="clearDropTarget(row.file.id)"
@@ -1227,6 +1266,7 @@ function showDropInside(targetId: string) {
                   <div v-if="showDropBefore(row.file.id)" class="absolute left-2 right-2 top-0 border-t-2 border-primary" />
                   <div v-if="showDropAfter(row.file.id)" class="absolute left-2 right-2 bottom-0 border-b-2 border-primary" />
                   <FileText class="h-3.5 w-3.5 text-blue-400 shrink-0" />
+                  <span v-if="isFileDirty(row.file)" aria-hidden="true" class="dirty-sql-library-marker">*</span>
                   <template v-if="renamingTarget?.type === 'file' && renamingTarget.id === row.file.id">
                     <input
                       :ref="setRenameInputRef"
@@ -1239,8 +1279,8 @@ function showDropInside(targetId: string) {
                       @click.stop
                     />
                   </template>
-                  <span v-else class="dbx-sql-library-drag-label min-w-0 flex-1 truncate" :title="row.file.name">{{ row.file.name }}</span>
-                  <span class="min-w-0 max-w-[45%] shrink truncate text-[13px] text-muted-foreground" :title="getConnectionLabel(row.file.connectionId)">[{{ getConnectionLabel(row.file.connectionId) }}]</span>
+                  <span v-else class="dbx-sql-library-drag-label min-w-0 flex-1 truncate" :title="fileTitleLabel(row.file)" :style="fileTitleStyle(row.file)">{{ row.file.name }}</span>
+                  <span class="min-w-0 max-w-[45%] shrink truncate text-[13px]" :class="fileMetaClass(row.file.id)" :title="getConnectionLabel(row.file.connectionId)">[{{ getConnectionLabel(row.file.connectionId) }}]</span>
                 </div>
               </div>
 
@@ -1258,7 +1298,7 @@ function showDropInside(targetId: string) {
                   v-for="file in visibleFiles"
                   :key="file.id"
                   class="relative flex items-center gap-1 rounded px-2 py-1.5 text-[13px] cursor-pointer group"
-                  :class="[isDraggingItem(file.id) ? 'opacity-50' : isFileSelected(file.id) ? 'bg-primary/10' : isFileActive(file.id) ? 'bg-accent' : 'hover:bg-accent']"
+                  :class="[fileRowClass(file.id), isDraggingItem(file.id) ? 'opacity-50' : '']"
                   @mousedown="handleDragMouseDown($event, file.id, 'file')"
                   @mousemove="updateDropTarget($event, file.id, 'file')"
                   @mouseleave="clearDropTarget(file.id)"
@@ -1272,6 +1312,7 @@ function showDropInside(targetId: string) {
                   <div v-if="showDropBefore(file.id)" class="absolute left-2 right-2 top-0 border-t-2 border-primary" />
                   <div v-if="showDropAfter(file.id)" class="absolute left-2 right-2 bottom-0 border-b-2 border-primary" />
                   <FileText class="h-3.5 w-3.5 text-blue-400 shrink-0" />
+                  <span v-if="isFileDirty(file)" aria-hidden="true" class="dirty-sql-library-marker">*</span>
                   <template v-if="renamingTarget?.type === 'file' && renamingTarget.id === file.id">
                     <input
                       :ref="setRenameInputRef"
@@ -1284,8 +1325,8 @@ function showDropInside(targetId: string) {
                       @click.stop
                     />
                   </template>
-                  <span v-else class="dbx-sql-library-drag-label min-w-0 flex-1 truncate" :title="file.name">{{ file.name }}</span>
-                  <span class="min-w-0 max-w-[45%] shrink truncate text-[13px] text-muted-foreground" :title="getConnectionLabel(file.connectionId)">[{{ getConnectionLabel(file.connectionId) }}]</span>
+                  <span v-else class="dbx-sql-library-drag-label min-w-0 flex-1 truncate" :title="fileTitleLabel(file)" :style="fileTitleStyle(file)">{{ file.name }}</span>
+                  <span class="min-w-0 max-w-[45%] shrink truncate text-[13px]" :class="fileMetaClass(file.id)" :title="getConnectionLabel(file.connectionId)">[{{ getConnectionLabel(file.connectionId) }}]</span>
                 </div>
               </div>
             </div>
@@ -1336,3 +1377,20 @@ function showDropInside(targetId: string) {
     </Dialog>
   </div>
 </template>
+
+<style scoped>
+.dirty-sql-library-marker {
+  display: inline-flex;
+  width: 0.5rem;
+  height: 0.75rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  color: currentColor;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 12px;
+  opacity: 0.9;
+  transform: translateY(2px);
+}
+</style>

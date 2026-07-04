@@ -531,6 +531,7 @@ export type TreeNodeType =
   | "saved-sql-root"
   | "saved-sql-folder"
   | "saved-sql-file"
+  | "table-search-control"
   | "load-more"
   | "column"
   | "index"
@@ -589,6 +590,7 @@ export interface TreeNode {
   partitionParentSchema?: string;
   partitionParentName?: string;
   hiddenChildren?: TreeNode[];
+  tableSearchParentId?: string;
   savedSqlId?: string;
   savedSqlFolderId?: string;
   meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | VectorCollectionMeta;
@@ -606,10 +608,10 @@ export interface TableStructureEditorDraft {
   newTableName: string;
   tableComment: string;
   originalTableComment: string;
-  columns: import("@/lib/tableStructureEditorSql").EditableStructureColumn[];
-  indexes: import("@/lib/tableStructureEditorSql").EditableStructureIndex[];
-  foreignKeys: import("@/lib/tableStructureEditorSql").EditableStructureForeignKey[];
-  triggers: import("@/lib/tableStructureEditorSql").EditableStructureTrigger[];
+  columns: import("@/lib/table/tableStructureEditorSql").EditableStructureColumn[];
+  indexes: import("@/lib/table/tableStructureEditorSql").EditableStructureIndex[];
+  foreignKeys: import("@/lib/table/tableStructureEditorSql").EditableStructureForeignKey[];
+  triggers: import("@/lib/table/tableStructureEditorSql").EditableStructureTrigger[];
   initialized: boolean;
 }
 
@@ -650,7 +652,7 @@ export interface QueryTab {
   resultRuns?: QueryResultRun[];
   activeResultRunId?: string;
   resultAutoSave?: boolean;
-  explainPlan?: import("@/lib/explainPlan").ParsedExplainPlan;
+  explainPlan?: import("@/lib/diagram/explainPlan").ParsedExplainPlan;
   explainError?: string;
   explainSql?: string;
   lastExplainedSql?: string;

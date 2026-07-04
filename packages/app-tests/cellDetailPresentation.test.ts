@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { visibleCellDetailTabs } from "../../apps/desktop/src/lib/cellDetailPresentation.ts";
+import { visibleCellDetailTabs } from "../../apps/desktop/src/lib/dataGrid/cellDetailPresentation.ts";
 
 test("visibleCellDetailTabs exposes hex viewer only for binary details", () => {
   assert.deepEqual(visibleCellDetailTabs({ isEditable: false }), ["details"]);

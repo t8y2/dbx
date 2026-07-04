@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildTabResultSnapshot } from "../../apps/desktop/src/lib/tabResultCache.ts";
-import { decodeQueryResultArchive, defaultQueryResultArchiveFileName, encodeQueryResultArchive } from "../../apps/desktop/src/lib/queryResultArchive.ts";
+import { buildTabResultSnapshot } from "../../apps/desktop/src/lib/tabs/tabResultCache.ts";
+import { decodeQueryResultArchive, defaultQueryResultArchiveFileName, encodeQueryResultArchive } from "../../apps/desktop/src/lib/query/queryResultArchive.ts";
 import type { QueryTab } from "../../apps/desktop/src/types/database.ts";
 
 function queryTab(overrides: Partial<QueryTab> = {}): QueryTab {

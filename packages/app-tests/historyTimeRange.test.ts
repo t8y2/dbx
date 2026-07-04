@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { historyDateRangeIsValid, historyEntryMatchesDateRange } from "../../apps/desktop/src/lib/historyTimeRange.ts";
+import { historyDateRangeIsValid, historyEntryMatchesDateRange } from "../../apps/desktop/src/lib/history/historyTimeRange.ts";
 
 test("matches entries on the selected start and end dates inclusively", () => {
   const range = { startDate: "2026-06-01", endDate: "2026-06-18" };

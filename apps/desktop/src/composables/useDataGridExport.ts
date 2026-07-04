@@ -1,20 +1,20 @@
 import { computed, ref, type ComputedRef, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { isTauriRuntime } from "@/lib/tauriRuntime";
-import * as api from "@/lib/api";
-import { formatSelectionAsCsv, formatSelectionAsJson, formatSelectionAsSqlInList, formatSelectionAsTsv, type CellSelectionRange, type SelectionData } from "@/lib/gridSelection";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import * as api from "@/lib/backend/api";
+import { formatSelectionAsCsv, formatSelectionAsJson, formatSelectionAsSqlInList, formatSelectionAsTsv, type CellSelectionRange, type SelectionData } from "@/lib/dataGrid/gridSelection";
 import { useToast } from "@/composables/useToast";
-import { displayCellValue, type CellValue } from "@/lib/cellValue";
-import { tryStartExclusiveActivation, type ActionActivationGuard } from "@/lib/actionActivation";
-import { copyToClipboard } from "@/lib/clipboard";
-import { buildDataGridCopyInsertStatement, buildDataGridCopyUpdateStatements, type DataGridTableMeta } from "@/lib/dataGridSql";
-import { formatSqlInsert } from "@/lib/exportFormats";
-import { uuid } from "@/lib/utils";
+import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
+import { tryStartExclusiveActivation, type ActionActivationGuard } from "@/lib/connection/actionActivation";
+import { copyToClipboard } from "@/lib/common/clipboard";
+import { buildDataGridCopyInsertStatement, buildDataGridCopyUpdateStatements, type DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
+import { formatSqlInsert } from "@/lib/export/exportFormats";
+import { uuid } from "@/lib/common/utils";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { expandNestedJsonStringsForCopy } from "@/lib/jsonCopyValue";
-import { buildMongoCopyInsertDocument, formatMongoShellLiteral, type MongoInputValue } from "@/lib/mongoDocumentValues";
+import { expandNestedJsonStringsForCopy } from "@/lib/common/jsonCopyValue";
+import { buildMongoCopyInsertDocument, formatMongoShellLiteral, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import type { DatabaseType, QueryResult } from "@/types/database";
-import type { QueryResultExportRequest } from "@/lib/api";
+import type { QueryResultExportRequest } from "@/lib/backend/api";
 
 interface RowItem {
   id: number;

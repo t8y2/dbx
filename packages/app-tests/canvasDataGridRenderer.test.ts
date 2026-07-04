@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { fitCanvasText } from "../../apps/desktop/src/lib/canvasDataGridRenderer.ts";
+import { fitCanvasText } from "../../apps/desktop/src/lib/dataGrid/canvasDataGridRenderer.ts";
 
 function measureContext(charWidth = 1): CanvasRenderingContext2D {
   return {

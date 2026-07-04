@@ -13,7 +13,7 @@ import {
   normalizeSelectionRange,
   parseClipboardTable,
   rowSelectionRange,
-} from "../../apps/desktop/src/lib/gridSelection.ts";
+} from "../../apps/desktop/src/lib/dataGrid/gridSelection.ts";
 
 test("normalizes a dragged cell range in either direction", () => {
   const range = normalizeSelectionRange({ rowIndex: 4, colIndex: 3 }, { rowIndex: 1, colIndex: 0 });

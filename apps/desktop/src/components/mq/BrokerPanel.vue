@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { formatError } from "@/lib/errorUtils";
+import { formatError } from "@/lib/backend/errorUtils";
 import { ref, watch, onMounted, onUnmounted } from "vue";
 import type { ClusterInfo } from "@/types/mq";
-import { mqGetClusterInfo } from "@/lib/api";
+import { mqGetClusterInfo } from "@/lib/backend/api";
 
 interface Props {
   connectionId: string;

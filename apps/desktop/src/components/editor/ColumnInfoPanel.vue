@@ -4,7 +4,7 @@ import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/composables/useToast";
-import { copyToClipboard } from "@/lib/clipboard";
+import { copyToClipboard } from "@/lib/common/clipboard";
 
 export interface ColumnInfo {
   name: string;

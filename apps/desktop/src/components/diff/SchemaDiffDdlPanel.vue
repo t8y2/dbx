@@ -2,7 +2,7 @@
 import { ref, computed, watch, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
-import { copyToClipboard } from "@/lib/clipboard";
+import { copyToClipboard } from "@/lib/common/clipboard";
 import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { DEFAULT_CUSTOM_THEME_DDL_COLORS } from "@/stores/settingsStore";
@@ -12,7 +12,7 @@ import DiffSvgConnector from "@/components/diff/DiffSvgConnector.vue";
 import { FileCode, ScrollText, Copy, Play } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
-import type { SchemaDiffObject } from "@/lib/schemaDiff";
+import type { SchemaDiffObject } from "@/lib/schema/schemaDiff";
 
 const { t } = useI18n();
 const { toast } = useToast();

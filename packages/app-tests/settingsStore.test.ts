@@ -1,10 +1,10 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
 import { createPinia, setActivePinia } from "pinia";
-import { DEFAULT_SQL_FORMATTER_SETTINGS } from "../../apps/desktop/src/lib/sqlFormatterConfig.ts";
-import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS } from "../../apps/desktop/src/lib/tableColumnTemplates.ts";
-import { DEFAULT_UI_FONT_FAMILY, SYSTEM_UI_FONT_FAMILY } from "../../apps/desktop/src/lib/appFonts.ts";
-import { tableOpenPageLimit } from "../../apps/desktop/src/lib/tableOpenPageLimit.ts";
+import { DEFAULT_SQL_FORMATTER_SETTINGS } from "../../apps/desktop/src/lib/sql/sqlFormatterConfig.ts";
+import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS } from "../../apps/desktop/src/lib/table/tableColumnTemplates.ts";
+import { DEFAULT_UI_FONT_FAMILY, SYSTEM_UI_FONT_FAMILY } from "../../apps/desktop/src/lib/app/appFonts.ts";
+import { tableOpenPageLimit } from "../../apps/desktop/src/lib/table/tableOpenPageLimit.ts";
 import { AI_PROVIDER_PRESETS, DEFAULT_EDITOR_SETTINGS, normalizeAiConfig, normalizeEditorSettings, useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
 
 const OLD_FONT_SIZE_KEY = "dbx-query-editor-font-size";
@@ -161,6 +161,9 @@ test("defaults shortcut settings", () => {
   assert.equal(settings.shortcuts.resetUiZoom, "Mod+0");
   assert.equal(settings.shortcuts.refreshData, "F5");
   assert.equal(settings.shortcuts.toggleTranspose, "Tab");
+  assert.equal(settings.shortcuts.copySidebarSelection, "Mod+C");
+  assert.equal(settings.shortcuts.pasteSidebarSelection, "Mod+V");
+  assert.equal(settings.shortcuts.editSidebarConnection, "Mod+E");
 });
 
 test("keeps saved shortcut overrides", () => {
@@ -172,6 +175,7 @@ test("keeps saved shortcut overrides", () => {
       newQuery: "Shift+Mod+N",
       openSettings: "Shift+Mod+P",
       zoomInUi: "Alt+Mod+=",
+      editSidebarConnection: "Alt+E",
     } as any,
   });
 
@@ -181,6 +185,7 @@ test("keeps saved shortcut overrides", () => {
   assert.equal(settings.shortcuts.newQuery, "Shift+Mod+N");
   assert.equal(settings.shortcuts.openSettings, "Shift+Mod+P");
   assert.equal(settings.shortcuts.zoomInUi, "Alt+Mod+=");
+  assert.equal(settings.shortcuts.editSidebarConnection, "Alt+E");
   assert.equal(settings.shortcuts.saveSql, "Mod+S");
 });
 

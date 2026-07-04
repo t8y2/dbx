@@ -1,7 +1,7 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import { buildRedisKeyTree, collectRedisGroupKeyRaws, collectExpandedGroupIds, flattenVisibleRedisKeyTree, mergeKeysIntoRedisKeyTree, redisKeyNameCopyText, redisKeyToFlatTreeRow, type RedisKeyTreeNode } from "../../apps/desktop/src/lib/redisKeyTree.ts";
-import type { RedisKeyInfo } from "../../apps/desktop/src/lib/api.ts";
+import { buildRedisKeyTree, collectRedisGroupKeyRaws, collectExpandedGroupIds, flattenVisibleRedisKeyTree, mergeKeysIntoRedisKeyTree, redisKeyNameCopyText, redisKeyToFlatTreeRow, type RedisKeyTreeNode } from "../../apps/desktop/src/lib/redis/redisKeyTree.ts";
+import type { RedisKeyInfo } from "../../apps/desktop/src/lib/backend/api.ts";
 
 function makeKey(key_display: string, key_raw: string, key_type = "string", ttl = -1): RedisKeyInfo {
   return { key_display, key_raw, key_type, ttl };

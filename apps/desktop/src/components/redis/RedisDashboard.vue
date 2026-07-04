@@ -6,8 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
-import * as api from "@/lib/api";
-import type { RedisNodeEndpoint, RedisCommandResult } from "@/lib/api";
+import * as api from "@/lib/backend/api";
+import type { RedisNodeEndpoint, RedisCommandResult } from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 

@@ -1,5 +1,5 @@
 import { onMounted, onUnmounted } from "vue";
-import { refreshConnections } from "@/lib/api";
+import { refreshConnections } from "@/lib/backend/api";
 import { useQueryStore } from "@/stores/queryStore";
 
 let hiddenAt: number | null = null;

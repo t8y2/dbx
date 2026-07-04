@@ -6,8 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { useTheme } from "@/composables/useTheme";
 import { useToast } from "@/composables/useToast";
-import { copyToClipboard } from "@/lib/clipboard";
-import { formatSqlText, type SqlFormatDialect } from "@/lib/sqlFormatter";
+import { copyToClipboard } from "@/lib/common/clipboard";
+import { formatSqlText, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import type { Highlighter } from "shiki";
 
 const props = defineProps<{

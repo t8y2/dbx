@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
@@ -39,15 +40,17 @@ const POOL_CLOSE_TIMEOUT_SECS: u64 = 3;
 mod duckdb_types {
     use std::sync::Arc;
     pub type DuckDbHandle = Arc<crate::db::duckdb_driver::DuckDbConnection>;
+    pub type DuckDbWorkerHandle = Arc<crate::db::duckdb_worker_process::DuckDbWorkerClient>;
     pub type ExternalTabularHandle = Arc<crate::external::ExternalPool>;
 }
 #[cfg(not(feature = "duckdb-bundled"))]
 mod duckdb_types {
     pub type DuckDbHandle = ();
+    pub type DuckDbWorkerHandle = ();
     pub type ExternalTabularHandle = ();
 }
 
-use duckdb_types::{DuckDbHandle, ExternalTabularHandle};
+use duckdb_types::{DuckDbHandle, DuckDbWorkerHandle, ExternalTabularHandle};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MysqlMode {
@@ -77,6 +80,7 @@ pub enum PoolKind {
     Turso(db::turso_driver::TursoClient),
     Redis(db::redis_driver::RedisConnection),
     DuckDb(DuckDbHandle),
+    DuckDbWorker(DuckDbWorkerHandle),
     MongoDb(mongodb::Client),
     ClickHouse(db::clickhouse_driver::ChClient),
     SqlServer(Arc<tokio::sync::Mutex<db::sqlserver::SqlServerClient>>),
@@ -157,7 +161,7 @@ pub struct AppState {
     pub connections: Arc<RwLock<HashMap<String, PoolKind>>>,
     keepalive_tasks: Arc<RwLock<HashMap<String, JoinHandle<()>>>>,
     pool_activity: Arc<RwLock<HashMap<String, PoolActivity>>>,
-    connection_attempts: RwLock<HashMap<String, u64>>,
+    connection_attempts: RwLock<HashMap<String, ConnectionAttemptState>>,
     pub configs: RwLock<HashMap<String, ConnectionConfig>>,
     pub running_queries: RunningQueries,
     pub tunnels: TunnelManager,
@@ -167,6 +171,7 @@ pub struct AppState {
     pub plugins: PluginRegistry,
     pub agent_manager: crate::agent_manager::AgentManager,
     pub nacos_registry: crate::nacos::NacosAdminRegistry,
+    duckdb_worker_process_isolation: AtomicBool,
     /// PostgreSQL TLS cancel context, keyed by pool_key.
     /// Used to reconstruct a TLS connector compatible with the original connection when cancelling.
     postgres_cancel_contexts: Arc<RwLock<HashMap<String, db::postgres::PostgresCancelContext>>>,
@@ -178,6 +183,12 @@ pub struct AppState {
 #[derive(Clone, Copy)]
 struct PoolActivity {
     last_used_at: Instant,
+}
+
+#[derive(Clone, Copy)]
+struct ConnectionAttemptState {
+    server_attempt: u64,
+    client_attempt: Option<u64>,
 }
 
 impl PoolActivity {
@@ -467,6 +478,7 @@ impl AppState {
                 app_version,
             ),
             nacos_registry: crate::nacos::NacosAdminRegistry::new(),
+            duckdb_worker_process_isolation: AtomicBool::new(false),
             postgres_cancel_contexts: Arc::new(RwLock::new(HashMap::new())),
             transaction_sessions: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "mq-admin")]
@@ -480,6 +492,21 @@ impl AppState {
             Ok(None) => JDBC_PLUGIN_NOT_INSTALLED.to_string(),
             Err(err) => format!("Failed to inspect JDBC plugin: {err}"),
         }
+    }
+
+    pub fn set_duckdb_worker_process_isolation_enabled(&self, enabled: bool) {
+        self.duckdb_worker_process_isolation.store(enabled, Ordering::Relaxed);
+    }
+
+    pub async fn apply_duckdb_worker_process_isolation(&self, enabled: bool) {
+        let previous = self.duckdb_worker_process_isolation.swap(enabled, Ordering::Relaxed);
+        if previous != enabled {
+            self.remove_duckdb_pools_detached().await;
+        }
+    }
+
+    fn duckdb_worker_process_isolation_enabled(&self) -> bool {
+        self.duckdb_worker_process_isolation.load(Ordering::Relaxed)
     }
 
     pub async fn test_external_driver(&self, driver_id: &str, config: &ConnectionConfig) -> Result<String, String> {
@@ -532,9 +559,17 @@ impl AppState {
     }
 
     pub async fn begin_connection_attempt(&self, connection_id: &str) -> u64 {
+        self.begin_connection_attempt_with_client_attempt(connection_id, None).await
+    }
+
+    pub async fn begin_connection_attempt_with_client_attempt(
+        &self,
+        connection_id: &str,
+        client_attempt: Option<u64>,
+    ) -> u64 {
         let mut attempts = self.connection_attempts.write().await;
-        let next = attempts.get(connection_id).copied().unwrap_or(0).wrapping_add(1);
-        attempts.insert(connection_id.to_string(), next);
+        let next = attempts.get(connection_id).map(|state| state.server_attempt).unwrap_or(0).wrapping_add(1);
+        attempts.insert(connection_id.to_string(), ConnectionAttemptState { server_attempt: next, client_attempt });
         next
     }
 
@@ -542,11 +577,34 @@ impl AppState {
         self.begin_connection_attempt(connection_id).await;
     }
 
-    async fn connection_attempt_is_current(&self, connection_id: &str, attempt: u64) -> bool {
-        self.connection_attempts.read().await.get(connection_id).copied() == Some(attempt)
+    pub async fn supersede_connection_attempt_if_client_attempt(
+        &self,
+        connection_id: &str,
+        client_attempt: u64,
+    ) -> bool {
+        let mut attempts = self.connection_attempts.write().await;
+        let Some(current) = attempts.get(connection_id).copied() else {
+            return false;
+        };
+        if current.client_attempt != Some(client_attempt) {
+            return false;
+        }
+        attempts.insert(
+            connection_id.to_string(),
+            ConnectionAttemptState { server_attempt: current.server_attempt.wrapping_add(1), client_attempt: None },
+        );
+        true
     }
 
-    async fn ensure_current_connection_attempt(&self, connection_id: &str, attempt: Option<u64>) -> Result<(), String> {
+    async fn connection_attempt_is_current(&self, connection_id: &str, attempt: u64) -> bool {
+        self.connection_attempts.read().await.get(connection_id).map(|state| state.server_attempt) == Some(attempt)
+    }
+
+    pub async fn ensure_current_connection_attempt(
+        &self,
+        connection_id: &str,
+        attempt: Option<u64>,
+    ) -> Result<(), String> {
         let Some(attempt) = attempt else {
             return Ok(());
         };
@@ -571,6 +629,22 @@ impl AppState {
         }
         self.insert_connection_pool(pool_key, pool, config).await;
         Ok(())
+    }
+
+    async fn discard_stale_connection_attempt_pool(
+        &self,
+        connection_id: &str,
+        pool_key: String,
+        pool: PoolKind,
+        config: &ConnectionConfig,
+    ) {
+        // mq_registry only exists in mq-admin builds; other builds reject MQ connects before a pool is created.
+        #[cfg(feature = "mq-admin")]
+        if matches!(pool, PoolKind::MessageQueue) {
+            self.mq_registry.drop_connection(connection_id).await;
+        }
+        self.reset_connection_transport_for_config(connection_id, config).await;
+        close_pool_kind_with_timeout(pool_key, pool).await;
     }
 
     async fn start_keepalive_task(&self, pool_key: &str, pool: &PoolKind, config: &ConnectionConfig) {
@@ -744,7 +818,9 @@ impl AppState {
         let conns = self.connections.read().await;
         if conns.contains_key(&pool_key) {
             drop(conns);
-            if !self.remove_stale_connection_pool(&pool_key).await {
+            if self.remove_pool_if_duckdb_isolation_mismatch(&pool_key).await {
+                // Recreate below using the current DuckDB isolation mode.
+            } else if !self.remove_stale_connection_pool(&pool_key).await {
                 self.touch_pool_activity(&pool_key).await;
                 return Ok(pool_key);
             }
@@ -759,8 +835,17 @@ impl AppState {
         let db_config = database_connection_config(&config, database);
 
         validate_h2_file_connection(&db_config)?;
+        self.ensure_current_connection_attempt(connection_id, connection_attempt).await?;
         let (host, port) = self.connection_host_port(connection_id, &db_config).await?;
+        if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
+            self.reset_connection_transport_for_config(connection_id, &db_config).await;
+            return Err(err);
+        }
         probe_connection_endpoint(&db_config, &host, port).await?;
+        if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
+            self.reset_connection_transport_for_config(connection_id, &db_config).await;
+            return Err(err);
+        }
         let url = connection_url_for_endpoint(&db_config, &host, port);
         let connect_timeout = std::time::Duration::from_secs(db_config.effective_connect_timeout_secs());
         let idle_timeout = std::time::Duration::from_secs(db_config.idle_timeout_secs);
@@ -859,14 +944,35 @@ impl AppState {
             }
             #[cfg(feature = "duckdb-bundled")]
             DatabaseType::DuckDb => {
-                let con = db::duckdb_driver::connect_path(&expand_tilde(&db_config.host))?;
-                {
-                    let locked = con.lock().map_err(|e| e.to_string())?;
-                    for attached in &db_config.attached_databases {
-                        crate::schema::duckdb_attach_database(&locked, &attached.name, &expand_tilde(&attached.path))?;
+                if self.duckdb_worker_process_isolation_enabled() {
+                    let attached_databases = db_config
+                        .attached_databases
+                        .iter()
+                        .map(|attached| crate::models::connection::AttachedDatabaseConfig {
+                            name: attached.name.clone(),
+                            path: expand_tilde(&attached.path),
+                        })
+                        .collect();
+                    let client = db::duckdb_worker_process::DuckDbWorkerClient::open(
+                        expand_tilde(&db_config.host),
+                        attached_databases,
+                    )
+                    .await?;
+                    PoolKind::DuckDbWorker(Arc::new(client))
+                } else {
+                    let con = db::duckdb_driver::connect_path(&expand_tilde(&db_config.host))?;
+                    {
+                        let locked = con.lock().map_err(|e| e.to_string())?;
+                        for attached in &db_config.attached_databases {
+                            crate::schema::duckdb_attach_database(
+                                &locked,
+                                &attached.name,
+                                &expand_tilde(&attached.path),
+                            )?;
+                        }
                     }
+                    PoolKind::DuckDb(con)
                 }
-                PoolKind::DuckDb(con)
             }
             #[cfg(not(feature = "duckdb-bundled"))]
             DatabaseType::DuckDb => {
@@ -891,9 +997,21 @@ impl AppState {
                             Ok(()) => {
                                 // Re-check: another task may have created the pool while we were connecting.
                                 if self.connections.read().await.contains_key(&pool_key) {
+                                    close_pool_kind_with_timeout(pool_key.clone(), PoolKind::MongoDb(client)).await;
                                     return Ok(pool_key);
                                 }
-                                self.ensure_current_connection_attempt(connection_id, connection_attempt).await?;
+                                if let Err(err) =
+                                    self.ensure_current_connection_attempt(connection_id, connection_attempt).await
+                                {
+                                    self.discard_stale_connection_attempt_pool(
+                                        connection_id,
+                                        pool_key.clone(),
+                                        PoolKind::MongoDb(client),
+                                        &db_config,
+                                    )
+                                    .await;
+                                    return Err(err);
+                                }
                                 self.insert_connection_pool(pool_key.clone(), PoolKind::MongoDb(client), &db_config)
                                     .await;
                                 return Ok(pool_key);
@@ -1089,6 +1207,11 @@ impl AppState {
                     self.mq_registry.drop_connection(connection_id).await;
                     return Err(err);
                 }
+                if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
+                    self.mq_registry.drop_connection(connection_id).await;
+                    self.reset_connection_transport_for_config(connection_id, &db_config).await;
+                    return Err(err);
+                }
                 PoolKind::MessageQueue
             }
             #[cfg(not(feature = "mq-admin"))]
@@ -1101,7 +1224,7 @@ impl AppState {
         };
 
         if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
-            close_pool_kind_with_timeout(pool_key.clone(), pool).await;
+            self.discard_stale_connection_attempt_pool(connection_id, pool_key.clone(), pool, &db_config).await;
             return Err(err);
         }
         self.insert_connection_pool(pool_key.clone(), pool, &db_config).await;
@@ -1532,6 +1655,7 @@ impl AppState {
                 }
                 PoolKind::Sqlite(_)
                 | PoolKind::DuckDb(_)
+                | PoolKind::DuckDbWorker(_)
                 | PoolKind::ExternalTabular(_)
                 | PoolKind::ExternalDriver { .. }
                 | PoolKind::MessageQueue
@@ -1628,6 +1752,43 @@ impl AppState {
         } else {
             false
         }
+    }
+
+    #[cfg(feature = "duckdb-bundled")]
+    async fn remove_pool_by_key_detached(&self, pool_key: &str) -> bool {
+        self.stop_keepalive_task(pool_key).await;
+        self.pool_activity.write().await.remove(pool_key);
+        self.postgres_cancel_contexts.write().await.remove(pool_key);
+        let removed = self.connections.write().await.remove(pool_key);
+        if let Some(pool) = removed {
+            close_removed_pools_in_background(vec![(pool_key.to_string(), pool)]);
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(feature = "duckdb-bundled")]
+    async fn remove_pool_if_duckdb_isolation_mismatch(&self, pool_key: &str) -> bool {
+        let isolation_enabled = self.duckdb_worker_process_isolation_enabled();
+        let mismatch = {
+            let connections = self.connections.read().await;
+            match connections.get(pool_key) {
+                Some(PoolKind::DuckDb(_)) => isolation_enabled,
+                Some(PoolKind::DuckDbWorker(_)) => !isolation_enabled,
+                _ => false,
+            }
+        };
+        if mismatch {
+            self.remove_pool_by_key_detached(pool_key).await
+        } else {
+            false
+        }
+    }
+
+    #[cfg(not(feature = "duckdb-bundled"))]
+    async fn remove_pool_if_duckdb_isolation_mismatch(&self, _pool_key: &str) -> bool {
+        false
     }
 
     #[cfg(feature = "duckdb-bundled")]
@@ -1995,6 +2156,7 @@ impl AppState {
                 }
                 PoolKind::Sqlite(_)
                 | PoolKind::DuckDb(_)
+                | PoolKind::DuckDbWorker(_)
                 | PoolKind::ExternalTabular(_)
                 | PoolKind::ExternalDriver { .. }
                 | PoolKind::MessageQueue
@@ -2063,6 +2225,15 @@ impl AppState {
         close_removed_pools_in_background(removed);
     }
 
+    #[cfg(feature = "duckdb-bundled")]
+    async fn remove_duckdb_pools_detached(&self) {
+        let removed = self.drain_duckdb_pools().await;
+        close_removed_pools_in_background(removed);
+    }
+
+    #[cfg(not(feature = "duckdb-bundled"))]
+    async fn remove_duckdb_pools_detached(&self) {}
+
     pub async fn remove_external_driver_pools(&self, driver_id: &str) {
         let removed = self.drain_external_driver_pools(driver_id).await;
         close_removed_pools(removed).await;
@@ -2098,6 +2269,37 @@ impl AppState {
         // Also drop the MQ admin adapter if this is an MQ connection.
         #[cfg(feature = "mq-admin")]
         self.mq_registry.drop_connection(connection_id).await;
+        removed
+    }
+
+    #[cfg(feature = "duckdb-bundled")]
+    async fn drain_duckdb_pools(&self) -> Vec<(String, PoolKind)> {
+        let keys_to_remove: Vec<String> = self
+            .connections
+            .read()
+            .await
+            .iter()
+            .filter_map(|(key, pool)| match pool {
+                PoolKind::DuckDb(_) | PoolKind::DuckDbWorker(_) => Some(key.clone()),
+                _ => None,
+            })
+            .collect();
+        self.stop_keepalive_tasks(&keys_to_remove).await;
+        {
+            let mut activity = self.pool_activity.write().await;
+            let mut cancel_contexts = self.postgres_cancel_contexts.write().await;
+            for key in &keys_to_remove {
+                activity.remove(key);
+                cancel_contexts.remove(key);
+            }
+        }
+        let mut conns = self.connections.write().await;
+        let mut removed = Vec::with_capacity(keys_to_remove.len());
+        for key in keys_to_remove {
+            if let Some(pool) = conns.remove(&key) {
+                removed.push((key, pool));
+            }
+        }
         removed
     }
 
@@ -2360,8 +2562,12 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         PoolKind::Turso(client) => PoolKind::Turso(client.clone()),
         #[cfg(feature = "duckdb-bundled")]
         PoolKind::DuckDb(con) => PoolKind::DuckDb(con.clone()),
+        #[cfg(feature = "duckdb-bundled")]
+        PoolKind::DuckDbWorker(client) => PoolKind::DuckDbWorker(client.clone()),
         #[cfg(not(feature = "duckdb-bundled"))]
         PoolKind::DuckDb(con) => PoolKind::DuckDb(con.clone()),
+        #[cfg(not(feature = "duckdb-bundled"))]
+        PoolKind::DuckDbWorker(client) => PoolKind::DuckDbWorker(client.clone()),
         PoolKind::MongoDb(client) => PoolKind::MongoDb(client.clone()),
         PoolKind::ClickHouse(client) => PoolKind::ClickHouse(client.clone()),
         PoolKind::SqlServer(client) => PoolKind::SqlServer(client.clone()),
@@ -2395,8 +2601,14 @@ pub async fn close_pool_kind(pool: PoolKind) {
         PoolKind::DuckDb(con) => {
             crate::db::duckdb_driver::close_connection(con);
         }
+        #[cfg(feature = "duckdb-bundled")]
+        PoolKind::DuckDbWorker(client) => {
+            client.shutdown().await;
+        }
         #[cfg(not(feature = "duckdb-bundled"))]
         PoolKind::DuckDb(_) => {}
+        #[cfg(not(feature = "duckdb-bundled"))]
+        PoolKind::DuckDbWorker(_) => {}
         PoolKind::MongoDb(client) => {
             drop(client);
         }
@@ -3608,6 +3820,55 @@ mod tests {
         state.get_or_create_pool("duckdb-conn", None).await.unwrap();
 
         assert!(state.duckdb_existing_pool_is_usable_for_config(&config).await.unwrap());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(feature = "duckdb-bundled")]
+    #[tokio::test]
+    async fn applying_duckdb_worker_isolation_drops_existing_duckdb_pools() {
+        let (state, dir) = test_app_state().await;
+        let db_path = dir.join("app.duckdb");
+        duckdb::Connection::open(&db_path).unwrap();
+        let mut config = mysql_config(None);
+        config.id = "duckdb-conn".to_string();
+        config.name = "DuckDB".to_string();
+        config.db_type = DatabaseType::DuckDb;
+        config.host = db_path.to_string_lossy().to_string();
+        config.port = 0;
+
+        state.configs.write().await.insert(config.id.clone(), config);
+        state.get_or_create_pool("duckdb-conn", None).await.unwrap();
+        assert!(matches!(state.connections.read().await.get("duckdb-conn"), Some(PoolKind::DuckDb(_))));
+
+        state.apply_duckdb_worker_process_isolation(true).await;
+
+        assert!(!state.connections.read().await.contains_key("duckdb-conn"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(feature = "duckdb-bundled")]
+    #[tokio::test]
+    async fn duckdb_pool_mode_mismatch_removes_existing_pool() {
+        let (state, dir) = test_app_state().await;
+        let db_path = dir.join("app.duckdb");
+        duckdb::Connection::open(&db_path).unwrap();
+        let mut config = mysql_config(None);
+        config.id = "duckdb-conn".to_string();
+        config.name = "DuckDB".to_string();
+        config.db_type = DatabaseType::DuckDb;
+        config.host = db_path.to_string_lossy().to_string();
+        config.port = 0;
+
+        state.configs.write().await.insert(config.id.clone(), config);
+        state.get_or_create_pool("duckdb-conn", None).await.unwrap();
+        assert!(matches!(state.connections.read().await.get("duckdb-conn"), Some(PoolKind::DuckDb(_))));
+
+        state.set_duckdb_worker_process_isolation_enabled(true);
+
+        assert!(state.remove_pool_if_duckdb_isolation_mismatch("duckdb-conn").await);
+        assert!(!state.connections.read().await.contains_key("duckdb-conn"));
 
         let _ = std::fs::remove_dir_all(dir);
     }

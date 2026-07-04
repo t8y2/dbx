@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from "vue";
 import type { PeekedMessage, TopicInfo, TopicRef, SendMessageRequest, SendMessageResponse } from "@/types/mq";
-import { mqSendMessage, mqListTopics, mqPeekMessages } from "@/lib/api";
-import { formatError } from "@/lib/errorUtils";
+import { mqSendMessage, mqListTopics, mqPeekMessages } from "@/lib/backend/api";
+import { formatError } from "@/lib/backend/errorUtils";
 
 interface Props {
   connectionId: string;

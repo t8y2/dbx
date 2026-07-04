@@ -12,7 +12,7 @@ import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMe
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { QueryResult } from "@/types/database";
 import { useTheme } from "@/composables/useTheme";
-import { axisColumnLabel, chartableColumnIndexes, toChartNumber } from "@/lib/chartData";
+import { axisColumnLabel, chartableColumnIndexes, toChartNumber } from "@/lib/dataGrid/chartData";
 
 use([CanvasRenderer, LineChart, BarChart, PieChart, GridComponent, TooltipComponent, LegendComponent]);
 

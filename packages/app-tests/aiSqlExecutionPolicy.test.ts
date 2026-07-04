@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { classifyAiSqlExecution, classifyConnectionEnvironment, shouldAttemptAiAutoExecute } from "../../apps/desktop/src/lib/aiSqlExecutionPolicy.ts";
+import { classifyAiSqlExecution, classifyConnectionEnvironment, shouldAttemptAiAutoExecute } from "../../apps/desktop/src/lib/ai/aiSqlExecutionPolicy.ts";
 import type { ConnectionConfig } from "../../apps/desktop/src/types/database.ts";
 
 function conn(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {

@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { coerceDataGridCellValue } from "../../apps/desktop/src/lib/dataGridCellCoercion.ts";
+import { coerceDataGridCellValue } from "../../apps/desktop/src/lib/dataGrid/dataGridCellCoercion.ts";
 
 test("MySQL JSON field with English quotes should remain unchanged", () => {
   const input = '{"2:3":"3:4","3:2":"4:3","21:9":"16:9"}';

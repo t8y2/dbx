@@ -40,57 +40,78 @@ import {
   type CustomThemeColors,
   type CustomTheme,
 } from "@/stores/settingsStore";
-import { loadEditorTheme, editorFontTheme } from "@/lib/editorThemes";
-import { formatAiModelOption } from "@/lib/aiModelPresentation";
+import { loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
+import { formatAiModelOption } from "@/lib/ai/aiModelPresentation";
 import ThemeCustomizerDialog from "./ThemeCustomizerDialog.vue";
-import { isTauriRuntime } from "@/lib/tauriRuntime";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useTheme } from "@/composables/useTheme";
-import { copyToClipboard } from "@/lib/clipboard";
-import { clearDebugLogs as clearStoredDebugLogs, downloadDebugLogs, getDebugLogBundleText } from "@/lib/debugLog";
+import { copyToClipboard } from "@/lib/common/clipboard";
+import { clearDebugLogs as clearStoredDebugLogs, downloadDebugLogs, getDebugLogBundleText } from "@/lib/backend/debugLog";
 import {
   aiListModels,
   aiTestConnection,
   checkMcpServerStatus,
   installMcpServer,
+  forgetWebdavSyncSecretsPassphrase,
   forgetWebdavSavedPassword,
   listSystemFonts,
+  saveWebdavSyncSecretsPreference,
   saveWebdavSavedPassword,
   webdavPasswordStatus,
   webdavSyncDownload,
+  webdavSyncSecretsStatus,
   webdavSyncTest,
   webdavSyncUpload,
   type AiModelInfo,
   type McpServerStatus,
   type WebDavConfig,
-} from "@/lib/api";
-import { eventToShortcut } from "@/lib/keyboardShortcuts";
-import { SHORTCUT_DEFINITIONS, findShortcutConflict, normalizeShortcutSettings, type ShortcutActionId } from "@/lib/shortcutRegistry";
-import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebarTableNameDisplay";
-import { normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sqlFormatterConfig";
-import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES } from "@/lib/tableColumnTemplates";
-import { buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpVsCodeConfig, type McpEnvEntry, type McpLaunchConfig } from "@/lib/mcpConfigTemplates";
-import { isWindows } from "@/lib/platform";
-import { combineDataTypeForDatabase, dataTypeLengthInputValue, getDataTypeOptions, getDefaultLengthForType, isDataTypeLengthDisabled, splitDataType } from "@/lib/tableStructureEditorState";
+} from "@/lib/backend/api";
+import { eventToShortcut } from "@/lib/editor/keyboardShortcuts";
+import { SHORTCUT_DEFINITIONS, findShortcutConflict, normalizeShortcutSettings, type ShortcutActionId } from "@/lib/editor/shortcutRegistry";
+import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
+import { normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
+import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES } from "@/lib/table/tableColumnTemplates";
+import { buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpVsCodeConfig, type McpEnvEntry, type McpLaunchConfig } from "@/lib/mcp/mcpConfigTemplates";
+import { isWindows } from "@/lib/backend/platform";
+import { combineDataTypeForDatabase, dataTypeLengthInputValue, getDataTypeOptions, getDefaultLengthForType, isDataTypeLengthDisabled, splitDataType } from "@/lib/table/tableStructureEditorState";
+import { useToast } from "@/composables/useToast";
 import type { DatabaseType, SqlSnippet } from "@/types/database";
-import { uuid } from "@/lib/utils";
-import { DEFAULT_SQL_SNIPPETS } from "@/lib/sqlCompletion";
+import { uuid } from "@/lib/common/utils";
+import { DEFAULT_SQL_SNIPPETS } from "@/lib/sql/sqlCompletion";
 import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
 import AppLogo from "@/components/icons/AppLogo.vue";
 import SqlFormatterSettingsPanel from "./SqlFormatterSettingsPanel.vue";
-import type { AppThemeAppearance } from "@/lib/appTheme";
+import { APP_THEME_PALETTES, type AppThemeAppearance, type AppThemeMode, type AppThemePalette } from "@/lib/app/appTheme";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { currentLocale, setLocale, type Locale } from "@/i18n";
-import { LOCALE_OPTIONS } from "@/lib/localeOptions";
-import { DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES, DEFAULT_WEB_DAV_REMOTE_PATH, normalizedWebDavAutoUploadInterval, writeWebDavAutoUploadFields } from "@/lib/webdavAutoUploadConfig";
-import { apiUrl } from "@/lib/webPath";
-import { DEFAULT_UI_FONT_FAMILY, SYSTEM_UI_FONT_FAMILY } from "@/lib/appFonts";
+import { LOCALE_OPTIONS } from "@/lib/app/localeOptions";
+import { DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES, DEFAULT_WEB_DAV_REMOTE_PATH, normalizedWebDavAutoUploadInterval, writeWebDavAutoUploadFields } from "@/lib/webdav/webdavAutoUploadConfig";
+import { apiUrl } from "@/lib/common/webPath";
+import { DEFAULT_UI_FONT_FAMILY, SYSTEM_UI_FONT_FAMILY } from "@/lib/app/appFonts";
 
 const { t } = useI18n();
+const { toast } = useToast();
 const settingsStore = useSettingsStore();
 const connectionStore = useConnectionStore();
 const savedSqlStore = useSavedSqlStore();
-const { isDark, themeMode, setThemeMode } = useTheme();
+const { isDark, themeMode, themePalette, setThemeMode, setThemePalette } = useTheme();
+
+const appThemePaletteOptions = computed(
+  (): Array<{ value: AppThemePalette; label: string; previewColor: string }> =>
+    APP_THEME_PALETTES.map((palette) => ({
+      value: palette.value,
+      label: t(palette.labelKey),
+      previewColor: palette.previewColor,
+    })),
+);
+const selectedThemePaletteOption = computed(() => appThemePaletteOptions.value.find((option) => option.value === themePalette.value) ?? appThemePaletteOptions.value[0]);
+const selectedLocaleOption = computed(() => LOCALE_OPTIONS.find((locale) => locale.value === currentLocale()) ?? LOCALE_OPTIONS[0]);
+const appThemeModeOptions = computed(() => [
+  { value: "light" as AppThemeMode, label: t("toolbar.themeLight"), icon: Sun },
+  { value: "dark" as AppThemeMode, label: t("toolbar.themeDark"), icon: Moon },
+  { value: "system" as AppThemeMode, label: t("toolbar.themeSystem"), icon: SunMoon },
+]);
 
 let cachedSystemFonts: string[] | null = null;
 let pendingSystemFonts: Promise<string[]> | null = null;
@@ -224,6 +245,10 @@ const editQuitOnClose = ref(settingsStore.desktopSettings.quit_on_close);
 const desktopCloseBehaviorResetPending = ref(false);
 const editIconTheme = ref<DesktopIconTheme>(settingsStore.desktopSettings.icon_theme);
 const editDebugLoggingEnabled = ref(settingsStore.desktopSettings.debug_logging_enabled);
+const editDuckDbWorkerProcessIsolation = ref(settingsStore.desktopSettings.duckdb_worker_process_isolation);
+const startupDuckDbWorkerProcessIsolation = ref(settingsStore.desktopSettings.duckdb_worker_process_isolation);
+const duckDbWorkerStartupCaptured = ref(false);
+const duckDbRestarting = ref(false);
 const editSidebarTablePageSize = ref(settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE);
 const debugLogCopied = ref(false);
 const debugLogDownloaded = ref(false);
@@ -265,7 +290,9 @@ const systemFontsLoaded = ref(false);
 const uiScaleOptions = [0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
 const fontSearchTriggerClass =
   "h-8 w-full max-w-none justify-between gap-1.5 rounded-[6px] border border-input bg-transparent py-2 pl-2.5 pr-2 text-sm font-normal shadow-none hover:bg-transparent focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 aria-expanded:bg-transparent dark:bg-input/30 dark:hover:bg-input/50";
+const appearanceFontSearchTriggerClass = `${fontSearchTriggerClass} gap-0 pl-2 pr-1.5`;
 const fontSearchTriggerIconClass = "size-4 text-muted-foreground";
+const appearanceFontSearchTriggerIconClass = "size-2.5 text-muted-foreground";
 const disconnectTabHandlingModeDescriptionKey = computed(() => {
   switch (editDisconnectTabHandlingMode.value) {
     case "close-tabs":
@@ -523,6 +550,7 @@ watch(
       editQuitOnClose.value = settingsStore.desktopSettings.quit_on_close;
       editIconTheme.value = settingsStore.desktopSettings.icon_theme;
       editDebugLoggingEnabled.value = settingsStore.desktopSettings.debug_logging_enabled;
+      editDuckDbWorkerProcessIsolation.value = settingsStore.desktopSettings.duckdb_worker_process_isolation;
       editSidebarTablePageSize.value = settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
       editShowColumnCommentsInHeader.value = settingsStore.editorSettings.showColumnCommentsInHeader;
       editShowColumnTypesInHeader.value = settingsStore.editorSettings.showColumnTypesInHeader;
@@ -566,6 +594,7 @@ const formatterEditorShortcutIds: ShortcutActionId[] = ["formatSql", "find", "re
 const formatterEditorShortcutDefinitions = computed(() => formatterEditorShortcutIds.map((id) => SHORTCUT_DEFINITIONS.find((definition) => definition.id === id)).filter((definition): definition is (typeof SHORTCUT_DEFINITIONS)[number] => !!definition));
 const hasShortcutConflicts = computed(() => shortcutConflicts.value.length > 0);
 const shortcutsChanged = computed(() => JSON.stringify(editShortcuts.value) !== JSON.stringify(settingsStore.editorSettings.shortcuts));
+const duckDbWorkerProcessIsolationRequiresRestart = computed(() => editDuckDbWorkerProcessIsolation.value !== startupDuckDbWorkerProcessIsolation.value);
 const hasBlockingShortcutConflicts = computed(() => shortcutsChanged.value && hasShortcutConflicts.value);
 const hasBlockingFormatterConfig = computed(() => activeSettingsTab.value === "formatter" && !sqlFormatterConfigValid.value);
 const hasApplyBlocker = computed(() => hasBlockingShortcutConflicts.value || hasBlockingFormatterConfig.value);
@@ -593,6 +622,7 @@ function hasChanges(): boolean {
     editQuitOnClose.value !== settingsStore.desktopSettings.quit_on_close ||
     editIconTheme.value !== settingsStore.desktopSettings.icon_theme ||
     editDebugLoggingEnabled.value !== settingsStore.desktopSettings.debug_logging_enabled ||
+    editDuckDbWorkerProcessIsolation.value !== settingsStore.desktopSettings.duckdb_worker_process_isolation ||
     editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE) ||
     editShowColumnCommentsInHeader.value !== settingsStore.editorSettings.showColumnCommentsInHeader ||
     editShowColumnTypesInHeader.value !== settingsStore.editorSettings.showColumnTypesInHeader ||
@@ -677,6 +707,7 @@ async function persistSettings() {
     close_action_prompted: desktopCloseBehaviorResetPending.value ? false : true,
     icon_theme: editIconTheme.value,
     debug_logging_enabled: editDebugLoggingEnabled.value,
+    duckdb_worker_process_isolation: editDuckDbWorkerProcessIsolation.value,
     sidebar_table_page_size: editSidebarTablePageSize.value,
   });
   desktopCloseBehaviorResetPending.value = false;
@@ -694,6 +725,20 @@ async function applySettings() {
 async function applySettingsAndClose() {
   await persistSettings();
   closeSettings();
+}
+
+async function restartDbxForDuckDbIsolation() {
+  if (duckDbRestarting.value || hasApplyBlocker.value || isWeb) return;
+  duckDbRestarting.value = true;
+  try {
+    await persistSettings();
+    const { relaunch } = await import("@tauri-apps/plugin-process");
+    await relaunch();
+  } catch (e: any) {
+    toast(t("settings.restartDbxFailed", { error: e?.message || String(e) }), 5000);
+  } finally {
+    duckDbRestarting.value = false;
+  }
 }
 
 function resetDefaultsForTab(tab: SettingsCategory) {
@@ -744,6 +789,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
     editInfiniteScroll.value = DEFAULT_EDITOR_SETTINGS.infiniteScroll;
     editInfiniteScrollMaxRows.value = DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows;
+    editDuckDbWorkerProcessIsolation.value = DEFAULT_DESKTOP_SETTINGS.duckdb_worker_process_isolation;
     editTableColumnTemplateRows.value = tableColumnTemplateRowsFromSettings(DEFAULT_EDITOR_SETTINGS.tableColumnTemplateFields);
     editExportBatchSize.value = DEFAULT_EDITOR_SETTINGS.exportBatchSize;
     editExportRowLimitEnabled.value = DEFAULT_EDITOR_SETTINGS.exportRowLimitEnabled;
@@ -781,6 +827,7 @@ function resetAllDefaults() {
   desktopCloseBehaviorResetPending.value = true;
   editIconTheme.value = DEFAULT_DESKTOP_SETTINGS.icon_theme;
   editDebugLoggingEnabled.value = DEFAULT_DESKTOP_SETTINGS.debug_logging_enabled;
+  editDuckDbWorkerProcessIsolation.value = DEFAULT_DESKTOP_SETTINGS.duckdb_worker_process_isolation;
   editSidebarTablePageSize.value = DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
   editShowColumnCommentsInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader;
   editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
@@ -1094,14 +1141,14 @@ function setSidebarActivation(value: "single" | "double") {
   editSidebarActivation.value = value;
 }
 
-const activeSettingsTab = ref("editor");
+const activeSettingsTab = ref("appearance");
 const isWeb = !isTauriRuntime();
 const displayedAppVersion = computed(() => (props.appVersion ? `v${props.appVersion}` : ""));
 type SettingsCategory = "editor" | "formatter" | "appearance" | "navigation" | "data" | "shortcuts" | "snippets" | "sync" | "ai" | "mcp" | "security" | "about";
 const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[]>(() => [
+  { value: "appearance", label: t("settings.appearanceTab") },
   { value: "editor", label: t("settings.editorTab") },
   { value: "formatter", label: t("settings.sqlFormatterTab") },
-  { value: "appearance", label: t("settings.appearanceTab") },
   { value: "navigation", label: t("settings.navigationTab") },
   { value: "data", label: t("settings.dataTab") },
   { value: "shortcuts", label: t("settings.shortcutsTab") },
@@ -1119,7 +1166,7 @@ function hasSettingsApplyFooter(value: SettingsCategory): boolean {
 }
 
 function settingsCategoryButton(value: SettingsCategory): string {
-  return ["w-full rounded-md px-3 py-2 text-left text-sm transition-colors", value === activeSettingsTab.value ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:bg-muted hover:text-foreground"].join(" ");
+  return ["w-auto shrink-0 whitespace-nowrap rounded-md px-3 py-2 text-left text-sm transition-colors lg:w-full", value === activeSettingsTab.value ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:bg-muted hover:text-foreground"].join(" ");
 }
 
 function openExternalUrl(url: string) {
@@ -1278,13 +1325,14 @@ const webdavHasSavedPassword = ref(false);
 const webdavRemotePath = ref(localStorage.getItem("dbx-webdav-remote-path") || DEFAULT_WEB_DAV_REMOTE_PATH);
 const webdavSyncSecrets = ref(false);
 const webdavSecretsPassphrase = ref("");
+const webdavHasSavedSecretsPassphrase = ref(false);
 const webdavAutoUploadEnabled = ref(localStorage.getItem("dbx-webdav-auto-upload-enabled") === "true");
 const webdavAutoUploadIntervalMinutes = ref(Number(localStorage.getItem("dbx-webdav-auto-upload-interval-minutes") || String(DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES)));
 const webdavBusy = ref<"" | "test" | "upload" | "download">("");
 const webdavMessage = ref("");
 const webdavError = ref(false);
 
-const webdavReady = computed(() => !!webdavEndpoint.value.trim() && !webdavBusy.value && (!webdavSyncSecrets.value || !!webdavSecretsPassphrase.value.trim()));
+const webdavReady = computed(() => !!webdavEndpoint.value.trim() && !webdavBusy.value && (!webdavSyncSecrets.value || !!webdavSecretsPassphrase.value.trim() || webdavHasSavedSecretsPassphrase.value));
 
 function currentWebDavConfig(): WebDavConfig {
   return {
@@ -1320,6 +1368,7 @@ async function runWebDavAction(kind: "test" | "upload" | "download", action: () 
   try {
     rememberWebDavFields();
     await applyWebDavPasswordPreference();
+    await applyWebDavSyncSecretsPreference();
     setWebDavResult(await action());
   } catch (e: any) {
     setWebDavResult(e?.message || String(e), true);
@@ -1353,6 +1402,40 @@ async function applyWebDavPasswordPreference() {
   if (!webdavRememberPassword.value && webdavHasSavedPassword.value) {
     await forgetWebdavSavedPassword(currentWebDavAccountConfig());
     webdavHasSavedPassword.value = false;
+  }
+}
+
+async function refreshWebDavSyncSecretsStatus() {
+  try {
+    const status = await webdavSyncSecretsStatus();
+    webdavSyncSecrets.value = status.enabled;
+    webdavHasSavedSecretsPassphrase.value = status.hasSavedPassphrase;
+  } catch {
+    webdavSyncSecrets.value = false;
+    webdavHasSavedSecretsPassphrase.value = false;
+  }
+}
+
+async function applyWebDavSyncSecretsPreference() {
+  const passphrase = webdavSecretsPassphrase.value.trim();
+  if (!webdavSyncSecrets.value) {
+    await saveWebdavSyncSecretsPreference(false);
+    return;
+  }
+  await saveWebdavSyncSecretsPreference(true, passphrase || undefined);
+  if (passphrase) {
+    webdavHasSavedSecretsPassphrase.value = true;
+    webdavSecretsPassphrase.value = "";
+  }
+}
+
+async function clearWebDavSyncSecretsPassphrase() {
+  try {
+    await forgetWebdavSyncSecretsPassphrase();
+    webdavHasSavedSecretsPassphrase.value = false;
+    webdavSecretsPassphrase.value = "";
+  } catch (e: any) {
+    setWebDavResult(e?.message || String(e), true);
   }
 }
 
@@ -1412,7 +1495,7 @@ watch(
   () => settingsVisible.value,
   async (open) => {
     if (open) {
-      activeSettingsTab.value = props.initialTab || "editor";
+      activeSettingsTab.value = props.initialTab || "appearance";
       passwordMessage.value = "";
       oldPassword.value = "";
       newPassword.value = "";
@@ -1423,9 +1506,16 @@ watch(
       editQuitOnClose.value = settingsStore.desktopSettings.quit_on_close;
       editIconTheme.value = settingsStore.desktopSettings.icon_theme;
       editDebugLoggingEnabled.value = settingsStore.desktopSettings.debug_logging_enabled;
+      editDuckDbWorkerProcessIsolation.value = settingsStore.desktopSettings.duckdb_worker_process_isolation;
+      if (!duckDbWorkerStartupCaptured.value) {
+        startupDuckDbWorkerProcessIsolation.value = settingsStore.desktopSettings.duckdb_worker_process_isolation;
+        duckDbWorkerStartupCaptured.value = true;
+      }
       editSidebarTablePageSize.value = settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
       webdavPassword.value = "";
+      webdavSecretsPassphrase.value = "";
       await refreshWebDavPasswordStatus();
+      await refreshWebDavSyncSecretsStatus();
       syncAiEditState();
       if (!isWeb && activeSettingsTab.value === "mcp") void refreshMcpStatus();
       if (!isWeb && activeSettingsTab.value === "ai" && aiIsCodexCli.value) void ensureCodexMcpStatus();
@@ -1890,12 +1980,14 @@ const previewSettings = computed<{
   fontSize: number;
   theme: EditorTheme;
   appAppearance: AppThemeAppearance;
+  appPalette: AppThemePalette;
   customColors?: CustomThemeColors;
 }>(() => ({
   fontFamily: editFontFamily.value,
   fontSize: editFontSize.value,
   theme: editTheme.value,
   appAppearance: isDark.value ? "dark" : "light",
+  appPalette: themePalette.value,
   customColors: getPreviewCustomThemeColors(),
 }));
 
@@ -1945,7 +2037,7 @@ watch(
   async ([ss]) => {
     if (!previewView.value || !fontThemeComp || !themeComp || !editorViewModule) return;
 
-    const themeExt = await loadEditorTheme(ss.theme, ss.appAppearance, ss.customColors);
+    const themeExt = await loadEditorTheme(ss.theme, ss.appAppearance, ss.customColors, ss.appPalette);
     previewView.value.dispatch({
       effects: [themeComp.reconfigure(themeExt), fontThemeComp.reconfigure(editorFontTheme(editorViewModule.EditorView, ss.fontSize, ss.fontFamily))],
     });
@@ -1993,7 +2085,7 @@ watch(previewRef, async (el) => {
   previewSqlDiagnostics = previewDiagnosticsForSql(currentPreviewSql());
 
   const ss = previewSettings.value;
-  const themeExt = await loadEditorTheme(ss.theme, ss.appAppearance, ss.customColors);
+  const themeExt = await loadEditorTheme(ss.theme, ss.appAppearance, ss.customColors, ss.appPalette);
   const diagnosticTheme = EditorView.baseTheme({
     ".cm-settings-preview-sql-error": {
       textDecoration: "underline wavy var(--destructive)",
@@ -2053,8 +2145,8 @@ onUnmounted(cleanupPreviewEditor);
         </component>
       </DialogHeader>
 
-      <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden sm:flex-row">
-        <nav class="settingsCategoryNav flex min-h-0 shrink-0 gap-1 overflow-x-auto border-b pb-3 sm:w-40 sm:flex-col sm:overflow-x-hidden sm:overflow-y-auto sm:border-b-0 sm:border-r sm:pb-0 sm:pr-3">
+      <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden lg:flex-row">
+        <nav class="settingsCategoryNav flex min-h-0 shrink-0 gap-1 overflow-x-auto border-b pb-3 lg:w-40 lg:flex-col lg:overflow-x-hidden lg:overflow-y-auto lg:border-b-0 lg:border-r lg:pb-0 lg:pr-3">
           <button v-for="category in settingsCategoryNav" :key="category.value" type="button" :class="settingsCategoryButton(category.value)" @click="activeSettingsTab = category.value">
             {{ category.label }}
           </button>
@@ -2302,16 +2394,25 @@ onUnmounted(cleanupPreviewEditor);
             </section>
 
             <section v-else-if="activeSettingsTab === 'appearance'" class="flex flex-col gap-5 py-2">
-              <div class="grid gap-4 md:grid-cols-[minmax(220px,280px)_minmax(260px,1fr)]">
+              <div class="grid gap-x-1.5 gap-y-4 sm:grid-cols-[minmax(0,127fr)_minmax(0,127fr)_minmax(0,191fr)_minmax(0,130fr)]">
                 <div class="space-y-2 min-w-0">
-                  <Label>{{ t("settings.languageTitle") }}</Label>
+                  <div class="flex h-9 items-end">
+                    <Label class="whitespace-normal leading-tight">{{ t("settings.languageTitle") }}</Label>
+                  </div>
                   <Select :model-value="currentLocale()" @update:model-value="onLocaleChange">
-                    <SelectTrigger class="h-8 w-full">
-                      <SelectValue />
+                    <SelectTrigger class="h-8 w-full gap-0.5 px-0.5">
+                      <SelectValue>
+                        <span v-if="selectedLocaleOption" class="flex min-w-0 items-center gap-0.5">
+                          <span class="inline-flex h-5 shrink-0 items-center justify-center text-sm font-medium leading-none">
+                            {{ selectedLocaleOption.flag }}
+                          </span>
+                          <span class="truncate">{{ selectedLocaleOption.label }}</span>
+                        </span>
+                      </SelectValue>
                     </SelectTrigger>
-                    <SelectContent>
+                    <SelectContent class="w-[150px]">
                       <SelectItem v-for="locale in LOCALE_OPTIONS" :key="locale.value" :value="locale.value">
-                        <div class="flex items-center gap-2">
+                        <div class="flex items-center gap-1">
                           <span class="inline-flex h-5 w-6 shrink-0 items-center justify-center text-sm font-medium leading-none">
                             {{ locale.flag }}
                           </span>
@@ -2323,7 +2424,36 @@ onUnmounted(cleanupPreviewEditor);
                 </div>
 
                 <div class="space-y-2 min-w-0">
-                  <Label>{{ t("settings.uiFontFamily") }}</Label>
+                  <div class="flex h-9 items-end">
+                    <Label class="whitespace-normal leading-tight">{{ t("settings.colorTheme") }}</Label>
+                  </div>
+                  <Select :model-value="themePalette" @update:model-value="(value) => setThemePalette(value as AppThemePalette)">
+                    <SelectTrigger class="h-8 w-full gap-1">
+                      <SelectValue :placeholder="t('settings.selectColorTheme')">
+                        <span v-if="selectedThemePaletteOption" class="flex min-w-0 items-center gap-1">
+                          <span class="h-3 w-3 shrink-0 rounded-full border border-border shadow-xs" :style="{ background: selectedThemePaletteOption.previewColor }" />
+                          <span class="truncate">{{ selectedThemePaletteOption.label }}</span>
+                        </span>
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem v-for="option in appThemePaletteOptions" :key="option.value" :value="option.value">
+                        <div class="flex items-center gap-2">
+                          <span class="h-3 w-3 rounded-full border border-border shadow-xs" :style="{ background: option.previewColor }" />
+                          {{ option.label }}
+                        </div>
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div class="space-y-2 min-w-0">
+                  <div class="flex h-9 items-end gap-1">
+                    <Label class="min-w-0 whitespace-normal leading-tight">{{ t("settings.uiFontFamily") }}</Label>
+                    <HelpTooltip :label="t('settings.uiFontFamily')" trigger-class="[&_svg]:h-3 [&_svg]:w-3" content-class="max-w-64">
+                      <p>{{ t("settings.uiFontFamilyDescription") }}</p>
+                    </HelpTooltip>
+                  </div>
                   <SearchableSelect
                     :model-value="editUiFontFamily"
                     :options="uiFontOptions"
@@ -2334,8 +2464,8 @@ onUnmounted(cleanupPreviewEditor);
                     allow-custom
                     :display-name="displayUiFontFamily"
                     :normalize-custom="normalizeCustomFontFamilyInput"
-                    :trigger-class="fontSearchTriggerClass"
-                    :trigger-icon-class="fontSearchTriggerIconClass"
+                    :trigger-class="appearanceFontSearchTriggerClass"
+                    :trigger-icon-class="appearanceFontSearchTriggerIconClass"
                     content-class="w-[var(--reka-popover-trigger-width)] min-w-[260px]"
                     @update:model-value="onUiFontFamilyChange"
                     @update:open="(open: boolean) => open && loadSystemFontOptions()"
@@ -2354,54 +2484,51 @@ onUnmounted(cleanupPreviewEditor);
                       </span>
                     </template>
                   </SearchableSelect>
-                  <p class="text-xs text-muted-foreground">{{ t("settings.uiFontFamilyDescription") }}</p>
+                </div>
+
+                <div class="space-y-2 min-w-0">
+                  <div class="flex h-9 items-end gap-1">
+                    <Label class="min-w-0 whitespace-normal leading-tight">{{ t("settings.uiScale") }}</Label>
+                    <HelpTooltip :label="t('settings.uiScale')" trigger-class="[&_svg]:h-3 [&_svg]:w-3" content-class="max-w-64">
+                      <p>{{ t("settings.uiScaleDescription") }}</p>
+                    </HelpTooltip>
+                  </div>
+                  <Select
+                    :model-value="String(editUiScale)"
+                    @update:model-value="
+                      (value: any) => {
+                        const next = Number(value);
+                        if (Number.isFinite(next)) editUiScale = next;
+                      }
+                    "
+                  >
+                    <SelectTrigger class="h-8 w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem v-for="scale in uiScaleOptions" :key="scale" :value="String(scale)" class="pl-2.5"> {{ Math.round(scale * 100) }}% </SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
               </div>
 
               <div class="space-y-2">
                 <Label>{{ t("settings.theme") }}</Label>
-                <div class="flex gap-2">
+                <div class="flex flex-wrap gap-2">
                   <Button
-                    v-for="option in [
-                      { value: 'light', label: t('toolbar.themeLight'), icon: Sun },
-                      { value: 'dark', label: t('toolbar.themeDark'), icon: Moon },
-                      { value: 'system', label: t('toolbar.themeSystem'), icon: SunMoon },
-                    ]"
+                    v-for="option in appThemeModeOptions"
                     :key="option.value"
                     type="button"
                     variant="outline"
                     size="sm"
-                    class="h-auto gap-1.5 px-3 py-1.5"
-                    :class="themeMode === option.value ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
-                    @click="setThemeMode(option.value as 'light' | 'dark' | 'system')"
+                    class="h-8 gap-1.5 rounded-[6px] px-3"
+                    :class="themeMode === option.value ? 'border-primary/40 bg-primary/10 text-primary ring-1 ring-primary/30' : 'text-foreground'"
+                    @click="setThemeMode(option.value)"
                   >
                     <component :is="option.icon" class="h-3.5 w-3.5" />
                     {{ option.label }}
                   </Button>
                 </div>
-              </div>
-
-              <Separator />
-
-              <div class="space-y-2">
-                <Label>{{ t("settings.uiScale") }}</Label>
-                <Select
-                  :model-value="String(editUiScale)"
-                  @update:model-value="
-                    (value: any) => {
-                      const next = Number(value);
-                      if (Number.isFinite(next)) editUiScale = next;
-                    }
-                  "
-                >
-                  <SelectTrigger class="min-w-36">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem v-for="scale in uiScaleOptions" :key="scale" :value="String(scale)" class="pl-2.5"> {{ Math.round(scale * 100) }}% </SelectItem>
-                  </SelectContent>
-                </Select>
-                <p class="text-xs text-muted-foreground">{{ t("settings.uiScaleDescription") }}</p>
               </div>
 
               <Separator />
@@ -2832,6 +2959,35 @@ onUnmounted(cleanupPreviewEditor);
 
             <!-- Data Tab -->
             <section v-else-if="activeSettingsTab === 'data'" class="flex flex-col gap-5 py-2">
+              <template v-if="!isWeb">
+                <div class="space-y-3">
+                  <div class="text-sm font-medium text-muted-foreground">DuckDB</div>
+                  <div class="flex items-start justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                    <div class="space-y-1">
+                      <Label for="duckdb-worker-process-isolation">
+                        {{ t("settings.duckDbWorkerProcessIsolation") }}
+                      </Label>
+                      <p class="text-xs text-muted-foreground">
+                        {{ t("settings.duckDbWorkerProcessIsolationDescription") }}
+                      </p>
+                      <div v-if="duckDbWorkerProcessIsolationRequiresRestart" class="flex flex-wrap items-center gap-2 pt-1">
+                        <p class="text-xs font-medium text-amber-600 dark:text-amber-400">
+                          {{ t("settings.duckDbWorkerProcessIsolationRestartRequired") }}
+                        </p>
+                        <Button type="button" variant="outline" size="sm" class="h-7 gap-1.5 px-2 text-xs" :disabled="duckDbRestarting || hasApplyBlocker" @click="restartDbxForDuckDbIsolation">
+                          <Loader2 v-if="duckDbRestarting" class="size-3.5 animate-spin" />
+                          <RefreshCw v-else class="size-3.5" />
+                          {{ t("settings.restartDbx") }}
+                        </Button>
+                      </div>
+                    </div>
+                    <Switch id="duckdb-worker-process-isolation" v-model="editDuckDbWorkerProcessIsolation" class="mt-0.5" />
+                  </div>
+                </div>
+
+                <Separator />
+              </template>
+
               <div class="space-y-3">
                 <div class="text-sm font-medium text-muted-foreground">{{ t("settings.exportSection") }}</div>
                 <div class="space-y-2">
@@ -3173,7 +3329,21 @@ onUnmounted(cleanupPreviewEditor);
                 </div>
                 <div v-if="webdavSyncSecrets" class="space-y-2">
                   <Label for="webdav-secrets-passphrase">{{ t("settings.syncSecretsPassphrase") }}</Label>
-                  <PasswordInput id="webdav-secrets-passphrase" v-model="webdavSecretsPassphrase" autocomplete="new-password" />
+                  <div class="flex items-center gap-2">
+                    <PasswordInput id="webdav-secrets-passphrase" v-model="webdavSecretsPassphrase" class="min-w-0 flex-1" :placeholder="webdavHasSavedSecretsPassphrase ? '••••••••' : ''" :show-toggle="!webdavHasSavedSecretsPassphrase || !!webdavSecretsPassphrase" autocomplete="new-password" />
+                    <Button
+                      v-if="webdavHasSavedSecretsPassphrase"
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      class="h-9 w-9 shrink-0 text-muted-foreground hover:text-foreground"
+                      :title="t('settings.syncClearSavedPassword')"
+                      :aria-label="t('settings.syncClearSavedPassword')"
+                      @click="clearWebDavSyncSecretsPassphrase"
+                    >
+                      <X class="size-3.5" />
+                    </Button>
+                  </div>
                   <p class="text-xs text-muted-foreground">{{ t("settings.syncSecretsPassphraseDescription") }}</p>
                 </div>
               </div>

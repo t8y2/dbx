@@ -10,11 +10,11 @@ import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
-import { isSchemaAware } from "@/lib/databaseCapabilities";
-import { copyToClipboard } from "@/lib/clipboard";
-import type { DataCompareCellValue, DataCompareModifiedRow, DataCompareResult, DataCompareRow, DataCompareSyncPlan, DataCompareSyncPlanTableOptions } from "@/lib/dataCompare";
+import { isSchemaAware } from "@/lib/database/databaseCapabilities";
+import { copyToClipboard } from "@/lib/common/clipboard";
+import type { DataCompareCellValue, DataCompareModifiedRow, DataCompareResult, DataCompareRow, DataCompareSyncPlan, DataCompareSyncPlanTableOptions } from "@/lib/dataGrid/dataCompare";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
-import * as api from "@/lib/api";
+import * as api from "@/lib/backend/api";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import { ArrowLeftRight, CheckSquare, ChevronDown, ChevronRight, Copy, GitCompareArrows, Loader2, Play, Square } from "@lucide/vue";
 

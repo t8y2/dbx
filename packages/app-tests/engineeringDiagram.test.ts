@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildEngineeringDiagram } from "../../apps/desktop/src/lib/engineeringDiagram.ts";
-import type { DiagramRelationship, DiagramTable } from "../../apps/desktop/src/lib/erDiagram.ts";
+import { buildEngineeringDiagram } from "../../apps/desktop/src/lib/diagram/engineeringDiagram.ts";
+import type { DiagramRelationship, DiagramTable } from "../../apps/desktop/src/lib/diagram/erDiagram.ts";
 
 const tables: DiagramTable[] = [
   {

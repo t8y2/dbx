@@ -11,7 +11,7 @@ import {
   tabDisplayTitle,
   tabModeLabel,
   tabularResultItems,
-} from "../../apps/desktop/src/lib/tabPresentation.ts";
+} from "../../apps/desktop/src/lib/tabs/tabPresentation.ts";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
 import type { ConnectionConfig, QueryResult, QueryTab } from "../../apps/desktop/src/types/database.ts";
 

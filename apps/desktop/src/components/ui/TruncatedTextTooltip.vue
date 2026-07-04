@@ -2,7 +2,7 @@
 import { ref } from "vue";
 import type { HTMLAttributes } from "vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/common/utils";
 
 const props = withDefaults(
   defineProps<{

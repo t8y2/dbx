@@ -8,7 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/composables/useToast";
-import { copyToClipboard } from "@/lib/clipboard";
+import { copyToClipboard } from "@/lib/common/clipboard";
 import {
   DEFAULT_SQL_FORMATTER_SETTINGS,
   SQL_FORMATTER_CONFIG_FORMATTER,
@@ -26,7 +26,7 @@ import {
   type SqlFormatterParamTypes,
   type SqlFormatterSettings,
   type SqlFormatterTabWidth,
-} from "@/lib/sqlFormatterConfig";
+} from "@/lib/sql/sqlFormatterConfig";
 
 type EditorViewInstance = import("@codemirror/view").EditorView;
 type CodeMirrorModules = {

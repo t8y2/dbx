@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { displayCellValue } from "../../apps/desktop/src/lib/cellValue.ts";
+import { displayCellValue } from "../../apps/desktop/src/lib/dataGrid/cellValue.ts";
 
 test("displayCellValue returns NULL for null", () => {
   assert.equal(displayCellValue(null), "NULL");

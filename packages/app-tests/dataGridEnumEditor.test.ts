@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { isEnumColumn, enumValuesForColumn } from "../../apps/desktop/src/lib/dataGridEnumEditor.ts";
+import { isEnumColumn, enumValuesForColumn } from "../../apps/desktop/src/lib/dataGrid/dataGridEnumEditor.ts";
 
 test("detects MySQL enum column types", () => {
   assert.equal(isEnumColumn({ data_type: "enum('pending','active','archived')" }), true);

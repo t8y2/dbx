@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { formatError } from "@/lib/errorUtils";
+import { formatError } from "@/lib/backend/errorUtils";
 import { computed, ref, watch, onMounted, onUnmounted } from "vue";
 import { use } from "echarts/core";
 import { CanvasRenderer } from "echarts/renderers";
@@ -8,7 +8,7 @@ import { GridComponent, LegendComponent, TooltipComponent } from "echarts/compon
 import VChart from "vue-echarts";
 import { Activity, AlertTriangle, BarChart3, Boxes, CheckCircle2, Database, Download, Gauge, Hash, HardDrive, Layers3, Loader2, Package, RadioTower, RefreshCw, Send, ShieldCheck, Table2, Upload, Users } from "@lucide/vue";
 import type { TopicRef, TopicInfo, TopicStats, BacklogStats } from "@/types/mq";
-import { mqGetTopicStats, mqGetBacklog } from "@/lib/api";
+import { mqGetTopicStats, mqGetBacklog } from "@/lib/backend/api";
 
 use([CanvasRenderer, LineChart, GridComponent, LegendComponent, TooltipComponent]);
 

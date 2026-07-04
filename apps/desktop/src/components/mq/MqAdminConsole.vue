@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { formatError } from "@/lib/errorUtils";
+import { formatError } from "@/lib/backend/errorUtils";
 import { ref, computed, onMounted, watch } from "vue";
 import type { MqClusterInfo, TopicInfo } from "@/types/mq";
-import { mqTestConnection } from "@/lib/api";
+import { mqTestConnection } from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { mqClusterOptionsFromExtra } from "@/lib/mqTenantForm";
+import { mqClusterOptionsFromExtra } from "@/lib/mq/mqTenantForm";
 import TenantsPanel from "./TenantsPanel.vue";
 import NamespacesPanel from "./NamespacesPanel.vue";
 import TopicsPanel from "./TopicsPanel.vue";

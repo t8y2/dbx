@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { canGoNextDataGridPage } from "../../apps/desktop/src/lib/dataGridPagination.ts";
+import { canGoNextDataGridPage } from "../../apps/desktop/src/lib/dataGrid/dataGridPagination.ts";
 
 test("known total disables next page at the last exact page", () => {
   assert.equal(

@@ -1,5 +1,5 @@
 import { ref, type Ref } from "vue";
-import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/safeStorage";
+import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 
 export function usePanelResize() {
   const sidebarWidth = ref(Number(safeLocalStorageGet("dbx-sidebar-width")) || 260);

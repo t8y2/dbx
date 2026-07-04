@@ -1,6 +1,6 @@
 {
   "name": "@dbx-app/cli",
-  "version": "0.4.20",
+  "version": "0.4.21",
   "description": "Command line interface for DBX database connections, schema, and safe queries",
   "keywords": [
     "ai-agent",

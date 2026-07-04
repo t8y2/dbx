@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "vitest";
 
 import { canDownloadAndInstallUpdate, normalizeUpdateDownloadSource, resolveUpdateReleaseUrl, tagVersion } from "../../apps/desktop/src/composables/useAppUpdater.ts";
-import type { UpdateInfo } from "../../apps/desktop/src/lib/api.ts";
+import type { UpdateInfo } from "../../apps/desktop/src/lib/backend/api.ts";
 
 function updateInfo(overrides: Partial<UpdateInfo> = {}): UpdateInfo {
   return {

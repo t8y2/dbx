@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { Database } from "@lucide/vue";
-import { webPath } from "@/lib/webPath";
+import { webPath } from "@/lib/common/webPath";
 
 const props = defineProps<{
   dbType: string;

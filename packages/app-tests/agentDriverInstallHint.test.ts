@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { appendAgentDriverUpdateHint, hasAgentDriverUpdate, showAgentDriverInstallHint } from "../../apps/desktop/src/lib/agentDriverInstallHint.ts";
+import { appendAgentDriverUpdateHint, hasAgentDriverUpdate, showAgentDriverInstallHint } from "../../apps/desktop/src/lib/connection/agentDriverInstallHint.ts";
 
 test("hides the agent driver install hint when the selected driver is installed", () => {
   assert.equal(showAgentDriverInstallHint("informix", [{ db_type: "informix", installed: true }]), false);

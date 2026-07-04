@@ -9,7 +9,7 @@ const apiMock = vi.hoisted(() => ({
   startTransfer: vi.fn(),
 }));
 
-vi.mock("@/lib/api", () => apiMock);
+vi.mock("@/lib/backend/api", () => apiMock);
 
 const { useExportTracker } = await import("../../apps/desktop/src/composables/useExportTracker.ts");
 

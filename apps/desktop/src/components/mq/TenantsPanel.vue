@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { formatError } from "@/lib/errorUtils";
+import { formatError } from "@/lib/backend/errorUtils";
 import { computed, ref, onBeforeUnmount, onMounted, watch } from "vue";
 import type { TenantInfo, TenantConfig } from "@/types/mq";
-import { mqListTenants, mqCreateTenant, mqUpdateTenant, mqDeleteTenant } from "@/lib/api";
-import { defaultTenantConfig, normalizeClusterOptions, validateTenantForm } from "@/lib/mqTenantForm";
+import { mqListTenants, mqCreateTenant, mqUpdateTenant, mqDeleteTenant } from "@/lib/backend/api";
+import { defaultTenantConfig, normalizeClusterOptions, validateTenantForm } from "@/lib/mq/mqTenantForm";
 
 interface Props {
   connectionId: string;

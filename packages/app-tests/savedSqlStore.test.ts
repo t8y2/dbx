@@ -12,7 +12,7 @@ const apiMock = vi.hoisted(() => ({
   syncSavedSqlDirectory: vi.fn<() => Promise<void>>(),
 }));
 
-vi.mock("@/lib/api", () => apiMock);
+vi.mock("@/lib/backend/api", () => apiMock);
 
 beforeEach(() => {
   setActivePinia(createPinia());

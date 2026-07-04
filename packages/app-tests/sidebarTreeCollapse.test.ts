@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { collapseExpandedTreeNodes } from "../../apps/desktop/src/lib/sidebarTreeCollapse.ts";
+import { collapseExpandedTreeNodes } from "../../apps/desktop/src/lib/sidebar/sidebarTreeCollapse.ts";
 import type { TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 test("collapseExpandedTreeNodes collapses all expanded descendants", () => {

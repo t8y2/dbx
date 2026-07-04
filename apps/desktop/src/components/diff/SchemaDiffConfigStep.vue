@@ -7,8 +7,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
-import * as api from "@/lib/api";
-import { isSchemaAware } from "@/lib/databaseCapabilities";
+import * as api from "@/lib/backend/api";
+import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { ArrowLeftRight, GitCompareArrows, Save, FolderOpen, Settings, X } from "@lucide/vue";
 import type { SchemaDiffConfig, SchemaDiffCompareOptions } from "@/types/schemaDiff";
 

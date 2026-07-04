@@ -5,16 +5,16 @@ import { json } from "@codemirror/lang-json";
 import { search as cmSearch } from "@codemirror/search";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { bracketMatching } from "@codemirror/language";
-import { trimmedSelectionLayer } from "@/lib/codemirrorTrimmedSelectionLayer";
-import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, cellDetailActiveLineColor, loadEditorTheme, editorFontTheme } from "@/lib/editorThemes";
-import { shortcutToCodeMirrorKey } from "@/lib/shortcutRegistry";
+import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
+import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, cellDetailActiveLineColor, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
+import { shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { CELL_DETAIL_JSON_FORMAT_MAX_LENGTH, isJsonColumnType } from "@/lib/cellDetailPresentation";
-import { clampEditorFontSize, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editorZoom";
+import { CELL_DETAIL_JSON_FORMAT_MAX_LENGTH, isJsonColumnType } from "@/lib/dataGrid/cellDetailPresentation";
+import { clampEditorFontSize, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
 import i18n from "@/i18n";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import type { EditorTheme } from "@/stores/settingsStore";
-import type { AppThemeAppearance } from "@/lib/appTheme";
+import type { AppThemeAppearance, AppThemePalette } from "@/lib/app/appTheme";
 
 export interface UseCellDetailEditorOptions {
   onChange?: (value: string) => void;
@@ -24,6 +24,7 @@ export interface UseCellDetailEditorOptions {
   readOnly?: boolean;
   editorTheme: () => EditorTheme;
   appAppearance: () => AppThemeAppearance;
+  appPalette: () => AppThemePalette;
   fontSize: () => number;
   fontFamily: () => string;
 }
@@ -130,14 +131,14 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
     zoomCommitScheduler.flush(liveFontSize);
   }
 
-  watch([() => options.fontSize(), () => options.fontFamily(), () => options.editorTheme(), () => options.appAppearance()], async ([fontSize, fontFamily, editorTheme, appearance]) => {
+  watch([() => options.fontSize(), () => options.fontFamily(), () => options.editorTheme(), () => options.appAppearance(), () => options.appPalette()], async ([fontSize, fontFamily, editorTheme, appearance, palette]) => {
     const editor = view.value;
     if (!editor || destroyed) return;
     if (!isGestureZooming && !zoomCommitScheduler.hasPendingCommit()) {
       liveFontSize = clampEditorFontSize(fontSize);
     }
     syncEditorFontCssVars(liveFontSize, fontFamily);
-    const theme = await loadEditorTheme(editorTheme, appearance);
+    const theme = await loadEditorTheme(editorTheme, appearance, undefined, palette);
     if (!view.value || destroyed) return;
     view.value.dispatch({
       effects: [themeComp.reconfigure(theme), fontThemeComp.reconfigure(editorFontTheme(EditorView, liveFontSize, fontFamily, { fixedHeight: true, scrollable: true }))],
@@ -150,7 +151,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
     const doc = initialValue ?? "";
     currentIsJson = options.language === "json" || shouldUseJsonMode(columnType, doc);
 
-    const theme = await loadEditorTheme(options.editorTheme(), options.appAppearance());
+    const theme = await loadEditorTheme(options.editorTheme(), options.appAppearance(), undefined, options.appPalette());
     liveFontSize = clampEditorFontSize(options.fontSize());
     const fontTheme = editorFontTheme(EditorView, liveFontSize, options.fontFamily(), { fixedHeight: true, scrollable: true });
     const shortcuts = settingsStore.editorSettings.shortcuts;

@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
 import { Lock, Loader2, ShieldCheck } from "@lucide/vue";
 import AppLogo from "@/components/icons/AppLogo.vue";
-import { apiUrl } from "@/lib/webPath";
+import { apiUrl } from "@/lib/common/webPath";
 
 const props = withDefaults(
   defineProps<{

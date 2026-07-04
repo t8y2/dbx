@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { imagePreviewDialogSize } from "../../apps/desktop/src/lib/imagePreviewViewer.ts";
+import { imagePreviewDialogSize } from "../../apps/desktop/src/lib/dataGrid/imagePreviewViewer.ts";
 
 test("sizes wide image preview dialogs as landscape", () => {
   const size = imagePreviewDialogSize({

@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { appendColumnValueFilterCondition, buildColumnValueFilterCondition, buildColumnValuesFilterCondition } from "../../apps/desktop/src/lib/dataGridColumnFilter.ts";
+import { appendColumnValueFilterCondition, buildColumnValueFilterCondition, buildColumnValuesFilterCondition } from "../../apps/desktop/src/lib/dataGrid/dataGridColumnFilter.ts";
 
 function installFilterFetchMock() {
   globalThis.fetch = (async (input, init) => {

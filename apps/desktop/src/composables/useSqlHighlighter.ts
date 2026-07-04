@@ -1,6 +1,6 @@
 import { onMounted, ref } from "vue";
 import { useTheme } from "@/composables/useTheme";
-import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sqlHighlighter";
+import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sql/sqlHighlighter";
 
 export function useSqlHighlighter() {
   const { isDark } = useTheme();

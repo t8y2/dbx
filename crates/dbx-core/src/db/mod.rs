@@ -1,6 +1,12 @@
 pub mod agent_driver;
 pub mod clickhouse_driver;
 pub mod duckdb_driver;
+#[cfg(feature = "duckdb-bundled")]
+pub mod duckdb_worker_process;
+#[cfg(feature = "duckdb-bundled")]
+pub mod duckdb_worker_protocol;
+#[cfg(feature = "duckdb-bundled")]
+pub mod duckdb_worker_runtime;
 pub mod elasticsearch_driver;
 pub mod elasticsearch_sql;
 pub mod file_validator;

@@ -3,7 +3,7 @@ import { computed, ref, watch } from "vue";
 import { Settings2 } from "@lucide/vue";
 import type { AiProvider } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
-import { webPath } from "@/lib/webPath";
+import { webPath } from "@/lib/common/webPath";
 
 const props = defineProps<{
   provider: AiProvider;

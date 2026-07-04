@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { effectiveDatabaseTypeForConnection, inferJdbcDialect } from "../../apps/desktop/src/lib/jdbcDialect.ts";
+import { effectiveDatabaseTypeForConnection, inferJdbcDialect } from "../../apps/desktop/src/lib/database/jdbcDialect.ts";
 
 test("infers GoldenDB for generic JDBC connections", () => {
   assert.equal(

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { buildBinaryHexViewRows } from "../../apps/desktop/src/lib/binaryHexViewer.ts";
+import { buildBinaryHexViewRows } from "../../apps/desktop/src/lib/dataGrid/binaryHexViewer.ts";
 
 test("buildBinaryHexViewRows formats offsets, hex bytes, and ascii preview", () => {
   const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x20, 0x41, 0x7e, 0x7f, 0x00, 0x01, 0x02, 0xff, 0x48]);

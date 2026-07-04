@@ -26,7 +26,7 @@ describe("queryStore cancel timeout recovery", () => {
   it("clears cancelling state when cancelQuery does not return", async () => {
     const cancelQuery = vi.fn(() => new Promise(() => undefined));
 
-    vi.doMock("@/lib/api", () => ({ cancelQuery }));
+    vi.doMock("@/lib/backend/api", () => ({ cancelQuery }));
 
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
@@ -52,7 +52,7 @@ describe("queryStore cancel timeout recovery", () => {
   it("clears cancelling state when cancel is acknowledged but execution does not settle", async () => {
     const cancelQuery = vi.fn(() => Promise.resolve(true));
 
-    vi.doMock("@/lib/api", () => ({ cancelQuery }));
+    vi.doMock("@/lib/backend/api", () => ({ cancelQuery }));
 
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

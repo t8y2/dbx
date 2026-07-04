@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
+[[bin]]
+name = "duckdb-worker-test-host"
+path = "tests/support/duckdb_worker_test_host.rs"
+required-features = ["duckdb-bundled"]
+test = false
+bench = false
+
 [features]
 default = ["duckdb-bundled", "mq-admin"]
 duckdb-bundled = ["duckdb/bundled"]

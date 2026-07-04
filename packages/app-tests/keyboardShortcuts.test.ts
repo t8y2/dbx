@@ -5,12 +5,15 @@ import {
   isBrowserReloadShortcut,
   isCancelSearchShortcut,
   isCloseTabShortcut,
+  isCopySidebarSelectionShortcut,
   isExecuteSqlShortcut,
+  isEditSidebarConnectionShortcut,
   isFocusSearchShortcut,
   isModRShortcut,
   isNewQueryShortcut,
   isObjectSourceSaveShortcutTarget,
   isOpenSettingsShortcut,
+  isPasteSidebarSelectionShortcut,
   isResetZoomShortcut,
   isRefreshDataShortcut,
   isSaveShortcut,
@@ -22,8 +25,8 @@ import {
   isZoomInShortcut,
   isZoomOutShortcut,
   switchToTabIndexFromShortcut,
-} from "../../apps/desktop/src/lib/keyboardShortcuts.ts";
-import { shortcutToCodeMirrorKey } from "../../apps/desktop/src/lib/shortcutRegistry.ts";
+} from "../../apps/desktop/src/lib/editor/keyboardShortcuts.ts";
+import { shortcutToCodeMirrorKey } from "../../apps/desktop/src/lib/editor/shortcutRegistry.ts";
 
 test("matches Cmd+Enter for SQL execution", () => {
   assert.equal(isExecuteSqlShortcut({ key: "Enter", metaKey: true }), true);
@@ -245,4 +248,22 @@ test("matches Escape for cancelling search", () => {
 
 test("ignores cancelling search while composing", () => {
   assert.equal(isCancelSearchShortcut({ key: "Escape", isComposing: true }), false);
+});
+
+test("matches configurable sidebar shortcuts", () => {
+  assert.equal(isCopySidebarSelectionShortcut({ key: "c", metaKey: true }), true);
+  assert.equal(isPasteSidebarSelectionShortcut({ key: "v", ctrlKey: true }), true);
+  assert.equal(isEditSidebarConnectionShortcut({ key: "e", metaKey: true }), true);
+
+  const shortcuts = {
+    copySidebarSelection: "Alt+C",
+    pasteSidebarSelection: "Alt+V",
+    editSidebarConnection: "Shift+Mod+E",
+  } as any;
+
+  assert.equal(isCopySidebarSelectionShortcut({ key: "c", metaKey: true }, shortcuts), false);
+  assert.equal(isCopySidebarSelectionShortcut({ key: "c", altKey: true }, shortcuts), true);
+  assert.equal(isPasteSidebarSelectionShortcut({ key: "v", altKey: true }, shortcuts), true);
+  assert.equal(isEditSidebarConnectionShortcut({ key: "e", metaKey: true }, shortcuts), false);
+  assert.equal(isEditSidebarConnectionShortcut({ key: "e", ctrlKey: true, shiftKey: true }, shortcuts), true);
 });

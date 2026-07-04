@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
-import { uuid } from "@/lib/utils";
+import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -18,16 +18,16 @@ import { useHistoryStore } from "@/stores/historyStore";
 import { useSettingsStore, type StructureEditorDensity } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
 import { useToast } from "@/composables/useToast";
-import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sqlHighlighter";
-import { copyToClipboard } from "@/lib/clipboard";
-import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sqlFormatter";
-import { queryTimeoutSecsForConnection } from "@/lib/queryTimeout";
-import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/safeStorage";
-import { type EditableStructureColumn, type EditableStructureForeignKey, type EditableStructureIndex, type EditableStructureTrigger } from "@/lib/tableStructureEditorSql";
-import { PRESET_FIELDS_TEMPLATE_ID, createTableColumnTemplateDrafts } from "@/lib/tableColumnTemplates";
-import { getTableMetadataCapabilities } from "@/lib/tableMetadataCapabilities";
-import { canAddTableStructureColumn, getTableStructureCapabilities } from "@/lib/tableStructureCapabilities";
-import { connectionObjectTreeQuerySchema, tableStructureDatabaseTypeForConnection } from "@/lib/jdbcDialect";
+import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sql/sqlHighlighter";
+import { copyToClipboard } from "@/lib/common/clipboard";
+import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
+import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
+import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { type EditableStructureColumn, type EditableStructureForeignKey, type EditableStructureIndex, type EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql";
+import { PRESET_FIELDS_TEMPLATE_ID, createTableColumnTemplateDrafts } from "@/lib/table/tableColumnTemplates";
+import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
+import { canAddTableStructureColumn, getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
+import { connectionObjectTreeQuerySchema, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import type { TableInfoTab, TableStructureEditorDraft } from "@/types/database";
 import {
   buildStructureTargetLabel,
@@ -51,8 +51,8 @@ import {
   toColumnNames,
   applyManticoreDdlColumnExtras,
   canEditManticoreColumnProperties,
-} from "@/lib/tableStructureEditorState";
-import * as api from "@/lib/api";
+} from "@/lib/table/tableStructureEditorState";
+import * as api from "@/lib/backend/api";
 
 const { t } = useI18n();
 const { isDark } = useTheme();

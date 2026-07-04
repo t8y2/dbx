@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { buildRedisSyntaxDiagnostics, shouldRunRedisDiagnostics, tokenizeRedisLine } from "../../apps/desktop/src/lib/redisSyntaxDiagnostics.ts";
+import { buildRedisSyntaxDiagnostics, shouldRunRedisDiagnostics, tokenizeRedisLine } from "../../apps/desktop/src/lib/redis/redisSyntaxDiagnostics.ts";
 
 function messages(source: string): string[] {
   return buildRedisSyntaxDiagnostics(source).map((d) => d.message);

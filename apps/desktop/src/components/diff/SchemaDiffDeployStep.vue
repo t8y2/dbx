@@ -2,20 +2,20 @@
 import { ref, computed, onMounted, onUnmounted, watch, shallowRef } from "vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
-import { copyToClipboard } from "@/lib/clipboard";
+import { copyToClipboard } from "@/lib/common/clipboard";
 import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
-import { loadEditorTheme, editorFontTheme } from "@/lib/editorThemes";
-import { createDbxCodeMirrorSqlDialect } from "@/lib/codemirrorSqlDialect";
+import { loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
+import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { Splitpanes, Pane } from "splitpanes";
-import type { SchemaDiffObject, DiffOperationType, DiffObjectKind } from "@/lib/schemaDiff";
+import type { SchemaDiffObject, DiffOperationType, DiffObjectKind } from "@/lib/schema/schemaDiff";
 import { ArrowLeft, Copy, Download, Play, Loader2, PlusCircle, XCircle, ArrowRightLeft, Table, Eye, FunctionSquare, ListOrdered, ScrollText, UserCog, ListTree, Link2, Zap } from "@lucide/vue";
 
 const { t } = useI18n();
 const { toast } = useToast();
 const settingsStore = useSettingsStore();
-const { isDark } = useTheme();
+const { isDark, themePalette } = useTheme();
 
 const props = defineProps<{
   deploySql: string;
@@ -120,7 +120,7 @@ async function initEditor() {
   const fontSize = settingsStore.editorSettings.fontSize;
   const fontFamily = settingsStore.editorSettings.fontFamily;
 
-  const themeExt = await loadEditorTheme(editorTheme, appAppearance);
+  const themeExt = await loadEditorTheme(editorTheme, appAppearance, undefined, themePalette.value);
   const fontExt = editorFontTheme(EditorView, fontSize, fontFamily, { fixedHeight: true, scrollable: true });
 
   const dialect = createDbxCodeMirrorSqlDialect(langSql, "postgres");

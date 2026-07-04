@@ -5,11 +5,11 @@ import { Clipboard, Loader2, RefreshCw } from "@lucide/vue";
 import { useToast } from "@/composables/useToast";
 import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { loadEditorTheme, editorFontTheme } from "@/lib/editorThemes";
-import { createDbxCodeMirrorSqlDialect } from "@/lib/codemirrorSqlDialect";
-import { copyToClipboard } from "@/lib/clipboard";
-import { formatSqlForDisplay, type SqlFormatDialect } from "@/lib/sqlFormatter";
-import * as api from "@/lib/api";
+import { loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
+import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
+import { copyToClipboard } from "@/lib/common/clipboard";
+import { formatSqlForDisplay, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import * as api from "@/lib/backend/api";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
@@ -36,7 +36,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const { toast } = useToast();
-const { isDark } = useTheme();
+const { isDark, themePalette } = useTheme();
 const settingsStore = useSettingsStore();
 
 const ddlContent = ref("");
@@ -84,7 +84,7 @@ async function initDdlEditor(content: string) {
   const appAppearance = isDark.value ? "dark" : "light";
   const fontSize = settingsStore.editorSettings.fontSize;
   const fontFamily = settingsStore.editorSettings.fontFamily;
-  const themeExt = await loadEditorTheme(editorTheme, appAppearance);
+  const themeExt = await loadEditorTheme(editorTheme, appAppearance, undefined, themePalette.value);
   const fontExt = editorFontTheme(EditorView, fontSize, fontFamily, { fixedHeight: true, scrollable: true });
   const dialect = createDbxCodeMirrorSqlDialect(langSql, props.dialect);
   const state = EditorState.create({

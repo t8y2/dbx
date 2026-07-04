@@ -13,7 +13,7 @@ import {
   transposeFieldWidth,
   transposeScrollLeftForRecord,
   visibleTransposeRecordWindow,
-} from "../../apps/desktop/src/lib/dataGridTranspose.ts";
+} from "../../apps/desktop/src/lib/dataGrid/dataGridTranspose.ts";
 
 test("row number double click opens transpose for a row", () => {
   assert.deepEqual(nextTransposeState(false, null, 2), {

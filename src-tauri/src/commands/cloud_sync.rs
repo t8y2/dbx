@@ -1,9 +1,12 @@
 use std::sync::Arc;
 
 use dbx_core::cloud_sync::{
-    apply_sync_snapshot, build_sync_snapshot, forget_webdav_password, resolve_webdav_password, save_webdav_password,
-    webdav_saved_password_status, ApplySnapshotOptions, ApplySnapshotSummary, WebDavClient, WebDavConfig,
-    WebDavPasswordStatus, WebDavSyncSummary,
+    apply_sync_snapshot, build_sync_snapshot_with_saved_secrets, forget_webdav_password,
+    forget_webdav_sync_secrets_passphrase as core_forget_webdav_sync_secrets_passphrase, resolve_webdav_password,
+    resolve_webdav_sync_secrets_passphrase, save_webdav_password,
+    save_webdav_sync_secrets_preference as core_save_webdav_sync_secrets_preference, webdav_saved_password_status,
+    webdav_sync_secrets_status as core_webdav_sync_secrets_status, ApplySnapshotOptions, ApplySnapshotSummary,
+    WebDavClient, WebDavConfig, WebDavPasswordStatus, WebDavSyncSecretsStatus, WebDavSyncSummary,
 };
 use dbx_core::storage::DesktopSettings;
 use serde::{Deserialize, Serialize};
@@ -49,6 +52,25 @@ pub async fn forget_webdav_saved_password(state: State<'_, Arc<AppState>>, confi
 }
 
 #[tauri::command]
+pub async fn webdav_sync_secrets_status(state: State<'_, Arc<AppState>>) -> Result<WebDavSyncSecretsStatus, String> {
+    core_webdav_sync_secrets_status(&state.storage).await
+}
+
+#[tauri::command]
+pub async fn save_webdav_sync_secrets_preference(
+    state: State<'_, Arc<AppState>>,
+    enabled: bool,
+    passphrase: Option<String>,
+) -> Result<(), String> {
+    core_save_webdav_sync_secrets_preference(&state.storage, enabled, passphrase.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn forget_webdav_sync_secrets_passphrase(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    core_forget_webdav_sync_secrets_passphrase(&state.storage).await
+}
+
+#[tauri::command]
 pub async fn webdav_sync_upload(
     state: State<'_, Arc<AppState>>,
     mut config: WebDavConfig,
@@ -56,9 +78,13 @@ pub async fn webdav_sync_upload(
     secrets_passphrase: Option<String>,
 ) -> Result<WebDavSyncSummary, String> {
     resolve_webdav_password(&state.storage, &mut config).await?;
-    let snapshot =
-        build_sync_snapshot(&state.storage, env!("CARGO_PKG_VERSION"), editor_settings, secrets_passphrase.as_deref())
-            .await?;
+    let snapshot = build_sync_snapshot_with_saved_secrets(
+        &state.storage,
+        env!("CARGO_PKG_VERSION"),
+        editor_settings,
+        secrets_passphrase.as_deref(),
+    )
+    .await?;
     WebDavClient::new(config).put_snapshot(&snapshot).await
 }
 
@@ -70,10 +96,16 @@ pub async fn webdav_sync_download(
 ) -> Result<WebDavDownloadResult, String> {
     resolve_webdav_password(&state.storage, &mut config).await?;
     let (snapshot, summary) = WebDavClient::new(config).get_snapshot().await?;
+    let explicit_passphrase = secrets_passphrase.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let saved_passphrase = if explicit_passphrase.is_some() {
+        None
+    } else {
+        resolve_webdav_sync_secrets_passphrase(&state.storage).await?
+    };
     let apply_summary = apply_sync_snapshot(
         &state.storage,
         &snapshot,
-        ApplySnapshotOptions { secrets_passphrase: secrets_passphrase.as_deref() },
+        ApplySnapshotOptions { secrets_passphrase: explicit_passphrase.or(saved_passphrase.as_deref()) },
     )
     .await?;
     Ok(WebDavDownloadResult {

@@ -1,17 +1,18 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
-import * as api from "@/lib/api";
-import { normalizeColumnFormatter, normalizeCustomColumnFormatter, type ColumnFormatterConfig, type CustomColumnFormatterConfig } from "@/lib/columnFormatter";
-import { normalizeShortcutSettings, type ShortcutSettings } from "@/lib/shortcutRegistry";
-import { normalizeResultPageSize } from "@/lib/paginationPageSize";
-import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebarTableNameDisplay";
-import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sqlFormatterConfig";
-import type { SidebarActivation } from "@/lib/treeNodeClick";
+import * as api from "@/lib/backend/api";
+import { normalizeColumnFormatter, normalizeCustomColumnFormatter, type ColumnFormatterConfig, type CustomColumnFormatterConfig } from "@/lib/dataGrid/columnFormatter";
+import { normalizeShortcutSettings, type ShortcutSettings } from "@/lib/editor/shortcutRegistry";
+import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
+import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
+import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
+import type { SidebarActivation } from "@/lib/sidebar/treeNodeClick";
 import type { SqlSnippet } from "@/types/database";
-import { DEFAULT_SQL_SNIPPETS } from "@/lib/sqlCompletion";
-import { setDebugLoggingEnabled } from "@/lib/debugLog";
-import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS, normalizeTableColumnTemplateFields } from "@/lib/tableColumnTemplates";
-import { DEFAULT_UI_FONT_FAMILY } from "@/lib/appFonts";
+import { DEFAULT_SQL_SNIPPETS } from "@/lib/sql/sqlCompletion";
+import { setDebugLoggingEnabled } from "@/lib/backend/debugLog";
+import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS, normalizeTableColumnTemplateFields } from "@/lib/table/tableColumnTemplates";
+import { DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
+import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
 
 export type AiProvider = "claude" | "openai" | "gemini" | "deepseek" | "qwen" | "ollama" | "openai-compatible" | "codex-cli" | "custom";
 export type AiApiStyle = "completions" | "responses" | "anthropic-messages";
@@ -48,6 +49,7 @@ export interface DesktopSettings {
   quit_on_close: boolean;
   close_action_prompted: boolean;
   debug_logging_enabled: boolean;
+  duckdb_worker_process_isolation: boolean;
   saved_sql_sync_dir?: string | null;
   driver_store_dir?: string | null;
   plugin_store_dir?: string | null;
@@ -72,6 +74,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   quit_on_close: false,
   close_action_prompted: false,
   debug_logging_enabled: false,
+  duckdb_worker_process_isolation: false,
   saved_sql_sync_dir: null,
   driver_store_dir: null,
   plugin_store_dir: null,
@@ -79,7 +82,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   sidebar_table_page_size: DEFAULT_SIDEBAR_TABLE_PAGE_SIZE,
 };
 
-function normalizeDesktopSettings(settings: Partial<DesktopSettings> | null | undefined): DesktopSettings {
+export function normalizeDesktopSettings(settings: Partial<DesktopSettings> | null | undefined): DesktopSettings {
   const iconTheme = settings?.icon_theme === "black" ? "black" : DEFAULT_DESKTOP_SETTINGS.icon_theme;
   const sidebarTablePageSize = typeof settings?.sidebar_table_page_size === "number" && settings.sidebar_table_page_size > 0 ? settings.sidebar_table_page_size : DEFAULT_DESKTOP_SETTINGS.sidebar_table_page_size;
   return {
@@ -88,6 +91,7 @@ function normalizeDesktopSettings(settings: Partial<DesktopSettings> | null | un
     quit_on_close: settings?.quit_on_close ?? DEFAULT_DESKTOP_SETTINGS.quit_on_close,
     close_action_prompted: settings?.close_action_prompted ?? DEFAULT_DESKTOP_SETTINGS.close_action_prompted,
     debug_logging_enabled: settings?.debug_logging_enabled ?? DEFAULT_DESKTOP_SETTINGS.debug_logging_enabled,
+    duckdb_worker_process_isolation: settings?.duckdb_worker_process_isolation ?? DEFAULT_DESKTOP_SETTINGS.duckdb_worker_process_isolation,
     saved_sql_sync_dir: settings?.saved_sql_sync_dir?.trim() || DEFAULT_DESKTOP_SETTINGS.saved_sql_sync_dir,
     driver_store_dir: settings?.driver_store_dir?.trim() || DEFAULT_DESKTOP_SETTINGS.driver_store_dir,
     plugin_store_dir: settings?.plugin_store_dir?.trim() || DEFAULT_DESKTOP_SETTINGS.plugin_store_dir,
@@ -249,7 +253,27 @@ function inferAiProviderFromConfig(config: Partial<AiConfig> | null | undefined)
   return "claude";
 }
 
-export type EditorTheme = "app" | "one-dark" | "vscode-dark" | "vscode-light" | "nord" | "okaidia" | "material" | "duotone-light" | "duotone-dark" | "xcode" | "custom";
+export type EditorTheme =
+  | "app"
+  | "one-dark"
+  | "vscode-dark"
+  | "vscode-light"
+  | "nord"
+  | "okaidia"
+  | "material"
+  | "duotone-light"
+  | "duotone-dark"
+  | "xcode"
+  | "xcode-dark"
+  | "idea-light"
+  | "idea-dark"
+  | "jetbrains-light"
+  | "jetbrains-dark"
+  | "cursor-light"
+  | "cursor-dark"
+  | "claude-light"
+  | "claude-dark"
+  | "custom";
 
 const STRUCTURE_EDITOR_DENSITIES = ["compact", "standard", "comfortable"] as const;
 export type StructureEditorDensity = (typeof STRUCTURE_EDITOR_DENSITIES)[number];
@@ -257,6 +281,8 @@ const CELL_DETAIL_PANEL_LAYOUTS = ["bottom", "right"] as const;
 export type CellDetailPanelLayout = (typeof CELL_DETAIL_PANEL_LAYOUTS)[number];
 const DATA_GRID_RENDER_MODES = ["dom", "canvas"] as const;
 export type DataGridRenderMode = (typeof DATA_GRID_RENDER_MODES)[number];
+const DATA_GRID_SEARCH_MODES = ["filter", "highlight"] as const;
+export type DataGridSearchMode = (typeof DATA_GRID_SEARCH_MODES)[number];
 export const TABLE_FONT_SIZE_MIN = 12;
 export const TABLE_FONT_SIZE_MAX = 16;
 export const TABLE_FONT_SIZE_DEFAULT = 13;
@@ -351,6 +377,7 @@ export interface EditorSettings {
   compactColumnHeaderActions: boolean;
   dataGridQuickEntry: boolean;
   dataGridRenderMode: DataGridRenderMode;
+  dataGridSearchMode: DataGridSearchMode;
   tableFontSize: number;
   structureEditorDensity: StructureEditorDensity;
   tableInfoDrawerWidth: number;
@@ -420,6 +447,15 @@ export const EDITOR_THEMES: { value: EditorTheme; label: string; dark: boolean }
   { value: "duotone-light", label: "Duotone Light", dark: false },
   { value: "duotone-dark", label: "Duotone Dark", dark: true },
   { value: "xcode", label: "Xcode", dark: false },
+  { value: "xcode-dark", label: "Xcode Dark", dark: true },
+  { value: "idea-light", label: "IDEA Light", dark: false },
+  { value: "idea-dark", label: "IDEA Darcula", dark: true },
+  { value: "jetbrains-light", label: "JetBrains Light", dark: false },
+  { value: "jetbrains-dark", label: "JetBrains Dark", dark: true },
+  { value: "cursor-light", label: "Cursor Light", dark: false },
+  { value: "cursor-dark", label: "Cursor Dark", dark: true },
+  { value: "claude-light", label: "Claude Code Light", dark: false },
+  { value: "claude-dark", label: "Claude Code Dark", dark: true },
   { value: "custom", label: "Custom", dark: true },
 ];
 
@@ -464,6 +500,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   compactColumnHeaderActions: true,
   dataGridQuickEntry: false,
   dataGridRenderMode: "canvas",
+  dataGridSearchMode: "filter",
   tableFontSize: TABLE_FONT_SIZE_DEFAULT,
   structureEditorDensity: "compact",
   tableInfoDrawerWidth: 320,
@@ -527,6 +564,10 @@ function normalizeCellDetailPanelLayout(value: unknown): CellDetailPanelLayout {
 
 function normalizeDataGridRenderMode(value: unknown): DataGridRenderMode {
   return DATA_GRID_RENDER_MODES.includes(value as DataGridRenderMode) ? (value as DataGridRenderMode) : DEFAULT_EDITOR_SETTINGS.dataGridRenderMode;
+}
+
+function normalizeDataGridSearchMode(value: unknown): DataGridSearchMode {
+  return DATA_GRID_SEARCH_MODES.includes(value as DataGridSearchMode) ? (value as DataGridSearchMode) : DEFAULT_EDITOR_SETTINGS.dataGridSearchMode;
 }
 
 function normalizeTableFontSize(value: unknown): number {
@@ -679,6 +720,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     compactColumnHeaderActions: settings.compactColumnHeaderActions ?? DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions,
     dataGridQuickEntry: settings.dataGridQuickEntry ?? DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry,
     dataGridRenderMode: normalizeDataGridRenderMode(settings.dataGridRenderMode),
+    dataGridSearchMode: normalizeDataGridSearchMode(settings.dataGridSearchMode),
     tableFontSize: normalizeTableFontSize(settings.tableFontSize),
     structureEditorDensity: normalizeStructureEditorDensity(settings.structureEditorDensity),
     tableInfoDrawerWidth: normalizeDrawerWidth(settings.tableInfoDrawerWidth, 240, DEFAULT_EDITOR_SETTINGS.tableInfoDrawerWidth),
@@ -710,46 +752,34 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
   };
 }
 
-function loadEditorSettings(): EditorSettings {
-  // Try new format first
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
+function loadLegacyEditorSettings(): EditorSettings | null {
+  const raw = safeLocalStorageGet(STORAGE_KEY);
+  if (raw) {
+    try {
       const parsed = JSON.parse(raw) as Partial<EditorSettings>;
-      if (parsed.exportBatchSize === LEGACY_DEFAULT_EXPORT_BATCH_SIZE && localStorage.getItem(EXPORT_BATCH_SIZE_DEFAULT_MIGRATION_KEY) !== "1") {
+      if (parsed.exportBatchSize === LEGACY_DEFAULT_EXPORT_BATCH_SIZE && safeLocalStorageGet(EXPORT_BATCH_SIZE_DEFAULT_MIGRATION_KEY) !== "1") {
         parsed.exportBatchSize = DEFAULT_EDITOR_SETTINGS.exportBatchSize;
-        localStorage.setItem(EXPORT_BATCH_SIZE_DEFAULT_MIGRATION_KEY, "1");
-        const migrated = normalizeEditorSettings(parsed);
-        saveEditorSettings(migrated);
-        return migrated;
       }
       return normalizeEditorSettings(parsed);
+    } catch {
+      return null;
     }
-  } catch {
-    /* ignore */
   }
 
-  // Migrate old font-size key if new settings don't exist
-  try {
-    const oldSize = localStorage.getItem(OLD_FONT_SIZE_KEY);
-    if (oldSize) {
-      const parsed = parseInt(oldSize, 10);
-      if (!isNaN(parsed)) {
-        const migrated = normalizeEditorSettings({ fontSize: parsed });
-        saveEditorSettings(migrated);
-        localStorage.removeItem(OLD_FONT_SIZE_KEY);
-        return migrated;
-      }
-    }
-  } catch {
-    /* ignore */
-  }
+  const oldSize = safeLocalStorageGet(OLD_FONT_SIZE_KEY);
+  if (!oldSize) return null;
+  const parsed = parseInt(oldSize, 10);
+  return Number.isNaN(parsed) ? null : normalizeEditorSettings({ fontSize: parsed });
+}
 
-  return normalizeEditorSettings({});
+function clearLegacyEditorSettings() {
+  safeLocalStorageRemove(STORAGE_KEY);
+  safeLocalStorageRemove(OLD_FONT_SIZE_KEY);
+  safeLocalStorageRemove(EXPORT_BATCH_SIZE_DEFAULT_MIGRATION_KEY);
 }
 
 function saveEditorSettings(settings: EditorSettings) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+  void api.saveEditorSettings(settings).catch(() => {});
 }
 
 export const useSettingsStore = defineStore("settings", () => {
@@ -758,8 +788,33 @@ export const useSettingsStore = defineStore("settings", () => {
   const aiProviderConfigs = ref<Partial<Record<AiProvider, AiConfig>>>({});
   const desktopSettings = ref<DesktopSettings>({ ...DEFAULT_DESKTOP_SETTINGS });
   const isDesktopSettingsLoaded = ref(false);
+  const isEditorSettingsLoaded = ref(false);
 
-  const editorSettings = ref<EditorSettings>(loadEditorSettings());
+  const editorSettings = ref<EditorSettings>(normalizeEditorSettings({}));
+
+  async function initEditorSettings() {
+    if (isEditorSettingsLoaded.value) return;
+    const saved = await api.loadEditorSettings().catch(() => null);
+    if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+      editorSettings.value = normalizeEditorSettings(saved as Partial<EditorSettings>);
+      isEditorSettingsLoaded.value = true;
+      return;
+    }
+
+    const legacy = loadLegacyEditorSettings();
+    if (legacy) {
+      editorSettings.value = legacy;
+      try {
+        await api.saveEditorSettings(legacy);
+        // Existing desktop users keep settings in localStorage; remove them only
+        // after the async store has accepted the migrated value.
+        clearLegacyEditorSettings();
+      } catch {
+        /* keep legacy values for a later migration attempt */
+      }
+    }
+    isEditorSettingsLoaded.value = true;
+  }
 
   async function initDesktopSettings() {
     if (isDesktopSettingsLoaded.value) return;
@@ -901,6 +956,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.compactColumnHeaderActions !== undefined) editorSettings.value.compactColumnHeaderActions = partial.compactColumnHeaderActions;
     if (partial.dataGridQuickEntry !== undefined) editorSettings.value.dataGridQuickEntry = partial.dataGridQuickEntry;
     if (partial.dataGridRenderMode !== undefined) editorSettings.value.dataGridRenderMode = normalizeDataGridRenderMode(partial.dataGridRenderMode);
+    if (partial.dataGridSearchMode !== undefined) editorSettings.value.dataGridSearchMode = normalizeDataGridSearchMode(partial.dataGridSearchMode);
     if (partial.tableFontSize !== undefined) editorSettings.value.tableFontSize = normalizeTableFontSize(partial.tableFontSize);
     if (partial.structureEditorDensity !== undefined) editorSettings.value.structureEditorDensity = normalizeStructureEditorDensity(partial.structureEditorDensity);
     if (partial.tableInfoDrawerWidth !== undefined) editorSettings.value.tableInfoDrawerWidth = normalizeDrawerWidth(partial.tableInfoDrawerWidth, 240, DEFAULT_EDITOR_SETTINGS.tableInfoDrawerWidth);
@@ -974,8 +1030,10 @@ export const useSettingsStore = defineStore("settings", () => {
     updateAiConfig,
     isConfigured,
     isAiProviderConfigured,
+    isEditorSettingsLoaded,
     editorSettings,
     desktopSettings,
+    initEditorSettings,
     updateEditorSettings,
     initDesktopSettings,
     updateDesktopSettings,

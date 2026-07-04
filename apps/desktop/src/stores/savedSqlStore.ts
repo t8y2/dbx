@@ -1,8 +1,9 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
-import { uuid } from "@/lib/utils";
-import * as api from "@/lib/api";
-import { isTauriRuntime } from "@/lib/tauriRuntime";
+import { uuid } from "@/lib/common/utils";
+import * as api from "@/lib/backend/api";
+import { forgetSavedSqlEditorPosition } from "@/lib/app/savedSqlEditorPosition";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { SavedSqlFile, SavedSqlFolder, SavedSqlLibrary } from "@/types/database";
 
@@ -294,6 +295,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     for (const tab of tabsToClose) {
       queryStore.closeTab(tab.id, { force: true });
     }
+    forgetSavedSqlEditorPosition(id);
   }
 
   async function persistFolders(nextFolders: SavedSqlFolder[]) {

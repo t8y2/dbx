@@ -1,7 +1,7 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
 import type { ConnectionConfig } from "../../apps/desktop/src/types/database.ts";
-import { connectionDriverLabel, connectionEndpointLabel, connectionIconType, connectionOptionSubtitle, connectionRedactedEndpointLabel, connectionRedactedNameLabel, connectionRedactedOptionSubtitle } from "../../apps/desktop/src/lib/connectionPresentation.ts";
+import { connectionDriverLabel, connectionEndpointLabel, connectionIconType, connectionOptionSubtitle, connectionRedactedEndpointLabel, connectionRedactedNameLabel, connectionRedactedOptionSubtitle } from "../../apps/desktop/src/lib/connection/connectionPresentation.ts";
 
 const baseConnection: ConnectionConfig = {
   id: "conn-1",

@@ -5,9 +5,9 @@ import { Download, RefreshCcw, Trash2, Upload } from "@lucide/vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/composables/useToast";
-import { downloadBinaryCellPayload, type BinaryCellDownloadPayload } from "@/lib/binaryCellDownload";
-import { isTauriRuntime } from "@/lib/tauriRuntime";
-import * as api from "@/lib/api";
+import { downloadBinaryCellPayload, type BinaryCellDownloadPayload } from "@/lib/dataGrid/binaryCellDownload";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import * as api from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
 
 const props = defineProps<{

@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { ref, watch, computed } from "vue";
 import type { NamespaceRef, TopicRef, TopicInfo, ListTopicsOpts } from "@/types/mq";
-import { mqListTopics, mqCreateTopic, mqDeleteTopic, mqUpdatePartitions } from "@/lib/api";
-import { formatError } from "@/lib/errorUtils";
+import { mqListTopics, mqCreateTopic, mqDeleteTopic, mqUpdatePartitions } from "@/lib/backend/api";
+import { formatError } from "@/lib/backend/errorUtils";
 
 interface Props {
   connectionId: string;

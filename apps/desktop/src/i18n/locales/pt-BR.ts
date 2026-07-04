@@ -332,6 +332,7 @@ export default withEnglishFallback({
     advancedTab: "Avançado",
     sshEnable: "Usar túnel SSH / proxy",
     sshHost: "Host SSH",
+    sshHostPlaceholder: "ssh.example.com ou um alias de ~/.ssh/config",
     sshUser: "Usuário SSH",
     sshPassword: "Senha SSH",
     sshPasswordPlaceholder: "Deixe vazio para usar a chave",

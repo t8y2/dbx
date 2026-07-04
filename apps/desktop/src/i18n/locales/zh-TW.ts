@@ -332,6 +332,7 @@ export default withEnglishFallback({
     advancedTab: "進階",
     sshEnable: "使用 SSH 隧道/代理連線",
     sshHost: "SSH 主機",
+    sshHostPlaceholder: "ssh.example.com 或 ~/.ssh/config 中的別名",
     sshUser: "SSH 使用者",
     sshPassword: "SSH 密碼",
     sshPasswordPlaceholder: "留空則使用金鑰",

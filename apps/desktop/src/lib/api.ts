@@ -231,6 +231,7 @@ export const deleteAiConversation = forward("deleteAiConversation");
 
 // System
 export const listSystemFonts = forward("listSystemFonts");
+export const listSshConfigHosts = forward("listSshConfigHosts");
 
 // SQL File Execution
 export const previewSqlFile = forward("previewSqlFile");

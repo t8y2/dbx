@@ -325,6 +325,7 @@ export default withEnglishFallback({
     advancedTab: "詳細",
     sshEnable: "SSHトンネル/プロキシを使用する",
     sshHost: "SSHホスト",
+    sshHostPlaceholder: "ssh.example.com または ~/.ssh/config のエイリアス",
     sshUser: "SSHユーザー",
     sshPassword: "SSHパスワード",
     sshPasswordPlaceholder: "鍵を使用する場合は空のまま",

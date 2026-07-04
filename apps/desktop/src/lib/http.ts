@@ -29,6 +29,7 @@ import type {
   SavedSqlFile,
   SavedSqlFolder,
   SavedSqlLibrary,
+  SshConfigHostEntry,
 } from "@/types/database";
 import type { CollectionInfo } from "@/types/database";
 import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, TableDiff, FunctionDiff, SequenceDiff, RuleDiff, OwnerDiff } from "@/lib/schemaDiff";
@@ -238,6 +239,10 @@ export async function decryptConfig(payload: unknown, passphrase: string): Promi
 
 export async function listSystemFonts(): Promise<string[]> {
   return get("/api/system/fonts");
+}
+
+export async function listSshConfigHosts(): Promise<SshConfigHostEntry[]> {
+  return get("/api/ssh/config-hosts");
 }
 
 export async function listPlugins(): Promise<InstalledPlugin[]> {

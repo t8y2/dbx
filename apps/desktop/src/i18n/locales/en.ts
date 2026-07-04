@@ -330,6 +330,7 @@ export default {
     advancedTab: "Advanced",
     sshEnable: "Use tunnel / proxy",
     sshHost: "SSH Host",
+    sshHostPlaceholder: "ssh.example.com or an alias from ~/.ssh/config",
     sshUser: "SSH User",
     sshPassword: "SSH Password",
     sshPasswordPlaceholder: "Leave empty to use key",

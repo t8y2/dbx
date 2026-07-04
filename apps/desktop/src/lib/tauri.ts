@@ -30,6 +30,7 @@ import type {
   SavedSqlFile,
   SavedSqlFolder,
   SavedSqlLibrary,
+  SshConfigHostEntry,
 } from "@/types/database";
 import type { CollectionInfo } from "@/types/database";
 import type { SidebarObjectKind } from "@/lib/databaseObjectCapabilities";
@@ -446,6 +447,10 @@ export async function savePinnedTreeNodeIds(ids: string[]): Promise<void> {
 
 export async function listSystemFonts(): Promise<string[]> {
   return invoke("list_system_fonts");
+}
+
+export async function listSshConfigHosts(): Promise<SshConfigHostEntry[]> {
+  return invoke("list_ssh_config_hosts");
 }
 
 export async function pendingOpenSqlFiles(): Promise<string[]> {

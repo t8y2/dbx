@@ -13,7 +13,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
-import type { ConnectionConfig, DatabaseType, HttpTunnelConfig, JdbcDriverInfo, JdbcMavenBundleInfo, ProxyTunnelConfig, SshTunnelConfig, TransportLayerConfig } from "@/types/database";
+import type { ConnectionConfig, DatabaseType, HttpTunnelConfig, JdbcDriverInfo, JdbcMavenBundleInfo, ProxyTunnelConfig, SshConfigHostEntry, SshTunnelConfig, TransportLayerConfig } from "@/types/database";
 import type { MqAdminConfig, MqAuth, MqSystemKind } from "@/types/mq";
 import type { NacosAdminConfig, NacosAuthConfig } from "@/types/nacos";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -346,6 +346,7 @@ const mongoUseUrl = ref(false);
 const jdbcDriverPathsInput = ref("");
 const jdbcDrivers = ref<JdbcDriverInfo[]>([]);
 const jdbcMavenBundles = ref<JdbcMavenBundleInfo[]>([]);
+const sshConfigHosts = ref<SshConfigHostEntry[]>([]);
 const agentDrivers = ref<AgentDriverInstallState[]>([]);
 const selectedJdbcDriverPath = ref("");
 const jdbcManualClasspathOpen = ref(false);
@@ -2796,6 +2797,7 @@ watch(
     if (!props.prefillConfig?.oneTime) {
       void loadJdbcDrivers();
       void loadAgentDrivers();
+      void loadSshConfigHosts();
     }
     // Preload database names so the summary count is accurate right away.
     void nextTick(() => {
@@ -3011,6 +3013,23 @@ watch([() => editingId.value, () => open.value], () => {
   dialogTitle.value = editingId.value ? t("connection.editTitle") : t("connection.title");
 });
 
+const sshConfigHostAliases = computed(() => sshConfigHosts.value.map((entry) => entry.alias));
+
+/**
+ * Prefills user/port/key_path from a matching ~/.ssh/config alias, without
+ * overwriting values the user already changed away from the form defaults.
+ * This is a UX preview only — the authoritative resolution happens in the
+ * Rust backend at connect time (see resolve_ssh_tunnel_config), so imported
+ * configs that never touched this UI still resolve correctly.
+ */
+function applySshConfigHostAliasPrefill(target: SshTunnelConfig) {
+  const entry = sshConfigHosts.value.find((candidate) => candidate.alias === target.host);
+  if (!entry) return;
+  if (target.user === DEFAULT_SSH_USER && entry.user) target.user = entry.user;
+  if (target.port === 22 && entry.port) target.port = entry.port;
+  if (!target.key_path && entry.identity_file) target.key_path = entry.identity_file;
+}
+
 async function browseSshKeyPath(target?: SshTunnelConfig | null) {
   if (isTauriRuntime()) {
     const { open } = await import("@tauri-apps/plugin-dialog");
@@ -3224,6 +3243,14 @@ async function loadJdbcDrivers() {
   } catch {
     jdbcDrivers.value = [];
     jdbcMavenBundles.value = [];
+  }
+}
+
+async function loadSshConfigHosts() {
+  try {
+    sshConfigHosts.value = await api.listSshConfigHosts();
+  } catch {
+    sshConfigHosts.value = [];
   }
 }
 
@@ -4731,7 +4758,10 @@ function openExternalUrl(url: string) {
                   <template v-if="selectedSshLayer">
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.sshHost") }}</Label>
-                      <Input v-model="selectedSshLayer.host" class="col-span-2" placeholder="ssh.example.com" :disabled="selectedSshLayer.enabled === false" />
+                      <Input v-model="selectedSshLayer.host" class="col-span-2" list="ssh-config-host-aliases" :placeholder="t('connection.sshHostPlaceholder')" :disabled="selectedSshLayer.enabled === false" @change="applySshConfigHostAliasPrefill(selectedSshLayer!)" />
+                      <datalist id="ssh-config-host-aliases">
+                        <option v-for="alias in sshConfigHostAliases" :key="alias" :value="alias" />
+                      </datalist>
                       <Input v-model.number="selectedSshLayer.port" type="number" min="1" max="65535" class="col-span-1" :disabled="selectedSshLayer.enabled === false" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">

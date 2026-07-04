@@ -174,6 +174,14 @@ export interface SshTunnelConfig {
   ssh_agent_sock_path?: string;
 }
 
+export interface SshConfigHostEntry {
+  alias: string;
+  host_name?: string;
+  port?: number;
+  user?: string;
+  identity_file?: string;
+}
+
 export interface ProxyTunnelConfig {
   id: string;
   name?: string;

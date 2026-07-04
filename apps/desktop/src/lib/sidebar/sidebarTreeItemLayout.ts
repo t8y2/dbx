@@ -19,6 +19,7 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "elasticsearch-index",
   "user-admin",
   "saved-sql-file",
+  "table-search-control",
   "load-more",
 ]);
 

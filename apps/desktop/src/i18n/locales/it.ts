@@ -96,6 +96,8 @@ export default withEnglishFallback({
     searchScopeSchema: "Schema",
     searchScopeTable: "Tabella",
     searchScopeView: "Vista",
+    searchTablesInCurrentScope: "Cerca tabelle in questo database...",
+    clearTableSearch: "Cancella ricerca tabelle",
     clearFilter: "Cancella filtro",
     locateActiveTab: "Trova nella barra laterale",
   },

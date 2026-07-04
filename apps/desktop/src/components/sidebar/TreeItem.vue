@@ -58,6 +58,7 @@ import {
   Info,
   Archive,
   Square,
+  X,
 } from "@lucide/vue";
 import CustomContextMenu from "@/components/ui/CustomContextMenu.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -3639,6 +3640,11 @@ const tableComment = computed(() =>
     : null,
 );
 const paddingLeft = computed(() => treeItemPaddingLeft(props.depth));
+const tableSearchParentId = computed(() => props.node.tableSearchParentId || "");
+const tableSearchValue = computed(() => {
+  const parentId = tableSearchParentId.value;
+  return parentId ? connectionStore.sidebarTableSearchQueries[parentId] || "" : "";
+});
 const isConnected = computed(() => props.node.type === "connection" && !!props.node.connectionId && connectionStore.connectedIds.has(props.node.connectionId));
 const isConnectionReadonly = computed(() => props.node.type === "connection" && !!props.node.connectionId && (connectionStore.getConfig(props.node.connectionId)?.read_only ?? false));
 const isOpenedDatabase = computed(() => isSidebarDatabaseOpened(props.node, connectionStore.isTreeNodeChildrenLoaded));
@@ -3699,6 +3705,22 @@ const rowStyle = computed(() => {
 
 function togglePin() {
   connectionStore.toggleTreeNodePin(props.node.id);
+}
+
+function updateTableSearchQuery(value: string | number) {
+  const parentId = tableSearchParentId.value;
+  if (!parentId) return;
+  const query = String(value);
+  if (sidebarTreeContext?.setTableSearchQuery) {
+    sidebarTreeContext.setTableSearchQuery(parentId, query);
+    return;
+  }
+  connectionStore.setSidebarTableSearchQuery(parentId, query);
+  void connectionStore.refreshSidebarTableSearch(parentId);
+}
+
+function clearTableSearchQuery() {
+  updateTableSearchQuery("");
 }
 
 function openVisibleDatabasesDialog() {
@@ -4639,7 +4661,27 @@ function treeItemMenuItems(): ContextMenuItem[] {
 </script>
 
 <template>
-  <CustomContextMenu :items="treeItemMenuItems()" v-slot="contextMenuSlot">
+  <div v-if="node.type === 'table-search-control'" class="flex h-7 items-center py-0.5 pr-2" :style="{ paddingLeft }" @click.stop @dblclick.stop @mousedown.stop @keydown.stop>
+    <div class="relative w-full min-w-0">
+      <Search class="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
+      <Input
+        :model-value="tableSearchValue"
+        autocapitalize="off"
+        autocorrect="off"
+        spellcheck="false"
+        class="h-6 w-full rounded border-border/70 bg-background pl-7 pr-6 text-xs shadow-none focus-visible:ring-1"
+        :placeholder="t(node.label)"
+        :aria-label="t(node.label)"
+        :data-sidebar-table-search-parent-id="tableSearchParentId"
+        @update:model-value="updateTableSearchQuery"
+      />
+      <button v-if="tableSearchValue" type="button" class="absolute right-1.5 top-1/2 flex h-4 w-4 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="t('sidebar.clearTableSearch')" @click.stop="clearTableSearchQuery">
+        <X class="h-3 w-3" />
+      </button>
+    </div>
+  </div>
+
+  <CustomContextMenu v-else :items="treeItemMenuItems()" v-slot="contextMenuSlot">
     <div @contextmenu="onTreeItemContextMenu($event, contextMenuSlot.onContextMenu)">
       <LightTooltip :text="displayLabel(node)" :disabled="isTooltipDisabled()" side="right" :side-offset="8" :delay="0" :close-delay="0">
         <div

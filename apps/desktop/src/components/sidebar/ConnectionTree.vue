@@ -19,6 +19,7 @@ import { activeTabSidebarTarget, findSidebarNodeForActiveTab, findSidebarNodeFor
 import { findLoadedTableTargetForCandidate, queryContextTargetFromCandidate, queryCursorTableCandidate, type QueryCursorTableCandidate } from "@/lib/sql/queryCursorTableTarget";
 import { SIDEBAR_TREE_ROW_HEIGHT, SIDEBAR_TREE_PRERENDER_COUNT, SIDEBAR_TREE_SCROLL_BUFFER, flattenTree, shouldVirtualizeFlatTree, type FlatTreeNode } from "@/composables/useFlatTree";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
+import { insertSidebarTableSearchControls, isSidebarTableSearchControlNode } from "@/lib/sidebar/sidebarTableSearchControl";
 import TreeItem from "./TreeItem.vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
@@ -42,6 +43,10 @@ const selectedSearchScopes = ref<SearchScope[]>([]);
 const searchCollapsedIds = ref<Set<string>>(new Set());
 const searchRefreshedNodeIds = new Set<string>();
 let searchTimer: number | undefined;
+const tableSearchTimers = new Map<string, number>();
+const tableSearchFocusRestoreTokens = new Map<string, number>();
+let tableSearchFocusRestoreTokenSeq = 0;
+let latestTableSearchInteractionParentId: string | null = null;
 
 watch(
   searchQuery,
@@ -61,6 +66,13 @@ watch(
   { flush: "sync" },
 );
 
+function refreshActiveSidebarTableSearches() {
+  if (isFiltering.value) return;
+  for (const parentNodeId of Object.keys(store.sidebarTableSearchQueries)) {
+    scheduleSidebarTableSearchRefresh(parentNodeId);
+  }
+}
+
 watch(deferredSearchQuery, (newQuery, oldQuery) => {
   store.sidebarSearchQuery = newQuery;
   const tasks: Promise<void>[] = [];
@@ -70,7 +82,11 @@ watch(deferredSearchQuery, (newQuery, oldQuery) => {
   if (!newQuery && oldQuery) {
     searchRefreshedNodeIds.clear();
   }
-  Promise.all(tasks).catch(() => {});
+  Promise.all(tasks)
+    .then(() => {
+      if (!newQuery && oldQuery) refreshActiveSidebarTableSearches();
+    })
+    .catch(() => {});
 });
 
 const searchableObjectGroupTypes = new Set<TreeNodeType>(["group-tables", "group-views", "group-materialized-views"]);
@@ -78,7 +94,7 @@ const simpleObjectParentTypes = new Set<TreeNodeType>(["database", "schema", "li
 const simpleObjectChildTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "sequence", "package", "package-body", "load-more"]);
 
 function isSimpleObjectSearchParent(node: TreeNode): boolean {
-  return settingsStore.editorSettings.sidebarObjectDisplay === "simple" && simpleObjectParentTypes.has(node.type) && node.isExpanded === true && !!node.children?.some((child) => simpleObjectChildTypes.has(child.type));
+  return settingsStore.editorSettings.sidebarObjectDisplay === "simple" && simpleObjectParentTypes.has(node.type) && node.isExpanded === true && (!!node.children?.some((child) => simpleObjectChildTypes.has(child.type)) || !!store.sidebarTableSearchQueries[node.id]?.trim());
 }
 
 function collectExpandedObjectSearchTargets(node: TreeNode, tasks: Promise<void>[], refreshedNodeIds?: Set<string>) {
@@ -185,6 +201,47 @@ function clearSearchScopeFilter() {
   selectedSearchScopes.value = [];
 }
 
+function scheduleSidebarTableSearchRefresh(parentNodeId: string, options?: { restoreFocus?: boolean }) {
+  window.clearTimeout(tableSearchTimers.get(parentNodeId));
+  if (isFiltering.value) return;
+  const restoreToken = options?.restoreFocus ? ++tableSearchFocusRestoreTokenSeq : 0;
+  if (restoreToken) {
+    tableSearchFocusRestoreTokens.clear();
+    tableSearchFocusRestoreTokens.set(parentNodeId, restoreToken);
+  }
+  const timer = window.setTimeout(() => {
+    tableSearchTimers.delete(parentNodeId);
+    void store.refreshSidebarTableSearch(parentNodeId).then(() => {
+      if (!restoreToken) return;
+      if (tableSearchFocusRestoreTokens.get(parentNodeId) !== restoreToken) return;
+      tableSearchFocusRestoreTokens.delete(parentNodeId);
+      if (latestTableSearchInteractionParentId !== parentNodeId) return;
+      if (document.activeElement === document.body || activeTableSearchParentId() === parentNodeId) {
+        focusTableSearchInput(parentNodeId);
+      }
+    });
+  }, 250);
+  tableSearchTimers.set(parentNodeId, timer);
+}
+
+function activeTableSearchParentId(): string | null {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLElement)) return null;
+  return active.dataset.sidebarTableSearchParentId || null;
+}
+
+function focusTableSearchInput(parentNodeId: string) {
+  void nextTick(() => {
+    const root = rootRef.value;
+    if (!root) return;
+    const input = Array.from(root.querySelectorAll<HTMLInputElement>("[data-sidebar-table-search-parent-id]")).find((item) => item.dataset.sidebarTableSearchParentId === parentNodeId);
+    if (!input) return;
+    input.focus({ preventScroll: true });
+    const end = input.value.length;
+    input.setSelectionRange(end, end);
+  });
+}
+
 const filteredNodes = computed(() => {
   let nodes = store.treeNodes;
 
@@ -197,11 +254,18 @@ const filteredNodes = computed(() => {
   return nodes;
 });
 
-const flatNodes = computed<FlatTreeNode[]>(() => flattenTree(filteredNodes.value));
+const flatNodes = computed<FlatTreeNode[]>(() =>
+  insertSidebarTableSearchControls(flattenTree(filteredNodes.value), {
+    enabled: !isFiltering.value,
+    sidebarObjectDisplay: settingsStore.editorSettings.sidebarObjectDisplay,
+    activeQueries: store.sidebarTableSearchQueries,
+  }),
+);
 const visibleNodes = computed<TreeNode[]>(() => flatNodes.value.map((item) => item.node));
-const visibleNodeIndexById = computed(() => {
+const selectableVisibleNodes = computed<TreeNode[]>(() => visibleNodes.value.filter((node) => !isSidebarTableSearchControlNode(node)));
+const selectableVisibleNodeIndexById = computed(() => {
   const next = new Map<string, number>();
-  visibleNodes.value.forEach((node, index) => next.set(node.id, index));
+  selectableVisibleNodes.value.forEach((node, index) => next.set(node.id, index));
   return next;
 });
 const useVirtualTree = computed(() => shouldVirtualizeFlatTree(flatNodes.value.length));
@@ -405,8 +469,13 @@ function onSidebarScrollbarThumbPointerDown(event: PointerEvent) {
 }
 
 provide(sidebarTreeContextKey, {
-  getVisibleNodes: () => visibleNodes.value,
-  getVisibleNodeIndex: (id: string) => visibleNodeIndexById.value.get(id) ?? -1,
+  getVisibleNodes: () => selectableVisibleNodes.value,
+  getVisibleNodeIndex: (id: string) => selectableVisibleNodeIndexById.value.get(id) ?? -1,
+  setTableSearchQuery: (parentNodeId, query) => {
+    latestTableSearchInteractionParentId = parentNodeId;
+    store.setSidebarTableSearchQuery(parentNodeId, query);
+    scheduleSidebarTableSearchRefresh(parentNodeId, { restoreFocus: true });
+  },
 });
 
 const pendingRenameGroupId = ref<string | null>(null);
@@ -805,7 +874,7 @@ function onWindowKeydown(event: KeyboardEvent) {
     }
   }
 
-  if (!pointerInsideTree.value || isEditableSidebarTypeSearchTarget(event.target)) return;
+  if (!pointerInsideTree.value || isEditableSidebarTypeSearchTarget(event.target) || isEditableSidebarTypeSearchTarget(document.activeElement)) return;
   if (isCancelSearchShortcut(event)) {
     if (!searchQuery.value) return;
     event.preventDefault();
@@ -905,6 +974,12 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener("keydown", onWindowKeydown);
+  for (const timer of tableSearchTimers.values()) {
+    window.clearTimeout(timer);
+  }
+  tableSearchTimers.clear();
+  tableSearchFocusRestoreTokens.clear();
+  latestTableSearchInteractionParentId = null;
   stopSidebarScrollbarDrag();
   sidebarScrollbarResizeObserver?.disconnect();
   window.cancelAnimationFrame(sidebarScrollbarAnimationFrame);

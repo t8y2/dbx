@@ -165,6 +165,9 @@ export type TreeClipboard =
 interface LoadTreeOptions {
   force?: boolean;
   expectedSidebarSearchQuery?: string;
+  searchFilter?: string;
+  sidebarTableSearchParentId?: string;
+  expectedSidebarTableSearchQuery?: string;
 }
 
 interface PersistedTreeChildrenLoadResult {
@@ -215,6 +218,7 @@ export const useConnectionStore = defineStore("connection", () => {
   const mongoCompletionFieldsCache = ref<Record<string, MongoCompletionField[]>>({});
   const schemaListCache = ref<Record<string, string[]>>({});
   const sidebarSearchQuery = ref("");
+  const sidebarTableSearchQueries = ref<Record<string, string>>({});
   const completionTableIndex = new Map<string, { touched: number; tables: SqlCompletionTable[] }>();
   const completionObjectIndex = new Map<string, { touched: number; objects: SqlCompletionObject[] }>();
   const completionColumnIndex = new Map<string, { touched: number; columns: SqlCompletionColumn[] }>();
@@ -822,7 +826,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!options.node.connectionId || !options.node.database) {
       return { children: [], objectCount: 0, hasMore: false, nextOffset: options.offset };
     }
-    const searchFilter = options.searchFilter || sidebarSearchQuery.value || undefined;
+    const searchFilter = (options.searchFilter ?? sidebarSearchQuery.value) || undefined;
     const fetchLimit = searchFilter ? options.pageSize : options.pageSize + 1;
     const tables = await api.listTables(options.node.connectionId, options.node.database, options.querySchema, searchFilter, fetchLimit, searchFilter ? undefined : options.offset, options.objectTypes);
     const hasMore = searchFilter ? false : tables.length > options.pageSize;
@@ -855,7 +859,7 @@ export const useConnectionStore = defineStore("connection", () => {
     pageSize: number;
     searchFilter?: string;
   }): Promise<{ children: TreeNode[]; objectCount: number; hasMore: boolean; nextOffset: number }> {
-    const searchFilter = options.searchFilter || sidebarSearchQuery.value || undefined;
+    const searchFilter = (options.searchFilter ?? sidebarSearchQuery.value) || undefined;
     const fetchLimit = searchFilter ? options.pageSize : options.pageSize + 1;
     const tables = await api.listTables(options.connectionId, options.database, options.querySchema, searchFilter, fetchLimit, searchFilter ? undefined : options.offset);
     const hasMore = searchFilter ? false : tables.length > options.pageSize;
@@ -956,6 +960,20 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function isSidebarSearchQueryChanged(options?: LoadTreeOptions) {
     return options?.expectedSidebarSearchQuery !== undefined && (sidebarSearchQuery.value || "") !== options.expectedSidebarSearchQuery;
+  }
+
+  function isSidebarTableSearchQueryChanged(options?: LoadTreeOptions) {
+    if (!options?.sidebarTableSearchParentId || options.expectedSidebarTableSearchQuery === undefined) return false;
+    return (sidebarTableSearchQueries.value[options.sidebarTableSearchParentId]?.trim() || "") !== options.expectedSidebarTableSearchQuery;
+  }
+
+  function activeTreeLoadSearchFilter(options?: LoadTreeOptions): string {
+    return (options?.searchFilter ?? sidebarSearchQuery.value) || "";
+  }
+
+  function isTreeLoadSearchChanged(searchFilter: string, options?: LoadTreeOptions): boolean {
+    if (options?.sidebarTableSearchParentId) return isSidebarTableSearchQueryChanged(options);
+    return (sidebarSearchQuery.value || "") !== searchFilter || isSidebarSearchQueryChanged(options);
   }
 
   function isTreeNodeChildrenLoaded(nodeId: string): boolean {
@@ -2157,7 +2175,8 @@ export const useConnectionStore = defineStore("connection", () => {
       if (useCachedChildren(node, options)) return;
       const simpleObjectDisplay = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
       const cacheKey = schemaCacheKey(connectionId, database, schema || "", simpleObjectDisplay ? "objects-simple-v3" : "objects-grouped-v3");
-      const searchFilter = sidebarSearchQuery.value || "";
+      const searchFilter = activeTreeLoadSearchFilter(options);
+      const isSidebarTableSearch = !!options?.sidebarTableSearchParentId;
       if (!options?.force && !searchFilter) {
         const cached = await loadPersistedTreeChildren(node, cacheKey);
         if (cached.hit) {
@@ -2195,9 +2214,9 @@ export const useConnectionStore = defineStore("connection", () => {
           objectTypes: supportedSidebarObjectTypes(config),
         });
       }
-      if ((sidebarSearchQuery.value || "") !== searchFilter || isSidebarSearchQueryChanged(options)) return;
+      if (isTreeLoadSearchChanged(searchFilter, options)) return;
       setChildren(node, children);
-      if (!searchFilter) {
+      if (!searchFilter && !isSidebarTableSearch) {
         await savePersistedTreeChildren(cacheKey, children);
       }
       node.isExpanded = true;
@@ -2223,7 +2242,8 @@ export const useConnectionStore = defineStore("connection", () => {
       const querySchema = connectionObjectTreeQuerySchema(config, node.database, node.schema);
       const effectiveSchema = connectionObjectTreeNodeSchema(config, node.database, node.schema);
       const cacheKey = objectGroupCacheKey(node);
-      const searchFilter = sidebarSearchQuery.value || "";
+      const searchFilter = activeTreeLoadSearchFilter(options);
+      const isSidebarTableSearch = !!options?.sidebarTableSearchParentId;
       if (!options?.force && !searchFilter) {
         const cached = await loadPersistedTreeChildren(node, cacheKey);
         if (cached.hit) {
@@ -2258,9 +2278,9 @@ export const useConnectionStore = defineStore("connection", () => {
         });
         node.objectCount = children.length;
       }
-      if ((sidebarSearchQuery.value || "") !== searchFilter || isSidebarSearchQueryChanged(options)) return;
+      if (isTreeLoadSearchChanged(searchFilter, options)) return;
       setChildren(node, children);
-      if (!searchFilter) {
+      if (!searchFilter && !isSidebarTableSearch) {
         await savePersistedTreeChildren(cacheKey, children);
       }
       node.isExpanded = true;
@@ -2427,6 +2447,39 @@ export const useConnectionStore = defineStore("connection", () => {
       throw e;
     } finally {
       parent.isLoading = false;
+    }
+  }
+
+  function setSidebarTableSearchQuery(parentNodeId: string, query: string) {
+    const normalized = query.trim();
+    const next = { ...sidebarTableSearchQueries.value };
+    if (normalized) {
+      next[parentNodeId] = query;
+    } else {
+      delete next[parentNodeId];
+    }
+    sidebarTableSearchQueries.value = next;
+  }
+
+  async function refreshSidebarTableSearch(parentNodeId: string) {
+    const parent = findNode(treeNodes.value, parentNodeId);
+    if (!parent?.connectionId || !hasTreeNodeDatabaseContext(parent)) return;
+
+    const searchFilter = sidebarTableSearchQueries.value[parentNodeId]?.trim() || "";
+    const options: LoadTreeOptions = {
+      force: true,
+      searchFilter: searchFilter || undefined,
+      sidebarTableSearchParentId: parentNodeId,
+      expectedSidebarTableSearchQuery: searchFilter,
+    };
+
+    if (parent.type === "group-tables") {
+      await loadObjectGroupChildren(parent, options);
+      return;
+    }
+
+    if (parent.type === "database" || parent.type === "schema" || parent.type === "linked-server-schema") {
+      await loadTables(parent.connectionId, parent.database, parent.schema, options);
     }
   }
 
@@ -4118,6 +4171,9 @@ export const useConnectionStore = defineStore("connection", () => {
     databaseSearchSource,
     databaseExportSource,
     sidebarSearchQuery,
+    sidebarTableSearchQueries,
+    setSidebarTableSearchQuery,
+    refreshSidebarTableSearch,
     createConnectionGroup(name: string, parentGroupId?: string | null) {
       const result = createGroupOp(sidebarLayout.value, name, parentGroupId);
       updateLayoutAndRebuild(result.layout);

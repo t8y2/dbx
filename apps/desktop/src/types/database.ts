@@ -512,6 +512,7 @@ export type TreeNodeType =
   | "saved-sql-root"
   | "saved-sql-folder"
   | "saved-sql-file"
+  | "table-search-control"
   | "load-more"
   | "column"
   | "index"
@@ -570,6 +571,7 @@ export interface TreeNode {
   partitionParentSchema?: string;
   partitionParentName?: string;
   hiddenChildren?: TreeNode[];
+  tableSearchParentId?: string;
   savedSqlId?: string;
   savedSqlFolderId?: string;
   meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | VectorCollectionMeta;

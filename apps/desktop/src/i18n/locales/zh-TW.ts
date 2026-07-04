@@ -97,6 +97,8 @@ export default withEnglishFallback({
     searchScopeSchema: "Schema",
     searchScopeTable: "資料表",
     searchScopeView: "檢視",
+    searchTablesInCurrentScope: "搜尋目前資料庫的資料表...",
+    clearTableSearch: "清除資料表搜尋",
     clearFilter: "清除篩選",
     locateActiveTab: "在側邊欄中定位",
   },

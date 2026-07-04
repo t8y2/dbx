@@ -95,6 +95,8 @@ export default {
     searchScopeSchema: "Schema",
     searchScopeTable: "Table",
     searchScopeView: "View",
+    searchTablesInCurrentScope: "Search tables in this database...",
+    clearTableSearch: "Clear table search",
     clearFilter: "Clear filter",
     locateActiveTab: "Locate in sidebar",
   },

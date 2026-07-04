@@ -97,6 +97,8 @@ export default withEnglishFallback({
     searchScopeSchema: "スキーマ",
     searchScopeTable: "テーブル",
     searchScopeView: "ビュー",
+    searchTablesInCurrentScope: "このデータベースのテーブルを検索...",
+    clearTableSearch: "テーブル検索をクリア",
     clearFilter: "フィルターをクリア",
     locateActiveTab: "サイドバーで表示",
   },

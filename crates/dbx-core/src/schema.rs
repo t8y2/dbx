@@ -2439,6 +2439,9 @@ mod tests {
             "Agent RPC error (-1): Unknown method: completion_assistant_search_v1"
         ));
         assert!(super::is_agent_completion_assistant_unsupported(
+            "Agent RPC error (-1): unknown method: completion_assistant_search_v1"
+        ));
+        assert!(super::is_agent_completion_assistant_unsupported(
             "Agent RPC error (-1): Completion assistant search is not supported by this agent"
         ));
         assert!(!super::is_agent_completion_assistant_unsupported("Agent RPC error (-1): Connection failed"));
@@ -2932,10 +2935,10 @@ pub async fn completion_assistant_search_core(
 }
 
 fn is_agent_completion_assistant_unsupported(error: &str) -> bool {
-    error.contains("Unknown method: completion_assistant_search_v1")
-        || error.contains("Method not found: completion_assistant_search_v1")
+    let error = error.to_ascii_lowercase();
+    error.contains("unknown method: completion_assistant_search_v1")
         || error.contains("method not found: completion_assistant_search_v1")
-        || error.contains("Completion assistant search is not supported")
+        || error.contains("completion assistant search is not supported")
 }
 
 async fn completion_assistant_fallback_core(

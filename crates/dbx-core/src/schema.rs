@@ -4625,10 +4625,9 @@ async fn append_db2_comments_to_ddl(
     timeout_duration: Option<Duration>,
 ) -> Result<String, String> {
     let table_comment = db2_table_comment(client, database, schema, table, timeout_duration).await;
+    let column_comments = db2_column_comments(client, database, schema, table, timeout_duration).await;
     let mut columns =
         client.get_columns::<Vec<db::ColumnInfo>>(database, schema, table, timeout_duration).await.unwrap_or_default();
-    // Agent 驱动可能不返回列注释，单独查询 SYSCAT.COLUMNS.REMARKS 补充
-    let column_comments = db2_column_comments(client, database, schema, table, timeout_duration).await;
     if !column_comments.is_empty() {
         for column in &mut columns {
             if column.comment.as_deref().is_none_or(|c| c.trim().is_empty() || c.trim().eq_ignore_ascii_case("null")) {

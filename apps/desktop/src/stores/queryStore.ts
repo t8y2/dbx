@@ -44,12 +44,14 @@ import * as api from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
+import { createSavedSqlEditorPosition, restoreSavedSqlEditorPosition, saveSavedSqlEditorPosition } from "@/lib/app/savedSqlEditorPosition";
 import type { SavedSqlFile } from "@/types/database";
 
 const ORACLE_LIKE_METADATA_TYPES = new Set<string>(["oracle", "dameng", "oceanbase-oracle"]);
 const BACKGROUND_CLIENT_SESSION_SUFFIXES = ["count", "explain", "export"] as const;
 const CANCEL_QUERY_TIMEOUT_MS = 10_000;
 const CANCEL_ACK_SETTLE_TIMEOUT_MS = 2_000;
+const SAVED_SQL_EDITOR_POSITION_PERSIST_DELAY_MS = 500;
 type CloseConfirmContext = "tab" | "batch" | "app";
 
 function cloneTabDraft<T>(value: T): T {
@@ -222,6 +224,7 @@ export const useQueryStore = defineStore("query", () => {
     if (tab.mode === "data") void deleteTabResultSnapshot(tabResultCacheKey(tab.id));
   }
   const tableStructureRefreshVersions = ref<Record<string, number>>({});
+  const savedSqlEditorPositionTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   function tableStructureKey(connectionId: string, database: string, schema: string | undefined, tableName: string): string {
     return [connectionId, database, schema || "", tableName].map((part) => part.toLowerCase()).join("\u0000");
@@ -898,6 +901,36 @@ export const useQueryStore = defineStore("query", () => {
     if (tab) tab.originalSql = tab.sql;
   }
 
+  function persistSavedSqlEditorPosition(tab: QueryTab | undefined) {
+    if (!tab?.savedSqlId || tab.mode !== "query") return;
+    const pending = savedSqlEditorPositionTimers.get(tab.savedSqlId);
+    if (pending) {
+      clearTimeout(pending);
+      savedSqlEditorPositionTimers.delete(tab.savedSqlId);
+    }
+    saveSavedSqlEditorPosition(
+      createSavedSqlEditorPosition({
+        savedSqlId: tab.savedSqlId,
+        sql: tab.sql,
+        selection: tab.editorSelection,
+        viewport: tab.editorViewport,
+      }),
+    );
+  }
+
+  function queueSavedSqlEditorPositionPersist(tab: QueryTab | undefined) {
+    if (!tab?.savedSqlId || tab.mode !== "query") return;
+    const pending = savedSqlEditorPositionTimers.get(tab.savedSqlId);
+    if (pending) clearTimeout(pending);
+    const tabId = tab.id;
+    const savedSqlId = tab.savedSqlId;
+    const timer = setTimeout(() => {
+      savedSqlEditorPositionTimers.delete(savedSqlId);
+      persistSavedSqlEditorPosition(tabs.value.find((item) => item.id === tabId));
+    }, SAVED_SQL_EDITOR_POSITION_PERSIST_DELAY_MS);
+    savedSqlEditorPositionTimers.set(savedSqlId, timer);
+  }
+
   function discardTabChanges(id: string) {
     const tab = tabs.value.find((item) => item.id === id);
     if (!tab || tab.mode !== "query") return false;
@@ -969,6 +1002,7 @@ export const useQueryStore = defineStore("query", () => {
     }
     const idx = tabs.value.findIndex((t) => t.id === id);
     if (idx < 0) return;
+    persistSavedSqlEditorPosition(tabs.value[idx]);
     clearDataGridPendingSnapshotsForTab(id);
     if (tabs.value[idx].txnSessionId) void rollbackTransaction(id);
     if (tabs.value[idx].isExecuting) void cancelTabExecution(id);
@@ -1305,6 +1339,7 @@ export const useQueryStore = defineStore("query", () => {
     const tab = tabs.value.find((t) => t.id === id);
     if (tab) {
       tab.sql = sql;
+      queueSavedSqlEditorPositionPersist(tab);
     }
   }
 
@@ -1355,12 +1390,14 @@ export const useQueryStore = defineStore("query", () => {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab) return;
     tab.editorViewport = viewport;
+    queueSavedSqlEditorPositionPersist(tab);
   }
 
   function updateEditorSelection(id: string, selection: { anchor: number; head: number }) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab) return;
     tab.editorSelection = selection;
+    queueSavedSqlEditorPositionPersist(tab);
   }
 
   function renameTab(id: string, title: string) {
@@ -1399,15 +1436,20 @@ export const useQueryStore = defineStore("query", () => {
   function openSavedSql(file: SavedSqlFile) {
     const existing = tabs.value.find((tab) => tab.savedSqlId === file.id);
     if (existing) {
+      persistSavedSqlEditorPosition(existing);
       if (!existing.sql && file.sql) {
         existing.sql = file.sql;
         existing.originalSql = file.sql;
+        const restored = restoreSavedSqlEditorPosition(file.id, file.sql);
+        existing.editorSelection = restored.selection;
+        existing.editorViewport = restored.viewport;
       }
       activeTabId.value = existing.id;
       return existing.id;
     }
 
     const id = uuid();
+    const restoredPosition = restoreSavedSqlEditorPosition(file.id, file.sql);
     const tab: QueryTab = {
       id,
       title: file.name,
@@ -1422,6 +1464,8 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode: "query",
+      editorSelection: restoredPosition.selection,
+      editorViewport: restoredPosition.viewport,
     };
     tabs.value.push(tab);
     activeTabId.value = id;
@@ -1440,6 +1484,9 @@ export const useQueryStore = defineStore("query", () => {
       tab.schema = file.schema;
       tab.sql = file.sql;
       tab.originalSql = file.sql;
+      const restored = restoreSavedSqlEditorPosition(file.id, file.sql);
+      tab.editorSelection = restored.selection;
+      tab.editorViewport = restored.viewport;
     }
   }
 

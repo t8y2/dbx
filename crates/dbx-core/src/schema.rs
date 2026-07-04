@@ -4647,26 +4647,36 @@ async fn db2_table_comment(
     table: &str,
     timeout_duration: Option<Duration>,
 ) -> Option<String> {
-    let schema_filter =
-        if schema.trim().is_empty() { "CURRENT SCHEMA".to_string() } else { sql_string(&schema.trim().to_uppercase()) };
-    let sql = format!(
-        "SELECT REMARKS FROM SYSCAT.TABLES WHERE TABSCHEMA = {} AND TABNAME = {} AND REMARKS IS NOT NULL",
-        schema_filter,
-        sql_string(&table.trim().to_uppercase()),
-    );
-    let result = client
-        .execute_query_with_timeout::<db::QueryResult>(
-            agent_execute_query_params(
-                &sql,
-                if database.is_empty() { None } else { Some(database) },
-                if schema.is_empty() { None } else { Some(schema) },
-                QueryExecutionOptions { max_rows: Some(1), ..Default::default() },
-            ),
-            timeout_duration,
-        )
-        .await
-        .ok()?;
-    result.rows.first().and_then(|row| row.first()).and_then(|v| v.as_str()).map(|s| s.to_string())
+    // 优先使用原始值查询，支持 quoted/mixed-case 对象；如果查不到再 fallback 到大写
+    for (schema_name, table_name) in
+        [(schema.trim(), table.trim()), (&schema.trim().to_uppercase(), &table.trim().to_uppercase())]
+    {
+        let schema_filter = if schema_name.is_empty() { "CURRENT SCHEMA".to_string() } else { sql_string(schema_name) };
+        let sql = format!(
+            "SELECT REMARKS FROM SYSCAT.TABLES WHERE TABSCHEMA = {} AND TABNAME = {} AND REMARKS IS NOT NULL",
+            schema_filter,
+            sql_string(table_name),
+        );
+        if let Ok(result) = client
+            .execute_query_with_timeout::<db::QueryResult>(
+                agent_execute_query_params(
+                    &sql,
+                    if database.is_empty() { None } else { Some(database) },
+                    if schema.is_empty() { None } else { Some(schema) },
+                    QueryExecutionOptions { max_rows: Some(1), ..Default::default() },
+                ),
+                timeout_duration,
+            )
+            .await
+        {
+            if let Some(comment) =
+                result.rows.first().and_then(|row| row.first()).and_then(|v| v.as_str()).map(|s| s.to_string())
+            {
+                return Some(comment);
+            }
+        }
+    }
+    None
 }
 
 async fn db2_column_comments(
@@ -4676,34 +4686,41 @@ async fn db2_column_comments(
     table: &str,
     timeout_duration: Option<Duration>,
 ) -> HashMap<String, String> {
-    let schema_filter =
-        if schema.trim().is_empty() { "CURRENT SCHEMA".to_string() } else { sql_string(&schema.trim().to_uppercase()) };
-    let sql = format!(
-        "SELECT COLNAME, REMARKS FROM SYSCAT.COLUMNS WHERE TABSCHEMA = {} AND TABNAME = {} AND REMARKS IS NOT NULL",
-        schema_filter,
-        sql_string(&table.trim().to_uppercase()),
-    );
-    let result = match client
-        .execute_query_with_timeout::<db::QueryResult>(
-            agent_execute_query_params(
-                &sql,
-                if database.is_empty() { None } else { Some(database) },
-                if schema.is_empty() { None } else { Some(schema) },
-                QueryExecutionOptions { max_rows: Some(500), ..Default::default() },
-            ),
-            timeout_duration,
-        )
-        .await
-    {
-        Ok(result) => result,
-        Err(_) => return HashMap::new(),
-    };
+    // 优先使用原始值查询，支持 quoted/mixed-case 对象；如果查不到再 fallback 到大写
     let mut comments = HashMap::new();
-    for row in &result.rows {
-        let col_name = row.first().and_then(|v| v.as_str()).unwrap_or("").trim();
-        let remark = row.get(1).and_then(|v| v.as_str()).unwrap_or("").trim();
-        if !col_name.is_empty() && !remark.is_empty() {
-            comments.insert(col_name.to_uppercase(), remark.to_string());
+    for (schema_name, table_name) in
+        [(schema.trim(), table.trim()), (&schema.trim().to_uppercase(), &table.trim().to_uppercase())]
+    {
+        let schema_filter = if schema_name.is_empty() { "CURRENT SCHEMA".to_string() } else { sql_string(schema_name) };
+        let sql = format!(
+            "SELECT COLNAME, REMARKS FROM SYSCAT.COLUMNS WHERE TABSCHEMA = {} AND TABNAME = {} AND REMARKS IS NOT NULL",
+            schema_filter,
+            sql_string(table_name),
+        );
+        let result = match client
+            .execute_query_with_timeout::<db::QueryResult>(
+                agent_execute_query_params(
+                    &sql,
+                    if database.is_empty() { None } else { Some(database) },
+                    if schema.is_empty() { None } else { Some(schema) },
+                    QueryExecutionOptions { ..Default::default() },
+                ),
+                timeout_duration,
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(_) => continue,
+        };
+        for row in &result.rows {
+            let col_name = row.first().and_then(|v| v.as_str()).unwrap_or("").trim();
+            let remark = row.get(1).and_then(|v| v.as_str()).unwrap_or("").trim();
+            if !col_name.is_empty() && !remark.is_empty() {
+                comments.entry(col_name.to_uppercase()).or_insert_with(|| remark.to_string());
+            }
+        }
+        if !comments.is_empty() {
+            break;
         }
     }
     comments

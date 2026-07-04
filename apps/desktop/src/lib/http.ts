@@ -64,6 +64,8 @@ import type {
   KvPutResponse,
   KvDeleteResponse,
   MongoDocumentResult,
+  MongoCollectionStatsResult,
+  MongoGridFsBucketInfo,
   HistoryEntry,
   SqlFileRequest,
   SqlFilePreview,
@@ -88,6 +90,7 @@ import type {
   BuildExplainSqlOptions,
   ExplainSqlBuildResult,
   DroppedFilePreviewSqlOptions,
+  MongoGridFsFileInfo,
 } from "./tauri";
 import type { QueryEditability } from "@/lib/sqlAnalysis";
 import type {
@@ -1800,12 +1803,65 @@ export async function documentFindDocuments(connectionId: string, database: stri
   return post("/api/document-store/find-documents", { connectionId, database, collection, skip, limit, filter, projection, sort, executionId });
 }
 
+export async function documentListGridFsFiles(connectionId: string, database: string, bucket: string): Promise<MongoGridFsFileInfo[]> {
+  return post("/api/document-store/list-gridfs-files", { connectionId, database, bucket });
+}
+
+export async function documentListGridFsBuckets(connectionId: string, database: string): Promise<MongoGridFsBucketInfo[]> {
+  return post("/api/document-store/list-gridfs-buckets", { connectionId, database });
+}
+
+export async function documentCreateGridFsBucket(connectionId: string, database: string, bucket: string): Promise<void> {
+  return post("/api/document-store/create-gridfs-bucket", { connectionId, database, bucket });
+}
+
+export async function documentDeleteGridFsBucket(connectionId: string, database: string, bucket: string): Promise<void> {
+  return post("/api/document-store/delete-gridfs-bucket", { connectionId, database, bucket });
+}
+
+export async function documentDownloadGridFsFile(connectionId: string, database: string, bucket: string, fileId: string): Promise<Uint8Array> {
+  const res = await fetch(apiUrl("/api/document-store/download-gridfs-file"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ connectionId, database, bucket, fileId }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const data = (await res.json()) as number[];
+  return new Uint8Array(data);
+}
+
+export async function documentUploadGridFsFile(connectionId: string, database: string, bucket: string, fileName: string, data: Uint8Array, contentType?: string): Promise<string> {
+  const body = new FormData();
+  body.append("connectionId", connectionId);
+  body.append("database", database);
+  body.append("bucket", bucket);
+  body.append("fileName", fileName);
+  if (contentType) body.append("contentType", contentType);
+  const bytes = new Uint8Array(data.byteLength);
+  bytes.set(data);
+  body.append("file", new Blob([bytes], { type: contentType || "application/octet-stream" }), fileName);
+  const res = await fetch(apiUrl("/api/document-store/upload-gridfs-file"), {
+    method: "POST",
+    body,
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function documentDeleteGridFsFile(connectionId: string, database: string, bucket: string, fileId: string): Promise<void> {
+  return post("/api/document-store/delete-gridfs-file", { connectionId, database, bucket, fileId });
+}
+
 export async function mongoServerVersion(connectionId: string, database: string, executionId?: string): Promise<string> {
   return post("/api/mongo/server-version", { connectionId, database, executionId });
 }
 
 export async function mongoAggregateDocuments(connectionId: string, database: string, collection: string, pipelineJson: string, maxRows?: number, executionId?: string): Promise<MongoDocumentResult> {
   return post("/api/mongo/aggregate-documents", { connectionId, database, collection, pipelineJson, maxRows, executionId });
+}
+
+export async function mongoCollectionStats(connectionId: string, database: string, collection: string, scale?: number, executionId?: string): Promise<MongoCollectionStatsResult> {
+  return post("/api/mongo/collection-stats", { connectionId, database, collection, scale, executionId });
 }
 
 export async function mongoCreateIndex(connectionId: string, database: string, collection: string, keysJson: string, optionsJson?: string): Promise<{ name: string }> {

@@ -807,6 +807,11 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
       const result = await withTimeout(mongoAggregateDocuments(config, getIndexes.collection, '[{"$indexStats":{}}]', resolveMaxRows(options)), resolveTimeoutMs(options));
       return mongoDocumentsToQueryResult(result.documents.slice(0, resolveMaxRows(options)), result.total);
     }
+    const collectionStats = parseMongoCollectionStatsCommand(sql);
+    if (collectionStats) {
+      const result = await withTimeout(mongoCollectionStats(config, collectionStats.collection, collectionStats.scale), resolveTimeoutMs(options));
+      return mongoCollectionStatsToQueryResult(collectionStats.metric, result);
+    }
     const write = parseMongoWriteCommand(sql);
     if (write) {
       const safety = evaluateMongoWriteSafety(write, sqlSafetyFromEnv());
@@ -829,7 +834,7 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
       return { columns: [], rows: [], row_count: result.affectedRows };
     }
     throw new Error(
-      "Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.version(), db.projects.countDocuments({}), db.projects.count({}), db.projects.getIndexes(), db.projects.createIndex({...}), db.projects.dropIndex(\"name\"), db.projects.dropIndexes(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})",
+      "Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.version(), db.projects.countDocuments({}), db.projects.count({}), db.projects.getIndexes(), db.projects.dataSize(), db.projects.storageSize(1024), db.projects.totalIndexSize(), db.projects.stats(), db.projects.createIndex({...}), db.projects.dropIndex(\"name\"), db.projects.dropIndexes(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})",
     );
   }
   if (isDirectQueryType(config.db_type)) {
@@ -1045,6 +1050,19 @@ async function mongoServerVersion(config: ConnectionConfig): Promise<string> {
   });
 }
 
+async function mongoCollectionStats(
+  config: ConnectionConfig,
+  collection: string,
+  scale?: number,
+): Promise<Record<string, unknown>> {
+  return bridgeDataRequest<Record<string, unknown>>("/data/mongo/collection-stats", {
+    connection_name: config.name,
+    database: config.database || "",
+    collection,
+    scale,
+  });
+}
+
 async function executeMongoWrite(
   config: ConnectionConfig,
   command: MongoWriteCommand,
@@ -1107,6 +1125,26 @@ async function mongoAggregateDocuments(config: ConnectionConfig, collection: str
     pipeline_json: pipelineJson,
     max_rows: maxRows,
   });
+}
+
+export function mongoCollectionStatsToQueryResult(
+  metric: MongoCollectionStatsMetric,
+  stats: Record<string, unknown>,
+): QueryResult {
+  if (metric === "stats") {
+    const columns = ["count", "size", "avgObjSize", "storageSize", "totalIndexSize", "nindexes"];
+    const row: Record<string, unknown> = {};
+    for (const column of columns) {
+      row[column] = column in stats ? toCellValue(stats[column]) : null;
+    }
+    return { columns, rows: [row], row_count: 1 };
+  }
+  const sourceField = metric === "dataSize" ? "size" : metric;
+  return {
+    columns: [metric],
+    rows: [{ [metric]: sourceField in stats ? toCellValue(stats[sourceField]) : null }],
+    row_count: 1,
+  };
 }
 
 export function mongoDocumentsToQueryResult(documents: unknown[], _total: number): QueryResult {
@@ -1177,6 +1215,14 @@ interface MongoAggregateCommand {
 
 interface MongoGetIndexesCommand {
   collection: string;
+}
+
+type MongoCollectionStatsMetric = "stats" | "dataSize" | "storageSize" | "totalIndexSize";
+
+interface MongoCollectionStatsCommand {
+  collection: string;
+  metric: MongoCollectionStatsMetric;
+  scale?: number;
 }
 
 export type MongoWriteCommand =
@@ -1280,6 +1326,19 @@ export function parseMongoGetIndexesCommand(input: string): MongoGetIndexesComma
   const args = parseMethodArgs(source, target.methodCallIndex);
   if (!args || args.some((arg) => arg.trim())) return null;
   return { collection: target.collection };
+}
+
+export function parseMongoCollectionStatsCommand(input: string): MongoCollectionStatsCommand | null {
+  const source = input.trim().replace(/;$/, "").trim();
+  for (const metric of ["stats", "dataSize", "storageSize", "totalIndexSize"] as const) {
+    const target = parseCollectionMethodTarget(source, metric);
+    if (!target) continue;
+    const args = parseMethodArgs(source, target.methodCallIndex);
+    if (!args) return null;
+    const scale = parseMongoCollectionStatsScale(args);
+    return scale === null ? null : { collection: target.collection, metric, ...(scale === undefined ? {} : { scale }) };
+  }
+  return null;
 }
 
 export function mongoAggregateWriteStage(pipelineJson: string): "$out" | "$merge" | null {
@@ -1495,6 +1554,16 @@ function parseMongoDropIndexesArgument(args: string[]): string | undefined | nul
   if (typeof parsed === "string") return normalized;
   if (isNonEmptyRecord(parsed)) return normalized;
   return Array.isArray(parsed) && parsed.length > 0 && parsed.every((item) => typeof item === "string") ? normalized : null;
+}
+
+function parseMongoCollectionStatsScale(args: string[]): number | undefined | null {
+  if (args.length === 1 && !args[0]?.trim()) return undefined;
+  if (args.length !== 1) return null;
+  const raw = args[0].trim();
+  if (!/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(raw)) return null;
+  const scale = Number(raw);
+  if (!Number.isFinite(scale)) return null;
+  return scale;
 }
 
 function convertSingleQuotedStrings(source: string): string {

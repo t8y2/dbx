@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { executeQuery, inferMongoColumns, mongoAggregateWriteStage, mongoDocumentsToQueryResult, parseMongoAggregateCommand, parseMongoCountDocumentsCommand, parseMongoFindCommand, parseMongoGetIndexesCommand, parseMongoVersionCommand, parseMongoWriteCommand } from "../src/database.js";
+import { executeQuery, inferMongoColumns, mongoAggregateWriteStage, mongoCollectionStatsToQueryResult, mongoDocumentsToQueryResult, parseMongoAggregateCommand, parseMongoCollectionStatsCommand, parseMongoCountDocumentsCommand, parseMongoFindCommand, parseMongoGetIndexesCommand, parseMongoVersionCommand, parseMongoWriteCommand } from "../src/database.js";
 
 test("parseMongoFindCommand accepts shell-style find commands", () => {
   assert.deepEqual(parseMongoFindCommand('db.getCollection("operation_logs").find({"level":"info"}).sort({"ts":-1}).skip(5).limit(10)'), {
@@ -98,6 +98,63 @@ test("parseMongoGetIndexesCommand accepts shell-style index commands", () => {
     collection: "audit.logs",
   });
   assert.equal(parseMongoGetIndexesCommand("db.web_log.getIndexes({})"), null);
+});
+
+test("parseMongoCollectionStatsCommand accepts Mongo shell stats helpers", () => {
+  assert.deepEqual(parseMongoCollectionStatsCommand("db.users.dataSize()"), {
+    collection: "users",
+    metric: "dataSize",
+  });
+  assert.deepEqual(parseMongoCollectionStatsCommand('db.getCollection("audit.logs").dataSize(1024)'), {
+    collection: "audit.logs",
+    metric: "dataSize",
+    scale: 1024,
+  });
+  assert.deepEqual(parseMongoCollectionStatsCommand("db.users.storageSize(1024)"), {
+    collection: "users",
+    metric: "storageSize",
+    scale: 1024,
+  });
+  assert.deepEqual(parseMongoCollectionStatsCommand("db.users.totalIndexSize()"), {
+    collection: "users",
+    metric: "totalIndexSize",
+  });
+  assert.deepEqual(parseMongoCollectionStatsCommand("db.users.stats()"), {
+    collection: "users",
+    metric: "stats",
+  });
+  assert.deepEqual(parseMongoCollectionStatsCommand("db.users.stats(1024)"), {
+    collection: "users",
+    metric: "stats",
+    scale: 1024,
+  });
+});
+
+test("parseMongoCollectionStatsCommand rejects unsupported stats helper arguments", () => {
+  assert.equal(parseMongoCollectionStatsCommand("db.users.dataSize(1, 2)"), null);
+  assert.equal(parseMongoCollectionStatsCommand("db.users.storageSize({scale: 1024})"), null);
+  assert.equal(parseMongoCollectionStatsCommand("db.users.stats().limit(1)"), null);
+});
+
+test("mongoCollectionStatsToQueryResult maps dataSize helper to collStats size", () => {
+  assert.deepEqual(mongoCollectionStatsToQueryResult("dataSize", { size: 2048 }), {
+    columns: ["dataSize"],
+    rows: [{ dataSize: 2048 }],
+    row_count: 1,
+  });
+  assert.deepEqual(
+    mongoCollectionStatsToQueryResult("stats", {
+      count: 3,
+      size: 128,
+      storageSize: 512,
+      totalIndexSize: 64,
+    }),
+    {
+      columns: ["count", "size", "avgObjSize", "storageSize", "totalIndexSize", "nindexes"],
+      rows: [{ count: 3, size: 128, avgObjSize: null, storageSize: 512, totalIndexSize: 64, nindexes: null }],
+      row_count: 1,
+    },
+  );
 });
 
 test("mongoAggregateWriteStage detects write stages", () => {

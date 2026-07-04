@@ -123,6 +123,24 @@ pub async fn mongo_server_version(
 }
 
 #[tauri::command]
+pub async fn mongo_collection_stats(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    collection: String,
+    scale: Option<serde_json::Number>,
+    execution_id: Option<String>,
+) -> Result<dbx_core::db::mongo_driver::MongoCollectionStatsResult, String> {
+    let app = state.inner().clone();
+    run_cancellable(
+        &app,
+        execution_id,
+        dbx_core::mongo_ops::mongo_collection_stats_core(&app, &connection_id, &database, &collection, scale),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn mongo_aggregate_documents(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

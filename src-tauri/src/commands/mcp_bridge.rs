@@ -64,6 +64,14 @@ struct MongoServerVersionRequest {
 }
 
 #[derive(Deserialize)]
+struct MongoCollectionStatsRequest {
+    connection_name: String,
+    database: Option<String>,
+    collection: String,
+    scale: Option<serde_json::Number>,
+}
+
+#[derive(Deserialize)]
 struct MongoAggregateDocumentsRequest {
     connection_name: String,
     database: Option<String>,
@@ -187,6 +195,8 @@ pub fn start(app_handle: AppHandle, state: Arc<AppState>, data_dir: PathBuf) {
                     handle_mongo_find_documents_data(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /data/mongo/server-version") {
                     handle_mongo_server_version_data(&st, body, &mut stream).await;
+                } else if first_line.starts_with("POST /data/mongo/collection-stats") {
+                    handle_mongo_collection_stats_data(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /data/mongo/aggregate-documents") {
                     handle_mongo_aggregate_documents_data(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /data/mongo/create-index") {
@@ -501,6 +511,27 @@ async fn handle_mongo_server_version_data(state: &Arc<AppState>, body: &str, str
     };
     match dbx_core::mongo_ops::mongo_server_version_core(state, &pool_key, &database).await {
         Ok(version) => respond_json(stream, &version).await,
+        Err(e) => respond_error(stream, "500 Internal Server Error", &e).await,
+    }
+}
+
+async fn handle_mongo_collection_stats_data(state: &Arc<AppState>, body: &str, stream: &mut tokio::net::TcpStream) {
+    let req: MongoCollectionStatsRequest = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(_) => {
+            respond_error(stream, "400 Bad Request", "Invalid JSON").await;
+            return;
+        }
+    };
+    let Some((pool_key, database, _connection_id)) =
+        resolve_mongo_pool_key(state, &req.connection_name, req.database, stream).await
+    else {
+        return;
+    };
+    match dbx_core::mongo_ops::mongo_collection_stats_core(state, &pool_key, &database, &req.collection, req.scale)
+        .await
+    {
+        Ok(result) => respond_json(stream, &result).await,
         Err(e) => respond_error(stream, "500 Internal Server Error", &e).await,
     }
 }

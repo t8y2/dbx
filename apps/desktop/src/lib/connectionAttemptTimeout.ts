@@ -54,7 +54,8 @@ export function connectionAttemptTimeoutMs(config: Pick<ConnectionConfig, "conne
   const agentMinTimeoutSecs = config.db_type === "access" ? ACCESS_AGENT_MIN_CONNECT_TIMEOUT_SECS : AGENT_DRIVER_MIN_CONNECT_TIMEOUT_SECS;
   const timeouts = [DRIVER_STARTUP_FLOOR_TYPES.has(config.db_type as DatabaseType) ? Math.max(baseTimeoutSecs, agentMinTimeoutSecs) : baseTimeoutSecs];
   for (const layer of config.transport_layers ?? []) {
-    if (layer.type === "ssh") {
+    if (layer.enabled === false) continue;
+    if (layer.type === "ssh" || layer.type === "http_tunnel") {
       timeouts.push(positiveSeconds(layer.connect_timeout_secs, DEFAULT_CONNECT_TIMEOUT_SECS));
     }
   }

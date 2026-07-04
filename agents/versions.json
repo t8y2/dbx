@@ -27,7 +27,7 @@
   "trino": "0.1.27",
   "vastbase": "0.1.27",
   "vertica": "0.1.22",
-  "mongodb": "0.1.26",
+  "mongodb": "0.1.27",
   "highgo": "0.1.25",
   "yashandb": "0.1.23",
   "oscar": "0.1.2",

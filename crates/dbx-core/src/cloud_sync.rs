@@ -319,6 +319,9 @@ fn scrub_connection_secrets(config: &mut ConnectionConfig) {
             TransportLayerConfig::Proxy(proxy) => {
                 proxy.password.clear();
             }
+            TransportLayerConfig::HttpTunnel(http) => {
+                http.token.clear();
+            }
         }
     }
     config.redis_sentinel_password.clear();
@@ -362,6 +365,14 @@ async fn build_sensitive_payload(
                         &config.id,
                         &transport_layer_proxy_password_key(index, layer),
                         &proxy.password,
+                    );
+                }
+                TransportLayerConfig::HttpTunnel(http) => {
+                    push_secret(
+                        &mut connection_secrets,
+                        &config.id,
+                        &transport_layer_http_tunnel_token_key(index, layer),
+                        &http.token,
                     );
                 }
             }
@@ -449,6 +460,9 @@ async fn clear_connection_secrets(storage: &Storage, connections: &[ConnectionCo
                 TransportLayerConfig::Proxy(_) => {
                     storage.delete_secret(&config.id, &transport_layer_proxy_password_key(index, layer)).await?;
                 }
+                TransportLayerConfig::HttpTunnel(_) => {
+                    storage.delete_secret(&config.id, &transport_layer_http_tunnel_token_key(index, layer)).await?;
+                }
             }
         }
     }
@@ -474,6 +488,10 @@ fn transport_layer_ssh_key_passphrase_key(index: usize, layer: &TransportLayerCo
 
 fn transport_layer_proxy_password_key(index: usize, layer: &TransportLayerConfig) -> String {
     format!("{}{}.proxy_password", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
+}
+
+fn transport_layer_http_tunnel_token_key(index: usize, layer: &TransportLayerConfig) -> String {
+    format!("{}{}.http_tunnel_token", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
 }
 
 fn encrypt_sensitive_payload(payload: &SensitiveSyncPayload, passphrase: &str) -> Result<EncryptedSecretsBlob, String> {
@@ -605,21 +623,31 @@ mod tests {
             visible_schemas: None,
             attached_databases: Vec::new(),
             color: None,
-            transport_layers: vec![TransportLayerConfig::Ssh(crate::models::connection::SshTunnelConfig {
-                id: "hop-1".to_string(),
-                name: String::new(),
-                enabled: true,
-                host: "bastion".to_string(),
-                port: 22,
-                user: "user".to_string(),
-                password: "hop-password".to_string(),
-                key_path: String::new(),
-                key_passphrase: "hop-passphrase".to_string(),
-                connect_timeout_secs: 5,
-                expose_lan: false,
-                use_ssh_agent: false,
-                ssh_agent_sock_path: String::new(),
-            })],
+            transport_layers: vec![
+                TransportLayerConfig::Ssh(crate::models::connection::SshTunnelConfig {
+                    id: "hop-1".to_string(),
+                    name: String::new(),
+                    enabled: true,
+                    host: "bastion".to_string(),
+                    port: 22,
+                    user: "user".to_string(),
+                    password: "hop-password".to_string(),
+                    key_path: String::new(),
+                    key_passphrase: "hop-passphrase".to_string(),
+                    connect_timeout_secs: 5,
+                    expose_lan: false,
+                    use_ssh_agent: false,
+                    ssh_agent_sock_path: String::new(),
+                }),
+                TransportLayerConfig::HttpTunnel(crate::models::connection::HttpTunnelConfig {
+                    id: "http".to_string(),
+                    name: String::new(),
+                    enabled: true,
+                    url: "https://dbx.example.com/dbx_tunnel.php".to_string(),
+                    token: "tunnel-token".to_string(),
+                    connect_timeout_secs: 10,
+                }),
+            ],
             connect_timeout_secs: 5,
             query_timeout_secs: 30,
             idle_timeout_secs: 60,
@@ -656,7 +684,11 @@ mod tests {
                 assert!(ssh.password.is_empty());
                 assert!(ssh.key_passphrase.is_empty());
             }
-            TransportLayerConfig::Proxy(_) => panic!("expected ssh layer"),
+            _ => panic!("expected ssh layer"),
+        }
+        match &config.transport_layers[1] {
+            TransportLayerConfig::HttpTunnel(http) => assert!(http.token.is_empty()),
+            _ => panic!("expected http tunnel layer"),
         }
         assert!(config.redis_sentinel_password.is_empty());
         assert!(config.connection_string.is_none());

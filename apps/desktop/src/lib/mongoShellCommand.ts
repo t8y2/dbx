@@ -31,6 +31,14 @@ export interface MongoVersionCommand {
   kind: "version";
 }
 
+export type MongoCollectionStatsMetric = "stats" | "dataSize" | "storageSize" | "totalIndexSize";
+
+export interface MongoCollectionStatsCommand {
+  collection: string;
+  metric: MongoCollectionStatsMetric;
+  scale?: number;
+}
+
 type MongoWriteKind = "insert" | "update" | "delete" | "createIndex" | "dropIndex" | "dropIndexes";
 
 export type MongoCommand =
@@ -39,6 +47,7 @@ export type MongoCommand =
   | ({ kind: "countDocuments" } & MongoCountDocumentsCommand)
   | ({ kind: "aggregate" } & MongoAggregateCommand)
   | ({ kind: "getIndexes" } & MongoGetIndexesCommand)
+  | ({ kind: "collectionStats" } & MongoCollectionStatsCommand)
   | ({ kind: "use" } & MongoUseCommand)
   | { kind: "insert"; collection: string; docsJson: string }
   | { kind: "update"; collection: string; filter: string; update: string; many: boolean }
@@ -223,6 +232,29 @@ export function parseMongoGetIndexesCommand(input: string): MongoGetIndexesComma
   };
 }
 
+export function parseMongoCollectionStatsCommand(input: string): MongoCollectionStatsCommand | null {
+  const source = input.trim().replace(/;$/, "").trim();
+  for (const metric of ["stats", "dataSize", "storageSize", "totalIndexSize"] as const) {
+    const target = parseCollectionMethodTarget(source, metric);
+    if (!target) continue;
+    const args = parseMethodArgs(source, target.methodCallIndex);
+    if (!args) return null;
+    const scale = parseMongoCollectionStatsScale(args);
+    return scale === null ? null : { collection: target.collection, metric, ...(scale === undefined ? {} : { scale }) };
+  }
+  return null;
+}
+
+function parseMongoCollectionStatsScale(args: string[]): number | undefined | null {
+  if (args.length === 1 && !args[0]?.trim()) return undefined;
+  if (args.length !== 1) return null;
+  const raw = args[0].trim();
+  if (!/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(raw)) return null;
+  const scale = Number(raw);
+  if (!Number.isFinite(scale)) return null;
+  return scale;
+}
+
 export function parseMongoUseCommand(input: string): MongoUseCommand | null {
   const source = input.trim().replace(/;$/, "").trim();
   const match = /^use\s+([a-zA-Z0-9_-]+)$/i.exec(source);
@@ -339,6 +371,10 @@ export function parseMongoCommand(input: string): ParsedMongoCommand | null {
     (source) => {
       const getIndexes = parseMongoGetIndexesCommand(source);
       return getIndexes ? { kind: "getIndexes", ...getIndexes } : null;
+    },
+    (source) => {
+      const stats = parseMongoCollectionStatsCommand(source);
+      return stats ? { kind: "collectionStats", ...stats } : null;
     },
     (source) => {
       const write = parseMongoWriteCommand(source);
@@ -526,6 +562,26 @@ export function mongoIndexesToQueryResult(
     rows: indexes.map((index) => [index.name, index.columns.join(", "), index.is_unique, index.is_primary, index.index_type ?? null, index.filter ?? null]),
     affected_rows: indexes.length,
     execution_time_ms: Math.max(0, Math.round(executionTimeMs)),
+  };
+}
+
+export function mongoCollectionStatsToQueryResult(metric: MongoCollectionStatsMetric, stats: Record<string, unknown>, executionTimeMs: number): QueryResult {
+  const execution_time_ms = Math.max(0, Math.round(executionTimeMs));
+  if (metric === "stats") {
+    const columns = ["count", "size", "avgObjSize", "storageSize", "totalIndexSize", "nindexes"];
+    return {
+      columns,
+      rows: [columns.map((column) => (column in stats ? toCellValue(stats[column]) : null))],
+      affected_rows: 1,
+      execution_time_ms,
+    };
+  }
+  const sourceField = metric === "dataSize" ? "size" : metric;
+  return {
+    columns: [metric],
+    rows: [[sourceField in stats ? toCellValue(stats[sourceField]) : null]],
+    affected_rows: 1,
+    execution_time_ms,
   };
 }
 

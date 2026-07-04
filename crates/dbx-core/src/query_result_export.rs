@@ -9,7 +9,8 @@ use crate::database_export::is_export_cancelled;
 pub use crate::database_export::ExportStatus;
 use crate::models::connection::DatabaseType;
 use crate::query::{
-    canceled_error, close_query_session, execute_sql_statement_with_options, QueryExecutionOptions, QUERY_CANCELED,
+    canceled_error, close_query_session, execute_sql_statement_with_options, operation_budget_for_pool_key,
+    QueryExecutionOptions, QUERY_CANCELED,
 };
 use crate::query_result_sql::{
     build_query_pagination_execution_plan, QueryPagination, QueryPaginationExecutionPlanOptions,
@@ -314,6 +315,10 @@ async fn export_query_result_core_inner(
 
     on_progress(progress(request, 0, ExportStatus::Running, None));
 
+    if try_export_postgres_query_result_stream(state, request, &format, cancel_token.clone(), on_progress).await? {
+        return Ok(());
+    }
+
     if try_export_sqlserver_query_result_stream(state, request, &format, cancel_token.clone(), on_progress).await? {
         return Ok(());
     }
@@ -552,6 +557,152 @@ async fn export_query_result_core_inner(
 
     on_progress(progress(request, rows_exported, ExportStatus::Done, None));
     Ok(())
+}
+
+async fn try_export_postgres_query_result_stream(
+    state: &AppState,
+    request: &QueryResultExportRequest,
+    format: &str,
+    cancel_token: Option<CancellationToken>,
+    on_progress: &impl Fn(TableExportProgress),
+) -> Result<bool, String> {
+    if request.use_agent_cursor
+        || !crate::sql::starts_with_executable_sql_keyword(
+            &request.sql,
+            &["SELECT", "SHOW", "EXPLAIN", "WITH", "TABLE"],
+        )
+    {
+        return Ok(false);
+    }
+
+    let database = request.database.trim();
+    let pool_key = if database.is_empty() {
+        state.get_or_create_pool_for_session(&request.connection_id, None, request.client_session_id.as_deref()).await?
+    } else {
+        state
+            .get_or_create_pool_for_session(
+                &request.connection_id,
+                Some(database),
+                request.client_session_id.as_deref(),
+            )
+            .await?
+    };
+    let connections = state.connections.read().await;
+    let Some(pool) = connections.get(&pool_key).and_then(|pool| match pool {
+        PoolKind::Postgres(pool) => Some(pool.clone()),
+        _ => None,
+    }) else {
+        return Ok(false);
+    };
+    drop(connections);
+
+    if let Some(execution_id) = request.execution_id.as_deref() {
+        state.running_queries.set_pool_key(execution_id, pool_key.clone());
+    }
+    state.touch_pool_activity(&pool_key).await;
+    let _activity_touch = state.pool_activity_touch(&pool_key);
+
+    let xlsx_hard_limit_active = xlsx_hard_limit_active(format, request);
+    let row_limit = effective_row_limit(format, request);
+    let stream_row_limit =
+        if xlsx_hard_limit_active { row_limit.map(|limit| limit.saturating_add(1)) } else { row_limit };
+    let progress_row_interval = request.page_size.max(1) as u64;
+    let mut columns: Vec<String> = Vec::new();
+    let mut rows_exported = 0_u64;
+    let mut last_progress_rows = 0_u64;
+    let mut last_progress_at = Instant::now();
+    let mut csv_file = if format == "csv" {
+        let mut file =
+            BufWriter::new(File::create(&request.file_path).map_err(|e| format!("Failed to create file: {e}"))?);
+        file.write_all(b"\xEF\xBB\xBF").map_err(|e| format!("Failed to write BOM: {e}"))?;
+        Some(file)
+    } else {
+        None
+    };
+    let mut xlsx = None;
+    let budget = operation_budget_for_pool_key(state, &pool_key, query_export_timeout(request.timeout_secs)).await;
+    let cancel_context = state.get_postgres_cancel_context(&pool_key).await;
+
+    crate::db::postgres::stream_select_query_with_cancel(
+        &pool,
+        request.schema.as_deref(),
+        &request.sql,
+        stream_row_limit,
+        cancel_token,
+        budget,
+        cancel_context,
+        |item| {
+            match item {
+                crate::db::postgres::PostgresQueryStreamItem::Columns { columns: stream_columns, .. } => {
+                    columns = stream_columns;
+                    if let Some(file) = csv_file.as_mut() {
+                        let csv = format_query_result_csv(&columns, &[]);
+                        let header = csv.strip_suffix('\n').unwrap_or(&csv);
+                        file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write CSV: {e}"))?;
+                    } else {
+                        let xlsx_file =
+                            File::create(&request.file_path).map_err(|e| format!("Failed to create XLSX file: {e}"))?;
+                        xlsx =
+                            Some(start_streaming_xlsx_workbook(BufWriter::new(xlsx_file), Some("Result"), &columns)?);
+                    }
+                }
+                crate::db::postgres::PostgresQueryStreamItem::Row(row) => {
+                    if xlsx_hard_limit_active && rows_exported as usize >= XLSX_MAX_DATA_ROWS {
+                        return Err(XLSX_ROW_LIMIT_ERROR.to_string());
+                    }
+                    if let Some(file) = csv_file.as_mut() {
+                        let rows_csv = format_query_result_csv_rows(std::slice::from_ref(&row));
+                        write!(file, "\n{rows_csv}").map_err(|e| format!("Failed to write CSV rows: {e}"))?;
+                    } else if let Some(writer) = xlsx.as_mut() {
+                        writer.write_row(&row).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
+                    } else {
+                        let xlsx_file =
+                            File::create(&request.file_path).map_err(|e| format!("Failed to create XLSX file: {e}"))?;
+                        xlsx =
+                            Some(start_streaming_xlsx_workbook(BufWriter::new(xlsx_file), Some("Result"), &columns)?);
+                        if let Some(writer) = xlsx.as_mut() {
+                            writer.write_row(&row).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
+                        }
+                    }
+                    rows_exported += 1;
+                    let now = Instant::now();
+                    if should_emit_stream_progress(
+                        rows_exported,
+                        last_progress_rows,
+                        progress_row_interval,
+                        now.duration_since(last_progress_at),
+                    ) {
+                        on_progress(progress(request, rows_exported, ExportStatus::Running, None));
+                        last_progress_rows = rows_exported;
+                        last_progress_at = now;
+                    }
+                }
+            }
+            Ok(())
+        },
+    )
+    .await?;
+
+    if rows_exported != last_progress_rows {
+        on_progress(progress(request, rows_exported, ExportStatus::Running, None));
+    }
+    on_progress(progress(request, rows_exported, ExportStatus::Writing, None));
+    if let Some(file) = csv_file.as_mut() {
+        file.flush().map_err(|e| format!("Failed to flush CSV file: {e}"))?;
+    }
+    if let Some(writer) = xlsx {
+        let mut buf =
+            finish_streaming_xlsx_workbook(writer).map_err(|e| format!("Failed to finalize XLSX file: {e}"))?;
+        buf.flush().map_err(|e| format!("Failed to flush XLSX file: {e}"))?;
+    } else if format == "xlsx" {
+        let xlsx_file = File::create(&request.file_path).map_err(|e| format!("Failed to create XLSX file: {e}"))?;
+        let writer = start_streaming_xlsx_workbook(BufWriter::new(xlsx_file), Some("Result"), &columns)?;
+        let mut buf =
+            finish_streaming_xlsx_workbook(writer).map_err(|e| format!("Failed to finalize XLSX file: {e}"))?;
+        buf.flush().map_err(|e| format!("Failed to flush XLSX file: {e}"))?;
+    }
+    on_progress(progress(request, rows_exported, ExportStatus::Done, None));
+    Ok(true)
 }
 
 async fn try_export_sqlserver_query_result_stream(

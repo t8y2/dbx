@@ -2198,7 +2198,7 @@ WHERE u.id = picked.id;
         // `add_outer_standard_limit` always includes OFFSET clause.
         assert_eq!(
             result.sql.unwrap(),
-            "SELECT * FROM (SELECT DISTINCT a, b, c FROM t LIMIT 500) \"dbx_page\" ORDER BY 1, 2, 3 LIMIT 100 OFFSET 0;"
+            "SELECT * FROM (SELECT DISTINCT a, b, c FROM t LIMIT 500) `dbx_page` ORDER BY 1, 2, 3 LIMIT 100 OFFSET 0;"
         );
     }
 

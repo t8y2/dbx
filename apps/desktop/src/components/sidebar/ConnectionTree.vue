@@ -114,7 +114,7 @@ const SEARCH_SCOPE_TO_NODE_TYPES: Record<SearchScope, TreeNodeType[]> = {
   connection: ["connection"],
   database: ["database", "redis-db", "mq-tenant", "nacos-namespace", "mongo-db"],
   schema: ["schema"],
-  table: ["table", "mongo-collection", "vector-collection", "elasticsearch-index"],
+  table: ["table", "mongo-collection", "mongo-bucket", "vector-collection", "elasticsearch-index"],
   view: ["view"],
 };
 
@@ -440,6 +440,7 @@ function clearSidebarSelection() {
   // Clicking the blank area of the tree clears the current selection. Row
   // clicks call event.stopPropagation(), so this only fires for blank clicks
   // (issue #681 — selection wasn't cleared in double-click activation mode).
+  store.connectionMultiSelectActive = false;
   store.selectedTreeNodeId = null;
   store.selectedTreeNodeIds = [];
   store.treeSelectionAnchorId = null;

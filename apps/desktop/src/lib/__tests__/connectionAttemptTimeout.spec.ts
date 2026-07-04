@@ -34,6 +34,41 @@ describe("connectionAttemptTimeout", () => {
     expect(connectionAttemptTimeoutMs({ db_type: "access", connect_timeout_secs: 45, transport_layers: [] })).toBe(47_000);
   });
 
+  it("includes HTTP tunnel connection timeout values", () => {
+    expect(
+      connectionAttemptTimeoutMs({
+        db_type: "mysql",
+        connect_timeout_secs: 5,
+        transport_layers: [
+          {
+            type: "http_tunnel",
+            id: "http",
+            url: "https://dbx.example.com/dbx_tunnel.php",
+            connect_timeout_secs: 25,
+          },
+        ],
+      }),
+    ).toBe(27_000);
+  });
+
+  it("ignores disabled transport layer timeouts", () => {
+    expect(
+      connectionAttemptTimeoutMs({
+        db_type: "mysql",
+        connect_timeout_secs: 5,
+        transport_layers: [
+          {
+            type: "http_tunnel",
+            id: "http",
+            enabled: false,
+            url: "https://dbx.example.com/dbx_tunnel.php",
+            connect_timeout_secs: 60,
+          },
+        ],
+      }),
+    ).toBe(7_000);
+  });
+
   it("adds late original database errors to timeout messages", () => {
     const timeoutMessage = connectionAttemptTimeoutMessage(7_000);
 

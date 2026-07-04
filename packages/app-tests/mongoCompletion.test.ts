@@ -41,6 +41,15 @@ test("suggests collection methods after direct and getCollection references", ()
     assert.ok(labels('db.getCollection("users").ag').includes("aggregate"));
 });
 
+test("suggests collection stats methods after a collection reference", () => {
+    const methodLabels = labels("db.users.");
+    for (const method of ["stats", "dataSize", "storageSize", "totalIndexSize"]) {
+        assert.ok(methodLabels.includes(method), `expected completion to include ${method}`);
+    }
+    const item = buildMongoCompletionItems("db.users.stat", "db.users.stat".length).find((candidate) => candidate.label === "stats");
+    assert.equal(item?.apply, "stats()");
+});
+
 test("suggests cursor methods after find result chains", () => {
     const allItems = buildMongoCompletionItems("db.characters.find({}).", "db.characters.find({}).".length);
     const prefixedItems = buildMongoCompletionItems("db.characters.find({}).li", "db.characters.find({}).li".length);

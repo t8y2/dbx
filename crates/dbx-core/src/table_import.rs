@@ -370,7 +370,12 @@ pub fn build_import_insert_batches(
                 .map(|(_, data_type)| data_type.clone())
         })
         .collect::<Vec<_>>();
-    let batch_size = batch_size.max(1);
+    let batch_size = match db_type {
+        // Oracle-compatible drivers reject INSERT ... VALUES (...), (...), so
+        // keep import batches executable as single-row statements.
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => 1,
+        _ => batch_size.max(1),
+    };
     let mut batches = Vec::new();
 
     for chunk in data.rows.chunks(batch_size) {
@@ -638,6 +643,44 @@ mod tests {
                 row_count: 1,
             },
         ]);
+    }
+
+    #[test]
+    fn oracle_import_insert_batches_use_single_row_statements() {
+        let mappings = vec![
+            TableImportColumnMapping { source_column: "id".to_string(), target_column: "id".to_string() },
+            TableImportColumnMapping { source_column: "name".to_string(), target_column: "name".to_string() },
+        ];
+        let data = ParsedImportFile {
+            columns: vec!["id".to_string(), "name".to_string()],
+            rows: vec![
+                vec![serde_json::json!(1), serde_json::json!("Ada")],
+                vec![serde_json::json!(2), serde_json::json!("Grace")],
+                vec![serde_json::json!(3), serde_json::Value::Null],
+            ],
+            total_rows: 3,
+        };
+
+        let batches =
+            build_import_insert_batches(&data, &mappings, &[], "users", "HR", &DatabaseType::Oracle, 500).unwrap();
+
+        assert_eq!(
+            batches,
+            vec![
+                ImportSqlBatch {
+                    sql: "INSERT INTO \"HR\".\"users\" (\"id\", \"name\") VALUES\n(1, 'Ada')".to_string(),
+                    row_count: 1,
+                },
+                ImportSqlBatch {
+                    sql: "INSERT INTO \"HR\".\"users\" (\"id\", \"name\") VALUES\n(2, 'Grace')".to_string(),
+                    row_count: 1,
+                },
+                ImportSqlBatch {
+                    sql: "INSERT INTO \"HR\".\"users\" (\"id\", \"name\") VALUES\n(3, NULL)".to_string(),
+                    row_count: 1,
+                },
+            ]
+        );
     }
 
     #[test]

@@ -2,8 +2,46 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
+
+pub struct DuckDbConnection {
+    connection: Mutex<duckdb::Connection>,
+    interrupt_handle: Arc<duckdb::InterruptHandle>,
+    draining: AtomicBool,
+}
+
+impl DuckDbConnection {
+    pub fn new(connection: duckdb::Connection) -> Self {
+        let interrupt_handle = connection.interrupt_handle();
+        Self { connection: Mutex::new(connection), interrupt_handle, draining: AtomicBool::new(false) }
+    }
+
+    pub fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, duckdb::Connection>> {
+        self.connection.lock()
+    }
+
+    pub fn interrupt_handle(&self) -> Arc<duckdb::InterruptHandle> {
+        self.interrupt_handle.clone()
+    }
+
+    pub fn mark_draining(&self) {
+        self.draining.store(true, Ordering::SeqCst);
+    }
+
+    pub fn clear_draining(&self) {
+        self.draining.store(false, Ordering::SeqCst);
+    }
+
+    pub fn is_draining(&self) -> bool {
+        self.draining.load(Ordering::SeqCst)
+    }
+
+    fn into_inner(self) -> std::sync::LockResult<duckdb::Connection> {
+        self.connection.into_inner()
+    }
+}
 
 /// Connects to a DuckDb database file with file validation.
 ///
@@ -11,9 +49,9 @@ use std::sync::Mutex;
 /// * `path` - The file path to the DuckDb database
 ///
 /// # Returns
-/// * `Ok(Arc<Mutex<duckdb::Connection>>)` on successful connection
+/// * `Ok(Arc<DuckDbConnection>)` on successful connection
 /// * `Err(String)` with descriptive error message if connection fails
-pub fn connect_path(path: &str) -> Result<Arc<Mutex<duckdb::Connection>>, String> {
+pub fn connect_path(path: &str) -> Result<Arc<DuckDbConnection>, String> {
     let is_memory = is_memory_database_path(path);
     if !is_memory {
         validate_duckdb_path(path)?;
@@ -23,7 +61,7 @@ pub fn connect_path(path: &str) -> Result<Arc<Mutex<duckdb::Connection>>, String
     let connection = if is_memory { duckdb::Connection::open_in_memory() } else { duckdb::Connection::open(path) }
         .map_err(|e| format!("DuckDb connection failed: {e}"))?;
 
-    Ok(Arc::new(Mutex::new(connection)))
+    Ok(Arc::new(DuckDbConnection::new(connection)))
 }
 
 fn validate_duckdb_path(path: &str) -> Result<(), String> {
@@ -78,9 +116,9 @@ pub fn is_memory_database_path(path: &str) -> bool {
 /// Unlike relying on Drop, this calls `duckdb_disconnect` synchronously
 /// so the file handle is released before this function returns.
 /// On Windows this prevents "file already in use" errors when reconnecting.
-pub fn close_connection(con: Arc<Mutex<duckdb::Connection>>) {
+pub fn close_connection(con: Arc<DuckDbConnection>) {
     match Arc::try_unwrap(con) {
-        Ok(mutex) => match mutex.into_inner() {
+        Ok(handle) => match handle.into_inner() {
             Ok(conn) => {
                 let _ = conn.close();
             }
@@ -108,6 +146,14 @@ mod tests {
         let value: i32 = locked.query_row("SELECT id FROM memory_probe;", [], |row| row.get(0)).expect("select row");
 
         assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn interrupt_handle_is_available_while_connection_is_locked() {
+        let con = connect_path(":memory:").expect("connect in-memory DuckDB");
+        let _locked = con.lock().expect("lock connection");
+
+        let _interrupt_handle = con.interrupt_handle();
     }
 
     #[test]

@@ -48,4 +48,30 @@ describe("queryStore cancel timeout recovery", () => {
     });
     expect(store.tabs[0]?.result?.rows[0]?.[0]).toContain("Cancel request timed out");
   }, 15_000);
+
+  it("clears cancelling state when cancel is acknowledged but execution does not settle", async () => {
+    const cancelQuery = vi.fn(() => Promise.resolve(true));
+
+    vi.doMock("@/lib/api", () => ({ cancelQuery }));
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("duckdb-1", "main", "query_1");
+    store.setExecutingWithId(tabId, "exec-1");
+
+    const cancel = store.cancelTabExecution(tabId);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await cancel).toBe(true);
+    expect(store.tabs[0]?.isCancelling).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(2_001);
+
+    expect(cancelQuery).toHaveBeenCalledWith("exec-1");
+    expect(store.tabs[0]).toMatchObject({
+      isExecuting: false,
+      isCancelling: false,
+      executionId: undefined,
+    });
+    expect(store.tabs[0]?.result?.rows[0]?.[0]).toContain("Query canceled");
+  }, 15_000);
 });

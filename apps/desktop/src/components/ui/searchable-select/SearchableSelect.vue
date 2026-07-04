@@ -47,6 +47,12 @@ const emit = defineEmits<{
   "update:open": [value: boolean];
 }>();
 
+defineSlots<{
+  "trigger-label"?(props: { value: string; label: string; loading: boolean }): any;
+  "option-label"?(props: { option: string; label: string }): any;
+  "custom-option-label"?(props: { value: string }): any;
+}>();
+
 const open = ref(false);
 const searchText = ref("");
 const searchInput = ref<InstanceType<typeof Input>>();

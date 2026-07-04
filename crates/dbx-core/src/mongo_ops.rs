@@ -1,5 +1,5 @@
 use crate::connection::{AppState, PoolKind};
-use crate::db::mongo_driver::{self, MongoDocumentResult, MongoDropIndexesResult};
+use crate::db::mongo_driver::{self, MongoCollectionStatsResult, MongoDocumentResult, MongoDropIndexesResult};
 use crate::document_ops::CollectionInfo;
 
 async fn ensure_document_pool(state: &AppState, connection_id: &str) -> Result<(), String> {
@@ -66,6 +66,22 @@ pub async fn mongo_server_version_core(
             let mut client = client.lock().await;
             client.mongo_server_version(database).await
         }
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+pub async fn mongo_collection_stats_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    scale: Option<serde_json::Number>,
+) -> Result<MongoCollectionStatsResult, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => mongo_driver::collection_stats(client, database, collection, scale).await,
+        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support collection stats helpers".to_string()),
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }

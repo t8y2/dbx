@@ -39,6 +39,8 @@ const RedisDashboard = defineAsyncComponent(() => import("@/components/redis/Red
 const EtcdKeyBrowser = defineAsyncComponent(() => import("@/components/etcd/EtcdKeyBrowser.vue"));
 const ZooKeeperKeyBrowser = defineAsyncComponent(() => import("@/components/zookeeper/ZooKeeperKeyBrowser.vue"));
 const DocumentBrowser = defineAsyncComponent(() => import("@/components/document/DocumentBrowser.vue"));
+const MongoGridFsBrowser = defineAsyncComponent(() => import("@/components/document/MongoGridFsBrowser.vue"));
+const MongoBucketBrowser = defineAsyncComponent(() => import("@/components/document/MongoBucketBrowser.vue"));
 const VectorBrowser = defineAsyncComponent(() => import("@/components/vector/VectorBrowser.vue"));
 const MqAdminConsole = defineAsyncComponent(() => import("@/components/mq/MqAdminConsole.vue"));
 const NacosAdminConsole = defineAsyncComponent(() => import("@/components/nacos/NacosAdminConsole.vue"));
@@ -1285,6 +1287,18 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
     <template v-else-if="activeTab.mode === 'mongo'">
       <div class="flex-1 min-h-0">
         <DocumentBrowser :key="activeTab.id" :connection-id="activeTab.connectionId" :database="activeTab.database" :collection="activeTab.sql" :database-type="activeEffectiveDatabaseType" />
+      </div>
+    </template>
+
+    <template v-else-if="activeTab.mode === 'mongo-gridfs'">
+      <div class="flex-1 min-h-0">
+        <MongoGridFsBrowser :key="activeTab.id" :connection-id="activeTab.connectionId" :database="activeTab.database" />
+      </div>
+    </template>
+
+    <template v-else-if="activeTab.mode === 'mongo-bucket'">
+      <div class="flex-1 min-h-0">
+        <MongoBucketBrowser :key="activeTab.id" :connection-id="activeTab.connectionId" :database="activeTab.database" :bucket="activeTab.mongoBucket?.bucketName || activeTab.sql" />
       </div>
     </template>
 

@@ -1,15 +1,23 @@
 ---
-title: SSH Tunnel
-description: Connect securely to databases behind firewalls via SSH tunnel. Password and key authentication.
+title: Tunnel / Proxy
+description: Connect to private databases through SSH tunnels, HTTP tunnels, SOCKS5 proxies, or HTTP proxies.
 ---
 
-<Callout type="info">Built-in SSH tunnel — no manual terminal setup. Supports password and private key authentication, with optional LAN exposure for team sharing.</Callout>
+<Callout type="info">DBX can open connection layers for databases that are not directly reachable. Configure them from the connection dialog's **Tunnel / Proxy** tab.</Callout>
 
-DBX can connect to databases through an SSH tunnel, allowing secure access to servers behind firewalls or on private networks.
+DBX supports three tunnel / proxy types:
 
-## Configuration
+| Type        | Use When                                                                 |
+| ----------- | ------------------------------------------------------------------------ |
+| SSH tunnel  | You have SSH access to a bastion host or database server.                |
+| Proxy       | Your network requires SOCKS5 or HTTP CONNECT proxy access.               |
+| HTTP tunnel | Only a web server can reach the database, and SSH/VPN is not available. |
 
-When creating or editing a connection, enable the SSH tunnel option:
+For network databases, DBX opens a local port and points the database driver at that port. The tunnel / proxy layer then forwards the database protocol bytes to the real target.
+
+## SSH Tunnel
+
+SSH tunnels are built in. You do not need to create a manual terminal port forward.
 
 | Field           | Description                                                                   |
 | --------------- | ----------------------------------------------------------------------------- |
@@ -18,46 +26,107 @@ When creating or editing a connection, enable the SSH tunnel option:
 | SSH User        | Username for SSH authentication                                               |
 | Connect Timeout | Maximum time DBX waits while opening the SSH connection; default is 5 seconds |
 
-## Authentication Methods
-
 <Tabs groupId="ssh-auth" items={['Private Key (Recommended)', 'Password']}>
   <Tab value="Private Key (Recommended)">
-    Select a private key file (e.g., `~/.ssh/id_rsa`, `~/.ssh/id_ed25519`):
+    Select a private key file (for example `~/.ssh/id_rsa` or `~/.ssh/id_ed25519`):
 
-    - **Key Path** — Use the file picker to browse and select your key file
-    - **Key Passphrase** — Enter the passphrase if your key is password-protected
+    - **Key Path** — Browse and select your key file.
+    - **Key Passphrase** — Enter the passphrase if your key is encrypted.
 
     Key authentication is more secure than password authentication.
 
   </Tab>
   <Tab value="Password">
-    Enter your SSH password directly. Works on servers that allow password authentication.
+    Enter your SSH password directly. This works on servers that allow password authentication.
   </Tab>
 </Tabs>
 
-## Expose Tunnel to LAN
+### Expose Tunnel to LAN
 
-<Callout type="warn">Enabling LAN exposure means any device on the same network can access the tunneled database port. Only enable this on trusted networks.</Callout>
+<Callout type="warn">Enabling LAN exposure means other devices on the same network can access the forwarded database port through your machine. Only enable this on trusted networks.</Callout>
 
-By default, the SSH tunnel listens on `localhost` only. Enable LAN exposure to bind to `0.0.0.0`, making the tunnel accessible to other devices on your network — useful for team collaboration or multi-device access.
+By default, the SSH tunnel listens on `localhost` only. Enable LAN exposure to bind to `0.0.0.0`, which is useful for temporary team sharing or multi-device access.
 
-## How It Works
+## Proxy
 
-1. DBX establishes an SSH connection to the specified server
-2. Creates a local port that forwards traffic through the tunnel to the database
-3. Connects to the database through the forwarded local port
+Use a proxy layer when your environment requires an outbound proxy instead of SSH.
 
-The tunnel remains active for the duration of the connection and closes automatically when you disconnect.
+DBX supports:
 
-## SSH, Proxy, And File Databases
+- SOCKS5 proxy
+- HTTP CONNECT proxy
+- Optional proxy username and password
 
-SSH tunnels are available for network databases. SQLite and Access connections are file-based and do not use SSH. DuckDB usually uses a local file as well, so only configure SSH when the selected driver profile actually needs a network endpoint.
+## HTTP Tunnel
 
-If your network requires a proxy instead of SSH, use the connection dialog's proxy tab. DBX supports SOCKS5 and HTTP proxy settings with optional username and password.
+<Callout type="info">The feature is an HTTP tunnel. The script currently provided by DBX is `dbx_tunnel.php`, so the deployment artifact is PHP-specific, but the connection type in DBX is HTTP tunnel.</Callout>
+
+Use HTTP tunnel when the database is inside a private network, but a web server in that network can reach it. This matches environments where only HTTP/HTTPS is available and SSH tunnel permissions are too broad or unavailable.
+
+### Deploy The Script
+
+Upload `deploy/dbx_tunnel.php` to a PHP web server that can reach the database.
+
+Configure these environment variables on the PHP server:
+
+| Variable                         | Required | Description                                                                 |
+| -------------------------------- | -------- | --------------------------------------------------------------------------- |
+| `DBX_TUNNEL_TOKEN`               | Yes      | Shared token. Enter the same value in DBX.                                  |
+| `DBX_TUNNEL_ALLOWED_HOSTS`       | No       | Comma-separated target host allow-list. Strongly recommended.               |
+| `DBX_TUNNEL_DIR`                 | No       | Session queue directory. Defaults to a temp directory.                      |
+| `DBX_TUNNEL_MAX_SESSION_SECONDS` | No       | Maximum session lifetime. Defaults to `3600`.                               |
+| `DBX_TUNNEL_PHP`                 | No       | PHP CLI path used when PHP-FPM `fastcgi_finish_request` is not available.   |
+
+In DBX, add an **HTTP Tunnel** layer and fill:
+
+| Field             | Description                                                        |
+| ----------------- | ------------------------------------------------------------------ |
+| Tunnel Script URL | URL of `dbx_tunnel.php`, for example `https://example.com/dbx_tunnel.php` |
+| Tunnel Token      | Value of `DBX_TUNNEL_TOKEN`                                        |
+| Tunnel Timeout    | Timeout for opening the HTTP tunnel and target database connection |
+
+The database host and port should be the address as seen from the PHP server, not necessarily the address as seen from your laptop.
+
+### HTTP Tunnel Flow
+
+```text
+DBX database driver
+  -> 127.0.0.1:<local temporary port>
+  -> DBX HTTP tunnel client
+  -> HTTP POST requests
+  -> dbx_tunnel.php on the web server
+  -> TCP connection from PHP to the private database
+  -> database
+```
+
+The request protocol is short HTTP polling:
+
+1. DBX starts a local TCP listener.
+2. The database driver connects to that local port.
+3. DBX sends `open` to `dbx_tunnel.php` with a session id, target host, target port, and connect timeout.
+4. The PHP script validates the token and allow-list, then starts a worker that opens a TCP socket to the database.
+5. Bytes from the database driver are sent to the script with `write`.
+6. DBX polls the script with `read`; response bytes are written back to the local database driver connection.
+7. When the connection ends, DBX sends `close` and the PHP worker closes the database socket.
+
+This does not require DBX Web and does not use WebSocket.
+
+### Security And Limits
+
+- Use HTTPS for the script URL.
+- Set a long random `DBX_TUNNEL_TOKEN`.
+- Set `DBX_TUNNEL_ALLOWED_HOSTS` so the script cannot become a general internal TCP relay.
+- Restrict public access to the script path where possible.
+- HTTP tunnel is convenient, but it is usually slower than direct TCP, VPN, or SSH because it forwards bytes through HTTP polling and a server-side queue.
+- If combined with other layers, HTTP tunnel must be the first tunnel / proxy layer because it is the outermost network boundary.
+
+## File Databases
+
+SQLite and Access connections are file-based and do not use tunnel / proxy layers. DuckDB usually uses a local file as well, so only configure tunnel / proxy layers when the selected driver profile uses a network endpoint.
 
 <Cards>
   <Card title="Create a Connection" href="/en/docs/getting-started">
-    Configure the database profile, SSH, proxy, SSL, and connection color together.
+    Configure the database profile, tunnel / proxy layers, SSL, and connection color together.
   </Card>
   <Card title="Database Support" href="/en/docs/databases">
     Check which database profiles are file-based, native, compatibility-based, or plugin-backed.

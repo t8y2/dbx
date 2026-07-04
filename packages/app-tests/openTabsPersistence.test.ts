@@ -356,6 +356,24 @@ test("restores MQ tabs with selected tenant context", () => {
   assert.equal(restored.tabs[0]?.mqTenant, "public");
 });
 
+test("restores GridFS manager tabs with their mode intact", () => {
+  const raw = JSON.stringify([
+    queryTab({
+      id: "gridfs",
+      title: "GridFS",
+      mode: "mongo-gridfs" as QueryTab["mode"],
+      sql: "",
+      database: "amazon",
+    }),
+  ]);
+
+  const restored = restoreOpenTabsState(raw, "gridfs");
+
+  assert.equal(restored.tabs[0]?.mode, "mongo-gridfs");
+  assert.equal(restored.tabs[0]?.title, "GridFS");
+  assert.equal(restored.activeTabId, "gridfs");
+});
+
 test("query-only restore keeps legacy query tabs without a mode", () => {
   const raw = JSON.stringify([
     {

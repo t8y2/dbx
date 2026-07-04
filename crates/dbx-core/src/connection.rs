@@ -17,6 +17,7 @@ use crate::agent_manager::{JavaRuntimeMode, DEFAULT_JRE_KEY};
 use crate::database_capabilities;
 use crate::db;
 use crate::db::agent_driver::AgentMethod;
+use crate::db::http_tunnel::HttpTunnelManager;
 use crate::db::proxy_tunnel::ProxyTunnelManager;
 use crate::db::ssh_tunnel::TunnelManager;
 use crate::models::connection::{
@@ -37,7 +38,7 @@ const POOL_CLOSE_TIMEOUT_SECS: u64 = 3;
 #[cfg(feature = "duckdb-bundled")]
 mod duckdb_types {
     use std::sync::Arc;
-    pub type DuckDbHandle = Arc<std::sync::Mutex<duckdb::Connection>>;
+    pub type DuckDbHandle = Arc<crate::db::duckdb_driver::DuckDbConnection>;
     pub type ExternalTabularHandle = Arc<crate::external::ExternalPool>;
 }
 #[cfg(not(feature = "duckdb-bundled"))]
@@ -161,6 +162,7 @@ pub struct AppState {
     pub running_queries: RunningQueries,
     pub tunnels: TunnelManager,
     pub proxy_tunnels: ProxyTunnelManager,
+    pub http_tunnels: HttpTunnelManager,
     pub storage: Storage,
     pub plugins: PluginRegistry,
     pub agent_manager: crate::agent_manager::AgentManager,
@@ -457,6 +459,7 @@ impl AppState {
             running_queries: RunningQueries::default(),
             tunnels: TunnelManager::new(),
             proxy_tunnels: ProxyTunnelManager::new(),
+            http_tunnels: HttpTunnelManager::new(),
             storage,
             plugins: PluginRegistry::new(plugin_dir),
             agent_manager: crate::agent_manager::AgentManager::new_with_base_dir_and_app_version(
@@ -1123,6 +1126,7 @@ impl AppState {
             remote_port,
             &self.tunnels,
             &self.proxy_tunnels,
+            &self.http_tunnels,
         )
         .await?;
 
@@ -1154,6 +1158,7 @@ impl AppState {
                     sentinel.port,
                     &self.tunnels,
                     &self.proxy_tunnels,
+                    &self.http_tunnels,
                 )
                 .await
                 {
@@ -1178,6 +1183,7 @@ impl AppState {
                                 layer_count,
                                 &self.tunnels,
                                 &self.proxy_tunnels,
+                                &self.http_tunnels,
                             )
                             .await;
                             continue;
@@ -1192,6 +1198,7 @@ impl AppState {
                     master.port,
                     &self.tunnels,
                     &self.proxy_tunnels,
+                    &self.http_tunnels,
                 )
                 .await
                 {
@@ -1206,6 +1213,7 @@ impl AppState {
                             layer_count,
                             &self.tunnels,
                             &self.proxy_tunnels,
+                            &self.http_tunnels,
                         )
                         .await;
                         continue;
@@ -1226,6 +1234,7 @@ impl AppState {
                             layer_count,
                             &self.tunnels,
                             &self.proxy_tunnels,
+                            &self.http_tunnels,
                         )
                         .await;
                         db::transport_layer_tunnel::stop_transport_layers(
@@ -1233,6 +1242,7 @@ impl AppState {
                             layer_count,
                             &self.tunnels,
                             &self.proxy_tunnels,
+                            &self.http_tunnels,
                         )
                         .await;
                     }
@@ -1247,6 +1257,7 @@ impl AppState {
             let redis_sentinel_prefix = redis_sentinel_transport_prefix(connection_id);
             self.tunnels.stop_tunnels_with_prefix(&redis_sentinel_prefix).await;
             self.proxy_tunnels.stop_tunnels_with_prefix(&redis_sentinel_prefix).await;
+            self.http_tunnels.stop_tunnels_with_prefix(&redis_sentinel_prefix).await;
         }
 
         result
@@ -1278,6 +1289,7 @@ impl AppState {
             let redis_cluster_prefix = redis_cluster_transport_prefix(connection_id);
             self.tunnels.stop_tunnels_with_prefix(&redis_cluster_prefix).await;
             self.proxy_tunnels.stop_tunnels_with_prefix(&redis_cluster_prefix).await;
+            self.http_tunnels.stop_tunnels_with_prefix(&redis_cluster_prefix).await;
         }
 
         result
@@ -1299,6 +1311,7 @@ impl AppState {
                 node.port,
                 &self.tunnels,
                 &self.proxy_tunnels,
+                &self.http_tunnels,
             )
             .await?;
             routes.push(db::redis_driver::RedisNodeRoute {
@@ -1617,6 +1630,76 @@ impl AppState {
         }
     }
 
+    #[cfg(feature = "duckdb-bundled")]
+    pub fn spawn_duckdb_pool_cleanup(&self, pool_key: String, con: DuckDbHandle) {
+        let connections = self.connections.clone();
+        let keepalive_tasks = self.keepalive_tasks.clone();
+        let pool_activity = self.pool_activity.clone();
+        let postgres_cancel_contexts = self.postgres_cancel_contexts.clone();
+        tokio::spawn(async move {
+            while Arc::strong_count(&con) > 2 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if let Some(handle) = keepalive_tasks.write().await.remove(&pool_key) {
+                handle.abort();
+            }
+            pool_activity.write().await.remove(&pool_key);
+            postgres_cancel_contexts.write().await.remove(&pool_key);
+            let removed = {
+                let mut conns = connections.write().await;
+                match conns.get(&pool_key) {
+                    Some(PoolKind::DuckDb(current)) if Arc::ptr_eq(current, &con) => conns.remove(&pool_key),
+                    _ => None,
+                }
+            };
+            if let Some(pool) = removed {
+                // Keep the old DuckDB pool marked as draining until it is no longer
+                // visible in the pool map, otherwise a concurrent query could reuse it.
+                con.clear_draining();
+                drop(con);
+                close_pool_kind_with_timeout(pool_key, pool).await;
+            }
+        });
+    }
+
+    #[cfg(feature = "duckdb-bundled")]
+    pub fn spawn_duckdb_draining_cleanup(
+        &self,
+        pool_key: String,
+        con: DuckDbHandle,
+        task: JoinHandle<Result<db::QueryResult, String>>,
+    ) {
+        let connections = self.connections.clone();
+        let keepalive_tasks = self.keepalive_tasks.clone();
+        let pool_activity = self.pool_activity.clone();
+        let postgres_cancel_contexts = self.postgres_cancel_contexts.clone();
+        tokio::spawn(async move {
+            let _ = task.await;
+            while Arc::strong_count(&con) > 2 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if let Some(handle) = keepalive_tasks.write().await.remove(&pool_key) {
+                handle.abort();
+            }
+            pool_activity.write().await.remove(&pool_key);
+            postgres_cancel_contexts.write().await.remove(&pool_key);
+            let removed = {
+                let mut conns = connections.write().await;
+                match conns.get(&pool_key) {
+                    Some(PoolKind::DuckDb(current)) if Arc::ptr_eq(current, &con) => conns.remove(&pool_key),
+                    _ => None,
+                }
+            };
+            if let Some(pool) = removed {
+                // Keep the old DuckDB pool marked as draining until it is no longer
+                // visible in the pool map, otherwise a concurrent query could reuse it.
+                con.clear_draining();
+                drop(con);
+                close_pool_kind_with_timeout(pool_key, pool).await;
+            }
+        });
+    }
+
     pub async fn close_database_pool(&self, connection_id: &str, database: Option<&str>) -> Result<bool, String> {
         let db_type = {
             let configs = self.configs.read().await;
@@ -1743,18 +1826,22 @@ impl AppState {
         let redis_cluster_prefix = redis_cluster_transport_prefix(connection_id);
         self.tunnels.stop_tunnels_with_prefix(&redis_cluster_prefix).await;
         self.proxy_tunnels.stop_tunnels_with_prefix(&redis_cluster_prefix).await;
+        self.http_tunnels.stop_tunnels_with_prefix(&redis_cluster_prefix).await;
         let redis_sentinel_prefix = redis_sentinel_transport_prefix(connection_id);
         self.tunnels.stop_tunnels_with_prefix(&redis_sentinel_prefix).await;
         self.proxy_tunnels.stop_tunnels_with_prefix(&redis_sentinel_prefix).await;
+        self.http_tunnels.stop_tunnels_with_prefix(&redis_sentinel_prefix).await;
         db::transport_layer_tunnel::stop_transport_layers(
             connection_id,
             layer_count,
             &self.tunnels,
             &self.proxy_tunnels,
+            &self.http_tunnels,
         )
         .await;
         self.tunnels.stop_tunnel(connection_id).await;
         self.proxy_tunnels.stop_tunnel(connection_id).await;
+        self.http_tunnels.stop_tunnel(connection_id).await;
     }
 
     /// Health-check the base connection pool for a given connection_id.

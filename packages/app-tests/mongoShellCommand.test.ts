@@ -4,10 +4,12 @@ import {
   evaluateMongoAggregateSafety,
   evaluateMongoWriteSafety,
   mongoAggregateWriteStage,
+  mongoCollectionStatsToQueryResult,
   mongoCountToQueryResult,
   mongoDocumentsToQueryResult,
   mongoIndexesToQueryResult,
   parseMongoAggregateCommand,
+  parseMongoCollectionStatsCommand,
   parseMongoCommand,
   parseMongoCountDocumentsCommand,
   parseMongoFindCommand,
@@ -248,6 +250,67 @@ test("parseMongoGetIndexesCommand parses collection index commands", () => {
     collection: "audit.logs",
   });
   assert.equal(parseMongoGetIndexesCommand("db.web_log.getIndexes({})"), null);
+});
+
+test("parseMongoCollectionStatsCommand parses collection stats commands", () => {
+  assert.deepEqual(parseMongoCollectionStatsCommand("db.users.stats()"), {
+    collection: "users",
+    metric: "stats",
+  });
+  assert.deepEqual(parseMongoCollectionStatsCommand("db.users.dataSize();"), {
+    collection: "users",
+    metric: "dataSize",
+  });
+  assert.deepEqual(parseMongoCollectionStatsCommand("db.users.storageSize(1024)"), {
+    collection: "users",
+    metric: "storageSize",
+    scale: 1024,
+  });
+  assert.deepEqual(parseMongoCollectionStatsCommand("db.users.totalIndexSize()"), {
+    collection: "users",
+    metric: "totalIndexSize",
+  });
+  assert.deepEqual(parseMongoCollectionStatsCommand('db.getCollection("audit.logs").stats()'), {
+    collection: "audit.logs",
+    metric: "stats",
+  });
+  // A non-numeric argument is rejected rather than silently ignored.
+  assert.equal(parseMongoCollectionStatsCommand('db.users.storageSize("big")'), null);
+});
+
+test("parseMongoCommand tags collection stats commands with the collectionStats kind", () => {
+  const parsed = parseMongoCommand("db.users.stats()");
+  assert.ok(parsed);
+  assert.deepEqual(parsed.command, { kind: "collectionStats", collection: "users", metric: "stats" });
+});
+
+test("mongoCollectionStatsToQueryResult formats stats and single-metric results", () => {
+  const stats = {
+    count: 12,
+    size: 4096,
+    avgObjSize: 341,
+    storageSize: 8192,
+    totalIndexSize: 2048,
+    nindexes: 3,
+  };
+  assert.deepEqual(mongoCollectionStatsToQueryResult("stats", stats, 5), {
+    columns: ["count", "size", "avgObjSize", "storageSize", "totalIndexSize", "nindexes"],
+    rows: [[12, 4096, 341, 8192, 2048, 3]],
+    affected_rows: 1,
+    execution_time_ms: 5,
+  });
+  assert.deepEqual(mongoCollectionStatsToQueryResult("dataSize", stats, 0), {
+    columns: ["dataSize"],
+    rows: [[4096]],
+    affected_rows: 1,
+    execution_time_ms: 0,
+  });
+  assert.deepEqual(mongoCollectionStatsToQueryResult("totalIndexSize", {}, 0), {
+    columns: ["totalIndexSize"],
+    rows: [[null]],
+    affected_rows: 1,
+    execution_time_ms: 0,
+  });
 });
 
 test("splitMongoCommands keeps semicolon-separated mongo commands in order", () => {

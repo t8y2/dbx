@@ -10441,6 +10441,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 .data-grid-topbar {
   --data-grid-topbar-transition-duration: 340ms;
   --data-grid-topbar-transition-easing: cubic-bezier(0.22, 1, 0.36, 1);
+  --data-grid-condition-font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   width: 100%;
   min-width: 0;
   transition: min-width var(--data-grid-topbar-transition-duration) var(--data-grid-topbar-transition-easing);
@@ -10456,8 +10457,10 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   max-width: 5rem;
   overflow: hidden;
   white-space: nowrap;
-  font-size: 0.75rem;
-  font-weight: 500;
+  font-family: var(--data-grid-condition-font-family, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.5rem;
   user-select: none;
   opacity: 1;
   transform: translateX(0);
@@ -10492,15 +10495,20 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
 .data-grid-topbar-condition-input,
 .data-grid-topbar-condition-measure {
-  font-size: 0.8125rem;
+  font-family: var(--data-grid-condition-font-family, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);
+  font-size: 0.875rem;
   line-height: 1.5rem;
+  font-variant-ligatures: none;
+  font-feature-settings:
+    "liga" 0,
+    "calt" 0;
 }
 
 .data-grid-topbar-condition-input {
   width: 100%;
   max-width: 100%;
   box-sizing: border-box;
-  padding: 0;
+  padding: 0 0.125rem;
   overflow-x: auto;
   overflow-y: hidden;
   white-space: pre;
@@ -10525,6 +10533,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 }
 
 .data-grid-topbar-condition-pane--expanded {
+  --data-grid-condition-font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   position: fixed;
   z-index: 80;
   right: auto;
@@ -10557,7 +10566,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   width: calc(100% - 1rem + var(--data-grid-expanded-scrollbar-offset));
   max-width: none;
   margin-right: calc(-1 * var(--data-grid-expanded-scrollbar-offset));
-  padding: 0 calc(var(--data-grid-condition-suffix-width) + 0.5rem) 0.0625rem 0;
+  padding: 0 calc(var(--data-grid-condition-suffix-width) + 0.5rem) 0.0625rem 0.125rem;
   text-indent: var(--data-grid-condition-prefix-indent);
   overflow-x: hidden;
   overflow-y: auto;

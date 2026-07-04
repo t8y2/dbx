@@ -218,7 +218,7 @@ pub(in crate::schema) async fn table_ddl(
     table: &str,
 ) -> Result<String, String> {
     match pool {
-        PoolKind::Mysql(p, _) => super::super::mysql_ddl(p, table).await,
+        PoolKind::Mysql(p, _) => super::super::mysql_ddl(p, schema, table).await,
         PoolKind::Postgres(p) if config.is_some_and(is_opengauss_family_config) => {
             match super::super::opengauss_table_ddl(p, schema, table).await {
                 Ok(ddl) => Ok(ddl),
@@ -247,7 +247,14 @@ pub(in crate::schema) async fn object_source(
     object_type: &db::ObjectSourceKind,
 ) -> Result<Option<String>, String> {
     match pool {
-        PoolKind::Mysql(pool, _) => super::super::mysql_object_source(pool, name, object_type).await.map(Some),
+        PoolKind::Mysql(pool, _) => super::super::mysql_object_source(
+            pool,
+            super::super::mysql_table_metadata_catalog(database, schema),
+            name,
+            object_type,
+        )
+        .await
+        .map(Some),
         PoolKind::Postgres(pool) => {
             super::super::postgres_object_source(pool, schema, name, object_type).await.map(Some)
         }

@@ -48,7 +48,12 @@ pub fn qualified_table_name(database_type: Option<DatabaseType>, schema: Option<
         }
         return table_name;
     }
-    if database_type.is_some_and(is_schema_aware)
+    let supports_qualifier = database_type.is_some_and(is_schema_aware)
+        || matches!(
+            database_type,
+            Some(DatabaseType::Mysql | DatabaseType::Goldendb | DatabaseType::StarRocks | DatabaseType::Doris)
+        );
+    if supports_qualifier
         && database_type != Some(DatabaseType::Jdbc)
         && schema.is_some_and(|schema| !schema.trim().is_empty())
     {
@@ -76,6 +81,7 @@ pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -
         Some(
             DatabaseType::Mysql
             | DatabaseType::ClickHouse
+            | DatabaseType::Doris
             | DatabaseType::Goldendb
             | DatabaseType::StarRocks
             | DatabaseType::ManticoreSearch

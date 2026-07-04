@@ -20,6 +20,7 @@ static CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
 const MAX_TRANSFER_WRITE_SQL_BYTES: usize = 512 * 1024;
 const MAX_SQLSERVER_INSERT_ROWS: usize = 1000;
 const MAX_ORACLE_MERGE_ROWS: usize = 500;
+const TRANSFER_TARGET_TABLE_LOOKUP_LIMIT: usize = 1000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -110,6 +111,102 @@ pub fn validate_transfer_target_table_names(request: &TransferRequest) -> Result
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedTransferTargetTable {
+    name: String,
+    preexisting: bool,
+}
+
+fn json_scalar_to_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn mysql_lower_case_table_names_from_result(result: &db::QueryResult) -> Option<u8> {
+    let row = result.rows.first()?;
+    row.get(1).or_else(|| row.first()).and_then(json_scalar_to_string)?.trim().parse::<u8>().ok()
+}
+
+async fn target_table_lookup_is_case_insensitive(
+    state: &AppState,
+    target_pool_key: &str,
+    target_db_type: &DatabaseType,
+) -> bool {
+    if !matches!(target_db_type, DatabaseType::Mysql) {
+        return false;
+    }
+
+    let result = match execute_on_pool(state, target_pool_key, "SHOW VARIABLES LIKE 'lower_case_table_names'").await {
+        Ok(result) => result,
+        Err(error) => {
+            log::debug!("[transfer] failed to read MySQL lower_case_table_names: {error}");
+            return false;
+        }
+    };
+
+    // MySQL lower_case_table_names=1/2 means table lookup is case-insensitive.
+    // Prefer the metadata name so generated INSERT/TRUNCATE SQL keeps the target
+    // table's declared case instead of the source-derived request case.
+    mysql_lower_case_table_names_from_result(&result).is_some_and(|value| value != 0)
+}
+
+fn existing_transfer_target_table_name(
+    requested_name: &str,
+    tables: &[db::TableInfo],
+    allow_case_insensitive_match: bool,
+) -> Option<String> {
+    if let Some(table) = tables.iter().find(|table| table.name == requested_name) {
+        return Some(table.name.clone());
+    }
+    if !allow_case_insensitive_match {
+        return None;
+    }
+    tables.iter().find(|table| table.name.eq_ignore_ascii_case(requested_name)).map(|table| table.name.clone())
+}
+
+async fn resolve_transfer_target_table_name(
+    state: &AppState,
+    request: &TransferRequest,
+    source_table: &str,
+    target_pool_key: &str,
+    target_db_type: &DatabaseType,
+) -> ResolvedTransferTargetTable {
+    let requested_name = request.target_table_name(source_table);
+    if is_mongodb_transfer_type(target_db_type) {
+        return ResolvedTransferTargetTable { name: requested_name, preexisting: false };
+    }
+
+    let allow_case_insensitive_match =
+        target_table_lookup_is_case_insensitive(state, target_pool_key, target_db_type).await;
+    let tables = crate::schema::list_tables_core(
+        state,
+        &request.target_connection_id,
+        &request.target_database,
+        &request.target_schema,
+        Some(&requested_name),
+        Some(TRANSFER_TARGET_TABLE_LOOKUP_LIMIT),
+        None,
+        None,
+    )
+    .await
+    .unwrap_or_else(|error| {
+        log::debug!("[transfer] failed to resolve target table metadata for {requested_name}: {error}");
+        Vec::new()
+    });
+
+    if let Some(existing_name) =
+        existing_transfer_target_table_name(&requested_name, &tables, allow_case_insensitive_match)
+    {
+        ResolvedTransferTargetTable { name: existing_name, preexisting: true }
+    } else {
+        ResolvedTransferTargetTable { name: requested_name, preexisting: false }
+    }
 }
 
 fn quote_string_literal(value: &str) -> String {
@@ -3215,7 +3312,8 @@ where
     F: FnMut(TransferProgress),
 {
     let total_tables = request.tables.len();
-    let target_table = request.target_table_name(table);
+    let ResolvedTransferTargetTable { name: target_table, preexisting: target_table_preexisting } =
+        resolve_transfer_target_table_name(state, request, table, target_pool_key, target_db_type).await;
     let batch_size = if request.batch_size == 0 { 1000 } else { request.batch_size };
     let mut offset: u64 = 0;
     let mut total_transferred: u64 = 0;
@@ -3346,19 +3444,6 @@ where
                     sql_target_columns.iter().map(|column| Some(column.data_type.clone())).collect();
 
                 if request.create_table {
-                    let target_table_preexisting = crate::schema::list_tables_core(
-                        state,
-                        &request.target_connection_id,
-                        &request.target_database,
-                        &request.target_schema,
-                        Some(&target_table),
-                        Some(1),
-                        None,
-                        None,
-                    )
-                    .await
-                    .map(|tables| !tables.is_empty())
-                    .unwrap_or(false);
                     if !target_table_preexisting {
                         let ddl = generate_create_table_ddl(
                             &sql_target_columns,
@@ -3494,7 +3579,8 @@ where
 
     let total_tables = request.tables.len();
     let pg_compat_transfer = is_postgres_compat_transfer(source_db_type, target_db_type);
-    let target_table = request.target_table_name(table);
+    let ResolvedTransferTargetTable { name: target_table, preexisting: mut target_table_preexisting } =
+        resolve_transfer_target_table_name(state, request, table, target_pool_key, target_db_type).await;
     let preserves_target_table_name = target_table == table;
 
     // Get source columns (deduplicate by name)
@@ -3543,20 +3629,6 @@ where
     .into_iter()
     .next()
     .and_then(|t| t.comment);
-
-    let mut target_table_preexisting = crate::schema::list_tables_core(
-        state,
-        &request.target_connection_id,
-        &request.target_database,
-        &request.target_schema,
-        Some(&target_table),
-        Some(1),
-        None,
-        None,
-    )
-    .await
-    .map(|tables| !tables.is_empty())
-    .unwrap_or(false);
 
     let source_indexes =
         if request.create_table && pg_compat_transfer && preserves_target_table_name && !target_table_preexisting {
@@ -4264,6 +4336,30 @@ mod tests {
         }
     }
 
+    fn test_table(name: &str) -> db::TableInfo {
+        db::TableInfo {
+            name: name.to_string(),
+            table_type: "TABLE".to_string(),
+            comment: None,
+            parent_schema: None,
+            parent_name: None,
+        }
+    }
+
+    fn test_query_result(rows: Vec<Vec<serde_json::Value>>) -> db::QueryResult {
+        db::QueryResult {
+            columns: Vec::new(),
+            column_types: Vec::new(),
+            column_sortables: Vec::new(),
+            rows,
+            affected_rows: 0,
+            execution_time_ms: 0,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+        }
+    }
+
     fn test_transfer_request(tables: Vec<&str>) -> TransferRequest {
         TransferRequest {
             transfer_id: "transfer-1".to_string(),
@@ -4300,6 +4396,39 @@ mod tests {
 
         assert_eq!(request.target_table_name_case, TransferTableNameCase::Preserve);
         assert_eq!(request.target_table_name("ORDERS"), "ORDERS");
+    }
+
+    #[test]
+    fn transfer_existing_target_table_name_prefers_exact_case() {
+        let tables = vec![test_table("orders"), test_table("Orders")];
+
+        assert_eq!(existing_transfer_target_table_name("Orders", &tables, true), Some("Orders".to_string()));
+    }
+
+    #[test]
+    fn transfer_existing_target_table_name_respects_case_sensitive_targets() {
+        let tables = vec![test_table("Orders")];
+
+        assert_eq!(existing_transfer_target_table_name("orders", &tables, false), None);
+        assert_eq!(existing_transfer_target_table_name("orders", &tables, true), Some("Orders".to_string()));
+    }
+
+    #[test]
+    fn transfer_existing_target_table_name_ignores_contains_matches() {
+        let tables = vec![test_table("archived_orders"), test_table("orders_backup")];
+
+        assert_eq!(existing_transfer_target_table_name("orders", &tables, true), None);
+    }
+
+    #[test]
+    fn parses_mysql_lower_case_table_names_values() {
+        let string_result = test_query_result(vec![vec![json!("lower_case_table_names"), json!("2")]]);
+        let numeric_result = test_query_result(vec![vec![json!("lower_case_table_names"), json!(1)]]);
+        let empty_result = test_query_result(Vec::new());
+
+        assert_eq!(mysql_lower_case_table_names_from_result(&string_result), Some(2));
+        assert_eq!(mysql_lower_case_table_names_from_result(&numeric_result), Some(1));
+        assert_eq!(mysql_lower_case_table_names_from_result(&empty_result), None);
     }
 
     #[test]
@@ -5502,7 +5631,7 @@ mod tests {
         con.execute_batch("CREATE SCHEMA analytics; CREATE TABLE analytics.items(id INTEGER);").unwrap();
 
         let state = AppState::new(storage);
-        let con = Arc::new(std::sync::Mutex::new(con));
+        let con = Arc::new(crate::db::duckdb_driver::DuckDbConnection::new(con));
         state.connections.write().await.insert("duckdb-1".to_string(), PoolKind::DuckDb(con));
         state.configs.write().await.insert("duckdb-1".to_string(), duckdb_test_config("duckdb-1"));
 

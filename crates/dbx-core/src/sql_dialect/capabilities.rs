@@ -64,6 +64,12 @@ pub fn uses_fetch_first(database_type: DatabaseType) -> bool {
     matches!(database_type, DatabaseType::Oracle | DatabaseType::Dameng | DatabaseType::Db2)
 }
 
+/// Oracle 系方言不支持 `INSERT ... VALUES (...), (...)` 多行语法，
+/// 复制为 INSERT 与导出 INSERT 都需按行生成单条语句。
+pub fn uses_single_row_insert_statements(database_type: DatabaseType) -> bool {
+    matches!(database_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
+}
+
 pub fn pagination_strategy(database_type: Option<DatabaseType>, context: PaginationContext) -> TablePaginationStrategy {
     match database_type {
         Some(DatabaseType::Jdbc) => TablePaginationStrategy::AgentMaxRows,

@@ -177,6 +177,7 @@ export const useConnectionStore = defineStore("connection", () => {
   const selectedTreeNodeId = ref<string | null>(null);
   const selectedTreeNodeIds = ref<string[]>([]);
   const treeSelectionAnchorId = ref<string | null>(null);
+  const connectionMultiSelectActive = ref(false);
   const treeClipboard = ref<TreeClipboard | null>(null);
 
   watch(activeConnectionId, (id) => {
@@ -1868,18 +1869,32 @@ export const useConnectionStore = defineStore("connection", () => {
     node.isLoading = true;
     try {
       const collections = await api.mongoListCollections(connectionId, database);
-      const names = collections.map((c) => c.name);
-      setChildren(
-        node,
-        sortSidebarNames(names).map((col) => ({
-          id: `${nodeId}:${col}`,
-          label: col,
-          type: "mongo-collection" as const,
+      const bucketNames = new Set(collections.filter((c) => c.kind === "bucket" && c.bucketName).map((c) => c.bucketName as string));
+      const hiddenCollectionNames = new Set([...bucketNames].flatMap((bucketName) => [`${bucketName}.files`, `${bucketName}.chunks`]));
+      const collectionNames = collections
+        .filter((c) => c.kind !== "bucket")
+        .map((c) => c.name)
+        .filter((name) => !hiddenCollectionNames.has(name));
+      const collectionChildren = sortSidebarNames(collectionNames).map((col) => ({
+        id: `${nodeId}:${col}`,
+        label: col,
+        type: "mongo-collection" as const,
+        connectionId,
+        database,
+        isExpanded: false,
+      }));
+      const children = [
+        {
+          id: `${nodeId}:__gridfs`,
+          label: i18n.global.t("tree.gridfs"),
+          type: "mongo-gridfs" as const,
           connectionId,
           database,
           isExpanded: false,
-        })),
-      );
+        },
+        ...collectionChildren,
+      ];
+      setChildren(node, children);
       node.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
@@ -2649,6 +2664,8 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadMongoCollections(node.connectionId, node.database);
     } else if (node.type === "mongo-collection" && node.connectionId && node.database) {
       await loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id);
+    } else if (node.type === "mongo-gridfs") {
+      node.isExpanded = true;
     } else if (node.type === "database" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
       const config = getConfig(node.connectionId);
       const effectiveDbType = effectiveDatabaseTypeForConnection(config);
@@ -3940,6 +3957,7 @@ export const useConnectionStore = defineStore("connection", () => {
     selectedTreeNodeId,
     selectedTreeNodeIds,
     treeSelectionAnchorId,
+    connectionMultiSelectActive,
     treeClipboard,
     treeNodes,
     removeTreeNode,

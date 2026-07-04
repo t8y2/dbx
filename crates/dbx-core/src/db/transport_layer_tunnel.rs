@@ -1,5 +1,6 @@
 use crate::models::connection::TransportLayerConfig;
 
+use super::http_tunnel::HttpTunnelManager;
 use super::proxy_tunnel::ProxyTunnelManager;
 use super::ssh_tunnel::TunnelManager;
 
@@ -26,10 +27,12 @@ pub async fn start_transport_layers(
     remote_port: u16,
     ssh_tunnels: &TunnelManager,
     proxy_tunnels: &ProxyTunnelManager,
+    http_tunnels: &HttpTunnelManager,
 ) -> Result<u16, String> {
     if layers.is_empty() {
         return Err("No transport layers configured".to_string());
     }
+    validate_transport_layers(layers)?;
 
     let mut next_connect_endpoint: Option<LayerEndpoint> = None;
     let mut final_local_port = 0;
@@ -80,6 +83,17 @@ pub async fn start_transport_layers(
                 )
                 .await
                 .map_err(|err| format!("Proxy layer {} failed: {err}", index + 1))?,
+            TransportLayerConfig::HttpTunnel(http) => http_tunnels
+                .start_tunnel(
+                    &layer_id,
+                    &http.url,
+                    &http.token,
+                    http.connect_timeout_secs,
+                    &target_endpoint.host,
+                    target_endpoint.port,
+                )
+                .await
+                .map_err(|err| format!("HTTP tunnel layer {} failed: {err}", index + 1))?,
         };
 
         final_local_port = local_port;
@@ -94,12 +108,23 @@ pub async fn stop_transport_layers(
     layer_count: usize,
     ssh_tunnels: &TunnelManager,
     proxy_tunnels: &ProxyTunnelManager,
+    http_tunnels: &HttpTunnelManager,
 ) {
     for index in 0..layer_count {
         let layer_id = layer_id(connection_id, index);
         ssh_tunnels.stop_tunnel(&layer_id).await;
         proxy_tunnels.stop_tunnel(&layer_id).await;
+        http_tunnels.stop_tunnel(&layer_id).await;
     }
+}
+
+fn validate_transport_layers(layers: &[TransportLayerConfig]) -> Result<(), String> {
+    for (index, layer) in layers.iter().enumerate() {
+        if matches!(layer, TransportLayerConfig::HttpTunnel(_)) && index != 0 {
+            return Err("HTTP tunnel must be the first transport layer".to_string());
+        }
+    }
+    Ok(())
 }
 
 fn layer_id(connection_id: &str, index: usize) -> String {
@@ -119,6 +144,7 @@ fn effective_ssh_connect_timeout_secs(value: u64) -> u64 {
 enum PlannedLayerType {
     Ssh,
     Proxy,
+    HttpTunnel,
 }
 
 #[cfg(test)]
@@ -154,6 +180,7 @@ fn plan_transport_layers(
         let layer_type = match layer {
             TransportLayerConfig::Ssh(_) => PlannedLayerType::Ssh,
             TransportLayerConfig::Proxy(_) => PlannedLayerType::Proxy,
+            TransportLayerConfig::HttpTunnel(_) => PlannedLayerType::HttpTunnel,
         };
         planned.push(PlannedTransportLayer {
             layer_type,
@@ -171,8 +198,10 @@ fn plan_transport_layers(
 
 #[cfg(test)]
 mod tests {
-    use super::{plan_transport_layers, PlannedLayerType, PlannedTransportLayer};
-    use crate::models::connection::{ProxyTunnelConfig, ProxyType, SshTunnelConfig, TransportLayerConfig};
+    use super::{plan_transport_layers, validate_transport_layers, PlannedLayerType, PlannedTransportLayer};
+    use crate::models::connection::{
+        HttpTunnelConfig, ProxyTunnelConfig, ProxyType, SshTunnelConfig, TransportLayerConfig,
+    };
 
     fn ssh_layer(id: &str, host: &str, port: u16) -> TransportLayerConfig {
         TransportLayerConfig::Ssh(SshTunnelConfig {
@@ -202,6 +231,17 @@ mod tests {
             port,
             username: String::new(),
             password: String::new(),
+        })
+    }
+
+    fn http_tunnel_layer(id: &str, url: &str) -> TransportLayerConfig {
+        TransportLayerConfig::HttpTunnel(HttpTunnelConfig {
+            id: id.to_string(),
+            name: String::new(),
+            enabled: true,
+            url: url.to_string(),
+            token: String::new(),
+            connect_timeout_secs: 10,
         })
     }
 
@@ -236,6 +276,48 @@ mod tests {
                     layer_type: PlannedLayerType::Ssh,
                     connect_host: "127.0.0.1".to_string(),
                     connect_port: 41002,
+                    remote_host: "db.internal".to_string(),
+                    remote_port: 5432,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn http_tunnel_must_be_outermost_layer() {
+        let layers = vec![
+            ssh_layer("ssh-a", "bastion-a", 22),
+            http_tunnel_layer("http", "https://dbx.example.com/dbx_tunnel.php"),
+        ];
+
+        let err = validate_transport_layers(&layers).unwrap_err();
+
+        assert!(err.contains("HTTP tunnel must be the first transport layer"));
+    }
+
+    #[test]
+    fn http_tunnel_first_layer_targets_next_layer() {
+        let layers = vec![
+            http_tunnel_layer("http", "https://dbx.example.com/dbx_tunnel.php"),
+            ssh_layer("ssh-a", "bastion-a", 22),
+        ];
+
+        let planned = plan_transport_layers(&layers, "db.internal", 5432, &[41001, 41002]);
+
+        assert_eq!(
+            planned,
+            vec![
+                PlannedTransportLayer {
+                    layer_type: PlannedLayerType::HttpTunnel,
+                    connect_host: "".to_string(),
+                    connect_port: 0,
+                    remote_host: "bastion-a".to_string(),
+                    remote_port: 22,
+                },
+                PlannedTransportLayer {
+                    layer_type: PlannedLayerType::Ssh,
+                    connect_host: "127.0.0.1".to_string(),
+                    connect_port: 41001,
                     remote_host: "db.internal".to_string(),
                     remote_port: 5432,
                 },

@@ -129,3 +129,90 @@ pub async fn document_delete_document(
     )
     .await
 }
+
+#[tauri::command]
+pub async fn document_list_gridfs_buckets(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+) -> Result<Vec<dbx_core::document_ops::MongoGridFsBucketInfo>, String> {
+    dbx_core::document_ops::list_gridfs_buckets_core(&state, &connection_id, &database).await
+}
+
+#[tauri::command]
+pub async fn document_create_gridfs_bucket(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    bucket: String,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Create GridFS bucket").await?;
+    dbx_core::document_ops::create_gridfs_bucket_core(&state, &connection_id, &database, &bucket).await
+}
+
+#[tauri::command]
+pub async fn document_delete_gridfs_bucket(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    bucket: String,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Delete GridFS bucket").await?;
+    dbx_core::document_ops::delete_gridfs_bucket_core(&state, &connection_id, &database, &bucket).await
+}
+
+#[tauri::command]
+pub async fn document_list_gridfs_files(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    bucket: String,
+) -> Result<Vec<dbx_core::document_ops::MongoGridFsFileInfo>, String> {
+    dbx_core::document_ops::list_gridfs_files_core(&state, &connection_id, &database, &bucket).await
+}
+
+#[tauri::command]
+pub async fn document_download_gridfs_file(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    bucket: String,
+    file_id: String,
+) -> Result<Vec<u8>, String> {
+    dbx_core::document_ops::download_gridfs_file_core(&state, &connection_id, &database, &bucket, &file_id).await
+}
+
+#[tauri::command]
+pub async fn document_upload_gridfs_file(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    bucket: String,
+    file_name: String,
+    data: Vec<u8>,
+    content_type: Option<String>,
+) -> Result<String, String> {
+    ensure_connection_writable(&state, &connection_id, "Upload GridFS file").await?;
+    dbx_core::document_ops::upload_gridfs_file_core(
+        &state,
+        &connection_id,
+        &database,
+        &bucket,
+        &file_name,
+        &data,
+        content_type.as_deref(),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn document_delete_gridfs_file(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    bucket: String,
+    file_id: String,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Delete GridFS file").await?;
+    dbx_core::document_ops::delete_gridfs_file_core(&state, &connection_id, &database, &bucket, &file_id).await
+}

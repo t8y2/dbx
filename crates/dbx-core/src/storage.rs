@@ -458,6 +458,10 @@ fn transport_layer_proxy_password_key(index: usize, layer: &TransportLayerConfig
     format!("{}{}.proxy_password", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
 }
 
+fn transport_layer_http_tunnel_token_key(index: usize, layer: &TransportLayerConfig) -> String {
+    format!("{}{}.http_tunnel_token", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
+}
+
 fn scrub_transport_layer_secrets(config: &mut ConnectionConfig) {
     for layer in &mut config.transport_layers {
         match layer {
@@ -467,6 +471,9 @@ fn scrub_transport_layer_secrets(config: &mut ConnectionConfig) {
             }
             TransportLayerConfig::Proxy(proxy) => {
                 proxy.password.clear();
+            }
+            TransportLayerConfig::HttpTunnel(http) => {
+                http.token.clear();
             }
         }
     }
@@ -1091,6 +1098,14 @@ impl Storage {
                                 &proxy.password,
                             )?;
                         }
+                        TransportLayerConfig::HttpTunnel(http) => {
+                            persist_secret_in_tx(
+                                &tx,
+                                &config.id,
+                                &transport_layer_http_tunnel_token_key(index, layer),
+                                &http.token,
+                            )?;
+                        }
                     }
                 }
                 persist_secret_in_tx(&tx, &config.id, "redis_sentinel_password", &config.redis_sentinel_password)?;
@@ -1154,7 +1169,7 @@ impl Storage {
                                 TransportLayerConfig::Ssh(layer) => {
                                     self.get_secret(&id, &ssh_tunnel_password_key(index, layer)).await?
                                 }
-                                TransportLayerConfig::Proxy(_) => None,
+                                TransportLayerConfig::Proxy(_) | TransportLayerConfig::HttpTunnel(_) => None,
                             })
                             .unwrap_or_default();
                         ssh.key_passphrase = self
@@ -1167,7 +1182,7 @@ impl Storage {
                                 TransportLayerConfig::Ssh(layer) => {
                                     self.get_secret(&id, &ssh_tunnel_key_passphrase_key(index, layer)).await?
                                 }
-                                TransportLayerConfig::Proxy(_) => None,
+                                TransportLayerConfig::Proxy(_) | TransportLayerConfig::HttpTunnel(_) => None,
                             })
                             .unwrap_or_default();
                     }
@@ -1181,6 +1196,12 @@ impl Storage {
                                 }
                                 _ => None,
                             })
+                            .unwrap_or_default();
+                    }
+                    TransportLayerConfig::HttpTunnel(http) => {
+                        http.token = self
+                            .get_secret(&id, &transport_layer_http_tunnel_token_key(index, &layer_for_key))
+                            .await?
                             .unwrap_or_default();
                     }
                 }

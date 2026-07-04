@@ -188,6 +188,9 @@ fn persist_transport_layer_secrets(
         TransportLayerConfig::Proxy(proxy) => {
             persist_secret(store, connection_id, &transport_layer_proxy_password_key(index, layer), &proxy.password)?;
         }
+        TransportLayerConfig::HttpTunnel(http) => {
+            persist_secret(store, connection_id, &transport_layer_http_tunnel_token_key(index, layer), &http.token)?;
+        }
     }
     Ok(())
 }
@@ -241,6 +244,17 @@ fn hydrate_transport_layer_secrets(
                     }
                 } else {
                     store.set_secret(&config.id, &password_key, &proxy.password)?;
+                    *needs_rewrite = true;
+                }
+            }
+            TransportLayerConfig::HttpTunnel(http) => {
+                let token_key = transport_layer_http_tunnel_token_key(index, &layer_for_key);
+                if http.token.is_empty() {
+                    if let Some(secret) = store.get_secret(&config.id, &token_key)? {
+                        http.token = secret;
+                    }
+                } else {
+                    store.set_secret(&config.id, &token_key, &http.token)?;
                     *needs_rewrite = true;
                 }
             }
@@ -584,6 +598,10 @@ fn transport_layer_proxy_password_key(index: usize, layer: &TransportLayerConfig
     format!("{}{}.proxy_password", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
 }
 
+fn transport_layer_http_tunnel_token_key(index: usize, layer: &TransportLayerConfig) -> String {
+    format!("{}{}.http_tunnel_token", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
+}
+
 fn read_connections(path: &Path) -> Result<Vec<ConnectionConfig>, String> {
     let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     serde_json::from_str(&json).map_err(|e| e.to_string())
@@ -610,6 +628,9 @@ fn sanitize_connections(configs: &[ConnectionConfig]) -> Vec<ConnectionConfig> {
                     TransportLayerConfig::Proxy(proxy) => {
                         proxy.password.clear();
                     }
+                    TransportLayerConfig::HttpTunnel(http) => {
+                        http.token.clear();
+                    }
                 }
             }
             config.redis_sentinel_password.clear();
@@ -632,7 +653,9 @@ mod tests {
         MAIN_PASSWORD_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, REDIS_SENTINEL_PASSWORD_KEY,
         SSH_PASSWORD_KEY,
     };
-    use crate::models::connection::{ConnectionConfig, DatabaseType, SshTunnelConfig, TransportLayerConfig};
+    use crate::models::connection::{
+        ConnectionConfig, DatabaseType, HttpTunnelConfig, SshTunnelConfig, TransportLayerConfig,
+    };
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::path::Path;
@@ -758,6 +781,17 @@ mod tests {
         }
     }
 
+    fn http_tunnel(id: &str, token: &str) -> TransportLayerConfig {
+        TransportLayerConfig::HttpTunnel(HttpTunnelConfig {
+            id: id.to_string(),
+            name: String::new(),
+            enabled: true,
+            url: "https://dbx.example.com/dbx_tunnel.php".to_string(),
+            token: token.to_string(),
+            connect_timeout_secs: 10,
+        })
+    }
+
     fn read_configs(path: &Path) -> Vec<ConnectionConfig> {
         let json = std::fs::read_to_string(path).unwrap();
         serde_json::from_str(&json).unwrap()
@@ -785,7 +819,7 @@ mod tests {
                 assert_eq!(ssh.password, "");
                 assert_eq!(ssh.key_passphrase, "");
             }
-            TransportLayerConfig::Proxy(_) => panic!("expected ssh layer"),
+            _ => panic!("expected ssh layer"),
         }
         assert_eq!(persisted[0].redis_sentinel_password, "");
     }
@@ -812,9 +846,35 @@ mod tests {
                 assert_eq!(ssh.password, "hop-secret");
                 assert_eq!(ssh.key_passphrase, "hop-key");
             }
-            TransportLayerConfig::Proxy(_) => panic!("expected ssh layer"),
+            _ => panic!("expected ssh layer"),
         }
         assert_eq!(loaded[0].redis_sentinel_password, "sentinel-secret");
+    }
+
+    #[test]
+    fn save_and_load_connections_move_http_tunnel_token_to_secret_store() {
+        let path = temp_connections_file("http-tunnel-token");
+        let store = MemorySecretStore::default();
+        let mut config = connection("main", "", "");
+        config.transport_layers = vec![http_tunnel("http", "tunnel-secret")];
+
+        save_connections_to_file(&path, &[config], &store).unwrap();
+
+        assert_eq!(
+            store.get_existing("main", "transport_layers.http.http_tunnel_token").as_deref(),
+            Some("tunnel-secret")
+        );
+        let persisted = read_configs(&path);
+        match &persisted[0].transport_layers[0] {
+            TransportLayerConfig::HttpTunnel(http) => assert_eq!(http.token, ""),
+            _ => panic!("expected http tunnel layer"),
+        }
+
+        let loaded = load_connections_from_file(&path, &store).unwrap();
+        match &loaded[0].transport_layers[0] {
+            TransportLayerConfig::HttpTunnel(http) => assert_eq!(http.token, "tunnel-secret"),
+            _ => panic!("expected http tunnel layer"),
+        }
     }
 
     #[test]
@@ -843,7 +903,7 @@ mod tests {
         assert_eq!(loaded[0].password, "plain-db");
         match &loaded[0].transport_layers[0] {
             TransportLayerConfig::Ssh(ssh) => assert_eq!(ssh.password, "plain-ssh"),
-            TransportLayerConfig::Proxy(_) => panic!("expected ssh layer"),
+            _ => panic!("expected ssh layer"),
         }
         assert_eq!(store.get_existing("legacy", MAIN_PASSWORD_KEY).as_deref(), Some("plain-db"));
         assert_eq!(store.get_existing("legacy", "transport_layers.legacy.ssh_password").as_deref(), Some("plain-ssh"));
@@ -851,7 +911,7 @@ mod tests {
         assert_eq!(persisted[0].password, "");
         match &persisted[0].transport_layers[0] {
             TransportLayerConfig::Ssh(ssh) => assert_eq!(ssh.password, ""),
-            TransportLayerConfig::Proxy(_) => panic!("expected ssh layer"),
+            _ => panic!("expected ssh layer"),
         }
     }
 

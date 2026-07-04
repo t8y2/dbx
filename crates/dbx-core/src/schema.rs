@@ -1902,8 +1902,12 @@ fn normalize_information_schema_table_type(table_type: &str) -> String {
     }
 }
 
-fn mysql_table_metadata_catalog<'a>(database: &'a str, _schema: &str) -> &'a str {
-    database
+fn mysql_table_metadata_catalog<'a>(database: &'a str, schema: &'a str) -> &'a str {
+    if schema.trim().is_empty() {
+        database
+    } else {
+        schema
+    }
 }
 
 fn quote_presto_like_identifier(identifier: &str) -> String {
@@ -1924,13 +1928,14 @@ mod tests {
     use super::{
         clickhouse_metadata_database, deduplicate_column_infos, filter_mysql_system_databases_for_config,
         filter_table_infos, filter_visible_schema_names, is_agent_postgres_metadata_fallback_config,
-        is_retryable_metadata_error, mysql_table_metadata_catalog, normalize_information_schema_table_type,
-        oracle_columns_from_query_result, oracle_columns_sql, oracle_object_statistics_dba_segments_sql,
-        oracle_object_statistics_from_query_result, oracle_object_statistics_rows_only_sql,
-        oracle_object_statistics_sql, oracle_object_statistics_user_segments_sql,
-        oracle_table_comment_from_query_result, oracle_table_comment_sql, oracle_table_comments_from_query_result,
-        oracle_table_comments_sql, presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
-        presto_like_information_schema_tables_sql, presto_like_tables_from_query_result, visible_schema_filter,
+        is_retryable_metadata_error, mysql_object_source_sql, mysql_table_metadata_catalog,
+        normalize_information_schema_table_type, oracle_columns_from_query_result, oracle_columns_sql,
+        oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
+        oracle_object_statistics_rows_only_sql, oracle_object_statistics_sql,
+        oracle_object_statistics_user_segments_sql, oracle_table_comment_from_query_result, oracle_table_comment_sql,
+        oracle_table_comments_from_query_result, oracle_table_comments_sql, presto_like_columns_from_query_result,
+        presto_like_information_schema_columns_sql, presto_like_information_schema_tables_sql,
+        presto_like_tables_from_query_result, visible_schema_filter,
     };
     #[cfg(feature = "duckdb-bundled")]
     use super::{
@@ -2005,9 +2010,29 @@ mod tests {
     }
 
     #[test]
-    fn mysql_table_child_metadata_uses_database_not_schema() {
+    fn mysql_table_child_metadata_prefers_schema_when_present() {
         assert_eq!(mysql_table_metadata_catalog("app_db", ""), "app_db");
-        assert_eq!(mysql_table_metadata_catalog("app_db", "public"), "app_db");
+        assert_eq!(mysql_table_metadata_catalog("app_db", "tenant_db"), "tenant_db");
+    }
+
+    #[test]
+    fn mysql_object_source_sql_qualifies_cross_database_objects() {
+        assert_eq!(
+            mysql_object_source_sql("tenant_db", "users_view", &db::ObjectSourceKind::View),
+            "SHOW CREATE VIEW `tenant_db`.`users_view`"
+        );
+        assert_eq!(
+            mysql_object_source_sql("tenant_db", "sync_users", &db::ObjectSourceKind::Procedure),
+            "SHOW CREATE PROCEDURE `tenant_db`.`sync_users`"
+        );
+        assert_eq!(
+            mysql_object_source_sql("tenant_db", "calc_score", &db::ObjectSourceKind::Function),
+            "SHOW CREATE FUNCTION `tenant_db`.`calc_score`"
+        );
+        assert_eq!(
+            mysql_object_source_sql("", "users_view", &db::ObjectSourceKind::View),
+            "SHOW CREATE VIEW `users_view`"
+        );
     }
 
     #[test]
@@ -3562,7 +3587,8 @@ pub async fn get_columns_core(
                 db::mysql::get_columns(p, metadata_database, table).await.map(deduplicate_column_infos)
             }
             PoolKind::Mysql(p, mode) => {
-                dispatch_mysql!(p, mode, db::mysql::get_columns, db::ob_oracle::get_columns, database, table)
+                let effective_db = mysql_table_metadata_catalog(database, schema);
+                dispatch_mysql!(p, mode, db::mysql::get_columns, db::ob_oracle::get_columns, effective_db, table)
                     .map(deduplicate_column_infos)
             }
             PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_questdb_config) => {
@@ -3968,7 +3994,7 @@ pub async fn get_table_ddl_core(
     let pool = connections.get(&pool_key).ok_or("Pool not found")?;
 
     match pool {
-        PoolKind::Mysql(p, _) => mysql_ddl(p, table).await,
+        PoolKind::Mysql(p, _) => mysql_ddl(p, mysql_table_metadata_catalog(database, schema), table).await,
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_opengauss_family_config) => {
             match opengauss_table_ddl(p, schema, table).await {
                 Ok(ddl) => Ok(ddl),
@@ -4056,6 +4082,14 @@ fn oracle_ident(value: &str) -> String {
 
 fn mysql_ident(value: &str) -> String {
     format!("`{}`", value.replace('`', "``"))
+}
+
+fn mysql_qualified_name(database: &str, name: &str) -> String {
+    if database.trim().is_empty() {
+        mysql_ident(name)
+    } else {
+        format!("{}.{}", mysql_ident(database), mysql_ident(name))
+    }
 }
 
 fn sqlite_object_type(kind: &db::ObjectSourceKind) -> &'static str {
@@ -4217,11 +4251,12 @@ pub fn sqlite_object_source_sql(name: &str, kind: &db::ObjectSourceKind) -> Stri
     )
 }
 
-pub fn mysql_object_source_sql(name: &str, kind: &db::ObjectSourceKind) -> String {
+pub fn mysql_object_source_sql(database: &str, name: &str, kind: &db::ObjectSourceKind) -> String {
+    let qualified_name = mysql_qualified_name(database, name);
     match kind {
-        db::ObjectSourceKind::View => format!("SHOW CREATE VIEW {}", mysql_ident(name)),
-        db::ObjectSourceKind::Procedure => format!("SHOW CREATE PROCEDURE {}", mysql_ident(name)),
-        db::ObjectSourceKind::Function => format!("SHOW CREATE FUNCTION {}", mysql_ident(name)),
+        db::ObjectSourceKind::View => format!("SHOW CREATE VIEW {qualified_name}"),
+        db::ObjectSourceKind::Procedure => format!("SHOW CREATE PROCEDURE {qualified_name}"),
+        db::ObjectSourceKind::Function => format!("SHOW CREATE FUNCTION {qualified_name}"),
         db::ObjectSourceKind::Sequence
         | db::ObjectSourceKind::Package
         | db::ObjectSourceKind::PackageBody
@@ -4251,11 +4286,12 @@ fn first_string_cell(result: db::QueryResult) -> Result<String, String> {
 
 async fn mysql_object_source(
     pool: &db::mysql::MySqlPool,
+    database: &str,
     name: &str,
     kind: &db::ObjectSourceKind,
 ) -> Result<String, String> {
     use mysql_async::prelude::*;
-    let sql = mysql_object_source_sql(name, kind);
+    let sql = mysql_object_source_sql(database, name, kind);
     let mut conn = db::mysql::get_conn_with_timeout(pool, db::connection_timeout()).await?;
     let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
@@ -4351,7 +4387,10 @@ async fn get_object_source_once(
             }
         } else {
             match connections.get(&pool_key).ok_or("Pool not found")? {
-                PoolKind::Mysql(pool, _) => mysql_object_source(pool, name, &object_type).await?,
+                PoolKind::Mysql(pool, _) => {
+                    mysql_object_source(pool, mysql_table_metadata_catalog(database, schema), name, &object_type)
+                        .await?
+                }
                 PoolKind::Postgres(pool) if db_config.as_ref().is_some_and(is_questdb_config) => {
                     // only view
                     db::questdb::questdb_object_source(pool, name).await?
@@ -4910,9 +4949,9 @@ mod ddl_tests {
     }
 }
 
-pub async fn mysql_ddl(pool: &db::mysql::MySqlPool, table: &str) -> Result<String, String> {
+pub async fn mysql_ddl(pool: &db::mysql::MySqlPool, database: &str, table: &str) -> Result<String, String> {
     use mysql_async::prelude::*;
-    let sql = format!("SHOW CREATE TABLE `{}`", table.replace('`', "``"));
+    let sql = format!("SHOW CREATE TABLE {}", mysql_qualified_name(database, table));
     // Use the health-checked getter so a stale pooled connection (server closed
     // it after an idle timeout, NAT/firewall dropped the TCP state, etc.) is
     // detected and replaced before issuing the query. Without this, the first

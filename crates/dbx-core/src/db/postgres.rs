@@ -712,6 +712,139 @@ async fn execute_select_query(
     }
 }
 
+pub enum PostgresQueryStreamItem {
+    Columns { columns: Vec<String>, column_types: Vec<String> },
+    Row(Vec<serde_json::Value>),
+}
+
+enum PostgresQueryStreamError {
+    Postgres { err: tokio_postgres::Error, emitted: bool },
+    Export(String),
+}
+
+impl PostgresQueryStreamError {
+    fn into_string(self) -> String {
+        match self {
+            Self::Postgres { err, .. } => pg_error_to_string(err),
+            Self::Export(err) => err,
+        }
+    }
+}
+
+async fn stream_select_query_prepared(
+    client: &deadpool_postgres::Client,
+    sql: &str,
+    row_limit: Option<usize>,
+    on_item: &mut impl FnMut(PostgresQueryStreamItem) -> Result<(), String>,
+) -> Result<u64, PostgresQueryStreamError> {
+    let stmt =
+        client.prepare_cached(sql).await.map_err(|err| PostgresQueryStreamError::Postgres { err, emitted: false })?;
+    let columns: Vec<String> = stmt.columns().iter().map(|c| c.name().to_string()).collect();
+    let column_types: Vec<String> = stmt.columns().iter().map(|c| c.type_().name().to_string()).collect();
+
+    let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
+    let stream = client
+        .query_raw(&stmt, params)
+        .await
+        .map_err(|err| PostgresQueryStreamError::Postgres { err, emitted: false })?;
+    tokio::pin!(stream);
+    let mut rows_streamed = 0_u64;
+    let mut columns_emitted = false;
+    while let Some(row_result) = stream.next().await {
+        if row_limit.is_some_and(|limit| rows_streamed as usize >= limit) {
+            break;
+        }
+        let row = row_result
+            .map_err(|err| PostgresQueryStreamError::Postgres { err, emitted: columns_emitted || rows_streamed > 0 })?;
+        if !columns_emitted {
+            on_item(PostgresQueryStreamItem::Columns { columns: columns.clone(), column_types: column_types.clone() })
+                .map_err(PostgresQueryStreamError::Export)?;
+            columns_emitted = true;
+        }
+        let values = (0..row.columns().len())
+            .map(|i| pg_value_to_json(&row, i, column_types.get(i).map(String::as_str).unwrap_or("")))
+            .collect();
+        on_item(PostgresQueryStreamItem::Row(values)).map_err(PostgresQueryStreamError::Export)?;
+        rows_streamed += 1;
+    }
+    if !columns_emitted {
+        on_item(PostgresQueryStreamItem::Columns { columns, column_types })
+            .map_err(PostgresQueryStreamError::Export)?;
+    }
+    Ok(rows_streamed)
+}
+
+async fn stream_select_query_text(
+    client: &deadpool_postgres::Client,
+    sql: &str,
+    row_limit: Option<usize>,
+    on_item: &mut impl FnMut(PostgresQueryStreamItem) -> Result<(), String>,
+) -> Result<u64, String> {
+    let stream = client.simple_query_raw(sql).await.map_err(pg_error_to_string)?;
+    tokio::pin!(stream);
+    let mut columns: Vec<String> = Vec::new();
+    let mut rows_streamed = 0_u64;
+    while let Some(message) = stream.next().await {
+        match message.map_err(pg_error_to_string)? {
+            SimpleQueryMessage::RowDescription(cols) => {
+                columns = cols.iter().map(|c| c.name().to_string()).collect();
+                on_item(PostgresQueryStreamItem::Columns { columns: columns.clone(), column_types: Vec::new() })?;
+            }
+            SimpleQueryMessage::Row(row) => {
+                if row_limit.is_some_and(|limit| rows_streamed as usize >= limit) {
+                    break;
+                }
+                if columns.is_empty() {
+                    columns = row.columns().iter().map(|c| c.name().to_string()).collect();
+                    on_item(PostgresQueryStreamItem::Columns { columns: columns.clone(), column_types: Vec::new() })?;
+                }
+                let mut values = Vec::with_capacity(row.len());
+                for i in 0..row.len() {
+                    values.push(match row.try_get(i).map_err(pg_error_to_string)? {
+                        Some(value) => serde_json::Value::String(value.to_string()),
+                        None => serde_json::Value::Null,
+                    });
+                }
+                on_item(PostgresQueryStreamItem::Row(values))?;
+                rows_streamed += 1;
+            }
+            SimpleQueryMessage::CommandComplete(_) => {}
+            _ => {}
+        }
+    }
+    Ok(rows_streamed)
+}
+
+async fn stream_select_query_inner(
+    client: &deadpool_postgres::Client,
+    sql: &str,
+    row_limit: Option<usize>,
+    on_item: &mut impl FnMut(PostgresQueryStreamItem) -> Result<(), String>,
+) -> Result<u64, String> {
+    match stream_select_query_prepared(client, sql, row_limit, on_item).await {
+        Ok(rows) => Ok(rows),
+        Err(PostgresQueryStreamError::Postgres { err, emitted: false }) if should_retry_postgres_stale_cache(&err) => {
+            // The cached prepared statement can become stale after schema changes.
+            // Evict and retry once, matching the normal query execution path.
+            log::warn!("[postgres][stream:stale_cache] evicting cached statement: {}", pg_error_to_string(err));
+            client.statement_cache.remove(sql, &[]);
+            match stream_select_query_prepared(client, sql, row_limit, on_item).await {
+                Ok(rows) => Ok(rows),
+                Err(PostgresQueryStreamError::Postgres { err, emitted: false })
+                    if should_retry_postgres_text_query(&err) =>
+                {
+                    stream_select_query_text(client, sql, row_limit, on_item).await
+                }
+                Err(err) => Err(err.into_string()),
+            }
+        }
+        Err(PostgresQueryStreamError::Postgres { err, emitted: false }) if should_retry_postgres_text_query(&err) => {
+            stream_select_query_text(client, sql, row_limit, on_item).await
+        }
+        Err(err) => Err(err.into_string()),
+    }
+}
+
 pub async fn stream_query_rows(
     pool: &Pool,
     sql: &str,
@@ -1961,6 +2094,59 @@ pub async fn execute_query_with_max_rows_and_cancel(
         execute_query_with_max_rows_inner(&client, sql, max_rows),
     )
     .await
+}
+
+pub async fn stream_select_query_with_cancel(
+    pool: &Pool,
+    schema: Option<&str>,
+    sql: &str,
+    max_rows: Option<usize>,
+    cancel_token: Option<CancellationToken>,
+    budget: DbOperationBudget,
+    cancel_context: Option<PostgresCancelContext>,
+    on_item: impl FnMut(PostgresQueryStreamItem) -> Result<(), String>,
+) -> Result<u64, String> {
+    let start = Instant::now();
+    let client = checkout_postgres_client(pool, cancel_token.as_ref(), budget.checkout_timeout).await?;
+    let mut on_item = on_item;
+    let row_limit = max_rows.map(|limit| limit.max(1));
+    let schema = schema.map(str::trim).filter(|schema| !schema.is_empty());
+    let schema_was_set = schema.is_some_and(|_| !is_transaction_recovery_statement(sql));
+
+    if let Some(schema) = schema.filter(|_| schema_was_set) {
+        // Match normal query execution: export may reference unqualified names
+        // in the active schema, so the streaming path must use the same search_path.
+        execute_postgres_infra_statement(
+            &client,
+            &format!("SET search_path TO {}, public", pg_quote_ident(schema)),
+            budget.recycle_timeout,
+            "schema.set",
+        )
+        .await?;
+    }
+
+    let pg_cancel_token = client.cancel_token();
+    let result = wait_postgres_query(
+        pg_cancel_token,
+        cancel_context,
+        cancel_token,
+        budget.query_timeout,
+        budget.cancel_timeout,
+        stream_select_query_inner(&client, sql, row_limit, &mut on_item),
+    )
+    .await;
+
+    if schema_was_set {
+        let reset_result = reset_postgres_search_path(&client, budget.cleanup_timeout, start).await;
+        match (result, reset_result) {
+            (Ok(rows), Ok(())) => Ok(rows),
+            (Err(query_err), Ok(())) => Err(query_err),
+            (Ok(_), Err(reset_err)) => Err(reset_err),
+            (Err(query_err), Err(reset_err)) => Err(format!("{query_err}; {reset_err}")),
+        }
+    } else {
+        result
+    }
 }
 
 pub async fn execute_query_with_schema(pool: &Pool, schema: &str, sql: &str) -> Result<QueryResult, String> {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount, inject } from "vue";
+import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount, inject, type Component } from "vue";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -48,6 +48,7 @@ import {
   ListFilter,
   Package,
   Clipboard,
+  Check,
   UsersRound,
   Lock,
   HardDriveDownload,
@@ -55,8 +56,10 @@ import {
   SquarePen,
   ListX,
   Info,
+  Archive,
+  Square,
 } from "@lucide/vue";
-import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
+import CustomContextMenu from "@/components/ui/CustomContextMenu.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -76,7 +79,7 @@ import { clearActiveTableReferencePayload, createTableReferencePayload, createTa
 import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/tableEditing";
 import { tableOpenPageLimit } from "@/lib/tableOpenPageLimit";
 import { supportsDatabaseCreation, supportsDatabaseSearch, supportsFieldLineage, supportsObjectBrowserTreeNode, supportsSchemaDiagram, supportsSqlFileExecution, supportsTableImport, supportsTableTruncate, supportsTableStructureEditing, usesTreeSchemaMode } from "@/lib/databaseCapabilities";
-import { copyNameForTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, sidebarSelectionCopyAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/treeNodeClick";
+import { copyNameForTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, sidebarSelectionCopyAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/treeNodeClick";
 import { formatSqlInsert } from "@/lib/exportFormats";
 import { joinExportedDdls } from "@/lib/ddlExport";
 import { fetchTableDataForExport } from "@/lib/tableDataExport";
@@ -149,6 +152,19 @@ const rowRef = ref<HTMLElement>();
 const labelOverflowing = ref(false);
 let labelResizeObserver: ResizeObserver | null = null;
 let labelMeasureFrame = 0;
+
+interface ContextMenuItem {
+  label: string;
+  action?: () => void;
+  disabled?: boolean;
+  separator?: boolean;
+  icon?: Component;
+  iconClass?: string;
+  shortcut?: string;
+  variant?: "default" | "destructive";
+  visible?: boolean;
+  children?: ContextMenuItem[];
+}
 
 function cancelLabelOverflowMeasure() {
   if (!labelMeasureFrame) return;
@@ -315,6 +331,11 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Database, colorClass: "text-blue-500" };
     case "mongo-db":
       return { icon: Database, colorClass: "text-yellow-500" };
+    case "mongo-gridfs":
+    case "mongo-buckets":
+      return { icon: Archive, colorClass: "text-amber-500" };
+    case "mongo-bucket":
+      return { icon: Archive, colorClass: "text-amber-400" };
     case "mongo-collection":
       return { icon: Table, colorClass: "text-green-400" };
     case "vector-collection":
@@ -648,12 +669,16 @@ function runRowClickAction(clickDetail: number) {
     void openObjectBrowser();
     return;
   }
+  if (node.type === "mongo-gridfs") {
+    openMongoTreeData(node);
+    return;
+  }
   const action = treeNodeRowAction(node.type, canExpand.value, settingsStore.editorSettings.sidebarActivation);
   if (!shouldRunTreeNodeRowAction(action, clickDetail)) return;
   if (action === "open-data") {
     openData();
-  } else if (node.type === "mongo-collection") {
-    openMongoCollectionData(node);
+  } else if (isDocumentBrowserTreeNode(node.type)) {
+    openMongoTreeData(node);
   } else if (node.type === "procedure" || node.type === "function" || node.type === "sequence" || node.type === "package" || node.type === "package-body") {
     void viewObjectSource();
   } else if (action === "toggle") {
@@ -705,12 +730,14 @@ function selectedTreeNodesInVisibleOrder(): TreeNode[] {
 }
 
 function selectSingleTreeNode(node: TreeNode) {
+  connectionStore.connectionMultiSelectActive = false;
   connectionStore.selectedTreeNodeId = node.id;
   connectionStore.selectedTreeNodeIds = [node.id];
   connectionStore.treeSelectionAnchorId = node.id;
 }
 
 function toggleTreeNodeSelection(node: TreeNode) {
+  connectionStore.connectionMultiSelectActive = false;
   const ids = new Set(connectionStore.selectedTreeNodeIds);
   if (ids.has(node.id)) ids.delete(node.id);
   else ids.add(node.id);
@@ -720,6 +747,7 @@ function toggleTreeNodeSelection(node: TreeNode) {
 }
 
 function selectTreeNodeRange(node: TreeNode) {
+  connectionStore.connectionMultiSelectActive = false;
   const visible = visibleTreeNodes();
   const anchorId = connectionStore.treeSelectionAnchorId || connectionStore.selectedTreeNodeId || node.id;
   const currentIndex = sidebarTreeContext ? sidebarTreeContext.getVisibleNodeIndex(node.id) : -1;
@@ -739,6 +767,30 @@ function selectTreeNodeRange(node: TreeNode) {
   const rangeIds = treeSelectionRangeIds(visible, node.id, anchorId, connectionStore.selectedTreeNodeId);
   connectionStore.selectedTreeNodeIds = rangeIds;
   connectionStore.selectedTreeNodeId = node.id;
+}
+
+const selectedConnectionIds = computed(() => {
+  const connectionIds = new Set(connectionStore.connections.map((connection) => connection.id));
+  return connectionStore.selectedTreeNodeIds.filter((id) => connectionIds.has(id));
+});
+
+const isConnectionSelectionChecked = computed(() => connectionStore.connectionMultiSelectActive && props.node.type === "connection" && !!props.node.connectionId && selectedConnectionIds.value.includes(props.node.connectionId));
+
+function toggleConnectionMultiSelection(event: MouseEvent) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (props.node.type !== "connection" || !props.node.connectionId) return;
+
+  const next = new Set(connectionStore.connectionMultiSelectActive ? selectedConnectionIds.value : []);
+  if (next.has(props.node.connectionId)) next.delete(props.node.connectionId);
+  else next.add(props.node.connectionId);
+
+  const ids = [...next];
+  connectionStore.selectedTreeNodeIds = ids;
+  connectionStore.selectedTreeNodeId = ids.includes(props.node.connectionId) ? props.node.connectionId : (ids[0] ?? null);
+  connectionStore.treeSelectionAnchorId = props.node.connectionId;
+  connectionStore.connectionMultiSelectActive = ids.length > 0;
+  rowRef.value?.focus({ preventScroll: true });
 }
 
 function onClick(event: MouseEvent) {
@@ -928,16 +980,25 @@ function onDoubleClick() {
     void viewObjectSource();
   } else if (action === "open-saved-sql") {
     openSavedSqlFile();
-  } else if (action === "toggle" && props.node.type === "mongo-collection") {
-    openMongoCollectionData(props.node);
+  } else if (action === "toggle" && (props.node.type === "mongo-gridfs" || isDocumentBrowserTreeNode(props.node.type))) {
+    openMongoTreeData(props.node);
   } else if (action === "toggle") {
     toggle();
   }
 }
 
-function openMongoCollectionData(node: TreeNode) {
-  if (node.type !== "mongo-collection" || !node.connectionId || !node.database) return;
+function openMongoTreeData(node: TreeNode) {
+  if (!node.connectionId || !node.database) return;
+  if (node.type === "mongo-gridfs") {
+    queryStore.openMongoGridFs(node.connectionId, node.database);
+    return;
+  }
   const tabTitle = `${node.database}.${node.label}`;
+  if (node.type === "mongo-bucket") {
+    queryStore.openMongoBucket(node.connectionId, node.database, node.label);
+    return;
+  }
+  if (node.type !== "mongo-collection") return;
   const tab = queryStore.createTab(node.connectionId, node.database, tabTitle, "mongo");
   queryStore.updateSql(tab, node.label);
 }
@@ -4510,19 +4571,22 @@ function treeItemMenuItems(): ContextMenuItem[] {
 </script>
 
 <template>
-  <CustomContextMenu :items="treeItemMenuItems()" v-slot="{ onContextMenu }">
-    <div @contextmenu="onTreeItemContextMenu($event, onContextMenu)">
+  <CustomContextMenu :items="treeItemMenuItems()" v-slot="contextMenuSlot">
+    <div @contextmenu="onTreeItemContextMenu($event, contextMenuSlot.onContextMenu)">
       <LightTooltip :text="displayLabel(node)" :disabled="isTooltipDisabled()" side="right" :side-offset="8" :delay="0" :close-delay="0">
         <div
           ref="rowRef"
-          class="group flex items-center gap-1.5 py-1 px-2 cursor-pointer hover:bg-accent relative outline-none"
+          class="group flex items-center gap-1.5 py-1 px-2 cursor-pointer relative outline-none"
           style="contain: layout style"
           :class="[
             rowWidthClass,
             {
+              'group/sidebar-row': true,
               'ring-1 ring-primary/50 bg-primary/5': showDropInside,
               'opacity-50': isDragging,
               'tree-item-connection-tint': connectionColor,
+              'hover:bg-accent': node.type !== 'connection',
+              'hover:bg-secondary/60': node.type === 'connection',
               rounded: !isSelected && !isMultiSelected,
               'tree-item-active rounded-none': connectionColor && (isSelected || isMultiSelected),
               'tree-item-active rounded-md': !connectionColor && (isSelected || isMultiSelected),
@@ -4548,7 +4612,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
             </button>
           </template>
           <span v-else class="w-3.5 h-3.5 shrink-0" />
-          <DatabaseIcon v-if="node.type === 'connection'" :db-type="connectionIconType(node.connectionId)" class="w-3.5 h-3.5 shrink-0" />
+          <DatabaseIcon v-if="node.type === 'connection'" :db-type="connectionIconType(node.connectionId)" class="h-3.5 w-3.5 shrink-0" />
           <Loader2 v-else-if="node.type === 'load-more' && node.isLoading" class="w-3.5 h-3.5 shrink-0 animate-spin text-primary" />
           <component v-else :is="getIconInfo(node)?.icon || Database" class="w-3.5 h-3.5 shrink-0" :class="nodeIconClass" />
           <input
@@ -4580,6 +4644,18 @@ function treeItemMenuItems(): ContextMenuItem[] {
           <Badge v-if="isConnectionReadonly" variant="secondary" class="h-4 px-1.5 text-[10px] gap-0.5"><Lock class="w-2.5 h-2.5" />{{ t("connection.readOnlyBadge") }}</Badge>
           <ConnectionErrorIndicator v-if="node.type === 'connection'" :connection-id="node.connectionId" trigger-class="h-4 w-4" />
           <Pin v-if="isPinned" class="w-3 h-3 shrink-0 text-primary fill-current" aria-hidden="true" />
+          <button
+            v-if="node.type === 'connection'"
+            type="button"
+            class="ml-auto flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground/55 opacity-0 transition-colors transition-opacity hover:bg-secondary/45 hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover/sidebar-row:opacity-100"
+            :class="{ 'opacity-100': isConnectionSelectionChecked || connectionStore.connectionMultiSelectActive }"
+            :aria-label="isConnectionSelectionChecked ? t('connectionGroup.deselectConnection') : t('connectionGroup.selectConnection')"
+            @mousedown.stop
+            @click="toggleConnectionMultiSelection"
+          >
+            <Check v-if="isConnectionSelectionChecked" class="h-3 w-3 text-primary" />
+            <Square v-else class="h-3 w-3 stroke-[1.7]" />
+          </button>
         </div>
         <template v-if="detailTooltip" #content>
           <div class="w-max min-w-40 max-w-[min(28rem,calc(100vw-24px))] rounded-md border border-border bg-popover p-2 text-popover-foreground shadow-lg">

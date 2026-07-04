@@ -1,13 +1,14 @@
 use mongodb::{
     bson::{doc, oid::ObjectId, Bson, DateTime, Document},
-    options::{ClientOptions, IndexOptions},
-    Client, IndexModel,
+    options::{ClientOptions, GridFsBucketOptions, IndexOptions},
+    Client, Database, IndexModel,
 };
 use serde::{Deserialize, Serialize};
 
 use super::with_connection_timeout;
+use crate::document_ops::{MongoGridFsBucketInfo, MongoGridFsFileInfo};
 use crate::types::IndexInfo;
-use futures::TryStreamExt;
+use futures::{io::AsyncReadExt, io::AsyncWriteExt, TryStreamExt};
 use percent_encoding::percent_decode_str;
 use std::{collections::HashSet, time::Duration};
 
@@ -21,6 +22,19 @@ pub struct MongoDocumentResult {
 pub struct MongoDropIndexesResult {
     pub dropped_names: Vec<String>,
     pub affected_rows: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MongoCollectionStatsResult {
+    pub count: serde_json::Value,
+    pub size: serde_json::Value,
+    #[serde(rename = "avgObjSize")]
+    pub avg_obj_size: serde_json::Value,
+    #[serde(rename = "storageSize")]
+    pub storage_size: serde_json::Value,
+    #[serde(rename = "totalIndexSize")]
+    pub total_index_size: serde_json::Value,
+    pub nindexes: serde_json::Value,
 }
 
 pub async fn connect(url: &str, timeout: Duration, idle_timeout: Duration) -> Result<Client, String> {
@@ -135,12 +149,305 @@ fn server_version_from_build_info(result: &Document) -> Result<String, String> {
     result.get_str("version").map(str::to_string).map_err(|e| format!("MongoDB server version not found: {e}"))
 }
 
+pub async fn collection_stats(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    scale: Option<serde_json::Number>,
+) -> Result<MongoCollectionStatsResult, String> {
+    let database = database.trim();
+    let collection = collection.trim();
+    if database.is_empty() {
+        return Err("Database name is required".to_string());
+    }
+    if collection.is_empty() {
+        return Err("Collection name is required".to_string());
+    }
+
+    let result = client
+        .database(database)
+        .run_command(collection_stats_command_document(collection, scale.as_ref()))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(collection_stats_result_from_document(&result))
+}
+
+fn collection_stats_command_document(collection: &str, scale: Option<&serde_json::Number>) -> Document {
+    let mut command = doc! { "collStats": collection };
+    if let Some(scale) = scale {
+        command.insert("scale", json_value_to_bson(&serde_json::Value::Number(scale.clone())));
+    }
+    command
+}
+
+fn collection_stats_result_from_document(result: &Document) -> MongoCollectionStatsResult {
+    MongoCollectionStatsResult {
+        count: collection_stats_field(result, "count"),
+        size: collection_stats_field(result, "size"),
+        avg_obj_size: collection_stats_field(result, "avgObjSize"),
+        storage_size: collection_stats_field(result, "storageSize"),
+        total_index_size: collection_stats_field(result, "totalIndexSize"),
+        nindexes: collection_stats_field(result, "nindexes"),
+    }
+}
+
+fn collection_stats_field(result: &Document, key: &str) -> serde_json::Value {
+    result.get(key).map(bson_to_json).unwrap_or(serde_json::Value::Null)
+}
+
 pub async fn list_databases(client: &Client) -> Result<Vec<String>, String> {
     client.list_database_names().await.map_err(|e| e.to_string())
 }
 
 pub async fn list_collections(client: &Client, database: &str) -> Result<Vec<String>, String> {
     client.database(database).list_collection_names().await.map_err(|e| e.to_string())
+}
+
+pub async fn list_gridfs_files(
+    client: &Client,
+    database: &str,
+    bucket: &str,
+) -> Result<Vec<MongoGridFsFileInfo>, String> {
+    let bucket = normalized_gridfs_bucket_name(bucket)?;
+    let collection_name = format!("{bucket}.files");
+    let collection = client.database(database).collection::<Document>(&collection_name);
+    let mut cursor =
+        collection.find(doc! {}).sort(doc! { "uploadDate": -1_i32, "_id": -1_i32 }).await.map_err(|e| e.to_string())?;
+    let mut files = Vec::new();
+    while cursor.advance().await.map_err(|e| e.to_string())? {
+        let doc = cursor.deserialize_current().map_err(|e| e.to_string())?;
+        files.push(gridfs_file_info_from_document(&doc));
+    }
+    Ok(files)
+}
+
+pub async fn gridfs_bucket_summary(
+    client: &Client,
+    database: &str,
+    bucket: &str,
+) -> Result<MongoGridFsBucketInfo, String> {
+    let bucket = normalized_gridfs_bucket_name(bucket)?;
+    let collection = client.database(database).collection::<Document>(&format!("{bucket}.files"));
+    let mut cursor = collection
+        .aggregate(vec![doc! {
+            "$group": {
+                "_id": Bson::Null,
+                "fileCount": { "$sum": 1_i32 },
+                "totalBytes": { "$sum": "$length" },
+            }
+        }])
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut file_count = 0_u64;
+    let mut total_bytes = 0_i64;
+    if cursor.advance().await.map_err(|e| e.to_string())? {
+        let doc = cursor.deserialize_current().map_err(|e| e.to_string())?;
+        file_count =
+            doc.get_i64("fileCount").or_else(|_| doc.get_i32("fileCount").map(i64::from)).unwrap_or(0).max(0) as u64;
+        total_bytes = doc.get_i64("totalBytes").or_else(|_| doc.get_i32("totalBytes").map(i64::from)).unwrap_or(0);
+    }
+
+    Ok(MongoGridFsBucketInfo { name: bucket, file_count, total_bytes })
+}
+
+pub async fn create_gridfs_bucket(client: &Client, database: &str, bucket: &str) -> Result<(), String> {
+    let bucket = normalized_gridfs_bucket_name(bucket)?;
+    let database = client.database(database);
+    let files_name = format!("{bucket}.files");
+    let chunks_name = format!("{bucket}.chunks");
+    let existing: HashSet<String> =
+        database.list_collection_names().await.map_err(|e| e.to_string())?.into_iter().collect();
+
+    if !existing.contains(&files_name) {
+        database.create_collection(&files_name).await.map_err(|e| e.to_string())?;
+    }
+    if !existing.contains(&chunks_name) {
+        database.create_collection(&chunks_name).await.map_err(|e| e.to_string())?;
+    }
+
+    database
+        .collection::<Document>(&files_name)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "filename": 1_i32, "uploadDate": 1_i32 })
+                .options(IndexOptions::builder().name(Some("filename_1_uploadDate_1".to_string())).build())
+                .build(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    database
+        .collection::<Document>(&chunks_name)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "files_id": 1_i32, "n": 1_i32 })
+                .options(IndexOptions::builder().name(Some("files_id_1_n_1".to_string())).unique(Some(true)).build())
+                .build(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+pub async fn delete_gridfs_bucket(client: &Client, database: &str, bucket: &str) -> Result<(), String> {
+    let bucket = normalized_gridfs_bucket_name(bucket)?;
+    let database = client.database(database);
+    drop_collection_if_exists(&database, &format!("{bucket}.files")).await?;
+    drop_collection_if_exists(&database, &format!("{bucket}.chunks")).await?;
+    Ok(())
+}
+
+pub async fn download_gridfs_file(
+    client: &Client,
+    database: &str,
+    bucket: &str,
+    file_id: &str,
+) -> Result<Vec<u8>, String> {
+    let bucket = normalized_gridfs_bucket_name(bucket)?;
+    let trimmed = file_id.trim();
+    if trimmed.is_empty() {
+        return Err("GridFS file id is required".to_string());
+    }
+
+    let bson_id = parse_gridfs_file_id(trimmed)?;
+
+    let files_collection = client.database(database).collection::<Document>(&format!("{bucket}.files"));
+    let file_doc = files_collection
+        .find_one(doc! { "_id": bson_id.clone() })
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "GridFS file not found".to_string())?;
+    let bucket =
+        client.database(database).gridfs_bucket(GridFsBucketOptions::builder().bucket_name(bucket.to_string()).build());
+    let mut stream = bucket
+        .open_download_stream(file_doc.get("_id").cloned().unwrap_or(bson_id))
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    stream.read_to_end(&mut bytes).await.map_err(|e| e.to_string())?;
+    Ok(bytes)
+}
+
+pub async fn upload_gridfs_file(
+    client: &Client,
+    database: &str,
+    bucket: &str,
+    file_name: &str,
+    data: &[u8],
+    content_type: Option<&str>,
+) -> Result<String, String> {
+    let bucket = normalized_gridfs_bucket_name(bucket)?;
+    let file_name = file_name.trim();
+    if file_name.is_empty() {
+        return Err("GridFS file name is required".to_string());
+    }
+
+    create_gridfs_bucket(client, database, &bucket).await?;
+
+    let database_ref = client.database(database);
+    let gridfs_bucket = database_ref.gridfs_bucket(GridFsBucketOptions::builder().bucket_name(bucket.clone()).build());
+    let mut upload_action = gridfs_bucket.open_upload_stream(file_name);
+    if let Some(content_type) = content_type.map(str::trim).filter(|value| !value.is_empty()) {
+        upload_action = upload_action.metadata(doc! { "contentType": content_type });
+    }
+    let mut stream = upload_action.await.map_err(|e| e.to_string())?;
+    let file_id = stream.id().clone();
+    stream.write_all(data).await.map_err(|e| e.to_string())?;
+    stream.close().await.map_err(|e| e.to_string())?;
+
+    if let Some(content_type) = content_type.map(str::trim).filter(|value| !value.is_empty()) {
+        database_ref
+            .collection::<Document>(&format!("{bucket}.files"))
+            .update_one(doc! { "_id": file_id.clone() }, doc! { "$set": { "contentType": content_type } })
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(gridfs_file_id_to_string(&file_id))
+}
+
+pub async fn delete_gridfs_file(client: &Client, database: &str, bucket: &str, file_id: &str) -> Result<(), String> {
+    let bucket = normalized_gridfs_bucket_name(bucket)?;
+    let bson_id = parse_gridfs_file_id(file_id.trim())?;
+    client
+        .database(database)
+        .gridfs_bucket(GridFsBucketOptions::builder().bucket_name(bucket).build())
+        .delete(bson_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn gridfs_file_id_to_string(id: &Bson) -> String {
+    match id {
+        Bson::ObjectId(value) => value.to_hex(),
+        Bson::String(value) => value.clone(),
+        _ => id.clone().into_relaxed_extjson().to_string(),
+    }
+}
+
+fn gridfs_upload_date_to_string(value: &DateTime) -> String {
+    value.try_to_rfc3339_string().unwrap_or_else(|_| value.timestamp_millis().to_string())
+}
+
+fn gridfs_file_info_from_document(doc: &Document) -> MongoGridFsFileInfo {
+    let id = gridfs_file_id_to_string(doc.get("_id").unwrap_or(&Bson::Null));
+    let filename = doc.get_str("filename").ok().map(str::to_string);
+    let length = doc.get_i64("length").or_else(|_| doc.get_i32("length").map(i64::from)).unwrap_or(0);
+    let chunk_size =
+        doc.get_i32("chunkSize").or_else(|_| doc.get_i64("chunkSize").map(|value| value as i32)).unwrap_or(0);
+    let upload_date = doc.get_datetime("uploadDate").ok().map(gridfs_upload_date_to_string);
+    let metadata = doc.get_document("metadata").ok().map(|value| Bson::Document(value.clone()).into_relaxed_extjson());
+    let md5 = doc.get_str("md5").ok().map(str::to_string);
+    let content_type = doc.get_str("contentType").ok().map(str::to_string).or_else(|| {
+        doc.get_document("metadata").ok().and_then(|meta| meta.get_str("contentType").ok().map(str::to_string))
+    });
+    let aliases = doc.get_array("aliases").ok().and_then(|values| {
+        let aliases: Vec<String> = values.iter().filter_map(|value| value.as_str().map(str::to_string)).collect();
+        if aliases.is_empty() {
+            None
+        } else {
+            Some(aliases)
+        }
+    });
+
+    MongoGridFsFileInfo { id, filename, length, chunk_size, upload_date, metadata, md5, content_type, aliases }
+}
+
+fn parse_gridfs_file_id(file_id: &str) -> Result<Bson, String> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(file_id) {
+        return Bson::try_from(value).map_err(|e| format!("Invalid GridFS file id: {e}"));
+    }
+
+    if let Ok(object_id) = ObjectId::parse_str(file_id) {
+        return Ok(Bson::ObjectId(object_id));
+    }
+
+    Ok(Bson::String(file_id.to_string()))
+}
+
+fn normalized_gridfs_bucket_name(bucket: &str) -> Result<String, String> {
+    let bucket = bucket.trim();
+    if bucket.is_empty() {
+        return Err("GridFS bucket name is required".to_string());
+    }
+    if bucket.ends_with(".files") || bucket.ends_with(".chunks") {
+        return Err("Use the GridFS bucket name without the .files or .chunks suffix".to_string());
+    }
+    Ok(bucket.to_string())
+}
+
+async fn drop_collection_if_exists(database: &Database, collection_name: &str) -> Result<(), String> {
+    match database.collection::<Document>(collection_name).drop().await {
+        Ok(()) => Ok(()),
+        Err(error) if mongo_namespace_missing(&error.to_string()) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn mongo_namespace_missing(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("ns not found") || lower.contains("namespace not found")
 }
 
 pub async fn create_database(client: &Client, database: &str) -> Result<(), String> {
@@ -1237,6 +1544,46 @@ mod tests {
     }
 
     #[test]
+    fn parse_gridfs_file_id_accepts_extended_json_object_id() {
+        let id = parse_gridfs_file_id(r#"{"$oid":"507f1f77bcf86cd799439011"}"#).unwrap();
+
+        assert!(matches!(id, Bson::ObjectId(oid) if oid.to_hex() == "507f1f77bcf86cd799439011"));
+    }
+
+    #[test]
+    fn parse_gridfs_file_id_accepts_json_string_ids() {
+        let id = parse_gridfs_file_id(r#""report-42""#).unwrap();
+
+        assert!(matches!(id, Bson::String(value) if value == "report-42"));
+    }
+
+    #[test]
+    fn gridfs_file_id_to_string_keeps_plain_strings_unquoted() {
+        let id = gridfs_file_id_to_string(&Bson::String("report-42".to_string()));
+
+        assert_eq!(id, "report-42");
+    }
+
+    #[test]
+    fn gridfs_file_info_includes_navicat_style_metadata_fields() {
+        let info = gridfs_file_info_from_document(&doc! {
+            "_id": "report-42",
+            "filename": "report.zip",
+            "length": 128_i64,
+            "chunkSize": 255_i32,
+            "md5": "abc123",
+            "contentType": "application/zip",
+            "aliases": ["archive", "nightly"],
+        });
+
+        assert_eq!(info.id, "report-42");
+        assert_eq!(info.filename.as_deref(), Some("report.zip"));
+        assert_eq!(info.md5.as_deref(), Some("abc123"));
+        assert_eq!(info.content_type.as_deref(), Some("application/zip"));
+        assert_eq!(info.aliases, Some(vec!["archive".to_string(), "nightly".to_string()]));
+    }
+
+    #[test]
     fn json_object_to_document_parses_find_projection() {
         let value = serde_json::json!({
             "title": 1,
@@ -1260,6 +1607,53 @@ mod tests {
         let error = server_version_from_build_info(&doc! { "ok": 1 }).unwrap_err();
 
         assert!(error.contains("MongoDB server version not found"));
+    }
+
+    #[test]
+    fn collection_stats_result_reads_expected_fields() {
+        let result = collection_stats_result_from_document(&doc! {
+            "count": 12_i64,
+            "size": 4096_i64,
+            "avgObjSize": 341.3_f64,
+            "storageSize": 8192_i64,
+            "totalIndexSize": 2048_i64,
+            "nindexes": 3_i32,
+        });
+
+        assert_eq!(
+            result,
+            MongoCollectionStatsResult {
+                count: serde_json::json!(12),
+                size: serde_json::json!(4096),
+                avg_obj_size: serde_json::json!(341.3),
+                storage_size: serde_json::json!(8192),
+                total_index_size: serde_json::json!(2048),
+                nindexes: serde_json::json!(3),
+            }
+        );
+    }
+
+    #[test]
+    fn collection_stats_result_fills_missing_fields_with_null() {
+        let result = collection_stats_result_from_document(&doc! {
+            "count": 7_i32,
+            "storageSize": 512_i32,
+        });
+
+        assert_eq!(result.count, serde_json::json!(7));
+        assert_eq!(result.size, serde_json::Value::Null);
+        assert_eq!(result.avg_obj_size, serde_json::Value::Null);
+        assert_eq!(result.storage_size, serde_json::json!(512));
+        assert_eq!(result.total_index_size, serde_json::Value::Null);
+        assert_eq!(result.nindexes, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn collection_stats_command_serializes_scale() {
+        let command = collection_stats_command_document("users", Some(&serde_json::Number::from(1024)));
+
+        assert_eq!(command.get_str("collStats").unwrap(), "users");
+        assert!(matches!(command.get("scale"), Some(Bson::Int64(1024))));
     }
 
     #[test]

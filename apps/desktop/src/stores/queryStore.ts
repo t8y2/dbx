@@ -11,6 +11,7 @@ import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY, restoreOpenTabsState, se
 import {
   evaluateMongoAggregateSafety,
   evaluateMongoWriteSafety,
+  mongoCollectionStatsToQueryResult,
   mongoCountToQueryResult,
   mongoCreateIndexToQueryResult,
   mongoDocumentsToQueryResult,
@@ -32,7 +33,7 @@ import { tableMetaForDataTab } from "@/lib/tableDataTabMeta";
 import { tableOpenPageLimit } from "@/lib/tableOpenPageLimit";
 import { quoteTableIdentifier } from "@/lib/tableSelectSql";
 import { connectionUsesDatabaseObjectTreeMode, connectionUsesSchemaExecutionContext, effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/jdbcDialect";
-import { queryTimeoutSecsForConnection } from "@/lib/queryTimeout";
+import { frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/queryTimeout";
 import { sortDataGridRows, type DataGridSortDirection } from "@/lib/dataGridSort";
 import { normalizeResultPageSize } from "@/lib/paginationPageSize";
 import { splitSqlStatementRanges } from "@/lib/sqlStatementRanges";
@@ -48,6 +49,7 @@ import type { SavedSqlFile } from "@/types/database";
 const ORACLE_LIKE_METADATA_TYPES = new Set<string>(["oracle", "dameng", "oceanbase-oracle"]);
 const BACKGROUND_CLIENT_SESSION_SUFFIXES = ["count", "explain", "export"] as const;
 const CANCEL_QUERY_TIMEOUT_MS = 10_000;
+const CANCEL_ACK_SETTLE_TIMEOUT_MS = 2_000;
 type CloseConfirmContext = "tab" | "batch" | "app";
 
 function cloneTabDraft<T>(value: T): T {
@@ -685,6 +687,58 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode: "users",
+    };
+    tabs.value.push(tab);
+    activeTabId.value = id;
+    return id;
+  }
+
+  function openMongoBucket(connectionId: string, database: string, bucketName: string) {
+    const title = `${database}.${bucketName}`;
+    const existing = tabs.value.find((tab) => tab.mode === "mongo-bucket" && tab.connectionId === connectionId && tab.database === database && tab.mongoBucket?.bucketName === bucketName);
+    if (existing) {
+      activeTabId.value = existing.id;
+      return existing.id;
+    }
+
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title,
+      connectionId,
+      database,
+      sql: bucketName,
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "mongo-bucket",
+      mongoBucket: {
+        bucketName,
+      },
+    };
+    tabs.value.push(tab);
+    activeTabId.value = id;
+    return id;
+  }
+
+  function openMongoGridFs(connectionId: string, database: string) {
+    const existing = tabs.value.find((tab) => tab.mode === "mongo-gridfs" && tab.connectionId === connectionId && tab.database === database);
+    if (existing) {
+      activeTabId.value = existing.id;
+      return existing.id;
+    }
+
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: "GridFS",
+      connectionId,
+      database,
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "mongo-gridfs",
     };
     tabs.value.push(tab);
     activeTabId.value = id;
@@ -1485,6 +1539,22 @@ export const useQueryStore = defineStore("query", () => {
     tab.executionId = undefined;
   }
 
+  function clearAcknowledgedCancelIfStillRunning(id: string, executionId: string) {
+    setTimeout(() => {
+      const current = tabs.value.find((t) => t.id === id);
+      if (!current || current.executionId !== executionId || !current.isCancelling) return;
+      current.isExecuting = false;
+      current.isCancelling = false;
+      current.executionId = undefined;
+      current.queryExecutionStartedAt = undefined;
+      current.result = toErrorResult(new Error("Query canceled"));
+      current.results = undefined;
+      current.activeResultIndex = undefined;
+      current.resultSessionId = undefined;
+      touchResult(current);
+    }, CANCEL_ACK_SETTLE_TIMEOUT_MS);
+  }
+
   async function executeCurrentTab() {
     const tab = tabs.value.find((t) => t.id === activeTabId.value);
     if (!tab || !tab.sql.trim()) return;
@@ -1944,6 +2014,25 @@ export const useQueryStore = defineStore("query", () => {
                 });
                 break;
               }
+              case "collectionStats": {
+                console.info("[DBX][executeTabSql:mongo-collection-stats:start]", {
+                  traceId,
+                  collection: mongoCommand.collection,
+                  metric: mongoCommand.metric,
+                  database: currentDatabase,
+                });
+                const stats = await api.mongoCollectionStats(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.scale, executionId);
+                allResults.push(markQueryResultRowsRaw(mongoCollectionStatsToQueryResult(mongoCommand.metric, stats as unknown as Record<string, unknown>, performance.now() - commandStartedAt)));
+                mongoEditTarget = undefined;
+                console.info("[DBX][executeTabSql:mongo-collection-stats:done]", {
+                  traceId,
+                  collection: mongoCommand.collection,
+                  metric: mongoCommand.metric,
+                  database: currentDatabase,
+                  elapsed: elapsed(),
+                });
+                break;
+              }
               case "insert":
               case "update":
               case "delete":
@@ -2063,7 +2152,7 @@ export const useQueryStore = defineStore("query", () => {
       }
 
       const executionSchema = connectionUsesSchemaExecutionContext(conn) ? tab.schema || tab.database : tab.mode === "data" || connectionUsesDatabaseObjectTreeMode(conn) ? undefined : tab.schema;
-      const frontendTimeoutSecs = Math.max(queryTimeoutSecs * 2, 60);
+      const frontendTimeoutSecs = frontendQueryTimeoutSecsForSql(sqlToExecute, effectiveDbType, queryTimeoutSecs);
       const sourceLabelDatabase = tab.database || conn?.database;
 
       let executionPromise: Promise<QueryResult[]>;
@@ -2102,7 +2191,7 @@ export const useQueryStore = defineStore("query", () => {
         });
         executionPromise = api.executeMulti(tab.connectionId, tab.database, sqlToExecute, executionSchema, executionId, executionOptions);
       }
-      const results = annotateQueryResultSources(markQueryResultsRowsRaw(await withFrontendQueryTimeout(executionPromise, queryTimeoutSecs === 0 ? 0 : frontendTimeoutSecs, t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs }))), queryBaseSql, sourceLabelDatabase, effectiveDbType);
+      const results = annotateQueryResultSources(markQueryResultsRowsRaw(await withFrontendQueryTimeout(executionPromise, frontendTimeoutSecs, t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs }))), queryBaseSql, sourceLabelDatabase, effectiveDbType);
       console.info("[DBX][executeTabSql:execute-multi:done]", {
         traceId,
         resultCount: results.length,
@@ -2331,6 +2420,9 @@ export const useQueryStore = defineStore("query", () => {
     tab.isCancelling = true;
     try {
       const canceled = await withCancelQueryTimeout(api.cancelQuery(executionId));
+      if (canceled) {
+        clearAcknowledgedCancelIfStillRunning(id, executionId);
+      }
       if (!canceled) {
         const current = tabs.value.find((t) => t.id === id);
         if (current && current.executionId === executionId) {
@@ -2778,6 +2870,8 @@ export const useQueryStore = defineStore("query", () => {
     rollbackTransaction,
     renameTab,
     openObjectBrowser,
+    openMongoGridFs,
+    openMongoBucket,
     openUserAdmin,
     openMqAdmin,
     openNacosAdmin,

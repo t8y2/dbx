@@ -5,7 +5,7 @@ use std::io::Write;
 use tokio::sync::RwLock;
 
 use crate::models::connection::DatabaseType;
-use crate::sql_dialect::{qualified_table_name, quote_table_identifier};
+use crate::sql_dialect::{qualified_table_name, quote_table_identifier, uses_single_row_insert_statements};
 use crate::transfer::{
     format_ch_array_sql_literal, format_pg_array_sql_literal, is_identity_column_extra, quote_identifier,
     selected_columns_include_identity_extras, wrap_dameng_identity_insert_sql,
@@ -388,7 +388,11 @@ pub fn build_export_insert_statements(options: BuildExportInsertStatementsOption
     if insert_columns.is_empty() {
         return Ok(Vec::new());
     }
-    let batch_size = options.batch_size.unwrap_or(DATABASE_EXPORT_INSERT_BATCH_SIZE).max(1);
+    let batch_size = if options.database_type.is_some_and(uses_single_row_insert_statements) {
+        1
+    } else {
+        options.batch_size.unwrap_or(DATABASE_EXPORT_INSERT_BATCH_SIZE).max(1)
+    };
     let columns = insert_columns
         .iter()
         .map(|(_, column)| quote_table_identifier(options.database_type, column))
@@ -1278,6 +1282,30 @@ mod tests {
             vec![
                 "INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada'), (2, 'O''Hara');",
                 "INSERT INTO `users` (`id`, `name`) VALUES (3, 'Linus');",
+            ]
+        );
+    }
+
+    #[test]
+    fn oracle_export_inserts_use_one_statement_per_row() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Oracle),
+            schema: Some("APP".to_string()),
+            table_name: Some("USERS".to_string()),
+            qualified_table_name: None,
+            columns: vec!["ID".to_string(), "NAME".to_string()],
+            column_types: Vec::new(),
+            column_extras: Vec::new(),
+            rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("Linus")]],
+            batch_size: Some(100),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                "INSERT INTO \"APP\".\"USERS\" (\"ID\", \"NAME\") VALUES (1, 'Ada');",
+                "INSERT INTO \"APP\".\"USERS\" (\"ID\", \"NAME\") VALUES (2, 'Linus');",
             ]
         );
     }

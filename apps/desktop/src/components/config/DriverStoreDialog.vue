@@ -12,14 +12,14 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import DriverInstallProgressCircle from "@/components/config/DriverInstallProgressCircle.vue";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import { useToast } from "@/composables/useToast";
-import { isTauriRuntime } from "@/lib/tauriRuntime";
-import { countAvailableDriverUpdates } from "@/lib/agentDriverUpdateBadge";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { countAvailableDriverUpdates } from "@/lib/connection/agentDriverUpdateBadge";
 import type { JdbcDriverInfo, JdbcMavenBundleInfo, JdbcPluginStatus } from "@/types/database";
-import * as api from "@/lib/api";
-import type { AgentDriverInfo, DriverRuntimeInfo, DriverRuntimeSummary, DriverStoreUsage, JavaRuntimeConfig } from "@/lib/api";
-import { formatRuntimeBytes, formatRuntimeCpu, formatRuntimeUptime, runtimeHealthClass, runtimeStatusClass, runtimeStatusDotClass } from "@/lib/driverRuntimePresentation";
-import { addDriverInstallQueue, driverInstallProgressPercent, isDriverInstallProgressTarget, removeDriverInstallQueue, takeNextDriverInstallQueue, type DriverInstallProgress } from "@/lib/driverInstallProgressUi";
-import { PRESTOSQL_DRIVER_DB_TYPE, prestoSqlBuiltinDriverRow, prestoSqlMavenBundle } from "@/lib/prestoSqlBuiltinDriver";
+import * as api from "@/lib/backend/api";
+import type { AgentDriverInfo, DriverRuntimeInfo, DriverRuntimeSummary, DriverStoreUsage, JavaRuntimeConfig } from "@/lib/backend/api";
+import { formatRuntimeBytes, formatRuntimeCpu, formatRuntimeUptime, runtimeHealthClass, runtimeStatusClass, runtimeStatusDotClass } from "@/lib/connection/driverRuntimePresentation";
+import { addDriverInstallQueue, driverInstallProgressPercent, isDriverInstallProgressTarget, removeDriverInstallQueue, takeNextDriverInstallQueue, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
+import { PRESTOSQL_DRIVER_DB_TYPE, prestoSqlBuiltinDriverRow, prestoSqlMavenBundle } from "@/lib/database/prestoSqlBuiltinDriver";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -43,7 +43,7 @@ const driverStoreTab = ref("agent");
 // ──────────── Driver store path ────────────
 
 import { useSettingsStore } from "@/stores/settingsStore";
-import type { DriverStorePathInfo } from "@/lib/api";
+import type { DriverStorePathInfo } from "@/lib/backend/api";
 const settingsStore = useSettingsStore();
 
 type DriverStoreDirKind = "plugin" | "agent";

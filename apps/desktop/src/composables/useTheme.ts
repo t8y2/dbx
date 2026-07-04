@@ -1,7 +1,7 @@
 import { computed, ref } from "vue";
-import { APP_THEME_STORAGE_KEY, getTauriThemeForMode, normalizeAppThemeMode, resolveAppThemeAppearance, type AppThemeMode } from "@/lib/appTheme";
-import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/safeStorage";
-import { isTauriRuntime } from "@/lib/tauriRuntime";
+import { APP_THEME_STORAGE_KEY, getTauriThemeForMode, normalizeAppThemeMode, resolveAppThemeAppearance, type AppThemeMode } from "@/lib/app/appTheme";
+import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 
 const themeMode = ref<AppThemeMode>(normalizeAppThemeMode(safeLocalStorageGet(APP_THEME_STORAGE_KEY)));
 const systemPrefersDark = ref(readSystemPrefersDark());

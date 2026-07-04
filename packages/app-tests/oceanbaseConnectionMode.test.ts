@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { oceanbaseModeConnectionPatch, oceanbaseSubModeFromConfig } from "../../apps/desktop/src/lib/oceanbaseConnectionMode.ts";
+import { oceanbaseModeConnectionPatch, oceanbaseSubModeFromConfig } from "../../apps/desktop/src/lib/database/oceanbaseConnectionMode.ts";
 
 test("detects OceanBase Oracle mode from either database type or driver profile", () => {
   assert.equal(oceanbaseSubModeFromConfig({ db_type: "mysql", driver_profile: "oceanbase-oracle" }), "oracle");

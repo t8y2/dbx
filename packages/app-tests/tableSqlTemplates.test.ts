@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import type { ColumnInfo } from "../../apps/desktop/src/types/database.ts";
-import { buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTemplate, buildTableUpdateTemplate } from "../../apps/desktop/src/lib/tableSqlTemplates.ts";
+import { buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTemplate, buildTableUpdateTemplate } from "../../apps/desktop/src/lib/table/tableSqlTemplates.ts";
 
 function col(overrides: Partial<ColumnInfo> & { name: string; data_type: string }): ColumnInfo {
   return {

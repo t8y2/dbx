@@ -7,14 +7,14 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import CustomContextMenu, { type ContextMenuItem as CtxMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { useToast } from "@/composables/useToast";
-import { isTauriRuntime } from "@/lib/tauriRuntime";
-import * as api from "@/lib/api";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import * as api from "@/lib/backend/api";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { focusSidebarRenameInput } from "@/lib/sidebarRenameFocus";
-import { savedSqlFolderBranchFileCount } from "@/lib/savedSqlFolderCounts";
+import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
+import { savedSqlFolderBranchFileCount } from "@/lib/savedSql/savedSqlFolderCounts";
 import type { SavedSqlFile, SavedSqlFolder } from "@/types/database";
 
 const { t } = useI18n();

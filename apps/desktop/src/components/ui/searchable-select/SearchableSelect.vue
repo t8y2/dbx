@@ -6,8 +6,8 @@ import { Button } from "@/components/ui/button";
 import type { ButtonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { filterDatabaseOptions } from "@/lib/databaseOptionSearch";
-import { cn } from "@/lib/utils";
+import { filterDatabaseOptions } from "@/lib/database/databaseOptionSearch";
+import { cn } from "@/lib/common/utils";
 
 const props = withDefaults(
   defineProps<{

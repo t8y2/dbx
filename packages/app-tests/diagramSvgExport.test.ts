@@ -1,8 +1,8 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildEngineeringDiagram } from "../../apps/desktop/src/lib/engineeringDiagram.ts";
-import { buildEngineeringDiagramSvg, buildTableDiagramSvg, diagramSvgFileName } from "../../apps/desktop/src/lib/diagramSvgExport.ts";
-import { buildDiagramRelationships, type DiagramTable } from "../../apps/desktop/src/lib/erDiagram.ts";
+import { buildEngineeringDiagram } from "../../apps/desktop/src/lib/diagram/engineeringDiagram.ts";
+import { buildEngineeringDiagramSvg, buildTableDiagramSvg, diagramSvgFileName } from "../../apps/desktop/src/lib/export/diagramSvgExport.ts";
+import { buildDiagramRelationships, type DiagramTable } from "../../apps/desktop/src/lib/diagram/erDiagram.ts";
 
 const tables: DiagramTable[] = [
   {

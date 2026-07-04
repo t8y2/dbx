@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { canApplyGridSelectionValue, matchesRowStatusFilter, rowStatusFilterAfterAddingRow, type RowStatus } from "../../apps/desktop/src/lib/gridRowStatus.ts";
+import { canApplyGridSelectionValue, matchesRowStatusFilter, rowStatusFilterAfterAddingRow, type RowStatus } from "../../apps/desktop/src/lib/dataGrid/gridRowStatus.ts";
 
 const statuses: RowStatus[] = ["clean", "edited", "new", "deleted"];
 

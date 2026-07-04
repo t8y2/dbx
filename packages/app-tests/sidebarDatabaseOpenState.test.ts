@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { canCloseSidebarDatabaseConnection, isSidebarDatabaseOpened } from "../../apps/desktop/src/lib/sidebarDatabaseOpenState.ts";
+import { canCloseSidebarDatabaseConnection, isSidebarDatabaseOpened } from "../../apps/desktop/src/lib/sidebar/sidebarDatabaseOpenState.ts";
 import type { TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 function databaseNode(id: string): TreeNode {

@@ -1,6 +1,6 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import { focusSidebarRenameInput, shouldPreventRenameCloseAutoFocus } from "../../apps/desktop/src/lib/sidebarRenameFocus.ts";
+import { focusSidebarRenameInput, shouldPreventRenameCloseAutoFocus } from "../../apps/desktop/src/lib/sidebar/sidebarRenameFocus.ts";
 
 test("focusSidebarRenameInput waits for menu focus restoration before focusing", () => {
   const calls: string[] = [];

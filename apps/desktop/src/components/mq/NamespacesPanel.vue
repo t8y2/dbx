@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { formatError } from "@/lib/errorUtils";
+import { formatError } from "@/lib/backend/errorUtils";
 import { ref, watch } from "vue";
 import type { NamespaceRef, NamespaceInfo, NamespaceConfig } from "@/types/mq";
-import { mqListNamespaces, mqCreateNamespace, mqDeleteNamespace } from "@/lib/api";
+import { mqListNamespaces, mqCreateNamespace, mqDeleteNamespace } from "@/lib/backend/api";
 
 interface Props {
   connectionId: string;

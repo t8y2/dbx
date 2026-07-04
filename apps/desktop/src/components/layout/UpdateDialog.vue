@@ -4,8 +4,8 @@ import { useI18n } from "vue-i18n";
 import { Loader2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import type { UpdateInfo } from "@/lib/api";
-import { isTauriRuntime } from "@/lib/tauriRuntime";
+import type { UpdateInfo } from "@/lib/backend/api";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { canDownloadAndInstallUpdate } from "@/composables/useAppUpdater";
 
 const open = defineModel<boolean>("open", { required: true });

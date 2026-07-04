@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { uuid } from "@/lib/utils";
+import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { AlertCircle, Loader2, Search, Square, Table2 } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
@@ -9,10 +9,10 @@ import { Dialog, DialogFooter, DialogHeader, DialogScrollContent, DialogTitle } 
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useConnectionStore } from "@/stores/connectionStore";
-import * as api from "@/lib/api";
-import { buildDatabaseSearchSql, buildSearchResultWhere, findMatchedSearchColumns } from "@/lib/databaseSearch";
+import * as api from "@/lib/backend/api";
+import { buildDatabaseSearchSql, buildSearchResultWhere, findMatchedSearchColumns } from "@/lib/database/databaseSearch";
 import type { DatabaseType, TableInfo } from "@/types/database";
-import { isSchemaAware } from "@/lib/databaseCapabilities";
+import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 
 const props = defineProps<{
   open: boolean;
@@ -29,6 +29,7 @@ const emit = defineEmits<{
       database: string;
       schema?: string;
       tableName: string;
+      tableType?: string;
       whereInput?: string;
     },
   ];
@@ -45,6 +46,7 @@ type SearchResultItem = {
   id: string;
   schema?: string;
   tableName: string;
+  tableType?: string;
   matchedColumns: string[];
   preview: string;
   whereInput: string;
@@ -223,6 +225,7 @@ async function searchTable(task: SearchTableTask, databaseType: DatabaseType, cu
         id: `${tableLabel}:${rowIndex}:${results.value.length}`,
         schema: task.schema,
         tableName: task.table.name,
+        tableType: task.table.table_type,
         matchedColumns,
         preview: rowPreview(result.columns, row, matchedColumns),
         whereInput,
@@ -257,6 +260,7 @@ function openResult(item: SearchResultItem) {
     database: props.prefillDatabase,
     schema: item.schema,
     tableName: item.tableName,
+    tableType: item.tableType,
     whereInput: item.whereInput,
   });
 }

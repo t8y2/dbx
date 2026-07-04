@@ -29,8 +29,13 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
     };
     let order_by = options.order_by.as_deref().filter(|order| !order.trim().is_empty()).or(default_order_by.as_deref());
     let order = order_by.map(|order_by| format!(" ORDER BY {order_by}")).unwrap_or_default();
+    // Oracle join views can raise ORA-01445 when ROWID is selected; keep the
+    // synthetic ROWID fallback scoped to base-table reads.
+    let include_oracle_row_id = options.include_row_id
+        && database_type == Some(DatabaseType::Oracle)
+        && !is_view_table_type(options.table_type.as_deref());
 
-    let select_columns = if options.include_row_id && database_type == Some(DatabaseType::Oracle) {
+    let select_columns = if include_oracle_row_id {
         format!("ROWIDTOCHAR(t.ROWID) AS \"{DBX_ROWID_COLUMN}\", t.*")
     } else {
         build_select_columns(
@@ -40,7 +45,7 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
         )
     };
     let rownum_select_columns = quoted_table_columns_or_star(database_type, &options.columns);
-    let page_select_columns = if options.include_row_id && database_type == Some(DatabaseType::Oracle) {
+    let page_select_columns = if include_oracle_row_id {
         if options.columns.is_empty() {
             "*".to_string()
         } else {
@@ -49,11 +54,8 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
     } else {
         rownum_select_columns.clone()
     };
-    let table_alias = if options.include_row_id && database_type.is_some_and(uses_fetch_first) {
-        format!("{table} t")
-    } else {
-        table
-    };
+    let table_alias =
+        if include_oracle_row_id && database_type.is_some_and(uses_fetch_first) { format!("{table} t") } else { table };
 
     match table_pagination_strategy(database_type) {
         TablePaginationStrategy::IrisTop => {
@@ -88,11 +90,8 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
             )
         }
         TablePaginationStrategy::Rownum => {
-            let rownum_inner_select_columns = if options.include_row_id && database_type == Some(DatabaseType::Oracle) {
-                &select_columns
-            } else {
-                &rownum_select_columns
-            };
+            let rownum_inner_select_columns =
+                if include_oracle_row_id { &select_columns } else { &rownum_select_columns };
             build_rownum_table_select_sql(
                 &table_alias,
                 &where_clause,
@@ -134,6 +133,10 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
             format!("SELECT {select_columns} FROM {table_alias}{where_clause}{order} LIMIT {limit}{offset};")
         }
     }
+}
+
+fn is_view_table_type(table_type: Option<&str>) -> bool {
+    table_type.is_some_and(|value| value.to_ascii_uppercase().contains("VIEW"))
 }
 
 pub fn build_table_select_sql(options: TableSelectSqlOptions<'_>) -> String {

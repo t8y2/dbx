@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, parseSqlFormatterConfig, serializeSqlFormatterConfig, sqlFormatterOptions, syncSqlFormatterConfigDraft } from "../../apps/desktop/src/lib/sqlFormatterConfig.ts";
+import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, parseSqlFormatterConfig, serializeSqlFormatterConfig, sqlFormatterOptions, syncSqlFormatterConfigDraft } from "../../apps/desktop/src/lib/sql/sqlFormatterConfig.ts";
 
 const defaultOptionSettings = DEFAULT_SQL_FORMATTER_SETTINGS;
 

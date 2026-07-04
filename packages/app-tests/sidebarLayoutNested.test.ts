@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { buildTreeNodesFromLayout, deleteGroup, moveConnectionToGroup, reconcileLayout, reorderEntry } from "../../apps/desktop/src/lib/sidebarLayout.ts";
+import { buildTreeNodesFromLayout, deleteGroup, moveConnectionToGroup, reconcileLayout, reorderEntry } from "../../apps/desktop/src/lib/sidebar/sidebarLayout.ts";
 import type { ConnectionConfig, SidebarLayout } from "../../apps/desktop/src/types/database.ts";
 
 function conn(id: string): ConnectionConfig {

@@ -12,8 +12,8 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import type { ConnectionConfig } from "@/types/database";
-import * as api from "@/lib/api";
-import { grantsFromQueryResult, getDatabaseUserAdminProvider, supportsDatabaseUserAdmin, type DatabaseUserIdentity, type PrivilegeScope } from "@/lib/databaseUserAdmin";
+import * as api from "@/lib/backend/api";
+import { grantsFromQueryResult, getDatabaseUserAdminProvider, supportsDatabaseUserAdmin, type DatabaseUserIdentity, type PrivilegeScope } from "@/lib/database/databaseUserAdmin";
 
 const props = defineProps<{
   connection: ConnectionConfig;

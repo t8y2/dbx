@@ -1,6 +1,6 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY } from "@/lib/openTabsPersistence";
+import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY } from "@/lib/app/openTabsPersistence";
 
 function installLocalStorage() {
   const data = new Map<string, string>();
@@ -38,6 +38,107 @@ describe("queryStore database open state", () => {
     store.closeTab(tabId);
 
     expect(store.isDatabaseOpen("pg-1", "analytics")).toBe(false);
+  });
+
+  it("closes data and structure tabs for a dropped table object", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    const queryId = store.createTab("pg-1", "app", "Query", "query", "public");
+    const dataId = store.createTab("pg-1", "app", "users", "data", "public");
+    store.setTableMeta(dataId, {
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [],
+      primaryKeys: [],
+    });
+    const otherSchemaDataId = store.createTab("pg-1", "app", "users", "data", "archive");
+    store.setTableMeta(otherSchemaDataId, {
+      schema: "archive",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [],
+      primaryKeys: [],
+    });
+    const otherConnectionDataId = store.createTab("pg-2", "app", "users", "data", "public");
+    store.setTableMeta(otherConnectionDataId, {
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [],
+      primaryKeys: [],
+    });
+    const structureId = store.openTableStructure("pg-1", "app", "public", "users");
+
+    store.activeTabId = dataId;
+    store.closeDroppedTableObjectTabs({
+      connectionId: "pg-1",
+      database: "app",
+      schema: "public",
+      name: "users",
+      objectType: "TABLE",
+    });
+
+    expect(store.tabs.some((tab) => tab.id === dataId)).toBe(false);
+    expect(store.tabs.some((tab) => tab.id === structureId)).toBe(false);
+    expect(store.tabs.some((tab) => tab.id === otherSchemaDataId)).toBe(true);
+    expect(store.tabs.some((tab) => tab.id === otherConnectionDataId)).toBe(true);
+    expect(store.tabs.some((tab) => tab.id === queryId)).toBe(true);
+    expect(store.activeTabId).not.toBe(dataId);
+  });
+
+  it("closes data tabs but keeps structure tabs for dropped views", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    const dataId = store.createTab("pg-1", "app", "report_view", "data", "public");
+    store.setTableMeta(dataId, {
+      schema: "public",
+      tableName: "report_view",
+      tableType: "VIEW",
+      columns: [],
+      primaryKeys: [],
+    });
+    const structureId = store.openTableStructure("pg-1", "app", "public", "report_view");
+
+    store.closeDroppedTableObjectTabs({
+      connectionId: "pg-1",
+      database: "app",
+      schema: "public",
+      name: "report_view",
+      objectType: "VIEW",
+    });
+
+    expect(store.tabs.some((tab) => tab.id === dataId)).toBe(false);
+    expect(store.tabs.some((tab) => tab.id === structureId)).toBe(true);
+  });
+
+  it("matches dropped table schema candidates", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    const dataId = store.createTab("pg-1", "app", "orders", "data", "app");
+    store.setTableMeta(dataId, {
+      schema: "app",
+      tableName: "orders",
+      tableType: "TABLE",
+      columns: [],
+      primaryKeys: [],
+    });
+    const structureId = store.openTableStructure("pg-1", "app", undefined, "orders");
+
+    store.closeDroppedTableObjectTabs({
+      connectionId: "pg-1",
+      database: "app",
+      schema: "app",
+      schemaCandidates: [undefined, "app"],
+      name: "orders",
+      objectType: "TABLE",
+    });
+
+    expect(store.tabs.some((tab) => tab.id === dataId)).toBe(false);
+    expect(store.tabs.some((tab) => tab.id === structureId)).toBe(false);
   });
 
   it("does not restore open tabs when launch restore mode is none", async () => {

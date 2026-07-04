@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { isRedisMutatingCommand, resolveRedisCommandSpec } from "../../apps/desktop/src/lib/redisCommandTable.ts";
+import { isRedisMutatingCommand, resolveRedisCommandSpec } from "../../apps/desktop/src/lib/redis/redisCommandTable.ts";
 
 test("write commands are flagged as mutating", () => {
   assert.equal(isRedisMutatingCommand("SET foo bar"), true);

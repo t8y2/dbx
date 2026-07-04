@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { formatError } from "@/lib/errorUtils";
+import { formatError } from "@/lib/backend/errorUtils";
 import { computed, nextTick, ref, watch } from "vue";
 import type { AuthAction, MqIssuedToken, MqTokenRecord, PermissionMap, PolicyScope, TopicInfo } from "@/types/mq";
-import { mqGrantPermission, mqIssueToken, mqListPermissions, mqListTokenRecords, mqRevokePermission } from "@/lib/api";
-import { formatMqTokenIssueError, type MqTokenIssueErrorView } from "@/lib/mqTokenErrors";
+import { mqGrantPermission, mqIssueToken, mqListPermissions, mqListTokenRecords, mqRevokePermission } from "@/lib/backend/api";
+import { formatMqTokenIssueError, type MqTokenIssueErrorView } from "@/lib/mq/mqTokenErrors";
 
 interface Props {
   connectionId: string;

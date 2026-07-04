@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildElasticsearchCompletionItems, getElasticsearchCompletionContext, shouldAutoOpenElasticsearchCompletion } from "../../apps/desktop/src/lib/elasticsearchCompletion.ts";
-import { buildSqlCompletionItems } from "../../apps/desktop/src/lib/sqlCompletion.ts";
+import { buildElasticsearchCompletionItems, getElasticsearchCompletionContext, shouldAutoOpenElasticsearchCompletion } from "../../apps/desktop/src/lib/elasticsearch/elasticsearchCompletion.ts";
+import { buildSqlCompletionItems } from "../../apps/desktop/src/lib/sql/sqlCompletion.ts";
 
 const indices = ["orders", "order_items", "users"];
 

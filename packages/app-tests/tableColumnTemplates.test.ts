@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { createTableColumnTemplateDrafts, DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS, normalizeTableColumnTemplateFields, parseTableColumnTemplateFields, PRESET_FIELDS_TEMPLATE_ID, tableColumnTemplates, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES } from "../../apps/desktop/src/lib/tableColumnTemplates.ts";
+import { createTableColumnTemplateDrafts, DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS, normalizeTableColumnTemplateFields, parseTableColumnTemplateFields, PRESET_FIELDS_TEMPLATE_ID, tableColumnTemplates, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES } from "../../apps/desktop/src/lib/table/tableColumnTemplates.ts";
 
 const sixCustomFields = [
   "tenant_id | mysql:bigint | postgres:uuid | default:0 | comment:Tenant",

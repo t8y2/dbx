@@ -69,8 +69,8 @@ describe("connectionStore MQ sidebar tree", () => {
       { name: "tenant-a", adminRoles: [], allowedClusters: [] },
     ]);
 
-    vi.doMock("@/lib/tauriRuntime", () => ({ isTauriRuntime: () => false }));
-    vi.doMock("@/lib/api", () => ({
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       listDatabases: vi.fn().mockResolvedValue([]),
@@ -106,8 +106,8 @@ describe("connectionStore MQ sidebar tree", () => {
   });
 
   it("adds a Kafka topics child with a topics initial tab", async () => {
-    vi.doMock("@/lib/tauriRuntime", () => ({ isTauriRuntime: () => false }));
-    vi.doMock("@/lib/api", () => ({
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       listDatabases: vi.fn().mockResolvedValue([]),
@@ -139,8 +139,8 @@ describe("connectionStore MQ sidebar tree", () => {
 
   it("detects Kafka from external config when driver profile is missing", async () => {
     const mqListTenants = vi.fn();
-    vi.doMock("@/lib/tauriRuntime", () => ({ isTauriRuntime: () => false }));
-    vi.doMock("@/lib/api", () => ({
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       listDatabases: vi.fn().mockResolvedValue([]),
@@ -180,8 +180,8 @@ describe("connectionStore MQ sidebar tree", () => {
         }),
     );
 
-    vi.doMock("@/lib/tauriRuntime", () => ({ isTauriRuntime: () => false }));
-    vi.doMock("@/lib/api", () => ({
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       connectDb,
     }));

@@ -2,12 +2,12 @@
 import { reactive, ref, computed, onMounted, watch, type ComponentPublicInstance } from "vue";
 import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
-import * as api from "@/lib/api";
-import type { TableGenerateConfig } from "@/lib/dataGenerate";
-import { findGeneratorKey, generateTableData, defaultGeneratorParams } from "@/lib/dataGenerate";
-import { quoteTableIdentifier } from "@/lib/tableSelectSql";
-import { isTauriRuntime } from "@/lib/tauriRuntime";
-import { effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
+import * as api from "@/lib/backend/api";
+import type { TableGenerateConfig } from "@/lib/dataGrid/dataGenerate";
+import { findGeneratorKey, generateTableData, defaultGeneratorParams } from "@/lib/dataGrid/dataGenerate";
+import { quoteTableIdentifier } from "@/lib/table/tableSelectSql";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import GeneratorParamsPanel from "./params/GeneratorParamsPanel.vue";
 import type { ColumnInfo, TableInfo } from "@/types/database";
 

@@ -7,8 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
-import { loadRoutineParameters } from "@/lib/routineParameters";
-import { acceptsRoutineInput, buildProcedureExecutionSql, buildProcedureExecutionSqlFromValues, type RoutineParameterValue } from "@/lib/routineExecutionSql";
+import { loadRoutineParameters } from "@/lib/table/routineParameters";
+import { acceptsRoutineInput, buildProcedureExecutionSql, buildProcedureExecutionSqlFromValues, type RoutineParameterValue } from "@/lib/table/routineExecutionSql";
 import type { DatabaseType } from "@/types/database";
 
 const { t } = useI18n();

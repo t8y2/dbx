@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { cellImagePreviewUrl } from "../../apps/desktop/src/lib/cellImageUrl.ts";
+import { cellImagePreviewUrl } from "../../apps/desktop/src/lib/dataGrid/cellImageUrl.ts";
 
 test("detects obvious remote image URLs", () => {
   assert.equal(cellImagePreviewUrl("https://cdn.example.com/avatar/user.png"), "https://cdn.example.com/avatar/user.png");

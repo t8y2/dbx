@@ -1,6 +1,6 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import { buildSqlServerDatabaseTreeNodes } from "../../apps/desktop/src/lib/sqlServerTree.ts";
+import { buildSqlServerDatabaseTreeNodes } from "../../apps/desktop/src/lib/database/sqlServerTree.ts";
 
 test("SQL Server database tree shows schemas before objects", () => {
   const nodes = buildSqlServerDatabaseTreeNodes("conn", "app", ["dbo", "zeta", "sales"]);

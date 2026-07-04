@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { uuid } from "@/lib/utils";
+import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
-import { isTauriRuntime } from "@/lib/tauriRuntime";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { Dialog, DialogHeader, DialogTitle, DialogFooter, DialogScrollContent } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,9 +11,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Check, FileUp, Loader2, Square, Upload, X } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
-import { autoMapImportColumns } from "@/lib/tableImport";
+import { autoMapImportColumns } from "@/lib/table/tableImport";
 import type { ColumnInfo } from "@/types/database";
-import * as api from "@/lib/api";
+import * as api from "@/lib/backend/api";
 
 const { t } = useI18n();
 const store = useConnectionStore();
@@ -104,7 +104,7 @@ async function previewSelectedImportFile(fileOrPath: string | File) {
   if (isTauriRuntime()) {
     return api.previewTableImportFile(fileOrPath as string);
   }
-  const { previewTableImportFile } = await import("@/lib/http");
+  const { previewTableImportFile } = await import("@/lib/backend/http");
   return previewTableImportFile(fileOrPath as File);
 }
 

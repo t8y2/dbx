@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { formatError } from "@/lib/errorUtils";
+import { formatError } from "@/lib/backend/errorUtils";
 import { computed, ref } from "vue";
 import type { MqRawResponse, TopicInfo } from "@/types/mq";
-import { mqRawRequest } from "@/lib/api";
+import { mqRawRequest } from "@/lib/backend/api";
 
 interface Props {
   connectionId: string;

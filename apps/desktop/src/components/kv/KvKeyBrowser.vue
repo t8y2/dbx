@@ -11,11 +11,11 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
-import type { KvCreateMode, KvGetResponse, KvKeySummary, KvListPrefixOptions, KvPutOptions, KvPutResponse, KvValue } from "@/lib/api";
-import { buildKvKeyTree, flattenVisibleKvKeyTree, preserveKvExpandedGroupIds, type KvKeyTreeNode } from "@/lib/kvKeyTree";
-import { refreshedKvSelectionKey } from "@/lib/kvRefreshSelection";
-import { formatZooKeeperMetadataRows, formatZooKeeperSummaryBadges, prettyPrintJsonText } from "@/lib/kvValueDisplay";
-import { createLazyKvKeyTreeState, flattenLazyKvKeyTree, lazyExpandedKeyFromId, normalizeZooKeeperPath, parentZooKeeperPath, replaceLazyKvChildren, replaceLazyKvFocusedRoot, resetLazyKvKeyTree, type LazyKvKeyTreeNode, type LazyKvKeyTreeRow } from "@/lib/zookeeperLazyKeyTree";
+import type { KvCreateMode, KvGetResponse, KvKeySummary, KvListPrefixOptions, KvPutOptions, KvPutResponse, KvValue } from "@/lib/backend/api";
+import { buildKvKeyTree, flattenVisibleKvKeyTree, preserveKvExpandedGroupIds, type KvKeyTreeNode } from "@/lib/kv/kvKeyTree";
+import { refreshedKvSelectionKey } from "@/lib/kv/kvRefreshSelection";
+import { formatZooKeeperMetadataRows, formatZooKeeperSummaryBadges, prettyPrintJsonText } from "@/lib/kv/kvValueDisplay";
+import { createLazyKvKeyTreeState, flattenLazyKvKeyTree, lazyExpandedKeyFromId, normalizeZooKeeperPath, parentZooKeeperPath, replaceLazyKvChildren, replaceLazyKvFocusedRoot, resetLazyKvKeyTree, type LazyKvKeyTreeNode, type LazyKvKeyTreeRow } from "@/lib/zookeeper/zookeeperLazyKeyTree";
 import { useToast } from "@/composables/useToast";
 
 interface KvKeyBrowserLabels {

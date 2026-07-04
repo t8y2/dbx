@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { compileSchemaDiffTableFilter, filterSchemaDiffTables } from "../../apps/desktop/src/lib/schemaDiffTableFilter.ts";
+import { compileSchemaDiffTableFilter, filterSchemaDiffTables } from "../../apps/desktop/src/lib/schema/schemaDiffTableFilter.ts";
 import type { TableInfo } from "../../apps/desktop/src/types/database.ts";
 import { normalizeSchemaDiffCompareOptions } from "../../apps/desktop/src/types/schemaDiff.ts";
 

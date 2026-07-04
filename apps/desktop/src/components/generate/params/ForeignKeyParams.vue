@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { Label } from "@/components/ui/label";
-import type { GeneratorParams } from "@/lib/dataGenerate";
-import * as api from "@/lib/api";
+import type { GeneratorParams } from "@/lib/dataGrid/dataGenerate";
+import * as api from "@/lib/backend/api";
 
 const props = defineProps<{ params: GeneratorParams; config: any; connectionId?: string; database?: string }>();
 

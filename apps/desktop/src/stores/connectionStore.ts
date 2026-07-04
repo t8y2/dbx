@@ -1,8 +1,8 @@
 import { defineStore } from "pinia";
-import { uuid } from "@/lib/utils";
+import { uuid } from "@/lib/common/utils";
 import { ref, computed, watch } from "vue";
 import type { ColumnInfo, CompletionAssistantCandidate, CompletionAssistantObjectKind, CompletionAssistantRequest, ConnectionConfig, ForeignKeyInfo, ObjectInfo, SchemaInfo, SidebarLayout, TableInfo, TreeNode } from "@/types/database";
-import { applyPinnedTreeNodeState, updatePinnedTreeNodeInPlace } from "@/lib/pinnedItems";
+import { applyPinnedTreeNodeState, updatePinnedTreeNodeInPlace } from "@/lib/app/pinnedItems";
 import {
   reconcileLayout,
   buildTreeNodesFromLayout,
@@ -19,19 +19,19 @@ import {
   remapSidebarLayoutConnectionIds,
   reorderEntry as reorderEntryOp,
   type DropPosition,
-} from "@/lib/sidebarLayout";
-import type { SqlCompletionColumn, SqlCompletionForeignKey, SqlCompletionObject, SqlCompletionTable } from "@/lib/sqlCompletion";
-import * as api from "@/lib/api";
-import { isTauriRuntime } from "@/lib/tauriRuntime";
-import { isSchemaAware, normalizeSidebarObjectKind, sidebarObjectKindsForDatabase, usesTreeSchemaMode } from "@/lib/databaseCapabilities";
-import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
-import { buildDatabaseTreeNodes, buildDuckDbConnectionTreeNodes, sortSidebarNames, shouldIncludeDefaultDatabaseNode } from "@/lib/databaseTree";
-import { buildSqlServerDatabaseTreeNodes } from "@/lib/sqlServerTree";
-import { collapseExpandedTreeNodes } from "@/lib/sidebarTreeCollapse";
-import { findDatabaseTreeNode } from "@/lib/treeRefreshTarget";
-import { shouldMarkDisconnected } from "@/lib/connectionHealth";
-import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connectionAttemptTimeout";
-import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, filterSchemaNamesForConnection, filterVisibleDatabaseNames, normalizeVisibleDatabaseSelection } from "@/lib/visibleDatabases";
+} from "@/lib/sidebar/sidebarLayout";
+import type { SqlCompletionColumn, SqlCompletionForeignKey, SqlCompletionObject, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
+import * as api from "@/lib/backend/api";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { isSchemaAware, normalizeSidebarObjectKind, sidebarObjectKindsForDatabase, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
+import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { buildDatabaseTreeNodes, buildDuckDbConnectionTreeNodes, sortSidebarNames, shouldIncludeDefaultDatabaseNode } from "@/lib/database/databaseTree";
+import { buildSqlServerDatabaseTreeNodes } from "@/lib/database/sqlServerTree";
+import { collapseExpandedTreeNodes } from "@/lib/sidebar/sidebarTreeCollapse";
+import { findDatabaseTreeNode } from "@/lib/sidebar/treeRefreshTarget";
+import { shouldMarkDisconnected } from "@/lib/connection/connectionHealth";
+import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connection/connectionAttemptTimeout";
+import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, filterSchemaNamesForConnection, filterVisibleDatabaseNames, normalizeVisibleDatabaseSelection } from "@/lib/database/visibleDatabases";
 import {
   buildObjectGroupPlaceholderNodes,
   buildGroupedObjectTreeNodes,
@@ -46,21 +46,21 @@ import {
   sortDatabaseObjectsByName,
   tablePartitionGroups,
   type DatabaseObjectTreeKind,
-} from "@/lib/tableTree";
-import { hasTreeNodeDatabaseContext, normalizeCataloglessDatabaseNodes, treeNodeSchemaCachePrefix } from "@/lib/treeNodeContext";
-import { decodeSchemaTreeCache, encodeSchemaTreeCache } from "@/lib/schemaTreeCache";
-import { sortSidebarTreeChildrenForParent } from "@/lib/sidebarNodeOrdering";
-import { prunePinnedTreeNodeIdsForConnection } from "@/lib/pinnedTreeNodeIds";
-import { supportsDatabaseUserAdmin } from "@/lib/databaseUserAdmin";
-import { getTableMetadataCapabilities } from "@/lib/tableMetadataCapabilities";
+} from "@/lib/table/tableTree";
+import { hasTreeNodeDatabaseContext, normalizeCataloglessDatabaseNodes, treeNodeSchemaCachePrefix } from "@/lib/sidebar/treeNodeContext";
+import { decodeSchemaTreeCache, encodeSchemaTreeCache } from "@/lib/metadata/schemaTreeCache";
+import { sortSidebarTreeChildrenForParent } from "@/lib/sidebar/sidebarNodeOrdering";
+import { prunePinnedTreeNodeIdsForConnection } from "@/lib/app/pinnedTreeNodeIds";
+import { supportsDatabaseUserAdmin } from "@/lib/database/databaseUserAdmin";
+import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { encodeSqlServerLinkedSchema, parseSqlServerLinkedSchema } from "@/lib/sqlServerLinkedServers";
-import { inferMongoCompletionFields, type MongoCompletionField } from "@/lib/mongoCompletion";
-import { completionSchemasFromTree, completionTablesFromTree } from "@/lib/completionTreeIndex";
-import { kvRootNodeLabel } from "@/lib/kvRootPresentation";
-import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redisKeyPattern";
-import { appendAgentDriverUpdateHint, hasAgentDriverUpdate, type AgentDriverInstallState } from "@/lib/agentDriverInstallHint";
-import { MetadataTaskLimiter } from "@/lib/metadataTaskLimiter";
+import { encodeSqlServerLinkedSchema, parseSqlServerLinkedSchema } from "@/lib/database/sqlServerLinkedServers";
+import { inferMongoCompletionFields, type MongoCompletionField } from "@/lib/mongo/mongoCompletion";
+import { completionSchemasFromTree, completionTablesFromTree } from "@/lib/metadata/completionTreeIndex";
+import { kvRootNodeLabel } from "@/lib/kv/kvRootPresentation";
+import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
+import { appendAgentDriverUpdateHint, hasAgentDriverUpdate, type AgentDriverInstallState } from "@/lib/connection/agentDriverInstallHint";
+import { MetadataTaskLimiter } from "@/lib/metadata/metadataTaskLimiter";
 import i18n from "@/i18n";
 import type { MqAdminConfig } from "@/types/mq";
 
@@ -147,10 +147,20 @@ interface TreeClipboardTableEntry {
   tableName: string;
 }
 
-export interface TreeClipboard {
-  kind: "table-copy";
-  tables: TreeClipboardTableEntry[];
+interface TreeClipboardConnectionEntry {
+  config: ConnectionConfig;
+  sourceGroupId: string | null;
 }
+
+export type TreeClipboard =
+  | {
+      kind: "table-copy";
+      tables: TreeClipboardTableEntry[];
+    }
+  | {
+      kind: "connection-copy";
+      connections: TreeClipboardConnectionEntry[];
+    };
 
 interface LoadTreeOptions {
   force?: boolean;
@@ -1015,6 +1025,43 @@ export const useConnectionStore = defineStore("connection", () => {
     rebuildTreeNodes();
     persistSidebarLayoutDebounced();
     stopCreatingConnectionInGroup();
+  }
+
+  function copyConnectionsToTreeClipboard(connectionIds: Iterable<string>): number {
+    const seen = new Set<string>();
+    const entries: TreeClipboardConnectionEntry[] = [];
+    for (const connectionId of connectionIds) {
+      if (seen.has(connectionId)) continue;
+      seen.add(connectionId);
+      const config = getConfig(connectionId);
+      if (!config) continue;
+      entries.push({
+        config: { ...config },
+        sourceGroupId: findConnectionLocation(sidebarLayout.value, connectionId)?.groupId ?? null,
+      });
+    }
+    if (!entries.length) return 0;
+    treeClipboard.value = { kind: "connection-copy", connections: entries };
+    return entries.length;
+  }
+
+  async function pasteConnectionClipboard(targetGroupId?: string | null): Promise<number> {
+    const clipboard = treeClipboard.value;
+    if (clipboard?.kind !== "connection-copy" || clipboard.connections.length === 0) return 0;
+
+    let pastedCount = 0;
+    for (const entry of clipboard.connections) {
+      await addConnection(
+        {
+          ...entry.config,
+          id: uuid(),
+          name: `${entry.config.name} (Copy)`,
+        },
+        targetGroupId === undefined ? entry.sourceGroupId : targetGroupId,
+      );
+      pastedCount += 1;
+    }
+    return pastedCount;
   }
 
   function invalidateCompletionCache(connectionId: string, database?: string) {
@@ -3596,7 +3643,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function exportConnectionsToFile(passphrase: string) {
-    const { encryptConfig } = await import("@/lib/configCrypto");
+    const { encryptConfig } = await import("@/lib/backend/configCrypto");
     const exportData = { connections: connections.value, layout: sidebarLayout.value };
     const json = JSON.stringify(exportData);
     const payload = await encryptConfig(json, passphrase);
@@ -3777,7 +3824,7 @@ export const useConnectionStore = defineStore("connection", () => {
       return { content, encrypted: false };
     }
 
-    const { isEncryptedConfig } = await import("@/lib/configCrypto");
+    const { isEncryptedConfig } = await import("@/lib/backend/configCrypto");
     const parsed = JSON.parse(content);
     return { content, encrypted: isEncryptedConfig(parsed) };
   }
@@ -3787,11 +3834,11 @@ export const useConnectionStore = defineStore("connection", () => {
     let importedLayout: SidebarLayout | undefined;
 
     if (!passphrase && content.trimStart().startsWith("<")) {
-      const { parseNavicatConnections } = await import("@/lib/navicatImport");
+      const { parseNavicatConnections } = await import("@/lib/imports/navicatImport");
       imported = await parseNavicatConnections(content);
     } else if (!passphrase) {
-      const { isDbeaverImportPayload, parseDbeaverConnections } = await import("@/lib/dbeaverImport");
-      const { isDataGripImportPayload, parseDataGripConnections } = await import("@/lib/datagripImport");
+      const { isDbeaverImportPayload, parseDbeaverConnections } = await import("@/lib/imports/dbeaverImport");
+      const { isDataGripImportPayload, parseDataGripConnections } = await import("@/lib/imports/datagripImport");
       if (isDataGripImportPayload(content)) {
         const payload = JSON.parse(content) as {
           format: "datagrip-import";
@@ -3822,7 +3869,7 @@ export const useConnectionStore = defineStore("connection", () => {
       const parsed = JSON.parse(content);
 
       if (passphrase) {
-        const { decryptConfig } = await import("@/lib/configCrypto");
+        const { decryptConfig } = await import("@/lib/backend/configCrypto");
         const json = await decryptConfig(parsed, passphrase);
         const decrypted = JSON.parse(json);
         if (Array.isArray(decrypted)) {
@@ -3866,7 +3913,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!payload) return 0;
 
     try {
-      const { getDataGripUuidMap, datagripKeychainService } = await import("@/lib/datagripImport");
+      const { getDataGripUuidMap, datagripKeychainService } = await import("@/lib/imports/datagripImport");
       // dedupKey → DataGrip UUID
       const uuidMap = getDataGripUuidMap(payload);
       if (uuidMap.size === 0) return 0;
@@ -3979,6 +4026,8 @@ export const useConnectionStore = defineStore("connection", () => {
     isTreeNodePinned,
     toggleTreeNodePin,
     addConnection,
+    copyConnectionsToTreeClipboard,
+    pasteConnectionClipboard,
     addEphemeralConnection,
     updateConnection,
     setDefaultDatabase,

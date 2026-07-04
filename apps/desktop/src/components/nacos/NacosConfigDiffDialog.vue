@@ -4,7 +4,7 @@ import { Loader2 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { buildNacosInlineDiff, buildNacosSideBySideDiff, summarizeNacosConfigDiff, type NacosDiffLineType, type NacosInlineSegment } from "@/lib/nacosAdmin";
+import { buildNacosInlineDiff, buildNacosSideBySideDiff, summarizeNacosConfigDiff, type NacosDiffLineType, type NacosInlineSegment } from "@/lib/nacos/nacosAdmin";
 
 const open = defineModel<boolean>("open", { default: false });
 

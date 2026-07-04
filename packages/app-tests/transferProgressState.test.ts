@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { isTransferRunActive, nextTransferTerminalState, shouldKeepTransferDraftOnOpen, shouldResetTransferDialogOnOpen } from "../../apps/desktop/src/lib/transferProgressState.ts";
+import { isTransferRunActive, nextTransferTerminalState, shouldKeepTransferDraftOnOpen, shouldResetTransferDialogOnOpen } from "../../apps/desktop/src/lib/app/transferProgressState.ts";
 
 test("marks transfer as failed when a table progress event reports error", () => {
   const state = nextTransferTerminalState({ done: false, cancelled: false, error: false }, { status: "error" });

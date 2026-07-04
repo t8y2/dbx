@@ -1,5 +1,5 @@
 import { ref, computed, watch } from "vue";
-import { uuid } from "@/lib/utils";
+import { uuid } from "@/lib/common/utils";
 import type { SchemaDiffConfig, SchemaDiffCompareOptions } from "@/types/schemaDiff";
 import { createEmptyConfig, getDefaultOptionsForDbType } from "@/types/schemaDiff";
 

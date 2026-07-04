@@ -10,13 +10,13 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useToast } from "@/composables/useToast";
-import { resolveHistoryActivityKind } from "@/lib/historyActivityKind";
-import { canRollbackHistoryEntry } from "@/lib/historyAiAnalysis";
-import { hasHistoryDateRange, historyDateRangeIsValid, historyEntryMatchesDateRange, type HistoryDateRange } from "@/lib/historyTimeRange";
-import { HISTORY_ROW_HEIGHT, HISTORY_SCROLL_BUFFER, shouldVirtualizeHistory } from "@/lib/historyVirtualList";
-import type { HistoryEntry } from "@/lib/api";
-import { copyToClipboard } from "@/lib/clipboard";
-import * as api from "@/lib/api";
+import { resolveHistoryActivityKind } from "@/lib/history/historyActivityKind";
+import { canRollbackHistoryEntry } from "@/lib/history/historyAiAnalysis";
+import { hasHistoryDateRange, historyDateRangeIsValid, historyEntryMatchesDateRange, type HistoryDateRange } from "@/lib/history/historyTimeRange";
+import { HISTORY_ROW_HEIGHT, HISTORY_SCROLL_BUFFER, shouldVirtualizeHistory } from "@/lib/history/historyVirtualList";
+import type { HistoryEntry } from "@/lib/backend/api";
+import { copyToClipboard } from "@/lib/common/clipboard";
+import * as api from "@/lib/backend/api";
 
 const { t } = useI18n();
 const { toast } = useToast();

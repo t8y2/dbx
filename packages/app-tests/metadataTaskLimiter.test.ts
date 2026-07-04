@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { MetadataTaskLimiter } from "../../apps/desktop/src/lib/metadataTaskLimiter.ts";
+import { MetadataTaskLimiter } from "../../apps/desktop/src/lib/metadata/metadataTaskLimiter.ts";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;

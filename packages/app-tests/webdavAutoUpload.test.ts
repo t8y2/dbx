@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, test, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { useWebDavAutoUpload } from "@/composables/useWebDavAutoUpload";
-import { readWebDavAutoUploadConfig } from "@/lib/webdavAutoUploadConfig";
+import { readWebDavAutoUploadConfig } from "@/lib/webdav/webdavAutoUploadConfig";
 
 const { webdavSyncUploadMock } = vi.hoisted(() => ({
   webdavSyncUploadMock: vi.fn(),
@@ -17,7 +17,7 @@ vi.mock("vue", async (importOriginal) => {
   };
 });
 
-vi.mock("@/lib/api", () => ({
+vi.mock("@/lib/backend/api", () => ({
   webdavSyncUpload: webdavSyncUploadMock,
 }));
 

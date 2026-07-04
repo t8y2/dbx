@@ -5,9 +5,9 @@ const apiMock = vi.hoisted(() => ({
   findStatementAtCursor: vi.fn(),
 }));
 
-vi.mock("@/lib/api", () => apiMock);
+vi.mock("@/lib/backend/api", () => apiMock);
 
-const { resolveExecutableSqlWithBackend } = await import("../../apps/desktop/src/lib/sqlExecutionTarget.ts");
+const { resolveExecutableSqlWithBackend } = await import("../../apps/desktop/src/lib/sql/sqlExecutionTarget.ts");
 
 beforeEach(() => {
   apiMock.findStatementAtCursor.mockReset();

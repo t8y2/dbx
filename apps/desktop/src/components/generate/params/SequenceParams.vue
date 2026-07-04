@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { RefreshCw } from "@lucide/vue";
-import type { GeneratorParams } from "@/lib/dataGenerate";
+import type { GeneratorParams } from "@/lib/dataGrid/dataGenerate";
 
 const props = defineProps<{ params: GeneratorParams }>();
 

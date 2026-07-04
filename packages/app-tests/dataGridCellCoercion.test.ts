@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { coerceDataGridCellValue, dataGridCellDisplayText, dataGridCellEditorText } from "../../apps/desktop/src/lib/dataGridCellCoercion.ts";
+import { coerceDataGridCellValue, dataGridCellDisplayText, dataGridCellEditorText } from "../../apps/desktop/src/lib/dataGrid/dataGridCellCoercion.ts";
 
 test("formats Postgres array cells with native brace syntax", () => {
   const columnInfo = { data_type: "_text" };

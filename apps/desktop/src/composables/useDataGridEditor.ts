@@ -1,15 +1,15 @@
 import { ref, computed, nextTick, watch, getCurrentInstance, onActivated, onBeforeUnmount, onDeactivated, onMounted, type ComputedRef, type Ref } from "vue";
-import * as api from "@/lib/api";
-import type { CellValue } from "@/lib/cellValue";
-import { coerceDataGridCellValue, dataGridCellEditorText } from "@/lib/dataGridCellCoercion";
-import { normalizeDataGridSaveError } from "@/lib/dataGridSql";
-import { rowStatusFilterAfterAddingRow, type RowStatusFilter } from "@/lib/gridRowStatus";
-import { supportsDataGridTransaction } from "@/lib/tableEditing";
+import * as api from "@/lib/backend/api";
+import type { CellValue } from "@/lib/dataGrid/cellValue";
+import { coerceDataGridCellValue, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
+import { normalizeDataGridSaveError } from "@/lib/dataGrid/dataGridSql";
+import { rowStatusFilterAfterAddingRow, type RowStatusFilter } from "@/lib/dataGrid/gridRowStatus";
+import { supportsDataGridTransaction } from "@/lib/table/tableEditing";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
-import { DBX_NEO4J_ELEMENT_ID_COLUMN, DBX_ROWID_COLUMN } from "@/lib/tableEditing";
-import { effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
+import { DBX_NEO4J_ELEMENT_ID_COLUMN, DBX_ROWID_COLUMN } from "@/lib/table/tableEditing";
+import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 
 interface RowItem {
   id: number;

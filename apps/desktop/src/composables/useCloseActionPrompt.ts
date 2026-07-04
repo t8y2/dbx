@@ -1,7 +1,7 @@
 import { ref } from "vue";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { isTauriRuntime } from "@/lib/tauriRuntime";
-import * as api from "@/lib/api";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import * as api from "@/lib/backend/api";
 
 export type AppCloseAction = "quit" | "hide";
 type AppCloseRequestTarget = "settings" | "quit";

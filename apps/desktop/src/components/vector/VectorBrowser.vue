@@ -5,8 +5,8 @@ import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import ErrorBanner from "@/components/ui/ErrorBanner.vue";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
-import * as api from "@/lib/api";
-import { uuid } from "@/lib/utils";
+import * as api from "@/lib/backend/api";
+import { uuid } from "@/lib/common/utils";
 import type { DatabaseType, QueryResult } from "@/types/database";
 
 const DataGrid = defineAsyncComponent(() => import("@/components/grid/DataGrid.vue"));

@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildDocumentFilterCondition, combineDocumentFilterConditions, currentDocumentFilterJson, documentStoreProviderFor, elasticsearchSearchBodyFromDocumentQuery, type DocumentFilterRule } from "../../apps/desktop/src/lib/documentStoreProvider.ts";
+import { buildDocumentFilterCondition, combineDocumentFilterConditions, currentDocumentFilterJson, documentStoreProviderFor, elasticsearchSearchBodyFromDocumentQuery, type DocumentFilterRule } from "../../apps/desktop/src/lib/app/documentStoreProvider.ts";
 
 function rule(patch: Partial<DocumentFilterRule>): DocumentFilterRule {
   return {

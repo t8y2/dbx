@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useI18n } from "vue-i18n";
-import type { SchemaDiffObject, DiffOperationType, DiffObjectKind } from "@/lib/schemaDiff";
+import type { SchemaDiffObject, DiffOperationType, DiffObjectKind } from "@/lib/schema/schemaDiff";
 import { Table, Eye, FunctionSquare, ListOrdered, ScrollText, UserCog, ListTree, Link2, Zap, ChevronDown, ChevronRight, ArrowRightLeft, PlusCircle, XCircle, MinusCircle } from "@lucide/vue";
 
 const { t } = useI18n();

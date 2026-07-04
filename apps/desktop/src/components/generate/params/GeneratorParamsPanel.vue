@@ -3,7 +3,7 @@ import { computed } from "vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { RotateCcw } from "@lucide/vue";
-import type { ColumnGenerateConfig, GeneratorParams } from "@/lib/dataGenerate";
+import type { ColumnGenerateConfig, GeneratorParams } from "@/lib/dataGrid/dataGenerate";
 import GeneratorSelect from "../GeneratorSelect.vue";
 import NumberParams from "./NumberParams.vue";
 import DateTimeParams from "./DateTimeParams.vue";

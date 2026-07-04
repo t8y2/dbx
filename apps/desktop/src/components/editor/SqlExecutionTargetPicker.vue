@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import type { SqlExecutionCandidate } from "@/lib/sqlExecutionTarget";
+import type { SqlExecutionCandidate } from "@/lib/sql/sqlExecutionTarget";
 import { useI18n } from "vue-i18n";
 
 const props = defineProps<{

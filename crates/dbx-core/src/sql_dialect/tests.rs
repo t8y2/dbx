@@ -700,6 +700,23 @@ fn builds_oracle_and_neo4j_table_data_queries() {
         "SELECT \"__DBX_ROWID\", \"ID\", \"NAME\" FROM (SELECT ROWIDTOCHAR(t.ROWID) AS \"__DBX_ROWID\", t.* FROM \"DBXTEST\".\"DBX_LOAD_TABLE_006\" t) WHERE ROWNUM <= 100"
     );
     assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Oracle),
+            schema: Some("DBXTEST".to_string()),
+            table_name: "DBX_JOIN_VIEW".to_string(),
+            table_type: Some("VIEW".to_string()),
+            primary_keys: vec![DBX_ROWID_COLUMN.to_string()],
+            columns: vec!["ID".to_string(), "NAME".to_string()],
+            fallback_order_columns: Vec::new(),
+            order_by: None,
+            limit: Some(100),
+            offset: None,
+            where_input: None,
+            include_row_id: true,
+        }),
+        "SELECT \"ID\", \"NAME\" FROM (SELECT \"ID\", \"NAME\" FROM \"DBXTEST\".\"DBX_JOIN_VIEW\") WHERE ROWNUM <= 100"
+    );
+    assert_eq!(
             build_table_data_select_sql(TableDataSelectSqlOptions {
                 database_type: Some(DatabaseType::Neo4j),
                 schema: None,

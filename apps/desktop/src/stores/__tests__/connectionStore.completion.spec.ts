@@ -48,8 +48,8 @@ describe("connectionStore completion assistant", () => {
       fallback_used: false,
     });
 
-    vi.doMock("@/lib/tauriRuntime", () => ({ isTauriRuntime: () => false }));
-    vi.doMock("@/lib/api", () => ({
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       completionAssistantSearch,
       listSchemas: vi.fn().mockResolvedValue(["public"]),
@@ -72,8 +72,8 @@ describe("connectionStore completion assistant", () => {
     const completionAssistantSearch = vi.fn().mockRejectedValue(new Error("assistant unavailable"));
     const listTables = vi.fn().mockResolvedValue([{ name: "accounts", table_type: "BASE TABLE", comment: null }]);
 
-    vi.doMock("@/lib/tauriRuntime", () => ({ isTauriRuntime: () => false }));
-    vi.doMock("@/lib/api", () => ({
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       completionAssistantSearch,
       listSchemas: vi.fn().mockResolvedValue(["public"]),
@@ -101,8 +101,8 @@ describe("connectionStore completion assistant", () => {
       return [];
     });
 
-    vi.doMock("@/lib/tauriRuntime", () => ({ isTauriRuntime: () => false }));
-    vi.doMock("@/lib/api", () => ({
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       completionAssistantSearch,
       listSchemas: vi.fn().mockResolvedValue(["dim_game_base", "dws_game_sdk_base"]),
@@ -134,8 +134,8 @@ describe("connectionStore completion assistant", () => {
       });
     });
 
-    vi.doMock("@/lib/tauriRuntime", () => ({ isTauriRuntime: () => false }));
-    vi.doMock("@/lib/api", () => ({
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       completionAssistantSearch: vi.fn().mockResolvedValue({ candidates: [], incomplete: false, fallback_used: false }),
       getColumns,

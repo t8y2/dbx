@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { caretPositionInsideInsertedSqlSingleQuotes, insertedSqlSingleQuoteAtCaret } from "../../apps/desktop/src/lib/sqlQuoteCaret.ts";
+import { caretPositionInsideInsertedSqlSingleQuotes, insertedSqlSingleQuoteAtCaret } from "../../apps/desktop/src/lib/sql/sqlQuoteCaret.ts";
 
 test("detects a newly typed SQL single quote", () => {
   assert.equal(

@@ -1,17 +1,17 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
-import * as api from "@/lib/api";
-import { normalizeColumnFormatter, normalizeCustomColumnFormatter, type ColumnFormatterConfig, type CustomColumnFormatterConfig } from "@/lib/columnFormatter";
-import { normalizeShortcutSettings, type ShortcutSettings } from "@/lib/shortcutRegistry";
-import { normalizeResultPageSize } from "@/lib/paginationPageSize";
-import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebarTableNameDisplay";
-import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sqlFormatterConfig";
-import type { SidebarActivation } from "@/lib/treeNodeClick";
+import * as api from "@/lib/backend/api";
+import { normalizeColumnFormatter, normalizeCustomColumnFormatter, type ColumnFormatterConfig, type CustomColumnFormatterConfig } from "@/lib/dataGrid/columnFormatter";
+import { normalizeShortcutSettings, type ShortcutSettings } from "@/lib/editor/shortcutRegistry";
+import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
+import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
+import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
+import type { SidebarActivation } from "@/lib/sidebar/treeNodeClick";
 import type { SqlSnippet } from "@/types/database";
-import { DEFAULT_SQL_SNIPPETS } from "@/lib/sqlCompletion";
-import { setDebugLoggingEnabled } from "@/lib/debugLog";
-import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS, normalizeTableColumnTemplateFields } from "@/lib/tableColumnTemplates";
-import { DEFAULT_UI_FONT_FAMILY } from "@/lib/appFonts";
+import { DEFAULT_SQL_SNIPPETS } from "@/lib/sql/sqlCompletion";
+import { setDebugLoggingEnabled } from "@/lib/backend/debugLog";
+import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS, normalizeTableColumnTemplateFields } from "@/lib/table/tableColumnTemplates";
+import { DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
 
 export type AiProvider = "claude" | "openai" | "gemini" | "deepseek" | "qwen" | "ollama" | "openai-compatible" | "codex-cli" | "custom";
 export type AiApiStyle = "completions" | "responses" | "anthropic-messages";
@@ -257,6 +257,8 @@ const CELL_DETAIL_PANEL_LAYOUTS = ["bottom", "right"] as const;
 export type CellDetailPanelLayout = (typeof CELL_DETAIL_PANEL_LAYOUTS)[number];
 const DATA_GRID_RENDER_MODES = ["dom", "canvas"] as const;
 export type DataGridRenderMode = (typeof DATA_GRID_RENDER_MODES)[number];
+const DATA_GRID_SEARCH_MODES = ["filter", "highlight"] as const;
+export type DataGridSearchMode = (typeof DATA_GRID_SEARCH_MODES)[number];
 export const TABLE_FONT_SIZE_MIN = 12;
 export const TABLE_FONT_SIZE_MAX = 16;
 export const TABLE_FONT_SIZE_DEFAULT = 13;
@@ -351,6 +353,7 @@ export interface EditorSettings {
   compactColumnHeaderActions: boolean;
   dataGridQuickEntry: boolean;
   dataGridRenderMode: DataGridRenderMode;
+  dataGridSearchMode: DataGridSearchMode;
   tableFontSize: number;
   structureEditorDensity: StructureEditorDensity;
   tableInfoDrawerWidth: number;
@@ -464,6 +467,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   compactColumnHeaderActions: true,
   dataGridQuickEntry: false,
   dataGridRenderMode: "canvas",
+  dataGridSearchMode: "filter",
   tableFontSize: TABLE_FONT_SIZE_DEFAULT,
   structureEditorDensity: "compact",
   tableInfoDrawerWidth: 320,
@@ -527,6 +531,10 @@ function normalizeCellDetailPanelLayout(value: unknown): CellDetailPanelLayout {
 
 function normalizeDataGridRenderMode(value: unknown): DataGridRenderMode {
   return DATA_GRID_RENDER_MODES.includes(value as DataGridRenderMode) ? (value as DataGridRenderMode) : DEFAULT_EDITOR_SETTINGS.dataGridRenderMode;
+}
+
+function normalizeDataGridSearchMode(value: unknown): DataGridSearchMode {
+  return DATA_GRID_SEARCH_MODES.includes(value as DataGridSearchMode) ? (value as DataGridSearchMode) : DEFAULT_EDITOR_SETTINGS.dataGridSearchMode;
 }
 
 function normalizeTableFontSize(value: unknown): number {
@@ -679,6 +687,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     compactColumnHeaderActions: settings.compactColumnHeaderActions ?? DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions,
     dataGridQuickEntry: settings.dataGridQuickEntry ?? DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry,
     dataGridRenderMode: normalizeDataGridRenderMode(settings.dataGridRenderMode),
+    dataGridSearchMode: normalizeDataGridSearchMode(settings.dataGridSearchMode),
     tableFontSize: normalizeTableFontSize(settings.tableFontSize),
     structureEditorDensity: normalizeStructureEditorDensity(settings.structureEditorDensity),
     tableInfoDrawerWidth: normalizeDrawerWidth(settings.tableInfoDrawerWidth, 240, DEFAULT_EDITOR_SETTINGS.tableInfoDrawerWidth),
@@ -901,6 +910,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.compactColumnHeaderActions !== undefined) editorSettings.value.compactColumnHeaderActions = partial.compactColumnHeaderActions;
     if (partial.dataGridQuickEntry !== undefined) editorSettings.value.dataGridQuickEntry = partial.dataGridQuickEntry;
     if (partial.dataGridRenderMode !== undefined) editorSettings.value.dataGridRenderMode = normalizeDataGridRenderMode(partial.dataGridRenderMode);
+    if (partial.dataGridSearchMode !== undefined) editorSettings.value.dataGridSearchMode = normalizeDataGridSearchMode(partial.dataGridSearchMode);
     if (partial.tableFontSize !== undefined) editorSettings.value.tableFontSize = normalizeTableFontSize(partial.tableFontSize);
     if (partial.structureEditorDensity !== undefined) editorSettings.value.structureEditorDensity = normalizeStructureEditorDensity(partial.structureEditorDensity);
     if (partial.tableInfoDrawerWidth !== undefined) editorSettings.value.tableInfoDrawerWidth = normalizeDrawerWidth(partial.tableInfoDrawerWidth, 240, DEFAULT_EDITOR_SETTINGS.tableInfoDrawerWidth);

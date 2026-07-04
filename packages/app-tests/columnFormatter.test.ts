@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { applyColumnFormatter, buildColumnFormatterKey, resolveColumnFormatter, normalizeColumnFormatter, type ColumnFormatterConfig } from "../../apps/desktop/src/lib/columnFormatter.ts";
+import { applyColumnFormatter, buildColumnFormatterKey, resolveColumnFormatter, normalizeColumnFormatter, type ColumnFormatterConfig } from "../../apps/desktop/src/lib/dataGrid/columnFormatter.ts";
 import timezone from "dayjs/plugin/timezone";
 import utc from "dayjs/plugin/utc";
 import dayjs from "dayjs";

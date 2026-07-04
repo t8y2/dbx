@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { buildDeploySqlForObjects, convertToSchemaDiffObjects, schemaDiffDeployTargetSchema, type TableDiff } from "../../apps/desktop/src/lib/schemaDiff.ts";
+import { buildDeploySqlForObjects, convertToSchemaDiffObjects, schemaDiffDeployTargetSchema, type TableDiff } from "../../apps/desktop/src/lib/schema/schemaDiff.ts";
 
 test("uses generated sync SQL for modified table deployment", () => {
   const tableDiffs: TableDiff[] = [

@@ -1,6 +1,6 @@
 import { ref, computed, watch, type ComputedRef, type Ref } from "vue";
 import { useElementSize } from "@vueuse/core";
-import { calculateDataGridColumnWidth, DATA_GRID_AUTO_FIT_VALUE_TEXT_LIMIT, DATA_GRID_COL_AUTO_FIT_MAX_WIDTH, DATA_GRID_COL_MIN_WIDTH, DATA_GRID_SAMPLE_ROWS } from "@/lib/dataGridColumnWidth";
+import { calculateDataGridColumnWidth, DATA_GRID_AUTO_FIT_VALUE_TEXT_LIMIT, DATA_GRID_COL_AUTO_FIT_MAX_WIDTH, DATA_GRID_COL_MIN_WIDTH, DATA_GRID_SAMPLE_ROWS } from "@/lib/dataGrid/dataGridColumnWidth";
 
 type CellValue = string | number | boolean | null;
 

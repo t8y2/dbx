@@ -28,7 +28,7 @@ import {
   usersFromMySqlGranteeResult,
   usersFromMySqlUserResult,
   usersFromPostgresRolesResult,
-} from "../../apps/desktop/src/lib/databaseUserAdmin.ts";
+} from "../../apps/desktop/src/lib/database/databaseUserAdmin.ts";
 import type { QueryResult } from "../../apps/desktop/src/types/database.ts";
 
 function result(columns: string[], rows: QueryResult["rows"]): QueryResult {

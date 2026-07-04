@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { uuid } from "@/lib/utils";
+import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
-import { isTauriRuntime } from "@/lib/tauriRuntime";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { Dialog, DialogFooter, DialogHeader, DialogScrollContent, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,8 +13,8 @@ import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import { useToast } from "@/composables/useToast";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
-import { requiresSqlFileTargetDatabaseSelection } from "@/lib/connectionLevelDatabaseBootstrap";
-import { cancelSqlFileExecution, executeSqlFile, listenSqlFileProgress, listDatabases, previewSqlFile, type SqlFilePreview, type SqlFileProgress, type SqlFileStatus } from "@/lib/api";
+import { requiresSqlFileTargetDatabaseSelection } from "@/lib/connection/connectionLevelDatabaseBootstrap";
+import { cancelSqlFileExecution, executeSqlFile, listenSqlFileProgress, listDatabases, previewSqlFile, type SqlFilePreview, type SqlFileProgress, type SqlFileStatus } from "@/lib/backend/api";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { Check, CheckSquare, FileCode, FolderOpen, Loader2, Play, Square, X } from "@lucide/vue";
 
@@ -205,7 +205,7 @@ async function previewSelectedSqlFile(fileOrPath: string | File) {
   if (isTauriRuntime()) {
     return previewSqlFile(fileOrPath as string);
   }
-  const { previewSqlFile: previewWebSqlFile } = await import("@/lib/http");
+  const { previewSqlFile: previewWebSqlFile } = await import("@/lib/backend/http");
   return previewWebSqlFile(fileOrPath as File);
 }
 
@@ -263,7 +263,7 @@ async function listenProgress(id: string, handler: (next: SqlFileProgress) => vo
   if (isTauriRuntime()) {
     return listenSqlFileProgress(handler);
   }
-  const { listenSqlFileProgressById } = await import("@/lib/httpSqlFileProgress");
+  const { listenSqlFileProgressById } = await import("@/lib/sql/httpSqlFileProgress");
   return listenSqlFileProgressById(id, handler);
 }
 

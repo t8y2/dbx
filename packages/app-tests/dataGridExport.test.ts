@@ -2,8 +2,8 @@ import { strict as assert } from "node:assert";
 import { beforeEach, test, vi } from "vitest";
 import { computed, ref } from "vue";
 import { useDataGridExport } from "../../apps/desktop/src/composables/useDataGridExport.ts";
-import { copyToClipboard } from "@/lib/clipboard";
-import * as api from "@/lib/api";
+import { copyToClipboard } from "@/lib/common/clipboard";
+import * as api from "@/lib/backend/api";
 
 vi.mock("vue-i18n", () => ({
   useI18n: () => ({
@@ -11,11 +11,11 @@ vi.mock("vue-i18n", () => ({
   }),
 }));
 
-vi.mock("@/lib/clipboard", () => ({
+vi.mock("@/lib/common/clipboard", () => ({
   copyToClipboard: vi.fn(async () => {}),
 }));
 
-vi.mock("@/lib/api", () => ({
+vi.mock("@/lib/backend/api", () => ({
   exportQueryResultCsv: vi.fn(async () => {}),
 }));
 

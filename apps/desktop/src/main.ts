@@ -3,7 +3,7 @@ import { createPinia } from "pinia";
 import VueVirtualScroller from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import "./styles/globals.css";
-import { installDebugLogCapture } from "@/lib/debugLog";
+import { installDebugLogCapture } from "@/lib/backend/debugLog";
 
 function startupErrorMessage(error: unknown): string {
   if (error instanceof Error) {

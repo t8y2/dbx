@@ -3,9 +3,9 @@ import { test } from "vitest";
 import { computed, nextTick, ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID, useDataGridEditor } from "../../apps/desktop/src/composables/useDataGridEditor.ts";
-import type { CellValue } from "../../apps/desktop/src/lib/cellValue.ts";
-import type { DataGridSaveStatementOptions } from "../../apps/desktop/src/lib/dataGridSql.ts";
-import { matchesRowStatusFilter, type RowStatusFilter } from "../../apps/desktop/src/lib/gridRowStatus.ts";
+import type { CellValue } from "../../apps/desktop/src/lib/dataGrid/cellValue.ts";
+import type { DataGridSaveStatementOptions } from "../../apps/desktop/src/lib/dataGrid/dataGridSql.ts";
+import { matchesRowStatusFilter, type RowStatusFilter } from "../../apps/desktop/src/lib/dataGrid/gridRowStatus.ts";
 import type { ColumnInfo } from "../../apps/desktop/src/types/database.ts";
 
 function installBrowserTestGlobals() {

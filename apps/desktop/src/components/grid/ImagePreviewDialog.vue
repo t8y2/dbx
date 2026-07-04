@@ -4,7 +4,7 @@ import { useI18n } from "vue-i18n";
 import { ExternalLink, Maximize2, X, ZoomIn, ZoomOut } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
-import { imagePreviewDialogSize, imagePreviewFitScale, imagePreviewTransform, nextImagePreviewScale } from "@/lib/imagePreviewViewer";
+import { imagePreviewDialogSize, imagePreviewFitScale, imagePreviewTransform, nextImagePreviewScale } from "@/lib/dataGrid/imagePreviewViewer";
 
 const props = defineProps<{
   open: boolean;

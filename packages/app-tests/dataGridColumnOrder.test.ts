@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { columnOrderKeysForIndexes, isDefaultColumnOrder, moveVisibleColumnIndex, orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "../../apps/desktop/src/lib/dataGridColumnOrder";
+import { columnOrderKeysForIndexes, isDefaultColumnOrder, moveVisibleColumnIndex, orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "../../apps/desktop/src/lib/dataGrid/dataGridColumnOrder";
 
 test("creates stable keys for duplicate column names", () => {
     assert.deepEqual(uniqueDataGridColumnOrderKeys(["id", "name", "name"]), [`id\u00000`, `name\u00000`, `name\u00001`]);

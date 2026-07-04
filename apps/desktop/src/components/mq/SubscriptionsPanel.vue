@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { formatError } from "@/lib/errorUtils";
+import { formatError } from "@/lib/backend/errorUtils";
 import { ref, watch } from "vue";
 import type { TopicRef, TopicInfo, SubscriptionInfo, ResetPosition, SkipCount, PeekedMessage } from "@/types/mq";
-import { mqListSubscriptions, mqCreateSubscription, mqDeleteSubscription, mqResetCursor, mqSkipMessages, mqClearBacklog, mqPeekMessages, mqExpireMessages } from "@/lib/api";
+import { mqListSubscriptions, mqCreateSubscription, mqDeleteSubscription, mqResetCursor, mqSkipMessages, mqClearBacklog, mqPeekMessages, mqExpireMessages } from "@/lib/backend/api";
 
 interface Props {
   connectionId: string;

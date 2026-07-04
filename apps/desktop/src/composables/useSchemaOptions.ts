@@ -1,9 +1,9 @@
 import { ref } from "vue";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { isSchemaAware as isSchemaAwareType, isSingleDatabase, usesTreeSchemaMode } from "@/lib/databaseCapabilities";
-import { filterSchemaNamesForConnection } from "@/lib/visibleDatabases";
+import { isSchemaAware as isSchemaAwareType, isSingleDatabase, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
+import { filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
 import type { ConnectionConfig } from "@/types/database";
-import * as api from "@/lib/api";
+import * as api from "@/lib/backend/api";
 
 export function hasSchemaOptionsCacheEntry(options: Record<string, string[]>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(options, key);

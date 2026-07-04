@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { buildAllDatabaseExportPlan } from "../../apps/desktop/src/lib/databaseExport.ts";
+import { buildAllDatabaseExportPlan } from "../../apps/desktop/src/lib/export/databaseExport.ts";
 
 test("all-database export includes every schema for schema-aware databases", () => {
   const plan = buildAllDatabaseExportPlan({

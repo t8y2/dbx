@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildAiAgentStepItems, toolCallStepKey, upsertAgentStep, type AiAgentStepItem } from "../../apps/desktop/src/lib/aiAgentStepPresentation.ts";
-import type { AiAgentPlan } from "../../apps/desktop/src/lib/aiAgentPlan.ts";
+import { buildAiAgentStepItems, toolCallStepKey, upsertAgentStep, type AiAgentStepItem } from "../../apps/desktop/src/lib/ai/aiAgentStepPresentation.ts";
+import type { AiAgentPlan } from "../../apps/desktop/src/lib/ai/aiAgentPlan.ts";
 
 test("presents auto-execute agent plans as completed generation, safety, and execution steps", () => {
   const plan: AiAgentPlan = {

@@ -33,20 +33,20 @@ import { useVisibilityChange } from "@/composables/useVisibilityChange";
 import { useWebDavAutoUpload } from "@/composables/useWebDavAutoUpload";
 import "@/i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
-import * as api from "@/lib/api";
-import { connectionRedactedNameLabel } from "@/lib/connectionPresentation";
-import { quickConnectionOpenTarget } from "@/lib/connectionOpenTarget";
-import { resolveDefaultDatabase } from "@/lib/defaultDatabase";
-import { findTreeNodeById, resolveNewQueryTarget } from "@/lib/newQueryContext";
-import { buildExecutableObjectSourceStatements, objectSourceSaveExecutionMode } from "@/lib/objectSourceEditor";
-import { resolveExecutableSql, resolveExecutableSqlWithBackend, type SqlExecutionSnapshot } from "@/lib/sqlExecutionTarget";
-import { uuid } from "@/lib/utils";
-import { isMacOS } from "@/lib/platform";
-import { isTauriRuntime } from "@/lib/tauriRuntime";
-import { openQueryResultArchiveFile } from "@/lib/queryResultArchiveFile";
-import { sqlFileTitleFromPath } from "@/lib/sqlFileOpen";
+import * as api from "@/lib/backend/api";
+import { connectionRedactedNameLabel } from "@/lib/connection/connectionPresentation";
+import { quickConnectionOpenTarget } from "@/lib/connection/connectionOpenTarget";
+import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
+import { findTreeNodeById, resolveNewQueryTarget } from "@/lib/sql/newQueryContext";
+import { buildExecutableObjectSourceStatements, objectSourceSaveExecutionMode } from "@/lib/table/objectSourceEditor";
+import { resolveExecutableSql, resolveExecutableSqlWithBackend, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
+import { uuid } from "@/lib/common/utils";
+import { isMacOS } from "@/lib/backend/platform";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { openQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
+import { sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
 import type { ConnectionConfig, ObjectSourceKind, QueryTab } from "@/types/database";
-import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connectionDeepLink";
+import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
 import {
   isBrowserReloadShortcut,
   isCloseTabShortcut,
@@ -66,25 +66,25 @@ import {
   isZoomInShortcut,
   isZoomOutShortcut,
   switchToTabIndexFromShortcut,
-} from "@/lib/keyboardShortcuts";
-import { isPreviewTab } from "@/lib/tabPresentation";
-import { supportsSqlFileExecution } from "@/lib/databaseCapabilities";
-import { classifyAiSqlExecution } from "@/lib/aiSqlExecutionPolicy";
-import { buildHistoryAiAnalysisPrompt } from "@/lib/historyAiAnalysis";
-import { countAvailableAgentDriverUpdates, type AgentDriverUpdateBadgeState } from "@/lib/agentDriverUpdateBadge";
-import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/safeStorage";
-import { apiUrl, webPath } from "@/lib/webPath";
-import { APP_FONT_SANS_CSS_VAR, DEFAULT_UI_FONT_FAMILY } from "@/lib/appFonts";
-import { rankSavedSqlHistory } from "@/lib/savedSqlHistory";
-import { isSchemaAware, isSingleDatabase, usesTreeSchemaMode } from "@/lib/databaseFeatureSupport";
-import { codeMirrorSqlDialect, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
-import { detectDatabaseFileType } from "@/lib/databaseFileDetection";
+} from "@/lib/editor/keyboardShortcuts";
+import { isPreviewTab } from "@/lib/tabs/tabPresentation";
+import { supportsSqlFileExecution } from "@/lib/database/databaseCapabilities";
+import { classifyAiSqlExecution } from "@/lib/ai/aiSqlExecutionPolicy";
+import { buildHistoryAiAnalysisPrompt } from "@/lib/history/historyAiAnalysis";
+import { countAvailableAgentDriverUpdates, type AgentDriverUpdateBadgeState } from "@/lib/connection/agentDriverUpdateBadge";
+import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { apiUrl, webPath } from "@/lib/common/webPath";
+import { APP_FONT_SANS_CSS_VAR, DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
+import { rankSavedSqlHistory } from "@/lib/savedSql/savedSqlHistory";
+import { isSchemaAware, isSingleDatabase, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
+import { codeMirrorSqlDialect, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { detectDatabaseFileType } from "@/lib/database/databaseFileDetection";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import type { HistoryEntry } from "@/lib/tauri";
-import type { AiAction } from "@/lib/ai";
+import type { HistoryEntry } from "@/lib/backend/tauri";
+import type { AiAction } from "@/lib/ai/ai";
 
 const AiAssistant = defineAsyncComponent(() => import("@/components/editor/AiAssistant.vue"));
 const QueryHistory = defineAsyncComponent(() => import("@/components/editor/QueryHistory.vue"));
@@ -1341,6 +1341,7 @@ async function handleQuickOpenSelect(item: any) {
       database: item.database,
       schema: item.schema,
       tableName: item.objectName || item.tableName,
+      tableType: item.type === "view" ? "VIEW" : item.type === "materialized_view" ? "MATERIALIZED_VIEW" : "TABLE",
     });
   } else if (item.type === "procedure" || item.type === "function" || item.type === "sequence" || item.type === "package" || item.type === "package-body") {
     // Open the object source in a source tab
@@ -1857,6 +1858,7 @@ onUnmounted(() => {
                           database: activeTab.database,
                           schema: target.schema,
                           tableName: target.tableName,
+                          tableType: target.tableType,
                         })
                     "
                     @object-schema-change="(schema) => activeTab && queryStore.updateSchema(activeTab.id, schema)"

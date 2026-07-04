@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import { GitCompareArrows, ArrowLeft, Play, Loader2, Maximize2, Minimize2, AlertTriangle, CircleCheck } from "@lucide/vue";
-import * as api from "@/lib/api";
+import * as api from "@/lib/backend/api";
 import { useSchemaDiffConfig } from "@/composables/useSchemaDiffConfig";
 import SchemaDiffConfigStep from "@/components/diff/SchemaDiffConfigStep.vue";
 import SchemaDiffObjectTree from "@/components/diff/SchemaDiffObjectTree.vue";
@@ -14,13 +14,13 @@ import SchemaDiffDdlPanel from "@/components/diff/SchemaDiffDdlPanel.vue";
 import SchemaDiffDeployStep from "@/components/diff/SchemaDiffDeployStep.vue";
 import SchemaDiffOptionsPanel from "@/components/diff/SchemaDiffOptionsPanel.vue";
 
-import { getSchemaDiffOptionsForDbType } from "@/lib/schemaDiffOptions";
-import { createConcurrencyLimiter, mapWithConcurrency, schemaDiffMetadataConcurrency } from "@/lib/schemaDiffMetadataLoad";
+import { getSchemaDiffOptionsForDbType } from "@/lib/schema/schemaDiffOptions";
+import { createConcurrencyLimiter, mapWithConcurrency, schemaDiffMetadataConcurrency } from "@/lib/schema/schemaDiffMetadataLoad";
 import { normalizeSchemaDiffCompareOptions } from "@/types/schemaDiff";
 import type { SchemaDiffCompareOptions, SchemaDiffConfig } from "@/types/schemaDiff";
 import type { ObjectSourceKind, TableInfo } from "@/types/database";
-import { buildDeploySqlForObjects, convertToSchemaDiffObjects, groupDiffObjects, schemaDiffDeployTargetSchema, type OperationGroup, type SchemaDiffObject, type DiffOperationType, type DiffObjectKind, type SchemaDiffPreparation, type TableSchemaDetail } from "@/lib/schemaDiff";
-import { compileSchemaDiffTableFilter, filterSchemaDiffTables } from "@/lib/schemaDiffTableFilter";
+import { buildDeploySqlForObjects, convertToSchemaDiffObjects, groupDiffObjects, schemaDiffDeployTargetSchema, type OperationGroup, type SchemaDiffObject, type DiffOperationType, type DiffObjectKind, type SchemaDiffPreparation, type TableSchemaDetail } from "@/lib/schema/schemaDiff";
+import { compileSchemaDiffTableFilter, filterSchemaDiffTables } from "@/lib/schema/schemaDiffTableFilter";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 

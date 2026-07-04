@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { beforeEach, test } from "vitest";
-import { forgetDataGridConditionHistory, loadDataGridConditionHistory, rememberDataGridConditionHistory } from "../../apps/desktop/src/lib/dataGridConditionHistory.ts";
+import { forgetDataGridConditionHistory, loadDataGridConditionHistory, rememberDataGridConditionHistory } from "../../apps/desktop/src/lib/dataGrid/dataGridConditionHistory.ts";
 
 class MemoryStorage {
   private values = new Map<string, string>();

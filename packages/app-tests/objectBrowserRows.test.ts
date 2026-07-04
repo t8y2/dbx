@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildObjectBrowserRows, filterObjectBrowserRows, formatObjectBrowserBytes, formatObjectBrowserCount, formatObjectBrowserTimestamp, sortObjectBrowserRows } from "../../apps/desktop/src/lib/objectBrowserRows.ts";
+import { buildObjectBrowserRows, filterObjectBrowserRows, formatObjectBrowserBytes, formatObjectBrowserCount, formatObjectBrowserTimestamp, sortObjectBrowserRows } from "../../apps/desktop/src/lib/table/objectBrowserRows.ts";
 
 test("builds unique row ids for overloaded routines with the same visible name", () => {
   const rows = buildObjectBrowserRows({

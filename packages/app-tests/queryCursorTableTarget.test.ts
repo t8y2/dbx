@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { extractQualifiedIdentifierPartsAt, findLoadedTableTargetForCandidate, qualifiedTableNameAtSqlPosition, queryContextTargetFromCandidate, queryCursorTableCandidate } from "../../apps/desktop/src/lib/queryCursorTableTarget.ts";
+import { extractQualifiedIdentifierPartsAt, findLoadedTableTargetForCandidate, qualifiedTableNameAtSqlPosition, queryContextTargetFromCandidate, queryCursorTableCandidate } from "../../apps/desktop/src/lib/sql/queryCursorTableTarget.ts";
 import type { QueryTab, TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 function queryTab(sql: string, head: number, schema = "public"): QueryTab {

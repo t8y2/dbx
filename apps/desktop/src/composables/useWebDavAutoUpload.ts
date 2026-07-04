@@ -1,8 +1,8 @@
 import { onMounted, onUnmounted } from "vue";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { appendDebugLog } from "@/lib/debugLog";
-import { webdavSyncUpload } from "@/lib/api";
-import { readWebDavAutoUploadConfig, WEB_DAV_AUTO_UPLOAD_STORAGE_KEYS } from "@/lib/webdavAutoUploadConfig";
+import { appendDebugLog } from "@/lib/backend/debugLog";
+import { webdavSyncUpload } from "@/lib/backend/api";
+import { readWebDavAutoUploadConfig, WEB_DAV_AUTO_UPLOAD_STORAGE_KEYS } from "@/lib/webdav/webdavAutoUploadConfig";
 
 export function useWebDavAutoUpload() {
   const settingsStore = useSettingsStore();

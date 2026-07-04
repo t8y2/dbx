@@ -12,9 +12,9 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useTabScroll } from "@/composables/useTabScroll";
 import { useTabDrag } from "@/composables/useTabDrag";
-import { connectionColor, isConnectionReadonly, tabDisplayTitle, tabTooltipLines } from "@/lib/tabPresentation";
-import { hexToRgba } from "@/lib/color";
-import { copyToClipboard } from "@/lib/clipboard";
+import { connectionColor, isConnectionReadonly, tabDisplayTitle, tabTooltipLines } from "@/lib/tabs/tabPresentation";
+import { hexToRgba } from "@/lib/common/color";
+import { copyToClipboard } from "@/lib/common/clipboard";
 import { useToast } from "@/composables/useToast";
 import type { QueryTab } from "@/types/database";
 

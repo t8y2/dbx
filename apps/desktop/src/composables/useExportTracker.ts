@@ -1,5 +1,5 @@
 import { reactive, computed } from "vue";
-import * as api from "@/lib/api";
+import * as api from "@/lib/backend/api";
 
 export type BackgroundTaskKind = "table-export" | "database-export" | "sql-file" | "data-transfer";
 export type BackgroundTaskStatus = "Running" | "Writing" | "Done" | "Error" | "Cancelled";

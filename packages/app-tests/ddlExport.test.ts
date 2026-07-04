@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildSingleDdlExportFileContent, ensureSqlStatementTerminator, joinExportedDdls } from "../../apps/desktop/src/lib/ddlExport.ts";
+import { buildSingleDdlExportFileContent, ensureSqlStatementTerminator, joinExportedDdls } from "../../apps/desktop/src/lib/export/ddlExport.ts";
 
 test("ensureSqlStatementTerminator appends a trailing semicolon when missing", () => {
   assert.equal(ensureSqlStatementTerminator("CREATE TABLE `users` (\n  `id` int\n) ENGINE=InnoDB"), "CREATE TABLE `users` (\n  `id` int\n) ENGINE=InnoDB;");

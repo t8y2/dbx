@@ -7,17 +7,18 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import type { TreeNode, TreeNodeType } from "@/types/database";
-import { filterSidebarSearchRootsByConnectionState, filterSidebarTree } from "@/lib/sidebarSearchTree";
-import { isCancelSearchShortcut } from "@/lib/keyboardShortcuts";
-import { copyNameForTreeNode } from "@/lib/treeNodeClick";
-import { copyToClipboard, eventTargetAllowsAppClipboardShortcut } from "@/lib/clipboard";
-import { isEditableSidebarTypeSearchTarget, sidebarTypeSearchNextQuery } from "@/lib/sidebarTypeSearch";
-import { usesTreeSchemaMode } from "@/lib/databaseFeatureSupport";
-import { connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
-import { activeTabSidebarTarget, findSidebarNodeForActiveTab, findSidebarNodeForTarget, findNodePathForTarget, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection, type ActiveTabSidebarTarget } from "@/lib/sidebarActiveTabTarget";
-import { findLoadedTableTargetForCandidate, queryContextTargetFromCandidate, queryCursorTableCandidate, type QueryCursorTableCandidate } from "@/lib/queryCursorTableTarget";
+import { filterSidebarSearchRootsByConnectionState, filterSidebarTree } from "@/lib/sidebar/sidebarSearchTree";
+import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
+import { copyNameForTreeNode } from "@/lib/sidebar/treeNodeClick";
+import { copyToClipboard } from "@/lib/common/clipboard";
+import { connectionPasteTargetGroupId, selectedConnectionClipboardNodes, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
+import { isEditableSidebarTypeSearchTarget, sidebarTypeSearchNextQuery } from "@/lib/sidebar/sidebarTypeSearch";
+import { usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
+import { connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { activeTabSidebarTarget, findSidebarNodeForActiveTab, findSidebarNodeForTarget, findNodePathForTarget, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection, type ActiveTabSidebarTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
+import { findLoadedTableTargetForCandidate, queryContextTargetFromCandidate, queryCursorTableCandidate, type QueryCursorTableCandidate } from "@/lib/sql/queryCursorTableTarget";
 import { SIDEBAR_TREE_ROW_HEIGHT, SIDEBAR_TREE_PRERENDER_COUNT, SIDEBAR_TREE_SCROLL_BUFFER, flattenTree, shouldVirtualizeFlatTree, type FlatTreeNode } from "@/composables/useFlatTree";
-import { sidebarTreeContextKey } from "@/lib/sidebarTreeContext";
+import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import TreeItem from "./TreeItem.vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
@@ -781,15 +782,22 @@ function focusSearchAtEnd() {
 function onWindowKeydown(event: KeyboardEvent) {
   if (event.defaultPrevented) return;
   if (sidebarShortcutTargetIsActive(event.target)) {
-    if (eventTargetAllowsAppClipboardShortcut(event, "c")) {
+    if (sidebarShortcutTargetAllowsAppShortcut(event.target) && isEditConnectionShortcut(event)) {
+      if (requestSelectedConnectionEdit()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
+    if (sidebarShortcutTargetAllowsAppShortcut(event.target) && isCopySidebarSelectionShortcut(event, settingsStore.editorSettings.shortcuts)) {
       if (copySelectedSidebarNames()) {
         event.preventDefault();
         event.stopPropagation();
       }
       return;
     }
-    if (eventTargetAllowsAppClipboardShortcut(event, "v")) {
-      if (requestSelectedSidebarPasteTable()) {
+    if (sidebarShortcutTargetAllowsAppShortcut(event.target) && isPasteSidebarSelectionShortcut(event, settingsStore.editorSettings.shortcuts)) {
+      if (requestSelectedSidebarPaste()) {
         event.preventDefault();
         event.stopPropagation();
       }
@@ -820,14 +828,39 @@ function sidebarShortcutTargetIsActive(target: EventTarget | null): boolean {
   return pointerInsideTree.value && (!active || active === document.body || root.contains(active));
 }
 
+function sidebarShortcutTargetAllowsAppShortcut(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return true;
+  return !(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target.isContentEditable || !!target.closest("[contenteditable='true'], [role='textbox']"));
+}
+
 function selectedSidebarNodesInVisibleOrder(): TreeNode[] {
   const selectedIds = new Set(store.selectedTreeNodeIds);
   return visibleNodes.value.filter((node) => selectedIds.has(node.id));
 }
 
+function isEditConnectionShortcut(event: KeyboardEvent): boolean {
+  return isEditSidebarConnectionShortcut(event, settingsStore.editorSettings.shortcuts);
+}
+
+function requestSelectedConnectionEdit(): boolean {
+  const selectedNodeId = store.selectedTreeNodeId;
+  const currentNode = selectedNodeId ? visibleNodes.value.find((node) => node.id === selectedNodeId) : null;
+  if (!currentNode) return false;
+  const editTarget = selectedConnectionEditTarget(currentNode, selectedSidebarNodesInVisibleOrder());
+  if (!editTarget) return false;
+  store.startEditing(editTarget.connectionId);
+  return true;
+}
+
 function copySelectedSidebarNames(): boolean {
   const nodes = selectedSidebarNodesInVisibleOrder();
   if (nodes.length === 0) return false;
+  const connectionNodes = selectedConnectionClipboardNodes(nodes);
+  if (connectionNodes.length > 0) {
+    const copiedCount = store.copyConnectionsToTreeClipboard(connectionNodes.map((node) => node.connectionId));
+    if (copiedCount > 0) toast(t("connection.copied"), 2000);
+    return copiedCount > 0;
+  }
   const tableNodes = nodes.filter((node) => node.type === "table" && !!node.connectionId && !!node.database);
   store.treeClipboard =
     tableNodes.length > 0
@@ -847,9 +880,20 @@ function copySelectedSidebarNames(): boolean {
   return true;
 }
 
-function requestSelectedSidebarPasteTable(): boolean {
+function requestSelectedSidebarPaste(): boolean {
   const clipboard = store.treeClipboard;
   const selectedNodeId = store.selectedTreeNodeId;
+  if (clipboard?.kind === "connection-copy") {
+    const selectedNode = selectedNodeId ? visibleNodes.value.find((node) => node.id === selectedNodeId) : null;
+    const targetGroupId = connectionPasteTargetGroupId(selectedNode, (connectionId) => store.groupIdForConnection(connectionId));
+    void store
+      .pasteConnectionClipboard(targetGroupId)
+      .then((count) => {
+        if (count > 0) toast(count > 1 ? t("connection.duplicatedSelected", { count }) : t("connection.duplicated"), 2000);
+      })
+      .catch((e: any) => toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000));
+    return true;
+  }
   if (clipboard?.kind !== "table-copy" || clipboard.tables.length === 0 || !selectedNodeId) return false;
   window.dispatchEvent(new CustomEvent("dbx:sidebar-request-paste-table", { detail: { nodeId: selectedNodeId } }));
   return true;

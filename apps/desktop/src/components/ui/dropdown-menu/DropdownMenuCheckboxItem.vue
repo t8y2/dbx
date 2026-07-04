@@ -5,8 +5,8 @@ import type { HTMLAttributes } from "vue";
 import { reactiveOmit } from "@vueuse/core";
 import { CheckIcon } from "@lucide/vue";
 import { DropdownMenuCheckboxItem, DropdownMenuItemIndicator, useForwardPropsEmits } from "reka-ui";
-import { shouldSuppressRepeatedActivation, suppressEvent, type ActionActivationGuard } from "@/lib/actionActivation";
-import { cn } from "@/lib/utils";
+import { shouldSuppressRepeatedActivation, suppressEvent, type ActionActivationGuard } from "@/lib/connection/actionActivation";
+import { cn } from "@/lib/common/utils";
 
 const props = defineProps<DropdownMenuCheckboxItemProps & { class?: HTMLAttributes["class"] }>();
 const emits = defineEmits<DropdownMenuCheckboxItemEmits>();

@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import * as langSql from "@codemirror/lang-sql";
-import { createDbxCodeMirrorSqlDialect } from "../../apps/desktop/src/lib/codemirrorSqlDialect.ts";
+import { createDbxCodeMirrorSqlDialect } from "../../apps/desktop/src/lib/editor/codemirrorSqlDialect.ts";
 
 function hasKeyword(keywords: string | undefined, keyword: string): boolean {
   return new RegExp(`(?:^|\\s)${keyword}(?:\\s|$)`, "i").test(keywords || "");

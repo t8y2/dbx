@@ -10,7 +10,7 @@ import ExportProgressPopover from "@/components/export/ExportProgressPopover.vue
 import { shouldReserveMacTrafficLightInset, useWindowControls } from "@/composables/useWindowControls";
 import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
-import type { AppThemeMode } from "@/lib/appTheme";
+import type { AppThemeMode } from "@/lib/app/appTheme";
 
 const GithubIcon = {
   render() {

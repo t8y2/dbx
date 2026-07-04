@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { mongoUrlParam, mongoUrlParamIsTrue, normalizeMongoTlsFormState, setMongoUrlParam, setMongoUrlParamBoolean, mongodbAuthFailureHint } from "../../apps/desktop/src/lib/mongoConnectionOptions.ts";
+import { mongoUrlParam, mongoUrlParamIsTrue, normalizeMongoTlsFormState, setMongoUrlParam, setMongoUrlParamBoolean, mongodbAuthFailureHint } from "../../apps/desktop/src/lib/mongo/mongoConnectionOptions.ts";
 
 test("reads MongoDB authSource from URL params", () => {
   assert.equal(mongoUrlParam("?replicaSet=rs0&authSource=admin", "authSource"), "admin");

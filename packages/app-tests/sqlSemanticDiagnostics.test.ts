@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildSqlParserErrorDiagnostic, buildSqlSemanticDiagnostics, areSqlSemanticDiagnosticsEqual, isSqlSemanticDiagnosticInputContext, shouldRunSqlSemanticDiagnostics, sqlSemanticDiagnosticRangesForViewport } from "../../apps/desktop/src/lib/sqlSemanticDiagnostics.ts";
+import { buildSqlParserErrorDiagnostic, buildSqlSemanticDiagnostics, areSqlSemanticDiagnosticsEqual, isSqlSemanticDiagnosticInputContext, shouldRunSqlSemanticDiagnostics, sqlSemanticDiagnosticRangesForViewport } from "../../apps/desktop/src/lib/sql/semantic/diagnostics.ts";
 import type { SqlReferenceAnalysis } from "../../apps/desktop/src/types/database.ts";
 
 const span = (startColumn: number, endColumn: number) => ({

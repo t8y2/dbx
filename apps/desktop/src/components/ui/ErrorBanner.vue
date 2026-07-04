@@ -3,7 +3,7 @@ import { computed } from "vue";
 import { Copy, TriangleAlert } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
-import { copyToClipboard } from "@/lib/clipboard";
+import { copyToClipboard } from "@/lib/common/clipboard";
 import { useToast } from "@/composables/useToast";
 
 const { t } = useI18n();

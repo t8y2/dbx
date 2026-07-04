@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { resolveHeaderColumnType } from "../../apps/desktop/src/lib/dataGridColumnType.ts";
+import { resolveHeaderColumnType } from "../../apps/desktop/src/lib/dataGrid/dataGridColumnType.ts";
 
 test("prefers table-metadata type over the result type", () => {
   const type = resolveHeaderColumnType({

@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 
-import { buildGetSchemaCommentSql, buildSetSchemaCommentSql, supportsSchemaComment } from "../../apps/desktop/src/lib/dbAdminSql.ts";
+import { buildGetSchemaCommentSql, buildSetSchemaCommentSql, supportsSchemaComment } from "../../apps/desktop/src/lib/database/dbAdminSql.ts";
 
 test("postgres schema comment SQL quotes identifiers and literals", () => {
   assert.equal(supportsSchemaComment("postgres"), true);

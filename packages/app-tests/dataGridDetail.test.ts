@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
-import { buildDataGridCellDetail, buildDataGridColumnDetail, dataGridColumnDetailJson, dataGridColumnDetailTsv, buildDataGridRowDetail, dataGridRowDetailJson, dataGridRowDetailTsv, filterDataGridDetailFields, type DataGridCellDetail } from "../../apps/desktop/src/lib/dataGridDetail.ts";
-import type { CellValue } from "../../apps/desktop/src/lib/cellValue.ts";
+import { buildDataGridCellDetail, buildDataGridColumnDetail, dataGridColumnDetailJson, dataGridColumnDetailTsv, buildDataGridRowDetail, dataGridRowDetailJson, dataGridRowDetailTsv, filterDataGridDetailFields, type DataGridCellDetail } from "../../apps/desktop/src/lib/dataGrid/dataGridDetail.ts";
+import type { CellValue } from "../../apps/desktop/src/lib/dataGrid/cellValue.ts";
 
 test("buildDataGridCellDetail returns null for an invalid column", () => {
   const detail = buildDataGridCellDetail({

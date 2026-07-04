@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { calculateDataGridColumnWidth, DATA_GRID_AUTO_FIT_VALUE_TEXT_LIMIT, DATA_GRID_COL_AUTO_FIT_MAX_WIDTH, DATA_GRID_COL_MAX_WIDTH } from "../../apps/desktop/src/lib/dataGridColumnWidth.ts";
+import { calculateDataGridColumnWidth, DATA_GRID_AUTO_FIT_VALUE_TEXT_LIMIT, DATA_GRID_COL_AUTO_FIT_MAX_WIDTH, DATA_GRID_COL_MAX_WIDTH } from "../../apps/desktop/src/lib/dataGrid/dataGridColumnWidth.ts";
 
 test("default data grid column width remains compact for long values", () => {
   const width = calculateDataGridColumnWidth({

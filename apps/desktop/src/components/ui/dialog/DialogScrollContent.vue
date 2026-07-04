@@ -6,7 +6,7 @@ import { reactiveOmit } from "@vueuse/core";
 import { XIcon } from "@lucide/vue";
 import { DialogClose, DialogContent, DialogDescription, DialogPortal, VisuallyHidden, useForwardPropsEmits } from "reka-ui";
 import DialogOverlay from "./DialogOverlay.vue";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/common/utils";
 
 defineOptions({
   inheritAttrs: false,

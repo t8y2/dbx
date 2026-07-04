@@ -10,11 +10,11 @@ import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { useSchemaOptions } from "@/composables/useSchemaOptions";
-import { connectionIconType } from "@/lib/connectionPresentation";
-import { formatDatabaseLabel, isDefaultDatabase } from "@/lib/defaultDatabase";
-import { connectionDisplayName } from "@/lib/tabPresentation";
-import { isSingleDatabase, supportsTransaction as supportsTransactionFeature } from "@/lib/databaseCapabilities";
-import { hexToRgba } from "@/lib/color";
+import { connectionIconType } from "@/lib/connection/connectionPresentation";
+import { formatDatabaseLabel, isDefaultDatabase } from "@/lib/database/defaultDatabase";
+import { connectionDisplayName } from "@/lib/tabs/tabPresentation";
+import { isSingleDatabase, supportsTransaction as supportsTransactionFeature } from "@/lib/database/databaseCapabilities";
+import { hexToRgba } from "@/lib/common/color";
 import type { QueryTab, ConnectionConfig } from "@/types/database";
 
 const props = defineProps<{

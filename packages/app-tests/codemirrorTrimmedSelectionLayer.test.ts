@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { trimmedSelectionHorizontalBounds } from "../../apps/desktop/src/lib/codemirrorTrimmedSelectionLayer.ts";
+import { trimmedSelectionHorizontalBounds } from "../../apps/desktop/src/lib/editor/codemirrorTrimmedSelectionLayer.ts";
 
 test("line-break-only selection starts at the content end", () => {
   const bounds = trimmedSelectionHorizontalBounds({

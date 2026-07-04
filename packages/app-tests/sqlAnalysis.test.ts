@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQuery, analyzeEditableQueryEditability, isBinaryType, queryEditabilityMessageKey, sourceColumnsForResult } from "../../apps/desktop/src/lib/sqlAnalysis.ts";
+import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQuery, analyzeEditableQueryEditability, isBinaryType, queryEditabilityMessageKey, sourceColumnsForResult } from "../../apps/desktop/src/lib/sql/sqlAnalysis.ts";
 
 test("recognizes a simple single-table SELECT as editable", () => {
   const result = analyzeEditableQueryEditability("select id, name from public.users where active = true order by id");

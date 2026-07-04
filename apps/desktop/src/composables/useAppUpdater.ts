@@ -1,11 +1,11 @@
 import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { isTauriRuntime } from "@/lib/tauriRuntime";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useToast } from "@/composables/useToast";
-import * as api from "@/lib/api";
+import * as api from "@/lib/backend/api";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { UpdateDownloadSource as SettingsUpdateDownloadSource } from "@/stores/settingsStore";
-import type { UpdateDownloadProgress } from "@/lib/tauri";
+import type { UpdateDownloadProgress } from "@/lib/backend/tauri";
 
 export function shouldOpenUpdateDialog(options: { silent?: boolean }) {
   return options.silent !== true;

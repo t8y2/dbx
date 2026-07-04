@@ -14,7 +14,7 @@ import {
   type SqlCompletionForeignKey,
   type SqlCompletionObject,
   type SqlCompletionTable,
-} from "../../apps/desktop/src/lib/sqlCompletion.ts";
+} from "../../apps/desktop/src/lib/sql/sqlCompletion.ts";
 
 const tables: SqlCompletionTable[] = [
   { name: "users", schema: "public", type: "table" },

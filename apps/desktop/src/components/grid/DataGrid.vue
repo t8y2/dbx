@@ -86,15 +86,15 @@ import ImagePreviewDialog from "@/components/grid/ImagePreviewDialog.vue";
 import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
 import EnumCellEditor from "@/components/grid/EnumCellEditor.vue";
 import type { QueryResult, ColumnInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo, TableInfoTab } from "@/types/database";
-import * as api from "@/lib/api";
-import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGridCellCoercion";
-import { createColumnDrafts } from "@/lib/tableStructureEditorState";
-import type { BuildSingleColumnAlterSqlOptions } from "@/lib/tableStructureEditorSql";
-import { buildTableSelectSql, quoteTableIdentifier } from "@/lib/tableSelectSql";
-import { uuid } from "@/lib/utils";
-import { resolveHeaderColumnType } from "@/lib/dataGridColumnType";
-import { canEditExistingTableRows, canInsertTableRows, canUseKeylessRowPredicate, hiveTablePropertiesIndicateTransactional, isClickHouseExistingRowReadonlyColumn, isHiddenGridColumn, isTdengineExistingRowReadonlyColumn, usesSyntheticRowIdKey } from "@/lib/tableEditing";
-import { buildDataGridColumnDistinctValuesSql, buildDataGridContextFilterCondition, buildDataGridCountSql, buildHiveTablePropertiesSql, type DataGridContextFilterMode } from "@/lib/dataGridSql";
+import * as api from "@/lib/backend/api";
+import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
+import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
+import type { BuildSingleColumnAlterSqlOptions } from "@/lib/table/tableStructureEditorSql";
+import { buildTableSelectSql, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
+import { uuid } from "@/lib/common/utils";
+import { resolveHeaderColumnType } from "@/lib/dataGrid/dataGridColumnType";
+import { canEditExistingTableRows, canInsertTableRows, canUseKeylessRowPredicate, hiveTablePropertiesIndicateTransactional, isClickHouseExistingRowReadonlyColumn, isHiddenGridColumn, isTdengineExistingRowReadonlyColumn, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
+import { buildDataGridColumnDistinctValuesSql, buildDataGridContextFilterCondition, buildDataGridCountSql, buildHiveTablePropertiesSql, type DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
 import {
   buildVisibleTransposeRows,
   nextAppendedTransposeState,
@@ -106,38 +106,38 @@ import {
   transposeFieldWidth,
   transposeScrollLeftForRecord,
   visibleTransposeRecordWindow,
-} from "@/lib/dataGridTranspose";
-import { canApplyGridSelectionValue, canDeleteGridRowItem, canEditGridCellDetail, matchesRowStatusFilter, shouldShowQuickEntryDraftRow, type RowStatus, type RowStatusFilter } from "@/lib/gridRowStatus";
-import { displayCellValue, type CellValue } from "@/lib/cellValue";
-import { getApplicablePreviewActions } from "@/lib/resultPreviewRegistry";
-import "@/lib/previewHandlers/geometryMapPreview";
-import { BINARY_CELL_DOWNLOAD_MODES, binaryCellDisplayText, binaryCellDownloadFileName, binaryCellDownloadPayload, canDownloadBinaryCellValue, downloadBinaryCellPayload, isBinaryCellColumnType, parseBinaryCellBytes, type BinaryCellDownloadMode } from "@/lib/binaryCellDownload";
-import { buildBinaryHexViewRows } from "@/lib/binaryHexViewer";
-import { canFormatCellDetailJson, cellDetailEditorText, compactJsonText, defaultCellDetailTab, formatJsonText, isGeometryColumnType, linkedCellDetailTarget, looksLikeJsonContainerText, valueEditorActions, visibleCellDetailTabs, type CellDetailTab } from "@/lib/cellDetailPresentation";
-import { renderWktOnCanvas, isHexGeometry } from "@/lib/geometryPreview";
-import { buildDataGridCellDetail, buildDataGridColumnDetail, buildDataGridRowDetail, dataGridColumnDetailJson, dataGridColumnDetailTsv, dataGridRowDetailJson, dataGridRowDetailTsv, filterDataGridDetailFields, type DataGridCellDetail } from "@/lib/dataGridDetail";
-import { applyColumnFormatter, buildColumnFormatterKey, normalizeColumnFormatter, resolveColumnFormatter, type ColumnFormatterConfig, type DateTimeFormatterUnit, DateTimePatterns } from "@/lib/columnFormatter";
-import { temporalCellEditorKind, type TemporalCellEditorKind } from "@/lib/dataGridTemporalEditor";
-import { isEnumColumn, enumValuesForColumn } from "@/lib/dataGridEnumEditor";
-import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowShortcut, isFocusSearchShortcut, isModRShortcut, isSaveShortcut, isToggleTransposeShortcut } from "@/lib/keyboardShortcuts";
-import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGridScrollGutter";
-import { canGoNextDataGridPage } from "@/lib/dataGridPagination";
-import { dataGridScrollPosition, isDataGridNearScrollBottom, shouldCheckInfiniteScrollAfterScroll, type DataGridScrollPosition } from "@/lib/dataGridInfiniteScroll";
-import { CANVAS_DATA_GRID_ROW_HEIGHT, drawCanvasDataGrid } from "@/lib/canvasDataGridRenderer";
-import { dataGridSaveActionMode, dataGridSaveToolbarState } from "@/lib/dataGridSaveUi";
-import { EDITOR_FONT_FAMILY_CSS_VAR } from "@/lib/editorThemes";
-import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/safeStorage";
-import { appendColumnValueFilterCondition, buildColumnValueFilterCondition, buildColumnValuesFilterCondition, combineWhereInputs, filterModeNeedsValue, parseFilterValue } from "@/lib/dataGridColumnFilter";
-import { clampSearchSplitWidth } from "@/lib/dataGridSearchSplit";
-import { MAX_RESULT_PAGE_SIZE, MIN_RESULT_PAGE_SIZE, normalizeResultPageSize, resultPageSizeMenuOptions } from "@/lib/paginationPageSize";
-import { allNullColumnIndexes, filterColumnVisibilityOptions, hiddenColumnIndexesWithAllNullColumns, invertedHiddenColumnIndexes, nextHiddenColumnIndexes, removeAutoHiddenColumnIndexes, visibleColumnIndexesForFilter } from "@/lib/dataGridColumnVisibility";
-import { columnOrderKeysForIndexes, isDefaultColumnOrder, moveVisibleColumnIndex, orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "@/lib/dataGridColumnOrder";
-import { dataGridColumnLayoutScopeKey, loadDataGridColumnOrder, removeDataGridColumnOrder, saveDataGridColumnOrder } from "@/lib/dataGridColumnLayoutStorage";
-import { parseClipboardTable, summarizeSelection } from "@/lib/gridSelection";
+} from "@/lib/dataGrid/dataGridTranspose";
+import { canApplyGridSelectionValue, canDeleteGridRowItem, canEditGridCellDetail, matchesRowStatusFilter, shouldShowQuickEntryDraftRow, type RowStatus, type RowStatusFilter } from "@/lib/dataGrid/gridRowStatus";
+import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
+import { getApplicablePreviewActions } from "@/lib/dataGrid/resultPreviewRegistry";
+import "@/lib/dataGrid/geometryMapPreview";
+import { BINARY_CELL_DOWNLOAD_MODES, binaryCellDisplayText, binaryCellDownloadFileName, binaryCellDownloadPayload, canDownloadBinaryCellValue, downloadBinaryCellPayload, isBinaryCellColumnType, parseBinaryCellBytes, type BinaryCellDownloadMode } from "@/lib/dataGrid/binaryCellDownload";
+import { buildBinaryHexViewRows } from "@/lib/dataGrid/binaryHexViewer";
+import { canFormatCellDetailJson, cellDetailEditorText, compactJsonText, defaultCellDetailTab, formatJsonText, isGeometryColumnType, linkedCellDetailTarget, looksLikeJsonContainerText, valueEditorActions, visibleCellDetailTabs, type CellDetailTab } from "@/lib/dataGrid/cellDetailPresentation";
+import { renderWktOnCanvas, isHexGeometry } from "@/lib/dataGrid/geometryPreview";
+import { buildDataGridCellDetail, buildDataGridColumnDetail, buildDataGridRowDetail, dataGridColumnDetailJson, dataGridColumnDetailTsv, dataGridRowDetailJson, dataGridRowDetailTsv, filterDataGridDetailFields, type DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
+import { applyColumnFormatter, buildColumnFormatterKey, normalizeColumnFormatter, resolveColumnFormatter, type ColumnFormatterConfig, type DateTimeFormatterUnit, DateTimePatterns } from "@/lib/dataGrid/columnFormatter";
+import { temporalCellEditorKind, type TemporalCellEditorKind } from "@/lib/dataGrid/dataGridTemporalEditor";
+import { isEnumColumn, enumValuesForColumn } from "@/lib/dataGrid/dataGridEnumEditor";
+import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowShortcut, isFocusSearchShortcut, isModRShortcut, isSaveShortcut, isToggleTransposeShortcut } from "@/lib/editor/keyboardShortcuts";
+import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
+import { canGoNextDataGridPage } from "@/lib/dataGrid/dataGridPagination";
+import { dataGridScrollPosition, isDataGridNearScrollBottom, shouldCheckInfiniteScrollAfterScroll, type DataGridScrollPosition } from "@/lib/dataGrid/dataGridInfiniteScroll";
+import { CANVAS_DATA_GRID_ROW_HEIGHT, drawCanvasDataGrid } from "@/lib/dataGrid/canvasDataGridRenderer";
+import { dataGridSaveActionMode, dataGridSaveToolbarState } from "@/lib/dataGrid/dataGridSaveUi";
+import { EDITOR_FONT_FAMILY_CSS_VAR } from "@/lib/editor/editorThemes";
+import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { appendColumnValueFilterCondition, buildColumnValueFilterCondition, buildColumnValuesFilterCondition, combineWhereInputs, filterModeNeedsValue, parseFilterValue } from "@/lib/dataGrid/dataGridColumnFilter";
+import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
+import { MAX_RESULT_PAGE_SIZE, MIN_RESULT_PAGE_SIZE, normalizeResultPageSize, resultPageSizeMenuOptions } from "@/lib/dataGrid/paginationPageSize";
+import { allNullColumnIndexes, filterColumnVisibilityOptions, hiddenColumnIndexesWithAllNullColumns, invertedHiddenColumnIndexes, nextHiddenColumnIndexes, removeAutoHiddenColumnIndexes, visibleColumnIndexesForFilter } from "@/lib/dataGrid/dataGridColumnVisibility";
+import { columnOrderKeysForIndexes, isDefaultColumnOrder, moveVisibleColumnIndex, orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
+import { dataGridColumnLayoutScopeKey, loadDataGridColumnOrder, removeDataGridColumnOrder, saveDataGridColumnOrder } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
+import { parseClipboardTable, summarizeSelection } from "@/lib/dataGrid/gridSelection";
 
 import { useToast } from "@/composables/useToast";
 import { useDataGridExport } from "@/composables/useDataGridExport";
-import { eventTargetAllowsNativeClipboard, isPlainClipboardShortcut, readTextFromClipboard } from "@/lib/clipboard";
+import { eventTargetAllowsNativeClipboard, isPlainClipboardShortcut, readTextFromClipboard } from "@/lib/common/clipboard";
 import ExportProgressDialog from "@/components/export/ExportProgressDialog.vue";
 import { DATA_GRID_ROW_NUM_WIDTH, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
 import { useDataGridSelection } from "@/composables/useDataGridSelection";
@@ -148,15 +148,15 @@ import { useTheme } from "@/composables/useTheme";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import type { DataGridSortDirection, DataGridSortMode } from "@/lib/dataGridSort";
-import { getTableMetadataCapabilities } from "@/lib/tableMetadataCapabilities";
-import { supportsTableStructureEditing } from "@/lib/databaseCapabilities";
-import { forgetDataGridConditionHistory, loadDataGridConditionHistory, rememberDataGridConditionHistory } from "@/lib/dataGridConditionHistory";
-import { getDataGridConditionSuggestionPosition } from "@/lib/dataGridConditionSuggestionPosition";
-import { caretPositionInsideInsertedSqlSingleQuotes, insertedSqlSingleQuoteAtCaret } from "@/lib/sqlQuoteCaret";
-import { effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
-import { isMacOS } from "@/lib/platform";
-import { formatShortcut } from "@/lib/shortcutRegistry";
+import type { DataGridSortDirection, DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
+import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
+import { supportsTableStructureEditing } from "@/lib/database/databaseCapabilities";
+import { forgetDataGridConditionHistory, loadDataGridConditionHistory, rememberDataGridConditionHistory } from "@/lib/dataGrid/dataGridConditionHistory";
+import { getDataGridConditionSuggestionPosition } from "@/lib/dataGrid/dataGridConditionSuggestionPosition";
+import { caretPositionInsideInsertedSqlSingleQuotes, insertedSqlSingleQuoteAtCaret } from "@/lib/sql/sqlQuoteCaret";
+import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { isMacOS } from "@/lib/backend/platform";
+import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 
 const SqlPreviewPanel = defineAsyncComponent(() => import("@/components/editor/SqlPreviewPanel.vue"));
@@ -341,6 +341,7 @@ const showColumnCommentsInHeader = computed(() => settingsStore.editorSettings.s
 const showColumnTypesInHeader = computed(() => settingsStore.editorSettings.showColumnTypesInHeader);
 const compactColumnHeaderActions = computed(() => settingsStore.editorSettings.compactColumnHeaderActions);
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
+const dataGridSearchMode = computed(() => settingsStore.editorSettings.dataGridSearchMode);
 const compactDataGridToolbar = computed(() => dataGridTopbarWidth.value > 0 && dataGridTopbarWidth.value < DATA_GRID_COMPACT_TOPBAR_WIDTH);
 const infiniteScrollEnabled = computed(() => settingsStore.editorSettings.infiniteScroll);
 const infiniteScrollMaxRows = computed(() => settingsStore.editorSettings.infiniteScrollMaxRows);
@@ -2460,7 +2461,7 @@ const persistedColumnOrderKeys = ref<string[]>([]);
 const displayableColumnIndexes = computed(() =>
   props.result.columns
     .map((column, index) => ({ column, index }))
-    .filter(({ column }) => !isHiddenGridColumn(props.databaseType, column, props.tableMeta?.primaryKeys ?? []))
+    .filter(({ column }) => !isHiddenGridColumn(props.databaseType, column, props.tableMeta?.primaryKeys ?? [], props.tableMeta?.tableType))
     .map(({ index }) => index),
 );
 const goToColumnItems = computed(() =>
@@ -3926,7 +3927,8 @@ function addRow() {
 const sortedRows = computed(() => {
   let indices = localFilteredRows.value;
   const q = deferredClientSearchText.value;
-  if (q) {
+  if (q && dataGridSearchMode.value === "filter") {
+    // Preserve the legacy Ctrl+F behavior when the user chooses row filtering.
     const rows = props.result.rows;
     indices = indices.filter((sourceIndex) => {
       const data = rows[sourceIndex];
@@ -4186,7 +4188,7 @@ const exportContextCell = computed(() => {
 const deleteRowDetails = computed(() => (props.tableMeta?.tableName ? t("dangerDialog.deleteRowDetails", { table: props.tableMeta.tableName }) : t("dangerDialog.deleteRowDetailsNoTable")));
 
 const hasVisibleRows = computed(() => displayRowCount.value > 0);
-const hasActiveFilter = computed(() => !!deferredClientSearchText.value || rowStatusFilter.value !== "all" || hasLocalColumnFilters.value);
+const hasActiveFilter = computed(() => (dataGridSearchMode.value === "filter" && !!deferredClientSearchText.value) || rowStatusFilter.value !== "all" || hasLocalColumnFilters.value);
 const emptyTitle = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRows") : t("grid.noRows")));
 const emptyDescription = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRowsDescription") : t("grid.noRowsDescription")));
 watch(
@@ -4652,7 +4654,7 @@ let sideJsonPreviewEditor: UseCellDetailEditorReturn | null = null;
 let dialogJsonPreviewEditor: UseCellDetailEditorReturn | null = null;
 
 const editorThemeAccessor = () => settingsStore.editorSettings.theme;
-const editorAppAppearance = () => (isDark.value ? "dark" : "light") as import("@/lib/appTheme").AppThemeAppearance;
+const editorAppAppearance = () => (isDark.value ? "dark" : "light") as import("@/lib/app/appTheme").AppThemeAppearance;
 const editorFontSize = () => settingsStore.editorSettings.fontSize;
 const editorFontFamily = () => settingsStore.editorSettings.fontFamily;
 const SIDE_DETAIL_EDITOR_MIN_HEIGHT = 160;
@@ -5002,7 +5004,7 @@ async function applyOrderBySearch() {
       orderBy: orderByClause,
       limit: pageSize.value,
       whereInput: currentWhereInput(),
-      includeRowId: usesSyntheticRowIdKey(resolvedDatabaseType.value, tableMeta.primaryKeys),
+      includeRowId: usesSyntheticRowIdKey(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
     });
     await props.onExecuteSql(sql);
   } catch (e: any) {
@@ -5033,7 +5035,7 @@ async function applyWhereFilter() {
       orderBy: orderByInput.value.trim() || (sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined),
       limit: pageSize.value,
       whereInput,
-      includeRowId: usesSyntheticRowIdKey(resolvedDatabaseType.value, tableMeta.primaryKeys),
+      includeRowId: usesSyntheticRowIdKey(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
     });
     await props.onExecuteSql(sql);
   } catch (e: any) {

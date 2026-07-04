@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { formatMongoShellText, MAX_MONGO_FORMAT_CHARS } from "../../apps/desktop/src/lib/mongoFormatter.ts";
+import { formatMongoShellText, MAX_MONGO_FORMAT_CHARS } from "../../apps/desktop/src/lib/mongo/mongoFormatter.ts";
 
 test("formats MongoDB find query objects", () => {
     assert.equal(

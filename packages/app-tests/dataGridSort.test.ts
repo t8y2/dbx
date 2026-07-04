@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { sortDataGridRows } from "../../apps/desktop/src/lib/dataGridSort.ts";
+import { sortDataGridRows } from "../../apps/desktop/src/lib/dataGrid/dataGridSort.ts";
 
 test("sortDataGridRows sorts numbers numerically and keeps null values last", () => {
   const rows = [

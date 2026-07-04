@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { dataGridSaveActionMode, dataGridSaveToolbarState } from "../../apps/desktop/src/lib/dataGridSaveUi.ts";
+import { dataGridSaveActionMode, dataGridSaveToolbarState } from "../../apps/desktop/src/lib/dataGrid/dataGridSaveUi.ts";
 
 test("uses concise save and commit labels for the primary grid save action", () => {
   assert.deepEqual(dataGridSaveActionMode({ pendingChangeCount: 3, useTransaction: true }), {

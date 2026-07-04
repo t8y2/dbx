@@ -1,9 +1,9 @@
-import * as api from "@/lib/api";
-import { effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/jdbcDialect";
-import { isNoSnapshotErrorResult } from "@/lib/queryResultError";
-import { buildTableSelectSql } from "@/lib/tableSelectSql";
-import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/tableEditing";
-import { tableOpenPageLimit } from "@/lib/tableOpenPageLimit";
+import * as api from "@/lib/backend/api";
+import { effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
+import { isNoSnapshotErrorResult } from "@/lib/query/queryResultError";
+import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
+import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
+import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -14,6 +14,7 @@ export type NavigationTarget = {
   database: string;
   schema?: string;
   tableName: string;
+  tableType?: string;
   columnName?: string;
   whereInput?: string;
 };
@@ -55,13 +56,15 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
     if (!config) throw new Error("Connection config not found");
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
     const querySchema = metadataSchemaForConnection(config, target.database, target.schema);
+    const targetTableType = target.tableType ?? "TABLE";
     if (config.db_type === "neo4j") {
       const columns = await api.getColumns(target.connectionId, target.database, querySchema, target.tableName);
-      const primaryKeys = editableRowIdentifierColumns(effectiveDbType, columns);
+      const primaryKeys = editableRowIdentifierColumns(effectiveDbType, columns, undefined, targetTableType);
       const sql = await buildTableSelectSql({
         databaseType: effectiveDbType,
         schema: target.schema,
         tableName: target.tableName,
+        tableType: targetTableType,
         columns: columns.map((column) => column.name),
         primaryKeys,
         whereInput: target.whereInput,
@@ -71,7 +74,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       queryStore.setTableMeta(tabId, {
         schema: target.schema,
         tableName: target.tableName,
-        tableType: "TABLE",
+        tableType: targetTableType,
         columns,
         primaryKeys,
       });
@@ -82,6 +85,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       databaseType: effectiveDbType,
       schema: target.schema,
       tableName: target.tableName,
+      tableType: targetTableType,
       whereInput: target.whereInput,
       limit: pageLimit,
     });
@@ -89,7 +93,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
     queryStore.setTableMeta(tabId, {
       schema: target.schema,
       tableName: target.tableName,
-      tableType: "TABLE",
+      tableType: targetTableType,
       columns: [],
       primaryKeys: [],
     });
@@ -106,6 +110,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
         databaseType: effectiveDbType,
         schema: target.schema,
         tableName: target.tableName,
+        tableType: targetTableType,
         whereInput: target.whereInput,
         limit: 0,
       });
@@ -115,12 +120,12 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
     try {
       const columns = await api.getColumns(target.connectionId, target.database, querySchema, target.tableName);
       const indexes = await api.listIndexes(target.connectionId, target.database, querySchema, target.tableName).catch(() => []);
-      const primaryKeys = editableRowIdentifierColumns(effectiveDbType, columns, indexes);
-      const useRowId = usesSyntheticRowIdKey(effectiveDbType, primaryKeys);
+      const primaryKeys = editableRowIdentifierColumns(effectiveDbType, columns, indexes, targetTableType);
+      const useRowId = usesSyntheticRowIdKey(effectiveDbType, primaryKeys, targetTableType);
       queryStore.setTableMeta(tabId, {
         schema: target.schema,
         tableName: target.tableName,
-        tableType: "TABLE",
+        tableType: targetTableType,
         columns,
         primaryKeys,
       });
@@ -129,6 +134,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
           databaseType: effectiveDbType,
           schema: target.schema,
           tableName: target.tableName,
+          tableType: targetTableType,
           whereInput: target.whereInput,
           primaryKeys,
           columns: columns.map((column) => column.name),

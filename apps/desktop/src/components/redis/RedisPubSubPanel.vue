@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, nextTick, onBeforeUnmount } from "vue";
 import { useI18n } from "vue-i18n";
-import * as api from "@/lib/api";
+import * as api from "@/lib/backend/api";
 import { useToast } from "@/composables/useToast";
 
 const props = defineProps<{

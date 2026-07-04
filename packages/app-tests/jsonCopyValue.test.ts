@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { expandNestedJsonStringsForCopy } from "../../apps/desktop/src/lib/jsonCopyValue.ts";
+import { expandNestedJsonStringsForCopy } from "../../apps/desktop/src/lib/common/jsonCopyValue.ts";
 
 test("expands nested JSON strings for copied rows", () => {
   const value = {

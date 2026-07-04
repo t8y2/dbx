@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, visibleDatabaseSelectionIsStale, initialVisibleDatabaseSelection } from "../../apps/desktop/src/lib/connectionVisibleDatabases.ts";
-import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, filterDatabaseNamesForVisiblePicker } from "../../apps/desktop/src/lib/visibleDatabases.ts";
+import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, visibleDatabaseSelectionIsStale, initialVisibleDatabaseSelection } from "../../apps/desktop/src/lib/connection/connectionVisibleDatabases.ts";
+import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, filterDatabaseNamesForVisiblePicker } from "../../apps/desktop/src/lib/database/visibleDatabases.ts";
 import type { ConnectionConfig } from "../../apps/desktop/src/types/database.ts";
 
 function config(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {

@@ -18,8 +18,8 @@ import {
   parseMongoWriteCommand,
   splitMongoCommands,
   splitMongoCommandRanges,
-} from "../../apps/desktop/src/lib/mongoShellCommand.ts";
-import { buildMongoUpdateDocument as buildMongoDocumentUpdate, formatMongoShellLiteral as formatMongoDocumentShellLiteral } from "../../apps/desktop/src/lib/mongoDocumentValues.ts";
+} from "../../apps/desktop/src/lib/mongo/mongoShellCommand.ts";
+import { buildMongoUpdateDocument as buildMongoDocumentUpdate, formatMongoShellLiteral as formatMongoDocumentShellLiteral } from "../../apps/desktop/src/lib/mongo/mongoDocumentValues.ts";
 
 test("parseMongoFindCommand parses db collection find with an empty JSON filter", () => {
   assert.deepEqual(parseMongoFindCommand("db.users.find({})"), {

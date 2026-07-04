@@ -5,16 +5,16 @@ import { json } from "@codemirror/lang-json";
 import { search as cmSearch } from "@codemirror/search";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { bracketMatching } from "@codemirror/language";
-import { trimmedSelectionLayer } from "@/lib/codemirrorTrimmedSelectionLayer";
-import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, cellDetailActiveLineColor, loadEditorTheme, editorFontTheme } from "@/lib/editorThemes";
-import { shortcutToCodeMirrorKey } from "@/lib/shortcutRegistry";
+import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
+import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, cellDetailActiveLineColor, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
+import { shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { CELL_DETAIL_JSON_FORMAT_MAX_LENGTH, isJsonColumnType } from "@/lib/cellDetailPresentation";
-import { clampEditorFontSize, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editorZoom";
+import { CELL_DETAIL_JSON_FORMAT_MAX_LENGTH, isJsonColumnType } from "@/lib/dataGrid/cellDetailPresentation";
+import { clampEditorFontSize, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
 import i18n from "@/i18n";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import type { EditorTheme } from "@/stores/settingsStore";
-import type { AppThemeAppearance } from "@/lib/appTheme";
+import type { AppThemeAppearance } from "@/lib/app/appTheme";
 
 export interface UseCellDetailEditorOptions {
   onChange?: (value: string) => void;

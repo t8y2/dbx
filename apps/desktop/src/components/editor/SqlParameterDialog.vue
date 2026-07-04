@@ -8,8 +8,8 @@ import { Input } from "@/components/ui/input";
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import TruncatedTextTooltip from "@/components/ui/TruncatedTextTooltip.vue";
-import { loadSqlParameterHistory, rememberSqlParameterValues } from "@/lib/sqlParameterHistory";
-import { substituteSqlParameters, type SqlParameterInput, type SqlParameterValueKind } from "@/lib/sqlParameters";
+import { loadSqlParameterHistory, rememberSqlParameterValues } from "@/lib/sql/sqlParameterHistory";
+import { substituteSqlParameters, type SqlParameterInput, type SqlParameterValueKind } from "@/lib/sql/sqlParameters";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 
 const { t } = useI18n();

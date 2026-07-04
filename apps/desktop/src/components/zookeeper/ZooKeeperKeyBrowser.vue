@@ -2,8 +2,8 @@
 import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import KvKeyBrowser from "@/components/kv/KvKeyBrowser.vue";
-import * as api from "@/lib/api";
-import type { KvCreateMode } from "@/lib/api";
+import * as api from "@/lib/backend/api";
+import type { KvCreateMode } from "@/lib/backend/api";
 
 const props = defineProps<{ connectionId: string }>();
 

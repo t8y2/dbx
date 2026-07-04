@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { isReactive } from "vue";
-import { decodeQueryResultArchive } from "../../apps/desktop/src/lib/queryResultArchive.ts";
+import { decodeQueryResultArchive } from "../../apps/desktop/src/lib/query/queryResultArchive.ts";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
 import { useQueryStore } from "../../apps/desktop/src/stores/queryStore.ts";
 import { useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";

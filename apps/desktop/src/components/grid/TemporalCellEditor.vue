@@ -4,7 +4,7 @@ import type { FocusOutsideEvent, PointerDownOutsideEvent } from "reka-ui";
 import { CalendarClock, ChevronDown, ChevronUp, CircleSlash } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { formatTemporalInputValue, stepTemporalInputValue, type TemporalCellEditorKind } from "@/lib/dataGridTemporalEditor";
+import { formatTemporalInputValue, stepTemporalInputValue, type TemporalCellEditorKind } from "@/lib/dataGrid/dataGridTemporalEditor";
 
 const props = withDefaults(
   defineProps<{

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { hasTreeNodeDatabaseContext, normalizeCataloglessDatabaseNodes, treeNodeSchemaCachePrefix } from "../../apps/desktop/src/lib/treeNodeContext.ts";
+import { hasTreeNodeDatabaseContext, normalizeCataloglessDatabaseNodes, treeNodeSchemaCachePrefix } from "../../apps/desktop/src/lib/sidebar/treeNodeContext.ts";
 import type { TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 test("treats empty database string as a valid catalogless context", () => {

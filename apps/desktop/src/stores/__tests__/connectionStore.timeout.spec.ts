@@ -43,8 +43,8 @@ describe("connectionStore timeout recovery", () => {
     const checkConnectionHealth = vi.fn(() => new Promise(() => undefined));
     const connectDb = vi.fn().mockResolvedValue(undefined);
 
-    vi.doMock("@/lib/tauriRuntime", () => ({ isTauriRuntime: () => false }));
-    vi.doMock("@/lib/api", () => ({
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
       checkConnectionHealth,
       connectDb,
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
@@ -68,8 +68,8 @@ describe("connectionStore timeout recovery", () => {
   }, 10_000);
 
   it("normalizes missing keepalive interval to 30 seconds", async () => {
-    vi.doMock("@/lib/tauriRuntime", () => ({ isTauriRuntime: () => false }));
-    vi.doMock("@/lib/api", () => ({
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       saveConnections: vi.fn().mockResolvedValue(undefined),
       saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
@@ -86,8 +86,8 @@ describe("connectionStore timeout recovery", () => {
     const checkConnectionHealth = vi.fn(() => new Promise(() => undefined));
     const connectDb = vi.fn().mockRejectedValue(new Error("reconnect failed"));
 
-    vi.doMock("@/lib/tauriRuntime", () => ({ isTauriRuntime: () => false }));
-    vi.doMock("@/lib/api", () => ({
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
       checkConnectionHealth,
       connectDb,
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),

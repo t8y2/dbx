@@ -2,7 +2,7 @@
 import { useI18n } from "vue-i18n";
 import { FilePlus2, Plus, History, Upload, Database, Search, ShieldCheck, Sparkles } from "@lucide/vue";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
-import { connectionDriverLabel, connectionIconType, connectionRedactedNameLabel, connectionRedactedOptionSubtitle } from "@/lib/connectionPresentation";
+import { connectionDriverLabel, connectionIconType, connectionRedactedNameLabel, connectionRedactedOptionSubtitle } from "@/lib/connection/connectionPresentation";
 import type { ConnectionConfig } from "@/types/database";
 
 export interface WelcomeSavedSqlHistoryItem {

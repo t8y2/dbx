@@ -41,7 +41,7 @@ const { toast } = useToast();
 const { t } = useI18n();
 const settingsStore = useSettingsStore();
 const connectionStore = useConnectionStore();
-const { isDark } = useTheme();
+const { isDark, themePalette } = useTheme();
 const activeTab = ref<AdminTab>("configs");
 const connectionInfo = ref<NacosConnectionInfo | null>(null);
 const connectionError = ref("");
@@ -191,7 +191,7 @@ async function mountConfigEditor() {
     configLanguageExtension(configType.value),
   ]);
   const editorSettings = settingsStore.editorSettings;
-  const theme = await loadEditorTheme(editorSettings.theme, editorThemeAppearance(), currentCustomThemeColors());
+  const theme = await loadEditorTheme(editorSettings.theme, editorThemeAppearance(), currentCustomThemeColors(), themePalette.value);
   const view = new EditorView({
     parent: configEditorHost.value,
     state: EditorState.create({
@@ -819,11 +819,11 @@ watch(historyCompareOpen, (value) => {
 });
 
 watch(
-  [() => settingsStore.editorSettings, () => isDark.value],
+  [() => settingsStore.editorSettings, () => isDark.value, () => themePalette.value],
   async ([settings]) => {
     const view = configEditorView.value;
     if (!view) return;
-    const [{ EditorView }, theme] = await Promise.all([import("@codemirror/view"), loadEditorTheme(settings.theme, editorThemeAppearance(), currentCustomThemeColors())]);
+    const [{ EditorView }, theme] = await Promise.all([import("@codemirror/view"), loadEditorTheme(settings.theme, editorThemeAppearance(), currentCustomThemeColors(), themePalette.value)]);
     if (configEditorView.value !== view) return;
     view.dispatch({
       effects: [configEditorTheme.reconfigure(theme), configEditorFontTheme.reconfigure(editorFontTheme(EditorView, settings.fontSize, settings.fontFamily, { fixedHeight: true, scrollable: true }))],

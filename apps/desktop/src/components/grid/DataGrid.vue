@@ -169,7 +169,7 @@ const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize);
-const { isDark } = useTheme();
+const { isDark, themePalette } = useTheme();
 const { toast } = useToast();
 const { highlight } = useSqlHighlighter();
 const binaryCellDownloadMenuItems = computed(() =>
@@ -4655,6 +4655,7 @@ let dialogJsonPreviewEditor: UseCellDetailEditorReturn | null = null;
 
 const editorThemeAccessor = () => settingsStore.editorSettings.theme;
 const editorAppAppearance = () => (isDark.value ? "dark" : "light") as import("@/lib/app/appTheme").AppThemeAppearance;
+const editorAppPalette = () => themePalette.value;
 const editorFontSize = () => settingsStore.editorSettings.fontSize;
 const editorFontFamily = () => settingsStore.editorSettings.fontFamily;
 const SIDE_DETAIL_EDITOR_MIN_HEIGHT = 160;
@@ -4681,6 +4682,7 @@ watch(detailsEditorContainer, async (el) => {
       onEscape: () => cancelDetailEdit(),
       editorTheme: editorThemeAccessor,
       appAppearance: editorAppAppearance,
+      appPalette: editorAppPalette,
       fontSize: editorFontSize,
       fontFamily: editorFontFamily,
     });
@@ -4701,6 +4703,7 @@ watch(valueEditorContainer, async (el) => {
       onBlur: () => commitValueEditorEdit(),
       editorTheme: editorThemeAccessor,
       appAppearance: editorAppAppearance,
+      appPalette: editorAppPalette,
       fontSize: editorFontSize,
       fontFamily: editorFontFamily,
     });
@@ -4718,6 +4721,7 @@ watch(sideJsonPreviewContainer, async (el) => {
       readOnly: true,
       editorTheme: editorThemeAccessor,
       appAppearance: editorAppAppearance,
+      appPalette: editorAppPalette,
       fontSize: editorFontSize,
       fontFamily: editorFontFamily,
     });
@@ -4735,6 +4739,7 @@ watch(dialogJsonPreviewContainer, async (el) => {
       readOnly: true,
       editorTheme: editorThemeAccessor,
       appAppearance: editorAppAppearance,
+      appPalette: editorAppPalette,
       fontSize: editorFontSize,
       fontFamily: editorFontFamily,
     });
@@ -5180,7 +5185,7 @@ const canvasSurfaceWidth = computed(() => {
   if (vw <= 0) return total;
   return Math.min(vw, total);
 });
-const canvasRenderStyleKey = computed(() => `${settingsStore.editorSettings.theme}:${settingsStore.editorSettings.uiScale}:${canvasBackingPixelRatio.value}:${isDark.value}:${settingsStore.editorSettings.fontFamily}:${tableFontSize.value}`);
+const canvasRenderStyleKey = computed(() => `${settingsStore.editorSettings.theme}:${settingsStore.editorSettings.uiScale}:${canvasBackingPixelRatio.value}:${isDark.value}:${themePalette.value}:${settingsStore.editorSettings.fontFamily}:${tableFontSize.value}`);
 const CANVAS_MOUSE_WHEEL_SCROLL_MULTIPLIER = 1.5;
 const CANVAS_TRACKPAD_DELTA_THRESHOLD = 40;
 let canvasResizeObserver: ResizeObserver | null = null;

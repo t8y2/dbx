@@ -10,7 +10,7 @@ import ExportProgressPopover from "@/components/export/ExportProgressPopover.vue
 import { shouldReserveMacTrafficLightInset, useWindowControls } from "@/composables/useWindowControls";
 import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
-import type { AppThemeMode } from "@/lib/app/appTheme";
+import { isSystemAppThemeMode, type AppThemeMode } from "@/lib/app/appTheme";
 
 const GithubIcon = {
   render() {
@@ -61,14 +61,15 @@ const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
 const { isMac, isDesktop, showControls, isMaximized, isFullscreen, minimize, toggleMaximize, close } = useWindowControls();
 
 const themeTriggerIcon = computed(() => {
-  if (props.themeMode === "system") return SunMoon;
+  if (isSystemAppThemeMode(props.themeMode)) return SunMoon;
   return props.isDark ? Moon : Sun;
 });
 
+const themeCycle: AppThemeMode[] = ["light", "dark", "system"];
+
 function nextThemeMode(mode: AppThemeMode): AppThemeMode {
-  if (mode === "light") return "dark";
-  if (mode === "dark") return "system";
-  return "light";
+  const index = themeCycle.indexOf(mode);
+  return themeCycle[(index + 1) % themeCycle.length] ?? themeCycle[0];
 }
 
 function themeModeLabel(mode: AppThemeMode): string {
@@ -362,7 +363,7 @@ const toolbarDropdownTriggerClass = `inline-flex h-8 items-center gap-1 rounded-
 </script>
 
 <template>
-  <div ref="toolbarEl" class="h-10 flex items-center gap-1 px-2 border-b bg-muted/30 shrink-0 overflow-hidden" :class="{ 'pl-17.5': shouldReserveMacTrafficLightInset(isMac, isFullscreen, isDesktop) }" data-tauri-drag-region @dblclick="onToolbarDblClick">
+  <div ref="toolbarEl" class="app-toolbar h-10 flex items-center gap-1 px-2 border-b bg-muted/30 shrink-0 overflow-hidden" :class="{ 'pl-17.5': shouldReserveMacTrafficLightInset(isMac, isFullscreen, isDesktop) }" data-tauri-drag-region @dblclick="onToolbarDblClick">
     <Button variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('new-connection')">
       <DatabaseZap class="h-3.5 w-3.5" />
       <span :class="toolbarTextLabelClass">{{ t("toolbar.newConnection") }}</span>

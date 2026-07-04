@@ -1,9 +1,25 @@
 import { computed, ref } from "vue";
-import { APP_THEME_STORAGE_KEY, getTauriThemeForMode, normalizeAppThemeMode, resolveAppThemeAppearance, type AppThemeMode } from "@/lib/app/appTheme";
+import {
+  APP_THEME_PALETTE_CLASS_NAMES,
+  APP_THEME_PALETTE_STORAGE_KEY,
+  APP_THEME_STORAGE_KEY,
+  getAppThemePaletteClass,
+  getTauriThemeForMode,
+  isSystemAppThemeMode,
+  normalizeAppThemeMode,
+  normalizeAppThemePalette,
+  resolveAppThemeAppearance,
+  type AppThemeMode,
+  type AppThemePalette,
+} from "@/lib/app/appTheme";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 
-const themeMode = ref<AppThemeMode>(normalizeAppThemeMode(safeLocalStorageGet(APP_THEME_STORAGE_KEY)));
+const savedThemeMode = safeLocalStorageGet(APP_THEME_STORAGE_KEY);
+const themeMode = ref<AppThemeMode>(normalizeAppThemeMode(savedThemeMode));
+const savedThemePalette = safeLocalStorageGet(APP_THEME_PALETTE_STORAGE_KEY);
+const themePalette = ref<AppThemePalette>(normalizeAppThemePalette(savedThemePalette));
+if (savedThemeMode && savedThemeMode !== themeMode.value) safeLocalStorageSet(APP_THEME_STORAGE_KEY, themeMode.value);
 const systemPrefersDark = ref(readSystemPrefersDark());
 const isDark = computed(() => resolveAppThemeAppearance(themeMode.value, systemPrefersDark.value) === "dark");
 
@@ -22,7 +38,7 @@ function setupSystemThemeListener() {
   systemPrefersDark.value = mediaQuery.matches;
   const onChange = (event: MediaQueryListEvent) => {
     systemPrefersDark.value = event.matches;
-    if (themeMode.value === "system") applyTheme();
+    if (isSystemAppThemeMode(themeMode.value)) applyTheme();
   };
   mediaQuery.addEventListener("change", onChange);
   isListeningForSystemTheme = true;
@@ -36,6 +52,9 @@ function applyTheme() {
 
   doc.classList.add("disable-transitions");
   doc.classList.toggle("dark", dark);
+  for (const className of APP_THEME_PALETTE_CLASS_NAMES) doc.classList.remove(className);
+  const paletteClass = getAppThemePaletteClass(themePalette.value);
+  if (paletteClass) doc.classList.add(paletteClass);
   doc.style.colorScheme = dark ? "dark" : "light";
 
   // force reflow so the class toggle takes effect before re-enabling transitions
@@ -65,6 +84,12 @@ function setThemeMode(mode: AppThemeMode) {
   applyTheme();
 }
 
+function setThemePalette(palette: AppThemePalette) {
+  themePalette.value = palette;
+  safeLocalStorageSet(APP_THEME_PALETTE_STORAGE_KEY, palette);
+  applyTheme();
+}
+
 export function useTheme() {
   setupSystemThemeListener();
 
@@ -72,5 +97,5 @@ export function useTheme() {
     setThemeMode(isDark.value ? "light" : "dark");
   }
 
-  return { isDark, themeMode, applyTheme, setThemeMode, toggleTheme };
+  return { isDark, themeMode, themePalette, applyTheme, setThemeMode, setThemePalette, toggleTheme };
 }

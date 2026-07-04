@@ -109,7 +109,7 @@ let latestViewport: { scrollTop: number; scrollLeft: number } | undefined = prop
 let latestSelection: { anchor: number; head: number } | undefined = props.initialSelection;
 const connectionStore = useConnectionStore();
 const settingsStore = useSettingsStore();
-const { isDark } = useTheme();
+const { isDark, themePalette } = useTheme();
 const { t } = useI18n();
 const { toast } = useToast();
 
@@ -2295,7 +2295,7 @@ onMounted(async () => {
   const dialect = createDbxCodeMirrorSqlDialect(langSql, props.dialect);
 
   const initialSettings = settingsStore.editorSettings;
-  const theme = await loadEditorTheme(initialSettings.theme, editorThemeAppearance(), getCurrentCustomThemeColors());
+  const theme = await loadEditorTheme(initialSettings.theme, editorThemeAppearance(), getCurrentCustomThemeColors(), themePalette.value);
   if (initialSettings.vimModeEnabled) {
     await ensureCodeMirrorVim();
   }
@@ -2643,7 +2643,7 @@ onMounted(async () => {
     if (!view.value || !codeMirrorTheme) return;
     const settings = settingsStore.editorSettings;
     const themeColors = settings.theme === "custom" ? getCurrentCustomThemeColors() : settings.customThemeColors;
-    const themeExt = await loadEditorTheme(settings.theme, editorThemeAppearance(), themeColors);
+    const themeExt = await loadEditorTheme(settings.theme, editorThemeAppearance(), themeColors, themePalette.value);
     view.value.dispatch({
       effects: [codeMirrorTheme.reconfigure(themeExt)],
     });
@@ -2724,7 +2724,7 @@ function getCurrentCustomThemeColors() {
 
 // Reactively apply editor settings changes
 watch(
-  [queryEditorAppearanceSettings, () => isDark.value],
+  [queryEditorAppearanceSettings, () => isDark.value, () => themePalette.value],
   async ([ss]) => {
     if (!view.value || !codeMirrorTheme || !fontThemeComp || !wordWrapComp || !vimModeComp || !runKeymapComp || !editorViewModule) {
       return;
@@ -2734,7 +2734,7 @@ watch(
     }
     syncEditorFontCssVars(liveFontSize.value, ss.fontFamily);
     const themeColors = getCurrentCustomThemeColors();
-    const [themeExt] = await Promise.all([loadEditorTheme(ss.theme, editorThemeAppearance(), themeColors), ss.vimModeEnabled ? ensureCodeMirrorVim() : Promise.resolve(false)]);
+    const [themeExt] = await Promise.all([loadEditorTheme(ss.theme, editorThemeAppearance(), themeColors, themePalette.value), ss.vimModeEnabled ? ensureCodeMirrorVim() : Promise.resolve(false)]);
     if (!view.value || !codeMirrorTheme || !wordWrapComp || !vimModeComp || !runKeymapComp || !editorViewModule) {
       return;
     }

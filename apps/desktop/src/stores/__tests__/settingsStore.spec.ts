@@ -30,6 +30,12 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({}).updateDownloadSource).toBe("official");
   });
 
+  it("preserves explicit editor themes from saved settings", () => {
+    expect(normalizeEditorSettings({ theme: "xcode" }).theme).toBe("xcode");
+    expect(normalizeEditorSettings({ theme: "one-dark" }).theme).toBe("one-dark");
+    expect(normalizeEditorSettings({ theme: "custom" }).theme).toBe("custom");
+  });
+
   it("restores all open tabs on launch by default", () => {
     expect(normalizeEditorSettings({}).openTabsRestoreMode).toBe("all");
   });

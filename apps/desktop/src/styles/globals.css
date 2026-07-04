@@ -154,6 +154,966 @@
   --sidebar-ring: rgb(133 134 139);
 }
 
+html.theme-soft {
+  --background: rgb(250 251 253);
+  --foreground: rgb(40 44 52);
+  --card: rgb(255 255 255);
+  --card-foreground: rgb(36 40 48);
+  --popover: rgb(255 255 255);
+  --popover-foreground: rgb(36 40 48);
+  --primary: rgb(46 95 166);
+  --primary-foreground: rgb(247 250 255);
+  --secondary: rgb(237 241 246);
+  --secondary-foreground: rgb(47 53 63);
+  --muted: rgb(237 241 246);
+  --muted-foreground: rgb(104 113 126);
+  --accent: rgb(226 233 242);
+  --accent-foreground: rgb(36 44 57);
+  --destructive: rgb(197 68 58);
+  --border: rgb(208 215 224);
+  --input: rgb(198 207 218);
+  --ring: rgb(110 128 154);
+  --chart-1: rgb(84 125 191);
+  --chart-2: rgb(80 150 137);
+  --chart-3: rgb(184 128 58);
+  --chart-4: rgb(136 115 194);
+  --chart-5: rgb(191 94 89);
+  --sidebar: rgb(239 242 246);
+  --sidebar-foreground: rgb(48 54 65);
+  --sidebar-primary: rgb(46 95 166);
+  --sidebar-primary-foreground: rgb(247 250 255);
+  --sidebar-accent: rgb(224 231 241);
+  --sidebar-accent-foreground: rgb(34 41 52);
+  --sidebar-border: rgb(202 210 221);
+  --sidebar-ring: rgb(110 128 154);
+  --dbx-chrome: rgb(236 240 245);
+  --dbx-chrome-muted: rgb(231 236 243);
+  --dbx-content: rgb(255 255 255);
+  --dbx-editor-toolbar: rgb(246 248 251);
+  --dbx-gutter: rgb(229 234 241);
+  --dbx-sidebar-header: rgb(233 238 244);
+}
+
+html.theme-soft.dark {
+  --background: rgb(31 33 37);
+  --foreground: rgb(202 206 214);
+  --card: rgb(38 41 46);
+  --card-foreground: rgb(202 206 214);
+  --popover: rgb(42 45 51);
+  --popover-foreground: rgb(207 211 218);
+  --primary: rgb(157 177 205);
+  --primary-foreground: rgb(27 30 34);
+  --secondary: rgb(47 51 58);
+  --secondary-foreground: rgb(201 205 213);
+  --muted: rgb(47 51 58);
+  --muted-foreground: rgb(146 153 164);
+  --accent: rgb(55 60 69);
+  --accent-foreground: rgb(208 212 219);
+  --destructive: rgb(224 101 93);
+  --border: rgb(104 112 126 / 0.34);
+  --input: rgb(116 126 142 / 0.36);
+  --ring: rgb(138 148 164);
+  --chart-1: rgb(131 157 199);
+  --chart-2: rgb(111 168 153);
+  --chart-3: rgb(199 151 91);
+  --chart-4: rgb(160 145 207);
+  --chart-5: rgb(209 116 111);
+  --sidebar: rgb(34 37 42);
+  --sidebar-foreground: rgb(193 198 207);
+  --sidebar-primary: rgb(157 177 205);
+  --sidebar-primary-foreground: rgb(27 30 34);
+  --sidebar-accent: rgb(45 50 58);
+  --sidebar-accent-foreground: rgb(205 210 218);
+  --sidebar-border: rgb(105 114 128 / 0.32);
+  --sidebar-ring: rgb(138 148 164);
+  --dbx-chrome: rgb(39 43 49);
+  --dbx-chrome-muted: rgb(43 47 54);
+  --dbx-content: rgb(33 36 41);
+  --dbx-editor-toolbar: rgb(36 39 44);
+  --dbx-gutter: rgb(27 30 34);
+  --dbx-sidebar-header: rgb(38 42 48);
+}
+
+html.theme-graphite {
+  --background: rgb(249 250 252);
+  --foreground: rgb(42 45 51);
+  --card: rgb(255 255 255);
+  --card-foreground: rgb(39 42 48);
+  --popover: rgb(255 255 255);
+  --popover-foreground: rgb(39 42 48);
+  --primary: rgb(72 80 93);
+  --primary-foreground: rgb(248 250 252);
+  --secondary: rgb(238 240 244);
+  --secondary-foreground: rgb(49 53 61);
+  --muted: rgb(238 240 244);
+  --muted-foreground: rgb(106 112 123);
+  --accent: rgb(226 230 236);
+  --accent-foreground: rgb(39 44 53);
+  --destructive: rgb(198 72 62);
+  --border: rgb(210 215 224);
+  --input: rgb(198 204 214);
+  --ring: rgb(116 125 139);
+  --chart-1: rgb(92 107 127);
+  --chart-2: rgb(80 143 132);
+  --chart-3: rgb(178 132 74);
+  --chart-4: rgb(121 113 173);
+  --chart-5: rgb(184 94 91);
+  --sidebar: rgb(235 238 243);
+  --sidebar-foreground: rgb(48 52 60);
+  --sidebar-primary: rgb(72 80 93);
+  --sidebar-primary-foreground: rgb(248 250 252);
+  --sidebar-accent: rgb(222 227 235);
+  --sidebar-accent-foreground: rgb(39 44 53);
+  --sidebar-border: rgb(202 208 218);
+  --sidebar-ring: rgb(116 125 139);
+  --dbx-chrome: rgb(232 236 242);
+  --dbx-chrome-muted: rgb(226 231 238);
+  --dbx-content: rgb(255 255 255);
+  --dbx-editor-toolbar: rgb(246 248 251);
+  --dbx-gutter: rgb(224 229 237);
+  --dbx-sidebar-header: rgb(229 233 240);
+}
+
+html.theme-graphite.dark {
+  --background: rgb(30 32 36);
+  --foreground: rgb(198 201 207);
+  --card: rgb(38 40 45);
+  --card-foreground: rgb(199 202 208);
+  --popover: rgb(42 44 50);
+  --popover-foreground: rgb(205 208 214);
+  --primary: rgb(174 181 192);
+  --primary-foreground: rgb(27 29 33);
+  --secondary: rgb(47 50 57);
+  --secondary-foreground: rgb(199 202 208);
+  --muted: rgb(47 50 57);
+  --muted-foreground: rgb(144 150 160);
+  --accent: rgb(55 58 66);
+  --accent-foreground: rgb(207 210 216);
+  --destructive: rgb(223 101 92);
+  --border: rgb(104 110 122 / 0.34);
+  --input: rgb(115 123 137 / 0.36);
+  --ring: rgb(138 145 158);
+  --chart-1: rgb(146 158 176);
+  --chart-2: rgb(110 165 151);
+  --chart-3: rgb(198 150 92);
+  --chart-4: rgb(151 142 199);
+  --chart-5: rgb(206 113 109);
+  --sidebar: rgb(33 35 40);
+  --sidebar-foreground: rgb(190 195 203);
+  --sidebar-primary: rgb(174 181 192);
+  --sidebar-primary-foreground: rgb(27 29 33);
+  --sidebar-accent: rgb(45 48 55);
+  --sidebar-accent-foreground: rgb(204 208 215);
+  --sidebar-border: rgb(104 110 122 / 0.32);
+  --sidebar-ring: rgb(138 145 158);
+  --dbx-chrome: rgb(38 41 47);
+  --dbx-chrome-muted: rgb(43 46 53);
+  --dbx-content: rgb(32 34 39);
+  --dbx-editor-toolbar: rgb(36 38 43);
+  --dbx-gutter: rgb(27 29 33);
+  --dbx-sidebar-header: rgb(37 40 46);
+}
+
+html.theme-cobalt {
+  --background: rgb(247 250 253);
+  --foreground: rgb(32 43 58);
+  --card: rgb(255 255 255);
+  --card-foreground: rgb(30 41 56);
+  --popover: rgb(255 255 255);
+  --popover-foreground: rgb(30 41 56);
+  --primary: rgb(43 99 183);
+  --primary-foreground: rgb(247 250 255);
+  --secondary: rgb(232 240 250);
+  --secondary-foreground: rgb(38 52 70);
+  --muted: rgb(232 240 250);
+  --muted-foreground: rgb(96 111 130);
+  --accent: rgb(216 229 246);
+  --accent-foreground: rgb(31 48 72);
+  --destructive: rgb(197 70 61);
+  --border: rgb(200 212 229);
+  --input: rgb(187 204 224);
+  --ring: rgb(85 119 165);
+  --chart-1: rgb(60 111 191);
+  --chart-2: rgb(75 145 159);
+  --chart-3: rgb(180 130 64);
+  --chart-4: rgb(132 113 190);
+  --chart-5: rgb(190 91 95);
+  --sidebar: rgb(232 239 248);
+  --sidebar-foreground: rgb(37 51 68);
+  --sidebar-primary: rgb(43 99 183);
+  --sidebar-primary-foreground: rgb(247 250 255);
+  --sidebar-accent: rgb(214 228 246);
+  --sidebar-accent-foreground: rgb(31 48 72);
+  --sidebar-border: rgb(195 209 228);
+  --sidebar-ring: rgb(85 119 165);
+  --dbx-chrome: rgb(228 236 247);
+  --dbx-chrome-muted: rgb(221 231 245);
+  --dbx-content: rgb(255 255 255);
+  --dbx-editor-toolbar: rgb(244 248 253);
+  --dbx-gutter: rgb(218 229 243);
+  --dbx-sidebar-header: rgb(224 234 246);
+}
+
+html.theme-cobalt.dark {
+  --background: rgb(25 31 42);
+  --foreground: rgb(198 207 219);
+  --card: rgb(31 38 51);
+  --card-foreground: rgb(200 209 221);
+  --popover: rgb(35 43 58);
+  --popover-foreground: rgb(206 214 225);
+  --primary: rgb(137 173 223);
+  --primary-foreground: rgb(20 28 39);
+  --secondary: rgb(43 53 70);
+  --secondary-foreground: rgb(200 209 221);
+  --muted: rgb(43 53 70);
+  --muted-foreground: rgb(143 155 171);
+  --accent: rgb(49 62 82);
+  --accent-foreground: rgb(209 218 229);
+  --destructive: rgb(224 101 94);
+  --border: rgb(101 119 144 / 0.34);
+  --input: rgb(109 130 158 / 0.36);
+  --ring: rgb(133 154 184);
+  --chart-1: rgb(133 173 229);
+  --chart-2: rgb(107 172 184);
+  --chart-3: rgb(199 151 90);
+  --chart-4: rgb(158 143 207);
+  --chart-5: rgb(209 114 116);
+  --sidebar: rgb(28 35 48);
+  --sidebar-foreground: rgb(191 202 216);
+  --sidebar-primary: rgb(137 173 223);
+  --sidebar-primary-foreground: rgb(20 28 39);
+  --sidebar-accent: rgb(42 54 72);
+  --sidebar-accent-foreground: rgb(206 215 227);
+  --sidebar-border: rgb(101 119 144 / 0.32);
+  --sidebar-ring: rgb(133 154 184);
+  --dbx-chrome: rgb(32 40 54);
+  --dbx-chrome-muted: rgb(37 47 63);
+  --dbx-content: rgb(27 34 46);
+  --dbx-editor-toolbar: rgb(30 38 51);
+  --dbx-gutter: rgb(22 28 38);
+  --dbx-sidebar-header: rgb(31 39 53);
+}
+
+html.theme-sage {
+  --background: rgb(248 250 248);
+  --foreground: rgb(36 48 43);
+  --card: rgb(255 255 255);
+  --card-foreground: rgb(34 46 41);
+  --popover: rgb(255 255 255);
+  --popover-foreground: rgb(34 46 41);
+  --primary: rgb(58 123 106);
+  --primary-foreground: rgb(246 252 249);
+  --secondary: rgb(233 241 237);
+  --secondary-foreground: rgb(42 58 52);
+  --muted: rgb(233 241 237);
+  --muted-foreground: rgb(97 113 106);
+  --accent: rgb(219 234 227);
+  --accent-foreground: rgb(31 55 47);
+  --destructive: rgb(196 72 61);
+  --border: rgb(203 217 211);
+  --input: rgb(190 208 200);
+  --ring: rgb(88 135 119);
+  --chart-1: rgb(63 132 112);
+  --chart-2: rgb(74 137 168);
+  --chart-3: rgb(180 132 68);
+  --chart-4: rgb(132 115 185);
+  --chart-5: rgb(188 95 90);
+  --sidebar: rgb(235 242 238);
+  --sidebar-foreground: rgb(38 54 48);
+  --sidebar-primary: rgb(58 123 106);
+  --sidebar-primary-foreground: rgb(246 252 249);
+  --sidebar-accent: rgb(218 234 227);
+  --sidebar-accent-foreground: rgb(31 55 47);
+  --sidebar-border: rgb(197 213 206);
+  --sidebar-ring: rgb(88 135 119);
+  --dbx-chrome: rgb(231 239 235);
+  --dbx-chrome-muted: rgb(225 235 230);
+  --dbx-content: rgb(255 255 255);
+  --dbx-editor-toolbar: rgb(245 248 246);
+  --dbx-gutter: rgb(221 233 227);
+  --dbx-sidebar-header: rgb(228 237 233);
+}
+
+html.theme-sage.dark {
+  --background: rgb(27 35 33);
+  --foreground: rgb(198 208 204);
+  --card: rgb(34 43 40);
+  --card-foreground: rgb(200 210 206);
+  --popover: rgb(38 48 45);
+  --popover-foreground: rgb(206 216 212);
+  --primary: rgb(138 184 169);
+  --primary-foreground: rgb(22 32 29);
+  --secondary: rgb(44 57 53);
+  --secondary-foreground: rgb(200 210 206);
+  --muted: rgb(44 57 53);
+  --muted-foreground: rgb(143 157 151);
+  --accent: rgb(50 65 60);
+  --accent-foreground: rgb(208 218 214);
+  --destructive: rgb(224 102 94);
+  --border: rgb(100 122 113 / 0.34);
+  --input: rgb(107 132 122 / 0.36);
+  --ring: rgb(132 159 149);
+  --chart-1: rgb(134 188 170);
+  --chart-2: rgb(111 170 190);
+  --chart-3: rgb(199 151 91);
+  --chart-4: rgb(154 143 203);
+  --chart-5: rgb(207 114 108);
+  --sidebar: rgb(30 39 36);
+  --sidebar-foreground: rgb(191 203 198);
+  --sidebar-primary: rgb(138 184 169);
+  --sidebar-primary-foreground: rgb(22 32 29);
+  --sidebar-accent: rgb(43 58 53);
+  --sidebar-accent-foreground: rgb(205 217 212);
+  --sidebar-border: rgb(100 122 113 / 0.32);
+  --sidebar-ring: rgb(132 159 149);
+  --dbx-chrome: rgb(34 45 41);
+  --dbx-chrome-muted: rgb(39 51 47);
+  --dbx-content: rgb(29 38 35);
+  --dbx-editor-toolbar: rgb(32 42 39);
+  --dbx-gutter: rgb(24 31 29);
+  --dbx-sidebar-header: rgb(33 43 40);
+}
+
+html.theme-amber {
+  --background: rgb(255 252 242);
+  --foreground: rgb(56 48 32);
+  --card: rgb(255 255 250);
+  --card-foreground: rgb(51 44 30);
+  --popover: rgb(255 255 250);
+  --popover-foreground: rgb(51 44 30);
+  --primary: rgb(149 95 28);
+  --primary-foreground: rgb(255 250 236);
+  --secondary: rgb(247 238 213);
+  --secondary-foreground: rgb(68 56 36);
+  --muted: rgb(247 238 213);
+  --muted-foreground: rgb(123 105 70);
+  --accent: rgb(239 219 174);
+  --accent-foreground: rgb(65 48 24);
+  --destructive: rgb(191 72 57);
+  --border: rgb(224 207 168);
+  --input: rgb(211 191 148);
+  --ring: rgb(166 119 47);
+  --chart-1: rgb(171 111 34);
+  --chart-2: rgb(93 137 112);
+  --chart-3: rgb(69 124 162);
+  --chart-4: rgb(134 111 178);
+  --chart-5: rgb(184 90 87);
+  --sidebar: rgb(247 238 213);
+  --sidebar-foreground: rgb(61 51 33);
+  --sidebar-primary: rgb(149 95 28);
+  --sidebar-primary-foreground: rgb(255 250 236);
+  --sidebar-accent: rgb(239 221 181);
+  --sidebar-accent-foreground: rgb(65 48 24);
+  --sidebar-border: rgb(218 199 158);
+  --sidebar-ring: rgb(166 119 47);
+  --dbx-chrome: rgb(244 233 203);
+  --dbx-chrome-muted: rgb(239 226 191);
+  --dbx-content: rgb(255 255 250);
+  --dbx-editor-toolbar: rgb(252 247 232);
+  --dbx-gutter: rgb(235 219 181);
+  --dbx-sidebar-header: rgb(242 229 196);
+}
+
+html.theme-amber.dark {
+  --background: rgb(37 34 27);
+  --foreground: rgb(217 208 188);
+  --card: rgb(45 41 32);
+  --card-foreground: rgb(219 210 191);
+  --popover: rgb(50 46 36);
+  --popover-foreground: rgb(225 216 197);
+  --primary: rgb(213 169 75);
+  --primary-foreground: rgb(34 29 21);
+  --secondary: rgb(59 53 40);
+  --secondary-foreground: rgb(218 209 190);
+  --muted: rgb(59 53 40);
+  --muted-foreground: rgb(163 150 123);
+  --accent: rgb(71 61 43);
+  --accent-foreground: rgb(228 219 199);
+  --destructive: rgb(225 104 92);
+  --border: rgb(129 112 77 / 0.36);
+  --input: rgb(141 121 83 / 0.38);
+  --ring: rgb(185 151 84);
+  --chart-1: rgb(214 170 78);
+  --chart-2: rgb(121 171 139);
+  --chart-3: rgb(103 161 198);
+  --chart-4: rgb(160 143 205);
+  --chart-5: rgb(210 115 111);
+  --sidebar: rgb(41 37 29);
+  --sidebar-foreground: rgb(210 200 180);
+  --sidebar-primary: rgb(213 169 75);
+  --sidebar-primary-foreground: rgb(34 29 21);
+  --sidebar-accent: rgb(57 50 36);
+  --sidebar-accent-foreground: rgb(224 215 196);
+  --sidebar-border: rgb(129 112 77 / 0.34);
+  --sidebar-ring: rgb(185 151 84);
+  --dbx-chrome: rgb(48 43 33);
+  --dbx-chrome-muted: rgb(54 48 36);
+  --dbx-content: rgb(39 36 28);
+  --dbx-editor-toolbar: rgb(43 39 31);
+  --dbx-gutter: rgb(32 29 23);
+  --dbx-sidebar-header: rgb(46 41 32);
+}
+
+html.theme-blush {
+  --background: rgb(255 248 251);
+  --foreground: rgb(61 48 56);
+  --card: rgb(255 255 255);
+  --card-foreground: rgb(57 45 53);
+  --popover: rgb(255 255 255);
+  --popover-foreground: rgb(57 45 53);
+  --primary: rgb(184 86 123);
+  --primary-foreground: rgb(255 248 251);
+  --secondary: rgb(246 232 239);
+  --secondary-foreground: rgb(74 55 67);
+  --muted: rgb(246 232 239);
+  --muted-foreground: rgb(126 98 115);
+  --accent: rgb(239 213 226);
+  --accent-foreground: rgb(83 50 68);
+  --destructive: rgb(197 69 64);
+  --border: rgb(226 202 214);
+  --input: rgb(214 187 201);
+  --ring: rgb(188 111 141);
+  --chart-1: rgb(190 88 126);
+  --chart-2: rgb(117 141 190);
+  --chart-3: rgb(116 157 132);
+  --chart-4: rgb(180 132 74);
+  --chart-5: rgb(137 108 183);
+  --sidebar: rgb(248 234 241);
+  --sidebar-foreground: rgb(66 50 60);
+  --sidebar-primary: rgb(184 86 123);
+  --sidebar-primary-foreground: rgb(255 248 251);
+  --sidebar-accent: rgb(239 214 226);
+  --sidebar-accent-foreground: rgb(83 50 68);
+  --sidebar-border: rgb(220 195 208);
+  --sidebar-ring: rgb(188 111 141);
+  --dbx-chrome: rgb(246 230 238);
+  --dbx-chrome-muted: rgb(240 220 230);
+  --dbx-content: rgb(255 255 255);
+  --dbx-editor-toolbar: rgb(253 246 250);
+  --dbx-gutter: rgb(237 216 227);
+  --dbx-sidebar-header: rgb(243 225 235);
+}
+
+html.theme-blush.dark {
+  --background: rgb(42 35 40);
+  --foreground: rgb(221 205 214);
+  --card: rgb(52 42 49);
+  --card-foreground: rgb(223 207 216);
+  --popover: rgb(58 47 55);
+  --popover-foreground: rgb(230 214 222);
+  --primary: rgb(226 160 184);
+  --primary-foreground: rgb(39 29 35);
+  --secondary: rgb(67 52 62);
+  --secondary-foreground: rgb(222 206 215);
+  --muted: rgb(67 52 62);
+  --muted-foreground: rgb(166 140 154);
+  --accent: rgb(82 59 72);
+  --accent-foreground: rgb(231 216 224);
+  --destructive: rgb(226 102 96);
+  --border: rgb(139 108 124 / 0.35);
+  --input: rgb(151 116 134 / 0.38);
+  --ring: rgb(202 143 164);
+  --chart-1: rgb(225 160 184);
+  --chart-2: rgb(134 159 211);
+  --chart-3: rgb(126 178 151);
+  --chart-4: rgb(202 152 93);
+  --chart-5: rgb(170 145 207);
+  --sidebar: rgb(47 38 45);
+  --sidebar-foreground: rgb(214 197 207);
+  --sidebar-primary: rgb(226 160 184);
+  --sidebar-primary-foreground: rgb(39 29 35);
+  --sidebar-accent: rgb(66 51 61);
+  --sidebar-accent-foreground: rgb(229 213 222);
+  --sidebar-border: rgb(139 108 124 / 0.33);
+  --sidebar-ring: rgb(202 143 164);
+  --dbx-chrome: rgb(55 44 52);
+  --dbx-chrome-muted: rgb(62 49 58);
+  --dbx-content: rgb(44 36 42);
+  --dbx-editor-toolbar: rgb(50 40 47);
+  --dbx-gutter: rgb(37 30 35);
+  --dbx-sidebar-header: rgb(52 42 49);
+}
+
+html.theme-vscode {
+  --background: rgb(255 255 255);
+  --foreground: rgb(51 51 51);
+  --card: rgb(255 255 255);
+  --card-foreground: rgb(45 45 45);
+  --popover: rgb(255 255 255);
+  --popover-foreground: rgb(45 45 45);
+  --primary: rgb(0 122 204);
+  --primary-foreground: rgb(255 255 255);
+  --secondary: rgb(243 243 243);
+  --secondary-foreground: rgb(51 51 51);
+  --muted: rgb(243 243 243);
+  --muted-foreground: rgb(106 106 106);
+  --accent: rgb(229 241 251);
+  --accent-foreground: rgb(0 74 122);
+  --destructive: rgb(196 72 62);
+  --border: rgb(224 224 224);
+  --input: rgb(206 206 206);
+  --ring: rgb(0 122 204);
+  --chart-1: rgb(0 122 204);
+  --chart-2: rgb(64 143 114);
+  --chart-3: rgb(186 133 62);
+  --chart-4: rgb(126 112 190);
+  --chart-5: rgb(190 90 90);
+  --sidebar: rgb(243 243 243);
+  --sidebar-foreground: rgb(51 51 51);
+  --sidebar-primary: rgb(0 122 204);
+  --sidebar-primary-foreground: rgb(255 255 255);
+  --sidebar-accent: rgb(230 230 230);
+  --sidebar-accent-foreground: rgb(45 45 45);
+  --sidebar-border: rgb(216 216 216);
+  --sidebar-ring: rgb(0 122 204);
+  --dbx-chrome: rgb(221 221 221);
+  --dbx-chrome-muted: rgb(232 232 232);
+  --dbx-content: rgb(255 255 255);
+  --dbx-editor-toolbar: rgb(246 246 246);
+  --dbx-gutter: rgb(229 229 229);
+  --dbx-sidebar-header: rgb(236 236 236);
+}
+
+html.theme-vscode.dark {
+  --background: rgb(30 30 30);
+  --foreground: rgb(204 204 204);
+  --card: rgb(37 37 38);
+  --card-foreground: rgb(204 204 204);
+  --popover: rgb(45 45 48);
+  --popover-foreground: rgb(212 212 212);
+  --primary: rgb(0 122 204);
+  --primary-foreground: rgb(255 255 255);
+  --secondary: rgb(45 45 48);
+  --secondary-foreground: rgb(204 204 204);
+  --muted: rgb(45 45 48);
+  --muted-foreground: rgb(133 133 133);
+  --accent: rgb(38 79 120);
+  --accent-foreground: rgb(235 244 255);
+  --destructive: rgb(241 112 105);
+  --border: rgb(60 60 60);
+  --input: rgb(70 70 70);
+  --ring: rgb(0 122 204);
+  --chart-1: rgb(55 148 255);
+  --chart-2: rgb(78 201 176);
+  --chart-3: rgb(220 180 120);
+  --chart-4: rgb(197 134 192);
+  --chart-5: rgb(244 135 113);
+  --sidebar: rgb(37 37 38);
+  --sidebar-foreground: rgb(204 204 204);
+  --sidebar-primary: rgb(0 122 204);
+  --sidebar-primary-foreground: rgb(255 255 255);
+  --sidebar-accent: rgb(45 45 48);
+  --sidebar-accent-foreground: rgb(212 212 212);
+  --sidebar-border: rgb(60 60 60);
+  --sidebar-ring: rgb(0 122 204);
+  --dbx-chrome: rgb(51 51 51);
+  --dbx-chrome-muted: rgb(45 45 48);
+  --dbx-content: rgb(30 30 30);
+  --dbx-editor-toolbar: rgb(37 37 38);
+  --dbx-gutter: rgb(27 27 28);
+  --dbx-sidebar-header: rgb(45 45 48);
+}
+
+html.theme-idea {
+  --background: rgb(250 250 250);
+  --foreground: rgb(43 43 43);
+  --card: rgb(255 255 255);
+  --card-foreground: rgb(40 40 40);
+  --popover: rgb(255 255 255);
+  --popover-foreground: rgb(40 40 40);
+  --primary: rgb(75 110 175);
+  --primary-foreground: rgb(255 255 255);
+  --secondary: rgb(239 240 242);
+  --secondary-foreground: rgb(47 49 52);
+  --muted: rgb(239 240 242);
+  --muted-foreground: rgb(106 109 113);
+  --accent: rgb(218 231 249);
+  --accent-foreground: rgb(34 68 124);
+  --destructive: rgb(196 72 62);
+  --border: rgb(213 215 219);
+  --input: rgb(200 203 209);
+  --ring: rgb(75 110 175);
+  --chart-1: rgb(75 110 175);
+  --chart-2: rgb(78 139 119);
+  --chart-3: rgb(181 128 62);
+  --chart-4: rgb(132 112 184);
+  --chart-5: rgb(188 91 87);
+  --sidebar: rgb(235 236 240);
+  --sidebar-foreground: rgb(47 49 52);
+  --sidebar-primary: rgb(75 110 175);
+  --sidebar-primary-foreground: rgb(255 255 255);
+  --sidebar-accent: rgb(222 226 233);
+  --sidebar-accent-foreground: rgb(34 68 124);
+  --sidebar-border: rgb(207 210 216);
+  --sidebar-ring: rgb(75 110 175);
+  --dbx-chrome: rgb(230 231 235);
+  --dbx-chrome-muted: rgb(224 226 231);
+  --dbx-content: rgb(255 255 255);
+  --dbx-editor-toolbar: rgb(246 247 249);
+  --dbx-gutter: rgb(222 225 231);
+  --dbx-sidebar-header: rgb(229 231 236);
+}
+
+html.theme-idea.dark {
+  --background: rgb(43 43 43);
+  --foreground: rgb(187 187 187);
+  --card: rgb(60 63 65);
+  --card-foreground: rgb(187 187 187);
+  --popover: rgb(67 70 72);
+  --popover-foreground: rgb(200 200 200);
+  --primary: rgb(106 135 197);
+  --primary-foreground: rgb(30 32 34);
+  --secondary: rgb(60 63 65);
+  --secondary-foreground: rgb(187 187 187);
+  --muted: rgb(60 63 65);
+  --muted-foreground: rgb(139 141 143);
+  --accent: rgb(72 78 86);
+  --accent-foreground: rgb(210 218 234);
+  --destructive: rgb(226 104 96);
+  --border: rgb(85 86 87);
+  --input: rgb(96 97 98);
+  --ring: rgb(106 135 197);
+  --chart-1: rgb(106 135 197);
+  --chart-2: rgb(98 170 142);
+  --chart-3: rgb(204 152 88);
+  --chart-4: rgb(166 145 205);
+  --chart-5: rgb(211 115 108);
+  --sidebar: rgb(49 51 53);
+  --sidebar-foreground: rgb(184 186 188);
+  --sidebar-primary: rgb(106 135 197);
+  --sidebar-primary-foreground: rgb(30 32 34);
+  --sidebar-accent: rgb(62 66 70);
+  --sidebar-accent-foreground: rgb(206 214 229);
+  --sidebar-border: rgb(85 86 87);
+  --sidebar-ring: rgb(106 135 197);
+  --dbx-chrome: rgb(60 63 65);
+  --dbx-chrome-muted: rgb(55 58 60);
+  --dbx-content: rgb(43 43 43);
+  --dbx-editor-toolbar: rgb(50 53 55);
+  --dbx-gutter: rgb(38 38 38);
+  --dbx-sidebar-header: rgb(55 58 60);
+}
+
+html.theme-xcode {
+  --background: rgb(250 252 255);
+  --foreground: rgb(31 41 55);
+  --card: rgb(255 255 255);
+  --card-foreground: rgb(29 39 53);
+  --popover: rgb(255 255 255);
+  --popover-foreground: rgb(29 39 53);
+  --primary: rgb(10 132 255);
+  --primary-foreground: rgb(255 255 255);
+  --secondary: rgb(235 239 245);
+  --secondary-foreground: rgb(43 55 72);
+  --muted: rgb(235 239 245);
+  --muted-foreground: rgb(98 110 126);
+  --accent: rgb(219 236 255);
+  --accent-foreground: rgb(0 75 153);
+  --destructive: rgb(200 71 62);
+  --border: rgb(207 216 228);
+  --input: rgb(194 206 221);
+  --ring: rgb(10 132 255);
+  --chart-1: rgb(10 132 255);
+  --chart-2: rgb(78 145 163);
+  --chart-3: rgb(184 132 67);
+  --chart-4: rgb(130 113 190);
+  --chart-5: rgb(190 92 90);
+  --sidebar: rgb(242 245 250);
+  --sidebar-foreground: rgb(43 55 72);
+  --sidebar-primary: rgb(10 132 255);
+  --sidebar-primary-foreground: rgb(255 255 255);
+  --sidebar-accent: rgb(224 235 250);
+  --sidebar-accent-foreground: rgb(0 75 153);
+  --sidebar-border: rgb(201 211 224);
+  --sidebar-ring: rgb(10 132 255);
+  --dbx-chrome: rgb(233 237 243);
+  --dbx-chrome-muted: rgb(226 232 240);
+  --dbx-content: rgb(255 255 255);
+  --dbx-editor-toolbar: rgb(247 249 252);
+  --dbx-gutter: rgb(221 229 239);
+  --dbx-sidebar-header: rgb(235 240 247);
+}
+
+html.theme-xcode.dark {
+  --background: rgb(31 35 41);
+  --foreground: rgb(215 221 231);
+  --card: rgb(37 41 50);
+  --card-foreground: rgb(216 222 232);
+  --popover: rgb(45 51 59);
+  --popover-foreground: rgb(224 229 237);
+  --primary: rgb(10 132 255);
+  --primary-foreground: rgb(255 255 255);
+  --secondary: rgb(45 51 59);
+  --secondary-foreground: rgb(216 222 232);
+  --muted: rgb(45 51 59);
+  --muted-foreground: rgb(149 158 173);
+  --accent: rgb(29 69 117);
+  --accent-foreground: rgb(222 238 255);
+  --destructive: rgb(229 105 96);
+  --border: rgb(94 106 124 / 0.42);
+  --input: rgb(104 118 139 / 0.44);
+  --ring: rgb(86 160 255);
+  --chart-1: rgb(86 160 255);
+  --chart-2: rgb(111 174 190);
+  --chart-3: rgb(203 153 90);
+  --chart-4: rgb(160 144 207);
+  --chart-5: rgb(211 116 111);
+  --sidebar: rgb(37 41 50);
+  --sidebar-foreground: rgb(207 214 225);
+  --sidebar-primary: rgb(10 132 255);
+  --sidebar-primary-foreground: rgb(255 255 255);
+  --sidebar-accent: rgb(45 54 68);
+  --sidebar-accent-foreground: rgb(220 236 255);
+  --sidebar-border: rgb(94 106 124 / 0.38);
+  --sidebar-ring: rgb(86 160 255);
+  --dbx-chrome: rgb(45 51 59);
+  --dbx-chrome-muted: rgb(39 45 53);
+  --dbx-content: rgb(31 35 41);
+  --dbx-editor-toolbar: rgb(35 39 46);
+  --dbx-gutter: rgb(25 29 34);
+  --dbx-sidebar-header: rgb(42 47 56);
+}
+
+html.theme-jetbrains {
+  --background: rgb(248 249 251);
+  --foreground: rgb(31 35 40);
+  --card: rgb(255 255 255);
+  --card-foreground: rgb(28 32 37);
+  --popover: rgb(255 255 255);
+  --popover-foreground: rgb(28 32 37);
+  --primary: rgb(108 93 211);
+  --primary-foreground: rgb(255 255 255);
+  --secondary: rgb(235 237 241);
+  --secondary-foreground: rgb(43 48 56);
+  --muted: rgb(235 237 241);
+  --muted-foreground: rgb(100 108 119);
+  --accent: rgb(229 225 251);
+  --accent-foreground: rgb(66 52 153);
+  --destructive: rgb(198 72 62);
+  --border: rgb(211 216 224);
+  --input: rgb(198 204 214);
+  --ring: rgb(108 93 211);
+  --chart-1: rgb(108 93 211);
+  --chart-2: rgb(57 151 167);
+  --chart-3: rgb(184 132 67);
+  --chart-4: rgb(72 125 197);
+  --chart-5: rgb(190 91 90);
+  --sidebar: rgb(242 243 245);
+  --sidebar-foreground: rgb(43 48 56);
+  --sidebar-primary: rgb(108 93 211);
+  --sidebar-primary-foreground: rgb(255 255 255);
+  --sidebar-accent: rgb(229 231 236);
+  --sidebar-accent-foreground: rgb(66 52 153);
+  --sidebar-border: rgb(205 210 219);
+  --sidebar-ring: rgb(108 93 211);
+  --dbx-chrome: rgb(235 237 241);
+  --dbx-chrome-muted: rgb(228 231 236);
+  --dbx-content: rgb(255 255 255);
+  --dbx-editor-toolbar: rgb(247 248 250);
+  --dbx-gutter: rgb(224 228 235);
+  --dbx-sidebar-header: rgb(237 239 243);
+}
+
+html.theme-jetbrains.dark {
+  --background: rgb(30 31 34);
+  --foreground: rgb(223 225 229);
+  --card: rgb(43 45 48);
+  --card-foreground: rgb(223 225 229);
+  --popover: rgb(49 51 56);
+  --popover-foreground: rgb(231 233 237);
+  --primary: rgb(123 97 255);
+  --primary-foreground: rgb(255 255 255);
+  --secondary: rgb(43 45 48);
+  --secondary-foreground: rgb(223 225 229);
+  --muted: rgb(43 45 48);
+  --muted-foreground: rgb(161 164 171);
+  --accent: rgb(61 58 89);
+  --accent-foreground: rgb(233 231 255);
+  --destructive: rgb(229 105 96);
+  --border: rgb(77 80 86);
+  --input: rgb(89 92 99);
+  --ring: rgb(123 97 255);
+  --chart-1: rgb(123 97 255);
+  --chart-2: rgb(75 190 202);
+  --chart-3: rgb(207 155 91);
+  --chart-4: rgb(105 162 230);
+  --chart-5: rgb(214 116 111);
+  --sidebar: rgb(43 45 48);
+  --sidebar-foreground: rgb(215 218 224);
+  --sidebar-primary: rgb(123 97 255);
+  --sidebar-primary-foreground: rgb(255 255 255);
+  --sidebar-accent: rgb(54 56 61);
+  --sidebar-accent-foreground: rgb(232 231 255);
+  --sidebar-border: rgb(77 80 86);
+  --sidebar-ring: rgb(123 97 255);
+  --dbx-chrome: rgb(43 45 48);
+  --dbx-chrome-muted: rgb(37 39 42);
+  --dbx-content: rgb(30 31 34);
+  --dbx-editor-toolbar: rgb(35 37 40);
+  --dbx-gutter: rgb(24 25 28);
+  --dbx-sidebar-header: rgb(39 41 44);
+}
+
+html.theme-cursor {
+  --background: rgb(251 252 254);
+  --foreground: rgb(31 36 45);
+  --card: rgb(255 255 255);
+  --card-foreground: rgb(28 33 42);
+  --popover: rgb(255 255 255);
+  --popover-foreground: rgb(28 33 42);
+  --primary: rgb(59 130 246);
+  --primary-foreground: rgb(255 255 255);
+  --secondary: rgb(239 241 245);
+  --secondary-foreground: rgb(42 49 60);
+  --muted: rgb(239 241 245);
+  --muted-foreground: rgb(101 111 126);
+  --accent: rgb(222 235 255);
+  --accent-foreground: rgb(31 79 154);
+  --destructive: rgb(198 72 62);
+  --border: rgb(213 218 226);
+  --input: rgb(199 206 217);
+  --ring: rgb(59 130 246);
+  --chart-1: rgb(59 130 246);
+  --chart-2: rgb(78 151 166);
+  --chart-3: rgb(184 132 67);
+  --chart-4: rgb(132 112 190);
+  --chart-5: rgb(190 91 90);
+  --sidebar: rgb(244 245 247);
+  --sidebar-foreground: rgb(42 49 60);
+  --sidebar-primary: rgb(59 130 246);
+  --sidebar-primary-foreground: rgb(255 255 255);
+  --sidebar-accent: rgb(230 234 241);
+  --sidebar-accent-foreground: rgb(31 79 154);
+  --sidebar-border: rgb(207 213 223);
+  --sidebar-ring: rgb(59 130 246);
+  --dbx-chrome: rgb(242 243 245);
+  --dbx-chrome-muted: rgb(234 237 242);
+  --dbx-content: rgb(255 255 255);
+  --dbx-editor-toolbar: rgb(247 248 250);
+  --dbx-gutter: rgb(228 232 239);
+  --dbx-sidebar-header: rgb(238 240 244);
+}
+
+html.theme-cursor.dark {
+  --background: rgb(15 17 26);
+  --foreground: rgb(213 215 222);
+  --card: rgb(21 24 33);
+  --card-foreground: rgb(214 216 223);
+  --popover: rgb(27 30 39);
+  --popover-foreground: rgb(223 225 232);
+  --primary: rgb(107 164 255);
+  --primary-foreground: rgb(8 12 20);
+  --secondary: rgb(27 30 39);
+  --secondary-foreground: rgb(214 216 223);
+  --muted: rgb(27 30 39);
+  --muted-foreground: rgb(142 149 164);
+  --accent: rgb(31 51 82);
+  --accent-foreground: rgb(222 236 255);
+  --destructive: rgb(228 104 96);
+  --border: rgb(82 91 111 / 0.42);
+  --input: rgb(93 104 128 / 0.44);
+  --ring: rgb(107 164 255);
+  --chart-1: rgb(107 164 255);
+  --chart-2: rgb(91 187 199);
+  --chart-3: rgb(204 154 91);
+  --chart-4: rgb(162 143 207);
+  --chart-5: rgb(213 116 111);
+  --sidebar: rgb(21 24 33);
+  --sidebar-foreground: rgb(205 209 219);
+  --sidebar-primary: rgb(107 164 255);
+  --sidebar-primary-foreground: rgb(8 12 20);
+  --sidebar-accent: rgb(28 34 46);
+  --sidebar-accent-foreground: rgb(219 233 255);
+  --sidebar-border: rgb(82 91 111 / 0.38);
+  --sidebar-ring: rgb(107 164 255);
+  --dbx-chrome: rgb(27 30 39);
+  --dbx-chrome-muted: rgb(24 27 36);
+  --dbx-content: rgb(15 17 26);
+  --dbx-editor-toolbar: rgb(20 23 32);
+  --dbx-gutter: rgb(11 13 20);
+  --dbx-sidebar-header: rgb(25 28 38);
+}
+
+html.theme-claude {
+  --background: rgb(251 247 239);
+  --foreground: rgb(51 43 35);
+  --card: rgb(255 253 248);
+  --card-foreground: rgb(48 40 32);
+  --popover: rgb(255 253 248);
+  --popover-foreground: rgb(48 40 32);
+  --primary: rgb(184 107 60);
+  --primary-foreground: rgb(255 250 243);
+  --secondary: rgb(242 231 219);
+  --secondary-foreground: rgb(65 53 43);
+  --muted: rgb(242 231 219);
+  --muted-foreground: rgb(117 98 81);
+  --accent: rgb(234 216 198);
+  --accent-foreground: rgb(99 54 31);
+  --destructive: rgb(195 73 61);
+  --border: rgb(221 205 187);
+  --input: rgb(209 190 169);
+  --ring: rgb(184 107 60);
+  --chart-1: rgb(184 107 60);
+  --chart-2: rgb(84 139 119);
+  --chart-3: rgb(75 124 160);
+  --chart-4: rgb(135 112 178);
+  --chart-5: rgb(188 92 87);
+  --sidebar: rgb(239 231 220);
+  --sidebar-foreground: rgb(58 48 39);
+  --sidebar-primary: rgb(184 107 60);
+  --sidebar-primary-foreground: rgb(255 250 243);
+  --sidebar-accent: rgb(231 216 200);
+  --sidebar-accent-foreground: rgb(99 54 31);
+  --sidebar-border: rgb(215 199 181);
+  --sidebar-ring: rgb(184 107 60);
+  --dbx-chrome: rgb(241 231 219);
+  --dbx-chrome-muted: rgb(234 222 209);
+  --dbx-content: rgb(255 253 248);
+  --dbx-editor-toolbar: rgb(248 241 233);
+  --dbx-gutter: rgb(230 216 199);
+  --dbx-sidebar-header: rgb(236 226 214);
+}
+
+html.theme-claude.dark {
+  --background: rgb(33 31 28);
+  --foreground: rgb(216 208 196);
+  --card: rgb(42 39 35);
+  --card-foreground: rgb(219 211 199);
+  --popover: rgb(49 45 40);
+  --popover-foreground: rgb(226 218 206);
+  --primary: rgb(210 138 95);
+  --primary-foreground: rgb(35 27 21);
+  --secondary: rgb(55 49 43);
+  --secondary-foreground: rgb(219 211 199);
+  --muted: rgb(55 49 43);
+  --muted-foreground: rgb(163 150 134);
+  --accent: rgb(68 56 47);
+  --accent-foreground: rgb(232 222 210);
+  --destructive: rgb(226 103 95);
+  --border: rgb(127 108 91 / 0.38);
+  --input: rgb(138 117 98 / 0.4);
+  --ring: rgb(210 138 95);
+  --chart-1: rgb(210 138 95);
+  --chart-2: rgb(116 177 149);
+  --chart-3: rgb(101 161 198);
+  --chart-4: rgb(160 143 205);
+  --chart-5: rgb(211 115 109);
+  --sidebar: rgb(42 39 35);
+  --sidebar-foreground: rgb(210 201 188);
+  --sidebar-primary: rgb(210 138 95);
+  --sidebar-primary-foreground: rgb(35 27 21);
+  --sidebar-accent: rgb(56 50 44);
+  --sidebar-accent-foreground: rgb(229 219 207);
+  --sidebar-border: rgb(127 108 91 / 0.35);
+  --sidebar-ring: rgb(210 138 95);
+  --dbx-chrome: rgb(49 45 40);
+  --dbx-chrome-muted: rgb(55 49 43);
+  --dbx-content: rgb(33 31 28);
+  --dbx-editor-toolbar: rgb(39 36 32);
+  --dbx-gutter: rgb(27 25 23);
+  --dbx-sidebar-header: rgb(45 41 37);
+}
+
 @supports (color: oklch(1 0 0)) {
   :root {
     --background: oklch(1 0 0);
@@ -221,6 +1181,86 @@
     --sidebar-accent-foreground: oklch(0.9 0.006 285);
     --sidebar-border: oklch(0.54 0.006 285 / 28%);
     --sidebar-ring: oklch(0.62 0.008 285);
+  }
+
+  html.theme-soft {
+    --background: oklch(0.985 0.003 255);
+    --foreground: oklch(0.315 0.018 255);
+    --card: oklch(1 0 0);
+    --card-foreground: oklch(0.295 0.018 255);
+    --popover: oklch(1 0 0);
+    --popover-foreground: oklch(0.295 0.018 255);
+    --primary: oklch(0.48 0.115 255);
+    --primary-foreground: oklch(0.985 0.006 255);
+    --secondary: oklch(0.955 0.008 255);
+    --secondary-foreground: oklch(0.36 0.02 255);
+    --muted: oklch(0.955 0.008 255);
+    --muted-foreground: oklch(0.53 0.024 255);
+    --accent: oklch(0.925 0.014 255);
+    --accent-foreground: oklch(0.32 0.03 255);
+    --destructive: oklch(0.55 0.16 28);
+    --border: oklch(0.875 0.012 255);
+    --input: oklch(0.835 0.018 255);
+    --ring: oklch(0.61 0.045 255);
+    --chart-1: oklch(0.57 0.12 255);
+    --chart-2: oklch(0.62 0.09 180);
+    --chart-3: oklch(0.65 0.12 70);
+    --chart-4: oklch(0.62 0.1 300);
+    --chart-5: oklch(0.63 0.13 28);
+    --sidebar: oklch(0.955 0.007 255);
+    --sidebar-foreground: oklch(0.35 0.022 255);
+    --sidebar-primary: oklch(0.48 0.115 255);
+    --sidebar-primary-foreground: oklch(0.985 0.006 255);
+    --sidebar-accent: oklch(0.92 0.014 255);
+    --sidebar-accent-foreground: oklch(0.31 0.03 255);
+    --sidebar-border: oklch(0.855 0.014 255);
+    --sidebar-ring: oklch(0.61 0.045 255);
+    --dbx-chrome: oklch(0.948 0.008 255);
+    --dbx-chrome-muted: oklch(0.93 0.012 255);
+    --dbx-content: oklch(1 0 0);
+    --dbx-editor-toolbar: oklch(0.973 0.005 255);
+    --dbx-gutter: oklch(0.925 0.011 255);
+    --dbx-sidebar-header: oklch(0.94 0.009 255);
+  }
+
+  html.theme-soft.dark {
+    --background: oklch(0.245 0.009 260);
+    --foreground: oklch(0.835 0.014 260);
+    --card: oklch(0.285 0.011 260);
+    --card-foreground: oklch(0.835 0.014 260);
+    --popover: oklch(0.305 0.012 260);
+    --popover-foreground: oklch(0.855 0.014 260);
+    --primary: oklch(0.76 0.045 260);
+    --primary-foreground: oklch(0.22 0.01 260);
+    --secondary: oklch(0.345 0.013 260);
+    --secondary-foreground: oklch(0.83 0.014 260);
+    --muted: oklch(0.345 0.013 260);
+    --muted-foreground: oklch(0.68 0.018 260);
+    --accent: oklch(0.385 0.018 260);
+    --accent-foreground: oklch(0.86 0.014 260);
+    --destructive: oklch(0.68 0.16 26);
+    --border: oklch(0.62 0.018 260 / 34%);
+    --input: oklch(0.66 0.02 260 / 36%);
+    --ring: oklch(0.68 0.025 260);
+    --chart-1: oklch(0.69 0.08 255);
+    --chart-2: oklch(0.7 0.09 180);
+    --chart-3: oklch(0.72 0.11 70);
+    --chart-4: oklch(0.7 0.08 300);
+    --chart-5: oklch(0.7 0.12 28);
+    --sidebar: oklch(0.265 0.011 260);
+    --sidebar-foreground: oklch(0.805 0.015 260);
+    --sidebar-primary: oklch(0.76 0.045 260);
+    --sidebar-primary-foreground: oklch(0.22 0.01 260);
+    --sidebar-accent: oklch(0.335 0.016 260);
+    --sidebar-accent-foreground: oklch(0.85 0.014 260);
+    --sidebar-border: oklch(0.62 0.018 260 / 32%);
+    --sidebar-ring: oklch(0.68 0.025 260);
+    --dbx-chrome: oklch(0.295 0.012 260);
+    --dbx-chrome-muted: oklch(0.32 0.013 260);
+    --dbx-content: oklch(0.255 0.01 260);
+    --dbx-editor-toolbar: oklch(0.275 0.01 260);
+    --dbx-gutter: oklch(0.215 0.01 260);
+    --dbx-sidebar-header: oklch(0.285 0.012 260);
   }
 }
 
@@ -314,6 +1354,35 @@ body.dbx-table-reference-dragging * {
 .dark .app-panel-gutter {
   background: rgb(23 23 25);
   background: oklch(0.205 0.004 285);
+}
+:is(.theme-soft, .theme-graphite, .theme-cobalt, .theme-sage, .theme-amber, .theme-blush, .theme-vscode, .theme-idea, .theme-xcode, .theme-jetbrains, .theme-cursor, .theme-claude) .app-panel-gutter {
+  background: var(--dbx-gutter);
+}
+:is(.theme-soft, .theme-graphite, .theme-cobalt, .theme-sage, .theme-amber, .theme-blush, .theme-vscode, .theme-idea, .theme-xcode, .theme-jetbrains, .theme-cursor, .theme-claude) .app-toolbar,
+:is(.theme-soft, .theme-graphite, .theme-cobalt, .theme-sage, .theme-amber, .theme-blush, .theme-vscode, .theme-idea, .theme-xcode, .theme-jetbrains, .theme-cursor, .theme-claude) .app-tab-bar {
+  border-color: var(--border);
+  background: var(--dbx-chrome);
+}
+:is(.theme-soft, .theme-graphite, .theme-cobalt, .theme-sage, .theme-amber, .theme-blush, .theme-vscode, .theme-idea, .theme-xcode, .theme-jetbrains, .theme-cursor, .theme-claude) .app-sidebar-panel {
+  color: var(--sidebar-foreground);
+  background: var(--sidebar);
+}
+:is(.theme-soft, .theme-graphite, .theme-cobalt, .theme-sage, .theme-amber, .theme-blush, .theme-vscode, .theme-idea, .theme-xcode, .theme-jetbrains, .theme-cursor, .theme-claude) .app-layout-classic > .app-sidebar-panel {
+  border-right: 1px solid var(--sidebar-border);
+}
+:is(.theme-soft, .theme-graphite, .theme-cobalt, .theme-sage, .theme-amber, .theme-blush, .theme-vscode, .theme-idea, .theme-xcode, .theme-jetbrains, .theme-cursor, .theme-claude) .app-sidebar-toolbar,
+:is(.theme-soft, .theme-graphite, .theme-cobalt, .theme-sage, .theme-amber, .theme-blush, .theme-vscode, .theme-idea, .theme-xcode, .theme-jetbrains, .theme-cursor, .theme-claude) .connection-tree-search,
+:is(.theme-soft, .theme-graphite, .theme-cobalt, .theme-sage, .theme-amber, .theme-blush, .theme-vscode, .theme-idea, .theme-xcode, .theme-jetbrains, .theme-cursor, .theme-claude) .sticky-database-header {
+  border-color: var(--sidebar-border);
+  background: var(--dbx-sidebar-header);
+}
+:is(.theme-soft, .theme-graphite, .theme-cobalt, .theme-sage, .theme-amber, .theme-blush, .theme-vscode, .theme-idea, .theme-xcode, .theme-jetbrains, .theme-cursor, .theme-claude) .app-editor-toolbar {
+  border-color: var(--border);
+  background: var(--dbx-editor-toolbar);
+}
+:is(.theme-soft, .theme-graphite, .theme-cobalt, .theme-sage, .theme-amber, .theme-blush, .theme-vscode, .theme-idea, .theme-xcode, .theme-jetbrains, .theme-cursor, .theme-claude) .app-layout-classic > .min-w-0,
+:is(.theme-soft, .theme-graphite, .theme-cobalt, .theme-sage, .theme-amber, .theme-blush, .theme-vscode, .theme-idea, .theme-xcode, .theme-jetbrains, .theme-cursor, .theme-claude) .app-layout-classic > .flex-1 {
+  background: var(--dbx-content);
 }
 .app-layout-classic .panel-resize-handle {
   width: 3px;

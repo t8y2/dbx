@@ -36,7 +36,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const { toast } = useToast();
-const { isDark } = useTheme();
+const { isDark, themePalette } = useTheme();
 const settingsStore = useSettingsStore();
 
 const ddlContent = ref("");
@@ -84,7 +84,7 @@ async function initDdlEditor(content: string) {
   const appAppearance = isDark.value ? "dark" : "light";
   const fontSize = settingsStore.editorSettings.fontSize;
   const fontFamily = settingsStore.editorSettings.fontFamily;
-  const themeExt = await loadEditorTheme(editorTheme, appAppearance);
+  const themeExt = await loadEditorTheme(editorTheme, appAppearance, undefined, themePalette.value);
   const fontExt = editorFontTheme(EditorView, fontSize, fontFamily, { fixedHeight: true, scrollable: true });
   const dialect = createDbxCodeMirrorSqlDialect(langSql, props.dialect);
   const state = EditorState.create({

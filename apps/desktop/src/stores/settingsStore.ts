@@ -249,7 +249,27 @@ function inferAiProviderFromConfig(config: Partial<AiConfig> | null | undefined)
   return "claude";
 }
 
-export type EditorTheme = "app" | "one-dark" | "vscode-dark" | "vscode-light" | "nord" | "okaidia" | "material" | "duotone-light" | "duotone-dark" | "xcode" | "custom";
+export type EditorTheme =
+  | "app"
+  | "one-dark"
+  | "vscode-dark"
+  | "vscode-light"
+  | "nord"
+  | "okaidia"
+  | "material"
+  | "duotone-light"
+  | "duotone-dark"
+  | "xcode"
+  | "xcode-dark"
+  | "idea-light"
+  | "idea-dark"
+  | "jetbrains-light"
+  | "jetbrains-dark"
+  | "cursor-light"
+  | "cursor-dark"
+  | "claude-light"
+  | "claude-dark"
+  | "custom";
 
 const STRUCTURE_EDITOR_DENSITIES = ["compact", "standard", "comfortable"] as const;
 export type StructureEditorDensity = (typeof STRUCTURE_EDITOR_DENSITIES)[number];
@@ -423,6 +443,15 @@ export const EDITOR_THEMES: { value: EditorTheme; label: string; dark: boolean }
   { value: "duotone-light", label: "Duotone Light", dark: false },
   { value: "duotone-dark", label: "Duotone Dark", dark: true },
   { value: "xcode", label: "Xcode", dark: false },
+  { value: "xcode-dark", label: "Xcode Dark", dark: true },
+  { value: "idea-light", label: "IDEA Light", dark: false },
+  { value: "idea-dark", label: "IDEA Darcula", dark: true },
+  { value: "jetbrains-light", label: "JetBrains Light", dark: false },
+  { value: "jetbrains-dark", label: "JetBrains Dark", dark: true },
+  { value: "cursor-light", label: "Cursor Light", dark: false },
+  { value: "cursor-dark", label: "Cursor Dark", dark: true },
+  { value: "claude-light", label: "Claude Code Light", dark: false },
+  { value: "claude-dark", label: "Claude Code Dark", dark: true },
   { value: "custom", label: "Custom", dark: true },
 ];
 

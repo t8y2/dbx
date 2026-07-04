@@ -186,6 +186,7 @@ mod tests {
             expose_lan: false,
             use_ssh_agent: false,
             ssh_agent_sock_path: String::new(),
+            auth_method: "password".to_string(),
         }
     }
 

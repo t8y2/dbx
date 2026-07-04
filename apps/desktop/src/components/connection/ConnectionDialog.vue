@@ -200,7 +200,22 @@ function defaultSshTunnel(): SshTunnelConfig {
     expose_lan: false,
     use_ssh_agent: false,
     ssh_agent_sock_path: "",
+    auth_method: "password",
   };
+}
+
+/**
+ * Infers a login method for connections saved before `auth_method` existed
+ * (or imported from a source that never set it), so the dropdown shows a
+ * sensible current state instead of defaulting blindly to "password".
+ * Mirrors the priority `connect_and_authenticate` actually uses at connect
+ * time (key > password > agent > none) — see `db/ssh_tunnel.rs`.
+ */
+function inferSshAuthMethod(hop: Partial<SshTunnelConfig>): "password" | "key" | "agent" | "none" {
+  if (hop.key_path?.trim()) return "key";
+  if (hop.password) return "password";
+  if (hop.use_ssh_agent) return "agent";
+  return "none";
 }
 
 function normalizeSshTunnel(hop: Partial<SshTunnelConfig>): SshTunnelConfig {
@@ -218,6 +233,7 @@ function normalizeSshTunnel(hop: Partial<SshTunnelConfig>): SshTunnelConfig {
     expose_lan: !!hop.expose_lan,
     use_ssh_agent: !!hop.use_ssh_agent,
     ssh_agent_sock_path: hop.ssh_agent_sock_path || "",
+    auth_method: hop.auth_method || inferSshAuthMethod(hop),
   };
 }
 
@@ -2932,6 +2948,23 @@ function updateSelectedProxyType(value: unknown) {
   resetTestState();
 }
 
+/**
+ * "agent" is legacy-only: it's never chosen from this dropdown, only ever
+ * inherited from a connection saved before this selector existed. Once the
+ * user picks something else, the option (and its underlying checkbox) is
+ * gone from the form for good.
+ */
+function isLegacySshAgentMethod(hop: Partial<SshTunnelConfig> | null | undefined) {
+  return hop?.auth_method === "agent";
+}
+
+function updateSelectedSshAuthMethod(value: unknown) {
+  const layer = selectedSshLayer.value;
+  if (!layer) return;
+  layer.auth_method = value === "key" ? "key" : value === "none" ? "none" : "password";
+  resetTestState();
+}
+
 function validateTransportLayers(config: LegacyConnectionConfig) {
   const layers = config.transport_layers || [];
   layers.forEach((layer, index) => {
@@ -4769,10 +4802,20 @@ function openExternalUrl(url: string) {
                       <Input v-model="selectedSshLayer.user" class="col-span-3" placeholder="root" :disabled="selectedSshLayer.enabled === false" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelSmallClass">{{ t("connection.sshPassword") }}</Label>
-                      <PasswordInput v-model="selectedSshLayer.password" class="col-span-3" :placeholder="t('connection.sshPasswordPlaceholder')" :disabled="selectedSshLayer.enabled === false" />
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.sshAuthMethod") }}</Label>
+                      <Select :model-value="selectedSshLayer.auth_method || 'password'" :disabled="selectedSshLayer.enabled === false" @update:model-value="updateSelectedSshAuthMethod">
+                        <SelectTrigger class="col-span-3 h-9">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="password">{{ t("connection.sshAuthMethodPassword") }}</SelectItem>
+                          <SelectItem value="key">{{ t("connection.sshAuthMethodKey") }}</SelectItem>
+                          <SelectItem value="none">{{ t("connection.sshAuthMethodNone") }}</SelectItem>
+                          <SelectItem v-if="isLegacySshAgentMethod(selectedSshLayer)" value="agent" disabled>{{ t("connection.sshAuthMethodAgentLegacy") }}</SelectItem>
+                        </SelectContent>
+                      </Select>
                     </div>
-                    <div class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="selectedSshLayer.auth_method === 'key'" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.sshKeyPath") }}</Label>
                       <div class="col-span-3 flex items-center gap-1">
                         <Input v-model="selectedSshLayer.key_path" class="flex-1" placeholder="~/.ssh/id_rsa" :disabled="selectedSshLayer.enabled === false" />
@@ -4786,21 +4829,31 @@ function openExternalUrl(url: string) {
                         </Tooltip>
                       </div>
                     </div>
-                    <div class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="selectedSshLayer.auth_method === 'key'" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.sshKeyPassphrase") }}</Label>
                       <PasswordInput v-model="selectedSshLayer.key_passphrase" class="col-span-3" :placeholder="t('connection.sshKeyPassphrasePlaceholder')" :disabled="selectedSshLayer.enabled === false" />
                     </div>
-                    <div class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="!selectedSshLayer.auth_method || selectedSshLayer.auth_method === 'password'" class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.sshPassword") }}</Label>
+                      <PasswordInput v-model="selectedSshLayer.password" class="col-span-3" :placeholder="t('connection.sshPasswordPlaceholder')" :disabled="selectedSshLayer.enabled === false" />
+                    </div>
+                    <div v-if="selectedSshLayer.auth_method === 'none'" class="grid grid-cols-4 items-center gap-4">
                       <span />
-                      <label class="col-span-3 flex items-center gap-2 cursor-pointer">
-                        <input type="checkbox" v-model="selectedSshLayer.use_ssh_agent" class="mr-0" :disabled="selectedSshLayer.enabled === false" />
-                        <span class="text-xs text-muted-foreground">{{ t("connection.sshUseAgent") }}</span>
-                      </label>
+                      <p class="col-span-3 text-xs text-muted-foreground">{{ t("connection.sshAuthMethodNoneHint") }}</p>
                     </div>
-                    <div v-if="selectedSshLayer.use_ssh_agent" class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelSmallClass">{{ t("connection.sshAgentSockPath") }}</Label>
-                      <Input v-model="selectedSshLayer.ssh_agent_sock_path" class="col-span-3" :placeholder="t('connection.sshAgentSockPathPlaceholder')" :disabled="selectedSshLayer.enabled === false" />
-                    </div>
+                    <template v-if="isLegacySshAgentMethod(selectedSshLayer)">
+                      <div class="grid grid-cols-4 items-center gap-4">
+                        <span />
+                        <label class="col-span-3 flex items-center gap-2 cursor-pointer">
+                          <input type="checkbox" v-model="selectedSshLayer.use_ssh_agent" class="mr-0" :disabled="selectedSshLayer.enabled === false" />
+                          <span class="text-xs text-muted-foreground">{{ t("connection.sshUseAgent") }}</span>
+                        </label>
+                      </div>
+                      <div v-if="selectedSshLayer.use_ssh_agent" class="grid grid-cols-4 items-center gap-4">
+                        <Label :class="connectionLabelSmallClass">{{ t("connection.sshAgentSockPath") }}</Label>
+                        <Input v-model="selectedSshLayer.ssh_agent_sock_path" class="col-span-3" :placeholder="t('connection.sshAgentSockPathPlaceholder')" :disabled="selectedSshLayer.enabled === false" />
+                      </div>
+                    </template>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <span />
                       <label class="col-span-3 flex items-center gap-2 cursor-pointer">

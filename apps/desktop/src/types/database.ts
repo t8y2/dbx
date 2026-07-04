@@ -172,6 +172,17 @@ export interface SshTunnelConfig {
   expose_lan?: boolean;
   use_ssh_agent?: boolean;
   ssh_agent_sock_path?: string;
+  /**
+   * UI-facing choice of login method. Drives which credential inputs the
+   * connection dialog shows; the backend still probes "none" then falls
+   * back to key > password > agent based on which fields are non-empty,
+   * independent of this selector (see `db/ssh_tunnel.rs`).
+   *
+   * `"agent"` is a legacy value: it's no longer offered as a dropdown
+   * choice for new connections, but is preserved and displayed read-only
+   * for connections that already have `use_ssh_agent` configured.
+   */
+  auth_method?: "password" | "key" | "agent" | "none";
 }
 
 export interface SshConfigHostEntry {

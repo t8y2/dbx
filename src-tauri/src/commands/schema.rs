@@ -278,3 +278,22 @@ pub async fn list_owners(
 ) -> Result<Vec<db::OwnerInfo>, String> {
     dbx_core::schema::list_owners_core(&state, &connection_id, &database, &schema).await
 }
+
+#[tauri::command]
+pub async fn list_extensions(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+) -> Result<Vec<db::ExtensionInfo>, String> {
+    dbx_core::schema::list_extensions_core(&state, &connection_id, &database, &schema).await
+}
+
+#[tauri::command]
+pub async fn list_available_extensions(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+) -> Result<Vec<db::ExtensionInfo>, String> {
+    dbx_core::schema::list_available_extensions_core(&state, &connection_id, &database).await
+}

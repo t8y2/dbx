@@ -126,6 +126,7 @@ import { canCloseSidebarDatabaseConnection, isSidebarDatabaseOpened } from "@/li
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
+import InstallExtensionDialog from "@/components/objects/InstallExtensionDialog.vue";
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { copyToClipboard } from "@/lib/common/clipboard";
@@ -370,6 +371,10 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Package, colorClass: "text-cyan-500" };
     case "group-partitions":
       return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-green-400" };
+    case "group-extensions":
+      return { icon: Package, colorClass: "text-violet-500" };
+    case "extension":
+      return { icon: Package, colorClass: "text-violet-400" };
     case "load-more":
       return { icon: Plus, colorClass: "text-primary" };
     default:
@@ -377,7 +382,7 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
   }
 }
 
-const groupTypes: Set<TreeNodeType> = new Set(["group-columns", "group-indexes", "group-fkeys", "group-triggers", "group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-sequences", "group-packages", "group-partitions"]);
+const groupTypes: Set<TreeNodeType> = new Set(["group-columns", "group-indexes", "group-fkeys", "group-triggers", "group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-sequences", "group-packages", "group-partitions", "group-extensions"]);
 function isGroupLabel(node: TreeNode): boolean {
   return groupTypes.has(node.type);
 }
@@ -1731,6 +1736,13 @@ const showDropSchemaConfirm = ref(false);
 const showEditSchemaCommentDialog = ref(false);
 const schemaCommentText = ref("");
 const schemaCommentLoading = ref(false);
+
+// --- Extension Management ---
+const installExtensionDialogRef = ref<InstanceType<typeof InstallExtensionDialog> | null>(null);
+
+function openInstallExtensionDialog(_node: TreeNode) {
+  installExtensionDialogRef.value?.show();
+}
 
 // --- Procedure / Function Management ---
 const showDropObjectConfirm = ref(false);
@@ -4628,6 +4640,12 @@ function treeItemMenuItems(): ContextMenuItem[] {
     return items;
   }
 
+  // 8.5 Extension
+  if (node.type === "extension") {
+    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    return items;
+  }
+
   // 9. Group Labels (group-columns, group-tables, etc.)
   if (isGroupLabel(node)) {
     const hasGroupCreateAction = (node.type === "group-tables" && canCreateTable.value) || (node.type === "group-views" && !!node.connectionId && !!node.database);
@@ -4642,6 +4660,14 @@ function treeItemMenuItems(): ContextMenuItem[] {
       items.push({ label: t("contextMenu.createView"), action: createView, icon: Plus });
     }
     if (hasGroupCreateAction) {
+      items.push({ label: "", separator: true });
+    }
+    if (node.type === "group-extensions") {
+      items.push({
+        label: t("contextMenu.manageExtension"),
+        action: () => openInstallExtensionDialog(node),
+        icon: Plus,
+      });
       items.push({ label: "", separator: true });
     }
     if (canLoadAllObjectGroup) {
@@ -5205,6 +5231,8 @@ function treeItemMenuItems(): ContextMenuItem[] {
   <DangerConfirmDialog v-model:open="showDropSchemaConfirm" :title="t('contextMenu.confirmDropSchemaTitle')" :message="t('contextMenu.confirmDropSchemaMessage', { name: node.label })" :sql="dropSchemaPreviewSql" :confirm-label="t('contextMenu.dropSchema')" @confirm="confirmDropSchema" />
 
   <DdlViewDialog v-if="ddlTarget" :connection-id="ddlTarget.connectionId!" :database="ddlTarget.database!" :schema="ddlTarget.schema" :table-name="ddlTarget.label" :dialect="ddlDialect" :format-dialect="ddlFormatDialect" v-model:open="showDdlDialog" />
+
+  <InstallExtensionDialog ref="installExtensionDialogRef" :node="node" @close="refresh" />
 </template>
 
 <style>

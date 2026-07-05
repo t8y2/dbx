@@ -2406,6 +2406,18 @@ export const useConnectionStore = defineStore("connection", () => {
           schema: effectiveSchema,
           objectTypes: supportedSidebarObjectTypes(config),
         });
+        if (isPostgresLikeForExtensions(config?.db_type)) {
+          children.push({
+            id: `${nodeId}:__extensions`,
+            label: "tree.extensions",
+            type: "group-extensions",
+            connectionId,
+            database,
+            schema: effectiveSchema,
+            isExpanded: false,
+            children: [],
+          });
+        }
       }
       if (isTreeLoadSearchChanged(searchFilter, options)) return;
       setChildren(node, children);
@@ -2479,6 +2491,35 @@ export const useConnectionStore = defineStore("connection", () => {
       node.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(node.connectionId, e);
+      throw e;
+    } finally {
+      node.isLoading = false;
+    }
+  }
+
+  async function loadExtensions(connectionId: string, database: string, schema: string) {
+    const node = findNode(treeNodes.value, `${connectionId}:${database}:${schema}:__extensions`);
+    if (!node) return;
+    node.isLoading = true;
+    try {
+      await ensureConnected(connectionId);
+      if (useCachedChildren(node)) return;
+      const extensions = await withMetadataLoadTimeout(connectionId, api.listExtensions(connectionId, database, schema), "extensions");
+      const children: TreeNode[] = extensions.map((ext) => ({
+        id: `${node.id}:${ext.name}`,
+        label: ext.name,
+        type: "extension" as const,
+        connectionId,
+        database,
+        schema,
+        comment: ext.comment ?? null,
+        meta: ext,
+        isExpanded: false,
+      }));
+      setChildren(node, children);
+      node.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e);
       throw e;
     } finally {
       node.isLoading = false;
@@ -2993,6 +3034,8 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadObjectGroupChildren(node, options);
     } else if (node.type === "group-partitions") {
       node.isExpanded = true;
+    } else if (node.type === "group-extensions" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
+      await loadExtensions(node.connectionId, node.database || "", node.schema || "");
     }
   }
 
@@ -3052,6 +3095,10 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function isSchemaAwareDatabase(connectionId: string): boolean {
     return isSchemaAware(getConfig(connectionId)?.db_type);
+  }
+
+  function isPostgresLikeForExtensions(dbType?: string): boolean {
+    return dbType === "postgres" || dbType === "gaussdb" || dbType === "kwdb" || dbType === "opengauss" || dbType === "highgo" || dbType === "vastbase" || dbType === "kingbase";
   }
 
   function metadataQuerySchema(connectionId: string, database: string, schema?: string): string {

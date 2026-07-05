@@ -122,3 +122,24 @@ function quotePostgresIdentifier(value: string): string {
 function quoteSqlLiteral(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
+
+export function buildCreateExtensionSql(name: string, schema?: string | null): string {
+  const extName = quotePostgresIdentifier(name);
+  if (schema) {
+    return `CREATE EXTENSION ${extName} WITH SCHEMA ${quotePostgresIdentifier(schema)};`;
+  }
+  return `CREATE EXTENSION ${extName};`;
+}
+
+export function buildDropExtensionSql(name: string, cascade = false): string {
+  const extName = quotePostgresIdentifier(name);
+  return cascade ? `DROP EXTENSION ${extName} CASCADE;` : `DROP EXTENSION ${extName};`;
+}
+
+export function buildListAvailableExtensionsSql(schema?: string | null): string {
+  // pg_available_extensions shows extensions available for installation
+  if (schema) {
+    return `SELECT name, default_version, comment FROM pg_catalog.pg_available_extensions ORDER BY name`;
+  }
+  return `SELECT name, default_version, comment FROM pg_catalog.pg_available_extensions ORDER BY name`;
+}

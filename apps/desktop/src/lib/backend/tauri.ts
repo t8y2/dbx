@@ -20,6 +20,7 @@ import type {
   SequenceInfo,
   RuleInfo,
   OwnerInfo,
+  ExtensionInfo,
   QueryResult,
   SqlReferenceAnalysis,
   DatabaseType,
@@ -993,6 +994,14 @@ export async function listRules(connectionId: string, database: string, schema: 
 
 export async function listOwners(connectionId: string, database: string, schema: string): Promise<OwnerInfo[]> {
   return invoke("list_owners", { connectionId, database, schema });
+}
+
+export async function listExtensions(connectionId: string, database: string, schema: string): Promise<ExtensionInfo[]> {
+  return invoke("list_extensions", { connectionId, database, schema });
+}
+
+export async function listAvailableExtensions(connectionId: string, database: string): Promise<ExtensionInfo[]> {
+  return invoke("list_available_extensions", { connectionId, database });
 }
 
 export async function saveConnections(configs: ConnectionConfig[]): Promise<void> {

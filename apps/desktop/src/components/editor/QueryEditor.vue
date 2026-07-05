@@ -566,10 +566,10 @@ function selectAllSqlFromContextMenu() {
   focusEditor();
 }
 
-function convertSelectedSqlCaseFromContextMenu(mode: SelectionCaseMode) {
+function convertSelectedSqlCase(mode: SelectionCaseMode): boolean {
   const currentView = view.value;
   const EditorSelection = codeMirrorEditorSelection;
-  if (!currentView || !EditorSelection || !canCopySelectedSql.value) return;
+  if (!currentView || !EditorSelection) return false;
 
   const state = currentView.state;
   const transaction = state.changeByRange((range) => {
@@ -585,8 +585,10 @@ function convertSelectedSqlCaseFromContextMenu(mode: SelectionCaseMode) {
 
   if (!transaction.changes.empty) {
     currentView.dispatch({ ...transaction, scrollIntoView: true, userEvent: "input" });
+    focusEditor();
+    return true;
   }
-  focusEditor();
+  return false;
 }
 
 function openTableFromContextMenu() {
@@ -637,52 +639,59 @@ function selectSqlLineFromGutter(currentView: EditorViewType, line: { from: numb
   return true;
 }
 
-const contextMenuItems = computed<ContextMenuItem[]>(() => [
-  {
-    label: executeContextMenuLabel.value,
-    action: executeFromContextMenu,
-    disabled: !canExecuteContextSql.value,
-    icon: Play,
-  },
-  {
-    label: t("contextMenu.viewData"),
-    action: openTableFromContextMenu,
-    disabled: !contextTableName.value,
-    icon: Table2,
-  },
-  {
-    label: t("contextMenu.editStructure"),
-    action: editTableStructureFromContextMenu,
-    disabled: !contextTableName.value,
-    icon: PencilRuler,
-  },
-  {
-    label: t("contextMenu.viewDdl"),
-    action: openTableDdlFromContextMenu,
-    disabled: !contextTableName.value,
-    icon: FileCode,
-  },
-  { label: "", separator: true },
-  {
-    label: t("editor.contextMenu.copySelection"),
-    action: copySelectedSqlFromContextMenu,
-    disabled: !canCopySelectedSql.value,
-    icon: Copy,
-  },
-  {
-    label: t("editor.contextMenu.uppercaseSelection"),
-    action: () => convertSelectedSqlCaseFromContextMenu("upper"),
-    disabled: !canCopySelectedSql.value,
-    icon: CaseUpper,
-  },
-  {
-    label: t("editor.contextMenu.lowercaseSelection"),
-    action: () => convertSelectedSqlCaseFromContextMenu("lower"),
-    disabled: !canCopySelectedSql.value,
-    icon: CaseLower,
-  },
-  { label: t("editor.contextMenu.selectAll"), action: selectAllSqlFromContextMenu, icon: TextSelect },
-]);
+const contextMenuItems = computed<ContextMenuItem[]>(() => {
+  const shortcuts = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
+  return [
+    {
+      label: executeContextMenuLabel.value,
+      action: executeFromContextMenu,
+      disabled: !canExecuteContextSql.value,
+      icon: Play,
+      shortcut: shortcuts.executeSql,
+    },
+    {
+      label: t("contextMenu.viewData"),
+      action: openTableFromContextMenu,
+      disabled: !contextTableName.value,
+      icon: Table2,
+    },
+    {
+      label: t("contextMenu.editStructure"),
+      action: editTableStructureFromContextMenu,
+      disabled: !contextTableName.value,
+      icon: PencilRuler,
+    },
+    {
+      label: t("contextMenu.viewDdl"),
+      action: openTableDdlFromContextMenu,
+      disabled: !contextTableName.value,
+      icon: FileCode,
+    },
+    { label: "", separator: true },
+    {
+      label: t("editor.contextMenu.copySelection"),
+      action: copySelectedSqlFromContextMenu,
+      disabled: !canCopySelectedSql.value,
+      icon: Copy,
+      shortcut: "Mod+C",
+    },
+    {
+      label: t("editor.contextMenu.uppercaseSelection"),
+      action: () => convertSelectedSqlCase("upper"),
+      disabled: !canCopySelectedSql.value,
+      icon: CaseUpper,
+      shortcut: shortcuts.uppercaseSelection,
+    },
+    {
+      label: t("editor.contextMenu.lowercaseSelection"),
+      action: () => convertSelectedSqlCase("lower"),
+      disabled: !canCopySelectedSql.value,
+      icon: CaseLower,
+      shortcut: shortcuts.lowercaseSelection,
+    },
+    { label: t("editor.contextMenu.selectAll"), action: selectAllSqlFromContextMenu, icon: TextSelect, shortcut: shortcuts.selectAll },
+  ];
+});
 
 function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view"))["keymap"]) {
   const shortcuts = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
@@ -718,6 +727,8 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...binding(shortcuts.undo, (view) => codeMirrorUndo?.(view) ?? false),
         ...binding(shortcuts.redo, (view) => codeMirrorRedo?.(view) ?? false),
         ...binding(shortcuts.selectAll, (view) => codeMirrorSelectAll?.(view) ?? false),
+        ...binding(shortcuts.uppercaseSelection, () => convertSelectedSqlCase("upper")),
+        ...binding(shortcuts.lowercaseSelection, () => convertSelectedSqlCase("lower")),
       ]),
     ) ?? [],
     codeMirrorKeymap.of(

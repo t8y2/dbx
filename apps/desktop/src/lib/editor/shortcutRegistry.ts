@@ -14,6 +14,8 @@ export type ShortcutActionId =
   | "undo"
   | "redo"
   | "selectAll"
+  | "uppercaseSelection"
+  | "lowercaseSelection"
   | "copyCurrentRow"
   | "deleteCurrentRow"
   | "newQuery"
@@ -146,6 +148,18 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutSelectAll",
     scope: "editor",
     defaultShortcut: "Mod+A",
+  },
+  {
+    id: "uppercaseSelection",
+    labelKey: "settings.shortcutUppercaseSelection",
+    scope: "editor",
+    defaultShortcut: "Shift+Alt+U",
+  },
+  {
+    id: "lowercaseSelection",
+    labelKey: "settings.shortcutLowercaseSelection",
+    scope: "editor",
+    defaultShortcut: "Shift+Alt+L",
   },
   {
     id: "copyCurrentRow",

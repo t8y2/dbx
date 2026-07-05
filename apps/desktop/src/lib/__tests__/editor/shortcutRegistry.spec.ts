@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_SHORTCUT_SETTINGS, SHORTCUT_DEFINITIONS, findShortcutConflict, normalizeShortcutSettings, type ShortcutActionId } from "@/lib/editor/shortcutRegistry";
 
 describe("shortcutRegistry editor actions", () => {
-  const formatterEditorActionIds: ShortcutActionId[] = ["formatSql", "indentMore", "indentLess", "duplicateLine", "deleteLine", "moveLineUp", "moveLineDown", "copyLineUp", "copyLineDown", "undo", "redo", "selectAll"];
+  const formatterEditorActionIds: ShortcutActionId[] = ["formatSql", "indentMore", "indentLess", "duplicateLine", "deleteLine", "moveLineUp", "moveLineDown", "copyLineUp", "copyLineDown", "undo", "redo", "selectAll", "uppercaseSelection", "lowercaseSelection"];
   const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection"];
 
   it("registers formatter editor shortcuts in the generic editor scope", () => {
@@ -30,12 +30,20 @@ describe("shortcutRegistry editor actions", () => {
     expect(shortcuts.undo).toBe("Mod+Z");
     expect(shortcuts.redo).toBe("Shift+Mod+Z");
     expect(shortcuts.selectAll).toBe("Mod+A");
+    expect(shortcuts.uppercaseSelection).toBe("Shift+Alt+U");
+    expect(shortcuts.lowercaseSelection).toBe("Shift+Alt+L");
   });
 
   it("detects conflicts between formatter editor shortcuts and other editor shortcuts", () => {
     const shortcuts = normalizeShortcutSettings({ duplicateLine: "Mod+F" });
 
     expect(findShortcutConflict("duplicateLine", shortcuts.duplicateLine, shortcuts)).toBe("find");
+  });
+
+  it("detects conflicts for SQL selection case shortcuts", () => {
+    const shortcuts = normalizeShortcutSettings({ uppercaseSelection: "Mod+A" });
+
+    expect(findShortcutConflict("uppercaseSelection", shortcuts.uppercaseSelection, shortcuts)).toBe("selectAll");
   });
 
   it("registers sidebar shortcuts in the sidebar scope", () => {

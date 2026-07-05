@@ -130,7 +130,6 @@ import { useExportTracker, type ExportTask } from "@/composables/useExportTracke
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { hasEnabledTransportLayers } from "@/lib/backend/connectionTransport";
-import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { isWindows } from "@/lib/backend/platform";
 import { rankSavedSqlHistory, type SavedSqlHistoryScope } from "@/lib/savedSql/savedSqlHistory";
 import { isSqlServerLinkedNode } from "@/lib/database/sqlServerLinkedServers";
@@ -4017,8 +4016,8 @@ onBeforeUnmount(() => {
 
 // ---- CustomContextMenu ----
 
-const shortcutCopyName = computed(() => formatShortcut(settingsStore.editorSettings.shortcuts.copySidebarSelection));
-const shortcutEditConnection = computed(() => formatShortcut(settingsStore.editorSettings.shortcuts.editSidebarConnection));
+const shortcutCopyName = computed(() => settingsStore.editorSettings.shortcuts.copySidebarSelection);
+const shortcutEditConnection = computed(() => settingsStore.editorSettings.shortcuts.editSidebarConnection);
 const shortcutRename = "F2";
 const shortcutRefresh = "F5";
 const shortcutDelete = "Delete";

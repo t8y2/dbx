@@ -68,6 +68,7 @@ import {
 } from "@/lib/backend/api";
 import { eventToShortcut } from "@/lib/editor/keyboardShortcuts";
 import { SHORTCUT_DEFINITIONS, findShortcutConflict, normalizeShortcutSettings, type ShortcutActionId } from "@/lib/editor/shortcutRegistry";
+import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES } from "@/lib/table/tableColumnTemplates";
@@ -590,7 +591,26 @@ const shortcutConflicts = computed(() =>
     return conflict ? [definition.id] : [];
   }),
 );
-const formatterEditorShortcutIds: ShortcutActionId[] = ["formatSql", "find", "replace", "saveSql", "acceptCompletion", "indentMore", "indentLess", "duplicateLine", "deleteLine", "moveLineUp", "moveLineDown", "copyLineUp", "copyLineDown", "undo", "redo", "selectAll"];
+const formatterEditorShortcutIds: ShortcutActionId[] = [
+  "formatSql",
+  "find",
+  "replace",
+  "saveSql",
+  "acceptCompletion",
+  "indentMore",
+  "indentLess",
+  "duplicateLine",
+  "deleteLine",
+  "moveLineUp",
+  "moveLineDown",
+  "copyLineUp",
+  "copyLineDown",
+  "undo",
+  "redo",
+  "selectAll",
+  "uppercaseSelection",
+  "lowercaseSelection",
+];
 const formatterEditorShortcutDefinitions = computed(() => formatterEditorShortcutIds.map((id) => SHORTCUT_DEFINITIONS.find((definition) => definition.id === id)).filter((definition): definition is (typeof SHORTCUT_DEFINITIONS)[number] => !!definition));
 const hasShortcutConflicts = computed(() => shortcutConflicts.value.length > 0);
 const shortcutsChanged = computed(() => JSON.stringify(editShortcuts.value) !== JSON.stringify(settingsStore.editorSettings.shortcuts));
@@ -1082,29 +1102,7 @@ function onShortcutKeydown(actionId: ShortcutActionId, event: KeyboardEvent) {
 }
 
 function formatShortcutPill(shortcut: string): string {
-  if (!shortcut) return "—";
-  const isMac = globalThis.navigator?.platform?.toLowerCase().includes("mac") ?? false;
-  return shortcut
-    .split("+")
-    .filter(Boolean)
-    .map((part) => {
-      if (part === "Mod") return isMac ? "⌘" : "Ctrl";
-      if (part === "Meta") return isMac ? "⌘" : "Meta";
-      if (part === "Shift") return isMac ? "⇧" : "Shift";
-      if (part === "Alt") return isMac ? "⌥" : "Alt";
-      if (part === "Control" || part === "Ctrl") return isMac ? "⌃" : "Ctrl";
-      if (part === "Enter") return "↵";
-      if (part === "Backspace") return "⌫";
-      if (part === "Delete") return isMac ? "⌦" : "Del";
-      if (part === "Escape") return "Esc";
-      if (part === "ArrowUp") return "↑";
-      if (part === "ArrowDown") return "↓";
-      if (part === "ArrowLeft") return "←";
-      if (part === "ArrowRight") return "→";
-      if (part === " ") return "Space";
-      return part.length === 1 ? part.toUpperCase() : part;
-    })
-    .join(isMac ? " " : " + ");
+  return formatShortcutDisplay(shortcut);
 }
 
 const shortcutPressShortcutLabel = computed(() => t("settings.shortcutPressShortcut"));

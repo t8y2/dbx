@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, onBeforeUnmount, nextTick, type Component } from "vue";
 import { ChevronRight } from "@lucide/vue";
+import { shortcutDisplayKeys } from "@/lib/editor/shortcutDisplay";
 
 export interface ContextMenuItem {
   label: string;
@@ -9,6 +10,7 @@ export interface ContextMenuItem {
   separator?: boolean;
   icon?: Component;
   iconClass?: string;
+  // Raw shortcut syntax such as `Mod+C` or `Shift+Alt+U`; display formatting stays in this component.
   shortcut?: string;
   variant?: "default" | "destructive";
   visible?: boolean;
@@ -239,20 +241,8 @@ function itemButtonClass(variant?: "default" | "destructive") {
   ];
 }
 
-function shortcutKeyLabel(part: string): string {
-  if (part === "Cmd") return "⌘";
-  if (part === "Meta") return "⌘";
-  if (part === "Alt") return "⌥";
-  if (part === "Shift") return "⇧";
-  if (part === "Delete") return "Del";
-  if (part === "Backspace") return "⌫";
-  if (part === "Enter") return "↵";
-  if (part === "Escape") return "Esc";
-  return part;
-}
-
 function shortcutKeys(shortcut?: string): string[] {
-  return shortcut?.split("+").filter(Boolean).map(shortcutKeyLabel) || [];
+  return shortcutDisplayKeys(shortcut);
 }
 
 onBeforeUnmount(() => {

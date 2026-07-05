@@ -160,7 +160,7 @@ describe("sqlCompletion scoped context classification", () => {
 
     expect(context.contextKind).toBe("column");
     expect(context.insertSchema).toBe("dbo");
-    expect(context.insertTable).toBe("users");
+    expect(context.insertTable).toBe("Users");
     expect(context.exclusiveColumnSuggestions).toBe(true);
   });
 

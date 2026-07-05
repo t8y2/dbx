@@ -1297,6 +1297,13 @@ test("detects INSERT INTO with schema-qualified table", () => {
   assert.equal(context.insertSchema, "public");
 });
 
+test("detects MySQL backtick-qualified INSERT INTO column list context", () => {
+  const sql = "INSERT INTO `other_db`.`orders` (";
+  const context = getSqlCompletionContext(sql, sql.length);
+  assert.equal(context.insertTable, "orders");
+  assert.equal(context.insertSchema, "other_db");
+});
+
 test("suggests columns for INSERT INTO target table", () => {
   const items = buildSqlCompletionItems("INSERT INTO users (", "INSERT INTO users (".length, {
     tables,
@@ -1307,6 +1314,92 @@ test("suggests columns for INSERT INTO target table", () => {
   assert.ok(columnItems.some((item) => item.label === "id"));
   assert.ok(columnItems.some((item) => item.label === "name"));
   assert.ok(columnItems.some((item) => item.label === "email"));
+});
+
+test("suggests all target columns for INSERT INTO column list", () => {
+  const items = buildSqlCompletionItems("INSERT INTO users (", "INSERT INTO users (".length, {
+    tables,
+    columnsByTable,
+  });
+
+  const allColumns = items.find((item) => item.type === "snippet" && item.label === "users.*");
+  assert.ok(allColumns);
+  assert.equal(allColumns.apply, "id, name, email");
+});
+
+test("keeps INSERT INTO all-column expansion available after a column prefix", () => {
+  const items = buildSqlCompletionItems("INSERT INTO users (id", "INSERT INTO users (id".length, {
+    tables,
+    columnsByTable,
+  });
+
+  const allColumns = items.find((item) => item.type === "snippet" && item.label === "users.*");
+  assert.ok(allColumns);
+  assert.equal(allColumns.apply, "id, name, email");
+});
+
+test("quotes PostgreSQL identifiers in INSERT INTO all-column expansion", () => {
+  const sql = 'INSERT INTO public."OrderLines" (';
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: postgresQuotedTables,
+    columnsByTable: postgresQuotedColumnsByTable,
+    databaseType: "postgres",
+    dialect: "postgres",
+  });
+
+  const allColumns = items.find((item) => item.type === "snippet" && item.label === "OrderLines.*");
+  assert.ok(allColumns);
+  assert.equal(allColumns.apply, 'article, "OrderId", "User", "has""quote"');
+});
+
+test("suggests all target columns for schema-qualified INSERT INTO column lists", () => {
+  const sql = "INSERT INTO dbo.Users (";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [{ name: "Users", schema: "dbo", type: "table" }],
+    columnsByTable: new Map([
+      [
+        "dbo.Users",
+        [
+          { name: "Id", table: "Users", schema: "dbo", dataType: "bigint" },
+          { name: "DisplayName", table: "Users", schema: "dbo", dataType: "nvarchar" },
+        ],
+      ],
+    ]),
+    databaseType: "sqlserver",
+    dialect: "sqlserver",
+  });
+
+  const allColumns = items.find((item) => item.type === "snippet" && item.label === "Users.*");
+  assert.ok(allColumns);
+  assert.equal(allColumns.apply, "Id, DisplayName");
+});
+
+test("scopes INSERT INTO all-column expansion to the database-qualified MySQL target", () => {
+  const sql = "INSERT INTO other_db.orders (";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [{ name: "orders", schema: "other_db", type: "table" }],
+    columnsByTable: mysqlCrossDatabaseColumnsByTable,
+    databaseType: "mysql",
+    dialect: "mysql",
+  });
+
+  const allColumns = items.find((item) => item.type === "snippet" && item.label === "orders.*");
+  assert.ok(allColumns);
+  assert.equal(allColumns.apply, "id, number, status");
+});
+
+test("suggests all target columns for MySQL backtick-qualified INSERT INTO", () => {
+  const sql = "INSERT INTO `other_db`.`orders` (";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [{ name: "orders", schema: "other_db", type: "table" }],
+    columnsByTable: mysqlCrossDatabaseColumnsByTable,
+    databaseType: "mysql",
+    dialect: "mysql",
+  });
+
+  const allColumns = items.find((item) => item.type === "snippet" && item.label === "orders.*");
+  assert.ok(allColumns);
+  assert.equal(allColumns.apply, "id, number, status");
 });
 
 // --- Column data type in detail ---

@@ -88,4 +88,13 @@ describe("semantic SQL completion candidates", () => {
 
     expect(items.find((item) => item.label === "User Name")?.apply).toBe('"User Name"');
   });
+
+  it("suggests all target columns for insert column lists", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["users", ["id", "name", "email"].map((name) => ({ name, table: "users" }))]]);
+
+    const { context, items } = semanticCompletion("INSERT INTO users (|", { columnsByTable });
+
+    expect(context.insertTable).toBe("users");
+    expect(items.find((item) => item.type === "snippet" && item.label === "users.*")?.apply).toBe("id, name, email");
+  });
 });

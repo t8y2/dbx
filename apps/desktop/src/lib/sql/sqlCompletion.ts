@@ -1256,6 +1256,7 @@ class SqlCompletionProvider {
     if (!context.exclusiveTableSuggestions && context.suggestColumns) {
       this.items.push(...buildColumnItems(context, this.input.columnsByTable, this.dialect));
       this.items.push(...buildSelectAllColumnItems(context, this.input.columnsByTable, this.t, this.dialect));
+      this.items.push(...buildInsertAllColumnItems(context, this.input.columnsByTable, this.t, this.dialect));
     }
 
     if (context.referencedTables.length > 0 && !context.suggestColumns && !context.insertTable) {
@@ -1957,11 +1958,12 @@ function detectComparisonLeftColumn(beforeCursor: string): string | undefined {
 }
 
 function detectInsertColumnListContext(beforeCursor: string): { table: string; schema?: string } | null {
-  const cleaned = beforeCursor
-    .replace(/'[^']*'/g, "''")
-    .replace(/"[^"]*"/g, '""')
-    .toLowerCase();
-  const match = /\binsert\s+into\s+([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)?)\s*\([^)]*$/i.exec(cleaned);
+  // Keep quoted identifiers intact so schema/table targets resolve to their
+  // real names instead of placeholder string contents.
+  const cleaned = beforeCursor.replace(/'[^']*'/g, "''");
+  const identifier = '(?:"[^"]+"|`[^`]+`|[A-Za-z_][\\w$]*)';
+  const qualifiedIdentifier = `${identifier}(?:\\.${identifier})?`;
+  const match = new RegExp(`\\binsert\\s+into\\s+(${qualifiedIdentifier})\\s*\\([^)]*$`, "i").exec(cleaned);
   if (!match) return null;
   const fullTable = match[1];
   if (!fullTable) return null;
@@ -2744,6 +2746,27 @@ function buildSelectAllColumnItems(context: SqlCompletionContext, columnsByTable
   return items;
 }
 
+function buildInsertAllColumnItems(context: SqlCompletionContext, columnsByTable: Map<string, SqlCompletionColumn[]>, t?: SqlCompletionTranslations, dialect?: "mysql" | "postgres" | "sqlserver"): SqlCompletionItem[] {
+  if (!context.insertTable) return [];
+  const columns = uniqueColumnsByName(columnsForInsertTarget(context, columnsByTable));
+  if (columns.length === 0) return [];
+
+  const label = `${context.insertTable}.*`;
+  if (!selectAllColumnItemMatchesPrefix(label, { name: context.insertTable, schema: context.insertSchema }, columns, context.prefix)) return [];
+
+  const expansion = columns.map((column) => quoteSqlIdentifier(column.name, dialect)).join(", ");
+  const countText = (t?.starExpansionColumns ?? "{count} columns").replace("{count}", String(columns.length));
+  return [
+    {
+      label,
+      type: "snippet" as const,
+      detail: `${countText}: ${expansion.length > 60 ? expansion.slice(0, 57) + "..." : expansion}`,
+      apply: expansion,
+      boost: 2450 + selectAllColumnItemPrefixBoost(label, { name: context.insertTable, schema: context.insertSchema }, columns, context.prefix),
+    },
+  ];
+}
+
 function referencedTablesForSelectAllColumns(context: SqlCompletionContext): SqlCompletionReferencedTable[] {
   if (!context.qualifier) return context.referencedTables;
   const qualifier = context.qualifier;
@@ -2986,25 +3009,37 @@ function isInTableListContext(beforeToken: string): boolean {
   return /,\s*$/.test(beforeToken) && /\b(?:from|join|update|into)\b/i.test(beforeToken);
 }
 
-function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<string, SqlCompletionColumn[]>, dialect?: "mysql" | "postgres" | "sqlserver"): SqlCompletionItem[] {
-  // Collect all columns from the map (all tables have been fetched)
+function collectCompletionColumns(columnsByTable: Map<string, SqlCompletionColumn[]>): Array<SqlCompletionColumn & { key: string }> {
   const allColumns: Array<SqlCompletionColumn & { key: string }> = [];
   for (const [key, cols] of columnsByTable.entries()) {
     for (const col of cols) {
       allColumns.push({ ...col, key });
     }
   }
+  return allColumns;
+}
+
+function columnsForInsertTarget(context: SqlCompletionContext, columnsByTable: Map<string, SqlCompletionColumn[]>): Array<SqlCompletionColumn & { key: string }> {
+  if (!context.insertTable) return [];
+  const tableKey = normalizeIdentifierPart(context.insertTable);
+  const schemaKey = context.insertSchema ? normalizeIdentifierPart(context.insertSchema) : undefined;
+  const qualifiedKey = schemaKey ? normalizeCompletionKey(`${context.insertSchema}.${context.insertTable}`) : undefined;
+  return collectCompletionColumns(columnsByTable).filter((column) => {
+    if (normalizeIdentifierPart(column.table) !== tableKey) return false;
+    if (!schemaKey) return true;
+    if (column.schema && normalizeIdentifierPart(column.schema) === schemaKey) return true;
+    return !!qualifiedKey && normalizeCompletionKey(column.key) === qualifiedKey;
+  });
+}
+
+function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<string, SqlCompletionColumn[]>, dialect?: "mysql" | "postgres" | "sqlserver"): SqlCompletionItem[] {
+  // Collect all columns from the map (all tables have been fetched)
+  const allColumns = collectCompletionColumns(columnsByTable);
 
   // Handle INSERT column list: filter to only the target table
   let relevantCols = allColumns;
   if (context.insertTable) {
-    const tableLower = context.insertTable.toLowerCase();
-    if (context.insertSchema) {
-      const schemaLower = context.insertSchema.toLowerCase();
-      relevantCols = allColumns.filter((c) => c.table.toLowerCase() === tableLower && (c.schema?.toLowerCase() === schemaLower || c.key.toLowerCase() === `${schemaLower}.${tableLower}`));
-    } else {
-      relevantCols = allColumns.filter((c) => c.table.toLowerCase() === tableLower);
-    }
+    relevantCols = columnsForInsertTarget(context, columnsByTable);
   } else if (context.qualifier) {
     const q = context.qualifier;
     const qLower = q.toLowerCase();

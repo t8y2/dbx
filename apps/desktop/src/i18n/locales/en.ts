@@ -3025,6 +3025,8 @@ export default {
     project: "Project",
     openSource: "Open-source repository",
     officialDocs: "Official docs",
+    shortcutUppercaseSelection: "Convert selection to uppercase",
+    shortcutLowercaseSelection: "Convert selection to lowercase",
   },
   driverStore: {
     progressJreExtract: "Extracting JRE...",

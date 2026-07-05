@@ -2883,6 +2883,8 @@ export default withEnglishFallback({
     exportRowLimitUnlimited: "無限制",
     queryExportKeysetOptimizationEnabled: "嘗試 keyset 最佳化",
     queryExportKeysetOptimizationEnabledDescription: "僅適用於可安全識別的單表查詢；複雜查詢會自動回退。",
+    shortcutUppercaseSelection: "選取內容轉為大寫",
+    shortcutLowercaseSelection: "選取內容轉為小寫",
   },
   driverStore: {
     progressJreExtract: "解壓縮 JRE……",

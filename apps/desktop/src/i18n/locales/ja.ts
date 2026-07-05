@@ -2979,6 +2979,8 @@ export default withEnglishFallback({
     project: "プロジェクト",
     openSource: "オープンソースリポジトリ",
     officialDocs: "公式ドキュメント",
+    shortcutUppercaseSelection: "選択範囲を大文字に変換",
+    shortcutLowercaseSelection: "選択範囲を小文字に変換",
   },
   driverStore: {
     progressJreExtract: "JREを展開中...",

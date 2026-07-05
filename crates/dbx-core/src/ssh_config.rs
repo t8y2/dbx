@@ -72,6 +72,12 @@ fn apply_host_entry(ssh: &SshTunnelConfig, entry: SshConfigHostEntry) -> SshTunn
     if resolved.key_path.is_empty() {
         if let Some(identity_file) = entry.identity_file {
             resolved.key_path = identity_file;
+            // If the SSH config supplied the only usable credential, make the
+            // backend use it even when an older/default UI payload still says
+            // "password" with an empty password.
+            if resolved.auth_method.is_empty() || (resolved.auth_method == "password" && resolved.password.is_empty()) {
+                resolved.auth_method = "key".to_string();
+            }
         }
     }
 
@@ -245,6 +251,16 @@ mod tests {
         assert_eq!(resolved.port, 2222);
         assert_eq!(resolved.user, "deploy");
         assert_eq!(resolved.key_path, "~/.ssh/id_ed25519");
+        assert_eq!(resolved.auth_method, "key");
+    }
+
+    #[test]
+    fn resolve_keeps_password_auth_when_password_is_present() {
+        let mut ssh = config("myserver");
+        ssh.password = "secret".to_string();
+        let resolved = apply_host_entry(&ssh, entry("myserver"));
+        assert_eq!(resolved.key_path, "~/.ssh/id_ed25519");
+        assert_eq!(resolved.auth_method, "password");
     }
 
     #[test]

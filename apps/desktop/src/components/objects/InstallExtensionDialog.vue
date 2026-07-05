@@ -9,12 +9,10 @@ import { buildCreateExtensionSql, buildDropExtensionSql } from "@/lib/database/d
 import * as api from "@/lib/backend/api";
 import { useToast } from "@/composables/useToast";
 import { translateBackendError } from "@/i18n/backend-errors";
-import { useConnectionStore } from "@/stores/connectionStore";
 import type { ExtensionInfo, TreeNode } from "@/types/database";
 
 const { t } = useI18n();
-const toast = useToast();
-const connectionStore = useConnectionStore();
+const { toast } = useToast();
 
 const props = defineProps<{
   node: TreeNode;
@@ -41,8 +39,7 @@ async function loadData() {
   loading.value = true;
   try {
     const [avail, inst] = await Promise.all([api.listAvailableExtensions(props.node.connectionId, props.node.database).catch(() => [] as ExtensionInfo[]), api.listExtensions(props.node.connectionId, props.node.database, props.node.schema || "public").catch(() => [] as ExtensionInfo[])]);
-    const installedNames = new Set(inst.map((e) => e.name));
-    available.value = avail.filter((e) => !installedNames.has(e.name));
+    available.value = avail;
     installed.value = inst;
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);

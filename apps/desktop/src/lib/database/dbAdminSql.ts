@@ -139,7 +139,7 @@ export function buildDropExtensionSql(name: string, cascade = false): string {
 export function buildListAvailableExtensionsSql(schema?: string | null): string {
   // pg_available_extensions shows extensions available for installation
   if (schema) {
-    return `SELECT name, default_version, comment FROM pg_catalog.pg_available_extensions ORDER BY name`;
+    return `SELECT name, default_version, comment FROM pg_catalog.pg_available_extensions WHERE installed_version IS NULL ORDER BY name`;
   }
-  return `SELECT name, default_version, comment FROM pg_catalog.pg_available_extensions ORDER BY name`;
+  return `SELECT name, default_version, comment FROM pg_catalog.pg_available_extensions WHERE installed_version IS NULL ORDER BY name`;
 }

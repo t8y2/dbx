@@ -2969,7 +2969,7 @@ function updateSelectedSshAuthMethod(value: unknown) {
     layer.key_path = "";
     layer.key_passphrase = "";
   }
-  if (layer.auth_method !== "agent" && layer.auth_method !== "key") {
+  if (layer.auth_method !== "key") {
     layer.use_ssh_agent = false;
   }
   resetTestState();
@@ -3072,7 +3072,12 @@ function applySshConfigHostAliasPrefill(target: SshTunnelConfig) {
   if (!entry) return;
   if (target.user === DEFAULT_SSH_USER && entry.user) target.user = entry.user;
   if (target.port === 22 && entry.port) target.port = entry.port;
-  if (!target.key_path && entry.identity_file) target.key_path = entry.identity_file;
+  if (!target.key_path && entry.identity_file) {
+    target.key_path = entry.identity_file;
+    if ((!target.auth_method || target.auth_method === "password") && !target.password?.trim()) {
+      target.auth_method = "key";
+    }
+  }
 }
 
 async function browseSshKeyPath(target?: SshTunnelConfig | null) {

@@ -2877,6 +2877,7 @@ pub async fn list_available_extensions(pool: &Pool) -> Result<Vec<ExtensionInfo>
         .prepare_cached(
             "SELECT name, default_version, comment \
              FROM pg_catalog.pg_available_extensions \
+             WHERE installed_version IS NULL \
              ORDER BY name",
         )
         .await

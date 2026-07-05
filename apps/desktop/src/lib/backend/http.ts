@@ -14,6 +14,7 @@ import type {
   IndexInfo,
   ForeignKeyInfo,
   TriggerInfo,
+  ExtensionInfo,
   FunctionInfo,
   SequenceInfo,
   RuleInfo,
@@ -608,6 +609,14 @@ export async function listRules(connectionId: string, database: string, schema: 
 
 export async function listOwners(connectionId: string, database: string, schema: string): Promise<OwnerInfo[]> {
   return get(`/api/schema/owners?${qs({ connection_id: connectionId, database, schema })}`);
+}
+
+export async function listExtensions(connectionId: string, database: string, schema: string): Promise<ExtensionInfo[]> {
+  return get(`/api/schema/extensions?${qs({ connection_id: connectionId, database, schema })}`);
+}
+
+export async function listAvailableExtensions(connectionId: string, database: string): Promise<ExtensionInfo[]> {
+  return get(`/api/schema/available-extensions?${qs({ connection_id: connectionId, database })}`);
 }
 
 // ---------------------------------------------------------------------------

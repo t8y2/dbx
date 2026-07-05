@@ -1467,6 +1467,8 @@ export default withEnglishFallback({
     schemaCommentPlaceholder: "輸入 Schema 註解...",
     schemaCommentSaving: "正在儲存...",
     editSchemaCommentSuccess: "Schema「{name}」註解已更新",
+    manageExtension: "管理擴展...",
+    dropExtension: "刪除擴展",
   },
   visibleDatabases: {
     title: "顯示資料庫",
@@ -1514,6 +1516,7 @@ export default withEnglishFallback({
     partitions: "分割區",
     loadMore: "載入更多...",
     objectBrowser: "在物件瀏覽器中檢視 ({count})",
+    extensions: "擴展",
   },
   objects: {
     all: "全部",
@@ -3292,5 +3295,17 @@ export default withEnglishFallback({
     deleteFileMessage: "確定從目前 GridFS 儲存桶中刪除選中檔案嗎？",
     fileUploaded: "已上傳 {fileName}。",
     fileDeleted: "已刪除 {fileName}。",
+  },
+  extension: {
+    installTitle: "安裝擴展",
+    manageTitle: "管理擴展",
+    name: "擴展名稱",
+    namePlaceholder: "例如：pg_stat_statements",
+    install: "安裝",
+    drop: "刪除",
+    available: "可用擴展",
+    installed: "已安裝",
+    noAvailable: "所有可用擴展均已安裝。",
+    noInstalled: "暫無已安裝的擴展。",
   },
 });

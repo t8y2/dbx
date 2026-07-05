@@ -1466,6 +1466,8 @@ export default withEnglishFallback({
     instanceInfo: "インスタンス情報",
     viewDdlLoading: "DDLを読み込み中...",
     ddlCopied: "DDLをコピーしました",
+    manageExtension: "拡張機能を管理...",
+    dropExtension: "拡張機能を削除",
   },
   visibleDatabases: {
     title: "表示するデータベース",
@@ -1513,6 +1515,7 @@ export default withEnglishFallback({
     objectBrowser: "オブジェクトブラウザで参照（{count}件）",
     linkedServers: "リンクサーバー",
     materializedViews: "マテリアライズドビュー",
+    extensions: "拡張機能",
   },
   zookeeper: {
     prefixPlaceholder: "パスプレフィックス（例: /app/）",
@@ -3291,5 +3294,17 @@ export default withEnglishFallback({
     deleteFileMessage: "現在の GridFS バケットから選択したファイルを削除してもよろしいですか？",
     fileUploaded: "{fileName} をアップロードしました。",
     fileDeleted: "{fileName} を削除しました。",
+  },
+  extension: {
+    installTitle: "拡張機能のインストール",
+    manageTitle: "拡張機能の管理",
+    name: "拡張機能名",
+    namePlaceholder: "例: pg_stat_statements",
+    install: "インストール",
+    drop: "削除",
+    available: "利用可能な拡張機能",
+    installed: "インストール済み",
+    noAvailable: "すべての利用可能な拡張機能がインストールされています。",
+    noInstalled: "インストールされている拡張機能はありません。",
   },
 });

@@ -1468,6 +1468,8 @@ export default withEnglishFallback({
     schemaCommentPlaceholder: "Introduce un comentario del esquema...",
     schemaCommentSaving: "Guardando...",
     editSchemaCommentSuccess: 'Comentario del esquema "{name}" actualizado',
+    manageExtension: "Administrar extensión...",
+    dropExtension: "Eliminar extensión",
   },
   visibleDatabases: {
     title: "Bases de datos visibles",
@@ -1515,6 +1517,7 @@ export default withEnglishFallback({
     partitions: "Particiones",
     loadMore: "Cargar más...",
     objectBrowser: "Explorar en el navegador de objetos ({count})",
+    extensions: "Extensiones",
   },
   userAdmin: {
     title: "Usuarios y Privilegios",
@@ -3293,5 +3296,17 @@ export default withEnglishFallback({
     deleteFileMessage: "¿Estás seguro de eliminar el archivo seleccionado del bucket de GridFS actual?",
     fileUploaded: "Archivo {fileName} subido.",
     fileDeleted: "Archivo {fileName} eliminado.",
+  },
+  extension: {
+    installTitle: "Instalar extensión",
+    manageTitle: "Administrar extensión",
+    name: "Nombre de la extensión",
+    namePlaceholder: "Por ejemplo: pg_stat_statements",
+    install: "Instalar",
+    drop: "Eliminar",
+    available: "Extensiones disponibles",
+    installed: "Extensiones instaladas",
+    noAvailable: "Todas las extensiones disponibles ya están instaladas.",
+    noInstalled: "Aún no hay extensiones instaladas.",
   },
 });

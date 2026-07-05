@@ -1466,6 +1466,8 @@ export default withEnglishFallback({
     schemaCommentPlaceholder: "Inserisci commento schema...",
     schemaCommentSaving: "Salvataggio...",
     editSchemaCommentSuccess: 'Commento dello schema "{name}" aggiornato',
+    manageExtension: "Gestisci estensione...",
+    dropExtension: "Elimina estensione",
   },
   visibleDatabases: {
     title: "Database Visibili",
@@ -1513,6 +1515,7 @@ export default withEnglishFallback({
     partitions: "Partizioni",
     loadMore: "Carica altro...",
     objectBrowser: "Sfoglia in Esplora Oggetti ({count})",
+    extensions: "Estensioni",
   },
   userAdmin: {
     title: "Utenti e Privilegi",
@@ -3291,5 +3294,17 @@ export default withEnglishFallback({
     deleteFileMessage: "Sei sicuro di voler eliminare il file selezionato dal bucket GridFS corrente?",
     fileUploaded: "{fileName} caricato.",
     fileDeleted: "{fileName} eliminato.",
+  },
+  extension: {
+    installTitle: "Installa estensione",
+    manageTitle: "Gestisci estensioni",
+    name: "Nome estensione",
+    namePlaceholder: "Es: pg_stat_statements",
+    install: "Installa",
+    drop: "Elimina",
+    available: "Estensioni disponibili",
+    installed: "Installate",
+    noAvailable: "Tutte le estensioni disponibili sono installate.",
+    noInstalled: "Nessuna estensione installata.",
   },
 });

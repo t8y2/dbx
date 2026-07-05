@@ -607,6 +607,13 @@ export const useQueryStore = defineStore("query", () => {
     if (legacy.rawTabs || legacy.rawActiveTabId) {
       const restored = restoreLegacySavedTabs();
       applyRestoredOpenTabs(restored);
+      if (useSettingsStore().editorSettings.openTabsRestoreMode === "none") {
+        // Restore is explicitly disabled, so keeping the legacy startup payload
+        // would resurrect old tabs if the user later changes the setting.
+        clearLegacySavedTabs();
+        isOpenTabsLoaded.value = true;
+        return;
+      }
       try {
         await saveTabs(tabs.value, activeTabId.value);
         // Keep old desktop installs readable until the async store has the

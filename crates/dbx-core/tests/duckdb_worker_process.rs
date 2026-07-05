@@ -1,11 +1,14 @@
 #![cfg(feature = "duckdb-bundled")]
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dbx_core::db::duckdb_worker_process::DuckDbWorkerClient;
 use dbx_core::query_cancel::{RunningQueries, RunningTaskMetadata};
 use tokio_util::sync::CancellationToken;
+
+static TEMP_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn worker_process_recovers_immediately_after_cancelled_long_query() {
@@ -121,5 +124,9 @@ async fn worker_process_recovers_after_registered_cancel_interrupt() {
 
 fn temp_duckdb_path() -> PathBuf {
     let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    std::env::temp_dir().join(format!("dbx-duckdb-worker-process-{suffix}.duckdb"))
+    let pid = std::process::id();
+    // These tests run concurrently; the counter prevents same-tick temp DB paths
+    // from sharing a DuckDB file lock.
+    let counter = TEMP_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("dbx-duckdb-worker-process-{pid}-{suffix}-{counter}.duckdb"))
 }

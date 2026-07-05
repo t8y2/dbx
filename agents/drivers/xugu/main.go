@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -196,6 +197,18 @@ type objectInfo struct {
 	Comment    *string `json:"comment"`
 }
 
+type metadataListConstraints struct {
+	Filter      string
+	Limit       int
+	Offset      int
+	ObjectTypes []string
+}
+
+type xuguMetadataListQuery struct {
+	SQL  string
+	Args []any
+}
+
 type columnInfo struct {
 	Name                   string  `json:"name"`
 	DataType               string  `json:"data_type"`
@@ -341,14 +354,14 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 			return nil, false, err
 		}
 		schema := stringParam(params, "schema")
-		result, err := s.listTables(schema)
+		result, err := s.listTables(schema, metadataListConstraintsFromParams(params))
 		return result, false, err
 	case "list_objects":
 		if err := s.useDatabase(stringParam(params, "database")); err != nil {
 			return nil, false, err
 		}
 		schema := stringParam(params, "schema")
-		result, err := s.listObjects(schema)
+		result, err := s.listObjects(schema, metadataListConstraintsFromParams(params))
 		return result, false, err
 	case "list_data_types":
 		return xuguDataTypes, false, nil
@@ -793,22 +806,13 @@ func (s *server) normalizeSchema(schema string) (string, error) {
 	return strings.ToUpper(schema), nil
 }
 
-func (s *server) listTables(schema string) ([]tableInfo, error) {
+func (s *server) listTables(schema string, constraints metadataListConstraints) ([]tableInfo, error) {
 	schema, err := s.normalizeSchema(schema)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.queryRows(`
-SELECT t.TABLE_NAME, 'TABLE' AS TABLE_TYPE, t.COMMENTS
-FROM ALL_TABLES t
-JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
-UNION ALL
-SELECT v.VIEW_NAME, 'VIEW' AS TABLE_TYPE, v.COMMENTS
-FROM ALL_VIEWS v
-JOIN ALL_SCHEMAS s ON s.DB_ID = v.DB_ID AND s.SCHEMA_ID = v.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
-ORDER BY 2, 1`, []any{schema, schema})
+	query := xuguListTablesQuery(schema, constraints)
+	rows, err := s.queryRows(query.SQL, query.Args)
 	if err != nil {
 		return nil, err
 	}
@@ -824,22 +828,13 @@ ORDER BY 2, 1`, []any{schema, schema})
 	return emptyIfNil(result), rows.Err()
 }
 
-func (s *server) listObjects(schema string) ([]objectInfo, error) {
+func (s *server) listObjects(schema string, constraints metadataListConstraints) ([]objectInfo, error) {
 	schema, err := s.normalizeSchema(schema)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.queryRows(`
-SELECT t.TABLE_NAME, 'TABLE' AS OBJECT_TYPE, t.COMMENTS
-FROM ALL_TABLES t
-JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
-UNION ALL
-SELECT v.VIEW_NAME, 'VIEW' AS OBJECT_TYPE, v.COMMENTS
-FROM ALL_VIEWS v
-JOIN ALL_SCHEMAS s ON s.DB_ID = v.DB_ID AND s.SCHEMA_ID = v.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
-ORDER BY 2, 1`, []any{schema, schema})
+	query := xuguListObjectsQuery(schema, constraints)
+	rows, err := s.queryRows(query.SQL, query.Args)
 	if err != nil {
 		return nil, err
 	}
@@ -854,6 +849,159 @@ ORDER BY 2, 1`, []any{schema, schema})
 		result = append(result, item)
 	}
 	return emptyIfNil(result), rows.Err()
+}
+
+func metadataListConstraintsFromParams(params map[string]json.RawMessage) metadataListConstraints {
+	objectTypes := stringSliceParam(params, "object_types")
+	if len(objectTypes) == 0 {
+		objectTypes = stringSliceParam(params, "objectTypes")
+	}
+	limit := intParam(params, "limit")
+	offset := intParam(params, "offset")
+	if limit < 0 {
+		limit = 0
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return metadataListConstraints{
+		Filter:      stringParam(params, "filter"),
+		Limit:       limit,
+		Offset:      offset,
+		ObjectTypes: objectTypes,
+	}
+}
+
+func xuguListTablesQuery(schema string, constraints metadataListConstraints) xuguMetadataListQuery {
+	return xuguConstrainedMetadataListQuery(
+		`
+SELECT t.TABLE_NAME, 'TABLE' AS TABLE_TYPE, t.COMMENTS
+FROM ALL_TABLES t
+JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+UNION ALL
+SELECT v.VIEW_NAME, 'VIEW' AS TABLE_TYPE, v.COMMENTS
+FROM ALL_VIEWS v
+JOIN ALL_SCHEMAS s ON s.DB_ID = v.DB_ID AND s.SCHEMA_ID = v.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)`,
+		"TABLE_NAME, TABLE_TYPE, COMMENTS",
+		"TABLE_NAME",
+		"TABLE_TYPE",
+		[]any{schema, schema},
+		constraints,
+	)
+}
+
+func xuguListObjectsQuery(schema string, constraints metadataListConstraints) xuguMetadataListQuery {
+	return xuguConstrainedMetadataListQuery(
+		`
+SELECT t.TABLE_NAME AS OBJECT_NAME, 'TABLE' AS OBJECT_TYPE, t.COMMENTS
+FROM ALL_TABLES t
+JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+UNION ALL
+SELECT v.VIEW_NAME AS OBJECT_NAME, 'VIEW' AS OBJECT_TYPE, v.COMMENTS
+FROM ALL_VIEWS v
+JOIN ALL_SCHEMAS s ON s.DB_ID = v.DB_ID AND s.SCHEMA_ID = v.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)`,
+		"OBJECT_NAME, OBJECT_TYPE, COMMENTS",
+		"OBJECT_NAME",
+		"OBJECT_TYPE",
+		[]any{schema, schema},
+		constraints,
+	)
+}
+
+func xuguConstrainedMetadataListQuery(baseSQL, selectList, nameColumn, typeColumn string, baseArgs []any, constraints metadataListConstraints) xuguMetadataListQuery {
+	args := append([]any{}, baseArgs...)
+	where := make([]string, 0, 2)
+	if filter := strings.TrimSpace(constraints.Filter); filter != "" {
+		args = append(args, strings.ToUpper(xuguFuzzyLikePattern(filter)))
+		where = append(where, fmt.Sprintf("UPPER(%s) LIKE ? ESCAPE '\\'", nameColumn))
+	}
+	if len(constraints.ObjectTypes) > 0 {
+		objectTypes := normalizedXuguObjectTypes(constraints.ObjectTypes)
+		if len(objectTypes) == 0 {
+			where = append(where, "1 = 0")
+		} else {
+			placeholders := make([]string, 0, len(objectTypes))
+			for _, objectType := range objectTypes {
+				args = append(args, objectType)
+				placeholders = append(placeholders, "?")
+			}
+			where = append(where, fmt.Sprintf("%s IN (%s)", typeColumn, strings.Join(placeholders, ",")))
+		}
+	}
+
+	sqlText := fmt.Sprintf("SELECT %s\nFROM (\n%s\n)", selectList, baseSQL)
+	if len(where) > 0 {
+		sqlText += "\nWHERE " + strings.Join(where, " AND ")
+	}
+	sqlText += fmt.Sprintf("\nORDER BY %s, %s", typeColumn, nameColumn)
+
+	// Xugu documents ROWNUM as the safe pagination path when ORDER BY belongs
+	// to an inner query; LIMIT is not portable for this UNION metadata query.
+	if constraints.Limit > 0 {
+		args = append(args, constraints.Offset+constraints.Limit, constraints.Offset)
+		sqlText = fmt.Sprintf(
+			"SELECT %s\nFROM (\n  SELECT DBX_Q.*, ROWNUM AS DBX_RN\n  FROM (\n%s\n  ) DBX_Q\n  WHERE ROWNUM <= ?\n)\nWHERE DBX_RN > ?",
+			selectList,
+			sqlText,
+		)
+	} else if constraints.Offset > 0 {
+		args = append(args, constraints.Offset)
+		sqlText = fmt.Sprintf(
+			"SELECT %s\nFROM (\n  SELECT DBX_Q.*, ROWNUM AS DBX_RN\n  FROM (\n%s\n  ) DBX_Q\n)\nWHERE DBX_RN > ?",
+			selectList,
+			sqlText,
+		)
+	}
+
+	return xuguMetadataListQuery{SQL: sqlText, Args: args}
+}
+
+func normalizedXuguObjectTypes(values []string) []string {
+	seen := map[string]bool{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		normalized := strings.ToUpper(strings.TrimSpace(value))
+		normalized = strings.ReplaceAll(normalized, "-", "_")
+		normalized = strings.ReplaceAll(normalized, " ", "_")
+		switch normalized {
+		case "TABLE", "BASE_TABLE":
+			normalized = "TABLE"
+		case "VIEW":
+			normalized = "VIEW"
+		default:
+			continue
+		}
+		if seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		result = append(result, normalized)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func xuguFuzzyLikePattern(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "%%"
+	}
+	var builder strings.Builder
+	builder.Grow(len(value)*2 + 2)
+	builder.WriteByte('%')
+	for _, ch := range value {
+		switch ch {
+		case '\\', '%', '_':
+			builder.WriteByte('\\')
+		}
+		builder.WriteRune(ch)
+		builder.WriteByte('%')
+	}
+	return builder.String()
 }
 
 func (s *server) getColumns(schema, table string) ([]columnInfo, error) {
@@ -1823,6 +1971,21 @@ func intParam(params map[string]json.RawMessage, key string) int {
 	var value int
 	_ = json.Unmarshal(params[key], &value)
 	return value
+}
+
+func stringSliceParam(params map[string]json.RawMessage, key string) []string {
+	if params == nil || len(params[key]) == 0 {
+		return nil
+	}
+	var values []string
+	if err := json.Unmarshal(params[key], &values); err == nil {
+		return values
+	}
+	var single string
+	if err := json.Unmarshal(params[key], &single); err == nil && strings.TrimSpace(single) != "" {
+		return []string{single}
+	}
+	return nil
 }
 
 func errorResponse(id json.RawMessage, err error) response {

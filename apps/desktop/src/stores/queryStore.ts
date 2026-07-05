@@ -27,10 +27,11 @@ import { redisCommandResultToQueryResult } from "@/lib/redis/redisQueryResult";
 import { nextRedisCommandDb } from "@/lib/redis/redisCommandSession";
 import { isRedisMutatingCommand } from "@/lib/redis/redisCommandTable";
 import { usesAgentCursorForQuery } from "@/lib/database/databaseDriverManifest";
-import { canUseKeylessRowPredicate, editableRowIdentifierColumns } from "@/lib/table/tableEditing";
+import { canUseKeylessRowPredicate } from "@/lib/table/tableEditing";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/table/tableDataExport";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
+import { loadTableMetadata } from "@/lib/metadata/tableMetadataCache";
 import { quoteTableIdentifier } from "@/lib/table/tableSelectSql";
 import { connectionUsesDatabaseObjectTreeMode, connectionUsesSchemaExecutionContext, effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
 import { frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
@@ -1771,21 +1772,33 @@ export const useQueryStore = defineStore("query", () => {
     const metadataAnalysis = normalizeOracleLikeQueryAnalysis(dbType, analysis, metadataSchema || undefined, metadataTableName);
 
     try {
-      console.info("[DBX][executeTabSql:metadata:get-columns:start]", {
+      console.info("[DBX][executeTabSql:metadata:table:start]", {
         traceId,
         schema: metadataSchema,
         table: metadataTableName,
         elapsed: elapsed?.(),
       });
-      const columns = await api.getColumns(tab.connectionId, tab.database, metadataSchema, metadataTableName);
-      console.info("[DBX][executeTabSql:metadata:get-columns:done]", {
+      const loadedMetadata = await loadTableMetadata({
+        connectionId: tab.connectionId,
+        database: tab.database,
+        schema: metadataSchema,
+        tableName: metadataTableName,
+        tableType: tab.tableMeta?.tableType,
+        databaseType: dbType,
+        driverProfile: conn?.driver_profile || conn?.db_type,
+        traceLogger: (event) => console.debug("[DBX][executeTabSql:metadata:table-trace]", { sourceTraceId: traceId, ...event }),
+      });
+      const columns = loadedMetadata.metadata.columns;
+      const primaryKeys = loadedMetadata.metadata.primaryKeys;
+      console.info("[DBX][executeTabSql:metadata:table:done]", {
         traceId,
         columnCount: columns.length,
+        primaryKeyCount: primaryKeys.length,
+        cacheStatus: loadedMetadata.cacheStatus,
+        ageMs: Math.round(loadedMetadata.ageMs),
         elapsed: elapsed?.(),
       });
-      const indexes = await api.listIndexes(tab.connectionId, tab.database, metadataSchema, metadataTableName).catch(() => []);
-      const tableType = tab.tableMeta?.tableType;
-      const primaryKeys = editableRowIdentifierColumns(dbType as DatabaseType, columns, indexes, tableType);
+      const tableType = loadedMetadata.metadata.tableType;
       const tableMeta = {
         schema: metadataSchema || undefined,
         tableName: metadataTableName,

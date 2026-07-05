@@ -8,6 +8,8 @@ import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcIdentifiers;
 import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MetadataListConstraints;
+import com.dbx.agent.MetadataSqlSupport;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.TableInfo;
@@ -87,6 +89,48 @@ public final class SnowflakeAgent extends AbstractJdbcAgent {
     }
 
     @Override
+    public List<TableInfo> listTables(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        if (isUnconstrained(normalized)) {
+            return listTables(schema);
+        }
+        if (!normalized.includesTableLikeTypes()) {
+            return List.of();
+        }
+        try {
+            return queryConstrainedTables(schema, normalized);
+        } catch (RuntimeException e) {
+            return normalized.filterTables(listTables(schema));
+        }
+    }
+
+    private List<TableInfo> queryConstrainedTables(String schema, MetadataListConstraints constraints) {
+        return unchecked(() -> {
+            List<TableInfo> result = new ArrayList<>();
+            List<Object> args = new ArrayList<>();
+            StringBuilder sql = new StringBuilder("SELECT TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?");
+            args.add(schema);
+            appendSnowflakeTableTypePredicate(sql, args, constraints);
+            MetadataSqlSupport.appendNameFilter(sql, args, "TABLE_NAME", constraints);
+            sql.append(" ORDER BY TABLE_NAME");
+            MetadataSqlSupport.appendLiteralLimitOffset(sql, constraints);
+            try (java.sql.PreparedStatement stmt = requireConnected().prepareStatement(sql.toString())) {
+                MetadataSqlSupport.bind(stmt, args);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        result.add(new TableInfo(
+                            rs.getString("TABLE_NAME"),
+                            normalizeTableType(rs.getString("TABLE_TYPE")),
+                            null
+                        ));
+                    }
+                }
+            }
+            return constraints.withoutPaging().filterTables(result);
+        });
+    }
+
+    @Override
     public List<ObjectInfo> listObjects(String schema) {
         return unchecked(() -> {
             List<ObjectInfo> result = new ArrayList<>();
@@ -107,6 +151,64 @@ public final class SnowflakeAgent extends AbstractJdbcAgent {
                 }
             }
             return result;
+        });
+    }
+
+    @Override
+    public List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        if (isUnconstrained(normalized)) {
+            return listObjects(schema);
+        }
+        if (!includesSupportedObjects(normalized)) {
+            return List.of();
+        }
+        try {
+            return queryConstrainedObjects(schema, normalized);
+        } catch (RuntimeException e) {
+            return normalized.filterObjects(listObjects(schema));
+        }
+    }
+
+    private List<ObjectInfo> queryConstrainedObjects(String schema, MetadataListConstraints constraints) {
+        return unchecked(() -> {
+            List<ObjectInfo> result = new ArrayList<>();
+            List<String> branches = new ArrayList<>();
+            List<Object> args = new ArrayList<>();
+            if (constraints.includesTableLikeTypes()) {
+                StringBuilder tableSql = new StringBuilder("SELECT TABLE_NAME AS OBJECT_NAME, TABLE_TYPE AS OBJECT_TYPE FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?");
+                args.add(schema);
+                appendSnowflakeTableTypePredicate(tableSql, args, constraints);
+                MetadataSqlSupport.appendNameFilter(tableSql, args, "TABLE_NAME", constraints);
+                branches.add(tableSql.toString());
+            }
+            if (constraints.objectTypeAllowed("PROCEDURE")) {
+                StringBuilder procedureSql = new StringBuilder("SELECT PROCEDURE_NAME AS OBJECT_NAME, 'PROCEDURE' AS OBJECT_TYPE FROM INFORMATION_SCHEMA.PROCEDURES WHERE PROCEDURE_SCHEMA = ?");
+                args.add(schema);
+                MetadataSqlSupport.appendNameFilter(procedureSql, args, "PROCEDURE_NAME", constraints);
+                branches.add(procedureSql.toString());
+            }
+            if (branches.isEmpty()) {
+                return List.of();
+            }
+            StringBuilder sql = new StringBuilder("SELECT OBJECT_NAME, OBJECT_TYPE FROM (")
+                .append(String.join(" UNION ALL ", branches))
+                .append(") metadata_objects ORDER BY CASE OBJECT_TYPE WHEN 'BASE TABLE' THEN 0 WHEN 'TABLE' THEN 0 WHEN 'VIEW' THEN 1 WHEN 'MATERIALIZED VIEW' THEN 2 WHEN 'PROCEDURE' THEN 3 ELSE 9 END, OBJECT_NAME");
+            MetadataSqlSupport.appendLiteralLimitOffset(sql, constraints);
+            try (java.sql.PreparedStatement stmt = requireConnected().prepareStatement(sql.toString())) {
+                MetadataSqlSupport.bind(stmt, args);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        result.add(new ObjectInfo(
+                            rs.getString("OBJECT_NAME"),
+                            normalizeTableType(rs.getString("OBJECT_TYPE")),
+                            schema,
+                            null
+                        ));
+                    }
+                }
+            }
+            return constraints.withoutPaging().filterObjects(result);
         });
     }
 
@@ -224,8 +326,44 @@ public final class SnowflakeAgent extends AbstractJdbcAgent {
         return "jdbc:snowflake://" + params.getHost() + ":" + params.getPort() + "/?db=" + params.getDatabase();
     }
 
+    private static boolean isUnconstrained(MetadataListConstraints constraints) {
+        return !constraints.hasFilter() && !constraints.hasLimit() && !constraints.hasOffset() && !constraints.hasObjectTypes();
+    }
+
+    private static boolean includesSupportedObjects(MetadataListConstraints constraints) {
+        return constraints.includesTableLikeTypes() || constraints.objectTypeAllowed("PROCEDURE");
+    }
+
+    private static void appendSnowflakeTableTypePredicate(StringBuilder sql, List<Object> args, MetadataListConstraints constraints) {
+        if (!constraints.hasObjectTypes()) {
+            return;
+        }
+        List<String> types = new ArrayList<>();
+        if (constraints.tableTypeAllowed("TABLE")) {
+            types.add("BASE TABLE");
+        }
+        if (constraints.tableTypeAllowed("VIEW")) {
+            types.add("VIEW");
+        }
+        if (constraints.tableTypeAllowed("MATERIALIZED_VIEW")) {
+            types.add("MATERIALIZED VIEW");
+        }
+        if (types.isEmpty()) {
+            sql.append(" AND 1 = 0");
+            return;
+        }
+        sql.append(" AND TABLE_TYPE IN (").append(MetadataSqlSupport.placeholders(types.size())).append(")");
+        args.addAll(types);
+    }
+
     private static String normalizeTableType(String tableType) {
-        return "BASE TABLE".equals(tableType) ? "TABLE" : tableType;
+        if ("BASE TABLE".equals(tableType)) {
+            return "TABLE";
+        }
+        if ("MATERIALIZED VIEW".equals(tableType)) {
+            return "MATERIALIZED_VIEW";
+        }
+        return tableType;
     }
 
     private static String blankToNull(String value) {

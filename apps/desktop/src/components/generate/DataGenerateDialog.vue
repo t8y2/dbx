@@ -480,6 +480,9 @@ async function startInsert() {
       }
     }
     perTable.push({ table: r.tableName, total: rowCount, ok, err: rowCount - ok, error: lastError || undefined });
+    if (ok > 0) {
+      store.invalidateMetadataCache(cid, db, props.prefillSchema || undefined, r.tableName);
+    }
   }
   executeResults.value = perTable;
   currentStep.value = "result";

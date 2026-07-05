@@ -1,6 +1,8 @@
 package com.dbx.agent.gbase8a;
 
+import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
+import com.dbx.agent.TableInfo;
 import com.dbx.agent.test.TestSupport;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -46,6 +48,53 @@ class Gbase8aAgentTest {
         Assertions.assertTrue(sql.get(1).contains("ROUTINE_SCHEMA = ?"), sql.get(1));
     }
 
+    @Test
+    void constrainedListTablesPushesFilterTypeAndLimit() {
+        List<String> sql = new ArrayList<>();
+        Gbase8aAgent agent = new Gbase8aAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql,
+            resultSet(
+                new String[]{"TABLE_NAME", "TABLE_TYPE"},
+                new Object[][]{{"user_order", "BASE TABLE"}}
+            )
+        ));
+
+        List<TableInfo> tables = agent.listTables(
+            "app",
+            new MetadataListConstraints("user", 1, 1, List.of("TABLE"))
+        );
+
+        Assertions.assertEquals(1, tables.size());
+        Assertions.assertEquals("user_order", tables.get(0).getName());
+        Assertions.assertTrue(sql.get(0).contains("TABLE_TYPE IN (?)"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("UPPER(TABLE_NAME) LIKE ?"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("LIMIT ?"), sql.get(0));
+    }
+
+    @Test
+    void constrainedListObjectsKeepsCustomRoutineMetadata() {
+        List<String> sql = new ArrayList<>();
+        Gbase8aAgent agent = new Gbase8aAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql,
+            resultSet(
+                new String[]{"ROUTINE_NAME", "ROUTINE_TYPE", "ROUTINE_COMMENT"},
+                new Object[][]{{"refresh_orders", "PROCEDURE", "proc comment"}, {"format_order", "FUNCTION", null}}
+            )
+        ));
+
+        List<ObjectInfo> objects = agent.listObjects(
+            "app",
+            new MetadataListConstraints("format", 1, null, List.of("FUNCTION"))
+        );
+
+        Assertions.assertEquals(1, objects.size());
+        Assertions.assertEquals("format_order", objects.get(0).getName());
+        Assertions.assertEquals("FUNCTION", objects.get(0).getObject_type());
+        Assertions.assertTrue(sql.get(0).contains("ROUTINE_TYPE IN (?)"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("UPPER(ROUTINE_NAME) LIKE ?"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("LIMIT ?"), sql.get(0));
+    }
+
     private static Connection preparedConnection(List<String> sql, ResultSet... resultSets) {
         int[] resultSetIndex = {0};
         PreparedStatement statement = proxy(PreparedStatement.class, (method, args) -> {
@@ -54,7 +103,7 @@ class Gbase8aAgentTest {
                 resultSetIndex[0] += 1;
                 return resultSets[current];
             }
-            if ("setString".equals(method.getName()) || "close".equals(method.getName())) {
+            if ("setString".equals(method.getName()) || "setInt".equals(method.getName()) || "close".equals(method.getName())) {
                 return null;
             }
             return defaultValue(method.getReturnType());

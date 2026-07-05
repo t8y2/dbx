@@ -124,11 +124,11 @@ public final class JsonRpcServer {
         }
         if (AgentProtocol.METHOD_LIST_TABLES.equals(method)) {
             switchCatalog(params);
-            return agent.listTables(params.get("schema").getAsString(), stringListOrNull(params, "object_types"));
+            return agent.listTables(params.get("schema").getAsString(), metadataListConstraints(params));
         }
         if (AgentProtocol.METHOD_LIST_OBJECTS.equals(method)) {
             switchCatalog(params);
-            return agent.listObjects(params.get("schema").getAsString());
+            return agent.listObjects(params.get("schema").getAsString(), metadataListConstraints(params));
         }
         if (AgentProtocol.METHOD_LIST_DATA_TYPES.equals(method)) {
             switchCatalog(params);
@@ -354,6 +354,15 @@ public final class JsonRpcServer {
             return null;
         }
         return element.getAsInt();
+    }
+
+    private MetadataListConstraints metadataListConstraints(JsonObject params) {
+        return new MetadataListConstraints(
+            stringOrNull(params, "filter"),
+            intOrNull(params, "limit"),
+            intOrNull(params, "offset"),
+            stringListOrNull(params, "object_types")
+        );
     }
 
     private static int intOrDefault(JsonObject object, String key, int defaultValue) {

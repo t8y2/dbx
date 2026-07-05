@@ -9,7 +9,7 @@ import { AI_PROVIDER_PRESETS, DEFAULT_EDITOR_SETTINGS, normalizeAiConfig, normal
 
 const OLD_FONT_SIZE_KEY = "dbx-query-editor-font-size";
 
-function withMockLocalStorage(initial: Record<string, string>, run: () => void) {
+async function withMockLocalStorage(initial: Record<string, string>, run: () => void | Promise<void>) {
   const previousDescriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
   const values = new Map(Object.entries(initial));
   const localStorageMock = {
@@ -31,7 +31,7 @@ function withMockLocalStorage(initial: Record<string, string>, run: () => void) 
   });
 
   try {
-    run();
+    await run();
   } finally {
     if (previousDescriptor) {
       Object.defineProperty(globalThis, "localStorage", previousDescriptor);
@@ -60,26 +60,28 @@ test("defaults export batch size to 2000 rows", () => {
   assert.equal(normalizeEditorSettings({ exportBatchSize: 2000 }).exportBatchSize, 2000);
 });
 
-test("migrates the legacy saved export batch default to 2000 once", () => {
-  withMockLocalStorage({ "dbx-editor-settings": JSON.stringify({ exportBatchSize: 10000 }) }, () => {
+test("migrates the legacy saved export batch default to 2000 once", async () => {
+  await withMockLocalStorage({ "dbx-editor-settings": JSON.stringify({ exportBatchSize: 10000 }) }, async () => {
     setActivePinia(createPinia());
     const store = useSettingsStore();
+    await store.initEditorSettings();
 
     assert.equal(store.editorSettings.exportBatchSize, 2000);
-    assert.equal(localStorage.getItem("dbx-export-batch-size-default-migrated-v1"), "1");
-    assert.equal(JSON.parse(localStorage.getItem("dbx-editor-settings") || "{}").exportBatchSize, 2000);
+    assert.equal(localStorage.getItem("dbx-editor-settings"), null);
+    assert.equal(JSON.parse(localStorage.getItem("dbx-app-state:editor_settings") || "{}").exportBatchSize, 2000);
   });
 });
 
-test("keeps a manually saved 10000 export batch size after migration", () => {
-  withMockLocalStorage(
+test("keeps a manually saved 10000 export batch size after migration", async () => {
+  await withMockLocalStorage(
     {
       "dbx-editor-settings": JSON.stringify({ exportBatchSize: 10000 }),
       "dbx-export-batch-size-default-migrated-v1": "1",
     },
-    () => {
+    async () => {
       setActivePinia(createPinia());
       const store = useSettingsStore();
+      await store.initEditorSettings();
 
       assert.equal(store.editorSettings.exportBatchSize, 10000);
     },
@@ -441,8 +443,8 @@ test("keeps SQL formatter default objects distinct", () => {
   assert.notEqual(normalized.sqlFormatter, DEFAULT_SQL_FORMATTER_SETTINGS);
 });
 
-test("does not leak default-loaded SQL formatter mutations into defaults", () => {
-  withMockLocalStorage({}, () => {
+test("does not leak default-loaded SQL formatter mutations into defaults", async () => {
+  await withMockLocalStorage({}, async () => {
     setActivePinia(createPinia());
     const store = useSettingsStore();
     const editorDefaultKeywordCase = DEFAULT_EDITOR_SETTINGS.sqlFormatter.keywordCase;
@@ -462,10 +464,11 @@ test("does not leak default-loaded SQL formatter mutations into defaults", () =>
   });
 });
 
-test("does not leak migrated SQL formatter mutations into defaults", () => {
-  withMockLocalStorage({ [OLD_FONT_SIZE_KEY]: "18" }, () => {
+test("does not leak migrated SQL formatter mutations into defaults", async () => {
+  await withMockLocalStorage({ [OLD_FONT_SIZE_KEY]: "18" }, async () => {
     setActivePinia(createPinia());
     const store = useSettingsStore();
+    await store.initEditorSettings();
     const editorDefaultKeywordCase = DEFAULT_EDITOR_SETTINGS.sqlFormatter.keywordCase;
     const formatterDefaultKeywordCase = DEFAULT_SQL_FORMATTER_SETTINGS.keywordCase;
 

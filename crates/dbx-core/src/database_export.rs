@@ -154,6 +154,10 @@ pub struct BuildDatabaseSqlExportOptions {
 }
 
 pub fn format_export_sql_literal(value: &Value) -> String {
+    format_export_sql_literal_for_database(value, None)
+}
+
+fn format_export_sql_literal_for_database(value: &Value, database_type: Option<DatabaseType>) -> String {
     if value.is_null() {
         return "NULL".to_string();
     }
@@ -167,7 +171,7 @@ pub fn format_export_sql_literal(value: &Value) -> String {
         return format_pg_array_sql_literal(arr);
     }
     let text = value.as_str().map_or_else(|| value.to_string(), ToString::to_string);
-    quote_export_sql_string(&text)
+    quote_export_sql_string_for_database(&text, database_type)
 }
 
 fn format_export_sql_literal_typed(
@@ -186,11 +190,51 @@ fn format_export_sql_literal_typed(
     if let Some(literal) = format_export_temporal_literal(value, database_type, column_type) {
         return literal;
     }
-    format_export_sql_literal(value)
+    format_export_sql_literal_for_database(value, database_type)
 }
 
 fn quote_export_sql_string(text: &str) -> String {
     format!("'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
+}
+
+fn quote_export_sql_string_for_database(text: &str, database_type: Option<DatabaseType>) -> String {
+    if is_mysql_compatible_export_literal_target(database_type) {
+        quote_mysql_compatible_export_sql_string(text)
+    } else {
+        quote_export_sql_string(text)
+    }
+}
+
+fn quote_mysql_compatible_export_sql_string(text: &str) -> String {
+    format!("'{}'", escape_mysql_compatible_export_sql_string(text))
+}
+
+fn escape_mysql_compatible_export_sql_string(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            // MySQL-family dumps should keep control characters out of the
+            // physical script layout while relying on the dialect's escapes.
+            '\0' => escaped.push_str("\\0"),
+            '\x08' => escaped.push_str("\\b"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\x0c' => escaped.push_str("\\f"),
+            '\x1a' => escaped.push_str("\\Z"),
+            '\\' => escaped.push_str("\\\\"),
+            '\'' => escaped.push_str("''"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn is_mysql_compatible_export_literal_target(database_type: Option<DatabaseType>) -> bool {
+    matches!(
+        database_type,
+        Some(DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::Goldendb)
+    )
 }
 
 fn format_export_temporal_literal(
@@ -357,7 +401,7 @@ fn format_mysql_bit_literal(value: &Value) -> String {
             if !trimmed.is_empty() && trimmed.bytes().all(|byte| byte == b'0' || byte == b'1') {
                 return format!("b'{trimmed}'");
             }
-            format!("b'{}'", value.replace('\\', "\\\\").replace('\'', "''"))
+            format!("b'{}'", escape_mysql_compatible_export_sql_string(value))
         }
         other => format_export_sql_literal(other),
     }
@@ -782,8 +826,17 @@ pub async fn export_database_sql_core(
     let mut functions: Vec<String> = Vec::new();
 
     if request.include_objects && request.selected_tables.is_empty() {
-        if let Ok(objects) =
-            crate::schema::list_objects_core(state, &request.connection_id, &request.database, &request.schema).await
+        if let Ok(objects) = crate::schema::list_objects_core(
+            state,
+            &request.connection_id,
+            &request.database,
+            &request.schema,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
         {
             for obj in &objects {
                 let ot = obj.object_type.to_uppercase();
@@ -1260,6 +1313,63 @@ mod tests {
         assert_eq!(format_export_sql_literal(&json!(42)), "42");
         assert_eq!(format_export_sql_literal(&json!(true)), "TRUE");
         assert_eq!(format_export_sql_literal(&json!("O'Hara")), "'O''Hara'");
+    }
+
+    #[test]
+    fn mysql_export_inserts_escape_control_characters() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Mysql),
+            schema: None,
+            table_name: Some("notes".to_string()),
+            qualified_table_name: None,
+            columns: vec!["body".to_string()],
+            column_types: vec![Some("text".to_string())],
+            column_extras: Vec::new(),
+            rows: vec![vec![json!("line1\nline2\tcol\rend\\slash\0\x1aO'Hara")]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec!["INSERT INTO `notes` (`body`) VALUES ('line1\\nline2\\tcol\\rend\\\\slash\\0\\ZO''Hara');"]
+        );
+    }
+
+    #[test]
+    fn doris_export_inserts_escape_control_characters() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Doris),
+            schema: Some("warehouse".to_string()),
+            table_name: Some("events".to_string()),
+            qualified_table_name: None,
+            columns: vec!["message".to_string()],
+            column_types: vec![Some("varchar(255)".to_string())],
+            column_extras: Vec::new(),
+            rows: vec![vec![json!("first\nsecond\tthird")]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(statements, vec!["INSERT INTO `warehouse`.`events` (`message`) VALUES ('first\\nsecond\\tthird');"]);
+    }
+
+    #[test]
+    fn postgres_export_inserts_keep_literal_control_characters() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Postgres),
+            schema: Some("public".to_string()),
+            table_name: Some("notes".to_string()),
+            qualified_table_name: None,
+            columns: vec!["body".to_string()],
+            column_types: vec![Some("text".to_string())],
+            column_extras: Vec::new(),
+            rows: vec![vec![json!("line1\nline2\tend")]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(statements, vec!["INSERT INTO \"public\".\"notes\" (\"body\") VALUES ('line1\nline2\tend');"]);
     }
 
     #[test]

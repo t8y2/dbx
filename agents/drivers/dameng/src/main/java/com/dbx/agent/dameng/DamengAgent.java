@@ -10,6 +10,7 @@ import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcExecutor;
 import com.dbx.agent.JdbcIdentifiers;
 import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.QueryPageOptions;
@@ -140,7 +141,9 @@ public final class DamengAgent extends BaseDatabaseAgent {
 
     @Override
     public List<TableInfo> listTables(String schema) {
-        return listTables(schema, null);
+        // Keep this call on the legacy object-type overload; the common agent
+        // also exposes a constraints overload for paged metadata listing.
+        return listTables(schema, (List<String>) null);
     }
 
     @Override
@@ -160,6 +163,60 @@ public final class DamengAgent extends BaseDatabaseAgent {
             result.sort(Comparator.comparing(TableInfo::getName));
             return result;
         });
+    }
+
+    @Override
+    public List<TableInfo> listTables(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        if (isUnconstrained(normalized)) {
+            return listTables(schema);
+        }
+        return queryConstrainedTables(schema, normalized);
+    }
+
+    private List<TableInfo> queryConstrainedTables(String schema, MetadataListConstraints constraints) {
+        if (!constraints.includesTableLikeTypes()) {
+            return List.of();
+        }
+        try {
+            return unchecked(() -> {
+                MetadataQuery query = buildConstrainedTablesQuery(schema, constraints);
+                List<TableInfo> result = new ArrayList<>();
+                try (PreparedStatement stmt = requireConnected().prepareStatement(query.sql())) {
+                    bind(stmt, query.args());
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        while (rs.next()) {
+                            result.add(new TableInfo(rs.getString("TABLE_NAME"), normalizeObjectType(rs.getString("TABLE_TYPE")), rs.getString("COMMENTS")));
+                        }
+                    }
+                }
+                return constraints.withoutPaging().filterTables(result);
+            });
+        } catch (RuntimeException e) {
+            // Restricted Dameng catalog views vary by version; fall back to the
+            // legacy metadata path so browsing still works when pushdown fails.
+            return constraints.filterTables(listTables(schema));
+        }
+    }
+
+    static MetadataQuery buildConstrainedTablesQuery(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        List<Object> args = new ArrayList<>();
+        StringBuilder sql = new StringBuilder("""
+            SELECT o.OBJECT_NAME AS TABLE_NAME,
+                   CASE WHEN o.OBJECT_TYPE = 'MATERIALIZED VIEW' THEN 'MATERIALIZED_VIEW' ELSE o.OBJECT_TYPE END AS TABLE_TYPE,
+                   c.COMMENTS
+            FROM ALL_OBJECTS o
+            LEFT JOIN ALL_TAB_COMMENTS c ON c.OWNER = o.OWNER AND c.TABLE_NAME = o.OBJECT_NAME
+            WHERE o.OWNER = ?
+            """.stripIndent().trim());
+        args.add(schema);
+        appendDamengObjectTypePredicate(sql, args, normalized, true);
+        sql.append(" AND (o.OBJECT_TYPE <> 'TABLE' OR o.OBJECT_NAME NOT LIKE 'MTAB$_%')");
+        appendNameFilter(sql, args, "o.OBJECT_NAME", normalized);
+        sql.append(" ORDER BY o.OBJECT_NAME");
+        appendLimitOffset(sql, args, normalized);
+        return new MetadataQuery(sql.toString(), args);
     }
 
     private void loadTableOrView(String schema, String tableType, Map<String, TableInfo> tablesByName) {
@@ -307,6 +364,111 @@ public final class DamengAgent extends BaseDatabaseAgent {
         return false;
     }
 
+    private static boolean isUnconstrained(MetadataListConstraints constraints) {
+        return !constraints.hasFilter() && !constraints.hasLimit() && !constraints.hasOffset() && !constraints.hasObjectTypes();
+    }
+
+    private static boolean includesSupportedObjectTypes(MetadataListConstraints constraints) {
+        return constraints.includesTableLikeTypes()
+            || constraints.objectTypeAllowed("PROCEDURE")
+            || constraints.objectTypeAllowed("FUNCTION");
+    }
+
+    private static void appendDamengObjectTypePredicate(
+        StringBuilder sql,
+        List<Object> args,
+        MetadataListConstraints constraints,
+        boolean tableOnly
+    ) {
+        List<String> objectTypes = tableOnly ? damengTableObjectTypes(constraints) : damengObjectTypes(constraints);
+        if (objectTypes.isEmpty()) {
+            sql.append(" AND 1 = 0");
+            return;
+        }
+        sql.append(" AND o.OBJECT_TYPE IN (").append(placeholders(objectTypes.size())).append(")");
+        args.addAll(objectTypes);
+    }
+
+    private static List<String> damengTableObjectTypes(MetadataListConstraints constraints) {
+        List<String> result = new ArrayList<>();
+        if (constraints.tableTypeAllowed("TABLE")) {
+            result.add("TABLE");
+        }
+        if (constraints.tableTypeAllowed("VIEW")) {
+            result.add("VIEW");
+        }
+        if (constraints.tableTypeAllowed("MATERIALIZED_VIEW")) {
+            result.add("MATERIALIZED VIEW");
+        }
+        return result;
+    }
+
+    private static List<String> damengObjectTypes(MetadataListConstraints constraints) {
+        List<String> result = damengTableObjectTypes(constraints);
+        if (constraints.objectTypeAllowed("PROCEDURE")) {
+            result.add("PROCEDURE");
+        }
+        if (constraints.objectTypeAllowed("FUNCTION")) {
+            result.add("FUNCTION");
+        }
+        return result;
+    }
+
+    private static void appendNameFilter(StringBuilder sql, List<Object> args, String column, MetadataListConstraints constraints) {
+        if (!constraints.hasFilter()) {
+            return;
+        }
+        sql.append(" AND UPPER(").append(column).append(") LIKE ? ESCAPE '\\\\'");
+        args.add(constraints.fuzzyLikePattern().toUpperCase(Locale.ROOT));
+    }
+
+    private static void appendLimitOffset(StringBuilder sql, List<Object> args, MetadataListConstraints constraints) {
+        if (!constraints.hasLimit()) {
+            return;
+        }
+        sql.append(" LIMIT ?");
+        args.add(constraints.getLimit());
+        if (constraints.hasOffset()) {
+            sql.append(" OFFSET ?");
+            args.add(constraints.getOffset());
+        }
+    }
+
+    private static String placeholders(int count) {
+        return String.join(", ", java.util.Collections.nCopies(count, "?"));
+    }
+
+    private static void bind(PreparedStatement stmt, List<Object> args) throws Exception {
+        for (int index = 0; index < args.size(); index += 1) {
+            Object arg = args.get(index);
+            if (arg instanceof Integer) {
+                stmt.setInt(index + 1, (Integer) arg);
+            } else if (arg == null) {
+                stmt.setObject(index + 1, null);
+            } else {
+                stmt.setString(index + 1, String.valueOf(arg));
+            }
+        }
+    }
+
+    static final class MetadataQuery {
+        private final String sql;
+        private final List<Object> args;
+
+        MetadataQuery(String sql, List<Object> args) {
+            this.sql = sql;
+            this.args = args;
+        }
+
+        String sql() {
+            return sql;
+        }
+
+        List<Object> args() {
+            return args;
+        }
+    }
+
     private static String normalizeObjectType(String value) {
         String upper = value == null ? "" : value.trim().toUpperCase(Locale.ROOT).replace(' ', '_').replace('-', '_');
         if (upper.contains("MATERIALIZED") && upper.contains("VIEW")) {
@@ -347,6 +509,71 @@ public final class DamengAgent extends BaseDatabaseAgent {
             }
             return result;
         });
+    }
+
+    @Override
+    public List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        if (isUnconstrained(normalized)) {
+            return listObjects(schema);
+        }
+        return queryConstrainedObjects(schema, normalized);
+    }
+
+    private List<ObjectInfo> queryConstrainedObjects(String schema, MetadataListConstraints constraints) {
+        if (!includesSupportedObjectTypes(constraints)) {
+            return List.of();
+        }
+        try {
+            return unchecked(() -> {
+                MetadataQuery query = buildConstrainedObjectsQuery(schema, constraints);
+                List<ObjectInfo> result = new ArrayList<>();
+                try (PreparedStatement stmt = requireConnected().prepareStatement(query.sql())) {
+                    bind(stmt, query.args());
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        while (rs.next()) {
+                            result.add(new ObjectInfo(
+                                rs.getString("OBJECT_NAME"),
+                                normalizeObjectType(rs.getString("OBJECT_TYPE")),
+                                schema,
+                                rs.getString("COMMENTS")
+                            ));
+                        }
+                    }
+                }
+                return constraints.withoutPaging().filterObjects(result);
+            });
+        } catch (RuntimeException e) {
+            // Keep restricted/older Dameng catalogs usable even if SQL pushdown
+            // is unavailable for a specific connection.
+            return constraints.filterObjects(listObjects(schema));
+        }
+    }
+
+    static MetadataQuery buildConstrainedObjectsQuery(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        List<Object> args = new ArrayList<>();
+        StringBuilder sql = new StringBuilder("""
+            SELECT o.OBJECT_NAME,
+                   CASE WHEN o.OBJECT_TYPE = 'MATERIALIZED VIEW' THEN 'MATERIALIZED_VIEW' ELSE o.OBJECT_TYPE END AS OBJECT_TYPE,
+                   c.COMMENTS
+            FROM ALL_OBJECTS o
+            LEFT JOIN ALL_TAB_COMMENTS c ON c.OWNER = o.OWNER AND c.TABLE_NAME = o.OBJECT_NAME
+            WHERE o.OWNER = ?
+            """.stripIndent().trim());
+        args.add(schema);
+        appendDamengObjectTypePredicate(sql, args, normalized, false);
+        sql.append(" AND (o.OBJECT_TYPE <> 'TABLE' OR o.OBJECT_NAME NOT LIKE 'MTAB$_%')");
+        appendNameFilter(sql, args, "o.OBJECT_NAME", normalized);
+        sql.append(" ORDER BY CASE o.OBJECT_TYPE")
+            .append(" WHEN 'TABLE' THEN 0")
+            .append(" WHEN 'VIEW' THEN 1")
+            .append(" WHEN 'MATERIALIZED VIEW' THEN 2")
+            .append(" WHEN 'PROCEDURE' THEN 3")
+            .append(" WHEN 'FUNCTION' THEN 4")
+            .append(" ELSE 9 END, o.OBJECT_NAME");
+        appendLimitOffset(sql, args, normalized);
+        return new MetadataQuery(sql.toString(), args);
     }
 
     @Override

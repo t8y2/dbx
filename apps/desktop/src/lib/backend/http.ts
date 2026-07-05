@@ -523,13 +523,16 @@ export async function getTableComment(_connectionId: string, _database: string, 
   throw new Error("Table comment lookup is not available in the web backend");
 }
 
-export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: SidebarObjectKind[]): Promise<ObjectInfo[]> {
+export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: SidebarObjectKind[], filter?: string, limit?: number, offset?: number): Promise<ObjectInfo[]> {
   return get(
     `/api/schema/objects?${qs({
       connection_id: connectionId,
       database,
       schema,
       object_types: objectTypes?.join(","),
+      filter,
+      limit,
+      offset,
     })}`,
   );
 }

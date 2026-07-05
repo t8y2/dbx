@@ -629,7 +629,29 @@ impl AgentDriverClient {
         object_types: Option<&[String]>,
         timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
+        self.list_tables_constrained(database, schema, None, None, None, object_types, timeout_duration).await
+    }
+
+    pub async fn list_tables_constrained<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        filter: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+        object_types: Option<&[String]>,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
         let mut params = agent_schema_params(database, schema);
+        if let Some(filter) = filter.map(str::trim).filter(|filter| !filter.is_empty()) {
+            params["filter"] = serde_json::json!(filter);
+        }
+        if let Some(limit) = limit {
+            params["limit"] = serde_json::json!(limit);
+        }
+        if let Some(offset) = offset {
+            params["offset"] = serde_json::json!(offset);
+        }
         if let Some(object_types) = object_types {
             params["object_types"] = serde_json::json!(object_types);
         }
@@ -642,8 +664,33 @@ impl AgentDriverClient {
         schema: &str,
         timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
-        self.call_method_with_timeout(AgentMethod::ListObjects, agent_schema_params(database, schema), timeout_duration)
-            .await
+        self.list_objects_constrained(database, schema, None, None, None, None, timeout_duration).await
+    }
+
+    pub async fn list_objects_constrained<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        filter: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+        object_types: Option<&[String]>,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        let mut params = agent_schema_params(database, schema);
+        if let Some(filter) = filter.map(str::trim).filter(|filter| !filter.is_empty()) {
+            params["filter"] = serde_json::json!(filter);
+        }
+        if let Some(limit) = limit {
+            params["limit"] = serde_json::json!(limit);
+        }
+        if let Some(offset) = offset {
+            params["offset"] = serde_json::json!(offset);
+        }
+        if let Some(object_types) = object_types {
+            params["object_types"] = serde_json::json!(object_types);
+        }
+        self.call_method_with_timeout(AgentMethod::ListObjects, params, timeout_duration).await
     }
 
     pub async fn list_data_types<T: DeserializeOwned + Send + 'static>(

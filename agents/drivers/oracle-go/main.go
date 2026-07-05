@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -42,7 +43,7 @@ ORDER BY CASE
   WHEN username = SYS_CONTEXT('USERENV', 'SESSION_USER') THEN 1
   ELSE 2
 END, username`
-const oracleListTablesSQL = `
+const oracleListTablesBaseSQL = `
 SELECT OBJECT_NAME, TABLE_TYPE, COMMENTS
 FROM (
 SELECT t.TABLE_NAME AS OBJECT_NAME,
@@ -58,9 +59,10 @@ SELECT o.OBJECT_NAME,
 FROM ALL_OBJECTS o
 WHERE o.OWNER = :2
   AND o.OBJECT_TYPE = 'VIEW'
-)
-ORDER BY OBJECT_NAME`
-const oracleListObjectsSQL = `
+)`
+const oracleListTablesOrderSQL = `ORDER BY OBJECT_NAME`
+const oracleListTablesSQL = oracleListTablesBaseSQL + "\n" + oracleListTablesOrderSQL
+const oracleListObjectsBaseSQL = `
 SELECT OBJECT_NAME, OBJECT_TYPE, COMMENTS
 FROM (
 SELECT t.TABLE_NAME AS OBJECT_NAME,
@@ -71,19 +73,21 @@ WHERE t.OWNER = :1
   AND t.NESTED = 'NO'
 UNION ALL
 SELECT o.OBJECT_NAME,
-       o.OBJECT_TYPE,
+       CASE o.OBJECT_TYPE WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY' ELSE o.OBJECT_TYPE END AS OBJECT_TYPE,
        CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
 FROM ALL_OBJECTS o
 WHERE o.OWNER = :2
-  AND o.OBJECT_TYPE IN ('VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE')
-)
-ORDER BY CASE OBJECT_TYPE
+  AND o.OBJECT_TYPE IN ('VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE', 'PACKAGE BODY')
+)`
+const oracleListObjectsOrderSQL = `ORDER BY CASE OBJECT_TYPE
   WHEN 'TABLE' THEN 0
   WHEN 'VIEW' THEN 1
   WHEN 'PROCEDURE' THEN 2
   WHEN 'FUNCTION' THEN 3
-  ELSE 4
+  WHEN 'PACKAGE' THEN 4
+  ELSE 5
 END, OBJECT_NAME`
+const oracleListObjectsSQL = oracleListObjectsBaseSQL + "\n" + oracleListObjectsOrderSQL
 
 type request struct {
 	ID     json.RawMessage            `json:"id"`
@@ -186,6 +190,13 @@ type tableInfo struct {
 	Name      string  `json:"name"`
 	TableType string  `json:"table_type"`
 	Comment   *string `json:"comment"`
+}
+
+type metadataListConstraints struct {
+	Filter      string
+	Limit       int
+	Offset      int
+	ObjectTypes []string
 }
 
 type objectInfo struct {
@@ -336,11 +347,11 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		return result, false, err
 	case "list_tables":
 		schema := stringParam(params, "schema")
-		result, err := s.listTables(schema)
+		result, err := s.listTables(schema, metadataListConstraintsFromParams(params))
 		return result, false, err
 	case "list_objects":
 		schema := stringParam(params, "schema")
-		result, err := s.listObjects(schema)
+		result, err := s.listObjects(schema, metadataListConstraintsFromParams(params))
 		return result, false, err
 	case "get_columns":
 		schema := stringParam(params, "schema")
@@ -675,12 +686,145 @@ func (s *server) normalizeSchema(schema string) (string, error) {
 	return strings.ToUpper(schema), nil
 }
 
-func (s *server) listTables(schema string) ([]tableInfo, error) {
+type oracleMetadataListQuery struct {
+	SQL  string
+	Args []any
+}
+
+func metadataListConstraintsFromParams(params map[string]json.RawMessage) metadataListConstraints {
+	objectTypes := stringSliceParam(params, "object_types")
+	if len(objectTypes) == 0 {
+		objectTypes = stringSliceParam(params, "objectTypes")
+	}
+	limit := intParam(params, "limit")
+	offset := intParam(params, "offset")
+	if limit < 0 {
+		limit = 0
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return metadataListConstraints{
+		Filter:      stringParam(params, "filter"),
+		Limit:       limit,
+		Offset:      offset,
+		ObjectTypes: objectTypes,
+	}
+}
+
+func oracleListTablesQuery(schema string, constraints metadataListConstraints) oracleMetadataListQuery {
+	return oracleConstrainedMetadataListQuery(
+		oracleListTablesBaseSQL,
+		"OBJECT_NAME, TABLE_TYPE, COMMENTS",
+		"TABLE_TYPE",
+		oracleListTablesOrderSQL,
+		[]any{schema, schema},
+		constraints,
+	)
+}
+
+func oracleListObjectsQuery(schema string, constraints metadataListConstraints) oracleMetadataListQuery {
+	return oracleConstrainedMetadataListQuery(
+		oracleListObjectsBaseSQL,
+		"OBJECT_NAME, OBJECT_TYPE, COMMENTS",
+		"OBJECT_TYPE",
+		oracleListObjectsOrderSQL,
+		[]any{schema, schema},
+		constraints,
+	)
+}
+
+func oracleConstrainedMetadataListQuery(baseSQL, selectList, typeColumn, orderSQL string, baseArgs []any, constraints metadataListConstraints) oracleMetadataListQuery {
+	args := append([]any{}, baseArgs...)
+	where := make([]string, 0, 2)
+	if filter := strings.TrimSpace(constraints.Filter); filter != "" {
+		args = append(args, strings.ToUpper(oracleFuzzyLikePattern(filter)))
+		where = append(where, fmt.Sprintf("UPPER(OBJECT_NAME) LIKE :%d ESCAPE '\\'", len(args)))
+	}
+	if objectTypes := normalizedMetadataObjectTypes(constraints.ObjectTypes); len(objectTypes) > 0 {
+		placeholders := make([]string, 0, len(objectTypes))
+		for _, objectType := range objectTypes {
+			args = append(args, objectType)
+			placeholders = append(placeholders, fmt.Sprintf(":%d", len(args)))
+		}
+		where = append(where, fmt.Sprintf("%s IN (%s)", typeColumn, strings.Join(placeholders, ",")))
+	}
+
+	sqlText := fmt.Sprintf("SELECT %s\nFROM (\n%s\n)", selectList, baseSQL)
+	if len(where) > 0 {
+		sqlText += "\nWHERE " + strings.Join(where, " AND ")
+	}
+	sqlText += "\n" + orderSQL
+
+	if constraints.Limit > 0 {
+		args = append(args, constraints.Offset+constraints.Limit)
+		maxRowParam := len(args)
+		args = append(args, constraints.Offset)
+		offsetParam := len(args)
+		sqlText = fmt.Sprintf(
+			"SELECT %s\nFROM (\n  SELECT DBX_Q.*, ROWNUM AS DBX_RN\n  FROM (\n%s\n  ) DBX_Q\n  WHERE ROWNUM <= :%d\n)\nWHERE DBX_RN > :%d",
+			selectList,
+			sqlText,
+			maxRowParam,
+			offsetParam,
+		)
+	} else if constraints.Offset > 0 {
+		args = append(args, constraints.Offset)
+		offsetParam := len(args)
+		sqlText = fmt.Sprintf(
+			"SELECT %s\nFROM (\n  SELECT DBX_Q.*, ROWNUM AS DBX_RN\n  FROM (\n%s\n  ) DBX_Q\n)\nWHERE DBX_RN > :%d",
+			selectList,
+			sqlText,
+			offsetParam,
+		)
+	}
+
+	return oracleMetadataListQuery{SQL: sqlText, Args: args}
+}
+
+func normalizedMetadataObjectTypes(values []string) []string {
+	seen := map[string]bool{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		normalized := strings.ToUpper(strings.TrimSpace(value))
+		normalized = strings.ReplaceAll(normalized, "-", "_")
+		normalized = strings.ReplaceAll(normalized, " ", "_")
+		if normalized == "" || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		result = append(result, normalized)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func oracleFuzzyLikePattern(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "%%"
+	}
+	var builder strings.Builder
+	builder.Grow(len(value)*2 + 2)
+	builder.WriteByte('%')
+	for _, ch := range value {
+		switch ch {
+		case '\\', '%', '_':
+			builder.WriteByte('\\')
+		}
+		builder.WriteRune(ch)
+		builder.WriteByte('%')
+	}
+	return builder.String()
+}
+
+func (s *server) listTables(schema string, constraints metadataListConstraints) ([]tableInfo, error) {
 	schema, err := s.normalizeSchema(schema)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.queryRows(oracleListTablesSQL, []any{schema, schema})
+	query := oracleListTablesQuery(schema, constraints)
+	rows, err := s.queryRows(query.SQL, query.Args)
 	if err != nil {
 		if isOraclePGALimitError(err) {
 			return []tableInfo{}, nil
@@ -699,12 +843,13 @@ func (s *server) listTables(schema string) ([]tableInfo, error) {
 	return emptyIfNil(result), rows.Err()
 }
 
-func (s *server) listObjects(schema string) ([]objectInfo, error) {
+func (s *server) listObjects(schema string, constraints metadataListConstraints) ([]objectInfo, error) {
 	schema, err := s.normalizeSchema(schema)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.queryRows(oracleListObjectsSQL, []any{schema, schema})
+	query := oracleListObjectsQuery(schema, constraints)
+	rows, err := s.queryRows(query.SQL, query.Args)
 	if err != nil {
 		if isOraclePGALimitError(err) {
 			return []objectInfo{}, nil

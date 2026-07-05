@@ -197,6 +197,7 @@ async function startImport() {
       },
     );
     toast(t("tableImport.success", { count: summary.rowsImported }), 2500);
+    store.invalidateMetadataCache(props.prefillConnectionId, props.prefillDatabase || "", props.prefillSchema || undefined, props.prefillTable);
     open.value = false;
   } catch (e: any) {
     errorMessage.value = String(e?.message || e);

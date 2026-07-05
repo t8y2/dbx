@@ -10,6 +10,8 @@ import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcExecutor;
 import com.dbx.agent.JdbcIdentifiers;
 import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MetadataListConstraints;
+import com.dbx.agent.MetadataSqlSupport;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.QueryResult;
@@ -104,6 +106,44 @@ public final class SundbAgent extends BaseDatabaseAgent {
     }
 
     @Override
+    public List<TableInfo> listTables(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        if (isUnconstrained(normalized)) {
+            return listTables(schema);
+        }
+        if (!normalized.includesTableLikeTypes()) {
+            return List.of();
+        }
+        try {
+            return queryConstrainedTables(schema, normalized);
+        } catch (RuntimeException e) {
+            return normalized.filterTables(listTables(schema));
+        }
+    }
+
+    private List<TableInfo> queryConstrainedTables(String schema, MetadataListConstraints constraints) {
+        return unchecked(() -> {
+            List<TableInfo> result = new ArrayList<>();
+            List<Object> args = new ArrayList<>();
+            StringBuilder sql = new StringBuilder("SELECT TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?");
+            args.add(schema);
+            appendInformationSchemaTableTypePredicate(sql, args, constraints);
+            MetadataSqlSupport.appendNameFilter(sql, args, "TABLE_NAME", constraints);
+            sql.append(" ORDER BY TABLE_NAME");
+            MetadataSqlSupport.appendLiteralLimitOffset(sql, constraints);
+            try (var stmt = requireConnected().prepareStatement(sql.toString())) {
+                MetadataSqlSupport.bind(stmt, args);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        result.add(new TableInfo(rs.getString("TABLE_NAME"), normalizeTableType(rs.getString("TABLE_TYPE")), null));
+                    }
+                }
+            }
+            return constraints.withoutPaging().filterTables(result);
+        });
+    }
+
+    @Override
     public List<ObjectInfo> listObjects(String schema) {
         return unchecked(() -> {
             List<ObjectInfo> result = new ArrayList<>();
@@ -122,6 +162,60 @@ public final class SundbAgent extends BaseDatabaseAgent {
                 }
             }
             return result;
+        });
+    }
+
+    @Override
+    public List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        if (isUnconstrained(normalized)) {
+            return listObjects(schema);
+        }
+        if (!includesSupportedObjects(normalized)) {
+            return List.of();
+        }
+        try {
+            return queryConstrainedObjects(schema, normalized);
+        } catch (RuntimeException e) {
+            return normalized.filterObjects(listObjects(schema));
+        }
+    }
+
+    private List<ObjectInfo> queryConstrainedObjects(String schema, MetadataListConstraints constraints) {
+        return unchecked(() -> {
+            List<ObjectInfo> result = new ArrayList<>();
+            List<String> branches = new ArrayList<>();
+            List<Object> args = new ArrayList<>();
+            if (constraints.includesTableLikeTypes()) {
+                StringBuilder tableSql = new StringBuilder("SELECT TABLE_NAME AS OBJECT_NAME, TABLE_TYPE AS OBJECT_TYPE FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?");
+                args.add(schema);
+                appendInformationSchemaTableTypePredicate(tableSql, args, constraints);
+                MetadataSqlSupport.appendNameFilter(tableSql, args, "TABLE_NAME", constraints);
+                branches.add(tableSql.toString());
+            }
+            if (constraints.objectTypeAllowed("PROCEDURE") || constraints.objectTypeAllowed("FUNCTION")) {
+                StringBuilder routineSql = new StringBuilder("SELECT ROUTINE_NAME AS OBJECT_NAME, ROUTINE_TYPE AS OBJECT_TYPE FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ?");
+                args.add(schema);
+                appendRoutineTypePredicate(routineSql, args, constraints);
+                MetadataSqlSupport.appendNameFilter(routineSql, args, "ROUTINE_NAME", constraints);
+                branches.add(routineSql.toString());
+            }
+            if (branches.isEmpty()) {
+                return List.of();
+            }
+            StringBuilder sql = new StringBuilder("SELECT OBJECT_NAME, OBJECT_TYPE FROM (")
+                .append(String.join(" UNION ALL ", branches))
+                .append(") metadata_objects ORDER BY CASE OBJECT_TYPE WHEN 'BASE TABLE' THEN 0 WHEN 'TABLE' THEN 0 WHEN 'VIEW' THEN 1 WHEN 'PROCEDURE' THEN 2 WHEN 'FUNCTION' THEN 3 ELSE 9 END, OBJECT_NAME");
+            MetadataSqlSupport.appendLiteralLimitOffset(sql, constraints);
+            try (var stmt = requireConnected().prepareStatement(sql.toString())) {
+                MetadataSqlSupport.bind(stmt, args);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        result.add(new ObjectInfo(rs.getString(1), normalizeTableType(rs.getString(2)), schema, null));
+                    }
+                }
+            }
+            return constraints.withoutPaging().filterObjects(result);
         });
     }
 
@@ -342,6 +436,58 @@ public final class SundbAgent extends BaseDatabaseAgent {
 
     private static String buildUrl(ConnectParams params) {
         return "jdbc:sundb://" + params.getHost() + ":" + params.getPort() + "/" + params.getDatabase();
+    }
+
+    private static boolean isUnconstrained(MetadataListConstraints constraints) {
+        return !constraints.hasFilter() && !constraints.hasLimit() && !constraints.hasOffset() && !constraints.hasObjectTypes();
+    }
+
+    private static boolean includesSupportedObjects(MetadataListConstraints constraints) {
+        return constraints.includesTableLikeTypes()
+            || constraints.objectTypeAllowed("PROCEDURE")
+            || constraints.objectTypeAllowed("FUNCTION");
+    }
+
+    private static void appendInformationSchemaTableTypePredicate(StringBuilder sql, List<Object> args, MetadataListConstraints constraints) {
+        if (!constraints.hasObjectTypes()) {
+            return;
+        }
+        List<String> types = new ArrayList<>();
+        if (constraints.tableTypeAllowed("TABLE")) {
+            types.add("BASE TABLE");
+        }
+        if (constraints.tableTypeAllowed("VIEW")) {
+            types.add("VIEW");
+        }
+        if (types.isEmpty()) {
+            sql.append(" AND 1 = 0");
+            return;
+        }
+        sql.append(" AND TABLE_TYPE IN (").append(MetadataSqlSupport.placeholders(types.size())).append(")");
+        args.addAll(types);
+    }
+
+    private static void appendRoutineTypePredicate(StringBuilder sql, List<Object> args, MetadataListConstraints constraints) {
+        if (!constraints.hasObjectTypes()) {
+            return;
+        }
+        List<String> types = new ArrayList<>();
+        if (constraints.objectTypeAllowed("PROCEDURE")) {
+            types.add("PROCEDURE");
+        }
+        if (constraints.objectTypeAllowed("FUNCTION")) {
+            types.add("FUNCTION");
+        }
+        if (types.isEmpty()) {
+            sql.append(" AND 1 = 0");
+            return;
+        }
+        sql.append(" AND ROUTINE_TYPE IN (").append(MetadataSqlSupport.placeholders(types.size())).append(")");
+        args.addAll(types);
+    }
+
+    private static String normalizeTableType(String tableType) {
+        return "BASE TABLE".equals(tableType) ? "TABLE" : tableType;
     }
 
     private static Integer integerOrNull(ResultSet rs, String column) throws Exception {

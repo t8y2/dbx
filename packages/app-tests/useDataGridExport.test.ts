@@ -9,6 +9,7 @@ const apiMock = vi.hoisted(() => ({
   cancelQueryResultExport: vi.fn(),
   startTableExport: vi.fn(),
   cancelTableExport: vi.fn(),
+  saveEditorSettings: vi.fn(async () => {}),
   exportQueryResultCsv: vi.fn(),
   exportQueryResultXlsx: vi.fn(),
   exportQueryResultJson: vi.fn(),

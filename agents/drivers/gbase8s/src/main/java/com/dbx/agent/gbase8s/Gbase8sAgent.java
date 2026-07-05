@@ -6,6 +6,7 @@ import com.dbx.agent.DatabaseInfo;
 import com.dbx.agent.ExecuteQueryOptions;
 import com.dbx.agent.JdbcAgentProfile;
 import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.QueryResult;
 import com.dbx.agent.TableInfo;
 import java.sql.Connection;
@@ -185,6 +186,60 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
         }
     }
 
+    @Override
+    public List<TableInfo> listTables(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        if (isUnconstrained(normalized)) {
+            return listTables(schema);
+        }
+        return queryConstrainedTables(schema, normalized);
+    }
+
+    private List<TableInfo> queryConstrainedTables(String schema, MetadataListConstraints constraints) {
+        if (!constraints.includesTableLikeTypes()) {
+            return List.of();
+        }
+        try {
+            List<TableInfo> result = new ArrayList<>();
+            List<Object> args = new ArrayList<>();
+            String owner = trim(schema);
+            // GBase 8s follows Informix-style SKIP/FIRST pagination in the SELECT list.
+            StringBuilder sql = new StringBuilder("SELECT ");
+            if (constraints.hasOffset()) {
+                sql.append("SKIP ").append(constraints.getOffset()).append(' ');
+            }
+            if (constraints.hasLimit()) {
+                sql.append("FIRST ").append(constraints.getLimit()).append(' ');
+            }
+            sql.append("tabname, tabtype FROM systables WHERE tabid >= 100");
+            appendGbase8sTableTypePredicate(sql, constraints);
+            if (!owner.isEmpty()) {
+                sql.append(" AND owner = ?");
+                args.add(owner);
+            }
+            if (constraints.hasFilter()) {
+                sql.append(" AND UPPER(tabname) LIKE ? ESCAPE '\\\\'");
+                args.add(constraints.fuzzyLikePattern().toUpperCase(Locale.ROOT));
+            }
+            sql.append(" ORDER BY tabname");
+            try (PreparedStatement stmt = requireConnection().prepareStatement(sql.toString())) {
+                bind(stmt, args);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        result.add(new TableInfo(
+                            trim(rs.getString("tabname")),
+                            tableType(rs.getString("tabtype"))
+                        ));
+                    }
+                }
+            }
+            result.sort(Comparator.comparing(TableInfo::getName));
+            return constraints.withoutPaging().filterTables(result);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     public static void main(String[] args) {
         new JsonRpcServer(new Gbase8sAgent()).run();
     }
@@ -279,6 +334,38 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
 
     private static String tableType(String tabtype) {
         return "V".equalsIgnoreCase(trim(tabtype)) ? "VIEW" : "TABLE";
+    }
+
+    private static void appendGbase8sTableTypePredicate(StringBuilder sql, MetadataListConstraints constraints) {
+        if (!constraints.hasObjectTypes()) {
+            sql.append(" AND tabtype IN ('T', 'V')");
+            return;
+        }
+        List<String> tabTypes = new ArrayList<>();
+        if (constraints.tableTypeAllowed("TABLE")) {
+            tabTypes.add("'T'");
+        }
+        if (constraints.tableTypeAllowed("VIEW")) {
+            tabTypes.add("'V'");
+        }
+        if (tabTypes.isEmpty()) {
+            sql.append(" AND 1 = 0");
+            return;
+        }
+        sql.append(" AND tabtype IN (").append(String.join(", ", tabTypes)).append(")");
+    }
+
+    private static void bind(PreparedStatement stmt, List<Object> args) throws Exception {
+        for (int index = 0; index < args.size(); index += 1) {
+            stmt.setString(index + 1, String.valueOf(args.get(index)));
+        }
+    }
+
+    private static boolean isUnconstrained(MetadataListConstraints constraints) {
+        return !constraints.hasFilter()
+            && !constraints.hasLimit()
+            && !constraints.hasOffset()
+            && !constraints.hasObjectTypes();
     }
 
     private static String trim(String value) {

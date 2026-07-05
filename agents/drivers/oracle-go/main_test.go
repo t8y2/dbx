@@ -358,6 +358,32 @@ func TestListTablesSQLUsesSplitDictionaryQuery(t *testing.T) {
 	}
 }
 
+func TestListTablesQueryAppliesMetadataConstraints(t *testing.T) {
+	query := oracleListTablesQuery("APP", metadataListConstraints{
+		Filter:      "u_r",
+		Limit:       501,
+		Offset:      10,
+		ObjectTypes: []string{"view", "TABLE", "TABLE"},
+	})
+	sqlText := strings.ToUpper(query.SQL)
+
+	if !strings.Contains(sqlText, "UPPER(OBJECT_NAME) LIKE :3 ESCAPE '\\'") {
+		t.Fatalf("table listing should push filter predicate, got: %s", query.SQL)
+	}
+	if !strings.Contains(sqlText, "TABLE_TYPE IN (:4,:5)") {
+		t.Fatalf("table listing should push table type predicate, got: %s", query.SQL)
+	}
+	if !strings.Contains(sqlText, "ROWNUM <= :6") || !strings.Contains(sqlText, "DBX_RN > :7") {
+		t.Fatalf("table listing should use rownum pagination, got: %s", query.SQL)
+	}
+	if len(query.Args) != 7 {
+		t.Fatalf("unexpected args: %#v", query.Args)
+	}
+	if query.Args[0] != "APP" || query.Args[1] != "APP" || query.Args[2] != "%U%\\_%R%" || query.Args[3] != "TABLE" || query.Args[4] != "VIEW" || query.Args[5] != 511 || query.Args[6] != 10 {
+		t.Fatalf("constraints args were not normalized: %#v", query.Args)
+	}
+}
+
 func TestListObjectsSQLUsesSplitDictionaryQuery(t *testing.T) {
 	sqlText := strings.ToUpper(oracleListObjectsSQL)
 
@@ -369,6 +395,42 @@ func TestListObjectsSQLUsesSplitDictionaryQuery(t *testing.T) {
 	}
 	if strings.Contains(sqlText, "ALL_TAB_COMMENTS") {
 		t.Fatalf("object listing should not load comments during refresh, got: %s", oracleListObjectsSQL)
+	}
+	if !strings.Contains(sqlText, "'PACKAGE BODY'") || !strings.Contains(sqlText, "PACKAGE_BODY") {
+		t.Fatalf("object listing should include package bodies with normalized type, got: %s", oracleListObjectsSQL)
+	}
+}
+
+func TestListObjectsQueryAppliesMetadataConstraints(t *testing.T) {
+	query := oracleListObjectsQuery("APP", metadataListConstraints{
+		Filter:      "pkg%",
+		Limit:       25,
+		ObjectTypes: []string{"FUNCTION", "package"},
+	})
+	sqlText := strings.ToUpper(query.SQL)
+
+	if !strings.Contains(sqlText, "UPPER(OBJECT_NAME) LIKE :3 ESCAPE '\\'") {
+		t.Fatalf("object listing should push filter predicate, got: %s", query.SQL)
+	}
+	if !strings.Contains(sqlText, "OBJECT_TYPE IN (:4,:5)") {
+		t.Fatalf("object listing should push object type predicate, got: %s", query.SQL)
+	}
+	if !strings.Contains(sqlText, "ROWNUM <= :6") || !strings.Contains(sqlText, "DBX_RN > :7") {
+		t.Fatalf("object listing should use rownum pagination, got: %s", query.SQL)
+	}
+	if len(query.Args) != 7 {
+		t.Fatalf("unexpected args: %#v", query.Args)
+	}
+	if query.Args[2] != "%P%K%G%\\%%" || query.Args[3] != "FUNCTION" || query.Args[4] != "PACKAGE" || query.Args[5] != 25 || query.Args[6] != 0 {
+		t.Fatalf("object constraints args were not normalized: %#v", query.Args)
+	}
+}
+
+func TestOracleFuzzyLikePatternEscapesSpecialCharacters(t *testing.T) {
+	got := oracleFuzzyLikePattern(`a_%\b`)
+	want := `%a%\_%\%%\\%b%`
+	if got != want {
+		t.Fatalf("oracleFuzzyLikePattern() = %q, want %q", got, want)
 	}
 }
 

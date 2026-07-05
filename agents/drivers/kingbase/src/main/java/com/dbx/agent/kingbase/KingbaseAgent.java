@@ -7,6 +7,8 @@ import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcIdentifiers;
 import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MetadataListConstraints;
+import com.dbx.agent.MetadataSqlSupport;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.PostgresLikeAgent;
@@ -126,6 +128,84 @@ public final class KingbaseAgent extends PostgresLikeAgent {
     }
 
     @Override
+    public List<TableInfo> listTables(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        if (isUnconstrained(normalized)) {
+            return listTables(schema);
+        }
+        if (!normalized.includesTableLikeTypes()) {
+            return List.of();
+        }
+        try {
+            return isMysqlCompatMode()
+                ? queryMysqlCompatTables(schema, normalized)
+                : queryRegularTables(schema, normalized);
+        } catch (RuntimeException e) {
+            return normalized.filterTables(listTables(schema));
+        }
+    }
+
+    private List<TableInfo> queryRegularTables(String schema, MetadataListConstraints constraints) {
+        return unchecked(() -> {
+            List<TableInfo> result = new ArrayList<>();
+            List<Object> args = new ArrayList<>();
+            StringBuilder sql = new StringBuilder("SELECT c.relname AS table_name, ")
+                .append("CASE c.relkind ")
+                .append("WHEN 'r' THEN 'TABLE' ")
+                .append("WHEN 'p' THEN 'TABLE' ")
+                .append("WHEN 'v' THEN 'VIEW' ")
+                .append("WHEN 'm' THEN 'MATERIALIZED_VIEW' ")
+                .append("WHEN 'f' THEN 'FOREIGN_TABLE' ")
+                .append("ELSE 'TABLE' END AS table_type, ")
+                .append("d.description AS table_comment ")
+                .append("FROM sys_catalog.sys_class c ")
+                .append("JOIN sys_catalog.sys_namespace n ON n.oid = c.relnamespace ")
+                .append("LEFT JOIN sys_catalog.sys_description d ON d.objoid = c.oid AND d.objsubid = 0 ")
+                .append("WHERE n.nspname = ? AND c.relkind IN ('r','p','v','m','f')");
+            args.add(effectiveSchema(schema));
+            appendRelkindPredicate(sql, args, constraints);
+            MetadataSqlSupport.appendNameFilter(sql, args, "c.relname", constraints);
+            sql.append(" ORDER BY c.relname");
+            MetadataSqlSupport.appendLiteralLimitOffset(sql, constraints);
+            try (PreparedStatement stmt = requireConnected().prepareStatement(sql.toString())) {
+                MetadataSqlSupport.bind(stmt, args);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        result.add(new TableInfo(
+                            rs.getString("table_name"),
+                            normalizeTableType(rs.getString("table_type")),
+                            rs.getString("table_comment")
+                        ));
+                    }
+                }
+            }
+            return constraints.withoutPaging().filterTables(result);
+        });
+    }
+
+    private List<TableInfo> queryMysqlCompatTables(String schema, MetadataListConstraints constraints) {
+        return unchecked(() -> {
+            List<TableInfo> result = new ArrayList<>();
+            List<Object> args = new ArrayList<>();
+            StringBuilder sql = new StringBuilder("SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = ?");
+            args.add(effectiveSchema(schema));
+            appendMysqlCompatTableTypePredicate(sql, args, constraints);
+            MetadataSqlSupport.appendNameFilter(sql, args, "table_name", constraints);
+            sql.append(" ORDER BY table_name");
+            MetadataSqlSupport.appendLiteralLimitOffset(sql, constraints);
+            try (PreparedStatement stmt = requireConnected().prepareStatement(sql.toString())) {
+                MetadataSqlSupport.bind(stmt, args);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        result.add(new TableInfo(rs.getString(1), normalizeTableType(rs.getString(2))));
+                    }
+                }
+            }
+            return constraints.withoutPaging().filterTables(result);
+        });
+    }
+
+    @Override
     public List<ObjectInfo> listObjects(String schema) {
         return unchecked(() -> {
             String effectiveSchema = effectiveSchema(schema);
@@ -159,6 +239,80 @@ public final class KingbaseAgent extends PostgresLikeAgent {
                 }
             }
             return result;
+        });
+    }
+
+    @Override
+    public List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        if (isUnconstrained(normalized)) {
+            return listObjects(schema);
+        }
+        if (!includesSupportedObjects(normalized)) {
+            return List.of();
+        }
+        try {
+            return isMysqlCompatMode()
+                ? normalized.filterObjects(toObjects(queryMysqlCompatTables(schema, normalized), effectiveSchema(schema)))
+                : queryRegularObjects(schema, normalized);
+        } catch (RuntimeException e) {
+            return normalized.filterObjects(listObjects(schema));
+        }
+    }
+
+    private List<ObjectInfo> queryRegularObjects(String schema, MetadataListConstraints constraints) {
+        return unchecked(() -> {
+            String effectiveSchema = effectiveSchema(schema);
+            List<ObjectInfo> result = new ArrayList<>();
+            List<String> branches = new ArrayList<>();
+            List<Object> args = new ArrayList<>();
+            if (constraints.includesTableLikeTypes()) {
+                StringBuilder tableSql = new StringBuilder("SELECT c.relname AS object_name, ")
+                    .append("CASE c.relkind WHEN 'r' THEN 'TABLE' WHEN 'p' THEN 'TABLE' WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED_VIEW' WHEN 'f' THEN 'FOREIGN_TABLE' ELSE 'TABLE' END AS object_type, ")
+                    .append("d.description AS object_comment ")
+                    .append("FROM sys_catalog.sys_class c ")
+                    .append("JOIN sys_catalog.sys_namespace n ON n.oid = c.relnamespace ")
+                    .append("LEFT JOIN sys_catalog.sys_description d ON d.objoid = c.oid AND d.objsubid = 0 ")
+                    .append("WHERE n.nspname = ? AND c.relkind IN ('r','p','v','m','f')");
+                args.add(effectiveSchema);
+                appendRelkindPredicate(tableSql, args, constraints);
+                MetadataSqlSupport.appendNameFilter(tableSql, args, "c.relname", constraints);
+                branches.add(tableSql.toString());
+            }
+            if (constraints.objectTypeAllowed("PROCEDURE") || constraints.objectTypeAllowed("FUNCTION")) {
+                StringBuilder routineSql = new StringBuilder("SELECT p.proname AS object_name, ")
+                    .append("CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type, ")
+                    .append("d.description AS object_comment ")
+                    .append("FROM sys_catalog.sys_proc p ")
+                    .append("JOIN sys_catalog.sys_namespace n ON n.oid = p.pronamespace ")
+                    .append("LEFT JOIN sys_catalog.sys_description d ON d.objoid = p.oid AND d.objsubid = 0 ")
+                    .append("WHERE n.nspname = ?");
+                args.add(effectiveSchema);
+                appendRoutineKindPredicate(routineSql, args, constraints);
+                MetadataSqlSupport.appendNameFilter(routineSql, args, "p.proname", constraints);
+                branches.add(routineSql.toString());
+            }
+            if (branches.isEmpty()) {
+                return List.of();
+            }
+            StringBuilder sql = new StringBuilder("SELECT object_name, object_type, object_comment FROM (")
+                .append(String.join(" UNION ALL ", branches))
+                .append(") metadata_objects ORDER BY CASE object_type WHEN 'TABLE' THEN 0 WHEN 'VIEW' THEN 1 WHEN 'MATERIALIZED_VIEW' THEN 2 WHEN 'FOREIGN_TABLE' THEN 3 WHEN 'PROCEDURE' THEN 4 WHEN 'FUNCTION' THEN 5 ELSE 9 END, object_name");
+            MetadataSqlSupport.appendLiteralLimitOffset(sql, constraints);
+            try (PreparedStatement stmt = requireConnected().prepareStatement(sql.toString())) {
+                MetadataSqlSupport.bind(stmt, args);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        result.add(new ObjectInfo(
+                            rs.getString("object_name"),
+                            rs.getString("object_type"),
+                            effectiveSchema,
+                            rs.getString("object_comment")
+                        ));
+                    }
+                }
+            }
+            return constraints.withoutPaging().filterObjects(result);
         });
     }
 
@@ -463,6 +617,83 @@ public final class KingbaseAgent extends PostgresLikeAgent {
             }
             return result;
         });
+    }
+
+    private static boolean isUnconstrained(MetadataListConstraints constraints) {
+        return !constraints.hasFilter() && !constraints.hasLimit() && !constraints.hasOffset() && !constraints.hasObjectTypes();
+    }
+
+    private static boolean includesSupportedObjects(MetadataListConstraints constraints) {
+        return constraints.includesTableLikeTypes()
+            || constraints.objectTypeAllowed("PROCEDURE")
+            || constraints.objectTypeAllowed("FUNCTION");
+    }
+
+    private static void appendRelkindPredicate(StringBuilder sql, List<Object> args, MetadataListConstraints constraints) {
+        if (!constraints.hasObjectTypes()) {
+            return;
+        }
+        List<String> kinds = new ArrayList<>();
+        if (constraints.tableTypeAllowed("TABLE")) {
+            kinds.add("r");
+            kinds.add("p");
+        }
+        if (constraints.tableTypeAllowed("VIEW")) {
+            kinds.add("v");
+        }
+        if (constraints.tableTypeAllowed("MATERIALIZED_VIEW")) {
+            kinds.add("m");
+        }
+        if (kinds.isEmpty()) {
+            sql.append(" AND 1 = 0");
+            return;
+        }
+        sql.append(" AND c.relkind IN (").append(MetadataSqlSupport.placeholders(kinds.size())).append(")");
+        args.addAll(kinds);
+    }
+
+    private static void appendMysqlCompatTableTypePredicate(StringBuilder sql, List<Object> args, MetadataListConstraints constraints) {
+        if (!constraints.hasObjectTypes()) {
+            sql.append(" AND table_type IN ('BASE TABLE', 'VIEW')");
+            return;
+        }
+        List<String> types = new ArrayList<>();
+        if (constraints.tableTypeAllowed("TABLE")) {
+            types.add("BASE TABLE");
+        }
+        if (constraints.tableTypeAllowed("VIEW")) {
+            types.add("VIEW");
+        }
+        if (types.isEmpty()) {
+            sql.append(" AND 1 = 0");
+            return;
+        }
+        sql.append(" AND table_type IN (").append(MetadataSqlSupport.placeholders(types.size())).append(")");
+        args.addAll(types);
+    }
+
+    private static void appendRoutineKindPredicate(StringBuilder sql, List<Object> args, MetadataListConstraints constraints) {
+        List<String> kinds = new ArrayList<>();
+        if (!constraints.hasObjectTypes() || constraints.objectTypeAllowed("PROCEDURE")) {
+            kinds.add("p");
+        }
+        if (!constraints.hasObjectTypes() || constraints.objectTypeAllowed("FUNCTION")) {
+            kinds.add("f");
+        }
+        if (kinds.isEmpty()) {
+            sql.append(" AND 1 = 0");
+            return;
+        }
+        sql.append(" AND p.prokind IN (").append(MetadataSqlSupport.placeholders(kinds.size())).append(")");
+        args.addAll(kinds);
+    }
+
+    private static List<ObjectInfo> toObjects(List<TableInfo> tables, String schema) {
+        List<ObjectInfo> result = new ArrayList<>();
+        for (TableInfo table : tables) {
+            result.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment()));
+        }
+        return result;
     }
 
     private String effectiveSchema(String schema) {

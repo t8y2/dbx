@@ -12,10 +12,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 #[cfg(target_os = "macos")]
+use tauri::menu::Menu;
+#[cfg(target_os = "macos")]
 use tauri::menu::{AboutMetadata, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::RunEvent;
 use tauri::{
-    menu::{Menu, MenuBuilder},
+    menu::MenuBuilder,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tauri::{Emitter, Manager};
@@ -24,6 +26,7 @@ use tauri_plugin_deep_link::DeepLinkExt;
 
 const DESKTOP_TRAY_ID: &str = "main-tray";
 const APP_CLOSE_REQUESTED_EVENT: &str = "dbx-app-close-requested";
+#[cfg(target_os = "macos")]
 const APP_MENU_QUIT_ID: &str = "app-menu-quit";
 
 pub struct CloseBehaviorState {
@@ -37,10 +40,6 @@ impl CloseBehaviorState {
 
     pub(crate) fn allow_next_exit(&self) {
         self.confirmed_exit.store(true, Ordering::Relaxed);
-    }
-
-    pub(crate) fn is_exit_confirmed(&self) -> bool {
-        self.confirmed_exit.load(Ordering::Relaxed)
     }
 
     fn take_confirmed_exit(&self) -> bool {
@@ -67,8 +66,8 @@ fn should_show_main_window_after_setup() -> bool {
     true
 }
 
-fn should_confirm_app_exit_request(exit_code: Option<i32>, confirmed_exit: bool) -> bool {
-    exit_code != Some(tauri::RESTART_EXIT_CODE) && !confirmed_exit
+fn should_confirm_app_exit_request(target_os: &str, exit_code: Option<i32>, confirmed_exit: bool) -> bool {
+    should_hide_window_on_close(target_os) && exit_code != Some(tauri::RESTART_EXIT_CODE) && !confirmed_exit
 }
 
 fn native_window_decorations_override(target_os: &str) -> Option<bool> {
@@ -449,10 +448,11 @@ mod tests {
 
     #[test]
     fn only_user_requested_app_exit_needs_frontend_confirmation() {
-        assert!(should_confirm_app_exit_request(None, false));
-        assert!(should_confirm_app_exit_request(Some(0), false));
-        assert!(!should_confirm_app_exit_request(Some(0), true));
-        assert!(!should_confirm_app_exit_request(Some(tauri::RESTART_EXIT_CODE), false));
+        assert!(should_confirm_app_exit_request("windows", None, false));
+        assert!(should_confirm_app_exit_request("macos", Some(0), false));
+        assert!(!should_confirm_app_exit_request("windows", Some(0), true));
+        assert!(!should_confirm_app_exit_request("windows", Some(tauri::RESTART_EXIT_CODE), false));
+        assert!(!should_confirm_app_exit_request("linux", Some(0), false));
     }
 
     #[test]
@@ -1117,7 +1117,7 @@ pub fn run() {
                     .try_state::<CloseBehaviorState>()
                     .map(|state| state.take_confirmed_exit())
                     .unwrap_or(false);
-                if should_confirm_app_exit_request(*code, confirmed_exit) {
+                if should_confirm_app_exit_request(std::env::consts::OS, *code, confirmed_exit) {
                     api.prevent_exit();
                     request_app_close(app_handle, "quit");
                 }

@@ -70,24 +70,42 @@ public final class StandardJdbcMetadata {
     }
 
     public List<TableInfo> listTables(Connection conn, JdbcAgentProfile profile, String configuredDatabase, String schema) {
+        return listTables(conn, profile, configuredDatabase, schema, MetadataListConstraints.NONE);
+    }
+
+    public List<TableInfo> listTables(
+        Connection conn,
+        JdbcAgentProfile profile,
+        String configuredDatabase,
+        String schema,
+        MetadataListConstraints constraints
+    ) {
         return unchecked(() -> {
+            MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+            if (!normalized.includesTableLikeTypes()) {
+                return Collections.emptyList();
+            }
             DatabaseMetaData meta = conn.getMetaData();
             List<TableInfo> result = new ArrayList<>();
-            appendTables(result, meta, profile, null, schema);
+            appendTables(result, meta, profile, null, schema, normalized);
             if (result.isEmpty() && profile.getCatalogFallbackEnabled() && !configuredDatabase.trim().isEmpty()) {
-                appendTables(result, meta, profile, configuredDatabase, schema);
+                appendTables(result, meta, profile, configuredDatabase, schema, normalized);
             }
             result.sort(Comparator.comparing(TableInfo::getName));
-            return result;
+            return normalized.filterTables(result);
         });
     }
 
     public List<ObjectInfo> listObjects(List<TableInfo> tables, String schema) {
+        return listObjects(tables, schema, MetadataListConstraints.NONE);
+    }
+
+    public List<ObjectInfo> listObjects(List<TableInfo> tables, String schema, MetadataListConstraints constraints) {
         List<ObjectInfo> result = new ArrayList<>();
         for (TableInfo table : tables) {
             result.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment()));
         }
-        return result;
+        return MetadataListConstraints.orNone(constraints).filterObjects(result);
     }
 
     public List<String> listDataTypes(Connection conn) {
@@ -270,8 +288,19 @@ public final class StandardJdbcMetadata {
         return profile.schemaSwitchSql(schema, quote);
     }
 
-    private void appendTables(List<TableInfo> result, DatabaseMetaData meta, JdbcAgentProfile profile, String catalog, String schema) throws Exception {
-        String[] tableTypes = getDriverTableTypes(meta, profile);
+    private void appendTables(
+        List<TableInfo> result,
+        DatabaseMetaData meta,
+        JdbcAgentProfile profile,
+        String catalog,
+        String schema,
+        MetadataListConstraints constraints
+    ) throws Exception {
+        String[] tableTypes = constrainedTableTypes(getDriverTableTypes(meta, profile), constraints);
+        if (tableTypes.length == 0) {
+            return;
+        }
+        // JDBC has no portable metadata limit/offset. Use table types for safe pushdown and filter/page locally.
         try (ResultSet rs = meta.getTables(catalog, blankToNull(schema), "%", tableTypes)) {
             while (rs.next()) {
                 result.add(new TableInfo(
@@ -281,6 +310,20 @@ public final class StandardJdbcMetadata {
                 ));
             }
         }
+    }
+
+    private static String[] constrainedTableTypes(String[] tableTypes, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        if (!normalized.hasObjectTypes()) {
+            return tableTypes;
+        }
+        List<String> result = new ArrayList<>();
+        for (String tableType : tableTypes) {
+            if (normalized.tableTypeAllowed(tableType)) {
+                result.add(tableType);
+            }
+        }
+        return result.toArray(new String[0]);
     }
 
     private void appendCompletionSchemas(

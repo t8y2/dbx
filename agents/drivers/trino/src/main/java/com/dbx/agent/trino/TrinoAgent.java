@@ -8,6 +8,8 @@ import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcIdentifiers;
 import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MetadataListConstraints;
+import com.dbx.agent.MetadataSqlSupport;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
 import java.sql.Connection;
@@ -84,6 +86,48 @@ public final class TrinoAgent extends AbstractJdbcAgent {
                 }
             }
             return result;
+        });
+    }
+
+    @Override
+    public List<TableInfo> listTables(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        if (isUnconstrained(normalized)) {
+            return listTables(schema);
+        }
+        if (!normalized.includesTableLikeTypes()) {
+            return List.of();
+        }
+        try {
+            return queryConstrainedTables(schema, normalized);
+        } catch (RuntimeException e) {
+            return normalized.filterTables(listTables(schema));
+        }
+    }
+
+    private List<TableInfo> queryConstrainedTables(String schema, MetadataListConstraints constraints) {
+        return unchecked(() -> {
+            List<TableInfo> result = new ArrayList<>();
+            List<Object> args = new ArrayList<>();
+            StringBuilder sql = new StringBuilder("SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = ?");
+            args.add(schema);
+            appendTrinoTableTypePredicate(sql, args, constraints);
+            MetadataSqlSupport.appendNameFilter(sql, args, "table_name", constraints);
+            sql.append(" ORDER BY table_name");
+            MetadataSqlSupport.appendLiteralLimitOffset(sql, constraints);
+            try (java.sql.PreparedStatement stmt = requireConnected().prepareStatement(sql.toString())) {
+                MetadataSqlSupport.bind(stmt, args);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        result.add(new TableInfo(
+                            rs.getString("table_name"),
+                            normalizeTableType(rs.getString("table_type")),
+                            null
+                        ));
+                    }
+                }
+            }
+            return constraints.withoutPaging().filterTables(result);
         });
     }
 
@@ -188,6 +232,32 @@ public final class TrinoAgent extends AbstractJdbcAgent {
         return "jdbc:trino://" + params.getHost() + ":" + params.getPort() + "/" + params.getDatabase();
     }
 
+    private static boolean isUnconstrained(MetadataListConstraints constraints) {
+        return !constraints.hasFilter() && !constraints.hasLimit() && !constraints.hasOffset() && !constraints.hasObjectTypes();
+    }
+
+    private static void appendTrinoTableTypePredicate(StringBuilder sql, List<Object> args, MetadataListConstraints constraints) {
+        if (!constraints.hasObjectTypes()) {
+            return;
+        }
+        List<String> types = new ArrayList<>();
+        if (constraints.tableTypeAllowed("TABLE")) {
+            types.add("BASE TABLE");
+        }
+        if (constraints.tableTypeAllowed("VIEW")) {
+            types.add("VIEW");
+        }
+        if (constraints.tableTypeAllowed("MATERIALIZED_VIEW")) {
+            types.add("MATERIALIZED VIEW");
+        }
+        if (types.isEmpty()) {
+            sql.append(" AND 1 = 0");
+            return;
+        }
+        sql.append(" AND table_type IN (").append(MetadataSqlSupport.placeholders(types.size())).append(")");
+        args.addAll(types);
+    }
+
     private static String quoteIdentifier(String identifier) {
         return "\"" + identifier.replace("\"", "\"\"") + "\"";
     }
@@ -254,6 +324,9 @@ public final class TrinoAgent extends AbstractJdbcAgent {
     private static String normalizeTableType(String type) {
         if ("BASE TABLE".equals(type)) {
             return "TABLE";
+        }
+        if ("MATERIALIZED VIEW".equals(type)) {
+            return "MATERIALIZED_VIEW";
         }
         return type;
     }

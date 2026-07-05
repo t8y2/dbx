@@ -1,0 +1,23 @@
+driver	strategy	scope	reason
+access	intentional-fallback	java-jdbc-metadata	Uses Access JDBC metadata; no portable stable server-side paging API, common constraints filter locally.
+bigquery	native-pushdown	java-sql	Uses dataset INFORMATION_SCHEMA.TABLES with type, normal-name filter, stable order, and literal LIMIT/OFFSET.
+cassandra	intentional-fallback	java-cql	Uses Cassandra system_schema; portable LIKE/fuzzy paging is not safe across versions, common constraints filter locally.
+dameng	native-pushdown	java-sql	Uses ALL_OBJECTS with type, filter, stable order, and LIMIT/OFFSET with legacy fallback.
+databend	native-pushdown	java-sql	Uses system procedures for routine pushdown and shared table metadata constraints for table-like objects.
+db2	native-pushdown	java-sql	Uses SYSCAT metadata with type, filter, stable order, and OFFSET/FETCH.
+gbase8a	native-pushdown	java-sql	Uses information_schema with type, filter, stable order, and LIMIT/OFFSET.
+gbase8s	native-pushdown	java-sql	Uses systables with type, filter, stable order, and SKIP/FIRST.
+goldendb	native-pushdown	java-sql	Uses information_schema with type, filter, stable order, and LIMIT/OFFSET.
+h2	native-pushdown	java-sql	Uses INFORMATION_SCHEMA with type, filter, stable order, and LIMIT/OFFSET.
+hive	intentional-fallback	java-sql	Uses Hive metadata paths where stable server-side fuzzy paging is not portable, common constraints filter locally.
+informix	native-pushdown	java-sql	Uses systables/sysprocedures with type, filter, stable order, and SKIP/FIRST.
+kingbase	native-pushdown	java-sql	Uses sys_catalog/information_schema with type, filter, stable order, and LIMIT/OFFSET for both compatibility modes.
+kylin	intentional-fallback	java-jdbc-metadata	Uses JDBC metadata from Kylin driver; no portable server-side paging API, common constraints filter locally.
+neo4j	intentional-fallback	java-graph-metadata	Uses JDBC metadata with Cypher fallback; label discovery cannot guarantee relational-style filtered paging, common constraints filter locally.
+oceanbase-oracle	native-pushdown	java-sql	Uses Oracle-compatible metadata SQL with type, filter, stable order, and ROWNUM paging.
+oracle-go	native-pushdown	native-go	Uses Oracle-compatible metadata SQL with type, filter, stable order, and ROWNUM paging, with legacy profile guard.
+snowflake	native-pushdown	java-sql	Uses INFORMATION_SCHEMA with type, filter, stable order, and literal LIMIT/OFFSET.
+sundb	native-pushdown	java-sql	Uses information_schema with type, filter, stable order, and LIMIT/OFFSET.
+tdengine	intentional-fallback	java-show-metadata	Uses SHOW STABLES/TABLES; stable server-side fuzzy paging is not portable, common constraints filter locally.
+trino	native-pushdown	java-sql	Uses information_schema.tables with type, filter, stable order, and literal LIMIT/OFFSET.
+xugu	native-pushdown	native-go	Uses ALL_TABLES/ALL_VIEWS metadata with type, filter, stable order, and ROWNUM paging.

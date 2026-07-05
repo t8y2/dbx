@@ -383,6 +383,73 @@ func TestXuguMetadataAccessErrorDetection(t *testing.T) {
 	}
 }
 
+func TestXuguListTablesQueryAppliesMetadataConstraints(t *testing.T) {
+	query := xuguListTablesQuery("APP", metadataListConstraints{
+		Filter:      "ord_",
+		ObjectTypes: []string{"view", "table", "VIEW"},
+		Limit:       25,
+		Offset:      50,
+	})
+
+	for _, want := range []string{
+		"UPPER(TABLE_NAME) LIKE ? ESCAPE '\\'",
+		"TABLE_TYPE IN (?,?)",
+		"ORDER BY TABLE_TYPE, TABLE_NAME",
+		"ROWNUM <= ?",
+		"DBX_RN > ?",
+	} {
+		if !strings.Contains(query.SQL, want) {
+			t.Fatalf("expected SQL to contain %q:\n%s", want, query.SQL)
+		}
+	}
+
+	wantArgs := []any{"APP", "APP", `%O%R%D%\_%`, "TABLE", "VIEW", 75, 50}
+	assertArgs(t, query.Args, wantArgs)
+}
+
+func TestXuguListObjectsQueryRejectsUnsupportedObjectTypes(t *testing.T) {
+	query := xuguListObjectsQuery("APP", metadataListConstraints{
+		ObjectTypes: []string{"INDEX"},
+		Limit:       10,
+	})
+
+	if !strings.Contains(query.SQL, "1 = 0") {
+		t.Fatalf("unsupported object type should produce empty-result predicate:\n%s", query.SQL)
+	}
+
+	wantArgs := []any{"APP", "APP", 10, 0}
+	assertArgs(t, query.Args, wantArgs)
+}
+
+func TestMetadataListConstraintsFromParams(t *testing.T) {
+	params := map[string]json.RawMessage{
+		"filter":       json.RawMessage(`"tab"`),
+		"limit":        json.RawMessage(`30`),
+		"offset":       json.RawMessage(`5`),
+		"object_types": json.RawMessage(`["TABLE","VIEW"]`),
+	}
+
+	constraints := metadataListConstraintsFromParams(params)
+	if constraints.Filter != "tab" || constraints.Limit != 30 || constraints.Offset != 5 {
+		t.Fatalf("unexpected constraints: %+v", constraints)
+	}
+	if len(constraints.ObjectTypes) != 2 || constraints.ObjectTypes[0] != "TABLE" || constraints.ObjectTypes[1] != "VIEW" {
+		t.Fatalf("unexpected object types: %+v", constraints.ObjectTypes)
+	}
+}
+
+func assertArgs(t *testing.T, got []any, want []any) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("args length = %d, want %d: got=%#v want=%#v", len(got), len(want), got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("arg %d = %#v, want %#v; args=%#v", i, got[i], want[i], got)
+		}
+	}
+}
+
 func TestParseForeignKeyColumns(t *testing.T) {
 	local, ref := parseForeignKeyColumns(`("C1","C2")("ID1","ID2")`)
 

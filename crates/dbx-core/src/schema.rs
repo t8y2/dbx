@@ -1453,10 +1453,18 @@ async fn list_tables_once(
                 .await
                 .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types));
             }
+            let mut params =
+                serde_json::json!({ "connection": config.as_ref(), "database": database, "schema": schema });
+            if let Some(filter) = filter.map(str::trim).filter(|value| !value.is_empty()) {
+                params["filter"] = serde_json::json!(filter);
+            }
+            if let Some(object_types) = object_types {
+                params["object_types"] = serde_json::json!(object_types);
+            }
             return session
                 .invoke_with_timeout::<Vec<db::TableInfo>>(
                     "listTables",
-                    serde_json::json!({ "connection": config.as_ref(), "database": database, "schema": schema }),
+                    params,
                     agent_metadata_timeout(Some(config.as_ref())),
                 )
                 .await
@@ -1520,16 +1528,33 @@ async fn list_tables_once(
         try_sqlserver!(connections, &pool_key, list_tables, schema, filter, limit, offset);
         if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
             let is_oracle = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle);
+            let use_oracle_agent_paging = db_config.as_ref().is_some_and(is_default_oracle_agent_config);
             let timeout_duration = agent_metadata_timeout(db_config.as_ref());
             let fallback_config = db_config.clone();
             drop(connections);
             let mut client = client.lock().await;
+            let agent_limit = if use_oracle_agent_paging { limit } else { None };
+            let agent_offset = if use_oracle_agent_paging { offset } else { None };
             match client
-                .list_tables_filtered::<Vec<db::TableInfo>>(database, schema, object_types, timeout_duration)
+                .list_tables_constrained::<Vec<db::TableInfo>>(
+                    database,
+                    schema,
+                    filter,
+                    agent_limit,
+                    agent_offset,
+                    object_types,
+                    timeout_duration,
+                )
                 .await
             {
                 Ok(tables) if !tables.is_empty() => {
-                    let mut tables = filter_table_infos(tables, filter, limit, offset, object_types);
+                    let final_offset =
+                        if oracle_agent_paging_likely_applied(use_oracle_agent_paging, limit, tables.len()) {
+                            Some(0)
+                        } else {
+                            offset
+                        };
+                    let mut tables = filter_table_infos(tables, filter, limit, final_offset, object_types);
                     if is_oracle {
                         load_oracle_table_comments_for_tables(
                             &mut client,
@@ -1685,6 +1710,50 @@ fn filter_table_infos(
         .collect()
 }
 
+fn filter_object_infos(
+    objects: Vec<db::ObjectInfo>,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    object_types: Option<&[String]>,
+) -> Vec<db::ObjectInfo> {
+    let filter = filter.unwrap_or("");
+    let limit = limit.unwrap_or(usize::MAX);
+    let offset = offset.unwrap_or(0);
+    objects
+        .into_iter()
+        .filter(|object| crate::sql::contains_or_fuzzy_match(&object.name, filter))
+        .filter(|object| object_info_matches_object_types(object, object_types))
+        .skip(offset)
+        .take(limit)
+        .collect()
+}
+
+fn object_info_matches_object_types(object: &db::ObjectInfo, object_types: Option<&[String]>) -> bool {
+    let Some(object_types) = object_types else {
+        return true;
+    };
+    if object_types.is_empty() {
+        return true;
+    }
+    let object_type = normalize_object_info_object_type(&object.object_type);
+    object_types.iter().any(|expected| normalize_object_info_object_type(expected) == object_type)
+}
+
+fn normalize_object_info_object_type(value: &str) -> String {
+    let upper = value.to_ascii_uppercase().replace(' ', "_");
+    if upper.contains("MATERIALIZED") && upper.contains("VIEW") {
+        return "MATERIALIZED_VIEW".to_string();
+    }
+    if upper == "BASE_TABLE" || upper.contains("TABLE") {
+        return "TABLE".to_string();
+    }
+    if upper.contains("VIEW") {
+        return "VIEW".to_string();
+    }
+    upper
+}
+
 fn table_info_matches_object_types(table: &db::TableInfo, object_types: Option<&[String]>) -> bool {
     let Some(object_types) = object_types else {
         return true;
@@ -1750,8 +1819,12 @@ async fn external_driver_presto_like_objects(
     config: &ConnectionConfig,
     database: &str,
     schema: &str,
+    filter: Option<&str>,
+    object_types: Option<&[String]>,
 ) -> Result<Vec<db::ObjectInfo>, String> {
-    let tables = external_driver_presto_like_tables(session, config, database, schema, None, None, None).await?;
+    let tables = external_driver_presto_like_tables(session, config, database, schema, filter, None, None)
+        .await
+        .map(|tables| filter_table_infos(tables, filter, None, None, object_types))?;
     Ok(tables
         .into_iter()
         .map(|table| db::ObjectInfo {
@@ -1953,10 +2026,10 @@ mod tests {
     use super::db;
     use super::{
         clickhouse_metadata_database, deduplicate_column_infos, filter_mysql_system_databases_for_config,
-        filter_table_infos, filter_visible_schema_names, is_agent_postgres_metadata_fallback_config,
-        is_retryable_metadata_error, mysql_object_source_sql, mysql_table_metadata_catalog,
-        normalize_information_schema_table_type, oracle_columns_from_query_result, oracle_columns_sql,
-        oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
+        filter_object_infos, filter_table_infos, filter_visible_schema_names,
+        is_agent_postgres_metadata_fallback_config, is_retryable_metadata_error, mysql_object_source_sql,
+        mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
+        oracle_columns_sql, oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
         oracle_object_statistics_rows_only_sql, oracle_object_statistics_sql,
         oracle_object_statistics_user_segments_sql, oracle_table_comment_from_query_result, oracle_table_comment_sql,
         oracle_table_comments_from_query_result, oracle_table_comments_sql, presto_like_columns_from_query_result,
@@ -2084,6 +2157,30 @@ mod tests {
     }
 
     #[test]
+    fn default_oracle_agent_config_excludes_legacy_profiles() {
+        let mut config = test_connection_config(DatabaseType::Oracle);
+        assert!(super::is_default_oracle_agent_config(&config));
+
+        config.driver_profile = Some("oracle".to_string());
+        assert!(super::is_default_oracle_agent_config(&config));
+
+        config.driver_profile = Some("oracle-legacy".to_string());
+        assert!(!super::is_default_oracle_agent_config(&config));
+
+        config.driver_profile = Some("oracle-10g".to_string());
+        assert!(!super::is_default_oracle_agent_config(&config));
+    }
+
+    #[test]
+    fn oracle_agent_paging_detection_avoids_double_offset_only_when_page_sized() {
+        assert!(super::oracle_agent_paging_likely_applied(true, Some(500), 500));
+        assert!(super::oracle_agent_paging_likely_applied(true, Some(500), 120));
+        assert!(!super::oracle_agent_paging_likely_applied(true, Some(500), 501));
+        assert!(!super::oracle_agent_paging_likely_applied(false, Some(500), 120));
+        assert!(!super::oracle_agent_paging_likely_applied(true, None, 120));
+    }
+
+    #[test]
     fn filter_visible_schema_names_preserves_database_order() {
         let schemas = vec!["APP".to_string(), "SYS".to_string(), "REPORTING".to_string()];
         let visible = vec!["REPORTING".to_string(), "APP".to_string()];
@@ -2096,6 +2193,20 @@ mod tests {
             name: name.to_string(),
             table_type: "BASE TABLE".to_string(),
             comment: None,
+            parent_schema: None,
+            parent_name: None,
+        }
+    }
+
+    fn test_object_info(name: &str, object_type: &str) -> super::db::ObjectInfo {
+        super::db::ObjectInfo {
+            name: name.to_string(),
+            object_type: object_type.to_string(),
+            schema: Some("app".to_string()),
+            signature: None,
+            comment: None,
+            created_at: None,
+            updated_at: None,
             parent_schema: None,
             parent_name: None,
         }
@@ -2218,6 +2329,22 @@ mod tests {
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "active_users");
+    }
+
+    #[test]
+    fn filter_object_infos_filters_object_type_before_offset_and_limit() {
+        let objects = vec![
+            test_object_info("sync_user", "PROCEDURE"),
+            test_object_info("find_user", "FUNCTION"),
+            test_object_info("fetch_name", "FUNCTION"),
+            test_object_info("orders", "TABLE"),
+        ];
+        let object_types = vec!["FUNCTION".to_string()];
+
+        let filtered = filter_object_infos(objects, Some("fn"), Some(1), Some(1), Some(&object_types));
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "fetch_name");
     }
 
     #[test]
@@ -2793,9 +2920,26 @@ pub async fn list_objects_core(
     connection_id: &str,
     database: &str,
     schema: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    object_types: Option<&[String]>,
 ) -> Result<Vec<db::ObjectInfo>, String> {
-    retry_metadata_connection(state, connection_id, Some(database), || {
-        list_objects_once(state, connection_id, database, schema)
+    let use_oracle_agent_paging =
+        connection_config(state, connection_id).await.as_ref().is_some_and(is_default_oracle_agent_config);
+    retry_metadata_connection(state, connection_id, Some(database), || async {
+        let objects = list_objects_once(state, connection_id, database, schema, filter, limit, offset, object_types)
+            .await
+            .map(|objects| {
+                let final_offset = if oracle_agent_paging_likely_applied(use_oracle_agent_paging, limit, objects.len())
+                {
+                    Some(0)
+                } else {
+                    offset
+                };
+                filter_object_infos(objects, filter, limit, final_offset, object_types)
+            })?;
+        Ok(objects)
     })
     .await
 }
@@ -3109,6 +3253,10 @@ async fn list_objects_once(
     connection_id: &str,
     database: &str,
     schema: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    object_types: Option<&[String]>,
 ) -> Result<Vec<db::ObjectInfo>, String> {
     let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
     let db_config = connection_config(state, connection_id).await;
@@ -3144,12 +3292,28 @@ async fn list_objects_once(
             let session = session.clone();
             drop(connections);
             if uses_presto_like_information_schema_tables(&config.db_type) {
-                return external_driver_presto_like_objects(session, config.as_ref(), database, schema).await;
+                return external_driver_presto_like_objects(
+                    session,
+                    config.as_ref(),
+                    database,
+                    schema,
+                    filter,
+                    object_types,
+                )
+                .await;
+            }
+            let mut params =
+                serde_json::json!({ "connection": config.as_ref(), "database": database, "schema": schema });
+            if let Some(filter) = filter.map(str::trim).filter(|value| !value.is_empty()) {
+                params["filter"] = serde_json::json!(filter);
+            }
+            if let Some(object_types) = object_types {
+                params["object_types"] = serde_json::json!(object_types);
             }
             return session
                 .invoke_with_timeout::<Vec<db::ObjectInfo>>(
                     "listObjects",
-                    serde_json::json!({ "connection": config.as_ref(), "database": database, "schema": schema }),
+                    params,
                     agent_metadata_timeout(Some(config.as_ref())),
                 )
                 .await;
@@ -3157,18 +3321,41 @@ async fn list_objects_once(
         try_sqlserver!(connections, &pool_key, list_objects, schema);
         if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
             let is_oracle = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle);
+            let use_oracle_agent_paging = db_config.as_ref().is_some_and(is_default_oracle_agent_config);
+            let timeout_duration = agent_metadata_timeout(db_config.as_ref());
             let fallback_config = db_config.clone();
             drop(connections);
-            if is_oracle {
-                return oracle_agent_list_objects(client, database, schema, agent_metadata_timeout(db_config.as_ref()))
-                    .await;
+            if is_oracle && !use_oracle_agent_paging {
+                return oracle_agent_list_objects(client, database, schema, timeout_duration).await;
             }
             let mut client = client.lock().await;
+            let agent_limit = if use_oracle_agent_paging { limit } else { None };
+            let agent_offset = if use_oracle_agent_paging { offset } else { None };
             match client
-                .list_objects::<Vec<db::ObjectInfo>>(database, schema, agent_metadata_timeout(db_config.as_ref()))
+                .list_objects_constrained::<Vec<db::ObjectInfo>>(
+                    database,
+                    schema,
+                    filter,
+                    agent_limit,
+                    agent_offset,
+                    object_types,
+                    timeout_duration,
+                )
                 .await
             {
-                Ok(objects) if !objects.is_empty() => return Ok(objects),
+                Ok(mut objects) if !objects.is_empty() => {
+                    if is_oracle {
+                        load_oracle_table_comments_for_objects(
+                            &mut client,
+                            database,
+                            schema,
+                            &mut objects,
+                            timeout_duration,
+                        )
+                        .await?;
+                    }
+                    return Ok(objects);
+                }
                 Ok(objects) => {
                     if let Some(config) = fallback_config.as_ref() {
                         match native_postgres_metadata_pool(state, connection_id, database, config).await {
@@ -3338,7 +3525,7 @@ async fn list_completion_objects_once(
         PoolKind::Postgres(p) => db::postgres::list_objects(p, schema).await.map(filter_completion_objects),
         PoolKind::SqlServer(_) => {
             drop(connections);
-            let objects = list_objects_once(state, connection_id, database, schema).await?;
+            let objects = list_objects_once(state, connection_id, database, schema, None, None, None, None).await?;
             Ok(filter_completion_objects(objects))
         }
         _ => Ok(Vec::new()),
@@ -4105,6 +4292,16 @@ async fn connection_config(state: &AppState, connection_id: &str) -> Option<Conn
 fn is_opengauss_family_config(config: &ConnectionConfig) -> bool {
     matches!(config.db_type, DatabaseType::OpenGauss | DatabaseType::Gaussdb)
         || matches!(config.driver_profile.as_deref(), Some("opengauss" | "gaussdb"))
+}
+
+fn is_default_oracle_agent_config(config: &ConnectionConfig) -> bool {
+    // Only the default go-oracle agent handles filtered/paged metadata; legacy profiles keep Rust fallback paging.
+    matches!(config.db_type, DatabaseType::Oracle)
+        && !matches!(config.driver_profile.as_deref(), Some("oracle-legacy" | "oracle-10g"))
+}
+
+fn oracle_agent_paging_likely_applied(enabled: bool, limit: Option<usize>, returned_len: usize) -> bool {
+    enabled && limit.is_some_and(|limit| returned_len <= limit)
 }
 
 fn is_doris_family_config(config: &ConnectionConfig) -> bool {

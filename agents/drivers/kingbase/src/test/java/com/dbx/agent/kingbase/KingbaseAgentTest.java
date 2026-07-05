@@ -4,6 +4,7 @@ import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.DatabaseAgent;
 import com.dbx.agent.DatabaseInfo;
 import com.dbx.agent.IndexInfo;
+import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.TableInfo;
@@ -151,6 +152,58 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         Assertions.assertEquals("FUNCTION", objects.get(3).getObject_type());
         Assertions.assertTrue(sql.get(1).contains("FROM sys_catalog.sys_proc"), sql.get(1));
         Assertions.assertTrue(sql.get(1).contains("p.prokind IN ('p','f')"), sql.get(1));
+    }
+
+    @Test
+    void constrainedRegularTableMetadataPushesFilterTypesAndPaging() {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"table_name", "table_type", "table_comment"},
+            new Object[][]{}
+        )));
+
+        agent.listTables("public", new MetadataListConstraints("ord", 30, 60, List.of("TABLE", "VIEW")));
+
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_class"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("c.relkind IN (?, ?, ?)"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("UPPER(c.relname) LIKE ? ESCAPE '\\\\'"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).endsWith("LIMIT 30 OFFSET 60"), sql.get(0));
+    }
+
+    @Test
+    void constrainedRegularObjectMetadataPushesRoutineTypesAndPaging() {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"object_name", "object_type", "object_comment"},
+            new Object[][]{}
+        )));
+
+        agent.listObjects("public", new MetadataListConstraints("sync", 10, null, List.of("PROCEDURE", "FUNCTION")));
+
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_proc"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("p.prokind IN (?, ?)"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("ORDER BY CASE object_type"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).endsWith("LIMIT 10"), sql.get(0));
+    }
+
+    @Test
+    void constrainedMysqlCompatTableMetadataPushesInformationSchemaPaging() {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        agent.setMysqlCompatMode(true);
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"table_name", "table_type"},
+            new Object[][]{}
+        )));
+
+        agent.listTables("PUBLIC", new MetadataListConstraints("ord", 20, 40, List.of("VIEW")));
+
+        Assertions.assertTrue(sql.get(0).contains("FROM information_schema.tables"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("table_type IN (?)"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("UPPER(table_name) LIKE ? ESCAPE '\\\\'"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).endsWith("LIMIT 20 OFFSET 40"), sql.get(0));
     }
 
     @Test

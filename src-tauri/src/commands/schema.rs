@@ -138,8 +138,22 @@ pub async fn list_objects(
     connection_id: String,
     database: String,
     schema: String,
+    filter: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    object_types: Option<Vec<String>>,
 ) -> Result<Vec<db::ObjectInfo>, String> {
-    dbx_core::schema::list_objects_core(&state, &connection_id, &database, &schema).await
+    dbx_core::schema::list_objects_core(
+        &state,
+        &connection_id,
+        &database,
+        &schema,
+        filter.as_deref(),
+        limit,
+        offset,
+        object_types.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]

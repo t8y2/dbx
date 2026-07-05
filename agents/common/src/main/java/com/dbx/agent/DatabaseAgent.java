@@ -31,12 +31,22 @@ public interface DatabaseAgent {
         return listTables(schema);
     }
 
+    default List<TableInfo> listTables(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        // Keep old driver overrides for object type filtering, then apply the new optional constraints locally.
+        return normalized.filterTables(listTables(schema, normalized.getObjectTypes()));
+    }
+
     default List<ObjectInfo> listObjects(String schema) {
         List<ObjectInfo> result = new ArrayList<>();
         for (TableInfo table : listTables(schema)) {
             result.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment()));
         }
         return result;
+    }
+
+    default List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints) {
+        return MetadataListConstraints.orNone(constraints).filterObjects(listObjects(schema));
     }
 
     default List<String> listDataTypes() {

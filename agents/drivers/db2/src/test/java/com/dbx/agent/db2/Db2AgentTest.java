@@ -2,7 +2,9 @@ package com.dbx.agent.db2;
 
 import com.dbx.agent.DatabaseAgent;
 import com.dbx.agent.ConnectParams;
+import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.test.JdbcFakeExecutionBehaviorTest;
+import com.dbx.agent.test.JdbcMetadataSqlFake;
 import com.dbx.agent.test.TestSupport;
 import org.junit.jupiter.api.Test;
 
@@ -20,6 +22,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class Db2AgentTest extends JdbcFakeExecutionBehaviorTest {
     @Override
@@ -57,6 +60,35 @@ class Db2AgentTest extends JdbcFakeExecutionBehaviorTest {
         assertEquals(Arrays.asList("APP", "SZ", "TOOLS"), schemas);
         assertEquals("SELECT SCHEMANAME FROM SYSCAT.SCHEMATA ORDER BY SCHEMANAME", executedSql.get());
         assertFalse(executedSql.get().contains("OWNERTYPE"));
+    }
+
+    @Test
+    void constrainedTableMetadataUsesDb2CatalogPushdown() {
+        Db2Agent agent = new Db2Agent();
+        TestSupport.setPrivateConnection(agent, JdbcMetadataSqlFake.connection());
+
+        agent.listTables("APP", new MetadataListConstraints("ord", 25, 50, List.of("TABLE")));
+
+        String sql = JdbcMetadataSqlFake.statements.get(0);
+        assertTrue(sql.contains("FROM SYSCAT.TABLES"));
+        assertTrue(sql.contains("TYPE IN (?)"));
+        assertTrue(sql.contains("UPPER(TABNAME) LIKE ? ESCAPE '\\\\'"));
+        assertTrue(sql.endsWith("OFFSET 50 ROWS FETCH NEXT 25 ROWS ONLY"));
+        assertEquals(Arrays.asList("param:1=APP", "param:2=T", "param:3=%O%R%D%"), JdbcMetadataSqlFake.statements.subList(1, 4));
+    }
+
+    @Test
+    void constrainedObjectMetadataUsesDb2CatalogPushdown() {
+        Db2Agent agent = new Db2Agent();
+        TestSupport.setPrivateConnection(agent, JdbcMetadataSqlFake.connection());
+
+        agent.listObjects("APP", new MetadataListConstraints("sync", 10, null, List.of("PROCEDURE")));
+
+        String sql = JdbcMetadataSqlFake.statements.get(0);
+        assertTrue(sql.contains("FROM SYSCAT.PROCEDURES"));
+        assertTrue(sql.contains("ORDER BY CASE OBJECT_TYPE"));
+        assertTrue(sql.endsWith("FETCH FIRST 10 ROWS ONLY"));
+        assertEquals(Arrays.asList("param:1=APP", "param:2=%S%Y%N%C%"), JdbcMetadataSqlFake.statements.subList(1, 3));
     }
 
     private static Connection connection(AtomicReference<String> executedSql, ResultSet resultSet) {

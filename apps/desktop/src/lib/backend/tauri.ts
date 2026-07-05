@@ -616,8 +616,8 @@ export async function getTableComment(connectionId: string, database: string, sc
   return invoke("get_table_comment", { connectionId, database, schema, table });
 }
 
-export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: SidebarObjectKind[]): Promise<ObjectInfo[]> {
-  return invoke("list_objects", { connectionId, database, schema, objectTypes });
+export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: SidebarObjectKind[], filter?: string, limit?: number, offset?: number): Promise<ObjectInfo[]> {
+  return invoke("list_objects", { connectionId, database, schema, objectTypes, filter, limit, offset });
 }
 
 export async function listObjectStatistics(connectionId: string, database: string, schema: string): Promise<ObjectStatistics[]> {

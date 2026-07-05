@@ -77,8 +77,9 @@ import { buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTem
 import { connectionFilePath, defaultSqliteBackupFileName, isMemorySqlitePath, sqliteBackupSourcePath } from "@/lib/connection/connectionFile";
 import { revealPathInFileManager } from "@/lib/backend/tauri";
 import { clearActiveTableReferencePayload, createTableReferencePayload, createTableReferenceDropEvent, setActiveTableReferencePayload, type QueryEditorTableReferencePayload } from "@/lib/editor/queryEditorTableDrop";
-import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
+import { usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
+import { getCachedTableMetadata, loadTableMetadata, TABLE_METADATA_CACHE_TTL_MS, tableMetadataToDataTabMeta } from "@/lib/metadata/tableMetadataCache";
 import { supportsDatabaseCreation, supportsDatabaseSearch, supportsFieldLineage, supportsObjectBrowserTreeNode, supportsSchemaDiagram, supportsSqlFileExecution, supportsTableImport, supportsTableTruncate, supportsTableStructureEditing, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
 import { copyNameForTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/sidebar/treeNodeClick";
 import { isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
@@ -224,7 +225,7 @@ const useWindowsSidebarCommentFont = isWindows();
 
 type StructureCopyFormat = "tsv" | "markdown";
 type DuplicateStructureSource = TreeNode & { connectionId: string; database: string };
-const DATA_TAB_METADATA_TTL_MS = 30_000;
+const DATA_TAB_METADATA_TTL_MS = TABLE_METADATA_CACHE_TTL_MS;
 const { getDatabaseOptions } = useDatabaseOptions();
 const showVisibleDatabasesDialog = ref(false);
 const showVisibleSchemasDialog = ref(false);
@@ -1126,6 +1127,9 @@ async function openData() {
   });
   const tableSchema = connectionObjectTreeNodeSchema(config, node.database, node.schema);
   const tableType = node.type === "view" ? "VIEW" : node.type === "materialized_view" ? "MATERIALIZED_VIEW" : (node.tableType ?? "TABLE");
+  const querySchema = config ? connectionObjectTreeQuerySchema(config, node.database, tableSchema) : (tableSchema ?? "");
+  const effectiveDbType = effectiveDatabaseTypeForConnection(config);
+  const metadataDatabaseType = effectiveDbType || config?.db_type || "";
   const isSameDataTableTab = (tab: (typeof queryStore.tabs)[number]) => tab.mode === "data" && tab.connectionId === node.connectionId && tab.database === node.database && (tab.schema || "") === (tableSchema || "") && (tab.tableMeta?.tableName || tab.title) === node.label;
   const existingSameTableTab = queryStore.tabs.find(isSameDataTableTab);
   const resetReusedDataTabState = (tab: (typeof queryStore.tabs)[number]) => {
@@ -1191,7 +1195,21 @@ async function openData() {
   }
   const existingTableMeta = tab?.tableMeta;
   const existingTableMetaAgeMs = tab?.tableMetaUpdatedAt ? Date.now() - tab.tableMetaUpdatedAt : Number.POSITIVE_INFINITY;
-  const cachedTableMeta = existingTableMeta?.tableName === node.label && existingTableMeta.schema === tableSchema && existingTableMeta.tableType === tableType && existingTableMeta.columns.length > 0 && existingTableMetaAgeMs < DATA_TAB_METADATA_TTL_MS ? existingTableMeta : undefined;
+  const sharedCachedTableMeta = config
+    ? getCachedTableMetadata({
+        connectionId: node.connectionId,
+        database: node.database,
+        schema: querySchema,
+        tableName: node.label,
+        tableType,
+        databaseType: metadataDatabaseType,
+        driverProfile: config.driver_profile || config.db_type,
+      })
+    : undefined;
+  const tabCachedTableMeta = existingTableMeta?.tableName === node.label && existingTableMeta.schema === tableSchema && existingTableMeta.tableType === tableType && existingTableMeta.columns.length > 0 && existingTableMetaAgeMs < DATA_TAB_METADATA_TTL_MS ? existingTableMeta : undefined;
+  const cachedTableMeta = sharedCachedTableMeta ? tableMetadataToDataTabMeta(sharedCachedTableMeta.metadata, tableSchema) : tabCachedTableMeta;
+  const cachedTableMetaAgeMs = sharedCachedTableMeta?.ageMs ?? existingTableMetaAgeMs;
+  const cachedTableMetaSource = sharedCachedTableMeta ? "shared" : tabCachedTableMeta ? "tab" : undefined;
   queryStore.setTableMeta(
     tabId,
     cachedTableMeta ?? {
@@ -1223,8 +1241,6 @@ async function openData() {
     logPhase("ensure-connected", { tabId });
     if (!config) throw new Error("Connection config not found");
 
-    const querySchema = connectionObjectTreeQuerySchema(config, node.database, tableSchema);
-    const effectiveDbType = effectiveDatabaseTypeForConnection(config);
     const limit = tableOpenPageLimit(settingsStore.editorSettings.pageSize);
     const refreshTableMetaInBackground = async () => {
       const metadataStartedAt = performance.now();
@@ -1236,30 +1252,34 @@ async function openData() {
         elapsed: elapsed(),
       });
       try {
-        const nextColumns = await api.getColumns(node.connectionId, node.database, querySchema, node.label);
-        const indexes = await api.listIndexes(node.connectionId, node.database, querySchema, node.label).catch(() => []);
+        const loadedMetadata = await loadTableMetadata({
+          connectionId: node.connectionId,
+          database: node.database,
+          schema: querySchema,
+          tableName: node.label,
+          tableType,
+          databaseType: metadataDatabaseType,
+          driverProfile: config.driver_profile || config.db_type,
+          traceLogger: (event) => console.debug("[DBX][openData:metadata:trace]", { sourceTraceId: traceId, ...event }),
+        });
         if (!isCurrentDataTab()) {
           console.info("[DBX][openData:metadata:stale]", {
             traceId,
             tabId,
-            columnCount: nextColumns.length,
+            columnCount: loadedMetadata.metadata.columns.length,
             elapsed: elapsed(),
           });
           return;
         }
-        const nextPrimaryKeys = editableRowIdentifierColumns(effectiveDbType, nextColumns, indexes, tableType);
-        queryStore.setTableMeta(tabId, {
-          schema: tableSchema,
-          tableName: node.label,
-          tableType,
-          columns: nextColumns,
-          primaryKeys: nextPrimaryKeys,
-        });
+        const nextTableMeta = tableMetadataToDataTabMeta(loadedMetadata.metadata, tableSchema);
+        queryStore.setTableMeta(tabId, nextTableMeta);
         console.info("[DBX][openData:metadata:done]", {
           traceId,
           tabId,
-          columnCount: nextColumns.length,
-          primaryKeyCount: nextPrimaryKeys.length,
+          columnCount: nextTableMeta.columns.length,
+          primaryKeyCount: nextTableMeta.primaryKeys.length,
+          cacheStatus: loadedMetadata.cacheStatus,
+          ageMs: Math.round(loadedMetadata.ageMs),
           elapsed: elapsed(),
           metadataMs: Math.round(performance.now() - metadataStartedAt),
         });
@@ -1274,7 +1294,8 @@ async function openData() {
         tabId,
         columnCount: cachedTableMeta.columns.length,
         primaryKeyCount: cachedTableMeta.primaryKeys.length,
-        ageMs: Math.round(existingTableMetaAgeMs),
+        source: cachedTableMetaSource,
+        ageMs: Math.round(cachedTableMetaAgeMs),
         elapsed: elapsed(),
       });
     } else {

@@ -4,7 +4,9 @@ import com.dbx.agent.BaseDatabaseAgent;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.DatabaseAgent;
 import com.dbx.agent.ExecuteQueryOptions;
+import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.QueryResult;
+import com.dbx.agent.TableInfo;
 import com.dbx.agent.test.JdbcExecutionBehaviorTest;
 import com.dbx.agent.test.JdbcMetadataBehaviorTest;
 import java.util.List;
@@ -131,6 +133,23 @@ class H2MetadataBehaviorTest extends JdbcMetadataBehaviorTest {
     @Override
     protected List<String> expectedColumnsInOrder() {
         return List.of("ID", "NAME", "CREATED_AT");
+    }
+
+    @Test
+    void constrainedTableMetadataFiltersTypesAndPages() {
+        withAgent("dbx-agent-h2-constrained-metadata", agent -> {
+            for (String sql : metadataFixtureSql()) {
+                agent.executeQuery(sql, null, new ExecuteQueryOptions());
+            }
+
+            List<TableInfo> tables = agent.listTables(
+                metadataSchema(),
+                new MetadataListConstraints("table", 1, 1, List.of("TABLE"))
+            );
+
+            Assertions.assertEquals(1, tables.size());
+            Assertions.assertEquals("BETA_TABLE", tables.get(0).getName());
+        });
     }
 }
 

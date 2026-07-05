@@ -71,7 +71,7 @@ test("inserts a grouped local table search control only for expanded table group
     connectionId: "conn",
     database: "app",
     isExpanded: true,
-    children: [],
+    children: [{ id: "conn:app:orders", label: "orders", type: "table", connectionId: "conn", database: "app" }],
   };
   const viewGroup: TreeNode = {
     id: "conn:app:__views",
@@ -96,6 +96,65 @@ test("inserts a grouped local table search control only for expanded table group
   assert.equal(nodes[1].node.tableSearchParentId, "conn:app:__tables");
 });
 
+test("does not insert a local table search control for empty table scopes", () => {
+  const tableGroup: TreeNode = {
+    id: "conn:app:__tables",
+    label: "tree.tables",
+    type: "group-tables",
+    connectionId: "conn",
+    database: "app",
+    isExpanded: true,
+    children: [],
+  };
+  const routineOnlySchema: TreeNode = {
+    id: "conn:app:public",
+    label: "public",
+    type: "schema",
+    connectionId: "conn",
+    database: "app",
+    schema: "public",
+    isExpanded: true,
+    children: [{ id: "conn:app:public:sync_orders", label: "sync_orders", type: "procedure", connectionId: "conn", database: "app", schema: "public" }],
+  };
+
+  const groupedNodes = insertSidebarTableSearchControls([flat(tableGroup, 1)], {
+    enabled: true,
+    sidebarObjectDisplay: "grouped",
+    activeQueries: {},
+  });
+  const simpleNodes = insertSidebarTableSearchControls([flat(routineOnlySchema, 1)], {
+    enabled: true,
+    sidebarObjectDisplay: "simple",
+    activeQueries: {},
+  });
+
+  assert.deepEqual(groupedNodes.map((item) => item.node.type), ["group-tables"]);
+  assert.deepEqual(simpleNodes.map((item) => item.node.type), ["schema"]);
+});
+
+test("keeps a grouped local table search control visible when the current search has no results", () => {
+  const tableGroup: TreeNode = {
+    id: "conn:app:__tables",
+    label: "tree.tables",
+    type: "group-tables",
+    connectionId: "conn",
+    database: "app",
+    isExpanded: true,
+    children: [],
+  };
+
+  const nodes = insertSidebarTableSearchControls([flat(tableGroup, 1)], {
+    enabled: true,
+    sidebarObjectDisplay: "grouped",
+    activeQueries: { "conn:app:__tables": "invoice" },
+  });
+
+  assert.deepEqual(
+    nodes.map((item) => item.node.type),
+    ["group-tables", "table-search-control"],
+  );
+});
+
 test("uses isolated virtual scroller pools for each local table search input", () => {
   const first: TreeNode = {
     id: "conn:first:__tables",
@@ -104,7 +163,7 @@ test("uses isolated virtual scroller pools for each local table search input", (
     connectionId: "conn",
     database: "first",
     isExpanded: true,
-    children: [],
+    children: [{ id: "conn:first:orders", label: "orders", type: "table", connectionId: "conn", database: "first" }],
   };
   const second: TreeNode = {
     id: "conn:second:__tables",
@@ -113,7 +172,7 @@ test("uses isolated virtual scroller pools for each local table search input", (
     connectionId: "conn",
     database: "second",
     isExpanded: true,
-    children: [],
+    children: [{ id: "conn:second:orders", label: "orders", type: "table", connectionId: "conn", database: "second" }],
   };
 
   const nodes = insertSidebarTableSearchControls([flat(first, 1), flat(second, 1)], {

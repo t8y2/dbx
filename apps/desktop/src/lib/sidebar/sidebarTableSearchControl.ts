@@ -2,7 +2,7 @@ import type { FlatTreeNode } from "@/composables/useFlatTree";
 import type { TreeNode, TreeNodeType } from "@/types/database";
 
 const simpleObjectParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema"]);
-const simpleObjectChildTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "sequence", "package", "package-body", "load-more"]);
+const tableSearchableChildTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "load-more"]);
 
 export function isSidebarTableSearchControlNode(node: TreeNode): boolean {
   return node.type === "table-search-control";
@@ -12,18 +12,19 @@ function tableSearchControlId(parentId: string): string {
   return `${parentId}:__table_search`;
 }
 
-function parentHasDirectTableList(node: TreeNode): boolean {
-  return !!node.children?.some((child) => simpleObjectChildTypes.has(child.type));
+function parentHasSearchableTableList(node: TreeNode): boolean {
+  // Routine-only schemas should not show a table-specific search box.
+  return !!node.children?.some((child) => tableSearchableChildTypes.has(child.type));
 }
 
 function shouldInsertTableSearchControl(item: FlatTreeNode, sidebarObjectDisplay: "simple" | "grouped", activeQueries: Readonly<Record<string, string | undefined>>): boolean {
   const node = item.node;
   if (!node.isExpanded) return false;
   if (sidebarObjectDisplay === "grouped") {
-    return node.type === "group-tables";
+    return node.type === "group-tables" && (parentHasSearchableTableList(node) || !!activeQueries[node.id]?.trim());
   }
   if (!simpleObjectParentTypes.has(node.type)) return false;
-  return parentHasDirectTableList(node) || !!activeQueries[node.id]?.trim();
+  return parentHasSearchableTableList(node) || !!activeQueries[node.id]?.trim();
 }
 
 function buildTableSearchControlNode(parent: TreeNode): TreeNode {

@@ -166,15 +166,11 @@ pub struct SshTunnelConfig {
     /// the `SSH_AUTH_SOCK` environment variable.
     #[serde(default)]
     pub ssh_agent_sock_path: String,
-    /// UI-facing choice of login method: `"password"`, `"key"`, `"agent"`, or
-    /// `"none"`. Empty string means an older saved connection predating this
-    /// field — the frontend infers a value for display when it's empty.
-    ///
-    /// This field is not consulted by `connect_and_authenticate`
-    /// (`db/ssh_tunnel.rs`), which still probes "none" then falls back to
-    /// key > password > agent based on which fields are non-empty,
-    /// independent of this selector. It exists purely to drive which
-    /// credential inputs the connection dialog shows.
+    /// Login method: `"password"`, `"key"`, `"agent"`, or `"none"`.
+    /// Empty string means an older saved connection predating this field —
+    /// the backend falls back to probing key > password > agent based on
+    /// which fields are non-empty. When set to a specific method the backend
+    /// only tries that method (after the standard `none` probe).
     #[serde(default)]
     pub auth_method: String,
 }

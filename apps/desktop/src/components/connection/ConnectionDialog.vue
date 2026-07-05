@@ -2962,6 +2962,16 @@ function updateSelectedSshAuthMethod(value: unknown) {
   const layer = selectedSshLayer.value;
   if (!layer) return;
   layer.auth_method = value === "key" ? "key" : value === "none" ? "none" : "password";
+  // Scrub credential fields that do not apply to the selected method so
+  // they are not accidentally submitted or used by the backend fallback.
+  if (layer.auth_method !== "password") layer.password = "";
+  if (layer.auth_method !== "key") {
+    layer.key_path = "";
+    layer.key_passphrase = "";
+  }
+  if (layer.auth_method !== "agent" && layer.auth_method !== "key") {
+    layer.use_ssh_agent = false;
+  }
   resetTestState();
 }
 

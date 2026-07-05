@@ -85,6 +85,7 @@ pub async fn start_transport_layers(
                     &resolved.key_passphrase,
                     resolved.use_ssh_agent,
                     &resolved.ssh_agent_sock_path,
+                    &resolved.auth_method,
                     effective_ssh_connect_timeout_secs(resolved.connect_timeout_secs),
                     &target_endpoint.host,
                     target_endpoint.port,

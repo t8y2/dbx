@@ -2924,6 +2924,8 @@ export default {
     executeModeCurrent: "Execute statement at cursor",
     showExecutionTargetPicker: "Show execution target picker",
     showExecutionTargetPickerDescription: "When enabled, running without a selection lets you choose between the current statement and all SQL.",
+    showCurrentStatementFrame: "Show current statement frame",
+    showCurrentStatementFrameDescription: "When enabled, the SQL editor draws an outline around the current executable statement; when disabled, the outline is hidden.",
     wordWrap: "Word wrap",
     wordWrapDescription: "Wrap long SQL lines within the editor width",
     vimMode: "Vim mode",

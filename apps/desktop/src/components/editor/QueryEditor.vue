@@ -278,6 +278,7 @@ const queryEditorAppearanceSettings = computed(() => {
     activeCustomThemeId: settings.activeCustomThemeId,
     wordWrap: settings.wordWrap,
     vimModeEnabled: settings.vimModeEnabled,
+    showCurrentStatementFrame: settings.showCurrentStatementFrame,
     shortcuts: settings.shortcuts,
   };
 });
@@ -2342,6 +2343,7 @@ onMounted(async () => {
         this.decorations = this.getDeco(update.view);
       }
       getDeco(view: import("@codemirror/view").EditorView) {
+        if (!settingsStore.editorSettings.showCurrentStatementFrame) return Decoration.none;
         if (view.state.selection.ranges.some((range) => !range.empty)) return Decoration.none;
         const range = currentExecutableStatementRange(view);
         if (!range) return Decoration.none;

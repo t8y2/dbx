@@ -73,6 +73,8 @@ import { eventToShortcut } from "@/lib/editor/keyboardShortcuts";
 import { SHORTCUT_DEFINITIONS, findShortcutConflict, normalizeShortcutSettings, type ShortcutActionId } from "@/lib/editor/shortcutRegistry";
 import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
+import { currentStatementFrameRangeTo, visualSqlColumns } from "@/lib/sql/currentStatementFrame";
+import { currentExecutableStatementRange, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES } from "@/lib/table/tableColumnTemplates";
 import { buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpVsCodeConfig, type McpEnvEntry, type McpLaunchConfig } from "@/lib/mcp/mcpConfigTemplates";
@@ -236,6 +238,7 @@ const editActiveCustomThemeId = ref(settingsStore.editorSettings.activeCustomThe
 const showThemeCustomizer = ref(false);
 const editExecuteMode = ref(settingsStore.editorSettings.executeMode);
 const editShowExecutionTargetPicker = ref(settingsStore.editorSettings.showExecutionTargetPicker);
+const editShowCurrentStatementFrame = ref(settingsStore.editorSettings.showCurrentStatementFrame);
 const editAutoAliasTables = ref(settingsStore.editorSettings.autoAliasTables);
 const editWordWrap = ref(settingsStore.editorSettings.wordWrap);
 const editVimModeEnabled = ref(settingsStore.editorSettings.vimModeEnabled);
@@ -544,6 +547,7 @@ watch(
       editActiveCustomThemeId.value = settingsStore.editorSettings.activeCustomThemeId;
       editExecuteMode.value = settingsStore.editorSettings.executeMode;
       editShowExecutionTargetPicker.value = settingsStore.editorSettings.showExecutionTargetPicker;
+      editShowCurrentStatementFrame.value = settingsStore.editorSettings.showCurrentStatementFrame;
       editAutoAliasTables.value = settingsStore.editorSettings.autoAliasTables;
       editWordWrap.value = settingsStore.editorSettings.wordWrap;
       editVimModeEnabled.value = settingsStore.editorSettings.vimModeEnabled;
@@ -635,6 +639,7 @@ function hasChanges(): boolean {
     editActiveCustomThemeId.value !== settingsStore.editorSettings.activeCustomThemeId ||
     editExecuteMode.value !== settingsStore.editorSettings.executeMode ||
     editShowExecutionTargetPicker.value !== settingsStore.editorSettings.showExecutionTargetPicker ||
+    editShowCurrentStatementFrame.value !== settingsStore.editorSettings.showCurrentStatementFrame ||
     editAutoAliasTables.value !== settingsStore.editorSettings.autoAliasTables ||
     editWordWrap.value !== settingsStore.editorSettings.wordWrap ||
     editVimModeEnabled.value !== settingsStore.editorSettings.vimModeEnabled ||
@@ -693,6 +698,7 @@ async function persistSettings() {
     activeCustomThemeId: editActiveCustomThemeId.value,
     executeMode: editExecuteMode.value,
     showExecutionTargetPicker: editShowExecutionTargetPicker.value,
+    showCurrentStatementFrame: editShowCurrentStatementFrame.value,
     autoAliasTables: editAutoAliasTables.value,
     wordWrap: editWordWrap.value,
     vimModeEnabled: editVimModeEnabled.value,
@@ -774,6 +780,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editFontSize.value = DEFAULT_EDITOR_SETTINGS.fontSize;
     editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
     editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
+    editShowCurrentStatementFrame.value = DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame;
     editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
     editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
     editVimModeEnabled.value = DEFAULT_EDITOR_SETTINGS.vimModeEnabled;
@@ -842,6 +849,7 @@ function resetAllDefaults() {
   editActiveCustomThemeId.value = DEFAULT_EDITOR_SETTINGS.activeCustomThemeId;
   editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
   editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
+  editShowCurrentStatementFrame.value = DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame;
   editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
   editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
   editVimModeEnabled.value = DEFAULT_EDITOR_SETTINGS.vimModeEnabled;
@@ -1990,6 +1998,7 @@ const previewSettings = computed<{
   theme: EditorTheme;
   appAppearance: AppThemeAppearance;
   appPalette: AppThemePalette;
+  showCurrentStatementFrame: boolean;
   customColors?: CustomThemeColors;
 }>(() => ({
   fontFamily: editFontFamily.value,
@@ -1997,6 +2006,7 @@ const previewSettings = computed<{
   theme: editTheme.value,
   appAppearance: isDark.value ? "dark" : "light",
   appPalette: themePalette.value,
+  showCurrentStatementFrame: editShowCurrentStatementFrame.value,
   customColors: getPreviewCustomThemeColors(),
 }));
 
@@ -2010,8 +2020,9 @@ ORDER BY u.id LIMIT 5;`;
 let fontThemeComp: import("@codemirror/state").Compartment | null = null;
 let themeComp: import("@codemirror/state").Compartment | null = null;
 let diagnosticComp: import("@codemirror/state").Compartment | null = null;
+let currentStatementFrameComp: import("@codemirror/state").Compartment | null = null;
 let setPreviewDiagnosticsEffect: import("@codemirror/state").StateEffectType<PreviewSqlDiagnostic[]> | null = null;
-let editorViewModule: typeof import("@codemirror/view") | null = null;
+let editorViewModule: Pick<typeof import("@codemirror/view"), "Decoration" | "EditorView" | "ViewPlugin"> | null = null;
 let previewSqlDiagnostics: PreviewSqlDiagnostic[] = [];
 
 function currentPreviewSql(): string {
@@ -2041,15 +2052,90 @@ function updatePreviewSqlDiagnostics() {
   });
 }
 
+function buildPreviewCurrentStatementFrameExtension(viewModule: Pick<typeof import("@codemirror/view"), "Decoration" | "EditorView" | "ViewPlugin">, enabled: boolean) {
+  if (!enabled) return [];
+  const { Decoration, EditorView, ViewPlugin } = viewModule;
+  const frameTheme = EditorView.baseTheme({
+    ".cm-db-current-statement-line": {
+      position: "relative",
+    },
+    ".cm-db-current-statement-line::after": {
+      content: '""',
+      position: "absolute",
+      top: "0",
+      bottom: "0",
+      left: "0",
+      boxSizing: "border-box",
+      width: "var(--dbx-current-statement-frame-width, 100%)",
+      borderRight: "1px solid rgb(34 197 94 / 0.75)",
+      borderLeft: "1px solid rgb(34 197 94 / 0.75)",
+      pointerEvents: "none",
+    },
+    ".cm-db-current-statement-line--first::after": {
+      borderTop: "1px solid rgb(34 197 94 / 0.75)",
+    },
+    ".cm-db-current-statement-line--last::after": {
+      borderBottom: "1px solid rgb(34 197 94 / 0.75)",
+    },
+  });
+  const framePlugin = ViewPlugin.fromClass(
+    class {
+      decorations: import("@codemirror/view").DecorationSet;
+      constructor(view: import("@codemirror/view").EditorView) {
+        this.decorations = this.getDeco(view);
+      }
+      update(update: import("@codemirror/view").ViewUpdate) {
+        this.decorations = this.getDeco(update.view);
+      }
+      getDeco(view: import("@codemirror/view").EditorView) {
+        if (view.state.selection.ranges.some((range) => !range.empty)) return Decoration.none;
+        const docText = view.state.doc.toString();
+        const range = currentExecutableStatementRange(docText, view.state.selection.main.head, "mysql");
+        if (!range) return Decoration.none;
+        const startLine = view.state.doc.lineAt(range.from);
+        const frameTo = previewCurrentStatementFrameTo(view, range);
+        const endLine = view.state.doc.lineAt(Math.max(range.from, frameTo - 1));
+        let maxWidth = 1;
+        for (let lineNumber = startLine.number; lineNumber <= endLine.number; lineNumber += 1) {
+          const line = view.state.doc.line(lineNumber);
+          const lineRangeTo = Math.min(line.to, frameTo);
+          maxWidth = Math.max(maxWidth, visualSqlColumns(view.state.doc.sliceString(line.from, lineRangeTo)));
+        }
+
+        const deco: any[] = [];
+        const frameWidth = `calc(${maxWidth}ch + 2ch)`;
+        for (let lineNumber = startLine.number; lineNumber <= endLine.number; lineNumber += 1) {
+          const line = view.state.doc.line(lineNumber);
+          const classes = ["cm-db-current-statement-line"];
+          if (lineNumber === startLine.number) classes.push("cm-db-current-statement-line--first");
+          if (lineNumber === endLine.number) classes.push("cm-db-current-statement-line--last");
+          deco.push(Decoration.line({ class: classes.join(" "), attributes: { style: `--dbx-current-statement-frame-width: ${frameWidth};` } }).range(line.from));
+        }
+        return Decoration.set(deco);
+      }
+    },
+    { decorations: (v) => v.decorations },
+  );
+
+  return [framePlugin, frameTheme];
+}
+
+function previewCurrentStatementFrameTo(view: import("@codemirror/view").EditorView, range: SqlTextRange): number {
+  const nextChar = range.to < view.state.doc.length ? view.state.doc.sliceString(range.to, range.to + 1) : "";
+  return currentStatementFrameRangeTo(nextChar, range);
+}
+
 watch(
   [previewSettings, editCustomThemes, editActiveCustomThemeId],
   async ([ss]) => {
     if (!previewView.value || !fontThemeComp || !themeComp || !editorViewModule) return;
 
     const themeExt = await loadEditorTheme(ss.theme, ss.appAppearance, ss.customColors, ss.appPalette);
-    previewView.value.dispatch({
-      effects: [themeComp.reconfigure(themeExt), fontThemeComp.reconfigure(editorFontTheme(editorViewModule.EditorView, ss.fontSize, ss.fontFamily))],
-    });
+    const effects = [themeComp.reconfigure(themeExt), fontThemeComp.reconfigure(editorFontTheme(editorViewModule.EditorView, ss.fontSize, ss.fontFamily))];
+    if (currentStatementFrameComp) {
+      effects.push(currentStatementFrameComp.reconfigure(buildPreviewCurrentStatementFrameExtension(editorViewModule, ss.showCurrentStatementFrame)));
+    }
+    previewView.value.dispatch({ effects });
   },
   { deep: true },
 );
@@ -2068,6 +2154,7 @@ function cleanupPreviewEditor() {
   fontThemeComp = null;
   themeComp = null;
   diagnosticComp = null;
+  currentStatementFrameComp = null;
   setPreviewDiagnosticsEffect = null;
   editorViewModule = null;
   previewSqlDiagnostics = [];
@@ -2084,12 +2171,13 @@ watch(previewRef, async (el) => {
   previewInitialized = true;
   if (previewView.value) return;
 
-  const [{ EditorView, Decoration }, { EditorState, Compartment, StateEffect, StateField }, { sql, MySQL }, { basicSetup }] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("codemirror")]);
+  const [{ EditorView, Decoration, ViewPlugin }, { EditorState, Compartment, StateEffect, StateField }, { sql, MySQL }, { basicSetup }] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("codemirror")]);
 
-  editorViewModule = { EditorView } as typeof import("@codemirror/view");
+  editorViewModule = { Decoration, EditorView, ViewPlugin };
   fontThemeComp = new Compartment();
   themeComp = new Compartment();
   diagnosticComp = new Compartment();
+  currentStatementFrameComp = new Compartment();
   setPreviewDiagnosticsEffect = StateEffect.define<PreviewSqlDiagnostic[]>();
   previewSqlDiagnostics = previewDiagnosticsForSql(currentPreviewSql());
 
@@ -2126,9 +2214,11 @@ watch(previewRef, async (el) => {
     return [field, diagnosticTheme];
   };
 
+  const frameExt = buildPreviewCurrentStatementFrameExtension(editorViewModule, ss.showCurrentStatementFrame);
+
   const state = EditorState.create({
     doc: currentPreviewSql(),
-    extensions: [basicSetup, sql({ dialect: MySQL }), themeComp.of(themeExt), fontThemeComp.of(editorFontTheme(EditorView, ss.fontSize, ss.fontFamily)), diagnosticComp.of(buildPreviewDiagnosticExtension())],
+    extensions: [basicSetup, sql({ dialect: MySQL }), themeComp.of(themeExt), fontThemeComp.of(editorFontTheme(EditorView, ss.fontSize, ss.fontFamily)), diagnosticComp.of(buildPreviewDiagnosticExtension()), currentStatementFrameComp.of(frameExt)],
   });
 
   previewView.value = new EditorView({ state, parent: previewRef.value });
@@ -2261,6 +2351,14 @@ onUnmounted(cleanupPreviewEditor);
                     <p class="text-xs text-muted-foreground">{{ t("settings.showExecutionTargetPickerDescription") }}</p>
                   </div>
                   <Switch id="editor-show-execution-target-picker" v-model="editShowExecutionTargetPicker" class="mt-0.5" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-show-current-statement-frame">{{ t("settings.showCurrentStatementFrame") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.showCurrentStatementFrameDescription") }}</p>
+                  </div>
+                  <Switch id="editor-show-current-statement-frame" v-model="editShowCurrentStatementFrame" class="mt-0.5" />
                 </div>
 
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">

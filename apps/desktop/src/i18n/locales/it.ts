@@ -2866,6 +2866,8 @@ export default withEnglishFallback({
     executeModeCurrent: "Esegui istruzione al cursore",
     showExecutionTargetPicker: "Mostra selettore destinazione",
     showExecutionTargetPickerDescription: "Se attivo, l'esecuzione senza selezione permette di scegliere tra istruzione corrente e tutto l'SQL.",
+    showCurrentStatementFrame: "Mostra cornice istruzione corrente",
+    showCurrentStatementFrameDescription: "Se attivo, l'editor SQL disegna un contorno intorno all'istruzione eseguibile corrente; se disattivato, il contorno e nascosto.",
     wordWrap: "A capo automatico",
     wordWrapDescription: "Incolonna le righe SQL lunghe entro la larghezza dell'editor",
     vimMode: "Modalita Vim",

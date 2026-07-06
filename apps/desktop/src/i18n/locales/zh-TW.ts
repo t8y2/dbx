@@ -2764,6 +2764,8 @@ export default withEnglishFallback({
     executeModeCurrent: "執行指標所在語句",
     showExecutionTargetPicker: "顯示執行目標選擇器",
     showExecutionTargetPickerDescription: "啟用後，無選取執行時可在目前語句與全部 SQL 之間臨時選擇。",
+    showCurrentStatementFrame: "顯示目前語句外框線",
+    showCurrentStatementFrameDescription: "啟用後，在 SQL 編輯器中用外框線標出目前可執行語句；關閉後不顯示外框線。",
     wordWrap: "自動換行",
     wordWrapDescription: "長 SQL 在編輯器寬度內自動折行顯示",
     vimMode: "Vim 模式",

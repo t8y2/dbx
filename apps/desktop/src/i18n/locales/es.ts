@@ -2868,6 +2868,8 @@ export default withEnglishFallback({
     executeModeCurrent: "Ejecutar sentencia en el cursor",
     showExecutionTargetPicker: "Mostrar selector de objetivo",
     showExecutionTargetPickerDescription: "Al activarlo, ejecutar sin selección permite elegir entre la sentencia actual y todo el SQL.",
+    showCurrentStatementFrame: "Mostrar marco de la sentencia actual",
+    showCurrentStatementFrameDescription: "Al activarlo, el editor SQL dibuja un contorno alrededor de la sentencia ejecutable actual; al desactivarlo, se oculta.",
     wordWrap: "Ajuste de línea",
     wordWrapDescription: "Ajustar las líneas largas de SQL al ancho del editor",
     vimMode: "Modo Vim",

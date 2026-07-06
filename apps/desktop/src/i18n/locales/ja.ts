@@ -2857,6 +2857,8 @@ export default withEnglishFallback({
     executeModeCurrent: "カーソル位置の文を実行",
     showExecutionTargetPicker: "実行対象ピッカーを表示",
     showExecutionTargetPickerDescription: "有効にすると、選択なしで実行するときに現在の文とすべてのSQLを一時的に選べます。",
+    showCurrentStatementFrame: "現在の文の枠線を表示",
+    showCurrentStatementFrameDescription: "有効にすると、SQLエディタで現在実行可能な文を枠線で示します。無効にすると枠線を表示しません。",
     wordWrap: "折り返し",
     wordWrapDescription: "長いSQL行をエディタ幅内で折り返します",
     vimMode: "Vimモード",

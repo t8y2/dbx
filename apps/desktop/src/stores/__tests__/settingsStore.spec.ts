@@ -10,6 +10,14 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ autoAliasTables: false }).autoAliasTables).toBe(false);
   });
 
+  it("shows the current statement frame by default", () => {
+    expect(normalizeEditorSettings({}).showCurrentStatementFrame).toBe(true);
+  });
+
+  it("preserves disabled current statement frames", () => {
+    expect(normalizeEditorSettings({ showCurrentStatementFrame: false }).showCurrentStatementFrame).toBe(false);
+  });
+
   it("keeps SQL semantic diagnostics in auto mode and disabled by default", () => {
     const settings = normalizeEditorSettings({});
     expect(settings.sqlSemanticDiagnosticsMode).toBe("auto");

@@ -618,7 +618,14 @@ function parseCollectionMethodTarget(source: string, method: string): { collecti
 function normalizeJsonArgument(value: string): string | null {
   const trimmed = value.trim();
   if (!trimmed) return "{}";
-  const preprocessed = quoteUnquotedObjectKeys(convertSingleQuotedStrings(trimmed.replace(/ObjectId\s*\(\s*["']([^"']+)["']\s*\)/g, '{"$oid":"$1"}')));
+  // Rewrite mongo shell constructors that are not valid JSON into the extended
+  // JSON the backend understands (mongo_driver::json_value_to_bson): ObjectId(x)
+  // -> {"$oid":x} and ISODate(x)/new Date(x) -> {"$date":x}. Without this a
+  // filter such as { createdAt: { $gte: ISODate("...") } } fails JSON.parse,
+  // the command is left unrecognized and falls through to the SQL executor,
+  // which rejects it with "Use MongoDB-specific commands".
+  const withExtendedJson = trimmed.replace(/ObjectId\s*\(\s*["']([^"']+)["']\s*\)/g, '{"$oid":"$1"}').replace(/(?:ISODate|new\s+Date)\s*\(\s*["']([^"']+)["']\s*\)/g, '{"$date":"$1"}');
+  const preprocessed = quoteUnquotedObjectKeys(convertSingleQuotedStrings(withExtendedJson));
   try {
     JSON.parse(preprocessed);
     return preprocessed;

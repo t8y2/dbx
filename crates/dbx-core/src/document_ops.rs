@@ -52,7 +52,8 @@ pub async fn list_databases_core(state: &AppState, connection_id: &str) -> Resul
             }
             Err(error) => Err(error),
         },
-        PoolKind::Elasticsearch(_) | PoolKind::VectorDb(_) => Ok(vec!["default".to_string()]),
+        PoolKind::Elasticsearch(_) => Ok(vec!["default".to_string()]),
+        PoolKind::VectorDb(client) => vector_driver::list_databases(&client).await,
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
             match client.mongo_list_databases::<Vec<serde_json::Value>>().await {
@@ -376,8 +377,8 @@ pub async fn find_documents_core(
         PoolKind::VectorDb(client) => {
             let client = client.clone();
             drop(connections);
-            let _ = (database, filter, sort);
-            vector_driver::find_documents(&client, collection, skip, limit).await
+            let _ = (filter, sort);
+            vector_driver::find_documents(&client, database, collection, skip, limit).await
         }
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;

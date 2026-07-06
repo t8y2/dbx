@@ -230,7 +230,9 @@ function increaseTableFontSize() {
 const activeTabDimension = computed(() => {
   const tab = props.activeTab;
   if (!tab.connectionId || tab.mode !== "vector") return undefined;
-  const nodeId = `${tab.connectionId}:__vector_collection:${tab.sql}`;
+  const isMilvus = connectionStore.getConfig(tab.connectionId)?.db_type === "milvus";
+  const suffix = isMilvus && tab.database ? `${tab.database}:${tab.sql}` : tab.sql;
+  const nodeId = `${tab.connectionId}:__vector_collection:${suffix}`;
   const meta = findNodeInTree(connectionStore.treeNodes, nodeId)?.meta;
   return meta && "dimension" in meta ? (meta as VectorCollectionMeta).dimension : undefined;
 });

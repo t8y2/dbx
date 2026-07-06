@@ -556,6 +556,7 @@ export type TreeNodeType =
   | "mongo-buckets"
   | "mongo-bucket"
   | "mongo-collection"
+  | "vector-database"
   | "vector-collection"
   | "elasticsearch-index";
 
@@ -780,6 +781,7 @@ export interface SavedSqlLibrary {
 
 export interface VectorCollectionMeta {
   dimension?: number;
+  collectionId?: string;
 }
 
 export interface CollectionInfo {

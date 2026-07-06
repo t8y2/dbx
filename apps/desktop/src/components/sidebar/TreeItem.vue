@@ -580,7 +580,9 @@ async function toggle() {
         await connectionStore.loadMongoDatabases(node.connectionId);
       } else if (config?.db_type === "elasticsearch") {
         await connectionStore.loadElasticsearchIndices(node.connectionId);
-      } else if (config?.db_type === "qdrant" || config?.db_type === "milvus" || config?.db_type === "weaviate" || config?.db_type === "chromadb") {
+      } else if (config?.db_type === "milvus") {
+        await connectionStore.loadMilvusDatabases(node.connectionId);
+      } else if (config?.db_type === "qdrant" || config?.db_type === "weaviate" || config?.db_type === "chromadb") {
         await connectionStore.loadVectorCollections(node.connectionId);
       } else if (config?.db_type === "mq") {
         await connectionStore.loadMqTenants(node.connectionId);
@@ -614,6 +616,8 @@ async function toggle() {
       queryStore.openUserAdmin(node.connectionId);
     } else if (node.type === "mongo-db" && node.connectionId && node.database) {
       await connectionStore.loadMongoCollections(node.connectionId, node.database);
+    } else if (node.type === "vector-database" && node.connectionId && node.database) {
+      await connectionStore.loadVectorCollections(node.connectionId, node.database);
     } else if (node.type === "mongo-collection" && node.connectionId && node.database) {
       await connectionStore.loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id);
     } else if (node.type === "elasticsearch-index" && node.connectionId) {
@@ -622,7 +626,7 @@ async function toggle() {
       queryStore.updateSql(tab, node.label);
     } else if (node.type === "vector-collection" && node.connectionId) {
       await connectionStore.ensureConnected(node.connectionId);
-      const collectionRef = node.id.includes("__vector_collection:") ? node.id.split("__vector_collection:").pop() || node.label : node.label;
+      const collectionRef = (node.meta as { collectionId?: string } | undefined)?.collectionId ?? node.label;
       const tab = queryStore.createTab(node.connectionId, node.database || "default", node.label, "vector");
       queryStore.updateSql(tab, collectionRef);
       api

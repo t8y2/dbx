@@ -15,6 +15,8 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
     case "database":
     case "mongo-db":
       return { icon: Database, colorClass: "text-yellow-500" };
+    case "vector-database":
+      return { icon: Database, colorClass: "text-cyan-500" };
     case "linked-server-root":
       return { icon: Network, colorClass: "text-blue-500" };
     case "linked-server":

@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 import { uuid } from "@/lib/common/utils";
 import { ref, computed, watch } from "vue";
-import type { ColumnInfo, CompletionAssistantCandidate, CompletionAssistantObjectKind, CompletionAssistantRequest, ConnectionConfig, ForeignKeyInfo, ObjectInfo, SchemaInfo, SidebarLayout, TableInfo, TreeNode } from "@/types/database";
+import type { ColumnInfo, CompletionAssistantCandidate, CompletionAssistantObjectKind, CompletionAssistantRequest, ConnectionConfig, ForeignKeyInfo, ObjectInfo, SchemaInfo, SidebarLayout, TableInfo, TreeNode, VectorCollectionMeta } from "@/types/database";
 import { applyPinnedTreeNodeState, updatePinnedTreeNodeInPlace } from "@/lib/app/pinnedItems";
 import {
   reconcileLayout,
@@ -1683,7 +1683,9 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadMongoDatabases(connectionId);
     } else if (config.db_type === "elasticsearch") {
       await loadElasticsearchIndices(connectionId);
-    } else if (config.db_type === "qdrant" || config.db_type === "milvus" || config.db_type === "weaviate" || config.db_type === "chromadb") {
+    } else if (config.db_type === "milvus") {
+      await loadMilvusDatabases(connectionId);
+    } else if (config.db_type === "qdrant" || config.db_type === "weaviate" || config.db_type === "chromadb") {
       await loadVectorCollections(connectionId);
     } else if (config.db_type === "mq") {
       await loadMqTenants(connectionId, { force: true });
@@ -2305,33 +2307,63 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  async function loadVectorCollections(connectionId: string) {
+  async function loadMilvusDatabases(connectionId: string) {
     const node = findNode(treeNodes.value, connectionId);
     if (!node) return;
 
-    const config = getConfig(connectionId);
-    const database = config?.database || "default";
     node.isLoading = true;
     try {
       await ensureConnected(connectionId);
-      const collections = await withMetadataLoadTimeout(connectionId, api.vectorListCollections(connectionId, database), "vector collections");
-      const sorted = [...collections].sort((a, b) => a.name.localeCompare(b.name));
+      const dbs = await withMetadataLoadTimeout(connectionId, api.documentListDatabases(connectionId), "Milvus databases");
       setChildren(
         node,
         withSavedSqlRoot(
           connectionId,
-          sorted.map((info) => ({
-            id: `${connectionId}:__vector_collection:${info.id}`,
-            label: info.name,
-            type: "vector-collection" as const,
+          sortSidebarNames(dbs).map((db) => ({
+            id: `${connectionId}:${db}`,
+            label: db,
+            type: "vector-database" as const,
             connectionId,
-            database,
+            database: db,
             isExpanded: false,
-            meta: info.dimension != null ? { dimension: info.dimension } : undefined,
+            children: [],
           })),
           node,
         ),
       );
+      node.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e);
+      throw e;
+    } finally {
+      node.isLoading = false;
+    }
+  }
+
+  async function loadVectorCollections(connectionId: string, database?: string) {
+    const config = getConfig(connectionId);
+    const isMilvus = config?.db_type === "milvus";
+    const effectiveDb = database || config?.database || "default";
+    // Milvus groups collections under a per-database node; other vector stores stay flat under the connection.
+    const node = isMilvus && database ? findNode(treeNodes.value, `${connectionId}:${database}`) : findNode(treeNodes.value, connectionId);
+    if (!node) return;
+
+    node.isLoading = true;
+    try {
+      await ensureConnected(connectionId);
+      const collections = await withMetadataLoadTimeout(connectionId, api.vectorListCollections(connectionId, effectiveDb), "vector collections");
+      const sorted = [...collections].sort((a, b) => a.name.localeCompare(b.name));
+      const collectionChildren = sorted.map((info) => ({
+        // Include the database for Milvus so same-named collections across databases don't collide.
+        id: `${connectionId}:__vector_collection:${isMilvus ? `${effectiveDb}:${info.id}` : info.id}`,
+        label: info.name,
+        type: "vector-collection" as const,
+        connectionId,
+        database: effectiveDb,
+        isExpanded: false,
+        meta: { dimension: info.dimension, collectionId: info.id } as VectorCollectionMeta,
+      }));
+      setChildren(node, isMilvus && database ? collectionChildren : withSavedSqlRoot(connectionId, collectionChildren, node));
       node.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
@@ -3343,7 +3375,9 @@ export const useConnectionStore = defineStore("connection", () => {
         await loadMongoDatabases(node.connectionId);
       } else if (config?.db_type === "elasticsearch") {
         await loadElasticsearchIndices(node.connectionId);
-      } else if (config?.db_type === "qdrant" || config?.db_type === "milvus" || config?.db_type === "weaviate" || config?.db_type === "chromadb") {
+      } else if (config?.db_type === "milvus") {
+        await loadMilvusDatabases(node.connectionId);
+      } else if (config?.db_type === "qdrant" || config?.db_type === "weaviate" || config?.db_type === "chromadb") {
         await loadVectorCollections(node.connectionId);
       } else if (config?.db_type === "mq") {
         await loadMqTenants(node.connectionId, options);
@@ -3354,6 +3388,8 @@ export const useConnectionStore = defineStore("connection", () => {
       }
     } else if (node.type === "mongo-db" && node.connectionId && node.database) {
       await loadMongoCollections(node.connectionId, node.database);
+    } else if (node.type === "vector-database" && node.connectionId && node.database) {
+      await loadVectorCollections(node.connectionId, node.database);
     } else if (node.type === "mongo-collection" && node.connectionId && node.database) {
       await loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id);
     } else if (node.type === "mongo-gridfs") {
@@ -4716,6 +4752,7 @@ export const useConnectionStore = defineStore("connection", () => {
     loadNacosNamespaces,
     updateRedisDbKeyStats,
     loadMongoDatabases,
+    loadMilvusDatabases,
     loadElasticsearchIndices,
     loadVectorCollections,
     loadMongoCollections,

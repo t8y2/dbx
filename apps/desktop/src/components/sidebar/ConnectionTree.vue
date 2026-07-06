@@ -153,11 +153,18 @@ const SEARCH_SCOPE_TO_NODE_TYPES: Record<SearchScope, TreeNodeType[]> = {
   view: ["view"],
 };
 
-// Database-level container types. When browsing a large number of children
-// under one of these (e.g. hundreds of tables) and scrolling down, the row is
-// kept pinned at the top of the tree so the active database stays visible and
-// can be collapsed with one click. Mirrors the `database` search scope above.
-const DATABASE_LEVEL_TYPES = new Set<TreeNodeType>(SEARCH_SCOPE_TO_NODE_TYPES.database);
+// Types that can be pinned at the top of the tree while scrolling. When
+// browsing a large number of children (e.g. hundreds of tables) under one of
+// these and scrolling down, the row is kept visible so the active container
+// stays identifiable and can be collapsed with one click.
+//
+// `schema` is included as a fallback: Dameng / Oracle / oceanbase-oracle expose
+// `connection -> schema -> tables` (no database node, via
+// connectionUsesVisibleSchemaFilter), so the schema row is what represents the
+// active container there. Postgres/SQLServer keep the
+// `connection -> database -> schema -> tables` shape, and the sticky walk runs
+// upward so it still hits `database` first — schema never shadows it.
+const STICKY_CONTAINER_TYPES = new Set<TreeNodeType>([...SEARCH_SCOPE_TO_NODE_TYPES.database, "schema"]);
 
 const searchScopeOptions = computed(() => {
   return [
@@ -373,12 +380,13 @@ const stickyNode = computed<FlatTreeNode | null>(() => {
   if (len === 0) return null;
 
   const topIndex = Math.min(Math.floor(stickyScrollTop.value / SIDEBAR_TREE_ROW_HEIGHT), len - 1);
-  // Walk UP from the topmost visible row to the nearest database-level ancestor.
-  // Show the overlay as soon as that database row starts crossing the top edge,
-  // instead of waiting for it to fully scroll out by one row.
+  // Walk UP from the topmost visible row to the nearest sticky container
+  // ancestor (database, or schema as a fallback for Dameng/Oracle-style trees).
+  // Show the overlay as soon as that row starts crossing the top edge, instead
+  // of waiting for it to fully scroll out by one row.
   for (let i = topIndex; i >= 0; i--) {
     const item = nodes[i];
-    if (!DATABASE_LEVEL_TYPES.has(item.type)) continue;
+    if (!STICKY_CONTAINER_TYPES.has(item.type)) continue;
     const rowTop = i * SIDEBAR_TREE_ROW_HEIGHT;
     return stickyScrollTop.value > rowTop ? item : null;
   }
@@ -391,7 +399,7 @@ const stickyHeaderStyle = computed<CSSProperties>(() => {
   const nodes = flatNodes.value;
   const currentIndex = nodes.findIndex((item) => item.id === node.id);
   if (currentIndex < 0) return {};
-  const nextDatabaseIndex = nodes.findIndex((item, index) => index > currentIndex && DATABASE_LEVEL_TYPES.has(item.type));
+  const nextDatabaseIndex = nodes.findIndex((item, index) => index > currentIndex && STICKY_CONTAINER_TYPES.has(item.type));
   if (nextDatabaseIndex < 0) return {};
   const distanceToNext = nextDatabaseIndex * SIDEBAR_TREE_ROW_HEIGHT - stickyScrollTop.value;
   if (distanceToNext >= SIDEBAR_TREE_ROW_HEIGHT) return {};

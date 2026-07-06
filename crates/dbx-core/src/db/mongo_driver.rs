@@ -1144,6 +1144,13 @@ fn json_filter_value_to_bson(value: &serde_json::Value, field_name: Option<&str>
                         return Bson::ObjectId(oid);
                     }
                 }
+                // Extended JSON dates must be decoded in filters too, otherwise
+                // {"$date": ...} reaches the server as a raw document: a bare
+                // { field: {"$date": ...} } fails with "unknown operator: $date"
+                // and { field: {"$gte": {"$date": ...}} } silently matches nothing.
+                if let Some(date) = parse_extended_json_date(obj) {
+                    return Bson::DateTime(date);
+                }
             }
 
             if field_name == Some("_id") && obj.keys().all(|key| key.starts_with('$')) {
@@ -1325,6 +1332,27 @@ mod tests {
         let doc = json_filter_to_document(&filter).unwrap();
 
         assert!(matches!(doc.get("owner_id"), Some(Bson::String(value)) if value == id));
+    }
+
+    #[test]
+    fn json_filter_to_document_decodes_extended_json_dates() {
+        let iso = "2025-02-25T04:57:39.965Z";
+        let expected = DateTime::parse_rfc3339_str(iso).unwrap();
+
+        // Direct equality must yield a BSON DateTime, not a raw { "$date": ... }
+        // document that the server rejects with "unknown operator: $date".
+        let filter = serde_json::json!({ "createdAt": { "$date": iso } });
+        let doc = json_filter_to_document(&filter).unwrap();
+        assert_eq!(doc.get("createdAt"), Some(&Bson::DateTime(expected)));
+
+        // Range operands must be decoded too, otherwise $gte compares against a
+        // sub-document and silently matches nothing.
+        let range = serde_json::json!({ "createdAt": { "$gte": { "$date": iso } } });
+        let range_doc = json_filter_to_document(&range).unwrap();
+        let Some(Bson::Document(op)) = range_doc.get("createdAt") else {
+            panic!("expected operator document");
+        };
+        assert_eq!(op.get("$gte"), Some(&Bson::DateTime(expected)));
     }
 
     #[test]

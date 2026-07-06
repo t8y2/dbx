@@ -39,6 +39,7 @@ import { prestoSqlBuiltinDriverPaths } from "@/lib/database/prestoSqlBuiltinDriv
 import { SQLITE_DATABASE_FILE_EXTENSIONS } from "@/lib/database/databaseFileDetection";
 import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connection/connectionAttemptTimeout";
 import { appendConnectionErrorHints } from "@/lib/connection/connectionErrorHints";
+import { normalizeKafkaBootstrapServers } from "@/lib/connection/kafkaBootstrapServers";
 import { driverInstallProgressPercent, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 import { ArrowLeft, ArrowDown, ArrowUp, CheckSquare, ChevronRight, CircleHelp, Copy, ExternalLink, FilePlus2, FolderOpen, GripVertical, Grid3X3, KeyRound, Link2, List, ListFilter, Loader2, Pencil, Pipette, Plus, Search, ShieldCheck, Square, Trash2 } from "@lucide/vue";
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleDatabaseSelectionIsStale } from "@/lib/connection/connectionVisibleDatabases";
@@ -795,32 +796,6 @@ function requireMqField(value: string, message: string): string {
   return trimmed;
 }
 
-function normalizeMqKafkaBootstrapServer(server: string): string {
-  if (server.includes("://")) {
-    throw new Error("Kafka bootstrap servers must be host:port values without a URL scheme");
-  }
-  let parsed: URL;
-  try {
-    parsed = new URL(`kafka://${server}`);
-  } catch {
-    throw new Error("Kafka bootstrap servers are invalid");
-  }
-  if (!parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash || (parsed.pathname && parsed.pathname !== "/")) {
-    throw new Error("Kafka bootstrap servers are invalid");
-  }
-  return server;
-}
-
-function normalizeMqKafkaBootstrapServers(value: string): string {
-  const servers = requireMqField(value, "Kafka bootstrap servers are required")
-    .split(",")
-    .map((server) => server.trim())
-    .filter(Boolean)
-    .map(normalizeMqKafkaBootstrapServer);
-  if (!servers.length) throw new Error("Kafka bootstrap servers are required");
-  return servers.join(",");
-}
-
 function buildMqAuth(): MqAuth {
   switch (mqAuthKind.value) {
     case "token":
@@ -862,7 +837,7 @@ function buildMqTokenSigning() {
 function buildMqAdminConfig(): MqAdminConfig {
   const systemKind = mqSystemKind.value;
   if (systemKind === "kafka") {
-    const bootstrapServers = normalizeMqKafkaBootstrapServers(mqKafkaBootstrapServers.value);
+    const bootstrapServers = normalizeKafkaBootstrapServers(mqKafkaBootstrapServers.value);
     const extra: Record<string, string> = { bootstrapServers };
     const securityProtocol = mqKafkaSecurityProtocol.value === MQ_KAFKA_SECURITY_PROTOCOL_AUTO ? "" : mqKafkaSecurityProtocol.value.trim();
     const saslMechanism = mqKafkaSaslMechanism.value.trim();
@@ -1107,7 +1082,7 @@ function applyMqAdminUrl(config: LegacyConnectionConfig, adminUrl: string) {
 }
 
 function applyMqKafkaBootstrapServers(config: LegacyConnectionConfig, bootstrapServers: string, securityProtocol?: string) {
-  const first = normalizeMqKafkaBootstrapServers(bootstrapServers).split(",")[0];
+  const first = normalizeKafkaBootstrapServers(bootstrapServers).split(",")[0];
   if (!first) throw new Error("Kafka bootstrap servers are required");
   let parsed: URL;
   try {

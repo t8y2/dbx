@@ -3874,8 +3874,12 @@ export const useConnectionStore = defineStore("connection", () => {
   async function listCompletionTables(connectionId: string, database: string, filter = "", limit?: number, schema?: string): Promise<SqlCompletionTable[]> {
     const trimmedFilter = filter.trim();
     const normalizedFilter = trimmedFilter.toLowerCase();
-    const relaxedFilter = relaxedCompletionTableFilter(normalizedFilter);
-    const cacheKey = `${connectionId}:${database}:${normalizedFilter}:${limit ?? ""}:${schema ?? ""}`;
+    // Remote queries (Dameng/Oracle) are case-sensitive, so the cache key must
+    // preserve original casing — otherwise "TEST" and "test" collide and the
+    // second lookup returns the first's stale results. Local lookups below stay
+    // case-insensitive because tableMatchScore normalizes internally.
+    const relaxedFilter = relaxedCompletionTableFilter(trimmedFilter);
+    const cacheKey = `${connectionId}:${database}:${trimmedFilter}:${limit ?? ""}:${schema ?? ""}`;
     if (completionTablesCache.value[cacheKey]) {
       return completionTablesCache.value[cacheKey];
     }

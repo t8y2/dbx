@@ -14,6 +14,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
 import type { ConnectionConfig, DatabaseType, HttpTunnelConfig, JdbcDriverInfo, JdbcMavenBundleInfo, ProxyTunnelConfig, SshConfigHostEntry, SshTunnelConfig, TransportLayerConfig } from "@/types/database";
+import type { InfluxDbExternalConfig, InfluxDbVersion } from "@/types/influxdb";
 import type { MqAdminConfig, MqAuth, MqSystemKind } from "@/types/mq";
 import type { NacosAdminConfig, NacosAuthConfig } from "@/types/nacos";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
@@ -37,6 +38,8 @@ import { agentDriverInstallKey, appendAgentDriverUpdateHint, hasAgentDriverUpdat
 import { prestoSqlBuiltinDriverPaths } from "@/lib/database/prestoSqlBuiltinDriver";
 import { SQLITE_DATABASE_FILE_EXTENSIONS } from "@/lib/database/databaseFileDetection";
 import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connection/connectionAttemptTimeout";
+import { appendConnectionErrorHints } from "@/lib/connection/connectionErrorHints";
+import { normalizeKafkaBootstrapServers } from "@/lib/connection/kafkaBootstrapServers";
 import { driverInstallProgressPercent, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 import { ArrowLeft, ArrowDown, ArrowUp, CheckSquare, ChevronRight, CircleHelp, Copy, ExternalLink, FilePlus2, FolderOpen, GripVertical, Grid3X3, KeyRound, Link2, List, ListFilter, Loader2, Pencil, Pipette, Plus, Search, ShieldCheck, Square, Trash2 } from "@lucide/vue";
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleDatabaseSelectionIsStale } from "@/lib/connection/connectionVisibleDatabases";
@@ -755,36 +758,42 @@ function hydrateNacosFields(value: unknown) {
   resetNacosFields(value as Partial<NacosAdminConfig>);
 }
 
+const influxDbVersion = ref<InfluxDbVersion>("1");
+const influxDbOrg = ref("");
+
+function resetInfluxDbFields(config?: Partial<InfluxDbExternalConfig>) {
+  influxDbVersion.value = config?.version === "2" ? "2" : "1";
+  influxDbOrg.value = config?.org?.trim() || "";
+}
+
+function hydrateInfluxDbFields(value: unknown) {
+  if (!value || typeof value !== "object") {
+    resetInfluxDbFields();
+    return;
+  }
+  resetInfluxDbFields(value as Partial<InfluxDbExternalConfig>);
+}
+
+function buildInfluxDbExternalConfig(): InfluxDbExternalConfig {
+  if (influxDbVersion.value !== "2") return { version: "1" };
+  const org = influxDbOrg.value.trim();
+  if (!org) throw new Error("InfluxDB 2.x organization is required");
+  if (!form.value.password.trim()) throw new Error("InfluxDB 2.x token is required");
+  if (!form.value.database?.trim()) throw new Error("InfluxDB 2.x bucket is required");
+  return { version: "2", org };
+}
+
+watch(influxDbVersion, (version) => {
+  if (form.value.db_type !== "influxdb") return;
+  if (version === "2") {
+    form.value.username = "";
+  }
+});
+
 function requireMqField(value: string, message: string): string {
   const trimmed = value.trim();
   if (!trimmed) throw new Error(message);
   return trimmed;
-}
-
-function normalizeMqKafkaBootstrapServer(server: string): string {
-  if (server.includes("://")) {
-    throw new Error("Kafka bootstrap servers must be host:port values without a URL scheme");
-  }
-  let parsed: URL;
-  try {
-    parsed = new URL(`kafka://${server}`);
-  } catch {
-    throw new Error("Kafka bootstrap servers are invalid");
-  }
-  if (!parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash || (parsed.pathname && parsed.pathname !== "/")) {
-    throw new Error("Kafka bootstrap servers are invalid");
-  }
-  return server;
-}
-
-function normalizeMqKafkaBootstrapServers(value: string): string {
-  const servers = requireMqField(value, "Kafka bootstrap servers are required")
-    .split(",")
-    .map((server) => server.trim())
-    .filter(Boolean)
-    .map(normalizeMqKafkaBootstrapServer);
-  if (!servers.length) throw new Error("Kafka bootstrap servers are required");
-  return servers.join(",");
 }
 
 function buildMqAuth(): MqAuth {
@@ -828,7 +837,7 @@ function buildMqTokenSigning() {
 function buildMqAdminConfig(): MqAdminConfig {
   const systemKind = mqSystemKind.value;
   if (systemKind === "kafka") {
-    const bootstrapServers = normalizeMqKafkaBootstrapServers(mqKafkaBootstrapServers.value);
+    const bootstrapServers = normalizeKafkaBootstrapServers(mqKafkaBootstrapServers.value);
     const extra: Record<string, string> = { bootstrapServers };
     const securityProtocol = mqKafkaSecurityProtocol.value === MQ_KAFKA_SECURITY_PROTOCOL_AUTO ? "" : mqKafkaSecurityProtocol.value.trim();
     const saslMechanism = mqKafkaSaslMechanism.value.trim();
@@ -918,6 +927,7 @@ function errorMessage(error: unknown): string {
 }
 
 function connectionErrorWithDriverUpdateHint(config: ConnectionConfig, message: string): string {
+  message = appendConnectionErrorHints(config, message, t);
   if (!hasAgentDriverUpdate(config.db_type, agentDrivers.value, config.driver_profile)) return message;
   return appendAgentDriverUpdateHint(message, t("connection.agentDriverUpdateConnectionHint"));
 }
@@ -1072,7 +1082,7 @@ function applyMqAdminUrl(config: LegacyConnectionConfig, adminUrl: string) {
 }
 
 function applyMqKafkaBootstrapServers(config: LegacyConnectionConfig, bootstrapServers: string, securityProtocol?: string) {
-  const first = normalizeMqKafkaBootstrapServers(bootstrapServers).split(",")[0];
+  const first = normalizeKafkaBootstrapServers(bootstrapServers).split(",")[0];
   if (!first) throw new Error("Kafka bootstrap servers are required");
   let parsed: URL;
   try {
@@ -1233,6 +1243,12 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       form.value.connection_string = undefined;
       form.value.url_params = "";
     }
+    if (profile.type === "influxdb") {
+      resetInfluxDbFields();
+      form.value.database = undefined;
+      form.value.password = "";
+      form.value.connection_string = undefined;
+    }
   }
 }
 
@@ -1300,6 +1316,7 @@ watch(
         redis_scan_page_size: config.redis_scan_page_size ?? REDIS_SCAN_PAGE_SIZE_DEFAULT,
         etcd_endpoints: config.etcd_endpoints || "",
         informix_server: config.informix_server || "",
+        external_config: config.external_config,
         read_only: config.read_only || false,
         visible_databases: config.visible_databases,
       };
@@ -1314,6 +1331,11 @@ watch(
         hydrateNacosFields(config.external_config);
       } else {
         resetNacosFields();
+      }
+      if (config.db_type === "influxdb") {
+        hydrateInfluxDbFields(config.external_config);
+      } else {
+        resetInfluxDbFields();
       }
       h2ConnectionMode.value = h2ConnectionModeForConfig(config);
       customColorInput.value = config.color || "";
@@ -1341,6 +1363,7 @@ watch(
       customDriverName.value = "";
       resetMqFields();
       resetNacosFields();
+      resetInfluxDbFields();
       oceanbaseSubMode.value = "mysql";
       h2ConnectionMode.value = "file";
       dremioConnectionMode.value = "legacy";
@@ -1361,7 +1384,11 @@ watch(
   },
 );
 
-const databaseLabel = computed(() => (form.value.db_type === "oracle" ? t("connection.serviceName") : t("connection.database")));
+const databaseLabel = computed(() => {
+  if (form.value.db_type === "oracle") return t("connection.serviceName");
+  if (form.value.db_type === "influxdb" && influxDbVersion.value === "2") return "Bucket";
+  return t("connection.database");
+});
 
 const databasePlaceholder = computed(() => {
   const fallback = defaultDatabaseForProfile();
@@ -1680,7 +1707,7 @@ const postgresTlsMode = computed({
   },
   set: (value: string) => {
     form.value.ssl = value !== "disable";
-    form.value.url_params = setUrlParam(form.value.url_params, "sslmode", value === "prefer" ? "" : value);
+    form.value.url_params = setUrlParam(form.value.url_params, "sslmode", value);
   },
 });
 const postgresRootCertPath = computed({
@@ -1891,6 +1918,7 @@ async function testConnection() {
       mongoDriverMode.value = "legacy";
     }
     testResult.value = { ok: true, message: msg };
+    clearEditedConnectionErrorAfterSuccessfulTest();
   } catch (e: any) {
     if (runId !== testRunId) return;
     const message = connectionErrorWithDriverUpdateHint(config, mongodbAuthFailureHint(String(e)));
@@ -1901,7 +1929,9 @@ async function testConnection() {
       configTab.value = "advanced";
     }
     testResult.value = fallbackMessage ? { ok: true, message: fallbackMessage } : { ok: false, message };
-    if (!fallbackMessage) {
+    if (fallbackMessage) {
+      clearEditedConnectionErrorAfterSuccessfulTest();
+    } else {
       showConnectionError(message);
     }
   } finally {
@@ -1909,6 +1939,10 @@ async function testConnection() {
       isTesting.value = false;
     }
   }
+}
+
+function clearEditedConnectionErrorAfterSuccessfulTest() {
+  if (editingId.value) store.clearConnectionError(editingId.value);
 }
 
 function applyConnectionUrlToForm(input: string): boolean {
@@ -2108,6 +2142,14 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
     config.database = nacosConfig.namespace || undefined;
     config.connection_string = undefined;
     config.url_params = "";
+  } else if (config.db_type === "influxdb") {
+    config.external_config = buildInfluxDbExternalConfig();
+    config.connection_string = undefined;
+    if (influxDbVersion.value === "2") {
+      config.username = "";
+      config.password = config.password.trim();
+      config.database = config.database?.trim() || undefined;
+    }
   } else {
     config.external_config = undefined;
   }
@@ -2350,7 +2392,7 @@ function mysqlTlsModeFromParams(params: string | undefined, ssl: boolean | undef
       return "verify_identity";
   }
 
-  if (!ssl && getUrlParam(params, "require_ssl").toLowerCase() !== "true") return "preferred";
+  if (!ssl && getUrlParam(params, "require_ssl").toLowerCase() !== "true") return "disabled";
   if (getUrlParam(params, "verify_identity").toLowerCase() === "true") return "verify_identity";
   if (getUrlParam(params, "verify_ca").toLowerCase() === "true") return "verify_ca";
   return "required";
@@ -2362,7 +2404,7 @@ function applyMysqlTlsMode(params: string | undefined, mode: string): string {
     return setUrlParam(next, "ssl-mode", "disabled");
   }
   if (mode === "preferred") {
-    return next;
+    return setUrlParam(next, "ssl-mode", "preferred");
   }
 
   next = setUrlParam(next, "require_ssl", "true");
@@ -3039,7 +3081,7 @@ async function save() {
           const message = String(e?.message || e);
           if (message.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
           if (config.one_time) void store.removeConnection(config.id);
-          emit("connectFailed", mongodbAuthFailureHint(message));
+          emit("connectFailed", appendConnectionErrorHints(config, mongodbAuthFailureHint(message), t));
         });
       return;
     }
@@ -3699,6 +3741,10 @@ function openExternalUrl(url: string) {
                       </p>
                     </div>
                   </div>
+                  <div v-if="form.db_type === 'sqlite'" class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.sqliteCipherKey") }}</Label>
+                    <PasswordInput v-model="form.password" class="col-span-3" :placeholder="t('connection.sqliteCipherKeyPlaceholder')" />
+                  </div>
                   <div v-if="form.db_type === 'sqlite'" class="grid grid-cols-4 items-start gap-4">
                     <Label :class="connectionLabelTopClass">{{ t("connection.sqliteExtensions") }}</Label>
                     <div class="col-span-3 space-y-1">
@@ -4199,6 +4245,66 @@ function openExternalUrl(url: string) {
                   </template>
                 </template>
 
+                <!-- InfluxDB: v1 username/password or v2 token/org/bucket -->
+                <template v-else-if="form.db_type === 'influxdb'">
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.version") }}</Label>
+                    <Select v-model="influxDbVersion">
+                      <SelectTrigger class="col-span-3">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="1">InfluxDB 1.x</SelectItem>
+                        <SelectItem value="2">InfluxDB 2.x</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.host") }}</Label>
+                    <Input v-model="form.host" class="col-span-2" />
+                    <Input v-model.number="form.port" type="number" class="col-span-1" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <span />
+                    <label class="col-span-3 flex items-center gap-2 text-sm">
+                      <input type="checkbox" v-model="form.ssl" class="mr-0" />
+                      <span>{{ t("connection.sslEnable") }}</span>
+                    </label>
+                  </div>
+                  <template v-if="influxDbVersion === '2'">
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">Organization</Label>
+                      <Input v-model="influxDbOrg" class="col-span-3" placeholder="my-org" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">Bucket</Label>
+                      <Input v-model="form.database" class="col-span-3" placeholder="my-bucket" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">Token</Label>
+                      <PasswordInput v-model="form.password" class="col-span-3" />
+                    </div>
+                  </template>
+                  <template v-else>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.user") }}</Label>
+                      <Input v-model="form.username" class="col-span-3" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.password") }}</Label>
+                      <PasswordInput v-model="form.password" class="col-span-3" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.database") }}</Label>
+                      <Input v-model="form.database" class="col-span-3" :placeholder="t('connection.databasePlaceholder')" />
+                    </div>
+                  </template>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.urlParams") }}</Label>
+                    <Input v-model="form.url_params" class="col-span-3" :placeholder="influxDbVersion === '2' ? 'precision=ns' : 'epoch=ms'" />
+                  </div>
+                </template>
+
                 <!-- Turso: simplified form (URL + Token) -->
                 <template v-else-if="form.db_type === 'turso'">
                   <div class="grid grid-cols-4 items-center gap-4">
@@ -4316,9 +4422,7 @@ function openExternalUrl(url: string) {
                                 ? 'OAuthType=0;OAuthServiceAcctEmail=svc@project.iam.gserviceaccount.com;OAuthPvtKeyPath=/path/key.json'
                                 : form.db_type === 'informix'
                                   ? 'CLIENT_LOCALE=en_US.utf8;DB_LOCALE=en_US.utf8'
-                                  : form.db_type === 'influxdb'
-                                    ? 'epoch=ms'
-                                    : 'sslmode=disable'
+                                  : 'sslmode=disable'
                       "
                     />
                   </div>
@@ -4488,8 +4592,8 @@ function openExternalUrl(url: string) {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="preferred">{{ t("connection.mysqlTlsModePreferred") }}</SelectItem>
                         <SelectItem value="disabled">{{ t("connection.mysqlTlsModeDisabled") }}</SelectItem>
+                        <SelectItem value="preferred">{{ t("connection.mysqlTlsModePreferred") }}</SelectItem>
                         <SelectItem value="required">{{ t("connection.mysqlTlsModeRequired") }}</SelectItem>
                         <SelectItem value="verify_ca">{{ t("connection.mysqlTlsModeVerifyCa") }}</SelectItem>
                         <SelectItem value="verify_identity">{{ t("connection.mysqlTlsModeVerifyIdentity") }}</SelectItem>

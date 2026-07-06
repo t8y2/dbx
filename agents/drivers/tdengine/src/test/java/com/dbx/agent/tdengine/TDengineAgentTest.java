@@ -98,8 +98,10 @@ class TDengineAgentMetadataTest {
 
         agent.executeQuery("SELECT 1", "power", new ExecuteQueryOptions());
 
+        // JdbcSchemaSwitcher executes the USE statement (recorded as "execute")
+        // before the query runs, so the database is switched prior to execution.
         Assertions.assertEquals(
-            Arrays.asList("setMaxRows:10001", "execute"),
+            Arrays.asList("execute", "setMaxRows:10001", "execute"),
             JdbcAgentFake.calls
         );
     }

@@ -12,6 +12,7 @@ export interface TableAdminSqlOptions {
   databaseType?: DatabaseType;
   schema?: string | null;
   tableName: string;
+  cascade?: boolean;
 }
 
 export type TableChildObjectType = "COLUMN" | "INDEX" | "FOREIGN_KEY" | "TRIGGER";
@@ -83,6 +84,12 @@ export function buildEmptyTableSql(options: TableAdminSqlOptions): Promise<strin
 
 export function buildTruncateTableSql(options: TableAdminSqlOptions): Promise<string> {
   return api.buildTruncateTableSql(options);
+}
+
+const DROP_TABLE_CASCADE_DATABASE_TYPES: readonly DatabaseType[] = ["postgres", "redshift", "gaussdb", "kwdb", "kingbase", "highgo", "vastbase", "opengauss"];
+
+export function supportsDropTableCascade(databaseType?: DatabaseType): boolean {
+  return !!databaseType && DROP_TABLE_CASCADE_DATABASE_TYPES.includes(databaseType);
 }
 
 export function buildDropDatabaseSql(options: DatabaseNameSqlOptions): Promise<string> {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onBeforeUnmount, h } from "vue";
 import { useI18n } from "vue-i18n";
-import { DatabaseZap, FilePlus2, Loader2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, CloudDownload, Package, FileDown } from "@lucide/vue";
+import { DatabaseZap, FilePlus2, Loader2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, CloudDownload, Package, FileDown, FolderTree } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
@@ -28,6 +28,7 @@ const props = defineProps<{
   showAiPanel: boolean;
   showHistory: boolean;
   showSqlLibrary: boolean;
+  showSqlFilePanel: boolean;
   showDriverStore: boolean;
   showSettingsPage: boolean;
   checkingUpdates: boolean;
@@ -44,6 +45,7 @@ const emit = defineEmits<{
   "toggle-ai": [];
   "toggle-history": [];
   "toggle-sql-library": [];
+  "toggle-sql-file-panel": [];
   "open-github": [];
   "open-settings": [];
   "open-driver-store": [];
@@ -447,6 +449,15 @@ const toolbarDropdownTriggerClass = `inline-flex h-8 items-center gap-1 rounded-
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ t("sqlLibrary.title") }}</TooltipContent>
+      </Tooltip>
+
+      <Tooltip>
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0" :class="{ 'bg-accent': showSqlFilePanel }" @click="emit('toggle-sql-file-panel')">
+            <FolderTree class="h-4 w-4" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ t("sqlFileTree.title") }}</TooltipContent>
       </Tooltip>
 
       <Tooltip v-if="toolbarItems.history">

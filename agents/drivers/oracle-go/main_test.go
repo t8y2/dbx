@@ -514,6 +514,26 @@ func TestRewriteOracleXMLTypeSkipsJoins(t *testing.T) {
 	}
 }
 
+func TestOracleColumnTypeNamesContainXMLType(t *testing.T) {
+	tests := []struct {
+		name      string
+		typeNames []string
+		want      bool
+	}{
+		{name: "plain xmltype", typeNames: []string{"NUMBER", "XMLTYPE"}, want: true},
+		{name: "qualified xmltype", typeNames: []string{"SYS.XMLTYPE"}, want: true},
+		{name: "case and spaces", typeNames: []string{" varchar2 ", "sys.xmltype"}, want: true},
+		{name: "ordinary columns", typeNames: []string{"NUMBER", "VARCHAR2", "DATE"}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := oracleColumnTypeNamesContainXMLType(tt.typeNames); got != tt.want {
+				t.Fatalf("oracleColumnTypeNamesContainXMLType(%v) = %v, want %v", tt.typeNames, got, tt.want)
+			}
+		})
+	}
+}
+
 func fakeOracleColumnLoader(columns []oracleColumnMeta) oracleColumnMetaLoader {
 	return func(schema, table string) ([]oracleColumnMeta, error) {
 		if strings.ToUpper(table) != "TEST_LOBS" {

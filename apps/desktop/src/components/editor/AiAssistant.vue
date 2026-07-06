@@ -1,9 +1,39 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, type Component } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch, type Component } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
-import { ArrowUp, ArrowRightLeft, AlertTriangle, Bot, Check, ChevronRight, CircleSlash, Copy, Database, GitBranch, HelpCircle, History, Loader2, MessageSquarePlus, Pencil, Replace, Server, ShieldCheck, Table2, Play, Square, Trash2, Terminal, Wand2, Wrench, X, Zap, TestTube } from "@lucide/vue";
+import {
+  ArrowUp,
+  ArrowRightLeft,
+  AlertTriangle,
+  Bot,
+  Check,
+  ChevronRight,
+  CircleSlash,
+  Copy,
+  Database,
+  GitBranch,
+  HelpCircle,
+  History,
+  Loader2,
+  MessageSquarePlus,
+  Pencil,
+  Replace,
+  Server,
+  ShieldCheck,
+  Table2,
+  Play,
+  Square,
+  Trash2,
+  Terminal,
+  Wand2,
+  Wrench,
+  X,
+  Zap,
+  TestTube,
+  Search,
+} from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -18,7 +48,7 @@ import { connectionIconType } from "@/lib/connection/connectionPresentation";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
-import { buildAiContext, runAgentStream, isVectorDbType, type AiAction } from "@/lib/ai/ai";
+import { buildAiContext, runAgentStream, isVectorDbType, defaultActionForMode, isValidActionForMode, type AiAction, type AiAssistantMode } from "@/lib/ai/ai";
 import { formatAiModelOption } from "@/lib/ai/aiModelPresentation";
 import type { AgentEvent } from "@/lib/backend/tauri";
 import { buildAiAgentPlan } from "@/lib/ai/aiAgentPlan";
@@ -242,7 +272,15 @@ const selectedMentions = ref<AiTableMention[]>([]);
 let mentionTimer: ReturnType<typeof setTimeout> | undefined;
 let mentionRequestId = 0;
 
-const actionButtons: { action: AiAction; icon: Component; key: string }[] = [
+interface AiActionButton {
+  action: AiAction;
+  icon: Component;
+  /** i18n key for the menu label. */
+  key: string;
+}
+
+/** Ask-mode actions: SQL-producing, never auto-run. */
+const askActionButtons: AiActionButton[] = [
   { action: "generate", icon: Wand2, key: "ai.actions.generate" },
   { action: "explain", icon: HelpCircle, key: "ai.actions.explain" },
   { action: "optimize", icon: Zap, key: "ai.actions.optimize" },
@@ -250,6 +288,42 @@ const actionButtons: { action: AiAction; icon: Component; key: string }[] = [
   { action: "convert", icon: ArrowRightLeft, key: "ai.actions.convert" },
   { action: "sampleData", icon: TestTube, key: "ai.actions.sampleData" },
 ];
+
+/** Agent-mode actions: task-oriented, drive tool use and real results. */
+const agentActionButtons: AiActionButton[] = [
+  { action: "query", icon: Search, key: "ai.actions.query" },
+  { action: "exploreSchema", icon: Table2, key: "ai.actions.exploreSchema" },
+  { action: "executeAndExplain", icon: Play, key: "ai.actions.executeAndExplain" },
+  // `generate` is shared with Ask so users can still request SQL-only output without execution.
+  { action: "generate", icon: Wand2, key: "ai.actions.generateNoExec" },
+];
+
+const actionButtons = computed<AiActionButton[]>(() => (assistantMode.value === "agent" ? agentActionButtons : askActionButtons));
+
+// Vector DBs hide the action menu and only expose collection tools (list_collections /
+// browse_collection), never SQL tools. Keep their action at `generate` so the task contract
+// doesn't tell the LLM to call execute_query / produce SQL — neither applies to vector stores.
+function resolveDefaultAction(mode: AiAssistantMode): AiAction {
+  if (props.connection && isVectorDbType(props.connection.db_type)) return "generate";
+  return defaultActionForMode(mode);
+}
+
+// Switching mode is a deliberate context change: land on that mode's default action so the
+// menu and behavior match the new intent (Ask → generate, Agent → query). The shared
+// `generate` action is not carried across because its label/semantics differ per mode
+// ("生成 SQL" vs "生成但不执行").
+//
+// `triggerAction` may set the action itself after programmatically switching mode (e.g. "Fix
+// with AI" invoked from Agent mode); `suppressModeActionReset` tells this watch to skip the
+// default reset so the menu keeps reflecting the action actually being run.
+let suppressModeActionReset = false;
+watch(assistantMode, (mode) => {
+  if (suppressModeActionReset) {
+    suppressModeActionReset = false;
+    return;
+  }
+  activeAction.value = resolveDefaultAction(mode);
+});
 
 function selectAction(action: AiAction) {
   activeAction.value = action;
@@ -344,7 +418,7 @@ const assistantModeItems = computed(() => [
   },
 ]);
 const actionMenuItems = computed(() =>
-  actionButtons.map((button) => ({
+  actionButtons.value.map((button) => ({
     value: button.action,
     label: t(button.key),
     icon: button.icon,
@@ -932,7 +1006,7 @@ async function send() {
       if (msg && requestedMode === "agent") msg.agentSteps = buildAiAgentStepItems(agentPlan);
       if (agentPlan.handoffSql) emit("requestAutoExecuteSql", agentPlan.handoffSql);
     }
-    activeAction.value = "generate";
+    activeAction.value = resolveDefaultAction(assistantMode.value);
     currentSessionId.value = "";
     // Apply deferred context compaction after streaming so assistantIdx stays stable.
     // Visible chat history is kept for the user; future LLM history starts from this hidden summary.
@@ -1128,6 +1202,15 @@ onUnmounted(() => {
 });
 
 function triggerAction(action: AiAction, instruction?: string) {
+  // External Ask-style entry points (Fix with AI, Explain history) produce/analyze SQL text.
+  // If the assistant is currently in Agent mode where those actions aren't offered, switch to
+  // Ask mode so the action is valid and the menu reflects what actually runs.
+  if (!isValidActionForMode(action, assistantMode.value)) {
+    // Suppress the mode-switch watch so it doesn't overwrite `action` (set below) with the
+    // Ask default — the menu must reflect the action actually being run.
+    suppressModeActionReset = true;
+    assistantMode.value = "ask";
+  }
   activeAction.value = action;
   if (instruction) prompt.value = instruction;
   send();

@@ -97,4 +97,54 @@ describe("semantic SQL completion candidates", () => {
     expect(context.insertTable).toBe("users");
     expect(items.find((item) => item.type === "snippet" && item.label === "users.*")?.apply).toBe("id, name, email");
   });
+
+  it("keeps partial INSERT INTO targets in table completion context", () => {
+    const { context, items } = semanticCompletion("INSERT INTO ex|", {
+      tables: [
+        { name: "express", type: "table" },
+        { name: "orders", type: "table" },
+      ],
+    });
+
+    expect(context.suggestTables).toBe(true);
+    expect(context.exclusiveTableSuggestions).toBe(true);
+    expect(context.suggestColumns).toBe(false);
+    expect(context.referencedTables).toEqual([]);
+    expect(items.filter((item) => item.type === "table").map((item) => item.label)).toEqual(["express"]);
+  });
+
+  it("keeps partial SELECT FROM targets in table completion context", () => {
+    const { context, items } = semanticCompletion("SELECT * FROM ex|", {
+      tables: [
+        { name: "express", type: "table" },
+        { name: "orders", type: "table" },
+      ],
+    });
+
+    expect(context.suggestTables).toBe(true);
+    expect(context.exclusiveTableSuggestions).toBe(true);
+    expect(context.qualifier).toBeUndefined();
+    expect(context.qualifierParts).toBeUndefined();
+    expect(items.filter((item) => item.type === "table").map((item) => item.label)).toEqual(["express"]);
+  });
+
+  it("keeps JOIN modifier completion in keyword context", () => {
+    const { context, items } = semanticCompletion("SELECT * FROM users left |", {
+      tables: [{ name: "orders", type: "table" }],
+    });
+
+    expect(context.suggestTables).toBe(false);
+    expect(context.preferredKeywords).toContain("JOIN");
+    expect(items[0]?.label).toBe("JOIN");
+    expect(items.some((item) => item.type === "table")).toBe(false);
+  });
+
+  it("keeps table completion after completed LEFT JOIN", () => {
+    const { context, items } = semanticCompletion("SELECT * FROM users left join |", {
+      tables: [{ name: "orders", type: "table" }],
+    });
+
+    expect(context.suggestTables).toBe(true);
+    expect(items.filter((item) => item.type === "table").map((item) => item.label)).toEqual(["orders"]);
+  });
 });

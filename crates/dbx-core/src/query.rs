@@ -937,6 +937,30 @@ async fn configured_operation_budget_for_pool_key(state: &AppState, pool_key: &s
         .unwrap_or_else(DbOperationBudget::with_defaults)
 }
 
+fn oceanbase_mysql_session_timeout_sql(config: Option<&ConnectionConfig>, timeout_secs: Option<u64>) -> Option<String> {
+    let config = config?;
+    let timeout_secs = timeout_secs.unwrap_or(config.query_timeout_secs);
+    crate::connection::oceanbase_mysql_query_timeout_sql(config, timeout_secs)
+}
+
+async fn apply_oceanbase_mysql_session_timeout(
+    state: &AppState,
+    pool_key: &str,
+    conn: &mut mysql_async::Conn,
+    timeout_secs: Option<u64>,
+) -> Result<(), String> {
+    let sql = {
+        let configs = state.configs.read().await;
+        oceanbase_mysql_session_timeout_sql(crate::connection::config_for_pool_key(pool_key, &configs), timeout_secs)
+    };
+    if let Some(sql) = sql {
+        // OceanBase enforces query timeouts through a session variable; set it
+        // on the checked-out connection in case the pooled session was reset.
+        conn.query_drop(&sql).await.map_err(|err| format!("Failed to apply OceanBase query timeout: {err}"))?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn do_execute(
     state: &AppState,
@@ -1075,6 +1099,7 @@ pub async fn do_execute(
                     });
                 });
             }
+            apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, options.timeout_secs).await?;
             wait_for_query_opt(
                 cancel_token,
                 query_timeout,
@@ -1764,6 +1789,8 @@ async fn execute_multi_mysql(
     };
     let mut results = Vec::with_capacity(statements.len());
 
+    apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, options.timeout_secs).await?;
+
     for stmt in statements {
         if is_canceled(&cancel_token) {
             results.push(error_query_result(canceled_error()));
@@ -2096,7 +2123,7 @@ pub async fn execute_statements_in_transaction(
             exec_tx_pg_inner(pool, statements, schema, start, operation_budget.clone(), cancel_context).await
         }
         Some(TxPath::Mysql(pool, _bare)) => {
-            exec_tx_mysql_inner(pool, statements, start, operation_budget.clone()).await
+            exec_tx_mysql_inner(state, &pool_key, pool, statements, start, operation_budget.clone()).await
         }
         Some(TxPath::Sqlite(pool)) => exec_tx_sqlite_inner(pool, statements, start).await,
         Some(TxPath::Explicit) => {
@@ -2221,12 +2248,15 @@ async fn exec_tx_pg_statements(
 }
 
 async fn exec_tx_mysql_inner(
+    state: &AppState,
+    pool_key: &str,
     pool: mysql_async::Pool,
     statements: &[String],
     start: std::time::Instant,
     budget: DbOperationBudget,
 ) -> Result<db::QueryResult, String> {
     let mut conn = db::mysql::get_conn_with_health_check_with_timeout(&pool, budget.checkout_timeout).await?;
+    apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, None).await?;
     mysql_query_drop_with_timeout(
         &mut conn,
         "START TRANSACTION",
@@ -2912,6 +2942,37 @@ mod tests {
     fn agent_execute_batch_unsupported_ignores_unrelated_errors() {
         assert!(!is_agent_execute_batch_unsupported("ORA-00955: name is already used by an existing object"));
         assert!(!is_agent_execute_batch_unsupported("Agent RPC error (-1): unknown method: execute_query"));
+    }
+
+    #[test]
+    fn oceanbase_mysql_session_timeout_sql_uses_connection_timeout_by_default() {
+        let mut config = test_connection_config(DatabaseType::Mysql);
+        config.driver_profile = Some("oceanbase".to_string());
+        config.query_timeout_secs = 300_000;
+
+        assert_eq!(
+            oceanbase_mysql_session_timeout_sql(Some(&config), None),
+            Some("SET ob_query_timeout = 300000000000".to_string())
+        );
+    }
+
+    #[test]
+    fn oceanbase_mysql_session_timeout_sql_prefers_execution_timeout_override() {
+        let mut config = test_connection_config(DatabaseType::Mysql);
+        config.driver_profile = Some("oceanbase".to_string());
+        config.query_timeout_secs = 30;
+
+        assert_eq!(
+            oceanbase_mysql_session_timeout_sql(Some(&config), Some(600)),
+            Some("SET ob_query_timeout = 600000000".to_string())
+        );
+    }
+
+    #[test]
+    fn oceanbase_mysql_session_timeout_sql_skips_plain_mysql() {
+        let config = test_connection_config(DatabaseType::Mysql);
+
+        assert_eq!(oceanbase_mysql_session_timeout_sql(Some(&config), Some(600)), None);
     }
 
     #[tokio::test]

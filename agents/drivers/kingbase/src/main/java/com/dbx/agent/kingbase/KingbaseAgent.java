@@ -49,19 +49,34 @@ public final class KingbaseAgent extends PostgresLikeAgent {
     @Override
     public List<DatabaseInfo> listDatabases() {
         return unchecked(() -> {
-            String sql = isMysqlCompatMode()
-                ? "SELECT current_database() AS database_name"
-                : "SELECT datname AS database_name FROM sys_database WHERE datistemplate = false ORDER BY datname";
-            try (PreparedStatement stmt = requireConnected().prepareStatement(sql);
-                 ResultSet rs = stmt.executeQuery()) {
-                List<DatabaseInfo> result = new ArrayList<>();
-                while (rs.next()) {
-                    result.add(new DatabaseInfo(rs.getString("database_name")));
-                }
+            if (isMysqlCompatMode()) {
+                List<DatabaseInfo> result = queryDatabases("SELECT current_database() AS database_name");
                 if (!result.isEmpty()) return result;
+            }
+            for (String sql : List.of(
+                "SELECT datname AS database_name FROM sys_catalog.sys_database WHERE datistemplate = false ORDER BY datname",
+                "SELECT datname AS database_name FROM pg_database WHERE datistemplate = false ORDER BY datname"
+            )) {
+                try {
+                    List<DatabaseInfo> result = queryDatabases(sql);
+                    if (!result.isEmpty()) return result;
+                } catch (Exception ignored) {
+                    // Kingbase catalog names differ across compatibility modes and versions.
+                }
             }
             return Collections.singletonList(new DatabaseInfo(getConfiguredDatabase()));
         });
+    }
+
+    private List<DatabaseInfo> queryDatabases(String sql) throws Exception {
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql);
+             ResultSet rs = stmt.executeQuery()) {
+            List<DatabaseInfo> result = new ArrayList<>();
+            while (rs.next()) {
+                result.add(new DatabaseInfo(rs.getString("database_name")));
+            }
+            return result;
+        }
     }
 
     @Override
@@ -542,7 +557,10 @@ public final class KingbaseAgent extends PostgresLikeAgent {
 
     @Override
     public String setSchemaSQL(String schema) {
-        return "SET search_path TO " + JdbcIdentifiers.INSTANCE.doubleQuote(effectiveSchema(schema));
+        // Kingbase searches sys_catalog implicitly before user schemas unless it
+        // is listed explicitly. Put it after the selected schema so business
+        // tables named like system tables (for example sys_config) win.
+        return "SET search_path TO " + JdbcIdentifiers.INSTANCE.doubleQuote(effectiveSchema(schema)) + ", sys_catalog";
     }
 
     @Override

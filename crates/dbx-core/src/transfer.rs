@@ -19,6 +19,7 @@ static CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
 
 const MAX_TRANSFER_WRITE_SQL_BYTES: usize = 512 * 1024;
 const MAX_SQLSERVER_INSERT_ROWS: usize = 1000;
+const MAX_ORACLE_INSERT_ALL_ROWS: usize = 500;
 const MAX_ORACLE_MERGE_ROWS: usize = 500;
 const TRANSFER_TARGET_TABLE_LOOKUP_LIMIT: usize = 1000;
 
@@ -1590,6 +1591,15 @@ pub fn generate_insert_typed(
     let col_list = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
 
     let value_rows = value_rows_sql(rows, column_types, db_type);
+    if matches!(db_type, DatabaseType::Oracle) && rows.len() > 1 {
+        // Oracle 11g does not accept comma-separated multi-row VALUES lists.
+        let into_rows = value_rows
+            .iter()
+            .map(|values| format!("INTO {full_table} ({col_list}) VALUES {values}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return format!("INSERT ALL\n{into_rows}\nSELECT 1 FROM dual");
+    }
 
     format!("INSERT INTO {full_table} ({col_list}) VALUES\n{}", value_rows.join(",\n"))
 }
@@ -1770,6 +1780,7 @@ fn max_transfer_write_rows(db_type: &DatabaseType, mode: &TransferMode) -> usize
     match (db_type, mode) {
         (DatabaseType::SqlServer, TransferMode::Append | TransferMode::Overwrite) => MAX_SQLSERVER_INSERT_ROWS,
         (DatabaseType::Hive, _) => 500,
+        (DatabaseType::Oracle, TransferMode::Append | TransferMode::Overwrite) => MAX_ORACLE_INSERT_ALL_ROWS,
         (DatabaseType::Oracle, TransferMode::Upsert) => MAX_ORACLE_MERGE_ROWS,
         _ => usize::MAX,
     }
@@ -5584,6 +5595,64 @@ mod tests {
             r#"INSERT INTO `files` (`path`) VALUES
 ('C:\\tmp\\file.txt')"#
         );
+    }
+
+    #[test]
+    fn oracle_single_row_insert_keeps_values_shape() {
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("name")],
+            &[Some(String::from("number")), Some(String::from("varchar2(64)"))],
+            &[vec![json!(1), json!("Ada")]],
+            "INSTR_CATEGORY",
+            "APP",
+            &DatabaseType::Oracle,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT INTO "APP"."INSTR_CATEGORY" ("id", "name") VALUES
+(1, 'Ada')"#
+        );
+    }
+
+    #[test]
+    fn oracle_multi_row_insert_uses_insert_all() {
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("name")],
+            &[Some(String::from("number")), Some(String::from("varchar2(64)"))],
+            &[vec![json!(1), json!("Ada")], vec![json!(2), json!("O'Brien")]],
+            "INSTR_CATEGORY",
+            "APP",
+            &DatabaseType::Oracle,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT ALL
+INTO "APP"."INSTR_CATEGORY" ("id", "name") VALUES (1, 'Ada')
+INTO "APP"."INSTR_CATEGORY" ("id", "name") VALUES (2, 'O''Brien')
+SELECT 1 FROM dual"#
+        );
+    }
+
+    #[test]
+    fn oracle_transfer_write_batches_limit_insert_all_rows() {
+        let rows = (0..(MAX_ORACLE_INSERT_ALL_ROWS + 1)).map(|index| vec![json!(index)]).collect::<Vec<_>>();
+        let statements = generate_transfer_write_sql_batches(
+            &TransferMode::Append,
+            &[String::from("id")],
+            &[Some(String::from("number"))],
+            &rows,
+            "INSTR_CATEGORY",
+            "APP",
+            &DatabaseType::Oracle,
+            &[],
+        );
+
+        assert_eq!(statements.len(), 2);
+        assert_eq!(statements[0].matches("\nINTO ").count(), MAX_ORACLE_INSERT_ALL_ROWS);
+        assert!(statements[0].starts_with("INSERT ALL\nINTO "));
+        assert!(statements[0].ends_with("SELECT 1 FROM dual"));
     }
 
     #[test]

@@ -52,6 +52,23 @@ export interface UseDataGridExportOptions {
   hasRowSelection: ComputedRef<boolean>;
   fullExportResult?: (onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => Promise<QueryResult | undefined>;
   queryResultExportRequest?: (options: { exportId: string; filePath: string; format: "csv" | "xlsx" }) => Promise<QueryResultExportRequest | undefined>;
+  /**
+   * True when the in-memory result already holds the complete result set —
+   * i.e. the query ran without server-side pagination, was not truncated, and
+   * has no further pages. When true, full-result exports skip the re-executing
+   * backend/frontend streaming paths and write the local rows directly, so a
+   * slow query is never re-run just to export rows that are already on screen.
+   */
+  hasCompleteLocalResult?: ComputedRef<boolean>;
+  /**
+   * The raw in-memory QueryResult to use for "export all" when
+   * hasCompleteLocalResult is true. Exports the original query result (all
+   * rows, all columns, committed values) so the output matches the original
+   * re-run-SQL semantics — displayItems only covers visible columns and
+   * reflects client-side filters/search and unsaved edits, which would
+   * silently change what "export all data" produces.
+   */
+  completeLocalResult?: ComputedRef<QueryResult | undefined>;
   allExportResults?: ComputedRef<Array<{ sheetName: string; result: QueryResult }> | undefined>;
   currentResultLabel?: ComputedRef<string | undefined>;
   exportFileBaseName?: ComputedRef<string | undefined>;
@@ -122,6 +139,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     hasRowSelection,
     fullExportResult,
     queryResultExportRequest,
+    hasCompleteLocalResult,
+    completeLocalResult,
     allExportResults,
     currentResultLabel,
     exportFileBaseName,
@@ -146,9 +165,17 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   async function resultToExport(rowIds?: number[], onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void, useFullExport = true): Promise<{ columns: string[]; rows: CellValue[][] }> {
-    if (useFullExport && rowIds === undefined && fullExportResult) {
+    if (useFullExport && rowIds === undefined && fullExportResult && !hasCompleteLocalResult?.value) {
       const result = await fullExportResult(onProgress);
       if (result) return { columns: result.columns, rows: result.rows };
+    }
+    // The full result is already in memory — export the raw QueryResult (all
+    // rows, all columns, committed values) so "export all data" matches the
+    // original re-run-SQL semantics. displayItems only covers visible columns
+    // and reflects client-side filters/search and unsaved edits, which would
+    // silently change what the export contains.
+    if (useFullExport && rowIds === undefined && hasCompleteLocalResult?.value && completeLocalResult?.value) {
+      return { columns: completeLocalResult.value.columns, rows: completeLocalResult.value.rows };
     }
     return {
       columns: columns.value,
@@ -512,7 +539,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         if (await exportQueryResultViaBackend("csv", rowIds)) return;
         if (await exportFullTableDataViaBackend("csv", rowIds)) return;
 
-        const needsFullExport = rowIds === undefined && !!fullExportResult;
+        const needsFullExport = rowIds === undefined && !!fullExportResult && !hasCompleteLocalResult?.value;
         if (needsFullExport && exportProgressDialog && exportProgressState) {
           exportProgressState.value = {
             title: t("exportProgress.title"),
@@ -716,7 +743,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           if (!path) return;
           outputPath = path as string;
         }
-        const needsFullExport = rowIds === undefined && !!fullExportResult;
+        const needsFullExport = rowIds === undefined && !!fullExportResult && !hasCompleteLocalResult?.value;
         if (needsFullExport && exportProgressDialog && exportProgressState) {
           exportProgressState.value = {
             title: t("exportProgress.title"),
@@ -908,6 +935,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     if (rowIds !== undefined || context.value !== "results" || !queryResultExportRequest) {
       return false;
     }
+    // The full result is already in memory — don't re-execute the query on the
+    // backend just to stream the same rows back to a file.
+    if (hasCompleteLocalResult?.value) return false;
 
     const extension = format;
     const filterName = format === "csv" ? "CSV" : "Excel";

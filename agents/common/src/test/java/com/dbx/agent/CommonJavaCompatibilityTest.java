@@ -303,6 +303,29 @@ class CommonJavaCompatibilityTest {
     }
 
     @Test
+    void metadataConstraintsMatchTableAndObjectComments() {
+        MetadataListConstraints tableConstraints =
+            new MetadataListConstraints("account", null, null, Collections.singletonList("TABLE"));
+        List<TableInfo> tables = tableConstraints.filterTables(Arrays.asList(
+            new TableInfo("orders", "TABLE", "sales archive"),
+            new TableInfo("profile", "TABLE", "customer account data"),
+            new TableInfo("account_view", "VIEW", "ignored by type")
+        ));
+        assertEquals(1, tables.size());
+        assertEquals("profile", tables.get(0).getName());
+
+        MetadataListConstraints objectConstraints =
+            new MetadataListConstraints("revenue", null, null, Collections.singletonList("VIEW"));
+        List<ObjectInfo> objects = objectConstraints.filterObjects(Arrays.asList(
+            new ObjectInfo("order_view", "VIEW", "public", "monthly revenue summary"),
+            new ObjectInfo("sync_user", "PROCEDURE", "public", "sync revenue data"),
+            new ObjectInfo("audit_log", "TABLE", "public", "audit records")
+        ));
+        assertEquals(1, objects.size());
+        assertEquals("order_view", objects.get(0).getName());
+    }
+
+    @Test
     void executesTransactionsOneByOneWhenJdbcDriverDoesNotSupportTransactions() {
         List<String> calls = new ArrayList<>();
         DatabaseAgent agent = new TransactionAgent(nonTransactionalConnection(calls));
@@ -311,7 +334,7 @@ class CommonJavaCompatibilityTest {
 
         assertEquals(2L, result.getAffected_rows());
         assertEquals(
-            Arrays.asList("supportsTransactions", "setSchema:APP", "executeUpdate:UPDATE A SET ID = 1", "executeUpdate:UPDATE B SET ID = 2"),
+            Arrays.asList("supportsTransactions", "execute:SET SCHEMA \"APP\"", "executeUpdate:UPDATE A SET ID = 1", "executeUpdate:UPDATE B SET ID = 2"),
             calls
         );
     }

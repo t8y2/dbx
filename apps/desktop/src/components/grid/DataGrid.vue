@@ -1,6 +1,4 @@
 <script lang="ts">
-import { ref, shallowRef } from "vue";
-const globalDdlOpen = ref(false);
 type CachedStructuredFilterRule = {
   id: string;
   columnName: string;
@@ -19,7 +17,7 @@ const structuredFilterStateCache = new Map<string, StructuredFilterCacheState>()
 </script>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, onActivated, onDeactivated, useSlots, watch, defineAsyncComponent, type Component, type CSSProperties } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, onActivated, onDeactivated, ref, shallowRef, useSlots, watch, defineAsyncComponent, type Component, type CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
 import {
   ArrowUp,
@@ -109,7 +107,7 @@ import {
   visibleTransposeRecordWindow,
 } from "@/lib/dataGrid/dataGridTranspose";
 import { canApplyGridSelectionValue, canDeleteGridRowItem, canEditGridCellDetail, matchesRowStatusFilter, shouldShowQuickEntryDraftRow, type RowStatus, type RowStatusFilter } from "@/lib/dataGrid/gridRowStatus";
-import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
+import { displayCellValue, firstLineCellDisplayValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import { getApplicablePreviewActions } from "@/lib/dataGrid/resultPreviewRegistry";
 import "@/lib/dataGrid/geometryMapPreview";
 import { BINARY_CELL_DOWNLOAD_MODES, binaryCellDisplayText, binaryCellDownloadFileName, binaryCellDownloadPayload, canDownloadBinaryCellValue, downloadBinaryCellPayload, isBinaryCellColumnType, parseBinaryCellBytes, type BinaryCellDownloadMode } from "@/lib/dataGrid/binaryCellDownload";
@@ -3278,6 +3276,10 @@ const hasKnownTotalRowCount = computed(() => typeof serverKnownTotalRowCount.val
 // rowCount IS the total. Without this hint, the "page is full → assume more"
 // fallback in canGoNextDataGridPage lets the user keep clicking next forever.
 const allRowsLoaded = computed(() => isResultsContext.value && props.pageLimit === undefined);
+// True when the in-memory result already holds the complete result set (results
+// context, no server-side pagination, not truncated, no further pages). Used to
+// skip re-executing the query on export and instead write the local rows.
+const hasCompleteLocalResult = computed(() => !!props.result && allRowsLoaded.value && props.result.truncated !== true && props.result.has_more !== true);
 const canGoNextPage = computed(() => {
   return canGoNextDataGridPage({
     hasMore: props.result.has_more,
@@ -5827,6 +5829,8 @@ const {
   hasRowSelection,
   fullExportResult: props.fullExportResult,
   queryResultExportRequest: props.queryResultExportRequest,
+  hasCompleteLocalResult,
+  completeLocalResult: computed(() => (hasCompleteLocalResult.value ? props.result : undefined)),
   allExportResults: computed(() => props.allExportResults),
   currentResultLabel: computed(() => props.result.sourceLabel),
   exportFileBaseName: computed(() => props.exportFileBaseName),
@@ -7287,7 +7291,9 @@ function clampCellDetailPanelSize(value: number, layout = cellDetailPanelLayout.
   const max = layout === "bottom" ? CELL_DETAIL_PANEL_MAX_HEIGHT : DRAWER_MAX_WIDTH;
   return Math.min(Math.max(value, min), max);
 }
-const showTableInfo = globalDdlOpen;
+// Table info drawers are tied to a single grid instance. Keeping this state
+// module-global leaks the drawer into other kept-alive tabs.
+const showTableInfo = ref(false);
 const activeTableInfoTab = ref<TableInfoTab>("columns");
 const ddlContent = ref("");
 const ddlLoading = ref(false);
@@ -8838,7 +8844,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         <template v-if="draftCellPlaceholder(displayItems[cell.recordIndex], cell.valueIndex)">
                           <span class="text-muted-foreground/70 italic">{{ draftCellPlaceholder(displayItems[cell.recordIndex], cell.valueIndex) }}</span>
                         </template>
-                        <template v-else>{{ cell.display }}</template>
+                        <template v-else>{{ firstLineCellDisplayValue(cell.display) }}</template>
                         <div v-if="cellDetailButtonVisible(cell.recordIndex, cell.valueIndex)" class="absolute right-2 top-0.5 flex items-center gap-1">
                           <LightDropdownMenu
                             v-if="canQuickDownloadCellValue(cell.recordIndex, cell.valueIndex)"
@@ -9455,7 +9461,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         <template v-if="draftCellPlaceholder(item, col.actualColIdx)">
                           <span class="text-muted-foreground/70 italic">{{ draftCellPlaceholder(item, col.actualColIdx) }}</span>
                         </template>
-                        <template v-else>{{ formatCellCached(item.data[col.actualColIdx], col.actualColIdx) }}</template>
+                        <template v-else>{{ firstLineCellDisplayValue(formatCellCached(item.data[col.actualColIdx], col.actualColIdx)) }}</template>
                         <div v-if="cellDetailButtonVisible(item.displayIndex, col.actualColIdx)" class="absolute right-2 top-0.5 flex items-center gap-1">
                           <LightDropdownMenu
                             v-if="canQuickDownloadCellValue(item.displayIndex, col.actualColIdx)"
@@ -10336,7 +10342,18 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
           <p class="text-sm text-muted-foreground">
             {{ t("grid.bulkEditDescription", { count: selectedCellCount }) }}
           </p>
-          <Input v-model="bulkEditValue" :placeholder="t('grid.bulkEditValuePlaceholder')" @keydown.enter.prevent="applyBulkEditValue" />
+          <textarea
+            v-model="bulkEditValue"
+            autocapitalize="off"
+            autocomplete="off"
+            autocorrect="off"
+            spellcheck="false"
+            rows="5"
+            class="min-h-24 w-full min-w-0 resize-y rounded-[6px] border border-input bg-transparent px-2.5 py-1.5 text-base outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 md:text-sm"
+            :placeholder="t('grid.bulkEditValuePlaceholder')"
+            @keydown.ctrl.enter.prevent="applyBulkEditValue"
+            @keydown.meta.enter.prevent="applyBulkEditValue"
+          />
         </div>
         <DialogFooter>
           <Button variant="outline" @click="bulkEditDialogOpen = false">{{ t("dangerDialog.cancel") }}</Button>

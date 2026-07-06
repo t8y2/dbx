@@ -58,4 +58,16 @@ describe("requiresDatabaseSelection", () => {
   it("still requires a database for ordinary MySQL queries", () => {
     expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "SELECT * FROM users")).toBe(true);
   });
+
+  it("allows HANA with default database (empty string) to execute queries", () => {
+    expect(requiresDatabaseSelection(queryTab(""), connection("saphana"), "SELECT * FROM MOMX_MES.Z_SHIPMENT_INFORMATION")).toBe(false);
+  });
+
+  it("allows JDBC with default database (empty string) to execute queries", () => {
+    expect(requiresDatabaseSelection(queryTab(""), connection("jdbc"), "SELECT * FROM users")).toBe(false);
+  });
+
+  it("allows PostgreSQL with default database (empty string) to execute queries", () => {
+    expect(requiresDatabaseSelection(queryTab(""), connection("postgres"), "SELECT * FROM public.users")).toBe(false);
+  });
 });

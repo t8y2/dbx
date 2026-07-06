@@ -65,23 +65,25 @@ END;
 /
 SELECT 1;`;
 
-const mysqlProcedureDelimiterFixture = `DELIMITER $$
-
-CREATE PROCEDURE sync_user_status()
+const mysqlRoutineFixture = `CREATE PROCEDURE p()
 BEGIN
-  UPDATE users
-  SET status = 'inactive'
-  WHERE last_login_at < DATE_SUB(NOW(), INTERVAL 180 DAY);
+  SELECT 1;
+  IF 1 = 1 THEN
+    SELECT 'ok';
+  END IF;
+END;
+SELECT 2;`;
 
-  INSERT INTO audit_logs(action, created_at)
-  VALUES ('sync_user_status', NOW());
-END$$
-
-DELIMITER ;
-
-CALL sync_user_status();
-
-SELECT * FROM audit_logs ORDER BY id DESC LIMIT 10;`;
+const mysqlRoutineWithLoopsFixture = `CREATE PROCEDURE p_loop()
+BEGIN
+  WHILE 1 = 0 DO
+    SELECT 'while; still body';
+  END WHILE;
+  REPEAT
+    SELECT 'repeat; still body';
+  UNTIL 1 = 1 END REPEAT;
+END;
+SELECT 2;`;
 
 describe("splitSqlStatementRanges", () => {
   it("splits multiple top-level statements", () => {
@@ -145,17 +147,17 @@ describe("splitSqlStatementRanges", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(sql, "mysql"))).toEqual(["select COUNT(1) FROM your_table", "select COUNT(1) FROM your_table;"]);
   });
 
-  it("keeps Oracle PL/SQL blocks together and treats slash lines as delimiters", () => {
-    const ranges = splitSqlStatementRanges(oraclePlSqlFixture, "oracle");
-    expect(rangeSqlTexts(ranges)).toEqual([oraclePlSqlFixture.slice(0, oraclePlSqlFixture.indexOf("\n/")), "SELECT 1"]);
-    expect(ranges[0].sql).toContain("v_order_count NUMBER;");
-    expect(ranges[0].sql).toContain("END;");
-    expect(ranges[0].sql).not.toContain("\n/");
+  it("keeps MySQL routine blocks together without delimiter commands", () => {
+    const ranges = splitSqlStatementRanges(mysqlRoutineFixture, "mysql");
+    expect(rangeSqlTexts(ranges)).toEqual([mysqlRoutineFixture.slice(0, mysqlRoutineFixture.indexOf("\nSELECT 2;")).replace(/;$/, "").trim(), "SELECT 2"]);
+    expect(ranges[0].sql).toContain("SELECT 1;");
+    expect(ranges[0].sql).toContain("END IF;");
+    expect(ranges[0].sql).not.toMatch(/END;$/);
   });
 
-  it("keeps MySQL delimiter procedure bodies together", () => {
-    const procedureSql = mysqlProcedureDelimiterFixture.slice(mysqlProcedureDelimiterFixture.indexOf("CREATE"), mysqlProcedureDelimiterFixture.indexOf("$$\n\nDELIMITER"));
-    expect(rangeSqlTexts(splitSqlStatementRanges(mysqlProcedureDelimiterFixture, "mysql"))).toEqual([procedureSql, "CALL sync_user_status()", "SELECT * FROM audit_logs ORDER BY id DESC LIMIT 10"]);
+  it("does not merge regular MySQL transaction statements as routine blocks", () => {
+    const sql = "BEGIN; INSERT INTO t VALUES (1); COMMIT;";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "mysql"))).toEqual(["BEGIN", "INSERT INTO t VALUES (1)", "COMMIT"]);
   });
 
   it("treats SQL Server GO lines as batch delimiters", () => {
@@ -166,6 +168,14 @@ describe("splitSqlStatementRanges", () => {
   it("does not treat GO inside strings or comments as a SQL Server batch delimiter", () => {
     const sql = "SELECT 'GO'\n-- GO\nSELECT 2\nGO\nSELECT 3";
     expect(rangeSqlTexts(splitSqlStatementRanges(sql, "sqlserver"))).toEqual(["SELECT 'GO'\n-- GO\nSELECT 2", "SELECT 3"]);
+  });
+
+  it("keeps Oracle PL/SQL blocks together and treats slash lines as delimiters", () => {
+    const ranges = splitSqlStatementRanges(oraclePlSqlFixture, "oracle");
+    expect(rangeSqlTexts(ranges)).toEqual([oraclePlSqlFixture.slice(0, oraclePlSqlFixture.indexOf("\n/")), "SELECT 1"]);
+    expect(ranges[0].sql).toContain("v_order_count NUMBER;");
+    expect(ranges[0].sql).toContain("END;");
+    expect(ranges[0].sql).not.toContain("\n/");
   });
 });
 
@@ -236,6 +246,21 @@ describe("statementRangeAtCursor", () => {
     const sql = "SELECT 1\nSELECT 2;\nSELECT 3;";
     const range = statementRangeAtCursor(sql, indexOf(sql, "2"));
     expect(range?.sql.trim()).toBe("SELECT 2");
+  });
+
+  it("keeps newline set-operation SELECT operands with the cursor statement", () => {
+    const sql = "select * from tbA\nunion\nselect * from tbB";
+    const expected = "select * from tbA\nunion\nselect * from tbB";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "tbA"))?.sql.trim()).toBe(expected);
+    expect(statementRangeAtCursor(sql, indexOf(sql, "tbB"))?.sql.trim()).toBe(expected);
+  });
+
+  it("keeps newline set-operation operands with ALL modifiers together", () => {
+    const sql = "select * from tbA\nunion all\nselect * from tbB\nSELECT * FROM logs;";
+    const range = statementRangeAtCursor(sql, indexOf(sql, "tbA"));
+
+    expect(range?.sql.trim()).toBe("select * from tbA\nunion all\nselect * from tbB");
   });
 
   it("keeps a multi-line select together when continuation lines do not start statements", () => {
@@ -377,16 +402,9 @@ WHERE request_json LIKE '%"paperFlag":null%';`;
     expect(statementRangeAtCursor(sql, indexOf(sql, "delimiter"), "mysql")).toBeNull();
   });
 
-  it("returns the full Oracle PL/SQL block for cursors inside nested statements", () => {
-    const range = statementRangeAtCursor(oraclePlSqlFixture, indexOf(oraclePlSqlFixture, "ORDERS_10K", 2), "oracle");
-    expect(range?.sql.trim()).toBe(oraclePlSqlFixture.slice(0, oraclePlSqlFixture.indexOf("\n/")));
-  });
-
-  it("returns the full MySQL procedure definition for cursors inside procedure statements", () => {
-    const procedureSql = mysqlProcedureDelimiterFixture.slice(mysqlProcedureDelimiterFixture.indexOf("CREATE"), mysqlProcedureDelimiterFixture.indexOf("$$\n\nDELIMITER"));
-
-    expect(statementRangeAtCursor(mysqlProcedureDelimiterFixture, indexOf(mysqlProcedureDelimiterFixture, "UPDATE users"), "mysql")?.sql.trim()).toBe(procedureSql);
-    expect(statementRangeAtCursor(mysqlProcedureDelimiterFixture, indexOf(mysqlProcedureDelimiterFixture, "INSERT INTO"), "mysql")?.sql.trim()).toBe(procedureSql);
+  it("returns the full MySQL routine block for cursors inside nested statements", () => {
+    const range = statementRangeAtCursor(mysqlRoutineFixture, indexOf(mysqlRoutineFixture, "ok"), "mysql");
+    expect(range?.sql.trim()).toBe(mysqlRoutineFixture.slice(0, mysqlRoutineFixture.indexOf("\nSELECT 2;")).replace(/;$/, "").trim());
   });
 
   it("returns null on SQL Server GO batch delimiter lines", () => {
@@ -399,6 +417,11 @@ WHERE request_json LIKE '%"paperFlag":null%';`;
     expect(statementRangeAtCursor(sql, indexOf(sql, "1"), "sqlserver")?.sql.trim()).toBe("SELECT 1");
     expect(statementRangeAtCursor(sql, indexOf(sql, "2"), "sqlserver")?.sql.trim()).toBe("SELECT 2");
     expect(statementRangeAtCursor(sql, indexOf(sql, "3"), "sqlserver")?.sql.trim()).toBe("SELECT 3");
+  });
+
+  it("returns the full Oracle PL/SQL block for cursors inside nested statements", () => {
+    const range = statementRangeAtCursor(oraclePlSqlFixture, indexOf(oraclePlSqlFixture, "ORDERS_10K", 2), "oracle");
+    expect(range?.sql.trim()).toBe(oraclePlSqlFixture.slice(0, oraclePlSqlFixture.indexOf("\n/")));
   });
 });
 
@@ -434,15 +457,16 @@ describe("executableStatementRanges", () => {
     expect(rangeSqlTexts(executableStatementRanges(oraclePlSqlFixture, "oracle"))).toEqual([oraclePlSqlFixture.slice(0, oraclePlSqlFixture.indexOf("\n/")), "SELECT 1"]);
   });
 
-  it("does not split executable MySQL procedure ranges at inner statement starts", () => {
-    const procedureSql = mysqlProcedureDelimiterFixture.slice(mysqlProcedureDelimiterFixture.indexOf("CREATE"), mysqlProcedureDelimiterFixture.indexOf("$$\n\nDELIMITER"));
+  it("does not split executable MySQL routine ranges at inner statements", () => {
+    expect(rangeSqlTexts(executableStatementRanges(mysqlRoutineFixture, "mysql"))).toEqual([mysqlRoutineFixture.slice(0, mysqlRoutineFixture.indexOf("\nSELECT 2;")).replace(/;$/, "").trim(), "SELECT 2"]);
+  });
 
-    expect(rangeSqlTexts(executableStatementRanges(mysqlProcedureDelimiterFixture, "mysql"))).toEqual([procedureSql, "CALL sync_user_status()", "SELECT * FROM audit_logs ORDER BY id DESC LIMIT 10"]);
+  it("does not split executable MySQL routine ranges at WHILE and REPEAT endings", () => {
+    expect(rangeSqlTexts(executableStatementRanges(mysqlRoutineWithLoopsFixture, "mysql"))).toEqual([mysqlRoutineWithLoopsFixture.slice(0, mysqlRoutineWithLoopsFixture.indexOf("\nSELECT 2;")).replace(/;$/, "").trim(), "SELECT 2"]);
   });
 
   it("returns executable SQL Server batches without GO delimiter lines", () => {
-    const sql = "SELECT 1\nGO\nSELECT 2;";
-    expect(rangeSqlTexts(executableStatementRanges(sql, "sqlserver"))).toEqual(["SELECT 1", "SELECT 2"]);
+    expect(rangeSqlTexts(executableStatementRanges("SELECT 1\nGO\nSELECT 2;", "sqlserver"))).toEqual(["SELECT 1", "SELECT 2"]);
   });
 });
 
@@ -507,6 +531,13 @@ describe("buildExecutionCandidates", () => {
     expect(candidates[0].kind).toBe("all");
   });
 
+  it("uses the whole set-operation statement for cursor execution candidates", () => {
+    const sql = "select * from tbA\nunion\nselect * from tbB\nSELECT * FROM logs;";
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "tbA"));
+
+    expect(candidateSummaries(candidates)).toEqual(["cursor:select * from tbA\nunion\nselect * from tbB", "all:select * from tbA\nunion\nselect * from tbB\nSELECT * FROM logs;"]);
+  });
+
   it("uses the current command line for Redis cursor candidates", () => {
     const sql = "GET user:1\nDEL user:2\nHGETALL user:3";
     const candidates = buildExecutionCandidates(sql, indexOf(sql, "user:2"), "redis");
@@ -565,13 +596,6 @@ describe("buildExecutionCandidates", () => {
     expect(candidateSummaries(candidates)).toEqual(["cursor:select COUNT(1) FROM your_table;", "all:select COUNT(1) FROM your_table;\ndelimiter ;;\nselect COUNT(1) FROM your_table;\n\n;;\ndelimiter ;"]);
   });
 
-  it("uses the full MySQL procedure body for delimiter procedure cursor candidates", () => {
-    const procedureSql = mysqlProcedureDelimiterFixture.slice(mysqlProcedureDelimiterFixture.indexOf("CREATE"), mysqlProcedureDelimiterFixture.indexOf("$$\n\nDELIMITER"));
-    const candidates = buildExecutionCandidates(mysqlProcedureDelimiterFixture, indexOf(mysqlProcedureDelimiterFixture, "status ="), "mysql");
-
-    expect(candidateSummaries(candidates)[0]).toBe(`cursor:${procedureSql}`);
-  });
-
   it("uses the current SQL Server batch for cursor candidates", () => {
     const sql = "SELECT 1\nGO\nSELECT 2;";
     const candidates = buildExecutionCandidates(sql, indexOf(sql, "2"), "sqlserver");
@@ -600,6 +624,10 @@ describe("hasMultipleExecutionTargets", () => {
   it("counts MySQL delimiter scripts by executable statements", () => {
     const sql = "select COUNT(1) FROM your_table;\ndelimiter ;;\nselect COUNT(1) FROM your_table;\n\n;;\ndelimiter ;";
     expect(hasMultipleExecutionTargets(sql, "mysql")).toBe(true);
+  });
+
+  it("counts MySQL routine blocks without delimiter by executable statements", () => {
+    expect(hasMultipleExecutionTargets(mysqlRoutineFixture, "mysql")).toBe(true);
   });
 
   it("counts SQL Server GO batches as multiple execution targets", () => {

@@ -51,10 +51,11 @@ test("document browser helper covers Mongo collections and GridFS buckets", () =
   assert.equal(isDocumentBrowserTreeNode("redis-db"), false);
 });
 
-test("repeated clicks continue to toggle expandable rows", () => {
+test("double-click follow-up clicks do not run row actions", () => {
   assert.equal(shouldRunTreeNodeRowAction("toggle", 1), true);
-  assert.equal(shouldRunTreeNodeRowAction("toggle", 2), true);
-  assert.equal(shouldRunTreeNodeRowAction("toggle", 3), true);
+  assert.equal(shouldRunTreeNodeRowAction("toggle", 2), false);
+  assert.equal(shouldRunTreeNodeRowAction("toggle", 3), false);
+  assert.equal(shouldRunTreeNodeRowAction("open-data", 1), true);
   assert.equal(shouldRunTreeNodeRowAction("open-data", 2), false);
   assert.equal(shouldRunTreeNodeRowAction("none", 1), false);
 });

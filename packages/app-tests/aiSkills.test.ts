@@ -3,7 +3,17 @@ import { test } from "vitest";
 import type { AiAction } from "../../apps/desktop/src/lib/ai/ai.ts";
 import { AI_SKILL_DEFINITIONS, aiSkillForAction } from "../../apps/desktop/src/lib/ai/aiSkills.ts";
 
-const actions: AiAction[] = ["generate", "explain", "optimize", "fix", "convert", "sampleData"];
+const actions: AiAction[] = [
+  "generate",
+  "explain",
+  "optimize",
+  "fix",
+  "convert",
+  "sampleData",
+  "query",
+  "exploreSchema",
+  "executeAndExplain",
+];
 
 test("defines one internal AI skill per assistant action", () => {
   assert.deepEqual(AI_SKILL_DEFINITIONS.map((skill) => skill.action).sort(), [...actions].sort());
@@ -12,14 +22,14 @@ test("defines one internal AI skill per assistant action", () => {
     const skill = aiSkillForAction(action);
 
     assert.equal(skill.action, action);
-    assert.ok(skill.id.endsWith("_sql") || skill.id === "sample_data");
+    assert.match(skill.id, /^[a-z][a-z0-9_]*$/);
     assert.ok(skill.title.zh);
     assert.ok(skill.title.en);
     assert.ok(skill.contextNeeds.length > 0);
     assert.ok(skill.systemRules.zh.length > 0);
     assert.ok(skill.systemRules.en.length > 0);
-    assert.ok(skill.userInstruction.zh.includes("SQL"));
-    assert.ok(skill.userInstruction.en.includes("SQL"));
+    assert.ok(skill.userInstruction.zh.length > 0);
+    assert.ok(skill.userInstruction.en.length > 0);
   }
 });
 

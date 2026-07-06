@@ -23,6 +23,7 @@ export type ActiveTabSidebarTarget =
   | {
       type: "vector-collection";
       connectionId: string;
+      database: string;
       collectionName: string;
     }
   | {
@@ -102,6 +103,7 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
     return {
       type: "vector-collection",
       connectionId: tab.connectionId,
+      database: tab.database,
       collectionName,
     };
   }
@@ -157,7 +159,7 @@ export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): b
   }
 
   if (target.type === "vector-collection") {
-    return node.type === "vector-collection" && node.connectionId === target.connectionId && node.label === target.collectionName;
+    return node.type === "vector-collection" && node.connectionId === target.connectionId && node.database === target.database && node.label === target.collectionName;
   }
 
   if (target.type === "query-context") {

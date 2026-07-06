@@ -90,6 +90,7 @@ import type { AiAction } from "@/lib/ai/ai";
 const AiAssistant = defineAsyncComponent(() => import("@/components/editor/AiAssistant.vue"));
 const QueryHistory = defineAsyncComponent(() => import("@/components/editor/QueryHistory.vue"));
 const SqlLibraryPanel = defineAsyncComponent(() => import("@/components/layout/SqlLibraryPanel.vue"));
+const SqlFilePanel = defineAsyncComponent(() => import("@/components/layout/SqlFilePanel.vue"));
 const DriverStorePage = defineAsyncComponent(() => import("@/components/config/DriverStoreDialog.vue"));
 const EditorSettingsPage = defineAsyncComponent(() => import("@/components/editor/EditorSettingsDialog.vue"));
 const UpdateDialog = defineAsyncComponent(() => import("@/components/layout/UpdateDialog.vue"));
@@ -136,9 +137,10 @@ const agentDriverUpdateCount = ref(0);
 const showHistory = ref(false);
 const showAiPanel = ref(safeLocalStorageGet("dbx-ai-panel-open") === "true");
 const showSqlLibraryPanel = ref(safeLocalStorageGet("dbx-sql-library-open") === "true");
+const showSqlFilePanel = ref(safeLocalStorageGet("dbx-sql-file-panel-open") === "true");
 const sidebarOpen = ref(safeLocalStorageGet("dbx-sidebar-open") !== "false");
 const aiPanelReady = ref(false);
-const { sidebarWidth, aiPanelWidth, historyWidth, sqlLibraryWidth, startSidebarResize, startAiPanelResize, startHistoryResize, startSqlLibraryResize } = usePanelResize();
+const { sidebarWidth, aiPanelWidth, historyWidth, sqlLibraryWidth, sqlFilePanelWidth, startSidebarResize, startAiPanelResize, startHistoryResize, startSqlLibraryResize, startSqlFilePanelResize } = usePanelResize();
 const aiAssistantRef = ref<AiAssistantHandle | null>(null);
 const appSidebarRef = ref<InstanceType<typeof AppSidebar> | null>(null);
 const contentAreaRef = ref<InstanceType<typeof ContentArea> | null>(null);
@@ -463,6 +465,11 @@ function toggleAiPanel() {
 function toggleSqlLibrary() {
   showSqlLibraryPanel.value = !showSqlLibraryPanel.value;
   safeLocalStorageSet("dbx-sql-library-open", String(showSqlLibraryPanel.value));
+}
+
+function toggleSqlFilePanel() {
+  showSqlFilePanel.value = !showSqlFilePanel.value;
+  safeLocalStorageSet("dbx-sql-file-panel-open", String(showSqlFilePanel.value));
 }
 
 function fixWithAi(errorMessage: string) {
@@ -1719,6 +1726,7 @@ onUnmounted(() => {
           :show-ai-panel="showAiPanel"
           :show-history="showHistory"
           :show-sql-library="showSqlLibraryPanel"
+          :show-sql-file-panel="showSqlFilePanel"
           :show-driver-store="showDriverStore"
           :show-settings-page="showSettingsPage"
           :checking-updates="checkingUpdates"
@@ -1732,6 +1740,7 @@ onUnmounted(() => {
           @toggle-ai="toggleAiPanel"
           @toggle-history="showHistory = !showHistory"
           @toggle-sql-library="toggleSqlLibrary"
+          @toggle-sql-file-panel="toggleSqlFilePanel"
           @open-github="openGitHub"
           @open-settings="openSettings()"
           @open-driver-store="openDriverStorePage"
@@ -1921,6 +1930,13 @@ onUnmounted(() => {
             <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startSqlLibraryResize" />
             <div class="h-full min-h-0 overflow-hidden">
               <SqlLibraryPanel @close="toggleSqlLibrary" />
+            </div>
+          </div>
+
+          <div v-if="showSqlFilePanel" :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'" :style="{ width: sqlFilePanelWidth + 'px' }">
+            <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startSqlFilePanelResize" />
+            <div class="h-full min-h-0 overflow-hidden">
+              <SqlFilePanel @close="toggleSqlFilePanel" />
             </div>
           </div>
         </div>

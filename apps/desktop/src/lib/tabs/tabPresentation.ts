@@ -138,12 +138,24 @@ export function tabTooltipLines(tab: QueryTab, t: Translate): { label: string; v
   return lines;
 }
 
-export function tabularResultItems(results: QueryResult[] | undefined): { result: QueryResult; index: number; n: number; label?: string }[] {
+export function queryResultStatementLabel(result: Pick<QueryResult, "sourceLabel" | "sourceStatement">, maxLength = 48): string | undefined {
+  if (result.sourceLabel) return result.sourceLabel;
+  const statement = result.sourceStatement?.replace(/\s+/g, " ").trim();
+  if (!statement) return undefined;
+  if (statement.length <= maxLength) return statement;
+  return `${statement.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+}
+
+export function resultSqlForGrid(tab: Pick<QueryTab, "result" | "resultBaseSql" | "lastExecutedSql" | "sql">): string {
+  return tab.result?.sourceStatement || tab.resultBaseSql || tab.lastExecutedSql || tab.sql;
+}
+
+export function tabularResultItems(results: QueryResult[] | undefined): { result: QueryResult; index: number; n: number; label?: string; title?: string }[] {
   if (!results) return [];
   return results
     .map((result, index) => ({ result, index }))
     .filter((item) => item.result.columns.length > 0)
-    .map((item, ordinal) => ({ ...item, n: ordinal + 1, label: item.result.sourceLabel }));
+    .map((item, ordinal) => ({ ...item, n: ordinal + 1, label: queryResultStatementLabel(item.result), title: item.result.sourceStatement }));
 }
 
 export function activeResultRun(tab: Pick<QueryTab, "resultRuns" | "activeResultRunId">) {

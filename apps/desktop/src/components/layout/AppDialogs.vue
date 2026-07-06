@@ -20,6 +20,7 @@ const DataGenerateDialog = defineAsyncComponent(() => import("@/components/gener
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useDialogSources } from "@/composables/useDialogSources";
 import type { ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
+import type { SqlParameterDescriptor } from "@/lib/sql/sqlParameters";
 import type { ConfigTab } from "@/components/connection/ConnectionDialog.vue";
 
 const props = defineProps<{
@@ -31,7 +32,7 @@ const props = defineProps<{
   suppressDangerConfirm: boolean;
   showSqlParameterDialog: boolean;
   sqlParameterSourceSql: string;
-  sqlParameterNames: string[];
+  sqlParameterNames: SqlParameterDescriptor[];
 }>();
 
 const emit = defineEmits<{

@@ -157,6 +157,72 @@ export const AI_SKILL_DEFINITIONS: AiSkillDefinition[] = [
       zh: ["输出格式：先给安全的示例 SQL，再说明哪些值是模拟数据。"],
     },
   },
+  {
+    id: "query_data",
+    action: "query",
+    title: {
+      en: "Query Data",
+      zh: "查询数据",
+    },
+    riskPolicy: "readonly",
+    contextNeeds: ["schema", "indexes", "foreignKeys", "databaseDialect"],
+    userInstruction: {
+      en: "Query or aggregate data per the user's request. Confirm structure via the schema or list_tables/get_columns, then call execute_query to run a read-only query and obtain real results, then answer based on the actual data. Do not stop after merely outputting SQL text.",
+      zh: "根据用户请求查询或统计数据。先用 Schema 或 list_tables/get_columns 确认结构，然后调用 execute_query 执行只读查询获取真实结果，最后基于真实结果回答用户。不要只输出 SQL 文本就停止。",
+    },
+    systemRules: {
+      en: ["You MUST obtain real data via the execute_query tool before answering; do not stop at SQL text only.", "If safe execution requirements are not met, explain why first, then provide a read-only preview or a clarifying question."],
+      zh: ["必须通过 execute_query 工具获取真实数据后再回答，不要只生成 SQL 文本。", "如果安全执行条件不满足，先说明原因，再给只读预览或澄清问题。"],
+    },
+    outputContract: {
+      en: ["Output format: lead with a one-sentence conclusion based on real data, then include the SQL used in a ```sql code block. When safe execution is not possible, state the reason and ask one clarifying question."],
+      zh: ["输出格式：先给一句基于真实数据的结论，再附上所用的 SQL（放在 ```sql 代码块中）。无法安全执行时，说明原因并提出一个澄清问题。"],
+    },
+  },
+  {
+    id: "explore_schema",
+    action: "exploreSchema",
+    title: {
+      en: "Inspect Schema",
+      zh: "查看表结构",
+    },
+    riskPolicy: "readonly",
+    contextNeeds: ["schema", "databaseDialect"],
+    userInstruction: {
+      en: "Help the user understand the database or table structure. Prefer the loaded schema context; call list_tables / get_columns for more complete or authoritative definitions, then clearly summarize the structure.",
+      zh: "帮助用户了解数据库或表的结构。优先使用已加载的 Schema 上下文；需要更完整或权威的定义时调用 list_tables / get_columns，然后清晰总结结构。",
+    },
+    systemRules: {
+      en: ["Never invent tables or columns not present in the schema context.", "Use get_columns for authoritative column definitions; do not guess."],
+      zh: ["不要编造 Schema 中不存在的表或列。", "需要权威列定义时使用 get_columns，不要猜测。"],
+    },
+    outputContract: {
+      en: ["Output format: summarize the key structural points first, then list relevant tables/columns and their purpose. If further exploration helps, include a read-only metadata query."],
+      zh: ["输出格式：先概括结构要点，再列出相关表/列及其用途。如需进一步探索，附一个只读元数据查询。"],
+    },
+  },
+  {
+    id: "execute_and_explain",
+    action: "executeAndExplain",
+    title: {
+      en: "Run & Explain",
+      zh: "执行并解释",
+    },
+    riskPolicy: "readonly",
+    contextNeeds: ["currentSql", "schema", "indexes", "foreignKeys", "lastResultPreview", "databaseDialect"],
+    userInstruction: {
+      en: "Execute the current SQL and explain the results. First call execute_query to run the current SQL, then explain the query meaning, data characteristics, and notable points based on the real results.",
+      zh: "执行当前的 SQL 并解释结果。先调用 execute_query 运行当前 SQL，再基于真实结果解释查询含义、数据特征和值得注意的点。",
+    },
+    systemRules: {
+      en: ["Only SELECT/WITH/SHOW/DESCRIBE/EXPLAIN can be executed. If the current SQL is a write operation, do not execute; explain its impact instead.", "Base explanations on real execution results; do not speculate about data."],
+      zh: ["只有 SELECT/WITH/SHOW/DESCRIBE/EXPLAIN 可执行。如果当前 SQL 是写操作，不要执行，改为解释其影响。", "解释要基于真实执行结果，不要凭空推测数据。"],
+    },
+    outputContract: {
+      en: ["Output format: lead with an execution-result summary, then step through the key data and its meaning."],
+      zh: ["输出格式：先给执行结果概要，再逐步解释关键数据和含义。"],
+    },
+  },
 ];
 
 export function aiSkillForAction(action: AiAction): AiSkillDefinition {

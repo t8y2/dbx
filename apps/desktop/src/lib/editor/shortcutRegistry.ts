@@ -1,3 +1,5 @@
+import { parseShortcutParts, shortcutDisplayParts } from "@/lib/editor/shortcutDisplay";
+
 export type ShortcutActionId =
   | "executeSql"
   | "formatSql"
@@ -350,19 +352,19 @@ export function normalizeShortcutSettings(settings?: Partial<ShortcutSettings>):
 }
 
 export function shortcutToCodeMirrorKey(shortcut: string): string {
-  return shortcut
-    .split("+")
+  return parseShortcutParts(shortcut)
     .map((part) => (part.length === 1 ? part.toLowerCase() : part))
+    .map((part) => (part === "Plus" ? "+" : part))
     .join("-");
 }
 
 export function formatShortcut(shortcut: string, platform = globalThis.navigator?.platform || ""): string {
   const isMac = platform.toLowerCase().includes("mac");
-  return shortcut
-    .split("+")
+  return shortcutDisplayParts(shortcut, platform)
     .map((part) => {
       if (part === "Mod") return isMac ? "Cmd" : "Ctrl";
       if (part === "Meta") return isMac ? "Cmd" : "Meta";
+      if (part === "Plus") return "+";
       return part;
     })
     .join("+");

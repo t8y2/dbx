@@ -16,6 +16,7 @@ pub mod external_sql;
 pub mod fs_open;
 pub mod history;
 pub mod keychain;
+pub mod list_sql_files;
 pub mod mcp;
 pub mod mcp_bridge;
 pub mod mongo_cmd;

@@ -470,10 +470,14 @@ fn augment_system_prompt_with_task_contract(
     let user_request = contract.user_request.as_deref().unwrap_or("(not provided)");
     let mode_rule = if action_requires_sql_deliverable(action) {
         "This is a SQL-producing action: produce the final SQL in a fenced ```sql code block. Use tools only as intermediate evidence for schema/dialect; do not stop at a tool-result summary. In Agent mode, execute a query only when the original request explicitly asks for real data/results, not when it merely asks to generate SQL."
-    } else if is_agent_mode {
-        "For data-query intents, obtain real results with execute_query when safe; otherwise state the blocker."
     } else {
-        "In Ask mode, produce SQL/explanation only and do not claim execution."
+        match action.to_ascii_lowercase().as_str() {
+            "query" => "This is a data-query task: call execute_query to obtain real results, then answer based on the actual data. Do not stop after merely outputting SQL text.",
+            "exploreschema" => "This is a schema-inspection task: use list_tables/get_columns to obtain authoritative structure, then summarize. Do not execute data queries unless the user explicitly asks for data.",
+            "executeandexplain" => "This is an execute-and-explain task: call execute_query to run the current SQL, then explain the real results.",
+            _ if is_agent_mode => "For data-query intents, obtain real results with execute_query when safe; otherwise state the blocker.",
+            _ => "In Ask mode, produce SQL/explanation only and do not claim execution.",
+        }
     };
 
     format!(
@@ -517,10 +521,14 @@ fn build_contract_repair_prompt(task_contract: Option<&AiTaskContract>, is_agent
     let user_request = task_contract.and_then(|c| c.user_request.as_deref()).unwrap_or("(not provided)");
     let mode_rule = if action_requires_sql_deliverable(action) {
         "For this SQL-producing action, produce SQL in a fenced ```sql code block. Tool results are evidence only; do not answer by summarizing schema/tool output. Execute a query only when the original request explicitly asks for real data/results."
-    } else if is_agent_mode {
-        "If the original request asks for real data and it can be answered safely, call execute_query before the final answer."
     } else {
-        "In Ask mode, generate SQL and concise explanation only; do not claim the SQL was executed."
+        match action.to_ascii_lowercase().as_str() {
+            "query" => "For this data-query task, call execute_query and answer based on real data; do not stop at SQL text or a schema summary.",
+            "exploreschema" => "For this schema-inspection task, summarize real structure from list_tables/get_columns; do not invent columns.",
+            "executeandexplain" => "For this execute-and-explain task, run the current SQL via execute_query and explain the real results.",
+            _ if is_agent_mode => "If the original request asks for real data and it can be answered safely, call execute_query before the final answer.",
+            _ => "In Ask mode, generate SQL and concise explanation only; do not claim the SQL was executed.",
+        }
     };
 
     format!(
@@ -1283,5 +1291,68 @@ mod tests {
         let events = chunk_to_events(&chunk);
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], AgentEvent::TextDelta { .. }));
+    }
+
+    // --- Agent task-action contract tests (query / exploreSchema / executeAndExplain) ---
+
+    fn contract_for(action: &str, user_request: &str, mode: &str) -> AiTaskContract {
+        AiTaskContract {
+            action: Some(action.to_string()),
+            mode: Some(mode.to_string()),
+            user_request: Some(user_request.to_string()),
+        }
+    }
+
+    #[test]
+    fn query_action_contract_requires_execute_query() {
+        let contract = contract_for("query", "统计今天订单数", "agent");
+        let prompt = augment_system_prompt_with_task_contract("base", Some(&contract), true);
+
+        assert!(prompt.contains("data-query task"), "prompt should mark this as a data-query task");
+        assert!(prompt.contains("call execute_query"), "prompt should instruct the LLM to call execute_query");
+        assert!(!prompt.contains("SQL-producing action"), "query must not be treated as a SQL-producing action");
+    }
+
+    #[test]
+    fn explore_schema_contract_uses_metadata_tools_not_execute_query() {
+        let contract = contract_for("exploreSchema", "看一下 orders 表的结构", "agent");
+        let prompt = augment_system_prompt_with_task_contract("base", Some(&contract), true);
+
+        assert!(prompt.contains("schema-inspection task"));
+        assert!(prompt.contains("list_tables/get_columns"));
+        assert!(prompt.contains("Do not execute data queries"));
+    }
+
+    #[test]
+    fn execute_and_explain_contract_runs_current_sql() {
+        let contract = contract_for("executeAndExplain", "执行并解释当前 SQL", "agent");
+        let prompt = augment_system_prompt_with_task_contract("base", Some(&contract), true);
+
+        assert!(prompt.contains("execute-and-explain task"));
+        assert!(prompt.contains("run the current SQL"));
+    }
+
+    #[test]
+    fn task_actions_do_not_require_sql_deliverable() {
+        // query / exploreSchema / executeAndExplain are task-oriented, not SQL-producing:
+        // a final answer without a fenced SQL block must still satisfy the contract.
+        let answer_without_sql = "今天共有 42 笔订单。";
+        for action in ["query", "exploreSchema", "executeAndExplain"] {
+            let contract = contract_for(action, "统计今天订单数", "agent");
+            assert_eq!(
+                validate_final_answer(Some(&contract), answer_without_sql),
+                FinalAnswerCheck::Satisfied,
+                "action {action} should not require a SQL deliverable",
+            );
+        }
+    }
+
+    #[test]
+    fn query_action_repair_prompt_targets_execute_query() {
+        let contract = contract_for("query", "统计今天订单数", "agent");
+        let repair = build_contract_repair_prompt(Some(&contract), true, "previous answer did not execute");
+
+        assert!(repair.contains("data-query task"));
+        assert!(repair.contains("call execute_query"));
     }
 }

@@ -1061,24 +1061,29 @@ public final class DamengAgent extends BaseDatabaseAgent {
 
     private String appendIndependentIndexDdl(String ddl, String schema, String table) throws Exception {
         StringBuilder result = new StringBuilder(ddl == null ? "" : ddl.trim());
-        for (String indexName : independentIndexNames(schema, table)) {
+        for (IndexInfo index : independentIndexes(schema, table)) {
+            String indexName = index.getName();
+            if (isInternalIndexMetadata(index) || index.getColumns().isEmpty()) {
+                continue;
+            }
             if (containsCreateIndex(result.toString(), schema, indexName)) {
                 continue;
             }
-            String indexDdl = indexDdl(schema, indexName);
-            if (notBlank(indexDdl)) {
-                appendDdlStatement(result, ensureStatementTerminator(indexDdl));
-            }
+            appendDdlStatement(result, indexDdl(schema, table, index));
         }
         return result.toString();
     }
 
-    private List<String> independentIndexNames(String schema, String table) throws Exception {
-        List<String> result = new ArrayList<>();
+    private List<IndexInfo> independentIndexes(String schema, String table) throws Exception {
+        List<IndexInfo> result = new ArrayList<>();
         // Primary-key and unique-constraint backing indexes are already represented in table DDL.
         String sql = """
-            SELECT i.INDEX_NAME
+            SELECT i.INDEX_NAME,
+                LISTAGG(ic.COLUMN_NAME, ',') WITHIN GROUP (ORDER BY ic.COLUMN_POSITION) AS COLUMNS,
+                i.UNIQUENESS,
+                i.INDEX_TYPE
             FROM ALL_INDEXES i
+            JOIN ALL_IND_COLUMNS ic ON i.INDEX_NAME = ic.INDEX_NAME AND i.OWNER = ic.INDEX_OWNER AND i.TABLE_OWNER = ic.TABLE_OWNER
             WHERE i.TABLE_OWNER = ? AND i.TABLE_NAME = ?
                 AND NOT EXISTS (
                     SELECT 1
@@ -1088,6 +1093,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
                         AND c.INDEX_NAME = i.INDEX_NAME
                         AND c.CONSTRAINT_TYPE IN ('P', 'U')
                 )
+            GROUP BY i.INDEX_NAME, i.UNIQUENESS, i.INDEX_TYPE
             ORDER BY i.INDEX_NAME
             """.stripIndent().trim();
         try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
@@ -1097,7 +1103,16 @@ public final class DamengAgent extends BaseDatabaseAgent {
                 while (rs.next()) {
                     String indexName = rs.getString(1);
                     if (notBlank(indexName)) {
-                        result.add(indexName);
+                        result.add(new IndexInfo(
+                            indexName,
+                            splitNonEmpty(coalesce(rs.getString(2)), ","),
+                            "UNIQUE".equals(rs.getString(3)),
+                            false,
+                            null,
+                            rs.getString(4),
+                            null,
+                            null
+                        ));
                     }
                 }
             }
@@ -1105,16 +1120,29 @@ public final class DamengAgent extends BaseDatabaseAgent {
         return result;
     }
 
-    private String indexDdl(String schema, String indexName) throws Exception {
-        String sql = "SELECT DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL";
-        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
-            stmt.setString(1, "INDEX");
-            stmt.setString(2, indexName);
-            stmt.setString(3, schema);
-            try (ResultSet rs = stmt.executeQuery()) {
-                return rs.next() ? rs.getString(1) : null;
-            }
+    private static String indexDdl(String schema, String table, IndexInfo index) {
+        StringBuilder ddl = new StringBuilder("CREATE ");
+        if (index.getIs_unique()) {
+            ddl.append("UNIQUE ");
         }
+        ddl.append("INDEX ")
+            .append(qualifiedName(schema, index.getName()))
+            .append(" ON ")
+            .append(qualifiedName(schema, table))
+            .append(" (");
+        for (int i = 0; i < index.getColumns().size(); i++) {
+            if (i > 0) {
+                ddl.append(", ");
+            }
+            ddl.append(JdbcIdentifiers.INSTANCE.doubleQuote(index.getColumns().get(i)));
+        }
+        ddl.append(");");
+        return ddl.toString();
+    }
+
+    private static boolean isInternalIndexMetadata(IndexInfo index) {
+        String indexType = coalesce(index.getIndex_type()).toUpperCase(Locale.ROOT);
+        return indexType.contains("INNER") || indexType.contains("INTERNAL");
     }
 
     private String tableComment(String schema, String table) throws Exception {

@@ -101,6 +101,7 @@
   --accent: rgb(245 245 245);
   --accent-foreground: rgb(23 23 23);
   --destructive: rgb(231 0 11);
+  --destructive-rgb: 231, 0, 11;
   --border: rgb(229 229 229);
   --input: rgb(229 229 229);
   --ring: rgb(161 161 161);
@@ -136,6 +137,7 @@
   --accent: rgb(46 47 51);
   --accent-foreground: rgb(221 221 226);
   --destructive: rgb(243 98 95);
+  --destructive-rgb: 243, 98, 95;
   --border: rgb(110 110 114 / 0.28);
   --input: rgb(110 110 114 / 0.34);
   --ring: rgb(133 134 139);
@@ -1436,4 +1438,65 @@ body.dbx-table-reference-dragging * {
   background-color: oklch(0.205 0 0 / 0.82) !important;
   border-color: rgb(255 255 255 / 0.1) !important;
   border-color: oklch(1 0 0 / 0.1) !important;
+}
+
+/* Tailwind 4 falls back from bg-destructive/<alpha> to solid --destructive
+   when color-mix() is unavailable in older WebKit. Keep dangerous-action
+   surfaces translucent so red text/icons remain legible on macOS 12 WebView. */
+.bg-destructive\/5 {
+  background-color: rgba(var(--destructive-rgb), 0.05);
+}
+.bg-destructive\/10,
+.hover\:bg-destructive\/10:hover,
+.focus\:bg-destructive\/10:focus,
+.focus-visible\:bg-destructive\/10:focus-visible,
+.data-\[variant\=destructive\]\:focus\:bg-destructive\/10[data-variant="destructive"]:focus {
+  background-color: rgba(var(--destructive-rgb), 0.1);
+}
+.bg-destructive\/15,
+.hover\:bg-destructive\/15:hover {
+  background-color: rgba(var(--destructive-rgb), 0.15);
+}
+.bg-destructive\/20,
+.\[a\]\:hover\:bg-destructive\/20:is(a):hover,
+.hover\:bg-destructive\/20:hover,
+.dark\:bg-destructive\/20:is(.dark *),
+.dark\:focus\:bg-destructive\/20:is(.dark *):focus,
+.dark\:hover\:bg-destructive\/20:is(.dark *):hover,
+.dark\:data-\[variant\=destructive\]\:focus\:bg-destructive\/20:is(.dark *)[data-variant="destructive"]:focus {
+  background-color: rgba(var(--destructive-rgb), 0.2);
+}
+.bg-destructive\/30,
+.dark\:hover\:bg-destructive\/30:is(.dark *):hover {
+  background-color: rgba(var(--destructive-rgb), 0.3);
+}
+
+@supports (background-color: color-mix(in oklab, red 10%, transparent)) {
+  .bg-destructive\/5 {
+    background-color: color-mix(in oklab, var(--destructive) 5%, transparent);
+  }
+  .bg-destructive\/10,
+  .hover\:bg-destructive\/10:hover,
+  .focus\:bg-destructive\/10:focus,
+  .focus-visible\:bg-destructive\/10:focus-visible,
+  .data-\[variant\=destructive\]\:focus\:bg-destructive\/10[data-variant="destructive"]:focus {
+    background-color: color-mix(in oklab, var(--destructive) 10%, transparent);
+  }
+  .bg-destructive\/15,
+  .hover\:bg-destructive\/15:hover {
+    background-color: color-mix(in oklab, var(--destructive) 15%, transparent);
+  }
+  .bg-destructive\/20,
+  .\[a\]\:hover\:bg-destructive\/20:is(a):hover,
+  .hover\:bg-destructive\/20:hover,
+  .dark\:bg-destructive\/20:is(.dark *),
+  .dark\:focus\:bg-destructive\/20:is(.dark *):focus,
+  .dark\:hover\:bg-destructive\/20:is(.dark *):hover,
+  .dark\:data-\[variant\=destructive\]\:focus\:bg-destructive\/20:is(.dark *)[data-variant="destructive"]:focus {
+    background-color: color-mix(in oklab, var(--destructive) 20%, transparent);
+  }
+  .bg-destructive\/30,
+  .dark\:hover\:bg-destructive\/30:is(.dark *):hover {
+    background-color: color-mix(in oklab, var(--destructive) 30%, transparent);
+  }
 }

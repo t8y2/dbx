@@ -1,4 +1,4 @@
-import type { CellValue } from "@/lib/dataGrid/cellValue";
+import { firstLineCellDisplayValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import type { RowStatus } from "@/lib/dataGrid/gridRowStatus";
 import { DATA_GRID_DARK_SEARCH_COLORS, resolveDataGridPaintTheme, type DataGridPaintTheme } from "@/lib/dataGrid/dataGridPaintTheme";
 
@@ -374,7 +374,8 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
         const textLeft = alignCanvasPixel(x + 12, dpr);
         const paddedMaxWidth = Math.max(0, x + colWidth - textLeft - 12);
         const isEditingThisCell = editingCell?.rowId === item.id && editingCell.col === actualColIdx;
-        const displayText = isEditingThisCell ? "" : item.isDraft && value === null ? (draftCellPlaceholder ?? "") : formatCell(value, actualColIdx);
+        const rawDisplayText = item.isDraft && value === null ? (draftCellPlaceholder ?? "") : formatCell(value, actualColIdx);
+        const displayText = isEditingThisCell ? "" : firstLineCellDisplayValue(rawDisplayText);
         const needsTruncation = ctx.measureText(displayText).width > paddedMaxWidth;
         const textMaxWidth = needsTruncation ? Math.max(0, x + colWidth - textLeft) : paddedMaxWidth;
         const text = isEditingThisCell ? displayText : fitCanvasText(ctx, displayText, textMaxWidth - 12);

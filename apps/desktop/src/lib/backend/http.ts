@@ -1268,6 +1268,17 @@ export async function writeExternalSqlFile(_path: string, _content: string): Pro
   throw new Error("Saving external SQL file paths is only available in the desktop app");
 }
 
+export interface SqlFileEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  children: SqlFileEntry[];
+}
+
+export async function listSqlFilesInFolder(_folderPath: string): Promise<SqlFileEntry[]> {
+  throw new Error("Listing SQL files in a folder is only available in the desktop app");
+}
+
 // ---------------------------------------------------------------------------
 // Data Transfer
 // ---------------------------------------------------------------------------
@@ -1893,12 +1904,12 @@ export async function documentFindDocuments(connectionId: string, database: stri
   return post("/api/document-store/find-documents", { connectionId, database, collection, skip, limit, filter, projection, sort, executionId });
 }
 
-export async function documentListGridFsFiles(connectionId: string, database: string, bucket: string): Promise<MongoGridFsFileInfo[]> {
-  return post("/api/document-store/list-gridfs-files", { connectionId, database, bucket });
+export async function documentListGridFsFiles(connectionId: string, database: string, bucket: string, filter?: string, sort?: string): Promise<MongoGridFsFileInfo[]> {
+  return post("/api/document-store/list-gridfs-files", { connectionId, database, bucket, filter, sort });
 }
 
-export async function documentListGridFsBuckets(connectionId: string, database: string): Promise<MongoGridFsBucketInfo[]> {
-  return post("/api/document-store/list-gridfs-buckets", { connectionId, database });
+export async function documentListGridFsBuckets(connectionId: string, database: string, filter?: string, sort?: string): Promise<MongoGridFsBucketInfo[]> {
+  return post("/api/document-store/list-gridfs-buckets", { connectionId, database, filter, sort });
 }
 
 export async function documentCreateGridFsBucket(connectionId: string, database: string, bucket: string): Promise<void> {

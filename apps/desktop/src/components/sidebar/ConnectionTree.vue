@@ -73,6 +73,24 @@ function refreshActiveSidebarTableSearches() {
   }
 }
 
+watch(
+  () => settingsStore.editorSettings.sidebarTableSearchEnabled,
+  (enabled) => {
+    if (enabled) return;
+    const parentNodeIds = Object.keys(store.sidebarTableSearchQueries);
+    if (parentNodeIds.length === 0) return;
+
+    for (const parentNodeId of parentNodeIds) {
+      window.clearTimeout(tableSearchTimers.get(parentNodeId));
+      tableSearchTimers.delete(parentNodeId);
+      tableSearchFocusRestoreTokens.delete(parentNodeId);
+      store.setSidebarTableSearchQuery(parentNodeId, "");
+    }
+    latestTableSearchInteractionParentId = null;
+    void Promise.all(parentNodeIds.map((parentNodeId) => store.refreshSidebarTableSearch(parentNodeId))).catch(() => {});
+  },
+);
+
 watch(deferredSearchQuery, (newQuery, oldQuery) => {
   store.sidebarSearchQuery = newQuery;
   const tasks: Promise<void>[] = [];
@@ -256,7 +274,7 @@ const filteredNodes = computed(() => {
 
 const flatNodes = computed<FlatTreeNode[]>(() =>
   insertSidebarTableSearchControls(flattenTree(filteredNodes.value), {
-    enabled: !isFiltering.value,
+    enabled: settingsStore.editorSettings.sidebarTableSearchEnabled && !isFiltering.value,
     sidebarObjectDisplay: settingsStore.editorSettings.sidebarObjectDisplay,
     activeQueries: store.sidebarTableSearchQueries,
   }),

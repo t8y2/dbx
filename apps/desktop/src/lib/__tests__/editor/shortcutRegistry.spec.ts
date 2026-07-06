@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_SHORTCUT_SETTINGS, SHORTCUT_DEFINITIONS, findShortcutConflict, normalizeShortcutSettings, type ShortcutActionId } from "@/lib/editor/shortcutRegistry";
+import { DEFAULT_SHORTCUT_SETTINGS, SHORTCUT_DEFINITIONS, findShortcutConflict, formatShortcut, normalizeShortcutSettings, shortcutToCodeMirrorKey, type ShortcutActionId } from "@/lib/editor/shortcutRegistry";
 
 describe("shortcutRegistry editor actions", () => {
   const formatterEditorActionIds: ShortcutActionId[] = ["formatSql", "indentMore", "indentLess", "duplicateLine", "deleteLine", "moveLineUp", "moveLineDown", "copyLineUp", "copyLineDown", "undo", "redo", "selectAll", "uppercaseSelection", "lowercaseSelection"];
@@ -60,5 +60,14 @@ describe("shortcutRegistry editor actions", () => {
 
     expect(findShortcutConflict("copySidebarSelection", shortcuts.copySidebarSelection, shortcuts)).toBe("editSidebarConnection");
     expect(findShortcutConflict("copyCurrentRow", shortcuts.copyCurrentRow, shortcuts)).toBe(null);
+  });
+
+  it("formats Ctrl before Shift on Windows", () => {
+    expect(formatShortcut("Shift+Mod+F", "Win32")).toBe("Ctrl+Shift+F");
+  });
+
+  it("converts plus-key shortcuts for CodeMirror keymaps", () => {
+    expect(shortcutToCodeMirrorKey("Mod+Plus")).toBe("Mod-+");
+    expect(shortcutToCodeMirrorKey("Shift+Mod++")).toBe("Shift-Mod-+");
   });
 });

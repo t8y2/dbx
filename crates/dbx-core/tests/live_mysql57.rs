@@ -1,7 +1,7 @@
 use dbx_core::connection::AppState;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::query::execute_sql_statement;
-use dbx_core::sql::SqlFileRequest;
+use dbx_core::sql::{split_sql_statements_for_database, SqlFileRequest};
 use dbx_core::sql_file_import::execute_sql_file_content;
 use dbx_core::storage::Storage;
 use tokio_util::sync::CancellationToken;
@@ -132,6 +132,37 @@ END
 
     assert_eq!(result.columns, vec!["id", "NAME"]);
     assert_eq!(result.rows, vec![vec![serde_json::json!("1"), serde_json::json!("测试数据001")]]);
+}
+
+#[tokio::test]
+#[ignore = "requires a remote writable MySQL endpoint"]
+async fn live_mysql_splitter_executes_routine_without_delimiter() {
+    let url = std::env::var("DBX_LIVE_MYSQL_PROCEDURE_URL").expect("DBX_LIVE_MYSQL_PROCEDURE_URL");
+    let pool = dbx_core::db::mysql::connect(&url, std::time::Duration::from_secs(10)).await.unwrap();
+    let procedure = "dbx_issue_2695_proc";
+
+    let sql = format!(
+        "\
+DROP PROCEDURE IF EXISTS {procedure};
+CREATE PROCEDURE {procedure}()
+BEGIN
+    SET @dbx_issue_2695_value = 2695;
+    SELECT @dbx_issue_2695_value AS value;
+END;
+CALL {procedure}();
+DROP PROCEDURE IF EXISTS {procedure};"
+    );
+    let statements = split_sql_statements_for_database(&sql, DatabaseType::Mysql);
+    assert_eq!(statements.len(), 4);
+    assert!(statements[1].contains("SET @dbx_issue_2695_value = 2695;"));
+    assert!(statements[1].contains("SELECT @dbx_issue_2695_value AS value;"));
+    assert!(statements[1].ends_with("END"));
+
+    for statement in statements {
+        dbx_core::db::mysql::execute_query_with_max_rows(&pool, &statement, false, Some(10), Default::default())
+            .await
+            .unwrap();
+    }
 }
 
 #[tokio::test]

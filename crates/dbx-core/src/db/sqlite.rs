@@ -40,34 +40,50 @@ impl SqliteHandle {
 }
 
 pub async fn connect_path(path: &str) -> Result<SqliteHandle, String> {
-    connect_path_with_options(path, false, Vec::new()).await
+    connect_path_with_options(path, false, None, Vec::new()).await
 }
 
 pub async fn connect_path_with_extensions(
     path: &str,
     extensions: Vec<SqliteExtensionSpec>,
 ) -> Result<SqliteHandle, String> {
-    connect_path_with_options(path, false, extensions).await
+    connect_path_with_options(path, false, None, extensions).await
+}
+
+pub async fn connect_path_with_cipher_key_and_extensions(
+    path: &str,
+    cipher_key: &str,
+    extensions: Vec<SqliteExtensionSpec>,
+) -> Result<SqliteHandle, String> {
+    connect_path_with_options(path, false, sqlite_cipher_key(cipher_key), extensions).await
 }
 
 pub async fn connect_path_create_if_missing(path: &str) -> Result<SqliteHandle, String> {
-    connect_path_with_options(path, true, Vec::new()).await
+    connect_path_with_options(path, true, None, Vec::new()).await
 }
 
 pub async fn connect_path_create_if_missing_with_extensions(
     path: &str,
     extensions: Vec<SqliteExtensionSpec>,
 ) -> Result<SqliteHandle, String> {
-    connect_path_with_options(path, true, extensions).await
+    connect_path_with_options(path, true, None, extensions).await
+}
+
+pub async fn connect_path_create_if_missing_with_cipher_key(
+    path: &str,
+    cipher_key: &str,
+) -> Result<SqliteHandle, String> {
+    connect_path_with_options(path, true, sqlite_cipher_key(cipher_key), Vec::new()).await
 }
 
 async fn connect_path_with_options(
     path: &str,
     create_if_missing: bool,
+    cipher_key: Option<String>,
     extensions: Vec<SqliteExtensionSpec>,
 ) -> Result<SqliteHandle, String> {
     let path = path.to_string();
-    tokio::task::spawn_blocking(move || open_sqlite_handle(&path, create_if_missing, extensions))
+    tokio::task::spawn_blocking(move || open_sqlite_handle(&path, create_if_missing, cipher_key, extensions))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -75,9 +91,12 @@ async fn connect_path_with_options(
 fn open_sqlite_handle(
     path: &str,
     create_if_missing: bool,
+    cipher_key: Option<String>,
     extensions: Vec<SqliteExtensionSpec>,
 ) -> Result<SqliteHandle, String> {
     let is_memory = is_memory_database_path(path);
+    let encrypted = cipher_key.as_deref().is_some_and(|key| !key.is_empty());
+    ensure_sqlcipher_available(encrypted)?;
     if !is_memory && !create_if_missing {
         validate_file_path(path, is_network_path)?;
     }
@@ -85,7 +104,7 @@ fn open_sqlite_handle(
     if !is_memory && create_if_missing {
         ensure_parent_dir(path)?;
     }
-    if !is_memory && !is_network_path(path) {
+    if !is_memory && !is_network_path(path) && !encrypted {
         validate_existing_sqlite_file(path)?;
     }
 
@@ -105,11 +124,53 @@ fn open_sqlite_handle(
         }
     };
 
+    apply_sqlcipher_key(&conn, cipher_key.as_deref())?;
     conn.busy_timeout(std::time::Duration::from_secs(10)).map_err(|e| e.to_string())?;
     load_sqlite_extensions(&conn, &extensions)?;
     register_sqlite_compat_functions(&conn)?;
 
     Ok(SqliteHandle { conn: Arc::new(Mutex::new(conn)) })
+}
+
+fn sqlite_cipher_key(cipher_key: &str) -> Option<String> {
+    if cipher_key.is_empty() {
+        None
+    } else {
+        Some(cipher_key.to_string())
+    }
+}
+
+#[cfg(feature = "sqlite-sqlcipher")]
+fn ensure_sqlcipher_available(_encrypted: bool) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(feature = "sqlite-sqlcipher"))]
+fn ensure_sqlcipher_available(encrypted: bool) -> Result<(), String> {
+    if encrypted {
+        Err("SQLCipher support is not compiled in this build. Rebuild with the sqlite-sqlcipher feature.".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "sqlite-sqlcipher")]
+fn apply_sqlcipher_key(conn: &Connection, cipher_key: Option<&str>) -> Result<(), String> {
+    let Some(cipher_key) = cipher_key.filter(|key| !key.is_empty()) else {
+        return Ok(());
+    };
+
+    // SQLCipher requires the key before the first schema read; the verification
+    // query turns wrong keys into an immediate connection error.
+    conn.pragma_update(None, "key", cipher_key).map_err(|e| format!("SQLCipher key setup failed: {e}"))?;
+    conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
+        .map_err(|e| format!("SQLCipher database unlock failed. Check the SQLite password/key and file type: {e}"))?;
+    Ok(())
+}
+
+#[cfg(not(feature = "sqlite-sqlcipher"))]
+fn apply_sqlcipher_key(_conn: &Connection, _cipher_key: Option<&str>) -> Result<(), String> {
+    Ok(())
 }
 
 fn register_sqlite_compat_functions(conn: &Connection) -> Result<(), String> {
@@ -392,6 +453,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn text_affinity_blob_bytes_display_as_utf8_text() {
+        let pool = connect_path(":memory:").await.expect("connect in-memory SQLite");
+
+        execute_query(
+            &pool,
+            "CREATE TABLE goods (data TEXT); INSERT INTO goods (data) VALUES (X'7b227469746c65223a22e4b8ade69687227d');",
+        )
+        .await
+        .expect("insert blob-backed JSON into TEXT column");
+        let result = execute_query(&pool, "SELECT data FROM goods").await.expect("select data");
+
+        assert_eq!(result.rows[0][0], serde_json::json!(r#"{"title":"中文"}"#));
+    }
+
+    #[tokio::test]
+    async fn blob_declared_columns_stay_hex_encoded() {
+        let pool = connect_path(":memory:").await.expect("connect in-memory SQLite");
+
+        execute_query(
+            &pool,
+            "CREATE TABLE goods (data BLOB); INSERT INTO goods (data) VALUES (X'7b227469746c65223a22e4b8ade69687227d');",
+        )
+        .await
+        .expect("insert blob-backed JSON into BLOB column");
+        let result = execute_query(&pool, "SELECT data FROM goods").await.expect("select data");
+
+        assert_eq!(result.rows[0][0], serde_json::json!("0x7b227469746c65223a22e4b8ade69687227d"));
+    }
+
+    #[tokio::test]
     async fn create_if_missing_rejects_existing_non_sqlite_file() {
         let path = std::env::temp_dir().join(format!("dbx-not-sqlite-{}.png", uuid::Uuid::new_v4()));
         std::fs::write(&path, b"\x89PNG\r\n\x1a\nnot sqlite").unwrap();
@@ -431,6 +522,53 @@ mod tests {
         assert_eq!(result.rows[0][0], serde_json::json!("t"));
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "sqlite-sqlcipher")]
+    #[tokio::test]
+    async fn sqlcipher_key_creates_and_reopens_encrypted_database() {
+        let path = std::env::temp_dir().join(format!("dbx-sqlcipher-{}.db", uuid::Uuid::new_v4()));
+        let key = "secret key";
+
+        {
+            let pool = connect_path_create_if_missing_with_cipher_key(path.to_str().unwrap(), key)
+                .await
+                .expect("create encrypted sqlite");
+            execute_query(&pool, "CREATE TABLE t (name TEXT); INSERT INTO t VALUES ('encrypted');")
+                .await
+                .expect("write encrypted sqlite");
+        }
+
+        assert!(!path_has_sqlite_header(&path).expect("inspect encrypted header"));
+
+        let reopened = connect_path_with_cipher_key_and_extensions(path.to_str().unwrap(), key, Vec::new())
+            .await
+            .expect("reopen encrypted sqlite");
+        let result = execute_query(&reopened, "SELECT name FROM t").await.expect("read encrypted sqlite");
+        assert_eq!(result.rows[0][0], serde_json::json!("encrypted"));
+
+        let wrong_key =
+            match connect_path_with_cipher_key_and_extensions(path.to_str().unwrap(), "wrong key", Vec::new()).await {
+                Ok(_) => panic!("wrong key must fail"),
+                Err(err) => err,
+            };
+        assert!(wrong_key.contains("SQLCipher database unlock failed"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(not(feature = "sqlite-sqlcipher"))]
+    #[tokio::test]
+    async fn sqlcipher_key_requires_sqlcipher_feature() {
+        let err =
+            match connect_path_with_cipher_key_and_extensions("/tmp/dbx-missing-sqlcipher.db", "secret", Vec::new())
+                .await
+            {
+                Ok(_) => panic!("SQLCipher key should require feature support"),
+                Err(err) => err,
+            };
+
+        assert!(err.contains("SQLCipher support is not compiled"));
     }
 
     #[test]
@@ -1925,13 +2063,18 @@ fn execute_query_blocking(pool: &SqliteHandle, sql: &str, max_rows: Option<usize
         if starts_with_executable_sql_keyword(sql, &["SELECT", "PRAGMA", "EXPLAIN", "WITH"]) {
             let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
             let columns = stmt.column_names().iter().map(|name| name.to_string()).collect::<Vec<_>>();
+            let column_decl_types =
+                stmt.columns().iter().map(|column| column.decl_type().map(str::to_string)).collect::<Vec<_>>();
             let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
             let mut result_rows = Vec::new();
 
             while let Some(row) = rows.next().map_err(|e| e.to_string())? {
                 let mut values = Vec::with_capacity(columns.len());
                 for i in 0..columns.len() {
-                    values.push(value_ref_to_json(row.get_ref(i).map_err(|e| e.to_string())?));
+                    values.push(value_ref_to_json(
+                        row.get_ref(i).map_err(|e| e.to_string())?,
+                        column_decl_types.get(i).and_then(Option::as_deref),
+                    ));
                 }
                 result_rows.push(values);
                 if result_rows.len() > row_limit {
@@ -1972,7 +2115,7 @@ fn execute_query_blocking(pool: &SqliteHandle, sql: &str, max_rows: Option<usize
     })
 }
 
-fn value_ref_to_json(value: ValueRef<'_>) -> serde_json::Value {
+fn value_ref_to_json(value: ValueRef<'_>, column_decl_type: Option<&str>) -> serde_json::Value {
     match value {
         ValueRef::Null => serde_json::Value::Null,
         ValueRef::Integer(v) => super::safe_i64_to_json(v),
@@ -1980,6 +2123,22 @@ fn value_ref_to_json(value: ValueRef<'_>) -> serde_json::Value {
             serde_json::Number::from_f64(v).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
         }
         ValueRef::Text(v) => serde_json::Value::String(String::from_utf8_lossy(v).to_string()),
-        ValueRef::Blob(v) => super::binary_value_to_json(v),
+        ValueRef::Blob(v) => sqlite_blob_value_to_json(v, column_decl_type),
     }
+}
+
+fn sqlite_blob_value_to_json(bytes: &[u8], column_decl_type: Option<&str>) -> serde_json::Value {
+    if is_sqlite_text_affinity(column_decl_type) {
+        // SQLite columns can hold BLOB values even when declared as TEXT.
+        // Match common clients by showing valid UTF-8 bytes as text for text-affinity columns.
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            return serde_json::Value::String(text.to_string());
+        }
+    }
+    super::binary_value_to_json(bytes)
+}
+
+fn is_sqlite_text_affinity(column_decl_type: Option<&str>) -> bool {
+    let upper = column_decl_type.unwrap_or("").to_ascii_uppercase();
+    upper.contains("CHAR") || upper.contains("CLOB") || upper.contains("TEXT")
 }

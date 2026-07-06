@@ -19,4 +19,19 @@ describe("shortcut display", () => {
     expect(formatShortcutDisplay("Shift+Alt+ArrowUp", "MacIntel")).toBe("⇧ ⌥ ↑");
     expect(formatShortcutDisplay("Mod+Delete", "MacIntel")).toBe("⌘ ⌦");
   });
+
+  it("orders Ctrl before Shift on Windows", () => {
+    expect(formatShortcutDisplay("Shift+Mod+F", "Win32")).toBe("Ctrl + Shift + F");
+    expect(formatShortcutDisplay("Shift+Mod+K", "Win32")).toBe("Ctrl + Shift + K");
+    expect(formatShortcutDisplay("Shift+Mod+Z", "Win32")).toBe("Ctrl + Shift + Z");
+  });
+
+  it("keeps macOS modifier order and glyphs", () => {
+    expect(formatShortcutDisplay("Shift+Mod+F", "MacIntel")).toBe("⇧ ⌘ F");
+  });
+
+  it("displays canonical and legacy plus-key shortcuts", () => {
+    expect(formatShortcutDisplay("Mod+Plus", "Win32")).toBe("Ctrl + +");
+    expect(formatShortcutDisplay("Shift+Mod++", "Win32")).toBe("Ctrl + Shift + +");
+  });
 });

@@ -105,10 +105,21 @@ test("non-generate actions do not execute even in agent mode", () => {
 
   assert.deepEqual(plan.steps, [
     { kind: "generate_sql", status: "done", sql: "SELECT count(*) FROM users" },
-    { kind: "execute_sql", status: "skipped", reason: "unsupported_action" },
   ]);
   assert.equal(plan.executableSql, undefined);
   assert.equal(plan.handoffSql, undefined);
+});
+
+test("task-oriented Agent actions do not drive client-side execution", () => {
+  for (const action of ["query", "exploreSchema", "executeAndExplain"] as AiAction[]) {
+    const plan = buildAiAgentPlan(planInput({ action, instruction: "查一下用户数量" }));
+
+    assert.deepEqual(plan.steps, [
+      { kind: "generate_sql", status: "done", sql: "SELECT count(*) FROM users" },
+    ]);
+    assert.equal(plan.executableSql, undefined);
+    assert.equal(plan.handoffSql, undefined);
+  }
 });
 
 test("agent plan blocks dangerous SQL", () => {

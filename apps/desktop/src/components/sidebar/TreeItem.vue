@@ -118,6 +118,7 @@ import {
   buildCopyTableDataSql,
   buildEmptyTableSql,
   buildTruncateTableSql,
+  supportsDropTableCascade,
   supportsSchemaComment,
   type DropTableChildObjectSqlOptions,
   type DropObjectSqlOptions,
@@ -353,9 +354,9 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Database, colorClass: "text-yellow-500" };
     case "mongo-gridfs":
     case "mongo-buckets":
-      return { icon: Archive, colorClass: "text-amber-500" };
+      return { icon: Archive, colorClass: "text-cyan-500" };
     case "mongo-bucket":
-      return { icon: Archive, colorClass: "text-amber-400" };
+      return { icon: Archive, colorClass: "text-cyan-400" };
     case "mongo-collection":
       return { icon: Table, colorClass: "text-green-400" };
     case "vector-collection":
@@ -579,7 +580,9 @@ async function toggle() {
         await connectionStore.loadMongoDatabases(node.connectionId);
       } else if (config?.db_type === "elasticsearch") {
         await connectionStore.loadElasticsearchIndices(node.connectionId);
-      } else if (config?.db_type === "qdrant" || config?.db_type === "milvus" || config?.db_type === "weaviate" || config?.db_type === "chromadb") {
+      } else if (config?.db_type === "milvus") {
+        await connectionStore.loadMilvusDatabases(node.connectionId);
+      } else if (config?.db_type === "qdrant" || config?.db_type === "weaviate" || config?.db_type === "chromadb") {
         await connectionStore.loadVectorCollections(node.connectionId);
       } else if (config?.db_type === "mq") {
         await connectionStore.loadMqTenants(node.connectionId);
@@ -613,6 +616,8 @@ async function toggle() {
       queryStore.openUserAdmin(node.connectionId);
     } else if (node.type === "mongo-db" && node.connectionId && node.database) {
       await connectionStore.loadMongoCollections(node.connectionId, node.database);
+    } else if (node.type === "vector-database" && node.connectionId && node.database) {
+      await connectionStore.loadVectorCollections(node.connectionId, node.database);
     } else if (node.type === "mongo-collection" && node.connectionId && node.database) {
       await connectionStore.loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id);
     } else if (node.type === "elasticsearch-index" && node.connectionId) {
@@ -621,7 +626,7 @@ async function toggle() {
       queryStore.updateSql(tab, node.label);
     } else if (node.type === "vector-collection" && node.connectionId) {
       await connectionStore.ensureConnected(node.connectionId);
-      const collectionRef = node.id.includes("__vector_collection:") ? node.id.split("__vector_collection:").pop() || node.label : node.label;
+      const collectionRef = (node.meta as { collectionId?: string } | undefined)?.collectionId ?? node.label;
       const tab = queryStore.createTab(node.connectionId, node.database || "default", node.label, "vector");
       queryStore.updateSql(tab, collectionRef);
       api
@@ -1714,6 +1719,7 @@ const renameObjectName = ref("");
 const renameObjectError = ref("");
 const renameObjectPreviewSql = ref("");
 const dropTablePreviewSql = ref("");
+const dropTableCascade = ref(false);
 const emptyTablePreviewSql = ref("");
 const truncateTablePreviewSql = ref("");
 const dropObjectPreviewSql = ref("");
@@ -2442,17 +2448,25 @@ const canEditSchemaComment = computed(() => {
   return props.node.type === "schema" && !!props.node.database && !config?.read_only && supportsSchemaComment(effectiveDatabaseTypeForConnection(config));
 });
 
-function tableAdminSqlOptions(): TableAdminSqlOptions {
-  return {
+const canDropTableCascade = computed(() => props.node.type === "table" && supportsDropTableCascade(currentDatabaseType()));
+
+function tableAdminSqlOptions(options?: { cascade?: boolean }): TableAdminSqlOptions {
+  const result: TableAdminSqlOptions = {
     databaseType: currentDatabaseType(),
     schema: props.node.schema,
     tableName: props.node.label,
   };
+  if (options?.cascade) result.cascade = true;
+  return result;
+}
+
+function dropTableSqlOptions(): TableAdminSqlOptions {
+  return tableAdminSqlOptions({ cascade: canDropTableCascade.value && dropTableCascade.value });
 }
 
 async function refreshDropTablePreviewSql() {
   dropTablePreviewSql.value = "";
-  dropTablePreviewSql.value = await buildDropTableSql(tableAdminSqlOptions()).catch(() => "");
+  dropTablePreviewSql.value = await buildDropTableSql(dropTableSqlOptions()).catch(() => "");
 }
 
 async function refreshEmptyTablePreviewSql() {
@@ -2466,6 +2480,7 @@ async function refreshTruncateTablePreviewSql() {
 }
 
 function dropTable() {
+  dropTableCascade.value = false;
   void refreshDropTablePreviewSql();
   showDropTableConfirm.value = true;
 }
@@ -2480,7 +2495,7 @@ async function confirmDropTable() {
   if (!node.connectionId || !node.database) return;
   try {
     await connectionStore.ensureConnected(node.connectionId);
-    const sql = dropTablePreviewSql.value || (await buildDropTableSql(tableAdminSqlOptions()));
+    const sql = dropTablePreviewSql.value || (await buildDropTableSql(dropTableSqlOptions()));
     await api.executeQuery(node.connectionId, node.database, sql, node.schema);
     toast(t("contextMenu.dropTableSuccess", { name: node.label }), 3000);
     closeDroppedTableObjectTabsForNode(node);
@@ -3790,8 +3805,22 @@ function openTableImport() {
 
 function openStructureEditor() {
   const node = props.node;
-  if (node.type !== "table" || !node.connectionId || !node.database) return;
-  queryStore.openTableStructure(node.connectionId, node.database, node.schema, node.label);
+  if (!node.connectionId || !node.database) return;
+  if (node.type === "table") {
+    queryStore.openTableStructure(node.connectionId, node.database, node.schema, node.label);
+    return;
+  }
+  if (node.type === "column" && node.tableName) {
+    const columnName = tableChildDropObjectName(node).trim();
+    if (!columnName) return;
+    queryStore.openTableStructure(node.connectionId, node.database, node.schema, node.tableName, "columns", { kind: "column", name: columnName });
+    return;
+  }
+  if (node.type === "index" && node.tableName) {
+    const indexName = tableChildDropObjectName(node).trim();
+    if (!indexName) return;
+    queryStore.openTableStructure(node.connectionId, node.database, node.schema, node.tableName, "indexes", { kind: "index", name: indexName });
+  }
 }
 
 function openFieldLineage() {
@@ -3835,7 +3864,8 @@ const canOpenTableImport = computed(() => {
   return props.node.type === "table" && !isSqlServerLinkedNode(props.node) && !!props.node.database && supportsTableImport(currentDatabaseType());
 });
 const canOpenStructureEditor = computed(() => {
-  return props.node.type === "table" && !isSqlServerLinkedNode(props.node) && !!props.node.database && supportsTableStructureEditing(currentTableStructureDatabaseType());
+  const editableNode = props.node.type === "table" || ((props.node.type === "column" || props.node.type === "index") && !!props.node.tableName);
+  return editableNode && !isSqlServerLinkedNode(props.node) && !!props.node.connectionId && !!props.node.database && supportsTableStructureEditing(currentTableStructureDatabaseType());
 });
 const canOpenFieldLineage = computed(() => {
   return props.node.type === "column" && !!props.node.database && !!props.node.tableName && supportsFieldLineage(currentDatabaseType());
@@ -3916,6 +3946,16 @@ const rowStyle = computed(() => {
     "--tree-connection-row-hover-bg": hexToRgba(color, isActiveConnectionScope.value ? 0.18 : 0.12),
     "--tree-connection-active-bg": hexToRgba(color, 0.18),
     "--tree-connection-active-focus-bg": hexToRgba(color, 0.22),
+  };
+});
+const tableSearchStyle = computed(() => {
+  const color = connectionColor.value;
+  const rowBackgroundColor = color ? hexToRgba(color, isActiveConnectionScope.value ? 0.14 : 0.08) : "transparent";
+  return {
+    paddingLeft: paddingLeft.value,
+    "--tree-table-search-row-bg": rowBackgroundColor,
+    "--tree-table-search-input-bg": color ? hexToRgba(color, isActiveConnectionScope.value ? 0.05 : 0.03) : "hsl(var(--background) / 0.56)",
+    "--tree-table-search-border": color ? hexToRgba(color, isActiveConnectionScope.value ? 0.12 : 0.08) : "hsl(var(--border) / 0.36)",
   };
 });
 
@@ -4756,9 +4796,16 @@ function treeItemMenuItems(): ContextMenuItem[] {
   // 7. Column
   if (node.type === "column") {
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    const columnActions: ContextMenuItem[] = [];
+    if (canOpenStructureEditor.value) {
+      columnActions.push({ label: t("contextMenu.editColumn"), action: openStructureEditor, icon: PencilRuler });
+    }
     if (canOpenFieldLineage.value) {
+      columnActions.push({ label: t("lineage.open"), action: openFieldLineage, icon: Network });
+    }
+    if (columnActions.length > 0) {
       items.push({ label: "", separator: true });
-      items.push({ label: t("lineage.open"), action: openFieldLineage, icon: Network });
+      items.push(...columnActions);
     }
     if (canDropTableChildObject.value) {
       items.push({ label: "", separator: true });
@@ -4775,6 +4822,10 @@ function treeItemMenuItems(): ContextMenuItem[] {
 
   if (node.type === "index" || node.type === "fkey" || node.type === "trigger") {
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    if (node.type === "index" && canOpenStructureEditor.value) {
+      items.push({ label: "", separator: true });
+      items.push({ label: t("contextMenu.editIndex"), action: openStructureEditor, icon: PencilRuler });
+    }
     if (node.type === "index" && canDropMongoIndex.value) {
       items.push({ label: "", separator: true });
       items.push({
@@ -4896,7 +4947,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
 </script>
 
 <template>
-  <div v-if="node.type === 'table-search-control'" class="flex h-7 items-center py-0.5 pr-2" :style="{ paddingLeft }" @click.stop @dblclick.stop @mousedown.stop @keydown.stop>
+  <div v-if="node.type === 'table-search-control'" class="tree-table-search-control flex h-7 items-center py-0.5 pr-2" :style="tableSearchStyle" @click.stop @dblclick.stop @mousedown.stop @keydown.stop>
     <div class="relative w-full min-w-0">
       <Search class="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
       <Input
@@ -4904,7 +4955,8 @@ function treeItemMenuItems(): ContextMenuItem[] {
         autocapitalize="off"
         autocorrect="off"
         spellcheck="false"
-        class="h-6 w-full rounded border-border/70 bg-background pl-7 pr-6 text-xs shadow-none focus-visible:ring-1"
+        class="h-6 w-full rounded border pl-7 pr-6 text-xs shadow-none focus-visible:ring-1"
+        :style="{ backgroundColor: 'var(--tree-table-search-input-bg)', borderColor: 'var(--tree-table-search-border)' }"
         :placeholder="t(node.label)"
         :aria-label="t(node.label)"
         :data-sidebar-table-search-parent-id="tableSearchParentId"
@@ -5151,7 +5203,17 @@ function treeItemMenuItems(): ContextMenuItem[] {
     </DialogContent>
   </Dialog>
 
-  <DangerConfirmDialog v-model:open="showDropTableConfirm" :title="t('contextMenu.confirmDropTableTitle')" :message="t('contextMenu.confirmDropTableMessage', { name: node.label })" :sql="dropTablePreviewSql" :confirm-label="t('contextMenu.dropTable')" @confirm="confirmDropTable" />
+  <DangerConfirmDialog v-model:open="showDropTableConfirm" :title="t('contextMenu.confirmDropTableTitle')" :message="t('contextMenu.confirmDropTableMessage', { name: node.label })" :sql="dropTablePreviewSql" :confirm-label="t('contextMenu.dropTable')" @confirm="confirmDropTable">
+    <template v-if="canDropTableCascade" #options>
+      <label class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+        <input v-model="dropTableCascade" type="checkbox" class="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary" @change="refreshDropTablePreviewSql()" />
+        <span class="grid gap-0.5">
+          <span class="font-medium text-foreground">{{ t("contextMenu.dropTableCascade") }}</span>
+          <span class="text-xs leading-5 text-muted-foreground">{{ t("contextMenu.dropTableCascadeHint") }}</span>
+        </span>
+      </label>
+    </template>
+  </DangerConfirmDialog>
 
   <DangerConfirmDialog v-model:open="showEmptyTableConfirm" :title="t('contextMenu.confirmEmptyTableTitle')" :message="t('contextMenu.confirmEmptyTableMessage', { name: node.label })" :sql="emptyTablePreviewSql" :confirm-label="t('contextMenu.emptyTable')" @confirm="confirmEmptyTable" />
 
@@ -5557,6 +5619,26 @@ function treeItemMenuItems(): ContextMenuItem[] {
 
 .tree-item-connection-tint.tree-item-active:focus::before {
   background-color: var(--tree-connection-active-focus-bg, var(--tree-connection-active-bg));
+}
+
+.tree-table-search-control {
+  position: relative;
+  isolation: isolate;
+  background-color: transparent;
+}
+
+.tree-table-search-control::before {
+  content: "";
+  position: absolute;
+  inset: 0 -9999px;
+  z-index: 0;
+  background-color: var(--tree-table-search-row-bg);
+  pointer-events: none;
+}
+
+.tree-table-search-control > * {
+  position: relative;
+  z-index: 1;
 }
 
 /* Unfocused: subtle gray */

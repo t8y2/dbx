@@ -19,6 +19,7 @@ import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.sql.Types;
@@ -43,6 +44,14 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
 
         Assertions.assertEquals("com.kingbase8.Driver", agent.getProfile().getDriverClass());
         Assertions.assertEquals("jdbc:kingbase8://{host}:{port}/{database}", agent.getProfile().getUrlTemplate());
+    }
+
+    @Test
+    void schemaSwitchPlacesSysCatalogAfterSelectedSchema() {
+        KingbaseAgent agent = new KingbaseAgent();
+
+        Assertions.assertEquals("SET search_path TO \"app\", sys_catalog", agent.setSchemaSQL("app"));
+        Assertions.assertEquals("SET search_path TO \"app\"\"prod\", sys_catalog", agent.setSchemaSQL("app\"prod"));
     }
 
     @Test
@@ -72,7 +81,24 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         Assertions.assertEquals(2, databases.size());
         Assertions.assertEquals("app", databases.get(0).getName());
         Assertions.assertEquals("analytics", databases.get(1).getName());
-        Assertions.assertTrue(sql.get(0).contains("FROM sys_database"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_database"), sql.get(0));
+    }
+
+    @Test
+    void regularListDatabasesFallsBackToPostgresCatalog() {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnectionWithFailure(sql, "sys_catalog.sys_database", resultSet(
+            new String[]{"database_name"},
+            new Object[][]{{"test"}}
+        )));
+
+        List<DatabaseInfo> databases = agent.listDatabases();
+
+        Assertions.assertEquals(1, databases.size());
+        Assertions.assertEquals("test", databases.get(0).getName());
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_database"), sql.get(0));
+        Assertions.assertTrue(sql.get(1).contains("FROM pg_database"), sql.get(1));
     }
 
     @Test
@@ -374,6 +400,31 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
             }
             if ("createStatement".equals(method.getName())) {
                 return plainStatement;
+            }
+            if ("isClosed".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Connection preparedConnectionWithFailure(List<String> sql, String failingSqlFragment, ResultSet fallback) {
+        return proxy(Connection.class, (method, args) -> {
+            if ("prepareStatement".equals(method.getName())) {
+                String preparedSql = String.valueOf(args[0]);
+                sql.add(preparedSql);
+                return proxy(PreparedStatement.class, (statementMethod, statementArgs) -> {
+                    if ("executeQuery".equals(statementMethod.getName())) {
+                        if (preparedSql.contains(failingSqlFragment)) {
+                            throw new SQLException("relation does not exist: " + failingSqlFragment);
+                        }
+                        return fallback;
+                    }
+                    if ("close".equals(statementMethod.getName())) {
+                        return null;
+                    }
+                    return defaultValue(statementMethod.getReturnType());
+                });
             }
             if ("isClosed".equals(method.getName())) {
                 return false;

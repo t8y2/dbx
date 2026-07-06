@@ -48,7 +48,7 @@ import {
   type QueryEditorTableReferenceDropDetail,
   type QueryEditorTableReferencePayload,
 } from "@/lib/editor/queryEditorTableDrop";
-import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, loadEditorTheme, editorFontTheme, sqlCompletionTheme } from "@/lib/editor/editorThemes";
+import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, createRunStatementButtonDom, loadEditorTheme, editorFontTheme, sqlCompletionTheme } from "@/lib/editor/editorThemes";
 import { clampEditorFontSize, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
 import { normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
@@ -200,6 +200,7 @@ let codeMirrorTheme: import("@codemirror/state").Compartment | null = null;
 let wordWrapComp: import("@codemirror/state").Compartment | null = null;
 let vimModeComp: import("@codemirror/state").Compartment | null = null;
 let readOnlyComp: import("@codemirror/state").Compartment | null = null;
+let runGutterComp: import("@codemirror/state").Compartment | null = null;
 let runKeymapComp: import("@codemirror/state").Compartment | null = null;
 let completionComp: import("@codemirror/state").Compartment | null = null;
 let diagnosticComp: import("@codemirror/state").Compartment | null = null;
@@ -232,6 +233,7 @@ let setSqlDiagnosticsEffect: import("@codemirror/state").StateEffectType<SqlSema
 let setPreviewRangeEffect: import("@codemirror/state").StateEffectType<{ from: number; to: number } | null> | null = null;
 let previewRangeComp: import("@codemirror/state").Compartment | null = null;
 let buildPreviewRangeExtension: (() => import("@codemirror/state").Extension) | null = null;
+let buildRunStatementGutterExtension: (() => import("@codemirror/state").Extension) | null = null;
 let indentComp: import("@codemirror/state").Compartment | null = null;
 let codeMirrorIndentUnit: typeof import("@codemirror/language").indentUnit | null = null;
 let semanticDiagnostics: SqlSemanticDiagnostic[] = [];
@@ -246,7 +248,10 @@ let pendingImeModelEmit = false;
 type SelectionCaseMode = "upper" | "lower";
 let executableStatementRangeCache: ExecutableStatementRangeCache | null = null;
 let editorScrollbarPointerCleanup: (() => void) | null = null;
+let editorSelectionDragCleanup: (() => void) | null = null;
+let editorSelectionDropCursorEl: HTMLDivElement | null = null;
 const EDITOR_SCROLLBAR_POINTER_GUTTER_PX = 18;
+const EDITOR_SELECTION_DRAG_THRESHOLD_PX = 6;
 const tableNavigationHoverClass = "query-editor--table-navigation-hover";
 const DBX_VIM_SAVE_EVENT = "dbx-vim-save";
 
@@ -280,6 +285,7 @@ const queryEditorAppearanceSettings = computed(() => {
     vimModeEnabled: settings.vimModeEnabled,
     showCurrentStatementFrame: settings.showCurrentStatementFrame,
     shortcuts: settings.shortcuts,
+    showStatementRunButtons: settings.showStatementRunButtons,
   };
 });
 
@@ -539,6 +545,144 @@ function registerEditorScrollbarPointerGuard(currentView: EditorViewType) {
     currentView.scrollDOM.removeEventListener("mousedown", onPointerDown, true);
     editorScrollbarPointerCleanup = null;
   };
+}
+
+function selectedRangeAtPointer(currentView: EditorViewType, event: MouseEvent) {
+  if (props.readOnly || event.button !== 0) return null;
+  if (!currentView.contentDOM.contains(event.target as Node | null)) return null;
+  const range = currentView.state.selection.main;
+  if (range.empty) return null;
+  const pos = currentView.posAtCoords({ x: event.clientX, y: event.clientY }, false);
+  if (pos == null || pos < range.from || pos > range.to) return null;
+  return { from: range.from, to: range.to, text: currentView.state.sliceDoc(range.from, range.to) };
+}
+
+function moveOrCopySelectionToPointer(currentView: EditorViewType, selection: { from: number; to: number; text: string }, event: MouseEvent) {
+  const dropPos = currentView.posAtCoords({ x: event.clientX, y: event.clientY }, false);
+  if (dropPos == null) return false;
+  const copy = event.ctrlKey || event.metaKey;
+  if (!copy && dropPos >= selection.from && dropPos <= selection.to) return true;
+
+  const insert = { from: dropPos, insert: selection.text };
+  const changes = copy ? currentView.state.changes(insert) : currentView.state.changes([{ from: selection.from, to: selection.to }, insert]);
+  currentView.dispatch({
+    changes,
+    selection: {
+      anchor: changes.mapPos(dropPos, -1),
+      head: changes.mapPos(dropPos, 1),
+    },
+    scrollIntoView: true,
+    userEvent: copy ? "input.drop" : "move.drop",
+  });
+  currentView.focus();
+  return true;
+}
+
+function hideEditorSelectionDropCursor() {
+  editorSelectionDropCursorEl?.remove();
+  editorSelectionDropCursorEl = null;
+}
+
+function updateEditorSelectionDropCursor(currentView: EditorViewType, event: MouseEvent) {
+  const pos = currentView.posAtCoords({ x: event.clientX, y: event.clientY }, false);
+  if (pos == null) {
+    hideEditorSelectionDropCursor();
+    return;
+  }
+  const coords = currentView.coordsAtPos(pos);
+  if (!coords) {
+    hideEditorSelectionDropCursor();
+    return;
+  }
+  const ownerDocument = currentView.dom.ownerDocument;
+  const cursor = editorSelectionDropCursorEl ?? ownerDocument.createElement("div");
+  if (!editorSelectionDropCursorEl) {
+    cursor.setAttribute("aria-hidden", "true");
+    cursor.className = "dbx-editor-selection-drop-cursor";
+    // Use a fixed overlay instead of CodeMirror's internal drop cursor layer so
+    // the marker stays visible above selection layers, themes, and scrollers.
+    cursor.style.position = "fixed";
+    cursor.style.zIndex = "2147483647";
+    cursor.style.width = "2px";
+    cursor.style.pointerEvents = "none";
+    cursor.style.backgroundImage = "repeating-linear-gradient(to bottom, #e879f9 0 4px, transparent 4px 7px)";
+    cursor.style.filter = "drop-shadow(0 0 1px rgba(0, 0, 0, 0.7))";
+    ownerDocument.body.appendChild(cursor);
+    editorSelectionDropCursorEl = cursor;
+  }
+  cursor.style.left = `${Math.round(coords.left) - 1}px`;
+  cursor.style.top = `${Math.round(coords.top)}px`;
+  cursor.style.height = `${Math.max(16, Math.round(coords.bottom - coords.top))}px`;
+}
+
+function startEditorSelectionDrag(currentView: EditorViewType, event: MouseEvent): boolean {
+  const selection = selectedRangeAtPointer(currentView, event);
+  if (!selection) return false;
+
+  event.preventDefault();
+  event.stopPropagation();
+  if (!event.ctrlKey && !event.metaKey) {
+    emit("closeColumnPanel");
+  }
+  editorSelectionDragCleanup?.();
+  const startX = event.clientX;
+  const startY = event.clientY;
+  let dragging = false;
+
+  const cleanup = () => {
+    currentView.contentDOM.ownerDocument.removeEventListener("mousemove", onMove, true);
+    currentView.contentDOM.ownerDocument.removeEventListener("mouseup", onUp, true);
+    currentView.contentDOM.ownerDocument.removeEventListener("keydown", onKeyDown, true);
+    hideEditorSelectionDropCursor();
+    editorSelectionDragCleanup = null;
+  };
+
+  const onMove = (moveEvent: MouseEvent) => {
+    const distance = Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY);
+    if (!dragging && distance < EDITOR_SELECTION_DRAG_THRESHOLD_PX) return;
+    dragging = true;
+    if (moveEvent.ctrlKey || moveEvent.metaKey) {
+      currentView.contentDOM.style.cursor = "copy";
+    } else {
+      currentView.contentDOM.style.cursor = "move";
+    }
+    updateEditorSelectionDropCursor(currentView, moveEvent);
+    moveEvent.preventDefault();
+    moveEvent.stopImmediatePropagation();
+  };
+
+  const onUp = (upEvent: MouseEvent) => {
+    cleanup();
+    currentView.contentDOM.style.cursor = "";
+    upEvent.preventDefault();
+    upEvent.stopImmediatePropagation();
+    if (dragging) {
+      moveOrCopySelectionToPointer(currentView, selection, upEvent);
+      return;
+    }
+    const pos = currentView.posAtCoords({ x: upEvent.clientX, y: upEvent.clientY });
+    if (pos != null) {
+      currentView.dispatch({ selection: { anchor: pos }, userEvent: "select.pointer" });
+      currentView.focus();
+    }
+  };
+
+  const onKeyDown = (keyEvent: KeyboardEvent) => {
+    if (keyEvent.key !== "Escape") return;
+    cleanup();
+    currentView.contentDOM.style.cursor = "";
+    keyEvent.preventDefault();
+    keyEvent.stopImmediatePropagation();
+  };
+
+  currentView.contentDOM.ownerDocument.addEventListener("mousemove", onMove, true);
+  currentView.contentDOM.ownerDocument.addEventListener("mouseup", onUp, true);
+  currentView.contentDOM.ownerDocument.addEventListener("keydown", onKeyDown, true);
+  editorSelectionDragCleanup = () => {
+    cleanup();
+    currentView.contentDOM.style.cursor = "";
+  };
+  return true;
 }
 
 function executeFromContextMenu() {
@@ -1144,6 +1288,11 @@ function clearScheduledSemanticDiagnostics() {
   pendingSemanticDiagnosticPreserveOutsideRanges = false;
 }
 
+function invalidateSemanticDiagnosticsForDocumentChange() {
+  semanticDiagnosticRunId++;
+  semanticDiagnostics = [];
+}
+
 function shouldSkipSqlSemanticDiagnostics() {
   return props.databaseType !== "redis" && !settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled;
 }
@@ -1444,8 +1593,32 @@ function unregisterTableReferenceDropListener() {
 
 let completionEpoch = 0;
 let completionDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let typedCompletionActivationUntil = 0;
+let suppressNextSqlCompletionAutoStartUntil = 0;
 
 type QueryCompletionItem = SqlCompletionItem | ElasticsearchCompletionItem | RedisCompletionItem | MongoCompletionItem;
+
+function markTypedCompletionActivation() {
+  typedCompletionActivationUntil = Date.now() + 500;
+}
+
+function isTypedCompletionActivation(explicit: boolean) {
+  return explicit && typedCompletionActivationUntil >= Date.now();
+}
+
+function markCompletionAccepted() {
+  suppressNextSqlCompletionAutoStartUntil = Date.now() + 750;
+  completionEpoch++;
+}
+
+function consumeSqlCompletionAutoStartSuppression() {
+  if (suppressNextSqlCompletionAutoStartUntil < Date.now()) {
+    suppressNextSqlCompletionAutoStartUntil = 0;
+    return false;
+  }
+  suppressNextSqlCompletionAutoStartUntil = 0;
+  return true;
+}
 
 function buildCompletionResult(items: QueryCompletionItem[], from: number, validFor?: RegExp) {
   if (items.length === 0) return null;
@@ -1490,6 +1663,7 @@ function completionOptionForItem(item: QueryCompletionItem) {
       ...completion,
       apply(view: EditorViewType, completionItem: unknown, from: number, to: number) {
         record();
+        markCompletionAccepted();
         if (typeof originalApply === "function") {
           originalApply(view, completionItem as never, from, to);
         } else {
@@ -1510,6 +1684,7 @@ function completionOptionForItem(item: QueryCompletionItem) {
     boost: item.boost,
     apply(view: EditorViewType, _completionItem: unknown, from: number, to: number) {
       record();
+      markCompletionAccepted();
       const insert = item.apply ?? item.label;
       if (codeMirrorInsertCompletionText) {
         view.dispatch(codeMirrorInsertCompletionText(view.state, insert, from, to));
@@ -1617,6 +1792,7 @@ async function provideSqlCompletions(context: CompletionContext) {
   const currentState = context.state;
   const position = context.pos;
   const explicit = context.explicit;
+  const typedActivation = isTypedCompletionActivation(explicit);
   if (imeCompositionActive || view.value?.compositionStarted || view.value?.composing) return null;
   if (!props.connectionId) return null;
   const fullDoc = currentState.doc.toString();
@@ -1640,7 +1816,8 @@ async function provideSqlCompletions(context: CompletionContext) {
     if (!explicit && !shouldAutoOpenSqlCompletion(fullDoc, position)) return null;
 
     const legacyCompletionContext = getSqlCompletionContext(fullDoc, position);
-    const completionContext = SEMANTIC_SQL_COMPLETION_ENABLED ? sqlCompletionContextFromSemantic(buildSqlSemanticModel(fullDoc, position, { databaseType: props.databaseType, dialect: props.dialect }), legacyCompletionContext) : legacyCompletionContext;
+    const semanticModel = SEMANTIC_SQL_COMPLETION_ENABLED ? buildSqlSemanticModel(fullDoc, position, { databaseType: props.databaseType, dialect: props.dialect }) : null;
+    const completionContext = semanticModel ? sqlCompletionContextFromSemantic(semanticModel, legacyCompletionContext) : legacyCompletionContext;
 
     if (!hasDatabase) {
       const items = buildSqlCompletionItemsFromContext(completionContext, {
@@ -1677,13 +1854,16 @@ async function provideSqlCompletions(context: CompletionContext) {
       return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position));
     }
 
+    const tableNameCompletion = isTableNameCompletionContext(completionContext);
+    const shouldResolveColumnCompletion = completionContext.suggestColumns && completionContext.referencedTables.length > 0 && (completionContext.prefix.length > 0 || typedActivation);
+    const shouldResolveAsyncCompletion = tableNameCompletion || shouldResolveColumnCompletion;
     const localResult = buildLocalSqlCompletionResult(completionContext, fullDoc, position);
     if (localResult) {
       scheduleCompletionMetadataRefresh(completionContext);
-      if (!explicit) return localResult;
+      const hasLocalColumnResult = localResult.options.some((option) => option.type === "column");
+      if ((!explicit || typedActivation) && (!shouldResolveColumnCompletion || hasLocalColumnResult)) return localResult;
     }
-    const shouldResolveAsyncColumnCompletion = completionContext.suggestColumns && completionContext.referencedTables.length > 0 && completionContext.prefix.length > 0;
-    if (!explicit && !shouldResolveAsyncColumnCompletion) {
+    if ((!explicit || typedActivation) && !shouldResolveAsyncCompletion) {
       scheduleCompletionMetadataRefresh(completionContext);
       return null;
     }
@@ -1709,9 +1889,9 @@ async function provideSqlCompletions(context: CompletionContext) {
         }
         try {
           const result = await performAsyncCompletionWithResult(epoch, completionContext, fullDoc, position);
-          resolve(result);
+          resolve(result ?? localResult);
         } catch {
-          resolve(null);
+          resolve(localResult);
         }
       }, 150);
     });
@@ -1724,17 +1904,49 @@ function isEditorComposing(currentView: EditorViewType): boolean {
   return imeCompositionActive || currentView.compositionStarted || currentView.composing;
 }
 
+function scheduleSqlCompletionStart(currentView: EditorViewType) {
+  window.setTimeout(() => {
+    if (!codeMirrorStartCompletion || isEditorComposing(currentView)) return;
+    markTypedCompletionActivation();
+    codeMirrorStartCompletion(currentView);
+  }, 0);
+}
+
 function flushImeComposition() {
   const currentView = view.value;
   if (!currentView || !pendingImeModelEmit) return;
   pendingImeModelEmit = false;
   emit("update:modelValue", currentView.state.doc.toString());
+  invalidateSemanticDiagnosticsForDocumentChange();
   scheduleSemanticDiagnostics();
   syncContextMenuState(currentView);
   emit("selectionChange", selectedSqlFromView(currentView));
   emit("cursorChange", currentView.state.selection.main.head);
   latestSelection = readEditorSelection(currentView);
   if (editorIsActive) emitEditorSelection(latestSelection);
+  if (shouldAutoOpenSqlCompletion(currentView.state.doc.toString(), currentView.state.selection.main.head)) {
+    scheduleSqlCompletionStart(currentView);
+  }
+}
+
+function shouldStartSqlCompletionAfterInput(insertedText: string, removedText: string, currentView: EditorViewType): boolean {
+  const position = currentView.state.selection.main.head;
+  const fullDoc = currentView.state.doc.toString();
+  if (!insertedText && removedText) {
+    const completionContext = getSqlCompletionContext(fullDoc, position);
+    return isTableNameCompletionContext(completionContext) && shouldAutoOpenSqlCompletion(fullDoc, position);
+  }
+  if (insertedText.endsWith(".")) return true;
+  if (/[,(]$/.test(insertedText)) {
+    const completionContext = getSqlCompletionContext(fullDoc, position);
+    return !!completionContext.insertTable;
+  }
+  if (/\s$/.test(insertedText)) {
+    return shouldAutoOpenSqlCompletion(fullDoc, position);
+  }
+  if (!/[\w$@]$/.test(insertedText)) return false;
+  const completionContext = getSqlCompletionContext(fullDoc, position);
+  return isTableNameCompletionContext(completionContext) || shouldAutoOpenSqlCompletion(fullDoc, position);
 }
 
 function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getSqlCompletionContext>, fullDoc: string, position: number) {
@@ -1831,6 +2043,7 @@ function scheduleCompletionMetadataRefresh(completionContext: ReturnType<typeof 
   if (!props.connectionId || props.database == null) return;
   const localOnlyMetadata = usesLocalOnlyCompletionMetadata();
   const onDemandOnlyColumns = usesOnDemandOnlyCompletionColumns();
+  const tableNameCompletion = isTableNameCompletionContext(completionContext);
   const connectionId = props.connectionId;
   const database = props.database;
   const schema = completionContext.qualifier && completionContext.suggestTables ? completionContext.qualifier : props.schema;
@@ -1882,7 +2095,7 @@ function scheduleCompletionMetadataRefresh(completionContext: ReturnType<typeof 
         .catch(() => {});
     }
   }
-  if (!onDemandOnlyColumns) {
+  if (!onDemandOnlyColumns && !tableNameCompletion) {
     for (const refTable of completionContext.referencedTables) {
       if (refTable.columns && refTable.columns.length > 0) continue;
       const cacheKey = refTable.schema ? `${refTable.schema}.${refTable.name}` : refTable.name;
@@ -1898,7 +2111,7 @@ function scheduleCompletionMetadataRefresh(completionContext: ReturnType<typeof 
         .catch(() => {});
     }
   }
-  if ((completionContext.suggestTables || completionContext.suggestJoinConditions) && completionContext.referencedTables.length > 0) {
+  if (!tableNameCompletion && (completionContext.suggestTables || completionContext.suggestJoinConditions) && completionContext.referencedTables.length > 0) {
     void ensureForeignKeysForTables(completionContext.referencedTables);
   }
 }
@@ -1960,8 +2173,8 @@ async function performAsyncCompletionWithResult(epoch: number, completionContext
   }
   const qualifierDatabase = completionContext.qualifier ? findExactName(databaseNames, completionContext.qualifier) : undefined;
   const tableLookupDatabase = qualifierDatabase ?? props.database!;
-  const tableLookupSchema = qualifierDatabase ? undefined : props.schema;
-  const tableLookupFilter = completionContext.qualifier && !qualifierDatabase ? completionContext.qualifier : completionContext.prefix;
+  const tableLookupSchema = qualifierDatabase ? undefined : completionContext.qualifier && completionContext.suggestTables ? completionContext.qualifier : props.schema;
+  const tableLookupFilter = completionContext.qualifier && completionContext.suggestTables ? completionContext.prefix : completionContext.qualifier && !qualifierDatabase ? completionContext.qualifier : completionContext.prefix;
   let tables = shouldLoadTables
     ? localOnlyMetadata
       ? connectionStore.lookupLocalCompletionTables(props.connectionId!, tableLookupDatabase, tableLookupFilter, MAX_COMPLETION_TABLES, tableLookupSchema)
@@ -2062,8 +2275,8 @@ async function performAsyncCompletionWithResult(epoch: number, completionContext
     }
   }
 
-  const isTableNameCompletionContext = completionContext.suggestTables || completionContext.exclusiveTableSuggestions;
-  const shouldFetchColumnsForCompletion = !onDemandOnlyColumns || ((completionContext.suggestColumns || completionContext.exclusiveColumnSuggestions) && !isTableNameCompletionContext) || !!completionContext.insertTable;
+  const tableNameCompletion = isTableNameCompletionContext(completionContext);
+  const shouldFetchColumnsForCompletion = !tableNameCompletion && (!onDemandOnlyColumns || completionContext.suggestColumns || completionContext.exclusiveColumnSuggestions || !!completionContext.insertTable);
   if (shouldFetchColumnsForCompletion) {
     await Promise.all(
       refs.map(async (refTable) => {
@@ -2085,7 +2298,7 @@ async function performAsyncCompletionWithResult(epoch: number, completionContext
   }
   if (epoch !== completionEpoch) return null;
 
-  if ((completionContext.suggestTables || completionContext.suggestJoinConditions) && refs.length > 0) {
+  if (!tableNameCompletion && (completionContext.suggestTables || completionContext.suggestJoinConditions) && refs.length > 0) {
     const fkPrefetchTables = completionContext.suggestTables ? [...refs, ...tables.slice(0, MAX_JOIN_FK_PREFETCH_TABLES)] : refs;
     await ensureForeignKeysForTables(fkPrefetchTables.filter((table) => !("columns" in table) || !table.columns || table.columns.length === 0));
     if (epoch !== completionEpoch) return null;
@@ -2163,6 +2376,10 @@ function isReferencedTableQualifier(completionContext: ReturnType<typeof getSqlC
   return completionContext.referencedTables.some((table) => table.alias?.toLowerCase() === qualifier || table.name.toLowerCase() === qualifier || (!!qualifiedColumnTarget && completionTablesMatch(table, qualifiedColumnTarget)));
 }
 
+function isTableNameCompletionContext(completionContext: ReturnType<typeof getSqlCompletionContext>): boolean {
+  return completionContext.suggestTables || completionContext.exclusiveTableSuggestions;
+}
+
 function mergeCompletionObjects(existing: SqlCompletionObject[], incoming: SqlCompletionObject[]) {
   const merged = [...existing];
   const seen = new Set(existing.map((object) => `${object.type}:${object.schema ?? ""}:${object.name}:${object.parentName ?? ""}`.toLowerCase()));
@@ -2204,6 +2421,7 @@ onMounted(async () => {
   wordWrapComp = new Compartment();
   vimModeComp = new Compartment();
   readOnlyComp = new Compartment();
+  runGutterComp = new Compartment();
   runKeymapComp = new Compartment();
   completionComp = new Compartment();
   diagnosticComp = new Compartment();
@@ -2263,7 +2481,9 @@ onMounted(async () => {
       create: buildDecorations,
       update(value, transaction) {
         const diagnosticsChanged = !!diagnosticEffect && transaction.effects.some((effect) => effect.is(diagnosticEffect));
-        return transaction.docChanged || diagnosticsChanged ? buildDecorations(transaction.state) : value;
+        if (diagnosticsChanged) return buildDecorations(transaction.state);
+        if (transaction.docChanged) return Decoration.set([]);
+        return value;
       },
       provide: (field) => EditorView.decorations.from(field),
     });
@@ -2321,17 +2541,23 @@ onMounted(async () => {
 
   class RunStatementGutterMarker extends GutterMarker {
     toDOM() {
-      const marker = document.createElement("button");
-      marker.className = "cm-run-statement-marker cm-run-statement-marker--active";
-      marker.setAttribute("type", "button");
-      marker.setAttribute("aria-label", "Execute statement");
-      marker.innerHTML =
-        '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"></path></svg>';
-      return marker;
+      return createRunStatementButtonDom("Execute statement");
     }
   }
 
   const executableStatementMarker = new RunStatementGutterMarker();
+  buildRunStatementGutterExtension = () =>
+    settingsStore.editorSettings.showStatementRunButtons
+      ? gutter({
+          class: "cm-run-statement-gutter",
+          lineMarker(currentView, line) {
+            return executableStatementRangeStartingAt(currentView, line.from) ? executableStatementMarker : null;
+          },
+          domEventHandlers: {
+            mousedown: executeSqlStatementFromGutter,
+          },
+        })
+      : [];
 
   const currentStatementFrameHighlighter = ViewPlugin.fromClass(
     class {
@@ -2417,15 +2643,7 @@ onMounted(async () => {
           return { dom };
         },
       }),
-      gutter({
-        class: "cm-run-statement-gutter",
-        lineMarker(currentView, line) {
-          return executableStatementRangeStartingAt(currentView, line.from) ? executableStatementMarker : null;
-        },
-        domEventHandlers: {
-          mousedown: executeSqlStatementFromGutter,
-        },
-      }),
+      runGutterComp.of(buildRunStatementGutterExtension()),
       lineNumbers({
         domEventHandlers: {
           mousedown: selectSqlLineFromGutter,
@@ -2449,6 +2667,7 @@ onMounted(async () => {
       trimmedSelectionLayer(),
       selectionMatchOccurrences(),
       dropCursor(),
+      EditorView.dragMovesSelection.of((event) => !event.ctrlKey && !event.metaKey),
       EditorState.allowMultipleSelections.of(true),
       indentOnInput(),
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
@@ -2493,13 +2712,17 @@ onMounted(async () => {
             completionEpoch++;
           } else {
             emit("update:modelValue", update.state.doc.toString());
+            invalidateSemanticDiagnosticsForDocumentChange();
             scheduleSemanticDiagnostics();
             let insertedText = "";
-            update.changes.iterChanges((_fromA, _toA, _fromB, _toB, inserted) => {
+            let removedText = "";
+            update.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
               insertedText += inserted.toString();
+              removedText += update.startState.doc.sliceString(fromA, toA);
             });
-            if (insertedText.endsWith(".")) {
-              startCompletion(update.view);
+            const suppressCompletionAutoStart = consumeSqlCompletionAutoStartSuppression();
+            if (!suppressCompletionAutoStart && shouldStartSqlCompletionAfterInput(insertedText, removedText, update.view)) {
+              scheduleSqlCompletionStart(update.view);
             }
           }
         }
@@ -2566,6 +2789,10 @@ onMounted(async () => {
         },
         mousedown: (event: MouseEvent) => {
           clearTableNavigationHover();
+          const currentView = view.value;
+          if (currentView && startEditorSelectionDrag(currentView, event)) {
+            return true;
+          }
           // Click without modifier -> close column panel
           if (!event.metaKey && !event.ctrlKey) {
             if (event.button === 0) {
@@ -2576,7 +2803,6 @@ onMounted(async () => {
           // Only handle Ctrl/Cmd + left click
           if (event.button !== 0) return false;
 
-          const currentView = view.value;
           if (!currentView || !props.connectionId || props.database == null) {
             return false;
           }
@@ -2799,7 +3025,7 @@ function getCurrentCustomThemeColors() {
 watch(
   [queryEditorAppearanceSettings, () => isDark.value, () => themePalette.value],
   async ([ss]) => {
-    if (!view.value || !codeMirrorTheme || !fontThemeComp || !wordWrapComp || !vimModeComp || !runKeymapComp || !editorViewModule) {
+    if (!view.value || !codeMirrorTheme || !fontThemeComp || !wordWrapComp || !vimModeComp || !runGutterComp || !runKeymapComp || !editorViewModule) {
       return;
     }
     if (!isGestureZooming.value && !zoomCommitScheduler.hasPendingCommit() && liveFontSize.value !== ss.fontSize) {
@@ -2808,7 +3034,7 @@ watch(
     syncEditorFontCssVars(liveFontSize.value, ss.fontFamily);
     const themeColors = getCurrentCustomThemeColors();
     const [themeExt] = await Promise.all([loadEditorTheme(ss.theme, editorThemeAppearance(), themeColors, themePalette.value), ss.vimModeEnabled ? ensureCodeMirrorVim() : Promise.resolve(false)]);
-    if (!view.value || !codeMirrorTheme || !wordWrapComp || !vimModeComp || !runKeymapComp || !editorViewModule) {
+    if (!view.value || !codeMirrorTheme || !wordWrapComp || !vimModeComp || !runGutterComp || !runKeymapComp || !editorViewModule) {
       return;
     }
     view.value.dispatch({
@@ -2816,6 +3042,7 @@ watch(
         codeMirrorTheme.reconfigure(themeExt),
         wordWrapComp.reconfigure(props.forceWordWrap || ss.wordWrap ? editorViewModule.EditorView.lineWrapping : []),
         vimModeComp.reconfigure(vimModeExtension(settingsStore.editorSettings.vimModeEnabled)),
+        runGutterComp.reconfigure(buildRunStatementGutterExtension?.() ?? []),
         runKeymapComp.reconfigure(runKeymapExtension(editorViewModule.keymap)),
       ],
     });
@@ -2893,6 +3120,7 @@ onBeforeUnmount(() => {
     viewportRestoreFrame = null;
   }
   editorScrollbarPointerCleanup?.();
+  editorSelectionDragCleanup?.();
   view.value?.scrollDOM.removeEventListener("scroll", scheduleEditorViewportEmit);
   window.removeEventListener("keyup", clearTableNavigationHoverOnModifierRelease);
   window.removeEventListener("blur", clearTableNavigationHover);
@@ -3083,10 +3311,12 @@ defineExpose({ openSearch, openReplace, scrollCursorIntoView, requestExecute });
 }
 
 :deep(.cm-run-statement-gutter .cm-gutterElement) {
+  align-items: center;
   box-sizing: border-box;
+  display: flex;
+  justify-content: center;
   min-width: 34px;
   padding: 0 5px;
-  line-height: 24px;
 }
 
 :deep(.cm-run-statement-marker) {
@@ -3094,8 +3324,8 @@ defineExpose({ openSearch, openReplace, scrollCursorIntoView, requestExecute });
   align-items: center;
   justify-content: center;
   box-sizing: border-box;
-  width: 24px;
-  height: 24px;
+  width: min(24px, calc(var(--dbx-editor-font-size, 13px) * 1.6));
+  height: min(24px, calc(var(--dbx-editor-font-size, 13px) * 1.6));
   margin: 0;
   padding: 0;
   border: 1px solid transparent;
@@ -3133,8 +3363,8 @@ defineExpose({ openSearch, openReplace, scrollCursorIntoView, requestExecute });
 
 :deep(.cm-run-statement-marker svg) {
   display: block;
-  width: 14px;
-  height: 14px;
+  width: min(14px, 70%);
+  height: min(14px, 70%);
   pointer-events: none;
   flex-shrink: 0;
 }

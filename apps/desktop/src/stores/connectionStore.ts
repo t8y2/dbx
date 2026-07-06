@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 import { uuid } from "@/lib/common/utils";
 import { ref, computed, watch } from "vue";
-import type { ColumnInfo, CompletionAssistantCandidate, CompletionAssistantObjectKind, CompletionAssistantRequest, ConnectionConfig, ForeignKeyInfo, ObjectInfo, SchemaInfo, SidebarLayout, TableInfo, TreeNode } from "@/types/database";
+import type { ColumnInfo, CompletionAssistantCandidate, CompletionAssistantObjectKind, CompletionAssistantRequest, ConnectionConfig, ForeignKeyInfo, ObjectInfo, SchemaInfo, SidebarLayout, TableInfo, TreeNode, VectorCollectionMeta } from "@/types/database";
 import { applyPinnedTreeNodeState, updatePinnedTreeNodeInPlace } from "@/lib/app/pinnedItems";
 import {
   reconcileLayout,
@@ -60,6 +60,7 @@ import { completionSchemasFromTree, completionTablesFromTree } from "@/lib/metad
 import { kvRootNodeLabel } from "@/lib/kv/kvRootPresentation";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
 import { appendAgentDriverUpdateHint, hasAgentDriverUpdate, type AgentDriverInstallState } from "@/lib/connection/agentDriverInstallHint";
+import { appendConnectionErrorHints } from "@/lib/connection/connectionErrorHints";
 import { createMetadataLoadTrace, logMetadataLoadTrace, MetadataLoadCoordinator, type MetadataLoadTraceLogger } from "@/lib/metadata/metadataLoadCoordinator";
 import type { MetadataScopeInput } from "@/lib/metadata/metadataLoadScope";
 import { MetadataResultCache, type MetadataCacheInvalidation } from "@/lib/metadata/metadataResultCache";
@@ -304,9 +305,12 @@ export const useConnectionStore = defineStore("connection", () => {
   };
   const connectInFlight = new Map<string, Promise<void>>();
   const disconnectInFlight = new Map<string, Promise<void>>();
+  const disconnectInFlightScoped = new Map<string, boolean>();
   const cancelDisconnectInFlight = new Map<string, Promise<void>>();
   const activeLocalConnectionAttempts = new Map<string, number>();
   const cancelledLocalConnectionAttempts = new Map<string, Set<number>>();
+  const successfulLocalConnectionAttempts = new Map<string, number>();
+  const connectionStateRevisions = new Map<string, number>();
   let nextLocalConnectionAttempt = 0;
   let beforeConnectHandler: BeforeConnectHandler | null = null;
   let initFromDiskPromise: Promise<void> | null = null;
@@ -378,11 +382,30 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function beginLocalConnectionAttempt(connectionId: string): number {
     const attempt = ++nextLocalConnectionAttempt;
+    bumpConnectionStateRevision(connectionId);
     activeLocalConnectionAttempts.set(connectionId, attempt);
     connectingIds.value.add(connectionId);
     const node = findNode(treeNodes.value, connectionId);
     if (node) node.isLoading = true;
     return attempt;
+  }
+
+  function markSuccessfulLocalConnectionAttempt(connectionId: string, attempt: number) {
+    successfulLocalConnectionAttempts.set(connectionId, attempt);
+  }
+
+  function forgetSuccessfulLocalConnectionAttempt(connectionId: string) {
+    successfulLocalConnectionAttempts.delete(connectionId);
+  }
+
+  function bumpConnectionStateRevision(connectionId: string): number {
+    const revision = (connectionStateRevisions.get(connectionId) ?? 0) + 1;
+    connectionStateRevisions.set(connectionId, revision);
+    return revision;
+  }
+
+  function isCurrentConnectionStateRevision(connectionId: string, revision: number): boolean {
+    return connectionStateRevisions.get(connectionId) === revision;
   }
 
   function isCurrentLocalConnectionAttempt(connectionId: string, attempt: number): boolean {
@@ -420,41 +443,54 @@ export const useConnectionStore = defineStore("connection", () => {
     activeLocalConnectionAttempts.delete(connectionId);
     connectingIds.value.delete(connectionId);
     clearConnectionNodeLoading(connectionId);
+    clearConnectionRootMetadataLoad(connectionId);
     connectInFlight.delete(connectionId);
     return true;
   }
 
-  function getDisconnectInFlight(connectionId: string): Promise<void> | undefined {
-    return disconnectInFlight.get(connectionId);
+  function clearConnectionRootMetadataLoad(connectionId: string) {
+    metadataLoadCoordinator.clear({
+      kind: "connection-databases",
+      connectionId,
+      driverProfile: metadataDriverProfile(getConfig(connectionId)),
+    });
   }
 
-  async function waitForDisconnectInFlight(connectionId: string): Promise<void> {
-    const pending = getDisconnectInFlight(connectionId);
+  function getBlockingDisconnectInFlight(connectionId: string): Promise<void> | undefined {
+    return disconnectInFlightScoped.get(connectionId) ? undefined : disconnectInFlight.get(connectionId);
+  }
+
+  async function waitForBlockingDisconnectInFlight(connectionId: string): Promise<void> {
+    const pending = getBlockingDisconnectInFlight(connectionId);
     if (pending) await pending;
   }
 
-  function trackDisconnectRequest(connectionId: string, request: Promise<void>): Promise<void> {
-    const tracked = request
+  function trackDisconnectRequest(connectionId: string, request: Promise<void>, scoped: boolean): Promise<void> {
+    const bounded = withDisconnectRequestTimeout(connectionId, request);
+    const tracked = bounded
       .catch((error) => {
         console.warn("[DBX][connection:disconnect-error]", { connectionId, error });
       })
       .finally(() => {
         if (disconnectInFlight.get(connectionId) === tracked) {
           disconnectInFlight.delete(connectionId);
+          disconnectInFlightScoped.delete(connectionId);
         }
       });
     disconnectInFlight.set(connectionId, tracked);
-    return withDisconnectRequestTimeout(connectionId, request);
+    disconnectInFlightScoped.set(connectionId, scoped);
+    return bounded;
   }
 
   function startDisconnectRequest(connectionId: string): Promise<void> {
+    const clientAttempt = activeLocalConnectionAttempts.get(connectionId) ?? successfulLocalConnectionAttempts.get(connectionId);
     let request: Promise<void>;
     try {
-      request = api.disconnectDb(connectionId);
+      request = api.disconnectDb(connectionId, clientAttempt);
     } catch (error) {
       request = Promise.reject(error);
     }
-    return trackDisconnectRequest(connectionId, request);
+    return trackDisconnectRequest(connectionId, request, clientAttempt != null);
   }
 
   function cancelDisconnectKey(connectionId: string, attempt: number): string {
@@ -522,6 +558,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function connectionErrorWithDriverUpdateHint(config: ConnectionConfig | undefined, message: string): string {
     if (!config) return message;
+    message = appendConnectionErrorHints(config, message, i18n.global.t);
     if (!hasAgentDriverUpdate(config.db_type, agentDrivers.value, config.driver_profile)) return message;
     return appendAgentDriverUpdateHint(message, agentDriverUpdateHint());
   }
@@ -1681,7 +1718,9 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadMongoDatabases(connectionId);
     } else if (config.db_type === "elasticsearch") {
       await loadElasticsearchIndices(connectionId);
-    } else if (config.db_type === "qdrant" || config.db_type === "milvus" || config.db_type === "weaviate" || config.db_type === "chromadb") {
+    } else if (config.db_type === "milvus") {
+      await loadMilvusDatabases(connectionId);
+    } else if (config.db_type === "qdrant" || config.db_type === "weaviate" || config.db_type === "chromadb") {
       await loadVectorCollections(connectionId);
     } else if (config.db_type === "mq") {
       await loadMqTenants(connectionId, { force: true });
@@ -1694,7 +1733,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function connect(config: ConnectionConfig) {
     config = normalizeConnection(config);
-    if (getDisconnectInFlight(config.id)) await waitForDisconnectInFlight(config.id);
+    if (getBlockingDisconnectInFlight(config.id)) await waitForBlockingDisconnectInFlight(config.id);
     const localAttempt = beginLocalConnectionAttempt(config.id);
     try {
       await beforeConnectHandler?.(config);
@@ -1705,6 +1744,8 @@ export const useConnectionStore = defineStore("connection", () => {
       await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, localAttempt, id);
       activeConnectionId.value = id;
       connectedIds.value.add(id);
+      if (id !== config.id) markSuccessfulLocalConnectionAttempt(config.id, localAttempt);
+      markSuccessfulLocalConnectionAttempt(id, localAttempt);
       markConnectionHealthChecked(id);
       clearConnectionError(config.id);
       if (id !== config.id) clearConnectionError(id);
@@ -1758,11 +1799,26 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function disconnect(connectionId: string) {
+    const stateRevision = bumpConnectionStateRevision(connectionId);
     const disconnectRequest = startDisconnectRequest(connectionId);
     cancelLocalConnectionAttempt(connectionId);
     const shouldRemoveOneTimeConnection = getConfig(connectionId)?.one_time === true;
-    await disconnectRequest;
-    clearConnectionError(connectionId);
+
+    connectedIds.value.delete(connectionId);
+    forgetSuccessfulLocalConnectionAttempt(connectionId);
+    clearConnectionHealthCheck(connectionId);
+    const node = findNode(treeNodes.value, connectionId);
+    if (node) {
+      node.isLoading = false;
+      node.isExpanded = false;
+      node.children = [];
+    }
+    clearConnectionRootMetadataLoad(connectionId);
+    clearLoadedChildrenCache(connectionId);
+    if (activeConnectionId.value === connectionId) {
+      activeConnectionId.value = null;
+    }
+    invalidateCompletionCache(connectionId);
     const { useQueryStore } = await import("@/stores/queryStore");
     const queryStore = useQueryStore();
     switch (settingsStore.editorSettings.disconnectTabHandlingMode) {
@@ -1776,20 +1832,11 @@ export const useConnectionStore = defineStore("connection", () => {
         queryStore.rollbackConnectionTransactions(connectionId);
         break;
     }
-    connectedIds.value.delete(connectionId);
-    clearConnectionHealthCheck(connectionId);
-    const node = findNode(treeNodes.value, connectionId);
-    if (node) {
-      node.isLoading = false;
-      node.isExpanded = false;
-      node.children = [];
+    await disconnectRequest;
+    if (isCurrentConnectionStateRevision(connectionId, stateRevision)) {
+      clearConnectionError(connectionId);
     }
-    clearLoadedChildrenCache(connectionId);
-    if (activeConnectionId.value === connectionId) {
-      activeConnectionId.value = null;
-    }
-    invalidateCompletionCache(connectionId);
-    if (shouldRemoveOneTimeConnection) {
+    if (shouldRemoveOneTimeConnection && isCurrentConnectionStateRevision(connectionId, stateRevision)) {
       await removeConnection(connectionId);
     }
   }
@@ -1843,7 +1890,7 @@ export const useConnectionStore = defineStore("connection", () => {
       recordConnectionError(connectionId, error);
       throw error;
     }
-    if (getDisconnectInFlight(connectionId)) await waitForDisconnectInFlight(connectionId);
+    if (getBlockingDisconnectInFlight(connectionId)) await waitForBlockingDisconnectInFlight(connectionId);
     const existingConnect = connectInFlight.get(connectionId);
     if (existingConnect) {
       await existingConnect;
@@ -1858,6 +1905,7 @@ export const useConnectionStore = defineStore("connection", () => {
       await syncMongoLegacyDriverFallback(connectionId, config);
       await ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId, localAttempt, id);
       connectedIds.value.add(connectionId);
+      markSuccessfulLocalConnectionAttempt(connectionId, localAttempt);
       markConnectionHealthChecked(connectionId);
       activeConnectionId.value = connectionId;
       clearConnectionError(connectionId);
@@ -2303,33 +2351,63 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  async function loadVectorCollections(connectionId: string) {
+  async function loadMilvusDatabases(connectionId: string) {
     const node = findNode(treeNodes.value, connectionId);
     if (!node) return;
 
-    const config = getConfig(connectionId);
-    const database = config?.database || "default";
     node.isLoading = true;
     try {
       await ensureConnected(connectionId);
-      const collections = await withMetadataLoadTimeout(connectionId, api.vectorListCollections(connectionId, database), "vector collections");
-      const sorted = [...collections].sort((a, b) => a.name.localeCompare(b.name));
+      const dbs = await withMetadataLoadTimeout(connectionId, api.documentListDatabases(connectionId), "Milvus databases");
       setChildren(
         node,
         withSavedSqlRoot(
           connectionId,
-          sorted.map((info) => ({
-            id: `${connectionId}:__vector_collection:${info.id}`,
-            label: info.name,
-            type: "vector-collection" as const,
+          sortSidebarNames(dbs).map((db) => ({
+            id: `${connectionId}:${db}`,
+            label: db,
+            type: "vector-database" as const,
             connectionId,
-            database,
+            database: db,
             isExpanded: false,
-            meta: info.dimension != null ? { dimension: info.dimension } : undefined,
+            children: [],
           })),
           node,
         ),
       );
+      node.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e);
+      throw e;
+    } finally {
+      node.isLoading = false;
+    }
+  }
+
+  async function loadVectorCollections(connectionId: string, database?: string) {
+    const config = getConfig(connectionId);
+    const isMilvus = config?.db_type === "milvus";
+    const effectiveDb = database || config?.database || "default";
+    // Milvus groups collections under a per-database node; other vector stores stay flat under the connection.
+    const node = isMilvus && database ? findNode(treeNodes.value, `${connectionId}:${database}`) : findNode(treeNodes.value, connectionId);
+    if (!node) return;
+
+    node.isLoading = true;
+    try {
+      await ensureConnected(connectionId);
+      const collections = await withMetadataLoadTimeout(connectionId, api.vectorListCollections(connectionId, effectiveDb), "vector collections");
+      const sorted = [...collections].sort((a, b) => a.name.localeCompare(b.name));
+      const collectionChildren = sorted.map((info) => ({
+        // Include the database for Milvus so same-named collections across databases don't collide.
+        id: `${connectionId}:__vector_collection:${isMilvus ? `${effectiveDb}:${info.id}` : info.id}`,
+        label: info.name,
+        type: "vector-collection" as const,
+        connectionId,
+        database: effectiveDb,
+        isExpanded: false,
+        meta: { dimension: info.dimension, collectionId: info.id } as VectorCollectionMeta,
+      }));
+      setChildren(node, isMilvus && database ? collectionChildren : withSavedSqlRoot(connectionId, collectionChildren, node));
       node.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
@@ -3341,7 +3419,9 @@ export const useConnectionStore = defineStore("connection", () => {
         await loadMongoDatabases(node.connectionId);
       } else if (config?.db_type === "elasticsearch") {
         await loadElasticsearchIndices(node.connectionId);
-      } else if (config?.db_type === "qdrant" || config?.db_type === "milvus" || config?.db_type === "weaviate" || config?.db_type === "chromadb") {
+      } else if (config?.db_type === "milvus") {
+        await loadMilvusDatabases(node.connectionId);
+      } else if (config?.db_type === "qdrant" || config?.db_type === "weaviate" || config?.db_type === "chromadb") {
         await loadVectorCollections(node.connectionId);
       } else if (config?.db_type === "mq") {
         await loadMqTenants(node.connectionId, options);
@@ -3352,6 +3432,8 @@ export const useConnectionStore = defineStore("connection", () => {
       }
     } else if (node.type === "mongo-db" && node.connectionId && node.database) {
       await loadMongoCollections(node.connectionId, node.database);
+    } else if (node.type === "vector-database" && node.connectionId && node.database) {
+      await loadVectorCollections(node.connectionId, node.database);
     } else if (node.type === "mongo-collection" && node.connectionId && node.database) {
       await loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id);
     } else if (node.type === "mongo-gridfs") {
@@ -3870,9 +3952,14 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function listCompletionTables(connectionId: string, database: string, filter = "", limit?: number, schema?: string): Promise<SqlCompletionTable[]> {
-    const normalizedFilter = filter.trim().toLowerCase();
-    const relaxedFilter = relaxedCompletionTableFilter(normalizedFilter);
-    const cacheKey = `${connectionId}:${database}:${normalizedFilter}:${limit ?? ""}:${schema ?? ""}`;
+    const trimmedFilter = filter.trim();
+    const normalizedFilter = trimmedFilter.toLowerCase();
+    // Remote queries (Dameng/Oracle) are case-sensitive, so the cache key must
+    // preserve original casing — otherwise "TEST" and "test" collide and the
+    // second lookup returns the first's stale results. Local lookups below stay
+    // case-insensitive because tableMatchScore normalizes internally.
+    const relaxedFilter = relaxedCompletionTableFilter(trimmedFilter);
+    const cacheKey = `${connectionId}:${database}:${trimmedFilter}:${limit ?? ""}:${schema ?? ""}`;
     if (completionTablesCache.value[cacheKey]) {
       return completionTablesCache.value[cacheKey];
     }
@@ -3886,10 +3973,10 @@ export const useConnectionStore = defineStore("connection", () => {
           if (normalizedFilter || limit) {
             let results: SqlCompletionTable[] = [];
             try {
-              results = await listCompletionAssistantTables(connectionId, database, normalizedFilter, limit, schema);
+              results = await listCompletionAssistantTables(connectionId, database, trimmedFilter, limit, schema);
             } catch {
               if (schema) {
-                const tables = await api.listTables(connectionId, database, schema, normalizedFilter, limit);
+                const tables = await api.listTables(connectionId, database, schema, trimmedFilter, limit);
                 results = tables.map((table) => ({
                   name: table.name,
                   schema,
@@ -3937,7 +4024,7 @@ export const useConnectionStore = defineStore("connection", () => {
           return completionTablesCache.value[cacheKey];
         }
 
-        let tables = await api.listTables(connectionId, database, database, normalizedFilter, limit);
+        let tables = await api.listTables(connectionId, database, database, trimmedFilter, limit);
         if (tables.length === 0 && relaxedFilter) {
           tables = await api.listTables(connectionId, database, database, relaxedFilter, expandedCompletionLimit(limit));
         }
@@ -4714,6 +4801,7 @@ export const useConnectionStore = defineStore("connection", () => {
     loadNacosNamespaces,
     updateRedisDbKeyStats,
     loadMongoDatabases,
+    loadMilvusDatabases,
     loadElasticsearchIndices,
     loadVectorCollections,
     loadMongoCollections,

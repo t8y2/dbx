@@ -50,7 +50,14 @@ export interface NativeAgentDisplayEntry {
   info: ArtifactInfo;
 }
 
+export interface JdbcPluginDownloadEntry {
+  label: string;
+  filename: string;
+  url: string;
+}
+
 export interface AgentDownloadCatalog {
+  jdbcPlugin: JdbcPluginDownloadEntry;
   bundles: OfflineBundleEntry[];
   drivers: DriverDisplayEntry[];
   jres: JreDisplayEntry[];
@@ -58,6 +65,7 @@ export interface AgentDownloadCatalog {
 }
 
 const AGENTS_LATEST_RELEASE_API_URL = "https://api.github.com/repos/t8y2/dbx/releases/tags/agents-latest";
+const JDBC_PLUGIN_DOWNLOAD_URL = "https://dl.dbxio.com/releases/latest/dbx-jdbc-plugin-latest.zip";
 const MIN_APP_VERSION = "0.6.0";
 const driverVersionMap = driverVersions as Record<string, string>;
 const nativeDriverKeys = new Set(["oracle", "xugu"]);
@@ -149,10 +157,19 @@ export async function fetchAgentDownloadCatalog(): Promise<AgentDownloadCatalog 
 
 export function buildAgentDownloadCatalog(assets: GitHubReleaseAsset[]): AgentDownloadCatalog {
   return {
+    jdbcPlugin: buildJdbcPluginDownloadEntry(),
     bundles: buildOfflineBundleEntries(assets),
     drivers: buildDriverEntries(assets),
     jres: buildJreEntries(assets),
     nativeAgents: buildNativeAgentEntries(assets),
+  };
+}
+
+export function buildJdbcPluginDownloadEntry(): JdbcPluginDownloadEntry {
+  return {
+    label: "DBX JDBC Plugin",
+    filename: "dbx-jdbc-plugin-latest.zip",
+    url: JDBC_PLUGIN_DOWNLOAD_URL,
   };
 }
 

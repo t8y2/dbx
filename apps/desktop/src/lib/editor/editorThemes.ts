@@ -11,6 +11,16 @@ export const EDITOR_FONT_SIZE_CSS_VAR = "--dbx-editor-font-size";
 export const EDITOR_FONT_FAMILY_CSS_VAR = "--dbx-editor-font-family";
 const EDITOR_SELECTION_BACKGROUND_CSS_VAR = "--dbx-editor-selection-background";
 
+export function createRunStatementButtonDom(ariaLabel = "Execute statement"): HTMLButtonElement {
+  const marker = document.createElement("button");
+  marker.className = "cm-run-statement-marker cm-run-statement-marker--active";
+  marker.setAttribute("type", "button");
+  marker.setAttribute("aria-label", ariaLabel);
+  marker.innerHTML =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"></path></svg>';
+  return marker;
+}
+
 const SUPPORTS_COLOR_MIX = typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("color", "color-mix(in oklch, black 50%, white)");
 const SUPPORTS_OKLCH = typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("color", "oklch(0.62 0.19 255)");
 
@@ -737,6 +747,70 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
       cursor: "pointer",
       paddingRight: "16px",
       userSelect: "none",
+    },
+    ".cm-run-statement-gutter": {
+      minWidth: "34px",
+    },
+    ".cm-run-statement-gutter .cm-gutterElement": {
+      alignItems: "center",
+      boxSizing: "border-box",
+      display: "flex",
+      justifyContent: "center",
+      minWidth: "34px",
+      padding: "0 5px",
+    },
+    ".cm-run-statement-marker": {
+      alignItems: "center",
+      background: "transparent",
+      border: "1px solid transparent",
+      borderRadius: "6px",
+      boxSizing: "border-box",
+      color: "transparent",
+      display: "inline-flex",
+      flexShrink: "0",
+      height: `min(24px, calc(var(${EDITOR_FONT_SIZE_CSS_VAR}, ${defaults?.size ?? 13}px) * 1.6))`,
+      justifyContent: "center",
+      margin: "0",
+      outline: "none",
+      padding: "0",
+      transition: "color 0.15s, background-color 0.15s",
+      userSelect: "none",
+      verticalAlign: "middle",
+      whiteSpace: "nowrap",
+      width: `min(24px, calc(var(${EDITOR_FONT_SIZE_CSS_VAR}, ${defaults?.size ?? 13}px) * 1.6))`,
+    },
+    ".cm-run-statement-marker--active": {
+      background: "rgb(16 185 129 / 0.1)",
+      color: "rgb(4 120 87)",
+      cursor: "pointer",
+    },
+    ".cm-run-statement-marker--active:hover": {
+      background: "rgb(16 185 129 / 0.2)",
+      color: "rgb(6 95 70)",
+    },
+    "&.cm-editor .cm-run-statement-marker svg": {
+      display: "block",
+      flexShrink: "0",
+      height: "min(14px, 70%)",
+      pointerEvents: "none",
+      width: "min(14px, 70%)",
+    },
+    "&.cm-editor.cm-focused .cm-run-statement-marker:focus-visible": {
+      outline: "1px solid var(--ring)",
+      outlineOffset: "1px",
+    },
+    "&.cm-editor .cm-run-statement-marker--executed": {
+      background: "rgb(16 185 129 / 0.18)",
+      color: "rgb(6 95 70)",
+    },
+    "&.cm-editor .cm-settings-preview-run-highlight": {
+      background: "rgb(16 185 129 / 0.12)",
+    },
+    ".dark &.cm-editor .cm-run-statement-marker--active": {
+      color: "rgb(110 231 183)",
+    },
+    ".dark &.cm-editor .cm-run-statement-marker--active:hover, .dark &.cm-editor .cm-run-statement-marker--executed": {
+      color: "rgb(167 243 208)",
     },
   };
 }

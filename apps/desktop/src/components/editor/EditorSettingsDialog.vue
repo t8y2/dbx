@@ -43,7 +43,7 @@ import {
   type CustomThemeColors,
   type CustomTheme,
 } from "@/stores/settingsStore";
-import { loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
+import { createRunStatementButtonDom, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { formatAiModelOption } from "@/lib/ai/aiModelPresentation";
 import ThemeCustomizerDialog from "./ThemeCustomizerDialog.vue";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -74,8 +74,9 @@ import { SHORTCUT_DEFINITIONS, findShortcutConflict, normalizeShortcutSettings, 
 import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { currentStatementFrameRangeTo, visualSqlColumns } from "@/lib/sql/currentStatementFrame";
-import { currentExecutableStatementRange, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
+import { currentExecutableStatementRange, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
+import { executableStatementRangeCacheForDoc, executableStatementRangeStartingAt, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
 import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES } from "@/lib/table/tableColumnTemplates";
 import { buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpVsCodeConfig, type McpEnvEntry, type McpLaunchConfig } from "@/lib/mcp/mcpConfigTemplates";
 import { isWindows } from "@/lib/backend/platform";
@@ -238,6 +239,7 @@ const editActiveCustomThemeId = ref(settingsStore.editorSettings.activeCustomThe
 const showThemeCustomizer = ref(false);
 const editExecuteMode = ref(settingsStore.editorSettings.executeMode);
 const editShowExecutionTargetPicker = ref(settingsStore.editorSettings.showExecutionTargetPicker);
+const editShowStatementRunButtons = ref(settingsStore.editorSettings.showStatementRunButtons);
 const editShowCurrentStatementFrame = ref(settingsStore.editorSettings.showCurrentStatementFrame);
 const editAutoAliasTables = ref(settingsStore.editorSettings.autoAliasTables);
 const editWordWrap = ref(settingsStore.editorSettings.wordWrap);
@@ -279,6 +281,7 @@ const editingShortcutId = ref<ShortcutActionId | null>(null);
 const editSidebarActivation = ref(settingsStore.editorSettings.sidebarActivation);
 const editSidebarObjectDisplay = ref(settingsStore.editorSettings.sidebarObjectDisplay);
 const sidebarObjectDisplayHelp = ref<"grouped" | "simple" | null>(null);
+const editSidebarTableSearchEnabled = ref(settingsStore.editorSettings.sidebarTableSearchEnabled);
 const editAutoSelectActiveSidebarNode = ref(settingsStore.editorSettings.autoSelectActiveSidebarNode);
 const editOpenTabsRestoreMode = ref<OpenTabsRestoreMode>(settingsStore.editorSettings.openTabsRestoreMode);
 const editDisconnectTabHandlingMode = ref<DisconnectTabHandlingMode>(settingsStore.editorSettings.disconnectTabHandlingMode);
@@ -547,6 +550,7 @@ watch(
       editActiveCustomThemeId.value = settingsStore.editorSettings.activeCustomThemeId;
       editExecuteMode.value = settingsStore.editorSettings.executeMode;
       editShowExecutionTargetPicker.value = settingsStore.editorSettings.showExecutionTargetPicker;
+      editShowStatementRunButtons.value = settingsStore.editorSettings.showStatementRunButtons;
       editShowCurrentStatementFrame.value = settingsStore.editorSettings.showCurrentStatementFrame;
       editAutoAliasTables.value = settingsStore.editorSettings.autoAliasTables;
       editWordWrap.value = settingsStore.editorSettings.wordWrap;
@@ -574,6 +578,7 @@ watch(
       sqlFormatterConfigValid.value = true;
       editSidebarActivation.value = settingsStore.editorSettings.sidebarActivation;
       editSidebarObjectDisplay.value = settingsStore.editorSettings.sidebarObjectDisplay;
+      editSidebarTableSearchEnabled.value = settingsStore.editorSettings.sidebarTableSearchEnabled;
       editAutoSelectActiveSidebarNode.value = settingsStore.editorSettings.autoSelectActiveSidebarNode;
       editOpenTabsRestoreMode.value = settingsStore.editorSettings.openTabsRestoreMode;
       editDisconnectTabHandlingMode.value = settingsStore.editorSettings.disconnectTabHandlingMode;
@@ -639,6 +644,7 @@ function hasChanges(): boolean {
     editActiveCustomThemeId.value !== settingsStore.editorSettings.activeCustomThemeId ||
     editExecuteMode.value !== settingsStore.editorSettings.executeMode ||
     editShowExecutionTargetPicker.value !== settingsStore.editorSettings.showExecutionTargetPicker ||
+    editShowStatementRunButtons.value !== settingsStore.editorSettings.showStatementRunButtons ||
     editShowCurrentStatementFrame.value !== settingsStore.editorSettings.showCurrentStatementFrame ||
     editAutoAliasTables.value !== settingsStore.editorSettings.autoAliasTables ||
     editWordWrap.value !== settingsStore.editorSettings.wordWrap ||
@@ -666,6 +672,7 @@ function hasChanges(): boolean {
     JSON.stringify(editSqlFormatter.value) !== JSON.stringify(normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter)) ||
     editSidebarActivation.value !== settingsStore.editorSettings.sidebarActivation ||
     editSidebarObjectDisplay.value !== settingsStore.editorSettings.sidebarObjectDisplay ||
+    editSidebarTableSearchEnabled.value !== settingsStore.editorSettings.sidebarTableSearchEnabled ||
     editAutoSelectActiveSidebarNode.value !== settingsStore.editorSettings.autoSelectActiveSidebarNode ||
     editOpenTabsRestoreMode.value !== settingsStore.editorSettings.openTabsRestoreMode ||
     editDisconnectTabHandlingMode.value !== settingsStore.editorSettings.disconnectTabHandlingMode ||
@@ -698,6 +705,7 @@ async function persistSettings() {
     activeCustomThemeId: editActiveCustomThemeId.value,
     executeMode: editExecuteMode.value,
     showExecutionTargetPicker: editShowExecutionTargetPicker.value,
+    showStatementRunButtons: editShowStatementRunButtons.value,
     showCurrentStatementFrame: editShowCurrentStatementFrame.value,
     autoAliasTables: editAutoAliasTables.value,
     wordWrap: editWordWrap.value,
@@ -717,6 +725,7 @@ async function persistSettings() {
     sqlFormatter: normalizeSqlFormatterSettings(editSqlFormatter.value),
     sidebarActivation: editSidebarActivation.value,
     sidebarObjectDisplay: editSidebarObjectDisplay.value,
+    sidebarTableSearchEnabled: editSidebarTableSearchEnabled.value,
     autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode.value,
     openTabsRestoreMode: editOpenTabsRestoreMode.value,
     disconnectTabHandlingMode: editDisconnectTabHandlingMode.value,
@@ -780,6 +789,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editFontSize.value = DEFAULT_EDITOR_SETTINGS.fontSize;
     editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
     editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
+    editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
     editShowCurrentStatementFrame.value = DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame;
     editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
     editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
@@ -807,6 +817,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSidebarTablePageSize.value = DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
     editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
     editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
+    editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
     editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
     editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
     editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
@@ -849,6 +860,7 @@ function resetAllDefaults() {
   editActiveCustomThemeId.value = DEFAULT_EDITOR_SETTINGS.activeCustomThemeId;
   editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
   editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
+  editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
   editShowCurrentStatementFrame.value = DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame;
   editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
   editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
@@ -878,6 +890,7 @@ function resetAllDefaults() {
   sqlFormatterConfigValid.value = true;
   editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
   editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
+  editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
   editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
   editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
   editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
@@ -1998,32 +2011,48 @@ const previewSettings = computed<{
   theme: EditorTheme;
   appAppearance: AppThemeAppearance;
   appPalette: AppThemePalette;
-  showCurrentStatementFrame: boolean;
   customColors?: CustomThemeColors;
+  showStatementRunButtons: boolean;
+  showCurrentStatementFrame: boolean;
 }>(() => ({
   fontFamily: editFontFamily.value,
   fontSize: editFontSize.value,
   theme: editTheme.value,
   appAppearance: isDark.value ? "dark" : "light",
   appPalette: themePalette.value,
-  showCurrentStatementFrame: editShowCurrentStatementFrame.value,
   customColors: getPreviewCustomThemeColors(),
+  showStatementRunButtons: editShowStatementRunButtons.value,
+  showCurrentStatementFrame: editShowCurrentStatementFrame.value,
 }));
 
 const previewSqlNormal = `SELECT u.id, u.name
 FROM users u
-ORDER BY u.id LIMIT 5;`;
+ORDER BY u.id LIMIT 5;
+
+SELECT o.id, o.total
+FROM orders o
+WHERE o.total > 100;`;
 const previewSqlWithSyntaxError = `SELECT u.id, u.name
 FOM users u
-ORDER BY u.id LIMIT 5;`;
+ORDER BY u.id LIMIT 5;
+
+SELECT o.id, o.total
+FROM orders o
+WHERE o.total > 100;`;
 
 let fontThemeComp: import("@codemirror/state").Compartment | null = null;
 let themeComp: import("@codemirror/state").Compartment | null = null;
 let diagnosticComp: import("@codemirror/state").Compartment | null = null;
+let previewRunGutterComp: import("@codemirror/state").Compartment | null = null;
 let currentStatementFrameComp: import("@codemirror/state").Compartment | null = null;
 let setPreviewDiagnosticsEffect: import("@codemirror/state").StateEffectType<PreviewSqlDiagnostic[]> | null = null;
-let editorViewModule: Pick<typeof import("@codemirror/view"), "Decoration" | "EditorView" | "ViewPlugin"> | null = null;
+let setPreviewRunHighlightEffect: import("@codemirror/state").StateEffectType<{ from: number; to: number } | null> | null = null;
+let editorViewModule: typeof import("@codemirror/view") | null = null;
 let previewSqlDiagnostics: PreviewSqlDiagnostic[] = [];
+let previewExecutableCache: ExecutableStatementRangeCache | null = null;
+let previewRunHighlightRange: { from: number; to: number } | null = null;
+let previewRunHighlightTimer: ReturnType<typeof setTimeout> | null = null;
+let buildPreviewRunGutterExtension: () => import("@codemirror/state").Extension = () => [];
 
 function currentPreviewSql(): string {
   return editSqlSemanticDiagnosticsEnabled.value ? previewSqlWithSyntaxError : previewSqlNormal;
@@ -2046,10 +2075,51 @@ function updatePreviewSqlDiagnostics() {
     view.dispatch({ effects });
     return;
   }
+  previewExecutableCache = null;
   view.dispatch({
     changes: { from: 0, to: currentSql.length, insert: nextSql },
     effects,
   });
+}
+
+function previewExecutableStatementRangeStartingAt(currentView: EditorViewType, lineFrom: number) {
+  previewExecutableCache = executableStatementRangeCacheForDoc(previewExecutableCache, currentView.state.doc, "mysql");
+  return executableStatementRangeStartingAt(previewExecutableCache, lineFrom);
+}
+
+function clearPreviewRunHighlight() {
+  previewRunHighlightRange = null;
+  if (previewView.value && setPreviewRunHighlightEffect) {
+    previewView.value.dispatch({ effects: setPreviewRunHighlightEffect.of(null) });
+  }
+}
+
+function flashPreviewRunHighlight(range: { from: number; to: number }, event: Event) {
+  previewRunHighlightRange = range;
+  if (previewView.value && setPreviewRunHighlightEffect) {
+    previewView.value.dispatch({ effects: setPreviewRunHighlightEffect.of(range) });
+  }
+  if (event.target instanceof Element) {
+    const marker = event.target.closest(".cm-run-statement-marker");
+    marker?.classList.add("cm-run-statement-marker--executed");
+    window.setTimeout(() => marker?.classList.remove("cm-run-statement-marker--executed"), 650);
+  }
+  if (previewRunHighlightTimer) clearTimeout(previewRunHighlightTimer);
+  previewRunHighlightTimer = window.setTimeout(() => {
+    previewRunHighlightTimer = null;
+    clearPreviewRunHighlight();
+  }, 650);
+}
+
+function handlePreviewRunGutterMouseDown(currentView: EditorViewType, line: { from: number; to: number }, event: Event): boolean {
+  if (!(event instanceof MouseEvent) || event.button !== 0) return false;
+  const statementRange = previewExecutableStatementRangeStartingAt(currentView, line.from);
+  if (!statementRange) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  flashPreviewRunHighlight({ from: statementRange.from, to: statementRange.to }, event);
+  currentView.focus();
+  return true;
 }
 
 function buildPreviewCurrentStatementFrameExtension(viewModule: Pick<typeof import("@codemirror/view"), "Decoration" | "EditorView" | "ViewPlugin">, enabled: boolean) {
@@ -2089,9 +2159,9 @@ function buildPreviewCurrentStatementFrameExtension(viewModule: Pick<typeof impo
       }
       getDeco(view: import("@codemirror/view").EditorView) {
         if (view.state.selection.ranges.some((range) => !range.empty)) return Decoration.none;
-        const docText = view.state.doc.toString();
-        const range = currentExecutableStatementRange(docText, view.state.selection.main.head, "mysql");
+        const range = currentExecutableStatementRange(view.state.doc.toString(), view.state.selection.main.head, "mysql");
         if (!range) return Decoration.none;
+
         const startLine = view.state.doc.lineAt(range.from);
         const frameTo = previewCurrentStatementFrameTo(view, range);
         const endLine = view.state.doc.lineAt(Math.max(range.from, frameTo - 1));
@@ -2131,11 +2201,14 @@ watch(
     if (!previewView.value || !fontThemeComp || !themeComp || !editorViewModule) return;
 
     const themeExt = await loadEditorTheme(ss.theme, ss.appAppearance, ss.customColors, ss.appPalette);
-    const effects = [themeComp.reconfigure(themeExt), fontThemeComp.reconfigure(editorFontTheme(editorViewModule.EditorView, ss.fontSize, ss.fontFamily))];
-    if (currentStatementFrameComp) {
-      effects.push(currentStatementFrameComp.reconfigure(buildPreviewCurrentStatementFrameExtension(editorViewModule, ss.showCurrentStatementFrame)));
-    }
-    previewView.value.dispatch({ effects });
+    previewView.value.dispatch({
+      effects: [
+        themeComp.reconfigure(themeExt),
+        fontThemeComp.reconfigure(editorFontTheme(editorViewModule.EditorView, ss.fontSize, ss.fontFamily)),
+        ...(previewRunGutterComp ? [previewRunGutterComp.reconfigure(buildPreviewRunGutterExtension())] : []),
+        ...(currentStatementFrameComp ? [currentStatementFrameComp.reconfigure(buildPreviewCurrentStatementFrameExtension(editorViewModule, ss.showCurrentStatementFrame))] : []),
+      ],
+    });
   },
   { deep: true },
 );
@@ -2154,10 +2227,19 @@ function cleanupPreviewEditor() {
   fontThemeComp = null;
   themeComp = null;
   diagnosticComp = null;
+  previewRunGutterComp = null;
   currentStatementFrameComp = null;
   setPreviewDiagnosticsEffect = null;
+  setPreviewRunHighlightEffect = null;
   editorViewModule = null;
   previewSqlDiagnostics = [];
+  previewExecutableCache = null;
+  previewRunHighlightRange = null;
+  buildPreviewRunGutterExtension = () => [];
+  if (previewRunHighlightTimer) {
+    clearTimeout(previewRunHighlightTimer);
+    previewRunHighlightTimer = null;
+  }
 }
 
 watch(activeSettingsTab, (tab) => {
@@ -2171,14 +2253,16 @@ watch(previewRef, async (el) => {
   previewInitialized = true;
   if (previewView.value) return;
 
-  const [{ EditorView, Decoration, ViewPlugin }, { EditorState, Compartment, StateEffect, StateField }, { sql, MySQL }, { basicSetup }] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("codemirror")]);
+  const [{ EditorView, Decoration, ViewPlugin, gutter, GutterMarker }, { EditorState, Compartment, StateEffect, StateField }, { sql, MySQL }, { basicSetup }] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("codemirror")]);
 
-  editorViewModule = { Decoration, EditorView, ViewPlugin };
+  editorViewModule = { Decoration, EditorView, ViewPlugin } as typeof import("@codemirror/view");
   fontThemeComp = new Compartment();
   themeComp = new Compartment();
   diagnosticComp = new Compartment();
+  previewRunGutterComp = new Compartment();
   currentStatementFrameComp = new Compartment();
   setPreviewDiagnosticsEffect = StateEffect.define<PreviewSqlDiagnostic[]>();
+  setPreviewRunHighlightEffect = StateEffect.define<{ from: number; to: number } | null>();
   previewSqlDiagnostics = previewDiagnosticsForSql(currentPreviewSql());
 
   const ss = previewSettings.value;
@@ -2214,11 +2298,52 @@ watch(previewRef, async (el) => {
     return [field, diagnosticTheme];
   };
 
-  const frameExt = buildPreviewCurrentStatementFrameExtension(editorViewModule, ss.showCurrentStatementFrame);
+  class PreviewRunStatementGutterMarker extends GutterMarker {
+    toDOM() {
+      return createRunStatementButtonDom(t("settings.previewStatementRunButton"));
+    }
+  }
+
+  const previewRunMarker = new PreviewRunStatementGutterMarker();
+  buildPreviewRunGutterExtension = () =>
+    editShowStatementRunButtons.value
+      ? gutter({
+          class: "cm-run-statement-gutter",
+          lineMarker(currentView, line) {
+            return previewExecutableStatementRangeStartingAt(currentView, line.from) ? previewRunMarker : null;
+          },
+          domEventHandlers: {
+            mousedown: handlePreviewRunGutterMouseDown,
+          },
+        })
+      : [];
+
+  const buildPreviewRunHighlightExtension = () => {
+    const highlightEffect = setPreviewRunHighlightEffect;
+    const buildDecorations = () => (previewRunHighlightRange ? Decoration.set([Decoration.mark({ class: "cm-settings-preview-run-highlight" }).range(previewRunHighlightRange.from, previewRunHighlightRange.to)], true) : Decoration.none);
+    const field = StateField.define({
+      create: buildDecorations,
+      update(value, transaction) {
+        const highlightChanged = !!highlightEffect && transaction.effects.some((effect) => effect.is(highlightEffect));
+        return transaction.docChanged || highlightChanged ? buildDecorations() : value;
+      },
+      provide: (field) => EditorView.decorations.from(field),
+    });
+    return field;
+  };
 
   const state = EditorState.create({
     doc: currentPreviewSql(),
-    extensions: [basicSetup, sql({ dialect: MySQL }), themeComp.of(themeExt), fontThemeComp.of(editorFontTheme(EditorView, ss.fontSize, ss.fontFamily)), diagnosticComp.of(buildPreviewDiagnosticExtension()), currentStatementFrameComp.of(frameExt)],
+    extensions: [
+      basicSetup,
+      sql({ dialect: MySQL }),
+      themeComp.of(themeExt),
+      fontThemeComp.of(editorFontTheme(EditorView, ss.fontSize, ss.fontFamily)),
+      previewRunGutterComp.of(buildPreviewRunGutterExtension()),
+      currentStatementFrameComp.of(buildPreviewCurrentStatementFrameExtension(editorViewModule, ss.showCurrentStatementFrame)),
+      diagnosticComp.of(buildPreviewDiagnosticExtension()),
+      buildPreviewRunHighlightExtension(),
+    ],
   });
 
   previewView.value = new EditorView({ state, parent: previewRef.value });
@@ -2355,6 +2480,14 @@ onUnmounted(cleanupPreviewEditor);
 
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
+                    <Label for="editor-show-statement-run-buttons">{{ t("settings.showStatementRunButtons") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.showStatementRunButtonsDescription") }}</p>
+                  </div>
+                  <Switch id="editor-show-statement-run-buttons" v-model="editShowStatementRunButtons" class="mt-0.5" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
                     <Label for="editor-show-current-statement-frame">{{ t("settings.showCurrentStatementFrame") }}</Label>
                     <p class="text-xs text-muted-foreground">{{ t("settings.showCurrentStatementFrameDescription") }}</p>
                   </div>
@@ -2448,8 +2581,8 @@ onUnmounted(cleanupPreviewEditor);
                           readonly
                           :aria-invalid="shortcutConflicts.includes(definition.id)"
                           :placeholder="t('settings.shortcutPressShortcut')"
-                          class="h-7 w-auto min-w-12 max-w-32 shrink-0 cursor-default rounded-[6px] border border-transparent bg-background px-2.5 text-center font-mono text-[13px] font-semibold text-foreground/75 shadow-inner outline-none selection:bg-transparent placeholder:text-muted-foreground aria-invalid:border-destructive/70 aria-invalid:text-destructive aria-invalid:ring-destructive/20"
-                          :class="editingShortcutId === definition.id ? 'max-w-44 cursor-text border-border/80 bg-background text-left text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35' : ''"
+                          class="h-7 w-auto min-w-12 max-w-64 shrink-0 cursor-default rounded-[6px] border border-transparent bg-background px-2.5 text-center font-mono text-[13px] font-semibold text-foreground/75 shadow-inner outline-none selection:bg-transparent placeholder:text-muted-foreground aria-invalid:border-destructive/70 aria-invalid:text-destructive aria-invalid:ring-destructive/20"
+                          :class="editingShortcutId === definition.id ? 'max-w-64 cursor-text border-border/80 bg-background text-left text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35' : ''"
                           @keydown="(event: KeyboardEvent) => onShortcutKeydown(definition.id, event)"
                         />
                         <Button
@@ -2954,6 +3087,15 @@ onUnmounted(cleanupPreviewEditor);
               </div>
               <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
+                  <Label for="sidebar-table-search-enabled">{{ t("settings.sidebarTableSearchEnabled") }}</Label>
+                  <HelpTooltip :label="t('settings.sidebarTableSearchEnabled')">
+                    {{ t("settings.sidebarTableSearchEnabledDescription") }}
+                  </HelpTooltip>
+                </div>
+                <Switch id="sidebar-table-search-enabled" v-model="editSidebarTableSearchEnabled" />
+              </div>
+              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
                   <Label for="auto-select-active-sidebar-node">{{ t("settings.autoSelectActiveSidebarNode") }}</Label>
                   <HelpTooltip :label="t('settings.autoSelectActiveSidebarNode')">
                     {{ t("settings.autoSelectActiveSidebarNodeDescription") }}
@@ -3273,8 +3415,8 @@ onUnmounted(cleanupPreviewEditor);
                         readonly
                         :aria-invalid="shortcutConflicts.includes(definition.id)"
                         :placeholder="t('settings.shortcutPressShortcut')"
-                        class="h-7 w-auto min-w-12 max-w-32 shrink-0 cursor-default rounded-[6px] border border-transparent bg-muted px-2.5 text-center font-mono text-[13px] font-semibold text-foreground/75 shadow-inner outline-none selection:bg-transparent placeholder:text-muted-foreground aria-invalid:border-destructive/70 aria-invalid:text-destructive aria-invalid:ring-destructive/20"
-                        :class="editingShortcutId === definition.id ? 'max-w-44 cursor-text border-border/80 bg-background text-left text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35' : ''"
+                        class="h-7 w-auto min-w-12 max-w-64 shrink-0 cursor-default rounded-[6px] border border-transparent bg-muted px-2.5 text-center font-mono text-[13px] font-semibold text-foreground/75 shadow-inner outline-none selection:bg-transparent placeholder:text-muted-foreground aria-invalid:border-destructive/70 aria-invalid:text-destructive aria-invalid:ring-destructive/20"
+                        :class="editingShortcutId === definition.id ? 'max-w-64 cursor-text border-border/80 bg-background text-left text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35' : ''"
                         @keydown="(event: KeyboardEvent) => onShortcutKeydown(definition.id, event)"
                       />
                       <Button

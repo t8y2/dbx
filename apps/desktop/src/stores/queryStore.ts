@@ -2,7 +2,7 @@ import { defineStore } from "pinia";
 import { uuid } from "@/lib/common/utils";
 import { markRaw, ref, watch, computed } from "vue";
 import { useI18n } from "vue-i18n";
-import type { DatabaseType, QueryResult, QueryTab, TableInfoTab } from "@/types/database";
+import type { DatabaseType, QueryResult, QueryTab, TableInfoTab, TableStructureEditorTarget } from "@/types/database";
 import { orderPinnedFirst } from "@/lib/app/pinnedItems";
 import { canCancelQueryExecution } from "@/lib/sql/queryExecutionState";
 import { buildExplainSql, parseExplainResult, parseDamengExplainText } from "@/lib/diagram/explainPlan";
@@ -20,7 +20,7 @@ import {
   mongoUseToQueryResult,
   mongoVersionToQueryResult,
   mongoWriteToQueryResult,
-  splitMongoCommands,
+  splitMongoCommandRanges,
   type MongoAggregateSafetyOptions,
 } from "@/lib/mongo/mongoShellCommand";
 import { redisCommandResultToQueryResult } from "@/lib/redis/redisQueryResult";
@@ -124,13 +124,17 @@ function annotateQueryResultSources(results: QueryResult[], sql: string, databas
   let statementIndex = 0;
   for (const result of results) {
     const statement = statements[statementIndex++];
-    if (result.columns.length === 0) continue;
     if (!statement) continue;
-    result.sourceStatement = statement.sql;
-    const label = queryResultSourceLabel(statement.sql, database);
-    if (label) result.sourceLabel = label;
+    annotateQueryResultSource(result, statement.sql, database);
   }
   return results;
+}
+
+function annotateQueryResultSource(result: QueryResult, sourceStatement: string, database?: string): QueryResult {
+  result.sourceStatement = sourceStatement;
+  const label = queryResultSourceLabel(sourceStatement, database);
+  if (label) result.sourceLabel = label;
+  return result;
 }
 
 async function withFrontendQueryTimeout<T>(promise: Promise<T>, timeoutSecs: number, message: string): Promise<T> {
@@ -885,18 +889,19 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
-  function applyTableStructureInitialTab(tab: QueryTab, initialTab?: TableInfoTab) {
-    if (!initialTab) return;
-    tab.structureInitialTab = initialTab;
+  function applyTableStructureInitialTab(tab: QueryTab, initialTab?: TableInfoTab, initialTarget?: TableStructureEditorTarget) {
+    if (!initialTab && !initialTarget?.name) return;
+    if (initialTab) tab.structureInitialTab = initialTab;
+    tab.structureInitialTarget = initialTarget?.name ? initialTarget : undefined;
     tab.structureInitialTabRequestId = (tab.structureInitialTabRequestId ?? 0) + 1;
   }
 
-  function openTableStructure(connectionId: string, database: string, schema?: string, tableName?: string, initialTab?: TableInfoTab) {
+  function openTableStructure(connectionId: string, database: string, schema?: string, tableName?: string, initialTab?: TableInfoTab, initialTarget?: TableStructureEditorTarget) {
     const resolvedTableName = tableName || "";
     if (resolvedTableName) {
       const existing = tabs.value.find((tab) => tab.mode === "structure" && tab.connectionId === connectionId && tab.database === database && (tab.structureTableName || "") === resolvedTableName);
       if (existing) {
-        applyTableStructureInitialTab(existing, initialTab);
+        applyTableStructureInitialTab(existing, initialTab, initialTarget);
         activeTabId.value = existing.id;
         return existing.id;
       }
@@ -917,7 +922,8 @@ export const useQueryStore = defineStore("query", () => {
       mode: "structure",
       structureTableName: resolvedTableName,
       structureInitialTab: initialTab,
-      structureInitialTabRequestId: initialTab ? 1 : undefined,
+      structureInitialTabRequestId: initialTab || initialTarget?.name ? 1 : undefined,
+      structureInitialTarget: initialTarget?.name ? initialTarget : undefined,
     };
     tabs.value.push(tab);
     activeTabId.value = id;
@@ -1992,7 +1998,7 @@ export const useQueryStore = defineStore("query", () => {
     try {
       const connStore = useConnectionStore();
       let conn = connStore.getConfig(tab.connectionId);
-      const parsedMongoCommands = conn?.db_type === "mongodb" ? splitMongoCommands(sql) : undefined;
+      const parsedMongoCommands = conn?.db_type === "mongodb" ? splitMongoCommandRanges(sql) : undefined;
       let mongoCommands = parsedMongoCommands ?? [];
       const mongoNeedsConnection = mongoCommands.some(({ command }) => command.kind !== "use");
 
@@ -2007,7 +2013,7 @@ export const useQueryStore = defineStore("query", () => {
       }
       conn = connStore.getConfig(tab.connectionId);
       if (parsedMongoCommands === undefined && conn?.db_type === "mongodb") {
-        mongoCommands = splitMongoCommands(sql);
+        mongoCommands = splitMongoCommandRanges(sql);
       }
       const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
       const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
@@ -2034,7 +2040,7 @@ export const useQueryStore = defineStore("query", () => {
         for (const command of commands) {
           try {
             const result = await api.redisExecuteCommand(tab.connectionId, currentDb, command, skipSafety);
-            allResults.push(markQueryResultRowsRaw(redisCommandResultToQueryResult(result.value, performance.now() - startedAt, result.command)));
+            allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(redisCommandResultToQueryResult(result.value, performance.now() - startedAt, result.command), command)));
             // Track db switches from SELECT N so later commands in the same batch run on the right db.
             currentDb = nextRedisCommandDb(currentDb, command, result.value);
             // Write commands (SET/DEL/...) mutate the key set — drop the cached key-name completion
@@ -2044,7 +2050,7 @@ export const useQueryStore = defineStore("query", () => {
               connStore.invalidateCompletionCache(tab.connectionId, String(currentDb));
             }
           } catch (e: any) {
-            allResults.push({ columns: ["Error"], rows: [[e?.message ?? String(e)]], affected_rows: 0, execution_time_ms: 0 });
+            allResults.push(annotateQueryResultSource({ columns: ["Error"], rows: [[e?.message ?? String(e)]], affected_rows: 0, execution_time_ms: 0 }, command));
           }
         }
         console.info("[DBX][executeTabSql:redis:done]", { traceId, commandCount: commands.length, elapsed: elapsed() });
@@ -2097,13 +2103,14 @@ export const useQueryStore = defineStore("query", () => {
 
         for (const parsedCommand of mongoCommands) {
           const mongoCommand = parsedCommand.command;
+          const sourceStatement = parsedCommand.text;
           const commandStartedAt = performance.now();
           try {
             switch (mongoCommand.kind) {
               case "find": {
                 console.info("[DBX][executeTabSql:mongo-find:start]", { traceId, collection: mongoCommand.collection, database: currentDatabase });
                 const result = await api.mongoFindDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.skip, mongoCommand.limit, mongoCommand.filter, mongoCommand.projection, mongoCommand.sort, executionId);
-                const queryResult = markQueryResultRowsRaw(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total));
+                const queryResult = markQueryResultRowsRaw(annotateQueryResultSource(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total), sourceStatement));
                 allResults.push(queryResult);
                 mongoEditTarget = mongoCommands.length === 1 && queryResult.columns.includes("_id") ? { collection: mongoCommand.collection, idColumn: "_id" } : undefined;
                 console.info("[DBX][executeTabSql:mongo-find:done]", {
@@ -2119,7 +2126,7 @@ export const useQueryStore = defineStore("query", () => {
               case "version": {
                 console.info("[DBX][executeTabSql:mongo-version:start]", { traceId, database: currentDatabase });
                 const version = await api.mongoServerVersion(tab.connectionId, currentDatabase, executionId);
-                allResults.push(markQueryResultRowsRaw(mongoVersionToQueryResult(version, performance.now() - commandStartedAt)));
+                allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoVersionToQueryResult(version, performance.now() - commandStartedAt), sourceStatement)));
                 mongoEditTarget = undefined;
                 console.info("[DBX][executeTabSql:mongo-version:done]", {
                   traceId,
@@ -2132,7 +2139,7 @@ export const useQueryStore = defineStore("query", () => {
               case "countDocuments": {
                 console.info("[DBX][executeTabSql:mongo-count:start]", { traceId, collection: mongoCommand.collection, database: currentDatabase });
                 const result = await api.mongoFindDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, 0, 1, mongoCommand.filter, undefined, undefined, executionId);
-                allResults.push(markQueryResultRowsRaw(mongoCountToQueryResult(result.total, performance.now() - commandStartedAt)));
+                allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoCountToQueryResult(result.total, performance.now() - commandStartedAt), sourceStatement)));
                 mongoEditTarget = undefined;
                 console.info("[DBX][executeTabSql:mongo-count:done]", {
                   traceId,
@@ -2151,7 +2158,7 @@ export const useQueryStore = defineStore("query", () => {
                 console.info("[DBX][executeTabSql:mongo-aggregate:start]", { traceId, collection: mongoCommand.collection, database: currentDatabase });
                 const aggregateMaxRows = normalizeResultPageSize(pageLimit ?? options?.pagination?.limit ?? settingsStore.editorSettings.pageSize);
                 const result = await api.mongoAggregateDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.pipeline, aggregateMaxRows, executionId);
-                allResults.push(markQueryResultRowsRaw(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total)));
+                allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total), sourceStatement)));
                 mongoEditTarget = undefined;
                 console.info("[DBX][executeTabSql:mongo-aggregate:done]", {
                   traceId,
@@ -2166,7 +2173,7 @@ export const useQueryStore = defineStore("query", () => {
               case "getIndexes": {
                 console.info("[DBX][executeTabSql:mongo-indexes:start]", { traceId, collection: mongoCommand.collection, database: currentDatabase });
                 const indexes = await api.listIndexes(tab.connectionId, currentDatabase, "", mongoCommand.collection);
-                allResults.push(markQueryResultRowsRaw(mongoIndexesToQueryResult(indexes, performance.now() - commandStartedAt)));
+                allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoIndexesToQueryResult(indexes, performance.now() - commandStartedAt), sourceStatement)));
                 mongoEditTarget = undefined;
                 console.info("[DBX][executeTabSql:mongo-indexes:done]", {
                   traceId,
@@ -2185,7 +2192,7 @@ export const useQueryStore = defineStore("query", () => {
                   database: currentDatabase,
                 });
                 const stats = await api.mongoCollectionStats(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.scale, executionId);
-                allResults.push(markQueryResultRowsRaw(mongoCollectionStatsToQueryResult(mongoCommand.metric, stats as unknown as Record<string, unknown>, performance.now() - commandStartedAt)));
+                allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoCollectionStatsToQueryResult(mongoCommand.metric, stats as unknown as Record<string, unknown>, performance.now() - commandStartedAt), sourceStatement)));
                 mongoEditTarget = undefined;
                 console.info("[DBX][executeTabSql:mongo-collection-stats:done]", {
                   traceId,
@@ -2215,19 +2222,19 @@ export const useQueryStore = defineStore("query", () => {
                 mongoEditTarget = undefined;
                 if (mongoCommand.kind === "insert") {
                   const result = await api.mongoInsertDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.docsJson);
-                  allResults.push(markQueryResultRowsRaw(mongoWriteToQueryResult(result.affected_rows, performance.now() - commandStartedAt)));
+                  allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoWriteToQueryResult(result.affected_rows, performance.now() - commandStartedAt), sourceStatement)));
                 } else if (mongoCommand.kind === "update") {
                   const result = await api.mongoUpdateDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.filter, mongoCommand.update, mongoCommand.many);
-                  allResults.push(markQueryResultRowsRaw(mongoWriteToQueryResult(result.affected_rows, performance.now() - commandStartedAt)));
+                  allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoWriteToQueryResult(result.affected_rows, performance.now() - commandStartedAt), sourceStatement)));
                 } else if (mongoCommand.kind === "createIndex") {
                   const result = await api.mongoCreateIndex(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.keys, mongoCommand.options);
-                  allResults.push(markQueryResultRowsRaw(mongoCreateIndexToQueryResult(result.name, performance.now() - commandStartedAt)));
+                  allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoCreateIndexToQueryResult(result.name, performance.now() - commandStartedAt), sourceStatement)));
                 } else if (mongoCommand.kind === "dropIndex" || mongoCommand.kind === "dropIndexes") {
                   const result = await api.mongoDropIndexes(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.kind === "dropIndex" ? mongoCommand.index : mongoCommand.indexes, mongoCommand.kind === "dropIndex");
-                  allResults.push(markQueryResultRowsRaw(mongoDroppedIndexesToQueryResult(result.dropped_names, performance.now() - commandStartedAt)));
+                  allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoDroppedIndexesToQueryResult(result.dropped_names, performance.now() - commandStartedAt), sourceStatement)));
                 } else {
                   const result = await api.mongoDeleteDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.filter, mongoCommand.many);
-                  allResults.push(markQueryResultRowsRaw(mongoWriteToQueryResult(result.affected_rows, performance.now() - commandStartedAt)));
+                  allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoWriteToQueryResult(result.affected_rows, performance.now() - commandStartedAt), sourceStatement)));
                 }
                 console.info("[DBX][executeTabSql:mongo-write:done]", {
                   traceId,
@@ -2240,7 +2247,7 @@ export const useQueryStore = defineStore("query", () => {
               }
               case "use": {
                 currentDatabase = mongoCommand.database;
-                allResults.push(markQueryResultRowsRaw(mongoUseToQueryResult(currentDatabase, performance.now() - commandStartedAt)));
+                allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoUseToQueryResult(currentDatabase, performance.now() - commandStartedAt), sourceStatement)));
                 mongoEditTarget = undefined;
                 console.info("[DBX][executeTabSql:mongo-use:done]", {
                   traceId,
@@ -2253,7 +2260,7 @@ export const useQueryStore = defineStore("query", () => {
           } catch (error: any) {
             // Surface per-command failures inline and continue collecting results
             // for the rest of the batch, matching the grouped-result UX.
-            allResults.push(toErrorResult(error));
+            allResults.push(annotateQueryResultSource(toErrorResult(error), sourceStatement));
             mongoEditTarget = undefined;
           }
         }

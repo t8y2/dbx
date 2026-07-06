@@ -19,7 +19,6 @@ import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
 
 class DamengAgentMetadataTest {
     @Test
@@ -208,6 +207,35 @@ class DamengAgentMetadataTest {
         Assertions.assertFalse(ddl.contains("PK_USERS"), ddl);
         String indexSql = sqls.stream().filter(sql -> sql.contains("ALL_INDEXES")).findFirst().orElseThrow();
         Assertions.assertTrue(indexSql.contains("CONSTRAINT_TYPE IN ('P', 'U')"), indexSql);
+        long dbmsMetadataCalls = sqls.stream().filter(sql -> sql.contains("DBMS_METADATA.GET_DDL")).count();
+        Assertions.assertEquals(1, dbmsMetadataCalls);
+    }
+
+    @Test
+    void skipsDamengInternalIndexesWhenAppendingTableDdl() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, metadataConnection(
+            "id comment",
+            null,
+            false,
+            List.of(
+                indexRow("IDX_USERS_NAME", "NAME", "NONUNIQUE", "NORMAL"),
+                indexRow("SYS_INTERNAL_DDL", "ID", "NONUNIQUE", "INNER CLUSTER INDEX")
+            ),
+            sqls
+        ));
+
+        String ddl = agent.getTableDdl("APP", "USERS");
+
+        Assertions.assertTrue(
+            ddl.contains("CREATE INDEX \"APP\".\"IDX_USERS_NAME\" ON \"APP\".\"USERS\" (\"NAME\");"),
+            ddl
+        );
+        Assertions.assertFalse(ddl.contains("SYS_INTERNAL_DDL"), ddl);
+        Assertions.assertFalse(ddl.contains("INNER CLUSTER INDEX"), ddl);
+        long dbmsMetadataCalls = sqls.stream().filter(sql -> sql.contains("DBMS_METADATA.GET_DDL")).count();
+        Assertions.assertEquals(1, dbmsMetadataCalls);
     }
 
     private static Connection metadataConnection() {
@@ -219,7 +247,7 @@ class DamengAgentMetadataTest {
     }
 
     private static Connection metadataConnection(String allColumnComment, String fallbackColumnComment, boolean includeMaterializedView) {
-        return metadataConnection(allColumnComment, fallbackColumnComment, includeMaterializedView, List.of(), Map.of(), null);
+        return metadataConnection(allColumnComment, fallbackColumnComment, includeMaterializedView, List.of(), null);
     }
 
     private static Connection metadataConnectionWithIndexes(List<String> sqls) {
@@ -227,10 +255,9 @@ class DamengAgentMetadataTest {
             "id comment",
             null,
             false,
-            List.of("IDX_USERS_NAME", "UX_USERS_EMAIL"),
-            Map.of(
-                "IDX_USERS_NAME", "CREATE INDEX \"APP\".\"IDX_USERS_NAME\" ON \"APP\".\"USERS\" (\"NAME\")",
-                "UX_USERS_EMAIL", "CREATE UNIQUE INDEX \"APP\".\"UX_USERS_EMAIL\" ON \"APP\".\"USERS\" (\"EMAIL\")"
+            List.of(
+                indexRow("IDX_USERS_NAME", "NAME", "NONUNIQUE", "NORMAL"),
+                indexRow("UX_USERS_EMAIL", "EMAIL", "UNIQUE", "NORMAL")
             ),
             sqls
         );
@@ -240,8 +267,7 @@ class DamengAgentMetadataTest {
         String allColumnComment,
         String fallbackColumnComment,
         boolean includeMaterializedView,
-        List<String> independentIndexNames,
-        Map<String, String> indexDdlByName,
+        List<List<Object>> independentIndexes,
         List<String> sqls
     ) {
         return proxy(Connection.class, (method, args) -> {
@@ -252,7 +278,7 @@ class DamengAgentMetadataTest {
                     sqls.add(sql);
                 }
                 if (sql.contains("DBMS_METADATA.GET_DDL")) {
-                    return dbmsMetadataStatement(indexDdlByName);
+                    return dbmsMetadataStatement();
                 }
                 if (sql.contains("ALL_CONS_COLUMNS")) {
                     return metadataStatement(List.of(List.of("ID")));
@@ -288,7 +314,7 @@ class DamengAgentMetadataTest {
                     return metadataStatement(List.of());
                 }
                 if (sql.contains("ALL_INDEXES")) {
-                    return metadataStatement(independentIndexNames.stream().map(indexName -> List.of((Object) indexName)).toList());
+                    return metadataStatement(independentIndexes);
                 }
                 if (sql.contains("ALL_TAB_COMMENTS")) {
                     List<List<Object>> rows = new ArrayList<>();
@@ -331,15 +357,18 @@ class DamengAgentMetadataTest {
         });
     }
 
-    private static PreparedStatement dbmsMetadataStatement(Map<String, String> indexDdlByName) {
+    private static List<Object> indexRow(String name, String columns, String uniqueness, String indexType) {
+        return List.of(name, columns, uniqueness, indexType);
+    }
+
+    private static PreparedStatement dbmsMetadataStatement() {
         List<String> params = new ArrayList<>();
         return proxy(PreparedStatement.class, (method, args) -> {
             String name = method.getName();
             if ("executeQuery".equals(name)) {
                 String objectType = params.isEmpty() ? "" : params.get(0);
                 if ("INDEX".equals(objectType)) {
-                    String indexName = params.size() > 1 ? params.get(1) : "";
-                    return metadataResultSet(List.of(List.of(indexDdlByName.getOrDefault(indexName, ""))));
+                    throw new AssertionError("Dameng table DDL should generate index DDL from metadata");
                 }
                 return metadataResultSet(List.of(List.of("CREATE TABLE \"APP\".\"USERS\" (\n  \"ID\" NUMBER\n);")));
             }
@@ -455,7 +484,7 @@ class DamengAgentMetadataTest {
     private static <T> T proxy(Class<T> type, MethodHandler handler) {
         InvocationHandler invocationHandler = new InvocationHandler() {
             @Override
-            public Object invoke(Object proxy, Method method, Object[] args) {
+            public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
                 return handler.handle(method, args);
             }
         };
@@ -491,6 +520,6 @@ class DamengAgentMetadataTest {
     }
 
     private interface MethodHandler {
-        Object handle(Method method, Object[] args);
+        Object handle(Method method, Object[] args) throws Throwable;
     }
 }

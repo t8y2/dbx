@@ -1529,17 +1529,32 @@ async fn list_tables_once(
         if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
             let is_oracle = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle);
             let use_oracle_agent_paging = db_config.as_ref().is_some_and(is_default_oracle_agent_config);
+            let filter_locally_after_oracle_comments =
+                is_oracle && filter.is_some_and(|filter| !filter.trim().is_empty());
             let timeout_duration = agent_metadata_timeout(db_config.as_ref());
             let fallback_config = db_config.clone();
             drop(connections);
             let mut client = client.lock().await;
-            let agent_limit = if use_oracle_agent_paging { limit } else { None };
-            let agent_offset = if use_oracle_agent_paging { offset } else { None };
+            let agent_filter = if filter_locally_after_oracle_comments { None } else { filter };
+            let agent_limit = if filter_locally_after_oracle_comments {
+                None
+            } else if use_oracle_agent_paging {
+                limit
+            } else {
+                None
+            };
+            let agent_offset = if filter_locally_after_oracle_comments {
+                None
+            } else if use_oracle_agent_paging {
+                offset
+            } else {
+                None
+            };
             match client
                 .list_tables_constrained::<Vec<db::TableInfo>>(
                     database,
                     schema,
-                    filter,
+                    agent_filter,
                     agent_limit,
                     agent_offset,
                     object_types,
@@ -1547,14 +1562,7 @@ async fn list_tables_once(
                 )
                 .await
             {
-                Ok(tables) if !tables.is_empty() => {
-                    let final_offset =
-                        if oracle_agent_paging_likely_applied(use_oracle_agent_paging, limit, tables.len()) {
-                            Some(0)
-                        } else {
-                            offset
-                        };
-                    let mut tables = filter_table_infos(tables, filter, limit, final_offset, object_types);
+                Ok(mut tables) if !tables.is_empty() => {
                     if is_oracle {
                         load_oracle_table_comments_for_tables(
                             &mut client,
@@ -1565,6 +1573,14 @@ async fn list_tables_once(
                         )
                         .await?;
                     }
+                    let final_offset = if filter_locally_after_oracle_comments {
+                        offset
+                    } else if oracle_agent_paging_likely_applied(use_oracle_agent_paging, limit, tables.len()) {
+                        Some(0)
+                    } else {
+                        offset
+                    };
+                    let tables = filter_table_infos(tables, filter, limit, final_offset, object_types);
                     return Ok(tables);
                 }
                 Ok(tables) => {
@@ -1703,7 +1719,7 @@ fn filter_table_infos(
     let offset = offset.unwrap_or(0);
     tables
         .into_iter()
-        .filter(|table| crate::sql::contains_or_fuzzy_match(&table.name, filter))
+        .filter(|table| metadata_name_or_comment_matches(&table.name, table.comment.as_deref(), filter))
         .filter(|table| table_info_matches_object_types(table, object_types))
         .skip(offset)
         .take(limit)
@@ -1722,11 +1738,19 @@ fn filter_object_infos(
     let offset = offset.unwrap_or(0);
     objects
         .into_iter()
-        .filter(|object| crate::sql::contains_or_fuzzy_match(&object.name, filter))
+        .filter(|object| metadata_name_or_comment_matches(&object.name, object.comment.as_deref(), filter))
         .filter(|object| object_info_matches_object_types(object, object_types))
         .skip(offset)
         .take(limit)
         .collect()
+}
+
+fn metadata_name_or_comment_matches(name: &str, comment: Option<&str>, filter: &str) -> bool {
+    if filter.trim().is_empty() {
+        return true;
+    }
+    crate::sql::contains_or_fuzzy_match(name, filter)
+        || comment.is_some_and(|comment| crate::sql::contains_or_fuzzy_match(comment, filter))
 }
 
 fn object_info_matches_object_types(object: &db::ObjectInfo, object_types: Option<&[String]>) -> bool {
@@ -2286,6 +2310,19 @@ mod tests {
     }
 
     #[test]
+    fn filter_table_infos_matches_comments() {
+        let mut orders = test_table_info("orders");
+        orders.comment = Some("sales archive".to_string());
+        let mut profile = test_table_info("profile");
+        profile.comment = Some("customer account data".to_string());
+        let tables = vec![orders, profile, test_table_info("logs")];
+
+        let filtered = filter_table_infos(tables, Some("account"), None, None, None);
+
+        assert_eq!(filtered.into_iter().map(|table| table.name).collect::<Vec<_>>(), vec!["profile"]);
+    }
+
+    #[test]
     fn filter_table_infos_skips_fuzzy_for_single_character_filters() {
         let tables = vec![test_table_info("orders"), test_table_info("user_order")];
 
@@ -2345,6 +2382,20 @@ mod tests {
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "fetch_name");
+    }
+
+    #[test]
+    fn filter_object_infos_matches_comments() {
+        let mut order_view = test_object_info("order_view", "VIEW");
+        order_view.comment = Some("monthly revenue summary".to_string());
+        let mut sync_user = test_object_info("sync_user", "PROCEDURE");
+        sync_user.comment = Some("sync account records".to_string());
+        let objects = vec![order_view, sync_user, test_object_info("audit_log", "TABLE")];
+
+        let object_types = vec!["VIEW".to_string()];
+        let filtered = filter_object_infos(objects, Some("revenue"), None, None, Some(&object_types));
+
+        assert_eq!(filtered.into_iter().map(|object| object.name).collect::<Vec<_>>(), vec!["order_view"]);
     }
 
     #[test]
@@ -2925,8 +2976,12 @@ pub async fn list_objects_core(
     offset: Option<usize>,
     object_types: Option<&[String]>,
 ) -> Result<Vec<db::ObjectInfo>, String> {
+    let db_config = connection_config(state, connection_id).await;
+    let filter_locally_after_oracle_comments = db_config.as_ref().is_some_and(|config| {
+        config.db_type == DatabaseType::Oracle && filter.is_some_and(|filter| !filter.trim().is_empty())
+    });
     let use_oracle_agent_paging =
-        connection_config(state, connection_id).await.as_ref().is_some_and(is_default_oracle_agent_config);
+        db_config.as_ref().is_some_and(is_default_oracle_agent_config) && !filter_locally_after_oracle_comments;
     retry_metadata_connection(state, connection_id, Some(database), || async {
         let objects = list_objects_once(state, connection_id, database, schema, filter, limit, offset, object_types)
             .await
@@ -3322,6 +3377,8 @@ async fn list_objects_once(
         if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
             let is_oracle = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle);
             let use_oracle_agent_paging = db_config.as_ref().is_some_and(is_default_oracle_agent_config);
+            let filter_locally_after_oracle_comments =
+                is_oracle && filter.is_some_and(|filter| !filter.trim().is_empty());
             let timeout_duration = agent_metadata_timeout(db_config.as_ref());
             let fallback_config = db_config.clone();
             drop(connections);
@@ -3329,13 +3386,26 @@ async fn list_objects_once(
                 return oracle_agent_list_objects(client, database, schema, timeout_duration).await;
             }
             let mut client = client.lock().await;
-            let agent_limit = if use_oracle_agent_paging { limit } else { None };
-            let agent_offset = if use_oracle_agent_paging { offset } else { None };
+            let agent_filter = if filter_locally_after_oracle_comments { None } else { filter };
+            let agent_limit = if filter_locally_after_oracle_comments {
+                None
+            } else if use_oracle_agent_paging {
+                limit
+            } else {
+                None
+            };
+            let agent_offset = if filter_locally_after_oracle_comments {
+                None
+            } else if use_oracle_agent_paging {
+                offset
+            } else {
+                None
+            };
             match client
                 .list_objects_constrained::<Vec<db::ObjectInfo>>(
                     database,
                     schema,
-                    filter,
+                    agent_filter,
                     agent_limit,
                     agent_offset,
                     object_types,

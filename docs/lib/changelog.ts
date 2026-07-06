@@ -55,10 +55,8 @@ export function changelogUrl(lang: "en" | "cn") {
 }
 
 export async function fetchChangelog(lang: "en" | "cn"): Promise<ChangelogData> {
-  if (typeof window !== "undefined") {
-    return fetchGitHubChangelog();
-  }
-
+  // 浏览器端同样优先走 R2 的翻译版 JSON（英文版由 sync-changelog 翻译生成）；
+  // 之前客户端直接 fallback 到 GitHub 原文（中文），会导致英文页面 hydrate 后被中文覆盖。
   const url = changelogUrl(lang);
 
   try {

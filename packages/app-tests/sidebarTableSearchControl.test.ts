@@ -205,3 +205,23 @@ test("hides local table search controls while global sidebar filtering is active
 
   assert.deepEqual(nodes.map((item) => item.node.type), ["database"]);
 });
+
+test("does not insert local table search controls when the user setting is disabled", () => {
+  const tableGroup: TreeNode = {
+    id: "conn:app:__tables",
+    label: "tree.tables",
+    type: "group-tables",
+    connectionId: "conn",
+    database: "app",
+    isExpanded: true,
+    children: [{ id: "conn:app:orders", label: "orders", type: "table", connectionId: "conn", database: "app" }],
+  };
+
+  const nodes = insertSidebarTableSearchControls([flat(tableGroup, 1)], {
+    enabled: false,
+    sidebarObjectDisplay: "grouped",
+    activeQueries: { "conn:app:__tables": "orders" },
+  });
+
+  assert.deepEqual(nodes.map((item) => item.node.type), ["group-tables"]);
+});

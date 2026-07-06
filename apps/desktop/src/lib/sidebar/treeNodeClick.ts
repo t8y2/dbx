@@ -39,8 +39,9 @@ export function treeNodeRowAction(type: TreeNodeType, canExpand: boolean, activa
 }
 
 export function shouldRunTreeNodeRowAction(action: TreeNodeRowAction, clickDetail: number): boolean {
-  if (action === "none") return false;
-  return action === "toggle" || clickDetail <= 1;
+  // Double-clicks emit a second click before dblclick; leave that event to the
+  // double-click handler so expandable database rows do not toggle first.
+  return action !== "none" && clickDetail <= 1;
 }
 
 export function treeNodeRowDoubleClickAction(type: TreeNodeType, canOpenObjectBrowser: boolean, activation: SidebarActivation = "single", canExpand = false): TreeNodeRowDoubleClickAction {

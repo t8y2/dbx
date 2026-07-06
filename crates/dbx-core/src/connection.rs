@@ -64,12 +64,16 @@ fn is_oceanbase_mysql_config(config: &ConnectionConfig) -> bool {
         && config.driver_profile.as_deref().is_some_and(|profile| profile.eq_ignore_ascii_case("oceanbase"))
 }
 
-fn oceanbase_mysql_setup_queries(config: &ConnectionConfig) -> Vec<String> {
-    if !is_oceanbase_mysql_config(config) || config.query_timeout_secs == 0 {
-        return Vec::new();
+pub(crate) fn oceanbase_mysql_query_timeout_sql(config: &ConnectionConfig, timeout_secs: u64) -> Option<String> {
+    if !is_oceanbase_mysql_config(config) || timeout_secs == 0 {
+        return None;
     }
-    let timeout_us = config.query_timeout_secs.saturating_mul(1_000_000);
-    vec![format!("SET ob_query_timeout = {timeout_us}")]
+    let timeout_us = timeout_secs.saturating_mul(1_000_000);
+    Some(format!("SET ob_query_timeout = {timeout_us}"))
+}
+
+fn oceanbase_mysql_setup_queries(config: &ConnectionConfig) -> Vec<String> {
+    oceanbase_mysql_query_timeout_sql(config, config.query_timeout_secs).into_iter().collect()
 }
 
 pub enum PoolKind {
@@ -289,6 +293,21 @@ pub async fn connect_mysql_metadata_pool(
                     )
                     .await
                     .map(|pool| (pool, MysqlMode::Bare))
+                } else if let Some(db) = db_config.effective_database() {
+                    let mut unscoped_config = db_config.clone();
+                    unscoped_config.database = None;
+                    let unscoped_url = connection_url_for_endpoint(&unscoped_config, host, port);
+                    log::info!("MySQL connection with database in URL failed ({err}); retrying without database in URL and using USE statement.");
+                    connect_bare_mysql_pool_with_setup_database(
+                        &unscoped_config,
+                        &unscoped_url,
+                        connect_timeout,
+                        max_connections,
+                        db,
+                        &extra_setup_queries,
+                    )
+                    .await
+                    .map(|pool| (pool, MysqlMode::Bare))
                 } else {
                     Err(err)
                 }
@@ -322,6 +341,23 @@ pub async fn connect_mysql_metadata_pool(
                     connect_timeout,
                     max_connections,
                     idle_timeout_secs,
+                    &extra_setup_queries,
+                )
+                .await?;
+                let mode = detect_ob_oracle_mode(config, &pool).await;
+                Ok((pool, mode))
+            } else if let Some(db) = db_config.effective_database() {
+                let mut unscoped_config = db_config.clone();
+                unscoped_config.database = None;
+                let unscoped_url = connection_url_for_endpoint(&unscoped_config, host, port);
+                log::info!("MySQL connection with database in URL failed ({err}); retrying without database in URL and using USE statement.");
+                let pool = db::mysql::connect_with_ca_cert_pool_limit_idle_and_setup_database(
+                    &unscoped_url,
+                    Some(&config.ca_cert_path),
+                    connect_timeout,
+                    max_connections,
+                    idle_timeout_secs,
+                    Some(db),
                     &extra_setup_queries,
                 )
                 .await?;
@@ -423,6 +459,40 @@ async fn connect_bare_mysql_pool_with_setup(
     } else {
         db::mysql::connect_bare_with_pool_limit_and_setup(url, connect_timeout, max_connections, extra_setup_queries)
             .await
+    }
+}
+
+async fn connect_bare_mysql_pool_with_setup_database(
+    db_config: &ConnectionConfig,
+    url: &str,
+    connect_timeout: std::time::Duration,
+    max_connections: usize,
+    setup_database: &str,
+    extra_setup_queries: &[String],
+) -> Result<db::mysql::MySqlPool, String> {
+    // Some MySQL proxies reject the default database in the handshake; pass it
+    // separately so DB-layer setup keeps the normal charset/catalog/USE order.
+    if db_config.bare_mysql_uses_tls() {
+        let idle_timeout_secs = Some(db_config.idle_timeout_secs);
+        db::mysql::connect_with_ca_cert_pool_limit_idle_and_setup_database(
+            url,
+            Some(&db_config.ca_cert_path),
+            connect_timeout,
+            max_connections,
+            idle_timeout_secs,
+            Some(setup_database),
+            extra_setup_queries,
+        )
+        .await
+    } else {
+        db::mysql::connect_bare_with_pool_limit_and_setup_database(
+            url,
+            connect_timeout,
+            max_connections,
+            Some(setup_database),
+            extra_setup_queries,
+        )
+        .await
     }
 }
 
@@ -903,7 +973,12 @@ impl AppState {
                     })
                     .collect();
                 PoolKind::Sqlite(
-                    db::sqlite::connect_path_with_extensions(&expand_tilde(&db_config.host), extensions).await?,
+                    db::sqlite::connect_path_with_cipher_key_and_extensions(
+                        &expand_tilde(&db_config.host),
+                        &db_config.password,
+                        extensions,
+                    )
+                    .await?,
                 )
             }
             DatabaseType::Rqlite => {
@@ -1098,16 +1173,7 @@ impl AppState {
                 PoolKind::VectorDb(client)
             }
             DatabaseType::InfluxDb => {
-                let username = if db_config.username.is_empty() { None } else { Some(db_config.username.clone()) };
-                let password = if db_config.password.is_empty() { None } else { Some(db_config.password.clone()) };
-                let client = db::influxdb_driver::InfluxdbClient::new_with_ca_cert(
-                    &url,
-                    username,
-                    password,
-                    db_config.url_params.clone(),
-                    Some(&db_config.ca_cert_path),
-                    connect_timeout,
-                )?;
+                let client = db::influxdb_driver::InfluxdbClient::new_for_config(&url, &db_config, connect_timeout)?;
                 db::influxdb_driver::test_connection(&client, connect_timeout).await?;
                 PoolKind::InfluxDb(client)
             }
@@ -2910,10 +2976,10 @@ async fn detect_ob_oracle_mode(config: &ConnectionConfig, pool: &db::mysql::MySq
 mod tests {
     use super::{
         agent_connect_timeout, connection_remote_endpoint, connection_url_for_endpoint, database_connection_config,
-        metadata_connection_config, mysql_metadata_fallback_url, oceanbase_mysql_setup_queries,
-        prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint, redis_sentinel_transport_id,
-        redis_sentinel_transport_prefix, uses_bare_mysql_pool, uses_tcp_probe, validate_h2_database_path, AppState,
-        PoolKind, PRESTOSQL_JDBC_DRIVER_CLASS,
+        metadata_connection_config, mysql_metadata_fallback_url, oceanbase_mysql_query_timeout_sql,
+        oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint,
+        redis_sentinel_transport_id, redis_sentinel_transport_prefix, uses_bare_mysql_pool, uses_tcp_probe,
+        validate_h2_database_path, AppState, PoolKind, PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
@@ -3122,6 +3188,17 @@ mod tests {
         config.query_timeout_secs = 30;
 
         assert_eq!(oceanbase_mysql_setup_queries(&config), vec!["SET ob_query_timeout = 30000000"]);
+    }
+
+    #[test]
+    fn oceanbase_mysql_query_timeout_sql_accepts_large_timeout() {
+        let mut config = mysql_config(Some("dbx"));
+        config.driver_profile = Some("oceanbase".to_string());
+
+        assert_eq!(
+            oceanbase_mysql_query_timeout_sql(&config, 300_000),
+            Some("SET ob_query_timeout = 300000000000".to_string())
+        );
     }
 
     #[test]
@@ -3499,7 +3576,7 @@ mod tests {
 
         assert_eq!(
             mysql_metadata_fallback_url(&config, &metadata, &config.host, config.port),
-            Some("mysql://root:secret@127.0.0.1:3306/app?ssl-mode=preferred&charset=utf8mb4".to_string())
+            Some("mysql://root:secret@127.0.0.1:3306/app?ssl-mode=disabled&charset=utf8mb4".to_string())
         );
     }
 

@@ -1379,11 +1379,7 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 			HasMore:         false,
 		}, err
 	}
-	sqlText, err := s.rewriteXMLTypeSelectSQL(sqlText)
-	if err != nil {
-		return queryPageResult{}, err
-	}
-	rows, err := s.queryRows(sqlText, nil)
+	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText)
 	if err != nil {
 		return queryPageResult{}, err
 	}
@@ -1448,11 +1444,7 @@ func (s *server) startTableRead(opts queryOptions, pageSize int) (queryPageResul
 	if !isQuerySQL(sqlText) {
 		return queryPageResult{}, errors.New("table read requires a SELECT query")
 	}
-	sqlText, err := s.rewriteXMLTypeSelectSQL(sqlText)
-	if err != nil {
-		return queryPageResult{}, err
-	}
-	rows, err := s.queryRows(sqlText, nil)
+	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText)
 	if err != nil {
 		return queryPageResult{}, err
 	}
@@ -1603,12 +1595,7 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 }
 
 func (s *server) executeSelect(sqlText string, maxRows int) (queryResult, error) {
-	var err error
-	sqlText, err = s.rewriteXMLTypeSelectSQL(sqlText)
-	if err != nil {
-		return queryResult{}, err
-	}
-	rows, err := s.queryRows(sqlText, nil)
+	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText)
 	if err != nil {
 		return queryResult{}, err
 	}
@@ -1645,6 +1632,49 @@ func scanRow(rows *sql.Rows, columnCount int) ([]any, error) {
 		values[i] = normalizeValue(value)
 	}
 	return values, nil
+}
+
+func (s *server) queryRowsWithXMLTypeRewriteIfNeeded(sqlText string) (*sql.Rows, error) {
+	rows, err := s.queryRows(sqlText, nil)
+	if err != nil {
+		return nil, err
+	}
+	if !rowsContainOracleXMLType(rows) {
+		return rows, nil
+	}
+	rewritten, err := s.rewriteXMLTypeSelectSQL(sqlText)
+	if err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if rewritten == sqlText {
+		return rows, nil
+	}
+	// Only pay the ALL_TAB_COLUMNS rewrite cost when the result metadata shows
+	// XMLTYPE. Ordinary Oracle queries should not run dictionary probes first.
+	rows.Close()
+	return s.queryRows(rewritten, nil)
+}
+
+func rowsContainOracleXMLType(rows *sql.Rows) bool {
+	types, err := rows.ColumnTypes()
+	if err != nil {
+		return false
+	}
+	typeNames := make([]string, 0, len(types))
+	for _, columnType := range types {
+		typeNames = append(typeNames, columnType.DatabaseTypeName())
+	}
+	return oracleColumnTypeNamesContainXMLType(typeNames)
+}
+
+func oracleColumnTypeNamesContainXMLType(typeNames []string) bool {
+	for _, typeName := range typeNames {
+		if isOracleXMLType(typeName) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *server) rewriteXMLTypeSelectSQL(sqlText string) (string, error) {

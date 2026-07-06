@@ -46,11 +46,20 @@ describe("executableStatementRangeCacheForDoc", () => {
   });
 
   it("returns null for blank and pure comment cursor lines", () => {
-    const doc = Text.of(["SELECT 1;", "-- comment", "", "SELECT 2;"]);
+    const doc = Text.of(["SELECT 1;", "-- comment", "/* block comment */", "", "SELECT 2;"]);
     const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
 
     expect(executableStatementRangeAtCursor(cache, doc.line(2).from + 3)).toBeNull();
-    expect(executableStatementRangeAtCursor(cache, doc.line(3).from)).toBeNull();
+    expect(executableStatementRangeAtCursor(cache, doc.line(3).from + 3)).toBeNull();
+    expect(executableStatementRangeAtCursor(cache, doc.line(4).from)).toBeNull();
+  });
+
+  it("resolves SQL after a leading block comment on the same line", () => {
+    const doc = Text.of(["/* comment */ SELECT 1;"]);
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+
+    expect(executableStatementRangeAtCursor(cache, doc.toString().indexOf("SELECT"))?.sql).toBe("SELECT 1");
+    expect(executableStatementRangeAtCursor(cache, doc.toString().indexOf("comment"))).toBeNull();
   });
 
   it("rebuilds the cache when the document instance changes", () => {

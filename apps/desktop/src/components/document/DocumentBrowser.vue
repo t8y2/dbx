@@ -2,7 +2,7 @@
 import { computed, ref, onMounted, onBeforeUnmount } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
-import { RefreshCw, RefreshCcw, Loader2, Trash2, Plus, Save, ChevronLeft, ChevronRight, Table2, Braces, X, Columns3, Check, Search, Wrench, Filter } from "@lucide/vue";
+import { RefreshCw, Trash2, Plus, Save, ChevronLeft, ChevronRight, Table2, Braces, X, Columns3, Check, Search, Wrench, Filter } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -1123,13 +1123,6 @@ function resetTableSearchSplitWidth() {
               <X class="w-3 h-3" />
             </button>
           </div>
-        </div>
-        <div class="flex shrink-0 items-center gap-1 border-l px-1">
-          <Button variant="ghost" size="sm" class="h-5 shrink-0 gap-1 px-1.5 text-xs" :disabled="loading" @click="load">
-            <Loader2 v-if="loading" class="h-3 w-3 animate-spin" />
-            <RefreshCcw v-else class="h-3 w-3" />
-            {{ t("grid.refresh") }}
-          </Button>
         </div>
       </template>
     </DataGrid>

@@ -182,6 +182,18 @@ fn format_export_sql_literal_typed(
     if matches!(database_type, Some(DatabaseType::Mysql)) && column_type.is_some_and(is_mysql_bit_type) {
         return format_mysql_bit_literal(value);
     }
+    if is_mysql_compatible_export_literal_target(database_type) {
+        if column_type.is_some_and(is_mysql_binary_export_type) {
+            if let Some(literal) = format_mysql_binary_export_literal(value) {
+                return literal;
+            }
+        }
+        if column_type.is_some_and(is_export_numeric_type) {
+            if let Some(literal) = format_export_numeric_literal(value) {
+                return literal;
+            }
+        }
+    }
     if let Some(arr) = value.as_array() {
         if matches!(database_type, Some(DatabaseType::ClickHouse) | Some(DatabaseType::Databend)) {
             return format_ch_array_sql_literal(arr);
@@ -405,6 +417,72 @@ fn format_mysql_bit_literal(value: &Value) -> String {
         }
         other => format_export_sql_literal(other),
     }
+}
+
+fn is_mysql_binary_export_type(column_type: &str) -> bool {
+    let lower = column_type.trim().to_ascii_lowercase();
+    let base = lower.split(['(', ':', ' ', '\t', '\n']).next().unwrap_or("").trim();
+    matches!(base, "binary" | "varbinary" | "blob" | "tinyblob" | "mediumblob" | "longblob")
+}
+
+fn format_mysql_binary_export_literal(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => Some("NULL".to_string()),
+        Value::String(text) => format_mysql_binary_export_literal_text(text),
+        _ => None,
+    }
+}
+
+fn format_mysql_binary_export_literal_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    let hex = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X"))?;
+    if hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        // DBX exposes MySQL binary cells as 0x-prefixed hex text. Keep it as a
+        // MySQL hex literal so exported INSERT statements round-trip bytes.
+        Some(if hex.is_empty() { "X''".to_string() } else { format!("0x{hex}") })
+    } else {
+        None
+    }
+}
+
+fn is_export_numeric_type(column_type: &str) -> bool {
+    let lower = column_type.to_ascii_lowercase();
+    [
+        "int",
+        "integer",
+        "bigint",
+        "smallint",
+        "tinyint",
+        "mediumint",
+        "serial",
+        "number",
+        "numeric",
+        "decimal",
+        "dec",
+        "fixed",
+        "float",
+        "double",
+        "real",
+    ]
+    .iter()
+    .any(|part| lower.split(|ch: char| !ch.is_ascii_alphanumeric()).any(|token| token == *part))
+}
+
+fn format_export_numeric_literal(value: &Value) -> Option<String> {
+    match value {
+        Value::Number(number) => Some(number.to_string()),
+        Value::String(text) if is_export_numeric_literal(text) => Some(text.to_string()),
+        _ => None,
+    }
+}
+
+fn is_export_numeric_literal(text: &str) -> bool {
+    if text.trim() != text || text.is_empty() {
+        return false;
+    }
+    text.parse::<f64>().is_ok_and(f64::is_finite)
+        && text.chars().all(|ch| ch.is_ascii_digit() || matches!(ch, '+' | '-' | '.' | 'e' | 'E'))
+        && text.chars().any(|ch| ch.is_ascii_digit())
 }
 
 pub fn build_export_insert_statements(options: BuildExportInsertStatementsOptions) -> Result<Vec<String>, String> {
@@ -1438,6 +1516,32 @@ mod tests {
         assert_eq!(
             statements,
             vec!["INSERT INTO `flags` (`enabled`, `mask`, `label`) VALUES (b'1', b'1010', '1010'), (b'0', 3, 'off');"]
+        );
+    }
+
+    #[test]
+    fn mysql_export_uses_typed_literals_for_numeric_and_blob_columns() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Mysql),
+            schema: None,
+            table_name: Some("t_test_01".to_string()),
+            qualified_table_name: None,
+            columns: vec!["id".to_string(), "f_blob".to_string(), "note".to_string()],
+            column_types: vec![Some("int".to_string()), Some("blob".to_string()), Some("varchar(64)".to_string())],
+            column_extras: Vec::new(),
+            rows: vec![
+                vec![json!("1"), json!("0x68656c6c6f"), json!("0x68656c6c6f")],
+                vec![json!("2"), json!("0X"), json!("1")],
+            ],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                "INSERT INTO `t_test_01` (`id`, `f_blob`, `note`) VALUES (1, 0x68656c6c6f, '0x68656c6c6f'), (2, X'', '1');"
+            ]
         );
     }
 

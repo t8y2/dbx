@@ -32,8 +32,25 @@ function dbLabel(dbType: DatabaseType): string {
   return labels[dbType] || dbType;
 }
 
-export type AiAction = "generate" | "explain" | "optimize" | "fix" | "convert" | "sampleData";
+export type AiAction = "generate" | "explain" | "optimize" | "fix" | "convert" | "sampleData" | "query" | "exploreSchema" | "executeAndExplain";
 export type AiAssistantMode = "ask" | "agent";
+
+/** Actions shown in the Ask mode menu: SQL-producing, never auto-run. */
+export const ASK_ACTIONS: AiAction[] = ["generate", "explain", "optimize", "fix", "convert", "sampleData"];
+
+/**
+ * Actions shown in the Agent mode menu: task-oriented, drive tool use.
+ * `generate` is shared with Ask so users can still request SQL-only output without execution.
+ */
+export const AGENT_ACTIONS: AiAction[] = ["query", "exploreSchema", "executeAndExplain", "generate"];
+
+export function defaultActionForMode(mode: AiAssistantMode): AiAction {
+  return mode === "agent" ? "query" : "generate";
+}
+
+export function isValidActionForMode(action: AiAction, mode: AiAssistantMode): boolean {
+  return (mode === "agent" ? AGENT_ACTIONS : ASK_ACTIONS).includes(action);
+}
 
 function isChineseLocale(locale: Locale): boolean {
   return locale === "zh-CN" || locale === "zh-TW";
@@ -155,6 +172,9 @@ export function buildUserPrompt(action: AiAction, context: AiContext, instructio
 function actionParams(action: AiAction): { maxTokens: number } {
   switch (action) {
     case "explain":
+    case "query":
+    case "exploreSchema":
+    case "executeAndExplain":
       return { maxTokens: 3200 };
     case "sampleData":
       return { maxTokens: 2400 };

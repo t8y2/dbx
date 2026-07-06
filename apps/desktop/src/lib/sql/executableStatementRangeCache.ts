@@ -30,7 +30,7 @@ export function executableStatementRangeAtCursor(cache: ExecutableStatementRange
   const pos = Math.max(0, Math.min(cursorPos, cache.doc.length));
   const line = cache.doc.lineAt(pos);
   const lineText = line.text.trim();
-  if (!lineText || lineText.startsWith("--") || lineText.startsWith("#") || lineText.startsWith("/*")) return null;
+  if (!lineText || lineText.startsWith("--") || lineText.startsWith("#") || isCursorOnLeadingBlockComment(line.text, pos - line.from)) return null;
 
   for (let index = 0; index < cache.ranges.length; index += 1) {
     const range = cache.ranges[index];
@@ -47,6 +47,18 @@ export function executableStatementRangeAtCursor(cache: ExecutableStatementRange
   }
 
   return null;
+}
+
+function isCursorOnLeadingBlockComment(lineText: string, lineOffset: number): boolean {
+  const commentStart = lineText.search(/\S/);
+  if (commentStart < 0 || !lineText.startsWith("/*", commentStart)) return false;
+
+  const commentEnd = lineText.indexOf("*/", commentStart + 2);
+  if (commentEnd < 0) return true;
+  const afterComment = lineText.slice(commentEnd + 2);
+  if (!afterComment.trim()) return true;
+
+  return lineOffset <= commentEnd + 2;
 }
 
 function cursorRemainsOnRangeLine(doc: Text, rangeTo: number, cursorPos: number): boolean {

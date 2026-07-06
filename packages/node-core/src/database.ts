@@ -515,7 +515,7 @@ function normalizeMysqlUrlParams(value: string, forceTls: boolean, acceptInvalid
         urlParamKeyIs(part, "ssl-mode") || urlParamKeyIs(part, "sslmode") || urlParamKeyIs(part, "require_ssl"),
     )
   ) {
-    parts.unshift("ssl-mode=preferred");
+    parts.unshift("ssl-mode=disabled");
   }
   if (!parts.some((part) => urlParamKeyIs(part, "charset"))) {
     parts.push("charset=utf8mb4");

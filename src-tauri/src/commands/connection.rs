@@ -737,16 +737,7 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                     .map(|_| "Connection successful".to_string())
             }
             DatabaseType::InfluxDb => {
-                let username = if config.username.is_empty() { None } else { Some(config.username.clone()) };
-                let password = if config.password.is_empty() { None } else { Some(config.password.clone()) };
-                let client = db::influxdb_driver::InfluxdbClient::new_with_ca_cert(
-                    &url,
-                    username,
-                    password,
-                    config.url_params.clone(),
-                    Some(&config.ca_cert_path),
-                    connect_timeout,
-                )?;
+                let client = db::influxdb_driver::InfluxdbClient::new_for_config(&url, &config, connect_timeout)?;
                 db::influxdb_driver::test_connection(&client, connect_timeout)
                     .await
                     .map(|_| "Connection successful".to_string())
@@ -1054,16 +1045,7 @@ pub async fn connect_db(
             PoolKind::Turso(client)
         }
         DatabaseType::InfluxDb => {
-            let username = if db_config.username.is_empty() { None } else { Some(db_config.username.clone()) };
-            let password = if db_config.password.is_empty() { None } else { Some(db_config.password.clone()) };
-            let client = db::influxdb_driver::InfluxdbClient::new_with_ca_cert(
-                &url,
-                username,
-                password,
-                db_config.url_params,
-                Some(&db_config.ca_cert_path),
-                connect_timeout,
-            )?;
+            let client = db::influxdb_driver::InfluxdbClient::new_for_config(&url, &db_config, connect_timeout)?;
             db::influxdb_driver::test_connection(&client, connect_timeout).await?;
             PoolKind::InfluxDb(client)
         }

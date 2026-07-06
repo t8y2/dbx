@@ -1262,7 +1262,8 @@ class SqlCompletionProvider {
       this.items.push(...buildInsertAllColumnItems(context, this.input.columnsByTable, this.t, this.dialect));
     }
 
-    if (!pendingJoinKeyword && context.referencedTables.length > 0 && !context.suggestColumns && !context.insertTable) {
+    const emptyTableNameCompletion = !context.prefix && (context.suggestTables || context.exclusiveTableSuggestions);
+    if (!pendingJoinKeyword && !emptyTableNameCompletion && context.referencedTables.length > 0 && !context.suggestColumns && !context.insertTable) {
       this.items.push(...buildAliasItems(context, this.databaseType));
     }
 
@@ -1304,10 +1305,23 @@ export function shouldAutoOpenSqlCompletion(sql: string, cursor: number): boolea
   const context = getSqlCompletionContext(sql, cursor);
   if (previousChar === "(" && context.insertTable) return true;
   if (/[,;()[\]]/.test(previousChar)) return false;
-  if (context.exclusiveTableSuggestions || context.exclusiveColumnSuggestions || context.exclusiveRoutineSuggestions || context.suggestTables) {
+  if (context.exclusiveTableSuggestions || context.exclusiveRoutineSuggestions || context.suggestTables) {
     return true;
   }
-  return /[\w$.@]/.test(previousChar);
+  if (context.exclusiveColumnSuggestions || shouldAutoOpenColumnCompletion(context, sql, cursor)) return true;
+  return /[A-Za-z_$@.]/.test(previousChar);
+}
+
+function shouldAutoOpenColumnCompletion(context: SqlCompletionContext, sql: string, cursor: number): boolean {
+  if (!context.suggestColumns || context.referencedTables.length === 0) return false;
+  if (context.prefix.length > 0) return true;
+  return isColumnCompletionExpressionStart(sql.slice(0, cursor));
+}
+
+function isColumnCompletionExpressionStart(beforeCursor: string): boolean {
+  const cleaned = stripSqlLiterals(beforeCursor).trimEnd();
+  if (!cleaned) return false;
+  return /(?:\b(?:where|on|having|and|or|not|is|like|in|between|by)\b|[,(])$/i.test(cleaned);
 }
 
 export function isSqlCompletionSuppressedContext(sql: string, cursor: number): boolean {
@@ -1819,9 +1833,10 @@ function isInColumnContext(beforeCursor: string): boolean {
 
   // Check the last 3 words for column-context keywords
   for (let i = lastWords.length - 1; i >= Math.max(0, lastWords.length - 3); i--) {
-    const word = lastWords[i]?.toLowerCase().replace(/[^a-z0-9.]/g, "") ?? "";
+    const rawWord = lastWords[i]?.toLowerCase() ?? "";
+    if (/^[=<>!+\-/(,]$/.test(rawWord)) return true;
+    const word = rawWord.replace(/[^a-z0-9.]/g, "");
     // Operators that indicate column context
-    if (/^[=<>!+\-*/(,]$/.test(word)) return true;
     // Keywords that directly precede column expressions
     if (["where", "on", "having", "set", "and", "or", "not", "is", "like", "in", "between", "select"].includes(word)) {
       return true;
@@ -2054,6 +2069,7 @@ function isAfterSelectBodyExpression(beforeToken: string): boolean {
   if (!/^\s*(?:with\b[\s\S]*\bselect\b|select\b)/i.test(cleaned)) return false;
   if (!/\bfrom\b/i.test(cleaned)) return false;
   if (/\b(?:limit|offset|union|intersect|except)\b/i.test(cleaned)) return false;
+  if (/[,.(+\-*/%<>=!&|]$/.test(cleaned)) return false;
   const lastKeyword = /\b([A-Za-z_][\w$]*)\s*$/.exec(cleaned)?.[1]?.toLowerCase();
   if (lastKeyword && SELECT_BODY_INCOMPLETE_TAIL_KEYWORDS.has(lastKeyword)) return false;
   return true;

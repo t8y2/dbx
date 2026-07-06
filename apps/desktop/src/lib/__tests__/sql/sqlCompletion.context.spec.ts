@@ -1,5 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { buildSqlCompletionItems, getSqlCompletionContext } from "@/lib/sql/sqlCompletion";
+import { buildSqlCompletionItems, getSqlCompletionContext, shouldAutoOpenSqlCompletion } from "@/lib/sql/sqlCompletion";
+
+describe("sqlCompletion keyword snippets", () => {
+  it("auto-opens and suggests SELECT when typing sel", () => {
+    const sql = "sel";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      columnsByTable: new Map(),
+    });
+
+    expect(shouldAutoOpenSqlCompletion(sql, sql.length)).toBe(true);
+    expect(items).toEqual(expect.arrayContaining([expect.objectContaining({ label: "select *", type: "snippet" }), expect.objectContaining({ label: "SELECT", type: "keyword" })]));
+  });
+});
 
 describe("sqlCompletion quoted schema qualifiers", () => {
   it("parses quoted PostgreSQL schema names before a dot", () => {
@@ -25,6 +38,20 @@ describe("sqlCompletion quoted schema qualifiers", () => {
 
     expect(items.some((item) => item.label === "orders" && item.type === "table")).toBe(true);
     expect(items.some((item) => item.label === "shipments" && item.type === "table")).toBe(true);
+  });
+});
+
+describe("sqlCompletion table targets", () => {
+  it("does not suggest aliases while completing an empty FROM target before LIMIT", () => {
+    const sql = "SELECT *\nFROM \nLIMIT 100;";
+    const cursor = "SELECT *\nFROM ".length;
+    const items = buildSqlCompletionItems(sql, cursor, {
+      tables: [{ name: "users", type: "table" }],
+      columnsByTable: new Map(),
+    });
+
+    expect(items.some((item) => item.type === "snippet" && item.detail === "alias for LIMIT")).toBe(false);
+    expect(items.some((item) => item.type === "table" && item.label === "users")).toBe(true);
   });
 });
 
@@ -143,6 +170,18 @@ describe("sqlCompletion scoped context classification", () => {
     expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ name: "A1User" })]));
     expect(context.suggestColumns).toBe(true);
     expect(context.suggestRoutines).toBe(false);
+  });
+
+  it("auto-opens column completion after WHERE whitespace before LIMIT", () => {
+    const sql = "SELECT *\nFROM t_0001 AS t0 WHERE \nLIMIT 100;";
+    const cursor = "SELECT *\nFROM t_0001 AS t0 WHERE ".length;
+    const context = getSqlCompletionContext(sql, cursor);
+
+    expect(context.contextKind).toBe("column");
+    expect(context.prefix).toBe("");
+    expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ name: "t_0001", alias: "t0" })]));
+    expect(context.suggestColumns).toBe(true);
+    expect(shouldAutoOpenSqlCompletion(sql, cursor)).toBe(true);
   });
 
   it("classifies CALL routine contexts", () => {

@@ -1136,6 +1136,11 @@ function clearScheduledSemanticDiagnostics() {
   pendingSemanticDiagnosticPreserveOutsideRanges = false;
 }
 
+function invalidateSemanticDiagnosticsForDocumentChange() {
+  semanticDiagnosticRunId++;
+  semanticDiagnostics = [];
+}
+
 function shouldSkipSqlSemanticDiagnostics() {
   return props.databaseType !== "redis" && !settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled;
 }
@@ -1436,8 +1441,32 @@ function unregisterTableReferenceDropListener() {
 
 let completionEpoch = 0;
 let completionDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let typedCompletionActivationUntil = 0;
+let suppressNextSqlCompletionAutoStartUntil = 0;
 
 type QueryCompletionItem = SqlCompletionItem | ElasticsearchCompletionItem | RedisCompletionItem | MongoCompletionItem;
+
+function markTypedCompletionActivation() {
+  typedCompletionActivationUntil = Date.now() + 500;
+}
+
+function isTypedCompletionActivation(explicit: boolean) {
+  return explicit && typedCompletionActivationUntil >= Date.now();
+}
+
+function markCompletionAccepted() {
+  suppressNextSqlCompletionAutoStartUntil = Date.now() + 750;
+  completionEpoch++;
+}
+
+function consumeSqlCompletionAutoStartSuppression() {
+  if (suppressNextSqlCompletionAutoStartUntil < Date.now()) {
+    suppressNextSqlCompletionAutoStartUntil = 0;
+    return false;
+  }
+  suppressNextSqlCompletionAutoStartUntil = 0;
+  return true;
+}
 
 function buildCompletionResult(items: QueryCompletionItem[], from: number, validFor?: RegExp) {
   if (items.length === 0) return null;
@@ -1482,6 +1511,7 @@ function completionOptionForItem(item: QueryCompletionItem) {
       ...completion,
       apply(view: EditorViewType, completionItem: unknown, from: number, to: number) {
         record();
+        markCompletionAccepted();
         if (typeof originalApply === "function") {
           originalApply(view, completionItem as never, from, to);
         } else {
@@ -1502,6 +1532,7 @@ function completionOptionForItem(item: QueryCompletionItem) {
     boost: item.boost,
     apply(view: EditorViewType, _completionItem: unknown, from: number, to: number) {
       record();
+      markCompletionAccepted();
       const insert = item.apply ?? item.label;
       if (codeMirrorInsertCompletionText) {
         view.dispatch(codeMirrorInsertCompletionText(view.state, insert, from, to));
@@ -1609,6 +1640,7 @@ async function provideSqlCompletions(context: CompletionContext) {
   const currentState = context.state;
   const position = context.pos;
   const explicit = context.explicit;
+  const typedActivation = isTypedCompletionActivation(explicit);
   if (imeCompositionActive || view.value?.compositionStarted || view.value?.composing) return null;
   if (!props.connectionId) return null;
   const fullDoc = currentState.doc.toString();
@@ -1670,14 +1702,16 @@ async function provideSqlCompletions(context: CompletionContext) {
       return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position));
     }
 
+    const tableNameCompletion = isTableNameCompletionContext(completionContext);
+    const shouldResolveColumnCompletion = completionContext.suggestColumns && completionContext.referencedTables.length > 0 && (completionContext.prefix.length > 0 || typedActivation);
+    const shouldResolveAsyncCompletion = tableNameCompletion || shouldResolveColumnCompletion;
     const localResult = buildLocalSqlCompletionResult(completionContext, fullDoc, position);
     if (localResult) {
       scheduleCompletionMetadataRefresh(completionContext);
-      if (!explicit) return localResult;
+      const hasLocalColumnResult = localResult.options.some((option) => option.type === "column");
+      if ((!explicit || typedActivation) && (!shouldResolveColumnCompletion || hasLocalColumnResult)) return localResult;
     }
-    const tableNameCompletion = isTableNameCompletionContext(completionContext);
-    const shouldResolveAsyncCompletion = tableNameCompletion || (completionContext.suggestColumns && completionContext.referencedTables.length > 0 && completionContext.prefix.length > 0);
-    if (!explicit && !shouldResolveAsyncCompletion) {
+    if ((!explicit || typedActivation) && !shouldResolveAsyncCompletion) {
       scheduleCompletionMetadataRefresh(completionContext);
       return null;
     }
@@ -1703,9 +1737,9 @@ async function provideSqlCompletions(context: CompletionContext) {
         }
         try {
           const result = await performAsyncCompletionWithResult(epoch, completionContext, fullDoc, position);
-          resolve(result);
+          resolve(result ?? localResult);
         } catch {
-          resolve(null);
+          resolve(localResult);
         }
       }, 150);
     });
@@ -1718,22 +1752,38 @@ function isEditorComposing(currentView: EditorViewType): boolean {
   return imeCompositionActive || currentView.compositionStarted || currentView.composing;
 }
 
+function scheduleSqlCompletionStart(currentView: EditorViewType) {
+  window.setTimeout(() => {
+    if (!codeMirrorStartCompletion || isEditorComposing(currentView)) return;
+    markTypedCompletionActivation();
+    codeMirrorStartCompletion(currentView);
+  }, 0);
+}
+
 function flushImeComposition() {
   const currentView = view.value;
   if (!currentView || !pendingImeModelEmit) return;
   pendingImeModelEmit = false;
   emit("update:modelValue", currentView.state.doc.toString());
+  invalidateSemanticDiagnosticsForDocumentChange();
   scheduleSemanticDiagnostics();
   syncContextMenuState(currentView);
   emit("selectionChange", selectedSqlFromView(currentView));
   emit("cursorChange", currentView.state.selection.main.head);
   latestSelection = readEditorSelection(currentView);
   if (editorIsActive) emitEditorSelection(latestSelection);
+  if (shouldAutoOpenSqlCompletion(currentView.state.doc.toString(), currentView.state.selection.main.head)) {
+    scheduleSqlCompletionStart(currentView);
+  }
 }
 
-function shouldStartSqlCompletionAfterInput(insertedText: string, currentView: EditorViewType): boolean {
+function shouldStartSqlCompletionAfterInput(insertedText: string, removedText: string, currentView: EditorViewType): boolean {
   const position = currentView.state.selection.main.head;
   const fullDoc = currentView.state.doc.toString();
+  if (!insertedText && removedText) {
+    const completionContext = getSqlCompletionContext(fullDoc, position);
+    return isTableNameCompletionContext(completionContext) && shouldAutoOpenSqlCompletion(fullDoc, position);
+  }
   if (insertedText.endsWith(".")) return true;
   if (/[,(]$/.test(insertedText)) {
     const completionContext = getSqlCompletionContext(fullDoc, position);
@@ -1744,7 +1794,7 @@ function shouldStartSqlCompletionAfterInput(insertedText: string, currentView: E
   }
   if (!/[\w$@]$/.test(insertedText)) return false;
   const completionContext = getSqlCompletionContext(fullDoc, position);
-  return isTableNameCompletionContext(completionContext);
+  return isTableNameCompletionContext(completionContext) || shouldAutoOpenSqlCompletion(fullDoc, position);
 }
 
 function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getSqlCompletionContext>, fullDoc: string, position: number) {
@@ -2278,7 +2328,9 @@ onMounted(async () => {
       create: buildDecorations,
       update(value, transaction) {
         const diagnosticsChanged = !!diagnosticEffect && transaction.effects.some((effect) => effect.is(diagnosticEffect));
-        return transaction.docChanged || diagnosticsChanged ? buildDecorations(transaction.state) : value;
+        if (diagnosticsChanged) return buildDecorations(transaction.state);
+        if (transaction.docChanged) return Decoration.set([]);
+        return value;
       },
       provide: (field) => EditorView.decorations.from(field),
     });
@@ -2462,15 +2514,17 @@ onMounted(async () => {
             completionEpoch++;
           } else {
             emit("update:modelValue", update.state.doc.toString());
+            invalidateSemanticDiagnosticsForDocumentChange();
             scheduleSemanticDiagnostics();
             let insertedText = "";
-            update.changes.iterChanges((_fromA, _toA, _fromB, _toB, inserted) => {
+            let removedText = "";
+            update.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
               insertedText += inserted.toString();
+              removedText += update.startState.doc.sliceString(fromA, toA);
             });
-            if (shouldStartSqlCompletionAfterInput(insertedText, update.view)) {
-              window.setTimeout(() => {
-                if (!isEditorComposing(update.view)) startCompletion(update.view);
-              }, 0);
+            const suppressCompletionAutoStart = consumeSqlCompletionAutoStartSuppression();
+            if (!suppressCompletionAutoStart && shouldStartSqlCompletionAfterInput(insertedText, removedText, update.view)) {
+              scheduleSqlCompletionStart(update.view);
             }
           }
         }

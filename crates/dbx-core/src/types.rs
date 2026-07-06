@@ -76,6 +76,8 @@ pub struct ObjectSource {
     pub object_type: ObjectSourceKind,
     pub schema: Option<String>,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editable: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

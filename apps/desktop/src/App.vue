@@ -762,15 +762,16 @@ async function saveActiveObjectSource(tab: QueryTab): Promise<boolean> {
   if (!connection || !source) return false;
 
   try {
+    const databaseType = effectiveDatabaseTypeForConnection(connection) ?? connection.db_type;
     const statements = await buildExecutableObjectSourceStatements({
-      databaseType: connection.db_type,
+      databaseType,
       objectType: source.objectType,
       schema: source.schema || tab.schema || tab.database,
       name: source.name,
       source: tab.sql,
     });
     for (const sql of statements) {
-      if (objectSourceSaveExecutionMode(connection.db_type) === "single") {
+      if (objectSourceSaveExecutionMode(databaseType) === "single") {
         await api.executeQuery(tab.connectionId, tab.database, sql, source.schema || tab.schema);
       } else {
         await api.executeScript(tab.connectionId, tab.database, sql, source.schema || tab.schema);

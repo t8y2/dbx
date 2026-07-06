@@ -77,6 +77,7 @@ const props = defineProps<{
   executionErrorSql?: string;
   readOnly?: boolean;
   forceWordWrap?: boolean;
+  hideExecutionControls?: boolean;
   initialViewport?: { scrollTop: number; scrollLeft: number };
   initialSelection?: { anchor: number; head: number };
 }>();
@@ -794,13 +795,17 @@ function selectSqlLineFromGutter(currentView: EditorViewType, line: { from: numb
 const contextMenuItems = computed<ContextMenuItem[]>(() => {
   const shortcuts = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
   return [
-    {
-      label: executeContextMenuLabel.value,
-      action: executeFromContextMenu,
-      disabled: !canExecuteContextSql.value,
-      icon: Play,
-      shortcut: shortcuts.executeSql,
-    },
+    ...(props.hideExecutionControls
+      ? []
+      : [
+          {
+            label: executeContextMenuLabel.value,
+            action: executeFromContextMenu,
+            disabled: !canExecuteContextSql.value,
+            icon: Play,
+            shortcut: shortcuts.executeSql,
+          },
+        ]),
     {
       label: t("contextMenu.viewData"),
       action: openTableFromContextMenu,
@@ -849,6 +854,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
   const shortcuts = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
   const Prec = codeMirrorPrec;
   const binding = (shortcut: string, run: (view: EditorViewType) => boolean) => (shortcut ? [{ key: shortcutToCodeMirrorKey(shortcut), preventDefault: true, run }] : []);
+  const executeBindings = props.hideExecutionControls ? [] : binding(shortcuts.executeSql, () => requestExecute({ forceCurrent: true }));
   return [
     Prec?.high(
       codeMirrorKeymap.of([
@@ -859,7 +865,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         },
         ...binding(shortcuts.find, openSearch),
         ...binding(shortcuts.replace, openReplace),
-        ...binding(shortcuts.executeSql, () => requestExecute({ forceCurrent: true })),
+        ...executeBindings,
         ...binding(shortcuts.saveSql, () => {
           emit("save");
           return true;
@@ -2643,7 +2649,7 @@ onMounted(async () => {
           return { dom };
         },
       }),
-      runGutterComp.of(buildRunStatementGutterExtension()),
+      runGutterComp.of(props.hideExecutionControls ? [] : buildRunStatementGutterExtension()),
       lineNumbers({
         domEventHandlers: {
           mousedown: selectSqlLineFromGutter,
@@ -3042,7 +3048,7 @@ watch(
         codeMirrorTheme.reconfigure(themeExt),
         wordWrapComp.reconfigure(props.forceWordWrap || ss.wordWrap ? editorViewModule.EditorView.lineWrapping : []),
         vimModeComp.reconfigure(vimModeExtension(settingsStore.editorSettings.vimModeEnabled)),
-        runGutterComp.reconfigure(buildRunStatementGutterExtension?.() ?? []),
+        runGutterComp.reconfigure(props.hideExecutionControls ? [] : (buildRunStatementGutterExtension?.() ?? [])),
         runKeymapComp.reconfigure(runKeymapExtension(editorViewModule.keymap)),
       ],
     });

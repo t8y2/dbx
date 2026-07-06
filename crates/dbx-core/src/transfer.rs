@@ -2858,6 +2858,7 @@ async fn get_postgres_schema_object_sources_for_transfer(
             object_type: db::ObjectSourceKind::View,
             schema: Some(schema.to_string()),
             source,
+            editable: None,
         });
     }
     for row in execute_on_pool(state, pool_key, &routines_sql).await?.rows {
@@ -2871,7 +2872,13 @@ async fn get_postgres_schema_object_sources_for_transfer(
         let Some(source) = json_string_cell(&row, 2) else {
             continue;
         };
-        sources.push(db::ObjectSource { name, object_type: kind, schema: Some(schema.to_string()), source });
+        sources.push(db::ObjectSource {
+            name,
+            object_type: kind,
+            schema: Some(schema.to_string()),
+            source,
+            editable: None,
+        });
     }
 
     Ok(sources)

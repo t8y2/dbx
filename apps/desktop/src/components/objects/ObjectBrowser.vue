@@ -56,7 +56,6 @@ import { buildDropObjectSql, buildDropTableSql, buildDuplicateTableStructureSql,
 import { useToast } from "@/composables/useToast";
 import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceStatements, objectSourceSaveExecutionMode, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
 import { buildRenameObjectSql, supportsObjectRename } from "@/lib/table/objectRenameSql";
-import { buildViewDdl } from "@/lib/table/viewDdl";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
 import { copyToClipboard, eventTargetAllowsAppClipboardShortcut } from "@/lib/common/clipboard";
@@ -123,6 +122,7 @@ const sourceContent = ref("");
 const sourceError = ref("");
 const sourceRow = ref<ObjectBrowserRow | null>(null);
 const sourceEditing = ref(false);
+const sourceCanEdit = ref(true);
 const effectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(props.connection) ?? props.connection.db_type);
 const tableStructureDatabaseType = computed(() => tableStructureDatabaseTypeForConnection(props.connection) ?? props.connection.db_type);
 const sourceEditableText = ref("");
@@ -426,12 +426,14 @@ async function openSource(row: ObjectBrowserRow) {
   sourceContent.value = "";
   sourceError.value = "";
   sourceEditing.value = false;
+  sourceCanEdit.value = true;
   sourceEditableText.value = "";
   sourceDraft.value = "";
   sourceSaveError.value = "";
   sourceLoading.value = true;
   try {
     const result = await api.getObjectSource(props.connection.id, props.database, row.schema || selectedSchema.value || props.database, row.name, row.type as ObjectSourceKind);
+    sourceCanEdit.value = result.editable !== false && row.type !== "SEQUENCE";
     const editable = await api.buildEditableObjectSource({
       databaseType: effectiveDatabaseType.value,
       objectType: row.type as ObjectSourceKind,
@@ -442,32 +444,14 @@ async function openSource(row: ObjectBrowserRow) {
     sourceEditableText.value = editable;
     sourceContent.value = await formatSqlForDisplay(editable, sourceFormatDialect.value, settingsStore.editorSettings.sqlFormatter);
     sourceDraft.value = editable;
-    sourceEditing.value = row.type !== "SEQUENCE";
+    sourceEditing.value = sourceCanEdit.value;
+    if (!sourceCanEdit.value && row.type !== "SEQUENCE") {
+      toast(t("objects.sourceReadOnly"), 3000);
+    }
   } catch (e: any) {
     sourceError.value = e?.message || String(e);
   } finally {
     sourceLoading.value = false;
-  }
-}
-
-async function openViewDdl(row: ObjectBrowserRow) {
-  if (row.type !== "VIEW" && row.type !== "MATERIALIZED_VIEW") return;
-  try {
-    const schema = row.schema || selectedSchema.value || props.database;
-    const ddl =
-      row.type === "MATERIALIZED_VIEW"
-        ? await api.getTableDdl(props.connection.id, props.database, schema, row.name, "MATERIALIZED_VIEW")
-        : await buildViewDdl({
-            databaseType: effectiveDatabaseType.value,
-            schema,
-            name: row.name,
-            source: (await api.getObjectSource(props.connection.id, props.database, schema, row.name, "VIEW")).source,
-          });
-    const formatted = await formatSqlForDisplay(ddl, sourceFormatDialect.value, settingsStore.editorSettings.sqlFormatter);
-    const tabId = queryStore.createTab(props.connection.id, props.database, `DDL - ${row.name}`);
-    queryStore.updateSql(tabId, formatted);
-  } catch (e: any) {
-    toast(e?.message || String(e), 5000);
   }
 }
 
@@ -1219,6 +1203,10 @@ async function copySource() {
 
 function editSource() {
   if (!sourceRow.value || !sourceEditableText.value) return;
+  if (!sourceCanEdit.value) {
+    toast(t("objects.sourceReadOnly"), 3000);
+    return;
+  }
   sourceDraft.value = sourceEditableText.value;
   sourceSaveError.value = "";
   sourceEditing.value = true;
@@ -1231,6 +1219,10 @@ function cancelEditSource() {
 }
 
 async function saveSource() {
+  if (!sourceCanEdit.value) {
+    toast(t("objects.sourceReadOnly"), 3000);
+    return;
+  }
   if (!sourceRow.value || !sourceDraft.value.trim()) return;
   const row = sourceRow.value;
   const schema = row.schema || selectedSchema.value || props.database;
@@ -1502,7 +1494,14 @@ function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     { label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
     { label: t("contextMenu.editView"), action: () => openSource(item), icon: PencilLine },
     { label: t("contextMenu.viewSource"), action: () => openSource(item), icon: Code2 },
-    { label: t("contextMenu.viewDdl"), action: () => openViewDdl(item), icon: ScrollText },
+    {
+      label: t("contextMenu.viewDdl"),
+      action: () => {
+        ddlDialogTarget.value = item;
+        showDdlDialog.value = true;
+      },
+      icon: ScrollText,
+    },
     ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
     { label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
     ...(canOpenDiagram.value ? [{ label: t("diagram.open"), action: () => openDiagram(item), icon: Network }] : []),
@@ -1805,7 +1804,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <Button v-if="!sourceEditing" variant="ghost" size="icon" class="h-5 w-5" :disabled="!sourceContent" @click="copySource">
             <Copy class="h-3 w-3" />
           </Button>
-          <Button v-if="!sourceEditing" variant="ghost" size="icon" class="h-5 w-5" :disabled="!sourceContent" @click="editSource">
+          <Button v-if="!sourceEditing && sourceCanEdit" variant="ghost" size="icon" class="h-5 w-5" :disabled="!sourceContent" @click="editSource">
             <PencilLine class="h-3 w-3" />
           </Button>
           <Button variant="ghost" size="icon" class="h-5 w-5" @click="closeSource">
@@ -1949,7 +1948,17 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     </DialogContent>
   </Dialog>
 
-  <DdlViewDialog v-if="ddlDialogTarget" :connection-id="props.connection.id" :database="props.database" :schema="ddlDialogTarget.schema || selectedSchema" :table-name="ddlDialogTarget.name" :dialect="sourceDialect" :format-dialect="sourceFormatDialect" v-model:open="showDdlDialog" />
+  <DdlViewDialog
+    v-if="ddlDialogTarget"
+    :connection-id="props.connection.id"
+    :database="props.database"
+    :schema="ddlDialogTarget.schema || selectedSchema"
+    :table-name="ddlDialogTarget.name"
+    :object-type="tableDdlObjectType(ddlDialogTarget.type)"
+    :dialect="sourceDialect"
+    :format-dialect="sourceFormatDialect"
+    v-model:open="showDdlDialog"
+  />
 </template>
 
 <style scoped>

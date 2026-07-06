@@ -126,10 +126,11 @@ import {
   type TableAdminSqlOptions,
 } from "@/lib/database/dbAdminSql";
 import { buildRenameObjectSql, supportsObjectRename, type RenameableObjectType } from "@/lib/table/objectRenameSql";
-import { buildEditableObjectSource, buildRoutineRenameObjectSourceStatements, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
+import { buildRoutineRenameObjectSourceStatements, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
 import { buildViewDdl } from "@/lib/table/viewDdl";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import DdlViewDialog from "@/components/objects/DdlViewDialog.vue";
+import ObjectSourceDialog from "@/components/objects/ObjectSourceDialog.vue";
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { hexToRgba } from "@/lib/common/color";
@@ -709,7 +710,7 @@ function runRowClickAction(clickDetail: number) {
   } else if (isDocumentBrowserTreeNode(node.type)) {
     openMongoTreeData(node);
   } else if (node.type === "procedure" || node.type === "function" || node.type === "sequence" || node.type === "package" || node.type === "package-body") {
-    void viewObjectSource();
+    openObjectSourceDialog(false);
   } else if (action === "toggle") {
     toggle();
   }
@@ -1041,7 +1042,7 @@ function onDoubleClick() {
   } else if (action === "open-data") {
     openData();
   } else if (action === "open-source") {
-    void viewObjectSource();
+    openObjectSourceDialog(false);
   } else if (action === "open-saved-sql") {
     openSavedSqlFile();
   } else if (action === "toggle" && (props.node.type === "mongo-gridfs" || isDocumentBrowserTreeNode(props.node.type))) {
@@ -1747,6 +1748,15 @@ const ddlFormatDialect = computed(() => {
   if (!ddlTarget.value?.connectionId) return "generic";
   return sqlFormatDialectForDbType(effectiveDatabaseTypeForConnection(connectionStore.getConfig(ddlTarget.value.connectionId)));
 });
+const objectSourceTarget = ref<{ node: TreeNode; initialEditing: boolean } | null>(null);
+const showObjectSourceDialog = ref(false);
+const objectSourceType = computed(() => (objectSourceTarget.value ? objectSourceKindForTreeNode(objectSourceTarget.value.node.type) : null));
+const objectSourceDatabaseType = computed(() => {
+  const connectionId = objectSourceTarget.value?.node.connectionId;
+  return connectionId ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(connectionId)) : undefined;
+});
+const objectSourceDialect = computed(() => codeMirrorSqlDialect(objectSourceDatabaseType.value));
+const objectSourceFormatDialect = computed(() => sqlFormatDialectForDbType(objectSourceDatabaseType.value));
 const showCreateDatabaseDialog = ref(false);
 const createDatabaseName = ref("");
 const createDatabaseCharset = ref("utf8mb4");
@@ -1917,66 +1927,17 @@ async function refreshDropTableChildObjectPreviewSql() {
   dropTableChildObjectPreviewSql.value = options ? await buildDropTableChildObjectSql(options).catch(() => "") : "";
 }
 
-function viewObjectSource() {
+function openObjectSourceDialog(initialEditing: boolean) {
   const node = props.node;
   if (!node.connectionId || !node.database) return;
   const objectType = objectSourceKindForTreeNode(node.type);
   if (!objectType) return;
-  const schema = node.schema || node.database;
-  connectionStore
+  void connectionStore
     .ensureConnected(node.connectionId)
     .then(() => {
       connectionStore.activeConnectionId = node.connectionId!;
-      return api.getObjectSource(node.connectionId!, node.database!, schema, node.label, objectType as any);
-    })
-    .then(async (result) => {
-      const databaseType = currentDatabaseType();
-      if (!databaseType) throw new Error("Connection type is unavailable.");
-      const tabId = queryStore.createTab(node.connectionId!, node.database!, `Source - ${node.label}`);
-      const editable = await buildEditableObjectSource({
-        databaseType,
-        objectType,
-        schema,
-        name: node.label,
-        source: result.source,
-      });
-      queryStore.updateSql(tabId, editable);
-      if (objectType !== "SEQUENCE") {
-        queryStore.setObjectSource(tabId, {
-          schema,
-          name: node.label,
-          objectType,
-        });
-      }
-      queryStore.markTabClean(queryStore.tabs.find((tab) => tab.id === tabId));
-    })
-    .catch((e: any) => {
-      toast(e?.message || String(e), 5000);
-    });
-}
-
-function viewObjectDdl() {
-  const node = props.node;
-  if ((node.type !== "view" && node.type !== "materialized_view") || !node.connectionId || !node.database) return;
-  const schema = node.schema || node.database;
-  const objectType = node.type === "materialized_view" ? "MATERIALIZED_VIEW" : "VIEW";
-  connectionStore
-    .ensureConnected(node.connectionId)
-    .then(() => {
-      connectionStore.activeConnectionId = node.connectionId!;
-      return api.getObjectSource(node.connectionId!, node.database!, schema, node.label, objectType);
-    })
-    .then(async (result) => {
-      const connection = connectionStore.getConfig(node.connectionId!);
-      const ddl = await buildViewDdl({
-        databaseType: effectiveDatabaseTypeForConnection(connection),
-        schema,
-        name: node.label,
-        source: result.source,
-      });
-      const formatted = await formatSqlForDisplay(ddl, sqlFormatDialectForDbType(effectiveDatabaseTypeForConnection(connection)), settingsStore.editorSettings.sqlFormatter);
-      const tabId = queryStore.createTab(node.connectionId!, node.database!, `DDL - ${node.label}`);
-      queryStore.updateSql(tabId, formatted);
+      objectSourceTarget.value = { node, initialEditing };
+      showObjectSourceDialog.value = true;
     })
     .catch((e: any) => {
       toast(e?.message || String(e), 5000);
@@ -3273,9 +3234,16 @@ function createView() {
   const node = props.node;
   if (!node.connectionId || !node.database) return;
   connectionStore.activeConnectionId = node.connectionId;
-  const viewName = node.schema ? `${node.schema}.new_view` : "new_view";
+  const viewName = "new_view";
+  const effectiveDbType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(node.connectionId));
+  const viewSqlName = effectiveDbType === "informix" || !node.schema ? viewName : `${node.schema}.${viewName}`;
   const tabId = queryStore.createTab(node.connectionId, node.database, t("contextMenu.createView"), "query", node.schema);
-  queryStore.updateSql(tabId, `CREATE VIEW ${viewName} AS\nSELECT\n  *\nFROM table_name;\n`);
+  queryStore.updateSql(tabId, `CREATE VIEW ${viewSqlName} AS\nSELECT\n  *\nFROM table_name;\n`);
+  queryStore.setObjectSource(tabId, {
+    schema: node.schema,
+    name: viewName,
+    objectType: "VIEW",
+  });
 }
 
 async function saveFileContent(content: string, defaultFileName: string, filterName: string, filterExt: string) {
@@ -4697,9 +4665,16 @@ function treeItemMenuItems(): ContextMenuItem[] {
       });
     }
     if (node.type === "view" || node.type === "materialized_view") {
-      items.push({ label: t("contextMenu.editView"), action: viewObjectSource, icon: Pencil });
-      items.push({ label: t("contextMenu.viewSource"), action: viewObjectSource, icon: Code2 });
-      items.push({ label: t("contextMenu.viewDdl"), action: viewObjectDdl, icon: FileCode });
+      items.push({ label: t("contextMenu.editView"), action: () => openObjectSourceDialog(true), icon: Pencil });
+      items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
+      items.push({
+        label: t("contextMenu.viewDdl"),
+        action: () => {
+          ddlTarget.value = node;
+          showDdlDialog.value = true;
+        },
+        icon: FileCode,
+      });
     }
     if (canOpenStructureEditor.value) {
       items.push({ label: t("contextMenu.editStructure"), action: openStructureEditor, icon: PencilRuler });
@@ -4853,7 +4828,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
     if (node.type === "procedure") {
       items.push({ label: t("contextMenu.executeProcedure"), action: openProcedureExecution, icon: Play });
     }
-    items.push({ label: t("contextMenu.viewSource"), action: viewObjectSource, icon: Code2 });
+    items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
     if (canRenameObject.value) {
       items.push({
         label: t("contextMenu.renameObject"),
@@ -4874,14 +4849,14 @@ function treeItemMenuItems(): ContextMenuItem[] {
   }
 
   if (node.type === "sequence") {
-    items.push({ label: t("contextMenu.viewSource"), action: viewObjectSource, icon: Code2 });
+    items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     return items;
   }
 
   if (node.type === "package" || node.type === "package-body") {
-    items.push({ label: t("contextMenu.viewSource"), action: viewObjectSource, icon: Code2 });
+    items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     return items;
@@ -5561,7 +5536,32 @@ function treeItemMenuItems(): ContextMenuItem[] {
 
   <DangerConfirmDialog v-model:open="showDropSchemaConfirm" :title="t('contextMenu.confirmDropSchemaTitle')" :message="t('contextMenu.confirmDropSchemaMessage', { name: node.label })" :sql="dropSchemaPreviewSql" :confirm-label="t('contextMenu.dropSchema')" @confirm="confirmDropSchema" />
 
-  <DdlViewDialog v-if="ddlTarget" :connection-id="ddlTarget.connectionId!" :database="ddlTarget.database!" :schema="ddlTarget.schema" :table-name="ddlTarget.label" :dialect="ddlDialect" :format-dialect="ddlFormatDialect" v-model:open="showDdlDialog" />
+  <DdlViewDialog
+    v-if="ddlTarget"
+    :connection-id="ddlTarget.connectionId!"
+    :database="ddlTarget.database!"
+    :schema="ddlTarget.schema"
+    :table-name="ddlTarget.label"
+    :object-type="tableDdlObjectTypeForNode(ddlTarget.type)"
+    :dialect="ddlDialect"
+    :format-dialect="ddlFormatDialect"
+    v-model:open="showDdlDialog"
+  />
+
+  <ObjectSourceDialog
+    v-if="objectSourceTarget && objectSourceType"
+    v-model:open="showObjectSourceDialog"
+    :connection-id="objectSourceTarget.node.connectionId!"
+    :database="objectSourceTarget.node.database!"
+    :schema="objectSourceTarget.node.schema"
+    :name="objectSourceTarget.node.label"
+    :object-type="objectSourceType"
+    :database-type="objectSourceDatabaseType"
+    :dialect="objectSourceDialect"
+    :format-dialect="objectSourceFormatDialect"
+    :initial-editing="objectSourceTarget.initialEditing"
+    @saved="refresh"
+  />
 
   <InstallExtensionDialog ref="installExtensionDialogRef" :node="node" @close="refresh" />
 </template>

@@ -1566,6 +1566,7 @@ export default withEnglishFallback({
     cancelEdit: "取消",
     sourceSaved: "原始碼已儲存",
     sourceSaveFailed: "儲存原始碼失敗：{message}",
+    sourceReadOnly: "此原始碼為唯讀，不能編輯。",
     schemaColumn: "Schema",
     comment: "註解",
     loadingSchemas: "載入 Schema……",

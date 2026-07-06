@@ -332,6 +332,7 @@ export interface ObjectSource {
   object_type: ObjectSourceKind;
   schema?: string | null;
   source: string;
+  editable?: boolean;
 }
 
 export interface ColumnInfo {

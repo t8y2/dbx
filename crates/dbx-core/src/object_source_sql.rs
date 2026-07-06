@@ -152,6 +152,14 @@ pub fn build_executable_object_source_statements(input: EditableObjectSourceSqlI
         )]);
     }
 
+    if is_oracle_like(input.database_type) && input.object_type == ObjectSourceKind::View {
+        return Ok(vec![executable_oracle_view_ddl(input.schema.as_deref(), &input.name, source)]);
+    }
+
+    if input.database_type == DatabaseType::Informix && input.object_type == ObjectSourceKind::View {
+        return Ok(executable_informix_view_statements(input.schema.as_deref(), &input.name, source));
+    }
+
     let create_statement = ensure_semicolon(source);
     let cleanup = build_routine_rename_cleanup(&input, source);
     Ok(if let Some(cleanup) = cleanup { vec![create_statement, cleanup] } else { vec![create_statement] })
@@ -184,6 +192,9 @@ pub fn build_editable_object_source(input: EditableObjectSourceSqlInput) -> Stri
     {
         // Some providers return full view DDL instead of a bare SELECT body.
         return ensure_semicolon(source.trim());
+    }
+    if input.database_type == DatabaseType::Informix && input.object_type == ObjectSourceKind::View {
+        return editable_informix_view_ddl(input.schema.as_deref(), &input.name, &source);
     }
     match build_executable_object_source_statements(input) {
         Ok(statements) => statements.into_iter().next().unwrap_or_default(),
@@ -329,6 +340,68 @@ fn executable_postgres_view_ddl(source: &str) -> Option<String> {
     None
 }
 
+fn executable_oracle_view_ddl(schema: Option<&str>, name: &str, source: &str) -> String {
+    let trimmed = source.trim();
+    if Regex::new(r"(?i)^CREATE\s+OR\s+REPLACE\s+").unwrap().is_match(trimmed) || source_starts_with_alter(trimmed) {
+        return ensure_semicolon(trimmed);
+    }
+
+    let create_view = Regex::new(r"(?i)^CREATE\s+((?:(?:NO)?FORCE\s+)?(?:(?:NON)?EDITIONABLE\s+)?VIEW\s+)").unwrap();
+    if create_view.is_match(trimmed) {
+        let replaced = create_view.replace(trimmed, "CREATE OR REPLACE $1");
+        return ensure_semicolon(replaced.as_ref());
+    }
+
+    format!("CREATE OR REPLACE VIEW {} AS\n{}", postgres_qualified_name(schema, name), ensure_semicolon(trimmed))
+}
+
+fn executable_informix_view_statements(schema: Option<&str>, name: &str, source: &str) -> Vec<String> {
+    let (target_name, create_tail) = informix_view_definition(schema, name, source);
+    if source_starts_with_alter(source.trim()) {
+        return vec![ensure_semicolon(source.trim())];
+    }
+
+    let validation_name = informix_validation_view_name(&target_name);
+    let mut statements = vec![
+        drop_informix_view_if_exists(&validation_name),
+        create_informix_view(&validation_name, &create_tail),
+        drop_informix_view_if_exists(&validation_name),
+    ];
+
+    let original_name = informix_identifier(name);
+    if !target_name.eq_ignore_ascii_case(&original_name) {
+        statements.push(drop_informix_view_if_exists(&original_name));
+    }
+    statements.push(drop_informix_view_if_exists(&target_name));
+    statements.push(create_informix_view(&target_name, &create_tail));
+    statements
+}
+
+fn editable_informix_view_ddl(schema: Option<&str>, name: &str, source: &str) -> String {
+    if source_starts_with_alter(source.trim()) {
+        return ensure_semicolon(source.trim());
+    }
+    let (target_name, create_tail) = informix_view_definition(schema, name, source);
+    create_informix_view(&target_name, &create_tail)
+}
+
+fn informix_view_definition(schema: Option<&str>, name: &str, source: &str) -> (String, String) {
+    let trimmed = source.trim();
+    let create_view = Regex::new(
+        r#"(?is)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+((?:"(?:""|[^"])+"|[A-Za-z_][\w$]*)(?:\s*\.\s*(?:"(?:""|[^"])+"|[A-Za-z_][\w$]*))?)"#,
+    )
+    .unwrap();
+    if let Some(captures) = create_view.captures(trimmed) {
+        let view_name = captures.get(1).unwrap();
+        let target_name = strip_informix_owner_qualifiers(view_name.as_str(), schema);
+        let body = strip_informix_owner_qualifiers(&trimmed[view_name.end()..], schema);
+        return (target_name.trim().to_string(), body);
+    } else {
+        let body = strip_informix_owner_qualifiers(trimmed, schema);
+        (informix_identifier(name), format!(" AS\n{body}"))
+    }
+}
+
 fn postgres_qualified_name(schema: Option<&str>, name: &str) -> String {
     schema
         .into_iter()
@@ -337,6 +410,201 @@ fn postgres_qualified_name(schema: Option<&str>, name: &str) -> String {
         .map(quote_postgres_identifier)
         .collect::<Vec<_>>()
         .join(".")
+}
+
+fn informix_identifier(name: &str) -> String {
+    if is_simple_informix_identifier(name) {
+        name.to_string()
+    } else {
+        quote_postgres_identifier(name)
+    }
+}
+
+fn create_informix_view(name: &str, create_tail: &str) -> String {
+    ensure_semicolon(&format!("CREATE VIEW {}{}", name.trim(), create_tail))
+}
+
+fn drop_informix_view_if_exists(name: &str) -> String {
+    format!("DROP VIEW IF EXISTS {};", name.trim())
+}
+
+fn informix_validation_view_name(target_name: &str) -> String {
+    let mut hash = 0x811c9dc5u32;
+    for byte in target_name.bytes() {
+        hash ^= byte as u32;
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    format!("dbx_view_check_{hash:08x}")
+}
+
+fn strip_informix_owner_qualifiers(source: &str, schema: Option<&str>) -> String {
+    let Some(schema) = schema.map(str::trim).filter(|schema| !schema.is_empty()) else {
+        return source.to_string();
+    };
+
+    let mut result = String::with_capacity(source.len());
+    let mut index = 0;
+    while index < source.len() {
+        if let Some(end) = sql_single_quoted_literal_end(source, index) {
+            result.push_str(&source[index..end]);
+            index = end;
+            continue;
+        }
+        if let Some(end) = sql_line_comment_end(source, index) {
+            result.push_str(&source[index..end]);
+            index = end;
+            continue;
+        }
+        if let Some(end) = sql_block_comment_end(source, index) {
+            result.push_str(&source[index..end]);
+            index = end;
+            continue;
+        }
+        if let Some((end, replacement)) = informix_owner_qualifier_replacement(source, index, schema) {
+            result.push_str(replacement);
+            index = end;
+            continue;
+        }
+        let ch = source[index..].chars().next().unwrap();
+        result.push(ch);
+        index += ch.len_utf8();
+    }
+    result
+}
+
+fn informix_owner_qualifier_replacement<'a>(source: &'a str, start: usize, schema: &str) -> Option<(usize, &'a str)> {
+    if let Some((owner_end, owner)) = read_quoted_sql_identifier(source, start) {
+        if owner.eq_ignore_ascii_case(schema) {
+            let dot = skip_sql_whitespace(source, owner_end);
+            if source[dot..].starts_with('.') {
+                let ident_start = skip_sql_whitespace(source, dot + 1);
+                if let Some((ident_end, ident_text)) = read_informix_identifier_text(source, ident_start) {
+                    return Some((ident_end, ident_text));
+                }
+            }
+        }
+    }
+
+    if !is_simple_informix_identifier(schema) || !starts_with_ignore_ascii_case_at(source, start, schema) {
+        return None;
+    }
+    if source[..start].chars().next_back().is_some_and(is_informix_identifier_part) {
+        return None;
+    }
+    let owner_end = start + schema.len();
+    if source[owner_end..].chars().next().is_some_and(is_informix_identifier_part) {
+        return None;
+    }
+    let dot = skip_sql_whitespace(source, owner_end);
+    if !source[dot..].starts_with('.') {
+        return None;
+    }
+    let ident_start = skip_sql_whitespace(source, dot + 1);
+    read_informix_identifier_text(source, ident_start).map(|(ident_end, ident_text)| (ident_end, ident_text))
+}
+
+fn sql_single_quoted_literal_end(source: &str, start: usize) -> Option<usize> {
+    if !source[start..].starts_with('\'') {
+        return None;
+    }
+    let mut index = start + 1;
+    while index < source.len() {
+        let ch = source[index..].chars().next().unwrap();
+        index += ch.len_utf8();
+        if ch == '\'' {
+            if source[index..].starts_with('\'') {
+                index += 1;
+            } else {
+                return Some(index);
+            }
+        }
+    }
+    Some(source.len())
+}
+
+fn sql_line_comment_end(source: &str, start: usize) -> Option<usize> {
+    if !source[start..].starts_with("--") {
+        return None;
+    }
+    let rest = &source[start..];
+    Some(start + rest.find('\n').map(|index| index + 1).unwrap_or(rest.len()))
+}
+
+fn sql_block_comment_end(source: &str, start: usize) -> Option<usize> {
+    if !source[start..].starts_with("/*") {
+        return None;
+    }
+    let rest = &source[start + 2..];
+    Some(start + 2 + rest.find("*/").map(|index| index + 2).unwrap_or(rest.len()))
+}
+
+fn read_quoted_sql_identifier(source: &str, start: usize) -> Option<(usize, String)> {
+    if !source[start..].starts_with('"') {
+        return None;
+    }
+    let mut value = String::new();
+    let mut index = start + 1;
+    while index < source.len() {
+        let ch = source[index..].chars().next().unwrap();
+        index += ch.len_utf8();
+        if ch == '"' {
+            if source[index..].starts_with('"') {
+                value.push('"');
+                index += 1;
+            } else {
+                return Some((index, value));
+            }
+        } else {
+            value.push(ch);
+        }
+    }
+    None
+}
+
+fn read_informix_identifier_text(source: &str, start: usize) -> Option<(usize, &str)> {
+    if let Some((end, _)) = read_quoted_sql_identifier(source, start) {
+        return Some((end, &source[start..end]));
+    }
+    let first = source[start..].chars().next()?;
+    if !is_informix_identifier_start(first) {
+        return None;
+    }
+    let mut end = start + first.len_utf8();
+    while end < source.len() {
+        let ch = source[end..].chars().next().unwrap();
+        if !is_informix_identifier_part(ch) {
+            break;
+        }
+        end += ch.len_utf8();
+    }
+    Some((end, &source[start..end]))
+}
+
+fn skip_sql_whitespace(source: &str, mut index: usize) -> usize {
+    while index < source.len() {
+        let ch = source[index..].chars().next().unwrap();
+        if !ch.is_whitespace() {
+            break;
+        }
+        index += ch.len_utf8();
+    }
+    index
+}
+
+fn starts_with_ignore_ascii_case_at(source: &str, start: usize, needle: &str) -> bool {
+    source.get(start..start + needle.len()).is_some_and(|value| value.eq_ignore_ascii_case(needle))
+}
+
+fn is_informix_identifier_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic()
+}
+
+fn is_informix_identifier_part(ch: char) -> bool {
+    ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()
+}
+
+fn is_simple_informix_identifier(name: &str) -> bool {
+    Regex::new(r"^[A-Za-z_][A-Za-z0-9_$]*$").unwrap().is_match(name)
 }
 
 fn mysql_qualified_name(schema: Option<&str>, name: &str) -> String {
@@ -502,6 +770,36 @@ mod tests {
             name: "refresh_cache".to_string(),
             source: source.to_string(),
         }
+    }
+
+    fn informix_view_statements(name: &str, source: &str) -> Vec<String> {
+        build_executable_object_source_statements(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Informix,
+            object_type: ObjectSourceKind::View,
+            schema: Some("gbasedbt".to_string()),
+            name: name.to_string(),
+            source: source.to_string(),
+        })
+        .unwrap()
+    }
+
+    fn expected_informix_view_replace_statements(
+        original_name: &str,
+        target_name: &str,
+        create_tail: &str,
+    ) -> Vec<String> {
+        let validation_name = informix_validation_view_name(target_name);
+        let mut statements = vec![
+            drop_informix_view_if_exists(&validation_name),
+            create_informix_view(&validation_name, create_tail),
+            drop_informix_view_if_exists(&validation_name),
+        ];
+        if !target_name.eq_ignore_ascii_case(original_name) {
+            statements.push(drop_informix_view_if_exists(original_name));
+        }
+        statements.push(drop_informix_view_if_exists(target_name));
+        statements.push(create_informix_view(target_name, create_tail));
+        statements
     }
 
     #[test]
@@ -691,6 +989,141 @@ mod tests {
                 "CREATE OR REPLACE VIEW \"public\".\"active users\" AS\nSELECT id, name FROM users WHERE active;"
             );
         }
+    }
+
+    #[test]
+    fn oracle_view_body_saves_as_create_or_replace_view() {
+        let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Oracle,
+            object_type: ObjectSourceKind::View,
+            schema: Some("DBX_TEST".to_string()),
+            name: "V_ACTIVE_USERS".to_string(),
+            source: "SELECT id, name FROM users WHERE active = 1".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            sql,
+            "CREATE OR REPLACE VIEW \"DBX_TEST\".\"V_ACTIVE_USERS\" AS\nSELECT id, name FROM users WHERE active = 1;"
+        );
+    }
+
+    #[test]
+    fn oracle_view_create_source_saves_as_create_or_replace_view() {
+        let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Oracle,
+            object_type: ObjectSourceKind::View,
+            schema: Some("DBX_TEST".to_string()),
+            name: "V_ACTIVE_USERS".to_string(),
+            source: "CREATE FORCE EDITIONABLE VIEW DBX_TEST.V_ACTIVE_USERS AS SELECT id FROM users".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(sql, "CREATE OR REPLACE FORCE EDITIONABLE VIEW DBX_TEST.V_ACTIVE_USERS AS SELECT id FROM users;");
+    }
+
+    #[test]
+    fn oracle_view_source_opened_for_editing_shows_create_or_replace_view() {
+        let sql = build_editable_object_source(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Oracle,
+            object_type: ObjectSourceKind::View,
+            schema: Some("DBX_TEST".to_string()),
+            name: "V_ACTIVE_USERS".to_string(),
+            source: "SELECT id, name FROM users WHERE active = 1".to_string(),
+        });
+
+        assert_eq!(
+            sql,
+            "CREATE OR REPLACE VIEW \"DBX_TEST\".\"V_ACTIVE_USERS\" AS\nSELECT id, name FROM users WHERE active = 1;"
+        );
+    }
+
+    #[test]
+    fn informix_view_body_saves_with_validate_drop_create() {
+        let statements = informix_view_statements("demo_view", "SELECT id, name FROM users");
+
+        assert_eq!(
+            statements,
+            expected_informix_view_replace_statements("demo_view", "demo_view", " AS\nSELECT id, name FROM users")
+        );
+    }
+
+    #[test]
+    fn informix_view_create_source_strips_owner_qualifier_before_save() {
+        let statements =
+            informix_view_statements("demo_view", "create view \"gbasedbt\".demo_view (id) as select id from users");
+
+        assert_eq!(
+            statements,
+            expected_informix_view_replace_statements("demo_view", "demo_view", " (id) as select id from users")
+        );
+    }
+
+    #[test]
+    fn informix_view_create_source_preserves_sql_target_name() {
+        let statements = informix_view_statements("new_view", "create view codex_created_view as select id from users");
+
+        assert_eq!(
+            statements,
+            expected_informix_view_replace_statements("new_view", "codex_created_view", " as select id from users")
+        );
+    }
+
+    #[test]
+    fn informix_view_create_source_strips_same_owner_table_references() {
+        let statements = informix_view_statements(
+            "dba_db_links",
+            "create view \"gbasedbt\".dba_db_links as select x0.db_link from \"gbasedbt\".user_db_links x0",
+        );
+
+        assert_eq!(
+            statements,
+            expected_informix_view_replace_statements(
+                "dba_db_links",
+                "dba_db_links",
+                " as select x0.db_link from user_db_links x0",
+            )
+        );
+    }
+
+    #[test]
+    fn informix_view_body_strips_same_owner_table_references() {
+        let statements = informix_view_statements("demo_view", "SELECT id FROM gbasedbt.users");
+
+        assert_eq!(
+            statements,
+            expected_informix_view_replace_statements("demo_view", "demo_view", " AS\nSELECT id FROM users")
+        );
+    }
+
+    #[test]
+    fn informix_owner_qualifier_rewrite_skips_strings_and_comments() {
+        let statements = informix_view_statements(
+            "demo_view",
+            "SELECT 'gbasedbt.users' AS literal, id FROM gbasedbt.users -- gbasedbt.audit\n/* gbasedbt.logs */",
+        );
+
+        assert_eq!(
+            statements,
+            expected_informix_view_replace_statements(
+                "demo_view",
+                "demo_view",
+                " AS\nSELECT 'gbasedbt.users' AS literal, id FROM users -- gbasedbt.audit\n/* gbasedbt.logs */",
+            )
+        );
+    }
+
+    #[test]
+    fn informix_view_source_opened_for_editing_shows_unqualified_create_view() {
+        let sql = build_editable_object_source(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Informix,
+            object_type: ObjectSourceKind::View,
+            schema: Some("gbasedbt".to_string()),
+            name: "demo_view".to_string(),
+            source: "create view \"gbasedbt\".demo_view as select id from users".to_string(),
+        });
+
+        assert_eq!(sql, "CREATE VIEW demo_view as select id from users;");
     }
 
     #[test]

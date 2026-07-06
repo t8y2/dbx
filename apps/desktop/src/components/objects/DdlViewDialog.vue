@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import type { EditorView } from "@codemirror/view";
+import type { ObjectSourceKind } from "@/types/database";
 
 const props = withDefaults(
   defineProps<{
@@ -22,6 +23,7 @@ const props = withDefaults(
     database: string;
     schema?: string;
     tableName: string;
+    objectType?: ObjectSourceKind;
     /** SQL dialect for syntax highlighting. Non-PG/non-MSSQL databases fall back to MySQL (same as QueryEditor's source viewer). */
     dialect: "mysql" | "postgres" | "sqlserver";
     /** SQL formatter dialect. Kept separate from the syntax-highlighting dialect because several PG-compatible DBs highlight as MySQL. */
@@ -56,7 +58,7 @@ watch(
     ddlLoading.value = true;
     try {
       const schema = props.schema || props.database;
-      const ddl = await api.getTableDdl(props.connectionId, props.database, schema, props.tableName);
+      const ddl = await api.getTableDdl(props.connectionId, props.database, schema, props.tableName, props.objectType);
       ddlContent.value = await formatSqlForDisplay(ddl, props.formatDialect ?? props.dialect, settingsStore.editorSettings.sqlFormatter);
     } catch (e: any) {
       ddlError.value = e?.message || String(e);
@@ -171,7 +173,7 @@ function retry() {
   ddlContent.value = "";
   const schema = props.schema || props.database;
   api
-    .getTableDdl(props.connectionId, props.database, schema, props.tableName)
+    .getTableDdl(props.connectionId, props.database, schema, props.tableName, props.objectType)
     .then(async (ddl) => {
       ddlContent.value = await formatSqlForDisplay(ddl, props.formatDialect ?? props.dialect, settingsStore.editorSettings.sqlFormatter);
     })

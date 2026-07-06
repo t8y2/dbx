@@ -272,7 +272,7 @@ pub async fn object_source(
         )
         .await?,
     )?;
-    Ok(ObjectSource { name: name.to_string(), object_type: object_type.clone(), schema: None, source })
+    Ok(ObjectSource { name: name.to_string(), object_type: object_type.clone(), schema: None, source, editable: None })
 }
 
 pub async fn execute_query(client: &RqliteClient, sql: &str) -> Result<QueryResult, String> {

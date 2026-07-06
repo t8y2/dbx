@@ -1668,6 +1668,7 @@ export default {
     cancelEdit: "Cancel",
     sourceSaved: "Source saved",
     sourceSaveFailed: "Failed to save source: {message}",
+    sourceReadOnly: "This source is read-only and cannot be edited.",
     schemaColumn: "Schema",
     comment: "Comment",
     loadingSchemas: "Loading schemas...",

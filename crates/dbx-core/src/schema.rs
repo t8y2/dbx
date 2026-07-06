@@ -4772,6 +4772,7 @@ async fn get_object_source_once(
         object_type,
         schema: if schema.is_empty() { None } else { Some(schema.to_string()) },
         source,
+        editable: None,
     })
 }
 

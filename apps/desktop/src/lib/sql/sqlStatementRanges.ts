@@ -101,6 +101,8 @@ const EXPLAIN_STATEMENT_KEYWORDS = new Set(["SELECT", "WITH", "INSERT", "UPDATE"
 const CREATE_BODY_KEYWORDS = new Set(["SELECT", "WITH", "BEGIN", "DECLARE"]);
 const INSERT_BODY_KEYWORDS = new Set(["SELECT", "WITH"]);
 const ALTER_BODY_KEYWORDS = new Set(["ADD", "ALTER", "COMMENT", "DROP", "MODIFY", "RENAME", "SET"]);
+const SET_OPERATION_KEYWORDS = new Set(["UNION", "INTERSECT", "EXCEPT", "MINUS"]);
+const SET_OPERATION_MODIFIER_KEYWORDS = new Set(["ALL", "DISTINCT"]);
 const ORACLE_LIKE_PL_SQL_DATABASES: ReadonlySet<DatabaseType> = new Set(["oracle", "dameng", "gaussdb", "yashandb", "oscar", "oceanbase-oracle"]);
 const ORACLE_PL_SQL_BLOCK_STARTERS = new Set(["DECLARE", "BEGIN"]);
 const ORACLE_PL_SQL_CREATE_OBJECT_TYPES = new Set(["FUNCTION", "PROCEDURE", "TRIGGER", "PACKAGE", "PACKAGE BODY", "TYPE", "TYPE BODY"]);
@@ -434,6 +436,10 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
       continue;
     }
 
+    if (isSetOperationQueryContinuation(sql, statement.from, lineStart.from, lineStart.keyword)) {
+      continue;
+    }
+
     if (!consumedExplainStatement && EXPLAIN_STATEMENT_KEYWORDS.has(lineStart.keyword) && (currentKeyword === "EXPLAIN" || currentExplainTargetKeyword !== null)) {
       consumedExplainStatement = true;
       currentBodyKeyword = lineStart.keyword;
@@ -657,6 +663,174 @@ function softStatementKeywordAt(sql: string, pos: number, databaseType?: Databas
 
 function softStatementStartKeywords(databaseType?: DatabaseType): Set<string> {
   return new Set([...COMMON_SOFT_STATEMENT_START_KEYWORDS, ...(databaseType ? (DATABASE_SOFT_STATEMENT_KEYWORDS[databaseType] ?? []) : [])]);
+}
+
+function isSetOperationQueryContinuation(sql: string, from: number, to: number, keyword: string): boolean {
+  if (keyword !== "SELECT" && keyword !== "WITH") return false;
+  const words = topLevelWordsBefore(sql, from, to, 3);
+  const last = words[words.length - 1];
+  if (last && SET_OPERATION_KEYWORDS.has(last)) return true;
+  if (last && SET_OPERATION_MODIFIER_KEYWORDS.has(last)) {
+    const previous = words[words.length - 2];
+    return !!previous && SET_OPERATION_KEYWORDS.has(previous);
+  }
+  return false;
+}
+
+function topLevelWordsBefore(sql: string, from: number, to: number, limit: number): string[] {
+  const words: string[] = [];
+  let state: QuoteState | "lineComment" | "blockComment" = "none";
+  let dollarTag = "";
+  let parenDepth = 0;
+  let i = from;
+
+  while (i < to) {
+    const ch = sql[i];
+    const next = sql[i + 1] ?? "";
+
+    if (state === "lineComment") {
+      if (ch === "\n") state = "none";
+      i += 1;
+      continue;
+    }
+
+    if (state === "blockComment") {
+      if (ch === "*" && next === "/") {
+        state = "none";
+        i += 2;
+        continue;
+      }
+      i += 1;
+      continue;
+    }
+
+    if (state === "dollar") {
+      if (ch === "$") {
+        const closingTag = `$${dollarTag}$`;
+        if (sql.startsWith(closingTag, i)) {
+          i += closingTag.length;
+          state = "none";
+          dollarTag = "";
+          continue;
+        }
+      }
+      i += 1;
+      continue;
+    }
+
+    if (state === "single") {
+      if (ch === "\\" && next) {
+        i += 2;
+        continue;
+      }
+      if (ch === "'") {
+        if (next === "'") {
+          i += 2;
+          continue;
+        }
+        state = "none";
+      }
+      i += 1;
+      continue;
+    }
+
+    if (state === "double") {
+      if (ch === '"') {
+        if (next === '"') {
+          i += 2;
+          continue;
+        }
+        state = "none";
+      }
+      i += 1;
+      continue;
+    }
+
+    if (state === "backtick") {
+      if (ch === "`") {
+        if (next === "`") {
+          i += 2;
+          continue;
+        }
+        state = "none";
+      }
+      i += 1;
+      continue;
+    }
+
+    if (state === "bracket") {
+      if (ch === "]") state = "none";
+      i += 1;
+      continue;
+    }
+
+    if (ch === "-" && next === "-") {
+      state = "lineComment";
+      i += 2;
+      continue;
+    }
+    if (ch === "#") {
+      state = "lineComment";
+      i += 1;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      state = "blockComment";
+      i += 2;
+      continue;
+    }
+    if (ch === "'") {
+      state = "single";
+      i += 1;
+      continue;
+    }
+    if (ch === '"') {
+      state = "double";
+      i += 1;
+      continue;
+    }
+    if (ch === "`") {
+      state = "backtick";
+      i += 1;
+      continue;
+    }
+    if (ch === "[") {
+      state = "bracket";
+      i += 1;
+      continue;
+    }
+    if (ch === "$") {
+      const tagMatch = /^\$[A-Za-z_0-9]*\$/.exec(sql.slice(i));
+      if (tagMatch) {
+        dollarTag = tagMatch[0].slice(1, -1);
+        i += tagMatch[0].length;
+        state = "dollar";
+        continue;
+      }
+    }
+    if (ch === "(") {
+      parenDepth += 1;
+      i += 1;
+      continue;
+    }
+    if (ch === ")") {
+      if (parenDepth > 0) parenDepth -= 1;
+      i += 1;
+      continue;
+    }
+    if (parenDepth === 0) {
+      const match = /^[A-Za-z_][\w$]*/.exec(sql.slice(i));
+      if (match) {
+        words.push(match[0].toUpperCase());
+        if (words.length > limit) words.shift();
+        i += match[0].length;
+        continue;
+      }
+    }
+    i += 1;
+  }
+
+  return words;
 }
 
 function nextNonWhitespaceChar(sql: string, pos: number): string | null {

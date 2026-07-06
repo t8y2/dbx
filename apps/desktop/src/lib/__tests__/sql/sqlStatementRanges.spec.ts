@@ -205,6 +205,21 @@ describe("statementRangeAtCursor", () => {
     expect(range?.sql.trim()).toBe("SELECT 2");
   });
 
+  it("keeps newline set-operation SELECT operands with the cursor statement", () => {
+    const sql = "select * from tbA\nunion\nselect * from tbB";
+    const expected = "select * from tbA\nunion\nselect * from tbB";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "tbA"))?.sql.trim()).toBe(expected);
+    expect(statementRangeAtCursor(sql, indexOf(sql, "tbB"))?.sql.trim()).toBe(expected);
+  });
+
+  it("keeps newline set-operation operands with ALL modifiers together", () => {
+    const sql = "select * from tbA\nunion all\nselect * from tbB\nSELECT * FROM logs;";
+    const range = statementRangeAtCursor(sql, indexOf(sql, "tbA"));
+
+    expect(range?.sql.trim()).toBe("select * from tbA\nunion all\nselect * from tbB");
+  });
+
   it("keeps a multi-line select together when continuation lines do not start statements", () => {
     const sql = "SELECT id,\n  name\nFROM users\nWHERE active = 1\nSELECT * FROM logs;";
     const range = statementRangeAtCursor(sql, indexOf(sql, "name"));
@@ -414,6 +429,13 @@ describe("buildExecutionCandidates", () => {
     const candidates = buildExecutionCandidates(sql, indexOf(sql, "users"));
     expect(candidates).toHaveLength(1);
     expect(candidates[0].kind).toBe("all");
+  });
+
+  it("uses the whole set-operation statement for cursor execution candidates", () => {
+    const sql = "select * from tbA\nunion\nselect * from tbB\nSELECT * FROM logs;";
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "tbA"));
+
+    expect(candidateSummaries(candidates)).toEqual(["cursor:select * from tbA\nunion\nselect * from tbB", "all:select * from tbA\nunion\nselect * from tbB\nSELECT * FROM logs;"]);
   });
 
   it("uses the current command line for Redis cursor candidates", () => {

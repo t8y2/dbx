@@ -43,7 +43,7 @@ import {
   type CustomThemeColors,
   type CustomTheme,
 } from "@/stores/settingsStore";
-import { loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
+import { createRunStatementButtonDom, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { formatAiModelOption } from "@/lib/ai/aiModelPresentation";
 import ThemeCustomizerDialog from "./ThemeCustomizerDialog.vue";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -74,6 +74,7 @@ import { SHORTCUT_DEFINITIONS, findShortcutConflict, normalizeShortcutSettings, 
 import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
+import { executableStatementRangeCacheForDoc, executableStatementRangeStartingAt, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
 import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES } from "@/lib/table/tableColumnTemplates";
 import { buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpVsCodeConfig, type McpEnvEntry, type McpLaunchConfig } from "@/lib/mcp/mcpConfigTemplates";
 import { isWindows } from "@/lib/backend/platform";
@@ -236,6 +237,7 @@ const editActiveCustomThemeId = ref(settingsStore.editorSettings.activeCustomThe
 const showThemeCustomizer = ref(false);
 const editExecuteMode = ref(settingsStore.editorSettings.executeMode);
 const editShowExecutionTargetPicker = ref(settingsStore.editorSettings.showExecutionTargetPicker);
+const editShowStatementRunButtons = ref(settingsStore.editorSettings.showStatementRunButtons);
 const editAutoAliasTables = ref(settingsStore.editorSettings.autoAliasTables);
 const editWordWrap = ref(settingsStore.editorSettings.wordWrap);
 const editVimModeEnabled = ref(settingsStore.editorSettings.vimModeEnabled);
@@ -545,6 +547,7 @@ watch(
       editActiveCustomThemeId.value = settingsStore.editorSettings.activeCustomThemeId;
       editExecuteMode.value = settingsStore.editorSettings.executeMode;
       editShowExecutionTargetPicker.value = settingsStore.editorSettings.showExecutionTargetPicker;
+      editShowStatementRunButtons.value = settingsStore.editorSettings.showStatementRunButtons;
       editAutoAliasTables.value = settingsStore.editorSettings.autoAliasTables;
       editWordWrap.value = settingsStore.editorSettings.wordWrap;
       editVimModeEnabled.value = settingsStore.editorSettings.vimModeEnabled;
@@ -637,6 +640,7 @@ function hasChanges(): boolean {
     editActiveCustomThemeId.value !== settingsStore.editorSettings.activeCustomThemeId ||
     editExecuteMode.value !== settingsStore.editorSettings.executeMode ||
     editShowExecutionTargetPicker.value !== settingsStore.editorSettings.showExecutionTargetPicker ||
+    editShowStatementRunButtons.value !== settingsStore.editorSettings.showStatementRunButtons ||
     editAutoAliasTables.value !== settingsStore.editorSettings.autoAliasTables ||
     editWordWrap.value !== settingsStore.editorSettings.wordWrap ||
     editVimModeEnabled.value !== settingsStore.editorSettings.vimModeEnabled ||
@@ -696,6 +700,7 @@ async function persistSettings() {
     activeCustomThemeId: editActiveCustomThemeId.value,
     executeMode: editExecuteMode.value,
     showExecutionTargetPicker: editShowExecutionTargetPicker.value,
+    showStatementRunButtons: editShowStatementRunButtons.value,
     autoAliasTables: editAutoAliasTables.value,
     wordWrap: editWordWrap.value,
     vimModeEnabled: editVimModeEnabled.value,
@@ -778,6 +783,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editFontSize.value = DEFAULT_EDITOR_SETTINGS.fontSize;
     editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
     editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
+    editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
     editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
     editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
     editVimModeEnabled.value = DEFAULT_EDITOR_SETTINGS.vimModeEnabled;
@@ -847,6 +853,7 @@ function resetAllDefaults() {
   editActiveCustomThemeId.value = DEFAULT_EDITOR_SETTINGS.activeCustomThemeId;
   editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
   editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
+  editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
   editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
   editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
   editVimModeEnabled.value = DEFAULT_EDITOR_SETTINGS.vimModeEnabled;
@@ -1997,6 +2004,7 @@ const previewSettings = computed<{
   appAppearance: AppThemeAppearance;
   appPalette: AppThemePalette;
   customColors?: CustomThemeColors;
+  showStatementRunButtons: boolean;
 }>(() => ({
   fontFamily: editFontFamily.value,
   fontSize: editFontSize.value,
@@ -2004,21 +2012,36 @@ const previewSettings = computed<{
   appAppearance: isDark.value ? "dark" : "light",
   appPalette: themePalette.value,
   customColors: getPreviewCustomThemeColors(),
+  showStatementRunButtons: editShowStatementRunButtons.value,
 }));
 
 const previewSqlNormal = `SELECT u.id, u.name
 FROM users u
-ORDER BY u.id LIMIT 5;`;
+ORDER BY u.id LIMIT 5;
+
+SELECT o.id, o.total
+FROM orders o
+WHERE o.total > 100;`;
 const previewSqlWithSyntaxError = `SELECT u.id, u.name
 FOM users u
-ORDER BY u.id LIMIT 5;`;
+ORDER BY u.id LIMIT 5;
+
+SELECT o.id, o.total
+FROM orders o
+WHERE o.total > 100;`;
 
 let fontThemeComp: import("@codemirror/state").Compartment | null = null;
 let themeComp: import("@codemirror/state").Compartment | null = null;
 let diagnosticComp: import("@codemirror/state").Compartment | null = null;
+let previewRunGutterComp: import("@codemirror/state").Compartment | null = null;
 let setPreviewDiagnosticsEffect: import("@codemirror/state").StateEffectType<PreviewSqlDiagnostic[]> | null = null;
+let setPreviewRunHighlightEffect: import("@codemirror/state").StateEffectType<{ from: number; to: number } | null> | null = null;
 let editorViewModule: typeof import("@codemirror/view") | null = null;
 let previewSqlDiagnostics: PreviewSqlDiagnostic[] = [];
+let previewExecutableCache: ExecutableStatementRangeCache | null = null;
+let previewRunHighlightRange: { from: number; to: number } | null = null;
+let previewRunHighlightTimer: ReturnType<typeof setTimeout> | null = null;
+let buildPreviewRunGutterExtension: () => import("@codemirror/state").Extension = () => [];
 
 function currentPreviewSql(): string {
   return editSqlSemanticDiagnosticsEnabled.value ? previewSqlWithSyntaxError : previewSqlNormal;
@@ -2041,10 +2064,51 @@ function updatePreviewSqlDiagnostics() {
     view.dispatch({ effects });
     return;
   }
+  previewExecutableCache = null;
   view.dispatch({
     changes: { from: 0, to: currentSql.length, insert: nextSql },
     effects,
   });
+}
+
+function previewExecutableStatementRangeStartingAt(currentView: EditorViewType, lineFrom: number) {
+  previewExecutableCache = executableStatementRangeCacheForDoc(previewExecutableCache, currentView.state.doc, "mysql");
+  return executableStatementRangeStartingAt(previewExecutableCache, lineFrom);
+}
+
+function clearPreviewRunHighlight() {
+  previewRunHighlightRange = null;
+  if (previewView.value && setPreviewRunHighlightEffect) {
+    previewView.value.dispatch({ effects: setPreviewRunHighlightEffect.of(null) });
+  }
+}
+
+function flashPreviewRunHighlight(range: { from: number; to: number }, event: Event) {
+  previewRunHighlightRange = range;
+  if (previewView.value && setPreviewRunHighlightEffect) {
+    previewView.value.dispatch({ effects: setPreviewRunHighlightEffect.of(range) });
+  }
+  if (event.target instanceof Element) {
+    const marker = event.target.closest(".cm-run-statement-marker");
+    marker?.classList.add("cm-run-statement-marker--executed");
+    window.setTimeout(() => marker?.classList.remove("cm-run-statement-marker--executed"), 650);
+  }
+  if (previewRunHighlightTimer) clearTimeout(previewRunHighlightTimer);
+  previewRunHighlightTimer = window.setTimeout(() => {
+    previewRunHighlightTimer = null;
+    clearPreviewRunHighlight();
+  }, 650);
+}
+
+function handlePreviewRunGutterMouseDown(currentView: EditorViewType, line: { from: number; to: number }, event: Event): boolean {
+  if (!(event instanceof MouseEvent) || event.button !== 0) return false;
+  const statementRange = previewExecutableStatementRangeStartingAt(currentView, line.from);
+  if (!statementRange) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  flashPreviewRunHighlight({ from: statementRange.from, to: statementRange.to }, event);
+  currentView.focus();
+  return true;
 }
 
 watch(
@@ -2054,7 +2118,7 @@ watch(
 
     const themeExt = await loadEditorTheme(ss.theme, ss.appAppearance, ss.customColors, ss.appPalette);
     previewView.value.dispatch({
-      effects: [themeComp.reconfigure(themeExt), fontThemeComp.reconfigure(editorFontTheme(editorViewModule.EditorView, ss.fontSize, ss.fontFamily))],
+      effects: [themeComp.reconfigure(themeExt), fontThemeComp.reconfigure(editorFontTheme(editorViewModule.EditorView, ss.fontSize, ss.fontFamily)), ...(previewRunGutterComp ? [previewRunGutterComp.reconfigure(buildPreviewRunGutterExtension())] : [])],
     });
   },
   { deep: true },
@@ -2074,9 +2138,18 @@ function cleanupPreviewEditor() {
   fontThemeComp = null;
   themeComp = null;
   diagnosticComp = null;
+  previewRunGutterComp = null;
   setPreviewDiagnosticsEffect = null;
+  setPreviewRunHighlightEffect = null;
   editorViewModule = null;
   previewSqlDiagnostics = [];
+  previewExecutableCache = null;
+  previewRunHighlightRange = null;
+  buildPreviewRunGutterExtension = () => [];
+  if (previewRunHighlightTimer) {
+    clearTimeout(previewRunHighlightTimer);
+    previewRunHighlightTimer = null;
+  }
 }
 
 watch(activeSettingsTab, (tab) => {
@@ -2090,13 +2163,15 @@ watch(previewRef, async (el) => {
   previewInitialized = true;
   if (previewView.value) return;
 
-  const [{ EditorView, Decoration }, { EditorState, Compartment, StateEffect, StateField }, { sql, MySQL }, { basicSetup }] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("codemirror")]);
+  const [{ EditorView, Decoration, gutter, GutterMarker }, { EditorState, Compartment, StateEffect, StateField }, { sql, MySQL }, { basicSetup }] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("codemirror")]);
 
   editorViewModule = { EditorView } as typeof import("@codemirror/view");
   fontThemeComp = new Compartment();
   themeComp = new Compartment();
   diagnosticComp = new Compartment();
+  previewRunGutterComp = new Compartment();
   setPreviewDiagnosticsEffect = StateEffect.define<PreviewSqlDiagnostic[]>();
+  setPreviewRunHighlightEffect = StateEffect.define<{ from: number; to: number } | null>();
   previewSqlDiagnostics = previewDiagnosticsForSql(currentPreviewSql());
 
   const ss = previewSettings.value;
@@ -2132,9 +2207,51 @@ watch(previewRef, async (el) => {
     return [field, diagnosticTheme];
   };
 
+  class PreviewRunStatementGutterMarker extends GutterMarker {
+    toDOM() {
+      return createRunStatementButtonDom(t("settings.previewStatementRunButton"));
+    }
+  }
+
+  const previewRunMarker = new PreviewRunStatementGutterMarker();
+  buildPreviewRunGutterExtension = () =>
+    editShowStatementRunButtons.value
+      ? gutter({
+          class: "cm-run-statement-gutter",
+          lineMarker(currentView, line) {
+            return previewExecutableStatementRangeStartingAt(currentView, line.from) ? previewRunMarker : null;
+          },
+          domEventHandlers: {
+            mousedown: handlePreviewRunGutterMouseDown,
+          },
+        })
+      : [];
+
+  const buildPreviewRunHighlightExtension = () => {
+    const highlightEffect = setPreviewRunHighlightEffect;
+    const buildDecorations = () => (previewRunHighlightRange ? Decoration.set([Decoration.mark({ class: "cm-settings-preview-run-highlight" }).range(previewRunHighlightRange.from, previewRunHighlightRange.to)], true) : Decoration.none);
+    const field = StateField.define({
+      create: buildDecorations,
+      update(value, transaction) {
+        const highlightChanged = !!highlightEffect && transaction.effects.some((effect) => effect.is(highlightEffect));
+        return transaction.docChanged || highlightChanged ? buildDecorations() : value;
+      },
+      provide: (field) => EditorView.decorations.from(field),
+    });
+    return field;
+  };
+
   const state = EditorState.create({
     doc: currentPreviewSql(),
-    extensions: [basicSetup, sql({ dialect: MySQL }), themeComp.of(themeExt), fontThemeComp.of(editorFontTheme(EditorView, ss.fontSize, ss.fontFamily)), diagnosticComp.of(buildPreviewDiagnosticExtension())],
+    extensions: [
+      basicSetup,
+      sql({ dialect: MySQL }),
+      themeComp.of(themeExt),
+      fontThemeComp.of(editorFontTheme(EditorView, ss.fontSize, ss.fontFamily)),
+      previewRunGutterComp.of(buildPreviewRunGutterExtension()),
+      diagnosticComp.of(buildPreviewDiagnosticExtension()),
+      buildPreviewRunHighlightExtension(),
+    ],
   });
 
   previewView.value = new EditorView({ state, parent: previewRef.value });
@@ -2267,6 +2384,14 @@ onUnmounted(cleanupPreviewEditor);
                     <p class="text-xs text-muted-foreground">{{ t("settings.showExecutionTargetPickerDescription") }}</p>
                   </div>
                   <Switch id="editor-show-execution-target-picker" v-model="editShowExecutionTargetPicker" class="mt-0.5" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-show-statement-run-buttons">{{ t("settings.showStatementRunButtons") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.showStatementRunButtonsDescription") }}</p>
+                  </div>
+                  <Switch id="editor-show-statement-run-buttons" v-model="editShowStatementRunButtons" class="mt-0.5" />
                 </div>
 
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">

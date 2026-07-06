@@ -129,6 +129,13 @@ test("defaults dangerous SQL confirmation to enabled", () => {
   assert.equal(normalizeEditorSettings({ confirmDangerousSqlExecution: false }).confirmDangerousSqlExecution, false);
 });
 
+test("defaults statement run buttons to enabled and preserves saved booleans", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.showStatementRunButtons, true);
+  assert.equal(normalizeEditorSettings({}).showStatementRunButtons, true);
+  assert.equal(normalizeEditorSettings({ showStatementRunButtons: false }).showStatementRunButtons, false);
+  assert.equal(normalizeEditorSettings({ showStatementRunButtons: "nope" as any }).showStatementRunButtons, true);
+});
+
 test("defaults unsaved SQL close confirmation to enabled", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.confirmUnsavedSqlClose, true);
   assert.equal(normalizeEditorSettings({}).confirmUnsavedSqlClose, true);

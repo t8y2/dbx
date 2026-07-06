@@ -153,18 +153,19 @@ const SEARCH_SCOPE_TO_NODE_TYPES: Record<SearchScope, TreeNodeType[]> = {
   view: ["view"],
 };
 
-// Types that can be pinned at the top of the tree while scrolling. When
-// browsing a large number of children (e.g. hundreds of tables) under one of
-// these and scrolling down, the row is kept visible so the active container
-// stays identifiable and can be collapsed with one click.
+// Sticky-row container types. When browsing a large number of children (e.g.
+// hundreds of tables) under one of these and scrolling down, the row is kept
+// pinned at the top so the active container stays identifiable and can be
+// collapsed with one click.
 //
-// `schema` is included as a fallback: Dameng / Oracle / oceanbase-oracle expose
-// `connection -> schema -> tables` (no database node, via
-// connectionUsesVisibleSchemaFilter), so the schema row is what represents the
-// active container there. Postgres/SQLServer keep the
-// `connection -> database -> schema -> tables` shape, and the sticky walk runs
-// upward so it still hits `database` first — schema never shadows it.
-const STICKY_CONTAINER_TYPES = new Set<TreeNodeType>([...SEARCH_SCOPE_TO_NODE_TYPES.database, "schema"]);
+// Database-level containers are always preferred. Schema is only a fallback,
+// used when the upward path has NO database-level ancestor at all: Dameng /
+// Oracle / oceanbase-oracle expose `connection -> schema -> tables` (no database
+// node, via connectionUsesVisibleSchemaFilter). For Postgres/SQLServer, whose
+// tree is `connection -> database -> schema -> tables`, the sticky walk prefers
+// the database node, so schema never shadows it.
+const DATABASE_LEVEL_TYPES = new Set<TreeNodeType>(SEARCH_SCOPE_TO_NODE_TYPES.database);
+const SCHEMA_LEVEL_TYPES = new Set<TreeNodeType>(["schema"]);
 
 const searchScopeOptions = computed(() => {
   return [
@@ -380,17 +381,29 @@ const stickyNode = computed<FlatTreeNode | null>(() => {
   if (len === 0) return null;
 
   const topIndex = Math.min(Math.floor(stickyScrollTop.value / SIDEBAR_TREE_ROW_HEIGHT), len - 1);
-  // Walk UP from the topmost visible row to the nearest sticky container
-  // ancestor (database, or schema as a fallback for Dameng/Oracle-style trees).
-  // Show the overlay as soon as that row starts crossing the top edge, instead
-  // of waiting for it to fully scroll out by one row.
+  // flatNodes is a DFS preorder spanning ALL connections, so walking up from a
+  // leaf visits `... -> schema -> database -> connection -> <other connection>`.
+  // Stop at the connection boundary so the sticky row never leaks across into a
+  // different connection's subtree (e.g. MySQL's last database sticking while
+  // scrolling Dameng). Within one connection: track both candidates and prefer
+  // database-level; only fall back to schema when the whole path has no
+  // database-level container (Dameng/Oracle-style trees).
+  let schemaCandidate: FlatTreeNode | null = null;
+  let schemaCandidateTop = 0;
   for (let i = topIndex; i >= 0; i--) {
     const item = nodes[i];
-    if (!STICKY_CONTAINER_TYPES.has(item.type)) continue;
-    const rowTop = i * SIDEBAR_TREE_ROW_HEIGHT;
-    return stickyScrollTop.value > rowTop ? item : null;
+    if (item.type === "connection" || item.type === "connection-group") break;
+    if (DATABASE_LEVEL_TYPES.has(item.type)) {
+      const rowTop = i * SIDEBAR_TREE_ROW_HEIGHT;
+      return stickyScrollTop.value > rowTop ? item : null;
+    }
+    if (item.type === "schema" && !schemaCandidate) {
+      schemaCandidate = item;
+      schemaCandidateTop = i * SIDEBAR_TREE_ROW_HEIGHT;
+    }
   }
-  return null;
+  if (!schemaCandidate) return null;
+  return stickyScrollTop.value > schemaCandidateTop ? schemaCandidate : null;
 });
 
 const stickyHeaderStyle = computed<CSSProperties>(() => {
@@ -399,7 +412,20 @@ const stickyHeaderStyle = computed<CSSProperties>(() => {
   const nodes = flatNodes.value;
   const currentIndex = nodes.findIndex((item) => item.id === node.id);
   if (currentIndex < 0) return {};
-  const nextDatabaseIndex = nodes.findIndex((item, index) => index > currentIndex && STICKY_CONTAINER_TYPES.has(item.type));
+  // Look forward for the next sibling container at the SAME level as the sticky
+  // node so the push-up only fires when a peer scrolls in (database-to-database,
+  // or schema-to-schema for Dameng/Oracle), never schema-into-database. Stop at
+  // the connection boundary so we never reach into the next connection's rows.
+  const nextTypes = SCHEMA_LEVEL_TYPES.has(node.type) ? SCHEMA_LEVEL_TYPES : DATABASE_LEVEL_TYPES;
+  let nextDatabaseIndex = -1;
+  for (let i = currentIndex + 1; i < nodes.length; i++) {
+    const item = nodes[i];
+    if (item.type === "connection" || item.type === "connection-group") break;
+    if (nextTypes.has(item.type)) {
+      nextDatabaseIndex = i;
+      break;
+    }
+  }
   if (nextDatabaseIndex < 0) return {};
   const distanceToNext = nextDatabaseIndex * SIDEBAR_TREE_ROW_HEIGHT - stickyScrollTop.value;
   if (distanceToNext >= SIDEBAR_TREE_ROW_HEIGHT) return {};

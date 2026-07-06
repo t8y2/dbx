@@ -111,6 +111,15 @@ async function initDdlEditor(content: string) {
       // which is visible below the content when the DDL is short.
       EditorView.theme({
         "&.cm-focused": { outline: "none" },
+        ".cm-content": {
+          cursor: "text",
+          userSelect: "text",
+          WebkitUserSelect: "text",
+        },
+        ".cm-line": {
+          userSelect: "text",
+          WebkitUserSelect: "text",
+        },
       }),
       EditorState.readOnly.of(true),
     ],
@@ -197,7 +206,7 @@ function onClose() {
             {{ t("common.retry") }}
           </Button>
         </div>
-        <div v-else class="relative min-h-80 max-h-[60vh] overflow-hidden rounded border">
+        <div v-else class="ddl-view-editor relative min-h-80 max-h-[60vh] overflow-hidden rounded border">
           <div ref="ddlEditorContainer" class="h-full" />
           <EditorSearchPanel v-if="ddlEditorView" ref="ddlSearchPanelRef" :view="ddlEditorView" />
         </div>
@@ -212,3 +221,21 @@ function onClose() {
     </DialogContent>
   </Dialog>
 </template>
+
+<style scoped>
+.ddl-view-editor :deep(.cm-content),
+.ddl-view-editor :deep(.cm-line) {
+  cursor: text;
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
+.ddl-view-editor :deep(.cm-selectionBackground),
+.ddl-view-editor :deep(.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground) {
+  background: var(--dbx-editor-selection-background, rgba(59, 130, 246, 0.35)) !important;
+}
+
+.ddl-view-editor :deep(.cm-content ::selection) {
+  background: var(--dbx-editor-selection-background, rgba(59, 130, 246, 0.35)) !important;
+}
+</style>

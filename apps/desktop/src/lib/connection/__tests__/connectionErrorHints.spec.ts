@@ -27,6 +27,13 @@ describe("appendConnectionErrorHints", () => {
     expect(message).toContain("Set TLS Mode to Disabled.");
   });
 
+  it("adds the TLS hint for camel-case MySQL sslMode params", () => {
+    const message = appendConnectionErrorHints(mysqlConfig("sslMode=REQUIRED"), "MySQL connection failed: Driver error: `Client asked for SSL but server does not have this capability'", t);
+
+    expect(message).toContain("server does not have this capability");
+    expect(message).toContain("Set TLS Mode to Disabled.");
+  });
+
   it("does not add the TLS hint when MySQL TLS is disabled", () => {
     const message = appendConnectionErrorHints(mysqlConfig("ssl-mode=disabled"), "MySQL connection failed: TLS handshake failed", t);
 

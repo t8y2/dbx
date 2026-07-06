@@ -6,13 +6,26 @@ function normalizeUrlParams(params: string | undefined): URLSearchParams {
   return new URLSearchParams((params || "").trim().replace(/^\?/, ""));
 }
 
+function normalizeUrlParamKey(key: string): string {
+  return key.trim().toLowerCase().replace(/[-_]/g, "");
+}
+
+function urlParamValue(params: URLSearchParams, key: string): string {
+  const normalizedKey = normalizeUrlParamKey(key);
+  for (const [paramKey, value] of params.entries()) {
+    if (normalizeUrlParamKey(paramKey) === normalizedKey) return value;
+  }
+  return "";
+}
+
 function mysqlTlsMode(config: ConnectionConfig): string {
   const parsed = normalizeUrlParams(config.url_params);
-  const mode = (parsed.get("ssl-mode") || parsed.get("sslmode") || "").trim().toLowerCase().replace("-", "_");
+  // MySQL clients use ssl-mode, sslmode and sslMode spellings; keep hint behavior aligned with backend parsing.
+  const mode = urlParamValue(parsed, "ssl-mode").trim().toLowerCase().replace("-", "_");
   if (["disabled", "disable"].includes(mode)) return "disabled";
   if (["preferred", "prefer"].includes(mode)) return "preferred";
   if (["required", "require", "verify_ca", "verify_identity"].includes(mode)) return mode;
-  if (config.ssl || ["true", "1", "yes", "on"].includes((parsed.get("require_ssl") || "").trim().toLowerCase())) return "required";
+  if (config.ssl || ["true", "1", "yes", "on"].includes(urlParamValue(parsed, "require_ssl").trim().toLowerCase())) return "required";
   return "disabled";
 }
 

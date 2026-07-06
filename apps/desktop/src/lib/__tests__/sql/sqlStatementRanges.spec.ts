@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildExecutionCandidates, executableStatementRanges, fullSqlRange, hasMultipleExecutionTargets, splitSqlStatementRanges, statementRangeAtCursor, supportsExecutionTargetPicker } from "@/lib/sql/sqlStatementRanges";
+import { buildExecutionCandidates, currentExecutableStatementRange, executableStatementRanges, fullSqlRange, hasMultipleExecutionTargets, splitSqlStatementRanges, statementRangeAtCursor, supportsExecutionTargetPicker } from "@/lib/sql/sqlStatementRanges";
 
 function indexOf(sql: string, needle: string, occurrence = 1): number {
   let from = 0;
@@ -64,6 +64,24 @@ BEGIN
 END;
 /
 SELECT 1;`;
+
+const mysqlProcedureDelimiterFixture = `DELIMITER $$
+
+CREATE PROCEDURE sync_user_status()
+BEGIN
+  UPDATE users
+  SET status = 'inactive'
+  WHERE last_login_at < DATE_SUB(NOW(), INTERVAL 180 DAY);
+
+  INSERT INTO audit_logs(action, created_at)
+  VALUES ('sync_user_status', NOW());
+END$$
+
+DELIMITER ;
+
+CALL sync_user_status();
+
+SELECT * FROM audit_logs ORDER BY id DESC LIMIT 10;`;
 
 describe("splitSqlStatementRanges", () => {
   it("splits multiple top-level statements", () => {
@@ -133,6 +151,11 @@ describe("splitSqlStatementRanges", () => {
     expect(ranges[0].sql).toContain("v_order_count NUMBER;");
     expect(ranges[0].sql).toContain("END;");
     expect(ranges[0].sql).not.toContain("\n/");
+  });
+
+  it("keeps MySQL delimiter procedure bodies together", () => {
+    const procedureSql = mysqlProcedureDelimiterFixture.slice(mysqlProcedureDelimiterFixture.indexOf("CREATE"), mysqlProcedureDelimiterFixture.indexOf("$$\n\nDELIMITER"));
+    expect(rangeSqlTexts(splitSqlStatementRanges(mysqlProcedureDelimiterFixture, "mysql"))).toEqual([procedureSql, "CALL sync_user_status()", "SELECT * FROM audit_logs ORDER BY id DESC LIMIT 10"]);
   });
 });
 
@@ -348,6 +371,13 @@ WHERE request_json LIKE '%"paperFlag":null%';`;
     const range = statementRangeAtCursor(oraclePlSqlFixture, indexOf(oraclePlSqlFixture, "ORDERS_10K", 2), "oracle");
     expect(range?.sql.trim()).toBe(oraclePlSqlFixture.slice(0, oraclePlSqlFixture.indexOf("\n/")));
   });
+
+  it("returns the full MySQL procedure definition for cursors inside procedure statements", () => {
+    const procedureSql = mysqlProcedureDelimiterFixture.slice(mysqlProcedureDelimiterFixture.indexOf("CREATE"), mysqlProcedureDelimiterFixture.indexOf("$$\n\nDELIMITER"));
+
+    expect(statementRangeAtCursor(mysqlProcedureDelimiterFixture, indexOf(mysqlProcedureDelimiterFixture, "UPDATE users"), "mysql")?.sql.trim()).toBe(procedureSql);
+    expect(statementRangeAtCursor(mysqlProcedureDelimiterFixture, indexOf(mysqlProcedureDelimiterFixture, "INSERT INTO"), "mysql")?.sql.trim()).toBe(procedureSql);
+  });
 });
 
 describe("executableStatementRanges", () => {
@@ -380,6 +410,40 @@ describe("executableStatementRanges", () => {
 
   it("does not split executable Oracle PL/SQL ranges at inner statement starts", () => {
     expect(rangeSqlTexts(executableStatementRanges(oraclePlSqlFixture, "oracle"))).toEqual([oraclePlSqlFixture.slice(0, oraclePlSqlFixture.indexOf("\n/")), "SELECT 1"]);
+  });
+
+  it("does not split executable MySQL procedure ranges at inner statement starts", () => {
+    const procedureSql = mysqlProcedureDelimiterFixture.slice(mysqlProcedureDelimiterFixture.indexOf("CREATE"), mysqlProcedureDelimiterFixture.indexOf("$$\n\nDELIMITER"));
+
+    expect(rangeSqlTexts(executableStatementRanges(mysqlProcedureDelimiterFixture, "mysql"))).toEqual([procedureSql, "CALL sync_user_status()", "SELECT * FROM audit_logs ORDER BY id DESC LIMIT 10"]);
+  });
+});
+
+describe("currentExecutableStatementRange", () => {
+  it("uses the current SQL statement range for multi-line DDL", () => {
+    const sql = "ALTER TABLE `yb_course_order`\n  ADD COLUMN `audit_status` tinyint(4) DEFAULT NULL\n    COMMENT '审核状态：0-待审核，1-已通过，2-已拒绝',\n  ADD COLUMN `close_reason` varchar(30) DEFAULT NULL\n    COMMENT '关闭原因：timeout-超时关闭，cancel-取消关闭，refund-退款关闭';\nSELECT 1;";
+
+    expect(currentExecutableStatementRange(sql, indexOf(sql, "close_reason"), "mysql")?.sql.trim()).toBe(sql.slice(0, sql.indexOf(";\nSELECT")));
+  });
+
+  it("returns null on blank and pure comment lines", () => {
+    const sql = "SELECT 1;\n-- comment\n\nSELECT 2;";
+
+    expect(currentExecutableStatementRange(sql, indexOf(sql, "comment"), "mysql")).toBeNull();
+    expect(currentExecutableStatementRange(sql, sql.indexOf("\n\n") + 1, "mysql")).toBeNull();
+  });
+
+  it("uses the current Redis command line", () => {
+    const sql = "GET user:1\n  DEL user:2\n# comment";
+
+    expect(currentExecutableStatementRange(sql, indexOf(sql, "DEL"), "redis")?.sql).toBe("DEL user:2");
+    expect(currentExecutableStatementRange(sql, indexOf(sql, "comment"), "redis")).toBeNull();
+  });
+
+  it("does not expose current statement framing for MongoDB", () => {
+    const sql = "db.users.find({})";
+
+    expect(currentExecutableStatementRange(sql, indexOf(sql, "users"), "mongodb")).toBeNull();
   });
 });
 
@@ -472,6 +536,13 @@ describe("buildExecutionCandidates", () => {
     const sql = "select COUNT(1) FROM your_table;\ndelimiter ;;\nselect COUNT(1) FROM your_table;\n\n;;\ndelimiter ;";
     const candidates = buildExecutionCandidates(sql, indexOf(sql, "COUNT", 2), "mysql");
     expect(candidateSummaries(candidates)).toEqual(["cursor:select COUNT(1) FROM your_table;", "all:select COUNT(1) FROM your_table;\ndelimiter ;;\nselect COUNT(1) FROM your_table;\n\n;;\ndelimiter ;"]);
+  });
+
+  it("uses the full MySQL procedure body for delimiter procedure cursor candidates", () => {
+    const procedureSql = mysqlProcedureDelimiterFixture.slice(mysqlProcedureDelimiterFixture.indexOf("CREATE"), mysqlProcedureDelimiterFixture.indexOf("$$\n\nDELIMITER"));
+    const candidates = buildExecutionCandidates(mysqlProcedureDelimiterFixture, indexOf(mysqlProcedureDelimiterFixture, "status ="), "mysql");
+
+    expect(candidateSummaries(candidates)[0]).toBe(`cursor:${procedureSql}`);
   });
 });
 

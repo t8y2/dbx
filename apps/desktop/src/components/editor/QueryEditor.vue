@@ -11,7 +11,7 @@ import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomC
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { resolveExecutableSql, type SqlExecutionSnapshot, type SqlExecutionOverride, type SqlExecutionCandidate } from "@/lib/sql/sqlExecutionTarget";
 import { buildExecutionCandidates, hasMultipleExecutionTargets, supportsExecutionTargetPicker, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
-import { executableStatementRangeCacheForDoc, executableStatementRangeStartingAt as executableStatementRangeStartingAtLine, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
+import { executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, executableStatementRangeStartingAt as executableStatementRangeStartingAtLine, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
 import { formatSqlText, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { formatMongoShellText } from "@/lib/mongo/mongoFormatter";
 import { useConnectionStore, COMPLETION_METADATA_CONCURRENCY } from "@/stores/connectionStore";
@@ -612,6 +612,12 @@ function openTableDdlFromContextMenu() {
 function executableStatementRangeStartingAt(currentView: EditorViewType, lineFrom: number) {
   executableStatementRangeCache = executableStatementRangeCacheForDoc(executableStatementRangeCache, currentView.state.doc, props.databaseType);
   return executableStatementRangeStartingAtLine(executableStatementRangeCache, lineFrom);
+}
+
+function currentExecutableStatementRange(currentView: EditorViewType): SqlTextRange | null {
+  if (!supportsExecutionTargetPicker(props.databaseType)) return null;
+  executableStatementRangeCache = executableStatementRangeCacheForDoc(executableStatementRangeCache, currentView.state.doc, props.databaseType);
+  return executableStatementRangeAtCursor(executableStatementRangeCache, currentView.state.selection.main.head);
 }
 
 function executeSqlStatementFromGutter(currentView: EditorViewType, line: { from: number; to: number }, event: Event): boolean {
@@ -2325,6 +2331,68 @@ onMounted(async () => {
 
   const executableStatementMarker = new RunStatementGutterMarker();
 
+  const currentStatementFrameHighlighter = ViewPlugin.fromClass(
+    class {
+      decorations: import("@codemirror/view").DecorationSet;
+      constructor(view: import("@codemirror/view").EditorView) {
+        this.decorations = this.getDeco(view);
+      }
+      update(update: import("@codemirror/view").ViewUpdate) {
+        this.decorations = this.getDeco(update.view);
+      }
+      getDeco(view: import("@codemirror/view").EditorView) {
+        if (view.state.selection.ranges.some((range) => !range.empty)) return Decoration.none;
+        const range = currentExecutableStatementRange(view);
+        if (!range) return Decoration.none;
+
+        const startLine = view.state.doc.lineAt(range.from);
+        const frameTo = currentStatementFrameTo(view, range);
+        const endLine = view.state.doc.lineAt(Math.max(range.from, frameTo - 1));
+        let maxWidth = 1;
+        for (let lineNumber = startLine.number; lineNumber <= endLine.number; lineNumber += 1) {
+          const line = view.state.doc.line(lineNumber);
+          const lineRangeTo = Math.min(line.to, frameTo);
+          maxWidth = Math.max(maxWidth, visualSqlColumns(view.state.doc.sliceString(line.from, lineRangeTo)));
+        }
+
+        const deco: any[] = [];
+        const frameWidth = `calc(${maxWidth}ch + 2ch)`;
+        for (let lineNumber = startLine.number; lineNumber <= endLine.number; lineNumber += 1) {
+          const line = view.state.doc.line(lineNumber);
+          const classes = ["cm-db-current-statement-line"];
+          if (lineNumber === startLine.number) classes.push("cm-db-current-statement-line--first");
+          if (lineNumber === endLine.number) classes.push("cm-db-current-statement-line--last");
+          deco.push(Decoration.line({ class: classes.join(" "), attributes: { style: `--dbx-current-statement-frame-width: ${frameWidth};` } }).range(line.from));
+        }
+        return Decoration.set(deco);
+      }
+    },
+    { decorations: (v) => v.decorations },
+  );
+
+  function currentStatementFrameTo(view: import("@codemirror/view").EditorView, range: SqlTextRange): number {
+    const nextChar = range.to < view.state.doc.length ? view.state.doc.sliceString(range.to, range.to + 1) : "";
+    return nextChar === ";" ? range.to + 1 : range.to;
+  }
+
+  function visualSqlColumns(text: string): number {
+    let columns = 0;
+    for (const ch of text) {
+      if (ch === "\t") {
+        columns += 4;
+      } else if (isWideSqlChar(ch)) {
+        columns += 2;
+      } else {
+        columns += 1;
+      }
+    }
+    return columns;
+  }
+
+  function isWideSqlChar(ch: string): boolean {
+    return /[\u1100-\u115f\u2329\u232a\u2e80-\u303e\u3040-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6]/u.test(ch);
+  }
+
   const activeLineHighlighter = ViewPlugin.fromClass(
     class {
       decorations: import("@codemirror/view").DecorationSet;
@@ -2378,6 +2446,7 @@ onMounted(async () => {
           mousedown: selectSqlLineFromGutter,
         },
       }),
+      currentStatementFrameHighlighter,
       highlightActiveLineGutter(),
       highlightSpecialChars(),
       history(),
@@ -2716,6 +2785,14 @@ watch(
 );
 
 watch(
+  () => props.databaseType,
+  () => {
+    executableStatementRangeCache = null;
+    view.value?.dispatch({});
+  },
+);
+
+watch(
   () => props.forceWordWrap,
   () => {
     if (!view.value || !wordWrapComp) return;
@@ -2989,6 +3066,31 @@ defineExpose({ openSearch, openReplace, scrollCursorIntoView, requestExecute });
 
 :deep(.cm-db-execution-preview) {
   background: var(--dbx-editor-selection-background, rgba(59, 130, 246, 0.35));
+}
+
+:deep(.cm-db-current-statement-line) {
+  position: relative;
+}
+
+:deep(.cm-db-current-statement-line::after) {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  box-sizing: border-box;
+  width: var(--dbx-current-statement-frame-width, 100%);
+  border-right: 1px solid rgb(34 197 94 / 0.75);
+  border-left: 1px solid rgb(34 197 94 / 0.75);
+  pointer-events: none;
+}
+
+:deep(.cm-db-current-statement-line--first::after) {
+  border-top: 1px solid rgb(34 197 94 / 0.75);
+}
+
+:deep(.cm-db-current-statement-line--last::after) {
+  border-bottom: 1px solid rgb(34 197 94 / 0.75);
 }
 
 :deep(.cm-run-statement-gutter) {

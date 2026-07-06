@@ -544,6 +544,35 @@ test("suggests tables after LEFT JOIN", () => {
   assert.ok(items.some((item) => item.label === "user_profiles" && item.type === "table"));
 });
 
+test("suggests compound JOIN keywords while typing a join modifier", () => {
+  const sql = "select * from users le";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+  });
+
+  const leftJoinIndex = items.findIndex((item) => item.type === "keyword" && item.label === "LEFT JOIN");
+  const leftIndex = items.findIndex((item) => item.type === "keyword" && item.label === "LEFT");
+
+  assert.ok(leftJoinIndex >= 0);
+  assert.ok(leftIndex >= 0);
+  assert.ok(leftJoinIndex < leftIndex, "LEFT JOIN should rank ahead of the single LEFT token");
+  assert.equal(items[leftJoinIndex]?.apply, "LEFT JOIN ");
+});
+
+test("suggests JOIN after a join modifier", () => {
+  const sql = "select * from users left ";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+  });
+
+  assert.deepEqual(
+    items.map((item) => [item.label, item.type]),
+    [["JOIN", "keyword"]],
+  );
+});
+
 test("suggests tables after comma in FROM clause", () => {
   const sql = "select * from users, or";
   const items = buildSqlCompletionItems(sql, sql.length, {
@@ -829,7 +858,18 @@ test("auto-opens completion after word characters and explicit dot qualifiers", 
 });
 
 test("auto-opens table completion immediately after FROM context whitespace", () => {
-  for (const sql of ["select * from ", "select * from users join ", "select * from users, "]) {
+  for (const sql of ["select * from ", "select * from users join ", "select * from users, ", "insert into "]) {
+    assert.equal(shouldAutoOpenSqlCompletion(sql, sql.length), true, sql);
+  }
+});
+
+test("auto-opens keyword completion after JOIN modifier whitespace", () => {
+  assert.equal(shouldAutoOpenSqlCompletion("select * from users left ", "select * from users left ".length), true);
+  assert.equal(shouldAutoOpenSqlCompletion("select left ", "select left ".length), false);
+});
+
+test("auto-opens INSERT target column completion after column-list punctuation", () => {
+  for (const sql of ["insert into users (", "insert into users (id, "]) {
     assert.equal(shouldAutoOpenSqlCompletion(sql, sql.length), true, sql);
   }
 });
@@ -851,6 +891,25 @@ test("suggests table names for empty FROM context prefix", () => {
   );
 });
 
+test("suggests table names for empty INSERT INTO target prefix", () => {
+  const items = buildSqlCompletionItems("insert into ", "insert into ".length, {
+    tables,
+    columnsByTable,
+    schemas: ["public", "express-vue", "mall"],
+  });
+
+  assert.deepEqual(
+    items.slice(0, 4).map((item) => [item.label, item.type]),
+    [
+      ["users", "table"],
+      ["user_profiles", "table"],
+      ["orders", "table"],
+      ["ticket_summary", "table"],
+    ],
+  );
+  assert.ok(items.findIndex((item) => item.type === "schema" && item.label === "public") > 3);
+});
+
 test("suggests matching table names for partial table input", () => {
   const items = buildSqlCompletionItems("select * from ihli", "select * from ihli".length, {
     tables: [{ name: "ihli_data", schema: "public", type: "table" }],
@@ -861,6 +920,15 @@ test("suggests matching table names for partial table input", () => {
   assert.deepEqual(
     tableItems.map((item) => [item.label, item.type, item.detail]),
     [["ihli_data", "table", "public.ihli_data"]],
+  );
+});
+
+test("keeps completed references while removing active JOIN table prefixes", () => {
+  const context = getSqlCompletionContext("select * from users join ex", "select * from users join ex".length);
+
+  assert.deepEqual(
+    context.referencedTables.map((table) => table.name),
+    ["users"],
   );
 });
 
@@ -1289,10 +1357,19 @@ test("detects INSERT INTO column list context", () => {
   const context = getSqlCompletionContext("INSERT INTO users (", "INSERT INTO users (".length);
   assert.equal(context.insertTable, "users");
   assert.equal(context.exclusiveColumnSuggestions, true);
+  assert.deepEqual(context.referencedTables, []);
 });
 
 test("detects INSERT INTO with schema-qualified table", () => {
   const context = getSqlCompletionContext("INSERT INTO public.users (", "INSERT INTO public.users (".length);
+  assert.equal(context.insertTable, "users");
+  assert.equal(context.insertSchema, "public");
+});
+
+test("detects INSERT INTO column list with three-part qualified table", () => {
+  const sql = "INSERT INTO analytics.public.users (";
+  const context = getSqlCompletionContext(sql, sql.length);
+
   assert.equal(context.insertTable, "users");
   assert.equal(context.insertSchema, "public");
 });
@@ -1302,6 +1379,24 @@ test("detects MySQL backtick-qualified INSERT INTO column list context", () => {
   const context = getSqlCompletionContext(sql, sql.length);
   assert.equal(context.insertTable, "orders");
   assert.equal(context.insertSchema, "other_db");
+});
+
+test("does not treat partial INSERT INTO targets as referenced tables", () => {
+  const context = getSqlCompletionContext("INSERT INTO ord", "INSERT INTO ord".length);
+
+  assert.equal(context.contextKind, "insert_target");
+  assert.equal(context.suggestTables, true);
+  assert.equal(context.exclusiveTableSuggestions, true);
+  assert.deepEqual(context.referencedTables, []);
+});
+
+test("does not treat following SQL keywords as table references while completing table names", () => {
+  const sql = "SELECT *\nFROM \nLIMIT 100";
+  const cursor = "SELECT *\nFROM ".length;
+  const context = getSqlCompletionContext(sql, cursor);
+
+  assert.equal(context.suggestTables, true);
+  assert.deepEqual(context.referencedTables, []);
 });
 
 test("suggests columns for INSERT INTO target table", () => {
@@ -1452,6 +1547,11 @@ test("suggests schema names alongside tables in FROM context", () => {
     schemas: ["public", "private", "audit"],
   });
   const schemaItems = items.filter((item) => item.type === "schema");
+  const firstSchemaIndex = items.findIndex((item) => item.type === "schema");
+  const firstTableIndex = items.findIndex((item) => item.type === "table");
+
+  assert.ok(firstTableIndex >= 0);
+  assert.ok(firstSchemaIndex > firstTableIndex);
   assert.equal(schemaItems.length, 3);
   assert.ok(schemaItems.some((item) => item.label === "public"));
   assert.equal(schemaItems[0]?.apply, "public.");

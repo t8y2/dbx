@@ -171,6 +171,9 @@ export function sqlCompletionContextFromSemantic(model: SqlSemanticModel, base: 
   if (model.cursorIntent.confidence === "low" || model.cursorIntent.kind === "suppressed") {
     return base;
   }
+  if ((base.suggestTables || base.exclusiveTableSuggestions) && model.cursorIntent.kind !== "table" && model.cursorIntent.kind !== "schema" && model.cursorIntent.kind !== "catalog" && model.cursorIntent.kind !== "delete_target") {
+    return base;
+  }
 
   const scope = sqlSemanticCompletionScope(model);
   const qualifier = model.cursorIntent.qualifierParts.length > 0 ? model.cursorIntent.qualifierParts.join(".") : undefined;

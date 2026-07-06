@@ -381,23 +381,30 @@ function trailingIdentifier(tokens: readonly SqlSemanticToken[], cursor: number,
   let prefix = "";
   let replacementRange: SqlSemanticSpan = { start: cursor, end: cursor };
   let index = before.length - 1;
+  let hasQualifier = false;
   if (tokenIsIdentifier(last) && cursor <= last.span.end) {
     const rawPrefix = tokenTextAt(last.text, { start: 0, end: Math.max(0, cursor - last.span.start) });
     prefix = last.kind === "quoted_identifier" ? unquoteSqlSemanticIdentifier({ ...last, text: rawPrefix.endsWith(last.quote ?? "") ? rawPrefix : rawPrefix + (last.quote === "[" ? "]" : (last.quote ?? "")) }) : rawPrefix;
     replacementRange = { start: last.span.start, end: cursor };
     index -= 1;
-    if (before[index]?.text === ".") index -= 1;
+    if (before[index]?.text === ".") {
+      hasQualifier = true;
+      index -= 1;
+    }
   } else if (last.text === ".") {
+    hasQualifier = true;
     index -= 1;
   }
 
   const qualifierParts: string[] = [];
-  while (index >= 0) {
-    const identifier = before[index];
-    if (!tokenIsIdentifier(identifier)) break;
-    qualifierParts.unshift(identifierPart(identifier, dialect).name);
-    if (before[index - 1]?.text !== ".") break;
-    index -= 2;
+  if (hasQualifier) {
+    while (index >= 0) {
+      const identifier = before[index];
+      if (!tokenIsIdentifier(identifier)) break;
+      qualifierParts.unshift(identifierPart(identifier, dialect).name);
+      if (before[index - 1]?.text !== ".") break;
+      index -= 2;
+    }
   }
 
   return { prefix, replacementRange, qualifierParts };
@@ -507,7 +514,7 @@ function buildCursorIntent(tokens: readonly SqlSemanticToken[], cursor: number, 
     return { kind: "alias_column", prefix: trailing.prefix, replacementRange: trailing.replacementRange, qualifierParts: trailing.qualifierParts, targetSourceId: targetSource.id, expectedObjectKinds: ["column"], confidence: "high" };
   }
 
-  if (TABLE_INTRODUCERS.has(previous) || JOIN_MODIFIERS.has(previous) || previous === "from" || previous === "join" || tableListContinuation) {
+  if (TABLE_INTRODUCERS.has(previous) || TABLE_INTRODUCERS.has(wordBeforeReplacement) || previous === "from" || previous === "join" || wordBeforeReplacement === "from" || wordBeforeReplacement === "join" || tableListContinuation) {
     return { kind: previous === "join" ? "table" : "table", prefix: trailing.prefix, replacementRange: trailing.replacementRange, qualifierParts: trailing.qualifierParts, expectedObjectKinds: ["table", "view"], confidence: "high" };
   }
 

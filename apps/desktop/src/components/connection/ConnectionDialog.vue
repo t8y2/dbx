@@ -37,6 +37,7 @@ import { agentDriverInstallKey, appendAgentDriverUpdateHint, hasAgentDriverUpdat
 import { prestoSqlBuiltinDriverPaths } from "@/lib/database/prestoSqlBuiltinDriver";
 import { SQLITE_DATABASE_FILE_EXTENSIONS } from "@/lib/database/databaseFileDetection";
 import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connection/connectionAttemptTimeout";
+import { appendConnectionErrorHints } from "@/lib/connection/connectionErrorHints";
 import { driverInstallProgressPercent, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 import { ArrowLeft, ArrowDown, ArrowUp, CheckSquare, ChevronRight, CircleHelp, Copy, ExternalLink, FilePlus2, FolderOpen, GripVertical, Grid3X3, KeyRound, Link2, List, ListFilter, Loader2, Pencil, Pipette, Plus, Search, ShieldCheck, Square, Trash2 } from "@lucide/vue";
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleDatabaseSelectionIsStale } from "@/lib/connection/connectionVisibleDatabases";
@@ -918,6 +919,7 @@ function errorMessage(error: unknown): string {
 }
 
 function connectionErrorWithDriverUpdateHint(config: ConnectionConfig, message: string): string {
+  message = appendConnectionErrorHints(config, message, t);
   if (!hasAgentDriverUpdate(config.db_type, agentDrivers.value, config.driver_profile)) return message;
   return appendAgentDriverUpdateHint(message, t("connection.agentDriverUpdateConnectionHint"));
 }
@@ -3039,7 +3041,7 @@ async function save() {
           const message = String(e?.message || e);
           if (message.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
           if (config.one_time) void store.removeConnection(config.id);
-          emit("connectFailed", mongodbAuthFailureHint(message));
+          emit("connectFailed", appendConnectionErrorHints(config, mongodbAuthFailureHint(message), t));
         });
       return;
     }

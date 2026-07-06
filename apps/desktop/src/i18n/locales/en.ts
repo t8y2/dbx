@@ -215,6 +215,7 @@ export default {
     mysqlClientCertPlaceholder: "/path/to/client.crt",
     mysqlClientKeyPlaceholder: "/path/to/client.key",
     mysqlClientCertHint: "Client certificate and private key must be provided together when MySQL requires mTLS.",
+    mysqlTlsConnectionFailureHint: "If the MySQL server does not require TLS, edit the connection, set TLS Mode to Disabled, and try again.",
     mysqlClientCertBrowse: "Choose client certificate",
     mysqlClientKeyBrowse: "Choose client private key",
     postgresSslMode: "TLS Mode",

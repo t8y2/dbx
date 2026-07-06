@@ -60,6 +60,7 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   trino: { database: "schema" },
   prestosql: { database: "schema" },
   hive: { deferred: "Hive database creation needs agent metadata validation first" },
+  spark: { deferred: "Spark database creation needs agent metadata validation first" },
   db2: { database: "schema" },
   informix: { database: "schema" },
   neo4j: { deferred: "database creation depends on edition/admin privileges" },

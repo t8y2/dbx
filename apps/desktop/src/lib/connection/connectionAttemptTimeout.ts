@@ -29,6 +29,7 @@ const DRIVER_STARTUP_FLOOR_TYPES = new Set<DatabaseType>([
   "prestosql",
   "jdbc",
   "hive",
+  "spark",
   "db2",
   "informix",
   "neo4j",

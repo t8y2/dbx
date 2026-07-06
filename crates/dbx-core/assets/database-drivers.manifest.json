@@ -1820,6 +1820,36 @@
         "userAdmin": false,
         "driverManagement": false
       }
+    },
+    {
+      "dbType": "spark",
+      "label": "Apache Spark",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "spark",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 10015,
+      "supportLevel": "operate",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": true,
+        "objectSource": false,
+        "schemaSearch": true,
+        "diagram": false,
+        "tableDataEdit": true,
+        "tableStructureEdit": false,
+        "tableImport": false,
+        "dataTransfer": true,
+        "sqlFileExecution": true,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": true
+      }
     }
   ]
 }

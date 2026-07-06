@@ -61,6 +61,7 @@ export const DATABASE_PROPERTY_EDITING_MATRIX = {
   trino: { deferred: "catalog properties are connector-managed" },
   prestosql: { deferred: "catalog properties are connector-managed" },
   hive: { deferred: "database properties need agent metadata validation first" },
+  spark: { deferred: "database properties need agent metadata validation first" },
   db2: { deferred: "schema properties need product-specific handling" },
   informix: { deferred: "schema properties need product-specific handling" },
   neo4j: { deferred: "database properties depend on edition/admin privileges" },

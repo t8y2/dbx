@@ -44,6 +44,7 @@ export type DatabaseType =
   | "trino"
   | "prestosql"
   | "hive"
+  | "spark"
   | "db2"
   | "informix"
   | "neo4j"

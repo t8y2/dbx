@@ -787,6 +787,7 @@ export const useConnectionStore = defineStore("connection", () => {
       trino: "Trino",
       prestosql: "PrestoSQL",
       hive: "Hive",
+      spark: "Apache Spark",
       db2: "DB2",
       informix: "Informix",
       neo4j: "Neo4j",

@@ -173,6 +173,13 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
         store_visible: true,
         profiles: &[],
     },
+    AgentCatalogEntry {
+        db_type: DatabaseType::Spark,
+        key: "spark",
+        label: "Apache Spark",
+        store_visible: true,
+        profiles: &[],
+    },
     AgentCatalogEntry { db_type: DatabaseType::Db2, key: "db2", label: "IBM DB2", store_visible: true, profiles: &[] },
     AgentCatalogEntry {
         db_type: DatabaseType::Informix,

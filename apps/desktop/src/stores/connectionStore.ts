@@ -3872,7 +3872,8 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function listCompletionTables(connectionId: string, database: string, filter = "", limit?: number, schema?: string): Promise<SqlCompletionTable[]> {
-    const normalizedFilter = filter.trim().toLowerCase();
+    const trimmedFilter = filter.trim();
+    const normalizedFilter = trimmedFilter.toLowerCase();
     const relaxedFilter = relaxedCompletionTableFilter(normalizedFilter);
     const cacheKey = `${connectionId}:${database}:${normalizedFilter}:${limit ?? ""}:${schema ?? ""}`;
     if (completionTablesCache.value[cacheKey]) {
@@ -3888,10 +3889,10 @@ export const useConnectionStore = defineStore("connection", () => {
           if (normalizedFilter || limit) {
             let results: SqlCompletionTable[] = [];
             try {
-              results = await listCompletionAssistantTables(connectionId, database, normalizedFilter, limit, schema);
+              results = await listCompletionAssistantTables(connectionId, database, trimmedFilter, limit, schema);
             } catch {
               if (schema) {
-                const tables = await api.listTables(connectionId, database, schema, normalizedFilter, limit);
+                const tables = await api.listTables(connectionId, database, schema, trimmedFilter, limit);
                 results = tables.map((table) => ({
                   name: table.name,
                   schema,
@@ -3939,7 +3940,7 @@ export const useConnectionStore = defineStore("connection", () => {
           return completionTablesCache.value[cacheKey];
         }
 
-        let tables = await api.listTables(connectionId, database, database, normalizedFilter, limit);
+        let tables = await api.listTables(connectionId, database, database, trimmedFilter, limit);
         if (tables.length === 0 && relaxedFilter) {
           tables = await api.listTables(connectionId, database, database, relaxedFilter, expandedCompletionLimit(limit));
         }

@@ -232,4 +232,15 @@ describe("sqlCompletion scoped metadata ranking", () => {
     expect(items.length).toBeLessThanOrEqual(200);
     expect(items[0]?.label).toBe("TempTable_000");
   });
+
+  it("ranks real Oracle tables before built-in table functions in FROM contexts", () => {
+    const sql = "SELECT * FROM ";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "oracle",
+      tables: [{ name: "ORDERS_10K", schema: "DBX_TEST", type: "table" }],
+      columnsByTable: new Map(),
+    });
+
+    expect(items.findIndex((item) => item.label === "ORDERS_10K")).toBeLessThan(items.findIndex((item) => item.label === "TABLE"));
+  });
 });

@@ -60,6 +60,7 @@ import { completionSchemasFromTree, completionTablesFromTree } from "@/lib/metad
 import { kvRootNodeLabel } from "@/lib/kv/kvRootPresentation";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
 import { appendAgentDriverUpdateHint, hasAgentDriverUpdate, type AgentDriverInstallState } from "@/lib/connection/agentDriverInstallHint";
+import { appendConnectionErrorHints } from "@/lib/connection/connectionErrorHints";
 import { createMetadataLoadTrace, logMetadataLoadTrace, MetadataLoadCoordinator, type MetadataLoadTraceLogger } from "@/lib/metadata/metadataLoadCoordinator";
 import type { MetadataScopeInput } from "@/lib/metadata/metadataLoadScope";
 import { MetadataResultCache, type MetadataCacheInvalidation } from "@/lib/metadata/metadataResultCache";
@@ -522,6 +523,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function connectionErrorWithDriverUpdateHint(config: ConnectionConfig | undefined, message: string): string {
     if (!config) return message;
+    message = appendConnectionErrorHints(config, message, i18n.global.t);
     if (!hasAgentDriverUpdate(config.db_type, agentDrivers.value, config.driver_profile)) return message;
     return appendAgentDriverUpdateHint(message, agentDriverUpdateHint());
   }

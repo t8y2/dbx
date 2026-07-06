@@ -217,6 +217,7 @@ export default withEnglishFallback({
     mysqlClientCertPlaceholder: "/path/to/client.crt",
     mysqlClientKeyPlaceholder: "/path/to/client.key",
     mysqlClientCertHint: "MySQL 要求 mTLS 时，客户端证书和私钥必须一起填写。",
+    mysqlTlsConnectionFailureHint: "如果 MySQL 服务端不要求 TLS，请编辑连接，在 TLS 模式中选择“禁用”后重试。",
     mysqlClientCertBrowse: "选择客户端证书",
     mysqlClientKeyBrowse: "选择客户端私钥",
     postgresSslMode: "TLS 模式",

@@ -183,7 +183,11 @@ pub async fn list_databases(client: &VectorClient) -> Result<Vec<String>, String
 async fn list_milvus_databases(client: &VectorClient) -> Result<Vec<String>, String> {
     // Older Milvus versions (pre-2.2) do not expose the databases endpoint; fall back to "default"
     // so the connection stays browsable instead of failing the whole tree load.
-    let body = match send_json(client.post("/v2/vectordb/databases/list"), "Milvus").await {
+    //
+    // The endpoint rejects a bodyless POST with `{"code":1801,...}` (HTTP 200, no `data` field),
+    // so send an empty JSON object like every other Milvus v2 endpoint.
+    let body = match send_json(client.post("/v2/vectordb/databases/list").json(&serde_json::json!({})), "Milvus").await
+    {
         Ok(body) => body,
         Err(_) => return Ok(vec!["default".to_string()]),
     };

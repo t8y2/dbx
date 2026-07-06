@@ -19,6 +19,7 @@ import com.dbx.agent.QueryResult;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
 import java.io.PrintStream;
+import java.io.Reader;
 import java.sql.Blob;
 import java.sql.Clob;
 import java.sql.Connection;
@@ -593,7 +594,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
                 stmt.setString(2, name);
                 stmt.setString(3, schema);
                 try (ResultSet rs = stmt.executeQuery()) {
-                    source = rs.next() ? coalesce(rs.getString(1)) : "";
+                    source = rs.next() ? coalesce(readTextColumn(rs, 1)) : "";
                 }
             }
             return new ObjectSource(name, objectType, schema, source);
@@ -610,7 +611,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
                 stmt.setString(3, schema);
                 try (ResultSet rs = stmt.executeQuery()) {
                     if (rs.next()) {
-                        String ddl = appendTableAndColumnComments(coalesce(rs.getString(1)), schema, table);
+                        String ddl = appendTableAndColumnComments(coalesce(readTextColumn(rs, 1)), schema, table);
                         return appendIndependentIndexDdl(ddl, schema, table);
                     }
                 }
@@ -913,6 +914,24 @@ public final class DamengAgent extends BaseDatabaseAgent {
         return value == null ? null : unchecked(value::getString);
     }
 
+    private static String readTextColumn(ResultSet rs, int columnIndex) throws Exception {
+        try (Reader reader = rs.getCharacterStream(columnIndex)) {
+            String value = readAll(reader);
+            if (value != null) {
+                return value;
+            }
+        } catch (Exception ignored) {
+        }
+        try {
+            Clob clob = rs.getClob(columnIndex);
+            if (clob != null) {
+                return clob.getSubString(1, Math.toIntExact(clob.length()));
+            }
+        } catch (Exception ignored) {
+        }
+        return rs.getString(columnIndex);
+    }
+
     private static String bytesToHex(byte[] bytes) {
         if (bytes == null) {
             return null;
@@ -965,18 +984,22 @@ public final class DamengAgent extends BaseDatabaseAgent {
             }
         } catch (Exception ignored) {
         }
-        try (java.io.Reader reader = rs.getCharacterStream(column)) {
-            if (reader == null) {
-                return null;
-            }
-            StringBuilder sb = new StringBuilder();
-            char[] buf = new char[4096];
-            int n;
-            while ((n = reader.read(buf)) != -1) {
-                sb.append(buf, 0, n);
-            }
-            return sb.toString();
+        try (Reader reader = rs.getCharacterStream(column)) {
+            return readAll(reader);
         }
+    }
+
+    private static String readAll(Reader reader) throws Exception {
+        if (reader == null) {
+            return null;
+        }
+        StringBuilder sb = new StringBuilder();
+        char[] buf = new char[4096];
+        int n;
+        while ((n = reader.read(buf)) != -1) {
+            sb.append(buf, 0, n);
+        }
+        return sb.toString();
     }
 
     private static List<String> splitNonEmpty(String value, String delimiter) {

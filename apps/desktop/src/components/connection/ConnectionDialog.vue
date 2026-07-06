@@ -1918,6 +1918,7 @@ async function testConnection() {
       mongoDriverMode.value = "legacy";
     }
     testResult.value = { ok: true, message: msg };
+    clearEditedConnectionErrorAfterSuccessfulTest();
   } catch (e: any) {
     if (runId !== testRunId) return;
     const message = connectionErrorWithDriverUpdateHint(config, mongodbAuthFailureHint(String(e)));
@@ -1928,7 +1929,9 @@ async function testConnection() {
       configTab.value = "advanced";
     }
     testResult.value = fallbackMessage ? { ok: true, message: fallbackMessage } : { ok: false, message };
-    if (!fallbackMessage) {
+    if (fallbackMessage) {
+      clearEditedConnectionErrorAfterSuccessfulTest();
+    } else {
       showConnectionError(message);
     }
   } finally {
@@ -1936,6 +1939,10 @@ async function testConnection() {
       isTesting.value = false;
     }
   }
+}
+
+function clearEditedConnectionErrorAfterSuccessfulTest() {
+  if (editingId.value) store.clearConnectionError(editingId.value);
 }
 
 function applyConnectionUrlToForm(input: string): boolean {

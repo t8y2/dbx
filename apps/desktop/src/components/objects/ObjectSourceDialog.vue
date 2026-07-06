@@ -6,7 +6,7 @@ import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlForDisplay, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
-import { buildEditableObjectSource, buildExecutableObjectSourceStatements, objectSourceSaveExecutionMode } from "@/lib/table/objectSourceEditor";
+import { buildEditableObjectSource, buildExecutableObjectSourceStatements, executeObjectSourceSave } from "@/lib/table/objectSourceEditor";
 import * as api from "@/lib/backend/api";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
 import { Button } from "@/components/ui/button";
@@ -144,13 +144,7 @@ async function saveSource() {
       name: props.name,
       source: draft.value,
     });
-    for (const sql of statements) {
-      if (objectSourceSaveExecutionMode(props.databaseType) === "single") {
-        await api.executeQuery(props.connectionId, props.database, sql, schema);
-      } else {
-        await api.executeScript(props.connectionId, props.database, sql, schema);
-      }
-    }
+    await executeObjectSourceSave(props.connectionId, props.database, props.databaseType, statements, schema);
     toast(t("objects.sourceSaved"));
     emit("saved");
     await loadSource(false);

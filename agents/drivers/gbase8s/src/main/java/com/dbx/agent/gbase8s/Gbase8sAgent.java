@@ -468,9 +468,14 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             String owner = trim(schema);
             List<Object> args = new ArrayList<>();
             args.add(name);
-            StringBuilder sql = new StringBuilder("SELECT tabid, owner FROM systables WHERE tabtype = 'V' AND tabname = ?");
+            StringBuilder sql = new StringBuilder("""
+                SELECT t.tabid, t.owner,
+                       (SELECT v.tabid FROM systables v WHERE UPPER(TRIM(v.tabname)) = 'VERSION') AS system_boundary_tabid
+                FROM systables t
+                WHERE t.tabtype = 'V' AND t.tabname = ?
+                """.stripIndent().trim());
             if (!owner.isEmpty()) {
-                sql.append(" AND owner = ?");
+                sql.append(" AND t.owner = ?");
                 args.add(owner);
             }
             try (PreparedStatement stmt = requireConnection().prepareStatement(sql.toString())) {
@@ -479,7 +484,9 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
                     if (!rs.next()) {
                         return true;
                     }
-                    return !isSystemCatalogView(rs.getInt("tabid"), rs.getString("owner"));
+                    int systemBoundaryTabid = rs.getInt("system_boundary_tabid");
+                    Integer boundary = rs.wasNull() ? null : systemBoundaryTabid;
+                    return !isSystemCatalogView(rs.getInt("tabid"), rs.getString("owner"), boundary);
                 }
             }
         } catch (Exception ignored) {
@@ -487,8 +494,16 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
         }
     }
 
-    private static boolean isSystemCatalogView(int tabid, String owner) {
-        return tabid < 1000 && "gbasedbt".equalsIgnoreCase(trim(owner));
+    private static boolean isSystemCatalogView(int tabid, String owner, Integer systemBoundaryTabid) {
+        if (!"gbasedbt".equalsIgnoreCase(trim(owner))) {
+            return false;
+        }
+        // GBase 8s marks system catalog tables before/at VERSION; avoid a fixed tabid threshold
+        // so ordinary gbasedbt-owned user views are still editable.
+        if (systemBoundaryTabid != null && systemBoundaryTabid > 0) {
+            return tabid <= systemBoundaryTabid;
+        }
+        return tabid < 100;
     }
 
     public static String mapColType(int coltype) {

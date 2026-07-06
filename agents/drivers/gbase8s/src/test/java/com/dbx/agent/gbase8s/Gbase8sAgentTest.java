@@ -198,9 +198,9 @@ class Gbase8sAgentTest {
                 }
             ),
             resultSet(
-                new String[]{"tabid", "owner"},
+                new String[]{"tabid", "owner", "system_boundary_tabid"},
                 new Object[][]{
-                    {1000, "gbasedbt"}
+                    {1000, "gbasedbt", 614}
                 }
             )
         ));
@@ -216,7 +216,7 @@ class Gbase8sAgentTest {
         Assertions.assertTrue(sql.get(0).contains("FROM sysviews"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("t.owner = ?"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("ORDER BY v.seqno"), sql.get(0));
-        Assertions.assertTrue(sql.get(1).contains("SELECT tabid, owner FROM systables"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("system_boundary_tabid"), sql.get(1));
     }
 
     @Test
@@ -231,9 +231,9 @@ class Gbase8sAgentTest {
                 }
             ),
             resultSet(
-                new String[]{"tabid", "owner"},
+                new String[]{"tabid", "owner", "system_boundary_tabid"},
                 new Object[][]{
-                    {614, "gbasedbt"}
+                    {614, "gbasedbt", 614}
                 }
             )
         ));

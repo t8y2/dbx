@@ -38,7 +38,7 @@ import { connectionRedactedNameLabel } from "@/lib/connection/connectionPresenta
 import { quickConnectionOpenTarget } from "@/lib/connection/connectionOpenTarget";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { findTreeNodeById, resolveNewQueryTarget } from "@/lib/sql/newQueryContext";
-import { buildExecutableObjectSourceStatements, objectSourceSaveExecutionMode } from "@/lib/table/objectSourceEditor";
+import { buildExecutableObjectSourceStatements, executeObjectSourceSave } from "@/lib/table/objectSourceEditor";
 import { resolveExecutableSql, resolveExecutableSqlWithBackend, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 import { uuid } from "@/lib/common/utils";
 import { isMacOS } from "@/lib/backend/platform";
@@ -770,13 +770,7 @@ async function saveActiveObjectSource(tab: QueryTab): Promise<boolean> {
       name: source.name,
       source: tab.sql,
     });
-    for (const sql of statements) {
-      if (objectSourceSaveExecutionMode(databaseType) === "single") {
-        await api.executeQuery(tab.connectionId, tab.database, sql, source.schema || tab.schema);
-      } else {
-        await api.executeScript(tab.connectionId, tab.database, sql, source.schema || tab.schema);
-      }
-    }
+    await executeObjectSourceSave(tab.connectionId, tab.database, databaseType, statements, source.schema || tab.schema);
     queryStore.markTabClean(tab);
     toast(t("objects.sourceSaved"), 2000);
     return true;

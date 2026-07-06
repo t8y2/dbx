@@ -44,3 +44,23 @@ export function buildEditableObjectSource(input: BuildEditableObjectSourceSqlInp
 export function objectSourceSaveExecutionMode(_databaseType: DatabaseType): ObjectSourceSaveExecutionMode {
   return "single";
 }
+
+export async function executeObjectSourceSave(connectionId: string, database: string, databaseType: DatabaseType, statements: string[], schema?: string): Promise<void> {
+  const nonEmptyStatements = statements.filter((sql) => sql.trim().length > 0);
+  if (nonEmptyStatements.length === 0) return;
+
+  if (databaseType === "informix" && nonEmptyStatements.length > 1) {
+    // Informix/GBase 8s view replacement is validate + drop/create; run it atomically
+    // so a failing final CREATE rolls back the original view instead of deleting it.
+    await api.executeInTransaction(connectionId, database, nonEmptyStatements, schema);
+    return;
+  }
+
+  for (const sql of nonEmptyStatements) {
+    if (objectSourceSaveExecutionMode(databaseType) === "single") {
+      await api.executeQuery(connectionId, database, sql, schema);
+    } else {
+      await api.executeScript(connectionId, database, sql, schema);
+    }
+  }
+}

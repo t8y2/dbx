@@ -54,7 +54,7 @@ import { codeMirrorSqlDialect, connectionUsesDatabaseObjectTreeMode, effectiveDa
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
 import { buildDropObjectSql, buildDropTableSql, buildDuplicateTableStructureSql, buildCopyTableDataSql, buildEmptyTableSql, buildTruncateTableSql, supportsDropTableCascade, type TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
 import { useToast } from "@/composables/useToast";
-import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceStatements, objectSourceSaveExecutionMode, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
+import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceStatements, executeObjectSourceSave, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
 import { buildRenameObjectSql, supportsObjectRename } from "@/lib/table/objectRenameSql";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
@@ -1236,13 +1236,7 @@ async function saveSource() {
       name: row.name,
       source: sourceDraft.value,
     });
-    for (const sql of statements) {
-      if (objectSourceSaveExecutionMode(effectiveDatabaseType.value) === "single") {
-        await api.executeQuery(props.connection.id, props.database, sql, schema);
-      } else {
-        await api.executeScript(props.connection.id, props.database, sql, schema);
-      }
-    }
+    await executeObjectSourceSave(props.connection.id, props.database, effectiveDatabaseType.value, statements, schema);
     toast(t("objects.sourceSaved"));
     sourceEditing.value = false;
     sourceDraft.value = "";

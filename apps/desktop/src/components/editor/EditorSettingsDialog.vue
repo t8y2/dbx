@@ -2350,8 +2350,8 @@ onUnmounted(cleanupPreviewEditor);
                           readonly
                           :aria-invalid="shortcutConflicts.includes(definition.id)"
                           :placeholder="t('settings.shortcutPressShortcut')"
-                          class="h-7 w-auto min-w-12 max-w-32 shrink-0 cursor-default rounded-[6px] border border-transparent bg-background px-2.5 text-center font-mono text-[13px] font-semibold text-foreground/75 shadow-inner outline-none selection:bg-transparent placeholder:text-muted-foreground aria-invalid:border-destructive/70 aria-invalid:text-destructive aria-invalid:ring-destructive/20"
-                          :class="editingShortcutId === definition.id ? 'max-w-44 cursor-text border-border/80 bg-background text-left text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35' : ''"
+                          class="h-7 w-auto min-w-12 max-w-64 shrink-0 cursor-default rounded-[6px] border border-transparent bg-background px-2.5 text-center font-mono text-[13px] font-semibold text-foreground/75 shadow-inner outline-none selection:bg-transparent placeholder:text-muted-foreground aria-invalid:border-destructive/70 aria-invalid:text-destructive aria-invalid:ring-destructive/20"
+                          :class="editingShortcutId === definition.id ? 'max-w-64 cursor-text border-border/80 bg-background text-left text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35' : ''"
                           @keydown="(event: KeyboardEvent) => onShortcutKeydown(definition.id, event)"
                         />
                         <Button
@@ -3175,8 +3175,8 @@ onUnmounted(cleanupPreviewEditor);
                         readonly
                         :aria-invalid="shortcutConflicts.includes(definition.id)"
                         :placeholder="t('settings.shortcutPressShortcut')"
-                        class="h-7 w-auto min-w-12 max-w-32 shrink-0 cursor-default rounded-[6px] border border-transparent bg-muted px-2.5 text-center font-mono text-[13px] font-semibold text-foreground/75 shadow-inner outline-none selection:bg-transparent placeholder:text-muted-foreground aria-invalid:border-destructive/70 aria-invalid:text-destructive aria-invalid:ring-destructive/20"
-                        :class="editingShortcutId === definition.id ? 'max-w-44 cursor-text border-border/80 bg-background text-left text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35' : ''"
+                        class="h-7 w-auto min-w-12 max-w-64 shrink-0 cursor-default rounded-[6px] border border-transparent bg-muted px-2.5 text-center font-mono text-[13px] font-semibold text-foreground/75 shadow-inner outline-none selection:bg-transparent placeholder:text-muted-foreground aria-invalid:border-destructive/70 aria-invalid:text-destructive aria-invalid:ring-destructive/20"
+                        :class="editingShortcutId === definition.id ? 'max-w-64 cursor-text border-border/80 bg-background text-left text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35' : ''"
                         @keydown="(event: KeyboardEvent) => onShortcutKeydown(definition.id, event)"
                       />
                       <Button

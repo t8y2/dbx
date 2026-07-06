@@ -1628,6 +1628,7 @@ export default withEnglishFallback({
     batchDropSuccess: "{count} tablas eliminadas",
     copyTableSelected: "Copiar",
     pasteTableSelected: "Pegar",
+    sourceReadOnly: "Este código fuente es de solo lectura y no se puede editar.",
   },
   structureEditor: {
     title: "Editar estructura de tabla",

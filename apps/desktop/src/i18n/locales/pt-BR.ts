@@ -1627,6 +1627,7 @@ export default withEnglishFallback({
     batchDropSuccess: "{count} tabelas removidas",
     copyTableSelected: "Copiar",
     pasteTableSelected: "Colar",
+    sourceReadOnly: "O código fonte é somente leitura e não pode ser editado.",
   },
   structureEditor: {
     title: "Editar estrutura da tabela",

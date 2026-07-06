@@ -1626,6 +1626,7 @@ export default withEnglishFallback({
     batchDropSuccess: "Eliminate {count} tabelle",
     copyTableSelected: "Copia",
     pasteTableSelected: "Incolla",
+    sourceReadOnly: "Il codice sorgente è di sola lettura, non modificabile.",
   },
   structureEditor: {
     title: "Modifica Struttura Tabella",

@@ -1659,6 +1659,7 @@ export default withEnglishFallback({
     batchDropSuccess: "{count}テーブルを削除しました",
     copyTableSelected: "コピー",
     pasteTableSelected: "貼り付け",
+    sourceReadOnly: "このソースは読み取り専用で、編集できません。",
   },
   structureEditor: {
     title: "テーブル構造を編集",

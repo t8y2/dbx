@@ -112,6 +112,7 @@ struct SqlDialectProfile {
     supports_dollar_quoted_strings: bool,
     supports_go_batch_separator: bool,
     keeps_sqlserver_module_batch_at_cursor: bool,
+    keeps_mysql_compound_create_body: bool,
 }
 
 impl Default for SqlDialectProfile {
@@ -124,6 +125,7 @@ impl Default for SqlDialectProfile {
             supports_dollar_quoted_strings: true,
             supports_go_batch_separator: false,
             keeps_sqlserver_module_batch_at_cursor: false,
+            keeps_mysql_compound_create_body: false,
         }
     }
 }
@@ -146,7 +148,7 @@ impl SqlDialectProfile {
     }
 
     fn mysql_compatible() -> Self {
-        Self { supports_hash_line_comments: true, ..Self::default() }
+        Self { supports_hash_line_comments: true, keeps_mysql_compound_create_body: true, ..Self::default() }
     }
 
     fn oracle_like() -> Self {
@@ -386,6 +388,10 @@ impl SqlStatementSplitter {
                     if self.options.profile.supports_custom_delimiter_commands && self.on_delimiter_line() {
                         self.buffer.push(ch);
                     } else if self.custom_delimiter.is_some() {
+                        self.buffer.push(ch);
+                    } else if self.options.profile.keeps_mysql_compound_create_body
+                        && mysql_compound_create_has_open_block(&self.buffer)
+                    {
                         self.buffer.push(ch);
                     } else if self.options.profile.supports_oracle_plsql_blocks
                         && starts_with_oracle_plsql_block(&self.buffer)
@@ -783,6 +789,12 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                 && custom_delimiter.is_none()
                 && !(options.profile.supports_custom_delimiter_commands && is_on_delimiter_line(sql, start, i)) =>
             {
+                if options.profile.keeps_mysql_compound_create_body
+                    && mysql_compound_create_has_open_block(&sql[start..i])
+                {
+                    i += ch.len_utf8();
+                    continue;
+                }
                 let is_oracle_plsql =
                     options.profile.supports_oracle_plsql_blocks && starts_with_oracle_plsql_block(&sql[start..i]);
                 if is_oracle_plsql {
@@ -1007,6 +1019,160 @@ fn starts_with_sqlserver_module_ddl(sql: &str) -> bool {
 
 fn is_sqlserver_module_keyword(token: &str) -> bool {
     ["FUNCTION", "PROC", "PROCEDURE", "TRIGGER", "VIEW"].iter().any(|keyword| token.eq_ignore_ascii_case(keyword))
+}
+
+fn mysql_compound_create_has_open_block(sql: &str) -> bool {
+    let tokens = sql_word_tokens(sql);
+    if !starts_with_mysql_compound_create_tokens(&tokens) {
+        return false;
+    }
+
+    let mut stack: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let token = tokens[i].as_str();
+        match token {
+            "BEGIN" => stack.push("BLOCK"),
+            "IF" => {
+                if tokens.get(i.wrapping_sub(1)).map(|prev| prev.as_str()) != Some("END") {
+                    stack.push("IF");
+                }
+            }
+            "LOOP" => {
+                if tokens.get(i.wrapping_sub(1)).map(|prev| prev.as_str()) != Some("END") {
+                    stack.push("LOOP");
+                }
+            }
+            "CASE" => {
+                if tokens.get(i.wrapping_sub(1)).map(|prev| prev.as_str()) != Some("END") {
+                    stack.push("CASE");
+                }
+            }
+            "END" => {
+                let top = stack.last().copied();
+                let target = match (tokens.get(i + 1).map(|next| next.as_str()), top) {
+                    (Some("IF"), _) => "IF",
+                    (Some("LOOP"), _) => "LOOP",
+                    (Some("CASE"), _) => "CASE",
+                    (_, Some("CASE")) => "CASE",
+                    _ => "BLOCK",
+                };
+                if top == Some(target) {
+                    stack.pop();
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    !stack.is_empty()
+}
+
+fn starts_with_mysql_compound_create_tokens(tokens: &[String]) -> bool {
+    if tokens.first().map(|token| token.as_str()) != Some("CREATE") {
+        return false;
+    }
+    tokens.iter().skip(1).take(16).any(|token| matches!(token.as_str(), "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT"))
+}
+
+fn sql_word_tokens(sql: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut chars = sql.char_indices().peekable();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut in_backtick = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+
+    while let Some((_, ch)) = chars.next() {
+        let next = chars.peek().map(|(_, ch)| *ch);
+
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+            }
+            continue;
+        }
+        if in_block_comment {
+            if ch == '*' && next == Some('/') {
+                chars.next();
+                in_block_comment = false;
+            }
+            continue;
+        }
+        if in_single_quote {
+            if ch == '\'' {
+                if next == Some('\'') {
+                    chars.next();
+                } else {
+                    in_single_quote = false;
+                }
+            }
+            continue;
+        }
+        if in_double_quote {
+            if ch == '"' {
+                if next == Some('"') {
+                    chars.next();
+                } else {
+                    in_double_quote = false;
+                }
+            }
+            continue;
+        }
+        if in_backtick {
+            if ch == '`' {
+                if next == Some('`') {
+                    chars.next();
+                } else {
+                    in_backtick = false;
+                }
+            }
+            continue;
+        }
+
+        if ch == '-' && next == Some('-') {
+            chars.next();
+            in_line_comment = true;
+            continue;
+        }
+        if ch == '#' {
+            in_line_comment = true;
+            continue;
+        }
+        if ch == '/' && next == Some('*') {
+            chars.next();
+            in_block_comment = true;
+            continue;
+        }
+        if ch == '\'' {
+            in_single_quote = true;
+            continue;
+        }
+        if ch == '"' {
+            in_double_quote = true;
+            continue;
+        }
+        if ch == '`' {
+            in_backtick = true;
+            continue;
+        }
+        if ch.is_ascii_alphabetic() || ch == '_' {
+            let mut token = String::from(ch);
+            while let Some((_, next_ch)) = chars.peek().copied() {
+                if next_ch.is_ascii_alphanumeric() || next_ch == '_' || next_ch == '$' {
+                    token.push(next_ch);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            tokens.push(token.to_ascii_uppercase());
+        }
+    }
+
+    tokens
 }
 
 fn first_sql_tokens(sql: &str, limit: usize) -> Vec<String> {
@@ -2974,6 +3140,72 @@ delimiter ;";
                 "-- ----------------------------\n-- Procedure structure for fix_collation\n-- ----------------------------\nDROP PROCEDURE IF EXISTS `fix_collation`",
                 "CREATE PROCEDURE `fix_collation`()\nBEGIN\nDECLARE done INT DEFAULT FALSE;\nDECLARE tbl_name VARCHAR(255);\nDECLARE cur CURSOR FOR\nSELECT TABLE_NAME FROM information_schema.TABLES\nWHERE TABLE_SCHEMA = DATABASE() AND TABLE_COLLATION = 'utf8mb4_0900_ai_ci';\nDECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;\n\n    OPEN cur;\n    read_loop: LOOP\n        FETCH cur INTO tbl_name;\n        IF done THEN LEAVE read_loop; END IF;\n        SET @sql = CONCAT('ALTER TABLE `', tbl_name, '` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci');\n        PREPARE stmt FROM @sql;\n        EXECUTE stmt;\n        DEALLOCATE PREPARE stmt;\n    END LOOP;\n    CLOSE cur;\nEND",
             ]
+        );
+    }
+
+    #[test]
+    fn mysql_standalone_create_procedure_keeps_body_semicolons_together() {
+        let sql = "\
+CREATE PROCEDURE dbx_frame_write_smoke()
+BEGIN
+  INSERT INTO dbx_frame_test_people
+    (username, nickname, status, note)
+  VALUES
+    (CONCAT('dbx_proc_', DATE_FORMAT(NOW(), '%H%i%s')), '过程创建用户', 1, 'created by procedure; delimiter test');
+
+  INSERT INTO dbx_frame_test_audit
+    (person_id, action, detail)
+  SELECT
+    id,
+    'procedure_insert',
+    CONCAT('procedure touched ', username)
+  FROM dbx_frame_test_people
+  WHERE username LIKE 'dbx_proc_%'
+  ORDER BY id DESC
+  LIMIT 1;
+END";
+
+        assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Mysql), vec![sql.to_string()]);
+    }
+
+    #[test]
+    fn mysql_standalone_create_procedure_keeps_nested_blocks_together() {
+        let sql = "\
+CREATE PROCEDURE p_nested()
+BEGIN
+  IF 1 = 1 THEN
+    SELECT 'inside if; still body';
+  END IF;
+  SELECT 2;
+END";
+
+        assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Mysql), vec![sql.to_string()]);
+    }
+
+    #[test]
+    fn mysql_standalone_create_procedure_handles_case_expression_end() {
+        let procedure = "\
+CREATE PROCEDURE p_case_expr()
+BEGIN
+  SELECT CASE WHEN 1 = 1 THEN 'yes; still string' ELSE 'no' END AS answer;
+END";
+        let sql = format!("{procedure};\nSELECT 3;");
+
+        assert_eq!(
+            split_sql_statements_for_database(&sql, DatabaseType::Mysql),
+            vec![procedure.to_string(), "SELECT 3".to_string()]
+        );
+    }
+
+    #[test]
+    fn mysql_standalone_create_procedure_range_keeps_body_semicolons_together() {
+        let sql = "CREATE PROCEDURE p_range()\nBEGIN\n  SELECT 1;\n  SELECT 2;\nEND;\nSELECT 3;";
+        let ranges =
+            split_sql_statement_ranges_with_options(sql, SqlParsingOptions::for_database_type(DatabaseType::Mysql));
+
+        assert_eq!(
+            ranges.iter().map(|range| range.text.as_str()).collect::<Vec<_>>(),
+            vec!["CREATE PROCEDURE p_range()\nBEGIN\n  SELECT 1;\n  SELECT 2;\nEND", "SELECT 3"]
         );
     }
 

@@ -157,6 +157,16 @@ describe("splitSqlStatementRanges", () => {
     const procedureSql = mysqlProcedureDelimiterFixture.slice(mysqlProcedureDelimiterFixture.indexOf("CREATE"), mysqlProcedureDelimiterFixture.indexOf("$$\n\nDELIMITER"));
     expect(rangeSqlTexts(splitSqlStatementRanges(mysqlProcedureDelimiterFixture, "mysql"))).toEqual([procedureSql, "CALL sync_user_status()", "SELECT * FROM audit_logs ORDER BY id DESC LIMIT 10"]);
   });
+
+  it("treats SQL Server GO lines as batch delimiters", () => {
+    const sql = "SELECT 1\nGO\nSELECT 2;\n  GO 2\nSELECT 3";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "sqlserver"))).toEqual(["SELECT 1", "SELECT 2", "SELECT 3"]);
+  });
+
+  it("does not treat GO inside strings or comments as a SQL Server batch delimiter", () => {
+    const sql = "SELECT 'GO'\n-- GO\nSELECT 2\nGO\nSELECT 3";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "sqlserver"))).toEqual(["SELECT 'GO'\n-- GO\nSELECT 2", "SELECT 3"]);
+  });
 });
 
 describe("statementRangeAtCursor", () => {
@@ -378,6 +388,18 @@ WHERE request_json LIKE '%"paperFlag":null%';`;
     expect(statementRangeAtCursor(mysqlProcedureDelimiterFixture, indexOf(mysqlProcedureDelimiterFixture, "UPDATE users"), "mysql")?.sql.trim()).toBe(procedureSql);
     expect(statementRangeAtCursor(mysqlProcedureDelimiterFixture, indexOf(mysqlProcedureDelimiterFixture, "INSERT INTO"), "mysql")?.sql.trim()).toBe(procedureSql);
   });
+
+  it("returns null on SQL Server GO batch delimiter lines", () => {
+    const sql = "SELECT 1\nGO\nSELECT 2";
+    expect(statementRangeAtCursor(sql, indexOf(sql, "GO"), "sqlserver")).toBeNull();
+  });
+
+  it("returns the current SQL Server batch around GO delimiters", () => {
+    const sql = "SELECT 1\nGO\nSELECT 2\nGO\nSELECT 3";
+    expect(statementRangeAtCursor(sql, indexOf(sql, "1"), "sqlserver")?.sql.trim()).toBe("SELECT 1");
+    expect(statementRangeAtCursor(sql, indexOf(sql, "2"), "sqlserver")?.sql.trim()).toBe("SELECT 2");
+    expect(statementRangeAtCursor(sql, indexOf(sql, "3"), "sqlserver")?.sql.trim()).toBe("SELECT 3");
+  });
 });
 
 describe("executableStatementRanges", () => {
@@ -416,6 +438,11 @@ describe("executableStatementRanges", () => {
     const procedureSql = mysqlProcedureDelimiterFixture.slice(mysqlProcedureDelimiterFixture.indexOf("CREATE"), mysqlProcedureDelimiterFixture.indexOf("$$\n\nDELIMITER"));
 
     expect(rangeSqlTexts(executableStatementRanges(mysqlProcedureDelimiterFixture, "mysql"))).toEqual([procedureSql, "CALL sync_user_status()", "SELECT * FROM audit_logs ORDER BY id DESC LIMIT 10"]);
+  });
+
+  it("returns executable SQL Server batches without GO delimiter lines", () => {
+    const sql = "SELECT 1\nGO\nSELECT 2;";
+    expect(rangeSqlTexts(executableStatementRanges(sql, "sqlserver"))).toEqual(["SELECT 1", "SELECT 2"]);
   });
 });
 
@@ -544,6 +571,12 @@ describe("buildExecutionCandidates", () => {
 
     expect(candidateSummaries(candidates)[0]).toBe(`cursor:${procedureSql}`);
   });
+
+  it("uses the current SQL Server batch for cursor candidates", () => {
+    const sql = "SELECT 1\nGO\nSELECT 2;";
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "2"), "sqlserver");
+    expect(candidateSummaries(candidates)).toEqual(["cursor:SELECT 2", "all:SELECT 1\nGO\nSELECT 2;"]);
+  });
 });
 
 describe("hasMultipleExecutionTargets", () => {
@@ -567,6 +600,10 @@ describe("hasMultipleExecutionTargets", () => {
   it("counts MySQL delimiter scripts by executable statements", () => {
     const sql = "select COUNT(1) FROM your_table;\ndelimiter ;;\nselect COUNT(1) FROM your_table;\n\n;;\ndelimiter ;";
     expect(hasMultipleExecutionTargets(sql, "mysql")).toBe(true);
+  });
+
+  it("counts SQL Server GO batches as multiple execution targets", () => {
+    expect(hasMultipleExecutionTargets("SELECT 1\nGO\nSELECT 2", "sqlserver")).toBe(true);
   });
 
   it("does not show multiple targets for MySQL DESC UPDATE joins", () => {

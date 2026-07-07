@@ -12,6 +12,7 @@ export interface TableMetadata {
   schema?: string;
   tableName: string;
   tableType?: string;
+  catalog?: string;
   columns: ColumnInfo[];
   indexes: IndexInfo[];
   primaryKeys: string[];
@@ -26,6 +27,7 @@ export interface TableMetadataRequest {
   tableType?: string;
   databaseType: DatabaseType | string;
   driverProfile?: string;
+  catalog?: string;
   force?: boolean;
   traceLogger?: MetadataLoadTraceLogger;
 }
@@ -45,7 +47,7 @@ const tableMetadataCoordinator = new MetadataLoadCoordinator((event) => {
   console.debug("[DBX][metadata-load:table-coordinator]", event);
 });
 
-export function tableMetadataScope(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType">): MetadataScopeInput {
+export function tableMetadataScope(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType" | "catalog">): MetadataScopeInput {
   return {
     kind: "table-metadata",
     connectionId: request.connectionId,
@@ -54,10 +56,11 @@ export function tableMetadataScope(request: Pick<TableMetadataRequest, "connecti
     tableName: request.tableName,
     tableType: request.tableType,
     driverProfile: request.driverProfile || request.databaseType,
+    extra: request.catalog ? { catalog: request.catalog } : undefined,
   };
 }
 
-export function getCachedTableMetadata(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType">): TableMetadataLoadResult | undefined {
+export function getCachedTableMetadata(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType" | "catalog">): TableMetadataLoadResult | undefined {
   const hit = tableMetadataCache.get(tableMetadataScope(request));
   if (!hit) return undefined;
   return { metadata: hit.value, cacheStatus: hit.stale ? "stale" : "hit", ageMs: hit.ageMs };
@@ -68,6 +71,7 @@ export function tableMetadataToDataTabMeta(metadata: TableMetadata, schema = met
     schema,
     tableName: metadata.tableName,
     tableType: metadata.tableType,
+    catalog: metadata.catalog,
     columns: metadata.columns,
     primaryKeys: metadata.primaryKeys,
   };
@@ -92,13 +96,14 @@ export async function loadTableMetadata(request: TableMetadataRequest): Promise<
   const metadata = await tableMetadataCoordinator.run(
     scope,
     async () => {
-      const columns = await api.getColumns(request.connectionId, request.database, request.schema ?? "", request.tableName);
-      const indexes = await api.listIndexes(request.connectionId, request.database, request.schema ?? "", request.tableName).catch((): IndexInfo[] => []);
+      const columns = await api.getColumns(request.connectionId, request.database, request.schema ?? "", request.tableName, request.catalog);
+      const indexes = await api.listIndexes(request.connectionId, request.database, request.schema ?? "", request.tableName, request.catalog).catch((): IndexInfo[] => []);
       const primaryKeys = editableRowIdentifierColumns(request.databaseType as DatabaseType, columns, indexes, request.tableType);
       return {
         schema: request.schema || undefined,
         tableName: request.tableName,
         tableType: request.tableType,
+        catalog: request.catalog,
         columns,
         indexes,
         primaryKeys,

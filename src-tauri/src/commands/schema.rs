@@ -4,12 +4,36 @@ use tauri::State;
 use crate::commands::connection::AppState;
 use dbx_core::db;
 
+/// Resolve a non-internal catalog for dispatch to the Doris multi-catalog path.
+/// Thin wrapper around the shared dbx-core resolver so the Tauri and HTTP
+/// backends stay in sync.
+async fn external_doris_catalog(state: &AppState, connection_id: &str, catalog: Option<&str>) -> Option<String> {
+    dbx_core::schema::resolve_external_doris_catalog(state, connection_id, catalog).await
+}
+
 #[tauri::command]
 pub async fn list_databases(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
 ) -> Result<Vec<db::DatabaseInfo>, String> {
     dbx_core::schema::list_databases_core(&state, &connection_id).await
+}
+
+#[tauri::command]
+pub async fn list_doris_catalogs(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<Vec<db::CatalogInfo>, String> {
+    dbx_core::schema::list_doris_catalogs_core(&state, &connection_id).await
+}
+
+#[tauri::command]
+pub async fn list_doris_catalog_databases(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    catalog: String,
+) -> Result<Vec<db::DatabaseInfo>, String> {
+    dbx_core::schema::list_doris_catalog_databases_core(&state, &connection_id, &catalog).await
 }
 
 #[tauri::command]
@@ -107,7 +131,21 @@ pub async fn list_tables(
     limit: Option<usize>,
     offset: Option<usize>,
     object_types: Option<Vec<String>>,
+    catalog: Option<String>,
 ) -> Result<Vec<db::TableInfo>, String> {
+    if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
+        return dbx_core::schema::list_doris_catalog_tables_core(
+            &state,
+            &connection_id,
+            &catalog,
+            &database,
+            filter.as_deref(),
+            limit,
+            offset,
+            object_types.as_deref(),
+        )
+        .await;
+    }
     dbx_core::schema::list_tables_core(
         &state,
         &connection_id,
@@ -128,7 +166,18 @@ pub async fn get_table_comment(
     database: String,
     schema: String,
     table: String,
+    catalog: Option<String>,
 ) -> Result<Option<String>, String> {
+    if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
+        return dbx_core::schema::get_doris_catalog_table_comment_core(
+            &state,
+            &connection_id,
+            &catalog,
+            &database,
+            &table,
+        )
+        .await;
+    }
     dbx_core::schema::get_table_comment_core(&state, &connection_id, &database, &schema, &table).await
 }
 
@@ -142,7 +191,35 @@ pub async fn list_objects(
     limit: Option<usize>,
     offset: Option<usize>,
     object_types: Option<Vec<String>>,
+    catalog: Option<String>,
 ) -> Result<Vec<db::ObjectInfo>, String> {
+    if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
+        let tables = dbx_core::schema::list_doris_catalog_tables_core(
+            &state,
+            &connection_id,
+            &catalog,
+            &database,
+            filter.as_deref(),
+            limit,
+            offset,
+            object_types.as_deref(),
+        )
+        .await?;
+        return Ok(tables
+            .into_iter()
+            .map(|table| db::ObjectInfo {
+                name: table.name,
+                object_type: table.table_type,
+                schema: Some(database.clone()),
+                signature: None,
+                comment: table.comment,
+                created_at: None,
+                updated_at: None,
+                parent_schema: table.parent_schema,
+                parent_name: table.parent_name,
+            })
+            .collect());
+    }
     dbx_core::schema::list_objects_core(
         &state,
         &connection_id,
@@ -203,7 +280,12 @@ pub async fn get_columns(
     database: String,
     schema: String,
     table: String,
+    catalog: Option<String>,
 ) -> Result<Vec<db::ColumnInfo>, String> {
+    if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
+        return dbx_core::schema::get_doris_catalog_columns_core(&state, &connection_id, &catalog, &database, &table)
+            .await;
+    }
     dbx_core::schema::get_columns_core(&state, &connection_id, &database, &schema, &table).await
 }
 
@@ -214,7 +296,12 @@ pub async fn list_indexes(
     database: String,
     schema: String,
     table: String,
+    catalog: Option<String>,
 ) -> Result<Vec<db::IndexInfo>, String> {
+    if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
+        return dbx_core::schema::list_doris_catalog_indexes_core(&state, &connection_id, &catalog, &database, &table)
+            .await;
+    }
     dbx_core::schema::list_indexes_core(&state, &connection_id, &database, &schema, &table).await
 }
 
@@ -225,7 +312,18 @@ pub async fn list_foreign_keys(
     database: String,
     schema: String,
     table: String,
+    catalog: Option<String>,
 ) -> Result<Vec<db::ForeignKeyInfo>, String> {
+    if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
+        return dbx_core::schema::list_doris_catalog_foreign_keys_core(
+            &state,
+            &connection_id,
+            &catalog,
+            &database,
+            &table,
+        )
+        .await;
+    }
     dbx_core::schema::list_foreign_keys_core(&state, &connection_id, &database, &schema, &table).await
 }
 
@@ -236,7 +334,12 @@ pub async fn list_triggers(
     database: String,
     schema: String,
     table: String,
+    catalog: Option<String>,
 ) -> Result<Vec<db::TriggerInfo>, String> {
+    if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
+        return dbx_core::schema::list_doris_catalog_triggers_core(&state, &connection_id, &catalog, &database, &table)
+            .await;
+    }
     dbx_core::schema::list_triggers_core(&state, &connection_id, &database, &schema, &table).await
 }
 
@@ -248,7 +351,12 @@ pub async fn get_table_ddl(
     schema: String,
     table: String,
     object_type: Option<db::ObjectSourceKind>,
+    catalog: Option<String>,
 ) -> Result<String, String> {
+    if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
+        return dbx_core::schema::get_doris_catalog_table_ddl_core(&state, &connection_id, &catalog, &database, &table)
+            .await;
+    }
     dbx_core::schema::get_table_ddl_core(&state, &connection_id, &database, &schema, &table, object_type).await
 }
 

@@ -25,6 +25,8 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
     case "linked-server-schema":
     case "mq-tenant":
       return { icon: FolderOpen, colorClass: "text-sky-400" };
+    case "doris-catalog":
+      return { icon: FolderOpen, colorClass: "text-emerald-500" };
     case "nacos-namespace":
     case "etcd-root":
       return { icon: FolderOpen, colorClass: "text-sky-500" };

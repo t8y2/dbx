@@ -33,6 +33,7 @@ const pinnableTypes: Set<TreeNodeType> = new Set([
   "linked-server",
   "linked-server-catalog",
   "linked-server-schema",
+  "doris-catalog",
   "schema",
   "table",
   "view",

@@ -644,15 +644,21 @@ async function toggle() {
         })
         .catch(() => {});
     } else if (node.type === "database" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
-      const config = connectionStore.getConfig(node.connectionId);
-      const effectiveDbType = effectiveDatabaseTypeForConnection(config);
-      if (config?.db_type === "sqlserver") {
-        await connectionStore.loadSqlServerDatabaseObjects(node.connectionId, node.database);
-      } else if (usesTreeSchemaMode(effectiveDbType) && !connectionUsesDatabaseObjectTreeMode(config)) {
-        await connectionStore.loadSchemas(node.connectionId, node.database);
+      if (node.catalog && node.catalog !== "internal") {
+        await connectionStore.loadDorisCatalogTables(node);
       } else {
-        await connectionStore.loadTables(node.connectionId, node.database);
+        const config = connectionStore.getConfig(node.connectionId);
+        const effectiveDbType = effectiveDatabaseTypeForConnection(config);
+        if (config?.db_type === "sqlserver") {
+          await connectionStore.loadSqlServerDatabaseObjects(node.connectionId, node.database);
+        } else if (usesTreeSchemaMode(effectiveDbType) && !connectionUsesDatabaseObjectTreeMode(config)) {
+          await connectionStore.loadSchemas(node.connectionId, node.database);
+        } else {
+          await connectionStore.loadTables(node.connectionId, node.database);
+        }
       }
+    } else if (node.type === "doris-catalog" && node.connectionId) {
+      await connectionStore.loadDorisCatalogDatabases(node);
     } else if (node.type === "schema" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.schema) {
       await connectionStore.loadTables(node.connectionId, node.database, node.schema);
     } else if (node.type === "linked-server-root" && node.connectionId) {
@@ -664,15 +670,15 @@ async function toggle() {
     } else if (node.type === "linked-server-schema" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.schema) {
       await connectionStore.loadTables(node.connectionId, node.database, node.schema);
     } else if ((node.type === "table" || node.type === "view" || node.type === "materialized_view") && node.connectionId && hasTreeNodeDatabaseContext(node)) {
-      await connectionStore.loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id);
+      await connectionStore.loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id, node.catalog);
     } else if (node.type === "group-columns" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
-      await connectionStore.loadColumns(node.connectionId, node.database, node.tableName, node.schema, node.id);
+      await connectionStore.loadColumns(node.connectionId, node.database, node.tableName, node.schema, node.id, node.catalog);
     } else if (node.type === "group-indexes" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
-      await connectionStore.loadIndexes(node.connectionId, node.database, node.tableName, node.schema, node.id);
+      await connectionStore.loadIndexes(node.connectionId, node.database, node.tableName, node.schema, node.id, node.catalog);
     } else if (node.type === "group-fkeys" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
-      await connectionStore.loadForeignKeys(node.connectionId, node.database, node.tableName, node.schema, node.id);
+      await connectionStore.loadForeignKeys(node.connectionId, node.database, node.tableName, node.schema, node.id, node.catalog);
     } else if (node.type === "group-triggers" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
-      await connectionStore.loadTriggers(node.connectionId, node.database, node.tableName, node.schema, node.id);
+      await connectionStore.loadTriggers(node.connectionId, node.database, node.tableName, node.schema, node.id, node.catalog);
     } else if (databaseObjectGroup) {
       await connectionStore.loadObjectGroupChildren(node);
     }
@@ -1232,6 +1238,7 @@ async function openData() {
         tableType,
         databaseType: metadataDatabaseType,
         driverProfile: config.driver_profile || config.db_type,
+        catalog: node.catalog,
       })
     : undefined;
   const tabCachedTableMeta = existingTableMeta?.tableName === node.label && existingTableMeta.schema === tableSchema && existingTableMeta.tableType === tableType && existingTableMeta.columns.length > 0 && existingTableMetaAgeMs < DATA_TAB_METADATA_TTL_MS ? existingTableMeta : undefined;
@@ -1288,6 +1295,7 @@ async function openData() {
           tableType,
           databaseType: metadataDatabaseType,
           driverProfile: config.driver_profile || config.db_type,
+          catalog: node.catalog,
           traceLogger: (event) => console.debug("[DBX][openData:metadata:trace]", { sourceTraceId: traceId, ...event }),
         });
         if (!isCurrentDataTab()) {
@@ -1344,6 +1352,7 @@ async function openData() {
       schema: tableSchema,
       tableName: node.label,
       tableType,
+      catalog: node.catalog,
       columns: columns.map((column) => column.name),
       primaryKeys,
       limit,

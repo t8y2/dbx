@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 import { uuid } from "@/lib/common/utils";
 import { ref, computed, watch } from "vue";
-import type { ColumnInfo, CompletionAssistantCandidate, CompletionAssistantObjectKind, CompletionAssistantRequest, ConnectionConfig, ForeignKeyInfo, ObjectInfo, SchemaInfo, SidebarLayout, TableInfo, TreeNode, VectorCollectionMeta } from "@/types/database";
+import type { ColumnInfo, CompletionAssistantCandidate, CompletionAssistantObjectKind, CompletionAssistantRequest, ConnectionConfig, CatalogInfo, ForeignKeyInfo, ObjectInfo, SchemaInfo, SidebarLayout, TableInfo, TreeNode, VectorCollectionMeta } from "@/types/database";
 import { applyPinnedTreeNodeState, updatePinnedTreeNodeInPlace } from "@/lib/app/pinnedItems";
 import {
   reconcileLayout,
@@ -23,9 +23,9 @@ import {
 import type { SqlCompletionColumn, SqlCompletionForeignKey, SqlCompletionObject, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import { isSchemaAware, normalizeSidebarObjectKind, sidebarObjectKindsForDatabase, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
+import { connectionIsDorisFamilyCatalogCapable, isSchemaAware, normalizeSidebarObjectKind, sidebarObjectKindsForDatabase, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
 import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
-import { buildDatabaseTreeNodes, buildDuckDbConnectionTreeNodes, sortSidebarNames, shouldIncludeDefaultDatabaseNode } from "@/lib/database/databaseTree";
+import { buildDatabaseTreeNodes, buildDuckDbConnectionTreeNodes, sortSidebarDatabases, sortSidebarNames, shouldIncludeDefaultDatabaseNode } from "@/lib/database/databaseTree";
 import { buildSqlServerDatabaseTreeNodes } from "@/lib/database/sqlServerTree";
 import { collapseExpandedTreeNodes } from "@/lib/sidebar/sidebarTreeCollapse";
 import { findDatabaseTreeNode } from "@/lib/sidebar/treeRefreshTarget";
@@ -118,6 +118,14 @@ function sqlServerLinkedServerId(connectionId: string, server: string): string {
 
 function sqlServerLinkedCatalogId(connectionId: string, server: string, catalog: string): string {
   return `${sqlServerLinkedServerId(connectionId, server)}:${nodeIdPart(catalog)}`;
+}
+
+function dorisCatalogId(connectionId: string, catalog: string): string {
+  return `${connectionId}:doris-catalog:${nodeIdPart(catalog)}`;
+}
+
+function dorisCatalogDatabaseId(connectionId: string, catalog: string, database: string): string {
+  return `${dorisCatalogId(connectionId, catalog)}:${nodeIdPart(database)}`;
 }
 
 function sqlServerLinkedRuntimeDatabase(config?: ConnectionConfig): string {
@@ -2002,49 +2010,87 @@ export const useConnectionStore = defineStore("connection", () => {
             setChildren(node, withSavedSqlRoot(connectionId, schemaNodes, node));
             await savePersistedConnectionTreeChildren(cacheKey, node.children || schemaNodes);
           } else {
-            const cacheKey = schemaCacheKey(connectionId, "databases");
-            if (!options?.force) {
-              const cached = await loadPersistedTreeChildren(node, cacheKey);
-              if (cached.hit) {
-                if (cached.isStale) refreshStaleTreeNode(node);
-                return;
-              }
-            }
-            const databases = await withMetadataLoadTimeout(connectionId, api.listDatabases(connectionId), "databases");
-            const visibleNames = filterDatabaseNamesForConnection(
-              databases.map((database) => database.name),
-              config,
-            );
-            const visibleNameSet = new Set(visibleNames);
-            const visibleDatabases = databases.filter((database) => visibleNameSet.has(database.name));
-            const effectiveDbType = effectiveDatabaseTypeForConnection(config);
-            const databaseNodes = buildDatabaseTreeNodes(connectionId, visibleDatabases, {
-              includeDefaultWhenEmpty: usesTreeSchemaMode(effectiveDbType) || shouldIncludeDefaultDatabaseNode(config, visibleDatabases),
-            });
-            if (config?.db_type === "sqlserver") {
-              const linkedServers = await withMetadataLoadTimeout(connectionId, api.listSqlServerLinkedServers(connectionId), "linked servers").catch(() => []);
-              const linkedDatabase = sqlServerLinkedRuntimeDatabase(config);
-              databaseNodes.push({
-                ...sqlServerLinkedRootNode(connectionId, linkedDatabase),
-                children: linkedServers.map((server) => ({
-                  id: sqlServerLinkedServerId(connectionId, server.name),
-                  label: server.name,
-                  type: "linked-server",
-                  connectionId,
-                  database: linkedDatabase,
-                  linkedServer: server.name,
-                  comment: [server.product, server.provider, server.data_source].filter(Boolean).join(" / ") || null,
-                  isExpanded: false,
-                  children: [],
-                })),
+            // Doris / StarRocks multi-catalog: when external catalogs exist,
+            // render a catalog grouping layer (catalog → database → tables).
+            // When only `internal` is present, fall through to the flat database
+            // list (no regression for single-catalog deployments).
+            let dorisCatalogs: CatalogInfo[] | null = null;
+            if (connectionIsDorisFamilyCatalogCapable(config)) {
+              dorisCatalogs = await withMetadataLoadTimeout(connectionId, api.listDorisCatalogs(connectionId), "catalogs").catch((error: unknown) => {
+                recordMetadataLoadError(connectionId, error);
+                return null;
               });
-              if (linkedServers.length > 0) loadedTreeNodeChildrenIds.value.add(sqlServerLinkedRootId(connectionId));
             }
-            const children = withSavedSqlRoot(connectionId, databaseNodes, node);
-            if (isSidebarSearchQueryChanged(options)) return;
-            if (!canApplyTreeMetadataResult(node)) return;
-            setChildren(node, children);
-            await savePersistedConnectionTreeChildren(cacheKey, node.children || children);
+            if (dorisCatalogs && dorisCatalogs.length > 1) {
+              const cacheKey = schemaCacheKey(connectionId, "doris-catalogs");
+              if (!options?.force) {
+                const cached = await loadPersistedTreeChildren(node, cacheKey);
+                if (cached.hit) {
+                  if (cached.isStale) refreshStaleTreeNode(node);
+                  return;
+                }
+              }
+              const catalogNodes: TreeNode[] = dorisCatalogs.map((catalog) => ({
+                id: dorisCatalogId(connectionId, catalog.name),
+                label: catalog.name,
+                type: "doris-catalog" as const,
+                connectionId,
+                catalog: catalog.name,
+                catalogType: catalog.catalog_type,
+                comment: catalog.comment ?? null,
+                isExpanded: false,
+                children: [],
+              }));
+              const children = withSavedSqlRoot(connectionId, catalogNodes, node);
+              if (isSidebarSearchQueryChanged(options)) return;
+              if (!canApplyTreeMetadataResult(node)) return;
+              setChildren(node, children);
+              await savePersistedConnectionTreeChildren(cacheKey, node.children || children);
+            } else {
+              const cacheKey = schemaCacheKey(connectionId, "databases");
+              if (!options?.force) {
+                const cached = await loadPersistedTreeChildren(node, cacheKey);
+                if (cached.hit) {
+                  if (cached.isStale) refreshStaleTreeNode(node);
+                  return;
+                }
+              }
+              const databases = await withMetadataLoadTimeout(connectionId, api.listDatabases(connectionId), "databases");
+              const visibleNames = filterDatabaseNamesForConnection(
+                databases.map((database) => database.name),
+                config,
+              );
+              const visibleNameSet = new Set(visibleNames);
+              const visibleDatabases = databases.filter((database) => visibleNameSet.has(database.name));
+              const effectiveDbType = effectiveDatabaseTypeForConnection(config);
+              const databaseNodes = buildDatabaseTreeNodes(connectionId, visibleDatabases, {
+                includeDefaultWhenEmpty: usesTreeSchemaMode(effectiveDbType) || shouldIncludeDefaultDatabaseNode(config, visibleDatabases),
+              });
+              if (config?.db_type === "sqlserver") {
+                const linkedServers = await withMetadataLoadTimeout(connectionId, api.listSqlServerLinkedServers(connectionId), "linked servers").catch(() => []);
+                const linkedDatabase = sqlServerLinkedRuntimeDatabase(config);
+                databaseNodes.push({
+                  ...sqlServerLinkedRootNode(connectionId, linkedDatabase),
+                  children: linkedServers.map((server) => ({
+                    id: sqlServerLinkedServerId(connectionId, server.name),
+                    label: server.name,
+                    type: "linked-server",
+                    connectionId,
+                    database: linkedDatabase,
+                    linkedServer: server.name,
+                    comment: [server.product, server.provider, server.data_source].filter(Boolean).join(" / ") || null,
+                    isExpanded: false,
+                    children: [],
+                  })),
+                });
+                if (linkedServers.length > 0) loadedTreeNodeChildrenIds.value.add(sqlServerLinkedRootId(connectionId));
+              }
+              const children = withSavedSqlRoot(connectionId, databaseNodes, node);
+              if (isSidebarSearchQueryChanged(options)) return;
+              if (!canApplyTreeMetadataResult(node)) return;
+              setChildren(node, children);
+              await savePersistedConnectionTreeChildren(cacheKey, node.children || children);
+            }
           }
           node.isExpanded = true;
         } catch (e) {
@@ -2670,6 +2716,134 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
+  // Doris / StarRocks multi-catalog: load the databases under a catalog node.
+  async function loadDorisCatalogDatabases(node: TreeNode, options?: LoadTreeOptions) {
+    if (!node.connectionId || !node.catalog) return;
+    const connectionId = node.connectionId;
+    const catalog = node.catalog;
+    node.isLoading = true;
+    try {
+      await ensureConnected(connectionId);
+      if (useCachedChildren(node, options)) return;
+      const config = getConfig(connectionId);
+      const databases = await withMetadataLoadTimeout(connectionId, api.listDorisCatalogDatabases(connectionId, catalog), "databases");
+      let databaseNodes: TreeNode[];
+      if (catalog === "internal") {
+        // The internal catalog's databases are rendered as standard database
+        // nodes so they reuse the existing table-loading / table-open paths.
+        const visibleNames = filterDatabaseNamesForConnection(
+          databases.map((database) => database.name),
+          config,
+        );
+        const visibleNameSet = new Set(visibleNames);
+        const visibleDatabases = databases.filter((database) => visibleNameSet.has(database.name));
+        databaseNodes = buildDatabaseTreeNodes(connectionId, visibleDatabases, { includeDefaultWhenEmpty: false });
+      } else {
+        databaseNodes = sortSidebarDatabases(databases).flatMap((database) => {
+          const name = database.name.trim();
+          if (!name) return [];
+          return [
+            {
+              id: dorisCatalogDatabaseId(connectionId, catalog, name),
+              label: name,
+              type: "database" as const,
+              connectionId,
+              database: name,
+              catalog,
+              isExpanded: false,
+              children: [],
+            },
+          ];
+        });
+      }
+      if (isSidebarSearchQueryChanged(options)) return;
+      if (!canApplyTreeMetadataResult(node)) return;
+      setChildren(node, databaseNodes);
+      node.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e);
+      throw e;
+    } finally {
+      node.isLoading = false;
+    }
+  }
+
+  // Doris / StarRocks multi-catalog: load tables under an external-catalog
+  // database node. External catalogs only expose tables/views, so a flat list
+  // (no routines/sequences/triggers) is rendered.
+  async function loadDorisCatalogTables(node: TreeNode, options?: LoadTreeOptions) {
+    if (!node.connectionId || !node.database || !node.catalog) return;
+    const connectionId = node.connectionId;
+    const { database, catalog } = node;
+    const configForScope = getConfig(connectionId);
+    const simpleObjectDisplayForScope = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
+    const objectTypesForScope = simpleObjectDisplayForScope ? supportedSidebarObjectTypes(configForScope) : undefined;
+    return runTreeMetadataLoad(
+      {
+        kind: "schema-tables",
+        connectionId,
+        database,
+        schema: undefined,
+        nodeKind: "database",
+        objectTypes: objectTypesForScope,
+        searchFilter: activeTreeLoadSearchFilter(options),
+        limit: simpleObjectDisplayForScope ? sidebarObjectGroupPageSize() + 1 : undefined,
+        offset: 0,
+        sidebarDisplayMode: simpleObjectDisplayForScope ? "simple" : "grouped",
+        driverProfile: metadataDriverProfile(configForScope),
+        extra: options?.sidebarTableSearchParentId ? { sidebarTableSearchParentId: options.sidebarTableSearchParentId } : undefined,
+      },
+      async () => {
+        node.isLoading = true;
+        try {
+          await ensureConnected(connectionId);
+          if (useCachedChildren(node, options)) return;
+          const searchFilter = activeTreeLoadSearchFilter(options);
+          const cacheKey = schemaCacheKey(connectionId, `doris-catalog:${catalog}`, database, "objects-simple-v3");
+          if (!options?.force && !searchFilter) {
+            const cached = await loadPersistedTreeChildren(node, cacheKey);
+            if (cached.hit) {
+              if (cached.isStale) refreshStaleTreeNode(node);
+              return;
+            }
+          }
+          const pageSize = sidebarObjectGroupPageSize();
+          const fetchLimit = searchFilter ? pageSize : pageSize + 1;
+          const fetchOffset = searchFilter ? undefined : 0;
+          const tables = await withMetadataLoadTimeout(connectionId, api.listTables(connectionId, database, "", searchFilter, fetchLimit, fetchOffset, objectTypesForScope, catalog), "tables");
+          const hasMore = searchFilter ? false : tables.length > pageSize;
+          const pageTables = hasMore ? tables.slice(0, pageSize) : tables;
+          indexCompletionTables(connectionId, database, undefined, tableInfosToCompletionTables(pageTables, undefined));
+          let children = buildTableTreeNodes({
+            nodeId: node.id,
+            connectionId,
+            database,
+            schema: undefined,
+            tables: pageTables,
+            catalog,
+          });
+          if (hasMore && !searchFilter) {
+            children = [...children, buildLoadMoreNode(node, pageSize, pageSize)];
+          }
+          if (isTreeLoadSearchChanged(searchFilter, options)) return;
+          if (!canApplyTreeMetadataResult(node)) return;
+          node.objectCount = children.filter((child) => child.type !== "load-more").length;
+          setChildren(node, children);
+          if (!searchFilter && !options?.sidebarTableSearchParentId) {
+            await savePersistedTreeChildren(cacheKey, children);
+          }
+          node.isExpanded = true;
+        } catch (e) {
+          recordMetadataLoadError(connectionId, e);
+          throw e;
+        } finally {
+          node.isLoading = false;
+        }
+      },
+      options,
+    );
+  }
+
   async function loadTables(connectionId: string, database: string, schema?: string, options?: LoadTreeOptions) {
     const configForScope = getConfig(connectionId);
     const simpleObjectDisplayForScope = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
@@ -3156,7 +3330,7 @@ export const useConnectionStore = defineStore("connection", () => {
     return normalizeSidebarObjectKind(type);
   }
 
-  async function loadTableGroups(connectionId: string, database: string, table: string, schema?: string, nodeId?: string) {
+  async function loadTableGroups(connectionId: string, database: string, table: string, schema?: string, nodeId?: string, catalog?: string) {
     const parentId = nodeId ?? (schema ? `${connectionId}:${database}:${schema}:${table}` : `${connectionId}:${database}:${table}`);
     const node = findNode(treeNodes.value, parentId);
     if (!node) return;
@@ -3170,6 +3344,7 @@ export const useConnectionStore = defineStore("connection", () => {
         connectionId,
         database,
         schema,
+        catalog,
         tableName: table,
         isExpanded: false,
         children: [],
@@ -3187,6 +3362,7 @@ export const useConnectionStore = defineStore("connection", () => {
           connectionId,
           database,
           schema,
+          catalog,
           tableName: table,
           isExpanded: false,
           children: [],
@@ -3202,6 +3378,7 @@ export const useConnectionStore = defineStore("connection", () => {
           connectionId,
           database,
           schema,
+          catalog,
           tableName: table,
           isExpanded: false,
           children: [],
@@ -3215,6 +3392,7 @@ export const useConnectionStore = defineStore("connection", () => {
           connectionId,
           database,
           schema,
+          catalog,
           tableName: table,
           isExpanded: false,
           children: [],
@@ -3226,7 +3404,7 @@ export const useConnectionStore = defineStore("connection", () => {
     node.isExpanded = true;
   }
 
-  async function loadColumns(connectionId: string, database: string, table: string, schema?: string, nodeId?: string) {
+  async function loadColumns(connectionId: string, database: string, table: string, schema?: string, nodeId?: string, catalog?: string) {
     const parentId = nodeId ?? (schema ? `${connectionId}:${database}:${schema}:${table}:__columns` : `${connectionId}:${database}:${table}:__columns`);
     const node = findNode(treeNodes.value, parentId);
     if (!node) return;
@@ -3261,7 +3439,7 @@ export const useConnectionStore = defineStore("connection", () => {
         return;
       }
       const querySchema = metadataQuerySchema(connectionId, database, schema);
-      const columns = await api.getColumns(connectionId, database, querySchema, table);
+      const columns = await api.getColumns(connectionId, database, querySchema, table, catalog);
       setChildren(
         node,
         columns.map((col) => ({
@@ -3284,7 +3462,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  async function loadIndexes(connectionId: string, database: string, table: string, schema?: string, nodeId?: string) {
+  async function loadIndexes(connectionId: string, database: string, table: string, schema?: string, nodeId?: string, catalog?: string) {
     const parentId = nodeId ?? (schema ? `${connectionId}:${database}:${schema}:${table}:__indexes` : `${connectionId}:${database}:${table}:__indexes`);
     const node = findNode(treeNodes.value, parentId);
     if (!node) return;
@@ -3298,7 +3476,7 @@ export const useConnectionStore = defineStore("connection", () => {
         return;
       }
       const querySchema = metadataQuerySchema(connectionId, database, schema);
-      const indexes = await api.listIndexes(connectionId, database, querySchema, table);
+      const indexes = await api.listIndexes(connectionId, database, querySchema, table, catalog);
       setChildren(
         node,
         indexes.map((idx) => ({
@@ -3321,7 +3499,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  async function loadForeignKeys(connectionId: string, database: string, table: string, schema?: string, nodeId?: string) {
+  async function loadForeignKeys(connectionId: string, database: string, table: string, schema?: string, nodeId?: string, catalog?: string) {
     const parentId = nodeId ?? (schema ? `${connectionId}:${database}:${schema}:${table}:__fkeys` : `${connectionId}:${database}:${table}:__fkeys`);
     const node = findNode(treeNodes.value, parentId);
     if (!node) return;
@@ -3335,7 +3513,7 @@ export const useConnectionStore = defineStore("connection", () => {
         return;
       }
       const querySchema = metadataQuerySchema(connectionId, database, schema);
-      const fkeys = await api.listForeignKeys(connectionId, database, querySchema, table);
+      const fkeys = await api.listForeignKeys(connectionId, database, querySchema, table, catalog);
       const cacheKey = `${connectionId}:${database}:${schema || ""}:${table}`;
       completionForeignKeysCache.value[cacheKey] = fkeys;
       evictOldestCacheEntries(completionForeignKeysCache.value, COMPLETION_CACHE_MAX);
@@ -3362,7 +3540,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  async function loadTriggers(connectionId: string, database: string, table: string, schema?: string, nodeId?: string) {
+  async function loadTriggers(connectionId: string, database: string, table: string, schema?: string, nodeId?: string, catalog?: string) {
     const parentId = nodeId ?? (schema ? `${connectionId}:${database}:${schema}:${table}:__triggers` : `${connectionId}:${database}:${table}:__triggers`);
     const node = findNode(treeNodes.value, parentId);
     if (!node) return;
@@ -3376,7 +3554,7 @@ export const useConnectionStore = defineStore("connection", () => {
         return;
       }
       const querySchema = metadataQuerySchema(connectionId, database, schema);
-      const triggers = await api.listTriggers(connectionId, database, querySchema, table);
+      const triggers = await api.listTriggers(connectionId, database, querySchema, table, catalog);
       setChildren(
         node,
         triggers.map((tr) => ({
@@ -3439,15 +3617,21 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id);
     } else if (node.type === "mongo-gridfs") {
       node.isExpanded = true;
+    } else if (node.type === "doris-catalog" && node.connectionId) {
+      await loadDorisCatalogDatabases(node, options);
     } else if (node.type === "database" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
-      const config = getConfig(node.connectionId);
-      const effectiveDbType = effectiveDatabaseTypeForConnection(config);
-      if (config?.db_type === "sqlserver") {
-        await loadSqlServerDatabaseObjects(node.connectionId, node.database, options);
-      } else if (usesTreeSchemaMode(effectiveDbType) && !connectionUsesDatabaseObjectTreeMode(config)) {
-        await loadSchemas(node.connectionId, node.database, options);
+      if (node.catalog && node.catalog !== "internal") {
+        await loadDorisCatalogTables(node, options);
       } else {
-        await loadTables(node.connectionId, node.database, undefined, options);
+        const config = getConfig(node.connectionId);
+        const effectiveDbType = effectiveDatabaseTypeForConnection(config);
+        if (config?.db_type === "sqlserver") {
+          await loadSqlServerDatabaseObjects(node.connectionId, node.database, options);
+        } else if (usesTreeSchemaMode(effectiveDbType) && !connectionUsesDatabaseObjectTreeMode(config)) {
+          await loadSchemas(node.connectionId, node.database, options);
+        } else {
+          await loadTables(node.connectionId, node.database, undefined, options);
+        }
       }
     } else if (node.type === "schema" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.schema) {
       await loadTables(node.connectionId, node.database, node.schema, options);
@@ -3460,15 +3644,15 @@ export const useConnectionStore = defineStore("connection", () => {
     } else if (node.type === "linked-server-schema" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.schema) {
       await loadTables(node.connectionId, node.database, node.schema, options);
     } else if ((node.type === "table" || node.type === "view" || node.type === "materialized_view") && node.connectionId && hasTreeNodeDatabaseContext(node)) {
-      await loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id);
+      await loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id, node.catalog);
     } else if (node.type === "group-columns" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
-      await loadColumns(node.connectionId, node.database, node.tableName, node.schema, node.id);
+      await loadColumns(node.connectionId, node.database, node.tableName, node.schema, node.id, node.catalog);
     } else if (node.type === "group-indexes" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
-      await loadIndexes(node.connectionId, node.database, node.tableName, node.schema, node.id);
+      await loadIndexes(node.connectionId, node.database, node.tableName, node.schema, node.id, node.catalog);
     } else if (node.type === "group-fkeys" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
-      await loadForeignKeys(node.connectionId, node.database, node.tableName, node.schema, node.id);
+      await loadForeignKeys(node.connectionId, node.database, node.tableName, node.schema, node.id, node.catalog);
     } else if (node.type === "group-triggers" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
-      await loadTriggers(node.connectionId, node.database, node.tableName, node.schema, node.id);
+      await loadTriggers(node.connectionId, node.database, node.tableName, node.schema, node.id, node.catalog);
     } else if (node.type === "group-tables" || node.type === "group-views" || node.type === "group-materialized-views" || node.type === "group-procedures" || node.type === "group-functions" || node.type === "group-sequences" || node.type === "group-packages") {
       await loadObjectGroupChildren(node, options);
     } else if (node.type === "group-partitions") {
@@ -4811,6 +4995,8 @@ export const useConnectionStore = defineStore("connection", () => {
     loadSqlServerLinkedServers,
     loadSqlServerLinkedServerCatalogs,
     loadSqlServerLinkedServerSchemas,
+    loadDorisCatalogDatabases,
+    loadDorisCatalogTables,
     loadTables,
     loadTableForLocate,
     loadObjectGroupChildren,

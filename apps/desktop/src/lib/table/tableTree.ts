@@ -7,7 +7,7 @@ export function normalizeDatabaseObjectName(name: string): string {
   return name.trim();
 }
 
-export function buildTableTreeNodes({ nodeId, connectionId, database, schema, tables }: { nodeId: string; connectionId: string; database: string; schema?: string; tables: TableInfo[] }): TreeNode[] {
+export function buildTableTreeNodes({ nodeId, connectionId, database, schema, tables, catalog }: { nodeId: string; connectionId: string; database: string; schema?: string; tables: TableInfo[]; catalog?: string }): TreeNode[] {
   const entries = tables.flatMap((table) => {
     const name = normalizeDatabaseObjectName(table.name);
     if (!name) return [];
@@ -26,6 +26,7 @@ export function buildTableTreeNodes({ nodeId, connectionId, database, schema, ta
         comment: table.comment,
         parentSchema: table.parent_schema,
         parentName: table.parent_name,
+        catalog,
       }),
     ];
   });
@@ -54,6 +55,7 @@ function makeTableTreeEntry({
   comment,
   parentSchema,
   parentName,
+  catalog,
 }: {
   nodeId: string;
   connectionId: string;
@@ -66,6 +68,7 @@ function makeTableTreeEntry({
   comment?: string | null;
   parentSchema?: string | null;
   parentName?: string | null;
+  catalog?: string;
 }): TableTreeEntry {
   const normalizedParentSchema = parentSchema ? normalizeDatabaseObjectName(parentSchema) : undefined;
   const normalizedParentName = parentName ? normalizeDatabaseObjectName(parentName) : undefined;
@@ -79,6 +82,7 @@ function makeTableTreeEntry({
     connectionId,
     database,
     schema,
+    catalog,
     isExpanded: false,
     children: [],
   };
@@ -293,6 +297,7 @@ function buildPartitionTree(entries: TableTreeEntry[], connectionId: string, dat
       connectionId,
       database,
       schema: entry.schema,
+      catalog: entry.node.catalog,
       tableName: entry.node.label,
       objectCount: partitionChildren.length,
       isExpanded: false,

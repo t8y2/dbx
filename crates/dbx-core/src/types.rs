@@ -19,6 +19,17 @@ pub struct LinkedServerInfo {
     pub data_source: Option<String>,
 }
 
+/// A catalog exposed by a multi-catalog engine (e.g. Doris / StarRocks).
+/// `internal` is the engine's native catalog; other entries are external
+/// catalogs (iceberg, hive, jdbc, ...) federated through the same connection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogInfo {
+    pub name: String,
+    pub catalog_type: String,
+    pub is_current: bool,
+    pub comment: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableInfo {
     pub name: String,

@@ -1,10 +1,25 @@
-import type { DatabaseType, TreeNodeType } from "@/types/database";
+import type { ConnectionConfig, DatabaseType, TreeNodeType } from "@/types/database";
 import { supportsDatabaseFeature } from "@/lib/database/databaseDriverManifest";
 import { canEditTableStructure } from "@/lib/table/tableStructureCapabilities";
 import { DATABASE_OBJECT_TREE_TYPES, FETCH_FIRST_TYPES, PG_LIKE_STRUCTURE_TYPES, SCHEMA_AWARE_TYPES, SINGLE_DATABASE_TYPES, TREE_SCHEMA_TYPES } from "@/lib/database/databaseCapabilitySets";
 
 export function isSchemaAware(dbType?: DatabaseType): boolean {
   return !!dbType && SCHEMA_AWARE_TYPES.has(dbType);
+}
+
+/**
+ * Doris-family engines that support multi-catalog federation (`SHOW CATALOGS`):
+ * Doris (incl. SelectDB) and StarRocks. Manticore Search shares the MySQL code
+ * path but has no catalog concept, so it is excluded.
+ */
+export function isDorisFamilyCatalogCapable(dbType?: DatabaseType, driverProfile?: string | null): boolean {
+  if (dbType === "doris" || dbType === "starrocks") return true;
+  return driverProfile === "doris" || driverProfile === "selectdb" || driverProfile === "starrocks";
+}
+
+export function connectionIsDorisFamilyCatalogCapable(connection: Pick<ConnectionConfig, "db_type" | "driver_profile"> | undefined): boolean {
+  if (!connection) return false;
+  return isDorisFamilyCatalogCapable(connection.db_type, connection.driver_profile);
 }
 
 export function usesTreeSchemaMode(dbType?: DatabaseType): boolean {

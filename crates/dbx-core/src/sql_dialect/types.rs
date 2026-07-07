@@ -16,7 +16,7 @@ pub struct TableSelectSqlOptions<'a> {
     pub limit: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableDataSelectSqlOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -24,6 +24,11 @@ pub struct TableDataSelectSqlOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
     pub table_name: String,
+    /// Doris / StarRocks multi-catalog: when set to a non-`internal` catalog,
+    /// the FROM clause is prefixed with the catalog
+    /// (`<catalog>.<schema>.<table>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub table_type: Option<String>,
     #[serde(default)]

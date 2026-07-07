@@ -521,6 +521,200 @@ pub async fn list_sqlserver_linked_server_tables_core(
     Ok(vec![])
 }
 
+// ---------------------------------------------------------------------------
+// Doris / StarRocks multi-catalog federation.
+//
+// These engines expose external catalogs (iceberg, hive, jdbc, ...) alongside
+// the native `internal` catalog via `SHOW CATALOGS`. The functions below browse
+// a specific catalog's databases/tables and read table metadata using 3-part
+// qualified names (`<catalog>.<database>.<table>`), which the engines accept
+// directly. The native `internal` catalog continues to use the existing
+// `list_databases_core` / `list_tables_core` paths.
+// ---------------------------------------------------------------------------
+
+/// `SHOW CATALOGS` → catalogs visible to the current user. Always includes
+/// `internal` (defensive fallback) so single-catalog deployments degrade to the
+/// existing flat sidebar rather than breaking.
+pub async fn list_doris_catalogs_core(state: &AppState, connection_id: &str) -> Result<Vec<db::CatalogInfo>, String> {
+    let pool_key = state.get_or_create_pool(connection_id, None).await?;
+    let connections = state.connections.read().await;
+    if let Some(PoolKind::Mysql(p, _)) = connections.get(&pool_key) {
+        return db::mysql::list_doris_catalogs(p).await;
+    }
+    Ok(vec![db::CatalogInfo {
+        name: "internal".to_string(),
+        catalog_type: "internal".to_string(),
+        is_current: true,
+        comment: None,
+    }])
+}
+
+/// `SHOW DATABASES FROM <catalog>` → databases in the given catalog.
+///
+/// For `internal`, system databases are filtered (mirroring `list_databases_core`).
+/// For external catalogs, permission errors degrade to an empty list (the user
+/// asked that inaccessible catalogs simply not be shown).
+pub async fn list_doris_catalog_databases_core(
+    state: &AppState,
+    connection_id: &str,
+    catalog: &str,
+) -> Result<Vec<db::DatabaseInfo>, String> {
+    let pool_key = state.get_or_create_pool(connection_id, None).await?;
+    let db_config = connection_config(state, connection_id).await;
+    let connections = state.connections.read().await;
+    let pool = connections.get(&pool_key).ok_or("Pool not found")?;
+    let PoolKind::Mysql(p, _) = pool else {
+        return Ok(vec![]);
+    };
+    let databases = db::mysql::list_databases_show_from(p, catalog).await;
+    // External catalogs may reject `SHOW DATABASES FROM <catalog>` when the user
+    // lacks permission — surface as an empty list rather than an error.
+    let databases = match databases {
+        Ok(databases) => databases,
+        Err(error) => {
+            log::warn!(
+                "[schema][doris:list_catalog_databases] connection_id={} catalog={} error={}",
+                connection_id,
+                catalog,
+                error
+            );
+            return Ok(vec![]);
+        }
+    };
+    if catalog == "internal" {
+        return Ok(filter_mysql_system_databases_for_config(databases, db_config.as_ref()));
+    }
+    Ok(databases)
+}
+
+/// `SHOW TABLES FROM <catalog>.<database>` → tables in an external catalog.
+pub async fn list_doris_catalog_tables_core(
+    state: &AppState,
+    connection_id: &str,
+    catalog: &str,
+    database: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    object_types: Option<&[String]>,
+) -> Result<Vec<db::TableInfo>, String> {
+    let pool_key = state.get_or_create_pool(connection_id, None).await?;
+    let connections = state.connections.read().await;
+    let pool = connections.get(&pool_key).ok_or("Pool not found")?;
+    let PoolKind::Mysql(p, _) = pool else {
+        return Ok(vec![]);
+    };
+    db::mysql::list_tables_show_from(p, catalog, database)
+        .await
+        .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types))
+}
+
+/// Columns of an external catalog table via `SHOW COLUMNS FROM <catalog>.<db>.<table>`.
+pub async fn get_doris_catalog_columns_core(
+    state: &AppState,
+    connection_id: &str,
+    catalog: &str,
+    database: &str,
+    table: &str,
+) -> Result<Vec<db::ColumnInfo>, String> {
+    let pool_key = state.get_or_create_pool(connection_id, None).await?;
+    let connections = state.connections.read().await;
+    let pool = connections.get(&pool_key).ok_or("Pool not found")?;
+    let PoolKind::Mysql(p, _) = pool else {
+        return Ok(vec![]);
+    };
+    db::mysql::get_columns_show_from(p, catalog, database, table).await.map(deduplicate_column_infos)
+}
+
+/// DDL for an external catalog table via `SHOW CREATE TABLE <catalog>.<db>.<table>`.
+pub async fn get_doris_catalog_table_ddl_core(
+    state: &AppState,
+    connection_id: &str,
+    catalog: &str,
+    database: &str,
+    table: &str,
+) -> Result<String, String> {
+    let pool_key = state.get_or_create_pool(connection_id, None).await?;
+    let connections = state.connections.read().await;
+    let pool = connections.get(&pool_key).ok_or("Pool not found")?;
+    let PoolKind::Mysql(p, _) = pool else {
+        return Err("DDL not supported for this connection".to_string());
+    };
+    db::mysql::show_create_table_ddl_from(p, catalog, database, table).await
+}
+
+/// Best-effort index listing for an external catalog table (derived from DDL).
+pub async fn list_doris_catalog_indexes_core(
+    state: &AppState,
+    connection_id: &str,
+    catalog: &str,
+    database: &str,
+    table: &str,
+) -> Result<Vec<db::IndexInfo>, String> {
+    let pool_key = state.get_or_create_pool(connection_id, None).await?;
+    let connections = state.connections.read().await;
+    let pool = connections.get(&pool_key).ok_or("Pool not found")?;
+    let PoolKind::Mysql(p, _) = pool else {
+        return Ok(vec![]);
+    };
+    db::mysql::list_doris_catalog_indexes(p, catalog, database, table).await
+}
+
+/// Table comment for an external catalog table. Doris does not reliably expose
+/// comments for external catalog tables, so this returns `None`.
+pub async fn get_doris_catalog_table_comment_core(
+    _state: &AppState,
+    _connection_id: &str,
+    _catalog: &str,
+    _database: &str,
+    _table: &str,
+) -> Result<Option<String>, String> {
+    Ok(None)
+}
+
+/// Foreign keys are not applicable to external catalog tables.
+pub async fn list_doris_catalog_foreign_keys_core(
+    _state: &AppState,
+    _connection_id: &str,
+    _catalog: &str,
+    _database: &str,
+    _table: &str,
+) -> Result<Vec<db::ForeignKeyInfo>, String> {
+    Ok(vec![])
+}
+
+/// Triggers are not applicable to external catalog tables.
+pub async fn list_doris_catalog_triggers_core(
+    _state: &AppState,
+    _connection_id: &str,
+    _catalog: &str,
+    _database: &str,
+    _table: &str,
+) -> Result<Vec<db::TriggerInfo>, String> {
+    Ok(vec![])
+}
+
+/// Resolve a non-internal catalog for dispatch to the Doris multi-catalog path.
+/// Returns `Some(catalog)` only when `catalog` is a non-empty, non-`internal`
+/// name and the connection is a Doris-family engine that supports
+/// `SHOW CATALOGS`. Otherwise `None` (caller uses the default metadata path).
+pub async fn resolve_external_doris_catalog(
+    state: &AppState,
+    connection_id: &str,
+    catalog: Option<&str>,
+) -> Option<String> {
+    let catalog = catalog?.trim();
+    if catalog.is_empty() || catalog == "internal" {
+        return None;
+    }
+    let config = connection_config(state, connection_id).await?;
+    if is_doris_family_catalog_capable_config(&config) {
+        Some(catalog.to_string())
+    } else {
+        None
+    }
+}
+
 async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Vec<db::DatabaseInfo>, String> {
     log::info!("[list_databases] connection_id={connection_id}");
     let db_config = connection_config(state, connection_id).await;
@@ -2964,6 +3158,37 @@ mod tests {
             vec!["ORDERS".to_string(), "ORDERS_VIEW".to_string()]
         );
     }
+
+    #[test]
+    fn doris_family_catalog_capable_matches_doris_and_starrocks_only() {
+        // Doris and StarRocks expose multi-catalog federation.
+        assert!(super::is_doris_family_catalog_capable_config(&test_connection_config(DatabaseType::Doris)));
+        assert!(super::is_doris_family_catalog_capable_config(&test_connection_config(DatabaseType::StarRocks)));
+
+        // Driver profiles for Doris/SelectDB/StarRocks also qualify.
+        let mut doris = test_connection_config(DatabaseType::Mysql);
+        doris.driver_profile = Some("doris".to_string());
+        assert!(super::is_doris_family_catalog_capable_config(&doris));
+
+        let mut selectdb = test_connection_config(DatabaseType::Mysql);
+        selectdb.driver_profile = Some("selectdb".to_string());
+        assert!(super::is_doris_family_catalog_capable_config(&selectdb));
+
+        let mut starrocks = test_connection_config(DatabaseType::Mysql);
+        starrocks.driver_profile = Some("starrocks".to_string());
+        assert!(super::is_doris_family_catalog_capable_config(&starrocks));
+
+        // ManticoreSearch shares the MySQL code path but has no catalog concept.
+        assert!(!super::is_doris_family_catalog_capable_config(&test_connection_config(DatabaseType::ManticoreSearch)));
+
+        let mut manticore = test_connection_config(DatabaseType::Mysql);
+        manticore.driver_profile = Some("manticoresearch".to_string());
+        assert!(!super::is_doris_family_catalog_capable_config(&manticore));
+
+        // Plain MySQL / Postgres are not catalog-capable.
+        assert!(!super::is_doris_family_catalog_capable_config(&test_connection_config(DatabaseType::Mysql)));
+        assert!(!super::is_doris_family_catalog_capable_config(&test_connection_config(DatabaseType::Postgres)));
+    }
 }
 
 pub async fn list_objects_core(
@@ -4377,6 +4602,14 @@ fn oracle_agent_paging_likely_applied(enabled: bool, limit: Option<usize>, retur
 fn is_doris_family_config(config: &ConnectionConfig) -> bool {
     matches!(config.db_type, DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch)
         || matches!(config.driver_profile.as_deref(), Some("doris" | "selectdb" | "starrocks" | "manticoresearch"))
+}
+
+/// Doris-family engines that support multi-catalog federation (`SHOW CATALOGS`).
+/// Manticore Search is excluded — it shares the MySQL code path but has no
+/// catalog concept.
+pub fn is_doris_family_catalog_capable_config(config: &ConnectionConfig) -> bool {
+    matches!(config.db_type, DatabaseType::Doris | DatabaseType::StarRocks)
+        || matches!(config.driver_profile.as_deref(), Some("doris" | "selectdb" | "starrocks"))
 }
 
 fn is_manticoresearch_config(config: &ConnectionConfig) -> bool {

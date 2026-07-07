@@ -258,6 +258,7 @@ fn builds_table_data_where_and_schema_queries() {
             offset: None,
             where_input: Some("where status = 'active'".to_string()),
             include_row_id: false,
+            ..Default::default()
         }),
         "SELECT * FROM `users` WHERE (status = 'active') LIMIT 100;"
     );
@@ -275,6 +276,7 @@ fn builds_table_data_where_and_schema_queries() {
             offset: None,
             where_input: None,
             include_row_id: false,
+            ..Default::default()
         }),
         "SELECT * FROM `sys_dic` LIMIT 100;"
     );
@@ -292,6 +294,7 @@ fn builds_table_data_where_and_schema_queries() {
             offset: Some(100),
             where_input: Some("WHERE amount > 10".to_string()),
             include_row_id: false,
+            ..Default::default()
         }),
         "SELECT * FROM \"public\".\"orders\" WHERE (amount > 10) LIMIT 50 OFFSET 100;"
     );
@@ -309,6 +312,7 @@ fn builds_table_data_where_and_schema_queries() {
             offset: None,
             where_input: None,
             include_row_id: false,
+            ..Default::default()
         }),
         "SELECT * FROM \"DBX_TEST\".\"PRODUCTS\" LIMIT 100;"
     );
@@ -326,6 +330,7 @@ fn builds_table_data_where_and_schema_queries() {
             offset: None,
             where_input: Some("`customer_name` = 'Acme'".to_string()),
             include_row_id: false,
+            ..Default::default()
         }),
         "SELECT * FROM `sales_report` WHERE (`customer_name` = 'Acme') LIMIT 100;"
     );
@@ -343,6 +348,7 @@ fn builds_table_data_where_and_schema_queries() {
             offset: None,
             where_input: Some("WHERE amount > 10".to_string()),
             include_row_id: false,
+            ..Default::default()
         }),
         "SELECT * FROM \"DB2INST1\".\"ORDERS\" WHERE (amount > 10) FETCH FIRST 50 ROWS ONLY"
     );
@@ -360,6 +366,7 @@ fn builds_table_data_where_and_schema_queries() {
             offset: Some(100),
             where_input: Some("WHERE amount > 10".to_string()),
             include_row_id: false,
+            ..Default::default()
         }),
         "SELECT * FROM \"ORDERS\" WHERE (amount > 10) ORDER BY \"ID\" ASC ROWS 101 TO 150"
     );
@@ -377,6 +384,7 @@ fn builds_table_data_where_and_schema_queries() {
             offset: Some(100),
             where_input: Some("WHERE amount > 10".to_string()),
             include_row_id: false,
+            ..Default::default()
         }),
         "SELECT \"ID\", \"AMOUNT\" FROM (SELECT dbx_inner.*, ROWNUM AS \"__dbx_row_num\" FROM (SELECT \"ID\", \"AMOUNT\" FROM \"DBXTEST\".\"ORDERS\" WHERE (amount > 10) ORDER BY \"ID\" ASC) dbx_inner WHERE ROWNUM <= 150) WHERE \"__dbx_row_num\" > 100"
     );
@@ -394,6 +402,7 @@ fn builds_table_data_where_and_schema_queries() {
             offset: None,
             where_input: None,
             include_row_id: false,
+            ..Default::default()
         }),
         "SELECT * FROM (SELECT * FROM \"DBXTEST\".\"ORDERS\") WHERE ROWNUM <= 100"
     );
@@ -411,6 +420,7 @@ fn builds_table_data_where_and_schema_queries() {
             offset: None,
             where_input: Some("WHERE amount > 10".to_string()),
             include_row_id: false,
+            ..Default::default()
         }),
         "SELECT * FROM (SELECT * FROM \"DBXTEST\".\"ORDERS\" WHERE (amount > 10)) WHERE ROWNUM <= 50"
     );
@@ -428,6 +438,7 @@ fn builds_table_data_where_and_schema_queries() {
                 offset: Some(100),
                 where_input: Some("WHERE amount > 10".to_string()),
                 include_row_id: false,
+                ..Default::default()
             }),
             "SELECT \"ID\", \"AMOUNT\" FROM (SELECT dbx_t.\"ID\", dbx_t.\"AMOUNT\", ROW_NUMBER() OVER () AS \"__dbx_row_num\" FROM \"DB2INST1\".\"ORDERS\" dbx_t WHERE (amount > 10)) dbx_page WHERE \"__dbx_row_num\" > 100 AND \"__dbx_row_num\" <= 150 ORDER BY \"__dbx_row_num\""
         );
@@ -445,6 +456,7 @@ fn builds_table_data_where_and_schema_queries() {
             offset: None,
             where_input: None,
             include_row_id: false,
+            ..Default::default()
         }),
         "SELECT TOP 100 * FROM \"Ens\".\"AlarmResponse\""
     );
@@ -462,6 +474,7 @@ fn builds_table_data_where_and_schema_queries() {
             offset: None,
             where_input: None,
             include_row_id: false,
+            ..Default::default()
         }),
         "SELECT * FROM root.test.device2 LIMIT 100;"
     );
@@ -483,6 +496,7 @@ fn builds_informix_table_data_with_skip_first_pagination() {
             offset: Some(100),
             where_input: Some("WHERE active = 1".to_string()),
             include_row_id: false,
+            ..Default::default()
         }),
         "SELECT SKIP 100 FIRST 50 * FROM users WHERE (active = 1)"
     );
@@ -516,6 +530,7 @@ fn explicit_table_data_order_is_preserved() {
             offset: None,
             where_input: None,
             include_row_id: false,
+            ..Default::default()
         }),
         "SELECT * FROM \"public\".\"country_gdp\" ORDER BY \"iso3\" ASC LIMIT 100;"
     );
@@ -536,6 +551,7 @@ fn builds_iris_table_data_sql_with_literal_top_and_quoted_object() {
         offset: None,
         where_input: Some("WHERE \"Status\" = 'Open'".to_string()),
         include_row_id: false,
+        ..Default::default()
     });
 
     assert_eq!(
@@ -569,6 +585,7 @@ fn builds_table_data_special_column_queries() {
             offset: None,
             where_input: None,
             include_row_id: false,
+            ..Default::default()
         }),
         "SELECT tbname, `ts` AS `ts`, `current` AS `current`, `voltage` AS `voltage`, `location` AS `location`, `groupid` AS `groupid` FROM `test_db`.`meters` LIMIT 100;"
     );
@@ -586,6 +603,7 @@ fn builds_table_data_special_column_queries() {
             offset: None,
             where_input: None,
             include_row_id: false,
+            ..Default::default()
         }),
         "SELECT `ts` AS `ts`, `current` AS `current` FROM `test_db`.`d1001` LIMIT 100;"
     );
@@ -603,6 +621,7 @@ fn builds_table_data_special_column_queries() {
             offset: None,
             where_input: None,
             include_row_id: false,
+            ..Default::default()
         }),
         "SELECT `ts` AS `ts`, `current` AS `current` FROM `test_db`.`d1001` LIMIT 100;"
     );
@@ -620,6 +639,7 @@ fn builds_table_data_special_column_queries() {
             offset: None,
             where_input: None,
             include_row_id: false,
+            ..Default::default()
         }),
         "SELECT `id` AS `id`, `name` AS `name` FROM `departments` LIMIT 100;"
     );
@@ -641,6 +661,7 @@ fn builds_sqlserver_table_data_pages() {
             offset: None,
             where_input: Some("where id = 1".to_string()),
             include_row_id: false,
+            ..Default::default()
         }),
         "SELECT TOP (25) * FROM [dbo].[accounts] WHERE (id = 1)"
     );
@@ -658,6 +679,7 @@ fn builds_sqlserver_table_data_pages() {
                 offset: Some(100),
                 where_input: None,
                 include_row_id: false,
+                ..Default::default()
             }),
             "WITH [dbx_page] AS (SELECT [order_id], [customer], ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS [__dbx_row_num] FROM [sales].[orders]) SELECT [order_id], [customer] FROM [dbx_page] WHERE [__dbx_row_num] > 100 AND [__dbx_row_num] <= 150 ORDER BY [__dbx_row_num]"
         );
@@ -679,6 +701,7 @@ fn builds_oracle_and_neo4j_table_data_queries() {
             offset: None,
             where_input: None,
             include_row_id: true,
+            ..Default::default()
         }),
         "SELECT * FROM (SELECT ROWIDTOCHAR(t.ROWID) AS \"__DBX_ROWID\", t.* FROM \"DBXTEST\".\"DBX_LOAD_TABLE_006\" t) WHERE ROWNUM <= 100"
     );
@@ -696,6 +719,7 @@ fn builds_oracle_and_neo4j_table_data_queries() {
             offset: None,
             where_input: None,
             include_row_id: true,
+            ..Default::default()
         }),
         "SELECT \"__DBX_ROWID\", \"ID\", \"NAME\" FROM (SELECT ROWIDTOCHAR(t.ROWID) AS \"__DBX_ROWID\", t.* FROM \"DBXTEST\".\"DBX_LOAD_TABLE_006\" t) WHERE ROWNUM <= 100"
     );
@@ -713,6 +737,7 @@ fn builds_oracle_and_neo4j_table_data_queries() {
             offset: None,
             where_input: None,
             include_row_id: true,
+            ..Default::default()
         }),
         "SELECT \"ID\", \"NAME\" FROM (SELECT \"ID\", \"NAME\" FROM \"DBXTEST\".\"DBX_JOIN_VIEW\") WHERE ROWNUM <= 100"
     );
@@ -730,6 +755,7 @@ fn builds_oracle_and_neo4j_table_data_queries() {
                 offset: None,
                 where_input: None,
                 include_row_id: false,
+                ..Default::default()
             }),
             "MATCH (n:`Employee`) RETURN elementId(n) AS `__DBX_ELEMENT_ID`, n.`id` AS `id`, n.`first name` AS `first name`, n.`role` AS `role` LIMIT 100;"
         );

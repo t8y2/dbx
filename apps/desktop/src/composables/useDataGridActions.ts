@@ -39,6 +39,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       schema: tableMeta?.schema,
       tableName: tableMeta?.tableName ?? "",
       tableType: tableMeta?.tableType,
+      catalog: tableMeta?.catalog,
       columns: tableMeta?.columns.map((column) => column.name),
       primaryKeys,
       includeRowId: useRowId,

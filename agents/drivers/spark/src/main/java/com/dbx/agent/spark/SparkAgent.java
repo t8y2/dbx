@@ -156,7 +156,7 @@ public final class SparkAgent extends AbstractJdbcAgent {
         // catalog so switching schemas does not reset the catalog back to the
         // default (spark_catalog).
         if (configuredCatalog != null && !configuredCatalog.isEmpty()) {
-            if (schema == null || schema.isEmpty()) {
+            if (schema == null || schema.isEmpty() || schema.equals(configuredCatalog)) {
                 return "USE " + JdbcIdentifiers.INSTANCE.backtick(configuredCatalog);
             }
             return "USE " + JdbcIdentifiers.INSTANCE.backtick(configuredCatalog)
@@ -198,9 +198,22 @@ public final class SparkAgent extends AbstractJdbcAgent {
 
     private List<ColumnInfo> getColumnsFromDescribe(String schema, String table) throws Exception {
         List<ColumnInfo> result = new ArrayList<>();
-        useSchema(schema);
+        // Use catalog-qualified DESCRIBE when a catalog is configured, avoiding
+        // USE <schema> which would generate USE `catalog`.`catalog` when the
+        // sidebar passes the catalog name as the schema (Lance case).
+        String describeTarget;
+        if (configuredCatalog != null && !configuredCatalog.isEmpty()) {
+            describeTarget = JdbcIdentifiers.INSTANCE.backtick(configuredCatalog);
+            if (schema != null && !schema.isEmpty() && !schema.equals(configuredCatalog)) {
+                describeTarget += "." + JdbcIdentifiers.INSTANCE.backtick(schema);
+            }
+            describeTarget += "." + JdbcIdentifiers.INSTANCE.backtick(table);
+        } else {
+            useSchema(schema);
+            describeTarget = JdbcIdentifiers.INSTANCE.backtick(table);
+        }
         try (java.sql.Statement stmt = requireConnected().createStatement();
-             ResultSet rs = stmt.executeQuery("DESCRIBE " + JdbcIdentifiers.INSTANCE.backtick(table))) {
+             ResultSet rs = stmt.executeQuery("DESCRIBE " + describeTarget)) {
             while (rs.next()) {
                 String colName = trimToNull(rs.getString(1));
                 if (colName == null || colName.startsWith("#")) {

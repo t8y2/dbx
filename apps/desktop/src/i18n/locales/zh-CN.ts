@@ -1879,6 +1879,7 @@ export default withEnglishFallback({
     deleteTitle: "删除 ZooKeeper znode",
     keyPlaceholder: "/path/to/znode",
     keyRequired: "Znode 路径不能为空",
+    rootReadonly: "根 znode 不能被修改，请填写子节点路径",
     saved: "Znode 已保存",
     deleted: "Znode 已删除",
     base64Readonly: "Base64 值当前版本只读。",

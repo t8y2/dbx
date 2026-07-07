@@ -1879,6 +1879,7 @@ export default {
     deleteTitle: "Delete ZooKeeper znode",
     keyPlaceholder: "/path/to/znode",
     keyRequired: "Znode path is required",
+    rootReadonly: "Root znode cannot be modified. Enter a child znode path.",
     saved: "Znode saved",
     deleted: "Znode deleted",
     base64Readonly: "Base64 values are read-only in this version.",

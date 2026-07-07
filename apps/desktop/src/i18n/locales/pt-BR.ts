@@ -1820,6 +1820,7 @@ export default withEnglishFallback({
     deleteTitle: "Excluir znode do ZooKeeper",
     keyPlaceholder: "/caminho/para/znode",
     keyRequired: "Caminho do znode é obrigatório",
+    rootReadonly: "O znode raiz não pode ser modificado. Informe o caminho de um znode filho.",
     saved: "Znode salvo",
     deleted: "Znode excluído",
     base64Readonly: "Valores Base64 são somente leitura nesta versão.",

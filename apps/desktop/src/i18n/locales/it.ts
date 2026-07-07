@@ -1819,6 +1819,7 @@ export default withEnglishFallback({
     deleteTitle: "Elimina znode ZooKeeper",
     keyPlaceholder: "/percorso/per/znode",
     keyRequired: "Il percorso znode e obbligatorio",
+    rootReadonly: "Lo znode radice non può essere modificato. Inserisci il percorso di uno znode figlio.",
     saved: "Znode salvato",
     deleted: "Znode eliminato",
     base64Readonly: "I valori Base64 sono in sola lettura in questa versione.",

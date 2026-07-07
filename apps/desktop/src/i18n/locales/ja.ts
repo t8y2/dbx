@@ -1572,6 +1572,7 @@ export default withEnglishFallback({
     deleteTitle: "ZooKeeper znodeを削除",
     keyPlaceholder: "/path/to/znode",
     keyRequired: "Znodeパスは必須です",
+    rootReadonly: "ルートznodeは変更できません。子znodeのパスを入力してください。",
     saved: "Znodeを保存しました",
     deleted: "Znodeを削除しました",
     base64Readonly: "Base64値はこのバージョンでは読み取り専用です。",

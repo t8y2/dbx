@@ -47,6 +47,7 @@ export default withEnglishFallback({
     hidePreviewSql: "SQLプレビューを非表示",
     saveSql: "SQLライブラリに保存",
     openSql: "SQLファイルを開く",
+    exPasteSqlInCondition: "ExPaste: IN条件として貼り付け",
     theme: "テーマ",
     themeLight: "ライト",
     themeDark: "ダーク",
@@ -448,6 +449,12 @@ export default withEnglishFallback({
     setDefaultDatabase: "デフォルトに設定",
     defaultDatabase: "デフォルト",
     clearDatabase: "データベースをクリア",
+    exPasteNoValues: "クリップボードにIN条件で使える値がありません",
+    exPasteNotList: "変換可能な複数値リストを検出できませんでした",
+    exPasteTooLarge: "クリップボードの内容が大きすぎます。最大 {limit} 文字まで対応しています。",
+    exPasteTooManyValues: "値が多すぎます。最大 {limit} 件まで対応しています。",
+    exPasteClipboardReadFailed: "クリップボードの読み取りに失敗しました: {message}",
+    exPastePasted: "{count} 件のIN条件値を貼り付けました",
     completion: {
       nullValue: "NULL値",
       isNull: "NULLかどうか",
@@ -3067,6 +3074,7 @@ export default withEnglishFallback({
     officialDocs: "公式ドキュメント",
     shortcutUppercaseSelection: "選択範囲を大文字に変換",
     shortcutLowercaseSelection: "選択範囲を小文字に変換",
+    shortcutExPasteSqlInCondition: "ExPaste: IN条件として貼り付け",
   },
   driverStore: {
     progressJreExtract: "JREを展開中...",

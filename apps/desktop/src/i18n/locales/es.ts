@@ -47,6 +47,7 @@ export default withEnglishFallback({
     hidePreviewSql: "Ocultar vista previa de SQL",
     saveSql: "Guardar en biblioteca SQL",
     openSql: "Abrir archivo SQL",
+    exPasteSqlInCondition: "ExPaste: pegar como condición IN",
     theme: "Tema",
     themeLight: "Claro",
     themeDark: "Oscuro",
@@ -451,6 +452,12 @@ export default withEnglishFallback({
     setDefaultDatabase: "Establecer como predeterminada",
     defaultDatabase: "Predeterminada",
     clearDatabase: "Limpiar base de datos",
+    exPasteNoValues: "El portapapeles no contiene valores para una condición IN",
+    exPasteNotList: "No se detectó una lista de varios valores convertible",
+    exPasteTooLarge: "El contenido del portapapeles es demasiado grande. Máximo {limit} caracteres.",
+    exPasteTooManyValues: "Demasiados valores. Máximo {limit}.",
+    exPasteClipboardReadFailed: "No se pudo leer el portapapeles: {message}",
+    exPastePasted: "Se pegaron {count} valores de condición IN",
     completion: {
       nullValue: "Valor NULL",
       isNull: "Comprobar si es NULL",
@@ -3069,6 +3076,7 @@ export default withEnglishFallback({
     officialDocs: "Documentación oficial",
     shortcutUppercaseSelection: "Convertir selección a mayúsculas",
     shortcutLowercaseSelection: "Convertir selección a minúsculas",
+    shortcutExPasteSqlInCondition: "ExPaste: pegar como condición IN",
   },
   driverStore: {
     progressJreExtract: "Extrayendo JRE...",

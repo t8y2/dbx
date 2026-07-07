@@ -47,6 +47,7 @@ export default withEnglishFallback({
     hidePreviewSql: "隱藏 SQL 預覽",
     saveSql: "儲存到 SQL 庫",
     openSql: "開啟 SQL 檔案",
+    exPasteSqlInCondition: "ExPaste：貼上為 IN 條件",
     theme: "主題",
     themeLight: "亮色",
     themeDark: "暗色",
@@ -450,6 +451,12 @@ export default withEnglishFallback({
     setDefaultDatabase: "設為預設",
     defaultDatabase: "預設資料庫",
     clearDatabase: "清除資料庫",
+    exPasteNoValues: "剪貼簿中沒有可用於 IN 條件的值",
+    exPasteNotList: "未識別到可轉換的多值列表",
+    exPasteTooLarge: "剪貼簿內容過大，最多支援 {limit} 個字元",
+    exPasteTooManyValues: "值過多，最多支援 {limit} 個",
+    exPasteClipboardReadFailed: "讀取剪貼簿失敗：{message}",
+    exPastePasted: "已貼上 {count} 個 IN 條件值",
     completion: {
       nullValue: "空值",
       isNull: "判斷是否為 NULL",
@@ -2971,6 +2978,7 @@ export default withEnglishFallback({
     queryExportKeysetOptimizationEnabledDescription: "僅適用於可安全識別的單表查詢；複雜查詢會自動回退。",
     shortcutUppercaseSelection: "選取內容轉為大寫",
     shortcutLowercaseSelection: "選取內容轉為小寫",
+    shortcutExPasteSqlInCondition: "ExPaste：貼上為 IN 條件",
   },
   driverStore: {
     progressJreExtract: "解壓縮 JRE……",

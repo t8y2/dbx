@@ -878,6 +878,10 @@ async function importResultArchive() {
   }
 }
 
+function pasteClipboardAsSqlInCondition() {
+  void contentAreaRef.value?.pasteClipboardAsSqlInCondition?.();
+}
+
 async function openSqlFilePath(path: string) {
   if (!isTauriRuntime()) return;
   try {
@@ -1819,6 +1823,7 @@ onUnmounted(() => {
                   @save-sql="void openSaveSqlDialog()"
                   @open-sql="openSqlFile"
                   @import-result-archive="importResultArchive"
+                  @paste-sql-in-condition="pasteClipboardAsSqlInCondition"
                   @change-connection="changeActiveConnection"
                   @change-database="changeActiveDatabase"
                   @change-schema="changeActiveSchema"

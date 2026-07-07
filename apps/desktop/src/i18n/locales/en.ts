@@ -45,6 +45,7 @@ export default {
     hidePreviewSql: "Hide SQL Preview",
     saveSql: "Save to SQL Library",
     openSql: "Open SQL file",
+    exPasteSqlInCondition: "ExPaste: paste as IN condition",
     theme: "Theme",
     themeLight: "Light",
     themeDark: "Dark",
@@ -458,6 +459,12 @@ export default {
     setDefaultDatabase: "Set Default",
     defaultDatabase: "Default",
     clearDatabase: "Clear database",
+    exPasteNoValues: "Clipboard has no values for an IN condition",
+    exPasteNotList: "No convertible multi-value list was detected",
+    exPasteTooLarge: "Clipboard content is too large. Maximum supported length is {limit} characters.",
+    exPasteTooManyValues: "Too many values. Maximum supported count is {limit}.",
+    exPasteClipboardReadFailed: "Failed to read clipboard: {message}",
+    exPastePasted: "Pasted {count} IN condition values",
     completion: {
       nullValue: "NULL value",
       isNull: "Check if NULL",
@@ -3156,6 +3163,7 @@ export default {
     officialDocs: "Official docs",
     shortcutUppercaseSelection: "Convert selection to uppercase",
     shortcutLowercaseSelection: "Convert selection to lowercase",
+    shortcutExPasteSqlInCondition: "ExPaste: paste as IN condition",
   },
   driverStore: {
     progressJreExtract: "Extracting JRE...",

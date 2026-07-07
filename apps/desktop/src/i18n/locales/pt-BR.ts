@@ -47,6 +47,7 @@ export default withEnglishFallback({
     hidePreviewSql: "Ocultar Visualização SQL",
     saveSql: "Salvar na Biblioteca SQL",
     openSql: "Abrir arquivo SQL",
+    exPasteSqlInCondition: "ExPaste: colar como condição IN",
     theme: "Tema",
     themeLight: "Claro",
     themeDark: "Escuro",
@@ -450,6 +451,12 @@ export default withEnglishFallback({
     setDefaultDatabase: "Definir Padrão",
     defaultDatabase: "Padrão",
     clearDatabase: "Limpar banco de dados",
+    exPasteNoValues: "A área de transferência não contém valores para uma condição IN",
+    exPasteNotList: "Nenhuma lista de múltiplos valores conversível foi detectada",
+    exPasteTooLarge: "O conteúdo da área de transferência é grande demais. Máximo de {limit} caracteres.",
+    exPasteTooManyValues: "Valores demais. Máximo de {limit}.",
+    exPasteClipboardReadFailed: "Falha ao ler a área de transferência: {message}",
+    exPastePasted: "{count} valores de condição IN colados",
     completion: {
       nullValue: "Valor NULL",
       isNull: "Verificar se é NULL",
@@ -3068,6 +3075,7 @@ export default withEnglishFallback({
     officialDocs: "Documentação oficial",
     shortcutUppercaseSelection: "Converter seleção em maiúsculas",
     shortcutLowercaseSelection: "Converter seleção em minúsculas",
+    shortcutExPasteSqlInCondition: "ExPaste: colar como condição IN",
   },
   driverStore: {
     progressJreExtract: "Extraindo JRE...",

@@ -46,6 +46,7 @@ export default withEnglishFallback({
     hidePreviewSql: "Nascondi anteprima SQL",
     saveSql: "Salva nella Libreria SQL",
     openSql: "Apri file SQL",
+    exPasteSqlInCondition: "ExPaste: incolla come condizione IN",
     theme: "Tema",
     themeLight: "Chiaro",
     themeDark: "Scuro",
@@ -449,6 +450,12 @@ export default withEnglishFallback({
     setDefaultDatabase: "Imposta Predefinito",
     defaultDatabase: "Predefinito",
     clearDatabase: "Cancella database",
+    exPasteNoValues: "Gli appunti non contengono valori per una condizione IN",
+    exPasteNotList: "Nessun elenco di più valori convertibile rilevato",
+    exPasteTooLarge: "Il contenuto degli appunti è troppo grande. Massimo {limit} caratteri.",
+    exPasteTooManyValues: "Troppi valori. Massimo {limit}.",
+    exPasteClipboardReadFailed: "Impossibile leggere gli appunti: {message}",
+    exPastePasted: "Incollati {count} valori per la condizione IN",
     completion: {
       nullValue: "Valore NULL",
       isNull: "Verifica se NULL",
@@ -3067,6 +3074,7 @@ export default withEnglishFallback({
     officialDocs: "Documenti ufficiali",
     shortcutUppercaseSelection: "Converti selezione in maiuscolo",
     shortcutLowercaseSelection: "Converti selezione in minuscolo",
+    shortcutExPasteSqlInCondition: "ExPaste: incolla come condizione IN",
   },
   driverStore: {
     progressJreExtract: "Estrazione JRE...",

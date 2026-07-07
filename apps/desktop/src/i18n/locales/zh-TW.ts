@@ -918,6 +918,8 @@ export default withEnglishFallback({
     },
     sortUnsupported: "目前 SQL 不支援完整排序，請改為單條 SELECT 查詢後再嘗試。",
     truncatedHint: "結果已截斷，僅顯示前 {count} 行。可經由底部分頁繼續載入，或調整每頁行數。",
+    filterBuilderSearchColumns: "搜尋欄位...",
+    filterBuilderNoMatchingColumns: "沒有匹配的欄位",
   },
   exportProgress: {
     title: "匯出資料表資料",

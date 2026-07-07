@@ -917,6 +917,8 @@ export default withEnglishFallback({
     renderMode: "レンダーモード",
     undoChange: "変更を元に戻す",
     redoChange: "変更をやり直す",
+    filterBuilderSearchColumns: "フィールドを検索...",
+    filterBuilderNoMatchingColumns: "一致するフィールドがありません",
   },
   exportProgress: {
     title: "テーブルデータをエクスポート中",

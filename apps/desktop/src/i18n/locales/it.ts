@@ -917,6 +917,8 @@ export default withEnglishFallback({
     },
     sortUnsupported: "Questo SQL non supporta l'ordinamento sull'intero risultato. Riprova con una query SELECT semplice.",
     truncatedHint: "Risultati troncati a {count} righe. Usa la paginazione a piè di pagina o regola le righe per pagina.",
+    filterBuilderSearchColumns: "Cerca campi...",
+    filterBuilderNoMatchingColumns: "Nessun campo corrispondente",
   },
   exportProgress: {
     title: "Esportazione Dati Tabella",

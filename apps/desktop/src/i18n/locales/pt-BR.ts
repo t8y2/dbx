@@ -918,6 +918,8 @@ export default withEnglishFallback({
     },
     sortUnsupported: "Este SQL não suporta a ordenação do resultado completo. Tente novamente com uma única consulta SELECT.",
     truncatedHint: "Resultados truncados em {count} linhas. Use a paginação no rodapé ou ajuste as linhas por página.",
+    filterBuilderSearchColumns: "Pesquisar campos...",
+    filterBuilderNoMatchingColumns: "Nenhum campo correspondente",
   },
   exportProgress: {
     title: "Exportando Dados da Tabela",

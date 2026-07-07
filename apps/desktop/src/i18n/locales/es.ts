@@ -919,6 +919,8 @@ export default withEnglishFallback({
     },
     sortUnsupported: "Este SQL no admite ordenamiento del resultado completo. Intenta con una consulta SELECT simple.",
     truncatedHint: "Los resultados están limitados a 10.000 filas. Usa LIMIT/OFFSET en tu consulta para paginar.",
+    filterBuilderSearchColumns: "Buscar columnas...",
+    filterBuilderNoMatchingColumns: "Sin columnas coincidentes",
   },
   exportProgress: {
     title: "Exportando datos de la tabla",

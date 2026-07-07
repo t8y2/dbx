@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, onBeforeUnmount, h } from "vue";
+import { computed, ref, onMounted, onBeforeUnmount, h, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { DatabaseZap, FilePlus2, Loader2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, CloudDownload, Package, FileDown, FolderTree } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
@@ -61,6 +61,7 @@ const { toast } = useToast();
 const settingsStore = useSettingsStore();
 const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
 const { isMac, isDesktop, showControls, isMaximized, isFullscreen, minimize, toggleMaximize, close } = useWindowControls();
+const checkingUpdates = computed(() => props.checkingUpdates);
 
 const themeTriggerIcon = computed(() => {
   if (isSystemAppThemeMode(props.themeMode)) return SunMoon;
@@ -108,7 +109,9 @@ function checkToolbarWidth() {
 
 const rightWrapper = ref<HTMLElement>();
 const rightOverflowCount = ref(0);
-let prevRightAvailable = 0;
+let toolbarLayoutRaf = 0;
+let settlingRightOverflow = false;
+let pendingRightOverflowSettle = false;
 
 /** Ordered list of right-side item keys that can overflow into "More".
  *  Items earlier in the list overflow first when space shrinks. */
@@ -212,45 +215,91 @@ const overflowRightMenuItems = computed(() => {
   }));
 });
 
-function checkRightOverflow() {
+async function settleRightOverflowOnce() {
   const wrapper = rightWrapper.value;
   if (!wrapper) return;
 
-  const available = wrapper.clientWidth;
-  const growing = available > prevRightAvailable + 1;
-  prevRightAvailable = available;
+  const defsLength = collapsibleRightItemDefs.value.length;
+  if (rightOverflowCount.value > defsLength) {
+    rightOverflowCount.value = defsLength;
+    await nextTick();
+  }
 
-  if (wrapper.scrollWidth > wrapper.clientWidth) {
-    // Overflow — move one more item to "More" (always, even when growing
-    // brought an item back that still doesn't fit)
-    if (rightOverflowCount.value < collapsibleRightItemDefs.value.length) {
+  for (let i = 0; i <= defsLength + 1; i++) {
+    const current = rightWrapper.value;
+    if (!current) return;
+
+    if (current.scrollWidth > current.clientWidth + 1 && rightOverflowCount.value < defsLength) {
       rightOverflowCount.value++;
+      await nextTick();
+      continue;
     }
-  } else if (growing && rightOverflowCount.value > 0) {
-    // Window growing — try bringing one item back
+
+    if (rightOverflowCount.value <= 0) return;
+
     rightOverflowCount.value--;
+    await nextTick();
+
+    const restored = rightWrapper.value;
+    if (restored && restored.scrollWidth <= restored.clientWidth + 1) {
+      continue;
+    }
+
+    rightOverflowCount.value++;
+    await nextTick();
+    return;
   }
 }
+
+async function settleRightOverflow() {
+  if (settlingRightOverflow) {
+    pendingRightOverflowSettle = true;
+    return;
+  }
+
+  settlingRightOverflow = true;
+  try {
+    do {
+      pendingRightOverflowSettle = false;
+      await nextTick();
+      await settleRightOverflowOnce();
+    } while (pendingRightOverflowSettle);
+  } finally {
+    settlingRightOverflow = false;
+  }
+}
+
+function scheduleToolbarLayout() {
+  if (toolbarLayoutRaf) cancelAnimationFrame(toolbarLayoutRaf);
+  toolbarLayoutRaf = requestAnimationFrame(() => {
+    toolbarLayoutRaf = 0;
+    checkToolbarWidth();
+    void settleRightOverflow();
+  });
+}
+
+function handleWindowResize() {
+  scheduleToolbarLayout();
+}
+
+watch(collapsibleRightItemDefs, () => scheduleToolbarLayout(), { flush: "post" });
 
 // ──────────── Resize observer ────────────
 
 let resizeObserver: ResizeObserver | null = null;
 
 onMounted(() => {
-  resizeObserver = new ResizeObserver(() => {
-    checkToolbarWidth();
-    checkRightOverflow();
-  });
+  resizeObserver = new ResizeObserver(scheduleToolbarLayout);
   if (toolbarEl.value) resizeObserver.observe(toolbarEl.value);
-  window.addEventListener("resize", () => {
-    checkToolbarWidth();
-    checkRightOverflow();
-  });
+  if (rightWrapper.value) resizeObserver.observe(rightWrapper.value);
+  window.addEventListener("resize", handleWindowResize);
+  scheduleToolbarLayout();
 });
 
 onBeforeUnmount(() => {
+  if (toolbarLayoutRaf) cancelAnimationFrame(toolbarLayoutRaf);
   resizeObserver?.disconnect();
-  window.removeEventListener("resize", checkToolbarWidth);
+  window.removeEventListener("resize", handleWindowResize);
 });
 
 // ──────────── Left-side "More" items ────────────
@@ -365,9 +414,6 @@ function isRightItemVisible(key: string) {
   return !overflowedRightKeys.value.has(key);
 }
 
-// Track checking updates state for the overflow menu disabled state
-const checkingUpdates = computed(() => props.checkingUpdates);
-
 const toolbarTextButtonClass = "h-8 px-2 text-xs gap-1 leading-none";
 const toolbarTextLabelClass = "inline-flex translate-y-px items-center leading-none";
 const toolbarDropdownTriggerClass = `inline-flex h-8 items-center gap-1 rounded-[6px] px-2 text-xs font-medium leading-none hover:bg-muted hover:text-foreground dark:hover:bg-muted/50 transition-colors [&>span:first-child]:translate-y-px`;
@@ -432,7 +478,7 @@ const toolbarDropdownTriggerClass = `inline-flex h-8 items-center gap-1 rounded-
     <div class="flex-1" data-tauri-drag-region />
 
     <!-- Right-side items wrapped in overflow-aware container -->
-    <div ref="rightWrapper" class="flex items-center gap-1 overflow-hidden">
+    <div ref="rightWrapper" class="flex min-w-0 items-center gap-1 overflow-hidden">
       <template v-if="toolbarItems.checkUpdates">
         <Tooltip>
           <TooltipTrigger as-child>

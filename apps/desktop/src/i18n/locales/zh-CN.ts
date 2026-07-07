@@ -721,6 +721,8 @@ export default withEnglishFallback({
     filterBuilderSummary: "{count} 条规则",
     filterBuilderAddRule: "新增条件",
     filterBuilderColumn: "字段",
+    filterBuilderSearchColumns: "搜索字段...",
+    filterBuilderNoMatchingColumns: "没有匹配的字段",
     filterBuilderValue: "值",
     filterBuilderNoValue: "无需输入值",
     filterBuilderEmpty: "新增一条条件后即可开始筛选。",

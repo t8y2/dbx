@@ -719,6 +719,8 @@ export default {
     filterBuilderSummary: "{count} rules",
     filterBuilderAddRule: "Add rule",
     filterBuilderColumn: "Column",
+    filterBuilderSearchColumns: "Search columns...",
+    filterBuilderNoMatchingColumns: "No matching columns",
     filterBuilderValue: "Value",
     filterBuilderNoValue: "No value needed",
     filterBuilderEmpty: "Add a rule to start filtering rows.",

@@ -1080,6 +1080,7 @@ const serverFilterValueByKey = ref<Map<string, CellValue>>(new Map());
 let serverFilterRequestId = 0;
 let serverFilterSearchTimer: ReturnType<typeof window.setTimeout> | undefined;
 const filterBuilderOpen = ref(false);
+const filterBuilderColumnSearch = ref("");
 const filterModeOptions: Array<{ value: FilterMode; labelKey: string }> = [
   { value: "equals", labelKey: "grid.filterBuilderEquals" },
   { value: "not-equals", labelKey: "grid.filterBuilderNotEquals" },
@@ -1092,6 +1093,11 @@ const filterModeOptions: Array<{ value: FilterMode; labelKey: string }> = [
 ];
 const filterBuilderColumns = computed(() => props.tableMeta?.columns ?? []);
 const filterBuilderColumnOptions = computed(() => filterBuilderColumns.value.map((column) => column.name));
+const filteredFilterBuilderColumnOptions = computed(() => {
+  const query = filterBuilderColumnSearch.value.trim().toLowerCase();
+  if (!query) return filterBuilderColumnOptions.value;
+  return filterBuilderColumnOptions.value.filter((columnName) => columnName.toLowerCase().includes(query));
+});
 const structuredFilterCacheKey = computed(() => props.cacheKey || [props.connectionId ?? "", props.database ?? "", props.context ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? ""].join("\u0001"));
 const structuredFilterScopeKey = computed(() => [props.connectionId ?? "", props.database ?? "", props.schema ?? "", props.context ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? "", filterBuilderColumnOptions.value.join("\0")].join("\u0001"));
 const structuredFilterRules = ref<StructuredFilterRule[]>([]);
@@ -1815,6 +1821,11 @@ function updateStructuredFilterRule(ruleId: string, patch: Partial<StructuredFil
   });
 }
 
+function updateStructuredFilterRuleColumn(ruleId: string, columnName: string) {
+  updateStructuredFilterRule(ruleId, { columnName });
+  filterBuilderColumnSearch.value = "";
+}
+
 function resetStructuredFilters() {
   appliedStructuredWhereInput.value = "";
   structuredFilterRules.value = filterBuilderColumnOptions.value.length > 0 ? [defaultStructuredFilterRule()] : [];
@@ -1870,6 +1881,10 @@ async function applyStructuredFilters() {
 }
 
 watch([structuredFilterCacheKey, structuredFilterScopeKey], loadStructuredFilterStateForScope, { immediate: true });
+
+watch(filterBuilderOpen, (open) => {
+  if (!open) filterBuilderColumnSearch.value = "";
+});
 
 watch(
   [structuredFilterRules, appliedStructuredWhereInput],
@@ -8243,14 +8258,32 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                               </Button>
                             </div>
                             <div class="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1.2fr)_auto] items-center gap-2">
-                              <Select :model-value="rule.columnName" :disabled="rule.disabled" :class="rule.disabled ? 'opacity-45' : ''" @update:model-value="(value: any) => updateStructuredFilterRule(rule.id, { columnName: String(value) })">
+                              <Select :model-value="rule.columnName" :disabled="rule.disabled" :class="rule.disabled ? 'opacity-45' : ''" @update:model-value="(value: any) => updateStructuredFilterRuleColumn(rule.id, String(value))">
                                 <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
                                   <SelectValue :placeholder="t('grid.filterBuilderColumn')" />
                                 </SelectTrigger>
-                                <SelectContent position="popper">
-                                  <SelectItem v-for="columnName in filterBuilderColumnOptions" :key="columnName" :value="columnName">
+                                <SelectContent position="popper" class="max-h-72" :hide-scroll-buttons="true">
+                                  <SelectItem v-for="columnName in filteredFilterBuilderColumnOptions" :key="columnName" :value="columnName">
                                     {{ columnName }}
                                   </SelectItem>
+                                  <div v-if="filteredFilterBuilderColumnOptions.length === 0" class="px-2 py-2 text-xs text-muted-foreground">
+                                    {{ t("grid.filterBuilderNoMatchingColumns") }}
+                                  </div>
+                                  <div class="sticky bottom-0 mt-1 flex items-center gap-1.5 border-t bg-popover px-2 py-1.5">
+                                    <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                                    <input
+                                      v-model="filterBuilderColumnSearch"
+                                      autocapitalize="off"
+                                      autocomplete="off"
+                                      autocorrect="off"
+                                      spellcheck="false"
+                                      class="h-7 min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground"
+                                      :placeholder="t('grid.filterBuilderSearchColumns')"
+                                      @click.stop
+                                      @keydown.stop
+                                      @pointerdown.stop
+                                    />
+                                  </div>
                                 </SelectContent>
                               </Select>
 

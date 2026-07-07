@@ -49,6 +49,7 @@ export const BRIDGE_REQUIRED_TYPES = [
   "trino",
   "prestosql",
   "hive",
+  "spark",
   "db2",
   "informix",
   "iris",

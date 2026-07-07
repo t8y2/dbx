@@ -168,6 +168,33 @@ func TestIsQuerySQLRequiresKeywordBoundary(t *testing.T) {
 	}
 }
 
+func TestTrimStatementSQLPreservesAnonymousPLSQLBlockTerminator(t *testing.T) {
+	sqlText := `DECLARE
+   PRE_TRD_DATE   INTEGER ;
+BEGIN
+   SELECT 1 + 2 INTO PRE_TRD_DATE FROM DUAL;
+END;`
+
+	if got := trimStatementSQL(sqlText); got != sqlText {
+		t.Fatalf("trimStatementSQL() = %q, want full PL/SQL block %q", got, sqlText)
+	}
+}
+
+func TestTrimStatementSQLStripsSlashDelimiterAfterPLSQLBlock(t *testing.T) {
+	sqlText := "BEGIN\n  NULL;\nEND;\n/"
+	want := "BEGIN\n  NULL;\nEND;"
+
+	if got := trimStatementSQL(sqlText); got != want {
+		t.Fatalf("trimStatementSQL() = %q, want %q", got, want)
+	}
+}
+
+func TestTrimStatementSQLRemovesRegularStatementSemicolon(t *testing.T) {
+	if got := trimStatementSQL("SELECT 1 FROM DUAL;"); got != "SELECT 1 FROM DUAL" {
+		t.Fatalf("trimStatementSQL() = %q, want regular statement without semicolon", got)
+	}
+}
+
 func protocolContract(t *testing.T) struct {
 	ProtocolVersion int      `json:"protocolVersion"`
 	AllCapabilities []string `json:"allCapabilities"`

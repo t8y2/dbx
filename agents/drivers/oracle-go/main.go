@@ -22,6 +22,12 @@ import (
 
 const protocolVersion = 1
 const defaultMaxRows = 1000
+
+var (
+	oraclePlSQLBlockEndRegexp      = regexp.MustCompile(`(?is)\bEND\s*;\s*$`)
+	oracleNamedPlSQLBlockEndRegexp = regexp.MustCompile(`(?is)\bEND\s+([A-Z0-9_$#]+)\s*;\s*$`)
+)
+
 const oracleListDatabasesSQL = `
 SELECT username AS owner
 FROM all_users
@@ -2327,7 +2333,48 @@ func parseURLParams(raw string) map[string]string {
 }
 
 func trimStatementSQL(sqlText string) string {
-	return strings.TrimRight(strings.TrimSpace(sqlText), "; \t\r\n")
+	trimmed := stripTrailingSlashDelimiter(strings.TrimSpace(sqlText))
+	if isOraclePlSQLBlock(trimmed) {
+		return trimmed
+	}
+	return strings.TrimRight(trimmed, "; \t\r\n")
+}
+
+func stripTrailingSlashDelimiter(sqlText string) string {
+	trimmed := strings.TrimSpace(sqlText)
+	if !strings.HasSuffix(trimmed, "/") {
+		return trimmed
+	}
+	slashStart := len(trimmed) - 1
+	lineStart := strings.LastIndex(trimmed[:slashStart], "\n") + 1
+	if strings.TrimSpace(trimmed[lineStart:slashStart]) != "" {
+		return trimmed
+	}
+	beforeSlash := strings.TrimSpace(trimmed[:lineStart])
+	if isOraclePlSQLBlock(beforeSlash) {
+		return beforeSlash
+	}
+	return trimmed
+}
+
+func isOraclePlSQLBlock(sqlText string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(sqlText))
+	if !strings.HasPrefix(upper, "DECLARE") && !strings.HasPrefix(upper, "BEGIN") {
+		return false
+	}
+	if oraclePlSQLBlockEndRegexp.MatchString(upper) {
+		return true
+	}
+	matches := oracleNamedPlSQLBlockEndRegexp.FindStringSubmatch(upper)
+	if len(matches) != 2 {
+		return false
+	}
+	switch matches[1] {
+	case "IF", "LOOP", "CASE":
+		return false
+	default:
+		return true
+	}
 }
 
 func isQuerySQL(sqlText string) bool {

@@ -2872,6 +2872,37 @@ END;";
     }
 
     #[test]
+    fn oracle_like_split_keeps_issue_2405_anonymous_plsql_block_together() {
+        let sql = "\
+DECLARE
+   PRE_TRD_DATE   INTEGER ;
+BEGIN
+   SELECT 1 + 2 INTO PRE_TRD_DATE FROM DUAL;
+END;";
+
+        assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Oracle), vec![sql.to_string()]);
+    }
+
+    #[test]
+    fn oracle_like_current_statement_keeps_issue_2405_anonymous_plsql_block_together() {
+        let sql = "\
+DECLARE
+   PRE_TRD_DATE   INTEGER ;
+BEGIN
+   SELECT 1 + 2 INTO PRE_TRD_DATE FROM DUAL;
+END;";
+        let cursors = [
+            sql[..sql.find("PRE_TRD_DATE").unwrap()].encode_utf16().count(),
+            sql[..sql.find("SELECT 1 + 2").unwrap()].encode_utf16().count(),
+            sql[..sql.find("END;").unwrap()].encode_utf16().count(),
+        ];
+
+        for cursor in cursors {
+            assert_eq!(find_statement_at_cursor_for_database(sql, cursor, DatabaseType::Oracle), sql);
+        }
+    }
+
+    #[test]
     fn oracle_like_split_treats_slash_line_as_plsql_delimiter() {
         let sql = "\
 BEGIN

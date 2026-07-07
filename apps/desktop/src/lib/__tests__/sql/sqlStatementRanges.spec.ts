@@ -65,6 +65,12 @@ END;
 /
 SELECT 1;`;
 
+const oracleIssue2405PlSql = `DECLARE
+   PRE_TRD_DATE   INTEGER ;
+BEGIN
+   SELECT 1 + 2 INTO PRE_TRD_DATE FROM DUAL;
+END;`;
+
 const mysqlRoutineFixture = `CREATE PROCEDURE p()
 BEGIN
   SELECT 1;
@@ -176,6 +182,10 @@ describe("splitSqlStatementRanges", () => {
     expect(ranges[0].sql).toContain("v_order_count NUMBER;");
     expect(ranges[0].sql).toContain("END;");
     expect(ranges[0].sql).not.toContain("\n/");
+  });
+
+  it("keeps issue #2405 Oracle PL/SQL block together without a slash delimiter", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges(oracleIssue2405PlSql, "oracle"))).toEqual([oracleIssue2405PlSql]);
   });
 });
 
@@ -423,6 +433,12 @@ WHERE request_json LIKE '%"paperFlag":null%';`;
     const range = statementRangeAtCursor(oraclePlSqlFixture, indexOf(oraclePlSqlFixture, "ORDERS_10K", 2), "oracle");
     expect(range?.sql.trim()).toBe(oraclePlSqlFixture.slice(0, oraclePlSqlFixture.indexOf("\n/")));
   });
+
+  it("returns the full issue #2405 Oracle PL/SQL block for cursors inside the block", () => {
+    for (const cursor of [indexOf(oracleIssue2405PlSql, "PRE_TRD_DATE"), indexOf(oracleIssue2405PlSql, "SELECT 1 + 2"), indexOf(oracleIssue2405PlSql, "END;")]) {
+      expect(statementRangeAtCursor(oracleIssue2405PlSql, cursor, "oracle")?.sql.trim()).toBe(oracleIssue2405PlSql);
+    }
+  });
 });
 
 describe("executableStatementRanges", () => {
@@ -455,6 +471,10 @@ describe("executableStatementRanges", () => {
 
   it("does not split executable Oracle PL/SQL ranges at inner statement starts", () => {
     expect(rangeSqlTexts(executableStatementRanges(oraclePlSqlFixture, "oracle"))).toEqual([oraclePlSqlFixture.slice(0, oraclePlSqlFixture.indexOf("\n/")), "SELECT 1"]);
+  });
+
+  it("returns the issue #2405 Oracle PL/SQL block as one executable range", () => {
+    expect(rangeSqlTexts(executableStatementRanges(oracleIssue2405PlSql, "oracle"))).toEqual([oracleIssue2405PlSql]);
   });
 
   it("does not split executable MySQL routine ranges at inner statements", () => {

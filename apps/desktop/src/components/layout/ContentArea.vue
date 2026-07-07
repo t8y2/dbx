@@ -3,7 +3,7 @@ import { computed, ref, defineAsyncComponent, watch, nextTick, onMounted, onUnmo
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { Check, Columns3, EyeOff, Loader2, Search, Bot, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Timer, Wrench, Toolbox, ListChecks, Database, FileUp, Download, X, Pin, Rows3, SquareDashed, Minus, Plus } from "@lucide/vue";
+import { Check, Columns3, EyeOff, Loader2, Search, Bot, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Timer, Wrench, Toolbox, ListChecks, Database, Download, Upload, X, Pin, Rows3, SquareDashed, Minus, Plus } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -863,7 +863,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                 </Button>
                 <Button v-if="canExportResultArchive" variant="ghost" size="sm" class="h-6 shrink-0 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground" :disabled="resultArchiveExporting" @click="exportResultArchive">
                   <Loader2 v-if="resultArchiveExporting" class="h-3.5 w-3.5 animate-spin" />
-                  <Download v-else class="h-3.5 w-3.5" />
+                  <Upload v-else class="h-3.5 w-3.5" />
                   {{ t("tabs.exportResultArchive") }}
                 </Button>
                 <Popover v-if="activeOutputView === 'result' && activeTab.result">
@@ -1216,12 +1216,12 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                   {{ t("tableToolbox.generateData") }}
                 </DropdownMenuItem>
                 <DropdownMenuItem class="gap-2" @click="handleTableImport">
-                  <FileUp class="h-4 w-4" />
+                  <Download class="h-4 w-4" />
                   {{ t("tableToolbox.importData") }}
                 </DropdownMenuItem>
                 <DropdownMenuSub>
                   <DropdownMenuSubTrigger class="gap-2">
-                    <Download class="h-4 w-4" />
+                    <Upload class="h-4 w-4" />
                     {{ t("tableToolbox.exportData") }}
                   </DropdownMenuSubTrigger>
                   <DropdownMenuPortal>

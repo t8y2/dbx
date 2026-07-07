@@ -4341,7 +4341,7 @@ const shortcutDelete = "Delete";
 function exportDataSubmenu(): ContextMenuItem {
   return {
     label: t("contextMenu.exportData"),
-    icon: Download,
+    icon: Upload,
     children: [
       { label: "CSV", action: () => exportData("csv") },
       { label: "JSON", action: () => exportData("json") },
@@ -4608,7 +4608,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
       items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
     }
     if (canOpenTableImport.value) {
-      items.push({ label: t("contextMenu.importData"), action: openTableImport, icon: Upload });
+      items.push({ label: t("contextMenu.importData"), action: openTableImport, icon: Download });
     }
     if (canCreateSchema.value) {
       items.push({ label: t("contextMenu.createSchema"), action: openCreateSchemaDialog, icon: Plus });
@@ -4642,7 +4642,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
     items.push({ label: t("transfer.dataTransfer"), action: openTransfer, icon: ArrowRightLeft });
     items.push({ label: t("diff.title"), action: openSchemaDiff, icon: ArrowRightLeft });
     items.push({ label: t("dataCompare.title"), action: openDataCompare, icon: ArrowRightLeft });
-    items.push({ label: t("contextMenu.exportDatabase"), action: openDatabaseExport, icon: Download });
+    items.push({ label: t("contextMenu.exportDatabase"), action: openDatabaseExport, icon: Upload });
     const destructiveActions: ContextMenuItem[] = [];
     if (canDropDatabase.value) {
       destructiveActions.push({
@@ -4826,14 +4826,14 @@ function treeItemMenuItems(): ContextMenuItem[] {
       items.push({ label: t("diagram.open"), action: openDiagram, icon: Network });
     }
     if (canOpenTableImport.value) {
-      items.push({ label: t("contextMenu.importData"), action: openTableImport, icon: Upload });
+      items.push({ label: t("contextMenu.importData"), action: openTableImport, icon: Download });
     }
     if (isTableNotView.value) {
       items.push({ label: t("dataCompare.title"), action: openDataCompare, icon: ArrowRightLeft });
     }
     items.push({ label: "", separator: true });
     items.push(exportDataSubmenu());
-    items.push({ label: t("contextMenu.exportDatabase"), action: openDatabaseExport, icon: Download });
+    items.push({ label: t("contextMenu.exportDatabase"), action: openDatabaseExport, icon: Upload });
     items.push({ label: t("contextMenu.exportStructure"), action: exportStructure, icon: FileCode });
     items.push(copyStructureAsSubmenu());
     if (isTableNotView.value) {
@@ -5263,7 +5263,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
           {{ t("contextMenu.copyStructure") }}
         </Button>
         <Button :disabled="isLoadingStructurePreview || !structurePreviewSql" @click="saveStructurePreview">
-          <Download class="h-4 w-4" />
+          <Upload class="h-4 w-4" />
           {{ t("contextMenu.saveStructure") }}
         </Button>
       </DialogFooter>

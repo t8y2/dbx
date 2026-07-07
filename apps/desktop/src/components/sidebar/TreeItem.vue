@@ -4105,7 +4105,9 @@ const isDragging = computed(() => dragState.active && dragState.draggedId === pr
 const TABLE_REFERENCE_DRAG_THRESHOLD = 5;
 const TABLE_REFERENCE_DRAGGING_CLASS = "dbx-table-reference-dragging";
 const canDragTableReference = computed(() => {
-  if (props.dragDisabled || !props.node.connectionId || props.node.database == null) return false;
+  if (props.dragDisabled || !props.node.connectionId) return false;
+  if (props.node.type === "database") return typeof props.node.database === "string" && props.node.database.trim().length > 0;
+  if (props.node.database == null) return false;
   if (props.node.type === "table" || props.node.type === "view" || props.node.type === "materialized_view") return true;
   return props.node.type === "column" && !!props.node.tableName;
 });
@@ -4120,6 +4122,14 @@ let suppressNextTableReferenceClick = false;
 
 function tableReferenceDragPayload(): QueryEditorTableReferencePayload | null {
   if (!canDragTableReference.value) return null;
+  if (props.node.type === "database") {
+    return createTableReferencePayload({
+      connectionId: props.node.connectionId,
+      database: props.node.database,
+      referenceType: "database",
+      databaseType: currentDatabaseType(),
+    });
+  }
   if (props.node.type === "column") {
     const columnName = columnNameForDrag(props.node);
     if (!props.node.tableName || !columnName) return null;

@@ -5,6 +5,7 @@ use std::io::Write;
 use tokio::sync::RwLock;
 
 use crate::models::connection::DatabaseType;
+use crate::object_source_sql::build_export_object_source_sql;
 use crate::sql_dialect::{qualified_table_name, quote_table_identifier, uses_single_row_insert_statements};
 use crate::transfer::{
     format_ch_array_sql_literal, format_pg_array_sql_literal, is_identity_column_extra, quote_identifier,
@@ -1199,8 +1200,10 @@ pub async fn export_database_sql_core(
             .await
             {
                 Ok(obj_source) => {
-                    if !obj_source.source.is_empty() {
-                        writeln!(file, "{};\n", obj_source.source).map_err(|e| format!("Failed to write file: {e}"))?;
+                    let source =
+                        build_export_object_source_sql(db_type, crate::db::ObjectSourceKind::View, &obj_source.source);
+                    if !source.is_empty() {
+                        writeln!(file, "{source}\n").map_err(|e| format!("Failed to write file: {e}"))?;
                     }
                 }
                 Err(e) => {
@@ -1240,8 +1243,13 @@ pub async fn export_database_sql_core(
             .await
             {
                 Ok(obj_source) => {
-                    if !obj_source.source.is_empty() {
-                        writeln!(file, "{};\n", obj_source.source).map_err(|e| format!("Failed to write file: {e}"))?;
+                    let source = build_export_object_source_sql(
+                        db_type,
+                        crate::db::ObjectSourceKind::Procedure,
+                        &obj_source.source,
+                    );
+                    if !source.is_empty() {
+                        writeln!(file, "{source}\n").map_err(|e| format!("Failed to write file: {e}"))?;
                     }
                 }
                 Err(e) => {
@@ -1281,8 +1289,13 @@ pub async fn export_database_sql_core(
             .await
             {
                 Ok(obj_source) => {
-                    if !obj_source.source.is_empty() {
-                        writeln!(file, "{};\n", obj_source.source).map_err(|e| format!("Failed to write file: {e}"))?;
+                    let source = build_export_object_source_sql(
+                        db_type,
+                        crate::db::ObjectSourceKind::Function,
+                        &obj_source.source,
+                    );
+                    if !source.is_empty() {
+                        writeln!(file, "{source}\n").map_err(|e| format!("Failed to write file: {e}"))?;
                     }
                 }
                 Err(e) => {

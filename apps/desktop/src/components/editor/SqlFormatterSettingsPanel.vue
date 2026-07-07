@@ -478,11 +478,11 @@ onBeforeUnmount(() => {
     <div class="flex flex-wrap items-center gap-2">
       <input ref="fileInputRef" type="file" accept="application/json,.json" class="hidden" @change="onImportFile" />
       <Button type="button" variant="outline" size="sm" @click="importConfig">
-        <Upload class="mr-2 h-4 w-4" />
+        <Download class="mr-2 h-4 w-4" />
         {{ t("settings.sqlFormatterImport") }}
       </Button>
       <Button type="button" variant="outline" size="sm" @click="exportConfig">
-        <Download class="mr-2 h-4 w-4" />
+        <Upload class="mr-2 h-4 w-4" />
         {{ t("settings.sqlFormatterExport") }}
       </Button>
       <Button type="button" variant="outline" size="sm" @click="restoreDefaults">

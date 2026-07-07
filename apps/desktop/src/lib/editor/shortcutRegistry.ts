@@ -18,6 +18,7 @@ export type ShortcutActionId =
   | "selectAll"
   | "uppercaseSelection"
   | "lowercaseSelection"
+  | "exPasteSqlInCondition"
   | "copyCurrentRow"
   | "deleteCurrentRow"
   | "newQuery"
@@ -162,6 +163,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutLowercaseSelection",
     scope: "editor",
     defaultShortcut: "Shift+Alt+L",
+  },
+  {
+    id: "exPasteSqlInCondition",
+    labelKey: "settings.shortcutExPasteSqlInCondition",
+    scope: "editor",
+    defaultShortcut: "",
   },
   {
     id: "copyCurrentRow",

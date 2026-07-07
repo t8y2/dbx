@@ -252,7 +252,7 @@ function requestActiveEditorExecute() {
 
 const dialogs = useDialogSources();
 const { getDatabaseOptions } = useDatabaseOptions();
-const { openLineageTarget, openDatabaseSearchTarget, onStructureEditorSaved, openTableTarget } = useNavigationTargets(dialogs);
+const { openLineageTarget, openDatabaseSearchTarget, openDiagramTarget, onStructureEditorSaved, openTableTarget } = useNavigationTargets(dialogs);
 const { onExecuteSql, onReloadData, onPaginate, onSort } = useDataGridActions(activeTab);
 const { setupTauriListeners, cleanupTauriListeners } = useTauriEvents({
   openTableTarget,
@@ -876,6 +876,10 @@ async function importResultArchive() {
   } catch (e: any) {
     toast(t("tabs.resultArchiveImportFailed", { message: e?.message || String(e) }), 5000);
   }
+}
+
+function pasteClipboardAsSqlInCondition() {
+  void contentAreaRef.value?.pasteClipboardAsSqlInCondition?.();
 }
 
 async function openSqlFilePath(path: string) {
@@ -1819,6 +1823,7 @@ onUnmounted(() => {
                   @save-sql="void openSaveSqlDialog()"
                   @open-sql="openSqlFile"
                   @import-result-archive="importResultArchive"
+                  @paste-sql-in-condition="pasteClipboardAsSqlInCondition"
                   @change-connection="changeActiveConnection"
                   @change-database="changeActiveDatabase"
                   @change-schema="changeActiveSchema"
@@ -1969,6 +1974,7 @@ onUnmounted(() => {
           "
           @open-lineage-target="openLineageTarget"
           @open-database-search-target="openDatabaseSearchTarget"
+          @open-diagram-target="openDiagramTarget"
         />
         <UpdateDialog
           v-if="showUpdateDialog"

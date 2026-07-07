@@ -442,8 +442,29 @@ pub fn build_truncate_table_sql(options: TableAdminSqlOptions) -> String {
     } else if matches!(options.database_type, Some(DatabaseType::Sqlite | DatabaseType::DuckDb)) {
         format!("DELETE FROM {table};")
     } else {
-        format!("TRUNCATE TABLE {table};")
+        // TRUNCATE CASCADE is PostgreSQL-family syntax; other dialects keep their existing default.
+        let cascade = if options.cascade.unwrap_or(false) && supports_truncate_table_cascade(options.database_type) {
+            " CASCADE"
+        } else {
+            ""
+        };
+        format!("TRUNCATE TABLE {table}{cascade};")
     }
+}
+
+fn supports_truncate_table_cascade(database_type: Option<DatabaseType>) -> bool {
+    matches!(
+        database_type,
+        Some(
+            DatabaseType::Postgres
+                | DatabaseType::Gaussdb
+                | DatabaseType::Kwdb
+                | DatabaseType::Kingbase
+                | DatabaseType::Highgo
+                | DatabaseType::Vastbase
+                | DatabaseType::OpenGauss
+        )
+    )
 }
 
 pub fn build_drop_database_sql(options: DatabaseNameSqlOptions) -> String {
@@ -1064,7 +1085,25 @@ mod tests {
             "DROP TABLE `events`;"
         );
         assert_eq!(build_empty_table_sql(options.clone()), "DELETE FROM \"public\".\"events\";");
-        assert_eq!(build_truncate_table_sql(options), "TRUNCATE TABLE \"public\".\"events\";");
+        assert_eq!(build_truncate_table_sql(options.clone()), "TRUNCATE TABLE \"public\".\"events\";");
+        assert_eq!(
+            build_truncate_table_sql(TableAdminSqlOptions {
+                database_type: Some(DatabaseType::Postgres),
+                schema: Some("public".to_string()),
+                table_name: "events".to_string(),
+                cascade: Some(true),
+            }),
+            "TRUNCATE TABLE \"public\".\"events\" CASCADE;"
+        );
+        assert_eq!(
+            build_truncate_table_sql(TableAdminSqlOptions {
+                database_type: Some(DatabaseType::Mysql),
+                schema: None,
+                table_name: "events".to_string(),
+                cascade: Some(true),
+            }),
+            "TRUNCATE TABLE `events`;"
+        );
         assert_eq!(
             build_empty_table_sql(TableAdminSqlOptions {
                 database_type: Some(DatabaseType::ClickHouse),

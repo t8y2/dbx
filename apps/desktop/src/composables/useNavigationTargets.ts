@@ -152,7 +152,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
   }
 }
 
-export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value: boolean }; showDatabaseSearchDialog: { value: boolean } }) {
+export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value: boolean }; showDatabaseSearchDialog: { value: boolean }; showDiagramDialog: { value: boolean } }) {
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
 
@@ -163,6 +163,11 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
 
   async function openDatabaseSearchTarget(target: NavigationTarget) {
     dialogs.showDatabaseSearchDialog.value = false;
+    await openTableTarget(target);
+  }
+
+  async function openDiagramTarget(target: NavigationTarget) {
+    dialogs.showDiagramDialog.value = false;
     await openTableTarget(target);
   }
 
@@ -198,5 +203,5 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
     }
   }
 
-  return { openLineageTarget, openDatabaseSearchTarget, onStructureEditorSaved, openTableTarget };
+  return { openLineageTarget, openDatabaseSearchTarget, openDiagramTarget, onStructureEditorSaved, openTableTarget };
 }

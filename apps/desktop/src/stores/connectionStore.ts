@@ -251,7 +251,7 @@ export const useConnectionStore = defineStore("connection", () => {
     schema?: string;
     tableName?: string;
   } | null>(null);
-  const sqlFileSource = ref<{ connectionId: string; database: string } | null>(null);
+  const sqlFileSource = ref<{ connectionId: string; database: string; filePath?: string } | null>(null);
   const diagramSource = ref<{
     connectionId: string;
     database: string;
@@ -787,6 +787,7 @@ export const useConnectionStore = defineStore("connection", () => {
       trino: "Trino",
       prestosql: "PrestoSQL",
       hive: "Hive",
+      spark: "Apache Spark",
       db2: "DB2",
       informix: "Informix",
       neo4j: "Neo4j",

@@ -662,66 +662,77 @@ export const DEFAULT_SQL_SNIPPETS: SqlSnippet[] = [
     label: "select *",
     prefix: "sel",
     body: "SELECT *\nFROM table\nLIMIT 100;",
+    enabled: true,
   },
   {
     id: "builtin-ins",
     label: "insert into",
     prefix: "ins",
     body: "INSERT INTO table (columns)\nVALUES (values);",
+    enabled: true,
   },
   {
     id: "builtin-upd",
     label: "update set",
     prefix: "upd",
     body: "UPDATE table\nSET column = value\nWHERE condition;",
+    enabled: true,
   },
   {
     id: "builtin-cte",
     label: "common table expression",
     prefix: "cte",
     body: "WITH name AS (\n  SELECT columns\n  FROM table\n)\nSELECT *\nFROM name;",
+    enabled: true,
   },
   {
     id: "builtin-join",
     label: "join",
     prefix: "join",
     body: "JOIN table ON left_column = right_column",
+    enabled: true,
   },
   {
     id: "builtin-case",
     label: "case when",
     prefix: "case",
     body: "CASE\n  WHEN condition THEN value\n  ELSE default\nEND",
+    enabled: true,
   },
   {
     id: "builtin-ct",
     label: "create table",
     prefix: "ct",
     body: "CREATE TABLE table (\n  column type\n);",
+    enabled: true,
   },
   {
     id: "builtin-ex",
     label: "exists",
     prefix: "ex",
     body: "EXISTS (\n  SELECT 1\n  FROM table\n  WHERE condition\n)",
+    enabled: true,
   },
   {
     id: "builtin-nex",
     label: "not exists",
     prefix: "nex",
     body: "NOT EXISTS (\n  SELECT 1\n  FROM table\n  WHERE condition\n)",
+    enabled: true,
   },
   {
     id: "builtin-at",
     label: "alter table add column",
     prefix: "at",
     body: "ALTER TABLE table\nADD COLUMN column type;",
+    enabled: true,
   },
   {
     id: "builtin-ci",
     label: "create index",
     prefix: "ci",
     body: "CREATE INDEX idx_name\nON table (column);",
+    enabled: true,
   },
 ];
 
@@ -3587,6 +3598,7 @@ function buildSnippetItems(prefix: string, snippets: SqlSnippet[], keywordCase?:
   if (!prefix) return [];
   return snippets
     .filter((snippet) => {
+      if (snippet.enabled === false) return false;
       const matchesSnippetPrefix = matchesPrefix(snippet.prefix, prefix);
       const matchesSnippetLabel = prefix.length > snippet.prefix.length && matchesPrefix(snippet.label, prefix);
       return matchesSnippetPrefix || matchesSnippetLabel;

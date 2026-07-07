@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useI18n } from "vue-i18n";
-import { FilePlus2, Plus, History, Upload, Database, Search, ShieldCheck, Sparkles } from "@lucide/vue";
+import { FilePlus2, Plus, History, Download, Database, Search, ShieldCheck, Sparkles } from "@lucide/vue";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import { connectionDriverLabel, connectionIconType, connectionRedactedNameLabel, connectionRedactedOptionSubtitle } from "@/lib/connection/connectionPresentation";
 import type { ConnectionConfig } from "@/types/database";
@@ -85,7 +85,7 @@ const { t } = useI18n();
             <button class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" @click="emit('new-connection')"><Plus class="h-4 w-4" /> {{ t("toolbar.newConnection") }}</button>
             <button class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" :disabled="!hasConnections" @click="emit('new-query')"><FilePlus2 class="h-4 w-4" /> {{ t("toolbar.newQuery") }}</button>
             <button class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" @click="emit('show-history')"><History class="h-4 w-4" /> {{ t("history.title") }}</button>
-            <button class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" @click="emit('import-config')"><Upload class="h-4 w-4" /> {{ t("sidebar.import") }}</button>
+            <button class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" @click="emit('import-config')"><Download class="h-4 w-4" /> {{ t("sidebar.import") }}</button>
             <div class="mt-2 rounded-md bg-muted/30 px-3 py-2 text-xs leading-5 text-muted-foreground">
               <Search class="mr-1 inline h-3.5 w-3.5" />
               {{ t("welcome.tip") }}

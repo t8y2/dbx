@@ -1289,24 +1289,37 @@ impl ServerCertVerifier for NoPostgresCertVerification {
 
     fn verify_tls12_signature(
         &self,
-        message: &[u8],
+        _message: &[u8],
         cert: &CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
+        _dss: &rustls::DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        self.accept_tls_signature_for_unverified_cert(cert)
     }
 
     fn verify_tls13_signature(
         &self,
-        message: &[u8],
+        _message: &[u8],
         cert: &CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
+        _dss: &rustls::DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        self.accept_tls_signature_for_unverified_cert(cert)
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         self.provider.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+impl NoPostgresCertVerification {
+    fn accept_tls_signature_for_unverified_cert(
+        &self,
+        _cert: &CertificateDer<'_>,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        // PostgreSQL sslmode=prefer/require does not authenticate the server certificate.
+        // Avoid rustls' default signature helpers here because they parse the certificate
+        // before chain verification and reject legacy server certificates that libpq/JDBC
+        // still accept in these non-verifying modes.
+        Ok(HandshakeSignatureValid::assertion())
     }
 }
 
@@ -1753,7 +1766,38 @@ fn list_object_relations_sql(include_timestamps: bool) -> &'static str {
      WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p','S')"
 }
 
-fn list_object_routines_sql(include_timestamps: bool, has_proc_prokind: bool) -> &'static str {
+fn list_object_routines_sql(include_timestamps: bool, has_proc_prokind: bool, has_proc_prosp: bool) -> &'static str {
+    if has_proc_prokind && has_proc_prosp {
+        if include_timestamps {
+            return "SELECT p.proname AS object_name, \
+       CASE WHEN p.prokind = 'p' OR p.prosp THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type, \
+       obj_description(p.oid) AS object_comment, \
+       NULL::text AS created_at, \
+       CASE WHEN current_setting('track_commit_timestamp', true) = 'on' \
+         THEN pg_xact_commit_timestamp(p.xmin)::text END AS updated_at, \
+       NULL::text AS parent_schema, \
+       NULL::text AS parent_name, \
+       pg_get_function_arguments(p.oid) AS signature, \
+       CASE WHEN p.prokind = 'p' OR p.prosp THEN 2 ELSE 3 END AS sort_order \
+     FROM pg_catalog.pg_proc p \
+     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+     WHERE n.nspname = $1 AND (p.prokind IN ('p','f') OR p.prosp)";
+        }
+
+        return "SELECT p.proname AS object_name, \
+       CASE WHEN p.prokind = 'p' OR p.prosp THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type, \
+       obj_description(p.oid) AS object_comment, \
+       NULL::text AS created_at, \
+       NULL::text AS updated_at, \
+       NULL::text AS parent_schema, \
+       NULL::text AS parent_name, \
+       pg_get_function_arguments(p.oid) AS signature, \
+       CASE WHEN p.prokind = 'p' OR p.prosp THEN 2 ELSE 3 END AS sort_order \
+     FROM pg_catalog.pg_proc p \
+     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+     WHERE n.nspname = $1 AND (p.prokind IN ('p','f') OR p.prosp)";
+    }
+
     if has_proc_prokind {
         if include_timestamps {
             return "SELECT p.proname AS object_name, \
@@ -1783,6 +1827,37 @@ fn list_object_routines_sql(include_timestamps: bool, has_proc_prokind: bool) ->
      FROM pg_catalog.pg_proc p \
      JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
      WHERE n.nspname = $1 AND p.prokind IN ('p','f')";
+    }
+
+    if has_proc_prosp {
+        if include_timestamps {
+            return "SELECT p.proname AS object_name, \
+       CASE WHEN p.prosp THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type, \
+       obj_description(p.oid) AS object_comment, \
+       NULL::text AS created_at, \
+       CASE WHEN current_setting('track_commit_timestamp', true) = 'on' \
+         THEN pg_xact_commit_timestamp(p.xmin)::text END AS updated_at, \
+       NULL::text AS parent_schema, \
+       NULL::text AS parent_name, \
+       pg_get_function_arguments(p.oid) AS signature, \
+       CASE WHEN p.prosp THEN 2 ELSE 3 END AS sort_order \
+     FROM pg_catalog.pg_proc p \
+     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+     WHERE n.nspname = $1 AND NOT p.proisagg AND NOT p.proiswindow";
+        }
+
+        return "SELECT p.proname AS object_name, \
+       CASE WHEN p.prosp THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type, \
+       obj_description(p.oid) AS object_comment, \
+       NULL::text AS created_at, \
+       NULL::text AS updated_at, \
+       NULL::text AS parent_schema, \
+       NULL::text AS parent_name, \
+       pg_get_function_arguments(p.oid) AS signature, \
+       CASE WHEN p.prosp THEN 2 ELSE 3 END AS sort_order \
+     FROM pg_catalog.pg_proc p \
+     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+     WHERE n.nspname = $1 AND NOT p.proisagg AND NOT p.proiswindow";
     }
 
     if include_timestamps {
@@ -1815,11 +1890,11 @@ fn list_object_routines_sql(include_timestamps: bool, has_proc_prokind: bool) ->
      WHERE n.nspname = $1 AND NOT p.proisagg AND NOT p.proiswindow"
 }
 
-fn list_objects_sql(include_timestamps: bool, has_proc_prokind: bool) -> String {
+fn list_objects_sql(include_timestamps: bool, has_proc_prokind: bool, has_proc_prosp: bool) -> String {
     format!(
         "{} UNION ALL {} ORDER BY sort_order, object_name",
         list_object_relations_sql(include_timestamps),
-        list_object_routines_sql(include_timestamps, has_proc_prokind)
+        list_object_routines_sql(include_timestamps, has_proc_prokind, has_proc_prosp)
     )
 }
 
@@ -1839,24 +1914,43 @@ async fn postgres_proc_has_prokind(client: &deadpool_postgres::Client) -> Result
     Ok(row.get(0))
 }
 
+fn postgres_proc_has_prosp_sql() -> &'static str {
+    "SELECT EXISTS ( \
+       SELECT 1 \
+       FROM pg_catalog.pg_attribute \
+       WHERE attrelid = 'pg_catalog.pg_proc'::regclass \
+         AND attname = 'prosp' \
+         AND NOT attisdropped \
+     )"
+}
+
+async fn postgres_proc_has_prosp(client: &deadpool_postgres::Client) -> Result<bool, String> {
+    let row = postgres_query_one_cached(client, postgres_proc_has_prosp_sql(), &[]).await.map_err(|e| e.to_string())?;
+    Ok(row.get(0))
+}
+
 async fn list_objects_rows(
     client: &deadpool_postgres::Client,
     schema: &str,
     include_timestamps: bool,
     has_proc_prokind: bool,
+    has_proc_prosp: bool,
 ) -> Result<Vec<Row>, String> {
-    let sql = list_objects_sql(include_timestamps, has_proc_prokind);
+    let sql = list_objects_sql(include_timestamps, has_proc_prokind, has_proc_prosp);
     postgres_query_cached(client, &sql, &[&schema]).await.map_err(|e| e.to_string())
 }
 
 pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
     let has_proc_prokind = postgres_proc_has_prokind(&client).await?;
-    let rows = match list_objects_rows(&client, schema, true, has_proc_prokind).await {
+    // Some GaussDB-compatible catalogs expose prosp alongside, or instead of,
+    // PostgreSQL 11's prokind. Treat prosp as an extra procedure signal.
+    let has_proc_prosp = postgres_proc_has_prosp(&client).await?;
+    let rows = match list_objects_rows(&client, schema, true, has_proc_prokind, has_proc_prosp).await {
         Ok(rows) => rows,
         Err(primary_error) => {
             log::debug!("[postgres][list_objects:timestamp-fallback] primary_error={}", primary_error);
-            match list_objects_rows(&client, schema, false, has_proc_prokind).await {
+            match list_objects_rows(&client, schema, false, has_proc_prokind, has_proc_prosp).await {
                 Ok(rows) => rows,
                 Err(fallback_error) => {
                     return Err(format!("{primary_error}; timestamp fallback failed: {fallback_error}"));
@@ -3390,6 +3484,14 @@ mod tests {
     }
 
     #[test]
+    fn postgres_accept_all_tls_signature_does_not_parse_unverified_cert() {
+        let verifier = NoPostgresCertVerification { provider: Arc::new(rustls::crypto::aws_lc_rs::default_provider()) };
+        let malformed_cert = CertificateDer::from(vec![0x30, 0x03, 0x02, 0x01, 0x00]);
+
+        assert!(verifier.accept_tls_signature_for_unverified_cert(&malformed_cert).is_ok());
+    }
+
+    #[test]
     fn inject_postgres_keepalive_params_preserves_url_fragment() {
         let url = "postgres://localhost/app?sslmode=require#read-only";
 
@@ -3531,7 +3633,7 @@ mod tests {
 
     #[test]
     fn list_objects_sql_includes_routines() {
-        let sql = list_objects_sql(true, true);
+        let sql = list_objects_sql(true, true, false);
         assert!(sql.contains("pg_catalog.pg_class"));
         assert!(sql.contains("pg_catalog.pg_proc"));
         assert!(sql.contains("pg_catalog.pg_inherits"));
@@ -3548,7 +3650,7 @@ mod tests {
 
     #[test]
     fn list_objects_sql_without_timestamps_omits_stat_file() {
-        let sql = list_objects_sql(false, true);
+        let sql = list_objects_sql(false, true, false);
         assert!(!sql.contains("pg_stat_file"));
         assert!(sql.contains("NULL::text AS created_at"));
         assert!(sql.contains("NULL::text AS updated_at"));
@@ -3556,29 +3658,60 @@ mod tests {
 
     #[test]
     fn both_list_objects_sql_variants_use_parameter() {
-        assert!(list_objects_sql(true, true).contains("$1"));
-        assert!(list_objects_sql(false, true).contains("$1"));
-        assert!(list_objects_sql(true, false).contains("$1"));
-        assert!(list_objects_sql(false, false).contains("$1"));
+        assert!(list_objects_sql(true, true, true).contains("$1"));
+        assert!(list_objects_sql(false, true, true).contains("$1"));
+        assert!(list_objects_sql(true, true, false).contains("$1"));
+        assert!(list_objects_sql(false, true, false).contains("$1"));
+        assert!(list_objects_sql(true, false, true).contains("$1"));
+        assert!(list_objects_sql(false, false, true).contains("$1"));
+        assert!(list_objects_sql(true, false, false).contains("$1"));
+        assert!(list_objects_sql(false, false, false).contains("$1"));
     }
 
     #[test]
     fn both_list_objects_sql_variants_include_pg_proc() {
-        assert!(list_objects_sql(true, true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(false, true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(true, false).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(false, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(true, true, true).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(false, true, true).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(true, true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(false, true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(true, false, true).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(false, false, true).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(true, false, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(false, false, false).contains("pg_catalog.pg_proc"));
     }
 
     #[test]
     fn legacy_list_objects_sql_avoids_pg11_proc_kind_column() {
-        let sql = list_objects_sql(true, false);
+        let sql = list_objects_sql(true, false, false);
         assert!(!sql.contains("p.prokind"));
+        assert!(!sql.contains("p.prosp"));
         assert!(sql.contains("NOT p.proisagg"));
         assert!(sql.contains("NOT p.proiswindow"));
         assert!(sql.contains("pg_get_function_arguments(p.oid) AS signature"));
         assert!(sql.contains("'FUNCTION' AS object_type"));
         assert!(!sql.contains("'PROCEDURE'"));
+    }
+
+    #[test]
+    fn gaussdb_compatible_list_objects_sql_uses_prosp_when_prokind_is_missing() {
+        let sql = list_objects_sql(true, false, true);
+        assert!(!sql.contains("p.prokind"));
+        assert!(sql.contains("CASE WHEN p.prosp THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type"));
+        assert!(sql.contains("CASE WHEN p.prosp THEN 2 ELSE 3 END AS sort_order"));
+        assert!(sql.contains("NOT p.proisagg"));
+        assert!(sql.contains("NOT p.proiswindow"));
+        assert!(sql.contains("pg_get_function_arguments(p.oid) AS signature"));
+    }
+
+    #[test]
+    fn gaussdb_compatible_list_objects_sql_uses_prosp_with_prokind_when_available() {
+        let sql = list_objects_sql(true, true, true);
+        assert!(
+            sql.contains("CASE WHEN p.prokind = 'p' OR p.prosp THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type")
+        );
+        assert!(sql.contains("CASE WHEN p.prokind = 'p' OR p.prosp THEN 2 ELSE 3 END AS sort_order"));
+        assert!(sql.contains("p.prokind IN ('p','f') OR p.prosp"));
+        assert!(sql.contains("pg_get_function_arguments(p.oid) AS signature"));
     }
 
     #[test]
@@ -3606,6 +3739,14 @@ mod tests {
         assert!(sql.contains("pg_catalog.pg_attribute"));
         assert!(sql.contains("'pg_catalog.pg_proc'::regclass"));
         assert!(sql.contains("attname = 'prokind'"));
+    }
+
+    #[test]
+    fn postgres_proc_has_prosp_sql_checks_catalog_attribute() {
+        let sql = postgres_proc_has_prosp_sql();
+        assert!(sql.contains("pg_catalog.pg_attribute"));
+        assert!(sql.contains("'pg_catalog.pg_proc'::regclass"));
+        assert!(sql.contains("attname = 'prosp'"));
     }
 
     #[test]

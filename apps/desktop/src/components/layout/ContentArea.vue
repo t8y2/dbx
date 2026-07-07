@@ -3,7 +3,7 @@ import { computed, ref, defineAsyncComponent, watch, nextTick, onMounted, onUnmo
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { Check, Columns3, EyeOff, Loader2, Search, Bot, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Timer, Wrench, Toolbox, ListChecks, Database, FileUp, Download, X, Pin, Rows3, SquareDashed, Minus, Plus } from "@lucide/vue";
+import { Check, Columns3, EyeOff, Loader2, Search, Bot, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Timer, Wrench, Toolbox, ListChecks, Database, Download, Upload, X, Pin, Rows3, SquareDashed, Minus, Plus } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -54,6 +54,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore, type DataGridSearchMode } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/sql/queryExecutionState";
+import { isQueryTimeoutErrorMessage } from "@/lib/sql/queryError";
 import { databaseDisplayNameForTab, executionSummaryItems, nextExecutionSummaryView, resultGridCacheKey, resultRunItems, resultSqlForGrid, tabularResultItems } from "@/lib/tabs/tabPresentation";
 import { defaultQueryResultArchiveFileName } from "@/lib/query/queryResultArchive";
 import { saveQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
@@ -185,10 +186,6 @@ const dataGridSearchMode = computed(() => settingsStore.editorSettings.dataGridS
 const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize);
 const redisKeyBrowserRef = ref<SearchableBrowserHandle>();
 
-function isQueryTimeoutError(message: string): boolean {
-  const lower = message.toLowerCase();
-  return lower.includes("query timed out") || lower.includes("查询超时");
-}
 const etcdKeyBrowserRef = ref<SearchableBrowserHandle>();
 const zookeeperKeyBrowserRef = ref<SearchableBrowserHandle>();
 const objectBrowserRef = ref<SearchableBrowserHandle>();
@@ -727,7 +724,11 @@ function requestQueryEditorExecute() {
   return queryEditorRef.value?.requestExecute();
 }
 
-defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExecute });
+function pasteClipboardAsSqlInCondition() {
+  return queryEditorRef.value?.pasteClipboardAsSqlInCondition();
+}
+
+defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExecute, pasteClipboardAsSqlInCondition });
 </script>
 
 <template>
@@ -862,7 +863,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                 </Button>
                 <Button v-if="canExportResultArchive" variant="ghost" size="sm" class="h-6 shrink-0 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground" :disabled="resultArchiveExporting" @click="exportResultArchive">
                   <Loader2 v-if="resultArchiveExporting" class="h-3.5 w-3.5 animate-spin" />
-                  <Download v-else class="h-3.5 w-3.5" />
+                  <Upload v-else class="h-3.5 w-3.5" />
                   {{ t("tabs.exportResultArchive") }}
                 </Button>
                 <Popover v-if="activeOutputView === 'result' && activeTab.result">
@@ -1112,7 +1113,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                 @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', column, columnIndex, direction, whereInput, mode)"
               >
                 <template v-if="activeTab.result?.columns.includes('Error')" #error-actions="{ errorMessage }">
-                  <Button v-if="activeTab.connectionId && isQueryTimeoutError(String(errorMessage))" variant="outline" size="sm" class="h-7 gap-1.5 px-2.5 text-xs" @click="emit('openConnectionSettings', activeTab.connectionId, 'advanced')">
+                  <Button v-if="activeTab.connectionId && isQueryTimeoutErrorMessage(String(errorMessage))" variant="outline" size="sm" class="h-7 gap-1.5 px-2.5 text-xs" @click="emit('openConnectionSettings', activeTab.connectionId, 'advanced')">
                     <Wrench class="h-3.5 w-3.5" />
                     {{ t("editor.changeQueryTimeout") }}
                   </Button>
@@ -1215,12 +1216,12 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                   {{ t("tableToolbox.generateData") }}
                 </DropdownMenuItem>
                 <DropdownMenuItem class="gap-2" @click="handleTableImport">
-                  <FileUp class="h-4 w-4" />
+                  <Download class="h-4 w-4" />
                   {{ t("tableToolbox.importData") }}
                 </DropdownMenuItem>
                 <DropdownMenuSub>
                   <DropdownMenuSubTrigger class="gap-2">
-                    <Download class="h-4 w-4" />
+                    <Upload class="h-4 w-4" />
                     {{ t("tableToolbox.exportData") }}
                   </DropdownMenuSubTrigger>
                   <DropdownMenuPortal>

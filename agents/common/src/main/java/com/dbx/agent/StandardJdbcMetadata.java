@@ -168,7 +168,11 @@ public final class StandardJdbcMetadata {
             Set<String> primaryKeys = primaryKeys(meta, null, schema, table);
             List<ColumnInfo> result = new ArrayList<>();
             appendColumns(result, meta, null, schema, table, primaryKeys);
-            if (result.isEmpty() && profile.getCatalogFallbackEnabled() && !configuredDatabase.trim().isEmpty()) {
+            if (!result.isEmpty() && primaryKeys.isEmpty() && profile.getCatalogFallbackEnabled() && hasConfiguredDatabase(configuredDatabase)) {
+                Set<String> fallbackPrimaryKeys = primaryKeys(meta, configuredDatabase, schema, table);
+                markPrimaryKeys(result, fallbackPrimaryKeys);
+            }
+            if (result.isEmpty() && profile.getCatalogFallbackEnabled() && hasConfiguredDatabase(configuredDatabase)) {
                 Set<String> fallbackPrimaryKeys = primaryKeys(meta, configuredDatabase, schema, table);
                 appendColumns(result, meta, configuredDatabase, schema, table, fallbackPrimaryKeys);
             }
@@ -520,6 +524,21 @@ public final class StandardJdbcMetadata {
         } catch (Exception ignored) {
         }
         return keys;
+    }
+
+    private static boolean hasConfiguredDatabase(String configuredDatabase) {
+        return configuredDatabase != null && !configuredDatabase.trim().isEmpty();
+    }
+
+    private static void markPrimaryKeys(List<ColumnInfo> columns, Set<String> primaryKeys) {
+        if (primaryKeys.isEmpty()) {
+            return;
+        }
+        for (ColumnInfo column : columns) {
+            if (primaryKeys.contains(column.getName())) {
+                column.setIs_primary_key(true);
+            }
+        }
     }
 
     private static void appendSchemas(Set<String> names, ResultSet rs) throws Exception {

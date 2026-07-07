@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { connectionNamespaceCreationTarget, databaseNodeNamespaceCreationTarget } from "@/lib/database/databaseNamespaceCreation";
 import { editableDatabasePropertyGroups, editableSchemaPropertyGroups } from "@/lib/database/databasePropertyEditing";
 import { buildGetDatabaseCommentSql } from "@/lib/database/dbAdminSql";
-import { supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+import { supportsSqlInListPaste, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
 
 describe("supportsTransaction", () => {
   it("returns true for supported database types", () => {
@@ -27,6 +27,39 @@ describe("supportsTransaction", () => {
 
   it("returns false for undefined or empty input", () => {
     expect(supportsTransaction(undefined)).toBe(false);
+  });
+});
+
+describe("supportsSqlInListPaste", () => {
+  it("allows generic and SQL-like editors", () => {
+    expect(supportsSqlInListPaste(undefined)).toBe(true);
+    expect(supportsSqlInListPaste("mysql")).toBe(true);
+    expect(supportsSqlInListPaste("postgres")).toBe(true);
+    expect(supportsSqlInListPaste("oracle")).toBe(true);
+    expect(supportsSqlInListPaste("sqlserver")).toBe(true);
+    expect(supportsSqlInListPaste("sqlite")).toBe(true);
+    expect(supportsSqlInListPaste("cassandra")).toBe(true);
+    expect(supportsSqlInListPaste("tdengine")).toBe(true);
+    expect(supportsSqlInListPaste("iotdb")).toBe(true);
+    expect(supportsSqlInListPaste("jdbc")).toBe(true);
+  });
+
+  it("hides SQL IN list paste in non-SQL editors", () => {
+    expect(supportsSqlInListPaste("redis")).toBe(false);
+    expect(supportsSqlInListPaste("mongodb")).toBe(false);
+    expect(supportsSqlInListPaste("elasticsearch")).toBe(false);
+    expect(supportsSqlInListPaste("qdrant")).toBe(false);
+    expect(supportsSqlInListPaste("milvus")).toBe(false);
+    expect(supportsSqlInListPaste("weaviate")).toBe(false);
+    expect(supportsSqlInListPaste("chromadb")).toBe(false);
+    expect(supportsSqlInListPaste("etcd")).toBe(false);
+    expect(supportsSqlInListPaste("zookeeper")).toBe(false);
+    expect(supportsSqlInListPaste("mq")).toBe(false);
+    expect(supportsSqlInListPaste("nacos")).toBe(false);
+  });
+
+  it("excludes Neo4j because Cypher uses list syntax instead of SQL IN tuples", () => {
+    expect(supportsSqlInListPaste("neo4j")).toBe(false);
   });
 });
 

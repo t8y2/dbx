@@ -91,6 +91,12 @@ BEGIN
 END;
 SELECT 2;`;
 
+const sapHanaDoBlockFixture = `DO
+BEGIN
+  SELECT 1 AS "Result" FROM DUMMY;
+END;
+SELECT 2 FROM DUMMY;`;
+
 describe("splitSqlStatementRanges", () => {
   it("splits multiple top-level statements", () => {
     const sql = "SELECT 1;\nSELECT 2;\nSELECT 3;";
@@ -186,6 +192,14 @@ describe("splitSqlStatementRanges", () => {
 
   it("keeps issue #2405 Oracle PL/SQL block together without a slash delimiter", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(oracleIssue2405PlSql, "oracle"))).toEqual([oracleIssue2405PlSql]);
+  });
+
+  it("keeps SAP HANA DO blocks together", () => {
+    const ranges = splitSqlStatementRanges(sapHanaDoBlockFixture, "saphana");
+
+    expect(rangeSqlTexts(ranges)).toEqual([sapHanaDoBlockFixture.slice(0, sapHanaDoBlockFixture.indexOf("\nSELECT 2")), "SELECT 2 FROM DUMMY"]);
+    expect(ranges[0].sql).toContain('SELECT 1 AS "Result" FROM DUMMY;');
+    expect(ranges[0].sql).toContain("END;");
   });
 });
 
@@ -439,6 +453,12 @@ WHERE request_json LIKE '%"paperFlag":null%';`;
       expect(statementRangeAtCursor(oracleIssue2405PlSql, cursor, "oracle")?.sql.trim()).toBe(oracleIssue2405PlSql);
     }
   });
+
+  it("returns the full SAP HANA DO block for cursors inside nested statements", () => {
+    const range = statementRangeAtCursor(sapHanaDoBlockFixture, indexOf(sapHanaDoBlockFixture, "Result"), "saphana");
+
+    expect(range?.sql.trim()).toBe(sapHanaDoBlockFixture.slice(0, sapHanaDoBlockFixture.indexOf("\nSELECT 2")));
+  });
 });
 
 describe("executableStatementRanges", () => {
@@ -483,6 +503,10 @@ describe("executableStatementRanges", () => {
 
   it("does not split executable MySQL routine ranges at WHILE and REPEAT endings", () => {
     expect(rangeSqlTexts(executableStatementRanges(mysqlRoutineWithLoopsFixture, "mysql"))).toEqual([mysqlRoutineWithLoopsFixture.slice(0, mysqlRoutineWithLoopsFixture.indexOf("\nSELECT 2;")).replace(/;$/, "").trim(), "SELECT 2"]);
+  });
+
+  it("does not split executable SAP HANA DO ranges at inner statements", () => {
+    expect(rangeSqlTexts(executableStatementRanges(sapHanaDoBlockFixture, "saphana"))).toEqual([sapHanaDoBlockFixture.slice(0, sapHanaDoBlockFixture.indexOf("\nSELECT 2")), "SELECT 2 FROM DUMMY"]);
   });
 
   it("returns executable SQL Server batches without GO delimiter lines", () => {

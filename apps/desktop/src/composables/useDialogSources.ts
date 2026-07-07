@@ -32,6 +32,7 @@ const dataComparePrefillSchema = ref("");
 const dataComparePrefillTable = ref("");
 const sqlFilePrefillConnectionId = ref("");
 const sqlFilePrefillDatabase = ref("");
+const sqlFilePrefillFilePath = ref("");
 const diagramPrefillConnectionId = ref("");
 const diagramPrefillDatabase = ref("");
 const diagramPrefillSchema = ref("");
@@ -115,11 +116,21 @@ export function useDialogSources() {
         if (v) {
           sqlFilePrefillConnectionId.value = v.connectionId;
           sqlFilePrefillDatabase.value = v.database;
+          sqlFilePrefillFilePath.value = v.filePath ?? "";
           showSqlFileDialog.value = true;
           connectionStore.sqlFileSource = null;
         }
       },
     );
+
+    // Clear the pre-filled file path once the dialog closes so a later open
+    // via the toolbar (which doesn't go through sqlFileSource) doesn't re-load
+    // the previously previewed file. prefillConnectionId/database are harmless
+    // when stale (they only preselect dropdowns), but a stale path triggers an
+    // async file read + preview render — a visible side effect.
+    watch(showSqlFileDialog, (open) => {
+      if (!open) sqlFilePrefillFilePath.value = "";
+    });
 
     watch(
       () => connectionStore.diagramSource,
@@ -305,6 +316,7 @@ export function useDialogSources() {
     dataComparePrefillTable,
     sqlFilePrefillConnectionId,
     sqlFilePrefillDatabase,
+    sqlFilePrefillFilePath,
     diagramPrefillConnectionId,
     diagramPrefillDatabase,
     diagramPrefillSchema,

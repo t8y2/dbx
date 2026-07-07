@@ -52,7 +52,7 @@ import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
-import { buildDropObjectSql, buildDropTableSql, buildDuplicateTableStructureSql, buildCopyTableDataSql, buildEmptyTableSql, buildTruncateTableSql, supportsDropTableCascade, type TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
+import { buildDropObjectSql, buildDropTableSql, buildDuplicateTableStructureSql, buildCopyTableDataSql, buildEmptyTableSql, buildTruncateTableSql, supportsDropTableCascade, supportsTruncateTableCascade, type TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
 import { useToast } from "@/composables/useToast";
 import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceStatements, executeObjectSourceSave, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
 import { buildRenameObjectSql, supportsObjectRename } from "@/lib/table/objectRenameSql";
@@ -134,6 +134,7 @@ const showDropConfirm = ref(false);
 const dropTarget = ref<ObjectBrowserRow | null>(null);
 const dropPreviewSql = ref("");
 const dropTableCascade = ref(false);
+const batchDropCascade = ref(false);
 const showRenameDialog = ref(false);
 const renameTarget = ref<ObjectBrowserRow | null>(null);
 const renameInput = ref("");
@@ -142,6 +143,7 @@ const renamePreviewSqlText = ref("");
 const showTruncateConfirm = ref(false);
 const truncateTarget = ref<ObjectBrowserRow | null>(null);
 const truncatePreviewSql = ref("");
+const truncateTableCascade = ref(false);
 const showEmptyConfirm = ref(false);
 const emptyTarget = ref<ObjectBrowserRow | null>(null);
 const emptyPreviewSql = ref("");
@@ -156,6 +158,9 @@ const selectedTableIds = ref<Set<string>>(new Set());
 const expandedPartitionParentIds = ref<Set<string>>(new Set());
 const showBatchDropConfirm = ref(false);
 const batchDropPreviewSql = ref("");
+const showBatchTruncateConfirm = ref(false);
+const batchTruncatePreviewSql = ref("");
+const batchTruncateCascade = ref(false);
 // Paste table dialog state
 const showPasteDialog = ref(false);
 const pasteTableMode = ref<PasteTableMode>("structure-and-data");
@@ -179,6 +184,7 @@ const { addTask: addExportTask } = useExportTracker();
 
 const needsSchema = computed(() => isSchemaAware(props.connection.db_type) && !connectionUsesDatabaseObjectTreeMode(props.connection));
 const canDropTargetCascade = computed(() => dropTarget.value?.type === "TABLE" && supportsDropTableCascade(effectiveDatabaseType.value));
+const canTruncateTargetCascade = computed(() => !!truncateTarget.value && supportsTruncateTableCascade(effectiveDatabaseType.value));
 const tableCount = computed(() => rows.value.filter((row) => row.type === "TABLE").length);
 const viewCount = computed(() => rows.value.filter((row) => row.type === "VIEW").length);
 const materializedViewCount = computed(() => rows.value.filter((row) => row.type === "MATERIALIZED_VIEW").length);
@@ -249,6 +255,8 @@ const selectedTableRows = computed(() => {
   return selectableRows.value.filter((row) => ids.has(row.id));
 });
 const selectedTableCount = computed(() => selectedTableRows.value.length);
+const canBatchDropCascade = computed(() => selectedTableCount.value > 0 && supportsDropTableCascade(effectiveDatabaseType.value));
+const canBatchTruncateCascade = computed(() => selectedTableCount.value > 0 && supportsTruncateTableCascade(effectiveDatabaseType.value));
 const allVisibleTablesSelected = computed(() => visibleSelectableRows.value.length > 0 && visibleSelectableRows.value.every((row) => selectedTableIds.value.has(row.id)));
 
 function iconFor(row: ObjectBrowserRow) {
@@ -798,8 +806,9 @@ async function fetchSortedTableRowsForDrop(): Promise<ObjectBrowserRow[]> {
 async function refreshBatchDropPreviewSql() {
   const statements: string[] = [];
   const sortedRows = await fetchSortedTableRowsForDrop();
+  const useCascade = canBatchDropCascade.value && batchDropCascade.value;
   for (const row of sortedRows) {
-    const sql = await buildDropTableSql(tableAdminSqlOptions(row)).catch(() => "");
+    const sql = await buildDropTableSql(tableAdminSqlOptions(row, { cascade: useCascade })).catch(() => "");
     if (sql) statements.push(sql);
   }
   batchDropPreviewSql.value = statements.join("\n");
@@ -807,6 +816,7 @@ async function refreshBatchDropPreviewSql() {
 
 function requestBatchDropTables() {
   if (selectedTableCount.value === 0) return;
+  batchDropCascade.value = false;
   batchDropPreviewSql.value = "";
   void refreshBatchDropPreviewSql();
   showBatchDropConfirm.value = true;
@@ -816,13 +826,51 @@ async function confirmBatchDropTables() {
   const targets = await fetchSortedTableRowsForDrop();
   if (targets.length === 0) return;
   try {
+    const useCascade = canBatchDropCascade.value && batchDropCascade.value;
     for (const row of targets) {
-      const sql = await buildDropTableSql(tableAdminSqlOptions(row));
+      const sql = await buildDropTableSql(tableAdminSqlOptions(row, { cascade: useCascade }));
       await api.executeQuery(props.connection.id, props.database, sql);
       closeDroppedTableObjectTabsForRow(row);
     }
     toast(t("objects.batchDropSuccess", { count: targets.length }));
     clearTableSelection();
+    await reload();
+    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);
+  } catch (e: any) {
+    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+async function refreshBatchTruncatePreviewSql() {
+  const statements: string[] = [];
+  const useCascade = canBatchTruncateCascade.value && batchTruncateCascade.value;
+  for (const row of selectedTableRows.value) {
+    const sql = await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: useCascade })).catch(() => "");
+    if (sql) statements.push(sql);
+  }
+  batchTruncatePreviewSql.value = statements.join("\n");
+}
+
+function requestBatchTruncateTables() {
+  if (selectedTableCount.value === 0 || !supportsTruncateTable.value) return;
+  batchTruncateCascade.value = false;
+  batchTruncatePreviewSql.value = "";
+  void refreshBatchTruncatePreviewSql();
+  showBatchTruncateConfirm.value = true;
+}
+
+async function confirmBatchTruncateTables() {
+  const targets = [...selectedTableRows.value];
+  if (targets.length === 0) return;
+  try {
+    const useCascade = canBatchTruncateCascade.value && batchTruncateCascade.value;
+    for (const row of targets) {
+      const sql = await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: useCascade }));
+      await api.executeQuery(props.connection.id, props.database, sql);
+    }
+    toast(t("objects.batchTruncateSuccess", { count: targets.length }));
+    clearTableSelection();
+    showBatchTruncateConfirm.value = false;
     await reload();
     await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);
   } catch (e: any) {
@@ -1136,11 +1184,12 @@ function tableAdminSqlOptions(row: ObjectBrowserRow, options?: { cascade?: boole
 
 async function refreshTruncatePreviewSql(row: ObjectBrowserRow) {
   truncatePreviewSql.value = "";
-  truncatePreviewSql.value = await buildTruncateTableSql(tableAdminSqlOptions(row)).catch(() => "");
+  truncatePreviewSql.value = await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: canTruncateTargetCascade.value && truncateTableCascade.value })).catch(() => "");
 }
 
 function requestTruncateTable(row: ObjectBrowserRow) {
   truncateTarget.value = row;
+  truncateTableCascade.value = false;
   void refreshTruncatePreviewSql(row);
   showTruncateConfirm.value = true;
 }
@@ -1149,7 +1198,7 @@ async function confirmTruncateTable() {
   const row = truncateTarget.value;
   if (!row) return;
   try {
-    const sql = truncatePreviewSql.value || (await buildTruncateTableSql(tableAdminSqlOptions(row)));
+    const sql = truncatePreviewSql.value || (await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: canTruncateTargetCascade.value && truncateTableCascade.value })));
     await api.executeQuery(props.connection.id, props.database, sql);
     toast(t("contextMenu.truncateTableSuccess", { name: row.name }));
   } catch (e: any) {
@@ -1421,7 +1470,7 @@ watch(
 function exportDataSubmenu(item: ObjectBrowserRow): ContextMenuItem {
   return {
     label: t("contextMenu.exportData"),
-    icon: Download,
+    icon: Upload,
     children: [
       { label: "CSV", action: () => exportData(item, "csv") },
       { label: "JSON", action: () => exportData(item, "json") },
@@ -1446,11 +1495,11 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
     { label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
     ...(canOpenDiagram.value ? [{ label: t("diagram.open"), action: () => openDiagram(item), icon: Network }] : []),
-    ...(canOpenTableImport.value ? [{ label: t("contextMenu.importData"), action: () => openTableImport(item), icon: Upload }] : []),
+    ...(canOpenTableImport.value ? [{ label: t("contextMenu.importData"), action: () => openTableImport(item), icon: Download }] : []),
     { label: t("dataCompare.title"), action: () => openDataCompare(item), icon: ArrowRightLeft },
     { label: "", separator: true },
     exportDataSubmenu(item),
-    { label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Download },
+    { label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Upload },
     { label: t("contextMenu.exportStructure"), action: () => exportStructure(item), icon: FileCode },
     { label: "", separator: true },
     { label: t("contextMenu.duplicateStructure"), action: () => requestDuplicateStructure(item), icon: CopyPlus },
@@ -1501,7 +1550,7 @@ function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     ...(canOpenDiagram.value ? [{ label: t("diagram.open"), action: () => openDiagram(item), icon: Network }] : []),
     { label: "", separator: true },
     exportDataSubmenu(item),
-    { label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Download },
+    { label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Upload },
     { label: t("contextMenu.exportStructure"), action: () => exportStructure(item), icon: FileCode },
     { label: "", separator: true },
     {
@@ -1604,17 +1653,21 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         {{ t("objects.pasteTableSelected") }}
       </Button>
     </div>
-    <div v-if="selectedTableCount > 0" class="flex h-9 shrink-0 items-center gap-2 border-b bg-muted/30 px-3 text-xs">
+    <div v-if="selectedTableCount > 0" class="flex h-9 shrink-0 items-center gap-2 overflow-x-auto border-b bg-muted/30 px-3 text-xs">
       <div class="min-w-0 flex-1 truncate text-muted-foreground">
         {{ t("objects.selectedTables", { count: selectedTableCount }) }}
       </div>
       <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="openBatchDatabaseExport">
-        <Download class="mr-1.5 h-3.5 w-3.5" />
+        <Upload class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.exportSelected") }}
       </Button>
       <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="copySelectedTablesToClipboard">
         <Clipboard class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.copyTableSelected") }}
+      </Button>
+      <Button v-if="supportsTruncateTable" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchTruncateTables">
+        <Scissors class="mr-1.5 h-3.5 w-3.5" />
+        {{ t("objects.truncateSelected") }}
       </Button>
       <Button variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchDropTables">
         <Trash2 class="mr-1.5 h-3.5 w-3.5" />
@@ -1848,7 +1901,36 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     </template>
   </DangerConfirmDialog>
 
-  <DangerConfirmDialog v-model:open="showBatchDropConfirm" :title="t('objects.confirmBatchDropTitle')" :message="t('objects.confirmBatchDropMessage', { count: selectedTableCount })" :sql="batchDropPreviewSql" :confirm-label="t('objects.dropSelected')" @confirm="confirmBatchDropTables" />
+  <DangerConfirmDialog v-model:open="showBatchDropConfirm" :title="t('objects.confirmBatchDropTitle')" :message="t('objects.confirmBatchDropMessage', { count: selectedTableCount })" :sql="batchDropPreviewSql" :confirm-label="t('objects.dropSelected')" @confirm="confirmBatchDropTables">
+    <template v-if="canBatchDropCascade" #options>
+      <label class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+        <input v-model="batchDropCascade" type="checkbox" class="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary" @change="refreshBatchDropPreviewSql()" />
+        <span class="grid gap-0.5">
+          <span class="font-medium text-foreground">{{ t("contextMenu.dropTableCascade") }}</span>
+          <span class="text-xs leading-5 text-muted-foreground">{{ t("contextMenu.dropTableCascadeHint") }}</span>
+        </span>
+      </label>
+    </template>
+  </DangerConfirmDialog>
+
+  <DangerConfirmDialog
+    v-model:open="showBatchTruncateConfirm"
+    :title="t('objects.confirmBatchTruncateTitle')"
+    :message="t('objects.confirmBatchTruncateMessage', { count: selectedTableCount })"
+    :sql="batchTruncatePreviewSql"
+    :confirm-label="t('objects.truncateSelected')"
+    @confirm="confirmBatchTruncateTables"
+  >
+    <template v-if="canBatchTruncateCascade" #options>
+      <label class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+        <input v-model="batchTruncateCascade" type="checkbox" class="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary" @change="refreshBatchTruncatePreviewSql()" />
+        <span class="grid gap-0.5">
+          <span class="font-medium text-foreground">{{ t("contextMenu.truncateTableCascade") }}</span>
+          <span class="text-xs leading-5 text-muted-foreground">{{ t("contextMenu.truncateTableCascadeHint") }}</span>
+        </span>
+      </label>
+    </template>
+  </DangerConfirmDialog>
 
   <Dialog v-model:open="showRenameDialog">
     <DialogContent class="sm:max-w-[420px]">
@@ -1876,7 +1958,17 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     :sql="truncatePreviewSql"
     :confirm-label="t('contextMenu.truncateTable')"
     @confirm="confirmTruncateTable"
-  />
+  >
+    <template v-if="canTruncateTargetCascade" #options>
+      <label class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+        <input v-model="truncateTableCascade" type="checkbox" class="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary" @change="truncateTarget && refreshTruncatePreviewSql(truncateTarget)" />
+        <span class="grid gap-0.5">
+          <span class="font-medium text-foreground">{{ t("contextMenu.truncateTableCascade") }}</span>
+          <span class="text-xs leading-5 text-muted-foreground">{{ t("contextMenu.truncateTableCascadeHint") }}</span>
+        </span>
+      </label>
+    </template>
+  </DangerConfirmDialog>
 
   <DangerConfirmDialog v-model:open="showEmptyConfirm" :title="t('contextMenu.confirmEmptyTableTitle')" :message="t('contextMenu.confirmEmptyTableMessage', { name: emptyTarget?.name ?? '' })" :sql="emptyPreviewSql" :confirm-label="t('contextMenu.emptyTable')" @confirm="confirmEmptyTable" />
 

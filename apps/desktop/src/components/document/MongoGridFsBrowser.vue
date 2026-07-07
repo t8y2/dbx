@@ -152,7 +152,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="flex h-full min-h-0 flex-col">
+  <div class="flex h-full min-h-0 flex-col overflow-hidden">
     <div class="border-b border-border px-4 py-3">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div class="min-w-0">
@@ -263,7 +263,7 @@ onMounted(() => {
       {{ t("gridfsBrowser.emptyBuckets") }}
     </div>
 
-    <div v-else class="min-h-0 flex-1 flex-col xl:flex-row xl:divide-x xl:divide-border">
+    <div v-else class="min-h-0 flex flex-1 flex-col overflow-hidden xl:flex-row xl:divide-x xl:divide-border">
       <div class="min-h-0 flex-1 overflow-auto">
         <table class="min-w-full border-collapse text-sm">
           <thead class="sticky top-0 z-10 bg-background">
@@ -298,7 +298,7 @@ onMounted(() => {
         </table>
       </div>
 
-      <aside class="border-t border-border px-4 py-4 xl:w-72 xl:shrink-0 xl:border-t-0">
+      <aside class="overflow-auto border-t border-border px-4 py-4 xl:w-72 xl:shrink-0 xl:border-t-0">
         <template v-if="selectedBucket">
           <div class="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">{{ t("tabs.gridfs") }}</div>
           <div class="mt-2 break-all text-lg font-semibold">{{ selectedBucket.name }}</div>

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch, watchEffect } from "vue";
 import { useI18n } from "vue-i18n";
-import { Play, Loader2, Square, Database, Check, Table2, AlignLeft, GitBranch, Save, FolderOpen, Layers, X, Shield, Upload, RotateCcw, AlertTriangle } from "@lucide/vue";
+import { Play, Loader2, Square, Database, Check, Table2, AlignLeft, GitBranch, Save, FolderOpen, Layers, X, Shield, Download, RotateCcw, AlertTriangle, ClipboardPaste } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
@@ -13,7 +13,7 @@ import { useSchemaOptions } from "@/composables/useSchemaOptions";
 import { connectionIconType } from "@/lib/connection/connectionPresentation";
 import { formatDatabaseLabel, isDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { connectionDisplayName } from "@/lib/tabs/tabPresentation";
-import { isSingleDatabase, supportsTransaction as supportsTransactionFeature } from "@/lib/database/databaseCapabilities";
+import { isSingleDatabase, supportsSqlInListPaste, supportsTransaction as supportsTransactionFeature } from "@/lib/database/databaseCapabilities";
 import { hexToRgba } from "@/lib/common/color";
 import type { QueryTab, ConnectionConfig } from "@/types/database";
 
@@ -40,6 +40,7 @@ const emit = defineEmits<{
   saveSql: [];
   openSql: [];
   importResultArchive: [];
+  pasteSqlInCondition: [];
   changeConnection: [connectionId: string];
   changeDatabase: [database: string];
   changeSchema: [schema: string | undefined];
@@ -71,6 +72,7 @@ const supportsExplain = computed(() => {
   return dbType !== "redis" && dbType !== "mongodb" && dbType !== "elasticsearch" && dbType !== "qdrant" && dbType !== "milvus" && dbType !== "weaviate" && dbType !== "chromadb" && dbType !== "etcd" && dbType !== "zookeeper" && dbType !== "mq" && dbType !== "nacos";
 });
 const isSingleDb = computed(() => isSingleDatabase(props.activeConnection?.db_type));
+const supportsExPaste = computed(() => supportsSqlInListPaste(props.activeConnection?.db_type));
 const supportsTransaction = computed(() => supportsTransactionFeature(props.activeConnection?.db_type));
 const hasDefaultDatabaseOption = computed(() => activeDatabaseOptions.value.includes(""));
 const schemaDatabaseKey = computed(() => props.activeTab.database || (isSingleDb.value ? "_" : ""));
@@ -283,10 +285,18 @@ function connectionById(connectionId: string): ConnectionConfig | undefined {
       <Tooltip>
         <TooltipTrigger as-child>
           <Button variant="ghost" size="icon" class="h-6 w-6 text-cyan-600 hover:bg-cyan-500/10 hover:text-cyan-700 dark:text-cyan-300 dark:hover:text-cyan-200" @click="emit('importResultArchive')">
-            <Upload class="h-3.5 w-3.5" />
+            <Download class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ t("tabs.importResultArchive") }}</TooltipContent>
+      </Tooltip>
+      <Tooltip v-if="supportsExPaste">
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-6 w-6 text-teal-600 hover:bg-teal-500/10 hover:text-teal-700 dark:text-teal-300 dark:hover:text-teal-200" @click="emit('pasteSqlInCondition')">
+            <ClipboardPaste class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ t("toolbar.exPasteSqlInCondition") }}</TooltipContent>
       </Tooltip>
     </div>
     <span class="flex-1 min-w-0" />

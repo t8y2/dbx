@@ -146,6 +146,15 @@ const collapsibleRightItemDefs = computed(() => {
       disabled: false,
     });
   }
+  if (toolbarItems.value.sqlFileTree) {
+    items.push({
+      key: "sqlFileTree",
+      label: t("sqlFileTree.title"),
+      icon: FolderTree,
+      action: () => emit("toggle-sql-file-panel"),
+      disabled: false,
+    });
+  }
   if (toolbarItems.value.history) {
     items.push({
       key: "history",
@@ -385,9 +394,8 @@ const toolbarDropdownTriggerClass = `inline-flex h-8 items-center gap-1 rounded-
       <Button v-if="toolbarItems.driverManager" variant="ghost" size="sm" :class="[toolbarTextButtonClass, { 'bg-accent': showDriverStore }]" @click="emit('open-driver-store')">
         <Package class="h-3.5 w-3.5" />
         <span :class="toolbarTextLabelClass">{{ t("toolbar.driverManager") }}</span>
-        <span v-if="agentDriverUpdateCount > 0" class="ml-0.5 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-medium leading-none text-white" :aria-label="t('toolbar.updatableDriverCount')">
-          {{ agentDriverUpdateCount > 99 ? "99+" : agentDriverUpdateCount }}
-        </span>
+        <!-- 小圆点仅提示"有可更新驱动"，具体数量交给对话框内标签页红点展示，避免工具栏长期挂红数字。 -->
+        <span v-if="agentDriverUpdateCount > 0" class="ml-0.5 inline-block h-2 w-2 rounded-full bg-red-500" :aria-label="t('toolbar.updatableDriverCount')" :title="t('toolbar.updatableDriverCount')" />
       </Button>
 
       <LightDropdown
@@ -451,9 +459,9 @@ const toolbarDropdownTriggerClass = `inline-flex h-8 items-center gap-1 rounded-
         <TooltipContent>{{ t("sqlLibrary.title") }}</TooltipContent>
       </Tooltip>
 
-      <Tooltip>
+      <Tooltip v-if="toolbarItems.sqlFileTree">
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0" :class="{ 'bg-accent': showSqlFilePanel }" @click="emit('toggle-sql-file-panel')">
+          <Button v-show="isRightItemVisible('sqlFileTree')" variant="ghost" size="icon" class="h-8 w-8 shrink-0" :class="{ 'bg-accent': showSqlFilePanel }" @click="emit('toggle-sql-file-panel')">
             <FolderTree class="h-4 w-4" />
           </Button>
         </TooltipTrigger>

@@ -326,7 +326,11 @@ const visibleTableColumnTemplateRows = computed(() =>
 );
 
 // --- Snippet state ---
-const editSnippets = ref<SqlSnippet[]>(settingsStore.editorSettings.snippets.map((s) => ({ ...s })));
+function editableSnippet(snippet: SqlSnippet): SqlSnippet {
+  return { ...snippet, enabled: snippet.enabled !== false };
+}
+
+const editSnippets = ref<SqlSnippet[]>(settingsStore.editorSettings.snippets.map(editableSnippet));
 
 const snippetDialogOpen = ref(false);
 const snippetEditingId = ref<string | null>(null);
@@ -445,6 +449,7 @@ function saveSnippet() {
         label: snippetForm.value.label.trim() || prefix,
         prefix,
         body: snippetForm.value.body,
+        enabled: editSnippets.value[idx].enabled !== false,
       };
     }
   } else {
@@ -453,9 +458,16 @@ function saveSnippet() {
       label: snippetForm.value.label.trim() || prefix,
       prefix,
       body: snippetForm.value.body,
+      enabled: true,
     });
   }
   snippetDialogOpen.value = false;
+}
+
+function setSnippetEnabled(id: string, enabled: boolean) {
+  const idx = editSnippets.value.findIndex((s) => s.id === id);
+  if (idx === -1) return;
+  editSnippets.value[idx] = { ...editSnippets.value[idx], enabled };
 }
 
 function deleteSnippet(id: string) {
@@ -593,7 +605,7 @@ watch(
       editQueryExportKeysetOptimizationEnabled.value = settingsStore.editorSettings.queryExportKeysetOptimizationEnabled;
       editUpdateDownloadSource.value = settingsStore.editorSettings.updateDownloadSource;
       editToolbarItems.value = { ...settingsStore.editorSettings.toolbarItems };
-      editSnippets.value = settingsStore.editorSettings.snippets.map((s) => ({ ...s }));
+      editSnippets.value = settingsStore.editorSettings.snippets.map(editableSnippet);
     }
   },
   { immediate: true },
@@ -3000,6 +3012,7 @@ onUnmounted(cleanupPreviewEditor);
                       { key: 'dataCompare', label: t('dataCompare.title') },
                       { key: 'checkUpdates', label: t('updates.check') },
                       { key: 'sqlLibrary', label: t('sqlLibrary.title') },
+                      { key: 'sqlFileTree', label: t('sqlFileTree.title') },
                       { key: 'history', label: t('history.title') },
                       { key: 'ai', label: 'AI' },
                       { key: 'theme', label: t('toolbar.theme') },
@@ -3470,12 +3483,13 @@ onUnmounted(cleanupPreviewEditor);
               <div class="flex items-center justify-between">
                 <p class="text-sm text-muted-foreground">{{ t("settings.snippetsDescription") }}</p>
                 <Button variant="outline" size="sm" @click="openAddSnippetDialog">
+                  <Plus class="mr-2 h-4 w-4" />
                   {{ t("settings.snippetsAdd") }}
                 </Button>
               </div>
 
-              <div class="rounded-md border">
-                <table class="w-full text-sm">
+              <div class="overflow-x-auto rounded-md border">
+                <table class="w-full min-w-[720px] text-sm">
                   <thead>
                     <tr class="border-b bg-muted/50">
                       <th class="px-3 py-2 text-left font-medium whitespace-nowrap">
@@ -3485,18 +3499,29 @@ onUnmounted(cleanupPreviewEditor);
                         {{ t("settings.snippetsPrefix") }}
                       </th>
                       <th class="px-3 py-2 text-left font-medium whitespace-nowrap">
+                        {{ t("settings.snippetsStatus") }}
+                      </th>
+                      <th class="px-3 py-2 text-left font-medium whitespace-nowrap">
                         {{ t("settings.snippetsBody") }}
                       </th>
                       <th class="px-3 py-2 w-20"></th>
                     </tr>
                   </thead>
                   <tbody>
-                    <tr v-for="snippet in editSnippets" :key="snippet.id" class="border-b last:border-b-0 hover:bg-muted/30">
+                    <tr v-for="snippet in editSnippets" :key="snippet.id" class="border-b last:border-b-0 hover:bg-muted/30" :class="snippet.enabled === false ? 'text-muted-foreground' : ''">
                       <td class="px-3 py-2">{{ snippet.label }}</td>
                       <td class="px-3 py-2">
                         <Badge variant="outline" class="h-5 rounded-md px-1.5 text-[11px] font-mono text-muted-foreground">
                           {{ snippet.prefix }}
                         </Badge>
+                      </td>
+                      <td class="px-3 py-2">
+                        <div class="flex items-center gap-2">
+                          <Switch :id="`snippet-enabled-${snippet.id}`" :model-value="snippet.enabled !== false" size="sm" :aria-label="t('settings.snippetsToggle')" @update:model-value="(value: boolean) => setSnippetEnabled(snippet.id, value)" />
+                          <Label :for="`snippet-enabled-${snippet.id}`" class="text-xs font-normal text-muted-foreground">
+                            {{ snippet.enabled === false ? t("settings.snippetsDisabled") : t("settings.snippetsEnabled") }}
+                          </Label>
+                        </div>
                       </td>
                       <td class="px-3 py-2 font-mono text-xs text-muted-foreground max-w-[300px] truncate">
                         {{ snippet.body }}

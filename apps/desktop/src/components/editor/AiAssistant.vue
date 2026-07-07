@@ -511,7 +511,7 @@ function appendAssistantReasoning(assistantIdx: number, delta: string) {
   scrollToBottom();
 }
 
-const expandedReasoning = ref<Set<number>>(new Set());
+const reasoningExpanded = ref(false);
 const expandedSteps = ref<Set<string>>(new Set());
 
 function toggleStep(key: string) {
@@ -626,14 +626,8 @@ function agentEventToStep(event: AgentEvent, index: number): AiAgentStepItem | u
   };
 }
 
-function toggleReasoning(index: number) {
-  const next = new Set(expandedReasoning.value);
-  if (next.has(index)) {
-    next.delete(index);
-  } else {
-    next.add(index);
-  }
-  expandedReasoning.value = next;
+function toggleReasoning() {
+  reasoningExpanded.value = !reasoningExpanded.value;
 }
 
 function scrollToBottom() {
@@ -1324,16 +1318,16 @@ async function openExternalUrl(url: string) {
           <div v-else-if="msg.content || msg.reasoning || msg.isThinking" class="flex">
             <div class="max-w-[95%] min-w-0 rounded-lg bg-muted px-3 py-2 text-xs leading-relaxed">
               <div v-if="msg.reasoning || msg.isThinking" class="mb-2">
-                <button class="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors" @click="toggleReasoning(i)">
-                  <ChevronRight class="h-3 w-3 transition-transform duration-200" :class="{ 'rotate-90': expandedReasoning.has(i) || msg.isThinking }" />
+                <button class="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors" @click="toggleReasoning()">
+                  <ChevronRight class="h-3 w-3 transition-transform duration-200" :class="{ 'rotate-90': reasoningExpanded }" />
                   <Loader2 v-if="msg.isThinking" class="h-3 w-3 animate-spin" />
                   <span>{{ t("ai.reasoningProcess") }}</span>
                 </button>
                 <div
                   class="overflow-hidden transition-[max-height,opacity] duration-200 ease-in-out"
                   :style="{
-                    maxHeight: expandedReasoning.has(i) || msg.isThinking ? '20000px' : '0px',
-                    opacity: expandedReasoning.has(i) || msg.isThinking ? '1' : '0',
+                    maxHeight: reasoningExpanded ? '20000px' : '0px',
+                    opacity: reasoningExpanded ? '1' : '0',
                   }"
                 >
                   <div class="mt-1.5 pl-4 border-l-2 border-muted-foreground/20 text-[11px] text-muted-foreground whitespace-pre-wrap">

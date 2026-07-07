@@ -87,9 +87,14 @@ export function buildTruncateTableSql(options: TableAdminSqlOptions): Promise<st
 }
 
 const DROP_TABLE_CASCADE_DATABASE_TYPES: readonly DatabaseType[] = ["postgres", "redshift", "gaussdb", "kwdb", "kingbase", "highgo", "vastbase", "opengauss"];
+const TRUNCATE_TABLE_CASCADE_DATABASE_TYPES: readonly DatabaseType[] = ["postgres", "gaussdb", "kwdb", "kingbase", "highgo", "vastbase", "opengauss"];
 
 export function supportsDropTableCascade(databaseType?: DatabaseType): boolean {
   return !!databaseType && DROP_TABLE_CASCADE_DATABASE_TYPES.includes(databaseType);
+}
+
+export function supportsTruncateTableCascade(databaseType?: DatabaseType): boolean {
+  return !!databaseType && TRUNCATE_TABLE_CASCADE_DATABASE_TYPES.includes(databaseType);
 }
 
 export function buildDropDatabaseSql(options: DatabaseNameSqlOptions): Promise<string> {

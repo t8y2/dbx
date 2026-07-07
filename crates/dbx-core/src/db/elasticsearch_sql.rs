@@ -48,17 +48,17 @@ pub fn translate_select_star(sql: &str) -> Result<Option<TranslatedSelectStar>, 
     if !is_select_star(select) {
         return Ok(None);
     }
-    let Some(index) = single_table_name(select)? else {
+    let Some(source) = single_table_source(select)? else {
         return Ok(None);
     };
 
     let mut body: Map<String, Json> = Map::new();
     if let Some(where_expr) = &select.selection {
-        body.insert("query".to_string(), translate_predicate(where_expr)?);
+        body.insert("query".to_string(), translate_predicate(where_expr, source.alias.as_deref())?);
     }
     if let Some(order_by) = &query.order_by {
         if let OrderByKind::Expressions(items) = &order_by.kind {
-            if let Some(sort) = translate_order_by(items)? {
+            if let Some(sort) = translate_order_by(items, source.alias.as_deref())? {
                 body.insert("sort".to_string(), sort);
             }
         }
@@ -74,14 +74,19 @@ pub fn translate_select_star(sql: &str) -> Result<Option<TranslatedSelectStar>, 
         body.insert("from".to_string(), json!(effective_from));
     }
 
-    Ok(Some(TranslatedSelectStar { index, body: Json::Object(body), user_limited, from_plan_pagination }))
+    Ok(Some(TranslatedSelectStar { index: source.index, body: Json::Object(body), user_limited, from_plan_pagination }))
 }
 
 fn is_select_star(select: &Select) -> bool {
     select.projection.len() == 1 && matches!(select.projection.first(), Some(SelectItem::Wildcard(_)))
 }
 
-fn single_table_name(select: &Select) -> Result<Option<String>, String> {
+struct SelectSource {
+    index: String,
+    alias: Option<String>,
+}
+
+fn single_table_source(select: &Select) -> Result<Option<SelectSource>, String> {
     if select.from.len() != 1 {
         return Ok(None);
     }
@@ -89,7 +94,7 @@ fn single_table_name(select: &Select) -> Result<Option<String>, String> {
     if !table.joins.is_empty() {
         return Err("JOINs are not supported in Elasticsearch SQL translation".to_string());
     }
-    let TableFactor::Table { name, .. } = &table.relation else {
+    let TableFactor::Table { name, alias, .. } = &table.relation else {
         return Ok(None);
     };
     let joined = name
@@ -101,89 +106,94 @@ fn single_table_name(select: &Select) -> Result<Option<String>, String> {
         })
         .collect::<Vec<_>>()
         .join(".");
-    Ok(Some(joined))
+    Ok(Some(SelectSource { index: joined, alias: alias.as_ref().map(|alias| alias.name.value.clone()) }))
 }
 
-fn translate_predicate(expr: &Expr) -> Result<Json, String> {
+fn translate_predicate(expr: &Expr, table_alias: Option<&str>) -> Result<Json, String> {
     match expr {
-        Expr::Nested(inner) => translate_predicate(inner),
-        Expr::BinaryOp { left, op, right } => translate_binary_op(left, op, right),
+        Expr::Nested(inner) => translate_predicate(inner, table_alias),
+        Expr::BinaryOp { left, op, right } => translate_binary_op(left, op, right, table_alias),
         Expr::Like { negated, expr, pattern, .. } | Expr::ILike { negated, expr, pattern, .. } => {
-            translate_like(*negated, expr, pattern)
+            translate_like(*negated, expr, pattern, table_alias)
         }
-        Expr::InList { expr, list, negated } => translate_in_list(expr, list, *negated),
-        Expr::IsNull(inner) => translate_is_null(inner, false),
-        Expr::IsNotNull(inner) => translate_is_null(inner, true),
-        Expr::Between { expr, negated, low, high } => translate_between(expr, *negated, low, high),
+        Expr::InList { expr, list, negated } => translate_in_list(expr, list, *negated, table_alias),
+        Expr::IsNull(inner) => translate_is_null(inner, false, table_alias),
+        Expr::IsNotNull(inner) => translate_is_null(inner, true, table_alias),
+        Expr::Between { expr, negated, low, high } => translate_between(expr, *negated, low, high, table_alias),
         Expr::UnaryOp { op: UnaryOperator::Not, expr } => {
-            let inner = translate_predicate(expr)?;
+            let inner = translate_predicate(expr, table_alias)?;
             Ok(json!({ "bool": { "must_not": [inner] } }))
         }
         other => Err(format!("Unsupported WHERE expression: {other}")),
     }
 }
 
-fn translate_binary_op(left: &Expr, op: &BinaryOperator, right: &Expr) -> Result<Json, String> {
+fn translate_binary_op(
+    left: &Expr,
+    op: &BinaryOperator,
+    right: &Expr,
+    table_alias: Option<&str>,
+) -> Result<Json, String> {
     match op {
         BinaryOperator::And => {
             let mut must = Vec::new();
-            collect_and(left, &mut must)?;
-            collect_and(right, &mut must)?;
+            collect_and(left, &mut must, table_alias)?;
+            collect_and(right, &mut must, table_alias)?;
             Ok(json!({ "bool": { "must": must } }))
         }
         BinaryOperator::Or => {
             let mut should = Vec::new();
-            collect_or(left, &mut should)?;
-            collect_or(right, &mut should)?;
+            collect_or(left, &mut should, table_alias)?;
+            collect_or(right, &mut should, table_alias)?;
             Ok(json!({ "bool": { "should": should, "minimum_should_match": 1 } }))
         }
-        BinaryOperator::Eq => term_clause(left, right),
+        BinaryOperator::Eq => term_clause(left, right, table_alias),
         BinaryOperator::NotEq => {
-            let inner = term_clause(left, right)?;
+            let inner = term_clause(left, right, table_alias)?;
             Ok(json!({ "bool": { "must_not": [inner] } }))
         }
-        BinaryOperator::Gt => range_clause(left, right, "gt"),
-        BinaryOperator::Lt => range_clause(left, right, "lt"),
-        BinaryOperator::GtEq => range_clause(left, right, "gte"),
-        BinaryOperator::LtEq => range_clause(left, right, "lte"),
+        BinaryOperator::Gt => range_clause(left, right, "gt", table_alias),
+        BinaryOperator::Lt => range_clause(left, right, "lt", table_alias),
+        BinaryOperator::GtEq => range_clause(left, right, "gte", table_alias),
+        BinaryOperator::LtEq => range_clause(left, right, "lte", table_alias),
         other => Err(format!("Unsupported operator: {other}")),
     }
 }
 
-fn collect_and(expr: &Expr, out: &mut Vec<Json>) -> Result<(), String> {
+fn collect_and(expr: &Expr, out: &mut Vec<Json>, table_alias: Option<&str>) -> Result<(), String> {
     if let Expr::BinaryOp { left, op: BinaryOperator::And, right } = expr {
-        collect_and(left, out)?;
-        collect_and(right, out)?;
+        collect_and(left, out, table_alias)?;
+        collect_and(right, out, table_alias)?;
     } else {
-        out.push(translate_predicate(expr)?);
+        out.push(translate_predicate(expr, table_alias)?);
     }
     Ok(())
 }
 
-fn collect_or(expr: &Expr, out: &mut Vec<Json>) -> Result<(), String> {
+fn collect_or(expr: &Expr, out: &mut Vec<Json>, table_alias: Option<&str>) -> Result<(), String> {
     if let Expr::BinaryOp { left, op: BinaryOperator::Or, right } = expr {
-        collect_or(left, out)?;
-        collect_or(right, out)?;
+        collect_or(left, out, table_alias)?;
+        collect_or(right, out, table_alias)?;
     } else {
-        out.push(translate_predicate(expr)?);
+        out.push(translate_predicate(expr, table_alias)?);
     }
     Ok(())
 }
 
-fn term_clause(left: &Expr, right: &Expr) -> Result<Json, String> {
-    let field = field_path(left)?;
+fn term_clause(left: &Expr, right: &Expr, table_alias: Option<&str>) -> Result<Json, String> {
+    let field = field_path(left, table_alias)?;
     let value = literal_to_json(right)?;
     Ok(json!({ "term": { field: value } }))
 }
 
-fn range_clause(left: &Expr, right: &Expr, key: &str) -> Result<Json, String> {
-    let field = field_path(left)?;
+fn range_clause(left: &Expr, right: &Expr, key: &str, table_alias: Option<&str>) -> Result<Json, String> {
+    let field = field_path(left, table_alias)?;
     let value = literal_to_json(right)?;
     Ok(json!({ "range": { field: { key: value } } }))
 }
 
-fn translate_like(negated: bool, expr: &Expr, pattern: &Expr) -> Result<Json, String> {
-    let field = field_path(expr)?;
+fn translate_like(negated: bool, expr: &Expr, pattern: &Expr, table_alias: Option<&str>) -> Result<Json, String> {
+    let field = field_path(expr, table_alias)?;
     let pattern_str = match literal_string(pattern)? {
         Some(s) => s,
         None => return Err("LIKE pattern must be a string literal".to_string()),
@@ -213,8 +223,8 @@ fn translate_like(negated: bool, expr: &Expr, pattern: &Expr) -> Result<Json, St
     }
 }
 
-fn translate_in_list(expr: &Expr, list: &[Expr], negated: bool) -> Result<Json, String> {
-    let field = field_path(expr)?;
+fn translate_in_list(expr: &Expr, list: &[Expr], negated: bool, table_alias: Option<&str>) -> Result<Json, String> {
+    let field = field_path(expr, table_alias)?;
     let values: Vec<Json> = list.iter().map(literal_to_json).collect::<Result<_, _>>()?;
     let query = json!({ "terms": { field: values } });
     if negated {
@@ -224,8 +234,8 @@ fn translate_in_list(expr: &Expr, list: &[Expr], negated: bool) -> Result<Json, 
     }
 }
 
-fn translate_is_null(expr: &Expr, negated: bool) -> Result<Json, String> {
-    let field = field_path(expr)?;
+fn translate_is_null(expr: &Expr, negated: bool, table_alias: Option<&str>) -> Result<Json, String> {
+    let field = field_path(expr, table_alias)?;
     let exists = json!({ "exists": { "field": field } });
     if negated {
         // IS NOT NULL → field exists
@@ -235,8 +245,14 @@ fn translate_is_null(expr: &Expr, negated: bool) -> Result<Json, String> {
     }
 }
 
-fn translate_between(expr: &Expr, negated: bool, low: &Expr, high: &Expr) -> Result<Json, String> {
-    let field = field_path(expr)?;
+fn translate_between(
+    expr: &Expr,
+    negated: bool,
+    low: &Expr,
+    high: &Expr,
+    table_alias: Option<&str>,
+) -> Result<Json, String> {
+    let field = field_path(expr, table_alias)?;
     let lo = literal_to_json(low)?;
     let hi = literal_to_json(high)?;
     let query = json!({ "range": { field: { "gte": lo, "lte": hi } } });
@@ -247,10 +263,10 @@ fn translate_between(expr: &Expr, negated: bool, low: &Expr, high: &Expr) -> Res
     }
 }
 
-fn translate_order_by(items: &[OrderByExpr]) -> Result<Option<Json>, String> {
+fn translate_order_by(items: &[OrderByExpr], table_alias: Option<&str>) -> Result<Option<Json>, String> {
     let mut sort = Vec::new();
     for item in items {
-        let field = field_path(&item.expr)?;
+        let field = field_path(&item.expr, table_alias)?;
         let order = if item.options.asc.unwrap_or(true) { "asc" } else { "desc" };
         sort.push(json!({ field: { "order": order } }));
     }
@@ -285,10 +301,20 @@ fn usize_literal(expr: &Expr) -> Result<usize, String> {
     }
 }
 
-fn field_path(expr: &Expr) -> Result<String, String> {
+fn field_path(expr: &Expr, table_alias: Option<&str>) -> Result<String, String> {
     match expr {
         Expr::Identifier(ident) => Ok(ident.value.clone()),
-        Expr::CompoundIdentifier(parts) => Ok(parts.iter().map(|p| p.value.clone()).collect::<Vec<_>>().join(".")),
+        Expr::CompoundIdentifier(parts) => {
+            let mut field_parts = parts.iter().map(|p| p.value.clone()).collect::<Vec<_>>();
+            if let (Some(alias), Some(first)) = (table_alias, field_parts.first()) {
+                // Dotted Elasticsearch fields are valid document paths; only
+                // strip a known SQL table alias such as `ass.agencyCode`.
+                if first.eq_ignore_ascii_case(alias) {
+                    field_parts.remove(0);
+                }
+            }
+            Ok(field_parts.join("."))
+        }
         other => Err(format!("Expected column name, got {other}")),
     }
 }
@@ -341,4 +367,60 @@ fn sql_like_to_wildcard(pattern: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::translate_select_star;
+    use serde_json::json;
+
+    #[test]
+    fn translate_select_star_strips_table_alias_from_where_fields() {
+        let translated = translate_select_star(
+            "SELECT * FROM assets002 AS ass WHERE ass.agencyCode = '035021' AND ass.mofDivCode = '420108000'",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(translated.index, "assets002");
+        assert_eq!(
+            translated.body["query"],
+            json!({
+                "bool": {
+                    "must": [
+                        { "term": { "agencyCode": "035021" } },
+                        { "term": { "mofDivCode": "420108000" } }
+                    ]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn translate_select_star_strips_table_alias_before_nested_field_path() {
+        let translated =
+            translate_select_star("SELECT * FROM assets002 ass WHERE ass.department.code = 'A01'").unwrap().unwrap();
+
+        assert_eq!(translated.body["query"], json!({ "term": { "department.code": "A01" } }));
+    }
+
+    #[test]
+    fn translate_select_star_preserves_unaliased_dotted_document_fields() {
+        let translated = translate_select_star("SELECT * FROM logs WHERE host.ip = '127.0.0.1'").unwrap().unwrap();
+
+        assert_eq!(translated.body["query"], json!({ "term": { "host.ip": "127.0.0.1" } }));
+    }
+
+    #[test]
+    fn translate_select_star_strips_alias_in_like_and_order_by() {
+        let translated = translate_select_star(
+            "SELECT * FROM assets002 ass WHERE ass.assetName LIKE 'car%' ORDER BY ass.createdAt DESC LIMIT 10",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(translated.body["query"], json!({ "prefix": { "assetName": "car" } }));
+        assert_eq!(translated.body["sort"], json!([{ "createdAt": { "order": "desc" } }]));
+        assert_eq!(translated.body["size"], json!(10));
+    }
 }

@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, reactive, ref } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { ArrowDownWideNarrow, Download, FileInput, FilePlus, FileText, FolderCog, FolderClosed, FolderOpen, FolderPlus, Library, LocateFixed, Pencil, Search, Trash2, Upload, X } from "@lucide/vue";
+import { ArrowDownWideNarrow, Download, FilePlus, FileText, FolderCog, FolderClosed, FolderOpen, FolderPlus, Library, LocateFixed, Pencil, Search, Trash2, Upload, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import CustomContextMenu, { type ContextMenuItem as CtxMenuItem } from "@/components/ui/CustomContextMenu.vue";
@@ -853,7 +853,7 @@ const contextMenuItems = computed<CtxMenuItem[]>(() => {
   if ("sql" in target) {
     return [
       { label: t("savedSql.open"), action: () => openFile(target), icon: FileText },
-      { label: t("sqlLibrary.exportFile"), action: () => exportSingleFile(target), icon: FileInput },
+      { label: t("sqlLibrary.exportFile"), action: () => exportSingleFile(target), icon: Upload },
       { label: t("sqlLibrary.moveToFolder"), icon: FolderClosed, children: folderMoveMenuItems([target.id]) },
       { label: "", separator: true },
       { label: t("savedSql.renameFile"), action: () => startRenameFile(target), icon: Pencil },

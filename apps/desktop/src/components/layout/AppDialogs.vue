@@ -66,6 +66,15 @@ const emit = defineEmits<{
       whereInput?: string;
     },
   ];
+  openDiagramTarget: [
+    target: {
+      connectionId: string;
+      database: string;
+      schema?: string;
+      tableName: string;
+      tableType?: string;
+    },
+  ];
 }>();
 
 const { t } = useI18n();
@@ -135,7 +144,7 @@ watch(
     :prefill-schema="dialogs.dataComparePrefillSchema.value"
     :prefill-table="dialogs.dataComparePrefillTable.value"
   />
-  <SqlFileExecutionDialog v-model:open="dialogs.showSqlFileDialog.value" :prefill-connection-id="dialogs.sqlFilePrefillConnectionId.value" :prefill-database="dialogs.sqlFilePrefillDatabase.value" />
+  <SqlFileExecutionDialog v-model:open="dialogs.showSqlFileDialog.value" :prefill-connection-id="dialogs.sqlFilePrefillConnectionId.value" :prefill-database="dialogs.sqlFilePrefillDatabase.value" :prefill-file-path="dialogs.sqlFilePrefillFilePath.value" />
   <SchemaDiagramDialog
     v-if="dialogs.showDiagramDialog.value"
     v-model:open="dialogs.showDiagramDialog.value"
@@ -143,6 +152,7 @@ watch(
     :prefill-database="dialogs.diagramPrefillDatabase.value"
     :prefill-schema="dialogs.diagramPrefillSchema.value"
     :focus-table-name="dialogs.diagramFocusTableName.value"
+    @open-target="emit('openDiagramTarget', $event)"
   />
   <TableImportDialog
     v-if="dialogs.showTableImportDialog.value"

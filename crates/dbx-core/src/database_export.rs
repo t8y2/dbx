@@ -179,6 +179,9 @@ fn format_export_sql_literal_typed(
     database_type: Option<DatabaseType>,
     column_type: Option<&str>,
 ) -> String {
+    if is_postgres_json_export_column(database_type, column_type) {
+        return format_postgres_json_export_literal(value);
+    }
     if matches!(database_type, Some(DatabaseType::Mysql)) && column_type.is_some_and(is_mysql_bit_type) {
         return format_mysql_bit_literal(value);
     }
@@ -203,6 +206,16 @@ fn format_export_sql_literal_typed(
         return literal;
     }
     format_export_sql_literal_for_database(value, database_type)
+}
+
+fn format_postgres_json_export_literal(value: &Value) -> String {
+    if value.is_null() {
+        return "NULL".to_string();
+    }
+    let text = value.as_str().map_or_else(|| value.to_string(), ToString::to_string);
+    // PostgreSQL standard strings keep backslashes literal; JSON text needs its
+    // own escape sequences, so only SQL-escape the surrounding string delimiter.
+    postgres_string_literal(&text)
 }
 
 fn quote_export_sql_string(text: &str) -> String {
@@ -563,6 +576,18 @@ fn is_postgres_tsvector_export_column(database_type: Option<DatabaseType>, colum
             .map(|column_type| {
                 let normalized = column_type.trim().trim_matches('"').to_ascii_lowercase();
                 normalized == "tsvector" || normalized.ends_with(".tsvector")
+            })
+            .unwrap_or(false)
+}
+
+fn is_postgres_json_export_column(database_type: Option<DatabaseType>, column_type: Option<&str>) -> bool {
+    database_type == Some(DatabaseType::Postgres)
+        && column_type
+            .map(|column_type| {
+                let normalized = column_type.trim().trim_matches('"').to_ascii_lowercase();
+                matches!(normalized.as_str(), "json" | "jsonb")
+                    || normalized.ends_with(".json")
+                    || normalized.ends_with(".jsonb")
             })
             .unwrap_or(false)
 }
@@ -1448,6 +1473,29 @@ mod tests {
         .unwrap();
 
         assert_eq!(statements, vec!["INSERT INTO \"public\".\"notes\" (\"body\") VALUES ('line1\nline2\tend');"]);
+    }
+
+    #[test]
+    fn postgres_jsonb_export_preserves_json_escape_sequences() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Postgres),
+            schema: Some("public".to_string()),
+            table_name: Some("events".to_string()),
+            qualified_table_name: None,
+            columns: vec!["payload".to_string()],
+            column_types: vec![Some("jsonb".to_string())],
+            column_extras: Vec::new(),
+            rows: vec![vec![json!(r#"{"text":"say \"hi\"","path":"C:\\tmp","quote":"O'Hara"}"#)]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                r#"INSERT INTO "public"."events" ("payload") VALUES ('{"text":"say \"hi\"","path":"C:\\tmp","quote":"O''Hara"}');"#
+            ]
+        );
     }
 
     #[test]

@@ -117,7 +117,7 @@ fn open_sqlite_handle(
         }
         if is_network_path(path) {
             flags |= OpenFlags::SQLITE_OPEN_URI;
-            Connection::open_with_flags(format!("file:{}?vfs=unix-nolock", path), flags)
+            Connection::open_with_flags(sqlite_network_path_uri(path), flags)
                 .map_err(|e| format!("SQLite connection failed: {e}"))?
         } else {
             Connection::open_with_flags(path, flags).map_err(|e| format!("SQLite connection failed: {e}"))?
@@ -430,6 +430,39 @@ fn is_network_path(path: &str) -> bool {
     path.starts_with("\\\\") || path.starts_with("//") || path.contains("wsl.localhost") || path.contains("wsl$")
 }
 
+fn sqlite_network_path_uri(path: &str) -> String {
+    let (path_and_query, fragment) =
+        path.split_once('#').map_or((path, None), |(prefix, suffix)| (prefix, Some(suffix)));
+    let (file_path, query) = path_and_query.split_once('?').unwrap_or((path_and_query, ""));
+    let mut query = query.to_string();
+    if !sqlite_uri_query_has_param(&query, "nolock") {
+        if !query.is_empty() {
+            query.push('&');
+        }
+        // UNC/WSL shares may not support SQLite byte-range locks reliably. Use
+        // the cross-platform URI flag; unix-nolock is unavailable on Windows.
+        query.push_str("nolock=1");
+    }
+
+    let mut uri = format!("file:{file_path}");
+    if !query.is_empty() {
+        uri.push('?');
+        uri.push_str(&query);
+    }
+    if let Some(fragment) = fragment {
+        uri.push('#');
+        uri.push_str(fragment);
+    }
+    uri
+}
+
+fn sqlite_uri_query_has_param(query: &str, name: &str) -> bool {
+    query.split('&').any(|part| {
+        let key = part.split_once('=').map_or(part, |(key, _)| key);
+        key.eq_ignore_ascii_case(name)
+    })
+}
+
 pub fn is_memory_database_path(path: &str) -> bool {
     path.trim().eq_ignore_ascii_case(":memory:")
 }
@@ -591,6 +624,33 @@ mod tests {
     #[test]
     fn sqlite_extension_specs_ignore_empty_values() {
         assert!(sqlite_extension_specs_from_url_params(Some("sqlite_extension=&sqlite_extensions=%0A")).is_empty());
+    }
+
+    #[test]
+    fn sqlite_network_path_uri_uses_cross_platform_nolock() {
+        let path = r"\\wsl.localhost\Ubuntu\home\app\data.db";
+
+        assert_eq!(sqlite_network_path_uri(path), r"file:\\wsl.localhost\Ubuntu\home\app\data.db?nolock=1");
+    }
+
+    #[test]
+    fn sqlite_network_path_uri_appends_nolock_to_existing_query() {
+        let path = r"\\wsl.localhost\Ubuntu\home\app\data.db?cache=shared";
+
+        assert_eq!(
+            sqlite_network_path_uri(path),
+            r"file:\\wsl.localhost\Ubuntu\home\app\data.db?cache=shared&nolock=1"
+        );
+    }
+
+    #[test]
+    fn sqlite_network_path_uri_preserves_explicit_nolock_query() {
+        let path = r"\\wsl.localhost\Ubuntu\home\app\data.db?nolock=1&cache=shared";
+
+        assert_eq!(
+            sqlite_network_path_uri(path),
+            r"file:\\wsl.localhost\Ubuntu\home\app\data.db?nolock=1&cache=shared"
+        );
     }
 
     #[test]

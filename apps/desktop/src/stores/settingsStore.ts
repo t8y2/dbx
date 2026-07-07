@@ -430,6 +430,7 @@ export interface ToolbarItems {
   dataCompare: boolean;
   checkUpdates: boolean;
   sqlLibrary: boolean;
+  sqlFileTree: boolean;
   history: boolean;
   ai: boolean;
   theme: boolean;
@@ -444,6 +445,7 @@ export const DEFAULT_TOOLBAR_ITEMS: ToolbarItems = {
   dataCompare: true,
   checkUpdates: true,
   sqlLibrary: true,
+  sqlFileTree: true,
   history: true,
   ai: true,
   theme: true,
@@ -658,7 +660,8 @@ function normalizeSqlSnippets(value: unknown, existing?: SqlSnippet[]): SqlSnipp
     }
     if (seenPrefixes.has(item.prefix)) continue;
     seenPrefixes.add(item.prefix);
-    valid.push({ id: item.id, label: item.label, prefix: item.prefix, body: item.body });
+    // Older settings do not have this field; only an explicit false disables a snippet.
+    valid.push({ id: item.id, label: item.label, prefix: item.prefix, body: item.body, enabled: item.enabled !== false });
   }
   if (valid.length === 0) return existing ?? DEFAULT_SQL_SNIPPETS;
   return valid;
@@ -675,6 +678,7 @@ function normalizeToolbarItems(items: Partial<ToolbarItems> | undefined): Toolba
     dataCompare: items.dataCompare ?? defaults.dataCompare,
     checkUpdates: items.checkUpdates ?? defaults.checkUpdates,
     sqlLibrary: items.sqlLibrary ?? defaults.sqlLibrary,
+    sqlFileTree: items.sqlFileTree ?? defaults.sqlFileTree,
     history: items.history ?? defaults.history,
     ai: items.ai ?? defaults.ai,
     theme: items.theme ?? defaults.theme,

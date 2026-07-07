@@ -136,6 +136,22 @@ test("defaults statement run buttons to enabled and preserves saved booleans", (
   assert.equal(normalizeEditorSettings({ showStatementRunButtons: "nope" as any }).showStatementRunButtons, true);
 });
 
+test("normalizes SQL snippet enabled state", () => {
+  const settings = normalizeEditorSettings({
+    snippets: [
+      { id: "legacy", label: "legacy", prefix: "leg", body: "SELECT 1;" },
+      { id: "disabled", label: "disabled", prefix: "dis", body: "SELECT 2;", enabled: false },
+      { id: "invalid", label: "invalid", prefix: "inv", body: "SELECT 3;", enabled: "nope" },
+    ],
+  } as any);
+
+  assert.deepEqual(settings.snippets, [
+    { id: "legacy", label: "legacy", prefix: "leg", body: "SELECT 1;", enabled: true },
+    { id: "disabled", label: "disabled", prefix: "dis", body: "SELECT 2;", enabled: false },
+    { id: "invalid", label: "invalid", prefix: "inv", body: "SELECT 3;", enabled: true },
+  ]);
+});
+
 test("defaults unsaved SQL close confirmation to enabled", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.confirmUnsavedSqlClose, true);
   assert.equal(normalizeEditorSettings({}).confirmUnsavedSqlClose, true);

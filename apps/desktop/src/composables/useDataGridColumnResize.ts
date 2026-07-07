@@ -1,24 +1,24 @@
-import { ref, computed, watch, type ComputedRef, type Ref } from "vue";
-import { useElementSize } from "@vueuse/core";
+import { ref, computed, watch, type ComputedRef } from "vue";
 import { calculateDataGridColumnWidth, DATA_GRID_AUTO_FIT_VALUE_TEXT_LIMIT, DATA_GRID_COL_AUTO_FIT_MAX_WIDTH, DATA_GRID_COL_MIN_WIDTH, DATA_GRID_SAMPLE_ROWS } from "@/lib/dataGrid/dataGridColumnWidth";
 
 type CellValue = string | number | boolean | null;
 
 export const DATA_GRID_ROW_NUM_WIDTH = 48;
 
+export function resizeDataGridColumnWidth(startWidth: number, deltaX: number): number {
+  return Math.max(DATA_GRID_COL_MIN_WIDTH, startWidth + deltaX);
+}
+
 export interface UseDataGridColumnResizeOptions {
   columns: ComputedRef<string[]>;
   sourceRows: ComputedRef<CellValue[][]>;
   columnIndexes: ComputedRef<number[]>;
-  gridRef: Ref<HTMLDivElement | undefined>;
-  scrollbarGutter?: Ref<number>;
 }
 
 export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions) {
-  const { columns, sourceRows, columnIndexes, gridRef, scrollbarGutter } = options;
+  const { columns, sourceRows, columnIndexes } = options;
 
   const columnWidths = ref<number[]>([]);
-  const { width: gridWidth } = useElementSize(gridRef);
   let isResizing = false;
   let previousColumnIndexes: number[] = [];
 
@@ -59,7 +59,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     const startX = event.clientX;
     const startWidth = columnWidths.value[colIdx];
     const onMove = (e: MouseEvent) => {
-      columnWidths.value[colIdx] = Math.max(DATA_GRID_COL_MIN_WIDTH, startWidth + e.clientX - startX);
+      columnWidths.value[colIdx] = resizeDataGridColumnWidth(startWidth, e.clientX - startX);
     };
     const onUp = () => {
       document.removeEventListener("mousemove", onMove);
@@ -83,19 +83,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     });
   }
 
-  const baseTotalWidth = computed(() => columnWidths.value.reduce((a, b) => a + b, 0));
-
-  const renderedColumnWidths = computed(() => {
-    const widths = columnWidths.value;
-    if (widths.length === 0) return widths;
-
-    const availableWidth = Math.max(0, gridWidth.value - (scrollbarGutter?.value ?? 0));
-    const extraWidth = Math.max(0, availableWidth - DATA_GRID_ROW_NUM_WIDTH - baseTotalWidth.value);
-    if (extraWidth === 0) return widths;
-
-    const extraPerColumn = extraWidth / widths.length;
-    return widths.map((width) => width + extraPerColumn);
-  });
+  const renderedColumnWidths = computed(() => columnWidths.value);
 
   const totalWidth = computed(() => renderedColumnWidths.value.reduce((a, b) => a + b, 0) + DATA_GRID_ROW_NUM_WIDTH);
 

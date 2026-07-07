@@ -44,6 +44,7 @@ export type DatabaseType =
   | "trino"
   | "prestosql"
   | "hive"
+  | "spark"
   | "db2"
   | "informix"
   | "neo4j"
@@ -68,6 +69,7 @@ export interface SqlSnippet {
   label: string;
   prefix: string;
   body: string;
+  enabled?: boolean;
 }
 
 export type CompletionAssistantObjectKind = "database" | "schema" | "table" | "view" | "routine" | "procedure" | "function" | "column";

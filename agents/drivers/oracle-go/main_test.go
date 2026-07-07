@@ -189,6 +189,28 @@ func TestTrimStatementSQLStripsSlashDelimiterAfterPLSQLBlock(t *testing.T) {
 	}
 }
 
+func TestTrimStatementSQLPreservesCreatePLSQLObjectTerminator(t *testing.T) {
+	tests := []string{
+		"CREATE OR REPLACE PROCEDURE p AS\nBEGIN\n  NULL;\nEND;",
+		"CREATE OR REPLACE FUNCTION f RETURN NUMBER AS\nBEGIN\n  RETURN 1;\nEND;",
+		"CREATE OR REPLACE PACKAGE pkg_utils AS\n  FUNCTION get_version RETURN VARCHAR2;\nEND pkg_utils;",
+	}
+	for _, sqlText := range tests {
+		if got := trimStatementSQL(sqlText); got != sqlText {
+			t.Fatalf("trimStatementSQL() = %q, want full PL/SQL object %q", got, sqlText)
+		}
+	}
+}
+
+func TestTrimStatementSQLStripsSlashDelimiterAfterCreatePLSQLObject(t *testing.T) {
+	sqlText := "CREATE OR REPLACE PROCEDURE p AS\nBEGIN\n  NULL;\nEND;\n/"
+	want := "CREATE OR REPLACE PROCEDURE p AS\nBEGIN\n  NULL;\nEND;"
+
+	if got := trimStatementSQL(sqlText); got != want {
+		t.Fatalf("trimStatementSQL() = %q, want %q", got, want)
+	}
+}
+
 func TestTrimStatementSQLRemovesRegularStatementSemicolon(t *testing.T) {
 	if got := trimStatementSQL("SELECT 1 FROM DUAL;"); got != "SELECT 1 FROM DUAL" {
 		t.Fatalf("trimStatementSQL() = %q, want regular statement without semicolon", got)

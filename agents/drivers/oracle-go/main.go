@@ -24,6 +24,7 @@ const protocolVersion = 1
 const defaultMaxRows = 1000
 
 var (
+	oraclePlSQLBlockStartRegexp    = regexp.MustCompile(`(?is)^\s*(?:DECLARE|BEGIN|CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:EDITIONABLE|NONEDITIONABLE)\s+)?(?:FUNCTION|PROCEDURE|TRIGGER|PACKAGE(?:\s+BODY)?|TYPE(?:\s+BODY)?))\b`)
 	oraclePlSQLBlockEndRegexp      = regexp.MustCompile(`(?is)\bEND\s*;\s*$`)
 	oracleNamedPlSQLBlockEndRegexp = regexp.MustCompile(`(?is)\bEND\s+([A-Z0-9_$#]+)\s*;\s*$`)
 )
@@ -2351,6 +2352,8 @@ func stripTrailingSlashDelimiter(sqlText string) string {
 		return trimmed
 	}
 	beforeSlash := strings.TrimSpace(trimmed[:lineStart])
+	// SQL*Plus uses a standalone slash to execute PL/SQL blocks; go-ora needs
+	// only the block text and not that client-side delimiter.
 	if isOraclePlSQLBlock(beforeSlash) {
 		return beforeSlash
 	}
@@ -2358,10 +2361,12 @@ func stripTrailingSlashDelimiter(sqlText string) string {
 }
 
 func isOraclePlSQLBlock(sqlText string) bool {
-	upper := strings.ToUpper(strings.TrimSpace(sqlText))
-	if !strings.HasPrefix(upper, "DECLARE") && !strings.HasPrefix(upper, "BEGIN") {
+	trimmed := strings.TrimSpace(sqlText)
+	start := trimLeadingSQLComments(trimmed)
+	if !oraclePlSQLBlockStartRegexp.MatchString(start) {
 		return false
 	}
+	upper := strings.ToUpper(trimmed)
 	if oraclePlSQLBlockEndRegexp.MatchString(upper) {
 		return true
 	}

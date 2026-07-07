@@ -8,12 +8,13 @@ import { search as cmSearch } from "@codemirror/search";
 import EditorSearchPanel from "./EditorSearchPanel.vue";
 import SqlExecutionTargetPicker from "./SqlExecutionTargetPicker.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
-import { copyToClipboard } from "@/lib/common/clipboard";
+import { copyToClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
 import { resolveExecutableSql, type SqlExecutionSnapshot, type SqlExecutionOverride, type SqlExecutionCandidate } from "@/lib/sql/sqlExecutionTarget";
 import { buildExecutionCandidates, hasMultipleExecutionTargets, supportsExecutionTargetPicker, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, executableStatementRangeStartingAt as executableStatementRangeStartingAtLine, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
 import { currentStatementFrameRangeTo, visualSqlColumns } from "@/lib/sql/currentStatementFrame";
 import { formatSqlText, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import { buildSqlInConditionFromPasteSource, insertTextForSqlInCondition } from "@/lib/sql/sqlInListPaste";
 import { formatMongoShellText } from "@/lib/mongo/mongoFormatter";
 import { useConnectionStore, COMPLETION_METADATA_CONCURRENCY } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -54,7 +55,7 @@ import { normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
 import { selectionMatchOccurrences } from "@/lib/editor/codemirrorSelectionMatches";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
-import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
+import { isSchemaAware, isSingleDatabase, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
 import { usesLocalOnlyEditorCompletionMetadata, usesOnDemandOnlyEditorColumnMetadata } from "@/lib/metadata/completionMetadataPolicy";
 import { qualifiedTableNameAtSqlPosition } from "@/lib/sql/queryCursorTableTarget";
 import * as api from "@/lib/backend/api";
@@ -738,6 +739,50 @@ function convertSelectedSqlCase(mode: SelectionCaseMode): boolean {
   return false;
 }
 
+async function pasteClipboardAsSqlInCondition(): Promise<boolean> {
+  if (!supportsSqlInListPaste(props.databaseType)) return false;
+  if (props.readOnly) return false;
+  const currentView = view.value;
+  if (!currentView) return false;
+
+  const selection = currentView.state.selection.main;
+  const selectedSource = selection.empty ? "" : currentView.state.sliceDoc(selection.from, selection.to);
+  let source = selectedSource;
+  if (!source) {
+    try {
+      source = await readTextFromClipboard();
+    } catch (e: any) {
+      toast(t("editor.exPasteClipboardReadFailed", { message: e?.message || String(e) }), 5000);
+      focusEditor();
+      return false;
+    }
+  }
+
+  const result = buildSqlInConditionFromPasteSource(source);
+  if (!result.ok) {
+    const key = result.reason === "too-large" ? "editor.exPasteTooLarge" : result.reason === "too-many-values" ? "editor.exPasteTooManyValues" : result.reason === "not-list" ? "editor.exPasteNotList" : "editor.exPasteNoValues";
+    toast(t(key, { limit: result.limit ?? 0 }), 5000);
+    focusEditor();
+    return false;
+  }
+
+  if (view.value !== currentView || props.readOnly) return false;
+  const state = currentView.state;
+  const line = state.doc.lineAt(selection.from);
+  const prefix = state.sliceDoc(line.from, selection.from);
+  const insertText = insertTextForSqlInCondition(result.sql, prefix);
+
+  currentView.dispatch({
+    changes: { from: selection.from, to: selection.to, insert: insertText },
+    selection: { anchor: selection.from + insertText.length },
+    scrollIntoView: true,
+    userEvent: "input.paste",
+  });
+  currentView.focus();
+  toast(t("editor.exPastePasted", { count: result.valueCount }), 2000);
+  return true;
+}
+
 function openTableFromContextMenu() {
   if (!contextTableName.value) return;
   emit("viewTableData", contextTableName.value);
@@ -887,6 +932,11 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...binding(shortcuts.selectAll, (view) => codeMirrorSelectAll?.(view) ?? false),
         ...binding(shortcuts.uppercaseSelection, () => convertSelectedSqlCase("upper")),
         ...binding(shortcuts.lowercaseSelection, () => convertSelectedSqlCase("lower")),
+        ...binding(shortcuts.exPasteSqlInCondition, () => {
+          if (!supportsSqlInListPaste(props.databaseType)) return false;
+          void pasteClipboardAsSqlInCondition();
+          return true;
+        }),
       ]),
     ) ?? [],
     codeMirrorKeymap.of(
@@ -3254,7 +3304,7 @@ function scrollCursorIntoView() {
   });
 }
 
-defineExpose({ openSearch, openReplace, scrollCursorIntoView, requestExecute });
+defineExpose({ openSearch, openReplace, scrollCursorIntoView, requestExecute, pasteClipboardAsSqlInCondition });
 </script>
 
 <template>

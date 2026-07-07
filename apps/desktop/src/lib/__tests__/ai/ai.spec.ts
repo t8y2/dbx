@@ -10,6 +10,7 @@ function context(overrides: Partial<AiContext> = {}): AiContext {
     database: "app",
     currentSql: "",
     tables: [],
+    sqlFiles: [],
     truncated: false,
     ...overrides,
   };

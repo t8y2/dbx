@@ -538,6 +538,7 @@ export async function listSqlFilesInFolder(folderPath: string): Promise<SqlFileE
 export interface AiChatMessage {
   role: string;
   content: string;
+  mentions?: unknown[];
   reasoning?: string;
   kind?: "contextSummary";
 }

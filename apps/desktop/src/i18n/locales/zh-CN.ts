@@ -1207,8 +1207,9 @@ export default withEnglishFallback({
     thinking: "思考中...",
     reasoningProcess: "思考过程",
     stopGenerating: "停止生成",
-    tableMentionEmpty: "没有匹配的表",
-    tableMentionPlaceholderHint: "输入 {'@'} 可选择表并带入上下文",
+    scrollToBottom: "回到底部",
+    tableMentionEmpty: "没有匹配的表或 SQL 文件",
+    tableMentionPlaceholderHint: "输入 {'@'} 可选择表或 SQL 文件并带入上下文",
     tableMentionTypes: {
       table: "表",
       view: "视图",

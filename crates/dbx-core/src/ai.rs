@@ -194,6 +194,8 @@ pub struct AiChatMessage {
     pub role: String,
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mentions: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,

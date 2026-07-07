@@ -1205,8 +1205,9 @@ export default {
     thinking: "Thinking...",
     reasoningProcess: "Thinking process",
     stopGenerating: "Stop generating",
-    tableMentionEmpty: "No matching tables",
-    tableMentionPlaceholderHint: "Type {'@'} to mention tables for context",
+    scrollToBottom: "Back to bottom",
+    tableMentionEmpty: "No matching tables or SQL files",
+    tableMentionPlaceholderHint: "Type {'@'} to mention tables or SQL files for context",
     tableMentionTypes: {
       table: "Table",
       view: "View",

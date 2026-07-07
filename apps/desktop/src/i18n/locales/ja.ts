@@ -1181,8 +1181,9 @@ export default withEnglishFallback({
     thinking: "思考中...",
     reasoningProcess: "思考プロセス",
     stopGenerating: "生成を停止",
-    tableMentionEmpty: "一致するテーブルがありません",
-    tableMentionPlaceholderHint: "{'@'}を入力してコンテキスト用のテーブルを指定",
+    scrollToBottom: "一番下へ戻る",
+    tableMentionEmpty: "一致するテーブルまたは SQL ファイルがありません",
+    tableMentionPlaceholderHint: "{'@'}を入力してコンテキスト用のテーブルまたは SQL ファイルを指定",
     tableMentionTypes: {
       table: "テーブル",
       view: "ビュー",

@@ -1179,8 +1179,9 @@ export default withEnglishFallback({
     thinking: "Pensando...",
     reasoningProcess: "Processo de raciocínio",
     stopGenerating: "Parar geração",
-    tableMentionEmpty: "Nenhuma tabela correspondente",
-    tableMentionPlaceholderHint: "Digite {'@'} para mencionar tabelas como contexto",
+    scrollToBottom: "Voltar ao fim",
+    tableMentionEmpty: "Nenhuma tabela ou arquivo SQL correspondente",
+    tableMentionPlaceholderHint: "Digite {'@'} para mencionar tabelas ou arquivos SQL como contexto",
     tableMentionTypes: {
       table: "Tabela",
       view: "Visão",

@@ -1178,8 +1178,9 @@ export default withEnglishFallback({
     thinking: "Procesando...",
     reasoningProcess: "Proceso de razonamiento",
     stopGenerating: "Detener generación",
-    tableMentionEmpty: "Sin tablas coincidentes",
-    tableMentionPlaceholderHint: "Escribe {'@'} para mencionar tablas como contexto",
+    scrollToBottom: "Volver al final",
+    tableMentionEmpty: "Sin tablas ni archivos SQL coincidentes",
+    tableMentionPlaceholderHint: "Escribe {'@'} para mencionar tablas o archivos SQL como contexto",
     tableMentionTypes: {
       table: "Tabla",
       view: "Vista",

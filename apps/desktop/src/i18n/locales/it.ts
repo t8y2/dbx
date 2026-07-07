@@ -1159,8 +1159,9 @@ export default withEnglishFallback({
     thinking: "Riflessione...",
     reasoningProcess: "Processo di riflessione",
     stopGenerating: "Interrompi generazione",
-    tableMentionEmpty: "Nessuna tabella corrispondente",
-    tableMentionPlaceholderHint: "Digita {'@'} per menzionare le tabelle per il contesto",
+    scrollToBottom: "Torna in fondo",
+    tableMentionEmpty: "Nessuna tabella o file SQL corrispondente",
+    tableMentionPlaceholderHint: "Digita {'@'} per menzionare tabelle o file SQL per il contesto",
     tableMentionTypes: {
       table: "Tabella",
       view: "Vista",

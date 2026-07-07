@@ -1160,8 +1160,9 @@ export default withEnglishFallback({
     thinking: "思考中……",
     reasoningProcess: "思考過程",
     stopGenerating: "停止產生",
-    tableMentionEmpty: "沒有相符的資料表",
-    tableMentionPlaceholderHint: "輸入 {'@'} 可提及資料表作為脈絡",
+    scrollToBottom: "回到底部",
+    tableMentionEmpty: "沒有相符的資料表或 SQL 檔案",
+    tableMentionPlaceholderHint: "輸入 {'@'} 可提及資料表或 SQL 檔案作為脈絡",
     tableMentionTypes: {
       table: "資料表",
       view: "檢視",

@@ -66,6 +66,13 @@ export interface AiSchemaTable {
   foreignKeys?: ForeignKeyInfo[];
 }
 
+export interface AiSqlFileContext {
+  id: string;
+  name: string;
+  sql: string;
+  truncated?: boolean;
+}
+
 export interface AiContext {
   connectionId: string;
   connectionName: string;
@@ -75,6 +82,7 @@ export interface AiContext {
   lastError?: string;
   lastResultPreview?: string;
   tables: AiSchemaTable[];
+  sqlFiles: AiSqlFileContext[];
   schemaScope?: "focused_table" | "database";
   truncated: boolean;
 }
@@ -196,6 +204,7 @@ export function buildSystemPrompt(action: AiAction, context: AiContext, mode: Ai
   const schema = formatSchema(context);
   const resultPreview = context.lastResultPreview ? `\nLast result preview:\n${context.lastResultPreview}\n` : "";
   const lastError = context.lastError ? `\nLast error:\n${context.lastError}\n` : "";
+  const referencedSqlFiles = formatReferencedSqlFiles(context);
   const schemaScope = context.schemaScope ?? "database";
 
   const isZh = isChineseLocale(currentLocale());
@@ -225,6 +234,7 @@ export function buildSystemPrompt(action: AiAction, context: AiContext, mode: Ai
     schemaCoverageLine(context, isZh),
     "",
     `Current SQL:\n${context.currentSql.trim() || "(empty)"}`,
+    referencedSqlFiles,
     lastError,
     resultPreview,
     `Schema:\n${schema}`,
@@ -251,6 +261,7 @@ function buildBasePromptLines(isZh: boolean): string[] {
     isZh ? "当用户要求分析或查看某个表时，生成 SELECT 查询获取数据，而不是查询元数据。" : "When the user asks to 'analyze' or 'look at' a table, generate a SELECT query to retrieve data, not a metadata query.",
     isZh ? "不要编造 Schema 中不存在的表或列。" : "Never invent tables or columns that are not in the schema context.",
     isZh ? "用户输入中的 @schema.table 或 @table 表示用户明确提到的表；这些表已优先放入 Schema 上下文。" : "User input may contain @schema.table or @table mentions. Treat them as explicit table references; mentioned tables are prioritized in the schema context.",
+    isZh ? "用户引用的 SQL 库文件是额外上下文；可参考其中的查询意图、业务过滤条件和 SQL 写法，但不要把它当作当前编辑器内容。" : "Referenced SQL library files are additional context. Use them for query intent, business filters, and SQL style, but do not treat them as the current editor content.",
     isZh ? "不要生成多语句 SQL，除非用户明确要求。不要在同一个回答里混合 SELECT 和写操作。" : "Do not generate multi-statement SQL unless the user explicitly asks for it. Do not mix SELECT statements and write operations in the same answer.",
     isZh ? "对于 DROP、DELETE、TRUNCATE、ALTER 或没有 WHERE 的 UPDATE，简要警告并优先提供安全的 SELECT 预览。" : "For destructive statements (DROP, DELETE, TRUNCATE, ALTER, UPDATE without WHERE), warn briefly and prefer a safer SELECT preview.",
     isZh ? "对于 UPDATE 或 DELETE，必须带 WHERE 并说明影响范围；生产库写操作只给建议，不主动建议执行。" : "For UPDATE or DELETE, require a WHERE clause and explain the affected scope; for production writes, provide guidance but do not proactively suggest execution.",
@@ -263,6 +274,7 @@ function buildVectorSystemPrompt(context: AiContext, mode: AiAssistantMode): str
   const schema = formatSchema(context);
   const resultPreview = context.lastResultPreview ? `\nLast result preview:\n${context.lastResultPreview}\n` : "";
   const lastError = context.lastError ? `\nLast error:\n${context.lastError}\n` : "";
+  const referencedSqlFiles = formatReferencedSqlFiles(context);
   const lines: string[] = [
     isZh ? `你是 DBX 内置的向量数据库助手。当前连接的是 ${dbLabel(context.databaseType)} 数据库。用中文回复。` : `You are DBX's vector database assistant. Connected to ${dbLabel(context.databaseType)}. Reply in English.`,
     isZh ? "数据存储在集合（collections）中，每条记录包含唯一标识及可选的元数据负载（payload/metadata）。" : "Data is stored in collections. Each record has a unique identifier and optional metadata payload.",
@@ -274,6 +286,7 @@ function buildVectorSystemPrompt(context: AiContext, mode: AiAssistantMode): str
     schemaCoverageLine(context, isZh),
     "",
     `Current collection:\n${context.currentSql.trim() || "(none)"}`,
+    referencedSqlFiles,
     lastError,
     resultPreview,
     "",
@@ -369,7 +382,20 @@ function formatSchema(context: AiContext): string {
     .join("\n\n");
 }
 
-export async function buildAiContext(tab: QueryTab, connection: ConnectionConfig, options: { maxTables?: number; maxColumnsPerTable?: number; maxIndexesPerTable?: number; maxFksPerTable?: number; mentionedTables?: AiTableMention[] } = {}): Promise<AiContext> {
+function formatReferencedSqlFiles(context: AiContext): string {
+  if (!context.sqlFiles.length) return "";
+
+  return [
+    "Referenced SQL library files:",
+    ...context.sqlFiles.map((file) => {
+      const sql = file.sql.trim() || "(empty)";
+      const suffix = file.truncated ? " (truncated)" : "";
+      return `File: ${file.name}${suffix}\nSQL:\n${sql}`;
+    }),
+  ].join("\n\n");
+}
+
+export async function buildAiContext(tab: QueryTab, connection: ConnectionConfig, options: { maxTables?: number; maxColumnsPerTable?: number; maxIndexesPerTable?: number; maxFksPerTable?: number; mentionedTables?: AiTableMention[]; sqlFiles?: AiSqlFileContext[] } = {}): Promise<AiContext> {
   const maxTables = options.maxTables ?? 50;
   const maxColumnsPerTable = options.maxColumnsPerTable ?? 40;
   const maxIndexesPerTable = options.maxIndexesPerTable ?? 10;
@@ -496,6 +522,7 @@ export async function buildAiContext(tab: QueryTab, connection: ConnectionConfig
     lastError: extractLastError(tab.result),
     lastResultPreview: formatResultPreview(tab.result),
     tables,
+    sqlFiles: options.sqlFiles ?? [],
     schemaScope,
     truncated,
   };

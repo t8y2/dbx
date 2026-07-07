@@ -2786,32 +2786,42 @@ pub async fn list_indexes(pool: &Pool, schema: &str, table: &str) -> Result<Vec<
     }
 }
 
+fn postgres_foreign_keys_sql() -> &'static str {
+    "SELECT fk.constraint_name, fk.column_name, \
+     pk.table_schema AS ref_schema, pk.table_name AS ref_table, pk.column_name AS ref_column, \
+     rc.update_rule AS on_update, rc.delete_rule AS on_delete \
+     FROM information_schema.table_constraints tc \
+     JOIN information_schema.key_column_usage fk \
+       ON fk.constraint_name = tc.constraint_name \
+       AND fk.constraint_schema = tc.constraint_schema \
+       AND fk.table_schema = tc.table_schema \
+       AND fk.table_name = tc.table_name \
+     JOIN information_schema.referential_constraints rc \
+       ON rc.constraint_name = tc.constraint_name \
+       AND rc.constraint_schema = tc.constraint_schema \
+     JOIN information_schema.key_column_usage pk \
+       ON pk.constraint_name = rc.unique_constraint_name \
+       AND pk.constraint_schema = rc.unique_constraint_schema \
+       AND pk.ordinal_position = fk.position_in_unique_constraint \
+     WHERE tc.constraint_type = 'FOREIGN KEY' \
+       AND fk.table_schema = $1 AND fk.table_name = $2 \
+     ORDER BY fk.constraint_name, fk.ordinal_position"
+}
+
+fn postgres_foreign_key_action(value: String) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
 pub async fn list_foreign_keys(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ForeignKeyInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = postgres_query_cached(
-        &client,
-        "SELECT fk.constraint_name, fk.column_name, \
-         pk.table_schema AS ref_schema, pk.table_name AS ref_table, pk.column_name AS ref_column \
-         FROM information_schema.table_constraints tc \
-         JOIN information_schema.key_column_usage fk \
-           ON fk.constraint_name = tc.constraint_name \
-           AND fk.constraint_schema = tc.constraint_schema \
-           AND fk.table_schema = tc.table_schema \
-           AND fk.table_name = tc.table_name \
-         JOIN information_schema.referential_constraints rc \
-           ON rc.constraint_name = tc.constraint_name \
-           AND rc.constraint_schema = tc.constraint_schema \
-         JOIN information_schema.key_column_usage pk \
-           ON pk.constraint_name = rc.unique_constraint_name \
-           AND pk.constraint_schema = rc.unique_constraint_schema \
-           AND pk.ordinal_position = fk.position_in_unique_constraint \
-         WHERE tc.constraint_type = 'FOREIGN KEY' \
-           AND fk.table_schema = $1 AND fk.table_name = $2 \
-         ORDER BY fk.constraint_name, fk.ordinal_position",
-        &[&schema, &table],
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let rows = postgres_query_cached(&client, postgres_foreign_keys_sql(), &[&schema, &table])
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(rows
         .iter()
@@ -2821,8 +2831,8 @@ pub async fn list_foreign_keys(pool: &Pool, schema: &str, table: &str) -> Result
             ref_schema: Some(row.get::<_, String>(2)),
             ref_table: row.get::<_, String>(3),
             ref_column: row.get::<_, String>(4),
-            on_update: None,
-            on_delete: None,
+            on_update: postgres_foreign_key_action(row.get::<_, String>(5)),
+            on_delete: postgres_foreign_key_action(row.get::<_, String>(6)),
         })
         .collect())
 }
@@ -3175,6 +3185,23 @@ mod tests {
 
         let raw = PgRawBytes::from_sql(&Type::UNKNOWN, &[0x01, 0xAB, 0xFF]).unwrap();
         assert_eq!(raw.0, vec![0x01, 0xAB, 0xFF]);
+    }
+
+    #[test]
+    fn postgres_foreign_keys_sql_selects_referential_actions() {
+        let sql = postgres_foreign_keys_sql();
+
+        assert!(sql.contains("rc.update_rule AS on_update"));
+        assert!(sql.contains("rc.delete_rule AS on_delete"));
+        assert!(sql.contains("information_schema.referential_constraints rc"));
+    }
+
+    #[test]
+    fn postgres_foreign_key_action_keeps_non_empty_action() {
+        assert_eq!(postgres_foreign_key_action("CASCADE".to_string()), Some("CASCADE".to_string()));
+        assert_eq!(postgres_foreign_key_action(" SET NULL ".to_string()), Some("SET NULL".to_string()));
+        assert_eq!(postgres_foreign_key_action("".to_string()), None);
+        assert_eq!(postgres_foreign_key_action("  ".to_string()), None);
     }
 
     #[test]

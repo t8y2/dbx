@@ -22,7 +22,14 @@ import java.util.Locale;
 // Spark Thrift Server speaks the HiveServer2 protocol, so the Spark agent reuses
 // the Hive JDBC driver and mirrors the Hive agent's metadata queries (SHOW
 // DATABASES / SHOW TABLES / DESCRIBE), which Spark SQL supports as well.
+//
+// Spark 3.4+ supports multiple catalogs (Paimon, Lance, Iceberg, ...). When the
+// user supplies `catalog=<name>` in url_params, the agent switches to that catalog
+// after connecting and uses `SHOW TABLES IN <catalog>` for listing — which works
+// uniformly for catalogs that have databases (Paimon) and those that expose tables
+// at the catalog root with no databases (Lance). Mirrors the StarRocks catalog flow.
 public final class SparkAgent extends AbstractJdbcAgent {
+    private String configuredCatalog;
 
     @Override
     protected String driverClass() {
@@ -31,7 +38,18 @@ public final class SparkAgent extends AbstractJdbcAgent {
 
     @Override
     protected String buildJdbcUrl(ConnectParams params) {
-        return buildUrl(params);
+        return "jdbc:hive2://" + params.getHost() + ":" + params.getPort() + "/";
+    }
+
+    @Override
+    protected void afterConnect(ConnectParams params, Connection connection) throws Exception {
+        String catalog = extractCatalogParam(params.getUrl_params());
+        configuredCatalog = catalog;
+        if (catalog != null && !catalog.isEmpty()) {
+            try (java.sql.Statement stmt = connection.createStatement()) {
+                stmt.execute("USE " + JdbcIdentifiers.INSTANCE.backtick(catalog));
+            }
+        }
     }
 
     @Override
@@ -43,6 +61,12 @@ public final class SparkAgent extends AbstractJdbcAgent {
                 while (rs.next()) {
                     result.add(new DatabaseInfo(rs.getString(1)));
                 }
+            }
+            // Catalogs like Lance expose tables at the catalog root with no
+            // databases — SHOW DATABASES returns nothing. Return the catalog
+            // name itself as the database node so the sidebar can drill in.
+            if (result.isEmpty() && configuredCatalog != null && !configuredCatalog.isEmpty()) {
+                result.add(new DatabaseInfo(configuredCatalog));
             }
             result.sort(Comparator.comparing(DatabaseInfo::getName));
             return result;
@@ -62,16 +86,42 @@ public final class SparkAgent extends AbstractJdbcAgent {
     public List<TableInfo> listTables(String schema) {
         return unchecked(() -> {
             List<TableInfo> result = new ArrayList<>();
-            useSchema(schema);
+            String sql = buildShowTablesSql(schema);
             try (java.sql.Statement stmt = requireConnected().createStatement();
-                 ResultSet rs = stmt.executeQuery("SHOW TABLES")) {
+                 ResultSet rs = stmt.executeQuery(sql)) {
                 while (rs.next()) {
-                    result.add(new TableInfo(rs.getString(1), "TABLE", null));
+                    String name = readTableName(rs);
+                    if (name != null && !name.isEmpty()) {
+                        result.add(new TableInfo(name, "TABLE", null));
+                    }
                 }
             }
             result.sort(Comparator.comparing(TableInfo::getName));
             return result;
         });
+    }
+
+    // With a catalog configured, use `SHOW TABLES IN <catalog>[.<schema>]` which
+    // works for both catalog-root tables (Lance) and catalog.schema tables (Paimon).
+    // Without a catalog, fall back to the Hive-style `USE <schema>` + SHOW TABLES.
+    private String buildShowTablesSql(String schema) throws Exception {
+        if (configuredCatalog != null && !configuredCatalog.isEmpty()) {
+            String target = JdbcIdentifiers.INSTANCE.backtick(configuredCatalog);
+            if (schema != null && !schema.isEmpty() && !schema.equals(configuredCatalog)) {
+                target += "." + JdbcIdentifiers.INSTANCE.backtick(schema);
+            }
+            return "SHOW TABLES IN " + target;
+        }
+        useSchema(schema);
+        return "SHOW TABLES";
+    }
+
+    // `SHOW TABLES` (Hive style) returns a single tabName column, while
+    // `SHOW TABLES IN <catalog>` (Spark SQL) returns (database, tableName,
+    // isTemporary). Pick tableName from whichever column it lives in.
+    private static String readTableName(ResultSet rs) throws Exception {
+        int columns = rs.getMetaData().getColumnCount();
+        return columns > 1 ? rs.getString(2) : rs.getString(1);
     }
 
     @Override
@@ -102,7 +152,34 @@ public final class SparkAgent extends AbstractJdbcAgent {
 
     @Override
     public String setSchemaSQL(String schema) {
+        // When a catalog is configured, qualify the USE statement with the
+        // catalog so switching schemas does not reset the catalog back to the
+        // default (spark_catalog).
+        if (configuredCatalog != null && !configuredCatalog.isEmpty()) {
+            if (schema == null || schema.isEmpty()) {
+                return "USE " + JdbcIdentifiers.INSTANCE.backtick(configuredCatalog);
+            }
+            return "USE " + JdbcIdentifiers.INSTANCE.backtick(configuredCatalog)
+                + "." + JdbcIdentifiers.INSTANCE.backtick(schema);
+        }
         return "USE " + JdbcIdentifiers.INSTANCE.backtick(schema);
+    }
+
+    private static String extractCatalogParam(String urlParams) {
+        if (urlParams == null || urlParams.isEmpty()) {
+            return null;
+        }
+        for (String segment : urlParams.split("&")) {
+            int eq = segment.indexOf('=');
+            if (eq <= 0) {
+                continue;
+            }
+            if (segment.substring(0, eq).trim().equalsIgnoreCase("catalog")) {
+                String value = segment.substring(eq + 1).trim();
+                return value.isEmpty() ? null : value;
+            }
+        }
+        return null;
     }
 
     @Override
@@ -170,10 +247,6 @@ public final class SparkAgent extends AbstractJdbcAgent {
             }
         }
         return result;
-    }
-
-    private static String buildUrl(ConnectParams params) {
-        return "jdbc:hive2://" + params.getHost() + ":" + params.getPort() + "/" + params.getDatabase();
     }
 
     private static String trimToNull(String value) {

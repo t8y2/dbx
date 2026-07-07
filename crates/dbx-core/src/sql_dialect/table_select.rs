@@ -1,7 +1,9 @@
 use crate::models::connection::DatabaseType;
 
 use super::capabilities::{firebird_rows_clause, table_pagination_strategy, uses_fetch_first, TablePaginationStrategy};
-use super::identifiers::{normalize_where_input, qualified_table_name, quote_table_identifier};
+use super::identifiers::{
+    normalize_where_input, qualified_table_name, qualified_table_name_with_catalog, quote_table_identifier,
+};
 use super::types::{
     TableDataSelectSqlOptions, TableSelectSqlOptions, DBX_NEO4J_ELEMENT_ID_COLUMN, DBX_ROWID_COLUMN,
     DBX_TDENGINE_TBNAME_COLUMN,
@@ -18,19 +20,13 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
         return build_neo4j_table_select_sql(&options, limit);
     }
 
-    let table = qualified_table_name(database_type, options.schema.as_deref(), &options.table_name);
     // Doris / StarRocks multi-catalog: prefix the catalog for external-catalog tables.
-    let table = if let Some(catalog) =
-        options.catalog.as_deref().map(str::trim).filter(|catalog| !catalog.is_empty() && *catalog != "internal")
-    {
-        if matches!(database_type, Some(DatabaseType::Doris) | Some(DatabaseType::StarRocks)) {
-            format!("{}.{}", quote_table_identifier(database_type, catalog), table)
-        } else {
-            table
-        }
-    } else {
-        table
-    };
+    let table = qualified_table_name_with_catalog(
+        database_type,
+        options.catalog.as_deref(),
+        options.schema.as_deref(),
+        &options.table_name,
+    );
     let predicate = normalize_where_input(options.where_input.as_deref());
     let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE ({predicate})") };
     let default_order_by = if database_type == Some(DatabaseType::InfluxDb) {

@@ -56,6 +56,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       tabId: tab.id,
       connectionId: tab.connectionId,
       database: tab.database,
+      catalog: tableMeta.catalog,
       schema: tableMeta.schema,
       tableName: tableMeta.tableName,
       tableType: tableMeta.tableType,
@@ -67,17 +68,18 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const config = connectionStore.getConfig(target.connectionId);
     const querySchema = metadataSchemaForConnection(config, target.database, target.schema);
     console.info("[DBX][reloadData:metadata:get-columns:start]", { traceId: trace?.traceId, elapsed: trace?.elapsed(), schema: querySchema, table: target.tableName });
-    const columns = await api.getColumns(target.connectionId, target.database, querySchema, target.tableName);
-    const indexes = await api.listIndexes(target.connectionId, target.database, querySchema, target.tableName).catch(() => []);
+    const columns = await api.getColumns(target.connectionId, target.database, querySchema, target.tableName, target.catalog);
+    const indexes = await api.listIndexes(target.connectionId, target.database, querySchema, target.tableName, target.catalog).catch(() => []);
     console.info("[DBX][reloadData:metadata:get-columns:done]", { traceId: trace?.traceId, elapsed: trace?.elapsed(), columnCount: columns.length });
     const current = queryStore.tabs.find((item) => item.id === target.tabId);
     const currentMeta = current ? tableMetaForDataTab(current) : undefined;
-    if (!current || current.mode !== "data" || current.connectionId !== target.connectionId || current.database !== target.database || currentMeta?.tableName !== target.tableName || (currentMeta.schema ?? "") !== (target.schema ?? "")) {
+    if (!current || current.mode !== "data" || current.connectionId !== target.connectionId || current.database !== target.database || currentMeta?.tableName !== target.tableName || (currentMeta.schema ?? "") !== (target.schema ?? "") || (currentMeta.catalog ?? "") !== (target.catalog ?? "")) {
       console.info("[DBX][reloadData:metadata:stale-tab]", { traceId: trace?.traceId, elapsed: trace?.elapsed(), table: target.tableName });
       return;
     }
     const primaryKeys = editableRowIdentifierColumns(effectiveDatabaseTypeForConnection(config), columns, indexes, target.tableType);
     queryStore.setTableMeta(target.tabId, {
+      catalog: target.catalog,
       schema: target.schema,
       tableName: target.tableName,
       tableType: target.tableType,

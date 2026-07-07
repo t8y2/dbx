@@ -532,21 +532,17 @@ pub async fn list_sqlserver_linked_server_tables_core(
 // `list_databases_core` / `list_tables_core` paths.
 // ---------------------------------------------------------------------------
 
-/// `SHOW CATALOGS` → catalogs visible to the current user. Always includes
-/// `internal` (defensive fallback) so single-catalog deployments degrade to the
-/// existing flat sidebar rather than breaking.
+/// `SHOW CATALOGS` → catalogs visible to the current user. Returns an empty
+/// list when the connection pool is not a MySQL pool (Doris/StarRocks always
+/// use the MySQL protocol, so this is a defensive no-op); the caller's
+/// flat-sidebar fallback then renders the standard database list.
 pub async fn list_doris_catalogs_core(state: &AppState, connection_id: &str) -> Result<Vec<db::CatalogInfo>, String> {
     let pool_key = state.get_or_create_pool(connection_id, None).await?;
     let connections = state.connections.read().await;
     if let Some(PoolKind::Mysql(p, _)) = connections.get(&pool_key) {
         return db::mysql::list_doris_catalogs(p).await;
     }
-    Ok(vec![db::CatalogInfo {
-        name: "internal".to_string(),
-        catalog_type: "internal".to_string(),
-        is_current: true,
-        comment: None,
-    }])
+    Ok(vec![])
 }
 
 /// `SHOW DATABASES FROM <catalog>` → databases in the given catalog.

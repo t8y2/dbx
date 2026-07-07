@@ -90,6 +90,19 @@ fn get_opt_str(row: &mysql_async::Row, name: &str) -> Option<String> {
         .or_else(|| row_get::<Vec<u8>, _>(row, name).map(|b| String::from_utf8_lossy(&b).to_string()))
 }
 
+/// First non-empty string value among the named columns (e.g. Doris `CatalogName`
+/// vs StarRocks `Catalog`). Returns an empty string when none of the columns
+/// are present or all are empty.
+fn first_nonempty_str_by_name(row: &mysql_async::Row, names: &[&str]) -> String {
+    for name in names {
+        let value = get_str_by_name(row, name);
+        if !value.is_empty() {
+            return value;
+        }
+    }
+    String::new()
+}
+
 fn get_opt_metadata_string(row: &mysql_async::Row, name: &str) -> Option<String> {
     get_opt_str(row, name)
         .or_else(|| row_get::<NaiveDateTime, _>(row, name).map(|value| value.to_string()))
@@ -2919,17 +2932,22 @@ fn doris_catalog_table_ref(catalog: &str, database: &str, table: &str) -> String
 
 /// `SHOW CATALOGS` → list of catalogs visible to the current user.
 ///
-/// Column order (Doris/StarRocks): CatalogId, CatalogName, Type, IsCurrent,
-/// CreateTime, LastUpdateTime, Comment. Missing trailing columns (older
-/// versions) degrade gracefully to empty/None.
+/// Column layouts differ between engines: Doris exposes `CatalogName` (with
+/// `CatalogId`/`IsCurrent`/`CreateTime`/`LastUpdateTime`), while StarRocks
+/// exposes `Catalog` (only `Type`/`Comment`, no `IsCurrent`). The name is read
+/// from either column; missing trailing columns degrade gracefully to
+/// empty/None. The built-in catalog is named `internal` in Doris and
+/// `default_catalog` in StarRocks (both with `Type=internal`); detection is
+/// type-based (see `CatalogInfo::is_internal`), not name-based.
 pub async fn list_doris_catalogs(pool: &MySqlPool) -> Result<Vec<crate::db::CatalogInfo>, String> {
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
     let result = conn.query_iter("SHOW CATALOGS").await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
-    let mut catalogs: Vec<crate::db::CatalogInfo> = rows
+    let catalogs: Vec<crate::db::CatalogInfo> = rows
         .iter()
         .filter_map(|row| {
-            let name = get_str_by_name(row, "CatalogName").trim().to_string();
+            // Doris column is `CatalogName`; StarRocks column is `Catalog`.
+            let name = first_nonempty_str_by_name(row, &["CatalogName", "Catalog"]).trim().to_string();
             if name.is_empty() {
                 return None;
             }
@@ -2945,19 +2963,14 @@ pub async fn list_doris_catalogs(pool: &MySqlPool) -> Result<Vec<crate::db::Cata
     Ok(normalize_doris_catalogs(catalogs))
 }
 
-/// Ensure the native `internal` catalog is present (defensive fallback for
-/// very old / proxied deployments that omit it from `SHOW CATALOGS`) and sort
-/// with `internal` first, then the rest alphabetically by name.
+/// Sort with the built-in catalog first, then the rest alphabetically by name.
+/// The built-in catalog is identified by `CatalogInfo::is_internal` (type-based)
+/// rather than by name, so StarRocks `default_catalog` sorts first just like
+/// Doris `internal`. No synthetic catalog is injected: `SHOW CATALOGS` always
+/// lists the built-in catalog on both engines, and a single-catalog result is
+/// handled by the flat-sidebar fallback in the caller.
 fn normalize_doris_catalogs(mut catalogs: Vec<crate::db::CatalogInfo>) -> Vec<crate::db::CatalogInfo> {
-    if !catalogs.iter().any(|catalog| catalog.name == "internal") {
-        catalogs.push(crate::db::CatalogInfo {
-            name: "internal".to_string(),
-            catalog_type: "internal".to_string(),
-            is_current: false,
-            comment: None,
-        });
-    }
-    catalogs.sort_by(|a, b| match (a.name == "internal", b.name == "internal") {
+    catalogs.sort_by(|a, b| match (a.is_internal(), b.is_internal()) {
         (true, false) => std::cmp::Ordering::Less,
         (false, true) => std::cmp::Ordering::Greater,
         _ => a.name.cmp(&b.name),
@@ -4367,17 +4380,18 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     }
 
     #[test]
-    fn normalize_doris_catalogs_injects_missing_internal() {
+    fn normalize_doris_catalogs_does_not_inject_missing_internal() {
+        // SHOW CATALOGS always lists the built-in catalog on both engines, so a
+        // missing internal catalog is not synthesized — the caller's flat-sidebar
+        // fallback handles a single/empty result instead.
         let catalogs = vec![
             doris_catalog_info("iceberg_catalog", "iceberg", true),
             doris_catalog_info("hive_catalog", "hive", false),
         ];
         let normalized = normalize_doris_catalogs(catalogs);
         let names: Vec<&str> = normalized.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["internal", "hive_catalog", "iceberg_catalog"]);
-        let internal = normalized.iter().find(|c| c.name == "internal").unwrap();
-        assert_eq!(internal.catalog_type, "internal");
-        assert!(!internal.is_current);
+        assert_eq!(names, vec!["hive_catalog", "iceberg_catalog"]);
+        assert!(!normalized.iter().any(|c| c.is_internal()));
     }
 
     #[test]
@@ -4393,9 +4407,35 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     }
 
     #[test]
+    fn normalize_doris_catalogs_sorts_starrocks_default_catalog_first() {
+        // StarRocks names its built-in catalog `default_catalog` (Type=Internal);
+        // detection is type-based, so it sorts first just like Doris `internal`.
+        let catalogs = vec![
+            doris_catalog_info("hive_catalog", "hive", false),
+            doris_catalog_info("default_catalog", "Internal", true),
+        ];
+        let normalized = normalize_doris_catalogs(catalogs);
+        let names: Vec<&str> = normalized.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["default_catalog", "hive_catalog"]);
+        assert!(normalized[0].is_internal());
+        assert!(!normalized[1].is_internal());
+    }
+
+    #[test]
+    fn normalize_doris_catalogs_detects_internal_by_type_not_name() {
+        // A catalog literally named `internal` but with an external type is NOT
+        // the built-in catalog and must not sort first.
+        let catalogs =
+            vec![doris_catalog_info("internal", "iceberg", false), doris_catalog_info("hive_catalog", "hive", false)];
+        let normalized = normalize_doris_catalogs(catalogs);
+        let names: Vec<&str> = normalized.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["hive_catalog", "internal"]);
+        assert!(!normalized.iter().any(|c| c.is_internal()));
+    }
+
+    #[test]
     fn normalize_doris_catalogs_handles_empty_input() {
         let normalized = normalize_doris_catalogs(Vec::new());
-        let names: Vec<&str> = normalized.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["internal"]);
+        assert!(normalized.is_empty());
     }
 }

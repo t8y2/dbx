@@ -208,6 +208,7 @@ const props = defineProps<{
   sortDirection?: DataGridSortDirection;
   sortMode?: DataGridSortMode;
   tableMeta?: {
+    catalog?: string;
     schema?: string;
     tableName: string;
     tableType?: string;
@@ -1315,6 +1316,7 @@ async function loadServerFilterValues(columnIndex: number, searchValue: string) 
     const columnInfo = tableMeta.columns.find((column) => column.name === columnName);
     const sql = await buildDataGridColumnDistinctValuesSql({
       databaseType: resolvedDatabaseType.value,
+      catalog: tableMeta.catalog,
       schema: tableMeta.schema,
       tableName: tableMeta.tableName,
       columnName,
@@ -3502,6 +3504,7 @@ async function buildCurrentCountTarget(): Promise<{ sql: string; schema?: string
   if (props.tableMeta) {
     const sql = await buildDataGridCountSql({
       databaseType: props.databaseType,
+      catalog: props.tableMeta.catalog,
       schema: props.tableMeta.schema,
       tableName: props.tableMeta.tableName,
       whereInput: currentWhereInput(),
@@ -5045,6 +5048,7 @@ async function applyOrderBySearch() {
     if (!tableMeta) return;
     const sql = await buildTableSelectSql({
       databaseType: resolvedDatabaseType.value,
+      catalog: tableMeta.catalog,
       schema: tableMeta.schema,
       tableName: tableMeta.tableName,
       tableType: tableMeta.tableType,
@@ -5076,6 +5080,7 @@ async function applyWhereFilter() {
     if (!tableMeta) return;
     const sql = await buildTableSelectSql({
       databaseType: resolvedDatabaseType.value,
+      catalog: tableMeta.catalog,
       schema: tableMeta.schema,
       tableName: tableMeta.tableName,
       tableType: tableMeta.tableType,
@@ -7488,7 +7493,7 @@ async function selectTableInfoTab(tab: TableInfoTab) {
 }
 
 watch(
-  () => [props.tableInfoTab, props.connectionId, props.database, props.tableMeta?.schema, props.tableMeta?.tableName] as const,
+  () => [props.tableInfoTab, props.connectionId, props.database, props.tableMeta?.catalog, props.tableMeta?.schema, props.tableMeta?.tableName] as const,
   ([tab]) => {
     if (tab) void selectTableInfoTab(tab);
   },
@@ -7500,7 +7505,7 @@ async function fetchDdl() {
   showTableInfo.value = true;
   ddlLoading.value = true;
   try {
-    ddlContent.value = await api.getTableDdl(props.connectionId, props.database || "", props.tableMeta.schema || props.database || "", props.tableMeta.tableName);
+    ddlContent.value = await api.getTableDdl(props.connectionId, props.database || "", props.tableMeta.schema || props.database || "", props.tableMeta.tableName, undefined, props.tableMeta.catalog);
   } catch (e: any) {
     ddlContent.value = `-- Error: ${e}`;
   } finally {
@@ -7513,7 +7518,7 @@ async function fetchIndexes() {
   indexesLoading.value = true;
   indexesError.value = "";
   try {
-    indexes.value = await api.listIndexes(props.connectionId, props.database || "", props.tableMeta.schema || props.database || "", props.tableMeta.tableName);
+    indexes.value = await api.listIndexes(props.connectionId, props.database || "", props.tableMeta.schema || props.database || "", props.tableMeta.tableName, props.tableMeta.catalog);
     indexesLoaded.value = true;
   } catch (e: any) {
     indexesError.value = String(e?.message || e);
@@ -7532,7 +7537,7 @@ async function fetchForeignKeys() {
   foreignKeysLoading.value = true;
   foreignKeysError.value = "";
   try {
-    foreignKeys.value = await api.listForeignKeys(props.connectionId, props.database || "", props.tableMeta.schema || props.database || "", props.tableMeta.tableName);
+    foreignKeys.value = await api.listForeignKeys(props.connectionId, props.database || "", props.tableMeta.schema || props.database || "", props.tableMeta.tableName, props.tableMeta.catalog);
     foreignKeysLoaded.value = true;
   } catch (e: any) {
     foreignKeysError.value = String(e?.message || e);
@@ -7546,7 +7551,7 @@ async function fetchTriggers() {
   triggersLoading.value = true;
   triggersError.value = "";
   try {
-    triggers.value = await api.listTriggers(props.connectionId, props.database || "", props.tableMeta.schema || props.database || "", props.tableMeta.tableName);
+    triggers.value = await api.listTriggers(props.connectionId, props.database || "", props.tableMeta.schema || props.database || "", props.tableMeta.tableName, props.tableMeta.catalog);
     triggersLoaded.value = true;
   } catch (e: any) {
     triggersError.value = String(e?.message || e);
@@ -7556,7 +7561,7 @@ async function fetchTriggers() {
 }
 
 watch(
-  () => [props.connectionId, props.database, props.tableMeta?.schema, props.tableMeta?.tableName],
+  () => [props.connectionId, props.database, props.tableMeta?.catalog, props.tableMeta?.schema, props.tableMeta?.tableName],
   () => {
     ddlContent.value = "";
     indexes.value = [];

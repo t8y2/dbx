@@ -23,7 +23,7 @@ import {
 import type { SqlCompletionColumn, SqlCompletionForeignKey, SqlCompletionObject, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import { connectionIsDorisFamilyCatalogCapable, isSchemaAware, normalizeSidebarObjectKind, sidebarObjectKindsForDatabase, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
+import { connectionIsDorisFamilyCatalogCapable, isInternalDorisCatalog, isSchemaAware, normalizeSidebarObjectKind, sidebarObjectKindsForDatabase, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
 import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { buildDatabaseTreeNodes, buildDuckDbConnectionTreeNodes, sortSidebarDatabases, sortSidebarNames, shouldIncludeDefaultDatabaseNode } from "@/lib/database/databaseTree";
 import { buildSqlServerDatabaseTreeNodes } from "@/lib/database/sqlServerTree";
@@ -2728,9 +2728,11 @@ export const useConnectionStore = defineStore("connection", () => {
       const config = getConfig(connectionId);
       const databases = await withMetadataLoadTimeout(connectionId, api.listDorisCatalogDatabases(connectionId, catalog), "databases");
       let databaseNodes: TreeNode[];
-      if (catalog === "internal") {
+      if (isInternalDorisCatalog(node.catalogType, catalog)) {
         // The internal catalog's databases are rendered as standard database
         // nodes so they reuse the existing table-loading / table-open paths.
+        // Detection is type-based (catalogType=`internal`), so StarRocks
+        // `default_catalog` routes here too — its tables carry no catalog.
         const visibleNames = filterDatabaseNamesForConnection(
           databases.map((database) => database.name),
           config,

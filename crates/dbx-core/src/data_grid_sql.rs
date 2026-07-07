@@ -152,6 +152,8 @@ pub struct DataGridColumnDistinctValuesSqlOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_type: Option<DatabaseType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
     pub table_name: String,
     pub column_name: String,
@@ -172,6 +174,8 @@ pub struct DataGridColumnDistinctValuesSqlOptions {
 pub struct DataGridCountSqlOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
     pub table_name: String,
@@ -483,7 +487,12 @@ pub fn build_data_grid_column_distinct_values_sql(options: DataGridColumnDistinc
     }
 
     let limit = data_grid_column_distinct_values_limit(options.limit);
-    let table = qualified_table_name(options.database_type, options.schema.as_deref(), &options.table_name);
+    let table = crate::sql_dialect::qualified_table_name_with_catalog(
+        options.database_type,
+        options.catalog.as_deref(),
+        options.schema.as_deref(),
+        &options.table_name,
+    );
     let column = column_filter_ref(options.database_type, &options.column_name);
     let mut predicates = Vec::new();
     let predicate = crate::sql_dialect::normalize_where_input(options.where_input.as_deref());
@@ -529,7 +538,12 @@ pub fn build_data_grid_column_distinct_values_sql(options: DataGridColumnDistinc
 }
 
 pub fn build_data_grid_count_sql(options: DataGridCountSqlOptions) -> String {
-    let table = qualified_table_name(options.database_type, options.schema.as_deref(), &options.table_name);
+    let table = crate::sql_dialect::qualified_table_name_with_catalog(
+        options.database_type,
+        options.catalog.as_deref(),
+        options.schema.as_deref(),
+        &options.table_name,
+    );
     let predicate = crate::sql_dialect::normalize_where_input(options.where_input.as_deref());
     let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE ({predicate})") };
     format!("SELECT COUNT(*) AS cnt FROM {table}{where_clause}")
@@ -2268,6 +2282,7 @@ mod tests {
         assert_eq!(
             build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
                 database_type: Some(DatabaseType::Postgres),
+                catalog: None,
                 schema: Some("public".to_string()),
                 table_name: "users".to_string(),
                 column_name: "status".to_string(),
@@ -2282,6 +2297,7 @@ mod tests {
         assert_eq!(
             build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
                 database_type: Some(DatabaseType::SqlServer),
+                catalog: None,
                 schema: None,
                 table_name: "users".to_string(),
                 column_name: "status".to_string(),
@@ -2296,6 +2312,7 @@ mod tests {
         assert_eq!(
             build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
                 database_type: Some(DatabaseType::SqlServer),
+                catalog: None,
                 schema: None,
                 table_name: "users".to_string(),
                 column_name: "id".to_string(),
@@ -2310,6 +2327,7 @@ mod tests {
         assert_eq!(
             build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
                 database_type: Some(DatabaseType::Oracle),
+                catalog: None,
                 schema: Some("APP".to_string()),
                 table_name: "EVENTS".to_string(),
                 column_name: "KIND".to_string(),
@@ -2324,6 +2342,7 @@ mod tests {
         assert_eq!(
             build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
                 database_type: Some(DatabaseType::Firebird),
+                catalog: None,
                 schema: None,
                 table_name: "USERS".to_string(),
                 column_name: "STATUS".to_string(),
@@ -2335,6 +2354,53 @@ mod tests {
             }),
             "SELECT \"STATUS\" AS dbx_value FROM \"USERS\" WHERE (DELETED_AT IS NULL) GROUP BY \"STATUS\" ORDER BY dbx_value ROWS 25"
         );
+        // Doris / StarRocks external-catalog tables are addressed with a 3-part name.
+        assert_eq!(
+            build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+                database_type: Some(DatabaseType::Doris),
+                catalog: Some("iceberg_catalog".to_string()),
+                schema: Some("sales".to_string()),
+                table_name: "orders".to_string(),
+                column_name: "status".to_string(),
+                column_info: Some(column("status", "varchar", true, None)),
+                where_input: None,
+                search_value: None,
+                limit: Some(10),
+                include_counts: false,
+            }),
+            "SELECT `status` AS dbx_value FROM `iceberg_catalog`.`sales`.`orders` GROUP BY `status` ORDER BY dbx_value LIMIT 10"
+        );
+        assert_eq!(
+            build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+                database_type: Some(DatabaseType::StarRocks),
+                catalog: Some("hive_catalog".to_string()),
+                schema: None,
+                table_name: "orders".to_string(),
+                column_name: "status".to_string(),
+                column_info: Some(column("status", "varchar", true, None)),
+                where_input: None,
+                search_value: None,
+                limit: Some(10),
+                include_counts: true,
+            }),
+            "SELECT `status` AS dbx_value, COUNT(*) AS dbx_count FROM `hive_catalog`.`orders` GROUP BY `status` ORDER BY dbx_count DESC, dbx_value LIMIT 10"
+        );
+        // The built-in `internal` catalog is never prefixed.
+        assert_eq!(
+            build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+                database_type: Some(DatabaseType::Doris),
+                catalog: Some("internal".to_string()),
+                schema: None,
+                table_name: "orders".to_string(),
+                column_name: "status".to_string(),
+                column_info: Some(column("status", "varchar", true, None)),
+                where_input: None,
+                search_value: None,
+                limit: Some(10),
+                include_counts: false,
+            }),
+            "SELECT `status` AS dbx_value FROM `orders` GROUP BY `status` ORDER BY dbx_value LIMIT 10"
+        );
     }
 
     #[test]
@@ -2342,11 +2408,32 @@ mod tests {
         assert_eq!(
             build_data_grid_count_sql(DataGridCountSqlOptions {
                 database_type: Some(DatabaseType::Postgres),
+                catalog: None,
                 schema: Some("public".to_string()),
                 table_name: "users".to_string(),
                 where_input: Some("WHERE active = true;".to_string()),
             }),
             "SELECT COUNT(*) AS cnt FROM \"public\".\"users\" WHERE (active = true)"
+        );
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::Doris),
+                catalog: Some("iceberg_catalog".to_string()),
+                schema: Some("sales".to_string()),
+                table_name: "orders".to_string(),
+                where_input: Some("WHERE active = true;".to_string()),
+            }),
+            "SELECT COUNT(*) AS cnt FROM `iceberg_catalog`.`sales`.`orders` WHERE (active = true)"
+        );
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::StarRocks),
+                catalog: Some("hive_catalog".to_string()),
+                schema: None,
+                table_name: "orders".to_string(),
+                where_input: None,
+            }),
+            "SELECT COUNT(*) AS cnt FROM `hive_catalog`.`orders`"
         );
     }
 

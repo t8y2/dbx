@@ -73,6 +73,7 @@ export interface DataGridColumnValuesFilterConditionOptions {
 
 export interface DataGridColumnDistinctValuesSqlOptions {
   databaseType?: DatabaseType;
+  catalog?: string;
   schema?: string;
   tableName: string;
   columnName: string;
@@ -85,6 +86,7 @@ export interface DataGridColumnDistinctValuesSqlOptions {
 
 export interface DataGridCountSqlOptions {
   databaseType?: DatabaseType;
+  catalog?: string;
   schema?: string;
   tableName: string;
   whereInput?: string;

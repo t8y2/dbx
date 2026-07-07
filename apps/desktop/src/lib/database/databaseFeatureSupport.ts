@@ -22,6 +22,20 @@ export function connectionIsDorisFamilyCatalogCapable(connection: Pick<Connectio
   return isDorisFamilyCatalogCapable(connection.db_type, connection.driver_profile);
 }
 
+/**
+ * Whether a Doris/StarRocks catalog is the engine's built-in (non-federated)
+ * catalog. Doris names it `internal` (Type=`internal`); StarRocks names it
+ * `default_catalog` (Type=`Internal`). The `catalogType` column is the
+ * cross-engine signal, so it is matched case-insensitively, falling back to the
+ * canonical Doris name `internal` when the type is absent (very old / proxied
+ * deployments). Mirrors `CatalogInfo::is_internal` on the backend.
+ */
+export function isInternalDorisCatalog(catalogType?: string | null, catalogName?: string | null): boolean {
+  const type = (catalogType ?? "").trim().toLowerCase();
+  if (type) return type === "internal";
+  return (catalogName ?? "").trim() === "internal";
+}
+
 export function usesTreeSchemaMode(dbType?: DatabaseType): boolean {
   return !!dbType && TREE_SCHEMA_TYPES.has(dbType);
 }

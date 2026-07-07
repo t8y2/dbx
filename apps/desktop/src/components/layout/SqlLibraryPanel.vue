@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, reactive, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
 import { ArrowDownWideNarrow, Download, FileInput, FilePlus, FileText, FolderCog, FolderClosed, FolderOpen, FolderPlus, Library, LocateFixed, Pencil, Search, Trash2, Upload, X } from "@lucide/vue";
@@ -470,6 +470,19 @@ const activeItemId = ref<string | null>(null);
 const activeItemType = ref<"file" | "folder" | null>(null);
 const activeSavedSqlId = computed(() => queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId)?.savedSqlId ?? null);
 
+watch(
+  activeSavedSqlId,
+  (fileId) => {
+    if (fileId) {
+      setActiveItem(fileId, "file");
+    } else if (activeItemType.value === "file") {
+      activeItemId.value = null;
+      activeItemType.value = null;
+    }
+  },
+  { immediate: true },
+);
+
 // Unified item list for selection, matching the currently rendered order.
 const allSelectableItems = computed(() => {
   if (sortMode.value === "date") {
@@ -507,7 +520,7 @@ function isFolderSelected(folderId: string): boolean {
 }
 
 function isFileActive(fileId: string): boolean {
-  return (activeItemType.value === "file" && activeItemId.value === fileId) || activeSavedSqlId.value === fileId;
+  return activeItemType.value === "file" && activeItemId.value === fileId;
 }
 
 function isFolderActive(folderId: string): boolean {
@@ -515,8 +528,8 @@ function isFolderActive(folderId: string): boolean {
 }
 
 function selectionRowClass(selected: boolean, active: boolean): string {
-  if (selected) return "bg-primary/15 text-foreground ring-1 ring-primary/35 shadow-[inset_3px_0_0_var(--primary)]";
-  if (active) return "bg-primary/12 text-foreground ring-1 ring-primary/30 shadow-[inset_3px_0_0_var(--primary)]";
+  if (selected) return "bg-primary/10 text-foreground";
+  if (active) return "bg-primary/12 text-foreground";
   return "hover:bg-accent";
 }
 
@@ -1156,7 +1169,7 @@ function showDropInside(targetId: string) {
       </div>
     </div>
 
-    <div class="min-h-0 flex-1 overflow-y-auto p-1">
+    <div class="min-h-0 flex-1 overflow-y-auto py-1">
       <CustomContextMenu :items="contextMenuItems" @close="clearContextTarget">
         <template #default="{ onContextMenu }">
           <div
@@ -1172,7 +1185,7 @@ function showDropInside(targetId: string) {
               <div v-for="item in itemsByDate" :key="item.type + '-' + item.item.id">
                 <div
                   v-if="item.type === 'folder'"
-                  class="relative flex items-center gap-1 rounded px-2 py-1.5 text-[13px] cursor-pointer group"
+                  class="relative flex items-center gap-1 px-2 py-1.5 text-[13px] cursor-pointer group"
                   :class="[folderRowClass(item.item.id), isDraggingItem(item.item.id) ? 'opacity-50' : '']"
                   @mousedown="handleDragMouseDown($event, item.item.id, 'folder')"
                   @click="handleFolderClick(item.item, $event)"
@@ -1191,7 +1204,7 @@ function showDropInside(targetId: string) {
 
                 <div
                   v-else
-                  class="relative flex items-center gap-1 rounded px-2 py-1.5 text-[13px] cursor-pointer group"
+                  class="relative flex items-center gap-1 px-2 py-1.5 text-[13px] cursor-pointer group"
                   :class="[fileRowClass(item.item.id), isDraggingItem(item.item.id) ? 'opacity-50' : '']"
                   @mousedown="handleDragMouseDown($event, item.item.id, 'file')"
                   @click="handleFileClick(item.item, $event)"
@@ -1214,7 +1227,7 @@ function showDropInside(targetId: string) {
               <div v-for="row in visibleFolderRows" :key="row.type === 'folder' ? row.folder.id : row.file.id">
                 <div
                   v-if="row.type === 'folder'"
-                  class="relative flex items-center gap-1 rounded py-1.5 pr-2 text-[13px] cursor-pointer group"
+                  class="relative flex items-center gap-1 py-1.5 pr-2 text-[13px] cursor-pointer group"
                   :style="{ paddingLeft: `${8 + row.depth * 16}px` }"
                   :class="[showDropInside(row.folder.id) ? 'ring-1 ring-primary/50 bg-primary/5' : folderRowClass(row.folder.id), isDraggingItem(row.folder.id) ? 'opacity-50' : '']"
                   @mousedown="handleDragMouseDown($event, row.folder.id, 'folder')"
@@ -1250,7 +1263,7 @@ function showDropInside(targetId: string) {
 
                 <div
                   v-else
-                  class="relative flex items-center gap-1 rounded py-1.5 pr-2 text-[13px] cursor-pointer group"
+                  class="relative flex items-center gap-1 py-1.5 pr-2 text-[13px] cursor-pointer group"
                   :style="{ paddingLeft: `${8 + row.depth * 16}px` }"
                   :class="[fileRowClass(row.file.id), isDraggingItem(row.file.id) ? 'opacity-50' : '']"
                   @mousedown="handleDragMouseDown($event, row.file.id, 'file')"
@@ -1287,7 +1300,7 @@ function showDropInside(targetId: string) {
               <div v-if="visibleFiles.length > 0 || dragState.draggedType === 'file'">
                 <div
                   v-if="dragState.draggedType === 'file'"
-                  class="relative rounded px-2 py-1 text-[10px] font-medium uppercase text-muted-foreground"
+                  class="relative px-2 py-1 text-[10px] font-medium uppercase text-muted-foreground"
                   :class="showDropInside(UNFILED_DROP_TARGET_ID) ? 'ring-1 ring-primary/50 bg-primary/5' : ''"
                   @mousemove="updateDropTarget($event, UNFILED_DROP_TARGET_ID, 'unfiled')"
                   @mouseleave="clearDropTarget(UNFILED_DROP_TARGET_ID)"
@@ -1297,7 +1310,7 @@ function showDropInside(targetId: string) {
                 <div
                   v-for="file in visibleFiles"
                   :key="file.id"
-                  class="relative flex items-center gap-1 rounded px-2 py-1.5 text-[13px] cursor-pointer group"
+                  class="relative flex items-center gap-1 px-2 py-1.5 text-[13px] cursor-pointer group"
                   :class="[fileRowClass(file.id), isDraggingItem(file.id) ? 'opacity-50' : '']"
                   @mousedown="handleDragMouseDown($event, file.id, 'file')"
                   @mousemove="updateDropTarget($event, file.id, 'file')"

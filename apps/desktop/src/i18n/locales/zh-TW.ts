@@ -3374,6 +3374,7 @@ export default withEnglishFallback({
     summaryVersion: "版本",
     summaryLease: "租約",
     summarySize: "大小",
+    rootReadonly: "根 znode 不能被修改，請填寫子節點路徑",
   },
   gridfsBrowser: {
     bucketCount: "儲存桶",

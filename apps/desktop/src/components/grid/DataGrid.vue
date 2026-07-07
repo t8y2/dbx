@@ -1098,6 +1098,7 @@ const filteredFilterBuilderColumnOptions = computed(() => {
   if (!query) return filterBuilderColumnOptions.value;
   return filterBuilderColumnOptions.value.filter((columnName) => columnName.toLowerCase().includes(query));
 });
+const filterBuilderColumnSearchNavigationKeys = new Set(["Escape", "Tab", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"]);
 const structuredFilterCacheKey = computed(() => props.cacheKey || [props.connectionId ?? "", props.database ?? "", props.context ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? ""].join("\u0001"));
 const structuredFilterScopeKey = computed(() => [props.connectionId ?? "", props.database ?? "", props.schema ?? "", props.context ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? "", filterBuilderColumnOptions.value.join("\0")].join("\u0001"));
 const structuredFilterRules = ref<StructuredFilterRule[]>([]);
@@ -1824,6 +1825,19 @@ function updateStructuredFilterRule(ruleId: string, patch: Partial<StructuredFil
 function updateStructuredFilterRuleColumn(ruleId: string, columnName: string) {
   updateStructuredFilterRule(ruleId, { columnName });
   filterBuilderColumnSearch.value = "";
+}
+
+function handleFilterBuilderColumnSearchKeydown(event: KeyboardEvent) {
+  if (event.isComposing || event.key === "Process") {
+    event.stopPropagation();
+    return;
+  }
+  if (filterBuilderColumnSearchNavigationKeys.has(event.key)) return;
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  if (event.key.length === 1 || event.key === "Backspace" || event.key === "Delete") {
+    // Let text editing stay in the search box without breaking Select navigation keys.
+    event.stopPropagation();
+  }
 }
 
 function resetStructuredFilters() {
@@ -8280,7 +8294,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                                       class="h-7 min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground"
                                       :placeholder="t('grid.filterBuilderSearchColumns')"
                                       @click.stop
-                                      @keydown.stop
+                                      @keydown="handleFilterBuilderColumnSearchKeydown"
                                       @pointerdown.stop
                                     />
                                   </div>

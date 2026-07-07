@@ -82,6 +82,7 @@ const queryStore = useQueryStore();
 const { openTableTarget } = useNavigationTargets({
   showFieldLineageDialog: ref(false),
   showDatabaseSearchDialog: ref(false),
+  showDiagramDialog: ref(false),
 });
 const { toast } = useToast();
 const { isDark } = useTheme();

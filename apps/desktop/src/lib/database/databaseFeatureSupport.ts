@@ -38,6 +38,13 @@ export function supportsSqlFileExecution(dbType?: DatabaseType): boolean {
   return supportsDatabaseFeature(dbType, "sqlFileExecution");
 }
 
+const NON_SQL_IN_LIST_PASTE_TYPES = new Set<DatabaseType>(["neo4j"]);
+
+export function supportsSqlInListPaste(dbType?: DatabaseType): boolean {
+  if (!dbType) return true;
+  return supportsSqlFileExecution(dbType) && !NON_SQL_IN_LIST_PASTE_TYPES.has(dbType);
+}
+
 export function supportsSchemaDiagram(dbType?: DatabaseType): boolean {
   return supportsDatabaseFeature(dbType, "diagram");
 }

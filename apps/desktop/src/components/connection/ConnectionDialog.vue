@@ -1392,6 +1392,7 @@ const databaseLabel = computed(() => {
 });
 
 const databasePlaceholder = computed(() => {
+  if (form.value.db_type === "kingbase") return t("connection.databasePlaceholderRequired");
   const fallback = defaultDatabaseForProfile();
   if (!fallback) return t("connection.databasePlaceholder");
   return t("connection.databasePlaceholderWithDefault", { database: fallback });
@@ -1430,7 +1431,7 @@ function defaultDatabaseForProfile() {
   if (selectedType.value === "cockroachdb") return "defaultdb";
   if (form.value.db_type === "highgo") return "highgo";
   if (form.value.db_type === "yashandb") return "yasdb";
-  if (form.value.db_type === "postgres" || form.value.db_type === "kingbase" || form.value.db_type === "vastbase") return "postgres";
+  if (form.value.db_type === "postgres" || form.value.db_type === "vastbase") return "postgres";
   if (form.value.db_type === "sqlserver") return "master";
   if (form.value.db_type === "oracle") return "ORCL";
   if (form.value.db_type === "h2" && h2ConnectionMode.value === "tcp") return "test";
@@ -1912,8 +1913,9 @@ async function testConnection() {
   const runId = ++testRunId;
   isTesting.value = true;
   testResult.value = null;
-  const config = connectionConfigForSubmit(editingId.value || draftTestConnectionId.value);
+  let config: ConnectionConfig | null = null;
   try {
+    config = connectionConfigForSubmit(editingId.value || draftTestConnectionId.value);
     await ensureRequiredAgentDriverInstalled(config);
     const msg = await testConnectionWithTimeout(config, runId);
     if (runId !== testRunId) return;
@@ -1924,10 +1926,11 @@ async function testConnection() {
     clearEditedConnectionErrorAfterSuccessfulTest();
   } catch (e: any) {
     if (runId !== testRunId) return;
-    const message = connectionErrorWithDriverUpdateHint(config, mongodbAuthFailureHint(String(e)));
-    const fallbackMessage = await tryNacosDockerConsoleFallback(config, message, runId);
+    const rawMessage = mongodbAuthFailureHint(errorMessage(e));
+    const message = config ? connectionErrorWithDriverUpdateHint(config, rawMessage) : rawMessage;
+    const fallbackMessage = config ? await tryNacosDockerConsoleFallback(config, message, runId) : null;
     if (runId !== testRunId) return;
-    const shouldShowSqlServerLegacyMode = !fallbackMessage && config.db_type === "sqlserver" && !isSqlServerLegacyUnencryptedMode(config.url_params) && isSqlServerTlsHandshakeFailure(message);
+    const shouldShowSqlServerLegacyMode = !fallbackMessage && config?.db_type === "sqlserver" && !isSqlServerLegacyUnencryptedMode(config.url_params) && isSqlServerTlsHandshakeFailure(message);
     if (shouldShowSqlServerLegacyMode) {
       configTab.value = "advanced";
     }
@@ -2090,6 +2093,12 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
   }
   if (!config.name?.trim()) {
     config.name = generateConnectionName();
+  }
+  if (config.db_type === "kingbase") {
+    config.database = config.database?.trim() || undefined;
+    if (!config.database) {
+      throw new Error(t("connection.kingbaseDatabaseRequired"));
+    }
   }
   config.transport_layers = (config.transport_layers || []).map(normalizeTransportLayer);
   config.transport_layers = config.transport_layers.map((layer) => {
@@ -2556,12 +2565,12 @@ async function preloadVisibleDatabaseNames() {
   if (visibleDatabaseNames.value.length > 0) return;
   isLoadingVisibleDatabases.value = true;
   const draftId = buildDraftVisibleDatabasesConnectionId(uuid());
-  const draftConfig = {
-    ...connectionConfigForSubmit(draftId),
-    id: draftId,
-    one_time: true,
-  };
   try {
+    const draftConfig = {
+      ...connectionConfigForSubmit(draftId),
+      id: draftId,
+      one_time: true,
+    };
     await api.connectDb(draftConfig);
     visibleDatabaseNames.value = await loadVisibleDatabaseNames(draftId, draftConfig);
   } catch {
@@ -2580,13 +2589,13 @@ async function openVisibleDatabasesPicker() {
   visibleDatabaseError.value = "";
   visibleDatabaseSearchText.value = "";
   const draftId = buildDraftVisibleDatabasesConnectionId(uuid());
-  const draftConfig = {
-    ...connectionConfigForSubmit(draftId),
-    id: draftId,
-    one_time: true,
-  };
 
   try {
+    const draftConfig = {
+      ...connectionConfigForSubmit(draftId),
+      id: draftId,
+      one_time: true,
+    };
     await api.connectDb(draftConfig);
     const names = await loadVisibleDatabaseNames(draftId, draftConfig);
     visibleDatabaseNames.value = names;
@@ -2598,8 +2607,9 @@ async function openVisibleDatabasesPicker() {
   } catch (e: any) {
     visibleDatabaseNames.value = [];
     visibleDatabaseSelection.value = new Set();
-    visibleDatabaseError.value = mongodbAuthFailureHint(String(e?.message || e));
+    visibleDatabaseError.value = mongodbAuthFailureHint(errorMessage(e));
     testResult.value = { ok: false, message: visibleDatabaseError.value };
+    showVisibleDatabasesDialog.value = true;
   } finally {
     await api.disconnectDb(draftId).catch(() => undefined);
     isLoadingVisibleDatabases.value = false;

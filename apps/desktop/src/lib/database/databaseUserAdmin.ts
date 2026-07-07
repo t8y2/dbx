@@ -46,7 +46,8 @@ export interface DatabaseUserAdminProvider {
 }
 
 export const MYSQL_USER_ADMIN_TYPES = new Set<DatabaseType>(["mysql", "goldendb"]);
-export const POSTGRES_USER_ADMIN_TYPES = new Set<DatabaseType>(["postgres", "gaussdb", "highgo", "kingbase", "kwdb", "opengauss", "questdb", "vastbase"]);
+export const KINGBASE_USER_ADMIN_TYPES = new Set<DatabaseType>(["kingbase"]);
+export const POSTGRES_USER_ADMIN_TYPES = new Set<DatabaseType>(["postgres", "gaussdb", "highgo", "kwdb", "opengauss", "questdb", "vastbase"]);
 
 export const MYSQL_COMMON_PRIVILEGES = ["SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "INDEX", "REFERENCES", "EXECUTE", "SHOW VIEW", "TRIGGER", "EVENT", "CREATE TEMPORARY TABLES"] as const;
 
@@ -61,6 +62,7 @@ export function supportsDatabaseUserAdmin(dbType: DatabaseType | undefined): boo
 export function getDatabaseUserAdminProvider(dbType: DatabaseType | undefined): DatabaseUserAdminProvider | null {
   if (!dbType) return null;
   if (MYSQL_USER_ADMIN_TYPES.has(dbType)) return mysqlUserAdminProvider;
+  if (KINGBASE_USER_ADMIN_TYPES.has(dbType)) return kingbaseUserAdminProvider;
   if (POSTGRES_USER_ADMIN_TYPES.has(dbType)) return postgresUserAdminProvider;
   return null;
 }
@@ -257,6 +259,91 @@ FROM (
 ORDER BY sort, line;`.trim();
 }
 
+export function kingbaseListRolesSql(): string {
+  return `
+SELECT
+  r.rolname AS user,
+  CASE WHEN r.rolcanlogin THEN 'LOGIN' ELSE 'ROLE' END AS host,
+  concat_ws(', ',
+    CASE WHEN r.rolsuper THEN 'SUPERUSER' END,
+    CASE WHEN r.rolcreatedb THEN 'CREATEDB' END,
+    CASE WHEN r.rolcreaterole THEN 'CREATEROLE' END,
+    CASE WHEN r.rolreplication THEN 'REPLICATION' END,
+    CASE WHEN r.rolbypassrls THEN 'BYPASSRLS' END
+  ) AS plugin
+FROM sys_catalog.sys_roles r
+ORDER BY r.rolname;`.trim();
+}
+
+export function kingbaseShowGrantsSql(user: DatabaseUserIdentity): string {
+  const role = quoteSqlString(user.user);
+  return `
+WITH target AS (
+  SELECT oid, rolname, rolsuper, rolcreatedb, rolcreaterole, rolcanlogin, rolreplication, rolbypassrls
+  FROM sys_catalog.sys_roles r
+  WHERE r.rolname = ${role}
+)
+SELECT line
+FROM (
+  SELECT 1 AS sort, 'Role: ' || quote_ident(rolname) AS line
+  FROM target
+  UNION ALL
+  SELECT 2, 'Attributes: ' || COALESCE(NULLIF(concat_ws(', ',
+    CASE WHEN rolsuper THEN 'SUPERUSER' END,
+    CASE WHEN rolcreatedb THEN 'CREATEDB' END,
+    CASE WHEN rolcreaterole THEN 'CREATEROLE' END,
+    CASE WHEN rolcanlogin THEN 'LOGIN' ELSE 'NOLOGIN' END,
+    CASE WHEN rolreplication THEN 'REPLICATION' END,
+    CASE WHEN rolbypassrls THEN 'BYPASSRLS' END
+  ), ''), 'none')
+  FROM target
+  UNION ALL
+  SELECT 10, 'Member of: ' || quote_ident(parent.rolname) || CASE WHEN m.admin_option THEN ' WITH ADMIN OPTION' ELSE '' END
+  FROM sys_catalog.sys_auth_members m
+  JOIN target t ON t.oid = m.member
+  JOIN sys_catalog.sys_roles parent ON parent.oid = m.roleid
+  UNION ALL
+  SELECT 20, 'Has member: ' || quote_ident(member.rolname) || CASE WHEN m.admin_option THEN ' WITH ADMIN OPTION' ELSE '' END
+  FROM sys_catalog.sys_auth_members m
+  JOIN target t ON t.oid = m.roleid
+  JOIN sys_catalog.sys_roles member ON member.oid = m.member
+  UNION ALL
+  SELECT 30, 'Database: ' || quote_ident(d.datname) || ' = ' ||
+    concat_ws(', ',
+      CASE WHEN has_database_privilege(t.rolname, d.oid, 'CONNECT') THEN 'CONNECT' END,
+      CASE WHEN has_database_privilege(t.rolname, d.oid, 'CREATE') THEN 'CREATE' END,
+      CASE WHEN has_database_privilege(t.rolname, d.oid, 'TEMPORARY') THEN 'TEMPORARY' END
+    )
+  FROM target t
+  CROSS JOIN sys_catalog.sys_database d
+  WHERE has_database_privilege(t.rolname, d.oid, 'CONNECT')
+     OR has_database_privilege(t.rolname, d.oid, 'CREATE')
+     OR has_database_privilege(t.rolname, d.oid, 'TEMPORARY')
+  UNION ALL
+  SELECT 40, 'Schema: ' || quote_ident(n.nspname) || ' = ' ||
+    concat_ws(', ',
+      CASE WHEN has_schema_privilege(t.rolname, n.oid, 'USAGE') THEN 'USAGE' END,
+      CASE WHEN has_schema_privilege(t.rolname, n.oid, 'CREATE') THEN 'CREATE' END
+    )
+  FROM target t
+  CROSS JOIN sys_catalog.sys_namespace n
+  WHERE UPPER(n.nspname) <> 'INFORMATION_SCHEMA'
+    AND UPPER(n.nspname) NOT LIKE 'SYS%'
+    AND UPPER(n.nspname) NOT LIKE 'XLOG%'
+    AND (has_schema_privilege(t.rolname, n.oid, 'USAGE') OR has_schema_privilege(t.rolname, n.oid, 'CREATE'))
+  UNION ALL
+  SELECT 50, 'Table: ' || quote_ident(table_schema) || '.' || quote_ident(table_name) || ' = ' ||
+    string_agg(privilege_type || CASE WHEN is_grantable = 'YES' THEN ' WITH GRANT OPTION' ELSE '' END, ', ' ORDER BY privilege_type)
+  FROM information_schema.role_table_grants
+  WHERE grantee = ${role}
+    AND UPPER(table_schema) <> 'INFORMATION_SCHEMA'
+    AND UPPER(table_schema) NOT LIKE 'SYS%'
+    AND UPPER(table_schema) NOT LIKE 'XLOG%'
+  GROUP BY table_schema, table_name
+) grants
+ORDER BY sort, line;`.trim();
+}
+
 export function postgresCreateRoleSql(input: CreatePrincipalInput): string {
   const login = input.canLogin === false ? "NOLOGIN" : "LOGIN";
   return `CREATE ROLE ${quotePostgresIdentifier(input.user)} ${login} PASSWORD ${quoteSqlString(input.password)};`;
@@ -372,4 +459,10 @@ export const postgresUserAdminProvider: DatabaseUserAdminProvider = {
   detail: (user) => [user.host, user.plugin].filter(Boolean).join(" · ") || undefined,
   privilegesForScope: postgresPrivilegesForScope,
   defaultPrivilegesForScope: (scope) => (scope === "role" ? [] : [postgresDefaultPrivilege(scope)]),
+};
+
+export const kingbaseUserAdminProvider: DatabaseUserAdminProvider = {
+  ...postgresUserAdminProvider,
+  listUsersSql: kingbaseListRolesSql,
+  showGrantsSql: kingbaseShowGrantsSql,
 };

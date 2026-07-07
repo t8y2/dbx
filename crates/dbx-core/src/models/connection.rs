@@ -676,7 +676,7 @@ impl ConnectionConfig {
             DatabaseType::Rqlite | DatabaseType::Turso => Some("main"),
             DatabaseType::Gaussdb | DatabaseType::OpenGauss => Some("postgres"),
             DatabaseType::Kwdb => Some("defaultdb"),
-            DatabaseType::Kingbase | DatabaseType::Vastbase => Some("postgres"),
+            DatabaseType::Vastbase => Some("postgres"),
             DatabaseType::Highgo => Some("highgo"),
             DatabaseType::Yashandb => Some("yasdb"),
             DatabaseType::Oscar => Some("osrdb"),
@@ -2151,6 +2151,26 @@ mod tests {
         config.port = 8123;
 
         assert_eq!(config.effective_database(), Some("default"));
+    }
+
+    #[test]
+    fn kingbase_empty_database_has_no_default() {
+        let mut config = mysql_config("SYSTEM", "secret", None);
+        config.db_type = DatabaseType::Kingbase;
+        config.port = 54321;
+
+        assert_eq!(config.effective_database(), None);
+        assert_eq!(config.connection_url(), "kingbase://SYSTEM:secret@10.1.2.3:54321");
+    }
+
+    #[test]
+    fn vastbase_empty_database_uses_postgres_for_connection() {
+        let mut config = mysql_config("vastbase", "secret", None);
+        config.db_type = DatabaseType::Vastbase;
+        config.port = 5432;
+
+        assert_eq!(config.effective_database(), Some("postgres"));
+        assert_eq!(config.connection_url(), "vastbase://vastbase:secret@10.1.2.3:5432/postgres");
     }
 
     #[test]

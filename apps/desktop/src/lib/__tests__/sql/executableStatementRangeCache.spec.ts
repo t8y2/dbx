@@ -27,6 +27,25 @@ describe("executableStatementRangeCacheForDoc", () => {
     expect(executableStatementRangeStartingAt(cache, secondStatementLine.from)?.sql).toBe("SELECT *\nFROM menus AS mn\nLIMIT 100");
   });
 
+  it("resolves statements with leading whitespace for gutter run buttons", () => {
+    const doc = Text.of([" SELECT 1;", "  SELECT 2;", "\t SELECT 3;", "", "    "]);
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+
+    expect(executableStatementRangeStartingAt(cache, doc.line(1).from)?.sql).toBe("SELECT 1");
+    expect(executableStatementRangeStartingAt(cache, doc.line(2).from)?.sql).toBe("SELECT 2");
+    expect(executableStatementRangeStartingAt(cache, doc.line(3).from)?.sql).toBe("SELECT 3");
+    expect(executableStatementRangeStartingAt(cache, doc.line(4).from)).toBeNull();
+    expect(executableStatementRangeStartingAt(cache, doc.line(5).from)).toBeNull();
+  });
+
+  it("does not resolve gutter run buttons when non-whitespace precedes the statement on the same line", () => {
+    const doc = Text.of(["/* comment */ SELECT 1;"]);
+    const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");
+
+    expect(executableStatementRangeStartingAt(cache, doc.line(1).from)).toBeNull();
+    expect(executableStatementRangeStartingAt(cache, doc.toString().indexOf("SELECT"))?.sql).toBe("SELECT 1");
+  });
+
   it("resolves the current statement from a cursor inside a continuation line", () => {
     const doc = Text.of(["SELECT *", "FROM apis AS ap", "LIMIT 100;", "", "SELECT *", "FROM menus AS mn", "LIMIT 100;"]);
     const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");

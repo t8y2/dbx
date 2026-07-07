@@ -6,6 +6,7 @@ export interface ExecutableStatementRangeCache {
   doc: Text;
   databaseType?: DatabaseType;
   byStart: Map<number, SqlTextRange>;
+  byExecutableLineStart: Map<number, SqlTextRange>;
   ranges: SqlTextRange[];
 }
 
@@ -15,15 +16,20 @@ export function executableStatementRangeCacheForDoc(cache: ExecutableStatementRa
   if (cache?.doc === doc && cache.databaseType === databaseType) return cache;
 
   const byStart = new Map<number, SqlTextRange>();
+  const byExecutableLineStart = new Map<number, SqlTextRange>();
   const ranges = parse(doc.toString(), databaseType);
   for (const range of ranges) {
     byStart.set(range.from, range);
+    const line = doc.lineAt(range.from);
+    if (doc.sliceString(line.from, range.from).trim() === "") {
+      byExecutableLineStart.set(line.from, range);
+    }
   }
-  return { doc, databaseType, byStart, ranges };
+  return { doc, databaseType, byStart, byExecutableLineStart, ranges };
 }
 
 export function executableStatementRangeStartingAt(cache: ExecutableStatementRangeCache, lineFrom: number): SqlTextRange | null {
-  return cache.byStart.get(lineFrom) ?? null;
+  return cache.byStart.get(lineFrom) ?? cache.byExecutableLineStart.get(lineFrom) ?? null;
 }
 
 export function executableStatementRangeAtCursor(cache: ExecutableStatementRangeCache, cursorPos: number): SqlTextRange | null {

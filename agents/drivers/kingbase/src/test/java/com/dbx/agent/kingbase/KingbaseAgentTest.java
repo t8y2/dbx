@@ -149,6 +149,8 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_class"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_rewrite"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_index"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_views"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_matviews"), sql.get(0));
         Assertions.assertFalse(sql.get(0).contains("relkind"), sql.get(0));
     }
 
@@ -195,10 +197,31 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         agent.listTables("public", new MetadataListConstraints("ord", 30, 60, List.of("TABLE", "VIEW")));
 
         Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_class"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_views"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("UNION ALL"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("UPPER(CAST(c.relname AS varchar(256))) LIKE ? ESCAPE '\\\\'"), sql.get(0));
         Assertions.assertFalse(sql.get(0).contains("relkind"), sql.get(0));
         Assertions.assertTrue(sql.get(0).endsWith("LIMIT 30 OFFSET 60"), sql.get(0));
+    }
+
+    @Test
+    void constrainedRegularMaterializedViewMetadataUsesMatviewCatalog() {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"table_name", "table_type", "table_comment"},
+            new Object[][]{{"mv_sales", "MATERIALIZED_VIEW", "cached sales"}}
+        )));
+
+        List<TableInfo> tables = agent.listTables("public", new MetadataListConstraints("sales", 10, null, List.of("MATERIALIZED_VIEW")));
+
+        Assertions.assertEquals(1, tables.size());
+        Assertions.assertEquals("mv_sales", tables.get(0).getName());
+        Assertions.assertEquals("MATERIALIZED_VIEW", tables.get(0).getTable_type());
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_matviews"), sql.get(0));
+        Assertions.assertFalse(sql.get(0).contains("FROM sys_catalog.sys_views"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("UPPER(CAST(mv.matviewname AS varchar(256))) LIKE ? ESCAPE '\\\\'"), sql.get(0));
+        Assertions.assertFalse(sql.get(0).contains("relkind"), sql.get(0));
     }
 
     @Test

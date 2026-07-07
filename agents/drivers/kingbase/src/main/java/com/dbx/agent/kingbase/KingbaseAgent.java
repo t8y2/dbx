@@ -40,6 +40,10 @@ public final class KingbaseAgent extends PostgresLikeAgent {
     private static final String KINGBASE_ROUTINE_NAME = "CAST(p.proname AS varchar(256))";
     private static final String KINGBASE_ROUTINE_OID = "CAST(p.oid AS varchar(64))";
     private static final String KINGBASE_ROUTINE_NAMESPACE = "CAST(p.pronamespace AS varchar(64))";
+    private static final String KINGBASE_VIEW_NAME = "CAST(v.viewname AS varchar(256))";
+    private static final String KINGBASE_VIEW_SCHEMA = "CAST(v.schemaname AS varchar(256))";
+    private static final String KINGBASE_MATVIEW_NAME = "CAST(mv.matviewname AS varchar(256))";
+    private static final String KINGBASE_MATVIEW_SCHEMA = "CAST(mv.schemaname AS varchar(256))";
 
     public static final PostgresLikeAgentProfile KINGBASE_PROFILE = new PostgresLikeAgentProfile(
         "com.kingbase8.Driver",
@@ -626,13 +630,13 @@ public final class KingbaseAgent extends PostgresLikeAgent {
         String commentAlias
     ) {
         if (constraints.tableTypeAllowed("TABLE")) {
-            branches.add(regularRelationBranch(schema, args, constraints, nameAlias, typeAlias, commentAlias, "TABLE", false));
+            branches.add(regularRelationBranch(schema, args, constraints, nameAlias, typeAlias, commentAlias, "TABLE"));
         }
-        if (constraints.tableTypeAllowed("VIEW") || constraints.tableTypeAllowed("MATERIALIZED_VIEW")) {
-            String viewType = !constraints.tableTypeAllowed("VIEW") && constraints.tableTypeAllowed("MATERIALIZED_VIEW")
-                ? "MATERIALIZED_VIEW"
-                : "VIEW";
-            branches.add(regularRelationBranch(schema, args, constraints, nameAlias, typeAlias, commentAlias, viewType, true));
+        if (constraints.tableTypeAllowed("VIEW")) {
+            branches.add(regularViewBranch(schema, args, constraints, nameAlias, typeAlias, commentAlias));
+        }
+        if (constraints.tableTypeAllowed("MATERIALIZED_VIEW")) {
+            branches.add(regularMaterializedViewBranch(schema, args, constraints, nameAlias, typeAlias, commentAlias));
         }
     }
 
@@ -643,8 +647,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
         String nameAlias,
         String typeAlias,
         String commentAlias,
-        String objectType,
-        boolean viewBranch
+        String objectType
     ) {
         StringBuilder sql = new StringBuilder("SELECT ")
             .append(KINGBASE_REL_NAME).append(" AS ").append(nameAlias).append(", '")
@@ -654,19 +657,53 @@ public final class KingbaseAgent extends PostgresLikeAgent {
             .append("JOIN sys_catalog.sys_namespace n ON ").append(KINGBASE_NAMESPACE_OID).append(" = ").append(KINGBASE_REL_NAMESPACE).append(' ')
             .append("LEFT JOIN sys_catalog.sys_description d ON CAST(d.objoid AS varchar(64)) = ").append(KINGBASE_REL_OID).append(" AND d.objsubid = 0 ")
             .append("WHERE ").append(KINGBASE_SCHEMA_NAME).append(" = ").append(sqlString(schema));
-        if (viewBranch) {
-            appendRegularViewPredicate(sql);
-        } else {
-            appendRegularTablePredicate(sql);
-        }
+        appendRegularTablePredicate(sql);
         MetadataSqlSupport.appendNameFilter(sql, args, KINGBASE_REL_NAME, constraints);
         return sql.toString();
     }
 
-    private static void appendRegularViewPredicate(StringBuilder sql) {
-        sql.append(" AND EXISTS (SELECT 1 FROM sys_catalog.sys_rewrite r ")
-            .append("WHERE CAST(r.ev_class AS varchar(64)) = ").append(KINGBASE_REL_OID)
-            .append(" AND CAST(r.rulename AS varchar(256)) = '_RETURN')");
+    private static String regularViewBranch(
+        String schema,
+        List<Object> args,
+        MetadataListConstraints constraints,
+        String nameAlias,
+        String typeAlias,
+        String commentAlias
+    ) {
+        // sys_views/sys_matviews avoid relkind while preserving the sidebar's
+        // separate VIEW and MATERIALIZED_VIEW groups.
+        StringBuilder sql = new StringBuilder("SELECT ")
+            .append(KINGBASE_VIEW_NAME).append(" AS ").append(nameAlias).append(", 'VIEW' AS ").append(typeAlias).append(", ")
+            .append(KINGBASE_DESCRIPTION).append(" AS ").append(commentAlias).append(' ')
+            .append("FROM sys_catalog.sys_views v ")
+            .append("JOIN sys_catalog.sys_namespace n ON ").append(KINGBASE_SCHEMA_NAME).append(" = ").append(KINGBASE_VIEW_SCHEMA).append(' ')
+            .append("JOIN sys_catalog.sys_class c ON ").append(KINGBASE_REL_NAMESPACE).append(" = ").append(KINGBASE_NAMESPACE_OID)
+            .append(" AND ").append(KINGBASE_REL_NAME).append(" = ").append(KINGBASE_VIEW_NAME).append(' ')
+            .append("LEFT JOIN sys_catalog.sys_description d ON CAST(d.objoid AS varchar(64)) = ").append(KINGBASE_REL_OID).append(" AND d.objsubid = 0 ")
+            .append("WHERE ").append(KINGBASE_VIEW_SCHEMA).append(" = ").append(sqlString(schema));
+        MetadataSqlSupport.appendNameFilter(sql, args, KINGBASE_VIEW_NAME, constraints);
+        return sql.toString();
+    }
+
+    private static String regularMaterializedViewBranch(
+        String schema,
+        List<Object> args,
+        MetadataListConstraints constraints,
+        String nameAlias,
+        String typeAlias,
+        String commentAlias
+    ) {
+        StringBuilder sql = new StringBuilder("SELECT ")
+            .append(KINGBASE_MATVIEW_NAME).append(" AS ").append(nameAlias).append(", 'MATERIALIZED_VIEW' AS ").append(typeAlias).append(", ")
+            .append(KINGBASE_DESCRIPTION).append(" AS ").append(commentAlias).append(' ')
+            .append("FROM sys_catalog.sys_matviews mv ")
+            .append("JOIN sys_catalog.sys_namespace n ON ").append(KINGBASE_SCHEMA_NAME).append(" = ").append(KINGBASE_MATVIEW_SCHEMA).append(' ')
+            .append("JOIN sys_catalog.sys_class c ON ").append(KINGBASE_REL_NAMESPACE).append(" = ").append(KINGBASE_NAMESPACE_OID)
+            .append(" AND ").append(KINGBASE_REL_NAME).append(" = ").append(KINGBASE_MATVIEW_NAME).append(' ')
+            .append("LEFT JOIN sys_catalog.sys_description d ON CAST(d.objoid AS varchar(64)) = ").append(KINGBASE_REL_OID).append(" AND d.objsubid = 0 ")
+            .append("WHERE ").append(KINGBASE_MATVIEW_SCHEMA).append(" = ").append(sqlString(schema));
+        MetadataSqlSupport.appendNameFilter(sql, args, KINGBASE_MATVIEW_NAME, constraints);
+        return sql.toString();
     }
 
     private static void appendRegularTablePredicate(StringBuilder sql) {

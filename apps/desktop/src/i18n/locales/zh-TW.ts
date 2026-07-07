@@ -2610,7 +2610,7 @@ export default withEnglishFallback({
     languageTitle: "語言 / Language",
     fontSize: "字級",
     toolbarTitle: "工具列",
-    toolbarHiddenHint: "關閉的左側按鈕會自動收進「更多」下拉選單。",
+    toolbarHiddenHint: "部分關閉或空間不足的按鈕會自動收進「更多」下拉選單。",
     uiScale: "介面縮放",
     uiScaleDescription: "按比例縮放整個桌面端介面，適合高 DPI 螢幕；修改後立即生效，並在下次啟動時復原。",
     theme: "主題",

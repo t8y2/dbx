@@ -2707,7 +2707,7 @@ export default withEnglishFallback({
     languageTitle: "言語 / Language",
     fontSize: "フォントサイズ",
     toolbarTitle: "ツールバー",
-    toolbarHiddenHint: "非表示にした左側のボタンは、「もっと見る」ドロップダウン内に表示されます。",
+    toolbarHiddenHint: "非表示または幅が足りない一部のボタンは、「もっと見る」ドロップダウン内に表示されます。",
     uiScale: "UIスケール",
     uiScaleDescription: "高DPIディスプレイ向けにデスクトップUI全体をスケーリングします。変更は即座に適用され、次回起動時に復元されます。",
     theme: "テーマ",

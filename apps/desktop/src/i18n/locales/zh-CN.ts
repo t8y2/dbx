@@ -2784,7 +2784,7 @@ export default withEnglishFallback({
     languageTitle: "语言 / Language",
     fontSize: "字号",
     toolbarTitle: "工具栏",
-    toolbarHiddenHint: '关闭的左侧按钮会自动收进"更多"下拉菜单。',
+    toolbarHiddenHint: '部分关闭或空间不足的按钮会自动收进"更多"下拉菜单。',
     uiScale: "界面缩放",
     uiScaleDescription: "按比例缩放整个桌面端界面，适合高清屏；修改后立即生效，并在下次启动时恢复。",
     theme: "主题",

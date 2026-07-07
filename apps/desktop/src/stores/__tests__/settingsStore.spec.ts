@@ -70,6 +70,19 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ dataGridSearchMode: "highlight" }).dataGridSearchMode).toBe("highlight");
     expect(normalizeEditorSettings({ dataGridSearchMode: "invalid" as any }).dataGridSearchMode).toBe("filter");
   });
+
+  it("normalizes toolbar item settings from older saved settings", () => {
+    const settings = normalizeEditorSettings({
+      toolbarItems: {
+        sqlFileTree: false,
+        history: false,
+      } as any,
+    });
+
+    expect(settings.toolbarItems.sqlFileTree).toBe(false);
+    expect(settings.toolbarItems.history).toBe(false);
+    expect(settings.toolbarItems.sqlLibrary).toBe(true);
+  });
 });
 
 describe("normalizeDesktopSettings", () => {

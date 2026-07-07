@@ -146,6 +146,15 @@ const collapsibleRightItemDefs = computed(() => {
       disabled: false,
     });
   }
+  if (toolbarItems.value.sqlFileTree) {
+    items.push({
+      key: "sqlFileTree",
+      label: t("sqlFileTree.title"),
+      icon: FolderTree,
+      action: () => emit("toggle-sql-file-panel"),
+      disabled: false,
+    });
+  }
   if (toolbarItems.value.history) {
     items.push({
       key: "history",
@@ -451,9 +460,9 @@ const toolbarDropdownTriggerClass = `inline-flex h-8 items-center gap-1 rounded-
         <TooltipContent>{{ t("sqlLibrary.title") }}</TooltipContent>
       </Tooltip>
 
-      <Tooltip>
+      <Tooltip v-if="toolbarItems.sqlFileTree">
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0" :class="{ 'bg-accent': showSqlFilePanel }" @click="emit('toggle-sql-file-panel')">
+          <Button v-show="isRightItemVisible('sqlFileTree')" variant="ghost" size="icon" class="h-8 w-8 shrink-0" :class="{ 'bg-accent': showSqlFilePanel }" @click="emit('toggle-sql-file-panel')">
             <FolderTree class="h-4 w-4" />
           </Button>
         </TooltipTrigger>

@@ -430,6 +430,7 @@ export interface ToolbarItems {
   dataCompare: boolean;
   checkUpdates: boolean;
   sqlLibrary: boolean;
+  sqlFileTree: boolean;
   history: boolean;
   ai: boolean;
   theme: boolean;
@@ -444,6 +445,7 @@ export const DEFAULT_TOOLBAR_ITEMS: ToolbarItems = {
   dataCompare: true,
   checkUpdates: true,
   sqlLibrary: true,
+  sqlFileTree: true,
   history: true,
   ai: true,
   theme: true,
@@ -675,6 +677,7 @@ function normalizeToolbarItems(items: Partial<ToolbarItems> | undefined): Toolba
     dataCompare: items.dataCompare ?? defaults.dataCompare,
     checkUpdates: items.checkUpdates ?? defaults.checkUpdates,
     sqlLibrary: items.sqlLibrary ?? defaults.sqlLibrary,
+    sqlFileTree: items.sqlFileTree ?? defaults.sqlFileTree,
     history: items.history ?? defaults.history,
     ai: items.ai ?? defaults.ai,
     theme: items.theme ?? defaults.theme,

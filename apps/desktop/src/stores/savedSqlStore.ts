@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import { uuid } from "@/lib/common/utils";
 import * as api from "@/lib/backend/api";
 import { forgetSavedSqlEditorPosition } from "@/lib/app/savedSqlEditorPosition";
+import { ensureSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { SavedSqlFile, SavedSqlFolder, SavedSqlLibrary } from "@/types/database";
@@ -258,9 +259,20 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
   async function renameFile(id: string, name: string) {
     const existing = getFile(id);
     if (!existing) return;
-    const saved = await api.saveSavedSqlFile({ ...existing, name, updatedAt: nowIso() });
+    const normalizedName = ensureSqlExtension(name);
+    const saved = await api.saveSavedSqlFile({ ...existing, name: normalizedName, updatedAt: nowIso() });
     files.value = files.value.map((file) => (file.id === id ? { ...saved, sql: file.sql, sqlLoaded: file.sqlLoaded } : file));
     bumpVersion();
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const queryStore = useQueryStore();
+    for (const tab of queryStore.tabs) {
+      if (tab.savedSqlId === id) {
+        tab.title = saved.name;
+        tab.customTitle = true;
+      }
+    }
+
     await syncToLocalDirectory();
   }
 

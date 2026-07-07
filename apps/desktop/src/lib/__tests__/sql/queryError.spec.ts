@@ -20,6 +20,11 @@ describe("isQueryTimeoutErrorMessage", () => {
     expect(isQueryTimeoutErrorMessage("Query exceeded maximum execution time")).toBe(true);
   });
 
+  it("detects agent RPC client-side timeout", () => {
+    expect(isQueryTimeoutErrorMessage("Agent RPC call timed out (30s)")).toBe(true);
+    expect(isQueryTimeoutErrorMessage("Agent RPC call timed out (120s)")).toBe(true);
+  });
+
   it("does not classify unrelated errors as query timeouts", () => {
     expect(isQueryTimeoutErrorMessage('syntax error at or near "select"')).toBe(false);
     expect(isQueryTimeoutErrorMessage("Connection timed out while loading databases")).toBe(false);
@@ -27,5 +32,7 @@ describe("isQueryTimeoutErrorMessage", () => {
     expect(isQueryTimeoutErrorMessage("Cancel request timed out after 10s.")).toBe(false);
     expect(isQueryTimeoutErrorMessage("HTTP tunnel script read timed out")).toBe(false);
     expect(isQueryTimeoutErrorMessage('invalid value for parameter "statement_timeout"')).toBe(false);
+    // Agent RPC errors that are not timeouts must not trigger the action.
+    expect(isQueryTimeoutErrorMessage('Agent RPC error (-1): syntax error at or near "select"')).toBe(false);
   });
 });

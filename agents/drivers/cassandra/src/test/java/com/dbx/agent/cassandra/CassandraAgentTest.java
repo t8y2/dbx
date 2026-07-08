@@ -31,4 +31,22 @@ class CassandraAgentTest extends JdbcFakeExecutionBehaviorTest {
 
         assertEquals("jdbc:cassandra://127.0.0.1:9042/app_keyspace", CassandraAgent.buildUrl(params));
     }
+
+    @Test
+    void appendsUrlParamsForMultiDcLocalDatacenter() {
+        ConnectParams params = new ConnectParams(
+            "127.0.0.1", 9042, "app_keyspace", "cassandra", "cassandra", "localdatacenter=dc1", "", false
+        );
+
+        assertEquals("jdbc:cassandra://127.0.0.1:9042/app_keyspace?localdatacenter=dc1", CassandraAgent.buildUrl(params));
+    }
+
+    @Test
+    void stripsLeadingQuestionMarkFromUrlParams() {
+        ConnectParams params = new ConnectParams(
+            "127.0.0.1", 9042, "", "cassandra", "cassandra", "?localdatacenter=dc1", "", false
+        );
+
+        assertEquals("jdbc:cassandra://127.0.0.1:9042?localdatacenter=dc1", CassandraAgent.buildUrl(params));
+    }
 }

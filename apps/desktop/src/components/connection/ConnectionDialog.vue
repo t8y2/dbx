@@ -4575,7 +4575,9 @@ function openExternalUrl(url: string) {
                                   ? 'CLIENT_LOCALE=en_US.utf8;DB_LOCALE=en_US.utf8'
                                   : form.db_type === 'spark'
                                     ? 'catalog=paimon_catalog'
-                                    : 'sslmode=disable'
+                                    : form.db_type === 'cassandra'
+                                      ? 'localdatacenter=dc1'
+                                      : 'sslmode=disable'
                       "
                     />
                   </div>

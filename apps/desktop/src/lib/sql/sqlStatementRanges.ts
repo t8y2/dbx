@@ -106,6 +106,7 @@ const SET_OPERATION_KEYWORDS = new Set(["UNION", "INTERSECT", "EXCEPT", "MINUS"]
 const SET_OPERATION_MODIFIER_KEYWORDS = new Set(["ALL", "DISTINCT"]);
 const ORACLE_LIKE_PL_SQL_DATABASES: ReadonlySet<DatabaseType> = new Set(["oracle", "dameng", "gaussdb", "yashandb", "oscar", "oceanbase-oracle"]);
 const MYSQL_ROUTINE_BLOCK_DATABASES: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks", "manticoresearch", "goldendb"]);
+const MYSQL_CREATE_TABLE_OPTION_DATABASES: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks", "manticoresearch", "goldendb", "gbase"]);
 const MYSQL_ROUTINE_OBJECT_TYPES = new Set(["PROCEDURE", "FUNCTION", "TRIGGER", "EVENT"]);
 const MYSQL_NON_ROUTINE_CREATE_TYPES = new Set(["DATABASE", "INDEX", "LOGFILE", "ROLE", "SCHEMA", "SERVER", "SPATIAL", "TABLE", "TEMPORARY", "UNIQUE", "USER", "VIEW"]);
 const MYSQL_CONTROL_BLOCK_SUFFIXES = new Set(["IF", "LOOP", "CASE", "REPEAT", "WHILE"]);
@@ -503,6 +504,10 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
       continue;
     }
 
+    if (currentBodyKeyword === "CREATE" && isMysqlCreateTableOptionContinuation(sql, statement.from, lineStart.from, lineStart.keyword, databaseType)) {
+      continue;
+    }
+
     if (currentBodyKeyword === "INSERT" && INSERT_BODY_KEYWORDS.has(lineStart.keyword)) {
       continue;
     }
@@ -728,6 +733,20 @@ function isSetOperationQueryContinuation(sql: string, from: number, to: number, 
     return !!previous && SET_OPERATION_KEYWORDS.has(previous);
   }
   return false;
+}
+
+function isMysqlCreateTableOptionContinuation(sql: string, statementFrom: number, lineStartFrom: number, keyword: string, databaseType?: DatabaseType): boolean {
+  if (databaseType && !MYSQL_CREATE_TABLE_OPTION_DATABASES.has(databaseType)) return false;
+  if (keyword !== "COMMENT") return false;
+  if (!startsWithMysqlCreateTable(sql, statementFrom)) return false;
+
+  const next = nextNonWhitespaceChar(sql, lineStartFrom + keyword.length);
+  return next === "=" || next === "'" || next === '"';
+}
+
+function startsWithMysqlCreateTable(sql: string, statementFrom: number): boolean {
+  const text = sql.slice(statementFrom, statementFrom + 256);
+  return /^CREATE\s+(?:TEMPORARY\s+)?TABLE\b/i.test(text);
 }
 
 function topLevelWordsBefore(sql: string, from: number, to: number, limit: number): string[] {

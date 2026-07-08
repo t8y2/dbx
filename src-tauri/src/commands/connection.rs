@@ -163,6 +163,7 @@ mod tests {
             driver_profile: Some("mongodb".to_string()),
             driver_label: Some("MongoDB".to_string()),
             url_params: Some("authSource=admin&authMechanism=SCRAM-SHA-1".to_string()),
+            agent_java_options: Vec::new(),
             host: "172.22.4.42".to_string(),
             port: 27017,
             username: "mongouser".to_string(),

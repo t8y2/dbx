@@ -1663,7 +1663,7 @@ async function openExternalUrl(url: string) {
         <div class="flex flex-col gap-3 p-3">
           <template v-for="(msg, i) in visibleMessages" :key="i">
             <div v-if="msg.role === 'user'" class="group flex justify-end">
-              <div class="max-w-[85%]">
+              <div class="min-w-0 max-w-[85%]" :class="{ 'w-[85%]': editingMessageIndex === i }">
                 <template v-if="editingMessageIndex === i">
                   <div v-if="editingMentions.length" class="mb-1.5 flex flex-wrap justify-end gap-1">
                     <button

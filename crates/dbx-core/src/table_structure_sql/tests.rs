@@ -1292,7 +1292,7 @@ fn sqlserver_strips_mysql_display_width_from_fixed_integer_types() {
 }
 
 #[test]
-fn sqlserver_strips_display_width_from_float() {
+fn sqlserver_strips_scale_from_float() {
     let mut amount = column("amount");
     amount.data_type = "float(10,2)".to_string();
     amount.is_nullable = true;
@@ -1311,6 +1311,28 @@ fn sqlserver_strips_display_width_from_float() {
 
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(result.statements, vec!["ALTER TABLE [dbo].[orders] ADD [amount] float;"]);
+}
+
+#[test]
+fn sqlserver_preserves_float_mantissa_bits() {
+    let mut value = column("value");
+    value.data_type = "float(53)".to_string();
+    value.is_nullable = false;
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "measurements".to_string(),
+        columns: vec![value],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE [dbo].[measurements] ADD [value] float(53) NOT NULL;"]);
 }
 
 #[test]

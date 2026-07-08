@@ -437,7 +437,7 @@ export const POSTGRES_TYPE_LENGTH_DISABLES: string[] = [
 
 export const ORACLE_LIKE_TYPE_LENGTH_DISABLES: string[] = ["binary_double", "binary_float", "bigint", "boolean", "bool", "byte", "date", "double", "double precision", "float", "integer", "int", "long", "long raw", "nclob", "real", "smallint", "text", "tinyint"];
 
-export const SQLSERVER_TYPE_LENGTH_DISABLES: string[] = ["bigint", "bit", "date", "datetime", "float", "image", "int", "integer", "money", "ntext", "real", "smalldatetime", "smallint", "smallmoney", "sql_variant", "text", "timestamp", "tinyint", "uniqueidentifier", "xml"];
+export const SQLSERVER_TYPE_LENGTH_DISABLES: string[] = ["bigint", "bit", "date", "datetime", "image", "int", "integer", "money", "ntext", "real", "smalldatetime", "smallint", "smallmoney", "sql_variant", "text", "timestamp", "tinyint", "uniqueidentifier", "xml"];
 
 export function parseExtraToColumnExtra(extra: string | null | undefined, databaseType?: DatabaseType): ColumnExtra {
   const result: ColumnExtra = {};

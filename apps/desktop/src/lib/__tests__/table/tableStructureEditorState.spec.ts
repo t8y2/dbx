@@ -37,9 +37,8 @@ describe("tableStructureEditorState", () => {
   });
 
   it("does not expose SQL Server float display widths as editable length", () => {
-    expect(isDataTypeLengthDisabled("sqlserver", "float")).toBe(true);
-    expect(dataTypeLengthInputValue("sqlserver", "float(10,2)")).toBe("");
-    expect(combineDataTypeForDatabase("sqlserver", "float", "10,2")).toBe("float");
+    expect(isDataTypeLengthDisabled("sqlserver", "float")).toBe(false);
+    expect(combineDataTypeForDatabase("sqlserver", "float", "53")).toBe("float(53)");
   });
 
   it("strips SQL Server metadata parentheses from editable defaults", () => {

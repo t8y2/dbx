@@ -75,6 +75,21 @@ FROM ALL_OBJECTS o
 WHERE o.OWNER = :2
   AND o.OBJECT_TYPE = 'VIEW'
 )`
+const oracleListTablesSessionUserBaseSQL = `
+SELECT OBJECT_NAME, TABLE_TYPE, COMMENTS
+FROM (
+SELECT t.TABLE_NAME AS OBJECT_NAME,
+       'TABLE' AS TABLE_TYPE,
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+FROM USER_TABLES t
+WHERE t.NESTED = 'NO'
+UNION ALL
+SELECT o.OBJECT_NAME,
+       'VIEW' AS TABLE_TYPE,
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+FROM USER_OBJECTS o
+WHERE o.OBJECT_TYPE = 'VIEW'
+)`
 const oracleListTablesOrderSQL = `ORDER BY OBJECT_NAME`
 const oracleListTablesSQL = oracleListTablesBaseSQL + "\n" + oracleListTablesOrderSQL
 const oracleListObjectsBaseSQL = `
@@ -93,6 +108,21 @@ SELECT o.OBJECT_NAME,
 FROM ALL_OBJECTS o
 WHERE o.OWNER = :2
   AND o.OBJECT_TYPE IN ('VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE', 'PACKAGE BODY')
+)`
+const oracleListObjectsSessionUserBaseSQL = `
+SELECT OBJECT_NAME, OBJECT_TYPE, COMMENTS
+FROM (
+SELECT t.TABLE_NAME AS OBJECT_NAME,
+       'TABLE' AS OBJECT_TYPE,
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+FROM USER_TABLES t
+WHERE t.NESTED = 'NO'
+UNION ALL
+SELECT o.OBJECT_NAME,
+       CASE o.OBJECT_TYPE WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY' ELSE o.OBJECT_TYPE END AS OBJECT_TYPE,
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+FROM USER_OBJECTS o
+WHERE o.OBJECT_TYPE IN ('VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE', 'PACKAGE BODY')
 )`
 const oracleListObjectsOrderSQL = `ORDER BY CASE OBJECT_TYPE
   WHEN 'TABLE' THEN 0
@@ -785,6 +815,23 @@ func (s *server) normalizeSchema(schema string) (string, error) {
 	return strings.ToUpper(schema), nil
 }
 
+func (s *server) sessionUser() (string, error) {
+	db, err := s.requireDB()
+	if err != nil {
+		return "", err
+	}
+	var username string
+	if err := db.QueryRow("SELECT SYS_CONTEXT('USERENV', 'SESSION_USER') FROM DUAL").Scan(&username); err != nil {
+		return "", err
+	}
+	return strings.ToUpper(username), nil
+}
+
+func (s *server) schemaIsSessionUser(schema string) bool {
+	username, err := s.sessionUser()
+	return err == nil && strings.EqualFold(schema, username)
+}
+
 type oracleMetadataListQuery struct {
 	SQL  string
 	Args []any
@@ -822,6 +869,17 @@ func oracleListTablesQuery(schema string, constraints metadataListConstraints) o
 	)
 }
 
+func oracleListSessionUserTablesQuery(constraints metadataListConstraints) oracleMetadataListQuery {
+	return oracleConstrainedMetadataListQuery(
+		oracleListTablesSessionUserBaseSQL,
+		"OBJECT_NAME, TABLE_TYPE, COMMENTS",
+		"TABLE_TYPE",
+		oracleListTablesOrderSQL,
+		nil,
+		constraints,
+	)
+}
+
 func oracleListObjectsQuery(schema string, constraints metadataListConstraints) oracleMetadataListQuery {
 	return oracleConstrainedMetadataListQuery(
 		oracleListObjectsBaseSQL,
@@ -829,6 +887,17 @@ func oracleListObjectsQuery(schema string, constraints metadataListConstraints) 
 		"OBJECT_TYPE",
 		oracleListObjectsOrderSQL,
 		[]any{schema, schema},
+		constraints,
+	)
+}
+
+func oracleListSessionUserObjectsQuery(constraints metadataListConstraints) oracleMetadataListQuery {
+	return oracleConstrainedMetadataListQuery(
+		oracleListObjectsSessionUserBaseSQL,
+		"OBJECT_NAME, OBJECT_TYPE, COMMENTS",
+		"OBJECT_TYPE",
+		oracleListObjectsOrderSQL,
+		nil,
 		constraints,
 	)
 }
@@ -923,6 +992,9 @@ func (s *server) listTables(schema string, constraints metadataListConstraints) 
 		return nil, err
 	}
 	query := oracleListTablesQuery(schema, constraints)
+	if s.schemaIsSessionUser(schema) {
+		query = oracleListSessionUserTablesQuery(constraints)
+	}
 	rows, err := s.queryRows(query.SQL, query.Args)
 	if err != nil {
 		if isOraclePGALimitError(err) {
@@ -948,6 +1020,9 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 		return nil, err
 	}
 	query := oracleListObjectsQuery(schema, constraints)
+	if s.schemaIsSessionUser(schema) {
+		query = oracleListSessionUserObjectsQuery(constraints)
+	}
 	rows, err := s.queryRows(query.SQL, query.Args)
 	if err != nil {
 		if isOraclePGALimitError(err) {

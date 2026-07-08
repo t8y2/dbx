@@ -160,7 +160,7 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 
 const SqlPreviewPanel = defineAsyncComponent(() => import("@/components/editor/SqlPreviewPanel.vue"));
 const FORMATTED_JSON_EDIT_WARNING_COUNT_STORAGE_KEY = "dbx-cell-detail-formatted-json-edit-warning-count";
-const FORMATTED_JSON_EDIT_WARNING_MAX_COUNT = 5;
+const FORMATTED_JSON_EDIT_WARNING_MAX_COUNT = 3;
 
 const { t } = useI18n();
 const slots = useSlots();

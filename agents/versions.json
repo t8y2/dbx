@@ -2,7 +2,7 @@
   "access": "0.1.26",
   "bigquery": "0.1.30",
   "cassandra": "0.1.29",
-  "dameng": "0.1.32",
+  "dameng": "0.1.33",
   "databend": "0.1.17",
   "databricks": "0.1.24",
   "db2": "0.1.29",

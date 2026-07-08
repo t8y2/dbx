@@ -2419,6 +2419,11 @@ const isDuckDbConnection = computed(() => {
   return props.node.type === "connection" && connectionNamespaceCreationTarget(config) === "attach";
 });
 
+const isConnectionSchemaCreation = computed(() => {
+  const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
+  return props.node.type === "connection" && connectionNamespaceCreationTarget(config) === "schema";
+});
+
 const canSetCreateDatabaseCharset = computed(() => {
   const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
   return connectionNamespaceCreationTarget(config) === "database" && supportsCreateDatabaseCharset(config?.db_type, config?.driver_profile);
@@ -2831,6 +2836,20 @@ function openCreateDatabaseDialog() {
   }
 }
 
+function openConnectionNamespaceCreation() {
+  if (isConnectionSchemaCreation.value) {
+    openCreateSchemaDialog();
+    return;
+  }
+  void openCreateDatabase();
+}
+
+function connectionNamespaceCreationLabel() {
+  if (isDuckDbConnection.value) return t("contextMenu.createDuckDbFile");
+  if (isConnectionSchemaCreation.value) return t("contextMenu.createSchema");
+  return t("contextMenu.createDatabase");
+}
+
 function updateCreateDatabaseCharset(value: string) {
   const previousCharset = createDatabaseCharset.value;
   createDatabaseCharset.value = value;
@@ -2857,7 +2876,11 @@ async function loadCreateDatabaseCharsetMetadata(target: "create" | "edit" = "cr
     createDatabaseCollationsByCharset.value = metadata.collationsByCharset;
     const selectedCharset = target === "create" ? createDatabaseCharset.value : editDatabaseCharset.value;
     if (!createDatabaseCharsetOptions.value.includes(selectedCharset) && createDatabaseCharsetOptions.value.length) {
-      target === "create" ? updateCreateDatabaseCharset(createDatabaseCharsetOptions.value[0]) : updateEditDatabaseCharset(createDatabaseCharsetOptions.value[0]);
+      if (target === "create") {
+        updateCreateDatabaseCharset(createDatabaseCharsetOptions.value[0]);
+      } else {
+        updateEditDatabaseCharset(createDatabaseCharsetOptions.value[0]);
+      }
     } else {
       if (target === "create") {
         createDatabaseCollation.value = nextCreateDatabaseCollation(createDatabaseCharset.value, createDatabaseCharset.value, createDatabaseCollation.value, createDatabaseCollationsByCharset.value);
@@ -3149,21 +3172,25 @@ function openCreateSchemaDialog() {
 async function confirmCreateSchema() {
   const node = props.node;
   const name = createSchemaName.value.trim();
-  if (!name || !node.connectionId || !node.database) return;
+  const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
+  const isConnectionLevelSchemaCreation = node.type === "connection" && connectionNamespaceCreationTarget(config) === "schema";
+  const targetDatabase = isConnectionLevelSchemaCreation ? "" : node.database;
+  if (!name || !node.connectionId || (!targetDatabase && !isConnectionLevelSchemaCreation)) return;
   showCreateSchemaDialog.value = false;
   try {
     await connectionStore.ensureConnected(node.connectionId);
     const sql = await buildCreateSchemaSql({
-      databaseType: currentDatabaseType(),
+      databaseType: effectiveDatabaseTypeForConnection(config),
       name,
     });
-    await api.executeQuery(node.connectionId, node.database, sql);
+    await api.executeQuery(node.connectionId, targetDatabase || "", sql);
     toast(t("contextMenu.createSchemaSuccess", { name }), 3000);
-    const config = connectionStore.getConfig(node.connectionId);
-    if (config?.db_type === "sqlserver") {
-      await connectionStore.loadSqlServerDatabaseObjects(node.connectionId, node.database, { force: true });
+    if (isConnectionLevelSchemaCreation) {
+      await connectionStore.loadDatabases(node.connectionId, { force: true });
+    } else if (config?.db_type === "sqlserver") {
+      await connectionStore.loadSqlServerDatabaseObjects(node.connectionId, targetDatabase || "", { force: true });
     } else {
-      await connectionStore.loadSchemas(node.connectionId, node.database, { force: true });
+      await connectionStore.loadSchemas(node.connectionId, targetDatabase || "", { force: true });
     }
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
@@ -4483,8 +4510,8 @@ function treeItemMenuItems(): ContextMenuItem[] {
     }
     if (canCreateDatabase.value) {
       items.push({
-        label: isDuckDbConnection.value ? t("contextMenu.createDuckDbFile") : t("contextMenu.createDatabase"),
-        action: openCreateDatabase,
+        label: connectionNamespaceCreationLabel(),
+        action: openConnectionNamespaceCreation,
         icon: Plus,
       });
     }

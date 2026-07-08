@@ -256,6 +256,8 @@ MCP 查询执行默认非常保守：
 | 桌面本地模式 | 默认               | 读取 DBX 桌面端连接存储，并可调用桌面专属 UI bridge 工具 |
 | Web 模式     | 设置 `DBX_WEB_URL` | 不读取本机桌面存储，而是把请求发给 DBX Web 后端          |
 
+对于启用了密码保护的 DBX Web 或 Docker 部署，还需要在 MCP Server 环境变量中设置 `DBX_WEB_PASSWORD`。这里填写的就是 DBX Web 登录页使用的密码，也包括首次打开 Web 页面时通过 setup 设置的密码。为了让 MCP 可用，不需要在启动 DBX Web 时额外设置 `DBX_PASSWORD`；`DBX_PASSWORD` 只是服务端环境变量覆盖。当 Web 后端要求认证但没有提供密码时，MCP 调用会在返回任何连接数据前失败。桌面本地模式不使用 `DBX_WEB_PASSWORD`。
+
 ## 常见问题
 
 <Accordions>
@@ -263,7 +265,7 @@ MCP 查询执行默认非常保守：
   <Accordion title="dbx_open_table 报 'DBX is not running'">需要先启动 DBX 桌面应用。UI 联动功能依赖 DBX 运行时的本地 HTTP 服务（端口 4224）。</Accordion>
   <Accordion title="连接名称找不到">连接名称匹配不区分大小写，但需要和 DBX 中配置的名称一致。用 `dbx_list_connections` 查看所有可用名称。</Accordion>
   <Accordion title="查询超时">MCP Server 的查询超时为 30 秒。如果查询较慢，考虑添加索引或简化查询。也可以让 AI 助手先用 `dbx_describe_table` 了解表结构，再生成优化后的查询。</Accordion>
-  <Accordion title="Docker 环境下如何使用 MCP？">Docker 部署的 DBX 同样支持 MCP。MCP Server 会读取 Docker 容器内的连接配置。确保 MCP Server 能访问到 DBX 的配置目录。</Accordion>
+  <Accordion title="Docker 环境下如何使用 MCP？">把 `DBX_WEB_URL` 设置为 DBX Web 地址。如果 Web 页面需要密码，也要把 `DBX_WEB_PASSWORD` 设置为同一个 Web 登录密码；否则 MCP 会拒绝访问受保护的 Web API。</Accordion>
 </Accordions>
 
 ## 系统要求

@@ -22,6 +22,7 @@ fn live_postgres_config(
         driver_profile: None,
         driver_label: None,
         url_params: None,
+        agent_java_options: Vec::new(),
         host: host.to_string(),
         port,
         username: user.to_string(),

@@ -27,7 +27,7 @@ class OceanBaseOracleAgentTest {
         params.setDatabase("sys");
 
         Assertions.assertEquals(
-            "jdbc:oceanbase://oceanbase.example.com:2881/sys?compatibleOjdbcVersion=8",
+            "jdbc:oceanbase://oceanbase.example.com:2883/sys?compatibleOjdbcVersion=8",
             OceanBaseOracleAgent.buildUrl(params)
         );
     }

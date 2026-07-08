@@ -448,7 +448,7 @@ async fn connect_bare_mysql_pool_with_setup(
 ) -> Result<db::mysql::MySqlPool, String> {
     if db_config.bare_mysql_uses_tls() {
         let idle_timeout_secs = Some(db_config.idle_timeout_secs);
-        db::mysql::connect_with_ca_cert_pool_limit_idle_and_setup(
+        db::mysql::connect_compatible_with_ca_cert_pool_limit_idle_and_setup(
             url,
             Some(&db_config.ca_cert_path),
             connect_timeout,
@@ -475,7 +475,7 @@ async fn connect_bare_mysql_pool_with_setup_database(
     // separately so DB-layer setup keeps the normal charset/catalog/USE order.
     if db_config.bare_mysql_uses_tls() {
         let idle_timeout_secs = Some(db_config.idle_timeout_secs);
-        db::mysql::connect_with_ca_cert_pool_limit_idle_and_setup_database(
+        db::mysql::connect_compatible_with_ca_cert_pool_limit_idle_and_setup_database(
             url,
             Some(&db_config.ca_cert_path),
             connect_timeout,
@@ -1187,8 +1187,15 @@ impl AppState {
             agent_connection_pool_database_type!() => {
                 let connect_params =
                     agent_connect_params(&db_config, &host, port, db_config.effective_database().unwrap_or(""));
-                let mut client =
-                    self.agent_manager.spawn(&db_config.db_type, db_config.driver_profile.as_deref()).await?;
+                // Kerberos JVM properties are connection-scoped; shared agent daemons must not inherit them.
+                let mut client = self
+                    .agent_manager
+                    .spawn_with_extra_java_args(
+                        &db_config.db_type,
+                        db_config.driver_profile.as_deref(),
+                        &db_config.agent_java_options,
+                    )
+                    .await?;
                 let connect_result = client
                     .call_method_with_timeout::<serde_json::Value>(
                         AgentMethod::Connect,
@@ -3005,6 +3012,7 @@ mod tests {
             driver_profile: None,
             driver_label: None,
             url_params: None,
+            agent_java_options: Vec::new(),
             host: "127.0.0.1".to_string(),
             port: 3306,
             username: "root".to_string(),

@@ -118,6 +118,7 @@ export interface ConnectionConfig {
   driver_profile?: string;
   driver_label?: string;
   url_params?: string;
+  agent_java_options?: string[];
   host: string;
   port: number;
   username: string;

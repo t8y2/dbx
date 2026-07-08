@@ -16,6 +16,7 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         driver_profile: None,
         driver_label: None,
         url_params: None,
+        agent_java_options: Vec::new(),
         host: std::env::var("DBX_LIVE_SQLSERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
         port: std::env::var("DBX_LIVE_SQLSERVER_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(1433),
         username: std::env::var("DBX_LIVE_SQLSERVER_USER").unwrap_or_else(|_| "sa".to_string()),

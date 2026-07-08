@@ -160,7 +160,7 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 
 const SqlPreviewPanel = defineAsyncComponent(() => import("@/components/editor/SqlPreviewPanel.vue"));
 const FORMATTED_JSON_EDIT_WARNING_COUNT_STORAGE_KEY = "dbx-cell-detail-formatted-json-edit-warning-count";
-const FORMATTED_JSON_EDIT_WARNING_MAX_COUNT = 10;
+const FORMATTED_JSON_EDIT_WARNING_MAX_COUNT = 3;
 
 const { t } = useI18n();
 const slots = useSlots();
@@ -3364,6 +3364,10 @@ const isInfiniteScrollPaginating = ref(false);
 let lastInfiniteScrollPage = 0;
 let infiniteScrollCheckScheduled = false;
 let infiniteScrollAllLoaded = false;
+// Tracks whether the current loading cycle was triggered by a refresh/rollback
+// (as opposed to a normal paginate). Used to decide whether to auto-redirect
+// when the current page no longer exists after data was deleted.
+const isRefreshingData = ref(false);
 watch(pageSize, (value) => {
   customPageSizeInput.value = String(value);
 });
@@ -3454,6 +3458,26 @@ const canGoNextPage = computed(() => {
 const canJumpLastPage = computed(() => canGoNextPage.value && (hasKnownTotalRowCount.value || allRowsLoaded.value || !!props.tableMeta || !!props.countSql));
 const totalRowCountBusy = computed(() => props.totalRowCountLoading === true || manualTotalRowCountLoading.value);
 const canCalculateTotalRowCount = computed(() => !isResultsContext.value && !!props.connectionId && (!!props.tableMeta || !!props.countSql));
+// When a refresh/rollback completes and the current page exceeds the last
+// available page (e.g. data was deleted while viewing), auto-navigate to the
+// last available page instead of showing an empty page.
+watch(
+  () => props.loading,
+  (loading, prevLoading) => {
+    // Only act when loading completes (transitions from true to false)
+    // and the completion was triggered by a refresh/rollback.
+    if (!loading && prevLoading && isRefreshingData.value) {
+      isRefreshingData.value = false;
+      const total = displayedTotalRowCount.value;
+      if (!total || total <= 0) return;
+      const lastPageNum = Math.max(1, Math.ceil(total / pageSize.value));
+      if (currentPage.value <= lastPageNum) return;
+      currentPage.value = lastPageNum;
+      resetGridVerticalScroll(true);
+      emit("paginate", (lastPageNum - 1) * pageSize.value, pageSize.value, currentWhereInput(), currentOrderBy());
+    }
+  },
+);
 const showQueryEditReadyBadge = computed(() => isResultsContext.value && hasData.value && !!props.editable && (!!props.tableMeta || !!props.customSaveHandler));
 const queryEditReadyTargetLabel = computed(() => props.tableMeta?.tableName ?? props.customSaveHandler?.targetLabel ?? "");
 const showKeylessEditWarning = computed(() => !!props.editable && !!props.tableMeta && canUseKeylessRowPredicate(props.databaseType, props.tableMeta.primaryKeys ?? []));
@@ -4034,7 +4058,8 @@ async function onToolbarRefresh() {
     resetInfiniteScrollState();
   }
   preserveTransposeOnNextResult.value = showTranspose.value;
-  emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, 0);
+  isRefreshingData.value = true;
+  emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, (currentPage.value - 1) * pageSize.value);
 }
 
 function stopAutoRefreshTimer() {
@@ -4078,7 +4103,8 @@ function onToolbarRollback() {
   if (infiniteScrollEnabled.value) {
     resetInfiniteScrollState();
   }
-  emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, 0);
+  isRefreshingData.value = true;
+  emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, (currentPage.value - 1) * pageSize.value);
 }
 
 function addRow() {
@@ -4987,7 +5013,7 @@ function warnFormattedJsonEditIfNeeded(detail: DataGridCellDetail, force = false
   if (!force && (!sideDetailJsonView.value || !detail.formattedJson)) return;
   const count = Number(safeLocalStorageGet(FORMATTED_JSON_EDIT_WARNING_COUNT_STORAGE_KEY)) || 0;
   if (count >= FORMATTED_JSON_EDIT_WARNING_MAX_COUNT) return;
-  toast(t("grid.formattedJsonEditWarning"), 10000);
+  toast(t("grid.formattedJsonEditWarning"), 6000);
   safeLocalStorageSet(FORMATTED_JSON_EDIT_WARNING_COUNT_STORAGE_KEY, String(count + 1));
 }
 

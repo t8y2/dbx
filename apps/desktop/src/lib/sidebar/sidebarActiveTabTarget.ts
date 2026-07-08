@@ -143,7 +143,13 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
 
 function schemaMatches(node: TreeNode, schema: string | undefined): boolean {
   if (!schema) return true;
-  return (node.schema || "") === schema;
+
+  if ((node.schema || "") === schema) return true;
+  // Some database engines (for example MySQL in database-object tree mode) do
+  // not store a separate schema on table nodes. In that case the database name
+  // is the effective schema, so a target schema equal to the node database
+  // should still resolve to the loaded table node.
+  return !node.schema && (node.database || "") === schema;
 }
 
 export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): boolean {
@@ -207,16 +213,28 @@ export function shouldScrollActiveSidebarSelection(options: { activeTabId: strin
   return options.activeTabId !== options.previousActiveTabId || (options.autoSelectEnabled && options.previousAutoSelectEnabled === false);
 }
 
-export function scrollTopForSidebarNode(options: { index: number; currentScrollTop: number; viewportHeight: number; rowHeight?: number; topOcclusionHeight?: number }): number {
+// nearest is used for passive auto-selection; smart keeps context for explicit locate actions.
+export type SidebarNodeScrollAlign = "nearest" | "top" | "smart";
+
+export function scrollTopForSidebarNode(options: { index: number; currentScrollTop: number; viewportHeight: number; rowHeight?: number; topOcclusionHeight?: number; align?: SidebarNodeScrollAlign }): number {
   const rowHeight = options.rowHeight ?? SIDEBAR_TREE_ROW_HEIGHT;
   if (options.index < 0 || options.viewportHeight <= 0) return options.currentScrollTop;
 
   const rowTop = options.index * rowHeight;
   const rowBottom = rowTop + rowHeight;
-  const viewportTop = options.currentScrollTop + (options.topOcclusionHeight ?? 0);
+  const topOcclusionHeight = options.topOcclusionHeight ?? 0;
+  if (options.align === "top") return Math.max(0, rowTop - topOcclusionHeight);
+  if (options.align === "smart") {
+    // Similar to IDE Locate: place the target around the upper third of the viewport.
+    const availableViewportHeight = Math.max(rowHeight, options.viewportHeight - topOcclusionHeight);
+    const smartOffset = Math.max(0, (availableViewportHeight - rowHeight) / 3);
+    return Math.max(0, Math.round(rowTop - topOcclusionHeight - smartOffset));
+  }
+
+  const viewportTop = options.currentScrollTop + topOcclusionHeight;
   const viewportBottom = options.currentScrollTop + options.viewportHeight;
 
-  if (rowTop < viewportTop) return Math.max(0, rowTop - (options.topOcclusionHeight ?? 0));
+  if (rowTop < viewportTop) return Math.max(0, rowTop - topOcclusionHeight);
   if (rowBottom > viewportBottom) return Math.max(0, rowBottom - options.viewportHeight);
   return options.currentScrollTop;
 }

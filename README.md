@@ -158,6 +158,23 @@ Add to your `.mcp.json`:
 
 Windows portable builds need `DBX_DATA_DIR` in the MCP config, pointing to the `data` directory next to `DBX.exe` (the folder that contains `dbx.db`).
 
+For DBX Web or Docker deployments, point the MCP server at the Web backend API. If the Web login page requires a password, set `DBX_WEB_PASSWORD` to the same password used there:
+
+```json
+{
+  "mcpServers": {
+    "dbx": {
+      "command": "npx",
+      "args": ["-y", "@dbx-app/mcp-server"],
+      "env": {
+        "DBX_WEB_URL": "http://localhost:4224",
+        "DBX_WEB_PASSWORD": "your-web-login-password"
+      }
+    }
+  }
+}
+```
+
 Works with Claude Code, Cursor, Windsurf, and any MCP-compatible agent. Supports listing connections, browsing tables, executing SQL, and opening tables directly in DBX's UI.
 
 DBX also provides a dedicated CLI package for terminal, script, and Codex workflows:

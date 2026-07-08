@@ -825,6 +825,7 @@ export const useConnectionStore = defineStore("connection", () => {
       driver_profile: profile,
       driver_label: config.driver_label || labelMap[profile] || config.db_type,
       url_params: config.url_params || "",
+      agent_java_options: Array.isArray(config.agent_java_options) ? config.agent_java_options : [],
       attached_databases: Array.isArray(config.attached_databases) ? config.attached_databases.filter((database) => database.name?.trim() && database.path?.trim()) : [],
       transport_layers: Array.isArray(config.transport_layers) ? config.transport_layers : [],
       connect_timeout_secs: config.connect_timeout_secs || 10,

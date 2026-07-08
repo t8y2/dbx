@@ -16,6 +16,7 @@ fn postgres_test_config(id: &str, database: &str) -> ConnectionConfig {
         driver_profile: None,
         driver_label: None,
         url_params: None,
+        agent_java_options: Vec::new(),
         host: "127.0.0.1".to_string(),
         port: 5432,
         username: "postgres".to_string(),

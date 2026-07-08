@@ -251,6 +251,7 @@ pub fn supports_create_schema_target(database_type: Option<DatabaseType>) -> boo
                 | DatabaseType::Highgo
                 | DatabaseType::Vastbase
                 | DatabaseType::Yashandb
+                | DatabaseType::Dameng
                 | DatabaseType::Databricks
                 | DatabaseType::SapHana
                 | DatabaseType::Teradata
@@ -1230,6 +1231,14 @@ mod tests {
             })
             .unwrap(),
             "CREATE SCHEMA [analytics];"
+        );
+        assert_eq!(
+            build_create_schema_sql(SchemaNameSqlOptions {
+                database_type: Some(DatabaseType::Dameng),
+                name: "analytics".to_string(),
+            })
+            .unwrap(),
+            "CREATE SCHEMA \"analytics\";"
         );
         assert_eq!(
             build_create_schema_sql(SchemaNameSqlOptions {

@@ -2,7 +2,7 @@ import type { ConnectionConfig, DatabaseType, TreeNodeType } from "@/types/datab
 
 export type DatabaseNamespaceCreationTarget = "database" | "schema" | "attach" | "special";
 
-type ConnectionCreationTarget = Extract<DatabaseNamespaceCreationTarget, "database" | "attach" | "special">;
+type ConnectionCreationTarget = Extract<DatabaseNamespaceCreationTarget, "database" | "schema" | "attach" | "special">;
 type DatabaseNodeCreationTarget = Extract<DatabaseNamespaceCreationTarget, "schema">;
 
 export interface DatabaseNamespaceCreationMatrixEntry {
@@ -36,7 +36,7 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   manticoresearch: { deferred: "index/table creation is not database creation" },
   databend: { connection: "database" },
   redshift: { connection: "database", database: "schema" },
-  dameng: { deferred: "schema/user creation requires a dedicated user workflow" },
+  dameng: { connection: "schema" },
   gaussdb: { connection: "database", database: "schema" },
   kingbase: { connection: "database", database: "schema" },
   highgo: { connection: "database", database: "schema" },

@@ -374,6 +374,18 @@ export const QUESTDB_TYPE_LENGTHS: Record<string, string> = {
   decimal: "10,2",
 };
 
+export const SQLSERVER_TYPE_LENGTHS: Record<string, string> = {
+  decimal: "10,0",
+  numeric: "10,0",
+  float: "53",
+  char: "1",
+  nchar: "1",
+  varchar: "255",
+  nvarchar: "255",
+  binary: "1",
+  varbinary: "255",
+};
+
 export const DEFAULT_TYPE_LENGTH_DISABLES: string[] = [];
 
 export const POSTGRES_TYPE_LENGTH_DISABLES: string[] = [
@@ -424,6 +436,8 @@ export const POSTGRES_TYPE_LENGTH_DISABLES: string[] = [
 ];
 
 export const ORACLE_LIKE_TYPE_LENGTH_DISABLES: string[] = ["binary_double", "binary_float", "bigint", "boolean", "bool", "byte", "date", "double", "double precision", "float", "integer", "int", "long", "long raw", "nclob", "real", "smallint", "text", "tinyint"];
+
+export const SQLSERVER_TYPE_LENGTH_DISABLES: string[] = ["bigint", "bit", "date", "datetime", "image", "int", "integer", "money", "ntext", "real", "smalldatetime", "smallint", "smallmoney", "sql_variant", "text", "timestamp", "tinyint", "uniqueidentifier", "xml"];
 
 export function parseExtraToColumnExtra(extra: string | null | undefined, databaseType?: DatabaseType): ColumnExtra {
   const result: ColumnExtra = {};
@@ -900,6 +914,8 @@ export function getDefaultLengthForType(_dbType: DatabaseType | undefined, baseT
   const key = baseType.trim().toLowerCase();
   if (_dbType === "questdb") {
     return QUESTDB_TYPE_LENGTHS[key] ?? "";
+  } else if (_dbType === "sqlserver") {
+    return SQLSERVER_TYPE_LENGTHS[key] ?? "";
   } else {
     return DEFAULT_TYPE_LENGTHS[key] ?? "";
   }
@@ -916,6 +932,9 @@ export function isDataTypeLengthDisabled(_dbType: DatabaseType | undefined, base
   } else if (isOracleLikeStructureType(_dbType)) {
     // Dameng/Oracle integer aliases have fixed precision; MySQL-style display widths generate invalid DDL.
     return ORACLE_LIKE_TYPE_LENGTH_DISABLES.includes(key);
+  } else if (_dbType === "sqlserver") {
+    // SQL Server exact integer and legacy LOB types do not accept MySQL-style display widths.
+    return SQLSERVER_TYPE_LENGTH_DISABLES.includes(key);
   } else if (isMysqlLikeStructureType(_dbType)) {
     return key === "enum" || key === "set";
   } else {

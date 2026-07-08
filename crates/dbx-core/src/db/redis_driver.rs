@@ -3029,6 +3029,7 @@ mod tests {
             driver_profile: None,
             driver_label: None,
             url_params: None,
+            agent_java_options: Vec::new(),
             host: "cache.example.com".to_string(),
             port: 6379,
             username: String::new(),

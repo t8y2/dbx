@@ -52,7 +52,7 @@ import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
-import { buildAiContext, runAgentStream, isVectorDbType, defaultActionForMode, isValidActionForMode, type AiAction, type AiAssistantMode, type AiSqlFileContext } from "@/lib/ai/ai";
+import { buildAiContext, runAgentStream, isVectorDbType, isValidActionForMode, defaultActionForMode, type AiAction, type AiAssistantMode, type AiSqlFileContext } from "@/lib/ai/ai";
 import { formatAiModelOption } from "@/lib/ai/aiModelPresentation";
 import type { AgentEvent } from "@/lib/backend/tauri";
 import { buildAiAgentPlan } from "@/lib/ai/aiAgentPlan";
@@ -132,7 +132,7 @@ const prompt = ref("");
 const messages = ref<ChatMessage[]>([]);
 const isGenerating = ref(false);
 const scrollRef = ref<InstanceType<typeof ScrollArea> | null>(null);
-const activeAction = ref<AiAction>("generate");
+const activeAction = ref<AiAction>("general");
 const assistantMode = ref<"ask" | "agent">("ask");
 const currentSessionId = ref("");
 const conversationId = ref("");
@@ -335,6 +335,16 @@ const selectedSqlFileMentions = ref<AiSqlFileMention[]>([]);
 let mentionTimer: ReturnType<typeof setTimeout> | undefined;
 let mentionRequestId = 0;
 
+// Slash command menu
+const commandOpen = ref(false);
+const commandSelectedIndex = ref(0);
+const commandStart = ref(0);
+
+const filteredCommands = computed(() => {
+  const query = prompt.value.slice(commandStart.value + 1).toLowerCase();
+  return actionButtons.value.filter((cmd) => cmd.action.toLowerCase().includes(query) || t(cmd.key).toLowerCase().includes(query));
+});
+
 const AI_SQL_FILE_MENTION_CANDIDATE_LIMIT = 50;
 const AI_SQL_FILE_CONTEXT_MAX_CHARS = 12_000;
 
@@ -347,6 +357,7 @@ interface AiActionButton {
 
 /** Ask-mode actions: SQL-producing, never auto-run. */
 const askActionButtons: AiActionButton[] = [
+  { action: "general", icon: MessageSquarePlus, key: "ai.actions.general" },
   { action: "generate", icon: Wand2, key: "ai.actions.generate" },
   { action: "explain", icon: HelpCircle, key: "ai.actions.explain" },
   { action: "optimize", icon: Zap, key: "ai.actions.optimize" },
@@ -357,6 +368,7 @@ const askActionButtons: AiActionButton[] = [
 
 /** Agent-mode actions: task-oriented, drive tool use and real results. */
 const agentActionButtons: AiActionButton[] = [
+  { action: "general", icon: MessageSquarePlus, key: "ai.actions.general" },
   { action: "query", icon: Search, key: "ai.actions.query" },
   { action: "exploreSchema", icon: Table2, key: "ai.actions.exploreSchema" },
   { action: "executeAndExplain", icon: Play, key: "ai.actions.executeAndExplain" },
@@ -366,18 +378,15 @@ const agentActionButtons: AiActionButton[] = [
 
 const actionButtons = computed<AiActionButton[]>(() => (assistantMode.value === "agent" ? agentActionButtons : askActionButtons));
 
-// Vector DBs hide the action menu and only expose collection tools (list_collections /
-// browse_collection), never SQL tools. Keep their action at `generate` so the task contract
-// doesn't tell the LLM to call execute_query / produce SQL — neither applies to vector stores.
+// Vector DBs hide the action menu and only expose collection tools.
+// Keep their action at `generate` so the task contract doesn't tell the LLM to call execute_query.
 function resolveDefaultAction(mode: AiAssistantMode): AiAction {
   if (props.connection && isVectorDbType(props.connection.db_type)) return "generate";
   return defaultActionForMode(mode);
 }
 
 // Switching mode is a deliberate context change: land on that mode's default action so the
-// menu and behavior match the new intent (Ask → generate, Agent → query). The shared
-// `generate` action is not carried across because its label/semantics differ per mode
-// ("生成 SQL" vs "生成但不执行").
+// menu and behavior match the new intent. The shared `general` action is the default.
 //
 // `triggerAction` may set the action itself after programmatically switching mode (e.g. "Fix
 // with AI" invoked from Agent mode); `suppressModeActionReset` tells this watch to skip the
@@ -390,6 +399,18 @@ watch(assistantMode, (mode) => {
   }
   activeAction.value = resolveDefaultAction(mode);
 });
+
+watch(
+  () => props.connection?.db_type,
+  () => {
+    // Vector DBs hide the action picker, so keep the hidden action aligned with
+    // the collection-oriented prompt contract on initial render and connection changes.
+    if (props.connection && isVectorDbType(props.connection.db_type)) {
+      activeAction.value = "generate";
+    }
+  },
+  { immediate: true },
+);
 
 function selectAction(action: AiAction) {
   activeAction.value = action;
@@ -1137,6 +1158,23 @@ function scrollMentionSelectedIntoView() {
 
 function refreshMentionState() {
   clearTimeout(mentionTimer);
+
+  // 优先检测斜杠命令（仅在输入内容为空时触发）
+  const textarea = promptTextareaRef.value;
+  const cursor = textarea?.selectionStart ?? prompt.value.length;
+  const beforeCursor = prompt.value.slice(0, cursor);
+  const slashMatch = /^\/([^\s]*)$/.exec(beforeCursor.trimStart());
+
+  if (slashMatch) {
+    mentionOpen.value = false;
+    commandOpen.value = true;
+    commandStart.value = beforeCursor.length - slashMatch[1].length - 1;
+    commandSelectedIndex.value = 0;
+    return;
+  }
+
+  commandOpen.value = false;
+
   const mention = activeMentionAtCursor();
   if (!mention || !props.connection || !props.tab?.database) {
     mentionOpen.value = false;
@@ -1153,6 +1191,21 @@ function refreshMentionState() {
 function onPromptKeyup(event: KeyboardEvent) {
   if (["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(event.key)) return;
   refreshMentionState();
+}
+
+function selectCommand(command: AiActionButton) {
+  const before = prompt.value.slice(0, commandStart.value);
+  const after = prompt.value.slice(promptTextareaRef.value?.selectionStart ?? prompt.value.length);
+  prompt.value = `${before}${after}`.replace(/\s{2,}/g, " ").trim();
+  commandOpen.value = false;
+  activeAction.value = command.action;
+  nextTick(() => {
+    const textarea = promptTextareaRef.value;
+    if (textarea) {
+      textarea.selectionStart = textarea.selectionEnd = before.length;
+      textarea.focus();
+    }
+  });
 }
 
 function insertMention(candidate: AiMentionCandidate) {
@@ -1172,6 +1225,30 @@ function insertMention(candidate: AiMentionCandidate) {
 
 function onPromptKeydown(event: KeyboardEvent) {
   if (isAiPromptImeCompositionEvent(event, promptCompositionActive.value)) return;
+
+  // 斜杠命令菜单键盘导航
+  if (commandOpen.value) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      commandSelectedIndex.value = Math.min(commandSelectedIndex.value + 1, filteredCommands.value.length - 1);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      commandSelectedIndex.value = Math.max(commandSelectedIndex.value - 1, 0);
+      return;
+    }
+    if ((event.key === "Enter" || event.key === "Tab") && filteredCommands.value[commandSelectedIndex.value]) {
+      event.preventDefault();
+      selectCommand(filteredCommands.value[commandSelectedIndex.value]);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      commandOpen.value = false;
+      return;
+    }
+  }
 
   if (mentionOpen.value) {
     if (event.key === "ArrowDown") {
@@ -1304,7 +1381,7 @@ async function send() {
     await runAgentStream(
       {
         config: settings.aiConfig,
-        action: activeAction.value,
+        action: requestedAction,
         mode: requestedMode,
         instruction: modelInstruction,
         context,
@@ -1373,7 +1450,6 @@ async function send() {
       if (msg && requestedMode === "agent") msg.agentSteps = buildAiAgentStepItems(agentPlan);
       if (agentPlan.handoffSql) emit("requestAutoExecuteSql", agentPlan.handoffSql);
     }
-    activeAction.value = resolveDefaultAction(assistantMode.value);
     currentSessionId.value = "";
     // Apply deferred context compaction after streaming so assistantIdx stays stable.
     // Visible chat history is kept for the user; future LLM history starts from this hidden summary.
@@ -1663,7 +1739,7 @@ async function openExternalUrl(url: string) {
         <div class="flex flex-col gap-3 p-3">
           <template v-for="(msg, i) in visibleMessages" :key="i">
             <div v-if="msg.role === 'user'" class="group flex justify-end">
-              <div class="max-w-[85%]">
+              <div class="min-w-0 max-w-[85%]" :class="{ 'w-[85%]': editingMessageIndex === i }">
                 <template v-if="editingMessageIndex === i">
                   <div v-if="editingMentions.length" class="mb-1.5 flex flex-wrap justify-end gap-1">
                     <button
@@ -1907,6 +1983,23 @@ async function openExternalUrl(url: string) {
                   {{ mentionCandidateName(candidate) }}
                 </span>
                 <span class="max-w-[45%] shrink-0 truncate text-[10px] text-muted-foreground">{{ formatMentionCandidateType(candidate) }}</span>
+              </button>
+            </div>
+          </div>
+          <div v-if="commandOpen && filteredCommands.length" class="absolute bottom-full left-2 right-2 z-20 mb-1 max-h-56 overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-md">
+            <div class="max-h-56 overflow-auto p-1">
+              <button
+                v-for="(cmd, index) in filteredCommands"
+                :key="cmd.action"
+                type="button"
+                class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-muted"
+                :class="{ 'bg-muted': index === commandSelectedIndex }"
+                @mousedown.prevent="selectCommand(cmd)"
+                @mouseenter="commandSelectedIndex = index"
+              >
+                <component :is="cmd.icon" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <span class="font-medium">/{{ cmd.action }}</span>
+                <span class="ml-auto text-[11px] text-muted-foreground">{{ t(cmd.key) }}</span>
               </button>
             </div>
           </div>

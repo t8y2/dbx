@@ -11,6 +11,7 @@ import TruncatedTextTooltip from "@/components/ui/TruncatedTextTooltip.vue";
 import { loadSqlParameterHistory, rememberSqlParameterValues } from "@/lib/sql/sqlParameterHistory";
 import { substituteSqlParameters, type SqlParameterDescriptor, type SqlParameterInput, type SqlParameterSyntax, type SqlParameterValueKind } from "@/lib/sql/sqlParameters";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
+import type { DatabaseType } from "@/types/database";
 
 const { t } = useI18n();
 const { highlight } = useSqlHighlighter();
@@ -20,6 +21,7 @@ const open = defineModel<boolean>("open", { default: false });
 const props = defineProps<{
   sql: string;
   parameters: SqlParameterDescriptor[];
+  databaseType?: DatabaseType;
 }>();
 
 const emit = defineEmits<{
@@ -41,7 +43,7 @@ const syntaxLabels: Record<SqlParameterSyntax, string> = {
   sqlserver: "@name",
 };
 
-const resolvedSql = computed(() => substituteSqlParameters(props.sql, values.value));
+const resolvedSql = computed(() => substituteSqlParameters(props.sql, values.value, { databaseType: props.databaseType }));
 const highlightedSql = computed(() => highlight(resolvedSql.value));
 
 watch(

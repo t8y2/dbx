@@ -16,7 +16,6 @@ use crate::token_usage::TokenUsage;
 
 /// Maximum number of agent loop turns to prevent infinite loops.
 const MAX_AGENT_TURNS: u32 = 30;
-const AGENT_CANCELLED_ERROR: &str = "Agent loop cancelled";
 const MAX_TOOL_RESULT_CONTEXT_CHARS: usize = 12_000;
 const TOOL_RESULT_HEAD_CHARS: usize = 4_000;
 const TOOL_RESULT_TAIL_CHARS: usize = 4_000;
@@ -254,7 +253,7 @@ pub async fn run_agent_loop(
                     }
                     break;
                 }
-                Err(err) if err == AGENT_CANCELLED_ERROR => {
+                Err(err) if err == ai::AGENT_CANCELLED_ERROR => {
                     final_text = take_text(&accumulated_text);
                     loop_exit = LoopExit::Cancelled;
                     break;
@@ -319,6 +318,14 @@ pub async fn run_agent_loop(
                     break;
                 }
             }
+        }
+
+        // Honor a cancellation that arrived after the stream finished but before we
+        // run the requested tools; otherwise a long execute_query would keep running.
+        if cancelled.notified().now_or_never().is_some() {
+            final_text = accumulated_text;
+            loop_exit = LoopExit::Cancelled;
+            break;
         }
 
         // Execute each tool call
@@ -472,6 +479,7 @@ fn augment_system_prompt_with_task_contract(
         "This is a SQL-producing action: produce the final SQL in a fenced ```sql code block. Use tools only as intermediate evidence for schema/dialect; do not stop at a tool-result summary. In Agent mode, execute a query only when the original request explicitly asks for real data/results, not when it merely asks to generate SQL."
     } else {
         match action.to_ascii_lowercase().as_str() {
+            "general" => "This is a general Q&A mode. Answer the user's question directly and naturally using your knowledge and any available database context. Adapt to the user's intent.",
             "query" => "This is a data-query task: call execute_query to obtain real results, then answer based on the actual data. Do not stop after merely outputting SQL text.",
             "exploreschema" => "This is a schema-inspection task: use list_tables/get_columns to obtain authoritative structure, then summarize. Do not execute data queries unless the user explicitly asks for data.",
             "executeandexplain" => "This is an execute-and-explain task: call execute_query to run the current SQL, then explain the real results.",
@@ -523,6 +531,7 @@ fn build_contract_repair_prompt(task_contract: Option<&AiTaskContract>, is_agent
         "For this SQL-producing action, produce SQL in a fenced ```sql code block. Tool results are evidence only; do not answer by summarizing schema/tool output. Execute a query only when the original request explicitly asks for real data/results."
     } else {
         match action.to_ascii_lowercase().as_str() {
+            "general" => "For this general Q&A, answer the user's question directly and naturally.",
             "query" => "For this data-query task, call execute_query and answer based on real data; do not stop at SQL text or a schema summary.",
             "exploreschema" => "For this schema-inspection task, summarize real structure from list_tables/get_columns; do not invent columns.",
             "executeandexplain" => "For this execute-and-explain task, run the current SQL via execute_query and explain the real results.",
@@ -631,7 +640,7 @@ async fn stream_with_tools(
 ) -> Result<(Vec<ToolCall>, Option<TokenUsage>), String> {
     // Return early if the user cancelled before the LLM call started.
     if cancelled.notified().now_or_never().is_some() {
-        return Err(AGENT_CANCELLED_ERROR.to_string());
+        return Err(ai::AGENT_CANCELLED_ERROR.to_string());
     }
 
     ai::stream_with_tools(config, request, session_id, tools, cancelled, on_chunk).await
@@ -665,13 +674,19 @@ async fn run_agent_loop_text_only(
     messages: &[AiMessage],
     agent_ctx: &AgentLoopContext,
     on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
-    _cancelled: &Notify,
+    cancelled: &Notify,
     max_tokens: Option<u32>,
     task_contract: Option<&AiTaskContract>,
 ) -> Result<String, String> {
     // Build a schema-enriched system prompt so the LLM can answer schema questions
     // even without tool access.
     let enriched_prompt = build_schema_prompt(agent_ctx, system_prompt).await;
+
+    // Honor a cancellation requested while loading schema context.
+    if cancelled.notified().now_or_never().is_some() {
+        on_event(AgentEvent::AgentEnd { input_tokens: None, output_tokens: None });
+        return Ok("Agent run was cancelled before producing output.".to_string());
+    }
 
     let mut request = AiCompletionRequest {
         config: config.clone(),
@@ -683,7 +698,14 @@ async fn run_agent_loop_text_only(
 
     for attempt in 0..=MAX_CONTRACT_REPAIR_ATTEMPTS {
         // Use non-streaming completions so contract repair can suppress incomplete drafts.
-        let result = ai::complete(&request).await?;
+        // Race the (non-cancellable) HTTP call against cancellation so Stop still works.
+        let result = tokio::select! {
+            result = ai::complete(&request) => result?,
+            _ = cancelled.notified() => {
+                on_event(AgentEvent::AgentEnd { input_tokens: None, output_tokens: None });
+                return Ok("Agent run was cancelled before producing output.".to_string());
+            }
+        };
         match validate_final_answer(task_contract, &result) {
             FinalAnswerCheck::Satisfied => {
                 on_event(AgentEvent::TextDelta { delta: result.clone() });
@@ -1354,5 +1376,16 @@ mod tests {
 
         assert!(repair.contains("data-query task"));
         assert!(repair.contains("call execute_query"));
+    }
+
+    #[test]
+    fn general_action_skips_sql_validation() {
+        let contract = AiTaskContract {
+            action: Some("general".to_string()),
+            mode: Some("ask".to_string()),
+            user_request: Some("你好".to_string()),
+        };
+        let answer = "你好！我是 DBX 的数据库助手。有什么可以帮你的吗？";
+        assert_eq!(validate_final_answer(Some(&contract), answer), FinalAnswerCheck::Satisfied);
     }
 }

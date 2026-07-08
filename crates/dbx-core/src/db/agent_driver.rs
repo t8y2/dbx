@@ -15,6 +15,7 @@ const RPC_TIMEOUT_SECS: u64 = 30;
 const STARTUP_TIMEOUT_SECS: u64 = 15;
 const STDERR_TAIL_LINES: usize = 20;
 const AGENT_EXIT_DIAGNOSTIC_WAIT_MS: u64 = 200;
+const AGENT_JAVA_OPTS_ENV: &str = "DBX_AGENT_JAVA_OPTS";
 const AGENT_JAVA_TOO_OLD_MESSAGE: &str =
     "Agent requires Java 21, but DBX started it with an older Java runtime. Use DBX managed JRE 21 or select a Java 21 executable in Driver Manager.";
 #[cfg(windows)]
@@ -42,10 +43,18 @@ impl AgentLaunchSpec {
     }
 
     pub fn java_jar(java_path: impl Into<PathBuf>, jar_path: impl AsRef<Path>) -> Self {
+        Self::java_jar_with_extra_args(java_path, jar_path, &[])
+    }
+
+    pub fn java_jar_with_extra_args(
+        java_path: impl Into<PathBuf>,
+        jar_path: impl AsRef<Path>,
+        extra_java_args: &[String],
+    ) -> Self {
         let jar_path = jar_path.as_ref();
         Self {
             program: java_path.into(),
-            args: agent_java_args(&jar_path.to_string_lossy()),
+            args: agent_java_args_with_extra_args(&jar_path.to_string_lossy(), extra_java_args),
             working_dir: jar_path.parent().map(Path::to_path_buf),
         }
     }
@@ -1172,7 +1181,25 @@ pub fn mongo_document_id_params(database: &str, collection: &str, id: &str) -> V
     serde_json::json!({ "database": database, "collection": collection, "id": id })
 }
 
+#[cfg(test)]
 fn agent_java_args(jar_path: &str) -> Vec<String> {
+    agent_java_args_with_extra(jar_path, std::env::var(AGENT_JAVA_OPTS_ENV).ok().as_deref())
+}
+
+#[cfg(test)]
+fn agent_java_args_with_extra(jar_path: &str, extra_opts: Option<&str>) -> Vec<String> {
+    agent_java_args_with_extra_opts(jar_path, extra_opts, &[])
+}
+
+fn agent_java_args_with_extra_args(jar_path: &str, extra_java_args: &[String]) -> Vec<String> {
+    agent_java_args_with_extra_opts(jar_path, std::env::var(AGENT_JAVA_OPTS_ENV).ok().as_deref(), extra_java_args)
+}
+
+fn agent_java_args_with_extra_opts(
+    jar_path: &str,
+    extra_opts: Option<&str>,
+    extra_java_args: &[String],
+) -> Vec<String> {
     let mut args = vec![
         "-Dfile.encoding=UTF-8",
         "-Dsun.stdout.encoding=UTF-8",
@@ -1192,9 +1219,53 @@ fn agent_java_args(jar_path: &str) -> Vec<String> {
         args.push("-Djava.net.preferIPv4Stack=true".to_string());
     }
 
+    // Hive/Kerberos JDBC drivers read JAAS and krb5 settings during JVM startup,
+    // so users need a process-level escape hatch before the agent jar is loaded.
+    if let Some(extra) = extra_opts {
+        args.extend(parse_agent_java_opts(extra));
+    }
+    args.extend(extra_java_args.iter().map(|arg| arg.trim()).filter(|arg| !arg.is_empty()).map(str::to_string));
+
     args.push("--add-opens=java.sql/java.sql=ALL-UNNAMED".to_string());
 
     args.extend(["-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-jar", jar_path].into_iter().map(str::to_string));
+
+    args
+}
+
+fn parse_agent_java_opts(opts: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut chars = opts.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match (quote, ch) {
+            (None, ch) if ch.is_whitespace() => {
+                if !current.is_empty() {
+                    args.push(std::mem::take(&mut current));
+                }
+            }
+            (None, '\'' | '"') => quote = Some(ch),
+            (Some(q), ch) if ch == q => quote = None,
+            (Some('"'), '\\') => {
+                if let Some(&next) = chars.peek() {
+                    if next == '"' || next == '\\' {
+                        current.push(chars.next().unwrap());
+                    } else {
+                        current.push(ch);
+                    }
+                } else {
+                    current.push(ch);
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if !current.is_empty() {
+        args.push(current);
+    }
 
     args
 }
@@ -1345,13 +1416,13 @@ impl Drop for AgentDriverClient {
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_close_query_session_params, agent_handshake_params, agent_java_args, agent_object_source_params,
-        agent_proxy_env_vars, agent_schema_params, agent_schema_table_params, agent_supports_capability,
-        agent_transaction_params, format_agent_process_error, format_agent_startup_error,
-        is_unsupported_handshake_error, mongo_collection_params, mongo_database_params, mongo_document_id_params,
-        read_agent_line, start_stderr_collector, AgentCapability, AgentDriverClient, AgentHandshake, AgentKvMethod,
-        AgentMethod, AgentTableReadCloseParams, AgentTableReadPageParams, AgentTableReadStartParams, MongoAgentMethod,
-        StderrTail, AGENT_PROTOCOL_VERSION,
+        agent_close_query_session_params, agent_handshake_params, agent_java_args, agent_java_args_with_extra,
+        agent_java_args_with_extra_opts, agent_object_source_params, agent_proxy_env_vars, agent_schema_params,
+        agent_schema_table_params, agent_supports_capability, agent_transaction_params, format_agent_process_error,
+        format_agent_startup_error, is_unsupported_handshake_error, mongo_collection_params, mongo_database_params,
+        mongo_document_id_params, parse_agent_java_opts, read_agent_line, start_stderr_collector, AgentCapability,
+        AgentDriverClient, AgentHandshake, AgentKvMethod, AgentMethod, AgentTableReadCloseParams,
+        AgentTableReadPageParams, AgentTableReadStartParams, MongoAgentMethod, StderrTail, AGENT_PROTOCOL_VERSION,
     };
     use std::io::Cursor;
     use std::process::{Command, Stdio};
@@ -1401,6 +1472,60 @@ mod tests {
         let args = agent_java_args("/tmp/dbx/drivers/highgo/agent.jar");
 
         assert!(!args.iter().any(|arg| arg == "-Djava.net.preferIPv4Stack=true"));
+    }
+
+    #[test]
+    fn agent_java_args_include_custom_jvm_options_before_jar() {
+        let args = agent_java_args_with_extra(
+            "/tmp/dbx/drivers/hive/agent.jar",
+            Some("-Djava.security.auth.login.config=C:\\jaas.conf -Djavax.security.auth.useSubjectCredsOnly=false"),
+        );
+
+        let login_config = args
+            .iter()
+            .position(|arg| arg == "-Djava.security.auth.login.config=C:\\jaas.conf")
+            .expect("custom JAAS option should be present");
+        let jar = args.iter().position(|arg| arg == "-jar").expect("agent jar marker should be present");
+
+        assert!(login_config < jar);
+        assert!(args.iter().any(|arg| arg == "-Djavax.security.auth.useSubjectCredsOnly=false"));
+    }
+
+    #[test]
+    fn agent_java_args_include_connection_jvm_options_after_env_options() {
+        let args = agent_java_args_with_extra_opts(
+            "/tmp/dbx/drivers/hive/agent.jar",
+            Some("-Djava.security.krb5.conf=/etc/global-krb5.conf"),
+            &["-Djava.security.krb5.conf=/etc/connection-krb5.conf".to_string()],
+        );
+
+        let global = args
+            .iter()
+            .position(|arg| arg == "-Djava.security.krb5.conf=/etc/global-krb5.conf")
+            .expect("global krb5 option should be present");
+        let connection = args
+            .iter()
+            .position(|arg| arg == "-Djava.security.krb5.conf=/etc/connection-krb5.conf")
+            .expect("connection krb5 option should be present");
+        let jar = args.iter().position(|arg| arg == "-jar").expect("agent jar marker should be present");
+
+        assert!(global < connection);
+        assert!(connection < jar);
+    }
+
+    #[test]
+    fn agent_java_opts_parser_preserves_quoted_windows_paths() {
+        let args = parse_agent_java_opts(
+            r#"-Djava.security.krb5.conf="C:\Program Files\MIT\Kerberos5\krb5.ini" -Dsun.security.krb5.debug=true"#,
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "-Djava.security.krb5.conf=C:\\Program Files\\MIT\\Kerberos5\\krb5.ini",
+                "-Dsun.security.krb5.debug=true"
+            ]
+        );
     }
 
     #[test]

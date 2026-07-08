@@ -3,7 +3,7 @@ import { computed, ref, nextTick, onBeforeUnmount, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { onClickOutside } from "@vueuse/core";
 import { DynamicScroller, DynamicScrollerItem, RecycleScroller } from "vue-virtual-scroller";
-import { Copy, Eye, Terminal, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, IndentIncrease, IndentDecrease, ArrowUp, ArrowDown, ArrowUpDown, Search } from "@lucide/vue";
+import { Copy, Eye, Terminal, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, IndentIncrease, IndentDecrease, ArrowUp, ArrowDown, ArrowUpDown, Search, Clock } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -19,6 +19,7 @@ import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle
 import { createRedisShikiJsonHighlighter, type RedisJsonHighlighter } from "@/lib/redis/redisJsonHighlighter";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatTtl } from "@/lib/common/ttlFormat";
+import { computeAutoRefreshTick, computeDisplayTtl, shouldStopAutoRefresh } from "@/lib/redis/redisAutoRefresh";
 import {
   canRenderRedisValueFormat,
   canEditRedisMemberDetail,
@@ -99,6 +100,62 @@ const memberValueView = ref<RedisValueFormat>(readPreferredRedisValueFormat());
 const redisJsonView = ref<"raw" | "tree">("raw");
 const redisJsonWordWrap = ref(readRedisJsonWordWrap());
 const redisJsonHighlighter = ref<RedisJsonHighlighter>();
+
+// Auto-refresh
+const autoRefreshEnabled = ref(false);
+const countdownTtl = ref(0);
+let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
+
+function toggleAutoRefresh() {
+  autoRefreshEnabled.value = !autoRefreshEnabled.value;
+  if (autoRefreshEnabled.value) {
+    startAutoRefresh();
+  } else {
+    stopAutoRefresh();
+  }
+}
+
+function startAutoRefresh() {
+  stopAutoRefresh();
+  if (data.value && data.value.ttl > 0) {
+    countdownTtl.value = data.value.ttl;
+  }
+  autoRefreshTimer = setInterval(() => {
+    const action = computeAutoRefreshTick(autoRefreshEnabled.value, countdownTtl.value, loading.value);
+    if (action.type === "decrement") {
+      countdownTtl.value--;
+      return;
+    }
+    if (action.type === "refresh") {
+      load()
+        .then(() => {
+          if (!autoRefreshEnabled.value) return;
+          if (data.value && !shouldStopAutoRefresh(data.value.ttl)) {
+            countdownTtl.value = data.value.ttl;
+          } else {
+            // Key expired or has no TTL — stop auto-refresh to avoid infinite loop
+            stopAutoRefresh();
+            autoRefreshEnabled.value = false;
+          }
+        })
+        .catch(() => {
+          // Network / connection error — stop auto-refresh to avoid tight retry loop
+          if (autoRefreshEnabled.value) {
+            stopAutoRefresh();
+            autoRefreshEnabled.value = false;
+          }
+        });
+    }
+  }, 1000);
+}
+
+function stopAutoRefresh() {
+  if (autoRefreshTimer !== null) {
+    clearInterval(autoRefreshTimer);
+    autoRefreshTimer = null;
+  }
+}
+
 const hashSortBy = ref<"field" | "value" | null>(null);
 const hashSortDir = ref<"asc" | "desc">("asc");
 const hashSearchQuery = ref("");
@@ -130,6 +187,9 @@ const redisJsonAppearance = computed(() => (isDark.value ? "dark" : "light"));
 const isBinaryStringValue = computed(() => Boolean(stringValueDetail.value?.binary));
 const selectedMemberCanEdit = computed(() => selectedMemberContext.value?.canEdit ?? false);
 const canEditCurrentStringFormat = computed(() => Boolean(stringValueDetail.value?.editable) && stringValueView.value === "utf8");
+const showStringEditActions = computed(() => canEditCurrentStringFormat.value);
+const originalStringEditValue = computed(() => (stringBlob.value ? rawRedisValueText(stringBlob.value) : ""));
+const stringValueChanged = computed(() => canEditCurrentStringFormat.value && editValue.value !== originalStringEditValue.value);
 const canEditCurrentMemberFormat = computed(() => selectedMemberCanEdit.value && memberValueView.value === "utf8");
 const hasMore = computed(() => scanCursor.value != null && scanCursor.value > 0);
 const collectionTotal = computed(() => (data.value ? redisValueCollectionTotal(data.value) : null));
@@ -432,6 +492,10 @@ async function load(options: { selectDefaultMember?: boolean } = {}) {
   try {
     const loadedValue = await api.redisGetValue(props.connectionId, props.db, props.keyRaw);
     data.value = loadedValue;
+    // Reset auto-refresh countdown if active
+    if (autoRefreshEnabled.value) {
+      countdownTtl.value = shouldStopAutoRefresh(loadedValue.ttl) ? 0 : loadedValue.ttl;
+    }
     emit("loaded", loadedValue);
     scanCursor.value = redisValueCollectionScanCursor(loadedValue);
     collectionItems.value = redisValueCollectionItems(loadedValue);
@@ -477,7 +541,7 @@ async function loadMore() {
 }
 
 async function saveString() {
-  if (!data.value || !stringBlob.value || isBinaryStringValue.value) return;
+  if (!data.value || !stringBlob.value || isBinaryStringValue.value || !stringValueChanged.value) return;
   await api.redisSetString(props.connectionId, props.db, props.keyRaw, editValue.value);
   isEditing.value = false;
   await load();
@@ -485,8 +549,13 @@ async function saveString() {
 
 function handleStringInput() {
   if (canEditCurrentStringFormat.value) {
-    isEditing.value = true;
+    isEditing.value = stringValueChanged.value;
   }
+}
+
+function discardStringEdit() {
+  isEditing.value = false;
+  editValue.value = originalStringEditValue.value;
 }
 
 async function saveJson() {
@@ -1064,6 +1133,7 @@ onMounted(() => {
     });
 });
 onBeforeUnmount(() => {
+  stopAutoRefresh();
   stopResizeMemberSheet();
   stopResizeHashColumns();
   stopResizeZsetColumns();
@@ -1082,7 +1152,7 @@ onBeforeUnmount(() => {
       <div class="shrink-0 border-b bg-background">
         <div class="flex h-9 items-center gap-2 px-4">
           <span class="dbx-editor-font-family min-w-0 flex-1 truncate text-sm font-semibold">{{ formatValue(data.key_display) }}</span>
-          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" @click="load"><RefreshCw class="h-3.5 w-3.5" /></Button>
+          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" @click="load"><RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': autoRefreshEnabled }" /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" @click="copyValue"><Copy class="h-3.5 w-3.5" /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('redis.copyInsertStatement')" @click="copyInsertStatement"><Terminal class="h-3.5 w-3.5" /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 text-destructive" @click="requestDeleteKey"><Trash2 class="h-3.5 w-3.5" /></Button>
@@ -1092,13 +1162,16 @@ onBeforeUnmount(() => {
           <Badge variant="secondary" class="dbx-editor-font-family text-xs uppercase">{{ data.redis_type }}</Badge>
           <Badge v-if="metadataSizeLabel" variant="outline" class="text-xs text-muted-foreground"> {{ t("redis.columnSize") }}: {{ metadataSizeLabel }} </Badge>
           <template v-if="!editingTtl">
-            <Badge v-if="data.ttl > 0" variant="outline" class="text-xs cursor-pointer text-muted-foreground hover:bg-accent" @click="startEditTtl">TTL: {{ formatTtl(data.ttl, t) }}</Badge>
+            <Badge v-if="data.ttl > 0" variant="outline" class="text-xs cursor-pointer text-muted-foreground hover:bg-accent" @click="startEditTtl">TTL: {{ formatTtl(computeDisplayTtl(autoRefreshEnabled, countdownTtl, data.ttl), t) }}</Badge>
             <Badge v-else-if="data.ttl === -1" variant="outline" class="text-xs cursor-pointer text-muted-foreground hover:bg-accent" @click="startEditTtl">{{ t("redis.noExpiry") }}</Badge>
           </template>
           <div ref="editTtlWrapper" v-else class="flex items-center gap-1">
             <Input ref="ttlInputEl" v-model="ttlInput" class="h-6 w-20 text-xs" placeholder="seconds (-1=no expiry)" @keydown.enter="saveTtl" @keydown.escape="cancelEditTtl" />
             <Button variant="ghost" size="icon" class="h-6 w-6" @click="saveTtl"><Save class="h-3 w-3" /></Button>
           </div>
+          <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :class="{ 'text-primary bg-accent': autoRefreshEnabled }" :title="t('redis.autoRefresh')" @click="toggleAutoRefresh">
+            <Clock class="h-3.5 w-3.5" />
+          </Button>
         </div>
       </div>
 
@@ -1126,10 +1199,7 @@ onBeforeUnmount(() => {
             <Switch size="sm" :model-value="redisJsonWordWrap" @update:model-value="setRedisJsonWordWrap(Boolean($event))" />
           </label>
         </div>
-        <div v-if="isEditing" class="flex min-h-0 flex-1 flex-col">
-          <textarea v-model="editValue" class="dbx-editor-font-family min-h-0 flex-1 resize-none bg-background p-4 text-sm outline-none" spellcheck="false" />
-        </div>
-        <div v-else-if="stringValueView === 'json' && stringValueDetail.json" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-4 text-sm leading-6">
+        <div v-if="stringValueView === 'json' && stringValueDetail.json" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-4 text-sm leading-6">
           <RedisJsonTree :value="stringValueDetail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
         </div>
         <div v-else-if="stringValueView === 'javaserialize' && stringValueDetail.javaSerialized" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-4 text-sm leading-6">
@@ -1158,17 +1228,9 @@ onBeforeUnmount(() => {
         <div v-if="isBinaryStringValue" class="px-4 py-2 border-t text-xs text-muted-foreground shrink-0">
           {{ t("redis.binaryStringReadonlyHint") }}
         </div>
-        <div v-if="isEditing" class="px-4 py-2 border-t flex justify-end gap-2 shrink-0">
-          <Button
-            variant="ghost"
-            size="sm"
-            @click="
-              isEditing = false;
-              editValue = stringBlob ? rawRedisValueText(stringBlob) : '';
-            "
-            >{{ t("grid.discard") }}</Button
-          >
-          <Button size="sm" @click="saveString"><Save class="w-3 h-3 mr-1" /> {{ t("grid.save") }}</Button>
+        <div v-if="showStringEditActions" class="px-4 py-2 border-t flex justify-end gap-2 shrink-0">
+          <Button variant="ghost" size="sm" :disabled="!stringValueChanged" @click="discardStringEdit">{{ t("grid.discard") }}</Button>
+          <Button size="sm" :disabled="!stringValueChanged" @click="saveString"><Save class="w-3 h-3 mr-1" /> {{ t("grid.save") }}</Button>
         </div>
       </div>
 

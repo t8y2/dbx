@@ -452,8 +452,81 @@ pub async fn connect_with_ca_cert_pool_limit_idle_and_setup_database(
     setup_database: Option<&str>,
     extra_setup_queries: &[String],
 ) -> Result<MySqlPool, String> {
+    connect_with_ca_cert_pool_limit_idle_setup_database_with_mode(
+        url,
+        ca_cert_path,
+        fallback_timeout,
+        max_connections,
+        idle_timeout_secs,
+        setup_database,
+        extra_setup_queries,
+        MySqlSetupMode::Standard,
+    )
+    .await
+}
+
+pub async fn connect_compatible_with_ca_cert_pool_limit_idle_and_setup(
+    url: &str,
+    ca_cert_path: Option<&str>,
+    fallback_timeout: Duration,
+    max_connections: usize,
+    idle_timeout_secs: Option<u64>,
+    extra_setup_queries: &[String],
+) -> Result<MySqlPool, String> {
+    connect_compatible_with_ca_cert_pool_limit_idle_and_setup_database(
+        url,
+        ca_cert_path,
+        fallback_timeout,
+        max_connections,
+        idle_timeout_secs,
+        None,
+        extra_setup_queries,
+    )
+    .await
+}
+
+pub async fn connect_compatible_with_ca_cert_pool_limit_idle_and_setup_database(
+    url: &str,
+    ca_cert_path: Option<&str>,
+    fallback_timeout: Duration,
+    max_connections: usize,
+    idle_timeout_secs: Option<u64>,
+    setup_database: Option<&str>,
+    extra_setup_queries: &[String],
+) -> Result<MySqlPool, String> {
+    connect_with_ca_cert_pool_limit_idle_setup_database_with_mode(
+        url,
+        ca_cert_path,
+        fallback_timeout,
+        max_connections,
+        idle_timeout_secs,
+        setup_database,
+        extra_setup_queries,
+        MySqlSetupMode::Compatible,
+    )
+    .await
+}
+
+async fn connect_with_ca_cert_pool_limit_idle_setup_database_with_mode(
+    url: &str,
+    ca_cert_path: Option<&str>,
+    fallback_timeout: Duration,
+    max_connections: usize,
+    idle_timeout_secs: Option<u64>,
+    setup_database: Option<&str>,
+    extra_setup_queries: &[String],
+    setup_mode: MySqlSetupMode,
+) -> Result<MySqlPool, String> {
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
-    let pool = create_pool(url, ca_cert_path, max_connections, idle_timeout_secs, setup_database, extra_setup_queries)?;
+    let pool = create_pool(
+        url,
+        ca_cert_path,
+        max_connections,
+        idle_timeout_secs,
+        setup_database,
+        extra_setup_queries,
+        setup_mode,
+    )?;
     let result = verify_pool_connection(&pool, timeout).await;
 
     if let Err(ref e) = result {
@@ -467,6 +540,7 @@ pub async fn connect_with_ca_cert_pool_limit_idle_and_setup_database(
                     idle_timeout_secs,
                     setup_database,
                     extra_setup_queries,
+                    setup_mode,
                 )?;
                 return match verify_pool_connection(&fallback_pool, timeout).await {
                     Ok(()) => Ok(fallback_pool),
@@ -485,6 +559,18 @@ struct MySqlTlsFiles {
     sslkey: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MySqlSetupMode {
+    Standard,
+    Compatible,
+}
+
+impl MySqlSetupMode {
+    fn set_group_concat_max_len(self) -> bool {
+        self == Self::Standard
+    }
+}
+
 fn create_pool(
     url: &str,
     ca_cert_path: Option<&str>,
@@ -492,6 +578,7 @@ fn create_pool(
     idle_timeout_secs: Option<u64>,
     setup_database: Option<&str>,
     extra_setup_queries: &[String],
+    setup_mode: MySqlSetupMode,
 ) -> Result<MySqlPool, String> {
     let tls_url = mysql_tls_url(url)?;
     let opts =
@@ -508,9 +595,15 @@ fn create_pool(
         .with_constraints(mysql_async::PoolConstraints::new(1, max_connections).unwrap())
         .with_inactive_connection_ttl(inactive_ttl)
         .with_reset_connection(max_connections > 1);
-    let setup_queries = match setup_database {
-        Some(database) => mysql_setup_queries_for_database(url, Some(database), extra_setup_queries),
-        None => mysql_setup_queries(url, extra_setup_queries),
+    let setup_queries = match (setup_database, setup_mode) {
+        (Some(database), MySqlSetupMode::Standard) => {
+            mysql_setup_queries_for_database(url, Some(database), extra_setup_queries)
+        }
+        (None, MySqlSetupMode::Standard) => mysql_setup_queries(url, extra_setup_queries),
+        (Some(database), MySqlSetupMode::Compatible) => {
+            mysql_setup_queries_for_database_with_mode(url, Some(database), extra_setup_queries, setup_mode)
+        }
+        (None, MySqlSetupMode::Compatible) => mysql_setup_queries_with_mode(url, extra_setup_queries, setup_mode),
     };
     let mut builder = mysql_async::OptsBuilder::from_opts(opts)
         .ip_or_hostname(tcp_host)
@@ -634,13 +727,26 @@ fn mysql_ssl_opts(
 }
 
 fn mysql_setup_queries(url: &str, extra_setup_queries: &[String]) -> Vec<String> {
-    mysql_setup_queries_for_database(url, None, extra_setup_queries)
+    mysql_setup_queries_with_mode(url, extra_setup_queries, MySqlSetupMode::Standard)
 }
 
 fn mysql_setup_queries_for_database(
     url: &str,
     setup_database: Option<&str>,
     extra_setup_queries: &[String],
+) -> Vec<String> {
+    mysql_setup_queries_for_database_with_mode(url, setup_database, extra_setup_queries, MySqlSetupMode::Standard)
+}
+
+fn mysql_setup_queries_with_mode(url: &str, extra_setup_queries: &[String], setup_mode: MySqlSetupMode) -> Vec<String> {
+    mysql_setup_queries_for_database_with_mode(url, None, extra_setup_queries, setup_mode)
+}
+
+fn mysql_setup_queries_for_database_with_mode(
+    url: &str,
+    setup_database: Option<&str>,
+    extra_setup_queries: &[String],
+    setup_mode: MySqlSetupMode,
 ) -> Vec<String> {
     let charset = mysql_connection_charset(url).unwrap_or("utf8mb4");
     let catalog = mysql_connection_catalog(url);
@@ -654,9 +760,11 @@ fn mysql_setup_queries_for_database(
     }
     queries.push(format!("SET NAMES {charset}"));
     // MySQL defaults group_concat_max_len to 1024, which silently truncates
-    // GROUP_CONCAT results. Use @@ syntax because Manticore accepts it as a
-    // compatibility no-op while `SET SESSION` fails during connection setup.
-    queries.push("SET @@group_concat_max_len = 1048576".to_string());
+    // GROUP_CONCAT results. Skip it for MySQL protocol-compatible databases
+    // such as old StarRocks versions that reject unknown MySQL variables.
+    if setup_mode.set_group_concat_max_len() {
+        queries.push("SET @@group_concat_max_len = 1048576".to_string());
+    }
     // StarRocks/Doris expose external storage (Paimon, Hive, ...) through a
     // catalog. `SET catalog` must run *before* `USE <database>` (the database
     // lives in the external catalog and is unknown to the default one).
@@ -1049,6 +1157,7 @@ fn is_jdbc_param(key: &str) -> bool {
             | "transformedbitisboolean"
             | "yearisdatetype"
             | "createdatabaseifnotexist"
+            | "allowmultiqueries"
             | "noaccesstoprocedurebodies"
             | "nullcatalogmeanscurrent"
             | "nullnamepatternmatchesall"
@@ -1219,7 +1328,8 @@ pub async fn connect_bare_with_pool_limit_and_setup_database(
     extra_setup_queries: &[String],
 ) -> Result<MySqlPool, String> {
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
-    let pool = create_pool(url, None, max_connections, None, setup_database, extra_setup_queries)?;
+    let pool =
+        create_pool(url, None, max_connections, None, setup_database, extra_setup_queries, MySqlSetupMode::Compatible)?;
     verify_pool_connection(&pool, timeout).await.map(|_| pool)
 }
 
@@ -3851,6 +3961,37 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     }
 
     #[test]
+    fn mysql_compatible_setup_queries_skip_group_concat_variable() {
+        let queries = mysql_setup_queries_with_mode(
+            "mysql://root:secret@localhost:9030/analytics?charset=utf8mb4",
+            &[],
+            MySqlSetupMode::Compatible,
+        );
+
+        assert_eq!(queries, vec!["USE `analytics`", "SET NAMES utf8mb4"]);
+    }
+
+    #[test]
+    fn mysql_compatible_setup_queries_keep_catalog_and_extra_queries() {
+        let extra = vec!["SET ob_query_timeout = 30000000".to_string()];
+        let queries = mysql_setup_queries_with_mode(
+            "mysql://root:secret@localhost:9030/clip?catalog=paimon_catalog",
+            &extra,
+            MySqlSetupMode::Compatible,
+        );
+
+        assert_eq!(
+            queries,
+            vec![
+                "USE `clip`",
+                "SET NAMES utf8mb4",
+                "SET catalog = `paimon_catalog`",
+                "SET ob_query_timeout = 30000000"
+            ]
+        );
+    }
+
+    #[test]
     fn mysql_setup_queries_decode_database_name_from_url() {
         let queries = mysql_setup_queries("mysql://root:secret@localhost:3306/db%2Fname?charset=utf8mb4", &[]);
 
@@ -3987,7 +4128,7 @@ UNIQUE KEY(`tenant_id`, `name``part`)
 
     #[test]
     fn mysql_async_url_keeps_valid_params_while_stripping_jdbc() {
-        let url = "mysql://host:3306/db?useUnicode=true&characterEncoding=utf8&require_ssl=true&charset=utf8mb4&autoReconnect=true";
+        let url = "mysql://host:3306/db?useUnicode=true&characterEncoding=utf8&require_ssl=true&charset=utf8mb4&autoReconnect=true&allowMultiQueries=true";
         assert_eq!(mysql_async_url(url).as_ref(), "mysql://host:3306/db?require_ssl=true");
     }
 

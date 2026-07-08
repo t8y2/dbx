@@ -314,6 +314,48 @@ describe("statementRangeAtCursor", () => {
     expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql.slice(0, -1)]);
   });
 
+  it("keeps MySQL CREATE TABLE options with table comments", () => {
+    const sql = `CREATE TABLE test_1 (
+  id bigint NOT NULL AUTO_INCREMENT COMMENT '主键id',
+  deleted tinyint NOT NULL DEFAULT 0 COMMENT '删除标志(0:有效 1：无效)',
+  locked tinyint NOT NULL DEFAULT 0 COMMENT '是否锁定(0.否,1.是)',
+  version int NOT NULL DEFAULT 0 COMMENT '版本号',
+  creatorId bigint DEFAULT NULL COMMENT '创建人ID',
+  createBy varchar(100) DEFAULT NULL COMMENT '创建人名称',
+  createdTime timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  updaterId bigint DEFAULT NULL COMMENT '修改人ID',
+  updatedBy varchar(100) DEFAULT NULL COMMENT '修改人名称',
+  updatedTime timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '最后更新时间',
+  PRIMARY KEY (id)
+)
+ENGINE = INNODB,
+CHARACTER SET utf8mb4,
+COLLATE utf8mb4_general_ci,
+COMMENT = '测试';`;
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "CREATE"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(statementRangeAtCursor(sql, indexOf(sql, "COMMENT ="), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql.slice(0, -1)]);
+    expect(statementRangeAtCursor(sql, indexOf(sql, "COMMENT ="))?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql))).toEqual([sql.slice(0, -1)]);
+  });
+
+  it("keeps MySQL CREATE TABLE comments without equals as table options", () => {
+    const sql = "CREATE TABLE test_2 (\n  id bigint NOT NULL\n)\nCOMMENT '测试';";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "COMMENT"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql.slice(0, -1)]);
+    expect(statementRangeAtCursor(sql, indexOf(sql, "COMMENT"))?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql))).toEqual([sql.slice(0, -1)]);
+  });
+
+  it("does not merge standard COMMENT ON statements into preceding CREATE TABLE statements", () => {
+    const sql = "CREATE TABLE users (id int)\nCOMMENT ON TABLE users IS 'Users';";
+
+    expect(rangeSqlTexts(executableStatementRanges(sql, "postgres"))).toEqual(["CREATE TABLE users (id int)", "COMMENT ON TABLE users IS 'Users'"]);
+    expect(rangeSqlTexts(executableStatementRanges(sql))).toEqual(["CREATE TABLE users (id int)", "COMMENT ON TABLE users IS 'Users'"]);
+  });
+
   it("keeps MySQL ALTER TABLE drop column clauses with the statement", () => {
     const sql = "ALTER TABLE t\n  DROP COLUMN a,\n  DROP COLUMN b;";
 

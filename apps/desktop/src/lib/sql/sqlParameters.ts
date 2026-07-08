@@ -1,3 +1,5 @@
+import type { DatabaseType } from "@/types/database";
+
 export type SqlParameterValueKind = "string" | "number" | "boolean" | "null" | "raw";
 
 export interface SqlParameterInput {
@@ -19,19 +21,23 @@ interface ParameterOccurrence extends SqlParameterDescriptor {
   end: number;
 }
 
+export interface SqlParameterOptions {
+  databaseType?: DatabaseType;
+}
+
 const PARAMETER_NAME_RE = /^[\p{L}_][\p{L}\p{N}_]*$/u;
 const PARAMETER_NAME_START_RE = /[\p{L}_]/u;
 const PARAMETER_NAME_CHAR_RE = /[\p{L}\p{N}_]/u;
 const SQL_SERVER_TEMP_TABLE_CONTEXT_KEYWORDS = new Set(["table", "from", "join", "into", "update", "truncate"]);
 
-export function extractSqlParameters(sql: string): string[] {
-  return extractSqlParameterDescriptors(sql).map((descriptor) => descriptor.key);
+export function extractSqlParameters(sql: string, options?: SqlParameterOptions): string[] {
+  return extractSqlParameterDescriptors(sql, options).map((descriptor) => descriptor.key);
 }
 
-export function extractSqlParameterDescriptors(sql: string): SqlParameterDescriptor[] {
+export function extractSqlParameterDescriptors(sql: string, options?: SqlParameterOptions): SqlParameterDescriptor[] {
   const names = new Set<string>();
   const descriptors: SqlParameterDescriptor[] = [];
-  for (const occurrence of findSqlParameterOccurrences(sql)) {
+  for (const occurrence of findSqlParameterOccurrences(sql, options)) {
     if (names.has(occurrence.key)) continue;
     names.add(occurrence.key);
     descriptors.push({
@@ -44,8 +50,8 @@ export function extractSqlParameterDescriptors(sql: string): SqlParameterDescrip
   return descriptors;
 }
 
-export function substituteSqlParameters(sql: string, values: Record<string, SqlParameterInput>): string {
-  const occurrences = findSqlParameterOccurrences(sql);
+export function substituteSqlParameters(sql: string, values: Record<string, SqlParameterInput>, options?: SqlParameterOptions): string {
+  const occurrences = findSqlParameterOccurrences(sql, options);
   if (!occurrences.length) return sql;
 
   let result = "";
@@ -68,9 +74,10 @@ export function sqlParameterLiteral(input: SqlParameterInput): string {
   return quoteSqlString(raw);
 }
 
-function findSqlParameterOccurrences(sql: string): ParameterOccurrence[] {
+function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions): ParameterOccurrence[] {
   const occurrences: ParameterOccurrence[] = [];
   const nativeSqlServerParameters = collectNativeSqlServerParameters(sql);
+  const supportsNamedParameters = options?.databaseType !== "saphana";
   let i = 0;
   let dollarQuoteEnd = "";
   let positionalIndex = 0;
@@ -110,7 +117,7 @@ function findSqlParameterOccurrences(sql: string): ParameterOccurrence[] {
       i += 1;
       continue;
     }
-    if (ch === ":") {
+    if (ch === ":" && supportsNamedParameters) {
       const name = readParameterName(sql, i + 1);
       if (name && sql[i - 1] !== ":" && sql[i + 1] !== "=") {
         occurrences.push({

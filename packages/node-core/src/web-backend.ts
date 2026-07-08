@@ -4,16 +4,58 @@ import { collectionListToTableInfos, evaluateMongoAggregateSafety, evaluateMongo
 import type { RedisCommandOptions, RedisCommandResult } from "./redis-command.js";
 import { sqlSafetyFromEnv } from "./sql-safety.js";
 
-const baseUrl = process.env.DBX_WEB_URL!.replace(/\/+$/, "");
-const password = process.env.DBX_WEB_PASSWORD || "";
-
 let sessionCookie: string | null = null;
+let authChecked = false;
+
+interface AuthCheckResponse {
+  authenticated: boolean;
+  required: boolean;
+  setup_required: boolean;
+}
+
+function baseUrl(): string {
+  return process.env.DBX_WEB_URL!.replace(/\/+$/, "");
+}
+
+function webPassword(): string {
+  return process.env.DBX_WEB_PASSWORD || "";
+}
+
+function extractSessionCookie(setCookie: string | null): string | null {
+  const match = setCookie?.match(/dbx_session=([^;]+)/);
+  return match?.[1] ?? null;
+}
+
+async function checkAuth(): Promise<AuthCheckResponse> {
+  const res = await fetch(`${baseUrl()}/api/auth/check`, {
+    method: "GET",
+    redirect: "manual",
+  });
+  if (!res.ok) {
+    throw new Error(`Authentication check failed: ${res.status} ${res.statusText}`);
+  }
+  return (await res.json()) as AuthCheckResponse;
+}
 
 async function ensureAuth(): Promise<void> {
   if (sessionCookie) return;
-  if (!password) return; // no password set, assume no auth required
+  if (authChecked) return;
 
-  const res = await fetch(`${baseUrl}/api/auth/login`, {
+  const auth = await checkAuth();
+  if (auth.setup_required) {
+    throw new Error("DBX Web password setup is required before MCP Web mode can access APIs.");
+  }
+  if (!auth.required || auth.authenticated) {
+    authChecked = true;
+    return;
+  }
+
+  const password = webPassword();
+  if (!password) {
+    throw new Error("DBX Web authentication is required. Set DBX_WEB_PASSWORD for MCP Web mode.");
+  }
+
+  const res = await fetch(`${baseUrl()}/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ password }),
@@ -24,13 +66,11 @@ async function ensureAuth(): Promise<void> {
     throw new Error(`Authentication failed: ${res.status} ${res.statusText}`);
   }
 
-  const setCookie = res.headers.get("set-cookie");
-  if (setCookie) {
-    const match = setCookie.match(/dbx_session=([^;]+)/);
-    if (match) {
-      sessionCookie = match[1];
-    }
+  sessionCookie = extractSessionCookie(res.headers.get("set-cookie"));
+  if (!sessionCookie) {
+    throw new Error("Authentication failed: DBX Web did not return a session cookie.");
   }
+  authChecked = true;
 }
 
 function headers(extra?: Record<string, string>): Record<string, string> {
@@ -43,15 +83,29 @@ function headers(extra?: Record<string, string>): Record<string, string> {
 
 async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   await ensureAuth();
-  const res = await fetch(`${baseUrl}${path}`, {
+  let res = await fetch(`${baseUrl()}${path}`, {
     ...init,
     headers: headers(init?.headers as Record<string, string> | undefined),
   });
+  if (res.status === 401 && sessionCookie && webPassword()) {
+    sessionCookie = null;
+    authChecked = false;
+    await ensureAuth();
+    res = await fetch(`${baseUrl()}${path}`, {
+      ...init,
+      headers: headers(init?.headers as Record<string, string> | undefined),
+    });
+  }
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(`API request ${path} failed: ${res.status} ${res.statusText} ${body}`);
   }
   return res;
+}
+
+export function resetWebAuthForTests(): void {
+  sessionCookie = null;
+  authChecked = false;
 }
 
 export async function loadConnections(): Promise<ConnectionConfig[]> {

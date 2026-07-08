@@ -1,5 +1,7 @@
 # DBX Agents
 
+English | [简体中文](README.zh-CN.md)
+
 Agent drivers for [DBX](https://github.com/t8y2/dbx) — database support via JDBC and native database drivers.
 
 Each agent runs as a standalone process and communicates with DBX via stdin/stdout JSON-RPC 2.0.
@@ -81,6 +83,13 @@ cp agents/drivers/<db_type>/build/libs/*-all.jar ~/.dbx/agents/drivers/<db_type>
 Restart DBX or disconnect and reconnect the database so the new agent process loads the replacement JAR.
 
 Native agents such as `oracle` and `xugu` use the `agent` executable in the driver directory instead of `agent.jar`.
+
+## Versioning
+
+Agent module versions are tracked in [`versions.json`](versions.json).
+
+- **Changing an existing driver** — do not edit `versions.json` manually. The release CI diffs each `drivers/<module>/` directory against the previous tag and auto-bumps the patch version for every changed module (see [`bump-agent-versions.mjs`](../.github/scripts/bump-agent-versions.mjs)). A change to the shared `agents/common` runtime bumps every module that packages it.
+- **Adding a new driver** — add an entry to `versions.json`, e.g. `"rabbitmq": "0.1.0"`. The CI only bumps keys already present in the file, so a new module is invisible to versioning until it is registered here. In the same change, also add the module to `settings.gradle` and the support table above — `versions.json` keys must match the agent modules declared in `settings.gradle`, excluding the infrastructure modules `common` and `test-support`.
 
 ## Development
 

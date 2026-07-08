@@ -120,3 +120,53 @@ test("data reload executes before slow metadata refresh completes", async () => 
     restoreStorage();
   }
 });
+
+test("data reload preserves current page offset instead of resetting to page 1", async () => {
+  // Verifies the fix: onReloadData called with offset=400 (page 5, pageSize=100)
+  // should pass offset=400 to build-table-select-sql and store it in resultPageOffset,
+  // rather than defaulting to offset=0.
+  const restoreStorage = installMemoryStorage();
+  const originalFetch = globalThis.fetch;
+  const { useDataGridActions } = await import("../../apps/desktop/src/composables/useDataGridActions.ts");
+  let buildSqlOptions: any;
+  let executePagination: any;
+
+  globalThis.fetch = (async (input, init) => {
+    const url = new URL(String(input), "http://localhost");
+    if (url.pathname === "/api/connection/check-health") return Response.json(null);
+    if (url.pathname === "/api/schema/columns") return Response.json([]);
+    if (url.pathname === "/api/schema/indexes") return Response.json([]);
+    if (url.pathname === "/api/query/build-table-select-sql") {
+      buildSqlOptions = JSON.parse(String(init?.body ?? "{}"))?.options;
+      return Response.json(`SELECT * FROM \`orders\` LIMIT 100 OFFSET ${buildSqlOptions?.offset ?? 0}`);
+    }
+    if (url.pathname === "/api/query/execute-multi") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      executePagination = body?.page_offset;
+      return Response.json([{ columns: ["id"], rows: [[42]], affected_rows: 0, execution_time_ms: 1 }]);
+    }
+    return new Response(`unexpected ${url.pathname}`, { status: 500 });
+  }) as typeof fetch;
+
+  try {
+    setActivePinia(createPinia());
+    const connectionStore = useConnectionStore();
+    const queryStore = useQueryStore();
+    connectionStore.addEphemeralConnection(conn("mysql-1"));
+    const tabId = queryStore.createTab("mysql-1", "app", "orders", "data");
+    queryStore.setTableMeta(tabId, { tableName: "orders", tableType: "TABLE", columns: [], primaryKeys: [] });
+    const tab = queryStore.tabs.find((item) => item.id === tabId);
+    assert.ok(tab);
+
+    const actions = useDataGridActions(computed(() => tab));
+    // Simulate refresh from page 5 with pageSize=100 → offset=400
+    await actions.onReloadData(undefined, undefined, undefined, undefined, 100, 400);
+
+    assert.equal(buildSqlOptions?.offset, 400, "build-table-select-sql must receive offset=400 to stay on page 5");
+    assert.equal(buildSqlOptions?.limit, 100, "limit must be 100");
+    assert.equal(tab.resultPageOffset, 400, "resultPageOffset must be 400 after reload to keep DataGrid on page 5");
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});

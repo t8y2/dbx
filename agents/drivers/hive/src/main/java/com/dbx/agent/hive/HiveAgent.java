@@ -169,8 +169,30 @@ public final class HiveAgent extends AbstractJdbcAgent {
         return result;
     }
 
-    private static String buildUrl(ConnectParams params) {
-        return "jdbc:hive2://" + params.getHost() + ":" + params.getPort() + "/" + params.getDatabase();
+    static String buildUrl(ConnectParams params) {
+        String connectionString = trimToEmpty(params.getConnection_string());
+        if (!connectionString.isEmpty()) {
+            return connectionString;
+        }
+        String url = "jdbc:hive2://" + params.getHost() + ":" + params.getPort() + "/" + params.getDatabase();
+        return appendHiveUrlParams(url, params.getUrl_params());
+    }
+
+    private static String appendHiveUrlParams(String url, String urlParams) {
+        String params = trimHiveUrlParams(urlParams);
+        if (params.isEmpty()) {
+            return url;
+        }
+        // Hive JDBC authentication options use semicolon-separated URL properties.
+        return url + (url.endsWith(";") ? "" : ";") + params;
+    }
+
+    private static String trimHiveUrlParams(String urlParams) {
+        String value = trimToEmpty(urlParams);
+        while (value.startsWith("?") || value.startsWith("&") || value.startsWith(";")) {
+            value = value.substring(1);
+        }
+        return value;
     }
 
     private static String trimToNull(String value) {

@@ -81,11 +81,34 @@ function formatArgs(args: unknown[]): string {
   return message.length > MAX_TEXT_LENGTH ? `${message.slice(0, MAX_TEXT_LENGTH)}...` : message;
 }
 
+// Pads date/time parts to keep timestamps width-stable.
+export function padNumber(value: number, length = 2): string {
+  return String(value).padStart(length, "0");
+}
+
+// Formats the local UTC offset in RFC 3339 style.
+export function formatLocalTimezoneOffset(date: Date): string {
+  const offsetMinutes = -date.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? "+" : "-";
+  const absoluteMinutes = Math.abs(offsetMinutes);
+  return `${sign}${padNumber(Math.floor(absoluteMinutes / 60))}:${padNumber(absoluteMinutes % 60)}`;
+}
+
+// Formats a local timestamp with milliseconds and timezone.
+export function formatLocalTimestamp(date = new Date()): string {
+  return `${date.getFullYear()}-${padNumber(date.getMonth() + 1)}-${padNumber(date.getDate())}T${padNumber(date.getHours())}:${padNumber(date.getMinutes())}:${padNumber(date.getSeconds())}.${padNumber(date.getMilliseconds(), 3)}${formatLocalTimezoneOffset(date)}`;
+}
+
+// Converts the local timestamp into a Windows-safe filename token.
+export function formatLocalTimestampForFilename(date = new Date()): string {
+  return formatLocalTimestamp(date).replace(/[:.]/g, "-");
+}
+
 export function appendDebugLog(level: DebugLogLevel, ...args: unknown[]) {
   if (!isDebugLoggingEnabled()) return;
   const entries = readEntries();
   entries.push({
-    timestamp: new Date().toISOString(),
+    timestamp: formatLocalTimestamp(),
     level,
     message: formatArgs(args),
   });
@@ -111,14 +134,14 @@ export function clearDebugLogs() {
 
 export function getDebugLogText(): string {
   const entries = readEntries();
-  const header = [`DBX debug log`, `Exported: ${new Date().toISOString()}`, `User agent: ${navigator.userAgent}`, `Platform: ${navigator.platform}`, `Timezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone || "unknown"}`, ""];
+  const header = [`DBX debug log`, `Exported: ${formatLocalTimestamp()}`, `User agent: ${navigator.userAgent}`, `Platform: ${navigator.platform}`, `Timezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone || "unknown"}`, ""];
   const body = entries.map((entry) => `[${entry.timestamp}] [${entry.level.toUpperCase()}] ${entry.message}`);
   return [...header, ...body].join("\n");
 }
 
 export async function downloadDebugLogs() {
   const text = await getDebugLogBundleText();
-  const filename = `dbx-debug-log-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`;
+  const filename = `dbx-debug-log-${formatLocalTimestampForFilename()}.txt`;
   if (typeof window !== "undefined" && isTauriRuntimeLike()) {
     const [{ save }, { writeTextFile }] = await Promise.all([import("@tauri-apps/plugin-dialog"), import("@tauri-apps/plugin-fs")]);
     const path = await save({

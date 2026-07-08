@@ -267,6 +267,7 @@ mod tests {
             driver_profile: None,
             driver_label: None,
             url_params: None,
+            agent_java_options: Vec::new(),
             host: path.to_string(),
             port: 0,
             username: String::new(),

@@ -724,6 +724,7 @@ mod tests {
             driver_profile: None,
             driver_label: None,
             url_params: None,
+            agent_java_options: Vec::new(),
             host: "localhost".to_string(),
             port: 5432,
             username: "postgres".to_string(),

@@ -32,20 +32,20 @@ function dbLabel(dbType: DatabaseType): string {
   return labels[dbType] || dbType;
 }
 
-export type AiAction = "generate" | "explain" | "optimize" | "fix" | "convert" | "sampleData" | "query" | "exploreSchema" | "executeAndExplain";
+export type AiAction = "general" | "generate" | "explain" | "optimize" | "fix" | "convert" | "sampleData" | "query" | "exploreSchema" | "executeAndExplain";
 export type AiAssistantMode = "ask" | "agent";
 
 /** Actions shown in the Ask mode menu: SQL-producing, never auto-run. */
-export const ASK_ACTIONS: AiAction[] = ["generate", "explain", "optimize", "fix", "convert", "sampleData"];
+export const ASK_ACTIONS: AiAction[] = ["general", "generate", "explain", "optimize", "fix", "convert", "sampleData"];
 
 /**
  * Actions shown in the Agent mode menu: task-oriented, drive tool use.
  * `generate` is shared with Ask so users can still request SQL-only output without execution.
  */
-export const AGENT_ACTIONS: AiAction[] = ["query", "exploreSchema", "executeAndExplain", "generate"];
+export const AGENT_ACTIONS: AiAction[] = ["general", "query", "exploreSchema", "executeAndExplain", "generate"];
 
-export function defaultActionForMode(mode: AiAssistantMode): AiAction {
-  return mode === "agent" ? "query" : "generate";
+export function defaultActionForMode(_mode: AiAssistantMode): AiAction {
+  return "general";
 }
 
 export function isValidActionForMode(action: AiAction, mode: AiAssistantMode): boolean {

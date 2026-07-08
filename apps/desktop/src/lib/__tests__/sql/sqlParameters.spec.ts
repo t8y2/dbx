@@ -176,6 +176,11 @@ describe("extractSqlParameters", () => {
     const sql = "select value::int, value := 1, :actual_value";
     expect(extractSqlParameters(sql)).toEqual(["actual_value"]);
   });
+
+  it("ignores HANA SQLScript variable references", () => {
+    const sql = "DO BEGIN Dummy1 = SELECT 1 FROM DUMMY; SELECT * FROM :Dummy1; END";
+    expect(extractSqlParameters(sql, { databaseType: "saphana" })).toEqual([]);
+  });
 });
 
 describe("substituteSqlParameters", () => {
@@ -263,6 +268,11 @@ DEALLOCATE PREPARE stmt;`;
         tenant_id: { kind: "number", value: "7" },
       }),
     ).toBe("exec dbo.search_orders @date_start = '2026-07-04', @status = 'paid', @tenant_id = 7");
+  });
+
+  it("keeps HANA SQLScript variable references while replacing template parameters", () => {
+    const sql = "DO BEGIN Dummy1 = SELECT * FROM ORDERS WHERE TENANT_ID = ${tenant_id}; SELECT * FROM :Dummy1; END";
+    expect(substituteSqlParameters(sql, { tenant_id: { kind: "number", value: "42" } }, { databaseType: "saphana" })).toBe("DO BEGIN Dummy1 = SELECT * FROM ORDERS WHERE TENANT_ID = 42; SELECT * FROM :Dummy1; END");
   });
 });
 

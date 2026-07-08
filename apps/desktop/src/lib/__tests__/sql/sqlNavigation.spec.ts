@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractIdentifierAt, matchTable, splitQualifiedIdentifier } from "@/lib/sql/sqlNavigation";
+import { extractIdentifierAt, extractIdentifierDetailsAt, isSqlKeyword, matchTable, splitQualifiedIdentifier } from "@/lib/sql/sqlNavigation";
 
 describe("extractIdentifierAt", () => {
   it("extracts unquoted qualified identifiers", () => {
@@ -13,6 +13,27 @@ describe("extractIdentifierAt", () => {
 
     expect(extractIdentifierAt(sql, sql.indexOf("Accounts"))).toBe("MAAC00.Accounts");
     expect(extractIdentifierAt(sql, sql.indexOf("MAAC00"))).toBe("MAAC00.Accounts");
+  });
+
+  it("preserves quote metadata for quoted keyword identifiers", () => {
+    const sql = "SELECT * FROM `group` LIMIT 100;";
+
+    expect(extractIdentifierDetailsAt(sql, sql.indexOf("group"))).toEqual({
+      identifier: "group",
+      quoted: true,
+    });
+    expect(matchTable(extractIdentifierAt(sql, sql.indexOf("group")) ?? "", [{ name: "group" }])).toEqual({ name: "group" });
+  });
+
+  it("marks unquoted keyword identifiers as unquoted", () => {
+    const sql = "SELECT dept, COUNT(*) FROM users GROUP BY dept;";
+    const extracted = extractIdentifierDetailsAt(sql, sql.indexOf("GROUP"));
+
+    expect(extracted).toEqual({
+      identifier: "GROUP",
+      quoted: false,
+    });
+    expect(extracted && isSqlKeyword(extracted.identifier)).toBe(true);
   });
 
   it("extracts double-quoted qualified identifiers", () => {

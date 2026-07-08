@@ -656,7 +656,21 @@ pub fn run() {
                 s
             });
             let desktop_settings = tauri::async_runtime::block_on(storage.load_desktop_settings()).unwrap_or_default();
-            app.handle().plugin(tauri_plugin_log::Builder::default().level(log::LevelFilter::Debug).build())?;
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
+                    .format(|out, message, record| {
+                        out.finish(format_args!(
+                            "[{}][{}][{}] {}",
+                            chrono::Local::now().format("%Y-%m-%d][%H:%M:%S%.3f"),
+                            record.level(),
+                            record.target(),
+                            message
+                        ));
+                    })
+                    .level(log::LevelFilter::Debug)
+                    .build(),
+            )?;
             apply_debug_log_level(desktop_settings.debug_logging_enabled);
             eprintln!("[STARTUP] storage ready in {:?}", t.elapsed());
 
@@ -1107,6 +1121,7 @@ pub fn run() {
             commands::agents::list_installed_agents,
             commands::agents::list_installed_agents_local,
             commands::agents::get_driver_store_usage,
+            commands::agents::clear_driver_download_cache,
             commands::agents::get_driver_runtime_summary,
             commands::agents::stop_driver_runtime,
             commands::agents::restart_driver_runtime,

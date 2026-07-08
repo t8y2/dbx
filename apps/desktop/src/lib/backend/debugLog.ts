@@ -81,22 +81,26 @@ function formatArgs(args: unknown[]): string {
   return message.length > MAX_TEXT_LENGTH ? `${message.slice(0, MAX_TEXT_LENGTH)}...` : message;
 }
 
-function padNumber(value: number, length = 2): string {
+// Pads date/time parts to keep timestamps width-stable.
+export function padNumber(value: number, length = 2): string {
   return String(value).padStart(length, "0");
 }
 
-function formatLocalTimezoneOffset(date: Date): string {
+// Formats the local UTC offset in RFC 3339 style.
+export function formatLocalTimezoneOffset(date: Date): string {
   const offsetMinutes = -date.getTimezoneOffset();
   const sign = offsetMinutes >= 0 ? "+" : "-";
   const absoluteMinutes = Math.abs(offsetMinutes);
   return `${sign}${padNumber(Math.floor(absoluteMinutes / 60))}:${padNumber(absoluteMinutes % 60)}`;
 }
 
-function formatLocalTimestamp(date = new Date()): string {
+// Formats a local timestamp with milliseconds and timezone.
+export function formatLocalTimestamp(date = new Date()): string {
   return `${date.getFullYear()}-${padNumber(date.getMonth() + 1)}-${padNumber(date.getDate())}T${padNumber(date.getHours())}:${padNumber(date.getMinutes())}:${padNumber(date.getSeconds())}.${padNumber(date.getMilliseconds(), 3)}${formatLocalTimezoneOffset(date)}`;
 }
 
-function formatLocalTimestampForFilename(date = new Date()): string {
+// Converts the local timestamp into a Windows-safe filename token.
+export function formatLocalTimestampForFilename(date = new Date()): string {
   return formatLocalTimestamp(date).replace(/[:.]/g, "-");
 }
 

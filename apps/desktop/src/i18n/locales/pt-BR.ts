@@ -1249,6 +1249,7 @@ export default withEnglishFallback({
     enableThinkingOff: "Desativado",
     enableThinkingHint: "Esta opção só tem efeito em APIs /chat/completions e modelos compatíveis. Quando desativada, pode reduzir significativamente o uso de tokens, mas a qualidade dos resultados gerados pode diminuir ligeiramente.",
     actions: {
+      general: "Geral",
       generate: "Gerar SQL",
       explain: "Explicar SQL",
       optimize: "Otimizar SQL",
@@ -1261,6 +1262,7 @@ export default withEnglishFallback({
       generateNoExec: "Gerar (sem executar)",
     },
     placeholders: {
+      general: "Pergunte qualquer coisa...",
       generate: "Descreva o que você quer consultar, por exemplo, pedidos por usuário nos últimos 7 dias",
       explain: "Opcional: adicione o que você quer entender",
       optimize: "Opcional: adicione um objetivo, por exemplo, reduzir varreduras completas de tabela",

@@ -472,6 +472,7 @@ fn augment_system_prompt_with_task_contract(
         "This is a SQL-producing action: produce the final SQL in a fenced ```sql code block. Use tools only as intermediate evidence for schema/dialect; do not stop at a tool-result summary. In Agent mode, execute a query only when the original request explicitly asks for real data/results, not when it merely asks to generate SQL."
     } else {
         match action.to_ascii_lowercase().as_str() {
+            "general" => "This is a general Q&A mode. Answer the user's question directly and naturally using your knowledge and any available database context. Adapt to the user's intent.",
             "query" => "This is a data-query task: call execute_query to obtain real results, then answer based on the actual data. Do not stop after merely outputting SQL text.",
             "exploreschema" => "This is a schema-inspection task: use list_tables/get_columns to obtain authoritative structure, then summarize. Do not execute data queries unless the user explicitly asks for data.",
             "executeandexplain" => "This is an execute-and-explain task: call execute_query to run the current SQL, then explain the real results.",
@@ -523,6 +524,7 @@ fn build_contract_repair_prompt(task_contract: Option<&AiTaskContract>, is_agent
         "For this SQL-producing action, produce SQL in a fenced ```sql code block. Tool results are evidence only; do not answer by summarizing schema/tool output. Execute a query only when the original request explicitly asks for real data/results."
     } else {
         match action.to_ascii_lowercase().as_str() {
+            "general" => "For this general Q&A, answer the user's question directly and naturally.",
             "query" => "For this data-query task, call execute_query and answer based on real data; do not stop at SQL text or a schema summary.",
             "exploreschema" => "For this schema-inspection task, summarize real structure from list_tables/get_columns; do not invent columns.",
             "executeandexplain" => "For this execute-and-explain task, run the current SQL via execute_query and explain the real results.",
@@ -1354,5 +1356,16 @@ mod tests {
 
         assert!(repair.contains("data-query task"));
         assert!(repair.contains("call execute_query"));
+    }
+
+    #[test]
+    fn general_action_skips_sql_validation() {
+        let contract = AiTaskContract {
+            action: Some("general".to_string()),
+            mode: Some("ask".to_string()),
+            user_request: Some("你好".to_string()),
+        };
+        let answer = "你好！我是 DBX 的数据库助手。有什么可以帮你的吗？";
+        assert_eq!(validate_final_answer(Some(&contract), answer), FinalAnswerCheck::Satisfied);
     }
 }

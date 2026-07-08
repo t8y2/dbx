@@ -1306,6 +1306,7 @@ export default withEnglishFallback({
     reasoningLevelHigh: "高",
     reasoningLevelHint: "控制 Codex CLI 的 model_reasoning_effort。默认使用你的 Codex 配置。",
     actions: {
+      general: "通用问答",
       generate: "生成 SQL",
       explain: "解释 SQL",
       optimize: "优化 SQL",
@@ -1318,6 +1319,7 @@ export default withEnglishFallback({
       generateNoExec: "生成但不执行",
     },
     placeholders: {
+      general: "问我任何问题...",
       generate: "描述你想查询什么，例如：统计最近 7 天每个用户的订单数",
       explain: "可留空，或补充你关心的点",
       optimize: "可留空，或说明优化目标，例如：减少全表扫描",

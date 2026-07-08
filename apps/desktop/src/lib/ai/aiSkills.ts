@@ -26,6 +26,28 @@ export interface AiSkillDefinition {
 
 export const AI_SKILL_DEFINITIONS: AiSkillDefinition[] = [
   {
+    id: "general",
+    action: "general",
+    title: {
+      en: "General",
+      zh: "通用问答",
+    },
+    riskPolicy: "readonly",
+    contextNeeds: [],
+    userInstruction: {
+      en: "Answer the user's question directly and naturally. Use your general knowledge and the database schema context when relevant.",
+      zh: "直接、自然地回答用户的问题。使用你的通用知识，涉及数据库时可参考 Schema 上下文。",
+    },
+    systemRules: {
+      en: ["Answer naturally and helpfully. Adapt to the user's intent — whether that's a greeting, a conceptual question, or a database-related inquiry."],
+      zh: ["自然、有帮助地回答。根据用户意图灵活应对——无论是问候、概念性问题还是数据库相关咨询。"],
+    },
+    outputContract: {
+      en: ["Provide a clear, helpful answer adapted to the user's question."],
+      zh: ["根据用户问题提供清晰、有帮助的回答。"],
+    },
+  },
+  {
     id: "generate_sql",
     action: "generate",
     title: {

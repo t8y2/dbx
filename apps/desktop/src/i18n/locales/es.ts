@@ -1250,6 +1250,7 @@ export default withEnglishFallback({
     codexCliPath: "Ruta de Codex CLI",
     codexCliPathHint: "Déjalo vacío para usar codex desde PATH. Inicia sesión por separado con codex login.",
     actions: {
+      general: "General",
       generate: "Generar SQL",
       explain: "Explicar SQL",
       optimize: "Optimizar SQL",
@@ -1262,6 +1263,7 @@ export default withEnglishFallback({
       generateNoExec: "Generar (sin ejecutar)",
     },
     placeholders: {
+      general: "Pregunta lo que quieras...",
       generate: "Describe lo que quieres consultar, p. ej. pedidos por usuario en los últimos 7 días",
       explain: "Opcional: indica qué quieres entender",
       optimize: "Opcional: indica un objetivo, p. ej. reducir los escaneos completos de tabla",

@@ -1248,6 +1248,7 @@ export default withEnglishFallback({
     reasoningLevelHigh: "Alto",
     reasoningLevelHint: "Controlla model_reasoning_effort di Codex CLI. Predefinito usa la configurazione Codex.",
     actions: {
+      general: "Generale",
       generate: "Genera SQL",
       explain: "Spiega SQL",
       optimize: "Ottimizza SQL",
@@ -1260,6 +1261,7 @@ export default withEnglishFallback({
       generateNoExec: "Genera (senza eseguire)",
     },
     placeholders: {
+      general: "Chiedi qualsiasi cosa...",
       generate: "Descrivi cosa desideri interrogare, es. ordini per utente negli ultimi 7 giorni",
       explain: "Opzionale: aggiungi cosa desideri comprendere",
       optimize: "Opzionale: aggiungi un obiettivo, es. ridurre le scansioni complete della tabella",

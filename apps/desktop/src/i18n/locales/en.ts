@@ -1304,6 +1304,7 @@ export default {
     reasoningLevelHigh: "High",
     reasoningLevelHint: "Controls Codex CLI model_reasoning_effort. Default uses your Codex config.",
     actions: {
+      general: "General",
       generate: "Generate SQL",
       explain: "Explain SQL",
       optimize: "Optimize SQL",
@@ -1316,6 +1317,7 @@ export default {
       generateNoExec: "Generate (no run)",
     },
     placeholders: {
+      general: "Ask me anything...",
       generate: "Describe what you want to query, e.g. orders per user in the last 7 days",
       explain: "Optional: add what you want to understand",
       optimize: "Optional: add a goal, e.g. reduce full table scans",

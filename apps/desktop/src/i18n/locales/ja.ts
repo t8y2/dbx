@@ -1248,6 +1248,7 @@ export default withEnglishFallback({
     enableThinkingHint: "このオプションは/chat/completions APIとサポートされているモデルでのみ有効です。無効にするとトークン使用量を大幅に削減できますが、生成結果の品質が若干低下する可能性があります。",
     anthropicMessagesHint: "Anthropic Messages 互換 API は通常 /v1/messages を使用します。",
     actions: {
+      general: "一般的な質問",
       generate: "SQLを生成",
       explain: "SQLを説明",
       optimize: "SQLを最適化",
@@ -1260,6 +1261,7 @@ export default withEnglishFallback({
       generateNoExec: "生成のみ（実行しない）",
     },
     placeholders: {
+      general: "何でも聞いてください...",
       generate: "クエリしたい内容を説明してください（例: 過去7日間のユーザーごとの注文数）",
       explain: "任意: 理解したい内容を追加",
       optimize: "任意: 目標を追加（例: フルテーブルスキャンを減らす）",

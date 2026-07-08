@@ -32,6 +32,13 @@ public final class KafkaAgent {
     private static final Gson GSON = new GsonBuilder().serializeNulls().create();
     private static final int DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
     private static final int DEFAULT_SESSION_TIMEOUT_MS = 30_000;
+    private static final Set<String> KERBEROS_SYSTEM_PROPERTY_KEYS = Set.of(
+        "java.security.krb5.conf",
+        "sun.security.krb5.debug",
+        "javax.security.auth.useSubjectCredsOnly"
+    );
+    private static final Map<String, String> BASELINE_KERBEROS_SYSTEM_PROPERTIES =
+        snapshotKerberosSystemProperties();
 
     private static final List<String> CAPABILITIES = Collections.unmodifiableList(Arrays.asList(
         "mq_connect", "mq_test_connection", "mq_topics", "mq_consumer_groups",
@@ -138,28 +145,35 @@ public final class KafkaAgent {
 
     private static Object connect(JsonObject params) throws Exception {
         JsonObject conn = connectionObject(params);
-        AdminClient nextAdmin = buildAdminClient(conn);
+        Map<String, String> previousKerberosSystemProperties = applyKerberosSystemProperties(conn);
+        AdminClient nextAdmin = null;
         KafkaProducer<String, byte[]> nextProducer = null;
         try {
+            nextAdmin = buildAdminClient(conn);
             // Verify connectivity
             nextAdmin.describeCluster().clusterId().get(
                 intOrDefault(conn, "request_timeout_ms", DEFAULT_REQUEST_TIMEOUT_MS), TimeUnit.MILLISECONDS);
             nextProducer = buildProducer(conn);
             closeClients();
+            applyKerberosSystemProperties(conn);
             adminClient = nextAdmin;
             producer = nextProducer;
             return Collections.singletonMap("ok", true);
         } catch (Exception e) {
-            nextAdmin.close(Duration.ofSeconds(5));
+            if (nextAdmin != null) {
+                nextAdmin.close(Duration.ofSeconds(5));
+            }
             if (nextProducer != null) {
                 nextProducer.close(Duration.ofSeconds(5));
             }
+            restoreKerberosSystemProperties(previousKerberosSystemProperties);
             throw e;
         }
     }
 
     private static Object testConnection(JsonObject params) throws Exception {
         JsonObject conn = connectionObject(params);
+        Map<String, String> previousKerberosSystemProperties = applyKerberosSystemProperties(conn);
         AdminClient probe = buildAdminClient(conn);
         try {
             int timeout = intOrDefault(conn, "request_timeout_ms", DEFAULT_REQUEST_TIMEOUT_MS);
@@ -198,6 +212,7 @@ public final class KafkaAgent {
             return result;
         } finally {
             probe.close(Duration.ofSeconds(5));
+            restoreKerberosSystemProperties(previousKerberosSystemProperties);
         }
     }
 
@@ -210,6 +225,7 @@ public final class KafkaAgent {
             producer.close(Duration.ofSeconds(5));
             producer = null;
         }
+        restoreKerberosSystemProperties(BASELINE_KERBEROS_SYSTEM_PROPERTIES);
     }
 
     // -----------------------------------------------------------------------
@@ -335,24 +351,56 @@ public final class KafkaAgent {
                 if (entry.getValue().isJsonPrimitive()) {
                     String key = entry.getKey();
                     String value = entry.getValue().getAsString();
-                    applyKerberosSystemProperty(key, value);
                     props.put(key, value);
                 }
             }
         }
     }
 
-    private static void applyKerberosSystemProperty(String key, String value) {
-        switch (key) {
-            case "java.security.krb5.conf":
-            case "sun.security.krb5.debug":
-            case "javax.security.auth.useSubjectCredsOnly":
-                if (value != null && !value.isBlank()) {
-                    System.setProperty(key, value);
-                }
-                break;
-            default:
-                break;
+    static Map<String, String> applyKerberosSystemProperties(JsonObject conn) {
+        Map<String, String> previous = snapshotKerberosSystemProperties();
+        JsonObject properties = connectionProperties(conn);
+        for (String key : KERBEROS_SYSTEM_PROPERTY_KEYS) {
+            String value = stringProperty(properties, key);
+            if (value == null || value.isBlank()) {
+                value = BASELINE_KERBEROS_SYSTEM_PROPERTIES.get(key);
+            }
+            setOrClearSystemProperty(key, value);
+        }
+        return previous;
+    }
+
+    static void restoreKerberosSystemProperties(Map<String, String> values) {
+        for (String key : KERBEROS_SYSTEM_PROPERTY_KEYS) {
+            setOrClearSystemProperty(key, values.get(key));
+        }
+    }
+
+    private static Map<String, String> snapshotKerberosSystemProperties() {
+        Map<String, String> values = new LinkedHashMap<>();
+        for (String key : KERBEROS_SYSTEM_PROPERTY_KEYS) {
+            values.put(key, System.getProperty(key));
+        }
+        return values;
+    }
+
+    private static JsonObject connectionProperties(JsonObject conn) {
+        return conn.has("properties") && conn.get("properties").isJsonObject()
+            ? conn.getAsJsonObject("properties") : null;
+    }
+
+    private static String stringProperty(JsonObject properties, String key) {
+        if (properties == null || !properties.has(key) || !properties.get(key).isJsonPrimitive()) {
+            return null;
+        }
+        return properties.get(key).getAsString();
+    }
+
+    private static void setOrClearSystemProperty(String key, String value) {
+        if (value == null || value.isBlank()) {
+            System.clearProperty(key);
+        } else {
+            System.setProperty(key, value);
         }
     }
 

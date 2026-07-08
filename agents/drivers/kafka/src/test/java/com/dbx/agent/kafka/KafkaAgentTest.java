@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 import com.google.gson.JsonParser;
+import java.util.Map;
 import java.util.Properties;
 import org.junit.jupiter.api.Test;
 
@@ -57,26 +58,52 @@ class KafkaAgentTest {
     }
 
     @Test
-    void appliesKerberosSystemPropertyFromConnectionProperties() {
-        String previous = System.getProperty("java.security.krb5.conf");
+    void appliesAllowedKerberosSystemPropertiesFromConnectionProperties() {
+        Map<String, String> previous = KafkaAgent.applyKerberosSystemProperties(JsonParser.parseString("""
+            {
+              "properties": {
+                "java.security.krb5.conf": "/tmp/krb5.conf",
+                "sun.security.krb5.debug": "true",
+                "custom.system.property": "should-not-leak"
+              }
+            }
+            """).getAsJsonObject());
         try {
-            Properties props = new Properties();
-            KafkaAgent.applyConnectionProperties(JsonParser.parseString("""
+            assertEquals("/tmp/krb5.conf", System.getProperty("java.security.krb5.conf"));
+            assertEquals("true", System.getProperty("sun.security.krb5.debug"));
+            assertNull(System.getProperty("custom.system.property"));
+        } finally {
+            KafkaAgent.restoreKerberosSystemProperties(previous);
+        }
+    }
+
+    @Test
+    void clearsPreviousKerberosSystemPropertiesForNextConnection() {
+        String baseline = System.getProperty("java.security.krb5.conf");
+        Map<String, String> previous = KafkaAgent.applyKerberosSystemProperties(JsonParser.parseString("""
+            {
+              "properties": {
+                "java.security.krb5.conf": "/tmp/cluster-a.krb5.conf"
+              }
+            }
+            """).getAsJsonObject());
+        try {
+            assertEquals("/tmp/cluster-a.krb5.conf", System.getProperty("java.security.krb5.conf"));
+
+            Map<String, String> beforeSecondConnection = KafkaAgent.applyKerberosSystemProperties(JsonParser.parseString("""
                 {
                   "properties": {
-                    "java.security.krb5.conf": "/tmp/krb5.conf"
+                    "sasl.kerberos.service.name": "kafka"
                   }
                 }
-                """).getAsJsonObject(), props);
-
-            assertEquals("/tmp/krb5.conf", props.getProperty("java.security.krb5.conf"));
-            assertEquals("/tmp/krb5.conf", System.getProperty("java.security.krb5.conf"));
-        } finally {
-            if (previous == null) {
-                System.clearProperty("java.security.krb5.conf");
-            } else {
-                System.setProperty("java.security.krb5.conf", previous);
+                """).getAsJsonObject());
+            try {
+                assertEquals(baseline, System.getProperty("java.security.krb5.conf"));
+            } finally {
+                KafkaAgent.restoreKerberosSystemProperties(beforeSecondConnection);
             }
+        } finally {
+            KafkaAgent.restoreKerberosSystemProperties(previous);
         }
     }
 }

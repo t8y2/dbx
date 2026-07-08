@@ -3511,6 +3511,6 @@ export default withEnglishFallback({
     topicNameRequired: "El nombre del topic no puede estar vacío",
     currentPartitionsUnknown: "Se desconoce el número actual de particiones, no se puede ajustar de forma segura.",
     partitionMustIncrease: "El nuevo número de particiones debe ser mayor que el actual.",
-    confirmDelete: "¿Está seguro de que desea eliminar el tema \"{name}\"? Esta operación no se puede deshacer.",
+    confirmDelete: '¿Está seguro de que desea eliminar el tema "{name}"? Esta operación no se puede deshacer.',
   },
 });

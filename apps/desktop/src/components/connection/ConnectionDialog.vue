@@ -40,6 +40,7 @@ import { SQLITE_DATABASE_FILE_EXTENSIONS } from "@/lib/database/databaseFileDete
 import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connection/connectionAttemptTimeout";
 import { appendConnectionErrorHints } from "@/lib/connection/connectionErrorHints";
 import { normalizeKafkaBootstrapServers } from "@/lib/connection/kafkaBootstrapServers";
+import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } from "@/lib/connection/mqAuth";
 import { driverInstallProgressPercent, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 import { ArrowLeft, ArrowDown, ArrowUp, CheckSquare, ChevronRight, CircleHelp, Copy, ExternalLink, FilePlus2, FolderOpen, GripVertical, Grid3X3, KeyRound, Link2, List, ListFilter, Loader2, Pencil, Pipette, Plus, Search, ShieldCheck, Square, Trash2 } from "@lucide/vue";
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleDatabaseSelectionIsStale } from "@/lib/connection/connectionVisibleDatabases";
@@ -390,8 +391,6 @@ const dialogStep = ref<DialogStep>("select");
 const dbPickerView = ref<DbPickerView>("icon");
 const dbSearchQuery = ref("");
 const configTab = ref<ConfigTab>("connection");
-type MqAuthKind = MqAuth["kind"];
-type MqUiAuthKind = MqAuthKind | "kerberos";
 const MQ_KAFKA_SECURITY_PROTOCOL_AUTO = "__auto";
 const mqAdminUrl = ref("http://127.0.0.1:8080");
 const mqSystemKind = ref<MqSystemKind>("pulsar");
@@ -737,7 +736,12 @@ function resetMqFields(config?: Partial<MqAdminConfig>) {
   mqTlsSkipVerify.value = !!config?.tlsSkipVerify;
   mqPinnedVersion.value = pinnedVersionToSelection(config?.pinnedVersion);
   const auth = (config?.auth || { kind: "none" }) as MqAuth;
-  mqAuthKind.value = systemKind === "kafka" && mqKafkaSaslMechanism.value.toUpperCase() === "GSSAPI" && jaasConfig.includes("Krb5LoginModule") ? "kerberos" : systemKind === "kafka" && auth.kind !== "basic" ? "none" : auth.kind || "none";
+  mqAuthKind.value = detectMqUiAuthKind({
+    systemKind,
+    authKind: auth.kind,
+    saslMechanism: mqKafkaSaslMechanism.value,
+    jaasConfig,
+  });
   mqToken.value = auth.token || "";
   mqBasicUsername.value = auth.username || "";
   mqBasicPassword.value = auth.password || "";
@@ -774,7 +778,7 @@ function hydrateMqFields(value: unknown) {
 watch(mqSystemKind, (kind) => {
   if (kind === "kafka") {
     if (!mqKafkaBootstrapServers.value.trim()) mqKafkaBootstrapServers.value = "127.0.0.1:9092";
-    if (!["none", "basic"].includes(mqAuthKind.value)) mqAuthKind.value = "none";
+    if (!isMqAuthKindAllowedForSystem(kind, mqAuthKind.value)) mqAuthKind.value = "none";
     return;
   }
   if (!mqAdminUrl.value.trim()) mqAdminUrl.value = "http://127.0.0.1:8080";

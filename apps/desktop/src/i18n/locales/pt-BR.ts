@@ -3510,6 +3510,6 @@ export default withEnglishFallback({
     topicNameRequired: "O nome do tópico não pode estar vazio",
     currentPartitionsUnknown: "O número atual de partições é desconhecido, não é possível ajustar com segurança.",
     partitionMustIncrease: "O novo número de partições deve ser maior que o atual.",
-    confirmDelete: "Tem certeza de que deseja excluir o tópico \"{name}\"? Esta operação é irreversível.",
+    confirmDelete: 'Tem certeza de que deseja excluir o tópico "{name}"? Esta operação é irreversível.',
   },
 });

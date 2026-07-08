@@ -3509,6 +3509,6 @@ export default withEnglishFallback({
     topicNameRequired: "Il nome del topic non può essere vuoto",
     currentPartitionsUnknown: "Numero di partizioni attuali sconosciuto, impossibile regolare le partizioni in modo sicuro.",
     partitionMustIncrease: "Il nuovo numero di partizioni deve essere maggiore di quello attuale.",
-    confirmDelete: "Confermi di eliminare il topic \"{name}\"? Questa operazione è irreversibile.",
+    confirmDelete: 'Confermi di eliminare il topic "{name}"? Questa operazione è irreversibile.',
   },
 });

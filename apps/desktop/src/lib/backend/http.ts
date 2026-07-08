@@ -337,6 +337,10 @@ export async function getDriverStoreUsage(): Promise<DriverStoreUsage> {
   return get("/api/agents/storage-usage");
 }
 
+export async function clearDriverDownloadCache(): Promise<void> {
+  await del("/api/agents/download-cache");
+}
+
 export async function getDriverRuntimeSummary(): Promise<DriverRuntimeSummary> {
   return get("/api/agents/runtime");
 }

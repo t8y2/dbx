@@ -1121,6 +1121,7 @@ pub fn run() {
             commands::agents::list_installed_agents,
             commands::agents::list_installed_agents_local,
             commands::agents::get_driver_store_usage,
+            commands::agents::clear_driver_download_cache,
             commands::agents::get_driver_runtime_summary,
             commands::agents::stop_driver_runtime,
             commands::agents::restart_driver_runtime,

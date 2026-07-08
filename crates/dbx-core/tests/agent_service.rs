@@ -3,8 +3,9 @@ use dbx_core::agent_manager::{
     JreInfo, DEFAULT_JRE_KEY,
 };
 use dbx_core::agent_service::{
-    build_agent_list, github_url_to_r2_path, import_agent_jar, import_agents_from_zip, is_app_version_compatible,
-    jre_needs_install, local_agent_jar_candidates, replace_download, uninstall_agent_driver, AgentProgressEvent,
+    build_agent_list, clear_agent_download_cache, github_url_to_r2_path, import_agent_jar, import_agents_from_zip,
+    is_app_version_compatible, jre_needs_install, local_agent_jar_candidates, replace_download, uninstall_agent_driver,
+    AgentProgressEvent,
 };
 
 fn test_manager(name: &str) -> AgentManager {
@@ -442,6 +443,31 @@ async fn uninstall_driver_removes_artifact_and_state() {
     assert!(dameng_cache.exists());
     assert!(jre_cache.exists());
     assert!(!manager.load_state().installed_drivers.contains_key("h2"));
+}
+
+#[test]
+fn clear_download_cache_removes_only_cache_entries() {
+    let manager = test_manager("clear-download-cache");
+    let cache_dir = manager.download_cache_dir();
+    let driver_dir = manager.driver_dir("h2");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    std::fs::create_dir_all(&driver_dir).unwrap();
+    let driver_cache = cache_dir.join("driver-h2-0.1.0-abc-agent.jar");
+    let jre_cache = cache_dir.join("jre-21-21.0.11-abc-jre-download.tar.gz");
+    let nested_cache = cache_dir.join("stale-dir");
+    let installed_driver = driver_dir.join("agent.jar");
+    std::fs::write(&driver_cache, b"h2").unwrap();
+    std::fs::write(&jre_cache, b"jre").unwrap();
+    std::fs::create_dir_all(&nested_cache).unwrap();
+    std::fs::write(nested_cache.join("artifact"), b"x").unwrap();
+    std::fs::write(&installed_driver, b"driver").unwrap();
+
+    clear_agent_download_cache(&manager).unwrap();
+
+    assert!(!driver_cache.exists());
+    assert!(!jre_cache.exists());
+    assert!(!nested_cache.exists());
+    assert!(installed_driver.exists());
 }
 
 #[test]

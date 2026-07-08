@@ -1108,6 +1108,10 @@ export async function getDriverStoreUsage(): Promise<DriverStoreUsage> {
   return invoke("get_driver_store_usage");
 }
 
+export async function clearDriverDownloadCache(): Promise<void> {
+  return invoke("clear_driver_download_cache");
+}
+
 export async function getDriverRuntimeSummary(): Promise<DriverRuntimeSummary> {
   return invoke("get_driver_runtime_summary");
 }

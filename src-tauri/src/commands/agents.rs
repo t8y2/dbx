@@ -4,9 +4,10 @@ use tauri::{Emitter, State};
 
 use dbx_core::agent_manager::{AgentDriverInfo, DriverStoreUsage, JavaRuntimeConfig, JavaRuntimeMode, DEFAULT_JRE_KEY};
 use dbx_core::agent_service::{
-    build_agent_list, fetch_registry, import_agent_jar, import_agents_from_zip as import_agents_from_zip_core,
-    install_agent_driver, invalidate_registry_cache, reinstall_agent_jre, uninstall_agent_driver, uninstall_agent_jre,
-    upgrade_all_agent_drivers, AgentProgressEvent, UpgradeAllAgentDriversResult,
+    build_agent_list, clear_agent_download_cache, fetch_registry, import_agent_jar,
+    import_agents_from_zip as import_agents_from_zip_core, install_agent_driver, invalidate_registry_cache,
+    reinstall_agent_jre, uninstall_agent_driver, uninstall_agent_jre, upgrade_all_agent_drivers, AgentProgressEvent,
+    UpgradeAllAgentDriversResult,
 };
 use dbx_core::connection::AppState;
 use dbx_core::driver_runtime::DriverRuntimeSummary;
@@ -31,6 +32,11 @@ pub async fn list_installed_agents(state: State<'_, Arc<AppState>>) -> Result<Ve
 #[tauri::command]
 pub async fn get_driver_store_usage(state: State<'_, Arc<AppState>>) -> Result<DriverStoreUsage, String> {
     Ok(state.agent_manager.collect_driver_store_usage(state.plugins.root_dir()))
+}
+
+#[tauri::command]
+pub async fn clear_driver_download_cache(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    clear_agent_download_cache(&state.agent_manager)
 }
 
 #[tauri::command]

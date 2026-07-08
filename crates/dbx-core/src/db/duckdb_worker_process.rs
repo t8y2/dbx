@@ -547,6 +547,7 @@ fn is_transient_duckdb_file_lock_error(message: &str) -> bool {
         || lower.contains("file is already open");
     let mentions_lock = lower.contains("file is already open")
         || lower.contains("being used by another process")
+        || lower.contains("conflicting lock is held")
         || lower.contains("process cannot access the file")
         || lower.contains("sharing violation")
         || lower.contains("resource temporarily unavailable")

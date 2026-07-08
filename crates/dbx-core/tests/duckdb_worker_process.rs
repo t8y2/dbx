@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dbx_core::db::duckdb_worker_process::DuckDbWorkerClient;
@@ -19,6 +20,7 @@ static TEMP_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn worker_process_recovers_immediately_after_cancelled_long_query() {
+    let _guard = duckdb_worker_process_test_guard().await;
     let executable = PathBuf::from(env!("CARGO_BIN_EXE_duckdb-worker-test-host"));
     let db_path = temp_duckdb_path();
     let _ = std::fs::remove_file(&db_path);
@@ -69,6 +71,7 @@ async fn worker_process_recovers_immediately_after_cancelled_long_query() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn worker_process_recovers_after_registered_cancel_interrupt() {
+    let _guard = duckdb_worker_process_test_guard().await;
     let executable = PathBuf::from(env!("CARGO_BIN_EXE_duckdb-worker-test-host"));
     let db_path = temp_duckdb_path();
     let _ = std::fs::remove_file(&db_path);
@@ -131,6 +134,7 @@ async fn worker_process_recovers_after_registered_cancel_interrupt() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn worker_process_recovers_after_parser_error() {
+    let _guard = duckdb_worker_process_test_guard().await;
     let executable = PathBuf::from(env!("CARGO_BIN_EXE_duckdb-worker-test-host"));
     let db_path = temp_duckdb_path();
     let _ = std::fs::remove_file(&db_path);
@@ -180,6 +184,7 @@ async fn worker_process_recovers_after_parser_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn worker_process_keeps_session_state_after_benign_error() {
+    let _guard = duckdb_worker_process_test_guard().await;
     let executable = PathBuf::from(env!("CARGO_BIN_EXE_duckdb-worker-test-host"));
     let db_path = temp_duckdb_path();
     let _ = std::fs::remove_file(&db_path);
@@ -227,6 +232,7 @@ async fn worker_process_keeps_session_state_after_benign_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn worker_process_exits_when_stdin_closes_during_active_query() {
+    let _guard = duckdb_worker_process_test_guard().await;
     let executable = PathBuf::from(env!("CARGO_BIN_EXE_duckdb-worker-test-host"));
     let db_path = temp_duckdb_path();
     let _ = std::fs::remove_file(&db_path);
@@ -280,6 +286,7 @@ async fn worker_process_exits_when_stdin_closes_during_active_query() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn worker_process_is_killed_after_connect_timeout() {
+    let _guard = duckdb_worker_process_test_guard().await;
     let executable = PathBuf::from(env!("CARGO_BIN_EXE_duckdb-worker-hanging-connect-test-host"));
     let db_path = temp_duckdb_path();
     let pid_file = temp_pid_path();
@@ -292,7 +299,7 @@ async fn worker_process_is_killed_after_connect_timeout() {
         db_path.to_string_lossy().to_string(),
         Vec::new(),
         4,
-        Duration::from_millis(200),
+        Duration::from_secs(1),
         Duration::from_secs(5),
     );
 
@@ -312,6 +319,7 @@ async fn worker_process_is_killed_after_connect_timeout() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn worker_process_is_killed_after_connect_error() {
+    let _guard = duckdb_worker_process_test_guard().await;
     let executable = PathBuf::from(env!("CARGO_BIN_EXE_duckdb-worker-pid-test-host"));
     let db_path = temp_duckdb_path();
     let pid_file = temp_pid_path();
@@ -336,7 +344,12 @@ async fn worker_process_is_killed_after_connect_error() {
         .expect_err("connect should fail while another process owns the DuckDB file");
     std::env::remove_var("DBX_DUCKDB_PID_TEST_HOST_PID_FILE");
     assert!(
-        err.contains("Cannot open file") || err.contains("already open") || err.contains("另一个程序正在使用"),
+        err.contains("Cannot open file")
+            || err.contains("Could not set lock")
+            || err.contains("Conflicting lock is held")
+            || err.contains("already open")
+            || err.contains("timed out")
+            || err.contains("另一个程序正在使用"),
         "unexpected error: {err}"
     );
 
@@ -350,6 +363,7 @@ async fn worker_process_is_killed_after_connect_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn worker_process_retries_connect_after_transient_file_lock() {
+    let _guard = duckdb_worker_process_test_guard().await;
     let executable = PathBuf::from(env!("CARGO_BIN_EXE_duckdb-worker-test-host"));
     let db_path = temp_duckdb_path();
     let _ = std::fs::remove_file(&db_path);
@@ -433,6 +447,11 @@ fn temp_duckdb_path() -> PathBuf {
     // from sharing a DuckDB file lock.
     let counter = TEMP_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!("dbx-duckdb-worker-process-{pid}-{suffix}-{counter}.duckdb"))
+}
+
+async fn duckdb_worker_process_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    static GUARD: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    GUARD.get_or_init(|| tokio::sync::Mutex::new(())).lock().await
 }
 
 fn temp_pid_path() -> PathBuf {

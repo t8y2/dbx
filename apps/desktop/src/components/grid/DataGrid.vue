@@ -3364,6 +3364,10 @@ const isInfiniteScrollPaginating = ref(false);
 let lastInfiniteScrollPage = 0;
 let infiniteScrollCheckScheduled = false;
 let infiniteScrollAllLoaded = false;
+// Tracks whether the current loading cycle was triggered by a refresh/rollback
+// (as opposed to a normal paginate). Used to decide whether to auto-redirect
+// when the current page no longer exists after data was deleted.
+const isRefreshingData = ref(false);
 watch(pageSize, (value) => {
   customPageSizeInput.value = String(value);
 });
@@ -3408,6 +3412,22 @@ watch(
         infiniteScrollAllLoaded = true;
       }
     }
+  },
+);
+// When a refresh/rollback completes and the current page exceeds the last
+// available page (e.g. data was deleted while viewing), auto-navigate to the
+// last available page instead of showing an empty page.
+watch(
+  () => [props.loading, displayedTotalRowCount.value, currentPage.value, pageSize.value, isRefreshingData.value] as const,
+  ([loading, total, page, size, refreshing]) => {
+    if (loading || !refreshing) return;
+    isRefreshingData.value = false;
+    if (!total || total <= 0) return;
+    const lastPageNum = Math.max(1, Math.ceil(total / size));
+    if (page <= lastPageNum) return;
+    currentPage.value = lastPageNum;
+    resetGridVerticalScroll(true);
+    emit("paginate", (lastPageNum - 1) * size, size, currentWhereInput(), currentOrderBy());
   },
 );
 const manualTotalRowCount = ref<number | undefined>(undefined);
@@ -4034,6 +4054,7 @@ async function onToolbarRefresh() {
     resetInfiniteScrollState();
   }
   preserveTransposeOnNextResult.value = showTranspose.value;
+  isRefreshingData.value = true;
   emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, (currentPage.value - 1) * pageSize.value);
 }
 
@@ -4078,6 +4099,7 @@ function onToolbarRollback() {
   if (infiniteScrollEnabled.value) {
     resetInfiniteScrollState();
   }
+  isRefreshingData.value = true;
   emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, (currentPage.value - 1) * pageSize.value);
 }
 

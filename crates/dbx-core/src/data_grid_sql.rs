@@ -98,6 +98,16 @@ pub struct DataGridCopyInsertStatementOptions {
     pub rows: Vec<Vec<Value>>,
     #[serde(default)]
     pub exclude_primary_keys: bool,
+    #[serde(default)]
+    pub insert_mode: DataGridCopyInsertMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DataGridCopyInsertMode {
+    #[default]
+    Merged,
+    RowByRow,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -373,7 +383,9 @@ pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatemen
             )
         })
         .collect::<Vec<_>>();
-    if options.database_type.is_some_and(uses_single_row_insert_statements) {
+    if options.insert_mode == DataGridCopyInsertMode::RowByRow
+        || options.database_type.is_some_and(uses_single_row_insert_statements)
+    {
         return Some(
             value_rows
                 .iter()
@@ -2094,10 +2106,35 @@ mod tests {
             source_columns: None,
             rows: vec![vec![json!(1), json!("ada"), json!("Ada")], vec![json!(2), json!("linus"), json!("Linus")]],
             exclude_primary_keys: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
         });
         assert_eq!(
             statement.as_deref(),
             Some("INSERT INTO `users` (`login_name`, `display_name`) VALUES\n('ada', 'Ada'),\n('linus', 'Linus');")
+        );
+    }
+
+    #[test]
+    fn builds_copy_insert_statement_row_by_row() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            table_meta: Some(DataGridTableMeta {
+                schema: None,
+                table_name: "users".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: None,
+            }),
+            columns: vec!["id".to_string(), "login_name".to_string(), "display_name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("ada"), json!("Ada")], vec![json!(2), json!("linus"), json!("Linus")]],
+            exclude_primary_keys: false,
+            insert_mode: DataGridCopyInsertMode::RowByRow,
+        });
+        assert_eq!(
+            statement.as_deref(),
+            Some(
+                "INSERT INTO `users` (`id`, `login_name`, `display_name`) VALUES (1, 'ada', 'Ada');\nINSERT INTO `users` (`id`, `login_name`, `display_name`) VALUES (2, 'linus', 'Linus');"
+            )
         );
     }
 
@@ -2116,6 +2153,7 @@ mod tests {
             source_columns: None,
             rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("Linus")]],
             exclude_primary_keys: false,
+            insert_mode: DataGridCopyInsertMode::Merged,
         });
 
         assert_eq!(
@@ -2143,6 +2181,7 @@ mod tests {
             source_columns: None,
             rows: rows.clone(),
             exclude_primary_keys: false,
+            insert_mode: DataGridCopyInsertMode::Merged,
         });
         assert_eq!(
             insert.as_deref(),
@@ -2204,6 +2243,7 @@ mod tests {
             source_columns: None,
             rows: vec![vec![json!(1), json!("Hello"), json!("'hello':1A")]],
             exclude_primary_keys: false,
+            insert_mode: DataGridCopyInsertMode::Merged,
         });
 
         assert_eq!(

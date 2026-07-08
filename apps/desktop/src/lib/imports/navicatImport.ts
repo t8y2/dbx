@@ -28,7 +28,7 @@ const typeMap: Record<string, { dbType: DatabaseType; profile: string; label: st
   kingbase: { dbType: "kingbase", profile: "kingbase", label: "KingbaseES", port: 54321, user: "SYSTEM" },
   kingbasees: { dbType: "kingbase", profile: "kingbase", label: "KingbaseES", port: 54321, user: "SYSTEM" },
   gaussdb: { dbType: "gaussdb", profile: "gaussdb", label: "GaussDB", port: 8000, user: "root" },
-  oceanbase: { dbType: "oceanbase-oracle", profile: "oceanbase", label: "OceanBase", port: 2881, user: "root" },
+  oceanbase: { dbType: "oceanbase-oracle", profile: "oceanbase", label: "OceanBase", port: 2883, user: "root" },
   // Numeric type codes (Navicat uses numeric ConnType for some exports)
   "1": { dbType: "mysql", profile: "mysql", label: "MySQL", port: 3306, user: "root" },
   "2": { dbType: "postgres", profile: "postgres", label: "PostgreSQL", port: 5432, user: "postgres" },
@@ -175,7 +175,7 @@ async function parseConnection(node: ParsedNode): Promise<ConnectionConfig | nul
     const sp = serviceProvider.toLowerCase();
     if (sp.includes("oceanbase")) {
       const oceanbaseOracleMode = normalizeKey(rawType).includes("oracle") || profile.dbType === "oracle";
-      effectiveProfile = oceanbaseOracleMode ? { ...profile, dbType: "oceanbase-oracle", profile: "oceanbase-oracle", label: "OceanBase Oracle Mode", port: 2881 } : { ...profile, dbType: "mysql", profile: "oceanbase", label: "OceanBase", port: 2881 };
+      effectiveProfile = oceanbaseOracleMode ? { ...profile, dbType: "oceanbase-oracle", profile: "oceanbase-oracle", label: "OceanBase Oracle Mode", port: 2883 } : { ...profile, dbType: "mysql", profile: "oceanbase", label: "OceanBase", port: 2883 };
     } else if (sp.includes("gaussdb") || sp.includes("huaweicloudgauss")) {
       effectiveProfile = { ...profile, dbType: "gaussdb", profile: "gaussdb", label: "GaussDB", port: 8000 };
     }

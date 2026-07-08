@@ -111,6 +111,7 @@ pub async fn get_columns(pool: &Pool, _schema: &str, table: &str) -> Result<Vec<
                 numeric_precision: None,
                 numeric_scale: None,
                 character_maximum_length: None,
+                enum_values: None,
             }
         })
         .collect())

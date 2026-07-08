@@ -13,6 +13,11 @@ export function parseShortcutParts(shortcut?: string): string[] {
   return shortcut.split("+").filter(Boolean);
 }
 
+export function parseShortcutStrokes(shortcut?: string): string[][] {
+  if (!shortcut) return [];
+  return shortcut.trim().split(/\s+/).filter(Boolean).map(parseShortcutParts);
+}
+
 function shortcutDisplayOrder(parts: string[], platform = globalThis.navigator?.platform || ""): string[] {
   if (parts.length <= 2 || isMacShortcutPlatform(platform)) return parts;
 
@@ -43,6 +48,10 @@ export function shortcutDisplayParts(shortcut?: string, platform = globalThis.na
   return shortcutDisplayOrder(parseShortcutParts(shortcut), platform);
 }
 
+export function shortcutDisplayStrokes(shortcut?: string, platform = globalThis.navigator?.platform || ""): string[][] {
+  return parseShortcutStrokes(shortcut).map((parts) => shortcutDisplayOrder(parts, platform));
+}
+
 export function shortcutKeyLabel(part: string, platform = globalThis.navigator?.platform || ""): string {
   const isMac = isMacShortcutPlatform(platform);
   if (part === "Mod") return isMac ? "⌘" : "Ctrl";
@@ -65,10 +74,15 @@ export function shortcutKeyLabel(part: string, platform = globalThis.navigator?.
 }
 
 export function shortcutDisplayKeys(shortcut?: string, platform = globalThis.navigator?.platform || ""): string[] {
-  return shortcutDisplayParts(shortcut, platform).map((part) => shortcutKeyLabel(part, platform));
+  return shortcutDisplayStrokes(shortcut, platform)
+    .flat()
+    .map((part) => shortcutKeyLabel(part, platform));
 }
 
 export function formatShortcutDisplay(shortcut: string, platform = globalThis.navigator?.platform || ""): string {
   if (!shortcut) return "—";
-  return shortcutDisplayKeys(shortcut, platform).join(isMacShortcutPlatform(platform) ? " " : " + ");
+  const keySeparator = isMacShortcutPlatform(platform) ? " " : " + ";
+  return shortcutDisplayStrokes(shortcut, platform)
+    .map((parts) => parts.map((part) => shortcutKeyLabel(part, platform)).join(keySeparator))
+    .join(", ");
 }

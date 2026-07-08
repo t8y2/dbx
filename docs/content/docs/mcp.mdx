@@ -256,6 +256,8 @@ Set `DBX_MCP_ALLOW_WRITES=1` to allow write statements. Set `DBX_MCP_ALLOW_DANGE
 | Desktop local mode | Default            | Reads DBX desktop connection storage and can call desktop-only UI bridge tools |
 | Web mode           | Set `DBX_WEB_URL`  | Sends requests to the DBX web backend instead of reading local desktop storage |
 
+For DBX Web or Docker deployments that have password protection enabled, also set `DBX_WEB_PASSWORD` in the MCP server environment. This is the same password used on the DBX Web login page, including the password created by the first-run setup screen. You do not need to set `DBX_PASSWORD` on the DBX Web server just for MCP; `DBX_PASSWORD` is only a server-side environment override. MCP calls fail before returning connection data when the Web backend requires authentication and no password is provided. Desktop local mode does not use `DBX_WEB_PASSWORD`.
+
 ## FAQ
 
 <Accordions>
@@ -263,7 +265,7 @@ Set `DBX_MCP_ALLOW_WRITES=1` to allow write statements. Set `DBX_MCP_ALLOW_DANGE
   <Accordion title="dbx_open_table says 'DBX is not running'">Start the DBX desktop app first. UI integration requires DBX's local HTTP service (port 4224).</Accordion>
   <Accordion title="Connection name not found">Connection name matching is case-insensitive but must match the name configured in DBX. Use `dbx_list_connections` to see all available names.</Accordion>
   <Accordion title="Query timeout">MCP Server has a 30-second query timeout. Consider adding indexes or simplifying your query. You can also ask the AI to use `dbx_describe_table` first to understand the schema, then generate an optimized query.</Accordion>
-  <Accordion title="How to use MCP with Docker?">DBX deployed via Docker also supports MCP. The MCP Server reads connection configs from inside the Docker container. Make sure the MCP Server can access DBX's config directory.</Accordion>
+  <Accordion title="How to use MCP with Docker?">Set `DBX_WEB_URL` to your DBX Web URL. If the Web UI requires a password, set `DBX_WEB_PASSWORD` to the same password used on the Web login page; otherwise MCP will refuse protected Web API access.</Accordion>
 </Accordions>
 
 ## Requirements

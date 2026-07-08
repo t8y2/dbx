@@ -57,13 +57,36 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     event.preventDefault();
     isResizing = true;
     const startX = event.clientX;
-    const startWidth = columnWidths.value[colIdx];
-    const onMove = (e: MouseEvent) => {
-      columnWidths.value[colIdx] = resizeDataGridColumnWidth(startWidth, e.clientX - startX);
+    const startWidth = columnWidths.value[colIdx] ?? DATA_GRID_COL_MIN_WIDTH;
+    let pendingClientX = startX;
+    let resizeFrame = 0;
+
+    const applyPendingWidth = () => {
+      resizeFrame = 0;
+      columnWidths.value[colIdx] = resizeDataGridColumnWidth(startWidth, pendingClientX - startX);
     };
-    const onUp = () => {
+
+    const scheduleWidthUpdate = (clientX: number) => {
+      pendingClientX = clientX;
+      if (resizeFrame) return;
+      resizeFrame = requestAnimationFrame(applyPendingWidth);
+    };
+
+    const cancelPendingFrame = () => {
+      if (!resizeFrame) return;
+      cancelAnimationFrame(resizeFrame);
+      resizeFrame = 0;
+    };
+
+    const onMove = (e: MouseEvent) => {
+      scheduleWidthUpdate(e.clientX);
+    };
+    const onUp = (e: MouseEvent) => {
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
+      cancelPendingFrame();
+      pendingClientX = e.clientX;
+      applyPendingWidth();
       requestAnimationFrame(() => {
         isResizing = false;
       });
@@ -83,7 +106,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     });
   }
 
-  const renderedColumnWidths = computed(() => columnWidths.value);
+  const renderedColumnWidths = computed(() => columnWidths.value.slice());
 
   const totalWidth = computed(() => renderedColumnWidths.value.reduce((a, b) => a + b, 0) + DATA_GRID_ROW_NUM_WIDTH);
 

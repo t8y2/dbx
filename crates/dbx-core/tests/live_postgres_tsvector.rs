@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use dbx_core::data_grid_sql::{
-    build_data_grid_copy_insert_statement, DataGridColumnInfo, DataGridCopyInsertStatementOptions, DataGridTableMeta,
+    build_data_grid_copy_insert_statement, DataGridColumnInfo, DataGridCopyInsertMode,
+    DataGridCopyInsertStatementOptions, DataGridTableMeta,
 };
 use dbx_core::database_export::{build_export_insert_statements, BuildExportInsertStatementsOptions};
 use dbx_core::db::postgres;
@@ -73,6 +74,7 @@ async fn postgres_tsvector_generated_columns_are_readable_and_omitted_from_inser
         source_columns: None,
         rows: result.rows.clone(),
         exclude_primary_keys: false,
+        insert_mode: DataGridCopyInsertMode::Merged,
     })
     .expect("copy insert");
     assert!(copy_insert.contains("\"id\", \"title\", \"body\""));

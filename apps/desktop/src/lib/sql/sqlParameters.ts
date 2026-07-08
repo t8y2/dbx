@@ -1,3 +1,5 @@
+import type { DatabaseType } from "@/types/database";
+
 export type SqlParameterValueKind = "string" | "number" | "boolean" | "null" | "raw";
 
 export interface SqlParameterInput {
@@ -19,18 +21,23 @@ interface ParameterOccurrence extends SqlParameterDescriptor {
   end: number;
 }
 
+export interface SqlParameterOptions {
+  databaseType?: DatabaseType;
+}
+
 const PARAMETER_NAME_RE = /^[\p{L}_][\p{L}\p{N}_]*$/u;
 const PARAMETER_NAME_START_RE = /[\p{L}_]/u;
 const PARAMETER_NAME_CHAR_RE = /[\p{L}\p{N}_]/u;
+const SQL_SERVER_TEMP_TABLE_CONTEXT_KEYWORDS = new Set(["table", "from", "join", "into", "update", "truncate"]);
 
-export function extractSqlParameters(sql: string): string[] {
-  return extractSqlParameterDescriptors(sql).map((descriptor) => descriptor.key);
+export function extractSqlParameters(sql: string, options?: SqlParameterOptions): string[] {
+  return extractSqlParameterDescriptors(sql, options).map((descriptor) => descriptor.key);
 }
 
-export function extractSqlParameterDescriptors(sql: string): SqlParameterDescriptor[] {
+export function extractSqlParameterDescriptors(sql: string, options?: SqlParameterOptions): SqlParameterDescriptor[] {
   const names = new Set<string>();
   const descriptors: SqlParameterDescriptor[] = [];
-  for (const occurrence of findSqlParameterOccurrences(sql)) {
+  for (const occurrence of findSqlParameterOccurrences(sql, options)) {
     if (names.has(occurrence.key)) continue;
     names.add(occurrence.key);
     descriptors.push({
@@ -43,8 +50,8 @@ export function extractSqlParameterDescriptors(sql: string): SqlParameterDescrip
   return descriptors;
 }
 
-export function substituteSqlParameters(sql: string, values: Record<string, SqlParameterInput>): string {
-  const occurrences = findSqlParameterOccurrences(sql);
+export function substituteSqlParameters(sql: string, values: Record<string, SqlParameterInput>, options?: SqlParameterOptions): string {
+  const occurrences = findSqlParameterOccurrences(sql, options);
   if (!occurrences.length) return sql;
 
   let result = "";
@@ -67,9 +74,10 @@ export function sqlParameterLiteral(input: SqlParameterInput): string {
   return quoteSqlString(raw);
 }
 
-function findSqlParameterOccurrences(sql: string): ParameterOccurrence[] {
+function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions): ParameterOccurrence[] {
   const occurrences: ParameterOccurrence[] = [];
-  const declaredSqlServerVariables = collectDeclaredSqlServerVariables(sql);
+  const nativeSqlServerParameters = collectNativeSqlServerParameters(sql);
+  const supportsNamedParameters = options?.databaseType !== "saphana";
   let i = 0;
   let dollarQuoteEnd = "";
   let positionalIndex = 0;
@@ -109,7 +117,7 @@ function findSqlParameterOccurrences(sql: string): ParameterOccurrence[] {
       i += 1;
       continue;
     }
-    if (ch === ":") {
+    if (ch === ":" && supportsNamedParameters) {
       const name = readParameterName(sql, i + 1);
       if (name && sql[i - 1] !== ":" && sql[i + 1] !== "=") {
         occurrences.push({
@@ -146,13 +154,13 @@ function findSqlParameterOccurrences(sql: string): ParameterOccurrence[] {
         }
       }
     }
-    if (ch === "#") {
+    if (isHashLineComment(sql, i)) {
       i = skipLine(sql, i + 1);
       continue;
     }
     if (ch === "@") {
       const name = readParameterName(sql, i + 1);
-      if (name && next !== "@" && sql[i - 1] !== "@" && !declaredSqlServerVariables.has(name.toLowerCase())) {
+      if (name && next !== "@" && sql[i - 1] !== "@" && !nativeSqlServerParameters.declared.has(name.toLowerCase()) && !nativeSqlServerParameters.ignoredStarts.has(i)) {
         occurrences.push({
           key: name,
           name,
@@ -179,8 +187,9 @@ function findSqlParameterOccurrences(sql: string): ParameterOccurrence[] {
   return occurrences;
 }
 
-function collectDeclaredSqlServerVariables(sql: string): Set<string> {
+function collectNativeSqlServerParameters(sql: string): { declared: Set<string>; ignoredStarts: Set<number> } {
   const declared = new Set<string>();
+  const ignoredStarts = new Set<number>();
   let i = 0;
   let dollarQuoteEnd = "";
 
@@ -219,7 +228,7 @@ function collectDeclaredSqlServerVariables(sql: string): Set<string> {
         continue;
       }
     }
-    if (ch === "#") {
+    if (isHashLineComment(sql, i)) {
       i = skipLine(sql, i + 1);
       continue;
     }
@@ -227,10 +236,26 @@ function collectDeclaredSqlServerVariables(sql: string): Set<string> {
       i = collectDeclareStatementVariables(sql, i + "declare".length, declared);
       continue;
     }
+    if (matchesWord(sql, i, "set")) {
+      i = collectSetStatementVariables(sql, i + "set".length, declared);
+      continue;
+    }
+    if (matchesWord(sql, i, "select")) {
+      i = collectSelectAssignmentVariables(sql, i + "select".length, declared);
+      continue;
+    }
+    if ((matchesWord(sql, i, "create") || matchesWord(sql, i, "alter")) && isRoutineDefinitionStart(sql, i)) {
+      i = collectRoutineDefinitionVariables(sql, i, declared);
+      continue;
+    }
+    if (matchesWord(sql, i, "exec") || matchesWord(sql, i, "execute")) {
+      i = collectExecNamedArgumentStarts(sql, i + (matchesWord(sql, i, "exec") ? "exec".length : "execute".length), ignoredStarts);
+      continue;
+    }
     i += 1;
   }
 
-  return declared;
+  return { declared, ignoredStarts };
 }
 
 function collectDeclareStatementVariables(sql: string, start: number, declared: Set<string>): number {
@@ -256,7 +281,7 @@ function collectDeclareStatementVariables(sql: string, start: number, declared: 
       i = skipBlockComment(sql, i + 2);
       continue;
     }
-    if (ch === "#") {
+    if (isHashLineComment(sql, i)) {
       i = skipLine(sql, i + 1);
       continue;
     }
@@ -271,6 +296,208 @@ function collectDeclareStatementVariables(sql: string, start: number, declared: 
     i += 1;
   }
   return i;
+}
+
+function collectSetStatementVariables(sql: string, start: number, declared: Set<string>): number {
+  let i = start;
+  while (i < sql.length) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+    if (ch === ";") return i + 1;
+    if (isLineStatementStart(sql, i) && isSqlStatementKeyword(sql, i)) return i;
+    if (ch === "'" || ch === '"' || ch === "`") {
+      i = skipQuoted(sql, i, ch);
+      continue;
+    }
+    if (ch === "[") {
+      i = skipBracketIdentifier(sql, i);
+      continue;
+    }
+    if (ch === "-" && next === "-") {
+      i = skipLine(sql, i + 2);
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      i = skipBlockComment(sql, i + 2);
+      continue;
+    }
+    if (isHashLineComment(sql, i)) {
+      i = skipLine(sql, i + 1);
+      continue;
+    }
+    if (ch === "@") {
+      const name = readParameterName(sql, i + 1);
+      if (name && next !== "@" && sql[i - 1] !== "@" && isSetAssignmentTarget(sql, i + 1 + name.length)) {
+        declared.add(name.toLowerCase());
+        i += 1 + name.length;
+        continue;
+      }
+    }
+    i += 1;
+  }
+  return i;
+}
+
+function collectSelectAssignmentVariables(sql: string, start: number, declared: Set<string>): number {
+  let i = start;
+  while (i < sql.length) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+    if (ch === ";") return i + 1;
+    if (isLineStatementStart(sql, i) && isSqlStatementKeyword(sql, i)) return i;
+    if (matchesWord(sql, i, "from")) return i;
+    if (ch === "'" || ch === '"' || ch === "`") {
+      i = skipQuoted(sql, i, ch);
+      continue;
+    }
+    if (ch === "[") {
+      i = skipBracketIdentifier(sql, i);
+      continue;
+    }
+    if (ch === "-" && next === "-") {
+      i = skipLine(sql, i + 2);
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      i = skipBlockComment(sql, i + 2);
+      continue;
+    }
+    if (isHashLineComment(sql, i)) {
+      i = skipLine(sql, i + 1);
+      continue;
+    }
+    if (ch === "@") {
+      const name = readParameterName(sql, i + 1);
+      if (name && next !== "@" && sql[i - 1] !== "@" && isSetAssignmentTarget(sql, i + 1 + name.length)) {
+        declared.add(name.toLowerCase());
+        i += 1 + name.length;
+        continue;
+      }
+    }
+    i += 1;
+  }
+  return i;
+}
+
+function collectRoutineDefinitionVariables(sql: string, start: number, declared: Set<string>): number {
+  let i = start;
+  while (i < sql.length) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+    if (ch === ";") return i + 1;
+    if (matchesWord(sql, i, "as") || matchesWord(sql, i, "returns")) return i;
+    if (ch === "'" || ch === '"' || ch === "`") {
+      i = skipQuoted(sql, i, ch);
+      continue;
+    }
+    if (ch === "[") {
+      i = skipBracketIdentifier(sql, i);
+      continue;
+    }
+    if (ch === "-" && next === "-") {
+      i = skipLine(sql, i + 2);
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      i = skipBlockComment(sql, i + 2);
+      continue;
+    }
+    if (isHashLineComment(sql, i)) {
+      i = skipLine(sql, i + 1);
+      continue;
+    }
+    if (ch === "@") {
+      const name = readParameterName(sql, i + 1);
+      if (name && next !== "@" && sql[i - 1] !== "@") {
+        declared.add(name.toLowerCase());
+        i += 1 + name.length;
+        continue;
+      }
+    }
+    i += 1;
+  }
+  return i;
+}
+
+function collectExecNamedArgumentStarts(sql: string, start: number, ignoredStarts: Set<number>): number {
+  let i = start;
+  while (i < sql.length) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+    if (ch === ";") return i + 1;
+    if (isLineStatementStart(sql, i) && isSqlStatementKeyword(sql, i)) return i;
+    if (ch === "'" || ch === '"' || ch === "`") {
+      i = skipQuoted(sql, i, ch);
+      continue;
+    }
+    if (ch === "[") {
+      i = skipBracketIdentifier(sql, i);
+      continue;
+    }
+    if (ch === "-" && next === "-") {
+      i = skipLine(sql, i + 2);
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      i = skipBlockComment(sql, i + 2);
+      continue;
+    }
+    if (isHashLineComment(sql, i)) {
+      i = skipLine(sql, i + 1);
+      continue;
+    }
+    if (ch === "@") {
+      const name = readParameterName(sql, i + 1);
+      if (name && next !== "@" && sql[i - 1] !== "@" && isSetAssignmentTarget(sql, i + 1 + name.length)) {
+        ignoredStarts.add(i);
+        i += 1 + name.length;
+        continue;
+      }
+    }
+    i += 1;
+  }
+  return i;
+}
+
+function isRoutineDefinitionStart(sql: string, start: number): boolean {
+  const keyword = matchesWord(sql, start, "create") ? "create" : matchesWord(sql, start, "alter") ? "alter" : "";
+  if (!keyword) return false;
+
+  let next = readNextKeyword(sql, start + keyword.length);
+  if (!next) return false;
+  if (keyword === "create" && next.word === "or") {
+    const afterOr = readNextKeyword(sql, next.end);
+    if (!afterOr || (afterOr.word !== "alter" && afterOr.word !== "replace")) return false;
+    next = readNextKeyword(sql, afterOr.end);
+    if (!next) return false;
+  }
+  return next.word === "procedure" || next.word === "proc" || next.word === "function";
+}
+
+function readNextKeyword(sql: string, start: number): { word: string; end: number } | null {
+  let i = start;
+  while (i < sql.length) {
+    while (i < sql.length && /\s/.test(sql[i])) i += 1;
+    if (sql[i] === "-" && sql[i + 1] === "-") {
+      i = skipLine(sql, i + 2);
+      continue;
+    }
+    if (sql[i] === "/" && sql[i + 1] === "*") {
+      i = skipBlockComment(sql, i + 2);
+      continue;
+    }
+    break;
+  }
+  if (!PARAMETER_NAME_START_RE.test(sql[i] ?? "")) return null;
+  let end = i + 1;
+  while (end < sql.length && PARAMETER_NAME_CHAR_RE.test(sql[end])) end += 1;
+  return { word: sql.slice(i, end).toLowerCase(), end };
+}
+
+function isSetAssignmentTarget(sql: string, start: number): boolean {
+  let i = start;
+  while (i < sql.length && /\s/.test(sql[i])) i += 1;
+  return sql[i] === "=" || (sql[i] === ":" && sql[i + 1] === "=");
 }
 
 function isLineStatementStart(sql: string, start: number): boolean {
@@ -338,6 +565,31 @@ function skipLine(sql: string, start: number): number {
 function skipBlockComment(sql: string, start: number): number {
   const end = sql.indexOf("*/", start);
   return end === -1 ? sql.length : end + 2;
+}
+
+function isHashLineComment(sql: string, start: number): boolean {
+  if (sql[start] !== "#" || sql[start + 1] === "{") return false;
+  // Keep SQL Server #temp table names parseable while treating other # tokens as MySQL-style comments.
+  return !isSqlServerTempTableReference(sql, start);
+}
+
+function isSqlServerTempTableReference(sql: string, start: number): boolean {
+  let nameStart = start + 1;
+  if (sql[nameStart] === "#") nameStart += 1;
+  if (!PARAMETER_NAME_START_RE.test(sql[nameStart] ?? "")) return false;
+
+  const previous = previousKeyword(sql, start);
+  return !!previous && SQL_SERVER_TEMP_TABLE_CONTEXT_KEYWORDS.has(previous);
+}
+
+function previousKeyword(sql: string, start: number): string {
+  let end = start - 1;
+  while (end >= 0 && /\s/.test(sql[end])) end -= 1;
+  let begin = end;
+  while (begin >= 0 && PARAMETER_NAME_CHAR_RE.test(sql[begin])) begin -= 1;
+  begin += 1;
+  if (begin > end || !PARAMETER_NAME_START_RE.test(sql[begin] ?? "")) return "";
+  return sql.slice(begin, end + 1).toLowerCase();
 }
 
 function readDollarQuoteMarker(sql: string, start: number): string {

@@ -39,6 +39,8 @@ export interface DataGridCopyUpdateStatementOptions {
   rows: GridCellValue[][];
 }
 
+export type DataGridCopyInsertMode = "merged" | "row-by-row";
+
 export interface DataGridCopyInsertStatementOptions {
   databaseType?: DatabaseType;
   tableMeta?: DataGridTableMeta;
@@ -46,6 +48,7 @@ export interface DataGridCopyInsertStatementOptions {
   sourceColumns?: Array<string | undefined>;
   rows: GridCellValue[][];
   excludePrimaryKeys?: boolean;
+  insertMode?: DataGridCopyInsertMode;
 }
 
 export type DataGridContextFilterMode = "equals" | "not-equals" | "is-null" | "is-not-null" | "like" | "not-like" | "less-than" | "greater-than";

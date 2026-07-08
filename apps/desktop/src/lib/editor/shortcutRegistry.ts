@@ -1,8 +1,9 @@
-import { parseShortcutParts, shortcutDisplayParts } from "@/lib/editor/shortcutDisplay";
+import { parseShortcutStrokes, shortcutDisplayParts } from "@/lib/editor/shortcutDisplay";
 
 export type ShortcutActionId =
   | "executeSql"
   | "formatSql"
+  | "toggleLineComment"
   | "saveSql"
   | "acceptCompletion"
   | "indentMore"
@@ -73,6 +74,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutFormatSql",
     scope: "editor",
     defaultShortcut: "Shift+Mod+F",
+  },
+  {
+    id: "toggleLineComment",
+    labelKey: "settings.shortcutToggleLineComment",
+    scope: "editor",
+    defaultShortcut: "Mod+/",
   },
   {
     id: "saveSql",
@@ -359,10 +366,14 @@ export function normalizeShortcutSettings(settings?: Partial<ShortcutSettings>):
 }
 
 export function shortcutToCodeMirrorKey(shortcut: string): string {
-  return parseShortcutParts(shortcut)
-    .map((part) => (part.length === 1 ? part.toLowerCase() : part))
-    .map((part) => (part === "Plus" ? "+" : part))
-    .join("-");
+  return parseShortcutStrokes(shortcut)
+    .map((parts) =>
+      parts
+        .map((part) => (part.length === 1 ? part.toLowerCase() : part))
+        .map((part) => (part === "Plus" ? "+" : part))
+        .join("-"),
+    )
+    .join(" ");
 }
 
 export function formatShortcut(shortcut: string, platform = globalThis.navigator?.platform || ""): string {

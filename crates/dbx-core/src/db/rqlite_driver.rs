@@ -145,6 +145,7 @@ pub async fn get_columns(client: &RqliteClient, _schema: &str, table: &str) -> R
             numeric_precision: None,
             numeric_scale: None,
             character_maximum_length: None,
+            enum_values: None,
         })
         .collect())
 }

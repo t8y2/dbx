@@ -1,11 +1,18 @@
 #![cfg(feature = "duckdb-bundled")]
 
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dbx_core::db::duckdb_worker_process::DuckDbWorkerClient;
+use dbx_core::db::duckdb_worker_protocol::{
+    DuckDbWorkerConnectParams, DuckDbWorkerExecuteParams, DuckDbWorkerMethod, DuckDbWorkerRequest, DuckDbWorkerResponse,
+};
 use dbx_core::query_cancel::{RunningQueries, RunningTaskMetadata};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
 static TEMP_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -122,6 +129,303 @@ async fn worker_process_recovers_after_registered_cancel_interrupt() {
     let _ = std::fs::remove_file(&db_path);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_process_recovers_after_parser_error() {
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_duckdb-worker-test-host"));
+    let db_path = temp_duckdb_path();
+    let _ = std::fs::remove_file(&db_path);
+
+    let client =
+        DuckDbWorkerClient::open_with_executable(executable, db_path.to_string_lossy().to_string(), Vec::new())
+            .await
+            .expect("worker process connects");
+
+    client
+        .execute(
+            None,
+            "CREATE TABLE events (id INTEGER, name VARCHAR); INSERT INTO events VALUES (1, 'login');".to_string(),
+            Some(10),
+            None,
+            Some(Duration::from_secs(5)),
+        )
+        .await
+        .expect("create events table");
+
+    let err = client
+        .execute(None, "select * from table limit 19;".to_string(), Some(10), None, Some(Duration::from_secs(5)))
+        .await
+        .expect_err("reserved word query should fail");
+    assert!(err.contains("Parser Error"), "unexpected error: {err}");
+
+    let probe = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.execute(
+            None,
+            "SELECT * FROM events LIMIT 100;".to_string(),
+            Some(100),
+            None,
+            Some(Duration::from_secs(5)),
+        ),
+    )
+    .await
+    .expect("query after parser error should not hang")
+    .expect("query after parser error should succeed");
+
+    assert_eq!(probe.columns, vec!["id".to_string(), "name".to_string()]);
+    assert_eq!(probe.rows, vec![vec![serde_json::json!(1), serde_json::json!("login")]]);
+
+    client.shutdown().await;
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_process_keeps_session_state_after_benign_error() {
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_duckdb-worker-test-host"));
+    let db_path = temp_duckdb_path();
+    let _ = std::fs::remove_file(&db_path);
+
+    let client =
+        DuckDbWorkerClient::open_with_executable(executable, db_path.to_string_lossy().to_string(), Vec::new())
+            .await
+            .expect("worker process connects");
+
+    // Temp tables live only in the worker's session. If a benign error restarted the
+    // worker, this table would be gone after the error.
+    client
+        .execute(
+            None,
+            "CREATE TEMP TABLE scratch (id INTEGER); INSERT INTO scratch VALUES (7);".to_string(),
+            Some(10),
+            None,
+            Some(Duration::from_secs(5)),
+        )
+        .await
+        .expect("create temp table");
+
+    // Catalog error: prepare succeeds, the query fails at bind/exec time. This does not
+    // poison the connection, so the worker must stay alive and keep the temp table.
+    let err = client
+        .execute(None, "SELECT * FROM does_not_exist;".to_string(), Some(10), None, Some(Duration::from_secs(5)))
+        .await
+        .expect_err("missing table query should fail");
+    assert!(err.contains("does_not_exist") || err.contains("Catalog Error"), "unexpected error: {err}");
+
+    let probe = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.execute(None, "SELECT id FROM scratch;".to_string(), Some(10), None, Some(Duration::from_secs(5))),
+    )
+    .await
+    .expect("query after benign error should not hang")
+    .expect("temp table should still exist after a benign error");
+
+    assert_eq!(probe.columns, vec!["id".to_string()]);
+    assert_eq!(probe.rows, vec![vec![serde_json::json!(7)]]);
+
+    client.shutdown().await;
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_process_exits_when_stdin_closes_during_active_query() {
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_duckdb-worker-test-host"));
+    let db_path = temp_duckdb_path();
+    let _ = std::fs::remove_file(&db_path);
+    let mut child = Command::new(executable)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("spawn worker");
+    let mut stdin = child.stdin.take().expect("worker stdin");
+    let stdout = child.stdout.take().expect("worker stdout");
+    let mut lines = BufReader::new(stdout).lines();
+
+    write_worker_request(
+        &mut stdin,
+        DuckDbWorkerRequest::new(
+            "connect",
+            DuckDbWorkerMethod::Connect,
+            DuckDbWorkerConnectParams { path: db_path.to_string_lossy().to_string(), attached_databases: Vec::new() },
+        )
+        .expect("connect request"),
+    )
+    .await;
+    let connected = read_worker_response(&mut lines).await;
+    assert!(connected.ok, "connect failed: {connected:?}");
+
+    write_worker_request(
+        &mut stdin,
+        DuckDbWorkerRequest::new(
+            "long-query",
+            DuckDbWorkerMethod::Execute,
+            DuckDbWorkerExecuteParams {
+                sql: "SELECT sum(sin(i::DOUBLE) * cos(i::DOUBLE / 3.0)) FROM range(100000000000) AS t(i)".to_string(),
+                database: None,
+                max_rows: Some(10),
+            },
+        )
+        .expect("execute request"),
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drop(stdin);
+
+    tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .expect("worker should exit after stdin closes")
+        .expect("wait for worker");
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_process_is_killed_after_connect_timeout() {
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_duckdb-worker-hanging-connect-test-host"));
+    let db_path = temp_duckdb_path();
+    let pid_file = temp_pid_path();
+    let _ = std::fs::remove_file(&pid_file);
+    let _ = std::fs::remove_file(&db_path);
+
+    std::env::set_var("DBX_DUCKDB_HANGING_CONNECT_PID_FILE", &pid_file);
+    let client = DuckDbWorkerClient::new_unconnected_with_timeouts(
+        executable,
+        db_path.to_string_lossy().to_string(),
+        Vec::new(),
+        4,
+        Duration::from_millis(200),
+        Duration::from_secs(5),
+    );
+
+    let err = client
+        .execute(None, "SELECT 1".to_string(), Some(10), None, Some(Duration::from_secs(5)))
+        .await
+        .expect_err("connect should time out");
+    std::env::remove_var("DBX_DUCKDB_HANGING_CONNECT_PID_FILE");
+    assert!(err.contains("timed out"), "unexpected error: {err}");
+
+    let pid = read_pid_file(&pid_file).expect("hanging worker pid");
+    wait_until_process_exits(pid, Duration::from_secs(5)).await;
+
+    let _ = std::fs::remove_file(&pid_file);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_process_is_killed_after_connect_error() {
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_duckdb-worker-pid-test-host"));
+    let db_path = temp_duckdb_path();
+    let pid_file = temp_pid_path();
+    let _ = std::fs::remove_file(&pid_file);
+    let _ = std::fs::remove_file(&db_path);
+
+    let _file_owner = duckdb::Connection::open(&db_path).expect("open lock owner connection");
+
+    std::env::set_var("DBX_DUCKDB_PID_TEST_HOST_PID_FILE", &pid_file);
+    let client = DuckDbWorkerClient::new_unconnected_with_timeouts(
+        executable,
+        db_path.to_string_lossy().to_string(),
+        Vec::new(),
+        4,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    );
+
+    let err = client
+        .execute(None, "SELECT 1".to_string(), Some(10), None, Some(Duration::from_secs(5)))
+        .await
+        .expect_err("connect should fail while another process owns the DuckDB file");
+    std::env::remove_var("DBX_DUCKDB_PID_TEST_HOST_PID_FILE");
+    assert!(
+        err.contains("Cannot open file") || err.contains("already open") || err.contains("另一个程序正在使用"),
+        "unexpected error: {err}"
+    );
+
+    let pid = read_pid_file(&pid_file).expect("worker pid");
+    wait_until_process_exits(pid, Duration::from_secs(5)).await;
+
+    let _ = std::fs::remove_file(&pid_file);
+    drop(_file_owner);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_process_retries_connect_after_transient_file_lock() {
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_duckdb-worker-test-host"));
+    let db_path = temp_duckdb_path();
+    let _ = std::fs::remove_file(&db_path);
+
+    let mut owner_child = Command::new(&executable)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("spawn lock owner worker");
+    let mut owner_stdin = owner_child.stdin.take().expect("owner worker stdin");
+    let owner_stdout = owner_child.stdout.take().expect("owner worker stdout");
+    let mut owner_lines = BufReader::new(owner_stdout).lines();
+    write_worker_request(
+        &mut owner_stdin,
+        DuckDbWorkerRequest::new(
+            "connect-owner",
+            DuckDbWorkerMethod::Connect,
+            DuckDbWorkerConnectParams { path: db_path.to_string_lossy().to_string(), attached_databases: Vec::new() },
+        )
+        .expect("owner connect request"),
+    )
+    .await;
+    let connected = read_worker_response(&mut owner_lines).await;
+    assert!(connected.ok, "owner connect failed: {connected:?}");
+    drop(owner_lines);
+
+    let release_owner = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        drop(owner_stdin);
+        let _ = tokio::time::timeout(Duration::from_secs(5), owner_child.wait()).await;
+    });
+
+    let client = DuckDbWorkerClient::new_unconnected_with_timeouts(
+        executable,
+        db_path.to_string_lossy().to_string(),
+        Vec::new(),
+        4,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    );
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.execute(None, "SELECT 42 AS retried".to_string(), Some(10), None, Some(Duration::from_secs(5))),
+    )
+    .await;
+
+    let _ = release_owner.await;
+    client.shutdown().await;
+    let _ = std::fs::remove_file(&db_path);
+
+    let result = result
+        .expect("retrying connect should not hang")
+        .expect("connect should retry after a transient DuckDB file lock");
+    assert_eq!(result.columns, vec!["retried".to_string()]);
+    assert_eq!(result.rows, vec![vec![serde_json::json!(42)]]);
+}
+
+async fn write_worker_request(stdin: &mut tokio::process::ChildStdin, request: DuckDbWorkerRequest) {
+    let line = serde_json::to_string(&request).expect("request json");
+    stdin.write_all(line.as_bytes()).await.expect("write request");
+    stdin.write_all(b"\n").await.expect("write newline");
+    stdin.flush().await.expect("flush request");
+}
+
+async fn read_worker_response(
+    lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+) -> DuckDbWorkerResponse {
+    let line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        .await
+        .expect("worker response timed out")
+        .expect("read worker response")
+        .expect("worker response line");
+    serde_json::from_str(&line).expect("parse worker response")
+}
+
 fn temp_duckdb_path() -> PathBuf {
     let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
     let pid = std::process::id();
@@ -129,4 +433,45 @@ fn temp_duckdb_path() -> PathBuf {
     // from sharing a DuckDB file lock.
     let counter = TEMP_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!("dbx-duckdb-worker-process-{pid}-{suffix}-{counter}.duckdb"))
+}
+
+fn temp_pid_path() -> PathBuf {
+    let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let pid = std::process::id();
+    let counter = TEMP_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("dbx-duckdb-worker-process-{pid}-{suffix}-{counter}.pid"))
+}
+
+fn read_pid_file(path: &PathBuf) -> Option<u32> {
+    for _ in 0..20 {
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            if let Ok(pid) = contents.trim().parse::<u32>() {
+                return Some(pid);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    None
+}
+
+async fn wait_until_process_exits(pid: u32, timeout: Duration) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if !process_exists(pid) {
+            return;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "worker process {pid} should have been killed");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn process_exists(pid: u32) -> bool {
+    let mut system =
+        System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new().with_memory()));
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[Pid::from(pid as usize)]),
+        true,
+        ProcessRefreshKind::new().with_memory(),
+    );
+    system.process(Pid::from(pid as usize)).is_some()
 }

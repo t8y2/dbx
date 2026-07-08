@@ -184,6 +184,7 @@ pub async fn get_columns(client: &TursoClient, _schema: &str, table: &str) -> Re
             numeric_precision: None,
             numeric_scale: None,
             character_maximum_length: None,
+            enum_values: None,
         })
         .collect())
 }

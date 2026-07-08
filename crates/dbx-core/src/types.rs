@@ -120,6 +120,8 @@ pub struct ColumnInfo {
     pub numeric_precision: Option<i32>,
     pub numeric_scale: Option<i32>,
     pub character_maximum_length: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enum_values: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

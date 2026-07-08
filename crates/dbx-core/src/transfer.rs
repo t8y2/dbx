@@ -482,7 +482,9 @@ fn looks_like_numeric_literal(raw: &str) -> bool {
     if trimmed.is_empty() {
         return false;
     }
-    trimmed.parse::<i64>().is_ok() || trimmed.parse::<u64>().is_ok() || trimmed.parse::<f64>().is_ok()
+    trimmed.parse::<i64>().is_ok()
+        || trimmed.parse::<u64>().is_ok()
+        || trimmed.parse::<f64>().is_ok_and(|value| value.is_finite())
 }
 
 fn format_mysql_default_literal(raw: &str, data_type: &str) -> String {
@@ -971,6 +973,9 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             if let Some(binary_literal) = format_postgres_binary_sql_literal(s, db_type, column_type) {
                 return binary_literal;
             }
+            if let Some(numeric_literal) = format_mysql_numeric_string_literal(s, db_type, column_type) {
+                return numeric_literal;
+            }
 
             let literal = format_literal_string(s, db_type, column_type);
             let escaped = if is_postgres_family_target(db_type) {
@@ -1003,6 +1008,37 @@ fn is_mysql_bit_type(column_type: &str) -> bool {
     let trimmed = column_type.trim();
     let lower = trimmed.to_ascii_lowercase();
     lower == "bit" || lower.starts_with("bit(") || lower.starts_with("bit ")
+}
+
+fn is_mysql_numeric_string_literal_database(db_type: &DatabaseType) -> bool {
+    matches!(
+        db_type,
+        DatabaseType::Mysql
+            | DatabaseType::Doris
+            | DatabaseType::StarRocks
+            | DatabaseType::Goldendb
+            | DatabaseType::Sundb
+    )
+}
+
+fn is_mysql_non_bit_numeric_type(column_type: &str) -> bool {
+    is_mysql_numeric_base_type(column_type) && !is_mysql_bit_type(column_type)
+}
+
+fn format_mysql_numeric_string_literal(
+    value: &str,
+    db_type: &DatabaseType,
+    column_type: Option<&str>,
+) -> Option<String> {
+    if !is_mysql_numeric_string_literal_database(db_type) || !column_type.is_some_and(is_mysql_non_bit_numeric_type) {
+        return None;
+    }
+    let trimmed = value.trim();
+    if looks_like_numeric_literal(trimmed) {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
 }
 
 fn is_binary_transfer_column_type(column_type: &str) -> bool {
@@ -2281,6 +2317,7 @@ fn mongo_columns_from_documents(documents: &[serde_json::Value]) -> Vec<db::Colu
                 numeric_precision: None,
                 numeric_scale: None,
                 character_maximum_length: None,
+                enum_values: None,
             }
         })
         .collect()
@@ -3455,6 +3492,7 @@ where
                         numeric_precision: None,
                         numeric_scale: None,
                         character_maximum_length: None,
+                        enum_values: None,
                     });
                 }
                 sql_target_column_names = sql_target_columns.iter().map(|column| column.name.clone()).collect();
@@ -4298,6 +4336,7 @@ mod tests {
             driver_profile: None,
             driver_label: None,
             url_params: None,
+            agent_java_options: Vec::new(),
             host: ":memory:".to_string(),
             port: 0,
             username: String::new(),
@@ -4351,6 +4390,7 @@ mod tests {
             numeric_precision: None,
             numeric_scale: None,
             character_maximum_length: None,
+            enum_values: None,
         }
     }
 
@@ -5179,6 +5219,7 @@ mod tests {
                     numeric_precision: None,
                     numeric_scale: None,
                     character_maximum_length: None,
+                    enum_values: None,
                 },
                 db::ColumnInfo {
                     name: "identity_id".to_string(),
@@ -5191,6 +5232,7 @@ mod tests {
                     numeric_precision: None,
                     numeric_scale: None,
                     character_maximum_length: None,
+                    enum_values: None,
                 },
                 db::ColumnInfo {
                     name: "computed_id".to_string(),
@@ -5203,6 +5245,7 @@ mod tests {
                     numeric_precision: None,
                     numeric_scale: None,
                     character_maximum_length: None,
+                    enum_values: None,
                 },
             ],
             "users",
@@ -5276,6 +5319,7 @@ mod tests {
                 numeric_precision: None,
                 numeric_scale: None,
                 character_maximum_length: None,
+                enum_values: None,
             },
             db::ColumnInfo {
                 name: "name".to_string(),
@@ -5288,6 +5332,7 @@ mod tests {
                 numeric_precision: None,
                 numeric_scale: None,
                 character_maximum_length: None,
+                enum_values: None,
             },
         ];
         let source_ddl = crate::schema::render_postgres_table_ddl("public", "it_quick_entry", &columns, &[], &[]);
@@ -5457,6 +5502,62 @@ mod tests {
         assert_eq!(
             sql,
             "INSERT INTO `policies` (`dt`, `raw_text`, `d`, `t`) VALUES\n('2026-05-12 00:00:00', '2026-05-12T00:00:00+00:00', '2026-05-12', '09:30:45')"
+        );
+    }
+
+    #[test]
+    fn mysql_insert_formats_numeric_strings_from_numeric_columns_as_numeric_literals() {
+        let sql = generate_insert_typed(
+            &[
+                String::from("id"),
+                String::from("amount"),
+                String::from("quantity"),
+                String::from("text_id"),
+                String::from("bad_number"),
+                String::from("missing"),
+            ],
+            &[
+                Some(String::from("bigint(20)")),
+                Some(String::from("decimal(10,2)")),
+                Some(String::from("int unsigned")),
+                Some(String::from("varchar(64)")),
+                Some(String::from("bigint(20)")),
+                Some(String::from("bigint(20)")),
+            ],
+            &[vec![
+                json!("1234567890123"),
+                json!("12.34"),
+                json!("42"),
+                json!("123"),
+                json!("not-a-number"),
+                serde_json::Value::Null,
+            ]],
+            "orders",
+            "",
+            &DatabaseType::Mysql,
+        );
+
+        assert_eq!(
+            sql,
+            "INSERT INTO `orders` (`id`, `amount`, `quantity`, `text_id`, `bad_number`, `missing`) VALUES\n(1234567890123, 12.34, 42, '123', 'not-a-number', NULL)"
+        );
+    }
+
+    #[test]
+    fn mysql_upsert_formats_numeric_strings_from_numeric_columns_as_numeric_literals() {
+        let sql = generate_upsert_typed(
+            &[String::from("id"), String::from("amount")],
+            &[Some(String::from("bigint(20)")), Some(String::from("decimal(10,2)"))],
+            &[vec![json!("1234567890123"), json!("12.34")]],
+            "orders",
+            "",
+            &DatabaseType::Mysql,
+            &[String::from("id")],
+        );
+
+        assert_eq!(
+            sql,
+            "INSERT INTO `orders` (`id`, `amount`) VALUES\n(1234567890123, 12.34)\nON DUPLICATE KEY UPDATE `amount` = VALUES(`amount`)"
         );
     }
 

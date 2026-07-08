@@ -1,6 +1,7 @@
 use crate::connection::{AppState, PoolKind};
 use crate::db::redis_driver::{
-    self, RedisCommandResult, RedisConnection, RedisDatabaseInfo, RedisKeyInfo, RedisScanResult, RedisValue,
+    self, RedisCollectionPage, RedisCommandResult, RedisConnection, RedisDatabaseInfo, RedisKeyInfo, RedisScanResult,
+    RedisValue,
 };
 
 async fn ensure_redis_pool(state: &AppState, connection_id: &str) -> Result<(), String> {
@@ -790,7 +791,7 @@ pub async fn redis_load_more_in_db_core(
     cursor: u64,
     count: usize,
     filter: Option<&str>,
-) -> Result<redis_driver::RedisValue, String> {
+) -> Result<RedisCollectionPage, String> {
     ensure_redis_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {

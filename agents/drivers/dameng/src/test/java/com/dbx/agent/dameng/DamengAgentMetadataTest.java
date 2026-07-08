@@ -81,6 +81,20 @@ class DamengAgentMetadataTest {
     }
 
     @Test
+    void listSchemasIncludesSchemaObjectsWithoutChildren() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, metadataConnection("id comment", null, false, List.of(), sqls, ""));
+
+        List<String> schemas = agent.listSchemas();
+
+        Assertions.assertEquals(List.of("APP", "EMPTY_SCHEMA"), schemas);
+        Assertions.assertTrue(sqls.stream().anyMatch(sql -> sql.contains("SYS.SYSOBJECTS") && sql.contains("TYPE$ = 'SCH'")), String.join("\n", sqls));
+        Assertions.assertTrue(sqls.stream().noneMatch(sql -> sql.contains("ALL_USERS")), String.join("\n", sqls));
+        Assertions.assertTrue(sqls.stream().noneMatch(sql -> sql.contains("ALL_OBJECTS")), String.join("\n", sqls));
+    }
+
+    @Test
     void mapsMaterializedViewsFromMetadata() {
         DamengAgent agent = new DamengAgent();
         TestSupport.setPrivateConnection(agent, metadataConnection("id comment", null, true));
@@ -311,6 +325,9 @@ class DamengAgentMetadataTest {
                 }
                 if (sql.contains("DBMS_METADATA.GET_DDL")) {
                     return dbmsMetadataStatement(dbmsMetadataDdl);
+                }
+                if (sql.contains("SYS.SYSOBJECTS") && sql.contains("TYPE$ = 'SCH'")) {
+                    return metadataStatement(List.of(List.of("APP"), List.of("EMPTY_SCHEMA")));
                 }
                 if (sql.contains("ALL_CONS_COLUMNS")) {
                     return metadataStatement(List.of(List.of("ID")));

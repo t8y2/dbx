@@ -118,6 +118,7 @@ export interface ConnectionConfig {
   driver_profile?: string;
   driver_label?: string;
   url_params?: string;
+  agent_java_options?: string[];
   host: string;
   port: number;
   username: string;
@@ -356,6 +357,7 @@ export interface ColumnInfo {
   numeric_precision?: number | null;
   numeric_scale?: number | null;
   character_maximum_length?: number | null;
+  enum_values?: string[] | null;
 }
 
 export interface IndexInfo {

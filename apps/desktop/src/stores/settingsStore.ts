@@ -478,9 +478,9 @@ export const EDITOR_THEMES: { value: EditorTheme; label: string; dark: boolean }
 const EDITOR_THEME_VALUES = new Set<EditorTheme>(EDITOR_THEMES.map((theme) => theme.value));
 
 export const FONT_FAMILIES: { value: string; label: string }[] = [
+  { value: "'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', monospace", label: "Fira Code" },
   { value: "'JetBrains Mono', 'Fira Code', monospace", label: "JetBrains Mono" },
-  { value: "'Fira Code', monospace", label: "Fira Code" },
-  { value: "'Cascadia Code', monospace", label: "Cascadia Code" },
+  { value: "'Cascadia Code', 'Cascadia Mono', monospace", label: "Cascadia Code" },
   { value: "'Source Code Pro', monospace", label: "Source Code Pro" },
   { value: "'SF Mono', 'Menlo', monospace", label: "SF Mono / Menlo" },
   { value: "'Consolas', 'Courier New', monospace", label: "Consolas" },
@@ -488,7 +488,7 @@ export const FONT_FAMILIES: { value: string; label: string }[] = [
 ];
 
 export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
-  fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+  fontFamily: "'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', monospace",
   fontSize: 13,
   uiFontFamily: DEFAULT_UI_FONT_FAMILY,
   uiScale: 1,

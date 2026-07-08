@@ -106,38 +106,48 @@ public final class DamengAgent extends BaseDatabaseAgent {
 
     @Override
     public List<DatabaseInfo> listDatabases() {
-        return unchecked(() -> {
-            List<DatabaseInfo> result = new ArrayList<>();
-            String placeholders = String.join(",", SYSTEM_USERS.stream().map(user -> "?").toList());
-            String sql = "SELECT USERNAME FROM ALL_USERS WHERE USERNAME NOT IN (" + placeholders + ") ORDER BY USERNAME";
-            try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
-                int index = 1;
-                for (String user : SYSTEM_USERS) {
-                    stmt.setString(index++, user);
-                }
-                try (ResultSet rs = stmt.executeQuery()) {
-                    while (rs.next()) {
-                        result.add(new DatabaseInfo(rs.getString(1)));
-                    }
-                }
-            }
-            return result;
-        });
+        return unchecked(() -> listVisibleUsers().stream().map(DatabaseInfo::new).toList());
     }
 
     @Override
     public List<String> listSchemas() {
-        return unchecked(() -> {
-            List<String> result = new ArrayList<>();
-            String sql = "SELECT DISTINCT OWNER FROM ALL_OBJECTS ORDER BY OWNER";
-            try (java.sql.Statement stmt = requireConnected().createStatement();
-                 ResultSet rs = stmt.executeQuery(sql)) {
+        return unchecked(this::listVisibleSchemas);
+    }
+
+    private List<String> listVisibleUsers() throws Exception {
+        List<String> result = new ArrayList<>();
+        String placeholders = String.join(",", SYSTEM_USERS.stream().map(user -> "?").toList());
+        String sql = "SELECT USERNAME FROM ALL_USERS WHERE USERNAME NOT IN (" + placeholders + ") ORDER BY USERNAME";
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            int index = 1;
+            for (String user : SYSTEM_USERS) {
+                stmt.setString(index++, user);
+            }
+            try (ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {
                     result.add(rs.getString(1));
                 }
             }
-            return result;
-        });
+        }
+        return result;
+    }
+
+    private List<String> listVisibleSchemas() throws Exception {
+        List<String> result = new ArrayList<>();
+        String placeholders = String.join(",", SYSTEM_USERS.stream().map(user -> "?").toList());
+        String sql = "SELECT NAME FROM SYS.SYSOBJECTS WHERE TYPE$ = 'SCH' AND NAME NOT IN (" + placeholders + ") ORDER BY NAME";
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            int index = 1;
+            for (String user : SYSTEM_USERS) {
+                stmt.setString(index++, user);
+            }
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    result.add(rs.getString(1));
+                }
+            }
+        }
+        return result;
     }
 
     @Override

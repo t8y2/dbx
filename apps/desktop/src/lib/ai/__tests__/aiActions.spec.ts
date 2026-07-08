@@ -3,13 +3,12 @@ import { ASK_ACTIONS, AGENT_ACTIONS, defaultActionForMode, isValidActionForMode 
 
 describe("AI action mode mapping", () => {
   describe("defaultActionForMode", () => {
-    it("defaults Ask to generate", () => {
-      expect(defaultActionForMode("ask")).toBe("generate");
+    it("defaults Ask to general", () => {
+      expect(defaultActionForMode("ask")).toBe("general");
     });
 
-    it("defaults Agent to query (not generate)", () => {
-      // The whole point of the feature: Agent mode must not default to SQL generation.
-      expect(defaultActionForMode("agent")).toBe("query");
+    it("defaults Agent to general", () => {
+      expect(defaultActionForMode("agent")).toBe("general");
     });
   });
 
@@ -47,15 +46,15 @@ describe("AI action mode mapping", () => {
   });
 
   describe("action sets", () => {
-    it("Ask menu keeps the SQL-producing actions", () => {
-      expect(ASK_ACTIONS).toEqual(["generate", "explain", "optimize", "fix", "convert", "sampleData"]);
+    it("Ask menu starts with general, then SQL-producing actions", () => {
+      expect(ASK_ACTIONS).toEqual(["general", "generate", "explain", "optimize", "fix", "convert", "sampleData"]);
     });
 
-    it("Agent menu is task-oriented, starts with query, and still offers generate", () => {
-      expect(AGENT_ACTIONS[0]).toBe("query");
-      // generate is shared so users can still request SQL-only output ("生成但不执行").
+    it("Agent menu starts with general, then task-oriented actions", () => {
+      expect(AGENT_ACTIONS[0]).toBe("general");
+      // generate is shared so users can still request SQL-only output.
       expect(AGENT_ACTIONS).toContain("generate");
-      expect(AGENT_ACTIONS).toEqual(["query", "exploreSchema", "executeAndExplain", "generate"]);
+      expect(AGENT_ACTIONS).toEqual(["general", "query", "exploreSchema", "executeAndExplain", "generate"]);
     });
   });
 });

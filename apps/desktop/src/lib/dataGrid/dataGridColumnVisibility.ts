@@ -1,11 +1,29 @@
+import { buildDataGridColumnLookupItems, filterDataGridColumnLookupItems } from "./dataGridColumnLookup";
+
 export interface ColumnVisibilityOption {
   column: string;
+  comment?: string;
   index: number;
 }
 
-export function filterColumnVisibilityOptions(columns: string[], query: string): ColumnVisibilityOption[] {
-  const normalizedQuery = query.trim().toLowerCase();
-  return columns.map((column, index) => ({ column, index })).filter(({ column }) => !normalizedQuery || column.toLowerCase().includes(normalizedQuery));
+export interface ColumnVisibilityFilterOptions {
+  sourceColumns?: readonly (string | undefined)[];
+  commentByColumn?: ReadonlyMap<string, string>;
+}
+
+export function filterColumnVisibilityOptions(columns: readonly string[], query: string, options: ColumnVisibilityFilterOptions = {}): ColumnVisibilityOption[] {
+  return filterDataGridColumnLookupItems(
+    buildDataGridColumnLookupItems({
+      columns,
+      sourceColumns: options.sourceColumns,
+      commentByColumn: options.commentByColumn,
+    }),
+    query,
+  ).map((item) => ({
+    column: item.name,
+    ...(item.comment ? { comment: item.comment } : {}),
+    index: item.index,
+  }));
 }
 
 export function visibleColumnIndexesForFilter(availableIndexes: number[], hiddenIndexes: ReadonlySet<number>): number[] {

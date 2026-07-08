@@ -142,6 +142,8 @@ async fn connect_agent_pool(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "sqlite-sqlcipher")]
+    use super::connect_sqlite_from_config;
     use super::{
         mark_mongo_legacy_driver, mongo_legacy_connect_params, MONGO_LEGACY_DRIVER_LABEL, MONGO_LEGACY_DRIVER_PROFILE,
     };
@@ -161,6 +163,7 @@ mod tests {
             driver_profile: Some("mongodb".to_string()),
             driver_label: Some("MongoDB".to_string()),
             url_params: Some("authSource=admin&authMechanism=SCRAM-SHA-1".to_string()),
+            agent_java_options: Vec::new(),
             host: "172.22.4.42".to_string(),
             port: 27017,
             username: "mongouser".to_string(),
@@ -202,6 +205,24 @@ mod tests {
             one_time: false,
             read_only: false,
         }
+    }
+
+    #[cfg(feature = "sqlite-sqlcipher")]
+    fn sqlite_config(path: &std::path::Path, password: &str) -> ConnectionConfig {
+        let mut config = mongodb_config();
+        config.id = "sqlite".to_string();
+        config.name = "SQLite".to_string();
+        config.db_type = DatabaseType::Sqlite;
+        config.driver_profile = None;
+        config.driver_label = None;
+        config.url_params = None;
+        config.host = path.to_string_lossy().to_string();
+        config.port = 0;
+        config.username = String::new();
+        config.password = password.to_string();
+        config.database = None;
+        config.connection_string = None;
+        config
     }
 
     #[cfg(feature = "mq-admin")]
@@ -250,6 +271,51 @@ mod tests {
         assert_eq!(config.driver_profile.as_deref(), Some(MONGO_LEGACY_DRIVER_PROFILE));
         assert_eq!(config.driver_label.as_deref(), Some(MONGO_LEGACY_DRIVER_LABEL));
         assert!(!mark_mongo_legacy_driver(&mut config));
+    }
+
+    #[cfg(feature = "sqlite-sqlcipher")]
+    #[tokio::test]
+    async fn sqlite_connect_from_config_uses_sqlcipher_key() {
+        let path = std::env::temp_dir().join(format!("dbx-tauri-sqlcipher-{}.db", uuid::Uuid::new_v4()));
+        let key = "dbx-pass";
+
+        {
+            let pool =
+                dbx_core::db::sqlite::connect_path_create_if_missing_with_cipher_key(path.to_str().unwrap(), key)
+                    .await
+                    .expect("create encrypted sqlite");
+            pool.with_connection(|conn| {
+                conn.execute_batch(
+                    "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT); INSERT INTO users(name) VALUES ('Ada'), ('Grace');",
+                )
+                .map_err(|err| err.to_string())
+            })
+            .expect("write encrypted sqlite");
+        }
+
+        let config = sqlite_config(&path, key);
+        let pool = connect_sqlite_from_config(&config).await.expect("open encrypted sqlite");
+        let count = pool
+            .with_connection(|conn| {
+                conn.query_row("SELECT count(*) FROM users", [], |row| row.get::<_, i64>(0))
+                    .map_err(|err| err.to_string())
+            })
+            .expect("read encrypted sqlite");
+        assert_eq!(count, 2);
+
+        let wrong_key = match connect_sqlite_from_config(&sqlite_config(&path, "wrong-key")).await {
+            Ok(_) => panic!("wrong SQLCipher key must fail"),
+            Err(err) => err,
+        };
+        assert!(wrong_key.contains("SQLCipher database unlock failed"));
+
+        let missing_key = match connect_sqlite_from_config(&sqlite_config(&path, "")).await {
+            Ok(_) => panic!("missing SQLCipher key must fail"),
+            Err(err) => err,
+        };
+        assert!(missing_key.contains("not a valid SQLite database"));
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[cfg(feature = "mq-admin")]
@@ -487,6 +553,25 @@ pub async fn load_sidebar_layout(state: State<'_, Arc<AppState>>) -> Result<Opti
     state.storage.load_sidebar_layout().await
 }
 
+fn sqlite_extension_specs_from_config(config: &ConnectionConfig) -> Vec<db::sqlite::SqliteExtensionSpec> {
+    db::sqlite::sqlite_extension_specs_from_url_params(config.url_params.as_deref())
+        .into_iter()
+        .map(|mut extension| {
+            extension.path = expand_tilde(&extension.path);
+            extension
+        })
+        .collect()
+}
+
+async fn connect_sqlite_from_config(config: &ConnectionConfig) -> Result<db::sqlite::SqliteHandle, String> {
+    db::sqlite::connect_path_with_cipher_key_and_extensions(
+        &expand_tilde(&config.host),
+        &config.password,
+        sqlite_extension_specs_from_config(config),
+    )
+    .await
+}
+
 #[tauri::command]
 pub async fn test_connection(state: State<'_, Arc<AppState>>, config: ConnectionConfig) -> Result<String, String> {
     let tunnel_id = format!("{}:test", config.id);
@@ -512,7 +597,16 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                 }
             }
             DatabaseType::Mysql if config.needs_bare_mysql() && config.bare_mysql_uses_tls() => {
-                match db::mysql::connect_with_ca_cert(&url, Some(&config.ca_cert_path), connect_timeout).await {
+                match db::mysql::connect_compatible_with_ca_cert_pool_limit_idle_and_setup(
+                    &url,
+                    Some(&config.ca_cert_path),
+                    connect_timeout,
+                    10,
+                    None,
+                    &[],
+                )
+                .await
+                {
                     Ok(pool) => {
                         let _ = pool.disconnect().await;
                         Ok("Connection successful".to_string())
@@ -540,7 +634,15 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
             }
             DatabaseType::StarRocks => {
                 let connect = if config.bare_mysql_uses_tls() {
-                    db::mysql::connect_with_ca_cert(&url, Some(&config.ca_cert_path), connect_timeout).await
+                    db::mysql::connect_compatible_with_ca_cert_pool_limit_idle_and_setup(
+                        &url,
+                        Some(&config.ca_cert_path),
+                        connect_timeout,
+                        10,
+                        None,
+                        &[],
+                    )
+                    .await
                 } else {
                     db::mysql::connect_bare(&url, connect_timeout).await
                 };
@@ -564,19 +666,10 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                 }
                 Err(e) => Err(e),
             },
-            DatabaseType::Sqlite => {
-                let extensions = db::sqlite::sqlite_extension_specs_from_url_params(config.url_params.as_deref())
-                    .into_iter()
-                    .map(|mut extension| {
-                        extension.path = expand_tilde(&extension.path);
-                        extension
-                    })
-                    .collect();
-                match db::sqlite::connect_path_with_extensions(&expand_tilde(&config.host), extensions).await {
-                    Ok(_) => Ok("Connection successful".to_string()),
-                    Err(e) => Err(e),
-                }
-            }
+            DatabaseType::Sqlite => match connect_sqlite_from_config(&config).await {
+                Ok(_) => Ok("Connection successful".to_string()),
+                Err(e) => Err(e),
+            },
             DatabaseType::Redis => {
                 let con = if config.uses_redis_cluster() {
                     state.connect_redis_cluster(&tunnel_id, &config).await?;
@@ -843,18 +936,7 @@ pub async fn connect_db(
         | DatabaseType::Kwdb
         | DatabaseType::Questdb
         | DatabaseType::OpenGauss => PoolKind::Postgres(db::postgres::connect(&url, connect_timeout).await?),
-        DatabaseType::Sqlite => {
-            let extensions = db::sqlite::sqlite_extension_specs_from_url_params(db_config.url_params.as_deref())
-                .into_iter()
-                .map(|mut extension| {
-                    extension.path = expand_tilde(&extension.path);
-                    extension
-                })
-                .collect();
-            PoolKind::Sqlite(
-                db::sqlite::connect_path_with_extensions(&expand_tilde(&db_config.host), extensions).await?,
-            )
-        }
+        DatabaseType::Sqlite => PoolKind::Sqlite(connect_sqlite_from_config(&db_config).await?),
         DatabaseType::Redis => {
             let con = if db_config.uses_redis_cluster() {
                 PoolKind::Redis(db::redis_driver::RedisConnection::Cluster(

@@ -1832,6 +1832,50 @@ test("automatic table aliases avoid reserved words", () => {
   assert.equal(tableItem!.apply, "orders AS ord");
 });
 
+test("table alias suggestions avoid SQL keywords", () => {
+  const items = buildSqlCompletionItems("select * from item_file ", "select * from item_file ".length, {
+    tables: [{ name: "item_file", schema: "public", type: "table" }],
+    columnsByTable,
+  });
+
+  const aliasItem = items.find((item) => item.type === "snippet" && item.detail === "alias for item_file");
+  assert.ok(aliasItem);
+  assert.notEqual(aliasItem!.apply, "AS if ");
+  assert.equal(aliasItem!.apply, "AS it ");
+});
+
+test("automatic table aliases avoid SQL keywords", () => {
+  const cases: Array<[string, string]> = [
+    ["account_store", "account_store AS ac"],
+    ["account_type", "account_type AS ac"],
+    ["data_order", "data_order AS da"],
+    ["invoice_note", "invoice_note AS inv"],
+    ["item_file", "item_file AS it"],
+    ["item_status", "item_status AS it"],
+    ["new_order", "new_order AS ne"],
+    ["no_config", "no_config AS nc"],
+    ["order_node", "order_node AS ord"],
+    ["order_flow", "order_flow AS ord"],
+    ["order_region", "order_region AS ord"],
+    ["row_value", "row_value AS rv"],
+    ["use_case", "use_case AS uc"],
+    ["user_role", "user_role AS ur"],
+  ];
+
+  for (const [tableName, expectedApply] of cases) {
+    const sql = `select * from ${tableName.slice(0, 3)}`;
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [{ name: tableName, schema: "public", type: "table" }],
+      columnsByTable,
+      autoAliasTables: true,
+    });
+
+    const tableItem = items.find((item) => item.type === "table" && item.label === tableName);
+    assert.ok(tableItem, `should suggest ${tableName}`);
+    assert.equal(tableItem!.apply, expectedApply);
+  }
+});
+
 test("table alias suggestions avoid existing aliases", () => {
   const items = buildSqlCompletionItems("select * from customer_orders co join customer_orders ", "select * from customer_orders co join customer_orders ".length, {
     tables: [...tables, { name: "customer_orders", schema: "public", type: "table" }],

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { autoMapImportColumns, nextTableImportWizardStep, previousTableImportWizardStep, requiredImportTargetColumns, validateImportMappings } from "@/lib/table/tableImport";
+import { autoMapImportColumns, nextTableImportWizardStep, previousTableImportWizardStep, requiredImportTargetColumns, suggestImportTargetDataTypes, validateImportMappings } from "@/lib/table/tableImport";
 
 describe("tableImport", () => {
   it("auto maps exact and normalized column names", () => {
@@ -27,6 +27,13 @@ describe("tableImport", () => {
     expect(result.errors[0]).toContain("Target column mapped more than once");
   });
 
+  it("rejects empty create-table data types", () => {
+    const result = validateImportMappings([{ sourceColumn: "code", targetColumn: "code", targetDataType: "" }]);
+
+    expect(result.valid).toBe(false);
+    expect(result.errors).toEqual(["Target data type cannot be empty: code"]);
+  });
+
   it("detects unmapped required target columns", () => {
     expect(
       requiredImportTargetColumns(
@@ -45,5 +52,23 @@ describe("tableImport", () => {
     expect(nextTableImportWizardStep("execution")).toBe("execution");
     expect(previousTableImportWizardStep("review")).toBe("mapping");
     expect(previousTableImportWizardStep("source")).toBe("source");
+  });
+
+  it("suggests create-table data types from preview rows", () => {
+    expect(
+      suggestImportTargetDataTypes(
+        ["id", "code", "amount", "created_at"],
+        [
+          ["1001", "00123", "12.5", "2026-07-07 08:15:00"],
+          ["1002", "00456", "13.75", "2026-07-07 09:15:00"],
+        ],
+        "mysql",
+      ),
+    ).toEqual({
+      id: "BIGINT",
+      code: "TEXT",
+      amount: "DOUBLE",
+      created_at: "DATETIME",
+    });
   });
 });

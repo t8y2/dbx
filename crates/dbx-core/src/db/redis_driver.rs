@@ -64,12 +64,121 @@ pub struct RedisScanResult {
 pub struct RedisValue {
     pub key_display: String,
     pub key_raw: String,
-    pub key_type: String,
     pub ttl: i64,
-    pub value_is_binary: bool,
-    pub value: serde_json::Value,
-    pub total: Option<u64>,
-    pub scan_cursor: Option<u64>,
+    pub redis_type: String,
+    pub data: RedisValueData,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RedisBlobEncoding {
+    Utf8,
+    Binary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisBlob {
+    pub raw_base64: String,
+    pub encoding: RedisBlobEncoding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisListItem {
+    pub index: u64,
+    pub value: RedisBlob,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisSetItem {
+    pub member: RedisBlob,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisHashItem {
+    pub field: RedisBlob,
+    pub value: RedisBlob,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisZsetItem {
+    pub score: String,
+    pub member: RedisBlob,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisStreamField {
+    pub field: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisStreamEntry {
+    pub id: String,
+    pub fields: Vec<RedisStreamField>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RedisValueData {
+    String {
+        content: RedisBlob,
+    },
+    Json {
+        value: serde_json::Value,
+    },
+    List {
+        items: Vec<RedisListItem>,
+        total: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scan_cursor: Option<u64>,
+    },
+    Set {
+        items: Vec<RedisSetItem>,
+        total: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scan_cursor: Option<u64>,
+    },
+    Hash {
+        items: Vec<RedisHashItem>,
+        total: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scan_cursor: Option<u64>,
+    },
+    Zset {
+        items: Vec<RedisZsetItem>,
+        total: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scan_cursor: Option<u64>,
+    },
+    Stream {
+        entries: Vec<RedisStreamEntry>,
+    },
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RedisCollectionPage {
+    List {
+        items: Vec<RedisListItem>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scan_cursor: Option<u64>,
+    },
+    Set {
+        items: Vec<RedisSetItem>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scan_cursor: Option<u64>,
+    },
+    Hash {
+        items: Vec<RedisHashItem>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scan_cursor: Option<u64>,
+    },
+    Zset {
+        items: Vec<RedisZsetItem>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scan_cursor: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1701,17 +1810,18 @@ where
         let Ok(value) = get_value(con, &key).await else {
             continue;
         };
-        if !redis_value_matches_query(&value.value, query) {
+        if !redis_value_matches_query(&value, query) {
             continue;
         }
 
-        let value_preview = redis_search_value_preview(&value.value);
+        let value_preview = redis_search_value_preview(&value.data);
+        let size = redis_search_value_size(&value);
         result.push(RedisKeyInfo {
             key_display: value.key_display,
             key_raw: value.key_raw,
-            key_type: value.key_type,
+            key_type: value.redis_type,
             ttl: value.ttl,
-            size: redis_search_value_size(&value.value, value.total),
+            size,
             value_preview,
         });
     }
@@ -1723,19 +1833,18 @@ pub async fn get_value<C>(con: &mut C, key: &[u8]) -> Result<RedisValue, String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
-    let key_type: String = redis::cmd("TYPE").arg(key).query_async(con).await.map_err(|e| e.to_string())?;
+    let redis_type: String = redis::cmd("TYPE").arg(key).query_async(con).await.map_err(|e| e.to_string())?;
 
     let ttl: i64 = redis::cmd("TTL").arg(key).query_async(con).await.unwrap_or(-1);
 
-    let (value, value_is_binary, total, scan_cursor) = match key_type.as_str() {
+    let data = match redis_type.as_str() {
         "string" => {
             let v: RedisRawValue = redis::cmd("GET").arg(key).query_async(con).await.map_err(|e| e.to_string())?;
-            let value_is_binary = redis_value_contains_binary(&v);
-            let value = match v {
-                RedisRawValue::BulkString(bytes) => json_string_to_js_safe(redis_bytes_to_display(&bytes)),
-                other => redis_raw_to_json(other),
-            };
-            (value, value_is_binary, None, None)
+            RedisValueData::String {
+                content: redis_value_to_bytes(v)
+                    .map(|bytes| redis_blob_from_bytes(&bytes))
+                    .ok_or_else(|| "Redis string payload is not byte-addressable".to_string())?,
+            }
         }
         "list" => {
             let len: u64 = redis::cmd("LLEN").arg(key).query_async(con).await.unwrap_or(0);
@@ -1743,53 +1852,47 @@ where
             let v: RedisRawValue =
                 redis::cmd("LRANGE").arg(key).arg(0).arg(end).query_async(con).await.map_err(|e| e.to_string())?;
             let cursor = if len > COLLECTION_PAGE_SIZE as u64 { Some(COLLECTION_PAGE_SIZE as u64) } else { None };
-            (redis_array_to_json(v), false, Some(len), cursor)
+            RedisValueData::List { items: redis_list_items_from_raw(v, 0), total: len, scan_cursor: cursor }
         }
         "set" => {
             let len: u64 = redis::cmd("SCARD").arg(key).query_async(con).await.unwrap_or(0);
-            let (next_cursor, items) = sscan_page_raw(con, key, 0, COLLECTION_PAGE_SIZE).await?;
-            let cursor = if next_cursor > 0 { Some(next_cursor) } else { None };
-            (serde_json::Value::Array(items), false, Some(len), cursor)
+            let (cursor, items) = sscan_page_raw(con, key, 0, COLLECTION_PAGE_SIZE).await?;
+            RedisValueData::Set { items, total: len, scan_cursor: (cursor > 0).then_some(cursor) }
         }
         "zset" => {
             let len: u64 = redis::cmd("ZCARD").arg(key).query_async(con).await.unwrap_or(0);
-            let (next_cursor, items) = zscan_page_raw(con, key, 0, COLLECTION_PAGE_SIZE).await?;
-            let cursor = if next_cursor > 0 { Some(next_cursor) } else { None };
-            (serde_json::Value::Array(items), false, Some(len), cursor)
+            let (cursor, items) = zscan_page_raw(con, key, 0, COLLECTION_PAGE_SIZE).await?;
+            RedisValueData::Zset { items, total: len, scan_cursor: (cursor > 0).then_some(cursor) }
         }
         "hash" => {
             let len: u64 = redis::cmd("HLEN").arg(key).query_async(con).await.unwrap_or(0);
-            let (next_cursor, items) = hscan_page_raw(con, key, 0, COLLECTION_PAGE_SIZE, None).await?;
-            let cursor = if next_cursor > 0 { Some(next_cursor) } else { None };
-            (serde_json::Value::Array(items), false, Some(len), cursor)
+            let (cursor, items) = hscan_page_raw(con, key, 0, COLLECTION_PAGE_SIZE, None).await?;
+            RedisValueData::Hash { items, total: len, scan_cursor: (cursor > 0).then_some(cursor) }
         }
-        "stream" => (get_stream_entries(con, key).await?, false, None, None),
+        "stream" => RedisValueData::Stream { entries: get_stream_entries(con, key).await? },
         key_type if is_redis_json_type(key_type) => {
             let raw: RedisRawValue =
                 redis::cmd("JSON.GET").arg(key).query_async(con).await.map_err(|e| e.to_string())?;
-            (redis_json_raw_to_json(raw)?, false, None, None)
+            RedisValueData::Json { value: redis_json_raw_to_json(raw)? }
         }
-        _ => (serde_json::Value::Null, false, None, None),
+        _ => RedisValueData::Unknown,
     };
 
     Ok(RedisValue {
         key_display: redis_key_bytes_to_display(key),
         key_raw: redis_key_bytes_to_raw(key),
-        key_type,
+        redis_type,
         ttl,
-        value_is_binary,
-        value,
-        total,
-        scan_cursor,
+        data,
     })
 }
 
-fn redis_value_matches_query(value: &serde_json::Value, query: &str) -> bool {
+fn redis_value_matches_query(value: &RedisValue, query: &str) -> bool {
     let query = query.trim();
     if query.is_empty() {
         return false;
     }
-    redis_search_value_text(value).to_lowercase().contains(&query.to_lowercase())
+    redis_search_value_text(&value.data).to_lowercase().contains(&query.to_lowercase())
 }
 
 fn redis_key_matches_query(key_display: &str, key_raw: &str, query: &str) -> bool {
@@ -1801,35 +1904,38 @@ fn redis_key_matches_query(key_display: &str, key_raw: &str, query: &str) -> boo
     key_display.to_lowercase().contains(&query) || key_raw.to_lowercase().contains(&query)
 }
 
-fn redis_search_value_text(value: &serde_json::Value) -> String {
+fn redis_search_value_text(value: &RedisValueData) -> String {
     match value {
-        serde_json::Value::String(text) => text.clone(),
-        serde_json::Value::Array(arr) => {
-            // Hash type: [{field: "f1", value: "v1"}, ...] — extract field names and values
-            if let Some(first) = arr.first() {
-                if first.get("field").is_some() && first.get("value").is_some() {
-                    let parts: Vec<String> = arr
-                        .iter()
-                        .flat_map(|item| {
-                            let f = item.get("field").and_then(|v| v.as_str()).unwrap_or("");
-                            let v = item.get("value").and_then(|v| v.as_str()).unwrap_or("");
-                            vec![f.to_string(), v.to_string()]
-                        })
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    return parts.join(" ");
-                }
-            }
-            if arr.is_empty() {
-                return String::new();
-            }
-            serde_json::to_string(&arr).unwrap_or_default()
+        RedisValueData::String { content } => redis_blob_display_text(content),
+        RedisValueData::Json { value } => serde_json::to_string(value).unwrap_or_else(|_| value.to_string()),
+        RedisValueData::List { items, .. } => {
+            items.iter().map(|item| redis_blob_display_text(&item.value)).collect::<Vec<_>>().join(" ")
         }
-        other => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
+        RedisValueData::Set { items, .. } => {
+            items.iter().map(|item| redis_blob_display_text(&item.member)).collect::<Vec<_>>().join(" ")
+        }
+        RedisValueData::Hash { items, .. } => items
+            .iter()
+            .flat_map(|item| [redis_blob_display_text(&item.field), redis_blob_display_text(&item.value)])
+            .collect::<Vec<_>>()
+            .join(" "),
+        RedisValueData::Zset { items, .. } => items
+            .iter()
+            .flat_map(|item| [item.score.clone(), redis_blob_display_text(&item.member)])
+            .collect::<Vec<_>>()
+            .join(" "),
+        RedisValueData::Stream { entries } => entries
+            .iter()
+            .flat_map(|entry| {
+                entry.fields.iter().flat_map(|field| [field.field.clone(), field.value.clone()]).collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        RedisValueData::Unknown => String::new(),
     }
 }
 
-fn redis_search_value_preview(value: &serde_json::Value) -> String {
+fn redis_search_value_preview(value: &RedisValueData) -> String {
     const MAX_PREVIEW_LEN: usize = 160;
     let text = redis_search_value_text(value);
     if text.chars().count() <= MAX_PREVIEW_LEN {
@@ -1840,17 +1946,23 @@ fn redis_search_value_preview(value: &serde_json::Value) -> String {
     preview
 }
 
-fn redis_search_value_size(value: &serde_json::Value, total: Option<u64>) -> u64 {
-    if let Some(total) = total {
-        return total;
-    }
-    match value {
-        serde_json::Value::String(text) => text.len() as u64,
-        _ => 0,
+fn redis_search_value_size(value: &RedisValue) -> u64 {
+    match &value.data {
+        RedisValueData::String { content } => base64::engine::general_purpose::STANDARD
+            .decode(&content.raw_base64)
+            .map(|bytes| bytes.len() as u64)
+            .unwrap_or(0),
+        RedisValueData::Json { value } => serde_json::to_vec(value).map(|bytes| bytes.len() as u64).unwrap_or(0),
+        RedisValueData::List { total, .. }
+        | RedisValueData::Set { total, .. }
+        | RedisValueData::Hash { total, .. }
+        | RedisValueData::Zset { total, .. } => *total,
+        RedisValueData::Stream { entries } => entries.len() as u64,
+        RedisValueData::Unknown => 0,
     }
 }
 
-async fn get_stream_entries<C>(con: &mut C, key: &[u8]) -> Result<serde_json::Value, String>
+async fn get_stream_entries<C>(con: &mut C, key: &[u8]) -> Result<Vec<RedisStreamEntry>, String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
@@ -1892,16 +2004,14 @@ fn parse_scan_keys(raw: RedisRawValue) -> Result<(u64, Vec<Vec<u8>>), String> {
     Ok((cursor, parsed))
 }
 
-fn parse_stream_entries(raw: RedisRawValue) -> serde_json::Value {
+fn parse_stream_entries(raw: RedisRawValue) -> Vec<RedisStreamEntry> {
     match raw {
-        RedisRawValue::Array(entries) => {
-            serde_json::Value::Array(entries.into_iter().filter_map(parse_stream_entry).collect())
-        }
-        _ => serde_json::Value::Null,
+        RedisRawValue::Array(entries) => entries.into_iter().filter_map(parse_stream_entry).collect(),
+        _ => Vec::new(),
     }
 }
 
-fn parse_stream_entry(entry: RedisRawValue) -> Option<serde_json::Value> {
+fn parse_stream_entry(entry: RedisRawValue) -> Option<RedisStreamEntry> {
     let mut parts = match entry {
         RedisRawValue::Array(parts) if parts.len() == 2 => parts.into_iter(),
         _ => return None,
@@ -1913,7 +2023,7 @@ fn parse_stream_entry(entry: RedisRawValue) -> Option<serde_json::Value> {
         _ => return None,
     };
 
-    let mut field_map = serde_json::Map::new();
+    let mut parsed_fields = Vec::new();
     let mut fields = fields.into_iter();
     while let Some(field) = fields.next() {
         let Some(value) = fields.next() else {
@@ -1921,14 +2031,11 @@ fn parse_stream_entry(entry: RedisRawValue) -> Option<serde_json::Value> {
         };
         if let Some(field_name) = redis_value_to_string(field) {
             let value = redis_value_to_string(value).unwrap_or_default();
-            field_map.insert(field_name, json_string_to_js_safe(value));
+            parsed_fields.push(RedisStreamField { field: field_name, value });
         }
     }
 
-    Some(serde_json::json!({
-        "id": id,
-        "fields": field_map,
-    }))
+    Some(RedisStreamEntry { id, fields: parsed_fields })
 }
 
 fn redis_value_to_string(value: RedisRawValue) -> Option<String> {
@@ -1941,14 +2048,6 @@ fn redis_value_to_string(value: RedisRawValue) -> Option<String> {
         RedisRawValue::VerbatimString { text, .. } => Some(redis_bytes_to_display(text.as_bytes())),
         RedisRawValue::Okay => Some("OK".to_string()),
         _ => None,
-    }
-}
-
-fn redis_value_contains_binary(value: &RedisRawValue) -> bool {
-    match value {
-        RedisRawValue::BulkString(bytes) => std::str::from_utf8(bytes).is_err(),
-        RedisRawValue::VerbatimString { text, .. } => std::str::from_utf8(text.as_bytes()).is_err(),
-        _ => false,
     }
 }
 
@@ -1965,18 +2064,36 @@ fn redis_value_to_bytes(value: RedisRawValue) -> Option<Vec<u8>> {
     }
 }
 
-fn redis_array_to_json(value: RedisRawValue) -> serde_json::Value {
+fn redis_blob_from_bytes(bytes: &[u8]) -> RedisBlob {
+    RedisBlob {
+        raw_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        encoding: if std::str::from_utf8(bytes).is_ok() { RedisBlobEncoding::Utf8 } else { RedisBlobEncoding::Binary },
+    }
+}
+
+fn redis_blob_display_text(blob: &RedisBlob) -> String {
+    let bytes = base64::engine::general_purpose::STANDARD.decode(&blob.raw_base64).unwrap_or_default();
+    if matches!(blob.encoding, RedisBlobEncoding::Utf8) {
+        if let Ok(text) = std::str::from_utf8(&bytes) {
+            return text.to_string();
+        }
+    }
+    redis_bytes_to_display(&bytes)
+}
+
+fn redis_list_items_from_raw(value: RedisRawValue, start_index: u64) -> Vec<RedisListItem> {
     match value {
-        RedisRawValue::Array(values) => serde_json::Value::Array(
-            values
-                .into_iter()
-                .map(|v| match v {
-                    RedisRawValue::BulkString(bytes) => json_string_to_js_safe(redis_bytes_to_display(&bytes)),
-                    other => redis_raw_to_json(other),
+        RedisRawValue::Array(values) => values
+            .into_iter()
+            .enumerate()
+            .filter_map(|(offset, value)| {
+                redis_value_to_bytes(value).map(|bytes| RedisListItem {
+                    index: start_index + offset as u64,
+                    value: redis_blob_from_bytes(&bytes),
                 })
-                .collect(),
-        ),
-        other => redis_raw_to_json(other),
+            })
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -1986,21 +2103,6 @@ fn redis_raw_to_json(value: RedisRawValue) -> serde_json::Value {
         RedisRawValue::Array(values) => serde_json::Value::Array(values.into_iter().map(redis_raw_to_json).collect()),
         other => serde_json::Value::String(redis_value_to_string(other).unwrap_or_default()),
     }
-}
-
-/// If the text is JSON (starts with `{` or `[`), parse it, apply
-/// `json_value_for_js` (converting large ints to strings), then re-serialize
-/// back to a compact JSON string. Otherwise return the text unchanged.
-fn json_string_to_js_safe(text: String) -> serde_json::Value {
-    let trimmed = text.trim();
-    if trimmed.starts_with('{') || trimmed.starts_with('[') {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            let safe = json_value_for_js(json);
-            let re_serialized = serde_json::to_string(&safe).unwrap_or(text);
-            return serde_json::Value::String(re_serialized);
-        }
-    }
-    serde_json::Value::String(text)
 }
 
 fn redis_bytes_to_display(bytes: &[u8]) -> String {
@@ -2206,11 +2308,11 @@ pub async fn load_more_collection<C>(
     cursor: u64,
     count: usize,
     filter_query: Option<&str>,
-) -> Result<RedisValue, String>
+) -> Result<RedisCollectionPage, String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
-    let (value, next_cursor) = match key_type {
+    match key_type {
         "list" => {
             let start = cursor as i64;
             let end = start + count as i64 - 1;
@@ -2218,41 +2320,29 @@ where
                 redis::cmd("LRANGE").arg(key).arg(start).arg(end).query_async(con).await.map_err(|e| e.to_string())?;
             let len: u64 = redis::cmd("LLEN").arg(key).query_async(con).await.unwrap_or(0);
             let next = cursor + count as u64;
-            let cursor = if next < len { Some(next) } else { None };
-            (redis_array_to_json(v), cursor)
+            Ok(RedisCollectionPage::List {
+                items: redis_list_items_from_raw(v, cursor),
+                scan_cursor: (next < len).then_some(next),
+            })
         }
         "set" => {
-            let (next, items) = sscan_page_raw(con, key, cursor, count).await?;
-            let cursor = if next > 0 { Some(next) } else { None };
-            (serde_json::Value::Array(items), cursor)
+            let (next_cursor, items) = sscan_page_raw(con, key, cursor, count).await?;
+            Ok(RedisCollectionPage::Set { items, scan_cursor: (next_cursor > 0).then_some(next_cursor) })
         }
         "zset" => {
-            let (next, items) = zscan_page_raw(con, key, cursor, count).await?;
-            let cursor = if next > 0 { Some(next) } else { None };
-            (serde_json::Value::Array(items), cursor)
+            let (next_cursor, items) = zscan_page_raw(con, key, cursor, count).await?;
+            Ok(RedisCollectionPage::Zset { items, scan_cursor: (next_cursor > 0).then_some(next_cursor) })
         }
         "hash" => {
-            let (next, items) = if let Some(query) = filter_query.filter(|query| !query.is_empty()) {
+            let (next_cursor, items) = if let Some(query) = filter_query.filter(|query| !query.is_empty()) {
                 hscan_filtered_page_raw(con, key, cursor, count, query).await?
             } else {
                 hscan_page_raw(con, key, cursor, count, None).await?
             };
-            let cursor = if next > 0 { Some(next) } else { None };
-            (serde_json::Value::Array(items), cursor)
+            Ok(RedisCollectionPage::Hash { items, scan_cursor: (next_cursor > 0).then_some(next_cursor) })
         }
-        _ => return Err(format!("Pagination not supported for type: {key_type}")),
-    };
-
-    Ok(RedisValue {
-        key_display: redis_key_bytes_to_display(key),
-        key_raw: redis_key_bytes_to_raw(key),
-        key_type: key_type.to_string(),
-        ttl: -1,
-        value_is_binary: false,
-        value,
-        total: None,
-        scan_cursor: next_cursor,
-    })
+        _ => Err(format!("Pagination not supported for type: {key_type}")),
+    }
 }
 
 async fn hscan_page_raw<C>(
@@ -2261,7 +2351,7 @@ async fn hscan_page_raw<C>(
     cursor: u64,
     count: usize,
     match_pattern: Option<&str>,
-) -> Result<(u64, Vec<serde_json::Value>), String>
+) -> Result<(u64, Vec<RedisHashItem>), String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
@@ -2271,7 +2361,7 @@ where
         cmd.arg("MATCH").arg(pattern);
     }
     let raw: RedisRawValue = cmd.query_async(con).await.map_err(|e| e.to_string())?;
-    parse_scan_pairs(raw, "hash")
+    parse_scan_hash_entries(raw)
 }
 
 async fn hscan_filtered_page_raw<C>(
@@ -2280,7 +2370,7 @@ async fn hscan_filtered_page_raw<C>(
     cursor: u64,
     count: usize,
     query: &str,
-) -> Result<(u64, Vec<serde_json::Value>), String>
+) -> Result<(u64, Vec<RedisHashItem>), String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
@@ -2302,13 +2392,13 @@ where
     Ok((cur, items))
 }
 
-fn hash_entry_matches_query(item: &serde_json::Value, query: &str) -> bool {
+fn hash_entry_matches_query(item: &RedisHashItem, query: &str) -> bool {
     let query = query.to_lowercase();
     if query.is_empty() {
         return true;
     }
-    let field = item.get("field").and_then(serde_json::Value::as_str).unwrap_or_default();
-    let value = item.get("value").and_then(serde_json::Value::as_str).unwrap_or_default();
+    let field = redis_blob_display_text(&item.field);
+    let value = redis_blob_display_text(&item.value);
     field.to_lowercase().contains(&query) || value.to_lowercase().contains(&query)
 }
 
@@ -2317,7 +2407,7 @@ async fn sscan_page_raw<C>(
     key: &[u8],
     cursor: u64,
     count: usize,
-) -> Result<(u64, Vec<serde_json::Value>), String>
+) -> Result<(u64, Vec<RedisSetItem>), String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
@@ -2337,7 +2427,7 @@ async fn zscan_page_raw<C>(
     key: &[u8],
     cursor: u64,
     count: usize,
-) -> Result<(u64, Vec<serde_json::Value>), String>
+) -> Result<(u64, Vec<RedisZsetItem>), String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
@@ -2349,10 +2439,11 @@ where
         .query_async(con)
         .await
         .map_err(|e| e.to_string())?;
-    parse_scan_pairs(raw, "zset")
+    let (next_cursor, items) = parse_scan_pairs(raw)?;
+    Ok((next_cursor, items.into_iter().map(|(member, score)| RedisZsetItem { score, member }).collect()))
 }
 
-fn parse_scan_pairs(raw: RedisRawValue, kind: &str) -> Result<(u64, Vec<serde_json::Value>), String> {
+fn parse_scan_pairs(raw: RedisRawValue) -> Result<(u64, Vec<(RedisBlob, String)>), String> {
     let RedisRawValue::Array(parts) = raw else {
         return Err("Invalid SCAN response".to_string());
     };
@@ -2373,19 +2464,17 @@ fn parse_scan_pairs(raw: RedisRawValue, kind: &str) -> Result<(u64, Vec<serde_js
     let mut iter = entries.iter();
     while let Some(a) = iter.next() {
         let Some(b) = iter.next() else { break };
-        let a_str = redis_value_to_string(a.clone()).unwrap_or_default();
-        let b = redis_value_to_string(b.clone()).unwrap_or_default();
-        if kind == "zset" {
-            items.push(serde_json::json!({"member": a_str, "score": b}));
-        } else {
-            items.push(serde_json::json!({"field": a_str, "value": json_string_to_js_safe(b)}));
-        }
+        let member = redis_value_to_bytes(a.clone())
+            .map(|bytes| redis_blob_from_bytes(&bytes))
+            .ok_or_else(|| "Invalid SCAN member payload".to_string())?;
+        let value = redis_value_to_string(b.clone()).unwrap_or_default();
+        items.push((member, value));
     }
 
     Ok((cursor, items))
 }
 
-fn parse_scan_members(raw: RedisRawValue) -> Result<(u64, Vec<serde_json::Value>), String> {
+fn parse_scan_hash_entries(raw: RedisRawValue) -> Result<(u64, Vec<RedisHashItem>), String> {
     let RedisRawValue::Array(parts) = raw else {
         return Err("Invalid SCAN response".to_string());
     };
@@ -2402,7 +2491,45 @@ fn parse_scan_members(raw: RedisRawValue) -> Result<(u64, Vec<serde_json::Value>
         return Err("Invalid SCAN entries".to_string());
     };
 
-    let items = entries.iter().filter_map(|v| redis_value_to_string(v.clone())).map(json_string_to_js_safe).collect();
+    let mut items = Vec::new();
+    let mut iter = entries.iter();
+    while let Some(field) = iter.next() {
+        let Some(value) = iter.next() else { break };
+        let field = redis_value_to_bytes(field.clone())
+            .map(|bytes| redis_blob_from_bytes(&bytes))
+            .ok_or_else(|| "Invalid hash field payload".to_string())?;
+        let value = redis_value_to_bytes(value.clone())
+            .map(|bytes| redis_blob_from_bytes(&bytes))
+            .ok_or_else(|| "Invalid hash value payload".to_string())?;
+        items.push(RedisHashItem { field, value });
+    }
+
+    Ok((cursor, items))
+}
+
+fn parse_scan_members(raw: RedisRawValue) -> Result<(u64, Vec<RedisSetItem>), String> {
+    let RedisRawValue::Array(parts) = raw else {
+        return Err("Invalid SCAN response".to_string());
+    };
+    if parts.len() != 2 {
+        return Err("Invalid SCAN response".to_string());
+    }
+
+    let cursor = redis_value_to_string(parts[0].clone())
+        .ok_or("Invalid cursor")?
+        .parse::<u64>()
+        .map_err(|_| "Invalid cursor".to_string())?;
+
+    let RedisRawValue::Array(entries) = &parts[1] else {
+        return Err("Invalid SCAN entries".to_string());
+    };
+
+    let items = entries
+        .iter()
+        .filter_map(|value| {
+            redis_value_to_bytes(value.clone()).map(|bytes| RedisSetItem { member: redis_blob_from_bytes(&bytes) })
+        })
+        .collect();
 
     Ok((cursor, items))
 }
@@ -2414,11 +2541,13 @@ mod tests {
     use super::{
         classify_command, connection_info, decode_cluster_cursor, encode_cluster_cursor, is_redis_json_type,
         parse_cluster_slots, parse_command_argv, parse_database_count, parse_redis_endpoint, parse_scan_keys,
-        parse_stream_entries, redis_auth_candidates, redis_cluster_slot, redis_command_raw_to_json,
-        redis_database_index, redis_json_raw_to_json, redis_json_value_preview, redis_key_bytes_to_display,
-        redis_key_bytes_to_raw, redis_key_matches_query, redis_key_raw_to_bytes, redis_key_value_preview,
-        redis_raw_to_json, redis_sentinel_master_endpoint, redis_value_contains_binary, redis_value_matches_query,
-        RedisAuthCandidate, RedisClusterSlotRange, RedisCommandSafety, RedisNodeEndpoint, RedisRawValue,
+        parse_stream_entries, redis_auth_candidates, redis_blob_from_bytes, redis_cluster_slot,
+        redis_command_raw_to_json, redis_database_index, redis_json_raw_to_json, redis_json_value_preview,
+        redis_key_bytes_to_display, redis_key_bytes_to_raw, redis_key_matches_query, redis_key_raw_to_bytes,
+        redis_key_value_preview, redis_raw_to_json, redis_sentinel_master_endpoint, redis_value_matches_query,
+        redis_value_to_bytes, RedisAuthCandidate, RedisBlob, RedisBlobEncoding, RedisClusterSlotRange,
+        RedisCollectionPage, RedisCommandSafety, RedisHashItem, RedisNodeEndpoint, RedisRawValue, RedisSetItem,
+        RedisStreamEntry, RedisStreamField, RedisValue, RedisValueData,
     };
     use crate::models::connection::ConnectionConfig;
     use redis::{aio::ConnectionLike, Cmd, ConnectionAddr, Pipeline, RedisFuture};
@@ -2478,6 +2607,49 @@ mod tests {
         RedisRawValue::Array(vec![bulk(cursor), RedisRawValue::Array(entries)])
     }
 
+    fn text_blob(value: &str) -> RedisBlob {
+        redis_blob_from_bytes(value.as_bytes())
+    }
+
+    fn redis_value(redis_type: &str, data: RedisValueData) -> RedisValue {
+        RedisValue {
+            key_display: "test:key".to_string(),
+            key_raw: redis_key_bytes_to_raw(b"test:key"),
+            ttl: -1,
+            redis_type: redis_type.to_string(),
+            data,
+        }
+    }
+
+    fn string_value(value: &str) -> RedisValue {
+        redis_value("string", RedisValueData::String { content: text_blob(value) })
+    }
+
+    fn hash_value(entries: &[(&str, &str)]) -> RedisValue {
+        redis_value(
+            "hash",
+            RedisValueData::Hash {
+                items: entries
+                    .iter()
+                    .map(|(field, value)| RedisHashItem { field: text_blob(field), value: text_blob(value) })
+                    .collect(),
+                total: entries.len() as u64,
+                scan_cursor: None,
+            },
+        )
+    }
+
+    fn set_value(entries: &[&str]) -> RedisValue {
+        redis_value(
+            "set",
+            RedisValueData::Set {
+                items: entries.iter().map(|value| RedisSetItem { member: text_blob(value) }).collect(),
+                total: entries.len() as u64,
+                scan_cursor: None,
+            },
+        )
+    }
+
     #[test]
     fn parses_stream_entries() {
         let raw = RedisRawValue::Array(vec![RedisRawValue::Array(vec![
@@ -2489,15 +2661,13 @@ mod tests {
 
         assert_eq!(
             parsed,
-            serde_json::json!([
-                {
-                    "id": "1714470000000-0",
-                    "fields": {
-                        "event": "login",
-                        "user_id": "42"
-                    }
-                }
-            ])
+            vec![RedisStreamEntry {
+                id: "1714470000000-0".to_string(),
+                fields: vec![
+                    RedisStreamField { field: "event".to_string(), value: "login".to_string() },
+                    RedisStreamField { field: "user_id".to_string(), value: "42".to_string() },
+                ],
+            }]
         );
     }
 
@@ -2515,14 +2685,10 @@ mod tests {
 
         assert_eq!(
             parsed,
-            serde_json::json!([
-                {
-                    "id": "1714470000001-0",
-                    "fields": {
-                        "event": "logout"
-                    }
-                }
-            ])
+            vec![RedisStreamEntry {
+                id: "1714470000001-0".to_string(),
+                fields: vec![RedisStreamField { field: "event".to_string(), value: "logout".to_string() }],
+            }]
         );
     }
 
@@ -2617,8 +2783,11 @@ mod tests {
 
         let result = super::load_more_collection(&mut con, b"hash-key", "hash", 0, 1, Some("user")).await.unwrap();
 
-        assert_eq!(result.scan_cursor, Some(512));
-        assert_eq!(result.value, serde_json::json!([{ "field": "user:1", "value": "Ada" }]));
+        let RedisCollectionPage::Hash { items, scan_cursor } = result else {
+            panic!("expected hash collection page");
+        };
+        assert_eq!(scan_cursor, Some(512));
+        assert_eq!(items, vec![RedisHashItem { field: text_blob("user:1"), value: text_blob("Ada") }]);
         assert_eq!(con.command_count("HSCAN"), 1);
         assert!(!con.commands[0].contains("\r\nMATCH\r\n"));
     }
@@ -2630,8 +2799,11 @@ mod tests {
 
         let result = super::load_more_collection(&mut con, b"hash-key", "hash", 0, 20, Some("lovelace")).await.unwrap();
 
-        assert_eq!(result.scan_cursor, None);
-        assert_eq!(result.value, serde_json::json!([{ "field": "status", "value": "Ada Lovelace" }]));
+        let RedisCollectionPage::Hash { items, scan_cursor } = result else {
+            panic!("expected hash collection page");
+        };
+        assert_eq!(scan_cursor, None);
+        assert_eq!(items, vec![RedisHashItem { field: text_blob("status"), value: text_blob("Ada Lovelace") }]);
         assert_eq!(con.command_count("HSCAN"), 1);
         assert!(!con.commands[0].contains("\r\nMATCH\r\n"));
     }
@@ -2645,8 +2817,11 @@ mod tests {
 
         let result = super::load_more_collection(&mut con, b"hash-key", "hash", 0, 20, Some("missing")).await.unwrap();
 
-        assert_eq!(result.scan_cursor, Some(super::HASH_FILTER_SCAN_MAX_ITERATIONS as u64));
-        assert_eq!(result.value, serde_json::json!([]));
+        let RedisCollectionPage::Hash { items, scan_cursor } = result else {
+            panic!("expected hash collection page");
+        };
+        assert_eq!(scan_cursor, Some(super::HASH_FILTER_SCAN_MAX_ITERATIONS as u64));
+        assert!(items.is_empty());
         assert_eq!(con.command_count("HSCAN"), super::HASH_FILTER_SCAN_MAX_ITERATIONS);
     }
 
@@ -2663,7 +2838,16 @@ mod tests {
     fn does_not_treat_utf8_with_backslashes_as_binary() {
         let raw = RedisRawValue::BulkString(br#"C:\Users\path"#.to_vec());
 
-        assert!(!redis_value_contains_binary(&raw));
+        let blob = redis_value_to_bytes(raw).map(|bytes| redis_blob_from_bytes(&bytes)).unwrap();
+        assert_eq!(blob.encoding, RedisBlobEncoding::Utf8);
+    }
+
+    #[test]
+    fn preserves_non_ascii_utf8_as_utf8() {
+        let raw = RedisRawValue::BulkString("你好，redis".as_bytes().to_vec());
+
+        let blob = redis_value_to_bytes(raw).map(|bytes| redis_blob_from_bytes(&bytes)).unwrap();
+        assert_eq!(blob.encoding, RedisBlobEncoding::Utf8);
     }
 
     #[test]
@@ -2680,10 +2864,10 @@ mod tests {
 
     #[test]
     fn matches_redis_values_case_insensitively() {
-        assert!(redis_value_matches_query(&serde_json::json!("Hello Redis"), "redis"));
-        assert!(redis_value_matches_query(&serde_json::json!({"field": "Ada Lovelace"}), "lovelace"));
-        assert!(!redis_value_matches_query(&serde_json::json!("Hello Redis"), ""));
-        assert!(!redis_value_matches_query(&serde_json::json!("Hello Redis"), "mysql"));
+        assert!(redis_value_matches_query(&string_value("Hello Redis"), "redis"));
+        assert!(redis_value_matches_query(&hash_value(&[("field", "Ada Lovelace")]), "lovelace"));
+        assert!(!redis_value_matches_query(&string_value("Hello Redis"), ""));
+        assert!(!redis_value_matches_query(&string_value("Hello Redis"), "mysql"));
     }
 
     #[test]
@@ -2696,33 +2880,27 @@ mod tests {
 
     #[test]
     fn matches_hash_field_name_in_value_search() {
-        let hash_value = serde_json::json!([
-            {"field": "name", "value": "Alice"},
-            {"field": "email", "value": "alice@example.com"},
-        ]);
+        let hash_value = hash_value(&[("name", "Alice"), ("email", "alice@example.com")]);
         assert!(redis_value_matches_query(&hash_value, "name"));
         assert!(redis_value_matches_query(&hash_value, "email"));
     }
 
     #[test]
     fn matches_hash_field_value_in_value_search() {
-        let hash_value = serde_json::json!([
-            {"field": "name", "value": "Alice"},
-            {"field": "email", "value": "alice@example.com"},
-        ]);
+        let hash_value = hash_value(&[("name", "Alice"), ("email", "alice@example.com")]);
         assert!(redis_value_matches_query(&hash_value, "alice"));
         assert!(redis_value_matches_query(&hash_value, "example"));
     }
 
     #[test]
     fn empty_hash_does_not_match() {
-        let empty_hash = serde_json::json!([]);
+        let empty_hash = hash_value(&[]);
         assert!(!redis_value_matches_query(&empty_hash, "anything"));
     }
 
     #[test]
     fn non_hash_array_unaffected() {
-        let set_value = serde_json::json!(["member1", "member2", "hello"]);
+        let set_value = set_value(&["member1", "member2", "hello"]);
         assert!(redis_value_matches_query(&set_value, "member1"));
         assert!(redis_value_matches_query(&set_value, "hello"));
         assert!(!redis_value_matches_query(&set_value, "nonexistent"));
@@ -2851,6 +3029,7 @@ mod tests {
             driver_profile: None,
             driver_label: None,
             url_params: None,
+            agent_java_options: Vec::new(),
             host: "cache.example.com".to_string(),
             port: 6379,
             username: String::new(),

@@ -3,7 +3,7 @@ import { ref, watch, shallowRef, computed, onMounted, onUnmounted, nextTick } fr
 import type { Ref } from "vue";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { useI18n } from "vue-i18n";
-import { AlertTriangle, CheckCircle2, CircleHelp, Cloud, Copy, Download, ExternalLink, GripVertical, Loader2, Moon, PackageSearch, Pencil, Plus, RefreshCw, RotateCcw, Settings, Sun, SunMoon, Terminal, Trash2, Upload, X } from "@lucide/vue";
+import { AlertTriangle, CheckCircle2, CircleHelp, Cloud, Copy, Download, ExternalLink, GripVertical, Loader2, Moon, PackageSearch, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings, Sun, SunMoon, Terminal, Trash2, Upload, X } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -617,8 +617,10 @@ const shortcutConflicts = computed(() =>
     return conflict ? [definition.id] : [];
   }),
 );
+const shortcutSearchQuery = ref("");
 const formatterEditorShortcutIds: ShortcutActionId[] = [
   "formatSql",
+  "toggleLineComment",
   "find",
   "replace",
   "saveSql",
@@ -638,6 +640,15 @@ const formatterEditorShortcutIds: ShortcutActionId[] = [
   "lowercaseSelection",
 ];
 const formatterEditorShortcutDefinitions = computed(() => formatterEditorShortcutIds.map((id) => SHORTCUT_DEFINITIONS.find((definition) => definition.id === id)).filter((definition): definition is (typeof SHORTCUT_DEFINITIONS)[number] => !!definition));
+const filteredShortcutDefinitions = computed(() => {
+  const query = shortcutSearchQuery.value.trim().toLowerCase();
+  if (!query) return SHORTCUT_DEFINITIONS;
+  return SHORTCUT_DEFINITIONS.filter((definition) => {
+    const scope = t(`settings.shortcutScope${definition.scope[0].toUpperCase()}${definition.scope.slice(1)}`);
+    const shortcut = formatShortcutPill(editShortcuts.value[definition.id]);
+    return [definition.id, t(definition.labelKey), scope, shortcut].some((value) => value.toLowerCase().includes(query));
+  });
+});
 const hasShortcutConflicts = computed(() => shortcutConflicts.value.length > 0);
 const shortcutsChanged = computed(() => JSON.stringify(editShortcuts.value) !== JSON.stringify(settingsStore.editorSettings.shortcuts));
 const duckDbWorkerSettingsRequireRestart = computed(() => editDuckDbWorkerProcessIsolation.value !== startupDuckDbWorkerProcessIsolation.value || normalizeDuckDbWorkerMaxProcesses(editDuckDbWorkerMaxProcesses.value) !== startupDuckDbWorkerMaxProcesses.value);
@@ -3407,8 +3418,15 @@ onUnmounted(cleanupPreviewEditor);
             </section>
 
             <section v-else-if="activeSettingsTab === 'shortcuts'" class="flex flex-col gap-2 py-2">
+              <div class="relative">
+                <Search class="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input v-model="shortcutSearchQuery" autocomplete="off" :placeholder="t('settings.shortcutSearchPlaceholder')" class="h-9 pl-9 text-sm" />
+              </div>
               <div class="overflow-hidden rounded-md border border-border/70 bg-background">
-                <div v-for="definition in SHORTCUT_DEFINITIONS" :key="definition.id" class="group -mt-px grid gap-2 border-t border-border/70 px-3 py-2 transition-colors first:mt-0 first:border-t-0 hover:bg-muted/40 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+                <div v-if="filteredShortcutDefinitions.length === 0" class="px-3 py-8 text-center text-sm text-muted-foreground">
+                  {{ t("settings.shortcutSearchNoResults") }}
+                </div>
+                <div v-for="definition in filteredShortcutDefinitions" :key="definition.id" class="group -mt-px grid gap-2 border-t border-border/70 px-3 py-2 transition-colors first:mt-0 first:border-t-0 hover:bg-muted/40 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
                   <div class="min-w-0">
                     <div class="flex min-w-0 items-center gap-2">
                       <Label class="min-w-0 truncate leading-none">{{ t(definition.labelKey) }}</Label>

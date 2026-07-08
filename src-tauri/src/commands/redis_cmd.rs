@@ -3,7 +3,7 @@ use tauri::State;
 
 use crate::commands::connection::{ensure_connection_writable, AppState};
 use dbx_core::db::redis_driver::{
-    RedisCommandResult, RedisCommandSafety, RedisDatabaseInfo, RedisScanResult, RedisValue,
+    RedisCollectionPage, RedisCommandResult, RedisCommandSafety, RedisDatabaseInfo, RedisScanResult, RedisValue,
 };
 
 #[tauri::command]
@@ -325,7 +325,7 @@ pub async fn redis_load_more(
     cursor: u64,
     count: usize,
     filter: Option<String>,
-) -> Result<RedisValue, String> {
+) -> Result<RedisCollectionPage, String> {
     dbx_core::redis_ops::redis_load_more_in_db_core(
         &state,
         &connection_id,

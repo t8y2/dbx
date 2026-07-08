@@ -1405,7 +1405,7 @@ pub async fn list_databases(pool: &Pool) -> Result<Vec<DatabaseInfo>, String> {
     .await
     .map_err(|e| e.to_string())?;
 
-    Ok(rows.iter().map(|row| DatabaseInfo { name: row.get::<_, String>(0) }).collect())
+    Ok(rows.iter().map(|row| DatabaseInfo { name: pg_row_try_string(row, 0) }).collect())
 }
 
 pub async fn list_tables(pool: &Pool, schema: &str) -> Result<Vec<TableInfo>, String> {
@@ -1438,8 +1438,8 @@ pub async fn list_tables_filtered(
     Ok(rows
         .iter()
         .map(|row| TableInfo {
-            name: row.get::<_, String>(0),
-            table_type: row.get::<_, String>(1),
+            name: pg_row_try_string(row, 0),
+            table_type: pg_row_try_string(row, 1),
             comment: row.try_get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
             parent_schema: row.try_get::<_, Option<String>>(3).ok().flatten().filter(|s| !s.is_empty()),
             parent_name: row.try_get::<_, Option<String>>(4).ok().flatten().filter(|s| !s.is_empty()),
@@ -1474,7 +1474,7 @@ pub async fn completion_assistant_search(
         .await
         .map_err(|e| e.to_string())?
         {
-            let schema_name: String = row.get(0);
+            let schema_name: String = pg_row_try_string(&row, 0);
             candidates.push(CompletionAssistantCandidate {
                 name: schema_name.clone(),
                 kind: CompletionAssistantCandidateKind::Schema,
@@ -1498,16 +1498,16 @@ pub async fn completion_assistant_search(
         .await
         .map_err(|e| e.to_string())?;
         for row in rows {
-            let table_type: String = row.get(2);
+            let table_type: String = pg_row_try_string(&row, 2);
             candidates.push(CompletionAssistantCandidate {
-                name: row.get(0),
+                name: pg_row_try_string(&row, 0),
                 kind: if table_type.contains("VIEW") {
                     CompletionAssistantCandidateKind::View
                 } else {
                     CompletionAssistantCandidateKind::Table
                 },
                 database: Some(request.database.clone()),
-                schema: Some(row.get(1)),
+                schema: Some(pg_row_try_string(&row, 1)),
                 parent_schema: row.try_get::<_, Option<String>>(4).ok().flatten(),
                 parent_name: row.try_get::<_, Option<String>>(5).ok().flatten(),
                 comment: row.try_get::<_, Option<String>>(3).ok().flatten(),
@@ -1526,16 +1526,16 @@ pub async fn completion_assistant_search(
         .await
         .map_err(|e| e.to_string())?;
         for row in rows {
-            let routine_type: String = row.get(2);
+            let routine_type: String = pg_row_try_string(&row, 2);
             candidates.push(CompletionAssistantCandidate {
-                name: row.get(0),
+                name: pg_row_try_string(&row, 0),
                 kind: if routine_type == "PROCEDURE" {
                     CompletionAssistantCandidateKind::Procedure
                 } else {
                     CompletionAssistantCandidateKind::Function
                 },
                 database: Some(request.database.clone()),
-                schema: Some(row.get(1)),
+                schema: Some(pg_row_try_string(&row, 1)),
                 parent_schema: None,
                 parent_name: None,
                 comment: row.try_get::<_, Option<String>>(3).ok().flatten(),
@@ -1556,14 +1556,14 @@ pub async fn completion_assistant_search(
             .map_err(|e| e.to_string())?;
             for row in rows {
                 candidates.push(CompletionAssistantCandidate {
-                    name: row.get(0),
+                    name: pg_row_try_string(&row, 0),
                     kind: CompletionAssistantCandidateKind::Column,
                     database: Some(request.database.clone()),
                     schema: Some(schema.to_string()),
                     parent_schema: Some(schema.to_string()),
                     parent_name: Some(table.to_string()),
                     comment: row.try_get::<_, Option<String>>(2).ok().flatten(),
-                    data_type: Some(row.get(1)),
+                    data_type: Some(pg_row_try_string(&row, 1)),
                 });
             }
         }
@@ -1911,7 +1911,7 @@ fn postgres_proc_has_prokind_sql() -> &'static str {
 async fn postgres_proc_has_prokind(client: &deadpool_postgres::Client) -> Result<bool, String> {
     let row =
         postgres_query_one_cached(client, postgres_proc_has_prokind_sql(), &[]).await.map_err(|e| e.to_string())?;
-    Ok(row.get(0))
+    Ok(pg_row_try_bool(&row, 0).unwrap_or(false))
 }
 
 fn postgres_proc_has_prosp_sql() -> &'static str {
@@ -1926,7 +1926,7 @@ fn postgres_proc_has_prosp_sql() -> &'static str {
 
 async fn postgres_proc_has_prosp(client: &deadpool_postgres::Client) -> Result<bool, String> {
     let row = postgres_query_one_cached(client, postgres_proc_has_prosp_sql(), &[]).await.map_err(|e| e.to_string())?;
-    Ok(row.get(0))
+    Ok(pg_row_try_bool(&row, 0).unwrap_or(false))
 }
 
 async fn list_objects_rows(
@@ -1962,8 +1962,8 @@ pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, 
     Ok(rows
         .iter()
         .map(|row| ObjectInfo {
-            name: row.get::<_, String>(0),
-            object_type: row.get::<_, String>(1),
+            name: pg_row_try_string(row, 0),
+            object_type: pg_row_try_string(row, 1),
             schema: Some(schema.to_string()),
             comment: row.try_get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
             created_at: row.try_get::<_, Option<String>>(3).ok().flatten().filter(|s| !s.is_empty()),
@@ -1994,7 +1994,7 @@ pub async fn list_object_statistics(pool: &Pool, schema: &str) -> Result<Vec<Obj
     Ok(rows
         .iter()
         .map(|row| ObjectStatistics {
-            name: row.get::<_, String>(0),
+            name: pg_row_try_string(row, 0),
             schema: Some(schema.to_string()),
             estimated_rows: row.try_get::<_, i64>(1).ok(),
             total_bytes: row.try_get::<_, i64>(2).ok(),
@@ -2028,7 +2028,7 @@ pub async fn list_schema_infos(pool: &Pool) -> Result<Vec<SchemaInfo>, String> {
     Ok(rows
         .iter()
         .map(|row| SchemaInfo {
-            name: row.get::<_, String>(0),
+            name: pg_row_try_string(row, 0),
             comment: row.try_get::<_, Option<String>>(1).ok().flatten(),
         })
         .collect())
@@ -2059,9 +2059,13 @@ const POSTGRES_COLUMNS_SQL: &str = "SELECT a.attname AS column_name, \
              CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 \
                THEN (a.atttypmod - 4) & 65535 ELSE NULL END AS numeric_scale, \
              CASE WHEN t.typname IN ('varchar', 'bpchar') AND a.atttypmod > 0 \
-               THEN a.atttypmod - 4 ELSE NULL END AS character_maximum_length \
+               THEN a.atttypmod - 4 ELSE NULL END AS character_maximum_length, \
+             CASE WHEN enum_t.oid IS NULL THEN NULL \
+               ELSE COALESCE((SELECT array_to_json(array_agg(e.enumlabel ORDER BY e.enumsortorder))::text \
+                              FROM pg_enum e WHERE e.enumtypid = enum_t.oid), '[]') END AS enum_values \
              FROM pg_attribute a \
              JOIN pg_type t ON t.oid = a.atttypid \
+             LEFT JOIN pg_type enum_t ON enum_t.oid = CASE WHEN t.typtype = 'd' THEN t.typbasetype WHEN t.typtype = 'e' THEN t.oid ELSE NULL END AND enum_t.typtype = 'e' \
              LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
              LEFT JOIN pg_depend dep ON dep.refobjid = a.attrelid AND dep.refobjsubid = a.attnum AND dep.deptype = 'i' \
              LEFT JOIN pg_sequence pseq ON pseq.seqrelid = dep.objid \
@@ -2088,7 +2092,8 @@ const POSTGRES_COLUMNS_COMPAT_SQL: &str = "SELECT a.attname AS column_name, \
              CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 \
                THEN (a.atttypmod - 4) & 65535 ELSE NULL END AS numeric_scale, \
              CASE WHEN t.typname IN ('varchar', 'bpchar') AND a.atttypmod > 0 \
-               THEN a.atttypmod - 4 ELSE NULL END AS character_maximum_length \
+               THEN a.atttypmod - 4 ELSE NULL END AS character_maximum_length, \
+             NULL::text AS enum_values \
              FROM pg_attribute a \
              JOIN pg_type t ON t.oid = a.atttypid \
              LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
@@ -2119,24 +2124,75 @@ const POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL: &str = "SELECT c.column_name, \
              NULL::text AS column_extra, \
              CAST(c.numeric_precision AS int) AS numeric_precision, \
              CAST(c.numeric_scale AS int) AS numeric_scale, \
-             CAST(c.character_maximum_length AS int) AS character_maximum_length \
+             CAST(c.character_maximum_length AS int) AS character_maximum_length, \
+             NULL::text AS enum_values \
              FROM information_schema.columns c \
              WHERE c.table_schema = $1 AND c.table_name = $2 \
              ORDER BY c.ordinal_position";
 
+fn parse_enum_values_from_row(row: &Row, index: usize) -> Option<Vec<String>> {
+    let raw = row.try_get::<_, Option<String>>(index).ok().flatten()?;
+    serde_json::from_str::<Vec<String>>(&raw).ok()
+}
+
+/// Read a boolean column from a PostgreSQL row, tolerating databases that
+/// encode booleans as integers (0/1) or text ('t'/'f') instead of the standard
+/// `bool` OID.  Returns `None` when the column is NULL or truly unreadable.
+fn pg_row_try_bool(row: &Row, idx: usize) -> Option<bool> {
+    if let Ok(v) = row.try_get::<_, bool>(idx) {
+        return Some(v);
+    }
+    if let Ok(v) = row.try_get::<_, i32>(idx) {
+        return Some(v != 0);
+    }
+    if let Ok(v) = row.try_get::<_, i16>(idx) {
+        return Some(v != 0);
+    }
+    if let Ok(Some(v)) = row.try_get::<_, Option<String>>(idx) {
+        match v.as_str() {
+            "t" | "true" | "1" | "yes" | "YES" => return Some(true),
+            "f" | "false" | "0" | "no" | "NO" => return Some(false),
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Read a String column from a PostgreSQL row, tolerating databases that
+/// return text as other types.  Falls back to i64/i32/i16/bool formatting.
+fn pg_row_try_string(row: &Row, idx: usize) -> String {
+    if let Ok(v) = row.try_get::<_, String>(idx) {
+        return v;
+    }
+    if let Ok(v) = row.try_get::<_, i64>(idx) {
+        return v.to_string();
+    }
+    if let Ok(v) = row.try_get::<_, i32>(idx) {
+        return v.to_string();
+    }
+    if let Ok(v) = row.try_get::<_, i16>(idx) {
+        return v.to_string();
+    }
+    if let Some(v) = pg_row_try_bool(row, idx) {
+        return v.to_string();
+    }
+    String::new()
+}
+
 fn column_info_from_row(row: &Row) -> ColumnInfo {
     let full_type = row.try_get::<_, Option<String>>(1).ok().flatten().unwrap_or_default();
     ColumnInfo {
-        name: row.get::<_, String>(0),
+        name: pg_row_try_string(row, 0),
         data_type: full_type,
-        is_nullable: row.get::<_, bool>(2),
+        is_nullable: pg_row_try_bool(row, 2).unwrap_or(true),
         column_default: row.try_get::<_, Option<String>>(3).ok().flatten(),
-        is_primary_key: row.get::<_, bool>(4),
+        is_primary_key: pg_row_try_bool(row, 4).unwrap_or(false),
         extra: row.try_get::<_, Option<String>>(6).ok().flatten(),
         comment: row.try_get::<_, Option<String>>(5).ok().flatten(),
         numeric_precision: row.try_get::<_, Option<i32>>(7).ok().flatten(),
         numeric_scale: row.try_get::<_, Option<i32>>(8).ok().flatten(),
         character_maximum_length: row.try_get::<_, Option<i32>>(9).ok().flatten(),
+        enum_values: parse_enum_values_from_row(row, 10),
     }
 }
 
@@ -2747,16 +2803,16 @@ async fn list_indexes_with_sql(
     Ok(rows
         .iter()
         .map(|row| {
-            let all_cols: Vec<String> = row.get::<_, Vec<String>>(1);
+            let all_cols: Vec<String> = row.try_get::<_, Vec<String>>(1).unwrap_or_default();
             let nkeyatts = row.try_get::<_, Option<i16>>(6).ok().flatten().unwrap_or(all_cols.len() as i16) as usize;
             let split_at = nkeyatts.min(all_cols.len());
             let key_cols = all_cols[..split_at].to_vec();
             let included = if split_at < all_cols.len() { all_cols[split_at..].to_vec() } else { vec![] };
             IndexInfo {
-                name: row.get::<_, String>(0),
+                name: pg_row_try_string(row, 0),
                 columns: key_cols,
-                is_unique: row.get::<_, bool>(2),
-                is_primary: row.get::<_, bool>(3),
+                is_unique: pg_row_try_bool(row, 2).unwrap_or(false),
+                is_primary: pg_row_try_bool(row, 3).unwrap_or(false),
                 filter: row.try_get::<_, Option<String>>(4).ok().flatten(),
                 index_type: row.try_get::<_, Option<String>>(5).ok().flatten(),
                 included_columns: if included.is_empty() { None } else { Some(included) },
@@ -2786,43 +2842,53 @@ pub async fn list_indexes(pool: &Pool, schema: &str, table: &str) -> Result<Vec<
     }
 }
 
+fn postgres_foreign_keys_sql() -> &'static str {
+    "SELECT fk.constraint_name, fk.column_name, \
+     pk.table_schema AS ref_schema, pk.table_name AS ref_table, pk.column_name AS ref_column, \
+     rc.update_rule AS on_update, rc.delete_rule AS on_delete \
+     FROM information_schema.table_constraints tc \
+     JOIN information_schema.key_column_usage fk \
+       ON fk.constraint_name = tc.constraint_name \
+       AND fk.constraint_schema = tc.constraint_schema \
+       AND fk.table_schema = tc.table_schema \
+       AND fk.table_name = tc.table_name \
+     JOIN information_schema.referential_constraints rc \
+       ON rc.constraint_name = tc.constraint_name \
+       AND rc.constraint_schema = tc.constraint_schema \
+     JOIN information_schema.key_column_usage pk \
+       ON pk.constraint_name = rc.unique_constraint_name \
+       AND pk.constraint_schema = rc.unique_constraint_schema \
+       AND pk.ordinal_position = fk.position_in_unique_constraint \
+     WHERE tc.constraint_type = 'FOREIGN KEY' \
+       AND fk.table_schema = $1 AND fk.table_name = $2 \
+     ORDER BY fk.constraint_name, fk.ordinal_position"
+}
+
+fn postgres_foreign_key_action(value: String) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
 pub async fn list_foreign_keys(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ForeignKeyInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = postgres_query_cached(
-        &client,
-        "SELECT fk.constraint_name, fk.column_name, \
-         pk.table_schema AS ref_schema, pk.table_name AS ref_table, pk.column_name AS ref_column \
-         FROM information_schema.table_constraints tc \
-         JOIN information_schema.key_column_usage fk \
-           ON fk.constraint_name = tc.constraint_name \
-           AND fk.constraint_schema = tc.constraint_schema \
-           AND fk.table_schema = tc.table_schema \
-           AND fk.table_name = tc.table_name \
-         JOIN information_schema.referential_constraints rc \
-           ON rc.constraint_name = tc.constraint_name \
-           AND rc.constraint_schema = tc.constraint_schema \
-         JOIN information_schema.key_column_usage pk \
-           ON pk.constraint_name = rc.unique_constraint_name \
-           AND pk.constraint_schema = rc.unique_constraint_schema \
-           AND pk.ordinal_position = fk.position_in_unique_constraint \
-         WHERE tc.constraint_type = 'FOREIGN KEY' \
-           AND fk.table_schema = $1 AND fk.table_name = $2 \
-         ORDER BY fk.constraint_name, fk.ordinal_position",
-        &[&schema, &table],
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let rows = postgres_query_cached(&client, postgres_foreign_keys_sql(), &[&schema, &table])
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(rows
         .iter()
         .map(|row| ForeignKeyInfo {
-            name: row.get::<_, String>(0),
-            column: row.get::<_, String>(1),
-            ref_schema: Some(row.get::<_, String>(2)),
-            ref_table: row.get::<_, String>(3),
-            ref_column: row.get::<_, String>(4),
-            on_update: None,
-            on_delete: None,
+            name: pg_row_try_string(row, 0),
+            column: pg_row_try_string(row, 1),
+            ref_schema: Some(pg_row_try_string(row, 2)),
+            ref_table: pg_row_try_string(row, 3),
+            ref_column: pg_row_try_string(row, 4),
+            on_update: postgres_foreign_key_action(pg_row_try_string(row, 5)),
+            on_delete: postgres_foreign_key_action(pg_row_try_string(row, 6)),
         })
         .collect())
 }
@@ -2843,9 +2909,9 @@ pub async fn list_triggers(pool: &Pool, schema: &str, table: &str) -> Result<Vec
     Ok(rows
         .iter()
         .map(|row| TriggerInfo {
-            name: row.get::<_, String>(0),
-            event: row.get::<_, String>(1),
-            timing: row.get::<_, String>(2),
+            name: pg_row_try_string(row, 0),
+            event: pg_row_try_string(row, 1),
+            timing: pg_row_try_string(row, 2),
             statement: None,
         })
         .collect())
@@ -2890,7 +2956,7 @@ pub async fn list_functions(pool: &Pool, schema: &str) -> Result<Vec<FunctionInf
     Ok(rows
         .iter()
         .map(|row| {
-            let def: String = row.get::<_, String>(3);
+            let def: String = pg_row_try_string(row, 3);
             // Remove schema qualification from CREATE FUNCTION statement
             // to avoid false differences when comparing across schemas.
             // Handle both "schema.name" and schema.name formats.
@@ -2898,11 +2964,11 @@ pub async fn list_functions(pool: &Pool, schema: &str) -> Result<Vec<FunctionInf
                 .replace(&format!("CREATE OR REPLACE FUNCTION \"{}\".", schema), "CREATE OR REPLACE FUNCTION ")
                 .replace(&format!("CREATE OR REPLACE FUNCTION {}.", schema), "CREATE OR REPLACE FUNCTION ");
             FunctionInfo {
-                name: row.get::<_, String>(0),
-                function_type: row.get::<_, String>(1),
-                data_type: row.get::<_, String>(2),
+                name: pg_row_try_string(row, 0),
+                function_type: pg_row_try_string(row, 1),
+                data_type: pg_row_try_string(row, 2),
                 definition: normalized_def,
-                arguments: row.get::<_, String>(4),
+                arguments: pg_row_try_string(row, 4),
             }
         })
         .collect())
@@ -2934,13 +3000,13 @@ pub async fn list_sequences(pool: &Pool, schema: &str, with_last_values: bool) -
     let mut sequences: Vec<SequenceInfo> = rows
         .iter()
         .map(|row| SequenceInfo {
-            name: row.get::<_, String>(0),
-            data_type: row.get::<_, String>(1),
-            start_value: row.get::<_, String>(2),
-            min_value: row.get::<_, String>(3),
-            max_value: row.get::<_, String>(4),
-            increment: row.get::<_, String>(5),
-            cycle: row.get::<_, String>(6) == "YES",
+            name: pg_row_try_string(row, 0),
+            data_type: pg_row_try_string(row, 1),
+            start_value: pg_row_try_string(row, 2),
+            min_value: pg_row_try_string(row, 3),
+            max_value: pg_row_try_string(row, 4),
+            increment: pg_row_try_string(row, 5),
+            cycle: pg_row_try_string(row, 6) == "YES",
             last_value: None,
         })
         .collect();
@@ -2953,7 +3019,7 @@ pub async fn list_sequences(pool: &Pool, schema: &str, with_last_values: bool) -
                    WHERE c.relkind = 'S' AND n.nspname = $1";
         if let Ok(rows) = postgres_query_cached(&client, sql, &[&schema]).await {
             for row in rows {
-                let name: String = row.get(0);
+                let name: String = pg_row_try_string(&row, 0);
                 if let Ok(val) = row.try_get::<_, i64>(1) {
                     if let Some(seq) = sequences.iter_mut().find(|s| s.name == name) {
                         seq.last_value = Some(val.to_string());
@@ -2982,9 +3048,9 @@ pub async fn list_rules(pool: &Pool, schema: &str) -> Result<Vec<RuleInfo>, Stri
     Ok(rows
         .iter()
         .map(|row| RuleInfo {
-            name: row.get::<_, String>(2),
-            table_name: row.get::<_, String>(1),
-            definition: row.get::<_, String>(3),
+            name: pg_row_try_string(row, 2),
+            table_name: pg_row_try_string(row, 1),
+            definition: pg_row_try_string(row, 3),
         })
         .collect())
 }
@@ -3007,8 +3073,8 @@ pub async fn list_extensions(pool: &Pool, schema: &str) -> Result<Vec<ExtensionI
     Ok(rows
         .iter()
         .map(|row| ExtensionInfo {
-            name: row.get::<_, String>(0),
-            version: row.get::<_, String>(1),
+            name: pg_row_try_string(row, 0),
+            version: pg_row_try_string(row, 1),
             comment: row.try_get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
             schema: Some(schema.to_string()),
         })
@@ -3031,8 +3097,8 @@ pub async fn list_available_extensions(pool: &Pool) -> Result<Vec<ExtensionInfo>
     Ok(rows
         .iter()
         .map(|row| ExtensionInfo {
-            name: row.get::<_, String>(0),
-            version: row.get::<_, String>(1),
+            name: pg_row_try_string(row, 0),
+            version: pg_row_try_string(row, 1),
             comment: row.try_get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
             schema: None,
         })
@@ -3046,11 +3112,11 @@ pub async fn list_owners(pool: &Pool, schema: &str) -> Result<Vec<OwnerInfo>, St
     Ok(rows
         .iter()
         .map(|row| {
-            let relkind: String = row.get(2);
+            let relkind: String = pg_row_try_string(row, 2);
             OwnerInfo {
-                object_name: row.get::<_, String>(1),
+                object_name: pg_row_try_string(row, 1),
                 object_type: postgres_owner_object_type(&relkind).to_string(),
-                owner: row.get::<_, String>(3),
+                owner: pg_row_try_string(row, 3),
             }
         })
         .collect())
@@ -3130,7 +3196,81 @@ pub async fn copy_in(pool: &Pool, sql: &str, data: &[u8]) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+    use std::time::Instant;
     use tokio_postgres::types::FromSql;
+
+    struct DockerPostgres {
+        name: String,
+        port: u16,
+    }
+
+    impl DockerPostgres {
+        fn url(&self) -> String {
+            format!("postgres://postgres:postgres@127.0.0.1:{}/postgres?sslmode=disable", self.port)
+        }
+    }
+
+    impl Drop for DockerPostgres {
+        fn drop(&mut self) {
+            let _ = Command::new("docker").args(["rm", "-f", &self.name]).status();
+        }
+    }
+
+    fn docker_ready() -> bool {
+        Command::new("docker")
+            .args(["version", "--format", "{{.Server.Version}}"])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    async fn start_docker_postgres() -> Option<DockerPostgres> {
+        if !docker_ready() {
+            eprintln!("skipping docker-backed postgres test because Docker is unavailable");
+            return None;
+        }
+
+        let port = portpicker::pick_unused_port().expect("pick unused postgres port");
+        let container = DockerPostgres { name: format!("dbx-postgres-enum-{}", uuid::Uuid::new_v4()), port };
+
+        let status = Command::new("docker")
+            .args([
+                "run",
+                "-d",
+                "--rm",
+                "--name",
+                &container.name,
+                "-e",
+                "POSTGRES_PASSWORD=postgres",
+                "-e",
+                "POSTGRES_USER=postgres",
+                "-e",
+                "POSTGRES_DB=postgres",
+                "-p",
+                &format!("{port}:5432"),
+                "postgres:16-alpine",
+            ])
+            .status()
+            .expect("start docker postgres");
+        assert!(status.success(), "docker run postgres container should succeed");
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            match connect(&container.url(), Duration::from_secs(2)).await {
+                Ok(pool) => {
+                    drop(pool);
+                    return Some(container);
+                }
+                Err(_) if Instant::now() < deadline => tokio::time::sleep(Duration::from_millis(500)).await,
+                Err(error) => panic!("docker postgres did not become ready: {error}"),
+            }
+        }
+    }
+
+    fn state_enum_values(columns: &[ColumnInfo]) -> Option<Vec<String>> {
+        columns.iter().find(|column| column.name == "state").and_then(|column| column.enum_values.clone())
+    }
 
     // --- pg_quote_ident ---
 
@@ -3175,6 +3315,23 @@ mod tests {
 
         let raw = PgRawBytes::from_sql(&Type::UNKNOWN, &[0x01, 0xAB, 0xFF]).unwrap();
         assert_eq!(raw.0, vec![0x01, 0xAB, 0xFF]);
+    }
+
+    #[test]
+    fn postgres_foreign_keys_sql_selects_referential_actions() {
+        let sql = postgres_foreign_keys_sql();
+
+        assert!(sql.contains("rc.update_rule AS on_update"));
+        assert!(sql.contains("rc.delete_rule AS on_delete"));
+        assert!(sql.contains("information_schema.referential_constraints rc"));
+    }
+
+    #[test]
+    fn postgres_foreign_key_action_keeps_non_empty_action() {
+        assert_eq!(postgres_foreign_key_action("CASCADE".to_string()), Some("CASCADE".to_string()));
+        assert_eq!(postgres_foreign_key_action(" SET NULL ".to_string()), Some("SET NULL".to_string()));
+        assert_eq!(postgres_foreign_key_action("".to_string()), None);
+        assert_eq!(postgres_foreign_key_action("  ".to_string()), None);
     }
 
     #[test]
@@ -3582,6 +3739,8 @@ mod tests {
         assert!(POSTGRES_COLUMNS_SQL.contains("generated always as identity"));
         assert!(POSTGRES_COLUMNS_SQL.contains("COALESCE(c.is_nullable = 'YES', NOT a.attnotnull)"));
         assert!(POSTGRES_COLUMNS_SQL.contains("LEFT JOIN information_schema.columns"));
+        assert!(POSTGRES_COLUMNS_SQL.contains("pg_enum"));
+        assert!(POSTGRES_COLUMNS_SQL.contains("AS enum_values"));
     }
 
     #[test]
@@ -3592,6 +3751,8 @@ mod tests {
         assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("col_description"));
         assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("COALESCE(c.is_nullable = 'YES', NOT a.attnotnull)"));
         assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("LEFT JOIN information_schema.columns"));
+        assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("NULL::text AS enum_values"));
+        assert!(!POSTGRES_COLUMNS_COMPAT_SQL.contains("pg_enum"));
     }
 
     #[test]
@@ -3599,8 +3760,74 @@ mod tests {
         assert!(POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL.contains("information_schema.columns"));
         assert!(POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL.contains("information_schema.table_constraints"));
         assert!(POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL.contains("information_schema.key_column_usage"));
+        assert!(POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL.contains("NULL::text AS enum_values"));
         assert!(!POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL.contains("pg_attribute"));
         assert!(!POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL.contains("regclass"));
+    }
+
+    #[tokio::test]
+    async fn postgres_column_metadata_query_returns_enum_values_against_real_postgres() {
+        let Some(container) = start_docker_postgres().await else {
+            return;
+        };
+
+        let pool = connect(&container.url(), Duration::from_secs(5)).await.expect("connect postgres");
+        let schema = format!("dbx_enum_meta_{}", std::process::id());
+        let schema_ident = format!("\"{}\"", schema.replace('\"', "\"\""));
+        let table = format!("{schema_ident}.orders");
+        let type_ident = format!("{schema_ident}.\"status\"");
+
+        execute_query(&pool, &format!("CREATE SCHEMA {schema_ident}")).await.expect("create schema");
+        execute_query(&pool, &format!("CREATE TYPE {type_ident} AS ENUM ('pending', 'active', 'archived')"))
+            .await
+            .expect("create enum type");
+        execute_query(&pool, &format!("CREATE TABLE {table} (id integer PRIMARY KEY, state {type_ident} NOT NULL)"))
+            .await
+            .expect("create table");
+
+        let client =
+            checkout_postgres_client(&pool, None, crate::db::connection_timeout()).await.expect("checkout client");
+
+        let columns =
+            get_columns_with_sql(&client, POSTGRES_COLUMNS_SQL, &schema, "orders").await.expect("primary columns");
+        assert_eq!(
+            state_enum_values(&columns),
+            Some(vec!["pending".to_string(), "active".to_string(), "archived".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL database"]
+    async fn postgres_column_metadata_decode_type_mismatch_uses_fallbacks() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect(&url, std::time::Duration::from_secs(5)).await.expect("connect postgres");
+        let client =
+            checkout_postgres_client(&pool, None, std::time::Duration::from_secs(5)).await.expect("checkout postgres");
+        let row = client
+            .query_one(
+                "SELECT \
+                   1::int4 AS column_name, \
+                   'text'::text AS full_type, \
+                   'YES'::text AS is_nullable, \
+                   NULL::text AS column_default, \
+                   1::int4 AS is_pk, \
+                   NULL::text AS column_comment, \
+                   NULL::text AS column_extra, \
+                   NULL::int4 AS numeric_precision, \
+                   NULL::int4 AS numeric_scale, \
+                   NULL::int4 AS character_maximum_length",
+                &[],
+            )
+            .await
+            .expect("query mismatched metadata row");
+
+        let info = column_info_from_row(&row);
+        // int4 column_name should be converted to string "1" instead of panicking
+        assert_eq!(info.name, "1");
+        // text 'YES' is not a standard bool, pg_row_try_bool falls back to string match
+        assert!(info.is_nullable);
+        // int4 1 should be interpreted as true for is_primary_key
+        assert!(info.is_primary_key);
     }
 
     #[test]

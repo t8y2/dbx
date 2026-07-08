@@ -82,7 +82,6 @@ impl DriverProductCapabilities {
 #[serde(rename_all = "camelCase")]
 struct DriverProfileEntry {
     profile: String,
-    label: String,
     agent_key: String,
 }
 

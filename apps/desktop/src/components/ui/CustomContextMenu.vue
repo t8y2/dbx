@@ -258,7 +258,7 @@ onBeforeUnmount(() => {
   <slot :onContextMenu="onContextMenu" />
   <!-- Main menu -->
   <Teleport to="body">
-    <div v-if="show" ref="menuRef" :style="{ position: 'fixed', left: x + 'px', top: y + 'px', zIndex: 9999 }" class="bg-popover text-popover-foreground min-w-40 rounded-[6px] p-1 overflow-x-hidden overflow-y-auto ring-1 ring-foreground/10 shadow-lg">
+    <div v-if="show" ref="menuRef" :style="{ position: 'fixed', left: x + 'px', top: y + 'px', zIndex: 9999 }" class="bg-popover text-popover-foreground min-w-40 w-max max-w-[calc(100vw-16px)] rounded-[6px] p-1 overflow-y-auto ring-1 ring-foreground/10 shadow-lg">
       <template v-for="(item, index) in items" :key="index">
         <template v-if="item.visible !== false">
           <div v-if="item.separator" class="-mx-1 my-1 flex items-center px-1">
@@ -268,7 +268,7 @@ onBeforeUnmount(() => {
             <span class="flex size-4 shrink-0 items-center justify-center">
               <component :is="item.icon" v-if="item.icon" :class="['size-4', item.iconClass]" />
             </span>
-            <span class="min-w-0 flex-1 truncate">{{ item.label }}</span>
+            <span class="flex-1 whitespace-nowrap">{{ item.label }}</span>
             <span v-if="item.shortcut" class="ml-8 inline-flex shrink-0 items-center gap-1 text-muted-foreground">
               <kbd v-for="key in shortcutKeys(item.shortcut)" :key="key" class="min-w-4 rounded border border-border/70 bg-muted/60 px-1 py-0.5 text-center font-mono text-[10px] leading-none text-muted-foreground shadow-xs">{{ key }}</kbd>
             </span>
@@ -284,7 +284,7 @@ onBeforeUnmount(() => {
       v-if="show && activeSubIndex !== null && items[activeSubIndex]?.children?.length"
       ref="subRef"
       :style="{ position: 'fixed', left: subX + 'px', top: subY + 'px', zIndex: 10000, maxHeight: 'min(420px, calc(100vh - 16px))' }"
-      class="bg-popover text-popover-foreground w-56 max-w-[calc(100vw-16px)] rounded-[6px] p-1 overflow-x-hidden overflow-y-auto ring-1 ring-foreground/10 shadow-lg"
+      class="bg-popover text-popover-foreground min-w-56 w-max max-w-[calc(100vw-16px)] rounded-[6px] p-1 overflow-y-auto ring-1 ring-foreground/10 shadow-lg"
       @mouseenter="onSubMouseEnter"
       @mouseleave="onSubMouseLeave"
     >
@@ -297,7 +297,7 @@ onBeforeUnmount(() => {
             <span class="flex size-4 shrink-0 items-center justify-center">
               <component :is="child.icon" v-if="child.icon" :class="['size-4', child.iconClass]" />
             </span>
-            <span class="min-w-0 flex-1 truncate">{{ child.label }}</span>
+            <span class="flex-1 whitespace-nowrap">{{ child.label }}</span>
             <span v-if="child.shortcut" class="ml-8 inline-flex shrink-0 items-center gap-1 text-muted-foreground">
               <kbd v-for="key in shortcutKeys(child.shortcut)" :key="key" class="min-w-4 rounded border border-border/70 bg-muted/60 px-1 py-0.5 text-center font-mono text-[10px] leading-none text-muted-foreground shadow-xs">{{ key }}</kbd>
             </span>

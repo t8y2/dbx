@@ -17,7 +17,15 @@ use tokio_util::sync::CancellationToken;
 pub type SqlServerClient = Client<Compat<TcpStream>>;
 pub const SQLSERVER_DRIVER_PANIC_ERROR_PREFIX: &str = "SQL Server driver panic:";
 const SIMPLE_QUERY_MODULE_KEYWORDS: &[&str] = &["FUNCTION", "PROC", "PROCEDURE", "TRIGGER", "VIEW"];
+// Match JDBC/tiberius `encrypt=false`: encrypt only login, then drop back to raw TDS.
 const SQLSERVER_LEGACY_ENCRYPTION_LEVEL: tiberius::EncryptionLevel = tiberius::EncryptionLevel::Off;
+// Some very old SQL Server setups only accepted DBX <= 0.5.48 because the fallback
+// advertised no encryption support at all. Keep it as the last-resort compatibility path.
+const SQLSERVER_UNSUPPORTED_ENCRYPTION_LEVEL: tiberius::EncryptionLevel = tiberius::EncryptionLevel::NotSupported;
+const SQLSERVER_LEGACY_ENCRYPTION_FALLBACKS: [(&str, tiberius::EncryptionLevel); 2] = [
+    ("login-only encryption", SQLSERVER_LEGACY_ENCRYPTION_LEVEL),
+    ("no-encryption compatibility fallback", SQLSERVER_UNSUPPORTED_ENCRYPTION_LEVEL),
+];
 
 #[derive(Debug, PartialEq, Eq)]
 struct SqlServerEndpoint<'a> {
@@ -49,31 +57,49 @@ pub async fn connect(
     timeout: Duration,
 ) -> Result<SqlServerClient, String> {
     if sqlserver_legacy_encryption_disabled(url_params) {
-        return try_connect(host, port, user, pass, database, SQLSERVER_LEGACY_ENCRYPTION_LEVEL, timeout).await;
+        return try_connect_legacy_sqlserver_encryption(host, port, user, pass, database, timeout).await;
     }
 
     match try_connect(host, port, user, pass, database, tiberius::EncryptionLevel::Required, timeout).await {
         Ok(client) => Ok(client),
-        Err(encrypted_error) => {
-            try_connect(host, port, user, pass, database, tiberius::EncryptionLevel::NotSupported, timeout)
-                .await
-                .map_err(|plain_error| {
-                    if is_sqlserver_tls_handshake_error(&encrypted_error) {
-                        format!(
-                            "{encrypted_error}\n\nThis may be caused by an old SQL Server TLS configuration. \
-                         If you are connecting to SQL Server 2008/2008 R2 or another legacy instance, \
+        Err(encrypted_error) => try_connect_legacy_sqlserver_encryption(host, port, user, pass, database, timeout)
+            .await
+            .map_err(|plain_error| {
+                if is_sqlserver_tls_handshake_error(&encrypted_error) {
+                    format!(
+                        "{encrypted_error}\n\nThis may be caused by an old SQL Server TLS/encryption configuration. \
+                         If you are connecting to SQL Server 2008/2008 R2/2012 or another legacy instance, \
                          try SQL Server legacy unencrypted mode. It behaves like encrypt=false and only helps \
                          when the server allows unencrypted transport or login-only encryption. It will still fail \
-                         if the server requires TLS 1.0 encryption. Only use this mode on trusted networks, VPNs, \
+                         if the server requires encrypted transport that the embedded driver cannot negotiate. \
+                         Only use this mode on trusted networks, VPNs, \
                          or SSH tunnels.\n\n\
-                         Automatic unencrypted fallback also failed: {plain_error}"
-                        )
-                    } else {
-                        plain_error
-                    }
-                })
+                         Automatic legacy unencrypted fallback also failed: {plain_error}"
+                    )
+                } else {
+                    plain_error
+                }
+            }),
+    }
+}
+
+async fn try_connect_legacy_sqlserver_encryption(
+    host: &str,
+    port: u16,
+    user: &str,
+    pass: &str,
+    database: Option<&str>,
+    timeout: Duration,
+) -> Result<SqlServerClient, String> {
+    let mut errors = Vec::new();
+    for (label, encryption) in SQLSERVER_LEGACY_ENCRYPTION_FALLBACKS {
+        match try_connect(host, port, user, pass, database, encryption, timeout).await {
+            Ok(client) => return Ok(client),
+            Err(error) => errors.push(format!("{label} failed: {error}")),
         }
     }
+
+    Err(errors.join("\n"))
 }
 
 fn sqlserver_legacy_encryption_disabled(url_params: Option<&str>) -> bool {
@@ -82,8 +108,10 @@ fn sqlserver_legacy_encryption_disabled(url_params: Option<&str>) -> bool {
     };
 
     params.trim_start_matches('?').split(['&', ';']).filter_map(|pair| pair.split_once('=')).any(|(key, value)| {
-        key.trim().eq_ignore_ascii_case("sqlserverEncryption")
-            && matches!(value.trim().to_ascii_lowercase().as_str(), "disabled" | "disable" | "false" | "0" | "off")
+        let key = key.trim();
+        let value = value.trim().to_ascii_lowercase();
+        let disabled = matches!(value.as_str(), "disabled" | "disable" | "false" | "0" | "off" | "no");
+        (key.eq_ignore_ascii_case("sqlserverEncryption") || key.eq_ignore_ascii_case("encrypt")) && disabled
     })
 }
 
@@ -260,20 +288,20 @@ async fn describe_sqlserver_result_set(
         .collect())
 }
 
-async fn spatial_safe_sqlserver_query(client: &mut SqlServerClient, sql: &str) -> Result<Option<String>, String> {
+async fn sqlserver_unsafe_type_query(client: &mut SqlServerClient, sql: &str) -> Result<Option<String>, String> {
     if !is_single_sqlserver_select(sql) {
         return Ok(None);
     }
     let columns = describe_sqlserver_result_set(client, sql).await?;
-    Ok(build_spatial_safe_sqlserver_query(sql, &columns))
+    Ok(build_sqlserver_unsafe_type_query(sql, &columns))
 }
 
-fn build_spatial_safe_sqlserver_query(sql: &str, columns: &[SqlServerDescribedColumn]) -> Option<String> {
-    if columns.is_empty() || !columns.iter().any(is_sqlserver_spatial_column) {
+fn build_sqlserver_unsafe_type_query(sql: &str, columns: &[SqlServerDescribedColumn]) -> Option<String> {
+    if columns.is_empty() || !columns.iter().any(is_sqlserver_unsafe_column) {
         return None;
     }
     let statement = normalized_sqlserver_select_statement(sql)?;
-    let source_alias = quote_sqlserver_identifier("dbx_spatial_source");
+    let source_alias = quote_sqlserver_identifier("dbx_unsafe_source");
     let source_columns = (0..columns.len()).map(sqlserver_source_column_name).collect::<Vec<_>>();
     let source_alias_list =
         source_columns.iter().map(|name| quote_sqlserver_identifier(name)).collect::<Vec<_>>().join(", ");
@@ -287,6 +315,8 @@ fn build_spatial_safe_sqlserver_query(sql: &str, columns: &[SqlServerDescribedCo
             let value_ref = format!("{source_alias}.{source_column}");
             if is_sqlserver_spatial_column(column) {
                 format!("{quoted_output} = CASE WHEN {value_ref} IS NULL THEN NULL ELSE {value_ref}.STAsText() END")
+            } else if is_sqlserver_variant_column(column) {
+                format!("{quoted_output} = CAST({value_ref} AS NVARCHAR(MAX))")
             } else {
                 format!("{quoted_output} = {value_ref}")
             }
@@ -297,6 +327,10 @@ fn build_spatial_safe_sqlserver_query(sql: &str, columns: &[SqlServerDescribedCo
     Some(format!("SELECT {select_list} FROM ({statement}) AS {source_alias}({source_alias_list})"))
 }
 
+fn is_sqlserver_unsafe_column(column: &SqlServerDescribedColumn) -> bool {
+    is_sqlserver_spatial_column(column) || is_sqlserver_variant_column(column)
+}
+
 fn is_sqlserver_spatial_column(column: &SqlServerDescribedColumn) -> bool {
     [&column.system_type_name, &column.user_type_name].into_iter().flatten().any(|name| {
         let normalized = name.trim().trim_matches(['[', ']']).to_ascii_lowercase();
@@ -304,6 +338,13 @@ fn is_sqlserver_spatial_column(column: &SqlServerDescribedColumn) -> bool {
             || normalized == "geography"
             || normalized.ends_with(".geometry")
             || normalized.ends_with(".geography")
+    })
+}
+
+fn is_sqlserver_variant_column(column: &SqlServerDescribedColumn) -> bool {
+    [&column.system_type_name, &column.user_type_name].into_iter().flatten().any(|name| {
+        let normalized = name.trim().trim_matches(['[', ']']).to_ascii_lowercase();
+        normalized == "sql_variant" || normalized.ends_with(".sql_variant")
     })
 }
 
@@ -569,7 +610,7 @@ pub async fn stream_first_result_set(
     cancel_token: Option<CancellationToken>,
     mut on_item: impl for<'a> FnMut(SqlServerStreamItem<'a>) -> Result<(), String>,
 ) -> Result<SqlServerStreamExportSummary, String> {
-    let query_sql = match spatial_safe_sqlserver_query(client, sql).await {
+    let query_sql = match sqlserver_unsafe_type_query(client, sql).await {
         Ok(Some(sql)) => sql,
         Ok(None) | Err(_) => sql.to_string(),
     };
@@ -835,6 +876,7 @@ pub async fn get_linked_server_columns(
                 numeric_precision: column_size,
                 numeric_scale,
                 character_maximum_length: linked_i32(row, 15),
+                enum_values: None,
             })
         })
         .collect())
@@ -1395,6 +1437,7 @@ pub async fn get_columns(client: &mut SqlServerClient, schema: &str, table: &str
                 numeric_precision: num_prec,
                 numeric_scale: num_scale,
                 character_maximum_length: max_len,
+                enum_values: None,
             }
         })
         .collect())
@@ -1590,7 +1633,7 @@ pub async fn execute_query_with_max_rows(
     let start = Instant::now();
 
     if starts_with_executable_sql_keyword(sql, &["SELECT", "EXEC", "WITH", "TABLE"]) {
-        let query_sql = match spatial_safe_sqlserver_query(client, sql).await {
+        let query_sql = match sqlserver_unsafe_type_query(client, sql).await {
             Ok(Some(sql)) => sql,
             Ok(None) | Err(_) => sql.to_string(),
         };
@@ -1654,7 +1697,7 @@ pub async fn execute_batch_with_max_rows(
     }
 
     if is_single_sqlserver_select(sql) {
-        if let Ok(Some(query_sql)) = spatial_safe_sqlserver_query(client, sql).await {
+        if let Ok(Some(query_sql)) = sqlserver_unsafe_type_query(client, sql).await {
             let stream = sqlserver_driver_result(client.query(query_sql.as_str(), &[])).await?;
             return sqlserver_driver_result(collect_first_result_limited(stream, start, max_rows)).await.map(
                 |mut result| {
@@ -1813,8 +1856,8 @@ fn first_sql_tokens(sql: &str, limit: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_spatial_safe_sqlserver_query, is_sqlserver_spatial_column, requires_simple_query_batch,
-        sqlserver_batch_can_use_execute, sqlserver_cell_to_json, sqlserver_columns_sql,
+        build_sqlserver_unsafe_type_query, is_sqlserver_spatial_column, is_sqlserver_variant_column,
+        requires_simple_query_batch, sqlserver_batch_can_use_execute, sqlserver_cell_to_json, sqlserver_columns_sql,
         sqlserver_completion_assistant_sql, sqlserver_dml_output_returns_rows, sqlserver_hidden_schema_names,
         sqlserver_indexes_sql, sqlserver_list_objects_sql, sqlserver_list_schemas_sql, sqlserver_list_tables_sql,
         sqlserver_table_comment_sql, sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column,
@@ -1854,23 +1897,32 @@ mod tests {
     #[test]
     fn sqlserver_connect_uses_named_instance_resolution() {
         let source = include_str!("sqlserver.rs");
-        let try_connect = source.split("async fn try_connect").nth(1).unwrap();
+        let try_connect = source.split("\nasync fn try_connect(").nth(1).unwrap();
         let try_connect = try_connect.split("fn row_to_json").next().unwrap();
         assert!(try_connect.contains("connect_named(&config)"));
     }
 
     #[test]
-    fn sqlserver_legacy_encryption_flag_is_opt_in() {
+    fn sqlserver_legacy_encryption_flag_accepts_dbx_and_jdbc_params() {
         assert!(!super::sqlserver_legacy_encryption_disabled(None));
-        assert!(!super::sqlserver_legacy_encryption_disabled(Some("encrypt=false")));
+        assert!(!super::sqlserver_legacy_encryption_disabled(Some("encrypt=true")));
         assert!(super::sqlserver_legacy_encryption_disabled(Some("sqlserverEncryption=disabled")));
         assert!(super::sqlserver_legacy_encryption_disabled(Some("applicationName=dbx;sqlserverEncryption=off")));
         assert!(super::sqlserver_legacy_encryption_disabled(Some("?sqlserverEncryption=false&applicationName=dbx")));
+        assert!(super::sqlserver_legacy_encryption_disabled(Some("applicationName=dbx;encrypt=false")));
+        assert!(super::sqlserver_legacy_encryption_disabled(Some("?Encrypt=0&applicationName=dbx")));
     }
 
     #[test]
-    fn sqlserver_legacy_encryption_mode_matches_jdbc_encrypt_false_semantics() {
+    fn sqlserver_legacy_encryption_modes_cover_jdbc_and_no_encryption_fallback() {
         assert_eq!(super::SQLSERVER_LEGACY_ENCRYPTION_LEVEL, tiberius::EncryptionLevel::Off);
+        assert_eq!(super::SQLSERVER_UNSUPPORTED_ENCRYPTION_LEVEL, tiberius::EncryptionLevel::NotSupported);
+    }
+
+    #[test]
+    fn sqlserver_automatic_fallback_preserves_v48_no_encryption_compatibility() {
+        let levels = super::SQLSERVER_LEGACY_ENCRYPTION_FALLBACKS.map(|(_, encryption)| encryption);
+        assert_eq!(levels, [tiberius::EncryptionLevel::Off, tiberius::EncryptionLevel::NotSupported]);
     }
 
     #[test]
@@ -2286,7 +2338,7 @@ mod tests {
 
     #[test]
     fn sqlserver_wraps_geometry_columns_as_text() {
-        let rewritten = build_spatial_safe_sqlserver_query(
+        let rewritten = build_sqlserver_unsafe_type_query(
             "SELECT * FROM dbo.tLandPolygon;",
             &[
                 SqlServerDescribedColumn {
@@ -2307,14 +2359,14 @@ mod tests {
 
         assert_eq!(
             rewritten,
-            "SELECT [landId] = [dbx_spatial_source].[dbx_col_1], [polygon] = CASE WHEN [dbx_spatial_source].[dbx_col_2] IS NULL THEN NULL ELSE [dbx_spatial_source].[dbx_col_2].STAsText() END FROM (SELECT * FROM dbo.tLandPolygon) AS [dbx_spatial_source]([dbx_col_1], [dbx_col_2])"
+            "SELECT [landId] = [dbx_unsafe_source].[dbx_col_1], [polygon] = CASE WHEN [dbx_unsafe_source].[dbx_col_2] IS NULL THEN NULL ELSE [dbx_unsafe_source].[dbx_col_2].STAsText() END FROM (SELECT * FROM dbo.tLandPolygon) AS [dbx_unsafe_source]([dbx_col_1], [dbx_col_2])"
         );
     }
 
     #[test]
     fn sqlserver_does_not_wrap_non_spatial_columns() {
         assert_eq!(
-            build_spatial_safe_sqlserver_query(
+            build_sqlserver_unsafe_type_query(
                 "SELECT landId FROM dbo.tLandPolygon",
                 &[SqlServerDescribedColumn {
                     name: Some("landId".to_string()),
@@ -2329,7 +2381,7 @@ mod tests {
 
     #[test]
     fn sqlserver_preserves_order_by_when_wrapping_geometry_columns() {
-        let rewritten = build_spatial_safe_sqlserver_query(
+        let rewritten = build_sqlserver_unsafe_type_query(
             "SELECT landId, polygon FROM dbo.tLandPolygon ORDER BY landId DESC",
             &[
                 SqlServerDescribedColumn {
@@ -2384,5 +2436,104 @@ mod tests {
         );
 
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn sqlserver_detects_sql_variant_columns() {
+        assert!(is_sqlserver_variant_column(&SqlServerDescribedColumn {
+            name: Some("value".to_string()),
+            system_type_name: Some("sql_variant".to_string()),
+            user_type_schema: None,
+            user_type_name: None,
+        }));
+        assert!(is_sqlserver_variant_column(&SqlServerDescribedColumn {
+            name: Some("value".to_string()),
+            system_type_name: None,
+            user_type_schema: None,
+            user_type_name: Some("sql_variant".to_string()),
+        }));
+        assert!(!is_sqlserver_variant_column(&SqlServerDescribedColumn {
+            name: Some("name".to_string()),
+            system_type_name: Some("nvarchar(128)".to_string()),
+            user_type_schema: None,
+            user_type_name: None,
+        }));
+    }
+
+    #[test]
+    fn sqlserver_wraps_sql_variant_columns_as_nvarchar() {
+        let rewritten = build_sqlserver_unsafe_type_query(
+            "SELECT name, value FROM sys.extended_properties;",
+            &[
+                SqlServerDescribedColumn {
+                    name: Some("name".to_string()),
+                    system_type_name: Some("sysname".to_string()),
+                    user_type_schema: None,
+                    user_type_name: None,
+                },
+                SqlServerDescribedColumn {
+                    name: Some("value".to_string()),
+                    system_type_name: Some("sql_variant".to_string()),
+                    user_type_schema: None,
+                    user_type_name: None,
+                },
+            ],
+        )
+        .unwrap();
+
+        assert!(rewritten.contains("CAST("));
+        assert!(rewritten.contains("AS NVARCHAR(MAX))"));
+        assert!(rewritten.contains("FROM sys.extended_properties"));
+        // The name column should not be cast
+        assert_eq!(rewritten.matches("CAST(").count(), 1);
+    }
+
+    #[test]
+    fn sqlserver_does_not_wrap_non_variant_columns() {
+        assert_eq!(
+            build_sqlserver_unsafe_type_query(
+                "SELECT name FROM sys.extended_properties",
+                &[SqlServerDescribedColumn {
+                    name: Some("name".to_string()),
+                    system_type_name: Some("sysname".to_string()),
+                    user_type_schema: None,
+                    user_type_name: None,
+                }]
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn sqlserver_wraps_both_spatial_and_variant_columns() {
+        let rewritten = build_sqlserver_unsafe_type_query(
+            "SELECT id, shape, metadata FROM dbo.t;",
+            &[
+                SqlServerDescribedColumn {
+                    name: Some("id".to_string()),
+                    system_type_name: Some("int".to_string()),
+                    user_type_schema: None,
+                    user_type_name: None,
+                },
+                SqlServerDescribedColumn {
+                    name: Some("shape".to_string()),
+                    system_type_name: Some("geometry".to_string()),
+                    user_type_schema: Some("sys".to_string()),
+                    user_type_name: Some("geometry".to_string()),
+                },
+                SqlServerDescribedColumn {
+                    name: Some("metadata".to_string()),
+                    system_type_name: Some("sql_variant".to_string()),
+                    user_type_schema: None,
+                    user_type_name: None,
+                },
+            ],
+        )
+        .unwrap();
+
+        assert!(rewritten.contains(".STAsText()"));
+        assert!(rewritten.contains("CAST("));
+        assert!(rewritten.contains("AS NVARCHAR(MAX))"));
+        assert!(rewritten.contains("FROM dbo.t"));
     }
 }

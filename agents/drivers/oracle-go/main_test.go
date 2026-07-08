@@ -364,6 +364,47 @@ func TestBuildDSNAddsSysDbaOption(t *testing.T) {
 	}
 }
 
+func TestOracleGB18030ConverterRoundTrip(t *testing.T) {
+	converter := oracleGB18030Converter{}
+	input := "DBX \u4e2d\u6587 \U00020000"
+
+	encoded := converter.Encode(input)
+	if string(encoded) == input {
+		t.Fatalf("GB18030 converter should encode non-ASCII text away from UTF-8 bytes")
+	}
+	if decoded := converter.Decode(encoded); decoded != input {
+		t.Fatalf("GB18030 round trip = %q, want %q", decoded, input)
+	}
+	if converter.GetLangID() != oracleCharsetZHS32GB18030 {
+		t.Fatalf("GB18030 converter lang id = %d, want %d", converter.GetLangID(), oracleCharsetZHS32GB18030)
+	}
+	if clone := converter.Clone(); clone.GetLangID() != oracleCharsetZHS32GB18030 {
+		t.Fatalf("GB18030 converter clone lang id = %d, want %d", clone.GetLangID(), oracleCharsetZHS32GB18030)
+	}
+}
+
+func TestOracleStringConverterForUnsupportedCharsetError(t *testing.T) {
+	err := errors.New("the server use charset with id: 854 which is not supported by the driver")
+	converter, ok := oracleStringConverterForUnsupportedCharsetError(err)
+	if !ok {
+		t.Fatalf("expected GB18030 server charset error to have a converter")
+	}
+	if converter.GetLangID() != oracleCharsetZHS32GB18030 {
+		t.Fatalf("converter lang id = %d, want %d", converter.GetLangID(), oracleCharsetZHS32GB18030)
+	}
+	ncharsetErr := errors.New("the server use ncharset with id: 854 which is not supported by the driver")
+	if _, ok := oracleStringConverterForUnsupportedCharsetError(ncharsetErr); ok {
+		t.Fatalf("ncharset errors should not have a server charset converter")
+	}
+	otherCharsetErr := errors.New("the server use charset with id: 852 which is not supported by the driver")
+	if charsetID, ok := unsupportedOracleServerCharsetID(otherCharsetErr); !ok || charsetID != 852 {
+		t.Fatalf("other server charset should still be parsed, got id=%d ok=%v", charsetID, ok)
+	}
+	if _, ok := oracleStringConverterForUnsupportedCharsetError(otherCharsetErr); ok {
+		t.Fatalf("unknown charset ids should not get a guessed converter")
+	}
+}
+
 func TestListDatabasesSQLUsesUserDictionaryInsteadOfObjectDictionary(t *testing.T) {
 	sqlText := strings.ToUpper(oracleListDatabasesSQL)
 
@@ -433,6 +474,41 @@ func TestListTablesQueryAppliesMetadataConstraints(t *testing.T) {
 	}
 }
 
+func TestListSessionUserTablesQueryUsesUserDictionary(t *testing.T) {
+	query := oracleListSessionUserTablesQuery(metadataListConstraints{
+		Filter:      "u_r",
+		Limit:       501,
+		Offset:      10,
+		ObjectTypes: []string{"view", "TABLE", "TABLE"},
+	})
+	sqlText := strings.ToUpper(query.SQL)
+
+	if !strings.Contains(sqlText, "USER_TABLES") || !strings.Contains(sqlText, "USER_OBJECTS") {
+		t.Fatalf("session-user table listing should use USER_* dictionaries, got: %s", query.SQL)
+	}
+	if strings.Contains(sqlText, "ALL_TABLES") || strings.Contains(sqlText, "ALL_OBJECTS") {
+		t.Fatalf("session-user table listing should avoid ALL_* dictionaries, got: %s", query.SQL)
+	}
+	if strings.Contains(sqlText, "OWNER =") {
+		t.Fatalf("session-user table listing should not add owner predicates, got: %s", query.SQL)
+	}
+	if !strings.Contains(sqlText, "UPPER(OBJECT_NAME) LIKE :1 ESCAPE '\\'") {
+		t.Fatalf("table listing should push filter predicate, got: %s", query.SQL)
+	}
+	if !strings.Contains(sqlText, "TABLE_TYPE IN (:2,:3)") {
+		t.Fatalf("table listing should push table type predicate, got: %s", query.SQL)
+	}
+	if !strings.Contains(sqlText, "ROWNUM <= :4") || !strings.Contains(sqlText, "DBX_RN > :5") {
+		t.Fatalf("table listing should use rownum pagination, got: %s", query.SQL)
+	}
+	if len(query.Args) != 5 {
+		t.Fatalf("unexpected args: %#v", query.Args)
+	}
+	if query.Args[0] != "%U%\\_%R%" || query.Args[1] != "TABLE" || query.Args[2] != "VIEW" || query.Args[3] != 511 || query.Args[4] != 10 {
+		t.Fatalf("constraints args were not normalized: %#v", query.Args)
+	}
+}
+
 func TestListObjectsSQLUsesSplitDictionaryQuery(t *testing.T) {
 	sqlText := strings.ToUpper(oracleListObjectsSQL)
 
@@ -471,6 +547,40 @@ func TestListObjectsQueryAppliesMetadataConstraints(t *testing.T) {
 		t.Fatalf("unexpected args: %#v", query.Args)
 	}
 	if query.Args[2] != "%P%K%G%\\%%" || query.Args[3] != "FUNCTION" || query.Args[4] != "PACKAGE" || query.Args[5] != 25 || query.Args[6] != 0 {
+		t.Fatalf("object constraints args were not normalized: %#v", query.Args)
+	}
+}
+
+func TestListSessionUserObjectsQueryUsesUserDictionary(t *testing.T) {
+	query := oracleListSessionUserObjectsQuery(metadataListConstraints{
+		Filter:      "pkg%",
+		Limit:       25,
+		ObjectTypes: []string{"FUNCTION", "package"},
+	})
+	sqlText := strings.ToUpper(query.SQL)
+
+	if !strings.Contains(sqlText, "USER_TABLES") || !strings.Contains(sqlText, "USER_OBJECTS") {
+		t.Fatalf("session-user object listing should use USER_* dictionaries, got: %s", query.SQL)
+	}
+	if strings.Contains(sqlText, "ALL_TABLES") || strings.Contains(sqlText, "ALL_OBJECTS") {
+		t.Fatalf("session-user object listing should avoid ALL_* dictionaries, got: %s", query.SQL)
+	}
+	if strings.Contains(sqlText, "OWNER =") {
+		t.Fatalf("session-user object listing should not add owner predicates, got: %s", query.SQL)
+	}
+	if !strings.Contains(sqlText, "UPPER(OBJECT_NAME) LIKE :1 ESCAPE '\\'") {
+		t.Fatalf("object listing should push filter predicate, got: %s", query.SQL)
+	}
+	if !strings.Contains(sqlText, "OBJECT_TYPE IN (:2,:3)") {
+		t.Fatalf("object listing should push object type predicate, got: %s", query.SQL)
+	}
+	if !strings.Contains(sqlText, "ROWNUM <= :4") || !strings.Contains(sqlText, "DBX_RN > :5") {
+		t.Fatalf("object listing should use rownum pagination, got: %s", query.SQL)
+	}
+	if len(query.Args) != 5 {
+		t.Fatalf("unexpected args: %#v", query.Args)
+	}
+	if query.Args[0] != "%P%K%G%\\%%" || query.Args[1] != "FUNCTION" || query.Args[2] != "PACKAGE" || query.Args[3] != 25 || query.Args[4] != 0 {
 		t.Fatalf("object constraints args were not normalized: %#v", query.Args)
 	}
 }

@@ -11,6 +11,19 @@ required-features = ["duckdb-bundled"]
 test = false
 bench = false
 
+[[bin]]
+name = "duckdb-worker-hanging-connect-test-host"
+path = "tests/support/duckdb_worker_hanging_connect_test_host.rs"
+required-features = ["duckdb-bundled"]
+test = false
+
+[[bin]]
+name = "duckdb-worker-pid-test-host"
+path = "tests/support/duckdb_worker_pid_test_host.rs"
+required-features = ["duckdb-bundled"]
+test = false
+bench = false
+
 [features]
 default = ["duckdb-bundled", "mq-admin", "sqlite-sqlcipher"]
 duckdb-bundled = ["duckdb/bundled"]

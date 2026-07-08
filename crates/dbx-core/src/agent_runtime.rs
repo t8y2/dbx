@@ -24,7 +24,7 @@ pub async fn stop_daemon_by_key(manager: &AgentManager, agent_key: &str) {
 
 pub async fn restart_daemon_by_key(manager: &AgentManager, agent_key: &str) -> Result<(), String> {
     manager.daemons.lock().await.remove(agent_key);
-    let client = spawn_client_for_key(manager, agent_key).await?;
+    let client = spawn_client_for_key(manager, agent_key, &[]).await?;
     manager.daemons.lock().await.insert(agent_key.to_string(), client);
     Ok(())
 }
@@ -33,10 +33,11 @@ pub async fn spawn_connection_client(
     manager: &AgentManager,
     db_type: &DatabaseType,
     driver_profile: Option<&str>,
+    extra_java_args: &[String],
 ) -> Result<AgentDriverClient, String> {
     let keys = runtime_agent_key_candidates(db_type, driver_profile)
         .ok_or_else(|| format!("{:?} is not an agent-driven database type", db_type))?;
-    spawn_first_available_client(manager, &keys).await
+    spawn_first_available_client(manager, &keys, extra_java_args).await
 }
 
 pub async fn call_daemon<T: DeserializeOwned + Send + 'static>(
@@ -53,7 +54,7 @@ pub async fn call_daemon<T: DeserializeOwned + Send + 'static>(
     let mut daemons = manager.daemons.lock().await;
 
     if !daemons.contains_key(&key) {
-        let client = spawn_client_for_key(manager, &key).await?;
+        let client = spawn_client_for_key(manager, &key, &[]).await?;
         daemons.insert(key.clone(), client);
     }
 
@@ -63,7 +64,7 @@ pub async fn call_daemon<T: DeserializeOwned + Send + 'static>(
         Err(err) => {
             log::warn!("[agent] daemon call failed, respawning: {err}");
             daemons.remove(&key);
-            let mut new_client = spawn_client_for_key(manager, &key).await?;
+            let mut new_client = spawn_client_for_key(manager, &key, &[]).await?;
             let result = new_client.call::<T>(method, params).await?;
             daemons.insert(key, new_client);
             Ok(result)
@@ -86,7 +87,7 @@ pub async fn call_daemon_with_timeout<T: DeserializeOwned + Send + 'static>(
     let mut daemons = manager.daemons.lock().await;
 
     if !daemons.contains_key(&key) {
-        let client = spawn_client_for_key(manager, &key).await?;
+        let client = spawn_client_for_key(manager, &key, &[]).await?;
         daemons.insert(key.clone(), client);
     }
 
@@ -96,7 +97,7 @@ pub async fn call_daemon_with_timeout<T: DeserializeOwned + Send + 'static>(
         Err(err) => {
             log::warn!("[agent] daemon call failed, respawning: {err}");
             daemons.remove(&key);
-            let mut new_client = spawn_client_for_key(manager, &key).await?;
+            let mut new_client = spawn_client_for_key(manager, &key, &[]).await?;
             let result = new_client.call_with_timeout::<T>(method, params, timeout_duration).await?;
             daemons.insert(key, new_client);
             Ok(result)
@@ -137,10 +138,11 @@ fn first_installed_agent_key<'a>(manager: &AgentManager, keys: &'a [&'static str
 async fn spawn_first_available_client(
     manager: &AgentManager,
     keys: &[&'static str],
+    extra_java_args: &[String],
 ) -> Result<AgentDriverClient, String> {
     let mut last_error = None;
     for key in keys {
-        match spawn_client_for_key(manager, key).await {
+        match spawn_client_for_key(manager, key, extra_java_args).await {
             Ok(client) => return Ok(client),
             Err(err) => last_error = Some(err),
         }
@@ -148,11 +150,15 @@ async fn spawn_first_available_client(
     Err(last_error.unwrap_or_else(|| "No agent driver candidates available".to_string()))
 }
 
-async fn spawn_client_for_key(manager: &AgentManager, key: &str) -> Result<AgentDriverClient, String> {
+async fn spawn_client_for_key(
+    manager: &AgentManager,
+    key: &str,
+    extra_java_args: &[String],
+) -> Result<AgentDriverClient, String> {
     let state = manager.load_state();
     let jre_key = state.installed_drivers.get(key).map(|driver| driver.jre.as_str()).unwrap_or(DEFAULT_JRE_KEY);
 
-    let launch = manager.resolve_agent_launch_spec(&state, key, jre_key)?;
+    let launch = manager.resolve_agent_launch_spec_with_extra_args(&state, key, jre_key, extra_java_args)?;
     let mut client = AgentDriverClient::spawn(launch).await?;
     client.try_optional_handshake(manager.agent_app_version()).await;
     Ok(client)

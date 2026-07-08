@@ -116,7 +116,6 @@ import { renderWktOnCanvas, isHexGeometry } from "@/lib/dataGrid/geometryPreview
 import { buildDataGridCellDetail, buildDataGridColumnDetail, buildDataGridRowDetail, dataGridColumnDetailJson, dataGridColumnDetailTsv, dataGridRowDetailJson, dataGridRowDetailTsv, filterDataGridDetailFields, type DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
 import { applyColumnFormatter, buildColumnFormatterKey, normalizeColumnFormatter, resolveColumnFormatter, type ColumnFormatterConfig, type DateTimeFormatterUnit, DateTimePatterns } from "@/lib/dataGrid/columnFormatter";
 import { temporalCellEditorKind, type TemporalCellEditorKind } from "@/lib/dataGrid/dataGridTemporalEditor";
-import { isEnumColumn, enumValuesForColumn } from "@/lib/dataGrid/dataGridEnumEditor";
 import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowShortcut, isFocusSearchShortcut, isModRShortcut, isSaveShortcut, isToggleTransposeShortcut } from "@/lib/editor/keyboardShortcuts";
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
 import { canGoNextDataGridPage } from "@/lib/dataGrid/dataGridPagination";
@@ -129,9 +128,11 @@ import { appendColumnValueFilterCondition, buildColumnValueFilterCondition, buil
 import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
 import { MAX_RESULT_PAGE_SIZE, MIN_RESULT_PAGE_SIZE, normalizeResultPageSize, resultPageSizeMenuOptions } from "@/lib/dataGrid/paginationPageSize";
 import { allNullColumnIndexes, filterColumnVisibilityOptions, hiddenColumnIndexesWithAllNullColumns, invertedHiddenColumnIndexes, nextHiddenColumnIndexes, removeAutoHiddenColumnIndexes, visibleColumnIndexesForFilter } from "@/lib/dataGrid/dataGridColumnVisibility";
+import { buildDataGridColumnLookupItems, filterDataGridColumnLookupItems } from "@/lib/dataGrid/dataGridColumnLookup";
 import { columnOrderKeysForIndexes, isDefaultColumnOrder, moveVisibleColumnIndex, orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
 import { dataGridColumnLayoutScopeKey, loadDataGridColumnOrder, removeDataGridColumnOrder, saveDataGridColumnOrder } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { parseClipboardTable, summarizeSelection } from "@/lib/dataGrid/gridSelection";
+import { columnHeaderCanvasPointerDisabled, columnHeaderClickShouldBeSuppressed, columnHeaderPreviewOffsetForColumn, columnHeaderTooltipDisabled } from "@/lib/dataGrid/dataGridColumnHeaderInteraction";
 
 import { useToast } from "@/composables/useToast";
 import { useDataGridExport } from "@/composables/useDataGridExport";
@@ -159,7 +160,7 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 
 const SqlPreviewPanel = defineAsyncComponent(() => import("@/components/editor/SqlPreviewPanel.vue"));
 const FORMATTED_JSON_EDIT_WARNING_COUNT_STORAGE_KEY = "dbx-cell-detail-formatted-json-edit-warning-count";
-const FORMATTED_JSON_EDIT_WARNING_MAX_COUNT = 10;
+const FORMATTED_JSON_EDIT_WARNING_MAX_COUNT = 3;
 
 const { t } = useI18n();
 const slots = useSlots();
@@ -1081,6 +1082,7 @@ const serverFilterValueByKey = ref<Map<string, CellValue>>(new Map());
 let serverFilterRequestId = 0;
 let serverFilterSearchTimer: ReturnType<typeof window.setTimeout> | undefined;
 const filterBuilderOpen = ref(false);
+const filterBuilderColumnSearch = ref("");
 const filterModeOptions: Array<{ value: FilterMode; labelKey: string }> = [
   { value: "equals", labelKey: "grid.filterBuilderEquals" },
   { value: "not-equals", labelKey: "grid.filterBuilderNotEquals" },
@@ -1093,6 +1095,12 @@ const filterModeOptions: Array<{ value: FilterMode; labelKey: string }> = [
 ];
 const filterBuilderColumns = computed(() => props.tableMeta?.columns ?? []);
 const filterBuilderColumnOptions = computed(() => filterBuilderColumns.value.map((column) => column.name));
+const filteredFilterBuilderColumnOptions = computed(() => {
+  const query = filterBuilderColumnSearch.value.trim().toLowerCase();
+  if (!query) return filterBuilderColumnOptions.value;
+  return filterBuilderColumnOptions.value.filter((columnName) => columnName.toLowerCase().includes(query));
+});
+const filterBuilderColumnSearchNavigationKeys = new Set(["Escape", "Tab", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"]);
 const structuredFilterCacheKey = computed(() => props.cacheKey || [props.connectionId ?? "", props.database ?? "", props.context ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? ""].join("\u0001"));
 const structuredFilterScopeKey = computed(() => [props.connectionId ?? "", props.database ?? "", props.schema ?? "", props.context ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? "", filterBuilderColumnOptions.value.join("\0")].join("\u0001"));
 const structuredFilterRules = ref<StructuredFilterRule[]>([]);
@@ -1817,6 +1825,24 @@ function updateStructuredFilterRule(ruleId: string, patch: Partial<StructuredFil
   });
 }
 
+function updateStructuredFilterRuleColumn(ruleId: string, columnName: string) {
+  updateStructuredFilterRule(ruleId, { columnName });
+  filterBuilderColumnSearch.value = "";
+}
+
+function handleFilterBuilderColumnSearchKeydown(event: KeyboardEvent) {
+  if (event.isComposing || event.key === "Process") {
+    event.stopPropagation();
+    return;
+  }
+  if (filterBuilderColumnSearchNavigationKeys.has(event.key)) return;
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  if (event.key.length === 1 || event.key === "Backspace" || event.key === "Delete") {
+    // Let text editing stay in the search box without breaking Select navigation keys.
+    event.stopPropagation();
+  }
+}
+
 function resetStructuredFilters() {
   appliedStructuredWhereInput.value = "";
   structuredFilterRules.value = filterBuilderColumnOptions.value.length > 0 ? [defaultStructuredFilterRule()] : [];
@@ -1872,6 +1898,10 @@ async function applyStructuredFilters() {
 }
 
 watch([structuredFilterCacheKey, structuredFilterScopeKey], loadStructuredFilterStateForScope, { immediate: true });
+
+watch(filterBuilderOpen, (open) => {
+  if (!open) filterBuilderColumnSearch.value = "";
+});
 
 watch(
   [structuredFilterRules, appliedStructuredWhereInput],
@@ -2470,16 +2500,15 @@ const displayableColumnIndexes = computed(() =>
     .map(({ index }) => index),
 );
 const goToColumnItems = computed(() =>
-  displayableColumnIndexes.value.map((index) => ({
-    index,
-    name: props.result.columns[index] ?? `#${index + 1}`,
-    sourceName: props.sourceColumns?.[index],
-  })),
+  buildDataGridColumnLookupItems({
+    columns: props.result.columns,
+    sourceColumns: props.sourceColumns,
+    displayableIndexes: displayableColumnIndexes.value,
+    commentByColumn: columnCommentMap.value,
+  }),
 );
 const filteredGoToColumns = computed(() => {
-  const query = goToColumnSearch.value.trim().toLocaleLowerCase();
-  if (!query) return goToColumnItems.value;
-  return goToColumnItems.value.filter((column) => column.name.toLocaleLowerCase().includes(query) || column.sourceName?.toLocaleLowerCase().includes(query));
+  return filterDataGridColumnLookupItems(goToColumnItems.value, goToColumnSearch.value);
 });
 const orderedDisplayableColumnIndexes = computed(() =>
   orderedColumnIndexes({
@@ -2523,7 +2552,7 @@ const allNullColumnCount = computed(() => allNullColumnIndexesForResult.value.le
 const canToggleAllNullColumns = computed(() => nullColumnsHidden.value || (allNullColumnCount.value > 0 && displayableColumnCount.value > 1));
 function filteredColumnVisibilityOptions(query: string) {
   const displayable = new Set(displayableColumnIndexes.value);
-  return filterColumnVisibilityOptions(props.result.columns, query).filter((option) => displayable.has(option.index));
+  return filterColumnVisibilityOptions(props.result.columns, query, { sourceColumns: props.sourceColumns, commentByColumn: columnCommentMap.value }).filter((option) => displayable.has(option.index));
 }
 function isColumnVisible(columnIndex: number): boolean {
   return !hiddenColumnIndexes.value.has(columnIndex);
@@ -2992,7 +3021,78 @@ type ColumnHeaderDragState = {
   dragging: boolean;
 };
 const columnHeaderDragState = ref<ColumnHeaderDragState | null>(null);
+const columnHeaderResizeActive = ref(false);
 let columnHeaderDragClickGuardUntil = 0;
+let columnHeaderSuppressNextClick = false;
+let columnHeaderSuppressClickTimer = 0;
+let columnHeaderDragFrame = 0;
+let columnHeaderPendingClientX = 0;
+let columnHeaderResizeListenersCleanup: (() => void) | null = null;
+
+const columnHeaderTooltipsDisabled = computed(() =>
+  columnHeaderTooltipDisabled({
+    columnDragActive: columnHeaderDragState.value !== null,
+    columnResizeActive: columnHeaderResizeActive.value,
+  }),
+);
+
+function columnHeaderPointerInteractionActive(): boolean {
+  return columnHeaderCanvasPointerDisabled({
+    columnDragActive: columnHeaderDragState.value !== null,
+    columnResizeActive: columnHeaderResizeActive.value,
+  });
+}
+
+function finishColumnHeaderResizeInteraction() {
+  clearColumnHeaderResizeListeners();
+  requestAnimationFrame(() => {
+    columnHeaderResizeActive.value = false;
+  });
+}
+
+function clearColumnHeaderResizeListeners() {
+  if (!columnHeaderResizeListenersCleanup) return;
+  columnHeaderResizeListenersCleanup();
+  columnHeaderResizeListenersCleanup = null;
+}
+
+function clearColumnHeaderClickGuard() {
+  columnHeaderSuppressNextClick = false;
+  columnHeaderDragClickGuardUntil = 0;
+  if (columnHeaderSuppressClickTimer) {
+    window.clearTimeout(columnHeaderSuppressClickTimer);
+    columnHeaderSuppressClickTimer = 0;
+  }
+}
+
+function armColumnHeaderClickGuard() {
+  clearColumnHeaderClickGuard();
+  columnHeaderSuppressNextClick = true;
+  columnHeaderDragClickGuardUntil = Date.now() + 800;
+  columnHeaderSuppressClickTimer = window.setTimeout(() => {
+    clearColumnHeaderClickGuard();
+  }, 800);
+}
+
+function startColumnHeaderResize(visibleColIdx: number, event: MouseEvent) {
+  // Browser hover state can stick to multiple header cells during pointer drags,
+  // so keep header tooltips closed until the resize gesture has fully settled.
+  clearColumnHeaderResizeListeners();
+  columnHeaderResizeActive.value = true;
+  armColumnHeaderClickGuard();
+  onCanvasMouseLeave();
+  const finishResize = () => {
+    armColumnHeaderClickGuard();
+    finishColumnHeaderResizeInteraction();
+  };
+  columnHeaderResizeListenersCleanup = () => {
+    window.removeEventListener("mouseup", finishResize, true);
+    window.removeEventListener("blur", finishResize, true);
+  };
+  window.addEventListener("mouseup", finishResize, true);
+  window.addEventListener("blur", finishResize, true);
+  onResizeStart(visibleColIdx, event);
+}
 
 function columnHeaderInteractiveTarget(target: EventTarget | null): boolean {
   return target instanceof HTMLElement && !!target.closest("button, input, textarea, select, [contenteditable='true'], [role='button'], [data-column-resize-handle]");
@@ -3007,6 +3107,32 @@ function columnHeaderDropTargetVisibleIndex(clientX: number): number {
     if (clientX < rect.left + rect.width / 2) return visibleIndex;
   }
   return visibleColumnIndexes.value.length;
+}
+
+function applyColumnHeaderDragPreview() {
+  columnHeaderDragFrame = 0;
+  const state = columnHeaderDragState.value;
+  if (!state?.dragging) return;
+  state.currentX = columnHeaderPendingClientX;
+  state.targetVisibleIndex = columnHeaderDropTargetVisibleIndex(columnHeaderPendingClientX);
+  if (useCanvasGridRows.value) scheduleCanvasDraw();
+}
+
+function scheduleColumnHeaderDragPreview(clientX: number) {
+  columnHeaderPendingClientX = clientX;
+  if (columnHeaderDragFrame) return;
+  columnHeaderDragFrame = requestAnimationFrame(applyColumnHeaderDragPreview);
+}
+
+function flushColumnHeaderDragPreview() {
+  if (columnHeaderDragFrame) cancelAnimationFrame(columnHeaderDragFrame);
+  applyColumnHeaderDragPreview();
+}
+
+function cancelColumnHeaderDragPreview() {
+  if (!columnHeaderDragFrame) return;
+  cancelAnimationFrame(columnHeaderDragFrame);
+  columnHeaderDragFrame = 0;
 }
 
 function columnHeaderLayoutRects(): { visibleIndex: number; left: number; width: number }[] {
@@ -3026,12 +3152,15 @@ function columnHeaderLayoutRects(): { visibleIndex: number; left: number; width:
 function stopColumnHeaderDrag(commit: boolean) {
   const state = columnHeaderDragState.value;
   if (!state) return;
+  const hadCanvasPreview = useCanvasGridRows.value && state.dragging;
   window.removeEventListener("pointermove", onColumnHeaderPointerMove, true);
   window.removeEventListener("pointerup", onColumnHeaderPointerUp, true);
   window.removeEventListener("pointercancel", onColumnHeaderPointerCancel, true);
+  cancelColumnHeaderDragPreview();
   document.body.style.userSelect = "";
   columnHeaderDragState.value = null;
-  if (state.dragging) columnHeaderDragClickGuardUntil = Date.now() + 250;
+  if (hadCanvasPreview) scheduleCanvasDraw();
+  if (state.dragging) armColumnHeaderClickGuard();
   if (!commit || !state.dragging || state.sourceVisibleIndex === state.targetVisibleIndex) return;
   const next = moveVisibleColumnIndex({
     orderedIndexes: orderedDisplayableColumnIndexes.value,
@@ -3050,14 +3179,16 @@ function onColumnHeaderPointerMove(event: PointerEvent) {
   if (!state.dragging && moved) {
     state.dragging = true;
     document.body.style.userSelect = "none";
+    onCanvasMouseLeave();
   }
   if (!state.dragging) return;
   event.preventDefault();
-  state.currentX = event.clientX;
-  state.targetVisibleIndex = columnHeaderDropTargetVisibleIndex(event.clientX);
+  scheduleColumnHeaderDragPreview(event.clientX);
 }
 
-function onColumnHeaderPointerUp() {
+function onColumnHeaderPointerUp(event: PointerEvent) {
+  columnHeaderPendingClientX = event.clientX;
+  flushColumnHeaderDragPreview();
   stopColumnHeaderDrag(true);
 }
 
@@ -3076,17 +3207,35 @@ function startColumnHeaderDrag(visibleColIdx: number, event: PointerEvent) {
     columnRects: columnHeaderLayoutRects(),
     dragging: false,
   };
+  columnHeaderPendingClientX = event.clientX;
   window.addEventListener("pointermove", onColumnHeaderPointerMove, true);
   window.addEventListener("pointerup", onColumnHeaderPointerUp, true);
   window.addEventListener("pointercancel", onColumnHeaderPointerCancel, true);
 }
 
-function onHeaderClick(visibleColIdx: number, event: MouseEvent) {
-  if (Date.now() < columnHeaderDragClickGuardUntil) {
-    event.preventDefault();
-    event.stopPropagation();
-    return;
+function suppressHeaderClickIfNeeded(event: MouseEvent): boolean {
+  if (
+    !columnHeaderClickShouldBeSuppressed({
+      now: Date.now(),
+      guardUntil: columnHeaderDragClickGuardUntil,
+      suppressNextClick: columnHeaderSuppressNextClick,
+    })
+  ) {
+    return false;
   }
+  clearColumnHeaderClickGuard();
+  event.preventDefault();
+  event.stopPropagation();
+  event.stopImmediatePropagation();
+  return true;
+}
+
+function onHeaderClickCapture(event: MouseEvent) {
+  suppressHeaderClickIfNeeded(event);
+}
+
+function onHeaderClick(visibleColIdx: number, event: MouseEvent) {
+  if (suppressHeaderClickIfNeeded(event)) return;
   selectColumn(visibleColIdx, event);
 }
 
@@ -3099,14 +3248,16 @@ function columnHeaderDragClass(visibleColIdx: number) {
 
 function columnHeaderPreviewOffset(visibleColIdx: number): number {
   const state = columnHeaderDragState.value;
-  if (!state?.dragging) return 0;
-  const sourceIndex = state.sourceVisibleIndex;
-  if (visibleColIdx === sourceIndex) return state.currentX - state.startX;
-  const targetIndex = state.targetVisibleIndex;
-  const sourceWidth = renderedColumnWidths.value[sourceIndex] ?? 0;
-  if (targetIndex < sourceIndex && visibleColIdx >= targetIndex && visibleColIdx < sourceIndex) return sourceWidth;
-  if (targetIndex > sourceIndex && visibleColIdx > sourceIndex && visibleColIdx <= targetIndex) return -sourceWidth;
-  return 0;
+  if (!state) return 0;
+  return columnHeaderPreviewOffsetForColumn({
+    columnDragActive: state.dragging,
+    visibleColIdx,
+    sourceVisibleIndex: state.sourceVisibleIndex,
+    targetVisibleIndex: state.targetVisibleIndex,
+    startX: state.startX,
+    currentX: state.currentX,
+    sourceWidth: renderedColumnWidths.value[state.sourceVisibleIndex] ?? 0,
+  });
 }
 
 function columnHeaderStyle(visibleColIdx: number) {
@@ -3119,6 +3270,12 @@ function columnHeaderStyle(visibleColIdx: number) {
     transition: columnHeaderDragState.value?.sourceVisibleIndex === visibleColIdx ? undefined : "transform 120ms ease-out",
   };
 }
+
+const columnHeaderPreviewOffsets = computed(() => renderedColumnWidths.value.map((_, visibleColIdx) => columnHeaderPreviewOffset(visibleColIdx)));
+const columnHeaderPreviewSourceVisibleIndex = computed(() => {
+  const state = columnHeaderDragState.value;
+  return state?.dragging ? state.sourceVisibleIndex : null;
+});
 
 function columnContentOffsetLeft(visibleColIdx: number): number {
   return DATA_GRID_ROW_NUM_WIDTH + (renderedColumnOffsets.value[visibleColIdx] ?? 0);
@@ -3208,6 +3365,10 @@ const isInfiniteScrollPaginating = ref(false);
 let lastInfiniteScrollPage = 0;
 let infiniteScrollCheckScheduled = false;
 let infiniteScrollAllLoaded = false;
+// Tracks whether the current loading cycle was triggered by a refresh/rollback
+// (as opposed to a normal paginate). Used to decide whether to auto-redirect
+// when the current page no longer exists after data was deleted.
+const isRefreshingData = ref(false);
 watch(pageSize, (value) => {
   customPageSizeInput.value = String(value);
 });
@@ -3298,6 +3459,26 @@ const canGoNextPage = computed(() => {
 const canJumpLastPage = computed(() => canGoNextPage.value && (hasKnownTotalRowCount.value || allRowsLoaded.value || !!props.tableMeta || !!props.countSql));
 const totalRowCountBusy = computed(() => props.totalRowCountLoading === true || manualTotalRowCountLoading.value);
 const canCalculateTotalRowCount = computed(() => !isResultsContext.value && !!props.connectionId && (!!props.tableMeta || !!props.countSql));
+// When a refresh/rollback completes and the current page exceeds the last
+// available page (e.g. data was deleted while viewing), auto-navigate to the
+// last available page instead of showing an empty page.
+watch(
+  () => props.loading,
+  (loading, prevLoading) => {
+    // Only act when loading completes (transitions from true to false)
+    // and the completion was triggered by a refresh/rollback.
+    if (!loading && prevLoading && isRefreshingData.value) {
+      isRefreshingData.value = false;
+      const total = displayedTotalRowCount.value;
+      if (!total || total <= 0) return;
+      const lastPageNum = Math.max(1, Math.ceil(total / pageSize.value));
+      if (currentPage.value <= lastPageNum) return;
+      currentPage.value = lastPageNum;
+      resetGridVerticalScroll(true);
+      emit("paginate", (lastPageNum - 1) * pageSize.value, pageSize.value, currentWhereInput(), currentOrderBy());
+    }
+  },
+);
 const showQueryEditReadyBadge = computed(() => isResultsContext.value && hasData.value && !!props.editable && (!!props.tableMeta || !!props.customSaveHandler));
 const queryEditReadyTargetLabel = computed(() => props.tableMeta?.tableName ?? props.customSaveHandler?.targetLabel ?? "");
 const showKeylessEditWarning = computed(() => !!props.editable && !!props.tableMeta && canUseKeylessRowPredicate(props.databaseType, props.tableMeta.primaryKeys ?? []));
@@ -3818,11 +3999,11 @@ function temporalEditorKindForColumn(columnIndex: number): TemporalCellEditorKin
 }
 
 function enumValuesForGridColumn(columnIndex: number): string[] {
-  return enumValuesForColumn(tableColumnForGridColumn(columnIndex));
+  return tableColumnForGridColumn(columnIndex)?.enum_values ?? [];
 }
 
 function isEnumGridColumn(columnIndex: number): boolean {
-  return isEnumColumn(tableColumnForGridColumn(columnIndex));
+  return (tableColumnForGridColumn(columnIndex)?.enum_values?.length ?? 0) > 0;
 }
 
 function isEnumGridColumnNullable(columnIndex: number): boolean {
@@ -3879,7 +4060,8 @@ async function onToolbarRefresh() {
     resetInfiniteScrollState();
   }
   preserveTransposeOnNextResult.value = showTranspose.value;
-  emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, 0);
+  isRefreshingData.value = true;
+  emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, (currentPage.value - 1) * pageSize.value);
 }
 
 function stopAutoRefreshTimer() {
@@ -3923,7 +4105,8 @@ function onToolbarRollback() {
   if (infiniteScrollEnabled.value) {
     resetInfiniteScrollState();
   }
-  emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, 0);
+  isRefreshingData.value = true;
+  emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, (currentPage.value - 1) * pageSize.value);
 }
 
 function addRow() {
@@ -4832,7 +5015,7 @@ function warnFormattedJsonEditIfNeeded(detail: DataGridCellDetail, force = false
   if (!force && (!sideDetailJsonView.value || !detail.formattedJson)) return;
   const count = Number(safeLocalStorageGet(FORMATTED_JSON_EDIT_WARNING_COUNT_STORAGE_KEY)) || 0;
   if (count >= FORMATTED_JSON_EDIT_WARNING_MAX_COUNT) return;
-  toast(t("grid.formattedJsonEditWarning"), 10000);
+  toast(t("grid.formattedJsonEditWarning"), 6000);
   safeLocalStorageSet(FORMATTED_JSON_EDIT_WARNING_COUNT_STORAGE_KEY, String(count + 1));
 }
 
@@ -5438,6 +5621,11 @@ function onCanvasWheel(event: WheelEvent) {
 }
 
 function onCanvasMouseMove(event: MouseEvent) {
+  if (columnHeaderPointerInteractionActive()) {
+    if (canvasRef.value) canvasRef.value.style.cursor = "default";
+    onCanvasMouseLeave();
+    return;
+  }
   const hit = canvasHitTest(event);
   const hitItem = hit ? displayItemAt(hit.rowIndex) : undefined;
   const next = hit && hitItem ? { rowIndex: hitItem.displayIndex, visibleColIdx: hit.rowNumber ? -1 : hit.visibleColIdx } : null;
@@ -5674,6 +5862,8 @@ function drawCanvasGrid() {
     rowAt: displayItemAt,
     renderedColumnWidths: renderedColumnWidths.value,
     renderedColumnOffsets: renderedColumnOffsets.value,
+    columnPreviewOffsets: columnHeaderPreviewOffsets.value,
+    columnPreviewSourceVisibleIndex: columnHeaderPreviewSourceVisibleIndex.value,
     visibleColumnIndexes: visibleColumnIndexes.value,
     rowNumberWidth: DATA_GRID_ROW_NUM_WIDTH,
     hoverCell: canvasHoverCell.value,
@@ -7311,8 +7501,14 @@ function onRowContext(rowId: number, rowIndex: number) {
 
 async function prefetchCopyStatements() {
   await prefetchRowAsInsertStatement(false);
+  if (isMultiRow.value) {
+    await prefetchRowAsInsertStatement(false, "row-by-row");
+  }
   if (canCopyRowAsInsertWithoutPrimaryKeys.value) {
     await prefetchRowAsInsertStatement(true);
+    if (isMultiRow.value) {
+      await prefetchRowAsInsertStatement(true, "row-by-row");
+    }
   }
   if (canCopyRowAsUpdate.value) {
     await prefetchRowAsUpdateStatement();
@@ -7765,6 +7961,10 @@ onDeactivated(() => {
 onUnmounted(() => {
   cleanupFrames();
   stopAutoRefreshTimer();
+  cancelColumnHeaderDragPreview();
+  clearColumnHeaderResizeListeners();
+  clearColumnHeaderClickGuard();
+  columnHeaderResizeActive.value = false;
   onSearchSplitResizeEnd();
   onDdlResizeEnd();
   onDetailResizeEnd();
@@ -7921,7 +8121,11 @@ function copyRowLabels() {
   return {
     row: isMultiRow.value ? t("grid.copyRows", { count }) : t("grid.copyRow"),
     insert: isMultiRow.value ? t("grid.copyRowsInsert", { count }) : t("grid.copyRowInsert"),
+    insertMerged: t("grid.copyRowsInsertMerged", { count }),
+    insertRowByRow: t("grid.copyRowsInsertRowByRow", { count }),
     insertNoPk: isMultiRow.value ? t("grid.copyRowsInsertWithoutPrimaryKeys", { count }) : t("grid.copyRowInsertWithoutPrimaryKeys"),
+    insertNoPkMerged: t("grid.copyRowsInsertWithoutPrimaryKeysMerged", { count }),
+    insertNoPkRowByRow: t("grid.copyRowsInsertWithoutPrimaryKeysRowByRow", { count }),
     update: isMultiRow.value ? t("grid.copyRowsUpdate", { count }) : t("grid.copyRowUpdate"),
   };
 }
@@ -7953,13 +8157,31 @@ function copySubmenu(): ContextMenuItem {
     items.push({ label: t("grid.copyCell"), action: copyCell });
   }
   items.push({ label: labels.row, action: copyRow });
-  items.push({ label: labels.insert, action: copyRowAsInsert, disabled: !canCopyPreparedInsert(false) });
+  if (isMultiRow.value) {
+    items.push({ label: labels.insertMerged, action: () => copyRowAsInsert("merged"), disabled: !canCopyPreparedInsert(false, "merged") });
+    items.push({ label: labels.insertRowByRow, action: () => copyRowAsInsert("row-by-row"), disabled: !canCopyPreparedInsert(false, "row-by-row") });
+  } else {
+    items.push({ label: labels.insert, action: () => copyRowAsInsert(), disabled: !canCopyPreparedInsert(false) });
+  }
   if (canCopyRowAsInsertWithoutPrimaryKeys.value) {
-    items.push({
-      label: labels.insertNoPk,
-      action: copyRowAsInsertWithoutPrimaryKeys,
-      disabled: !canCopyPreparedInsert(true),
-    });
+    if (isMultiRow.value) {
+      items.push({
+        label: labels.insertNoPkMerged,
+        action: () => copyRowAsInsertWithoutPrimaryKeys("merged"),
+        disabled: !canCopyPreparedInsert(true, "merged"),
+      });
+      items.push({
+        label: labels.insertNoPkRowByRow,
+        action: () => copyRowAsInsertWithoutPrimaryKeys("row-by-row"),
+        disabled: !canCopyPreparedInsert(true, "row-by-row"),
+      });
+    } else {
+      items.push({
+        label: labels.insertNoPk,
+        action: () => copyRowAsInsertWithoutPrimaryKeys(),
+        disabled: !canCopyPreparedInsert(true),
+      });
+    }
   }
   if (canCopyRowAsUpdate.value) {
     items.push({ label: labels.update, action: copyRowAsUpdate, disabled: !canCopyPreparedUpdate() });
@@ -8248,14 +8470,32 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                               </Button>
                             </div>
                             <div class="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1.2fr)_auto] items-center gap-2">
-                              <Select :model-value="rule.columnName" :disabled="rule.disabled" :class="rule.disabled ? 'opacity-45' : ''" @update:model-value="(value: any) => updateStructuredFilterRule(rule.id, { columnName: String(value) })">
+                              <Select :model-value="rule.columnName" :disabled="rule.disabled" :class="rule.disabled ? 'opacity-45' : ''" @update:model-value="(value: any) => updateStructuredFilterRuleColumn(rule.id, String(value))">
                                 <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
                                   <SelectValue :placeholder="t('grid.filterBuilderColumn')" />
                                 </SelectTrigger>
-                                <SelectContent position="popper">
-                                  <SelectItem v-for="columnName in filterBuilderColumnOptions" :key="columnName" :value="columnName">
+                                <SelectContent position="popper" class="max-h-72" :hide-scroll-buttons="true">
+                                  <SelectItem v-for="columnName in filteredFilterBuilderColumnOptions" :key="columnName" :value="columnName">
                                     {{ columnName }}
                                   </SelectItem>
+                                  <div v-if="filteredFilterBuilderColumnOptions.length === 0" class="px-2 py-2 text-xs text-muted-foreground">
+                                    {{ t("grid.filterBuilderNoMatchingColumns") }}
+                                  </div>
+                                  <div class="sticky bottom-0 mt-1 flex items-center gap-1.5 border-t bg-popover px-2 py-1.5">
+                                    <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                                    <input
+                                      v-model="filterBuilderColumnSearch"
+                                      autocapitalize="off"
+                                      autocomplete="off"
+                                      autocorrect="off"
+                                      spellcheck="false"
+                                      class="h-7 min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground"
+                                      :placeholder="t('grid.filterBuilderSearchColumns')"
+                                      @click.stop
+                                      @keydown="handleFilterBuilderColumnSearchKeydown"
+                                      @pointerdown.stop
+                                    />
+                                  </div>
                                 </SelectContent>
                               </Select>
 
@@ -8627,9 +8867,10 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       </button>
                     </div>
                     <div class="max-h-56 overflow-auto rounded border">
-                      <button v-for="column in filteredGoToColumns" :key="column.index" type="button" class="flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground" @click="scrollToColumn(column.index)">
+                      <button v-for="column in filteredGoToColumns" :key="column.index" type="button" class="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-0.5 px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground" @click="scrollToColumn(column.index)">
                         <span class="min-w-0 truncate">{{ column.name }}</span>
-                        <span class="ml-auto shrink-0 font-mono text-[10px] text-muted-foreground">#{{ column.index + 1 }}</span>
+                        <span class="shrink-0 font-mono text-[10px] text-muted-foreground">#{{ column.index + 1 }}</span>
+                        <span v-if="column.comment" class="col-span-2 min-w-0 truncate text-[11px] leading-4 text-muted-foreground" :title="column.comment">{{ column.comment }}</span>
                       </button>
                       <div v-if="!filteredGoToColumns.length" class="px-2 py-3 text-center text-xs text-muted-foreground">{{ t("grid.noColumnsFound") }}</div>
                     </div>
@@ -8946,7 +9187,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     #
                   </div>
                   <div class="shrink-0" :style="{ width: `${horizontalColumnWindow.beforeWidth}px` }" />
-                  <LightTooltip v-for="col in renderedGridColumns" :key="`${col.name}-${col.actualColIdx}`" :text="col.name" side="bottom" :side-offset="4">
+                  <LightTooltip v-for="col in renderedGridColumns" :key="`${col.name}-${col.actualColIdx}`" :text="col.name" side="bottom" :side-offset="4" :disabled="columnHeaderTooltipsDisabled">
                     <div
                       class="shrink-0 px-2 py-1.5 border-r border-border whitespace-nowrap hover:bg-gray-200 dark:hover:bg-gray-800 select-none relative overflow-hidden"
                       :class="{
@@ -8958,6 +9199,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       :data-grid-column-index="col.actualColIdx"
                       :data-visible-col-index="col.visibleColIdx"
                       @pointerdown="startColumnHeaderDrag(col.visibleColIdx, $event)"
+                      @click.capture="onHeaderClickCapture"
                       @click="onHeaderClick(col.visibleColIdx, $event)"
                       @contextmenu="onHeaderContext(col.name, col.actualColIdx)"
                     >
@@ -9282,7 +9524,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           <Database class="h-3.5 w-3.5" />
                         </button>
                       </span>
-                      <div data-column-resize-handle class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="onResizeStart(col.visibleColIdx, $event)" @dblclick.stop="autoFitColumn(col.visibleColIdx)" />
+                      <div data-column-resize-handle class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="startColumnHeaderResize(col.visibleColIdx, $event)" @click.stop.prevent @dblclick.stop="autoFitColumn(col.visibleColIdx)" />
                     </div>
                     <template #content>
                       <div class="grid min-w-56 grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1 px-3 py-2">

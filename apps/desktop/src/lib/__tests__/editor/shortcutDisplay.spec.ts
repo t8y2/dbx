@@ -34,4 +34,8 @@ describe("shortcut display", () => {
     expect(formatShortcutDisplay("Mod+Plus", "Win32")).toBe("Ctrl + +");
     expect(formatShortcutDisplay("Shift+Mod++", "Win32")).toBe("Ctrl + Shift + +");
   });
+
+  it("displays multi-stroke shortcuts", () => {
+    expect(formatShortcutDisplay("Ctrl+K Ctrl+C", "Win32")).toBe("Ctrl + K, Ctrl + C");
+  });
 });

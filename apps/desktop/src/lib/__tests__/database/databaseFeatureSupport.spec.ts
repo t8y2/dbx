@@ -101,7 +101,8 @@ describe("database namespace creation", () => {
     expect(connectionNamespaceCreationTarget({ db_type: "tdengine" })).toBe("database");
   });
 
-  it("keeps special creation flows explicit", () => {
+  it("keeps non-database creation flows explicit", () => {
+    expect(connectionNamespaceCreationTarget({ db_type: "dameng" })).toBe("schema");
     expect(connectionNamespaceCreationTarget({ db_type: "duckdb" })).toBe("attach");
     expect(connectionNamespaceCreationTarget({ db_type: "mongodb" })).toBe("special");
     expect(connectionNamespaceCreationTarget({ db_type: "mongodb", driver_profile: "mongodb-legacy" })).toBeNull();

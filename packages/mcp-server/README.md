@@ -140,6 +140,26 @@ The MCP server reads your database connections from DBX's SQLite database:
 
 Windows portable builds store data next to `DBX.exe`, usually in `data\dbx.db`. Set `DBX_DATA_DIR` to that `data` folder instead of copying `dbx.db` into the default directory.
 
+## DBX Web / Docker Mode
+
+When connecting MCP to a deployed DBX Web instance, set `DBX_WEB_URL` instead of reading local desktop storage:
+
+```json
+{
+  "mcpServers": {
+    "dbx": {
+      "command": "dbx-mcp-server",
+      "env": {
+        "DBX_WEB_URL": "https://dbx.example.com",
+        "DBX_WEB_PASSWORD": "your-web-password"
+      }
+    }
+  }
+}
+```
+
+If the Web instance has password protection enabled, `DBX_WEB_PASSWORD` is required. Use the same password you enter on the DBX Web login page, including the password created by the first-run setup screen. You do not need to set `DBX_PASSWORD` on the DBX Web server just for MCP; `DBX_PASSWORD` is only a server-side environment override. Without `DBX_WEB_PASSWORD`, MCP calls fail before any connection data is returned. Desktop local mode does not use `DBX_WEB_PASSWORD`.
+
 ## DBX UI Integration
 
 The `dbx_open_table` tool communicates with the running DBX app to open tables directly in the UI. This requires DBX to be running. If DBX is not running, the tool will return an error message.
@@ -276,6 +296,26 @@ MCP Server 从 DBX 的 SQLite 数据库读取连接信息：
 - **Windows**: `%APPDATA%\com.dbx.app\dbx.db`
 
 Windows 便携版的数据通常在 `DBX.exe` 同级的 `data\dbx.db`。请把 `DBX_DATA_DIR` 设置为这个 `data` 文件夹，不要手工复制 `dbx.db` 到默认目录。
+
+### DBX Web / Docker 模式
+
+如果 MCP 连接的是已部署的 DBX Web 实例，请设置 `DBX_WEB_URL`，不要读取本机桌面端存储：
+
+```json
+{
+  "mcpServers": {
+    "dbx": {
+      "command": "dbx-mcp-server",
+      "env": {
+        "DBX_WEB_URL": "https://dbx.example.com",
+        "DBX_WEB_PASSWORD": "你的 Web 访问密码"
+      }
+    }
+  }
+}
+```
+
+当 Web 实例启用了密码保护时，必须提供 `DBX_WEB_PASSWORD`。这里填写的就是 DBX Web 登录页使用的密码，也包括首次打开 Web 页面时通过 setup 设置的密码。为了让 MCP 可用，不需要在启动 DBX Web 时额外设置 `DBX_PASSWORD`；`DBX_PASSWORD` 只是服务端环境变量覆盖。未提供 `DBX_WEB_PASSWORD` 时，MCP 调用会在返回任何连接数据前失败。桌面本地模式不使用 `DBX_WEB_PASSWORD`。
 
 ### DBX UI 联动
 

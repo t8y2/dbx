@@ -119,6 +119,7 @@
   --sidebar-accent-foreground: rgb(23 23 23);
   --sidebar-border: rgb(229 229 229);
   --sidebar-ring: rgb(161 161 161);
+  --dbx-window-top-border: rgb(0 0 0 / 0.35);
 }
 
 .dark {
@@ -154,6 +155,7 @@
   --sidebar-accent-foreground: rgb(221 221 226);
   --sidebar-border: rgb(110 110 114 / 0.28);
   --sidebar-ring: rgb(133 134 139);
+  --dbx-window-top-border: rgb(255 255 255 / 0.18);
 }
 
 html.theme-soft {
@@ -1312,6 +1314,22 @@ body.dbx-table-reference-dragging * {
     cursor: pointer;
     user-select: none;
   }
+}
+
+.dbx-desktop-window-frame {
+  position: relative;
+}
+
+.dbx-desktop-window-frame::before {
+  content: "";
+  position: absolute;
+  z-index: 80;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 1px;
+  pointer-events: none;
+  background: var(--dbx-window-top-border);
 }
 
 .dbx-editor-font-family {

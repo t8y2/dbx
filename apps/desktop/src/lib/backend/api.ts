@@ -76,6 +76,7 @@ export const uninstallJdbcPlugin = forward("uninstallJdbcPlugin");
 export const listInstalledAgentsLocal = forward("listInstalledAgentsLocal");
 export const listInstalledAgents = forward("listInstalledAgents");
 export const getDriverStoreUsage = forward("getDriverStoreUsage");
+export const clearDriverDownloadCache = forward("clearDriverDownloadCache");
 export const getDriverRuntimeSummary = forward("getDriverRuntimeSummary");
 export const stopDriverRuntime = forward("stopDriverRuntime");
 export const restartDriverRuntime = forward("restartDriverRuntime");
@@ -473,9 +474,18 @@ export type {
   WebDavDownloadResult,
   McpServerStatus,
   UpdateInfo,
+  RedisBlob,
+  RedisCollectionPage,
   RedisDatabaseInfo,
+  RedisHashItem,
   RedisKeyInfo,
+  RedisListItem,
+  RedisSetItem,
+  RedisStreamEntry,
+  RedisStreamField,
   RedisValue,
+  RedisValueData,
+  RedisZsetItem,
   RedisScanResult,
   RedisCommandSafety,
   RedisCommandResult,

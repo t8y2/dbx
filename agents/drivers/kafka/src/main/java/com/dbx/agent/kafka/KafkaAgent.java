@@ -753,7 +753,17 @@ public final class KafkaAgent {
         TopicPartition tp = new TopicPartition(topic, partition);
         try (KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(props)) {
             consumer.assign(Collections.singletonList(tp));
-            consumer.seek(tp, offset);
+            Map<TopicPartition, Long> beginningOffsets =
+                consumer.beginningOffsets(Collections.singletonList(tp), Duration.ofSeconds(5));
+            Map<TopicPartition, Long> endOffsets =
+                consumer.endOffsets(Collections.singletonList(tp), Duration.ofSeconds(5));
+            long beginningOffset = beginningOffsets.getOrDefault(tp, 0L);
+            long endOffset = endOffsets.getOrDefault(tp, beginningOffset);
+            Long seekOffset = normalizePeekOffset(offset, beginningOffset, endOffset);
+            if (seekOffset == null) {
+                return Collections.singletonMap("messages", Collections.emptyList());
+            }
+            consumer.seek(tp, seekOffset);
 
             List<Map<String, Object>> messages = new ArrayList<>();
             ConsumerRecords<String, byte[]> records = consumer.poll(Duration.ofSeconds(5));
@@ -1122,6 +1132,19 @@ public final class KafkaAgent {
             }
         } catch (Exception ignored) {}
         return null;
+    }
+
+    static Long normalizePeekOffset(long requestedOffset, long beginningOffset, long endOffset) {
+        if (endOffset <= beginningOffset) {
+            return null;
+        }
+        if (requestedOffset < beginningOffset) {
+            return beginningOffset;
+        }
+        if (requestedOffset >= endOffset) {
+            return null;
+        }
+        return requestedOffset;
     }
 
     private static String stringOrNull(JsonObject object, String key) {

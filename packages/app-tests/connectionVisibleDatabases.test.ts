@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, visibleDatabaseSelectionIsStale, initialVisibleDatabaseSelection } from "../../apps/desktop/src/lib/connection/connectionVisibleDatabases.ts";
+import { appendVisibleDatabaseSelection, buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, visibleDatabaseSelectionIsStale, initialVisibleDatabaseSelection } from "../../apps/desktop/src/lib/connection/connectionVisibleDatabases.ts";
 import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, filterDatabaseNamesForVisiblePicker } from "../../apps/desktop/src/lib/database/visibleDatabases.ts";
 import type { ConnectionConfig } from "../../apps/desktop/src/types/database.ts";
 
@@ -65,6 +65,17 @@ test("Redis visible database picker keeps every database and initial selection u
 
 test("connection database filtering still applies saved visible database filters for sidebar display", () => {
   assert.deepEqual(filterDatabaseNamesForConnection(["app", "analytics", "mysql", "sys"], config({ visible_databases: ["app"] })), ["app"]);
+});
+
+test("append visible database selection only when filter is enabled", () => {
+  assert.deepEqual(appendVisibleDatabaseSelection(["app"], "analytics"), ["app", "analytics"]);
+  assert.deepEqual(appendVisibleDatabaseSelection(["app", "analytics"], "analytics"), ["app", "analytics"]);
+  assert.equal(appendVisibleDatabaseSelection(undefined, "analytics"), undefined);
+});
+
+test("append visible database selection trims new database names and ignores empty names", () => {
+  assert.deepEqual(appendVisibleDatabaseSelection(["app"], " analytics "), ["app", "analytics"]);
+  assert.deepEqual(appendVisibleDatabaseSelection(["app"], "   "), ["app"]);
 });
 
 test("ZooKeeper connections do not offer visible database selection", () => {

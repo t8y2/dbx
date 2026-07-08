@@ -430,8 +430,8 @@ function clearContextTarget() {
                   <div
                     v-for="{ entry, depth } in flatTree(folder.entries, folder.expanded)"
                     :key="entry.path"
-                    class="flex items-center gap-1 px-2 py-1 cursor-pointer rounded-sm hover:bg-muted/60 text-sm"
-                    :class="selectedPath === entry.path ? 'bg-accent text-accent-foreground' : ''"
+                    class="flex items-center gap-1 px-2 py-1 cursor-pointer hover:bg-muted/60 text-sm"
+                    :class="[entry.is_dir ? 'rounded-sm' : 'rounded-none', selectedPath === entry.path ? 'bg-accent text-accent-foreground' : '']"
                     :style="{ paddingLeft: depth * 16 + 8 + 'px' }"
                     @click="
                       selectPath(entry.path);

@@ -10,6 +10,10 @@ import com.dbx.agent.JdbcIdentifiers;
 import com.dbx.agent.JsonRpcServer;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
+import com.dbx.agent.ExecuteQueryOptions;
+import com.dbx.agent.QueryPageOptions;
+import com.dbx.agent.QueryPageResult;
+import com.dbx.agent.QueryResult;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
@@ -103,6 +107,35 @@ public final class HiveAgent extends AbstractJdbcAgent {
     }
 
     @Override
+    public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
+        // Hive JDBC fetches rows via Thrift FetchResults in batches controlled
+        // by fetchSize. A large fetchSize can fail with "Error retrieving next
+        // row" when the result contains large binary/struct columns. Use a
+        // small fetchSize (50) so each Thrift batch stays within limits.
+        return super.executeQuery(sql, schema, new ExecuteQueryOptions(
+            options.getMaxRows(),
+            50,
+            options.getTimeoutSecs()
+        ));
+    }
+
+    @Override
+    public QueryPageResult executeQueryPage(String sql, String schema, QueryPageOptions options) {
+        return super.executeQueryPage(sql, schema, withSmallFetchSize(options));
+    }
+
+    @Override
+    public QueryPageResult startTableRead(String sql, String schema, QueryPageOptions options) {
+        return super.startTableRead(sql, schema, withSmallFetchSize(options));
+    }
+
+    private static QueryPageOptions withSmallFetchSize(QueryPageOptions options) {
+        return new QueryPageOptions(
+            options.getPageSize(), 50, options.getMaxRows(), options.getTimeoutSecs()
+        );
+    }
+
+    @Override
     protected Object resultValue(ResultSet rs, int index, int sqlType) {
         return unchecked(() -> {
             Object value = rs.getObject(index);
@@ -169,8 +202,30 @@ public final class HiveAgent extends AbstractJdbcAgent {
         return result;
     }
 
-    private static String buildUrl(ConnectParams params) {
-        return "jdbc:hive2://" + params.getHost() + ":" + params.getPort() + "/" + params.getDatabase();
+    static String buildUrl(ConnectParams params) {
+        String connectionString = trimToEmpty(params.getConnection_string());
+        if (!connectionString.isEmpty()) {
+            return connectionString;
+        }
+        String url = "jdbc:hive2://" + params.getHost() + ":" + params.getPort() + "/" + params.getDatabase();
+        return appendHiveUrlParams(url, params.getUrl_params());
+    }
+
+    private static String appendHiveUrlParams(String url, String urlParams) {
+        String params = trimHiveUrlParams(urlParams);
+        if (params.isEmpty()) {
+            return url;
+        }
+        // Hive JDBC authentication options use semicolon-separated URL properties.
+        return url + (url.endsWith(";") ? "" : ";") + params;
+    }
+
+    private static String trimHiveUrlParams(String urlParams) {
+        String value = trimToEmpty(urlParams);
+        while (value.startsWith("?") || value.startsWith("&") || value.startsWith(";")) {
+            value = value.substring(1);
+        }
+        return value;
     }
 
     private static String trimToNull(String value) {

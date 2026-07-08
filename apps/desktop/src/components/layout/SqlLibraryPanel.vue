@@ -16,6 +16,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import { savedSqlFolderBranchFileCount } from "@/lib/savedSql/savedSqlFolderCounts";
+import { ensureSqlExtension, stripSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import type { SavedSqlFile, SavedSqlFolder } from "@/types/database";
 
 const { t } = useI18n();
@@ -73,16 +74,8 @@ function importConnectionIdForFolder(folder?: SavedSqlFolder) {
   return folder?.connectionId || activeImportConnectionId();
 }
 
-function ensureSqlExtension(name: string) {
-  return /\.sql$/i.test(name) ? name : `${name}.sql`;
-}
-
 function sanitizeFileSystemSegment(name: string) {
   return name.replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_").trim() || "untitled";
-}
-
-function stripSqlExtension(name: string) {
-  return name.replace(/\.sql$/i, "");
 }
 
 function relativeImportName(baseDir: string, filePath: string) {
@@ -596,7 +589,7 @@ async function confirmRename() {
   if (type === "folder") {
     await savedSqlStore.renameFolder(id, name);
   } else {
-    await savedSqlStore.renameFile(id, name.endsWith(".sql") ? name : `${name}.sql`);
+    await savedSqlStore.renameFile(id, ensureSqlExtension(name));
   }
 }
 

@@ -227,6 +227,21 @@ pub fn build_view_ddl_sql(input: BuildViewDdlInput) -> String {
     format!("CREATE VIEW {qualified_name} AS\n{}", ensure_semicolon(source))
 }
 
+pub fn build_export_object_source_sql(
+    database_type: DatabaseType,
+    object_type: ObjectSourceKind,
+    source: &str,
+) -> String {
+    let source = source.trim();
+    if source.is_empty() {
+        return String::new();
+    }
+    if is_mysql_like(database_type) && matches!(object_type, ObjectSourceKind::Procedure | ObjectSourceKind::Function) {
+        return mysql_delimited_routine_source(source);
+    }
+    ensure_semicolon(source)
+}
+
 pub fn object_source_save_execution_mode(_database_type: DatabaseType) -> ObjectSourceSaveExecutionMode {
     ObjectSourceSaveExecutionMode::Single
 }
@@ -315,6 +330,23 @@ fn ensure_semicolon(sql: &str) -> String {
     } else {
         format!("{trimmed};")
     }
+}
+
+fn mysql_delimited_routine_source(source: &str) -> String {
+    let trimmed = source.trim();
+    if Regex::new(r"(?i)^\s*DELIMITER\b").unwrap().is_match(trimmed) {
+        return trimmed.to_string();
+    }
+    let body = trimmed.trim_end_matches(';').trim_end();
+    let delimiter = mysql_routine_script_delimiter(body);
+    format!("DELIMITER {delimiter}\n{body}{delimiter}\nDELIMITER ;")
+}
+
+fn mysql_routine_script_delimiter(source: &str) -> &'static str {
+    ["//", "$$", ";;", "__DBX_DELIMITER__"]
+        .into_iter()
+        .find(|delimiter| !source.contains(delimiter))
+        .unwrap_or("__DBX_DELIMITER__")
 }
 
 fn source_starts_with_create_or_alter(source: &str) -> bool {
@@ -1215,6 +1247,40 @@ mod tests {
                 "DROP PROCEDURE IF EXISTS `app`.`refresh_cache`;",
             ]
         );
+    }
+
+    #[test]
+    fn mysql_routine_export_uses_delimiter_script() {
+        let sql = build_export_object_source_sql(
+            DatabaseType::Mysql,
+            ObjectSourceKind::Procedure,
+            "CREATE DEFINER=`root`@`%` PROCEDURE `refresh_cache`()\nBEGIN\n  SELECT 1;\nEND",
+        );
+
+        assert_eq!(
+            sql,
+            "DELIMITER //\nCREATE DEFINER=`root`@`%` PROCEDURE `refresh_cache`()\nBEGIN\n  SELECT 1;\nEND//\nDELIMITER ;"
+        );
+    }
+
+    #[test]
+    fn mysql_routine_export_does_not_double_wrap_delimiter_script() {
+        let source = "DELIMITER //\nCREATE PROCEDURE `refresh_cache`()\nBEGIN\n  SELECT 1;\nEND//\nDELIMITER ;";
+
+        let sql = build_export_object_source_sql(DatabaseType::Mysql, ObjectSourceKind::Procedure, source);
+
+        assert_eq!(sql, source);
+    }
+
+    #[test]
+    fn mysql_view_export_keeps_regular_statement_terminator() {
+        let sql = build_export_object_source_sql(
+            DatabaseType::Mysql,
+            ObjectSourceKind::View,
+            "CREATE VIEW `active_users` AS SELECT `id` FROM `users`",
+        );
+
+        assert_eq!(sql, "CREATE VIEW `active_users` AS SELECT `id` FROM `users`;");
     }
 
     #[test]

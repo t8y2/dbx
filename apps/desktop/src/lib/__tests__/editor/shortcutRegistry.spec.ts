@@ -2,7 +2,24 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_SHORTCUT_SETTINGS, SHORTCUT_DEFINITIONS, findShortcutConflict, formatShortcut, normalizeShortcutSettings, shortcutToCodeMirrorKey, type ShortcutActionId } from "@/lib/editor/shortcutRegistry";
 
 describe("shortcutRegistry editor actions", () => {
-  const formatterEditorActionIds: ShortcutActionId[] = ["formatSql", "indentMore", "indentLess", "duplicateLine", "deleteLine", "moveLineUp", "moveLineDown", "copyLineUp", "copyLineDown", "undo", "redo", "selectAll", "uppercaseSelection", "lowercaseSelection", "exPasteSqlInCondition"];
+  const formatterEditorActionIds: ShortcutActionId[] = [
+    "formatSql",
+    "toggleLineComment",
+    "indentMore",
+    "indentLess",
+    "duplicateLine",
+    "deleteLine",
+    "moveLineUp",
+    "moveLineDown",
+    "copyLineUp",
+    "copyLineDown",
+    "undo",
+    "redo",
+    "selectAll",
+    "uppercaseSelection",
+    "lowercaseSelection",
+    "exPasteSqlInCondition",
+  ];
   const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection"];
 
   it("registers formatter editor shortcuts in the generic editor scope", () => {
@@ -19,6 +36,7 @@ describe("shortcutRegistry editor actions", () => {
 
     expect(shortcuts.executeSql).toBe("Mod+Shift+Enter");
     expect(shortcuts.formatSql).toBe("Shift+Mod+F");
+    expect(shortcuts.toggleLineComment).toBe("Mod+/");
     expect(shortcuts.indentMore).toBe("");
     expect(shortcuts.indentLess).toBe("Shift+Tab");
     expect(shortcuts.duplicateLine).toBe("Mod+D");
@@ -70,5 +88,13 @@ describe("shortcutRegistry editor actions", () => {
   it("converts plus-key shortcuts for CodeMirror keymaps", () => {
     expect(shortcutToCodeMirrorKey("Mod+Plus")).toBe("Mod-+");
     expect(shortcutToCodeMirrorKey("Shift+Mod++")).toBe("Shift-Mod-+");
+  });
+
+  it("converts slash shortcuts for CodeMirror keymaps", () => {
+    expect(shortcutToCodeMirrorKey("Mod+/")).toBe("Mod-/");
+  });
+
+  it("converts multi-stroke shortcuts for CodeMirror keymaps", () => {
+    expect(shortcutToCodeMirrorKey("Ctrl+K Ctrl+C")).toBe("Ctrl-k Ctrl-c");
   });
 });

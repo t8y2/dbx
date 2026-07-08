@@ -47,6 +47,8 @@ pub struct ImportCreateTablePlan {
 pub struct TableImportColumnMapping {
     pub source_column: String,
     pub target_column: String,
+    #[serde(default)]
+    pub target_data_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -696,6 +698,15 @@ pub fn mapping_indexes_for_columns(
     columns: &[String],
     mappings: &[TableImportColumnMapping],
 ) -> Result<Vec<(usize, String)>, String> {
+    mapping_indexes_with_mappings(columns, mappings).map(|mapped| {
+        mapped.into_iter().map(|(source_index, mapping)| (source_index, mapping.target_column.clone())).collect()
+    })
+}
+
+fn mapping_indexes_with_mappings<'a>(
+    columns: &[String],
+    mappings: &'a [TableImportColumnMapping],
+) -> Result<Vec<(usize, &'a TableImportColumnMapping)>, String> {
     if mappings.is_empty() {
         return Err("No columns mapped for import".to_string());
     }
@@ -712,7 +723,7 @@ pub fn mapping_indexes_for_columns(
         if !target_seen.insert(mapping.target_column.clone()) {
             return Err(format!("Target column mapped more than once: {}", mapping.target_column));
         }
-        mapped.push((source_index, mapping.target_column.clone()));
+        mapped.push((source_index, mapping));
     }
     Ok(mapped)
 }
@@ -1011,6 +1022,52 @@ fn import_data_type(inferred_type: ImportInferredType, db_type: &DatabaseType) -
     .to_string()
 }
 
+fn normalize_import_target_data_type(mapping: &TableImportColumnMapping) -> Result<Option<String>, String> {
+    let Some(raw_data_type) = mapping.target_data_type.as_deref() else {
+        return Ok(None);
+    };
+    let data_type = raw_data_type.trim();
+    if data_type.is_empty() {
+        return Err(format!("Target data type cannot be empty: {}", mapping.target_column));
+    }
+    validate_import_target_data_type(data_type)?;
+    Ok(Some(data_type.to_string()))
+}
+
+fn validate_import_target_data_type(data_type: &str) -> Result<(), String> {
+    let lowered = data_type.to_ascii_lowercase();
+    if data_type.contains(';')
+        || lowered.contains("--")
+        || lowered.contains("/*")
+        || lowered.contains("*/")
+        || data_type.chars().any(char::is_control)
+    {
+        return Err(format!("Unsupported target data type syntax: {data_type}"));
+    }
+
+    // A user-entered type is a DDL fragment, so keep it constrained to one type
+    // expression and reject separators that could add another column or clause.
+    let mut paren_depth = 0usize;
+    for ch in data_type.chars() {
+        match ch {
+            '(' => paren_depth += 1,
+            ')' => {
+                paren_depth = paren_depth
+                    .checked_sub(1)
+                    .ok_or_else(|| format!("Unsupported target data type syntax: {data_type}"))?;
+            }
+            ',' if paren_depth == 0 => {
+                return Err(format!("Unsupported target data type syntax: {data_type}"));
+            }
+            _ => {}
+        }
+    }
+    if paren_depth != 0 {
+        return Err(format!("Unsupported target data type syntax: {data_type}"));
+    }
+    Ok(())
+}
+
 pub fn build_import_create_table_plan(
     data: &ParsedImportFile,
     mappings: &[TableImportColumnMapping],
@@ -1021,12 +1078,17 @@ pub fn build_import_create_table_plan(
     if table.trim().is_empty() {
         return Err("Target table name is required".to_string());
     }
-    let mapped = mapping_indexes(data, mappings)?;
+    let mapped = mapping_indexes_with_mappings(&data.columns, mappings)?;
     let mut columns = Vec::with_capacity(mapped.len());
-    for (source_index, target_column) in mapped {
-        let inferred_type = infer_column_type(&data.rows, source_index);
-        columns
-            .push(ImportCreateTableColumn { name: target_column, data_type: import_data_type(inferred_type, db_type) });
+    for (source_index, mapping) in mapped {
+        let data_type = match normalize_import_target_data_type(mapping)? {
+            Some(data_type) => data_type,
+            None => {
+                let inferred_type = infer_column_type(&data.rows, source_index);
+                import_data_type(inferred_type, db_type)
+            }
+        };
+        columns.push(ImportCreateTableColumn { name: mapping.target_column.clone(), data_type });
     }
     if columns.is_empty() {
         return Err("No columns mapped for import".to_string());
@@ -1694,7 +1756,11 @@ mod tests {
         let mappings = data
             .columns
             .iter()
-            .map(|column| TableImportColumnMapping { source_column: column.clone(), target_column: column.clone() })
+            .map(|column| TableImportColumnMapping {
+                source_column: column.clone(),
+                target_column: column.clone(),
+                target_data_type: None,
+            })
             .collect::<Vec<_>>();
 
         let plan =
@@ -1721,8 +1787,11 @@ mod tests {
     fn create_table_plan_requires_target_table_name() {
         let data =
             ParsedImportFile { columns: vec!["id".to_string()], rows: vec![vec![serde_json::json!(1)]], total_rows: 1 };
-        let mappings =
-            vec![TableImportColumnMapping { source_column: "id".to_string(), target_column: "id".to_string() }];
+        let mappings = vec![TableImportColumnMapping {
+            source_column: "id".to_string(),
+            target_column: "id".to_string(),
+            target_data_type: None,
+        }];
 
         let error = build_import_create_table_plan(&data, &mappings, " ", "", &DatabaseType::Mysql).unwrap_err();
 
@@ -1736,8 +1805,11 @@ mod tests {
             rows: vec![vec![serde_json::json!("long text")]],
             total_rows: 1,
         };
-        let mappings =
-            vec![TableImportColumnMapping { source_column: "notes".to_string(), target_column: "notes".to_string() }];
+        let mappings = vec![TableImportColumnMapping {
+            source_column: "notes".to_string(),
+            target_column: "notes".to_string(),
+            target_data_type: None,
+        }];
 
         let plan = build_import_create_table_plan(&data, &mappings, "events", "dbo", &DatabaseType::SqlServer).unwrap();
 
@@ -1745,10 +1817,68 @@ mod tests {
     }
 
     #[test]
+    fn create_table_plan_uses_user_defined_column_type() {
+        let data = ParsedImportFile {
+            columns: vec!["code".to_string(), "amount".to_string()],
+            rows: vec![vec![serde_json::json!("1001"), serde_json::json!("12.5")]],
+            total_rows: 1,
+        };
+        let mappings = vec![
+            TableImportColumnMapping {
+                source_column: "code".to_string(),
+                target_column: "code".to_string(),
+                target_data_type: Some("VARCHAR(32)".to_string()),
+            },
+            TableImportColumnMapping {
+                source_column: "amount".to_string(),
+                target_column: "amount".to_string(),
+                target_data_type: Some("DECIMAL(10,2)".to_string()),
+            },
+        ];
+
+        let plan = build_import_create_table_plan(&data, &mappings, "invoice", "", &DatabaseType::Mysql).unwrap();
+
+        assert_eq!(plan.sql, "CREATE TABLE `invoice` (\n  `code` VARCHAR(32),\n  `amount` DECIMAL(10,2)\n)");
+        assert_eq!(
+            plan.columns,
+            vec![
+                ImportCreateTableColumn { name: "code".to_string(), data_type: "VARCHAR(32)".to_string() },
+                ImportCreateTableColumn { name: "amount".to_string(), data_type: "DECIMAL(10,2)".to_string() },
+            ]
+        );
+    }
+
+    #[test]
+    fn create_table_plan_rejects_unsafe_user_defined_column_type() {
+        let data = ParsedImportFile {
+            columns: vec!["name".to_string()],
+            rows: vec![vec![serde_json::json!("Ada")]],
+            total_rows: 1,
+        };
+        let mappings = vec![TableImportColumnMapping {
+            source_column: "name".to_string(),
+            target_column: "name".to_string(),
+            target_data_type: Some("TEXT, injected INT".to_string()),
+        }];
+
+        let error = build_import_create_table_plan(&data, &mappings, "users", "", &DatabaseType::Mysql).unwrap_err();
+
+        assert!(error.contains("Unsupported target data type syntax"));
+    }
+
+    #[test]
     fn builds_import_insert_batches_from_mapped_columns() {
         let mappings = vec![
-            TableImportColumnMapping { source_column: "id".to_string(), target_column: "user_id".to_string() },
-            TableImportColumnMapping { source_column: "name".to_string(), target_column: "display_name".to_string() },
+            TableImportColumnMapping {
+                source_column: "id".to_string(),
+                target_column: "user_id".to_string(),
+                target_data_type: None,
+            },
+            TableImportColumnMapping {
+                source_column: "name".to_string(),
+                target_column: "display_name".to_string(),
+                target_data_type: None,
+            },
         ];
         let data = ParsedImportFile {
             columns: vec!["id".to_string(), "name".to_string(), "ignored".to_string()],
@@ -1779,8 +1909,16 @@ mod tests {
     fn duplicate_mapping_is_rejected_before_sql_generation() {
         let columns = vec!["id".to_string(), "name".to_string()];
         let mappings = vec![
-            TableImportColumnMapping { source_column: "id".to_string(), target_column: "target".to_string() },
-            TableImportColumnMapping { source_column: "name".to_string(), target_column: "target".to_string() },
+            TableImportColumnMapping {
+                source_column: "id".to_string(),
+                target_column: "target".to_string(),
+                target_data_type: None,
+            },
+            TableImportColumnMapping {
+                source_column: "name".to_string(),
+                target_column: "target".to_string(),
+                target_data_type: None,
+            },
         ];
 
         let error = mapping_indexes_for_columns(&columns, &mappings).unwrap_err();
@@ -1792,8 +1930,16 @@ mod tests {
     fn builds_single_streaming_import_batch_from_rows() {
         let columns = vec!["id".to_string(), "name".to_string()];
         let mappings = vec![
-            TableImportColumnMapping { source_column: "id".to_string(), target_column: "id".to_string() },
-            TableImportColumnMapping { source_column: "name".to_string(), target_column: "name".to_string() },
+            TableImportColumnMapping {
+                source_column: "id".to_string(),
+                target_column: "id".to_string(),
+                target_data_type: None,
+            },
+            TableImportColumnMapping {
+                source_column: "name".to_string(),
+                target_column: "name".to_string(),
+                target_data_type: None,
+            },
         ];
         let rows = vec![vec![serde_json::json!(1), serde_json::json!("Ada")]];
 
@@ -1832,8 +1978,16 @@ mod tests {
     #[test]
     fn oracle_import_insert_batches_use_single_row_statements() {
         let mappings = vec![
-            TableImportColumnMapping { source_column: "id".to_string(), target_column: "id".to_string() },
-            TableImportColumnMapping { source_column: "name".to_string(), target_column: "name".to_string() },
+            TableImportColumnMapping {
+                source_column: "id".to_string(),
+                target_column: "id".to_string(),
+                target_data_type: None,
+            },
+            TableImportColumnMapping {
+                source_column: "name".to_string(),
+                target_column: "name".to_string(),
+                target_data_type: None,
+            },
         ];
         let data = ParsedImportFile {
             columns: vec!["id".to_string(), "name".to_string()],
@@ -1873,8 +2027,13 @@ mod tests {
             TableImportColumnMapping {
                 source_column: "start".to_string(),
                 target_column: "insurance_start_time".to_string(),
+                target_data_type: None,
             },
-            TableImportColumnMapping { source_column: "raw".to_string(), target_column: "raw_text".to_string() },
+            TableImportColumnMapping {
+                source_column: "raw".to_string(),
+                target_column: "raw_text".to_string(),
+                target_data_type: None,
+            },
         ];
         let data = ParsedImportFile {
             columns: vec!["start".to_string(), "raw".to_string()],
@@ -1907,8 +2066,11 @@ mod tests {
 
     #[test]
     fn import_insert_batches_preserve_sqlserver_unicode_text() {
-        let mappings =
-            vec![TableImportColumnMapping { source_column: "name".to_string(), target_column: "name".to_string() }];
+        let mappings = vec![TableImportColumnMapping {
+            source_column: "name".to_string(),
+            target_column: "name".to_string(),
+            target_data_type: None,
+        }];
         let data = ParsedImportFile {
             columns: vec!["name".to_string()],
             rows: vec![vec![serde_json::json!("Tiếng Việt")]],

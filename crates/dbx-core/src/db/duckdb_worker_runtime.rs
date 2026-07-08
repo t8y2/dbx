@@ -102,6 +102,27 @@ impl DuckDbWorkerSession {
         let connection = self.connection.as_ref().ok_or("DuckDB worker is not connected")?.clone();
         Ok(connection.interrupt_handle())
     }
+
+    /// Probes whether the connection is still usable after an execute error.
+    ///
+    /// duckdb-rs 1.10503.1 has a bug where `Connection::prepare()` failing at the
+    /// `duckdb_extract_statements` stage (a syntax `Parser Error`) permanently poisons
+    /// the connection: every later operation returns `resource deadlock would occur`,
+    /// and dropping the connection aborts the whole process. Benign errors (binder,
+    /// catalog, runtime) do not poison the connection.
+    ///
+    /// This probe runs a trivial query through `execute_batch`, which uses the
+    /// non-poisoning `duckdb_query_arrow` path and fails fast on a poisoned connection.
+    /// It returns `true` when the connection is healthy and safe to reuse.
+    fn is_connection_healthy(&self) -> bool {
+        match self.connection.as_ref() {
+            Some(connection) => match connection.lock() {
+                Ok(locked) => locked.execute_batch("SELECT 1").is_ok(),
+                Err(_) => false,
+            },
+            None => false,
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -175,19 +196,39 @@ impl DuckDbWorkerRuntime {
                 tokio::spawn(async move {
                     let id = request.id.clone();
                     let params = request.parse_params::<DuckDbWorkerExecuteParams>();
-                    let result = match params {
-                        Ok(params) => tokio::task::spawn_blocking(move || {
-                            let mut session = session.lock().unwrap_or_else(|e| e.into_inner());
-                            session.execute(params)
-                        })
-                        .await
-                        .map_err(|e| e.to_string())
-                        .and_then(|result| result),
-                        Err(err) => Err(err.message),
+                    let (result, poisoned) = match params {
+                        Ok(params) => {
+                            let probe_session = session.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let mut session = probe_session.lock().unwrap_or_else(|e| e.into_inner());
+                                let result = session.execute(params);
+                                // Only probe connection health when execute failed: a syntax
+                                // Parser Error can poison the connection (duckdb-rs bug), and any
+                                // later use — including drop — would abort the process.
+                                let poisoned = result.is_err() && !session.is_connection_healthy();
+                                (result, poisoned)
+                            })
+                            .await
+                            .map_err(|e| e.to_string())
+                            .unwrap_or_else(|err| (Err(err), true))
+                        }
+                        Err(err) => (Err(err.message), false),
                     };
                     *active_interrupt.lock().unwrap_or_else(|e| e.into_inner()) = None;
                     let response = match result {
                         Ok(result) => DuckDbWorkerResponse::ok(id, result),
+                        // A poisoned connection cannot be reused or even safely dropped in-process.
+                        // Report a distinct code so the parent kills this worker (OS-level, skipping
+                        // destructors) and restarts a fresh one on the next request. We must not exit
+                        // here ourselves: process::exit races the parent's next request, which could
+                        // be written to a dying worker. Killing on the parent side has no such window.
+                        Err(err) if poisoned => {
+                            log::warn!("[duckdb-worker:poisoned-connection] reporting to parent for restart");
+                            DuckDbWorkerResponse::err(
+                                id,
+                                DuckDbWorkerError::from_message("duckdb_worker_poisoned", err),
+                            )
+                        }
                         Err(err) => {
                             DuckDbWorkerResponse::err(id, DuckDbWorkerError::from_message("duckdb_execute_failed", err))
                         }
@@ -256,7 +297,7 @@ pub async fn run_stdio_worker() -> Result<(), String> {
     loop {
         let line = lines.next_line().await.map_err(|e| e.to_string())?;
         let Some(line) = line else {
-            break;
+            std::process::exit(0);
         };
         if line.trim().is_empty() {
             continue;

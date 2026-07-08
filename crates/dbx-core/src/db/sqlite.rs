@@ -108,28 +108,41 @@ fn open_sqlite_handle(
         validate_existing_sqlite_file(path)?;
     }
 
-    let conn = if is_memory {
-        Connection::open_in_memory().map_err(|e| format!("SQLite connection failed: {e}"))?
+    let sqlcipher_attempts: &[Option<i64>] = if encrypted { &[None, Some(3), Some(2), Some(1)] } else { &[None] };
+    let mut unlock_error: Option<String> = None;
+
+    for compatibility in sqlcipher_attempts {
+        let conn = open_sqlite_connection(path, create_if_missing)?;
+        if let Err(err) = apply_sqlcipher_key(&conn, cipher_key.as_deref(), *compatibility) {
+            unlock_error = Some(err);
+            continue;
+        }
+        conn.busy_timeout(std::time::Duration::from_secs(10)).map_err(|e| e.to_string())?;
+        load_sqlite_extensions(&conn, &extensions)?;
+        register_sqlite_compat_functions(&conn)?;
+
+        return Ok(SqliteHandle { conn: Arc::new(Mutex::new(conn)) });
+    }
+
+    Err(unlock_error.unwrap_or_else(|| "SQLCipher database unlock failed.".to_string()))
+}
+
+fn open_sqlite_connection(path: &str, create_if_missing: bool) -> Result<Connection, String> {
+    if is_memory_database_path(path) {
+        return Connection::open_in_memory().map_err(|e| format!("SQLite connection failed: {e}"));
+    }
+
+    let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE;
+    if create_if_missing {
+        flags |= OpenFlags::SQLITE_OPEN_CREATE;
+    }
+    if is_network_path(path) {
+        flags |= OpenFlags::SQLITE_OPEN_URI;
+        Connection::open_with_flags(sqlite_network_path_uri(path), flags)
+            .map_err(|e| format!("SQLite connection failed: {e}"))
     } else {
-        let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE;
-        if create_if_missing {
-            flags |= OpenFlags::SQLITE_OPEN_CREATE;
-        }
-        if is_network_path(path) {
-            flags |= OpenFlags::SQLITE_OPEN_URI;
-            Connection::open_with_flags(sqlite_network_path_uri(path), flags)
-                .map_err(|e| format!("SQLite connection failed: {e}"))?
-        } else {
-            Connection::open_with_flags(path, flags).map_err(|e| format!("SQLite connection failed: {e}"))?
-        }
-    };
-
-    apply_sqlcipher_key(&conn, cipher_key.as_deref())?;
-    conn.busy_timeout(std::time::Duration::from_secs(10)).map_err(|e| e.to_string())?;
-    load_sqlite_extensions(&conn, &extensions)?;
-    register_sqlite_compat_functions(&conn)?;
-
-    Ok(SqliteHandle { conn: Arc::new(Mutex::new(conn)) })
+        Connection::open_with_flags(path, flags).map_err(|e| format!("SQLite connection failed: {e}"))
+    }
 }
 
 fn sqlite_cipher_key(cipher_key: &str) -> Option<String> {
@@ -155,7 +168,7 @@ fn ensure_sqlcipher_available(encrypted: bool) -> Result<(), String> {
 }
 
 #[cfg(feature = "sqlite-sqlcipher")]
-fn apply_sqlcipher_key(conn: &Connection, cipher_key: Option<&str>) -> Result<(), String> {
+fn apply_sqlcipher_key(conn: &Connection, cipher_key: Option<&str>, compatibility: Option<i64>) -> Result<(), String> {
     let Some(cipher_key) = cipher_key.filter(|key| !key.is_empty()) else {
         return Ok(());
     };
@@ -163,14 +176,27 @@ fn apply_sqlcipher_key(conn: &Connection, cipher_key: Option<&str>) -> Result<()
     // SQLCipher requires the key before the first schema read; the verification
     // query turns wrong keys into an immediate connection error.
     conn.pragma_update(None, "key", cipher_key).map_err(|e| format!("SQLCipher key setup failed: {e}"))?;
-    conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
+    if let Some(compatibility) = compatibility {
+        conn.pragma_update(None, "cipher_compatibility", compatibility)
+            .map_err(|e| format!("SQLCipher compatibility setup failed: {e}"))?;
+    }
+    verify_sqlcipher_key(conn)
         .map_err(|e| format!("SQLCipher database unlock failed. Check the SQLite password/key and file type: {e}"))?;
     Ok(())
 }
 
 #[cfg(not(feature = "sqlite-sqlcipher"))]
-fn apply_sqlcipher_key(_conn: &Connection, _cipher_key: Option<&str>) -> Result<(), String> {
+fn apply_sqlcipher_key(
+    _conn: &Connection,
+    _cipher_key: Option<&str>,
+    _compatibility: Option<i64>,
+) -> Result<(), String> {
     Ok(())
+}
+
+#[cfg(feature = "sqlite-sqlcipher")]
+fn verify_sqlcipher_key(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
 }
 
 fn register_sqlite_compat_functions(conn: &Connection) -> Result<(), String> {
@@ -586,6 +612,32 @@ mod tests {
                 Err(err) => err,
             };
         assert!(wrong_key.contains("SQLCipher database unlock failed"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "sqlite-sqlcipher")]
+    #[tokio::test]
+    async fn sqlcipher_key_opens_legacy_compatible_database() {
+        let path = std::env::temp_dir().join(format!("dbx-sqlcipher-legacy-{}.db", uuid::Uuid::new_v4()));
+        let key = "legacy key";
+
+        {
+            let conn =
+                Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE)
+                    .expect("create legacy-compatible encrypted sqlite");
+            conn.pragma_update(None, "key", key).expect("set SQLCipher key");
+            conn.pragma_update(None, "cipher_compatibility", 3).expect("set SQLCipher compatibility");
+            conn.execute_batch("CREATE TABLE t (name TEXT); INSERT INTO t VALUES ('legacy');")
+                .expect("write legacy-compatible encrypted sqlite");
+        }
+
+        let reopened = connect_path_with_cipher_key_and_extensions(path.to_str().unwrap(), key, Vec::new())
+            .await
+            .expect("reopen legacy-compatible encrypted sqlite");
+        let result =
+            execute_query(&reopened, "SELECT name FROM t").await.expect("read legacy-compatible encrypted sqlite");
+        assert_eq!(result.rows[0][0], serde_json::json!("legacy"));
 
         let _ = std::fs::remove_file(path);
     }
@@ -1089,6 +1141,7 @@ pub async fn get_columns(pool: &SqliteHandle, _schema: &str, table: &str) -> Res
                         numeric_precision: None,
                         numeric_scale: None,
                         character_maximum_length: None,
+                        enum_values: None,
                     })
                 })
                 .map_err(|e| e.to_string())?;

@@ -47,4 +47,19 @@ describe("useDataGridColumnResize", () => {
     expect(resizeDataGridColumnWidth(120, -200)).toBe(DATA_GRID_COL_MIN_WIDTH);
     expect(resizeDataGridColumnWidth(120, 30)).toBe(150);
   });
+
+  it("publishes a fresh rendered width array when a column is resized", () => {
+    const state = createResizeState({
+      columns: ["id", "name"],
+      rows: [[1, "Alice"]],
+    });
+
+    state.initColumnWidths();
+    const before = state.renderedColumnWidths.value;
+
+    state.columnWidths.value[1] = before[1] + 40;
+
+    expect(state.renderedColumnWidths.value).not.toBe(before);
+    expect(state.renderedColumnWidths.value[1]).toBe(before[1] + 40);
+  });
 });

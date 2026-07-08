@@ -140,7 +140,6 @@ public final class ZooKeeperAgent {
         }
 
         List<String> paths = recursive ? listRecursive(active, root) : listDirectChildren(active, root);
-        paths.removeIf(path -> shouldHideFromRootListing(root, path));
         Collections.sort(paths);
         int offset = cursor == null ? 0 : Math.max(0, cursor.offset);
         int end = Math.min(paths.size(), offset + limit);
@@ -478,10 +477,6 @@ public final class ZooKeeperAgent {
         } catch (KeeperException.NoNodeException e) {
             return 0;
         }
-    }
-
-    private static boolean shouldHideFromRootListing(String root, String path) {
-        return "/".equals(root) && ("/zookeeper".equals(path) || path.startsWith("/zookeeper/"));
     }
 
     private static boolean hasTlsOptions(JsonObject connection) {

@@ -14,6 +14,8 @@ pub struct ConnectionConfig {
     pub driver_label: Option<String>,
     #[serde(default)]
     pub url_params: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_java_options: Vec<String>,
     pub host: String,
     pub port: u16,
     pub username: String,
@@ -382,6 +384,8 @@ struct ConnectionConfigData {
     pub driver_label: Option<String>,
     #[serde(default)]
     pub url_params: Option<String>,
+    #[serde(default)]
+    pub agent_java_options: Vec<String>,
     pub host: String,
     pub port: u16,
     pub username: String,
@@ -464,6 +468,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             driver_profile: data.driver_profile,
             driver_label: data.driver_label,
             url_params: data.url_params,
+            agent_java_options: data.agent_java_options,
             host: data.host,
             port: data.port,
             username: data.username,
@@ -676,7 +681,7 @@ impl ConnectionConfig {
             DatabaseType::Rqlite | DatabaseType::Turso => Some("main"),
             DatabaseType::Gaussdb | DatabaseType::OpenGauss => Some("postgres"),
             DatabaseType::Kwdb => Some("defaultdb"),
-            DatabaseType::Kingbase | DatabaseType::Vastbase => Some("postgres"),
+            DatabaseType::Vastbase => Some("postgres"),
             DatabaseType::Highgo => Some("highgo"),
             DatabaseType::Yashandb => Some("yasdb"),
             DatabaseType::Oscar => Some("osrdb"),
@@ -1790,6 +1795,7 @@ mod tests {
             driver_profile: None,
             driver_label: None,
             url_params: None,
+            agent_java_options: Vec::new(),
             host: "10.1.2.3".to_string(),
             port: 2883,
             username: username.to_string(),
@@ -1842,6 +1848,23 @@ mod tests {
     fn zookeeper_database_type_uses_stable_wire_name() {
         assert_eq!(serde_json::to_string(&DatabaseType::ZooKeeper).unwrap(), "\"zookeeper\"");
         assert_eq!(serde_json::from_str::<DatabaseType>("\"zookeeper\"").unwrap(), DatabaseType::ZooKeeper);
+    }
+
+    #[test]
+    fn connection_config_defaults_missing_agent_java_options_to_empty() {
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "id",
+            "name": "Hive",
+            "db_type": "hive",
+            "host": "hive.local",
+            "port": 10000,
+            "username": "",
+            "password": "",
+            "database": "default"
+        }))
+        .unwrap();
+
+        assert!(config.agent_java_options.is_empty());
     }
 
     #[test]
@@ -2151,6 +2174,26 @@ mod tests {
         config.port = 8123;
 
         assert_eq!(config.effective_database(), Some("default"));
+    }
+
+    #[test]
+    fn kingbase_empty_database_has_no_default() {
+        let mut config = mysql_config("SYSTEM", "secret", None);
+        config.db_type = DatabaseType::Kingbase;
+        config.port = 54321;
+
+        assert_eq!(config.effective_database(), None);
+        assert_eq!(config.connection_url(), "kingbase://SYSTEM:secret@10.1.2.3:54321");
+    }
+
+    #[test]
+    fn vastbase_empty_database_uses_postgres_for_connection() {
+        let mut config = mysql_config("vastbase", "secret", None);
+        config.db_type = DatabaseType::Vastbase;
+        config.port = 5432;
+
+        assert_eq!(config.effective_database(), Some("postgres"));
+        assert_eq!(config.connection_url(), "vastbase://vastbase:secret@10.1.2.3:5432/postgres");
     }
 
     #[test]

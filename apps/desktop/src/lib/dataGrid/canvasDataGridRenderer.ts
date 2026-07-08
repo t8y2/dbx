@@ -43,6 +43,8 @@ export interface DrawCanvasDataGridOptions {
   rowAt: (rowIndex: number) => CanvasDataGridRow | undefined;
   renderedColumnWidths: number[];
   renderedColumnOffsets?: number[];
+  columnPreviewOffsets?: readonly number[];
+  columnPreviewSourceVisibleIndex?: number | null;
   visibleColumnIndexes: number[];
   rowNumberWidth: number;
   hoverCell: CanvasHoverCell | null;
@@ -216,6 +218,8 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     rowAt,
     renderedColumnWidths,
     renderedColumnOffsets,
+    columnPreviewOffsets = [],
+    columnPreviewSourceVisibleIndex,
     visibleColumnIndexes,
     rowNumberWidth,
     hoverCell,
@@ -264,8 +268,14 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
   ctx.textBaseline = "middle";
 
   const offsets = renderedColumnOffsets ?? columnOffsets(renderedColumnWidths);
+  let maxPreviewRightShift = 0;
+  let maxPreviewLeftShift = 0;
+  for (const offset of columnPreviewOffsets) {
+    if (offset > maxPreviewRightShift) maxPreviewRightShift = offset;
+    else if (-offset > maxPreviewLeftShift) maxPreviewLeftShift = -offset;
+  }
   const contentStart = Math.max(0, scrollLeft - rowNumberWidth);
-  const firstCol = firstVisibleColumn(offsets, contentStart);
+  const firstCol = firstVisibleColumn(offsets, Math.max(0, contentStart - maxPreviewRightShift));
   const columnOffset = offsets[firstCol] ?? 0;
   const paintSearchMatches = !isScrolling && searchMatchKeys.size > 0;
   const rowNumberBorderX = crispCanvasLine(rowNumberWidth - 1, dpr);
@@ -312,121 +322,128 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     ctx.moveTo(0, rowBorderY);
     ctx.lineTo(width, rowBorderY);
     ctx.stroke();
-    let x = rowNumberWidth + columnOffset - scrollLeft;
-    for (let visibleColIdx = firstCol; visibleColIdx < renderedColumnWidths.length && x < width; visibleColIdx++) {
+    const drawCell = (visibleColIdx: number, baseX: number) => {
       const colWidth = renderedColumnWidths[visibleColIdx] ?? 0;
       const actualColIdx = visibleColumnIndexes[visibleColIdx];
-      if (actualColIdx === undefined) {
-        x += colWidth;
-        continue;
+      if (actualColIdx === undefined) return;
+      const drawX = baseX + (columnPreviewOffsets[visibleColIdx] ?? 0);
+      if (drawX + colWidth < rowNumberWidth || drawX >= width) return;
+
+      const selectedCell = cellIsSelected(item.displayIndex, visibleColIdx);
+      const rowSelectionVisual = rowCellsUseSelectionVisual(item.id);
+      const isDirtyCell = item.isDirtyCol[actualColIdx];
+      const selectedFillVisual = rowSelectionVisual || selectedCell;
+      const selectedBorderVisual = rowSelectionVisual || selectedCell;
+      const isSearchMatch = paintSearchMatches && searchMatchKeys.has(`cell:${item.displayIndex}:${actualColIdx}`);
+      const isCurrentSearchMatch = paintSearchMatches && currentSearchMatch?.displayRow === item.displayIndex && currentSearchMatch.col === actualColIdx;
+      const clippedX = Math.max(drawX, rowNumberWidth);
+      const cellPaintWidth = Math.min(width, drawX + colWidth) - clippedX;
+      if (cellPaintWidth <= 0) return;
+
+      if (isDirtyCell && !selectedFillVisual) {
+        ctx.fillStyle = theme.cellDirty;
+        ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
       }
-      if (x + colWidth >= rowNumberWidth) {
-        const selectedCell = cellIsSelected(item.displayIndex, visibleColIdx);
-        const rowSelectionVisual = rowCellsUseSelectionVisual(item.id);
-        const isDirtyCell = item.isDirtyCol[actualColIdx];
-        const selectedFillVisual = rowSelectionVisual || selectedCell;
-        const selectedBorderVisual = rowSelectionVisual || selectedCell;
-        const isSearchMatch = paintSearchMatches && searchMatchKeys.has(`cell:${item.displayIndex}:${actualColIdx}`);
-        const isCurrentSearchMatch = paintSearchMatches && currentSearchMatch?.displayRow === item.displayIndex && currentSearchMatch.col === actualColIdx;
-        const clippedX = Math.max(x, rowNumberWidth);
-        const cellPaintWidth = colWidth - Math.max(0, clippedX - x);
+      if (hoverCell?.rowIndex === item.displayIndex && hoverCell.visibleColIdx === visibleColIdx && !isScrolling && !isSearchMatch && !isCurrentSearchMatch && !isDirtyCell && cellCanHover(item, actualColIdx)) {
+        ctx.fillStyle = theme.cellHover;
+        ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
+      }
+      if ((rowIsActive || selectedCell) && !item.isDeleted && !isDirtyCell) {
+        ctx.fillStyle = theme.cellSelectedSingle;
+        ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
+      }
+      if (selectedFillVisual && isDirtyCell) {
+        ctx.fillStyle = theme.cellSelectedDirty;
+        ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
+      }
+      if (isSearchMatch) {
+        ctx.fillStyle = searchFill;
+        ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
+      }
+      if (isCurrentSearchMatch) {
+        ctx.fillStyle = currentSearchFill;
+        ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
+      }
 
-        if (isDirtyCell && !selectedFillVisual) {
-          ctx.fillStyle = theme.cellDirty;
-          ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
-        }
-        if (hoverCell?.rowIndex === item.displayIndex && hoverCell.visibleColIdx === visibleColIdx && !isScrolling && !isSearchMatch && !isCurrentSearchMatch && !isDirtyCell && cellCanHover(item, actualColIdx)) {
-          ctx.fillStyle = theme.cellHover;
-          ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
-        }
-        if ((rowIsActive || selectedCell) && !item.isDeleted && !isDirtyCell) {
-          ctx.fillStyle = theme.cellSelectedSingle;
-          ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
-        }
-        if (selectedFillVisual && isDirtyCell) {
-          ctx.fillStyle = theme.cellSelectedDirty;
-          ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
-        }
-        if (isSearchMatch) {
-          ctx.fillStyle = searchFill;
-          ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
-        }
-        if (isCurrentSearchMatch) {
-          ctx.fillStyle = currentSearchFill;
-          ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
-        }
+      ctx.strokeStyle = theme.border;
+      ctx.beginPath();
+      ctx.moveTo(clippedX, rowBorderY);
+      ctx.lineTo(Math.min(width, clippedX + cellPaintWidth), rowBorderY);
+      ctx.stroke();
 
-        ctx.strokeStyle = theme.border;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(clippedX, y, Math.min(cellPaintWidth, width - clippedX), CANVAS_DATA_GRID_ROW_HEIGHT);
+      ctx.clip();
+      const value = item.data[actualColIdx];
+      ctx.textAlign = "left";
+      ctx.fillStyle = value === null ? theme.mutedForeground : theme.foreground;
+      ctx.font = value === null ? italicFont : tabularFont;
+      setCanvasNumericVariant(ctx, value === null ? "normal" : "tabular-nums");
+      const textLeft = alignCanvasPixel(drawX + 12, dpr);
+      const paddedMaxWidth = Math.max(0, drawX + colWidth - textLeft - 12);
+      const isEditingThisCell = editingCell?.rowId === item.id && editingCell.col === actualColIdx;
+      const rawDisplayText = item.isDraft && value === null ? (draftCellPlaceholder ?? "") : formatCell(value, actualColIdx);
+      const displayText = isEditingThisCell ? "" : firstLineCellDisplayValue(rawDisplayText);
+      const needsTruncation = ctx.measureText(displayText).width > paddedMaxWidth;
+      const textMaxWidth = needsTruncation ? Math.max(0, drawX + colWidth - textLeft) : paddedMaxWidth;
+      const text = isEditingThisCell ? displayText : fitCanvasText(ctx, displayText, textMaxWidth - 12);
+      ctx.fillText(text, textLeft, textY);
+      if (item.isDeleted && text) {
+        const textWidth = Math.min(ctx.measureText(text).width, textMaxWidth);
+        ctx.strokeStyle = theme.foreground;
         ctx.beginPath();
-        ctx.moveTo(clippedX, rowBorderY);
-        ctx.lineTo(Math.min(width, clippedX + cellPaintWidth), rowBorderY);
+        ctx.moveTo(textLeft, textY);
+        ctx.lineTo(alignCanvasPixel(textLeft + textWidth, dpr), textY);
         ctx.stroke();
+      }
+      ctx.restore();
+      setCanvasNumericVariant(ctx, "normal");
+      ctx.font = normalFont;
 
-        ctx.save();
+      ctx.strokeStyle = theme.border;
+      ctx.beginPath();
+      const columnBorderX = crispCanvasLine(drawX + colWidth - 1, dpr);
+      ctx.moveTo(columnBorderX, y);
+      ctx.lineTo(columnBorderX, y + CANVAS_DATA_GRID_ROW_HEIGHT);
+      ctx.stroke();
+
+      if (selectedBorderVisual && cellPaintWidth >= 2) {
+        const selectedLeftX = clippedX + 0.5;
+        const selectedRightX = clippedX + cellPaintWidth - 1.5;
+        const selectedTopY = Math.max(y + 0.5, 1);
+        const drawSelectedLeftBorder = selectedLeftX >= rowNumberWidth + 0.5;
+        ctx.strokeStyle = selectedCell && !isDirtyCell ? theme.cellSelectedSingleBorder : theme.cellSelectedBorder;
         ctx.beginPath();
-        ctx.rect(clippedX, y, Math.min(cellPaintWidth, width - clippedX), CANVAS_DATA_GRID_ROW_HEIGHT);
-        ctx.clip();
-        const value = item.data[actualColIdx];
-        ctx.textAlign = "left";
-        ctx.fillStyle = value === null ? theme.mutedForeground : theme.foreground;
-        ctx.font = value === null ? italicFont : tabularFont;
-        setCanvasNumericVariant(ctx, value === null ? "normal" : "tabular-nums");
-        const textLeft = alignCanvasPixel(x + 12, dpr);
-        const paddedMaxWidth = Math.max(0, x + colWidth - textLeft - 12);
-        const isEditingThisCell = editingCell?.rowId === item.id && editingCell.col === actualColIdx;
-        const rawDisplayText = item.isDraft && value === null ? (draftCellPlaceholder ?? "") : formatCell(value, actualColIdx);
-        const displayText = isEditingThisCell ? "" : firstLineCellDisplayValue(rawDisplayText);
-        const needsTruncation = ctx.measureText(displayText).width > paddedMaxWidth;
-        const textMaxWidth = needsTruncation ? Math.max(0, x + colWidth - textLeft) : paddedMaxWidth;
-        const text = isEditingThisCell ? displayText : fitCanvasText(ctx, displayText, textMaxWidth - 12);
-        ctx.fillText(text, textLeft, textY);
-        if (item.isDeleted && text) {
-          const textWidth = Math.min(ctx.measureText(text).width, textMaxWidth);
-          ctx.strokeStyle = theme.foreground;
-          ctx.beginPath();
-          ctx.moveTo(textLeft, textY);
-          ctx.lineTo(alignCanvasPixel(textLeft + textWidth, dpr), textY);
-          ctx.stroke();
-        }
-        ctx.restore();
-        setCanvasNumericVariant(ctx, "normal");
-        ctx.font = normalFont;
-
-        ctx.strokeStyle = theme.border;
-        ctx.beginPath();
-        const columnBorderX = crispCanvasLine(x + colWidth - 1, dpr);
-        ctx.moveTo(columnBorderX, y);
-        ctx.lineTo(columnBorderX, y + CANVAS_DATA_GRID_ROW_HEIGHT);
-        ctx.stroke();
-
-        if (selectedBorderVisual && cellPaintWidth >= 2) {
-          const selectedLeftX = clippedX + 0.5;
-          const selectedRightX = clippedX + cellPaintWidth - 1.5;
-          const selectedTopY = Math.max(y + 0.5, 1);
-          const drawSelectedLeftBorder = selectedLeftX >= rowNumberWidth + 0.5;
-          ctx.strokeStyle = selectedCell && !isDirtyCell ? theme.cellSelectedSingleBorder : theme.cellSelectedBorder;
-          ctx.beginPath();
+        ctx.moveTo(selectedLeftX, selectedTopY);
+        ctx.lineTo(selectedRightX, selectedTopY);
+        ctx.moveTo(selectedLeftX, rowBorderY);
+        ctx.lineTo(selectedRightX, rowBorderY);
+        if (drawSelectedLeftBorder) {
           ctx.moveTo(selectedLeftX, selectedTopY);
-          ctx.lineTo(selectedRightX, selectedTopY);
-          ctx.moveTo(selectedLeftX, rowBorderY);
-          ctx.lineTo(selectedRightX, rowBorderY);
-          if (drawSelectedLeftBorder) {
-            ctx.moveTo(selectedLeftX, selectedTopY);
-            ctx.lineTo(selectedLeftX, rowBorderY);
-          }
-          ctx.moveTo(selectedRightX, selectedTopY);
-          ctx.lineTo(selectedRightX, rowBorderY);
-          ctx.stroke();
+          ctx.lineTo(selectedLeftX, rowBorderY);
         }
-
-        if (isCurrentSearchMatch) {
-          ctx.strokeStyle = currentSearchBorder;
-          ctx.lineWidth = 2;
-          ctx.strokeRect(clippedX + 1, y + 1, Math.max(0, cellPaintWidth - 2), CANVAS_DATA_GRID_ROW_HEIGHT - 2);
-          ctx.lineWidth = 1;
-        }
+        ctx.moveTo(selectedRightX, selectedTopY);
+        ctx.lineTo(selectedRightX, rowBorderY);
+        ctx.stroke();
       }
+
+      if (isCurrentSearchMatch) {
+        ctx.strokeStyle = currentSearchBorder;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(clippedX + 1, y + 1, Math.max(0, cellPaintWidth - 2), CANVAS_DATA_GRID_ROW_HEIGHT - 2);
+        ctx.lineWidth = 1;
+      }
+    };
+
+    let x = rowNumberWidth + columnOffset - scrollLeft;
+    for (let visibleColIdx = firstCol; visibleColIdx < renderedColumnWidths.length && x - maxPreviewLeftShift < width; visibleColIdx++) {
+      const colWidth = renderedColumnWidths[visibleColIdx] ?? 0;
+      drawCell(visibleColIdx, x);
       x += colWidth;
+    }
+    if (columnPreviewSourceVisibleIndex !== null && columnPreviewSourceVisibleIndex !== undefined && (columnPreviewOffsets[columnPreviewSourceVisibleIndex] ?? 0) !== 0) {
+      drawCell(columnPreviewSourceVisibleIndex, rowNumberWidth + (offsets[columnPreviewSourceVisibleIndex] ?? 0) - scrollLeft);
     }
     ctx.globalAlpha = 1;
   }

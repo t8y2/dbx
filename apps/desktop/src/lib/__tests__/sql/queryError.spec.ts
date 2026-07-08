@@ -23,6 +23,7 @@ describe("isQueryTimeoutErrorMessage", () => {
   it("detects agent RPC client-side timeout", () => {
     expect(isQueryTimeoutErrorMessage("Agent RPC call timed out (30s)")).toBe(true);
     expect(isQueryTimeoutErrorMessage("Agent RPC call timed out (120s)")).toBe(true);
+    expect(isQueryTimeoutErrorMessage("Agent RPC error (-1): Agent RPC call timed out (120s)")).toBe(true);
   });
 
   it("does not classify unrelated errors as query timeouts", () => {

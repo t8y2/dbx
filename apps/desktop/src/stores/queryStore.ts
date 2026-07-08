@@ -46,6 +46,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { createSavedSqlEditorPosition, initSavedSqlEditorPositions, restoreSavedSqlEditorPosition, saveSavedSqlEditorPosition } from "@/lib/app/savedSqlEditorPosition";
+import { ensureSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
 import type { SavedSqlFile } from "@/types/database";
 
@@ -1468,8 +1469,20 @@ export const useQueryStore = defineStore("query", () => {
     if (!trimmed) return false;
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.mode !== "query") return false;
-    tab.title = trimmed;
+    const normalizedTitle = tab.savedSqlId ? ensureSqlExtension(trimmed) : trimmed;
+    const previousTitle = tab.title;
+    tab.title = normalizedTitle;
     tab.customTitle = true;
+    if (tab.savedSqlId) {
+      const savedSqlStore = useSavedSqlStore();
+      const existing = savedSqlStore.getFile(tab.savedSqlId);
+      if (existing && existing.name !== normalizedTitle) {
+        void savedSqlStore.renameFile(tab.savedSqlId, normalizedTitle).catch((error) => {
+          console.warn("[DBX][saved-sql:rename:error]", error);
+          tab.title = previousTitle;
+        });
+      }
+    }
     return true;
   }
 

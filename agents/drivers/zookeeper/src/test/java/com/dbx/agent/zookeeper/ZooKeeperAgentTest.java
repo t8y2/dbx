@@ -398,7 +398,7 @@ final class ZooKeeperAgentTest {
 
             JsonObject list = result(request(5, "kv_list_prefix", "{\"prefix\":\"/\",\"recursive\":false}"));
 
-            Assertions.assertEquals(List.of("/app", "/config"), listedKeys(list));
+            Assertions.assertEquals(List.of("/app", "/config", "/zookeeper"), listedKeys(list));
             Assertions.assertTrue(list.get("continuation").isJsonNull());
         }
     }
@@ -412,7 +412,10 @@ final class ZooKeeperAgentTest {
 
             JsonObject list = result(request(5, "kv_list_prefix", "{\"prefix\":\"/\"}"));
 
-            Assertions.assertEquals(List.of("/app", "/app/name", "/config"), listedKeys(list));
+            Assertions.assertEquals(
+                List.of("/app", "/app/name", "/config", "/zookeeper", "/zookeeper/config", "/zookeeper/quota"),
+                listedKeys(list)
+            );
             Assertions.assertTrue(list.get("continuation").isJsonNull());
         }
     }
@@ -426,7 +429,10 @@ final class ZooKeeperAgentTest {
 
             JsonObject list = result(request(6, "kv_list_prefix", "{\"prefix\":\"/\",\"recursive\":true}"));
 
-            Assertions.assertEquals(List.of("/app", "/app/name", "/config"), listedKeys(list));
+            Assertions.assertEquals(
+                List.of("/app", "/app/name", "/config", "/zookeeper", "/zookeeper/config", "/zookeeper/quota"),
+                listedKeys(list)
+            );
         }
     }
 
@@ -457,11 +463,19 @@ final class ZooKeeperAgentTest {
                 "kv_list_prefix",
                 "{\"prefix\":\"/\",\"limit\":2,\"continuation\":\"" + continuation + "\"}"
             ));
+            String secondContinuation = second.get("continuation").getAsString();
+            JsonObject third = result(request(
+                7,
+                "kv_list_prefix",
+                "{\"prefix\":\"/\",\"limit\":2,\"continuation\":\"" + secondContinuation + "\"}"
+            ));
 
             Assertions.assertEquals(List.of("/a", "/b"), listedKeys(first));
             Assertions.assertFalse(continuation.isBlank());
-            Assertions.assertEquals(List.of("/c"), listedKeys(second));
-            Assertions.assertTrue(second.get("continuation").isJsonNull());
+            Assertions.assertEquals(List.of("/c", "/zookeeper"), listedKeys(second));
+            Assertions.assertFalse(secondContinuation.isBlank());
+            Assertions.assertEquals(List.of("/zookeeper/config", "/zookeeper/quota"), listedKeys(third));
+            Assertions.assertTrue(third.get("continuation").isJsonNull());
         }
     }
 

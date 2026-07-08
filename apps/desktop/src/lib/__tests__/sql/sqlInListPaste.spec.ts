@@ -21,7 +21,7 @@ describe("sqlInListPaste", () => {
   it("splits simple slash-separated value lists", () => {
     expect(buildSqlInConditionFromPasteSource("1/2/3")).toEqual({
       ok: true,
-      sql: "IN (1, 2, 3)",
+      sql: "IN ('1', '2', '3')",
       valueCount: 3,
     });
     expect(buildSqlInConditionFromPasteSource("A/B/C")).toEqual({
@@ -37,10 +37,10 @@ describe("sqlInListPaste", () => {
     expect(buildSqlInConditionFromPasteSource("/Users/staff/dbx")).toEqual({ ok: false, reason: "not-list" });
   });
 
-  it("preserves numeric and NULL literals while quoting strings", () => {
+  it("quotes all non-NULL values uniformly including numbers", () => {
     expect(buildSqlInConditionFromPasteSource("1\n-2.5\n001\nnull\nA1")).toEqual({
       ok: true,
-      sql: "IN (1, -2.5, '001', NULL, 'A1')",
+      sql: "IN ('1', '-2.5', '001', NULL, 'A1')",
       valueCount: 5,
     });
   });

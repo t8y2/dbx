@@ -7,7 +7,7 @@ import { useToast } from "@/composables/useToast";
 import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import { tryStartExclusiveActivation, type ActionActivationGuard } from "@/lib/connection/actionActivation";
 import { copyToClipboard } from "@/lib/common/clipboard";
-import { buildDataGridCopyInsertStatement, buildDataGridCopyUpdateStatements, type DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
+import { buildDataGridCopyInsertStatement, buildDataGridCopyUpdateStatements, type DataGridCopyInsertMode, type DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 import { formatSqlInsert } from "@/lib/export/exportFormats";
 import { uuid } from "@/lib/common/utils";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -102,7 +102,19 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     loading: false,
     ready: false,
   });
+  const copyRowInsertRowByRowCache = ref<CopyStatementCache>({
+    key: "",
+    text: "",
+    loading: false,
+    ready: false,
+  });
   const copyRowInsertWithoutPrimaryKeysCache = ref<CopyStatementCache>({
+    key: "",
+    text: "",
+    loading: false,
+    ready: false,
+  });
+  const copyRowInsertWithoutPrimaryKeysRowByRowCache = ref<CopyStatementCache>({
     key: "",
     text: "",
     loading: false,
@@ -217,7 +229,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     });
   }
 
-  function insertCopyKey(excludePrimaryKeys: boolean): string {
+  function insertCopyKey(excludePrimaryKeys: boolean, insertMode: DataGridCopyInsertMode): string {
     const rows = copyStatementRowsKey(insertEligibleRows());
     return JSON.stringify({
       databaseType: databaseType.value ?? null,
@@ -227,6 +239,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       columns: columns.value,
       sourceColumns: sourceColumns.value ?? null,
       excludePrimaryKeys,
+      insertMode,
       rows,
     });
   }
@@ -236,13 +249,22 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return rows.map((item) => ({ id: item.id, data: item.data }));
   }
 
-  function insertCopyCache(excludePrimaryKeys: boolean): CopyStatementCache {
-    return excludePrimaryKeys ? copyRowInsertWithoutPrimaryKeysCache.value : copyRowInsertCache.value;
+  function insertCopyCache(excludePrimaryKeys: boolean, insertMode: DataGridCopyInsertMode): CopyStatementCache {
+    if (excludePrimaryKeys) {
+      return insertMode === "row-by-row" ? copyRowInsertWithoutPrimaryKeysRowByRowCache.value : copyRowInsertWithoutPrimaryKeysCache.value;
+    }
+    return insertMode === "row-by-row" ? copyRowInsertRowByRowCache.value : copyRowInsertCache.value;
   }
 
-  function setInsertCopyCache(excludePrimaryKeys: boolean, cache: CopyStatementCache) {
+  function setInsertCopyCache(excludePrimaryKeys: boolean, insertMode: DataGridCopyInsertMode, cache: CopyStatementCache) {
     if (excludePrimaryKeys) {
-      copyRowInsertWithoutPrimaryKeysCache.value = cache;
+      if (insertMode === "row-by-row") {
+        copyRowInsertWithoutPrimaryKeysRowByRowCache.value = cache;
+      } else {
+        copyRowInsertWithoutPrimaryKeysCache.value = cache;
+      }
+    } else if (insertMode === "row-by-row") {
+      copyRowInsertRowByRowCache.value = cache;
     } else {
       copyRowInsertCache.value = cache;
     }
@@ -252,10 +274,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     copyRowUpdateCache.value = cache;
   }
 
-  async function prefetchRowAsInsertStatement(excludePrimaryKeys: boolean) {
+  async function prefetchRowAsInsertStatement(excludePrimaryKeys: boolean, insertMode: DataGridCopyInsertMode = "merged") {
     const rows = insertEligibleRows();
     if (!rows.length) {
-      setInsertCopyCache(excludePrimaryKeys, {
+      setInsertCopyCache(excludePrimaryKeys, insertMode, {
         key: "",
         text: "",
         loading: false,
@@ -263,11 +285,11 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       });
       return;
     }
-    const key = insertCopyKey(excludePrimaryKeys);
-    const current = insertCopyCache(excludePrimaryKeys);
+    const key = insertCopyKey(excludePrimaryKeys, insertMode);
+    const current = insertCopyCache(excludePrimaryKeys, insertMode);
     if ((current.loading || current.ready) && current.key === key) return;
 
-    setInsertCopyCache(excludePrimaryKeys, {
+    setInsertCopyCache(excludePrimaryKeys, insertMode, {
       key,
       text: "",
       loading: true,
@@ -283,6 +305,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
               sourceColumns: sourceColumns.value,
               rows: rows.map((item) => item.data),
               excludePrimaryKeys,
+              insertMode,
             })
           : await buildDataGridCopyInsertStatement({
               databaseType: databaseType.value,
@@ -291,19 +314,20 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
               sourceColumns: sourceColumns.value,
               rows: rows.map((item) => item.data),
               excludePrimaryKeys,
+              insertMode,
             });
-      const latest = insertCopyCache(excludePrimaryKeys);
+      const latest = insertCopyCache(excludePrimaryKeys, insertMode);
       if (latest.key !== key) return;
-      setInsertCopyCache(excludePrimaryKeys, {
+      setInsertCopyCache(excludePrimaryKeys, insertMode, {
         key,
         text: statement ?? "",
         loading: false,
         ready: !!statement,
       });
     } catch {
-      const latest = insertCopyCache(excludePrimaryKeys);
+      const latest = insertCopyCache(excludePrimaryKeys, insertMode);
       if (latest.key !== key) return;
-      setInsertCopyCache(excludePrimaryKeys, {
+      setInsertCopyCache(excludePrimaryKeys, insertMode, {
         key,
         text: "",
         loading: false,
@@ -312,14 +336,14 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     }
   }
 
-  function canCopyPreparedInsert(excludePrimaryKeys: boolean): boolean {
-    const cache = insertCopyCache(excludePrimaryKeys);
-    return cache.ready && cache.key === insertCopyKey(excludePrimaryKeys);
+  function canCopyPreparedInsert(excludePrimaryKeys: boolean, insertMode: DataGridCopyInsertMode = "merged"): boolean {
+    const cache = insertCopyCache(excludePrimaryKeys, insertMode);
+    return cache.ready && cache.key === insertCopyKey(excludePrimaryKeys, insertMode);
   }
 
-  function copyPreparedRowAsInsert(excludePrimaryKeys: boolean): boolean {
-    if (!canCopyPreparedInsert(excludePrimaryKeys)) return false;
-    void copyText(insertCopyCache(excludePrimaryKeys).text);
+  function copyPreparedRowAsInsert(excludePrimaryKeys: boolean, insertMode: DataGridCopyInsertMode = "merged"): boolean {
+    if (!canCopyPreparedInsert(excludePrimaryKeys, insertMode)) return false;
+    void copyText(insertCopyCache(excludePrimaryKeys, insertMode).text);
     return true;
   }
 
@@ -478,12 +502,12 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return targetedRows().filter((item) => !item.isDraft);
   }
 
-  async function copyRowAsInsert() {
-    copyPreparedRowAsInsert(false);
+  async function copyRowAsInsert(insertMode: DataGridCopyInsertMode = "merged") {
+    copyPreparedRowAsInsert(false, insertMode);
   }
 
-  async function copyRowAsInsertWithoutPrimaryKeys() {
-    copyPreparedRowAsInsert(true);
+  async function copyRowAsInsertWithoutPrimaryKeys(insertMode: DataGridCopyInsertMode = "merged") {
+    copyPreparedRowAsInsert(true, insertMode);
   }
 
   async function copyRowAsUpdate() {
@@ -1147,7 +1171,7 @@ function replaceControlCharacters(value: string, replacement: string): string {
     .join("");
 }
 
-function buildMongoCopyInsertStatement(options: { collection: string; columns: string[]; sourceColumns?: Array<string | undefined>; rows: CellValue[][]; excludePrimaryKeys?: boolean }): string | undefined {
+function buildMongoCopyInsertStatement(options: { collection: string; columns: string[]; sourceColumns?: Array<string | undefined>; rows: CellValue[][]; excludePrimaryKeys?: boolean; insertMode?: DataGridCopyInsertMode }): string | undefined {
   const saveColumns = effectiveColumns(options.sourceColumns, options.columns);
   const columnIndexes = saveColumns.map((column, index) => ({ column, index })).filter((item): item is { column: string; index: number } => !!item.column);
   if (columnIndexes.length === 0 || options.rows.length === 0) return undefined;
@@ -1155,6 +1179,9 @@ function buildMongoCopyInsertStatement(options: { collection: string; columns: s
   const documents = options.rows.map((row) => buildMongoCopyInsertDocument(columnIndexes.map((item) => row[item.index]) as MongoInputValue[], documentColumns, { excludePrimaryKeys: options.excludePrimaryKeys }));
   const collection = `db.getCollection(${JSON.stringify(options.collection)})`;
   if (documents.length === 1) return `${collection}.insert(${formatMongoShellLiteral(documents[0])});`;
+  if (options.insertMode === "row-by-row") {
+    return documents.map((document) => `${collection}.insert(${formatMongoShellLiteral(document)});`).join("\n");
+  }
   return `${collection}.insertMany(${formatMongoShellLiteral(documents)});`;
 }
 

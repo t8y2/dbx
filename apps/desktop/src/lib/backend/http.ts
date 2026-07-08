@@ -53,6 +53,7 @@ import type {
   JavaRuntimeConfig,
   UpdateInfo,
   UpdateDownloadSource,
+  RedisCollectionPage,
   RedisDatabaseInfo,
   RedisValue,
   RedisScanResult,
@@ -335,6 +336,10 @@ export async function listInstalledAgents(): Promise<AgentDriverInfo[]> {
 
 export async function getDriverStoreUsage(): Promise<DriverStoreUsage> {
   return get("/api/agents/storage-usage");
+}
+
+export async function clearDriverDownloadCache(): Promise<void> {
+  await del("/api/agents/download-cache");
 }
 
 export async function getDriverRuntimeSummary(): Promise<DriverRuntimeSummary> {
@@ -1737,7 +1742,7 @@ export async function redisExecuteCommand(connectionId: string, db: number, comm
   return post("/api/redis/execute-command", { connectionId, db, command, skipSafetyCheck: skipSafetyCheck ?? false });
 }
 
-export async function redisLoadMore(connectionId: string, db: number, keyRaw: string, keyType: string, cursor: number, count: number, filter?: string): Promise<RedisValue> {
+export async function redisLoadMore(connectionId: string, db: number, keyRaw: string, keyType: string, cursor: number, count: number, filter?: string): Promise<RedisCollectionPage> {
   return post("/api/redis/load-more", { connectionId, db, keyRaw, keyType, cursor, count, filter });
 }
 

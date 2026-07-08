@@ -142,15 +142,27 @@ fn build_app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri:
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn linux_webkit_rendering_workarounds() -> &'static [(&'static str, &'static str)] {
-    &[
-        // WebKitGTK's DMABUF renderer can produce a blank AppImage window or
-        // Wayland protocol errors on Fedora/Wayland/NVIDIA systems.
-        ("WEBKIT_DISABLE_DMABUF_RENDERER", "1"),
-        // Tauri's Linux graphics guidance recommends this for Wayland explicit
-        // sync issues that can prevent WebKitGTK from creating a usable surface.
-        ("__NV_DISABLE_EXPLICIT_SYNC", "1"),
-    ]
+fn linux_has_nvidia_gpu() -> bool {
+    // Detect the proprietary NVIDIA driver by checking for its kernel device
+    // node / proc entry. This is more reliable than parsing lspci output and
+    // has no external deps. Nouveau (open-source) does not create these nodes
+    // and falls through to the Mesa / DMABuf path, which is the desired behavior.
+    std::path::Path::new("/dev/nvidiactl").exists() || std::path::Path::new("/proc/driver/nvidia/version").exists()
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_webkit_rendering_workarounds(has_nvidia: bool) -> &'static [(&'static str, &'static str)] {
+    if has_nvidia {
+        // NVIDIA + Wayland: the DMABuf renderer triggers blank-window / Wayland
+        // protocol errors (EGL_EXT_image_dma_buf_import mismatch). Disable it
+        // and suppress explicit-sync to avoid a compositor crash.
+        &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1"), ("__NV_DISABLE_EXPLICIT_SYNC", "1")]
+    } else {
+        // AMD / Intel / other Mesa drivers support DMABuf natively.
+        // Keeping DMABUF enabled lets WebKitGTK use GPU compositing, which
+        // dramatically reduces CPU usage and eliminates UI lag on Wayland.
+        &[]
+    }
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -211,7 +223,8 @@ fn linux_appimage_system_gtk_immodules_cache(
 
 #[cfg(target_os = "linux")]
 fn apply_linux_webkit_rendering_workarounds() {
-    for (key, value) in linux_webkit_rendering_workarounds() {
+    let has_nvidia = linux_has_nvidia_gpu();
+    for (key, value) in linux_webkit_rendering_workarounds(has_nvidia) {
         if std::env::var_os(key).is_none() {
             std::env::set_var(key, value);
         }
@@ -464,10 +477,13 @@ mod tests {
 
     #[test]
     fn applies_linux_webkit_rendering_workarounds_before_webkit_starts() {
+        // NVIDIA: DMABuf must be disabled to avoid blank window / Wayland protocol errors.
         assert_eq!(
-            linux_webkit_rendering_workarounds(),
+            linux_webkit_rendering_workarounds(true),
             &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1"), ("__NV_DISABLE_EXPLICIT_SYNC", "1")]
         );
+        // AMD / Intel / Mesa: DMABuf is supported — no workarounds needed.
+        assert_eq!(linux_webkit_rendering_workarounds(false), &[]);
     }
 
     #[test]
@@ -640,7 +656,21 @@ pub fn run() {
                 s
             });
             let desktop_settings = tauri::async_runtime::block_on(storage.load_desktop_settings()).unwrap_or_default();
-            app.handle().plugin(tauri_plugin_log::Builder::default().level(log::LevelFilter::Debug).build())?;
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
+                    .format(|out, message, record| {
+                        out.finish(format_args!(
+                            "[{}][{}][{}] {}",
+                            chrono::Local::now().format("%Y-%m-%d][%H:%M:%S%.3f"),
+                            record.level(),
+                            record.target(),
+                            message
+                        ));
+                    })
+                    .level(log::LevelFilter::Debug)
+                    .build(),
+            )?;
             apply_debug_log_level(desktop_settings.debug_logging_enabled);
             eprintln!("[STARTUP] storage ready in {:?}", t.elapsed());
 
@@ -1093,6 +1123,7 @@ pub fn run() {
             commands::agents::list_installed_agents,
             commands::agents::list_installed_agents_local,
             commands::agents::get_driver_store_usage,
+            commands::agents::clear_driver_download_cache,
             commands::agents::get_driver_runtime_summary,
             commands::agents::stop_driver_runtime,
             commands::agents::restart_driver_runtime,

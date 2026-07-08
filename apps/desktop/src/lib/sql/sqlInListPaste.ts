@@ -25,7 +25,6 @@ interface ParsedPasteValues {
   explicitList: boolean;
 }
 
-const SQL_NUMBER_LITERAL_RE = /^[+-]?(?:(?:0|[1-9]\d*)(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
 const SIMPLE_SLASH_LIST_VALUE_RE = /^[A-Za-z0-9_.:-]+$/;
 
 export function buildSqlInConditionFromPasteSource(source: string): SqlInListPasteResult {
@@ -195,6 +194,5 @@ function hasSingleWrappingParentheses(value: string): boolean {
 
 function formatSqlLiteral(token: ParsedPasteValue): string {
   if (!token.quoted && /^null$/i.test(token.value)) return "NULL";
-  if (!token.quoted && SQL_NUMBER_LITERAL_RE.test(token.value)) return token.value;
   return `'${token.value.replace(/'/g, "''")}'`;
 }

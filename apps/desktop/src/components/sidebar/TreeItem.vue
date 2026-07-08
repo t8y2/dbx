@@ -2433,6 +2433,11 @@ const isDuckDbConnection = computed(() => {
   return props.node.type === "connection" && connectionNamespaceCreationTarget(config) === "attach";
 });
 
+const isConnectionSchemaCreation = computed(() => {
+  const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
+  return props.node.type === "connection" && connectionNamespaceCreationTarget(config) === "schema";
+});
+
 const canSetCreateDatabaseCharset = computed(() => {
   const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
   return connectionNamespaceCreationTarget(config) === "database" && supportsCreateDatabaseCharset(config?.db_type, config?.driver_profile);
@@ -2845,6 +2850,20 @@ function openCreateDatabaseDialog() {
   }
 }
 
+function openConnectionNamespaceCreation() {
+  if (isConnectionSchemaCreation.value) {
+    openCreateSchemaDialog();
+    return;
+  }
+  void openCreateDatabase();
+}
+
+function connectionNamespaceCreationLabel() {
+  if (isDuckDbConnection.value) return t("contextMenu.createDuckDbFile");
+  if (isConnectionSchemaCreation.value) return t("contextMenu.createSchema");
+  return t("contextMenu.createDatabase");
+}
+
 function updateCreateDatabaseCharset(value: string) {
   const previousCharset = createDatabaseCharset.value;
   createDatabaseCharset.value = value;
@@ -2871,7 +2890,11 @@ async function loadCreateDatabaseCharsetMetadata(target: "create" | "edit" = "cr
     createDatabaseCollationsByCharset.value = metadata.collationsByCharset;
     const selectedCharset = target === "create" ? createDatabaseCharset.value : editDatabaseCharset.value;
     if (!createDatabaseCharsetOptions.value.includes(selectedCharset) && createDatabaseCharsetOptions.value.length) {
-      target === "create" ? updateCreateDatabaseCharset(createDatabaseCharsetOptions.value[0]) : updateEditDatabaseCharset(createDatabaseCharsetOptions.value[0]);
+      if (target === "create") {
+        updateCreateDatabaseCharset(createDatabaseCharsetOptions.value[0]);
+      } else {
+        updateEditDatabaseCharset(createDatabaseCharsetOptions.value[0]);
+      }
     } else {
       if (target === "create") {
         createDatabaseCollation.value = nextCreateDatabaseCollation(createDatabaseCharset.value, createDatabaseCharset.value, createDatabaseCollation.value, createDatabaseCollationsByCharset.value);
@@ -2980,6 +3003,7 @@ async function createDuckDbAttachedDatabaseFile() {
         attached_databases: [...(config.attached_databases ?? []), { name, path }],
       });
     }
+    await connectionStore.ensureVisibleDatabase(node.connectionId, name);
     await connectionStore.loadDatabases(node.connectionId, { force: true });
     connectionStore.selectedTreeNodeId = `${node.connectionId}:${name}`;
     toast(t("contextMenu.createDuckDbFileSuccess", { name }), 3000);
@@ -2999,6 +3023,7 @@ async function confirmCreateDatabase() {
     if (config?.db_type === "mongodb") {
       await api.mongoCreateDatabase(node.connectionId, name);
       toast(t("contextMenu.createDatabaseSuccess", { name }), 3000);
+      await connectionStore.ensureVisibleDatabase(node.connectionId, name);
       await connectionStore.loadMongoDatabases(node.connectionId);
       return;
     }
@@ -3012,6 +3037,7 @@ async function confirmCreateDatabase() {
     });
     await api.executeQuery(node.connectionId, "", sql);
     toast(t("contextMenu.createDatabaseSuccess", { name }), 3000);
+    await connectionStore.ensureVisibleDatabase(node.connectionId, name);
     await connectionStore.loadDatabases(node.connectionId, { force: true });
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
@@ -3163,21 +3189,25 @@ function openCreateSchemaDialog() {
 async function confirmCreateSchema() {
   const node = props.node;
   const name = createSchemaName.value.trim();
-  if (!name || !node.connectionId || !node.database) return;
+  const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
+  const isConnectionLevelSchemaCreation = node.type === "connection" && connectionNamespaceCreationTarget(config) === "schema";
+  const targetDatabase = isConnectionLevelSchemaCreation ? "" : node.database;
+  if (!name || !node.connectionId || (!targetDatabase && !isConnectionLevelSchemaCreation)) return;
   showCreateSchemaDialog.value = false;
   try {
     await connectionStore.ensureConnected(node.connectionId);
     const sql = await buildCreateSchemaSql({
-      databaseType: currentDatabaseType(),
+      databaseType: effectiveDatabaseTypeForConnection(config),
       name,
     });
-    await api.executeQuery(node.connectionId, node.database, sql);
+    await api.executeQuery(node.connectionId, targetDatabase || "", sql);
     toast(t("contextMenu.createSchemaSuccess", { name }), 3000);
-    const config = connectionStore.getConfig(node.connectionId);
-    if (config?.db_type === "sqlserver") {
-      await connectionStore.loadSqlServerDatabaseObjects(node.connectionId, node.database, { force: true });
+    if (isConnectionLevelSchemaCreation) {
+      await connectionStore.loadDatabases(node.connectionId, { force: true });
+    } else if (config?.db_type === "sqlserver") {
+      await connectionStore.loadSqlServerDatabaseObjects(node.connectionId, targetDatabase || "", { force: true });
     } else {
-      await connectionStore.loadSchemas(node.connectionId, node.database, { force: true });
+      await connectionStore.loadSchemas(node.connectionId, targetDatabase || "", { force: true });
     }
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
@@ -4219,7 +4249,9 @@ const isDragging = computed(() => dragState.active && dragState.draggedId === pr
 const TABLE_REFERENCE_DRAG_THRESHOLD = 5;
 const TABLE_REFERENCE_DRAGGING_CLASS = "dbx-table-reference-dragging";
 const canDragTableReference = computed(() => {
-  if (props.dragDisabled || !props.node.connectionId || props.node.database == null) return false;
+  if (props.dragDisabled || !props.node.connectionId) return false;
+  if (props.node.type === "database") return typeof props.node.database === "string" && props.node.database.trim().length > 0;
+  if (props.node.database == null) return false;
   if (props.node.type === "table" || props.node.type === "view" || props.node.type === "materialized_view") return true;
   return props.node.type === "column" && !!props.node.tableName;
 });
@@ -4234,6 +4266,14 @@ let suppressNextTableReferenceClick = false;
 
 function tableReferenceDragPayload(): QueryEditorTableReferencePayload | null {
   if (!canDragTableReference.value) return null;
+  if (props.node.type === "database") {
+    return createTableReferencePayload({
+      connectionId: props.node.connectionId,
+      database: props.node.database,
+      referenceType: "database",
+      databaseType: currentDatabaseType(),
+    });
+  }
   if (props.node.type === "column") {
     const columnName = columnNameForDrag(props.node);
     if (!props.node.tableName || !columnName) return null;
@@ -4487,8 +4527,8 @@ function treeItemMenuItems(): ContextMenuItem[] {
     }
     if (canCreateDatabase.value) {
       items.push({
-        label: isDuckDbConnection.value ? t("contextMenu.createDuckDbFile") : t("contextMenu.createDatabase"),
-        action: openCreateDatabase,
+        label: connectionNamespaceCreationLabel(),
+        action: openConnectionNamespaceCreation,
         icon: Plus,
       });
     }
@@ -5070,7 +5110,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
 
   <CustomContextMenu v-else :items="treeItemMenuItems()" v-slot="contextMenuSlot">
     <div @contextmenu="onTreeItemContextMenu($event, contextMenuSlot.onContextMenu)">
-      <LightTooltip :text="displayLabel(node)" :disabled="isTooltipDisabled()" side="right" :side-offset="8" :delay="0" :close-delay="0">
+      <LightTooltip :text="displayLabel(node)" :disabled="isTooltipDisabled()" side="right" :side-offset="8" :delay="0" :close-delay="0" :surface="detailTooltip ? 'popover' : 'foreground'">
         <div
           ref="rowRef"
           class="group flex items-center gap-1.5 py-1 px-2 cursor-pointer relative outline-none"

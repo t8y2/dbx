@@ -156,6 +156,7 @@ describe("queryStore database open state", () => {
     vi.unstubAllGlobals();
     const storage = installLocalStorage();
     storage.set("dbx-editor-settings", JSON.stringify({ openTabsRestoreMode: "none" }));
+    storage.set("dbx-app-state:open_tabs", JSON.stringify({ tabs: JSON.parse(persistedTabs), activeTabId: "tab-1" }));
     storage.set(OPEN_TABS_STORAGE_KEY, persistedTabs);
     storage.set(ACTIVE_TAB_STORAGE_KEY, "tab-1");
     setActivePinia(createPinia());
@@ -170,6 +171,7 @@ describe("queryStore database open state", () => {
     expect(store.activeTabId).toBeNull();
     expect(storage.get(OPEN_TABS_STORAGE_KEY)).toBeUndefined();
     expect(storage.get(ACTIVE_TAB_STORAGE_KEY)).toBeUndefined();
+    expect(JSON.parse(storage.get("dbx-app-state:open_tabs") ?? "{}")).toEqual({ tabs: [], activeTabId: null });
   });
 
   it("restores only pinned tabs when launch restore mode is pinned", async () => {

@@ -604,6 +604,12 @@ export const useQueryStore = defineStore("query", () => {
     if (saved?.tabs && Array.isArray(saved.tabs)) {
       const restored = restoreSavedTabsFromPayload(saved);
       applyRestoredOpenTabs(restored);
+      if (useSettingsStore().editorSettings.openTabsRestoreMode === "none") {
+        // Restore is explicitly disabled, so stale saved payloads should not
+        // reappear if the user later changes the setting.
+        clearLegacySavedTabs();
+        await saveTabs(tabs.value, activeTabId.value).catch(() => undefined);
+      }
       isOpenTabsLoaded.value = true;
       return;
     }

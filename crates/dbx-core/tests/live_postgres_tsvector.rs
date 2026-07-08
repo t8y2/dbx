@@ -71,6 +71,7 @@ async fn postgres_tsvector_generated_columns_are_readable_and_omitted_from_inser
         database_type: Some(DatabaseType::Postgres),
         table_meta: Some(table_meta),
         columns: result.columns.clone(),
+        column_types: None,
         source_columns: None,
         rows: result.rows.clone(),
         exclude_primary_keys: false,

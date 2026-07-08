@@ -3127,6 +3127,7 @@ mod tests {
             database_type: Some(DatabaseType::Doris),
             table_meta: Some(table_meta.clone()),
             columns: vec!["id".to_string(), "status".to_string()],
+            column_types: None,
             source_columns: None,
             rows: vec![vec![json!(2), json!("new")]],
             exclude_primary_keys: false,

@@ -187,6 +187,9 @@ const redisJsonAppearance = computed(() => (isDark.value ? "dark" : "light"));
 const isBinaryStringValue = computed(() => Boolean(stringValueDetail.value?.binary));
 const selectedMemberCanEdit = computed(() => selectedMemberContext.value?.canEdit ?? false);
 const canEditCurrentStringFormat = computed(() => Boolean(stringValueDetail.value?.editable) && stringValueView.value === "utf8");
+const showStringEditActions = computed(() => canEditCurrentStringFormat.value);
+const originalStringEditValue = computed(() => (stringBlob.value ? rawRedisValueText(stringBlob.value) : ""));
+const stringValueChanged = computed(() => canEditCurrentStringFormat.value && editValue.value !== originalStringEditValue.value);
 const canEditCurrentMemberFormat = computed(() => selectedMemberCanEdit.value && memberValueView.value === "utf8");
 const hasMore = computed(() => scanCursor.value != null && scanCursor.value > 0);
 const collectionTotal = computed(() => (data.value ? redisValueCollectionTotal(data.value) : null));
@@ -538,7 +541,7 @@ async function loadMore() {
 }
 
 async function saveString() {
-  if (!data.value || !stringBlob.value || isBinaryStringValue.value) return;
+  if (!data.value || !stringBlob.value || isBinaryStringValue.value || !stringValueChanged.value) return;
   await api.redisSetString(props.connectionId, props.db, props.keyRaw, editValue.value);
   isEditing.value = false;
   await load();
@@ -546,8 +549,13 @@ async function saveString() {
 
 function handleStringInput() {
   if (canEditCurrentStringFormat.value) {
-    isEditing.value = true;
+    isEditing.value = stringValueChanged.value;
   }
+}
+
+function discardStringEdit() {
+  isEditing.value = false;
+  editValue.value = originalStringEditValue.value;
 }
 
 async function saveJson() {
@@ -1191,10 +1199,7 @@ onBeforeUnmount(() => {
             <Switch size="sm" :model-value="redisJsonWordWrap" @update:model-value="setRedisJsonWordWrap(Boolean($event))" />
           </label>
         </div>
-        <div v-if="isEditing" class="flex min-h-0 flex-1 flex-col">
-          <textarea v-model="editValue" class="dbx-editor-font-family min-h-0 flex-1 resize-none bg-background p-4 text-sm outline-none" spellcheck="false" />
-        </div>
-        <div v-else-if="stringValueView === 'json' && stringValueDetail.json" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-4 text-sm leading-6">
+        <div v-if="stringValueView === 'json' && stringValueDetail.json" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-4 text-sm leading-6">
           <RedisJsonTree :value="stringValueDetail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
         </div>
         <div v-else-if="stringValueView === 'javaserialize' && stringValueDetail.javaSerialized" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-4 text-sm leading-6">
@@ -1223,17 +1228,9 @@ onBeforeUnmount(() => {
         <div v-if="isBinaryStringValue" class="px-4 py-2 border-t text-xs text-muted-foreground shrink-0">
           {{ t("redis.binaryStringReadonlyHint") }}
         </div>
-        <div v-if="isEditing" class="px-4 py-2 border-t flex justify-end gap-2 shrink-0">
-          <Button
-            variant="ghost"
-            size="sm"
-            @click="
-              isEditing = false;
-              editValue = stringBlob ? rawRedisValueText(stringBlob) : '';
-            "
-            >{{ t("grid.discard") }}</Button
-          >
-          <Button size="sm" @click="saveString"><Save class="w-3 h-3 mr-1" /> {{ t("grid.save") }}</Button>
+        <div v-if="showStringEditActions" class="px-4 py-2 border-t flex justify-end gap-2 shrink-0">
+          <Button variant="ghost" size="sm" :disabled="!stringValueChanged" @click="discardStringEdit">{{ t("grid.discard") }}</Button>
+          <Button size="sm" :disabled="!stringValueChanged" @click="saveString"><Save class="w-3 h-3 mr-1" /> {{ t("grid.save") }}</Button>
         </div>
       </div>
 

@@ -304,7 +304,6 @@ mod tests {
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
-            agent_java_options: Vec::new(),
             one_time: false,
             read_only: false,
         }

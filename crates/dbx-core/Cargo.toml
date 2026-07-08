@@ -24,6 +24,13 @@ required-features = ["duckdb-bundled"]
 test = false
 bench = false
 
+[[bin]]
+name = "duckdb-worker-file-lock-owner"
+path = "tests/support/duckdb_worker_file_lock_owner.rs"
+required-features = ["duckdb-bundled"]
+test = false
+bench = false
+
 [features]
 default = ["duckdb-bundled", "mq-admin", "sqlite-sqlcipher"]
 duckdb-bundled = ["duckdb/bundled"]

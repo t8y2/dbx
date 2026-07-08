@@ -321,12 +321,11 @@ async fn worker_process_is_killed_after_connect_timeout() {
 async fn worker_process_is_killed_after_connect_error() {
     let _guard = duckdb_worker_process_test_guard().await;
     let executable = PathBuf::from(env!("CARGO_BIN_EXE_duckdb-worker-pid-test-host"));
-    let db_path = temp_duckdb_path();
+    let missing_dir = temp_duckdb_path();
+    let db_path = missing_dir.join("missing.duckdb");
     let pid_file = temp_pid_path();
     let _ = std::fs::remove_file(&pid_file);
-    let _ = std::fs::remove_file(&db_path);
-
-    let _file_owner = duckdb::Connection::open(&db_path).expect("open lock owner connection");
+    let _ = std::fs::remove_dir_all(&missing_dir);
 
     std::env::set_var("DBX_DUCKDB_PID_TEST_HOST_PID_FILE", &pid_file);
     let client = DuckDbWorkerClient::new_unconnected_with_timeouts(
@@ -341,15 +340,13 @@ async fn worker_process_is_killed_after_connect_error() {
     let err = client
         .execute(None, "SELECT 1".to_string(), Some(10), None, Some(Duration::from_secs(5)))
         .await
-        .expect_err("connect should fail while another process owns the DuckDB file");
+        .expect_err("connect should fail with an invalid DuckDB path");
     std::env::remove_var("DBX_DUCKDB_PID_TEST_HOST_PID_FILE");
     assert!(
         err.contains("Cannot open file")
-            || err.contains("Could not set lock")
-            || err.contains("Conflicting lock is held")
-            || err.contains("already open")
-            || err.contains("timed out")
-            || err.contains("另一个程序正在使用"),
+            || err.contains("No such file")
+            || err.contains("Parent directory does not exist")
+            || err.contains("不存在"),
         "unexpected error: {err}"
     );
 
@@ -357,45 +354,33 @@ async fn worker_process_is_killed_after_connect_error() {
     wait_until_process_exits(pid, Duration::from_secs(5)).await;
 
     let _ = std::fs::remove_file(&pid_file);
-    drop(_file_owner);
-    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_dir_all(&missing_dir);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn worker_process_retries_connect_after_transient_file_lock() {
     let _guard = duckdb_worker_process_test_guard().await;
     let executable = PathBuf::from(env!("CARGO_BIN_EXE_duckdb-worker-test-host"));
+    let lock_owner_executable = PathBuf::from(env!("CARGO_BIN_EXE_duckdb-worker-file-lock-owner"));
     let db_path = temp_duckdb_path();
     let _ = std::fs::remove_file(&db_path);
 
-    let mut owner_child = Command::new(&executable)
-        .stdin(Stdio::piped())
+    let mut lock_owner = Command::new(lock_owner_executable)
+        .arg(&db_path)
+        .arg("500")
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
+        .kill_on_drop(true)
         .spawn()
-        .expect("spawn lock owner worker");
-    let mut owner_stdin = owner_child.stdin.take().expect("owner worker stdin");
-    let owner_stdout = owner_child.stdout.take().expect("owner worker stdout");
-    let mut owner_lines = BufReader::new(owner_stdout).lines();
-    write_worker_request(
-        &mut owner_stdin,
-        DuckDbWorkerRequest::new(
-            "connect-owner",
-            DuckDbWorkerMethod::Connect,
-            DuckDbWorkerConnectParams { path: db_path.to_string_lossy().to_string(), attached_databases: Vec::new() },
-        )
-        .expect("owner connect request"),
-    )
-    .await;
-    let connected = read_worker_response(&mut owner_lines).await;
-    assert!(connected.ok, "owner connect failed: {connected:?}");
-    drop(owner_lines);
-
-    let release_owner = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        drop(owner_stdin);
-        let _ = tokio::time::timeout(Duration::from_secs(5), owner_child.wait()).await;
-    });
+        .expect("spawn lock owner");
+    let lock_owner_stdout = lock_owner.stdout.take().expect("lock owner stdout");
+    let mut lock_owner_lines = BufReader::new(lock_owner_stdout).lines();
+    let ready = tokio::time::timeout(Duration::from_secs(5), lock_owner_lines.next_line())
+        .await
+        .expect("lock owner ready timed out")
+        .expect("read lock owner ready line")
+        .expect("lock owner ready line");
+    assert_eq!(ready, "ready");
 
     let client = DuckDbWorkerClient::new_unconnected_with_timeouts(
         executable,
@@ -411,7 +396,10 @@ async fn worker_process_retries_connect_after_transient_file_lock() {
     )
     .await;
 
-    let _ = release_owner.await;
+    tokio::time::timeout(Duration::from_secs(5), lock_owner.wait())
+        .await
+        .expect("lock owner should exit")
+        .expect("wait for lock owner");
     client.shutdown().await;
     let _ = std::fs::remove_file(&db_path);
 

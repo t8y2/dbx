@@ -3246,6 +3246,7 @@ pub async fn get_columns_show_from(
                 numeric_precision: None,
                 numeric_scale: None,
                 character_maximum_length: None,
+                enum_values: None,
             })
         })
         .collect())

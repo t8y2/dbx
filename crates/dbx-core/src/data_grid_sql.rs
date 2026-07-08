@@ -2119,6 +2119,7 @@ mod tests {
         let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
             database_type: Some(DatabaseType::Mysql),
             table_meta: Some(DataGridTableMeta {
+                catalog: None,
                 schema: None,
                 table_name: "users".to_string(),
                 primary_keys: vec!["id".to_string()],
@@ -3034,6 +3035,7 @@ mod tests {
             source_columns: None,
             rows: vec![vec![json!(2), json!("new")]],
             exclude_primary_keys: false,
+            insert_mode: DataGridCopyInsertMode::Merged,
         });
         assert_eq!(
             copy_insert.as_deref(),

@@ -37,7 +37,7 @@ import { mergeSqlSemanticReferenceAnalysis, resolveSqlSemanticNavigationTarget }
 import { buildElasticsearchCompletionItemsFromContext, getElasticsearchCompletionContext, getElasticsearchCompletionResultValidFor, shouldAutoOpenElasticsearchCompletion, type ElasticsearchCompletionItem } from "@/lib/elasticsearch/elasticsearchCompletion";
 import { buildMongoCompletionItemsFromContext, getMongoCompletionContext, getMongoCompletionResultValidFor, shouldAutoOpenMongoCompletion, type MongoCompletionItem } from "@/lib/mongo/mongoCompletion";
 import { resolveSqlCompletionTableLookupTarget } from "@/lib/sql/sqlCompletionLookupTarget";
-import { extractIdentifierAt, isSqlKeyword, matchTable, splitQualifiedIdentifier } from "@/lib/sql/sqlNavigation";
+import { extractIdentifierDetailsAt, isSqlKeyword, matchTable, splitQualifiedIdentifier } from "@/lib/sql/sqlNavigation";
 import { lineColumnToOffset, parseSqlErrorLocation } from "@/lib/sql/sqlDiagnostics";
 import {
   DBX_TABLE_REFERENCE_MIME,
@@ -505,9 +505,9 @@ function tableNavigationIdentifierAt(currentView: EditorViewType, event: MouseEv
   if (!props.connectionId || props.database == null) return null;
   const pos = currentView.posAtCoords({ x: event.clientX, y: event.clientY });
   if (pos == null) return null;
-  const identifier = extractIdentifierAt(currentView.state.doc.toString(), pos);
-  if (!identifier || isSqlKeyword(identifier)) return null;
-  return identifier;
+  const extracted = extractIdentifierDetailsAt(currentView.state.doc.toString(), pos);
+  if (!extracted || (!extracted.quoted && isSqlKeyword(extracted.identifier))) return null;
+  return extracted.identifier;
 }
 
 function updateTableNavigationHover(currentView: EditorViewType, event: MouseEvent) {
@@ -2889,13 +2889,14 @@ onMounted(async () => {
           }
 
           const doc = currentView.state.doc.toString();
-          const identifier = extractIdentifierAt(doc, pos);
-          if (!identifier) {
+          const extracted = extractIdentifierDetailsAt(doc, pos);
+          if (!extracted) {
             return false;
           }
-          if (isSqlKeyword(identifier)) {
+          if (!extracted.quoted && isSqlKeyword(extracted.identifier)) {
             return false;
           }
+          const identifier = extracted.identifier;
 
           // Prevent default, resolve async
           event.preventDefault();

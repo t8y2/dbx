@@ -121,7 +121,12 @@ const SQL_KEYWORDS_SET = new Set([
   "list_transform",
 ]);
 
-type IdentifierPart = { value: string; start: number; end: number };
+type IdentifierPart = { value: string; start: number; end: number; quoted: boolean };
+
+export interface ExtractedSqlIdentifier {
+  identifier: string;
+  quoted: boolean;
+}
 
 function isIdentifierChar(char: string | undefined): boolean {
   return !!char && /^[A-Za-z0-9_$]$/.test(char);
@@ -141,7 +146,7 @@ function readQuotedPart(text: string, start: number): IdentifierPart | null {
         i += 1;
         continue;
       }
-      return { value, start, end: i + 1 };
+      return { value, start, end: i + 1, quoted: true };
     }
     value += char;
   }
@@ -152,7 +157,7 @@ function readUnquotedPart(text: string, start: number): IdentifierPart | null {
   if (!isIdentifierChar(text[start])) return null;
   let end = start + 1;
   while (end < text.length && isIdentifierChar(text[end])) end += 1;
-  return { value: text.slice(start, end), start, end };
+  return { value: text.slice(start, end), start, end, quoted: false };
 }
 
 function readIdentifierPart(text: string, start: number): IdentifierPart | null {
@@ -185,8 +190,8 @@ function identifierSearchBounds(doc: string, pos: number): { start: number; end:
   return { start, end };
 }
 
-/** Extract identifier at position `pos` in the document. */
-export function extractIdentifierAt(doc: string, pos: number): string | null {
+/** Extract identifier and quote metadata at position `pos` in the document. */
+export function extractIdentifierDetailsAt(doc: string, pos: number): ExtractedSqlIdentifier | null {
   if (pos < 0 || pos > doc.length) return null;
 
   const clickPos = pos === doc.length ? pos - 1 : pos;
@@ -198,7 +203,10 @@ export function extractIdentifierAt(doc: string, pos: number): string | null {
     const parsed = parseQualifiedIdentifier(doc, index);
     if (parsed) {
       if (clickPos >= parsed.start && clickPos < parsed.end) {
-        return parsed.parts.map((part) => part.value).join(".");
+        return {
+          identifier: parsed.parts.map((part) => part.value).join("."),
+          quoted: parsed.parts.some((part) => part.quoted),
+        };
       }
       index = Math.max(parsed.end, index + 1);
       continue;
@@ -207,6 +215,11 @@ export function extractIdentifierAt(doc: string, pos: number): string | null {
   }
 
   return null;
+}
+
+/** Extract identifier at position `pos` in the document. */
+export function extractIdentifierAt(doc: string, pos: number): string | null {
+  return extractIdentifierDetailsAt(doc, pos)?.identifier ?? null;
 }
 
 /** Check whether the identifier is a SQL keyword (not a table/column name). */

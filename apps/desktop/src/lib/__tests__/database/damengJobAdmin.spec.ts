@@ -12,12 +12,18 @@ describe("damengJobAdmin", () => {
     expect(damengJobStepsSql("12")).toBe("SELECT * FROM SYSJOB.USER_JOBSTEPS_VIEW WHERE JOBID = 12");
     expect(damengJobStepsSql("12", true)).toBe("SELECT * FROM SYSJOB.SYSJOBSTEPS WHERE JOBID = 12");
     expect(damengJobHistoriesSql({ id: "12", name: "JOB'A" }, true)).toBe("SELECT * FROM SYSJOB.SYSJOBHISTORIES2 WHERE JOBID = 12");
-    expect(damengRunJobSql("12")).toBe("SP_DBMS_JOB_RUN(12);");
+    expect(damengRunJobSql("12")).toBe("SP_DBMS_JOB_RUN_ASYNC(12);");
   });
 
-  it("uses system job tables for SYSDBA job list", () => {
+  it("avoids DBA running view for normal user job list", () => {
     expect(damengJobListSql()).toContain("FROM SYSJOB.USER_JOBS_VIEW J");
+    expect(damengJobListSql()).toContain("0 AS RUNNING");
+    expect(damengJobListSql()).not.toContain("DBA_JOBS_RUNNING");
+  });
+
+  it("uses system job tables with running state for SYSDBA job list", () => {
     expect(damengJobListSql(true)).toContain("FROM SYSJOB.SYSJOBS J");
+    expect(damengJobListSql(true)).toContain("SYSJOB.DBA_JOBS_RUNNING");
   });
 
   it("builds simple sql job creation script", () => {

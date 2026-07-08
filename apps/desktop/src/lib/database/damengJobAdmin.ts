@@ -29,11 +29,18 @@ export interface DamengJobCreateInput {
 }
 
 export function damengJobListSql(useSystemTables = false): string {
-  const source = useSystemTables ? "SYSJOB.SYSJOBS" : "SYSJOB.USER_JOBS_VIEW";
+  if (!useSystemTables) {
+    return `SELECT J.ID, J.NAME, J.ENABLE, J.USERNAME, J.CREATETIME, J.MODIFYTIME, J.VALID, J.DESCRIBE,
+       0 AS RUNNING,
+       NULL AS RUNNING_SID
+FROM SYSJOB.USER_JOBS_VIEW J
+ORDER BY J.NAME`;
+  }
+
   return `SELECT J.ID, J.NAME, J.ENABLE, J.USERNAME, J.CREATETIME, J.MODIFYTIME, J.VALID, J.DESCRIBE,
        CASE WHEN R.JOB IS NULL THEN 0 ELSE 1 END AS RUNNING,
        R.SID AS RUNNING_SID
-FROM ${source} J
+FROM SYSJOB.SYSJOBS J
 LEFT JOIN SYSJOB.DBA_JOBS_RUNNING R ON R.JOB = J.ID
 ORDER BY J.NAME`;
 }
@@ -73,7 +80,7 @@ export function damengDropJobSql(jobName: string): string {
 export function damengRunJobSql(jobId: string | number): string {
   const id = Number(jobId);
   if (!Number.isFinite(id)) return "";
-  return `SP_DBMS_JOB_RUN(${Math.trunc(id)});`;
+  return `SP_DBMS_JOB_RUN_ASYNC(${Math.trunc(id)});`;
 }
 
 export function damengStopJobSql(jobId: string | number): string {

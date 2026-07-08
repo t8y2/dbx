@@ -12,6 +12,7 @@ import { sqlMetadataRefreshTarget } from "@/lib/sql/sqlMetadataRefresh";
 import { classifyRedisCommandSafety, firstRedisCommandToken } from "@/lib/redis/redisCommandSafety";
 import { isSqlExecutionSnapshot, resolveExecutableSql, type SqlExecutionOverride, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 import { extractSqlParameterDescriptors, type SqlParameterDescriptor } from "@/lib/sql/sqlParameters";
+import { expandSqlVariables } from "@/lib/sql/sqlVariables";
 import type { ConnectionConfig, DatabaseType, QueryTab } from "@/types/database";
 
 const DANGER_RE = /^\s*(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
@@ -64,10 +65,10 @@ export function useSqlExecution(deps: {
   const sqlParameterDatabaseType = ref<DatabaseType | undefined>();
 
   async function resolvedExecutableSql(source?: SqlExecutionOverride): Promise<string> {
-    if (typeof source === "string") return source;
-    if (deps.resolveExecutableSql) return await deps.resolveExecutableSql(source);
-    if (isSqlExecutionSnapshot(source)) return resolveExecutableSql(source.fullSql, source.selectedSql, { cursorPos: source.cursorPos });
-    return deps.executableSql.value;
+    if (typeof source === "string") return expandSqlVariables(source).sql;
+    if (deps.resolveExecutableSql) return expandSqlVariables(await deps.resolveExecutableSql(source)).sql;
+    if (isSqlExecutionSnapshot(source)) return expandSqlVariables(resolveExecutableSql(source.fullSql, source.selectedSql, { cursorPos: source.cursorPos })).sql;
+    return expandSqlVariables(deps.executableSql.value).sql;
   }
 
   async function tryExecute(sqlOverride?: SqlExecutionOverride) {

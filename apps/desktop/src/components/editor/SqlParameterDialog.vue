@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import { Braces } from "@lucide/vue";
+import { Braces, Copy } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -11,10 +11,13 @@ import TruncatedTextTooltip from "@/components/ui/TruncatedTextTooltip.vue";
 import { loadSqlParameterHistory, rememberSqlParameterValues } from "@/lib/sql/sqlParameterHistory";
 import { substituteSqlParameters, type SqlParameterDescriptor, type SqlParameterInput, type SqlParameterSyntax, type SqlParameterValueKind } from "@/lib/sql/sqlParameters";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
+import { useToast } from "@/composables/useToast";
+import { copyToClipboard } from "@/lib/common/clipboard";
 import type { DatabaseType } from "@/types/database";
 
 const { t } = useI18n();
 const { highlight } = useSqlHighlighter();
+const { toast } = useToast();
 
 const open = defineModel<boolean>("open", { default: false });
 
@@ -105,6 +108,15 @@ function execute() {
   open.value = false;
   emit("execute", resolvedSql.value);
 }
+
+async function copyResolvedSql() {
+  try {
+    await copyToClipboard(resolvedSql.value);
+    toast(t("grid.copied"));
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
 </script>
 
 <template>
@@ -183,6 +195,10 @@ function execute() {
 
       <DialogFooter>
         <Button variant="outline" @click="open = false">{{ t("dangerDialog.cancel") }}</Button>
+        <Button variant="outline" @click="copyResolvedSql">
+          <Copy class="mr-1.5 h-4 w-4" />
+          {{ t("grid.copy") }}
+        </Button>
         <Button @click="execute">{{ t("sqlParameters.execute") }}</Button>
       </DialogFooter>
     </DialogContent>

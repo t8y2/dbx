@@ -8,134 +8,53 @@ function flat(node: TreeNode, depth = 0): FlatTreeNode {
   return { id: node.id, node, depth, type: node.type };
 }
 
-test("findNodePathForTarget finds a nested table node path", () => {
-  const tree: TreeNode[] = [
+test("findNodePathForTarget handles loaded, unloaded, and MySQL schema fallback trees", () => {
+  const cases = [
     {
-      id: "conn-1",
-      label: "MySQL",
-      type: "connection",
-      connectionId: "conn-1",
-      children: [
+      name: "nested table path",
+      tree: [
         {
-          id: "conn-1:__user_admin",
-          label: "tree.userAdmin",
-          type: "user-admin",
+          id: "conn-1",
+          label: "mysql.example.test",
+          type: "connection",
           connectionId: "conn-1",
-          database: "",
-        },
-        {
-          id: "conn-1:app",
-          label: "app",
-          type: "database",
-          connectionId: "conn-1",
-          database: "app",
-          children: [
-            {
-              id: "conn-1:app:__tables",
-              label: "tree.tables",
-              type: "group-tables",
-              connectionId: "conn-1",
-              database: "app",
-              children: [
-                {
-                  id: "conn-1:app:__tables:users",
-                  label: "users",
-                  type: "table",
-                  connectionId: "conn-1",
-                  database: "app",
-                },
-              ],
-            },
-          ],
-        },
-      ],
-    },
-  ];
-
-  const path = findNodePathForTarget(
-    {
-      type: "table",
-      connectionId: "conn-1",
-      database: "app",
-      tableName: "users",
-    },
-    tree,
-  );
-
-  assert.deepEqual(
-    path?.map((node) => node.id),
-    ["conn-1", "conn-1:app", "conn-1:app:__tables", "conn-1:app:__tables:users"],
-  );
-});
-
-test("findNodePathForTarget returns null for an unloaded connection tree", () => {
-  const tree: TreeNode[] = [
-    {
-      id: "mysql-conn-1",
-      label: "mysql.example.test",
-      type: "connection",
-      connectionId: "mysql-conn-1",
-      isExpanded: false,
-      children: [
-        {
-          id: "mysql-conn-1:__user_admin",
-          label: "tree.userAdmin",
-          type: "user-admin",
-          connectionId: "mysql-conn-1",
-          database: "",
-          isExpanded: false,
-        },
-      ],
-      pinned: false,
-    },
-  ];
-
-  const path = findNodePathForTarget(
-    {
-      type: "query-context",
-      connectionId: "mysql-conn-1",
-      database: "app_prd",
-    },
-    tree,
-  );
-
-  assert.equal(path, null);
-});
-
-test("findNodePathForTarget resolves a MySQL table when target schema equals database", () => {
-  const tree: TreeNode[] = [
-    {
-      id: "mysql-conn-1",
-      label: "mysql.example.test",
-      type: "connection",
-      connectionId: "mysql-conn-1",
-      isExpanded: true,
-      children: [
-        {
-          id: "mysql-conn-1:app_dev",
-          label: "app_dev",
-          type: "database",
-          connectionId: "mysql-conn-1",
-          database: "app_dev",
           isExpanded: true,
           children: [
             {
-              id: "mysql-conn-1:app_dev:__tables",
-              label: "tree.tables",
-              type: "group-tables",
-              connectionId: "mysql-conn-1",
-              database: "app_dev",
+              id: "conn-1:__user_admin",
+              label: "tree.userAdmin",
+              type: "user-admin",
+              connectionId: "conn-1",
+              database: "",
+              isExpanded: false,
+            },
+            {
+              id: "conn-1:app",
+              label: "app",
+              type: "database",
+              connectionId: "conn-1",
+              database: "app",
               isExpanded: true,
               children: [
                 {
-                  id: "mysql-conn-1:app_dev:__tables:enum_info",
-                  label: "enum_info",
-                  type: "table",
-                  tableType: "BASE TABLE",
-                  connectionId: "mysql-conn-1",
-                  database: "app_dev",
-                  isExpanded: false,
-                  children: [],
+                  id: "conn-1:app:__tables",
+                  label: "tree.tables",
+                  type: "group-tables",
+                  connectionId: "conn-1",
+                  database: "app",
+                  isExpanded: true,
+                  children: [
+                    {
+                      id: "conn-1:app:__tables:users",
+                      label: "users",
+                      type: "table",
+                      connectionId: "conn-1",
+                      database: "app",
+                      isExpanded: false,
+                      children: [],
+                      pinned: false,
+                    },
+                  ],
                   pinned: false,
                 },
               ],
@@ -145,29 +64,114 @@ test("findNodePathForTarget resolves a MySQL table when target schema equals dat
           pinned: false,
         },
       ],
+      target: {
+        type: "table",
+        connectionId: "conn-1",
+        database: "app",
+        tableName: "users",
+      },
+      expectedPath: ["conn-1", "conn-1:app", "conn-1:app:__tables", "conn-1:app:__tables:users"],
     },
-  ];
-
-  const path = findNodePathForTarget(
     {
-      type: "table",
-      connectionId: "mysql-conn-1",
-      database: "app_dev",
-      schema: "app_dev",
-      tableName: "enum_info",
+      name: "unloaded connection tree",
+      tree: [
+        {
+          id: "mysql-conn-1",
+          label: "mysql.example.test",
+          type: "connection",
+          connectionId: "mysql-conn-1",
+          isExpanded: false,
+          children: [
+            {
+              id: "mysql-conn-1:__user_admin",
+              label: "tree.userAdmin",
+              type: "user-admin",
+              connectionId: "mysql-conn-1",
+              database: "",
+              isExpanded: false,
+            },
+          ],
+          pinned: false,
+        },
+      ],
+      target: {
+        type: "query-context",
+        connectionId: "mysql-conn-1",
+        database: "app_prd",
+      },
+      expectedPath: null,
     },
-    tree,
-  );
+    {
+      name: "MySQL schema fallback to database",
+      tree: [
+        {
+          id: "mysql-conn-1",
+          label: "mysql.example.test",
+          type: "connection",
+          connectionId: "mysql-conn-1",
+          isExpanded: true,
+          children: [
+            {
+              id: "mysql-conn-1:app_dev",
+              label: "app_dev",
+              type: "database",
+              connectionId: "mysql-conn-1",
+              database: "app_dev",
+              isExpanded: true,
+              children: [
+                {
+                  id: "mysql-conn-1:app_dev:__tables",
+                  label: "tree.tables",
+                  type: "group-tables",
+                  connectionId: "mysql-conn-1",
+                  database: "app_dev",
+                  isExpanded: true,
+                  children: [
+                    {
+                      id: "mysql-conn-1:app_dev:__tables:enum_info",
+                      label: "enum_info",
+                      type: "table",
+                      tableType: "BASE TABLE",
+                      connectionId: "mysql-conn-1",
+                      database: "app_dev",
+                      isExpanded: false,
+                      children: [],
+                      pinned: false,
+                    },
+                  ],
+                  pinned: false,
+                },
+              ],
+              pinned: false,
+            },
+          ],
+        },
+      ],
+      target: {
+        type: "table",
+        connectionId: "mysql-conn-1",
+        database: "app_dev",
+        schema: "app_dev",
+        tableName: "enum_info",
+      },
+      expectedPath: [
+        "mysql-conn-1",
+        "mysql-conn-1:app_dev",
+        "mysql-conn-1:app_dev:__tables",
+        "mysql-conn-1:app_dev:__tables:enum_info",
+      ],
+    },
+  ] satisfies Array<{
+    name: string;
+    tree: TreeNode[];
+    target: Parameters<typeof findNodePathForTarget>[0];
+    expectedPath: string[] | null;
+  }>;
 
-  assert.deepEqual(
-    path?.map((node) => node.id),
-    [
-      "mysql-conn-1",
-      "mysql-conn-1:app_dev",
-      "mysql-conn-1:app_dev:__tables",
-      "mysql-conn-1:app_dev:__tables:enum_info",
-    ],
-  );
+  for (const item of cases) {
+    const path = findNodePathForTarget(item.target, item.tree);
+    assert.deepEqual(path?.map((node) => node.id) ?? null, item.expectedPath, item.name);
+  }
 });
 
 test("data tabs target the matching visible table or view node", () => {

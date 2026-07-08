@@ -8,6 +8,8 @@ import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
+import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useTabScroll } from "@/composables/useTabScroll";
@@ -40,6 +42,7 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const { toast } = useToast();
@@ -414,8 +417,21 @@ function tabColorStyle(tab: QueryTab) {
 }
 
 function tabIconClass(tab: QueryTab) {
+  if (tab.mode === "mq") return "";
   if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "vector" || tab.mode === "redis" || tab.mode === "objects" || tab.mode === "structure") return "text-emerald-600 dark:text-emerald-400";
   return "text-blue-600 dark:text-blue-400";
+}
+
+function tabDatabaseIconType(tab: QueryTab) {
+  const connection = connectionStore.getConfig(tab.connectionId);
+  if (!connection) return "mq";
+  if (connection.db_type === "mq") {
+    const externalConfig = connection.external_config as { systemKind?: unknown } | undefined;
+    const systemKind = typeof externalConfig?.systemKind === "string" ? externalConfig.systemKind : "";
+    if (connection.driver_profile === "kafka" || systemKind === "kafka") return "kafka";
+    if (connection.driver_profile === "pulsar" || systemKind === "pulsar") return "pulsar";
+  }
+  return connection.driver_profile || connection.db_type;
 }
 
 const showRegularTabScrollbar = computed(() => hasTabOverflow.value);
@@ -560,6 +576,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                   >
                     <span class="shrink-0" :class="tabIconClass(tab)">
                       <Table2 v-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis'" class="h-3.5 w-3.5" />
+                      <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
                       <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
                       <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper'" class="h-3.5 w-3.5" />
                       <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />
@@ -680,7 +697,8 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                 @contextmenu="onContextMenu"
                 @keydown="onOverflowItemKeydown($event, tab.id, 'regular')"
               >
-                <component :is="tabMenuIcon(tab)" :class="['h-3.5 w-3.5 shrink-0', tabIconClass(tab)]" />
+                <DatabaseIcon v-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5 shrink-0" />
+                <component :is="tabMenuIcon(tab)" v-else :class="['h-3.5 w-3.5 shrink-0', tabIconClass(tab)]" />
                 <span class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
                   <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
                   <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
@@ -739,6 +757,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                   >
                     <span class="shrink-0" :class="tabIconClass(tab)">
                       <Table2 v-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis'" class="h-3.5 w-3.5" />
+                      <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
                       <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
                       <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper'" class="h-3.5 w-3.5" />
                       <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />
@@ -807,7 +826,8 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                 @contextmenu="onContextMenu"
                 @keydown="onOverflowItemKeydown($event, tab.id, 'fixed')"
               >
-                <component :is="tabMenuIcon(tab)" :class="['h-3.5 w-3.5 shrink-0', tabIconClass(tab)]" />
+                <DatabaseIcon v-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5 shrink-0" />
+                <component :is="tabMenuIcon(tab)" v-else :class="['h-3.5 w-3.5 shrink-0', tabIconClass(tab)]" />
                 <span class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
                   <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
                   <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>

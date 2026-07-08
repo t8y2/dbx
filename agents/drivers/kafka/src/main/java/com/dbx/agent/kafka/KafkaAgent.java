@@ -333,9 +333,26 @@ public final class KafkaAgent {
         if (properties != null) {
             for (Map.Entry<String, JsonElement> entry : properties.entrySet()) {
                 if (entry.getValue().isJsonPrimitive()) {
-                    props.put(entry.getKey(), entry.getValue().getAsString());
+                    String key = entry.getKey();
+                    String value = entry.getValue().getAsString();
+                    applyKerberosSystemProperty(key, value);
+                    props.put(key, value);
                 }
             }
+        }
+    }
+
+    private static void applyKerberosSystemProperty(String key, String value) {
+        switch (key) {
+            case "java.security.krb5.conf":
+            case "sun.security.krb5.debug":
+            case "javax.security.auth.useSubjectCredsOnly":
+                if (value != null && !value.isBlank()) {
+                    System.setProperty(key, value);
+                }
+                break;
+            default:
+                break;
         }
     }
 

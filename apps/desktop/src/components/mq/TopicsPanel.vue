@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, computed } from "vue";
+import { useI18n } from "vue-i18n";
 import type { NamespaceRef, TopicRef, TopicInfo, ListTopicsOpts } from "@/types/mq";
 import { mqListTopics, mqCreateTopic, mqDeleteTopic, mqUpdatePartitions } from "@/lib/backend/api";
 import { formatError } from "@/lib/backend/errorUtils";
@@ -18,13 +19,17 @@ const emit = defineEmits<{
   topicSelected: [topic: TopicInfo];
 }>();
 
+const { t } = useI18n();
+
 const topics = ref<TopicInfo[]>([]);
 const loading = ref(false);
 const error = ref<string>();
+const dialogError = ref<string>();
 const showCreateDialog = ref(false);
 const showPartitionsDialog = ref(false);
 const selectedTopic = ref<TopicInfo>();
 const editingTopic = ref<TopicInfo>();
+const topicSearch = ref("");
 
 const formData = ref({
   topicName: "",
@@ -36,15 +41,23 @@ const formData = ref({
 const newPartitions = ref(4);
 
 const includeNonPersistent = ref(false);
-const readOnlyMessage = "当前连接为只读模式，不能执行写操作";
 
 const filteredTopics = computed(() => {
-  return topics.value;
+  const query = topicSearch.value.trim().toLowerCase();
+  if (!query) return topics.value;
+  return topics.value.filter((topic) => {
+    return topic.name.toLowerCase().includes(query) || topic.shortName.toLowerCase().includes(query);
+  });
+});
+const editingCurrentPartitions = computed(() => editingTopic.value?.partitions ?? 0);
+const canSubmitPartitionUpdate = computed(() => {
+  const current = editingCurrentPartitions.value;
+  return !props.readOnly && current > 0 && Number.isFinite(newPartitions.value) && newPartitions.value > current;
 });
 
 function guardWritable() {
   if (props.readOnly) {
-    error.value = readOnlyMessage;
+    error.value = t("mqTopics.readOnly");
     return false;
   }
   return true;
@@ -75,6 +88,7 @@ async function loadTopics() {
 
 function openCreateDialog() {
   if (!guardWritable()) return;
+  dialogError.value = undefined;
   formData.value = {
     topicName: "",
     persistent: true,
@@ -86,8 +100,9 @@ function openCreateDialog() {
 
 function openPartitionsDialog(topic: TopicInfo) {
   if (!guardWritable()) return;
+  dialogError.value = undefined;
   if (!topic.partitions || topic.partitions < 1) {
-    error.value = "当前分区数未知，无法安全调整分区";
+    error.value = t("mqTopics.currentPartitionsUnknown");
     return;
   }
   editingTopic.value = topic;
@@ -98,7 +113,7 @@ function openPartitionsDialog(topic: TopicInfo) {
 async function handleCreate() {
   if (!guardWritable()) return;
   if (!formData.value.topicName.trim() || !props.tenant || !props.namespace) {
-    error.value = "Topic name is required";
+    dialogError.value = t("mqTopics.topicNameRequired");
     return;
   }
   loading.value = true;
@@ -113,9 +128,10 @@ async function handleCreate() {
     const partitions = props.supportsPartitionedTopics !== false && formData.value.partitioned ? formData.value.partitions : undefined;
     await mqCreateTopic(props.connectionId, topicRef, partitions);
     showCreateDialog.value = false;
+    dialogError.value = undefined;
     await loadTopics();
   } catch (e: unknown) {
-    error.value = formatError(e);
+    dialogError.value = formatError(e);
   } finally {
     loading.value = false;
   }
@@ -123,7 +139,7 @@ async function handleCreate() {
 
 async function handleDelete(topic: TopicInfo) {
   if (!guardWritable()) return;
-  if (!confirm(`确定要删除主题 "${topic.shortName}" 吗？此操作不可逆。`)) return;
+  if (!confirm(t("mqTopics.confirmDelete", { name: topic.shortName }))) return;
   if (!props.tenant || !props.namespace) return;
   loading.value = true;
   error.value = undefined;
@@ -151,11 +167,11 @@ async function handleUpdatePartitions() {
   if (!editingTopic.value || !props.tenant || !props.namespace) return;
   const currentPartitions = editingTopic.value.partitions;
   if (!currentPartitions || currentPartitions < 1) {
-    error.value = "当前分区数未知，无法安全调整分区";
+    dialogError.value = t("mqTopics.currentPartitionsUnknown");
     return;
   }
   if (newPartitions.value <= currentPartitions) {
-    error.value = "新分区数必须大于当前分区数";
+    dialogError.value = t("mqTopics.partitionMustIncrease");
     return;
   }
   loading.value = true;
@@ -169,9 +185,10 @@ async function handleUpdatePartitions() {
     };
     await mqUpdatePartitions(props.connectionId, topicRef, newPartitions.value);
     showPartitionsDialog.value = false;
+    dialogError.value = undefined;
     await loadTopics();
   } catch (e: unknown) {
-    error.value = formatError(e);
+    dialogError.value = formatError(e);
   } finally {
     loading.value = false;
   }
@@ -180,6 +197,14 @@ async function handleUpdatePartitions() {
 function selectTopic(topic: TopicInfo) {
   selectedTopic.value = topic;
   emit("topicSelected", topic);
+}
+
+function normalizePartitionInput() {
+  const min = editingCurrentPartitions.value + 1;
+  if (!showPartitionsDialog.value || min <= 1) return;
+  if (!Number.isFinite(Number(newPartitions.value)) || Number(newPartitions.value) < min) {
+    newPartitions.value = min;
+  }
 }
 
 watch(
@@ -194,42 +219,52 @@ watch(
 watch(includeNonPersistent, () => {
   loadTopics();
 });
+
+watch(newPartitions, () => {
+  if (dialogError.value === t("mqTopics.partitionMustIncrease") && canSubmitPartitionUpdate.value) {
+    dialogError.value = undefined;
+  }
+});
 </script>
 
 <template>
   <div class="topics-panel">
     <div class="panel-toolbar">
       <div class="toolbar-left">
-        <h3>主题管理</h3>
+        <h3>{{ t("mqTopics.title") }}</h3>
+        <input v-model="topicSearch" type="search" class="topic-search" :placeholder="t('mqTopics.searchPlaceholder')" :disabled="loading && !topics.length" />
+        <span v-if="topics.length" class="topic-count">{{ filteredTopics.length }} / {{ topics.length }}</span>
         <label class="checkbox-label">
           <input type="checkbox" v-model="includeNonPersistent" />
-          包含非持久化主题
+          {{ t("mqTopics.includeNonPersistent") }}
         </label>
       </div>
       <div class="toolbar-actions">
         <button @click="loadTopics" :disabled="loading || !tenant || !namespace" class="btn-secondary">
-          {{ loading ? "刷新中..." : "刷新" }}
+          {{ loading ? t("mqTopics.refreshing") : t("mqTopics.refresh") }}
         </button>
-        <button @click="openCreateDialog" :disabled="loading || readOnly || !tenant || !namespace" class="btn-primary">+ 创建主题</button>
+        <button @click="openCreateDialog" :disabled="loading || readOnly || !tenant || !namespace" class="btn-primary">+ {{ t("mqTopics.createTopic") }}</button>
       </div>
     </div>
 
-    <div v-if="!tenant || !namespace" class="panel-placeholder">请先选择租户和命名空间</div>
+    <div v-if="!tenant || !namespace" class="panel-placeholder">{{ t("mqTopics.selectTenantNamespace") }}</div>
 
     <div v-else-if="error" class="panel-error">{{ error }}</div>
 
-    <div v-else-if="loading && !topics.length" class="panel-loading">加载中...</div>
+    <div v-else-if="loading && !topics.length" class="panel-loading">{{ t("mqTopics.loading") }}</div>
 
-    <div v-else-if="!topics.length" class="panel-placeholder">该命名空间下暂无主题</div>
+    <div v-else-if="!topics.length" class="panel-placeholder">{{ t("mqTopics.noTopics") }}</div>
+
+    <div v-else-if="!filteredTopics.length" class="panel-placeholder">{{ t("mqTopics.noMatches") }}</div>
 
     <div v-else class="topics-table">
       <table>
         <thead>
           <tr>
-            <th>名称</th>
-            <th>类型</th>
-            <th>分区</th>
-            <th>操作</th>
+            <th>{{ t("mqTopics.name") }}</th>
+            <th>{{ t("mqTopics.type") }}</th>
+            <th>{{ t("mqTopics.partitions") }}</th>
+            <th>{{ t("mqTopics.actions") }}</th>
           </tr>
         </thead>
         <tbody>
@@ -237,21 +272,23 @@ watch(includeNonPersistent, () => {
             <td class="topic-name">
               <div class="topic-name-cell">
                 <span>{{ topic.shortName }}</span>
-                <span v-if="!topic.persistent" class="badge badge-warning">非持久化</span>
+                <span v-if="!topic.persistent" class="badge badge-warning">{{ t("mqTopics.nonPersistent") }}</span>
               </div>
             </td>
             <td>
               <span class="badge" :class="topic.partitioned ? 'badge-info' : 'badge-default'">
-                {{ topic.partitioned ? "分区主题" : "普通主题" }}
+                {{ topic.partitioned ? t("mqTopics.partitionedTopic") : t("mqTopics.normalTopic") }}
               </span>
             </td>
             <td>
-              <span v-if="topic.partitioned">{{ topic.partitions ? `${topic.partitions} 个分区` : "分区数未知" }}</span>
+              <span v-if="topic.partitioned">{{ topic.partitions ? t("mqTopics.partitionCount", { count: topic.partitions }) : t("mqTopics.partitionsUnknown") }}</span>
               <span v-else class="text-muted">-</span>
             </td>
             <td class="actions">
-              <button v-if="topic.partitioned && supportsPartitionedTopics !== false" @click.stop="openPartitionsDialog(topic)" :disabled="readOnly || !topic.partitions" class="btn-sm">调整分区</button>
-              <button @click.stop="handleDelete(topic)" :disabled="readOnly" class="btn-sm btn-danger">删除</button>
+              <button v-if="topic.partitioned && supportsPartitionedTopics !== false" @click.stop="openPartitionsDialog(topic)" :disabled="readOnly || !topic.partitions" class="btn-sm">
+                {{ t("mqTopics.adjustPartitions") }}
+              </button>
+              <button @click.stop="handleDelete(topic)" :disabled="readOnly" class="btn-sm btn-danger">{{ t("mqTopics.delete") }}</button>
             </td>
           </tr>
         </tbody>
@@ -262,41 +299,41 @@ watch(includeNonPersistent, () => {
     <div v-if="showCreateDialog" class="dialog-overlay" @click="showCreateDialog = false">
       <div class="dialog" @click.stop>
         <div class="dialog-header">
-          <h3>创建主题</h3>
+          <h3>{{ t("mqTopics.createTopic") }}</h3>
           <button @click="showCreateDialog = false" class="btn-close">×</button>
         </div>
         <div class="dialog-body">
           <div v-if="!isKafkaCluster" class="form-group">
-            <label>租户 / 命名空间</label>
+            <label>{{ t("mqTopics.tenantNamespace") }}</label>
             <input type="text" :value="`${tenant} / ${namespace}`" disabled />
           </div>
           <div class="form-group">
-            <label>主题名称*</label>
-            <input v-model="formData.topicName" type="text" placeholder="例如: my-topic" :disabled="readOnly" />
+            <label>{{ t("mqTopics.topicName") }}*</label>
+            <input v-model="formData.topicName" type="text" :placeholder="t('mqTopics.topicNamePlaceholder')" :disabled="readOnly" />
           </div>
           <div class="form-group">
             <label class="checkbox-label">
               <input type="checkbox" v-model="formData.persistent" :disabled="readOnly" />
-              持久化主题（推荐）
+              {{ t("mqTopics.persistentRecommended") }}
             </label>
-            <div class="form-hint">持久化主题会将消息保存到磁盘，非持久化主题仅保存在内存中</div>
+            <div class="form-hint">{{ t("mqTopics.persistentHint") }}</div>
           </div>
           <div v-if="supportsPartitionedTopics !== false" class="form-group">
             <label class="checkbox-label">
               <input type="checkbox" v-model="formData.partitioned" :disabled="readOnly" />
-              启用分区
+              {{ t("mqTopics.enablePartitions") }}
             </label>
             <div v-if="formData.partitioned" class="form-subgroup">
-              <label>分区数量*</label>
+              <label>{{ t("mqTopics.partitionQuantity") }}*</label>
               <input v-model.number="formData.partitions" type="number" min="1" max="256" :disabled="readOnly" />
-              <div class="form-hint">分区可以提高并发性能，但会增加资源消耗</div>
+              <div class="form-hint">{{ t("mqTopics.partitionHint") }}</div>
             </div>
           </div>
-          <div v-if="error" class="form-error">{{ error }}</div>
+          <div v-if="dialogError" class="form-error">{{ dialogError }}</div>
         </div>
         <div class="dialog-footer">
-          <button @click="showCreateDialog = false" class="btn-secondary">取消</button>
-          <button @click="handleCreate" :disabled="loading || readOnly" class="btn-primary">创建</button>
+          <button @click="showCreateDialog = false" class="btn-secondary">{{ t("mqTopics.cancel") }}</button>
+          <button @click="handleCreate" :disabled="loading || readOnly" class="btn-primary">{{ t("mqTopics.create") }}</button>
         </div>
       </div>
     </div>
@@ -305,24 +342,24 @@ watch(includeNonPersistent, () => {
     <div v-if="showPartitionsDialog" class="dialog-overlay" @click="showPartitionsDialog = false">
       <div class="dialog" @click.stop>
         <div class="dialog-header">
-          <h3>调整分区数: {{ editingTopic?.shortName }}</h3>
+          <h3>{{ t("mqTopics.updatePartitionsTitle", { name: editingTopic?.shortName }) }}</h3>
           <button @click="showPartitionsDialog = false" class="btn-close">×</button>
         </div>
         <div class="dialog-body">
           <div class="form-group">
-            <label>当前分区数</label>
+            <label>{{ t("mqTopics.currentPartitions") }}</label>
             <input type="number" :value="editingTopic?.partitions" disabled />
           </div>
           <div class="form-group">
-            <label>新分区数*</label>
-            <input v-model.number="newPartitions" type="number" :min="(editingTopic?.partitions || 0) + 1" max="256" :disabled="readOnly" />
-            <div class="form-hint">⚠️ 分区数只能增加，不能减少</div>
+            <label>{{ t("mqTopics.newPartitions") }}*</label>
+            <input v-model.number="newPartitions" type="number" :min="editingCurrentPartitions + 1" max="256" :disabled="readOnly" @change="normalizePartitionInput" @blur="normalizePartitionInput" />
+            <div class="form-hint">{{ t("mqTopics.partitionMinHint", { min: editingCurrentPartitions + 1 }) }}</div>
           </div>
-          <div v-if="error" class="form-error">{{ error }}</div>
+          <div v-if="dialogError" class="form-error">{{ dialogError }}</div>
         </div>
         <div class="dialog-footer">
-          <button @click="showPartitionsDialog = false" class="btn-secondary">取消</button>
-          <button @click="handleUpdatePartitions" :disabled="loading || readOnly" class="btn-primary">更新</button>
+          <button @click="showPartitionsDialog = false" class="btn-secondary">{{ t("mqTopics.cancel") }}</button>
+          <button @click="handleUpdatePartitions" :disabled="loading || !canSubmitPartitionUpdate" class="btn-primary">{{ t("mqTopics.update") }}</button>
         </div>
       </div>
     </div>
@@ -331,6 +368,10 @@ watch(includeNonPersistent, () => {
 
 <style scoped>
 .topics-panel {
+  --topics-surface: var(--card, var(--color-background, #ffffff));
+  --topics-header-bg: color-mix(in srgb, var(--secondary, #f5f5f5) 86%, var(--card, #ffffff));
+  --topics-border: var(--border, var(--color-border, #e5e7eb));
+  --topics-border-light: color-mix(in srgb, var(--topics-border) 68%, transparent);
   height: 100%;
   display: flex;
   flex-direction: column;
@@ -348,6 +389,7 @@ watch(includeNonPersistent, () => {
   display: flex;
   align-items: center;
   gap: 16px;
+  min-width: 0;
 }
 
 .toolbar-actions {
@@ -360,6 +402,30 @@ watch(includeNonPersistent, () => {
   margin: 0;
   font-size: 16px;
   font-weight: 600;
+  flex: 0 0 auto;
+}
+
+.topic-search {
+  width: min(320px, 32vw);
+  min-width: 180px;
+  padding: 6px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-background);
+  color: var(--color-text);
+  font-size: 13px;
+}
+
+.topic-search:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px var(--color-primary-alpha);
+}
+
+.topic-count {
+  flex: 0 0 auto;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
 }
 
 .checkbox-label {
@@ -387,35 +453,56 @@ watch(includeNonPersistent, () => {
 }
 
 .topics-table {
+  position: relative;
   flex: 1;
   overflow: auto;
-  background: var(--color-background);
+  background: var(--topics-surface);
+}
+
+.topics-table::before {
+  content: "";
+  position: sticky;
+  top: 0;
+  display: block;
+  height: 38px;
+  margin-bottom: -38px;
+  background: var(--topics-header-bg);
+  z-index: 9;
+  box-shadow:
+    0 1px 0 var(--topics-border),
+    0 2px 8px rgba(0, 0, 0, 0.05);
+  pointer-events: none;
 }
 
 table {
+  position: relative;
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
 }
 
 thead {
   position: sticky;
   top: 0;
-  background: var(--color-background-secondary);
-  z-index: 1;
+  background: var(--topics-header-bg);
+  z-index: 10;
 }
 
 th {
   position: sticky;
   top: 0;
-  z-index: 2;
+  z-index: 11;
   padding: 10px 12px;
   text-align: left;
   font-weight: 600;
   font-size: 13px;
   color: var(--color-text-secondary);
-  background: var(--color-background-secondary);
-  border-bottom: 1px solid var(--color-border);
-  box-shadow: 0 1px 0 var(--color-border);
+  background: var(--topics-header-bg);
+  border-bottom: 1px solid var(--topics-border);
+  background-clip: padding-box;
+  box-shadow:
+    0 1px 0 var(--topics-border),
+    0 2px 6px rgba(0, 0, 0, 0.04);
 }
 
 tbody tr {
@@ -427,13 +514,22 @@ tbody tr:hover {
   background: var(--color-hover);
 }
 
+tbody tr:hover td {
+  background: var(--color-hover);
+}
+
 tbody tr.selected {
+  background: var(--color-primary-alpha);
+}
+
+tbody tr.selected td {
   background: var(--color-primary-alpha);
 }
 
 td {
   padding: 10px 12px;
-  border-bottom: 1px solid var(--color-border-light);
+  border-bottom: 1px solid var(--topics-border-light);
+  background: var(--topics-surface);
 }
 
 .topic-name-cell {

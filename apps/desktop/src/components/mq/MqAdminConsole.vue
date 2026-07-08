@@ -129,7 +129,7 @@ function handleNamespaceRolesSelected(namespace: string) {
 function handleTopicSelected(topic: TopicInfo) {
   selectedTopic.value = topic;
   selectedSubscriptionName.value = undefined;
-  activeTab.value = canManageSubscriptions.value ? "subscriptions" : "monitoring";
+  activeTab.value = isKafkaCluster.value ? "monitoring" : canManageSubscriptions.value ? "subscriptions" : "monitoring";
 }
 
 function handleSubscriptionSelected(subscription: string) {

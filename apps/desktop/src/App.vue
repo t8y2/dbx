@@ -31,6 +31,7 @@ import { useTauriEvents } from "@/composables/useTauriEvents";
 import { useCloseActionPrompt, type AppCloseAction, type AppCloseRequestOptions } from "@/composables/useCloseActionPrompt";
 import { useVisibilityChange } from "@/composables/useVisibilityChange";
 import { useWebDavAutoUpload } from "@/composables/useWebDavAutoUpload";
+import { shouldDrawDesktopWindowFrame } from "@/composables/useWindowControls";
 import "@/i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
 import * as api from "@/lib/backend/api";
@@ -113,6 +114,7 @@ const { checkingUpdates, updateInfo, updateCheckMessage, showUpdateDialog, isDow
 const { setupFileDrop } = useFileDrop();
 
 const isDesktop = isTauriRuntime();
+const drawDesktopWindowFrame = shouldDrawDesktopWindowFrame(isMacOS(), isDesktop);
 const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 let updateCheckTimer: ReturnType<typeof setInterval> | undefined;
 const needsAuth = ref(!isDesktop);
@@ -1719,7 +1721,7 @@ onUnmounted(() => {
   <LoginPage v-if="setupRequired || (needsAuth && !authenticated)" :setup-mode="setupRequired" @authenticated="onLoginSuccess" />
   <div v-show="!setupRequired && (!needsAuth || authenticated)" class="fixed inset-0 h-screen w-screen overflow-hidden">
     <TooltipProvider :delay-duration="300">
-      <div class="h-screen w-screen max-w-full min-w-[760px] min-h-[600px] flex flex-col bg-background text-foreground overflow-hidden" :style="appUiFontFamilyStyle">
+      <div class="h-screen w-screen max-w-full min-w-[760px] min-h-[600px] flex flex-col bg-background text-foreground overflow-hidden" :class="{ 'dbx-desktop-window-frame': drawDesktopWindowFrame }" :style="appUiFontFamilyStyle">
         <AppToolbar
           :is-dark="isDark"
           :theme-mode="themeMode"

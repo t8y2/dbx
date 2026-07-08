@@ -45,6 +45,7 @@ export interface DataGridCopyInsertStatementOptions {
   databaseType?: DatabaseType;
   tableMeta?: DataGridTableMeta;
   columns: string[];
+  columnTypes?: Array<string | null | undefined>;
   sourceColumns?: Array<string | undefined>;
   rows: GridCellValue[][];
   excludePrimaryKeys?: boolean;

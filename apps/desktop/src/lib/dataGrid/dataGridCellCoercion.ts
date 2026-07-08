@@ -45,6 +45,9 @@ export function dataGridCellDisplayText(options: { value: GridCellValue; databas
   if (Array.isArray(options.value) && options.databaseType === "postgres" && isPostgresArrayColumn(options.columnInfo, options.value)) {
     return formatPostgresArrayText(options.value);
   }
+  if (typeof options.value === "string" && isOracleDateColumn(options.databaseType, options.columnInfo)) {
+    return formatOracleDateDisplayText(options.value);
+  }
   return undefined;
 }
 
@@ -111,6 +114,39 @@ function shouldPreserveNumericTextForType(dataType: string | undefined, text: st
 
 function normalizeDataType(dataType: string | undefined): string {
   return (dataType ?? "").trim().toLowerCase();
+}
+
+function isOracleDateColumn(databaseType: DatabaseType | undefined, columnInfo: Pick<ColumnInfo, "data_type"> | undefined): boolean {
+  if (databaseType !== "oracle" && databaseType !== "oceanbase-oracle") return false;
+  const base = normalizeDataType(columnInfo?.data_type).split(/[()\s\t\n]/)[0] ?? "";
+  return base === "date";
+}
+
+function formatOracleDateDisplayText(value: string): string | undefined {
+  const parts = parseOracleDateLikeText(value);
+  if (!parts) return undefined;
+  if (parts.time === "00:00:00" && !parts.fraction) return parts.date;
+  return `${parts.date} ${parts.time}${parts.fraction ?? ""}`;
+}
+
+function parseOracleDateLikeText(value: string): { date: string; time: string; fraction?: string } | undefined {
+  if (!/^\d{4}-\d{2}-\d{2}/.test(value)) return undefined;
+  const date = value.slice(0, 10);
+  if (value.length === 10) return { date, time: "00:00:00" };
+  const separator = value[10];
+  if (separator !== "T" && separator !== " ") return undefined;
+  if (!/^\d{2}:\d{2}:\d{2}/.test(value.slice(11))) return undefined;
+  const time = value.slice(11, 19);
+  let rest = value.slice(19);
+  let fraction: string | undefined;
+  if (rest.startsWith(".")) {
+    const match = rest.match(/^(\.\d{1,9})(.*)$/);
+    if (!match) return undefined;
+    fraction = match[1];
+    rest = match[2];
+  }
+  if (rest && !/^z$/i.test(rest) && !/^[+-]\d{2}:\d{2}$/.test(rest)) return undefined;
+  return { date, time, fraction };
 }
 
 function isExactDecimalDataType(dataType: string): boolean {

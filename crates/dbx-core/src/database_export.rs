@@ -203,6 +203,9 @@ fn format_export_sql_literal_typed(
             return format_ch_array_sql_literal(arr);
         }
     }
+    if let Some(literal) = format_oracle_export_date_literal(value, database_type, column_type) {
+        return literal;
+    }
     if let Some(literal) = format_export_temporal_literal(value, database_type, column_type) {
         return literal;
     }
@@ -261,6 +264,26 @@ fn is_mysql_compatible_export_literal_target(database_type: Option<DatabaseType>
         database_type,
         Some(DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::Goldendb)
     )
+}
+
+fn format_oracle_export_date_literal(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_type: Option<&str>,
+) -> Option<String> {
+    if !matches!(database_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle)) {
+        return None;
+    }
+    if export_temporal_column_kind(database_type, column_type?)? != ExportTemporalKind::DateTime {
+        return None;
+    }
+    let lower = column_type?.trim().trim_matches('"').to_ascii_lowercase();
+    let base = lower.split(['(', ' ', '\t', '\n']).next().unwrap_or("");
+    if base != "date" {
+        return None;
+    }
+    let parts = parse_export_date_parts(value.as_str()?)?;
+    Some(format!("DATE '{}'", parts.date))
 }
 
 fn format_export_temporal_literal(
@@ -329,6 +352,53 @@ struct ExportRfc3339Parts {
     time: String,
     fraction: Option<String>,
     zone: String,
+}
+
+fn parse_export_date_parts(text: &str) -> Option<ExportRfc3339Parts> {
+    parse_export_rfc3339_parts(text).or_else(|| parse_export_local_temporal_parts(text))
+}
+
+fn parse_export_local_temporal_parts(text: &str) -> Option<ExportRfc3339Parts> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 10 || bytes.get(4) != Some(&b'-') || bytes.get(7) != Some(&b'-') {
+        return None;
+    }
+    let date = &text[0..10];
+    if !date.as_bytes().iter().enumerate().all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit()) {
+        return None;
+    }
+    if bytes.len() == 10 {
+        return Some(ExportRfc3339Parts {
+            date: date.to_string(),
+            time: "00:00:00".to_string(),
+            fraction: None,
+            zone: String::new(),
+        });
+    }
+    let separator = *bytes.get(10)?;
+    if separator != b'T' && separator != b' ' {
+        return None;
+    }
+    if bytes.len() < 19 || bytes.get(13) != Some(&b':') || bytes.get(16) != Some(&b':') {
+        return None;
+    }
+    let time = &text[11..19];
+    if !time.as_bytes().iter().enumerate().all(|(index, byte)| matches!(index, 2 | 5) || byte.is_ascii_digit()) {
+        return None;
+    }
+    let rest = &text[19..];
+    let fraction = if let Some(rest) = rest.strip_prefix('.') {
+        let digit_count = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
+        if digit_count == 0 || digit_count > 9 || digit_count != rest.len() {
+            return None;
+        }
+        Some(format!(".{}", &rest[..digit_count]))
+    } else if rest.is_empty() {
+        None
+    } else {
+        return None;
+    };
+    Some(ExportRfc3339Parts { date: date.to_string(), time: time.to_string(), fraction, zone: String::new() })
 }
 
 fn parse_export_rfc3339_parts(text: &str) -> Option<ExportRfc3339Parts> {
@@ -1555,6 +1625,29 @@ mod tests {
             vec![
                 "INSERT INTO \"APP\".\"USERS\" (\"ID\", \"NAME\") VALUES (1, 'Ada');",
                 "INSERT INTO \"APP\".\"USERS\" (\"ID\", \"NAME\") VALUES (2, 'Linus');",
+            ]
+        );
+    }
+
+    #[test]
+    fn oracle_date_columns_export_as_date_literals() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Oracle),
+            schema: Some("APP".to_string()),
+            table_name: Some("EVENTS".to_string()),
+            qualified_table_name: None,
+            columns: vec!["ID".to_string(), "CREATED_ON".to_string(), "RAW_TEXT".to_string()],
+            column_types: vec![Some("NUMBER".to_string()), Some("DATE".to_string()), Some("VARCHAR2(64)".to_string())],
+            column_extras: Vec::new(),
+            rows: vec![vec![json!(1), json!("2022-08-25T09:58:43Z"), json!("2022-08-25T09:58:43Z")]],
+            batch_size: Some(100),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                "INSERT INTO \"APP\".\"EVENTS\" (\"ID\", \"CREATED_ON\", \"RAW_TEXT\") VALUES (1, DATE '2022-08-25', '2022-08-25T09:58:43Z');"
             ]
         );
     }

@@ -173,6 +173,7 @@ type queryOptions struct {
 
 type queryResult struct {
 	Columns         []string `json:"columns"`
+	ColumnTypes     []string `json:"column_types"`
 	Rows            [][]any  `json:"rows"`
 	AffectedRows    int64    `json:"affected_rows"`
 	ExecutionTimeMS int64    `json:"execution_time_ms"`
@@ -185,6 +186,9 @@ func (r queryResult) MarshalJSON() ([]byte, error) {
 	if value.Columns == nil {
 		value.Columns = []string{}
 	}
+	if value.ColumnTypes == nil {
+		value.ColumnTypes = []string{}
+	}
 	if value.Rows == nil {
 		value.Rows = [][]any{}
 	}
@@ -193,6 +197,7 @@ func (r queryResult) MarshalJSON() ([]byte, error) {
 
 type queryPageResult struct {
 	Columns         []string `json:"columns"`
+	ColumnTypes     []string `json:"column_types"`
 	Rows            [][]any  `json:"rows"`
 	AffectedRows    int64    `json:"affected_rows"`
 	ExecutionTimeMS int64    `json:"execution_time_ms"`
@@ -207,6 +212,9 @@ func (r queryPageResult) MarshalJSON() ([]byte, error) {
 	if value.Columns == nil {
 		value.Columns = []string{}
 	}
+	if value.ColumnTypes == nil {
+		value.ColumnTypes = []string{}
+	}
 	if value.Rows == nil {
 		value.Rows = [][]any{}
 	}
@@ -214,10 +222,11 @@ func (r queryPageResult) MarshalJSON() ([]byte, error) {
 }
 
 type querySession struct {
-	rows      *sql.Rows
-	columns   []string
-	pending   []any
-	remaining int
+	rows        *sql.Rows
+	columns     []string
+	columnTypes []string
+	pending     []any
+	remaining   int
 }
 
 type oracleColumnMeta struct {
@@ -1545,6 +1554,7 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 		result, err := s.executeQuery(opts)
 		return queryPageResult{
 			Columns:         result.Columns,
+			ColumnTypes:     result.ColumnTypes,
 			Rows:            result.Rows,
 			AffectedRows:    result.AffectedRows,
 			ExecutionTimeMS: result.ExecutionTimeMS,
@@ -1562,11 +1572,12 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 		rows.Close()
 		return queryPageResult{}, err
 	}
+	columnTypes := columnTypeNames(rows)
 	maxRows := opts.MaxRows
 	if maxRows <= 0 {
 		maxRows = defaultMaxRows
 	}
-	session := &querySession{rows: rows, columns: columns, remaining: maxRows}
+	session := &querySession{rows: rows, columns: columns, columnTypes: columnTypes, remaining: maxRows}
 	result, err := readQuerySessionPage(session, pageSize)
 	result.ExecutionTimeMS = time.Since(start).Milliseconds()
 	if err != nil {
@@ -1585,7 +1596,7 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 func (s *server) fetchQueryPage(sessionID string, pageSize int) (queryPageResult, error) {
 	session := s.sessions[sessionID]
 	if session == nil {
-		return queryPageResult{Columns: []string{}, Rows: [][]any{}, SessionID: nil, HasMore: false}, nil
+		return queryPageResult{Columns: []string{}, ColumnTypes: []string{}, Rows: [][]any{}, SessionID: nil, HasMore: false}, nil
 	}
 	result, err := readQuerySessionPage(session, pageSize)
 	if err != nil {
@@ -1627,11 +1638,12 @@ func (s *server) startTableRead(opts queryOptions, pageSize int) (queryPageResul
 		rows.Close()
 		return queryPageResult{}, err
 	}
+	columnTypes := columnTypeNames(rows)
 	maxRows := opts.MaxRows
 	if maxRows <= 0 {
 		maxRows = defaultMaxRows
 	}
-	session := &querySession{rows: rows, columns: columns, remaining: maxRows}
+	session := &querySession{rows: rows, columns: columns, columnTypes: columnTypes, remaining: maxRows}
 	result, err := readQuerySessionPage(session, pageSize)
 	result.ExecutionTimeMS = time.Since(start).Milliseconds()
 	if err != nil {
@@ -1650,7 +1662,7 @@ func (s *server) startTableRead(opts queryOptions, pageSize int) (queryPageResul
 func (s *server) fetchTableReadPage(sessionID string, pageSize int) (queryPageResult, error) {
 	session := s.tableReadSessions[sessionID]
 	if session == nil {
-		return queryPageResult{Columns: []string{}, Rows: [][]any{}, SessionID: nil, HasMore: false}, nil
+		return queryPageResult{Columns: []string{}, ColumnTypes: []string{}, Rows: [][]any{}, SessionID: nil, HasMore: false}, nil
 	}
 	result, err := readQuerySessionPage(session, pageSize)
 	if err != nil {
@@ -1705,7 +1717,7 @@ func readQuerySessionPage(session *querySession, pageSize int) (queryPageResult,
 	if pageSize <= 0 {
 		pageSize = defaultMaxRows
 	}
-	result := queryPageResult{Columns: session.columns, Rows: [][]any{}, SessionID: nil, HasMore: false}
+	result := queryPageResult{Columns: session.columns, ColumnTypes: session.columnTypes, Rows: [][]any{}, SessionID: nil, HasMore: false}
 	for len(result.Rows) < pageSize && session.remaining > 0 {
 		if session.pending != nil {
 			result.Rows = append(result.Rows, session.pending)
@@ -1765,7 +1777,7 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 		return queryResult{}, err
 	}
 	affected, _ := execResult.RowsAffected()
-	return queryResult{Columns: []string{}, Rows: [][]any{}, AffectedRows: affected, ExecutionTimeMS: time.Since(start).Milliseconds()}, nil
+	return queryResult{Columns: []string{}, ColumnTypes: []string{}, Rows: [][]any{}, AffectedRows: affected, ExecutionTimeMS: time.Since(start).Milliseconds()}, nil
 }
 
 func (s *server) executeSelect(sqlText string, maxRows int) (queryResult, error) {
@@ -1778,7 +1790,7 @@ func (s *server) executeSelect(sqlText string, maxRows int) (queryResult, error)
 	if err != nil {
 		return queryResult{}, err
 	}
-	result := queryResult{Columns: columns, Rows: [][]any{}}
+	result := queryResult{Columns: columns, ColumnTypes: columnTypeNames(rows), Rows: [][]any{}}
 	for rows.Next() {
 		if len(result.Rows) >= maxRows {
 			result.Truncated = true
@@ -1806,6 +1818,18 @@ func scanRow(rows *sql.Rows, columnCount int) ([]any, error) {
 		values[i] = normalizeValue(value)
 	}
 	return values, nil
+}
+
+func columnTypeNames(rows *sql.Rows) []string {
+	types, err := rows.ColumnTypes()
+	if err != nil {
+		return []string{}
+	}
+	result := make([]string, 0, len(types))
+	for _, columnType := range types {
+		result = append(result, columnType.DatabaseTypeName())
+	}
+	return result
 }
 
 func (s *server) queryRowsWithXMLTypeRewriteIfNeeded(sqlText string) (*sql.Rows, error) {

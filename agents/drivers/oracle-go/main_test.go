@@ -78,7 +78,7 @@ func TestMissingTableReadSessionMethodsReturnEmptyOrFalse(t *testing.T) {
 	if err := json.Unmarshal(data, &page); err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Columns) != 0 || len(page.Rows) != 0 || page.HasMore || page.SessionID != nil {
+	if len(page.Columns) != 0 || len(page.ColumnTypes) != 0 || len(page.Rows) != 0 || page.HasMore || page.SessionID != nil {
 		t.Fatalf("missing table read session should return empty page, got %+v", page)
 	}
 
@@ -100,8 +100,11 @@ func TestEmptyResultSlicesMarshalAsArrays(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(data)
-	if strings.Contains(text, `"columns":null`) || strings.Contains(text, `"rows":null`) {
+	if strings.Contains(text, `"columns":null`) || strings.Contains(text, `"column_types":null`) || strings.Contains(text, `"rows":null`) {
 		t.Fatalf("query result should marshal nil slices as arrays: %s", text)
+	}
+	if !strings.Contains(text, `"column_types":[]`) {
+		t.Fatalf("query result should marshal empty column types array: %s", text)
 	}
 
 	data, err = json.Marshal(indexInfo{})

@@ -3994,6 +3994,11 @@ function tableColumnForGridColumn(columnIndex: number): ColumnInfo | undefined {
   return props.tableMeta?.columns.find((column) => column.name.toLowerCase() === columnName.toLowerCase());
 }
 
+function resultColumnInfoForGridColumn(columnIndex: number): Pick<ColumnInfo, "data_type"> | undefined {
+  const dataType = props.result.column_types?.[columnIndex]?.trim();
+  return dataType ? { data_type: dataType } : undefined;
+}
+
 function temporalEditorKindForColumn(columnIndex: number): TemporalCellEditorKind | undefined {
   return temporalCellEditorKind(tableColumnForGridColumn(columnIndex)?.data_type, props.databaseType);
 }
@@ -5321,7 +5326,8 @@ function formatCell(value: CellValue, columnIndex?: number): string {
   const formatter = columnIndex === undefined ? undefined : resolvedColumnFormatters.value[columnIndex];
   const columnName = columnIndex === undefined ? undefined : props.result.columns[columnIndex];
   const columnInfo = columnIndex === undefined ? undefined : tableColumnForGridColumn(columnIndex);
-  const arrayDisplay = formatter ? undefined : dataGridCellDisplayText({ value, databaseType: props.databaseType, columnInfo });
+  const displayColumnInfo = columnInfo ?? (columnIndex === undefined ? undefined : resultColumnInfoForGridColumn(columnIndex));
+  const arrayDisplay = formatter ? undefined : dataGridCellDisplayText({ value, databaseType: props.databaseType, columnInfo: displayColumnInfo });
   if (arrayDisplay !== undefined) return arrayDisplay;
   const binaryDisplay = formatter ? null : binaryCellDisplayText(value, columnInfo?.data_type ?? (columnName ? columnTypeMap.value.get(columnName) : undefined));
   if (binaryDisplay) return binaryDisplay;
@@ -5362,7 +5368,13 @@ function draftCellPlaceholder(item: RowItem | undefined, columnIndex: number): s
   return item?.isDraft && item.data[columnIndex] === null ? t("grid.quickEntryDraftPlaceholder") : null;
 }
 
-watch(() => [props.result.columns.join("\u0000"), columnFormatterSignatures.value.join("\u0000")], clearCellFormatCache);
+function columnTypeCacheSignature(): string {
+  const resultTypes = props.result.column_types?.join("\u0000") ?? "";
+  const tableTypes = props.tableMeta?.columns?.map((column) => `${column.name}:${column.data_type}`).join("\u0000") ?? "";
+  return `${resultTypes}\u0001${tableTypes}`;
+}
+
+watch(() => [props.result.columns.join("\u0000"), columnFormatterSignatures.value.join("\u0000"), columnTypeCacheSignature()], clearCellFormatCache);
 
 function quoteIdent(name: string): string {
   return quoteTableIdentifier(props.databaseType, name);

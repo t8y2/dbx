@@ -4,6 +4,7 @@ import * as api from "@/lib/backend/api";
 export type GridCellValue = string | number | boolean | null | unknown[] | { [key: string]: unknown };
 
 export interface DataGridTableMeta {
+  catalog?: string;
   schema?: string;
   tableName: string;
   primaryKeys: string[];

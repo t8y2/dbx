@@ -60,6 +60,7 @@ async fn postgres_tsvector_generated_columns_are_readable_and_omitted_from_inser
     assert!(search_vector.extra.as_deref().unwrap_or_default().contains("generated always as"));
 
     let table_meta = DataGridTableMeta {
+        catalog: None,
         schema: Some(schema.clone()),
         table_name: "articles".to_string(),
         primary_keys: vec!["id".to_string()],

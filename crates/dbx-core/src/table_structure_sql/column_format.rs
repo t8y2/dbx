@@ -193,6 +193,7 @@ fn is_sqlserver_lengthless_type(base_type: &str) -> bool {
             | "bit"
             | "date"
             | "datetime"
+            | "float"
             | "image"
             | "int"
             | "integer"

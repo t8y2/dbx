@@ -1292,6 +1292,28 @@ fn sqlserver_strips_mysql_display_width_from_fixed_integer_types() {
 }
 
 #[test]
+fn sqlserver_strips_display_width_from_float() {
+    let mut amount = column("amount");
+    amount.data_type = "float(10,2)".to_string();
+    amount.is_nullable = true;
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "orders".to_string(),
+        columns: vec![amount],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE [dbo].[orders] ADD [amount] float;"]);
+}
+
+#[test]
 fn sqlserver_default_changes_drop_old_constraints_with_isolated_batches() {
     let mut sku = column("sku");
     sku.data_type = "nvarchar(64)".to_string();

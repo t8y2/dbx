@@ -400,6 +400,18 @@ watch(assistantMode, (mode) => {
   activeAction.value = resolveDefaultAction(mode);
 });
 
+watch(
+  () => props.connection?.db_type,
+  () => {
+    // Vector DBs hide the action picker, so keep the hidden action aligned with
+    // the collection-oriented prompt contract on initial render and connection changes.
+    if (props.connection && isVectorDbType(props.connection.db_type)) {
+      activeAction.value = "generate";
+    }
+  },
+  { immediate: true },
+);
+
 function selectAction(action: AiAction) {
   activeAction.value = action;
   if (action === "fix" && props.tab?.result) {
@@ -1369,7 +1381,7 @@ async function send() {
     await runAgentStream(
       {
         config: settings.aiConfig,
-        action: activeAction.value,
+        action: requestedAction,
         mode: requestedMode,
         instruction: modelInstruction,
         context,

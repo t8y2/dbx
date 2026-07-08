@@ -448,7 +448,7 @@ async fn connect_bare_mysql_pool_with_setup(
 ) -> Result<db::mysql::MySqlPool, String> {
     if db_config.bare_mysql_uses_tls() {
         let idle_timeout_secs = Some(db_config.idle_timeout_secs);
-        db::mysql::connect_with_ca_cert_pool_limit_idle_and_setup(
+        db::mysql::connect_compatible_with_ca_cert_pool_limit_idle_and_setup(
             url,
             Some(&db_config.ca_cert_path),
             connect_timeout,
@@ -475,7 +475,7 @@ async fn connect_bare_mysql_pool_with_setup_database(
     // separately so DB-layer setup keeps the normal charset/catalog/USE order.
     if db_config.bare_mysql_uses_tls() {
         let idle_timeout_secs = Some(db_config.idle_timeout_secs);
-        db::mysql::connect_with_ca_cert_pool_limit_idle_and_setup_database(
+        db::mysql::connect_compatible_with_ca_cert_pool_limit_idle_and_setup_database(
             url,
             Some(&db_config.ca_cert_path),
             connect_timeout,

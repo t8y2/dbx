@@ -42,7 +42,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     public static final JdbcAgentProfile OCEANBASE_ORACLE_PROFILE = new JdbcAgentProfile(
         "com.oceanbase.jdbc.Driver",
         "jdbc:oceanbase://{host}:{port}/{database}",
-        2881,
+        2883,
         false,
         SYSTEM_SCHEMAS,
         List.of("TABLE", "VIEW", "BASE TABLE")

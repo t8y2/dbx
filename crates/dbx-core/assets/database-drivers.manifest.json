@@ -1067,7 +1067,7 @@
       "singleConnectionPool": true,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
-      "defaultPort": 2881,
+      "defaultPort": 2883,
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,

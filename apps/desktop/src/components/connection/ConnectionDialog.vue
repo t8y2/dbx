@@ -537,10 +537,10 @@ const driverProfiles: Record<
   chromadb: { type: "chromadb", port: 8000, user: "", label: "ChromaDB", icon: "chromadb" },
   mariadb: { type: "mysql", port: 3306, user: "root", label: "MariaDB", icon: "mariadb" },
   tidb: { type: "mysql", port: 4000, user: "root", label: "TiDB", icon: "tidb" },
-  oceanbase: { type: "mysql", port: 2881, user: "root", label: "OceanBase", icon: "oceanbase" },
+  oceanbase: { type: "mysql", port: 2883, user: "root", label: "OceanBase", icon: "oceanbase" },
   "oceanbase-oracle": {
     type: "oceanbase-oracle",
-    port: 2881,
+    port: 2883,
     user: "SYS",
     label: "OceanBase Oracle Mode",
     icon: "oceanbase",

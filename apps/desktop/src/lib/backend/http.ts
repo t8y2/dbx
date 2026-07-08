@@ -661,6 +661,7 @@ export async function executeMulti(
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
+    useTransaction?: boolean;
   },
 ): Promise<QueryResult[]> {
   return post("/api/query/execute-multi", { connectionId, database, sql, schema, executionId, ...options });

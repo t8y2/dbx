@@ -213,7 +213,7 @@ export function shouldScrollActiveSidebarSelection(options: { activeTabId: strin
   return options.activeTabId !== options.previousActiveTabId || (options.autoSelectEnabled && options.previousAutoSelectEnabled === false);
 }
 
-// nearest 用于自动选中；smart 用于手动定位并保留上下文。
+// nearest is used for passive auto-selection; smart keeps context for explicit locate actions.
 export type SidebarNodeScrollAlign = "nearest" | "top" | "smart";
 
 export function scrollTopForSidebarNode(options: { index: number; currentScrollTop: number; viewportHeight: number; rowHeight?: number; topOcclusionHeight?: number; align?: SidebarNodeScrollAlign }): number {
@@ -225,7 +225,7 @@ export function scrollTopForSidebarNode(options: { index: number; currentScrollT
   const topOcclusionHeight = options.topOcclusionHeight ?? 0;
   if (options.align === "top") return Math.max(0, rowTop - topOcclusionHeight);
   if (options.align === "smart") {
-    // smart 类似 IDE Locate：目标放在可视区上方约 1/3。
+    // Similar to IDE Locate: place the target around the upper third of the viewport.
     const availableViewportHeight = Math.max(rowHeight, options.viewportHeight - topOcclusionHeight);
     const smartOffset = Math.max(0, (availableViewportHeight - rowHeight) / 3);
     return Math.max(0, Math.round(rowTop - topOcclusionHeight - smartOffset));

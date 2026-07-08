@@ -160,7 +160,7 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 
 const SqlPreviewPanel = defineAsyncComponent(() => import("@/components/editor/SqlPreviewPanel.vue"));
 const FORMATTED_JSON_EDIT_WARNING_COUNT_STORAGE_KEY = "dbx-cell-detail-formatted-json-edit-warning-count";
-const FORMATTED_JSON_EDIT_WARNING_MAX_COUNT = 10;
+const FORMATTED_JSON_EDIT_WARNING_MAX_COUNT = 5;
 
 const { t } = useI18n();
 const slots = useSlots();
@@ -4987,7 +4987,7 @@ function warnFormattedJsonEditIfNeeded(detail: DataGridCellDetail, force = false
   if (!force && (!sideDetailJsonView.value || !detail.formattedJson)) return;
   const count = Number(safeLocalStorageGet(FORMATTED_JSON_EDIT_WARNING_COUNT_STORAGE_KEY)) || 0;
   if (count >= FORMATTED_JSON_EDIT_WARNING_MAX_COUNT) return;
-  toast(t("grid.formattedJsonEditWarning"), 10000);
+  toast(t("grid.formattedJsonEditWarning"), 6000);
   safeLocalStorageSet(FORMATTED_JSON_EDIT_WARNING_COUNT_STORAGE_KEY, String(count + 1));
 }
 

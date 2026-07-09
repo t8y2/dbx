@@ -104,6 +104,16 @@ final class ZooKeeperAgentTest {
     }
 
     @Test
+    void statLookupConcurrencyUsesConservativeDefaultsAndOverrides() {
+        Assertions.assertEquals(16, ZooKeeperAgent.configuredStatLookupConcurrency(null, null));
+        Assertions.assertEquals(20, ZooKeeperAgent.configuredStatLookupConcurrency("20", "12"));
+        Assertions.assertEquals(12, ZooKeeperAgent.configuredStatLookupConcurrency(null, "12"));
+        Assertions.assertEquals(1, ZooKeeperAgent.configuredStatLookupConcurrency("0", null));
+        Assertions.assertEquals(64, ZooKeeperAgent.configuredStatLookupConcurrency("128", null));
+        Assertions.assertEquals(16, ZooKeeperAgent.configuredStatLookupConcurrency("not-a-number", null));
+    }
+
+    @Test
     void connectAndTestConnectionWorkAgainstTestingServer() throws Exception {
         try (TestingServer server = new TestingServer()) {
             JsonObject connect = result(request(

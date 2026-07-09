@@ -21,7 +21,9 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public final class ZooKeeperAgent {
     private static final Gson GSON = new GsonBuilder().serializeNulls().create();
@@ -30,7 +32,16 @@ public final class ZooKeeperAgent {
     private static final int DEFAULT_CONNECTION_TIMEOUT_MS = 15000;
     private static final int DEFAULT_BASE_SLEEP_TIME_MS = 1000;
     private static final int DEFAULT_MAX_RETRIES = 3;
-    private static final int STAT_LOOKUP_CONCURRENCY = 32;
+    private static final String STAT_LOOKUP_CONCURRENCY_PROPERTY = "dbx.zookeeper.statLookupConcurrency";
+    private static final String STAT_LOOKUP_CONCURRENCY_ENV = "DBX_ZOOKEEPER_STAT_LOOKUP_CONCURRENCY";
+    private static final int DEFAULT_STAT_LOOKUP_CONCURRENCY = 16;
+    private static final int MIN_STAT_LOOKUP_CONCURRENCY = 1;
+    private static final int MAX_STAT_LOOKUP_CONCURRENCY = 64;
+    private static final int STAT_LOOKUP_CONCURRENCY = configuredStatLookupConcurrency();
+    private static final ExecutorService STAT_LOOKUP_EXECUTOR = Executors.newFixedThreadPool(
+        STAT_LOOKUP_CONCURRENCY,
+        daemonThreadFactory("dbx-zookeeper-stat-lookup-")
+    );
     private static final List<String> CAPABILITIES = Collections.unmodifiableList(Arrays.asList(
         AgentProtocol.CAPABILITY_CONNECT,
         AgentProtocol.CAPABILITY_TEST_CONNECTION,
@@ -274,6 +285,7 @@ public final class ZooKeeperAgent {
             }
             case AgentProtocol.METHOD_SHUTDOWN -> {
                 closeClient();
+                STAT_LOOKUP_EXECUTOR.shutdownNow();
                 System.exit(0);
                 yield Collections.singletonMap("ok", true);
             }
@@ -450,12 +462,10 @@ public final class ZooKeeperAgent {
             return Collections.emptyList();
         }
 
-        int concurrency = Math.min(STAT_LOOKUP_CONCURRENCY, paths.size());
-        ExecutorService executor = Executors.newFixedThreadPool(concurrency);
         try {
             List<Future<Map<String, Object>>> futures = new ArrayList<>();
             for (String path : paths) {
-                futures.add(executor.submit(() -> rowWithMetadata(active, path)));
+                futures.add(STAT_LOOKUP_EXECUTOR.submit(() -> rowWithMetadata(active, path)));
             }
 
             List<Map<String, Object>> rows = new ArrayList<>();
@@ -478,8 +488,6 @@ public final class ZooKeeperAgent {
                 throw error;
             }
             throw new RuntimeException(cause);
-        } finally {
-            executor.shutdownNow();
         }
     }
 
@@ -572,6 +580,35 @@ public final class ZooKeeperAgent {
     private static boolean boolOrDefault(JsonObject object, String key, boolean fallback) {
         JsonElement element = object.get(key);
         return element == null || element.isJsonNull() ? fallback : element.getAsBoolean();
+    }
+
+    static int configuredStatLookupConcurrency(String propertyValue, String envValue) {
+        String configured = firstNonBlank(propertyValue, envValue);
+        if (configured == null) {
+            return DEFAULT_STAT_LOOKUP_CONCURRENCY;
+        }
+        try {
+            int parsed = Integer.parseInt(configured.trim());
+            return Math.max(MIN_STAT_LOOKUP_CONCURRENCY, Math.min(MAX_STAT_LOOKUP_CONCURRENCY, parsed));
+        } catch (NumberFormatException e) {
+            return DEFAULT_STAT_LOOKUP_CONCURRENCY;
+        }
+    }
+
+    private static int configuredStatLookupConcurrency() {
+        return configuredStatLookupConcurrency(
+            System.getProperty(STAT_LOOKUP_CONCURRENCY_PROPERTY),
+            System.getenv(STAT_LOOKUP_CONCURRENCY_ENV)
+        );
+    }
+
+    private static ThreadFactory daemonThreadFactory(String prefix) {
+        AtomicInteger sequence = new AtomicInteger(1);
+        return runnable -> {
+            Thread thread = new Thread(runnable, prefix + sequence.getAndIncrement());
+            thread.setDaemon(true);
+            return thread;
+        };
     }
 
     private static String firstNonBlank(String... values) {

@@ -3,7 +3,7 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,8 @@ pub const AGENT_PROTOCOL_VERSION: u32 = 1;
 const RPC_TIMEOUT_SECS: u64 = 30;
 const STARTUP_TIMEOUT_SECS: u64 = 15;
 const STDERR_TAIL_LINES: usize = 20;
-const AGENT_EXIT_DIAGNOSTIC_WAIT_MS: u64 = 200;
+const AGENT_EXIT_DIAGNOSTIC_WAIT_MS: u64 = 1_000;
+const AGENT_EXIT_DIAGNOSTIC_POLL_MS: u64 = 10;
 const AGENT_JAVA_OPTS_ENV: &str = "DBX_AGENT_JAVA_OPTS";
 const AGENT_JAVA_TOO_OLD_MESSAGE: &str =
     "Agent requires Java 21, but DBX started it with an older Java runtime. Use DBX managed JRE 21 or select a Java 21 executable in Driver Manager.";
@@ -1368,12 +1369,16 @@ fn child_exit_status(child: &mut Child) -> Option<String> {
 }
 
 fn child_exit_status_after_short_wait(child: &mut Child) -> Option<String> {
-    let status = child_exit_status(child);
-    if status.is_some() {
-        return status;
+    let deadline = Instant::now() + Duration::from_millis(AGENT_EXIT_DIAGNOSTIC_WAIT_MS);
+    loop {
+        if let Some(status) = child_exit_status(child) {
+            return Some(status);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(AGENT_EXIT_DIAGNOSTIC_POLL_MS));
     }
-    std::thread::sleep(Duration::from_millis(AGENT_EXIT_DIAGNOSTIC_WAIT_MS));
-    child_exit_status(child)
 }
 
 fn stderr_tail_snapshot(stderr_tail: &Arc<Mutex<StderrTail>>) -> StderrTail {

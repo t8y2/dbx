@@ -308,7 +308,7 @@ export default withEnglishFallback({
     sqlServerLegacyCompatibilityMode: "舊版相容模式",
     sqlServerLegacyCompatibilityModeEnable: "使用 SQL Server 舊版相容連線",
     sqlServerLegacyCompatibilityModeEnabled: "已啟用 SQL Server 舊版相容模式。",
-    sqlServerLegacyCompatibilityModeHint: "適用於非加密、僅登入階段加密或 TLS 1.0 舊版相容場景。若相容元件未安裝，DBX 會先安裝再啟用此模式\n請僅在可信內網、VPN 或 SSH 隧道中使用",
+    sqlServerLegacyCompatibilityModeHint: "適用於非加密、僅登入階段加密或 TLS 1.0 舊版相容場景。若相容元件未安裝，DBX 會先安裝再啟用此模式\n若回退到相容元件，部分 SQL Server 原生能力可能無法使用\n請僅在可信內網、VPN 或 SSH 隧道中使用",
     sqlServerLegacyCompatibilityComponent: "SQL Server 舊版相容元件",
     sqlServerLegacyCompatibilityComponentInstalling: "正在安裝 SQL Server 舊版相容元件...",
     saveAndConnect: "儲存並連線",

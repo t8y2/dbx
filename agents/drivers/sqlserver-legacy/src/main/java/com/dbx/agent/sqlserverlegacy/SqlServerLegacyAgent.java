@@ -93,15 +93,37 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
             return sanitizeSqlServerUrl(connectionString.trim());
         }
 
-        int port = params.getPort() > 0 ? params.getPort() : PROFILE.getDefaultPort();
+        String host = normalizedSqlServerHost(params.getHost());
         StringBuilder url = new StringBuilder("jdbc:sqlserver://")
-            .append(params.getHost())
-            .append(":")
-            .append(port);
+            .append(host);
+        if (!usesNamedInstance(host)) {
+            int port = params.getPort() > 0 ? params.getPort() : PROFILE.getDefaultPort();
+            url.append(":").append(port);
+        }
         if (params.getDatabase() != null && !params.getDatabase().trim().isEmpty()) {
             url.append(";databaseName=").append(params.getDatabase().trim());
         }
         return trimSqlServerUrl(url.toString());
+    }
+
+    private static String normalizedSqlServerHost(String value) {
+        String host = value == null ? "" : value.trim();
+        int separator = host.indexOf('\\');
+        if (separator <= 0 || separator >= host.length() - 1) {
+            return host;
+        }
+
+        String server = host.substring(0, separator).trim();
+        String instance = host.substring(separator + 1).trim();
+        if (server.isEmpty() || instance.isEmpty()) {
+            return host;
+        }
+        return server + "\\" + instance;
+    }
+
+    private static boolean usesNamedInstance(String host) {
+        int separator = host.indexOf('\\');
+        return separator > 0 && separator < host.length() - 1;
     }
 
     private static String sanitizeSqlServerUrl(String value) {

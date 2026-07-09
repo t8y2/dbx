@@ -309,7 +309,7 @@ export default withEnglishFallback({
     sqlServerLegacyCompatibilityModeEnable: "Usar conexão de compatibilidade legada do SQL Server",
     sqlServerLegacyCompatibilityModeEnabled: "O modo de compatibilidade legado do SQL Server está ativado.",
     sqlServerLegacyCompatibilityModeHint:
-      "Aplica-se a cenários sem criptografia, com criptografia apenas no login ou compatibilidade legada TLS 1.0. Se o componente de compatibilidade não estiver instalado, o DBX o instala antes de ativar este modo.\nUse apenas em redes confiáveis, VPNs ou túneis SSH",
+      "Aplica-se a cenários sem criptografia, com criptografia apenas no login ou compatibilidade legada TLS 1.0. Se o componente de compatibilidade não estiver instalado, o DBX o instala antes de ativar este modo.\nQuando o fallback usa o componente de compatibilidade, alguns recursos nativos do SQL Server podem ficar indisponíveis.\nUse apenas em redes confiáveis, VPNs ou túneis SSH",
     sqlServerLegacyCompatibilityComponent: "Componente de compatibilidade legada do SQL Server",
     sqlServerLegacyCompatibilityComponentInstalling: "Instalando componente de compatibilidade legada do SQL Server...",
     saveAndConnect: "Salvar e Conectar",

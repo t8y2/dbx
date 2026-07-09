@@ -326,7 +326,8 @@ export default {
     sqlServerLegacyCompatibilityMode: "Legacy compatibility mode",
     sqlServerLegacyCompatibilityModeEnable: "Use SQL Server legacy compatibility connection",
     sqlServerLegacyCompatibilityModeEnabled: "SQL Server legacy compatibility mode is enabled.",
-    sqlServerLegacyCompatibilityModeHint: "Applies to unencrypted, login-only encrypted, or TLS 1.0 legacy compatibility scenarios. If the compatibility component is not installed, DBX installs it before enabling this mode.\nUse it only on trusted networks, VPNs, or SSH tunnels",
+    sqlServerLegacyCompatibilityModeHint:
+      "Applies to unencrypted, login-only encrypted, or TLS 1.0 legacy compatibility scenarios. If the compatibility component is not installed, DBX installs it before enabling this mode.\nSome native SQL Server features may be unavailable when fallback uses the compatibility component.\nUse it only on trusted networks, VPNs, or SSH tunnels",
     sqlServerLegacyCompatibilityComponent: "SQL Server legacy compatibility component",
     sqlServerLegacyCompatibilityComponentInstalling: "Installing SQL Server legacy compatibility component...",
     saveAndConnect: "Save & Connect",

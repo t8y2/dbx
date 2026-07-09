@@ -328,7 +328,7 @@ export default withEnglishFallback({
     sqlServerLegacyCompatibilityMode: "旧版兼容模式",
     sqlServerLegacyCompatibilityModeEnable: "使用 SQL Server 旧版兼容连接",
     sqlServerLegacyCompatibilityModeEnabled: "已启用 SQL Server 旧版兼容模式。",
-    sqlServerLegacyCompatibilityModeHint: "适用于非加密、仅登录阶段加密或 TLS 1.0 旧版兼容场景。若兼容组件未安装，DBX 会先安装再启用该模式\n请仅在可信内网、VPN 或 SSH 隧道中使用",
+    sqlServerLegacyCompatibilityModeHint: "适用于非加密、仅登录阶段加密或 TLS 1.0 旧版兼容场景。若兼容组件未安装，DBX 会先安装再启用该模式\n若回退到兼容组件，部分 SQL Server 原生能力可能不可用\n请仅在可信内网、VPN 或 SSH 隧道中使用",
     sqlServerLegacyCompatibilityComponent: "SQL Server 旧版兼容组件",
     sqlServerLegacyCompatibilityComponentInstalling: "正在安装 SQL Server 旧版兼容组件...",
     saveAndConnect: "保存并连接",

@@ -25,6 +25,25 @@ class SqlServerLegacyAgentTest {
     }
 
     @Test
+    void legacyTlsUrlKeepsNamedInstanceWithoutPort() {
+        ConnectParams params = new ConnectParams(
+            "db.example.com\\SQLEXPRESS",
+            1433,
+            "appdb",
+            "sa",
+            "secret",
+            "applicationName=dbx",
+            "",
+            false
+        );
+
+        Assertions.assertEquals(
+            "jdbc:sqlserver://db.example.com\\SQLEXPRESS;databaseName=appdb;applicationName=dbx;encrypt=true;trustServerCertificate=true;sslProtocol=TLSv1",
+            SqlServerLegacyAgent.legacyTlsUrl(params)
+        );
+    }
+
+    @Test
     void legacyTlsUrlNormalizesExplicitConnectionString() {
         ConnectParams params = new ConnectParams(
             "ignored",

@@ -308,7 +308,8 @@ export default withEnglishFallback({
     sqlServerLegacyCompatibilityMode: "Modo de compatibilidad heredado",
     sqlServerLegacyCompatibilityModeEnable: "Usar conexión de compatibilidad heredada de SQL Server",
     sqlServerLegacyCompatibilityModeEnabled: "El modo de compatibilidad heredado de SQL Server está activado.",
-    sqlServerLegacyCompatibilityModeHint: "Aplica a escenarios sin cifrado, con cifrado solo en el login o con compatibilidad heredada TLS 1.0. Si el componente de compatibilidad no está instalado, DBX lo instala antes de activar este modo.\nÚsalo solo en redes de confianza, VPN o túneles SSH",
+    sqlServerLegacyCompatibilityModeHint:
+      "Aplica a escenarios sin cifrado, con cifrado solo en el login o con compatibilidad heredada TLS 1.0. Si el componente de compatibilidad no está instalado, DBX lo instala antes de activar este modo.\nAl usar el componente de compatibilidad como fallback, algunas funciones nativas de SQL Server pueden no estar disponibles.\nÚsalo solo en redes de confianza, VPN o túneles SSH",
     sqlServerLegacyCompatibilityComponent: "Componente de compatibilidad heredada de SQL Server",
     sqlServerLegacyCompatibilityComponentInstalling: "Instalando componente de compatibilidad heredada de SQL Server...",
     saveAndConnect: "Guardar y conectar",

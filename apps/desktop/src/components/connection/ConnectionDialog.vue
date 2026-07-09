@@ -42,7 +42,7 @@ import { appendConnectionErrorHints } from "@/lib/connection/connectionErrorHint
 import { normalizeKafkaBootstrapServers } from "@/lib/connection/kafkaBootstrapServers";
 import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } from "@/lib/connection/mqAuth";
 import { driverInstallProgressPercent, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
-import { isSqlServerLegacyCompatibilityMode, setSqlServerLegacyCompatibilityMode, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
+import { isSqlServerLegacyCompatibilityMode, requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityMode, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
 import { ArrowLeft, ArrowDown, ArrowUp, CheckSquare, ChevronRight, CircleHelp, Copy, ExternalLink, FilePlus2, FolderOpen, GripVertical, Grid3X3, KeyRound, Link2, List, ListFilter, Loader2, Pencil, Pipette, Plus, Search, ShieldCheck, Square, Trash2 } from "@lucide/vue";
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleDatabaseSelectionIsStale } from "@/lib/connection/connectionVisibleDatabases";
 import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, isSystemDatabaseName, normalizeVisibleDatabaseSelection, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
@@ -1071,6 +1071,10 @@ function formatInstallSize(bytes: number): string {
 }
 
 async function ensureRequiredAgentDriverInstalled(config: ConnectionConfig): Promise<void> {
+  if (requiresSqlServerLegacyCompatibilityComponent(config)) {
+    await installSqlServerLegacyCompatibilityComponentIfNeeded();
+  }
+
   const driverKey = agentDriverInstallKey(config.db_type, config.driver_profile);
   if (!driverKey) return;
 

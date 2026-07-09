@@ -31,7 +31,7 @@ import { useTauriEvents } from "@/composables/useTauriEvents";
 import { useCloseActionPrompt, type AppCloseAction, type AppCloseRequestOptions } from "@/composables/useCloseActionPrompt";
 import { useVisibilityChange } from "@/composables/useVisibilityChange";
 import { useWebDavAutoUpload } from "@/composables/useWebDavAutoUpload";
-import { shouldDrawDesktopWindowFrame } from "@/composables/useWindowControls";
+import { macTrafficLightPositionForScale, shouldDrawDesktopWindowFrame } from "@/composables/useWindowControls";
 import "@/i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
 import * as api from "@/lib/backend/api";
@@ -117,6 +117,7 @@ const { setupFileDrop } = useFileDrop();
 
 const isDesktop = isTauriRuntime();
 const drawDesktopWindowFrame = shouldDrawDesktopWindowFrame(isMacOS(), isDesktop);
+const shouldSyncMacTrafficLights = isDesktop && isMacOS();
 const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 let updateCheckTimer: ReturnType<typeof setInterval> | undefined;
 const needsAuth = ref(!isDesktop);
@@ -375,6 +376,27 @@ async function applyUiScale(scale: number) {
   } catch (error) {
     console.warn("[DBX] Failed to apply UI scale", { scale, error });
   }
+  scheduleMacTrafficLightSync(scale);
+}
+
+async function syncMacTrafficLights(scale: number) {
+  if (!shouldSyncMacTrafficLights) return;
+  try {
+    await invoke("set_macos_traffic_light_position", macTrafficLightPositionForScale(scale));
+  } catch (error) {
+    console.warn("[DBX] Failed to sync macOS traffic light position", { scale, error });
+  }
+}
+
+function scheduleMacTrafficLightSync(scale: number) {
+  if (!shouldSyncMacTrafficLights) return;
+  void syncMacTrafficLights(scale);
+  requestAnimationFrame(() => {
+    void syncMacTrafficLights(scale);
+  });
+  window.setTimeout(() => {
+    void syncMacTrafficLights(scale);
+  }, 120);
 }
 
 function setGlobalUiScale(scale: number) {

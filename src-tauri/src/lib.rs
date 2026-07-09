@@ -773,6 +773,7 @@ pub fn run() {
             commands::app_settings::save_desktop_settings,
             commands::app_settings::complete_app_close,
             commands::app_settings::request_app_close_from_window_controls,
+            commands::window_controls::set_macos_traffic_light_position,
             commands::app_settings::set_driver_store_dir,
             commands::app_settings::set_plugin_store_dir,
             commands::app_settings::set_agent_store_dir,

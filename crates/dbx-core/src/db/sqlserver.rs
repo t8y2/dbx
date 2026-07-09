@@ -16,6 +16,8 @@ use tokio_util::sync::CancellationToken;
 
 pub type SqlServerClient = Client<Compat<TcpStream>>;
 pub const SQLSERVER_DRIVER_PANIC_ERROR_PREFIX: &str = "SQL Server driver panic:";
+pub const SQLSERVER_LEGACY_DRIVER_PROFILE: &str = "sqlserver-legacy";
+pub const SQLSERVER_LEGACY_DRIVER_LABEL: &str = "SQL Server legacy compatibility component";
 const SIMPLE_QUERY_MODULE_KEYWORDS: &[&str] = &["FUNCTION", "PROC", "PROCEDURE", "TRIGGER", "VIEW"];
 // Match JDBC/tiberius `encrypt=false`: encrypt only login, then drop back to raw TDS.
 const SQLSERVER_LEGACY_ENCRYPTION_LEVEL: tiberius::EncryptionLevel = tiberius::EncryptionLevel::Off;
@@ -53,13 +55,9 @@ pub async fn connect(
     user: &str,
     pass: &str,
     database: Option<&str>,
-    url_params: Option<&str>,
+    _url_params: Option<&str>,
     timeout: Duration,
 ) -> Result<SqlServerClient, String> {
-    if sqlserver_legacy_encryption_disabled(url_params) {
-        return try_connect_legacy_sqlserver_encryption(host, port, user, pass, database, timeout).await;
-    }
-
     match try_connect(host, port, user, pass, database, tiberius::EncryptionLevel::Required, timeout).await {
         Ok(client) => Ok(client),
         Err(encrypted_error) => try_connect_legacy_sqlserver_encryption(host, port, user, pass, database, timeout)
@@ -69,12 +67,11 @@ pub async fn connect(
                     format!(
                         "{encrypted_error}\n\nThis may be caused by an old SQL Server TLS/encryption configuration. \
                          If you are connecting to SQL Server 2008/2008 R2/2012 or another legacy instance, \
-                         try SQL Server legacy unencrypted mode. It behaves like encrypt=false and only helps \
-                         when the server allows unencrypted transport or login-only encryption. It will still fail \
-                         if the server requires encrypted transport that the embedded driver cannot negotiate. \
-                         Only use this mode on trusted networks, VPNs, \
+                         try SQL Server legacy compatibility mode. It first behaves like encrypt=false and, \
+                         when explicitly enabled, DBX can also fall back to the SQL Server legacy compatibility \
+                         driver for TLS 1.0 encrypted transport. Only use this mode on trusted networks, VPNs, \
                          or SSH tunnels.\n\n\
-                         Automatic legacy unencrypted fallback also failed: {plain_error}"
+                         Automatic native legacy fallback also failed: {plain_error}"
                     )
                 } else {
                     plain_error
@@ -102,7 +99,7 @@ async fn try_connect_legacy_sqlserver_encryption(
     Err(errors.join("\n"))
 }
 
-fn sqlserver_legacy_encryption_disabled(url_params: Option<&str>) -> bool {
+pub fn sqlserver_legacy_compatibility_enabled(url_params: Option<&str>) -> bool {
     let Some(params) = url_params.map(str::trim).filter(|params| !params.is_empty()) else {
         return false;
     };
@@ -1903,14 +1900,14 @@ mod tests {
     }
 
     #[test]
-    fn sqlserver_legacy_encryption_flag_accepts_dbx_and_jdbc_params() {
-        assert!(!super::sqlserver_legacy_encryption_disabled(None));
-        assert!(!super::sqlserver_legacy_encryption_disabled(Some("encrypt=true")));
-        assert!(super::sqlserver_legacy_encryption_disabled(Some("sqlserverEncryption=disabled")));
-        assert!(super::sqlserver_legacy_encryption_disabled(Some("applicationName=dbx;sqlserverEncryption=off")));
-        assert!(super::sqlserver_legacy_encryption_disabled(Some("?sqlserverEncryption=false&applicationName=dbx")));
-        assert!(super::sqlserver_legacy_encryption_disabled(Some("applicationName=dbx;encrypt=false")));
-        assert!(super::sqlserver_legacy_encryption_disabled(Some("?Encrypt=0&applicationName=dbx")));
+    fn sqlserver_legacy_compatibility_flag_accepts_dbx_and_jdbc_params() {
+        assert!(!super::sqlserver_legacy_compatibility_enabled(None));
+        assert!(!super::sqlserver_legacy_compatibility_enabled(Some("encrypt=true")));
+        assert!(super::sqlserver_legacy_compatibility_enabled(Some("sqlserverEncryption=disabled")));
+        assert!(super::sqlserver_legacy_compatibility_enabled(Some("applicationName=dbx;sqlserverEncryption=off")));
+        assert!(super::sqlserver_legacy_compatibility_enabled(Some("?sqlserverEncryption=false&applicationName=dbx")));
+        assert!(super::sqlserver_legacy_compatibility_enabled(Some("applicationName=dbx;encrypt=false")));
+        assert!(super::sqlserver_legacy_compatibility_enabled(Some("?Encrypt=0&applicationName=dbx")));
     }
 
     #[test]

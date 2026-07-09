@@ -747,17 +747,9 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                     .await
                     .map(|_| "Connection successful".to_string())
             }
-            DatabaseType::SqlServer => db::sqlserver::connect(
-                &host,
-                port,
-                &config.username,
-                &config.password,
-                config.database.as_deref(),
-                config.url_params.as_deref(),
-                connect_timeout,
-            )
-            .await
-            .map(|_| "Connection successful".to_string()),
+            DatabaseType::SqlServer => {
+                state.test_sqlserver_connection_with_legacy_fallback(&config, &host, port, connect_timeout).await
+            }
             DatabaseType::Elasticsearch => {
                 let mut client = db::elasticsearch_driver::EsClient::from_config(
                     &url,
@@ -1047,17 +1039,7 @@ pub async fn connect_db(
             PoolKind::ClickHouse(client)
         }
         DatabaseType::SqlServer => {
-            let client = db::sqlserver::connect(
-                &host,
-                port,
-                &db_config.username,
-                &db_config.password,
-                db_config.database.as_deref(),
-                db_config.url_params.as_deref(),
-                connect_timeout,
-            )
-            .await?;
-            PoolKind::SqlServer(std::sync::Arc::new(tokio::sync::Mutex::new(client)))
+            state.connect_sqlserver_pool_with_legacy_fallback(&db_config, &host, port, connect_timeout).await?
         }
         DatabaseType::Elasticsearch => {
             let mut client = db::elasticsearch_driver::EsClient::from_config(

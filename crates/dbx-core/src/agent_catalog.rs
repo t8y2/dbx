@@ -36,7 +36,10 @@ const MONGODB_PROFILES: &[AgentDriverProfile] = &[AgentDriverProfile {
     store_visible: false,
 }];
 
-const EXTRA_DRIVER_STORE_ENTRIES: &[(&str, &str)] = &[("kafka", "Apache Kafka")];
+const EXTRA_AGENT_LABELS: &[(&str, &str)] =
+    &[("kafka", "Apache Kafka"), ("sqlserver-legacy", "SQL Server legacy compatibility component")];
+const EXTRA_DRIVER_STORE_ENTRIES: &[(&str, &str)] =
+    &[("kafka", "Apache Kafka"), ("sqlserver-legacy", "SQL Server legacy compatibility component")];
 
 const AGENT_CATALOG: &[AgentCatalogEntry] = &[
     AgentCatalogEntry {
@@ -297,6 +300,11 @@ pub fn agent_key(db_type: &DatabaseType, driver_profile: Option<&str>) -> Option
     if *db_type == DatabaseType::MessageQueue {
         return (driver_profile == Some("kafka")).then_some("kafka");
     }
+    if *db_type == DatabaseType::SqlServer {
+        return driver_profile
+            .is_some_and(|profile| profile.eq_ignore_ascii_case("sqlserver-legacy"))
+            .then_some("sqlserver-legacy");
+    }
     let entry = entry_for_db_type(db_type)?;
     if let Some(driver_profile) = driver_profile {
         if let Some(profile) = entry.profiles.iter().find(|profile| profile.profile == driver_profile) {
@@ -328,7 +336,7 @@ pub fn driver_store_entries() -> impl Iterator<Item = (&'static str, &'static st
 }
 
 pub fn label_for_key(agent_key: &str) -> Option<&'static str> {
-    if let Some((_, label)) = EXTRA_DRIVER_STORE_ENTRIES.iter().find(|(key, _)| *key == agent_key) {
+    if let Some((_, label)) = EXTRA_AGENT_LABELS.iter().find(|(key, _)| *key == agent_key) {
         return Some(label);
     }
     for entry in entries() {

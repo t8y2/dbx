@@ -336,6 +336,10 @@ export async function listInstalledAgents(): Promise<AgentDriverInfo[]> {
   return get("/api/agents/installed");
 }
 
+export async function isAgentInstalled(dbType: string): Promise<boolean> {
+  return get(`/api/agents/installed/${encodeURIComponent(dbType)}`);
+}
+
 export async function getDriverStoreUsage(): Promise<DriverStoreUsage> {
   return get("/api/agents/storage-usage");
 }

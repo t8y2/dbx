@@ -1121,6 +1121,10 @@ export async function listInstalledAgents(): Promise<AgentDriverInfo[]> {
   return invoke("list_installed_agents");
 }
 
+export async function isAgentInstalled(dbType: string): Promise<boolean> {
+  return invoke("is_agent_installed", { dbType });
+}
+
 export async function getDriverStoreUsage(): Promise<DriverStoreUsage> {
   return invoke("get_driver_store_usage");
 }

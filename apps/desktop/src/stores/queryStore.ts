@@ -40,6 +40,7 @@ import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
 import { buildTabResultSnapshot, deleteTabResultSnapshot, readTabResultSnapshot, tabResultCacheKey, writeTabResultSnapshot } from "@/lib/tabs/tabResultCache";
+import { queryResultBaseSql, queryResultExecutionSql } from "@/lib/tabs/tabPresentation";
 import { decodeQueryResultArchive, encodeQueryResultArchive, type DecodedQueryResultArchive } from "@/lib/query/queryResultArchive";
 import * as api from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -2151,6 +2152,7 @@ export const useQueryStore = defineStore("query", () => {
       mongoSafety?: MongoAggregateSafetyOptions;
       preserveResultDuringExecution?: boolean;
       preserveTotalRowCountDuringExecution?: boolean;
+      replaceActiveResultInGroup?: boolean;
       skipRedisSafetyCheck?: boolean;
       sourceTraceId?: string;
       skipEnsureConnected?: boolean;
@@ -2580,7 +2582,14 @@ export const useQueryStore = defineStore("query", () => {
       });
       const current = tabs.value.find((t) => t.id === id);
       if (current?.executionId === executionId) {
-        if (results.length > 1) {
+        const activeGroupIndex = current.activeResultIndex;
+        const activeGroupResults = current.results;
+        const shouldReplaceActiveResultInGroup = options?.replaceActiveResultInGroup === true && results.length === 1 && Array.isArray(activeGroupResults) && typeof activeGroupIndex === "number" && activeGroupIndex >= 0 && activeGroupIndex < activeGroupResults.length;
+        if (shouldReplaceActiveResultInGroup) {
+          current.results = activeGroupResults.slice();
+          current.results[activeGroupIndex] = results[0];
+          current.result = results[0];
+        } else if (results.length > 1) {
           const activeResultIndex = results.findIndex((result) => result.columns.length > 0);
           const resultIndex = activeResultIndex >= 0 ? activeResultIndex : 0;
           current.results = results;
@@ -2659,9 +2668,19 @@ export const useQueryStore = defineStore("query", () => {
       }
       const current = tabs.value.find((t) => t.id === id);
       if (current?.executionId === executionId) {
-        current.result = toErrorResult(e);
-        current.results = undefined;
-        current.activeResultIndex = undefined;
+        const errorResult = toErrorResult(e);
+        const activeGroupIndex = current.activeResultIndex;
+        const activeGroupResults = current.results;
+        const shouldReplaceActiveResultInGroup = options?.replaceActiveResultInGroup === true && Array.isArray(activeGroupResults) && typeof activeGroupIndex === "number" && activeGroupIndex >= 0 && activeGroupIndex < activeGroupResults.length;
+        if (shouldReplaceActiveResultInGroup) {
+          current.results = activeGroupResults.slice();
+          current.results[activeGroupIndex] = errorResult;
+          current.result = errorResult;
+        } else {
+          current.result = errorResult;
+          current.results = undefined;
+          current.activeResultIndex = undefined;
+        }
         current.queryAnalysis = undefined;
         current.querySourceColumns = undefined;
         current.queryEditabilityReason = undefined;
@@ -2859,6 +2878,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortColumnIndex = undefined;
     tab.resultSortDirection = undefined;
     tab.resultSortMode = undefined;
+    tab.resultSortedSql = undefined;
     touchResult(tab);
     tab.queryAnalysis = undefined;
     tab.querySourceColumns = undefined;
@@ -3123,7 +3143,7 @@ export const useQueryStore = defineStore("query", () => {
 
     if (tab.mode !== "query") return tab.result;
 
-    const sql = tab.resultSortedSql ?? tab.resultBaseSql ?? tab.lastExecutedSql ?? tab.sql;
+    const sql = queryResultExecutionSql(tab);
     if (!sql.trim()) return tab.result;
 
     const connStore = useConnectionStore();
@@ -3132,7 +3152,7 @@ export const useQueryStore = defineStore("query", () => {
     const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
     const queryTimeoutSecs = queryTimeoutSecsForConnection(conn);
     const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
-    const queryBaseSql = tab.resultBaseSql ?? sql;
+    const queryBaseSql = queryResultBaseSql(tab);
     const exportSettings = useSettingsStore().editorSettings;
     const exportRowLimit = exportSettings.exportRowLimitEnabled ? exportSettings.exportRowLimit : Number.POSITIVE_INFINITY;
     const agentExportMaxRows = exportSettings.exportRowLimitEnabled ? exportSettings.exportRowLimit : 2_147_483_647;
@@ -3202,7 +3222,7 @@ export const useQueryStore = defineStore("query", () => {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab?.result || tab.mode !== "query") return undefined;
 
-    const sql = tab.resultSortedSql ?? tab.resultBaseSql ?? tab.lastExecutedSql ?? tab.sql;
+    const sql = queryResultExecutionSql(tab);
     if (!sql.trim()) return undefined;
 
     const connStore = useConnectionStore();
@@ -3212,7 +3232,7 @@ export const useQueryStore = defineStore("query", () => {
     const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
     if (!effectiveDbType) return undefined;
     const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
-    const queryBaseSql = tab.resultBaseSql ?? sql;
+    const queryBaseSql = queryResultBaseSql(tab);
     const rowLimit = settings.exportRowLimitEnabled ? settings.exportRowLimit : null;
     const totalRows = typeof tab.resultTotalRowCount === "number" ? (rowLimit === null ? tab.resultTotalRowCount : Math.min(tab.resultTotalRowCount, rowLimit)) : null;
     const clientSessionId = tabClientSessionId(tab, "export");

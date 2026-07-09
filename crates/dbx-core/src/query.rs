@@ -852,7 +852,12 @@ fn is_os_connection_error(lower: &str) -> bool {
 }
 
 pub fn timeout_error() -> String {
-    format!("Query timed out after {} seconds", QUERY_TIMEOUT.as_secs())
+    timeout_error_for(QUERY_TIMEOUT)
+}
+
+fn timeout_error_for(timeout_duration: Duration) -> String {
+    let seconds = timeout_duration.as_secs().max(1);
+    format!("Query timed out after {seconds} seconds")
 }
 
 pub fn canceled_error() -> String {
@@ -883,14 +888,25 @@ pub async fn wait_for_query_with_timeout<F>(
 where
     F: Future<Output = Result<db::QueryResult, String>>,
 {
+    wait_for_result_with_timeout(cancel_token, timeout_duration, future).await
+}
+
+async fn wait_for_result_with_timeout<T, F>(
+    cancel_token: Option<CancellationToken>,
+    timeout_duration: Duration,
+    future: F,
+) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>>,
+{
     if let Some(token) = cancel_token {
         tokio::select! {
             biased;
             _ = token.cancelled() => Err(canceled_error()),
-            result = timeout(timeout_duration, future) => result.map_err(|_| timeout_error())?,
+            result = timeout(timeout_duration, future) => result.map_err(|_| timeout_error_for(timeout_duration))?,
         }
     } else {
-        timeout(timeout_duration, future).await.map_err(|_| timeout_error())?
+        timeout(timeout_duration, future).await.map_err(|_| timeout_error_for(timeout_duration))?
     }
 }
 
@@ -906,6 +922,29 @@ where
 {
     match timeout_duration {
         Some(d) => wait_for_query_with_timeout(cancel_token, d, future).await,
+        None => match cancel_token {
+            Some(token) => {
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => Err(canceled_error()),
+                    result = future => result,
+                }
+            }
+            None => future.await,
+        },
+    }
+}
+
+async fn wait_for_result_opt<T, F>(
+    cancel_token: Option<CancellationToken>,
+    timeout_duration: Option<Duration>,
+    future: F,
+) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>>,
+{
+    match timeout_duration {
+        Some(d) => wait_for_result_with_timeout(cancel_token, d, future).await,
         None => match cancel_token {
             Some(token) => {
                 tokio::select! {
@@ -1867,6 +1906,7 @@ async fn execute_multi_sqlserver(
     check_read_only_for_connection_multi(state, pool_key, &batches).await?;
     let mut all_results = Vec::new();
     let max_rows = options.max_rows;
+    let query_timeout = resolve_query_timeout(options.timeout_secs);
 
     for batch in &batches {
         if is_canceled(&cancel_token) {
@@ -1892,16 +1932,47 @@ async fn execute_multi_sqlserver(
         };
         drop(connections);
 
-        let mut client = match cancel_token.as_ref() {
-            Some(token) => tokio::select! {
-                biased;
-                _ = token.cancelled() => return Err(canceled_error()),
-                guard = client.lock() => guard,
+        let mut client = match (cancel_token.as_ref(), query_timeout) {
+            (Some(token), Some(timeout_duration)) => {
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => return Err(canceled_error()),
+                    result = timeout(timeout_duration, client.lock()) => match result {
+                        Ok(guard) => guard,
+                        Err(_) => {
+                            let err = timeout_error_for(timeout_duration);
+                            all_results.push(error_query_result(err));
+                            state.remove_pool_by_key(pool_key).await;
+                            break;
+                        }
+                    },
+                }
+            }
+            (None, Some(timeout_duration)) => match timeout(timeout_duration, client.lock()).await {
+                Ok(guard) => guard,
+                Err(_) => {
+                    let err = timeout_error_for(timeout_duration);
+                    all_results.push(error_query_result(err));
+                    state.remove_pool_by_key(pool_key).await;
+                    break;
+                }
             },
-            None => client.lock().await,
+            (Some(token), None) => {
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => return Err(canceled_error()),
+                    guard = client.lock() => guard,
+                }
+            }
+            (None, None) => client.lock().await,
         };
 
-        let result = db::sqlserver::execute_batch_with_max_rows(&mut client, batch, max_rows).await;
+        let result = wait_for_result_opt(
+            cancel_token.clone(),
+            query_timeout,
+            db::sqlserver::execute_batch_with_max_rows(&mut client, batch, max_rows),
+        )
+        .await;
         drop(client);
 
         match result {
@@ -2887,6 +2958,7 @@ pub async fn rollback_manual_transaction(state: &AppState, txn_session_id: &str)
 mod tests {
     use super::*;
     use crate::models::connection::{default_redis_key_separator, ConnectionConfig, DatabaseType};
+    #[cfg(feature = "duckdb-bundled")]
     use crate::storage::Storage;
 
     fn test_connection_config(db_type: DatabaseType) -> ConnectionConfig {
@@ -3025,7 +3097,7 @@ mod tests {
         })
         .await;
 
-        assert_eq!(result.unwrap_err(), timeout_error());
+        assert_eq!(result.unwrap_err(), timeout_error_for(Duration::from_millis(10)));
     }
 
     #[cfg(feature = "duckdb-bundled")]

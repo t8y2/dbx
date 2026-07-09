@@ -614,6 +614,8 @@ export function createColumnDrafts(columns: ColumnInfo[], databaseType?: Databas
       defaultValue,
       comment: column.comment ?? "",
       isPrimaryKey: column.is_primary_key,
+      characterSet: column.character_set ?? "",
+      collation: column.collation ?? "",
       extra: parseExtraToColumnExtra(column.extra, databaseType),
       original: { ...column, column_default: column.column_default === null ? null : defaultValue },
       originalPosition: index,

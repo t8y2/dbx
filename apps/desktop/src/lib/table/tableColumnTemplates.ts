@@ -75,6 +75,8 @@ function templateColumn(createId: () => string, name: string, dataType: string, 
     defaultValue,
     comment,
     isPrimaryKey: false,
+    characterSet: "",
+    collation: "",
     extra: {},
     markedForDrop: false,
   };

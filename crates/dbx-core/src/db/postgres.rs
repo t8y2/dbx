@@ -2193,6 +2193,7 @@ fn column_info_from_row(row: &Row) -> ColumnInfo {
         numeric_scale: row.try_get::<_, Option<i32>>(8).ok().flatten(),
         character_maximum_length: row.try_get::<_, Option<i32>>(9).ok().flatten(),
         enum_values: parse_enum_values_from_row(row, 10),
+        ..Default::default()
     }
 }
 

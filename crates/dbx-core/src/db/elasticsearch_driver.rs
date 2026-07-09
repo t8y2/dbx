@@ -334,6 +334,7 @@ fn push_mapping_column(
         numeric_scale: None,
         character_maximum_length: None,
         enum_values: None,
+        ..Default::default()
     });
 }
 

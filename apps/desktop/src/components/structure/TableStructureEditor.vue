@@ -52,6 +52,7 @@ import {
   applyManticoreDdlColumnExtras,
   canEditManticoreColumnProperties,
 } from "@/lib/table/tableStructureEditorState";
+import { CREATE_DATABASE_CHARSET_OPTIONS, createDatabaseCollationOptionsForCharset } from "@/lib/database/createDatabaseCharsetOptions";
 import * as api from "@/lib/backend/api";
 
 const { t } = useI18n();
@@ -168,6 +169,8 @@ function columnChanged(column: EditableStructureColumn, index: number): boolean 
     !sameText(column.defaultValue, original.column_default) ||
     !sameText(column.comment, original.comment) ||
     column.isPrimaryKey !== original.is_primary_key ||
+    !sameText(column.characterSet, original.character_set) ||
+    !sameText(column.collation, original.collation) ||
     JSON.stringify(column.extra) !== JSON.stringify(parseExtraToColumnExtra(original.extra, databaseType.value))
   );
 }
@@ -226,7 +229,7 @@ const structureDensityValues: StructureEditorDensity[] = ["compact", "standard",
 const STRUCTURE_COLUMNS_WIDTHS_STORAGE_KEY = "dbx-structure-editor-column-widths";
 const STRUCTURE_INDEX_COLUMNS_WIDTHS_STORAGE_KEY = "dbx-structure-editor-index-column-widths";
 const STRUCTURE_SQL_PREVIEW_COLLAPSED_STORAGE_KEY = "dbx-structure-editor-sql-preview-collapsed";
-const STRUCTURE_COLUMN_WIDTH_COUNT = 10;
+const STRUCTURE_COLUMN_WIDTH_COUNT = 11;
 const STRUCTURE_INDEX_COLUMN_WIDTH_COUNT = 8;
 const PERSISTED_STRUCTURE_INDEX_COLUMN_WIDTHS = new Set([0, 1, 6]);
 const structureDensityMetrics: Record<
@@ -250,7 +253,7 @@ const structureDensityMetrics: Record<
   }
 > = {
   compact: {
-    columns: [28, 168, 136, 82, 60, 52, 108, 220, 144, 108],
+    columns: [28, 168, 136, 82, 60, 52, 108, 220, 100, 144, 108],
     indexes: [120, 180, 60, 88, 124, 144, 120, 70],
     minColumnWidth: 24,
     minIndexColumnWidth: 48,
@@ -267,7 +270,7 @@ const structureDensityMetrics: Record<
     lineHeight: 1.35,
   },
   standard: {
-    columns: [32, 200, 160, 104, 72, 64, 128, 260, 160, 136],
+    columns: [32, 200, 160, 104, 72, 64, 128, 260, 120, 160, 136],
     indexes: [148, 224, 72, 108, 148, 180, 148, 84],
     minColumnWidth: 28,
     minIndexColumnWidth: 60,
@@ -284,7 +287,7 @@ const structureDensityMetrics: Record<
     lineHeight: 1.4,
   },
   comfortable: {
-    columns: [36, 232, 188, 116, 84, 76, 152, 300, 188, 148],
+    columns: [36, 232, 188, 116, 84, 76, 152, 300, 140, 188, 148],
     indexes: [176, 260, 84, 124, 176, 216, 176, 104],
     minColumnWidth: 32,
     minIndexColumnWidth: 64,
@@ -645,7 +648,32 @@ const showExtendedProperties = computed(() => {
   const dt = databaseType.value;
   return dt === "mysql" || dt === "manticoresearch" || isPostgresIdentityType(dt) || dt === "sqlserver";
 });
-const extendedPropertiesColumnIndex = 8;
+const showCharacterSet = computed(() => structureDialect.value === "mysql");
+
+const mysqlCharsetOptions = [...CREATE_DATABASE_CHARSET_OPTIONS] as string[];
+
+function collationOptionsForCharset(charset: string): string[] {
+  return createDatabaseCollationOptionsForCharset(charset);
+}
+
+function onCharsetChange(column: EditableStructureColumn, charset: string) {
+  column.characterSet = charset;
+  // Auto-select the default collation for the new charset if no collation is set or current collation doesn't match
+  if (!column.collation || !collationOptionsForCharset(charset).includes(column.collation)) {
+    const options = collationOptionsForCharset(charset);
+    column.collation = options[0] ?? "";
+  }
+}
+
+function columnCharset(column: EditableStructureColumn): string {
+  return column.characterSet ?? "";
+}
+
+function columnCollation(column: EditableStructureColumn): string {
+  return column.collation ?? "";
+}
+
+const extendedPropertiesColumnIndex = 9;
 const actionButtonGap = 2;
 const columnActionButtonCount = computed(() => (canShowColumnDragControls.value ? 2 : 1));
 const columnActionsWidth = computed(() => {
@@ -671,10 +699,11 @@ const colLabels = computed(() => {
   if (columnEditorControls.value.primaryKey) labels.push({ key: "primaryKey", label: t("structureEditor.primaryKey"), widthIndex: 5 });
   if (columnEditorControls.value.defaultValue) labels.push({ key: "defaultValue", label: t("structureEditor.defaultValue"), widthIndex: 6 });
   if (columnEditorControls.value.comment) labels.push({ key: "comment", label: t("structureEditor.comment"), widthIndex: 7 });
+  if (showCharacterSet.value) labels.push({ key: "characterSet", label: t("structureEditor.characterSet"), widthIndex: 8 });
   if (showExtendedProperties.value) {
     labels.push({ key: "extendedProperties", label: t("structureEditor.extendedProperties"), widthIndex: extendedPropertiesColumnIndex });
   }
-  labels.push({ key: "actions", label: t("structureEditor.actions"), widthIndex: 9 });
+  labels.push({ key: "actions", label: t("structureEditor.actions"), widthIndex: 10 });
   return labels;
 });
 const indexColLabels = computed(() => [t("structureEditor.indexName"), t("structureEditor.indexColumns"), t("structureEditor.unique"), t("structureEditor.indexType"), t("structureEditor.includedColumns"), t("structureEditor.filter"), t("structureEditor.comment"), t("structureEditor.actions")]);
@@ -1127,6 +1156,8 @@ async function addColumn() {
     defaultValue: "",
     comment: "",
     isPrimaryKey: false,
+    characterSet: "",
+    collation: "",
     extra: {},
     markedForDrop: false,
   };
@@ -2309,6 +2340,31 @@ watch(activeTab, (tab) => {
                           />
                         </PopoverContent>
                       </Popover>
+                    </div>
+                  </td>
+                  <td v-if="showCharacterSet" :class="structureCellClass">
+                    <div class="flex min-w-0 items-center gap-0.5">
+                      <SearchableSelect
+                        :model-value="columnCharset(column)"
+                        :options="mysqlCharsetOptions"
+                        :placeholder="t('structureEditor.charsetPlaceholder')"
+                        :search-placeholder="t('structureEditor.charsetPlaceholder')"
+                        :empty-text="t('structureEditor.noMatchingType')"
+                        :allow-custom="true"
+                        :trigger-class="[structureMonoControlClass, 'w-20']"
+                        @update:model-value="(v: string) => onCharsetChange(column, v)"
+                      />
+                      <span class="text-muted-foreground shrink-0 mx-0.5">/</span>
+                      <SearchableSelect
+                        :model-value="columnCollation(column)"
+                        :options="collationOptionsForCharset(columnCharset(column))"
+                        :placeholder="t('structureEditor.collationPlaceholder')"
+                        :search-placeholder="t('structureEditor.collationPlaceholder')"
+                        :empty-text="t('structureEditor.noMatchingType')"
+                        :allow-custom="true"
+                        :trigger-class="[structureMonoControlClass, 'w-28']"
+                        @update:model-value="(v: string) => (column.collation = v)"
+                      />
                     </div>
                   </td>
                   <td v-if="showExtendedProperties" :class="structureCellClass">

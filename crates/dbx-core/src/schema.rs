@@ -237,6 +237,7 @@ pub fn duckdb_query_columns_in_database_with_attached(
                 numeric_scale: None,
                 character_maximum_length: None,
                 enum_values: None,
+                ..Default::default()
             })
         })
         .map_err(|e| e.to_string())?;
@@ -1239,6 +1240,7 @@ fn oracle_columns_from_query_result(result: db::QueryResult) -> Vec<db::ColumnIn
                 numeric_scale: scale,
                 character_maximum_length: length,
                 enum_values: None,
+                ..Default::default()
             })
         })
         .collect()
@@ -2173,6 +2175,7 @@ fn presto_like_columns_from_query_result(result: &db::QueryResult) -> Vec<db::Co
                 numeric_scale: presto_like_numeric_scale(&data_type),
                 character_maximum_length: presto_like_character_maximum_length(&data_type),
                 enum_values: None,
+                ..Default::default()
             })
         })
         .collect()
@@ -2274,6 +2277,7 @@ mod tests {
             numeric_scale: None,
             character_maximum_length: None,
             enum_values: None,
+            ..Default::default()
         }
     }
 
@@ -5497,6 +5501,7 @@ mod object_source_tests {
             numeric_scale: None,
             character_maximum_length: None,
             enum_values: None,
+            ..Default::default()
         };
         let mut ignored = column.clone();
         ignored.name = "EMPTY_COMMENT".to_string();
@@ -5530,6 +5535,7 @@ mod object_source_tests {
             numeric_scale: None,
             character_maximum_length: None,
             enum_values: None,
+            ..Default::default()
         };
 
         let ddl = append_oracle_comments_to_ddl(
@@ -5564,6 +5570,7 @@ mod ddl_tests {
             numeric_scale: None,
             character_maximum_length: None,
             enum_values: None,
+            ..Default::default()
         }
     }
 

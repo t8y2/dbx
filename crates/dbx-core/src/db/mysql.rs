@@ -2147,6 +2147,7 @@ fn columns_sql(database: &str, table: &str) -> String {
     format!(
         "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.COLUMN_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, c.EXTRA, \
          c.COLUMN_COMMENT, c.COLUMN_KEY, c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.CHARACTER_MAXIMUM_LENGTH, \
+         c.CHARACTER_SET_NAME, c.COLLATION_NAME \
          FROM information_schema.COLUMNS c \
          WHERE c.TABLE_SCHEMA = {} AND c.TABLE_NAME = {} \
          ORDER BY c.ORDINAL_POSITION",
@@ -2323,6 +2324,8 @@ pub async fn get_columns(pool: &MySqlPool, database: &str, table: &str) -> Resul
                 numeric_scale: get_opt_i32(row, "NUMERIC_SCALE"),
                 character_maximum_length: get_opt_i32(row, "CHARACTER_MAXIMUM_LENGTH"),
                 enum_values,
+                character_set: get_opt_str(row, "CHARACTER_SET_NAME").filter(|s| !s.is_empty()),
+                collation: get_opt_str(row, "COLLATION_NAME").filter(|s| !s.is_empty()),
             })
         })
         .collect();
@@ -2356,6 +2359,7 @@ pub async fn get_columns_show(pool: &MySqlPool, database: &str, table: &str) -> 
                 return None;
             }
             let key = get_str_by_name(row, "Key");
+            let collation = get_opt_str(row, "Collation").filter(|s| !s.is_empty());
             Some(ColumnInfo {
                 name,
                 data_type: get_str_by_name(row, "Type"),
@@ -2370,6 +2374,11 @@ pub async fn get_columns_show(pool: &MySqlPool, database: &str, table: &str) -> 
                 numeric_scale: None,
                 character_maximum_length: None,
                 enum_values: None,
+                character_set: collation
+                    .as_deref()
+                    .and_then(|c| c.split_once('_').map(|(charset, _)| charset.to_string()))
+                    .filter(|s| !s.is_empty()),
+                collation,
             })
         })
         .collect())
@@ -3311,6 +3320,7 @@ pub async fn get_columns_show_from(
                 return None;
             }
             let key = get_str_by_name(row, "Key");
+            let collation = get_opt_str(row, "Collation").filter(|s| !s.is_empty());
             Some(ColumnInfo {
                 name,
                 data_type: get_str_by_name(row, "Type"),
@@ -3325,6 +3335,11 @@ pub async fn get_columns_show_from(
                 numeric_scale: None,
                 character_maximum_length: None,
                 enum_values: None,
+                character_set: collation
+                    .as_deref()
+                    .and_then(|c| c.split_once('_').map(|(charset, _)| charset.to_string()))
+                    .filter(|s| !s.is_empty()),
+                collation,
             })
         })
         .collect())

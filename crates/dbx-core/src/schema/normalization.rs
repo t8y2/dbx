@@ -203,6 +203,7 @@ mod tests {
             numeric_precision: None,
             numeric_scale: None,
             character_maximum_length: None,
+        ..Default::default()
         }
     }
 

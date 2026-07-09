@@ -119,6 +119,8 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
             || column.is_nullable != original.is_nullable
             || normalize_default(Some(&column.default_value)) != original_default(column)
             || clean(&column.comment) != original_comment(column)
+            || column.character_set.trim() != original.character_set.as_deref().unwrap_or("")
+            || column.collation.trim() != original.collation.as_deref().unwrap_or("")
             || has_column_extra_change(column);
         if has_position_change && !capabilities.reorder_column {
             warnings.push(format!("Reordering columns is not supported for {database_label} from this editor."));

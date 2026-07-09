@@ -25,6 +25,8 @@ export interface EditableStructureColumn {
   comment: string;
   isPrimaryKey: boolean;
   extra: ColumnExtra;
+  characterSet?: string;
+  collation?: string;
   original?: ColumnInfo;
   originalPosition?: number;
   markedForDrop: boolean;

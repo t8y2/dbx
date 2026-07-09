@@ -14,6 +14,8 @@ fn column(name: &str) -> EditableStructureColumn {
         original: None,
         original_position: None,
         marked_for_drop: false,
+        character_set: String::new(),
+        collation: String::new(),
     }
 }
 
@@ -75,6 +77,7 @@ fn builds_mysql_column_and_index_changes() {
         is_primary_key: false,
         extra: None,
         comment: Some(String::new()),
+        ..Default::default()
     });
     let mut email = column("email");
     email.is_nullable = false;
@@ -151,6 +154,7 @@ fn doris_table_editor_renames_column_without_mysql_change_syntax() {
         is_primary_key: false,
         extra: None,
         comment: Some("Group DTP".to_string()),
+        ..Default::default()
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -182,6 +186,7 @@ fn doris_single_column_alter_renames_then_modifies_column_definition() {
         is_primary_key: false,
         extra: None,
         comment: Some("Division DTP".to_string()),
+        ..Default::default()
     });
 
     let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
@@ -283,6 +288,7 @@ fn builds_informix_column_and_index_changes() {
         is_primary_key: false,
         extra: None,
         comment: Some(String::new()),
+        ..Default::default()
     });
     let mut email = column("email");
     email.is_nullable = false;
@@ -296,6 +302,7 @@ fn builds_informix_column_and_index_changes() {
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
     let mut old_index = index("idx_old", &["name"]);
     old_index.marked_for_drop = true;
@@ -350,6 +357,7 @@ fn oracle_does_not_generate_drop_sql_for_all_columns() {
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
     let mut name = column("name");
     name.marked_for_drop = true;
@@ -361,6 +369,7 @@ fn oracle_does_not_generate_drop_sql_for_all_columns() {
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -397,6 +406,7 @@ fn oracle_timestamp_default_precedes_nullability_in_modify_sql() {
         is_primary_key: false,
         extra: None,
         comment: Some(String::new()),
+        ..Default::default()
     });
 
     let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
@@ -425,6 +435,7 @@ fn oracle_timestamp_precision_change_does_not_repeat_unchanged_nullability() {
         is_primary_key: false,
         extra: None,
         comment: Some(String::new()),
+        ..Default::default()
     });
 
     let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
@@ -535,6 +546,7 @@ fn manticoresearch_builds_add_and_drop_column_sql() {
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let mut name = column("name");
@@ -580,6 +592,7 @@ fn gbase8a_uses_limited_mysql_ddl() {
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
     let new_col = column("nickname");
     let mut old_col = column("old_col");
@@ -592,6 +605,7 @@ fn gbase8a_uses_limited_mysql_ddl() {
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
     let mut index = index("idx_users_email", &["display_email"]);
     index.original = Some(IndexInfo {
@@ -643,6 +657,7 @@ fn gbase8a_allows_mysql_style_column_reorder() {
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let mut name = column("name");
@@ -655,6 +670,7 @@ fn gbase8a_allows_mysql_style_column_reorder() {
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let mut email = column("email");
@@ -667,6 +683,7 @@ fn gbase8a_allows_mysql_style_column_reorder() {
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -698,6 +715,7 @@ fn manticoresearch_does_not_drop_id_column() {
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -734,6 +752,7 @@ fn manticoresearch_warns_when_existing_column_properties_change() {
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let mut resource = column("resource");
@@ -747,6 +766,7 @@ fn manticoresearch_warns_when_existing_column_properties_change() {
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let mut old_resource = column("old_resource");
@@ -760,6 +780,7 @@ fn manticoresearch_warns_when_existing_column_properties_change() {
         is_primary_key: false,
         extra: Some("secondary_index='1'".to_string()),
         comment: None,
+        ..Default::default()
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -997,6 +1018,7 @@ fn warns_for_sqlite_unsafe_column_changes() {
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -1084,6 +1106,7 @@ fn builds_mysql_column_reorder_statements() {
         is_primary_key: true,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let mut email = column("email");
@@ -1096,6 +1119,7 @@ fn builds_mysql_column_reorder_statements() {
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let mut name = column("display_name");
@@ -1110,6 +1134,7 @@ fn builds_mysql_column_reorder_statements() {
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -1143,6 +1168,7 @@ fn mysql_add_column_before_existing_column_does_not_reorder_shifted_column() {
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let new_column = column("sss");
@@ -1161,6 +1187,7 @@ fn mysql_add_column_before_existing_column_does_not_reorder_shifted_column() {
         is_primary_key: false,
         extra: None,
         comment: Some("tenant id".to_string()),
+        ..Default::default()
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -1194,6 +1221,7 @@ fn mysql_existing_column_reorder_does_not_reorder_columns_shifted_by_prior_move(
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let mut name = column("name");
@@ -1206,6 +1234,7 @@ fn mysql_existing_column_reorder_does_not_reorder_columns_shifted_by_prior_move(
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let mut email = column("email");
@@ -1218,6 +1247,7 @@ fn mysql_existing_column_reorder_does_not_reorder_columns_shifted_by_prior_move(
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -1250,6 +1280,7 @@ fn mysql_moving_first_column_to_end_uses_single_reorder_statement() {
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let mut col_1 = column("col_1");
@@ -1262,6 +1293,7 @@ fn mysql_moving_first_column_to_end_uses_single_reorder_statement() {
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let mut col_2 = column("col_2");
@@ -1274,6 +1306,7 @@ fn mysql_moving_first_column_to_end_uses_single_reorder_statement() {
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let mut col_3 = column("col_3");
@@ -1286,6 +1319,7 @@ fn mysql_moving_first_column_to_end_uses_single_reorder_statement() {
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -1411,6 +1445,7 @@ fn sqlserver_default_changes_drop_old_constraints_with_isolated_batches() {
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let mut active = column("active");
@@ -1425,6 +1460,7 @@ fn sqlserver_default_changes_drop_old_constraints_with_isolated_batches() {
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -1610,6 +1646,7 @@ fn sqlserver_unchanged_identity_extra_does_not_mark_existing_column_changed() {
         is_primary_key: true,
         extra: Some("IDENTITY(1,1)".to_string()),
         comment: None,
+        ..Default::default()
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -1647,6 +1684,7 @@ fn sqlserver_existing_column_identity_change_warns_without_unchanged_foreign_key
         is_primary_key: true,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let mut user_fk = foreign_key("fk_orders_user_id", "user_id", "users", "id");
@@ -1730,6 +1768,7 @@ fn builds_clickhouse_nullable_comment_and_reorder_statements() {
         is_primary_key: false,
         extra: None,
         comment: Some("old status".to_string()),
+        ..Default::default()
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -1773,6 +1812,7 @@ fn builds_h2_schema_qualified_existing_column_statements() {
         is_primary_key: false,
         extra: None,
         comment: Some(String::new()),
+        ..Default::default()
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -1815,6 +1855,7 @@ fn builds_postgres_alter_table_add_primary_key() {
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -1847,6 +1888,7 @@ fn builds_postgres_alter_table_drop_primary_key() {
         is_primary_key: true,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -1880,6 +1922,7 @@ fn builds_mysql_alter_table_change_primary_key() {
         is_primary_key: true,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let mut new_pk = column("uuid");
@@ -1895,6 +1938,7 @@ fn builds_mysql_alter_table_change_primary_key() {
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -1930,6 +1974,7 @@ fn builds_no_statements_when_primary_key_unchanged() {
         is_primary_key: true,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -1962,6 +2007,7 @@ fn warns_sqlite_cannot_alter_primary_key() {
         is_primary_key: false,
         extra: None,
         comment: None,
+        ..Default::default()
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -2230,6 +2276,7 @@ fn postgres_timestamp_literal_is_quoted() {
         is_primary_key: false,
         extra: None,
         comment: Some(String::new()),
+        ..Default::default()
     });
 
     let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
@@ -2255,6 +2302,7 @@ fn mysql_single_column_alter_quotes_datetime_literal() {
         is_primary_key: false,
         extra: None,
         comment: Some(String::new()),
+        ..Default::default()
     });
 
     let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
@@ -2498,6 +2546,7 @@ fn postgres_varchar_default_is_quoted() {
         is_primary_key: false,
         extra: None,
         comment: Some(String::new()),
+        ..Default::default()
     });
 
     let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
@@ -2523,6 +2572,7 @@ fn postgres_empty_string_default_is_not_quoted_again() {
         is_primary_key: false,
         extra: None,
         comment: Some(String::new()),
+        ..Default::default()
     });
 
     let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
@@ -2548,6 +2598,7 @@ fn postgres_string_default_cast_matches_plain_literal() {
         is_primary_key: false,
         extra: None,
         comment: Some(String::new()),
+        ..Default::default()
     });
 
     let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
@@ -2573,6 +2624,7 @@ fn postgres_integer_default_is_not_quoted() {
         is_primary_key: false,
         extra: None,
         comment: Some(String::new()),
+        ..Default::default()
     });
 
     let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {

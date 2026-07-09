@@ -187,9 +187,12 @@ fn structure_column(
             is_primary_key: false,
             extra: None,
             comment: None,
+            ..Default::default()
         }),
         original_position: None,
         marked_for_drop: false,
+        character_set: String::new(),
+        collation: String::new(),
     }
 }
 

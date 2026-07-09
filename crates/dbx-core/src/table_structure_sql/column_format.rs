@@ -10,6 +10,15 @@ pub(super) fn column_definition(dialect: StructureDialect, column: &EditableStru
         parts.insert(0, "IF NOT EXISTS".to_string());
         return parts.join(" ");
     }
+    // CHARACTER SET / COLLATE (MySQL only)
+    if dialect == StructureDialect::Mysql {
+        if !column.character_set.trim().is_empty() {
+            parts.push(format!("CHARACTER SET {}", quote_ident(dialect, &column.character_set)));
+        }
+        if !column.collation.trim().is_empty() {
+            parts.push(format!("COLLATE {}", quote_ident(dialect, &column.collation)));
+        }
+    }
     if !column.is_nullable && !is_oracle_like(dialect) && dialect != StructureDialect::ClickHouse {
         parts.push("NOT NULL".to_string());
     }

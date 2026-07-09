@@ -34,6 +34,8 @@ export interface ColumnInfo {
   numeric_scale?: number | null;
   character_maximum_length?: number | null;
   enum_values?: string[] | null;
+  character_set?: string | null;
+  collation?: string | null;
 }
 
 export interface QueryResult {
@@ -564,11 +566,13 @@ interface BridgeColumnInfo {
   numeric_scale?: number | null;
   character_maximum_length?: number | null;
   enum_values?: string[] | null;
+  character_set?: string | null;
+  collation?: string | null;
 }
 
 const POSTGRES_DESCRIBE_TABLE_SQL = `SELECT c.column_name AS name, CASE WHEN c.data_type = 'USER-DEFINED' THEN c.udt_name ELSE c.data_type END AS data_type, c.is_nullable = 'YES' AS is_nullable, c.column_default, CASE WHEN tc.constraint_type = 'PRIMARY KEY' THEN true ELSE false END AS is_primary_key, col_description(cls.oid, c.ordinal_position) AS comment, CASE WHEN enum_t.oid IS NULL THEN NULL ELSE COALESCE((SELECT array_to_json(array_agg(e.enumlabel ORDER BY e.enumsortorder)) FROM pg_enum e WHERE e.enumtypid = enum_t.oid), '[]'::json) END AS enum_values FROM information_schema.columns c LEFT JOIN information_schema.key_column_usage kcu ON kcu.table_schema = c.table_schema AND kcu.table_name = c.table_name AND kcu.column_name = c.column_name LEFT JOIN information_schema.table_constraints tc ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema AND tc.constraint_type = 'PRIMARY KEY' LEFT JOIN pg_class cls ON cls.relname = c.table_name AND cls.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = c.table_schema) LEFT JOIN pg_namespace type_ns ON type_ns.nspname = c.udt_schema LEFT JOIN pg_type t ON t.typnamespace = type_ns.oid AND t.typname = c.udt_name LEFT JOIN pg_type enum_t ON enum_t.oid = CASE WHEN t.typtype = 'd' THEN t.typbasetype WHEN t.typtype = 'e' THEN t.oid ELSE NULL END AND enum_t.typtype = 'e' WHERE c.table_schema = $1 AND c.table_name = $2 ORDER BY c.ordinal_position`;
 const POSTGRES_DESCRIBE_TABLE_COMPAT_SQL = `SELECT c.column_name AS name, CASE WHEN c.data_type = 'USER-DEFINED' THEN c.udt_name ELSE c.data_type END AS data_type, c.is_nullable = 'YES' AS is_nullable, c.column_default, CASE WHEN tc.constraint_type = 'PRIMARY KEY' THEN true ELSE false END AS is_primary_key, col_description(cls.oid, c.ordinal_position) AS comment, NULL AS enum_values FROM information_schema.columns c LEFT JOIN information_schema.key_column_usage kcu ON kcu.table_schema = c.table_schema AND kcu.table_name = c.table_name AND kcu.column_name = c.column_name LEFT JOIN information_schema.table_constraints tc ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema AND tc.constraint_type = 'PRIMARY KEY' LEFT JOIN pg_class cls ON cls.relname = c.table_name AND cls.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = c.table_schema) WHERE c.table_schema = $1 AND c.table_name = $2 ORDER BY c.ordinal_position`;
-const MYSQL_DESCRIBE_TABLE_SQL = `SELECT c.COLUMN_NAME AS name, c.DATA_TYPE AS data_type, c.COLUMN_TYPE AS column_type, c.IS_NULLABLE = 'YES' AS is_nullable, c.COLUMN_DEFAULT AS column_default, c.COLUMN_KEY = 'PRI' AS is_primary_key, c.COLUMN_COMMENT AS comment FROM information_schema.COLUMNS c WHERE c.TABLE_SCHEMA = DATABASE() AND c.TABLE_NAME = ? ORDER BY c.ORDINAL_POSITION`;
+const MYSQL_DESCRIBE_TABLE_SQL = `SELECT c.COLUMN_NAME AS name, c.DATA_TYPE AS data_type, c.COLUMN_TYPE AS column_type, c.IS_NULLABLE = 'YES' AS is_nullable, c.COLUMN_DEFAULT AS column_default, c.COLUMN_KEY = 'PRI' AS is_primary_key, c.COLUMN_COMMENT AS comment, c.CHARACTER_SET_NAME AS character_set, c.COLLATION_NAME AS collation FROM information_schema.COLUMNS c WHERE c.TABLE_SCHEMA = DATABASE() AND c.TABLE_NAME = ? ORDER BY c.ORDINAL_POSITION`;
 
 function normalizeEnumValues(value: unknown): string[] | null {
   if (value == null) return null;
@@ -649,6 +653,8 @@ function mapDescribeTableColumn(
     numeric_precision?: number | null;
     numeric_scale?: number | null;
     character_maximum_length?: number | null;
+    character_set?: string | null;
+    collation?: string | null;
   },
   enumValues: string[] | null,
 ): ColumnInfo {
@@ -664,6 +670,8 @@ function mapDescribeTableColumn(
   if ("numeric_precision" in row) column.numeric_precision = row.numeric_precision;
   if ("numeric_scale" in row) column.numeric_scale = row.numeric_scale;
   if ("character_maximum_length" in row) column.character_maximum_length = row.character_maximum_length;
+  if ("character_set" in row) column.character_set = row.character_set ?? null;
+  if ("collation" in row) column.collation = row.collation ?? null;
   return column;
 }
 

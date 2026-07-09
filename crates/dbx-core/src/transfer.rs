@@ -2429,6 +2429,7 @@ fn mongo_columns_from_documents(documents: &[serde_json::Value]) -> Vec<db::Colu
                 numeric_scale: None,
                 character_maximum_length: None,
                 enum_values: None,
+                ..Default::default()
             }
         })
         .collect()
@@ -3674,6 +3675,7 @@ where
                         numeric_scale: None,
                         character_maximum_length: None,
                         enum_values: None,
+                        ..Default::default()
                     });
                 }
                 sql_target_column_names = sql_target_columns.iter().map(|column| column.name.clone()).collect();
@@ -4599,6 +4601,7 @@ mod tests {
             numeric_scale: None,
             character_maximum_length: None,
             enum_values: None,
+            ..Default::default()
         }
     }
 
@@ -5429,6 +5432,7 @@ mod tests {
                     numeric_scale: None,
                     character_maximum_length: None,
                     enum_values: None,
+                    ..Default::default()
                 },
                 db::ColumnInfo {
                     name: "identity_id".to_string(),
@@ -5442,6 +5446,7 @@ mod tests {
                     numeric_scale: None,
                     character_maximum_length: None,
                     enum_values: None,
+                    ..Default::default()
                 },
                 db::ColumnInfo {
                     name: "computed_id".to_string(),
@@ -5455,6 +5460,7 @@ mod tests {
                     numeric_scale: None,
                     character_maximum_length: None,
                     enum_values: None,
+                    ..Default::default()
                 },
             ],
             "users",
@@ -5529,6 +5535,7 @@ mod tests {
                 numeric_scale: None,
                 character_maximum_length: None,
                 enum_values: None,
+                ..Default::default()
             },
             db::ColumnInfo {
                 name: "name".to_string(),
@@ -5542,6 +5549,7 @@ mod tests {
                 numeric_scale: None,
                 character_maximum_length: None,
                 enum_values: None,
+                ..Default::default()
             },
         ];
         let source_ddl = crate::schema::render_postgres_table_ddl("public", "it_quick_entry", &columns, &[], &[]);

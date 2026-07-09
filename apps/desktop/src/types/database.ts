@@ -358,6 +358,8 @@ export interface ColumnInfo {
   numeric_scale?: number | null;
   character_maximum_length?: number | null;
   enum_values?: string[] | null;
+  character_set?: string | null;
+  collation?: string | null;
 }
 
 export interface IndexInfo {

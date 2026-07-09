@@ -1424,11 +1424,9 @@ fn format_agent_startup_error(base: &str, child: &mut Child, stderr_tail: &Arc<M
 
 impl AgentDriverClient {
     fn format_agent_process_error(&mut self, base: &str) -> String {
-        format_agent_process_error(
-            base,
-            child_exit_status_after_short_wait(&mut self.child),
-            &stderr_tail_snapshot(&self.stderr_tail),
-        )
+        // Runtime RPC errors are common SQL/driver paths. Do not wait for the
+        // child to exit unless startup diagnostics already expect the process to die.
+        format_agent_process_error(base, child_exit_status(&mut self.child), &stderr_tail_snapshot(&self.stderr_tail))
     }
 }
 
@@ -1615,6 +1613,33 @@ mod tests {
         assert!(message.contains("Agent requires Java 21"));
         assert!(message.contains("details: Failed to read startup line from agent: end of stream"));
         assert!(message.contains("UnsupportedClassVersionError"));
+    }
+
+    #[test]
+    fn runtime_agent_process_error_does_not_wait_for_live_child() {
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 2")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("child should start");
+        let mut client = AgentDriverClient {
+            child,
+            stdin: None,
+            stdout: None,
+            stderr_tail: Arc::new(Mutex::new(StderrTail::default())),
+            handshake: None,
+            next_id: 0,
+        };
+
+        let started_at = std::time::Instant::now();
+        let message = client.format_agent_process_error("Agent RPC error (-1): syntax error");
+
+        assert!(started_at.elapsed() < std::time::Duration::from_millis(500));
+        assert!(message.contains("Agent RPC error (-1): syntax error"));
+        assert!(!message.contains("agent process exited"));
     }
 
     #[test]

@@ -1007,6 +1007,82 @@ test("completed query executions append result runs and select the latest run", 
   }
 });
 
+test("kept result runs evict inactive payloads without losing switch or archive data", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const runtimeCache = new Map<string, string>();
+  let executeCount = 0;
+
+  connectionStore.addEphemeralConnection(conn("conn-1"));
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/prepare-pagination-plan") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify({ sqlToExecute: body.options.sql, useAgentResultSession: false }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/query/execute-multi") {
+      executeCount++;
+      return new Response(JSON.stringify([{ columns: [`run_${executeCount}`], rows: [[executeCount]], affected_rows: 0, execution_time_ms: 1 }]), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url === "/api/query/analyze-editability") {
+      return new Response(JSON.stringify({ editable: false, reason: "complex-source" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/tab-runtime-cache" && init?.method === "POST") {
+      const body = JSON.parse(String(init.body ?? "{}")) as { key: string; payloadBase64: string };
+      runtimeCache.set(body.key, body.payloadBase64);
+      return new Response(JSON.stringify(true), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url.startsWith("/api/tab-runtime-cache?")) {
+      const key = new URL(url, "http://localhost").searchParams.get("key") ?? "";
+      if (init?.method === "DELETE") {
+        runtimeCache.delete(key);
+        return new Response(JSON.stringify(true), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ payloadBase64: runtimeCache.get(key) }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const tabId = store.createTab("conn-1", "db", "Query");
+    store.toggleResultAutoSave(tabId);
+    await store.executeTabSql(tabId, "select 1");
+    await store.executeTabSql(tabId, "select 2");
+
+    const tab = store.tabs.find((item) => item.id === tabId);
+    assert.ok(tab?.resultRuns?.[0]);
+    assert.ok(tab.resultRuns[1]);
+    await waitFor(() => tab.resultRuns?.[0]?.result === undefined && tab.resultRuns?.[0]?.resultCacheState === "disk");
+    assert.deepEqual(tab.result?.columns, ["run_2"]);
+    assert.deepEqual(tab.resultRuns[1]?.result?.columns, ["run_2"]);
+
+    await store.setActiveResultRun(tabId, tab.resultRuns[0].id);
+    assert.deepEqual(tab.result?.columns, ["run_1"]);
+    assert.deepEqual(tab.result?.rows, [[1]]);
+    assert.deepEqual(tab.resultRuns[0]?.result?.columns, ["run_1"]);
+
+    const archive = await store.exportResultArchive(tabId);
+    assert.ok(archive);
+    const decoded = await decodeQueryResultArchive(archive);
+    assert.deepEqual(
+      decoded?.snapshot.resultRuns?.map((run) => run.result?.rows),
+      [[[1]], [[2]]],
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("failed query executions append switchable error result runs", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());

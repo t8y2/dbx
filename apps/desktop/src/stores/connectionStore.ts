@@ -4091,6 +4091,7 @@ export const useConnectionStore = defineStore("connection", () => {
           databases.map((database) => database.name),
           config,
         );
+        evictOldestCacheEntries(completionDatabasesCache.value, COMPLETION_CACHE_MAX);
         return completionDatabasesCache.value[connectionId];
       },
       { scope: completionLimiterScope(connectionId), kind: "databases" },
@@ -4105,6 +4106,7 @@ export const useConnectionStore = defineStore("connection", () => {
     return withCompletionInFlight(`${cacheKey}:schemas`, async () => {
       const schemas = await api.listSchemas(connectionId, database);
       schemaListCache.value[cacheKey] = schemas;
+      evictOldestCacheEntries(schemaListCache.value, COMPLETION_CACHE_MAX);
       return schemas;
     });
   }

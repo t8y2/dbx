@@ -14,8 +14,8 @@ If you are not sure what to pick, documentation and small UX fixes are a solid f
 
 ### Prerequisites
 
-- Node.js >= 18
-- pnpm
+- Node.js >= 22.13.0
+- pnpm 10.27.0
 - Rust >= 1.77
 - Make
 
@@ -43,7 +43,7 @@ make cargo-check-fast  # fast Rust checks
 
 ### JDBC Agent Drivers
 
-Agent driver projects live under `agents/`:
+Agent driver projects live under `agents/`. Java/JDBC driver builds and tests require JDK 21; Gradle can auto-download the toolchain when available.
 
 ```bash
 cd agents

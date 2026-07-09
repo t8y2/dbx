@@ -14,8 +14,8 @@
 
 ### 环境要求
 
-- Node.js >= 18
-- pnpm
+- Node.js >= 22.13.0
+- pnpm 10.27.0
 - Rust >= 1.77
 - Make
 
@@ -43,7 +43,7 @@ make cargo-check-fast  # 快速 Rust 检查
 
 ### JDBC Agent 驱动
 
-Agent 驱动工程在 `agents/` 目录：
+Agent 驱动工程在 `agents/` 目录。Java/JDBC 驱动构建和测试需要 JDK 21；环境允许时 Gradle 可以自动下载对应 toolchain。
 
 ```bash
 cd agents

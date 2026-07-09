@@ -404,6 +404,23 @@ final class ZooKeeperAgentTest {
     }
 
     @Test
+    void listPrefixKeepsDirectChildMetadataForLazyExpansion() throws Exception {
+        try (TestingServer server = new TestingServer()) {
+            connect(server);
+            result(request(2, "kv_put", "{\"key\":\"/app/name\",\"value\":{\"encoding\":\"utf8\",\"data\":\"dbx\"}}"));
+            result(request(3, "kv_put", "{\"key\":\"/config\",\"value\":{\"encoding\":\"utf8\",\"data\":\"cfg\"}}"));
+
+            JsonObject list = result(request(5, "kv_list_prefix", "{\"prefix\":\"/\",\"recursive\":false}"));
+            JsonObject app = listedRow(list, "/app");
+            JsonObject config = listedRow(list, "/config");
+
+            Assertions.assertEquals(1, app.get("numChildren").getAsInt());
+            Assertions.assertEquals(0, config.get("numChildren").getAsInt());
+            Assertions.assertEquals(3, config.get("dataLength").getAsInt());
+        }
+    }
+
+    @Test
     void listPrefixDefaultsToRecursiveForDbxKvBrowser() throws Exception {
         try (TestingServer server = new TestingServer()) {
             connect(server);
@@ -553,5 +570,17 @@ final class ZooKeeperAgentTest {
             keys.add(row.getAsJsonObject().get("key").getAsString());
         }
         return keys;
+    }
+
+    private static JsonObject listedRow(JsonObject listResult, String key) {
+        JsonArray rows = listResult.getAsJsonArray("keys");
+        for (JsonElement row : rows) {
+            JsonObject object = row.getAsJsonObject();
+            if (key.equals(object.get("key").getAsString())) {
+                return object;
+            }
+        }
+        Assertions.fail("expected listed row for " + key);
+        return new JsonObject();
     }
 }

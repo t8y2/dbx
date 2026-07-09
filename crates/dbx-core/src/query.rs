@@ -745,8 +745,15 @@ pub fn is_connection_error(err: &str) -> bool {
         || lower.contains("closed")
         || lower.contains("关闭的连接")
         || lower.contains("连接已关闭")
+        || lower.contains("网络通信异常")
+        || lower.contains("通信异常")
+        || lower.contains("communications link failure")
+        || lower.contains("sqlrecoverableexception")
+        || lower.contains("sqlnontransientconnectionexception")
+        || lower.contains("sqltransientconnectionexception")
         || lower.contains("eof")
         || lower.contains("i/o error")
+        || lower.contains("input/output error")
         || lower.contains("not connected")
         || lower.contains("end-of-file")
         || lower.contains("idle")
@@ -3296,6 +3303,13 @@ mod tests {
         assert!(is_connection_error(
             "I/O error: 由于连接方在一段时间后没有正确答复或连接的主机没有反应，连接尝试失败。 (os error 10060)"
         ));
+        assert!(is_connection_error("Agent RPC error (-1): dm.jdbc.driver.DMException: 网络通信异常"));
+        assert!(is_connection_error(
+            "Agent RPC error (-1): java.sql.SQLRecoverableException: IO 错误: Got minus one from a read call"
+        ));
+        assert!(is_connection_error(
+            "Agent RPC error (-1): com.mysql.cj.jdbc.exceptions.CommunicationsException: Communications link failure"
+        ));
     }
 
     #[test]
@@ -3365,6 +3379,9 @@ mod tests {
 
         assert_eq!(pool_error_action(Some(DatabaseType::SqlServer), err), PoolErrorAction::ReconnectAndRetry);
         assert_eq!(pool_error_action(Some(DatabaseType::Postgres), err), PoolErrorAction::ReconnectAndRetry);
+
+        let dameng_err = "Agent RPC error (-1): dm.jdbc.driver.DMException: 网络通信异常";
+        assert_eq!(pool_error_action(Some(DatabaseType::Dameng), dameng_err), PoolErrorAction::ReconnectAndRetry);
     }
 
     #[cfg(feature = "duckdb-bundled")]

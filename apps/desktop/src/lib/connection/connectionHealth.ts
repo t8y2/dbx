@@ -24,6 +24,12 @@ const CONNECTION_ERROR_PATTERNS = [
   "input/output error",
   "关闭的连接",
   "连接已关闭",
+  "网络通信异常",
+  "通信异常",
+  "communications link failure",
+  "sqlrecoverableexception",
+  "sqlnontransientconnectionexception",
+  "sqltransientconnectionexception",
   "i/o error",
   "no route to host",
 ];

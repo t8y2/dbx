@@ -2357,6 +2357,7 @@ mod tests {
     fn metadata_retry_recovers_missing_pool_only_as_transient_state() {
         assert!(is_retryable_metadata_error("Pool not found"));
         assert!(is_retryable_metadata_error("connection reset by peer"));
+        assert!(is_retryable_metadata_error("Agent RPC error (-1): dm.jdbc.driver.DMException: 网络通信异常"));
         assert!(!is_retryable_metadata_error("Unknown column 'email' in 'field list'"));
         assert!(!is_retryable_metadata_error("Access denied for user"));
     }

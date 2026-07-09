@@ -21,6 +21,8 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tauri::{Emitter, Manager};
+#[cfg(target_os = "macos")]
+use tauri_plugin_clipboard_manager::ClipboardExt;
 #[cfg(any(windows, target_os = "linux"))]
 use tauri_plugin_deep_link::DeepLinkExt;
 
@@ -28,6 +30,8 @@ const DESKTOP_TRAY_ID: &str = "main-tray";
 const APP_CLOSE_REQUESTED_EVENT: &str = "dbx-app-close-requested";
 #[cfg(target_os = "macos")]
 const APP_MENU_QUIT_ID: &str = "app-menu-quit";
+#[cfg(target_os = "macos")]
+const APP_MENU_COPY_SUPPORT_INFO_ID: &str = "app-menu-copy-support-info";
 
 pub struct CloseBehaviorState {
     confirmed_exit: AtomicBool,
@@ -48,6 +52,8 @@ impl CloseBehaviorState {
 }
 #[cfg(target_os = "macos")]
 const MACOS_TRAY_ICON: tauri::image::Image<'_> = tauri::include_image!("icons/tray-macos-template.png");
+#[cfg(target_os = "macos")]
+const ABOUT_APP_ICON: tauri::image::Image<'_> = tauri::include_image!("icons/icon.png");
 const BLACK_APP_ICON: tauri::image::Image<'_> = tauri::include_image!("icons/icon-black.png");
 
 pub(crate) fn apply_debug_log_level(debug_logging_enabled: bool) {
@@ -80,15 +86,16 @@ fn native_window_decorations_override(target_os: &str) -> Option<bool> {
 #[cfg(target_os = "macos")]
 fn build_app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri::Result<Menu<R>> {
     let pkg_info = app_handle.package_info();
-    let config = app_handle.config();
     let app_name = pkg_info.name.clone();
     let about_metadata = AboutMetadata {
         name: Some(app_name.clone()),
         version: Some(pkg_info.version.to_string()),
-        copyright: config.bundle.copyright.clone(),
-        authors: config.bundle.publisher.clone().map(|p| vec![p]),
+        copyright: Some(commands::support_info::format_support_info_for_native_about()),
+        icon: Some(ABOUT_APP_ICON),
         ..Default::default()
     };
+    let copy_support_info_item =
+        MenuItem::with_id(app_handle, APP_MENU_COPY_SUPPORT_INFO_ID, "Copy Support Info", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app_handle, APP_MENU_QUIT_ID, format!("Quit {app_name}"), true, Some("Cmd+Q"))?;
 
     Menu::with_items(
@@ -100,6 +107,7 @@ fn build_app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri:
                 true,
                 &[
                     &PredefinedMenuItem::about(app_handle, None, Some(about_metadata))?,
+                    &copy_support_info_item,
                     &PredefinedMenuItem::separator(app_handle)?,
                     &PredefinedMenuItem::services(app_handle, None)?,
                     &PredefinedMenuItem::separator(app_handle)?,
@@ -626,6 +634,10 @@ pub fn run() {
     let builder = builder.menu(build_app_menu).on_menu_event(|app, event| {
         if event.id() == APP_MENU_QUIT_ID {
             request_app_close(app, "quit");
+        } else if event.id() == APP_MENU_COPY_SUPPORT_INFO_ID {
+            if let Err(err) = app.clipboard().write_text(commands::support_info::format_support_info_for_clipboard()) {
+                log::warn!("Failed to copy support info from app menu: {err}");
+            }
         }
     });
 
@@ -774,6 +786,7 @@ pub fn run() {
             commands::app_settings::load_saved_sql_editor_positions,
             commands::app_settings::save_saved_sql_editor_positions,
             commands::app_settings::load_native_debug_logs,
+            commands::support_info::get_app_support_info,
             commands::cloud_sync::webdav_sync_test,
             commands::cloud_sync::webdav_password_status,
             commands::cloud_sync::save_webdav_saved_password,

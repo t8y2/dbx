@@ -920,19 +920,7 @@ pub async fn wait_for_query_opt<F>(
 where
     F: Future<Output = Result<db::QueryResult, String>>,
 {
-    match timeout_duration {
-        Some(d) => wait_for_query_with_timeout(cancel_token, d, future).await,
-        None => match cancel_token {
-            Some(token) => {
-                tokio::select! {
-                    biased;
-                    _ = token.cancelled() => Err(canceled_error()),
-                    result = future => result,
-                }
-            }
-            None => future.await,
-        },
-    }
+    wait_for_result_opt(cancel_token, timeout_duration, future).await
 }
 
 async fn wait_for_result_opt<T, F>(
@@ -1932,39 +1920,15 @@ async fn execute_multi_sqlserver(
         };
         drop(connections);
 
-        let mut client = match (cancel_token.as_ref(), query_timeout) {
-            (Some(token), Some(timeout_duration)) => {
-                tokio::select! {
-                    biased;
-                    _ = token.cancelled() => return Err(canceled_error()),
-                    result = timeout(timeout_duration, client.lock()) => match result {
-                        Ok(guard) => guard,
-                        Err(_) => {
-                            let err = timeout_error_for(timeout_duration);
-                            all_results.push(error_query_result(err));
-                            state.remove_pool_by_key(pool_key).await;
-                            break;
-                        }
-                    },
-                }
-            }
-            (None, Some(timeout_duration)) => match timeout(timeout_duration, client.lock()).await {
-                Ok(guard) => guard,
-                Err(_) => {
-                    let err = timeout_error_for(timeout_duration);
-                    all_results.push(error_query_result(err));
-                    state.remove_pool_by_key(pool_key).await;
-                    break;
-                }
-            },
-            (Some(token), None) => {
+        let mut client = match cancel_token.as_ref() {
+            Some(token) => {
                 tokio::select! {
                     biased;
                     _ = token.cancelled() => return Err(canceled_error()),
                     guard = client.lock() => guard,
                 }
             }
-            (None, None) => client.lock().await,
+            None => client.lock().await,
         };
 
         let result = wait_for_result_opt(

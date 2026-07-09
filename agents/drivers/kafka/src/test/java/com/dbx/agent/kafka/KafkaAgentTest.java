@@ -106,4 +106,36 @@ class KafkaAgentTest {
             KafkaAgent.restoreKerberosSystemProperties(previous);
         }
     }
+
+    @Test
+    void restoresKerberosSystemPropertiesWhenTestConnectionClientConstructionFails() {
+        String previous = System.getProperty("java.security.krb5.conf");
+        try {
+            String response = KafkaAgent.handleRequest("""
+                {
+                  "jsonrpc": "2.0",
+                  "id": 42,
+                  "method": "test_connection",
+                  "params": {
+                    "connection": {
+                      "bootstrap_servers": "",
+                      "properties": {
+                        "java.security.krb5.conf": "/tmp/leaked-test-connection.krb5.conf"
+                      }
+                    }
+                  }
+                }
+                """);
+
+            assertEquals(-1, JsonParser.parseString(response).getAsJsonObject()
+                .getAsJsonObject("error").get("code").getAsInt());
+            assertEquals(previous, System.getProperty("java.security.krb5.conf"));
+        } finally {
+            if (previous == null) {
+                System.clearProperty("java.security.krb5.conf");
+            } else {
+                System.setProperty("java.security.krb5.conf", previous);
+            }
+        }
+    }
 }

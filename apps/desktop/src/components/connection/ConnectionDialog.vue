@@ -431,7 +431,6 @@ const mqKafkaSaslMechanismOptions = [
   { value: "PLAIN", label: "PLAIN" },
   { value: "SCRAM-SHA-256", label: "SCRAM-SHA-256" },
   { value: "SCRAM-SHA-512", label: "SCRAM-SHA-512" },
-  { value: "GSSAPI", label: "GSSAPI" },
 ];
 const nacosServerAddr = ref(NACOS_DEFAULT_CONSOLE_URL);
 const nacosNamespace = ref("");
@@ -782,6 +781,12 @@ watch(mqSystemKind, (kind) => {
     return;
   }
   if (!mqAdminUrl.value.trim()) mqAdminUrl.value = "http://127.0.0.1:8080";
+});
+
+watch(mqAuthKind, (kind) => {
+  if (mqSystemKind.value === "kafka" && kind === "basic" && mqKafkaSaslMechanism.value.toUpperCase() === "GSSAPI") {
+    mqKafkaSaslMechanism.value = "PLAIN";
+  }
 });
 
 function resetNacosFields(config?: Partial<NacosAdminConfig>) {

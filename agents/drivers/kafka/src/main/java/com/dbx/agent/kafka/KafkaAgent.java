@@ -174,8 +174,9 @@ public final class KafkaAgent {
     private static Object testConnection(JsonObject params) throws Exception {
         JsonObject conn = connectionObject(params);
         Map<String, String> previousKerberosSystemProperties = applyKerberosSystemProperties(conn);
-        AdminClient probe = buildAdminClient(conn);
+        AdminClient probe = null;
         try {
+            probe = buildAdminClient(conn);
             int timeout = intOrDefault(conn, "request_timeout_ms", DEFAULT_REQUEST_TIMEOUT_MS);
             DescribeClusterResult cluster = probe.describeCluster();
             String clusterId = cluster.clusterId().get(timeout, TimeUnit.MILLISECONDS);
@@ -211,7 +212,9 @@ public final class KafkaAgent {
             result.put("brokers", brokerList);
             return result;
         } finally {
-            probe.close(Duration.ofSeconds(5));
+            if (probe != null) {
+                probe.close(Duration.ofSeconds(5));
+            }
             restoreKerberosSystemProperties(previousKerberosSystemProperties);
         }
     }

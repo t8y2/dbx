@@ -1,0 +1,331 @@
+---
+title: Web API 参考
+description: DBX Web 与 Docker 部署使用的 HTTP API，适用于自动化与集成场景。
+---
+
+<Callout type="warn">这套 API 主要服务于 DBX Web 界面，以及 MCP Web 模式等内部工具。它不是单独对外承诺的集成契约，路由和字段可能随版本调整。做脚本或 Agent 集成时，优先使用 [@dbx-app/cli](/cn/docs/cli) 或 [@dbx-app/mcp-server](/cn/docs/mcp)。</Callout>
+
+## 基础地址
+
+DBX Web 默认监听 `4224` 端口：
+
+```text
+http://localhost:4224
+```
+
+如果通过反向代理挂在子路径下，需要设置 `DBX_PUBLIC_BASE_PATH`。例如 `/dbx`：
+
+```text
+https://example.com/dbx/api/auth/check
+```
+
+所有 API 都位于 `/api` 路径下。
+
+## 认证
+
+受保护的路由需要名为 `dbx_session` 的会话 Cookie。
+
+### 检查认证状态
+
+```http
+GET /api/auth/check
+```
+
+示例响应：
+
+```json
+{
+  "authenticated": false,
+  "required": true,
+  "setup_required": false
+}
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `required` | 已启用密码保护 |
+| `setup_required` | 仍需首次设置密码 |
+| `authenticated` | 当前请求已持有有效会话 |
+
+### 首次设置密码
+
+```http
+POST /api/auth/setup
+Content-Type: application/json
+
+{
+  "password": "your-password"
+}
+```
+
+### 登录
+
+```http
+POST /api/auth/login
+Content-Type: application/json
+
+{
+  "password": "your-password"
+}
+```
+
+登录成功后，响应会返回 `Set-Cookie: dbx_session=...`。后续请求带上这个 Cookie 即可。
+
+### 退出登录
+
+```http
+POST /api/auth/logout
+Cookie: dbx_session=...
+```
+
+### 环境变量
+
+| 变量 | 作用 |
+| --- | --- |
+| `DBX_PASSWORD` | 容器启动时设置初始密码 |
+| `DBX_DISABLE_PASSWORD=1` | 完全关闭密码保护 |
+| `DBX_PORT` | 修改监听端口，默认 `4224` |
+| `DBX_DATA_DIR` | 存放 `dbx.db` 的数据目录 |
+| `DBX_PUBLIC_BASE_PATH` | 在子路径下提供服务，例如 `/dbx` |
+
+## 请求约定
+
+- JSON 请求体字段名默认使用 `camelCase`。
+- `GET` 请求的查询参数使用 `snake_case`，例如 `connection_id`。
+- 出错时通常返回带 `error` 字段的 JSON 和对应 HTTP 状态码。
+
+## 连接相关 API
+
+### 列出连接
+
+```http
+GET /api/connection/list
+Cookie: dbx_session=...
+```
+
+返回已保存的连接配置。密码等敏感信息不会直接出现在返回 JSON 中。
+
+### 保存连接
+
+```http
+POST /api/connection/save
+Content-Type: application/json
+Cookie: dbx_session=...
+
+{
+  "configs": [
+    {
+      "name": "local-mysql",
+      "db_type": "mysql",
+      "host": "127.0.0.1",
+      "port": 3306,
+      "username": "root",
+      "database": "app"
+    }
+  ]
+}
+```
+
+### 测试连接
+
+```http
+POST /api/connection/test
+Content-Type: application/json
+
+{
+  "config": {
+    "name": "temp",
+    "db_type": "mysql",
+    "host": "127.0.0.1",
+    "port": 3306,
+    "username": "root",
+    "database": "app"
+  }
+}
+```
+
+### 建立连接
+
+大多数数据类 API 会要求目标连接先处于已连接状态。
+
+```http
+POST /api/connection/connect
+Content-Type: application/json
+
+{
+  "config": {
+    "id": "connection-id",
+    "name": "local-mysql",
+    "db_type": "mysql",
+    "host": "127.0.0.1",
+    "port": 3306,
+    "username": "root",
+    "database": "app"
+  }
+}
+```
+
+### 健康检查
+
+```http
+POST /api/connection/check-health
+Content-Type: application/json
+
+{
+  "connectionId": "connection-id"
+}
+```
+
+## Schema API
+
+### 列出表
+
+```http
+GET /api/schema/tables?connection_id=CONNECTION_ID&database=app&schema=
+Cookie: dbx_session=...
+```
+
+### 列出字段
+
+```http
+GET /api/schema/columns?connection_id=CONNECTION_ID&database=app&schema=&table=users
+Cookie: dbx_session=...
+```
+
+其他常用 Schema 路由包括：
+
+- `/api/schema/databases`
+- `/api/schema/schemas`
+- `/api/schema/indexes`
+- `/api/schema/foreign-keys`
+- `/api/schema/ddl`
+
+## SQL 查询 API
+
+### 执行单条语句
+
+```http
+POST /api/query/execute
+Content-Type: application/json
+
+{
+  "connectionId": "connection-id",
+  "database": "app",
+  "sql": "select id, name from users limit 10"
+}
+```
+
+响应示例：
+
+```json
+{
+  "columns": ["id", "name"],
+  "rows": [[1, "Ada"], [2, "Lin"]]
+}
+```
+
+相关路由：
+
+| 路由 | 作用 |
+| --- | --- |
+| `/api/query/execute-multi` | 一次请求执行多个结果集 |
+| `/api/query/execute-batch` | 执行语句列表 |
+| `/api/query/cancel` | 取消正在执行的查询 |
+| `/api/query/build-table-select-sql` | 生成表浏览 SQL |
+
+## Redis API
+
+Redis 浏览和命令执行使用独立路由。
+
+```http
+POST /api/redis/execute-command
+Content-Type: application/json
+
+{
+  "connectionId": "redis-id",
+  "db": 0,
+  "command": "GET mykey"
+}
+```
+
+其他常见 Redis 路由：
+
+- `/api/redis/scan-keys`
+- `/api/redis/get-value`
+- `/api/redis/set-string`
+- `/api/redis/delete-key`
+
+## MongoDB API
+
+MongoDB 路由都是 `POST` 请求，使用 JSON 请求体。
+
+### 列出集合
+
+```http
+POST /api/mongo/list-collections
+Content-Type: application/json
+
+{
+  "connectionId": "mongo-id",
+  "database": "app"
+}
+```
+
+### 查询文档
+
+```http
+POST /api/mongo/find-documents
+Content-Type: application/json
+
+{
+  "connectionId": "mongo-id",
+  "database": "app",
+  "collection": "users",
+  "skip": 0,
+  "limit": 20,
+  "filter": "{}"
+}
+```
+
+其他 MongoDB 路由还包括 `aggregate-documents`、`insert-documents`、`update-documents`、`delete-documents` 等。
+
+## MCP 与 CLI 集成
+
+做自动化时，通常比直接调 Web API 更好维护：
+
+- MCP：[@dbx-app/mcp-server](/cn/docs/mcp)
+- CLI：[@dbx-app/cli](/cn/docs/cli)
+
+如果 MCP 连接的是已部署的 Web 实例，可设置：
+
+```json
+{
+  "env": {
+    "DBX_WEB_URL": "http://localhost:4224",
+    "DBX_WEB_PASSWORD": "your-password"
+  }
+}
+```
+
+MCP Server 会自动处理登录和会话 Cookie。
+
+## 示例脚本
+
+仓库内示例：
+
+- [examples/web-api/automation.sh](https://github.com/t8y2/dbx/tree/main/examples/web-api/automation.sh)
+- [examples/docker/docker-compose.yml](https://github.com/t8y2/dbx/tree/main/examples/docker/docker-compose.yml)
+- [examples/cli/basic-workflow.sh](https://github.com/t8y2/dbx/tree/main/examples/cli/basic-workflow.sh)
+
+## 其他路由分组
+
+Web 后端还为界面提供了更多路由，例如：
+
+- `/api/export/*`：导出与下载
+- `/api/import/*`：表导入
+- `/api/transfer/*`：数据传输任务
+- `/api/ai/*`：内置 AI 助手
+- `/api/agents/*`、`/api/jdbc/*`：驱动管理
+- `/api/history/*`、`/api/saved-sql/*`：编辑器状态
+
+完整路由列表见仓库中的 `crates/dbx-web/src/main.rs`。

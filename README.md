@@ -343,6 +343,13 @@ The installer will be in `src-tauri/target/release/bundle/`.
 | Editor    | [CodeMirror 6](https://codemirror.net/)                                                                                                                                                                          |
 | Backend   | Rust + [sqlx](https://github.com/launchbadge/sqlx) / [tiberius](https://github.com/prisma/tiberius) / [redis-rs](https://github.com/redis-rs/redis-rs) / [mongodb](https://github.com/mongodb/mongo-rust-driver) |
 
+## Documentation
+
+- [Official docs](https://dbxio.com/en/docs/what-is-dbx) — feature guides and tutorials
+- [Contributing](CONTRIBUTING.md) — how to pick up issues and open PRs
+- [Web API reference](docs/content/docs/web-api.mdx) — HTTP API for Docker/Web deployments
+- [Examples](examples/) — CLI, MCP, Docker, and API samples
+
 ## Community
 
 <a href="https://discord.gg/W7NyVDRt6a" target="_blank"><img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>

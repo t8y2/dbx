@@ -26,6 +26,7 @@
     "ai-assistant",
     "cli",
     "mcp",
+    "web-api",
     "---Settings---",
     "plugins",
     "driver-management",

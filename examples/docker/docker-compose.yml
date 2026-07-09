@@ -1,0 +1,16 @@
+services:
+  dbx:
+    image: t8y2/dbx
+    ports:
+      - "4224:4224"
+    environment:
+      # Change this before exposing DBX to a network.
+      - DBX_PASSWORD=changeme
+      # Uncomment when serving DBX behind a reverse-proxy subpath.
+      # - DBX_PUBLIC_BASE_PATH=/dbx
+    volumes:
+      - dbx-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  dbx-data:

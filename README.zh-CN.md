@@ -340,6 +340,13 @@ make package
 | 编辑器 | [CodeMirror 6](https://codemirror.net/)                                                                                                                                                                          |
 | 后端   | Rust + [sqlx](https://github.com/launchbadge/sqlx) / [tiberius](https://github.com/prisma/tiberius) / [redis-rs](https://github.com/redis-rs/redis-rs) / [mongodb](https://github.com/mongodb/mongo-rust-driver) |
 
+## 文档
+
+- [官方文档](https://dbxio.com/cn/docs/what-is-dbx) — 功能说明与使用教程
+- [贡献指南](CONTRIBUTING.zh-CN.md) — 如何认领 Issue 并提交 PR
+- [Web API 参考](docs/content/docs/web-api.cn.mdx) — Docker/Web 部署的 HTTP API
+- [示例代码](examples/) — CLI、MCP、Docker 与 API 示例
+
 ## 社区
 
 <a href="https://discord.gg/W7NyVDRt6a" target="_blank"><img src="https://img.shields.io/badge/Discord-加入-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>

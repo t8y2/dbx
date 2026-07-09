@@ -1,0 +1,331 @@
+---
+title: Web API Reference
+description: HTTP API used by DBX Web and Docker deployments for automation and integrations.
+---
+
+<Callout type="warn">This API powers the DBX Web UI and internal tooling such as the MCP Web backend. It is not a separate public integration contract. Endpoints and payloads may change between releases. For scripting and agent workflows, prefer [@dbx-app/cli](/en/docs/cli) or [@dbx-app/mcp-server](/en/docs/mcp) when possible.</Callout>
+
+## Base URL
+
+By default, DBX Web listens on port `4224`:
+
+```text
+http://localhost:4224
+```
+
+When deployed behind a reverse-proxy subpath, set `DBX_PUBLIC_BASE_PATH` and prefix every route. For example, with `/dbx`:
+
+```text
+https://example.com/dbx/api/auth/check
+```
+
+All API routes are under `/api`.
+
+## Authentication
+
+Protected routes require a session cookie named `dbx_session`.
+
+### Check Auth State
+
+```http
+GET /api/auth/check
+```
+
+Example response:
+
+```json
+{
+  "authenticated": false,
+  "required": true,
+  "setup_required": false
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `required` | Password protection is enabled |
+| `setup_required` | First-run password setup is still needed |
+| `authenticated` | Current request already has a valid session |
+
+### First-Run Setup
+
+```http
+POST /api/auth/setup
+Content-Type: application/json
+
+{
+  "password": "your-password"
+}
+```
+
+### Login
+
+```http
+POST /api/auth/login
+Content-Type: application/json
+
+{
+  "password": "your-password"
+}
+```
+
+On success, the response sets `Set-Cookie: dbx_session=...`. Reuse that cookie on later requests.
+
+### Logout
+
+```http
+POST /api/auth/logout
+Cookie: dbx_session=...
+```
+
+### Environment Variables
+
+| Variable | Purpose |
+| --- | --- |
+| `DBX_PASSWORD` | Set an initial password at container startup |
+| `DBX_DISABLE_PASSWORD=1` | Disable password protection entirely |
+| `DBX_PORT` | Change the listen port (default `4224`) |
+| `DBX_DATA_DIR` | Data directory containing `dbx.db` |
+| `DBX_PUBLIC_BASE_PATH` | Serve DBX under a subpath such as `/dbx` |
+
+## Request Format
+
+- JSON request bodies use `camelCase` field names unless noted otherwise.
+- Query parameters for `GET` routes use `snake_case`, for example `connection_id`.
+- Errors usually return JSON with an `error` field and an HTTP status code.
+
+## Connection APIs
+
+### List Connections
+
+```http
+GET /api/connection/list
+Cookie: dbx_session=...
+```
+
+Returns saved connection profiles. Secrets such as passwords are stored separately from the returned JSON.
+
+### Save Connections
+
+```http
+POST /api/connection/save
+Content-Type: application/json
+Cookie: dbx_session=...
+
+{
+  "configs": [
+    {
+      "name": "local-mysql",
+      "db_type": "mysql",
+      "host": "127.0.0.1",
+      "port": 3306,
+      "username": "root",
+      "database": "app"
+    }
+  ]
+}
+```
+
+### Test Connection
+
+```http
+POST /api/connection/test
+Content-Type: application/json
+
+{
+  "config": {
+    "name": "temp",
+    "db_type": "mysql",
+    "host": "127.0.0.1",
+    "port": 3306,
+    "username": "root",
+    "database": "app"
+  }
+}
+```
+
+### Connect
+
+Most data APIs expect the target connection to be active first.
+
+```http
+POST /api/connection/connect
+Content-Type: application/json
+
+{
+  "config": {
+    "id": "connection-id",
+    "name": "local-mysql",
+    "db_type": "mysql",
+    "host": "127.0.0.1",
+    "port": 3306,
+    "username": "root",
+    "database": "app"
+  }
+}
+```
+
+### Check Health
+
+```http
+POST /api/connection/check-health
+Content-Type: application/json
+
+{
+  "connectionId": "connection-id"
+}
+```
+
+## Schema APIs
+
+### List Tables
+
+```http
+GET /api/schema/tables?connection_id=CONNECTION_ID&database=app&schema=
+Cookie: dbx_session=...
+```
+
+### List Columns
+
+```http
+GET /api/schema/columns?connection_id=CONNECTION_ID&database=app&schema=&table=users
+Cookie: dbx_session=...
+```
+
+Other schema routes include:
+
+- `/api/schema/databases`
+- `/api/schema/schemas`
+- `/api/schema/indexes`
+- `/api/schema/foreign-keys`
+- `/api/schema/ddl`
+
+## SQL Query APIs
+
+### Execute One Statement
+
+```http
+POST /api/query/execute
+Content-Type: application/json
+
+{
+  "connectionId": "connection-id",
+  "database": "app",
+  "sql": "select id, name from users limit 10"
+}
+```
+
+Example response shape:
+
+```json
+{
+  "columns": ["id", "name"],
+  "rows": [[1, "Ada"], [2, "Lin"]]
+}
+```
+
+Related routes:
+
+| Route | Purpose |
+| --- | --- |
+| `/api/query/execute-multi` | Execute multiple result sets in one request |
+| `/api/query/execute-batch` | Execute a list of statements |
+| `/api/query/cancel` | Cancel a running query |
+| `/api/query/build-table-select-sql` | Build a table browse query |
+
+## Redis APIs
+
+Redis browser and command execution use dedicated routes.
+
+```http
+POST /api/redis/execute-command
+Content-Type: application/json
+
+{
+  "connectionId": "redis-id",
+  "db": 0,
+  "command": "GET mykey"
+}
+```
+
+Other common Redis routes:
+
+- `/api/redis/scan-keys`
+- `/api/redis/get-value`
+- `/api/redis/set-string`
+- `/api/redis/delete-key`
+
+## MongoDB APIs
+
+MongoDB routes are `POST` endpoints with JSON bodies.
+
+### List Collections
+
+```http
+POST /api/mongo/list-collections
+Content-Type: application/json
+
+{
+  "connectionId": "mongo-id",
+  "database": "app"
+}
+```
+
+### Find Documents
+
+```http
+POST /api/mongo/find-documents
+Content-Type: application/json
+
+{
+  "connectionId": "mongo-id",
+  "database": "app",
+  "collection": "users",
+  "skip": 0,
+  "limit": 20,
+  "filter": "{}"
+}
+```
+
+Other MongoDB routes include `aggregate-documents`, `insert-documents`, `update-documents`, and `delete-documents`.
+
+## MCP and CLI Integration
+
+For automation, these packages are usually easier to maintain than calling the Web API directly:
+
+- MCP: [@dbx-app/mcp-server](/en/docs/mcp)
+- CLI: [@dbx-app/cli](/en/docs/cli)
+
+When MCP runs against a deployed Web instance, set:
+
+```json
+{
+  "env": {
+    "DBX_WEB_URL": "http://localhost:4224",
+    "DBX_WEB_PASSWORD": "your-password"
+  }
+}
+```
+
+The MCP server handles login and session cookies for you.
+
+## Example Scripts
+
+See the repository examples:
+
+- [examples/web-api/automation.sh](https://github.com/t8y2/dbx/tree/main/examples/web-api/automation.sh)
+- [examples/docker/docker-compose.yml](https://github.com/t8y2/dbx/tree/main/examples/docker/docker-compose.yml)
+- [examples/cli/basic-workflow.sh](https://github.com/t8y2/dbx/tree/main/examples/cli/basic-workflow.sh)
+
+## Route Groups
+
+The Web backend exposes many more routes for the UI, including:
+
+- `/api/export/*` for exports and downloads
+- `/api/import/*` for table imports
+- `/api/transfer/*` for data transfer jobs
+- `/api/ai/*` for the built-in AI assistant
+- `/api/agents/*` and `/api/jdbc/*` for driver management
+- `/api/history/*` and `/api/saved-sql/*` for editor state
+
+Browse `crates/dbx-web/src/main.rs` in the repository for the full route list.

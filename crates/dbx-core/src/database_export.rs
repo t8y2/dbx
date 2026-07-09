@@ -283,7 +283,24 @@ fn format_oracle_export_date_literal(
         return None;
     }
     let parts = parse_export_date_parts(value.as_str()?)?;
-    Some(format!("DATE '{}'", parts.date))
+    Some(format_oracle_export_date_parts_literal(&parts))
+}
+
+fn format_oracle_export_date_parts_literal(parts: &ExportRfc3339Parts) -> String {
+    if export_temporal_parts_are_midnight(parts) {
+        format!("DATE '{}'", parts.date)
+    } else {
+        format!("TO_DATE('{} {}', 'YYYY-MM-DD HH24:MI:SS')", parts.date, parts.time)
+    }
+}
+
+fn export_temporal_parts_are_midnight(parts: &ExportRfc3339Parts) -> bool {
+    parts.time == "00:00:00"
+        && parts
+            .fraction
+            .as_deref()
+            .map(|fraction| fraction.trim_start_matches('.').chars().all(|ch| ch == '0'))
+            .unwrap_or(true)
 }
 
 fn format_export_temporal_literal(
@@ -1639,7 +1656,10 @@ mod tests {
             columns: vec!["ID".to_string(), "CREATED_ON".to_string(), "RAW_TEXT".to_string()],
             column_types: vec![Some("NUMBER".to_string()), Some("DATE".to_string()), Some("VARCHAR2(64)".to_string())],
             column_extras: Vec::new(),
-            rows: vec![vec![json!(1), json!("2022-08-25T09:58:43Z"), json!("2022-08-25T09:58:43Z")]],
+            rows: vec![
+                vec![json!(1), json!("2022-08-25T09:58:43Z"), json!("2022-08-25T09:58:43Z")],
+                vec![json!(2), json!("2022-08-25T00:00:00Z"), json!("2022-08-25T00:00:00Z")],
+            ],
             batch_size: Some(100),
         })
         .unwrap();
@@ -1647,7 +1667,8 @@ mod tests {
         assert_eq!(
             statements,
             vec![
-                "INSERT INTO \"APP\".\"EVENTS\" (\"ID\", \"CREATED_ON\", \"RAW_TEXT\") VALUES (1, DATE '2022-08-25', '2022-08-25T09:58:43Z');"
+                "INSERT INTO \"APP\".\"EVENTS\" (\"ID\", \"CREATED_ON\", \"RAW_TEXT\") VALUES (1, TO_DATE('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS'), '2022-08-25T09:58:43Z');",
+                "INSERT INTO \"APP\".\"EVENTS\" (\"ID\", \"CREATED_ON\", \"RAW_TEXT\") VALUES (2, DATE '2022-08-25', '2022-08-25T00:00:00Z');",
             ]
         );
     }

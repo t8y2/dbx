@@ -1112,11 +1112,30 @@ fn format_oracle_date_sql_literal(value: &str, db_type: &DatabaseType, column_ty
     if temporal_column_kind(column_type) != Some("date") {
         return None;
     }
-    let date = oracle_export_date_part(value)?;
-    Some(format!("DATE '{date}'"))
+    let parts = oracle_export_date_parts(value)?;
+    Some(format_oracle_date_sql_literal_parts(&parts))
 }
 
-fn oracle_export_date_part(value: &str) -> Option<&str> {
+struct OracleExportDateParts<'a> {
+    date: &'a str,
+    time: &'a str,
+    fraction: Option<&'a str>,
+}
+
+fn format_oracle_date_sql_literal_parts(parts: &OracleExportDateParts<'_>) -> String {
+    if oracle_export_date_parts_are_midnight(parts) {
+        format!("DATE '{}'", parts.date)
+    } else {
+        format!("TO_DATE('{} {}', 'YYYY-MM-DD HH24:MI:SS')", parts.date, parts.time)
+    }
+}
+
+fn oracle_export_date_parts_are_midnight(parts: &OracleExportDateParts<'_>) -> bool {
+    parts.time == "00:00:00"
+        && parts.fraction.map(|fraction| fraction.trim_start_matches('.').chars().all(|ch| ch == '0')).unwrap_or(true)
+}
+
+fn oracle_export_date_parts(value: &str) -> Option<OracleExportDateParts<'_>> {
     let bytes = value.as_bytes();
     if bytes.len() < 10 || bytes.get(4) != Some(&b'-') || bytes.get(7) != Some(&b'-') {
         return None;
@@ -1126,7 +1145,7 @@ fn oracle_export_date_part(value: &str) -> Option<&str> {
         return None;
     }
     if bytes.len() == 10 {
-        return Some(date);
+        return Some(OracleExportDateParts { date, time: "00:00:00", fraction: None });
     }
     let separator = *bytes.get(10)?;
     if separator != b'T' && separator != b' ' {
@@ -1141,7 +1160,7 @@ fn oracle_export_date_part(value: &str) -> Option<&str> {
     }
     let rest = &value[19..];
     if rest.is_empty() || is_timezone_suffix(rest) {
-        return Some(date);
+        return Some(OracleExportDateParts { date, time, fraction: None });
     }
     if let Some(after_dot) = rest.strip_prefix('.') {
         let digit_count = after_dot.bytes().take_while(|byte| byte.is_ascii_digit()).count();
@@ -1150,7 +1169,7 @@ fn oracle_export_date_part(value: &str) -> Option<&str> {
         }
         let zone = &after_dot[digit_count..];
         if zone.is_empty() || is_timezone_suffix(zone) {
-            return Some(date);
+            return Some(OracleExportDateParts { date, time, fraction: Some(&value[19..19 + 1 + digit_count]) });
         }
     }
     None
@@ -5718,7 +5737,11 @@ mod tests {
 
         assert_eq!(
             sql,
-            "INSERT INTO \"APP\".\"events\" (\"id\", \"created_on\", \"created_at\", \"raw_text\") VALUES\n(1, DATE '2022-08-25', '2022-08-25T09:58:43Z', '2022-08-25T09:58:43Z')"
+            "INSERT INTO \"APP\".\"events\" (\"id\", \"created_on\", \"created_at\", \"raw_text\") VALUES\n(1, TO_DATE('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS'), '2022-08-25T09:58:43Z', '2022-08-25T09:58:43Z')"
+        );
+        assert_eq!(
+            escape_value_typed(&json!("2022-08-25T00:00:00Z"), &DatabaseType::Oracle, Some("DATE")),
+            "DATE '2022-08-25'"
         );
     }
 

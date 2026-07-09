@@ -1082,11 +1082,9 @@ fn format_grid_copy_insert_sql_literal(
 ) -> String {
     if is_oracle_temporal_literal_database(database_type) {
         if let Some(text) = value.as_str() {
-            if let Some(literal) = format_oracle_temporal_literal(
-                text,
-                column_info.map(|column| column.data_type.as_str()),
-                OracleDateLiteralStyle::DateOnly,
-            ) {
+            if let Some(literal) =
+                format_oracle_temporal_literal(text, column_info.map(|column| column.data_type.as_str()))
+            {
                 return literal;
             }
         }
@@ -1157,11 +1155,9 @@ pub fn format_grid_sql_literal(
         return format!("ST_GeomFromText('{}')", escaped);
     }
     if is_oracle_temporal_literal_database(database_type) {
-        if let Some(literal) = format_oracle_temporal_literal(
-            &text,
-            column_info.map(|column| column.data_type.as_str()),
-            OracleDateLiteralStyle::PreserveTime,
-        ) {
+        if let Some(literal) =
+            format_oracle_temporal_literal(&text, column_info.map(|column| column.data_type.as_str()))
+        {
             return literal;
         }
     }
@@ -1212,27 +1208,17 @@ enum OracleTemporalKind {
     TimestampWithTimeZone,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OracleDateLiteralStyle {
-    PreserveTime,
-    DateOnly,
-}
-
 fn is_oracle_temporal_literal_database(database_type: Option<DatabaseType>) -> bool {
     matches!(database_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle))
 }
 
-fn format_oracle_temporal_literal(
-    text: &str,
-    data_type: Option<&str>,
-    date_style: OracleDateLiteralStyle,
-) -> Option<String> {
+fn format_oracle_temporal_literal(text: &str, data_type: Option<&str>) -> Option<String> {
     let kind = oracle_temporal_column_kind(data_type?)?;
     let parts = regex_like_oracle_temporal(text)?;
-    let fraction = parts.fraction.unwrap_or_default();
+    let fraction = parts.fraction.as_deref().unwrap_or_default();
     let datetime = format!("{} {}{}", parts.date, parts.time, fraction);
     match kind {
-        OracleTemporalKind::Date if date_style == OracleDateLiteralStyle::DateOnly => {
+        OracleTemporalKind::Date if oracle_temporal_parts_are_midnight(&parts) => {
             Some(format!("DATE '{}'", parts.date))
         }
         OracleTemporalKind::Date => Some(format!("TO_DATE('{} {}', 'YYYY-MM-DD HH24:MI:SS')", parts.date, parts.time)),
@@ -1250,6 +1236,15 @@ fn format_oracle_temporal_literal(
             Some(format!("TO_TIMESTAMP_TZ('{datetime} {zone}', '{mask} TZH:TZM')"))
         }
     }
+}
+
+fn oracle_temporal_parts_are_midnight(parts: &Rfc3339Parts) -> bool {
+    parts.time == "00:00:00"
+        && parts
+            .fraction
+            .as_deref()
+            .map(|fraction| fraction.trim_start_matches('.').chars().all(|ch| ch == '0'))
+            .unwrap_or(true)
 }
 
 fn oracle_temporal_column_kind(data_type: &str) -> Option<OracleTemporalKind> {
@@ -2340,7 +2335,7 @@ mod tests {
 
         assert_eq!(
             statement.as_deref(),
-            Some("INSERT INTO table_name (\"ID\", \"CREATED_ON\", \"RAW_TEXT\") VALUES (1, DATE '2022-08-25', '2022-08-25T09:58:43Z');")
+            Some("INSERT INTO table_name (\"ID\", \"CREATED_ON\", \"RAW_TEXT\") VALUES (1, TO_DATE('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS'), '2022-08-25T09:58:43Z');")
         );
     }
 
@@ -2694,7 +2689,11 @@ mod tests {
         );
         assert_eq!(
             format_grid_sql_literal(&json!("2022-08-25"), Some(DatabaseType::Oracle), Some(&date)),
-            "TO_DATE('2022-08-25 00:00:00', 'YYYY-MM-DD HH24:MI:SS')"
+            "DATE '2022-08-25'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25T00:00:00Z"), Some(DatabaseType::Oracle), Some(&date)),
+            "DATE '2022-08-25'"
         );
     }
 

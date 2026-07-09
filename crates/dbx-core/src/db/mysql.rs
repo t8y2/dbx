@@ -1068,6 +1068,9 @@ fn mysql_error_should_retry_without_ssl(error: &str) -> bool {
         || error.contains("handshake")
         || error.contains("tls connection")
         || error.contains("server closed session")
+        // Some older MySQL proxies report a failed preferred-TLS probe as a
+        // protocol packet error instead of a TLS handshake error.
+        || error.contains("packet out of order")
         // Some MySQL-compatible servers report a preferred-TLS attempt as a
         // normal server error instead of a TLS handshake error.
         || (error.contains("client asked for ssl") && error.contains("server does not have this capability"))
@@ -4202,6 +4205,13 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     fn mysql_server_without_ssl_capability_retries_without_ssl() {
         let error =
             "MySQL connection failed: Driver error: `Client asked for SSL but server does not have this capability'";
+
+        assert!(mysql_error_should_retry_without_ssl(error));
+    }
+
+    #[test]
+    fn mysql_packet_out_of_order_can_retry_without_ssl() {
+        let error = "MySQL connection failed: Input/output error: Input/output error: packet out of order";
 
         assert!(mysql_error_should_retry_without_ssl(error));
     }

@@ -14,6 +14,7 @@ import {
   getColumnEditorControls,
   getDataTypeOptions,
   isProtectedManticoreIdColumn,
+  isDamengIdentityCompatibleDataType,
   isMysqlEnumDataType,
   isSqlServerIdentityCompatibleDataType,
   mysqlEnumDataType,
@@ -274,6 +275,16 @@ test("parses SQL Server identity extra string to ColumnExtra", () => {
   });
 });
 
+test("parses Dameng identity extra string to ColumnExtra", () => {
+  assert.deepEqual(parseExtraToColumnExtra("identity", "dameng"), {
+    autoIncrement: true,
+  });
+  assert.deepEqual(parseExtraToColumnExtra("IDENTITY(100, 5)", "dameng"), {
+    autoIncrement: true,
+    identity: { seed: 100, increment: 5 },
+  });
+});
+
 test("recognizes SQL Server identity-compatible data types", () => {
   assert.equal(isSqlServerIdentityCompatibleDataType("tinyint"), true);
   assert.equal(isSqlServerIdentityCompatibleDataType("smallint"), true);
@@ -284,6 +295,16 @@ test("recognizes SQL Server identity-compatible data types", () => {
   assert.equal(isSqlServerIdentityCompatibleDataType("numeric(10)"), true);
   assert.equal(isSqlServerIdentityCompatibleDataType("varchar(255)"), false);
   assert.equal(isSqlServerIdentityCompatibleDataType("numeric(18,2)"), false);
+});
+
+test("recognizes Dameng identity-compatible data types", () => {
+  assert.equal(isDamengIdentityCompatibleDataType("int"), true);
+  assert.equal(isDamengIdentityCompatibleDataType("integer"), true);
+  assert.equal(isDamengIdentityCompatibleDataType("bigint"), true);
+  assert.equal(isDamengIdentityCompatibleDataType("number(18, 0)"), true);
+  assert.equal(isDamengIdentityCompatibleDataType("decimal(10)"), true);
+  assert.equal(isDamengIdentityCompatibleDataType("varchar(255)"), false);
+  assert.equal(isDamengIdentityCompatibleDataType("number(18, 2)"), false);
 });
 
 test("does not add MySQL-style display widths to SQL Server integer types", () => {

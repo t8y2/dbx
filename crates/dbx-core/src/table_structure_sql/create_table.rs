@@ -1,4 +1,6 @@
-use super::column_format::{column_data_type, column_extra_clause};
+use super::column_format::{
+    column_data_type, column_extra_clause, has_dameng_identity, is_dameng_identity_compatible_type,
+};
 use super::comments::{build_sqlserver_column_comment_sql, build_sqlserver_table_comment_sql};
 use super::dialect::{capabilities_for, database_label, StructureDialect};
 use super::foreign_keys::build_foreign_key_sql;
@@ -25,6 +27,19 @@ pub fn build_create_table_sql(options: TableStructureSqlOptions) -> TableStructu
     let capabilities = capabilities_for(options.database_type);
     let dialect = capabilities.dialect;
     let table = qualified_table(dialect, options.schema.as_deref(), &options.table_name);
+    if dialect == StructureDialect::Dameng {
+        for column in &active_columns {
+            if has_dameng_identity(column) && !is_dameng_identity_compatible_type(&column.data_type) {
+                warnings.push(format!(
+                    "Dameng identity column \"{}\" must use tinyint, smallint, int, integer, bigint, number, numeric, or decimal/dec with scale 0.",
+                    column.name
+                ));
+            }
+        }
+        if !warnings.is_empty() {
+            return TableStructureSqlResult { statements: Vec::new(), warnings };
+        }
+    }
     let mut statements = Vec::new();
     let mut column_definitions = Vec::new();
 
@@ -73,7 +88,10 @@ pub fn build_create_table_sql(options: TableStructureSqlOptions) -> TableStructu
                 if let Some(last) = statements.last_mut() {
                     *last = last.replace(");", &format!(") COMMENT = {};", quote_string(&table_comment)));
                 }
-            } else if matches!(dialect, StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::H2) {
+            } else if matches!(
+                dialect,
+                StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::Dameng | StructureDialect::H2
+            ) {
                 statements.push(format!("COMMENT ON TABLE {table} IS {};", quote_string(&table_comment)));
             } else if dialect == StructureDialect::ClickHouse {
                 statements.push(format!("ALTER TABLE {table} MODIFY COMMENT {};", quote_string(&table_comment)));
@@ -89,7 +107,10 @@ pub fn build_create_table_sql(options: TableStructureSqlOptions) -> TableStructu
     }
 
     if capabilities.comment
-        && matches!(dialect, StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::H2)
+        && matches!(
+            dialect,
+            StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::Dameng | StructureDialect::H2
+        )
     {
         for column in &active_columns {
             if !clean(&column.comment).is_empty() {

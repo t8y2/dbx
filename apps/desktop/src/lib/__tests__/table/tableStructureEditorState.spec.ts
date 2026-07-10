@@ -6,6 +6,7 @@ import {
   getDefaultLengthForType,
   hasExistingColumnTypeChange,
   isDataTypeLengthDisabled,
+  isDamengIdentityCompatibleDataType,
   isMysqlCharacterDataType,
   isMysqlEnumDataType,
   isSqlServerIdentityCompatibleDataType,
@@ -182,6 +183,16 @@ describe("tableStructureEditorState", () => {
     expect(isSqlServerIdentityCompatibleDataType("decimal(10)")).toBe(true);
     expect(isSqlServerIdentityCompatibleDataType("varchar(255)")).toBe(false);
     expect(isSqlServerIdentityCompatibleDataType("numeric(18, 2)")).toBe(false);
+  });
+
+  it("limits Dameng identity columns to supported data types", () => {
+    expect(isDamengIdentityCompatibleDataType("int")).toBe(true);
+    expect(isDamengIdentityCompatibleDataType("integer")).toBe(true);
+    expect(isDamengIdentityCompatibleDataType("bigint")).toBe(true);
+    expect(isDamengIdentityCompatibleDataType("number(18, 0)")).toBe(true);
+    expect(isDamengIdentityCompatibleDataType("decimal(10)")).toBe(true);
+    expect(isDamengIdentityCompatibleDataType("varchar(255)")).toBe(false);
+    expect(isDamengIdentityCompatibleDataType("number(18, 2)")).toBe(false);
   });
 
   it("identifies MySQL character data types that accept charset/collation", () => {

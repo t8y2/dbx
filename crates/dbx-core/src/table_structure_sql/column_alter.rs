@@ -76,7 +76,7 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
         StructureDialect::Mysql => statements.extend(build_mysql_existing_column_sql(&table, &options.column, "")),
         StructureDialect::Doris => statements.extend(build_doris_existing_column_sql(&table, &options.column, "")),
         StructureDialect::Postgres => statements.extend(build_postgres_existing_column_sql(&table, &options.column)),
-        StructureDialect::Oracle => {
+        StructureDialect::Oracle | StructureDialect::Dameng => {
             statements.extend(build_oracle_like_existing_column_sql(dialect, &table, &options.column))
         }
         StructureDialect::H2 => statements.extend(build_h2_existing_column_sql(&table, &options.column)),

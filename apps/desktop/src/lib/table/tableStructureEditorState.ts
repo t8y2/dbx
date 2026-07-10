@@ -489,6 +489,17 @@ export function parseExtraToColumnExtra(extra: string | null | undefined, databa
         };
       }
     }
+  } else if (databaseType === "dameng") {
+    if (lower.includes("identity")) {
+      result.autoIncrement = true;
+      const identityMatch = lower.match(/identity\s*\(\s*(-?\d+)\s*,\s*(-?\d+)\s*\)/i);
+      if (identityMatch) {
+        result.identity = {
+          seed: Number(identityMatch[1]),
+          increment: Number(identityMatch[2]),
+        };
+      }
+    }
   } else if (databaseType === "manticoresearch") {
     const tokens = new Set(lower.split(/\s+/).filter(Boolean));
     if (tokens.has("indexed")) result.manticoreIndexed = true;
@@ -844,6 +855,20 @@ export function isSqlServerIdentityCompatibleDataType(rawDataType: string): bool
   const normalized = baseType.trim().replace(/\s+/g, " ").toLowerCase();
   if (["tinyint", "smallint", "int", "integer", "bigint"].includes(normalized)) return true;
   if (normalized !== "decimal" && normalized !== "numeric") return false;
+  const normalizedParams = params.replace(/\s+/g, "");
+  if (!normalizedParams) return true;
+  const parts = normalizedParams.split(",");
+  if (parts.length === 1) return /^\d+$/.test(parts[0] ?? "");
+  if (parts.length !== 2) return false;
+  const [precision, scale] = parts;
+  return /^\d+$/.test(precision ?? "") && scale === "0";
+}
+
+export function isDamengIdentityCompatibleDataType(rawDataType: string): boolean {
+  const { baseType, params } = splitDataType(rawDataType);
+  const normalized = baseType.trim().replace(/\s+/g, " ").toLowerCase();
+  if (["tinyint", "smallint", "int", "integer", "bigint"].includes(normalized)) return true;
+  if (!["number", "numeric", "decimal", "dec"].includes(normalized)) return false;
   const normalizedParams = params.replace(/\s+/g, "");
   if (!normalizedParams) return true;
   const parts = normalizedParams.split(",");

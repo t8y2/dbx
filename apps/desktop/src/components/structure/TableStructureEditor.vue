@@ -46,6 +46,7 @@ import {
   getDefaultLengthForType,
   hasExistingColumnTypeChange,
   isDataTypeLengthDisabled,
+  isDamengIdentityCompatibleDataType,
   isMysqlEnumDataType,
   isMysqlCharacterDataType,
   isProtectedManticoreIdColumn,
@@ -678,7 +679,7 @@ function isPostgresIdentityType(dbType: string | undefined): boolean {
 
 const showExtendedProperties = computed(() => {
   const dt = databaseType.value;
-  return dt === "mysql" || dt === "manticoresearch" || isPostgresIdentityType(dt) || dt === "sqlserver";
+  return dt === "mysql" || dt === "dameng" || dt === "manticoresearch" || isPostgresIdentityType(dt) || dt === "sqlserver";
 });
 const showCharacterSet = computed(() => structureDialect.value === "mysql");
 
@@ -1406,6 +1407,56 @@ function updateSqlServerIdentityIncrement(column: EditableStructureColumn, value
   column.extra.identity!.increment = parseOptionalNumberInput(value);
 }
 
+function isDamengIdentityChecked(column: EditableStructureColumn): boolean {
+  return !!column.extra.autoIncrement || !!column.extra.identity;
+}
+
+function canEditDamengIdentity(column: EditableStructureColumn): boolean {
+  return !column.original && !column.markedForDrop && isDamengIdentityCompatibleDataType(column.dataType);
+}
+
+function clearDamengIdentity(column: EditableStructureColumn) {
+  column.extra.autoIncrement = false;
+  column.extra.identity = undefined;
+}
+
+function syncDamengIdentityForDataType(column: EditableStructureColumn) {
+  if (databaseType.value !== "dameng") return;
+  if (!isDamengIdentityChecked(column)) return;
+  if (isDamengIdentityCompatibleDataType(column.dataType)) return;
+  clearDamengIdentity(column);
+}
+
+function ensureDamengIdentity(column: EditableStructureColumn) {
+  column.extra.autoIncrement = true;
+  column.extra.identity = {
+    seed: column.extra.identity?.seed ?? 1,
+    increment: column.extra.identity?.increment ?? 1,
+  };
+}
+
+function setDamengIdentity(column: EditableStructureColumn, checked: boolean) {
+  if (!canEditDamengIdentity(column)) return;
+  if (checked) {
+    ensureDamengIdentity(column);
+    column.isNullable = false;
+  } else {
+    clearDamengIdentity(column);
+  }
+}
+
+function updateDamengIdentitySeed(column: EditableStructureColumn, value: string | number) {
+  if (!canEditDamengIdentity(column)) return;
+  ensureDamengIdentity(column);
+  column.extra.identity!.seed = parseOptionalNumberInput(value);
+}
+
+function updateDamengIdentityIncrement(column: EditableStructureColumn, value: string | number) {
+  if (!canEditDamengIdentity(column)) return;
+  ensureDamengIdentity(column);
+  column.extra.identity!.increment = parseOptionalNumberInput(value);
+}
+
 function updateColumnDataType(column: EditableStructureColumn, baseType: string) {
   if (isMysqlEnumDataType(databaseType.value, baseType)) {
     if (!column.enumValues?.length) column.enumValues = [""];
@@ -1414,6 +1465,7 @@ function updateColumnDataType(column: EditableStructureColumn, baseType: string)
     column.dataType = combineDataTypeForDatabase(databaseType.value, baseType, getDefaultLengthForType(databaseType.value, baseType));
   }
   syncSqlServerIdentityForDataType(column);
+  syncDamengIdentityForDataType(column);
   // Clear charset/collation when switching to a non-character MySQL type
   if (showCharacterSet.value && !isMysqlCharacterDataType(column.dataType)) {
     column.characterSet = "";
@@ -1442,6 +1494,7 @@ function removeMysqlEnumValue(column: EditableStructureColumn, index: number) {
 function updateColumnDataTypeLength(column: EditableStructureColumn, value: string | number) {
   column.dataType = combineDataTypeForDatabase(databaseType.value, splitDataType(column.dataType).baseType, String(value));
   syncSqlServerIdentityForDataType(column);
+  syncDamengIdentityForDataType(column);
 }
 
 function moveColumnTo(index: number, insertionIndex: number) {
@@ -2603,6 +2656,31 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                           <input v-model="column.extra.onUpdateCurrentTimestamp" type="checkbox" :class="[structureCheckboxClass, 'shrink-0']" />
                           <span class="min-w-0 truncate">{{ t("structureEditor.onUpdateCurrentTimestamp") }}</span>
                         </label>
+                      </template>
+                      <!-- Dameng: IDENTITY -->
+                      <template v-else-if="databaseType === 'dameng'">
+                        <label :class="structurePropertyLabelClass" :title="t('structureEditor.identity')">
+                          <input :checked="isDamengIdentityChecked(column)" type="checkbox" :class="[structureCheckboxClass, 'shrink-0']" :disabled="!canEditDamengIdentity(column)" @change="setDamengIdentity(column, ($event.target as HTMLInputElement).checked)" />
+                          <span class="min-w-0 truncate">{{ t("structureEditor.autoIncrement") }}</span>
+                        </label>
+                        <template v-if="isDamengIdentityChecked(column)">
+                          <Input
+                            :model-value="column.extra.identity?.seed?.toString() ?? '1'"
+                            type="number"
+                            :class="[structureControlClass, 'w-14']"
+                            :placeholder="t('structureEditor.identitySeed')"
+                            :disabled="!canEditDamengIdentity(column)"
+                            @update:model-value="(v) => updateDamengIdentitySeed(column, v)"
+                          />
+                          <Input
+                            :model-value="column.extra.identity?.increment?.toString() ?? '1'"
+                            type="number"
+                            :class="[structureControlClass, 'w-14']"
+                            :placeholder="t('structureEditor.identityIncrement')"
+                            :disabled="!canEditDamengIdentity(column)"
+                            @update:model-value="(v) => updateDamengIdentityIncrement(column, v)"
+                          />
+                        </template>
                       </template>
                       <!-- PostgreSQL: IDENTITY -->
                       <template v-else-if="structureDialect === 'postgres'">

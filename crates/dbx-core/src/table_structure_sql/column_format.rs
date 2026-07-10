@@ -77,7 +77,48 @@ pub(super) fn column_extra_clause(dialect: StructureDialect, column: &EditableSt
                 None
             }
         }
+        StructureDialect::Dameng => {
+            if extra.auto_increment.unwrap_or(false) || extra.identity.is_some() {
+                let seed = extra.identity.as_ref().and_then(|i| i.seed).unwrap_or(1);
+                let increment = extra.identity.as_ref().and_then(|i| i.increment).unwrap_or(1);
+                Some(format!("IDENTITY({seed}, {increment})"))
+            } else {
+                None
+            }
+        }
         _ => None,
+    }
+}
+
+pub(super) fn has_dameng_identity(column: &EditableStructureColumn) -> bool {
+    column.extra.as_ref().is_some_and(|extra| extra.auto_increment.unwrap_or(false) || extra.identity.is_some())
+}
+
+pub(super) fn is_dameng_identity_compatible_type(data_type: &str) -> bool {
+    let trimmed = data_type.trim();
+    let (base_type, params) = match trimmed.find('(') {
+        Some(open_index) => {
+            let close_index = trimmed.rfind(')').unwrap_or(trimmed.len());
+            (&trimmed[..open_index], trimmed.get(open_index + 1..close_index).unwrap_or(""))
+        }
+        None => (trimmed, ""),
+    };
+    let normalized = base_type.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    if matches!(normalized.as_str(), "tinyint" | "smallint" | "int" | "integer" | "bigint") {
+        return true;
+    }
+    if !matches!(normalized.as_str(), "number" | "numeric" | "decimal" | "dec") {
+        return false;
+    }
+    let normalized_params = params.split_whitespace().collect::<String>();
+    if normalized_params.is_empty() {
+        return true;
+    }
+    let parts = normalized_params.split(',').collect::<Vec<_>>();
+    match parts.as_slice() {
+        [precision] => precision.parse::<u32>().is_ok(),
+        [precision, scale] => precision.parse::<u32>().is_ok() && *scale == "0",
+        _ => false,
     }
 }
 
@@ -282,7 +323,7 @@ pub(super) fn is_temporal_precision_type(dialect: StructureDialect, base_type: &
                 | "timestamp with time zone"
         ),
         StructureDialect::SqlServer => matches!(normalized.as_str(), "time" | "datetime2" | "datetimeoffset"),
-        StructureDialect::Oracle => {
+        StructureDialect::Oracle | StructureDialect::Dameng => {
             matches!(normalized.as_str(), "timestamp" | "timestamp with time zone" | "timestamp with local time zone")
         }
         _ => false,
@@ -293,7 +334,7 @@ pub(super) fn is_valid_temporal_precision(params: &str, dialect: StructureDialec
     let Ok(value) = params.parse::<u8>() else {
         return false;
     };
-    let max = if dialect == StructureDialect::Oracle { 9 } else { 6 };
+    let max = if matches!(dialect, StructureDialect::Oracle | StructureDialect::Dameng) { 9 } else { 6 };
     value <= max && params == value.to_string()
 }
 

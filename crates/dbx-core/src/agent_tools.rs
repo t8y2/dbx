@@ -819,6 +819,7 @@ mod tests {
         assert_eq!(names, vec!["list_collections", "browse_collection"]);
     }
 
+    #[test]
     fn confirmed_sql_permissions_update_execute_query_contract() {
         let tools = all_tools(DatabaseType::Mysql, AgentSqlPermissions { allow_writes: true, allow_dangerous: true });
         let execute_query = tools.iter().find(|tool| tool.name == "execute_query").unwrap();

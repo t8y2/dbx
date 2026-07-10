@@ -1583,6 +1583,7 @@ export default withEnglishFallback({
     sequences: "序列",
     packages: "套件",
     partitions: "分割區",
+    childTables: "子表",
     loadMore: "載入更多...",
     objectBrowser: "在物件瀏覽器中檢視 ({count})",
     extensions: "擴展",

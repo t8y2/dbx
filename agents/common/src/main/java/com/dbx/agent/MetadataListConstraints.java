@@ -197,7 +197,7 @@ public final class MetadataListConstraints {
         if (upper.contains("MATERIALIZED") && upper.contains("VIEW")) {
             return "MATERIALIZED_VIEW";
         }
-        if (upper.equals("BASE_TABLE") || upper.contains("TABLE")) {
+        if (upper.equals("STABLE") || upper.equals("BASE_TABLE") || upper.contains("TABLE")) {
             return "TABLE";
         }
         if (upper.contains("VIEW")) {

@@ -4,12 +4,15 @@ import com.dbx.agent.test.TestSupport;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.DatabaseAgent;
 import com.dbx.agent.ExecuteQueryOptions;
+import com.dbx.agent.TableInfo;
 import com.dbx.agent.test.JdbcAgentFake;
 import com.dbx.agent.test.JdbcFakeExecutionBehaviorTest;
 import com.dbx.agent.test.JdbcMetadataSqlFake;
 import java.nio.charset.StandardCharsets;
 import java.sql.Timestamp;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -75,11 +78,29 @@ class TDengineAgentMetadataTest {
             Arrays.asList(
                 "SHOW DATABASES",
                 "SHOW `power`.STABLES",
-                "SHOW `power`.TABLES",
+                "SELECT table_name, stable_name, table_comment FROM information_schema.ins_tables WHERE db_name = DATABASE()",
                 "DESCRIBE `power`.`meters`"
             ),
             JdbcMetadataSqlFake.statements
         );
+    }
+
+    @Test
+    void sortsSupertablesBeforeTheirChildTables() {
+        List<TableInfo> tables = new ArrayList<>(Arrays.asList(
+            new TableInfo("device_b", "TABLE", null, null, "meters"),
+            new TableInfo("standalone", "TABLE", null),
+            new TableInfo("meters", "STABLE", null),
+            new TableInfo("device_a", "TABLE", null, null, "meters")
+        ));
+
+        TDengineAgent.sortTablesForHierarchy(tables);
+
+        Assertions.assertEquals(
+            Arrays.asList("meters", "device_a", "device_b", "standalone"),
+            tables.stream().map(TableInfo::getName).toList()
+        );
+        Assertions.assertEquals("meters", tables.get(1).getParent_name());
     }
 
     @Test

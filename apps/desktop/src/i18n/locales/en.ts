@@ -1642,6 +1642,7 @@ export default {
     gridfs: "GridFS",
     buckets: "Buckets",
     partitions: "Partitions",
+    childTables: "Subtables",
     loadMore: "Load more...",
     objectBrowser: "Browse in Object Browser ({count})",
     extensions: "Extensions",

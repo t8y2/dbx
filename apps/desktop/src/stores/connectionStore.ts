@@ -38,6 +38,7 @@ import {
   buildGroupedObjectTreeNodes,
   buildSimpleObjectTreeNodes,
   buildTableTreeNodes,
+  appendTableTreeLoadMoreNode,
   expandCachedObjectBrowserNodes,
   filterSimpleSidebarSupplementalObjects,
   mergeTableInfosIntoObjects,
@@ -46,6 +47,8 @@ import {
   objectTypesForGroupNode,
   sortDatabaseObjectsByName,
   tablePartitionGroups,
+  withoutTableTreeLoadMoreNodes,
+  type TableTreeLoadMoreParent,
   type DatabaseObjectTreeKind,
 } from "@/lib/table/tableTree";
 import { hasTreeNodeDatabaseContext, normalizeCataloglessDatabaseNodes, treeNodeSchemaCachePrefix } from "@/lib/sidebar/treeNodeContext";
@@ -1159,7 +1162,7 @@ export const useConnectionStore = defineStore("connection", () => {
     pageSize: number;
     searchFilter?: string;
     force?: boolean;
-  }): Promise<{ children: TreeNode[]; objectCount: number; hasMore: boolean; nextOffset: number }> {
+  }): Promise<{ children: TreeNode[]; objectCount: number; hasMore: boolean; nextOffset: number; loadMoreParent?: TableTreeLoadMoreParent }> {
     if (!options.node.connectionId || !options.node.database) {
       return { children: [], objectCount: 0, hasMore: false, nextOffset: options.offset };
     }
@@ -1186,18 +1189,20 @@ export const useConnectionStore = defineStore("connection", () => {
     const pageTables = hasMore ? tables.slice(0, options.pageSize) : tables;
     indexCompletionTables(options.node.connectionId, options.node.database, options.effectiveSchema, tableInfosToCompletionTables(pageTables, options.effectiveSchema));
     const objects = mergeTableInfosIntoObjects([], pageTables, options.effectiveSchema);
-    const visibleObjectCount = objects.filter((object) => options.objectTypes.includes(normalizedObjectTreeKind(object.object_type))).length;
+    const children = objectGroupChildrenFromObjects({
+      node: options.node,
+      parentNodeId: options.parentNodeId,
+      effectiveSchema: options.effectiveSchema,
+      objectTypes: options.objectTypes,
+      objects,
+    });
+    const lastTable = pageTables[pageTables.length - 1];
     return {
-      children: objectGroupChildrenFromObjects({
-        node: options.node,
-        parentNodeId: options.parentNodeId,
-        effectiveSchema: options.effectiveSchema,
-        objectTypes: options.objectTypes,
-        objects,
-      }),
-      objectCount: visibleObjectCount,
+      children,
+      objectCount: children.length,
       hasMore,
       nextOffset: options.offset + pageTables.length,
+      loadMoreParent: lastTable?.parent_name ? { schema: lastTable.parent_schema, name: lastTable.parent_name } : undefined,
     };
   }
 
@@ -1212,7 +1217,7 @@ export const useConnectionStore = defineStore("connection", () => {
     pageSize: number;
     searchFilter?: string;
     force?: boolean;
-  }): Promise<{ children: TreeNode[]; objectCount: number; hasMore: boolean; nextOffset: number }> {
+  }): Promise<{ children: TreeNode[]; objectCount: number; hasMore: boolean; nextOffset: number; loadMoreParent?: TableTreeLoadMoreParent }> {
     const searchFilter = (options.searchFilter ?? sidebarSearchQuery.value) || undefined;
     const fetchLimit = searchFilter ? options.pageSize : options.pageSize + 1;
     const fetchOffset = searchFilter ? undefined : options.offset;
@@ -1242,11 +1247,13 @@ export const useConnectionStore = defineStore("connection", () => {
       schema: options.effectiveSchema,
       tables: pageTables,
     });
+    const lastTable = pageTables[pageTables.length - 1];
     return {
       children,
       objectCount: children.length,
       hasMore,
       nextOffset: options.offset + pageTables.length,
+      loadMoreParent: lastTable?.parent_name ? { schema: lastTable.parent_schema, name: lastTable.parent_name } : undefined,
     };
   }
 
@@ -2938,7 +2945,7 @@ export const useConnectionStore = defineStore("connection", () => {
               searchFilter: searchFilter || undefined,
               force: options?.force,
             });
-            children = page.hasMore && !searchFilter ? [...page.children, buildLoadMoreNode(node, page.nextOffset, pageSize)] : page.children;
+            children = page.hasMore && !searchFilter ? appendTableTreeLoadMoreNode(page.children, buildLoadMoreNode(node, page.nextOffset, pageSize), page.loadMoreParent) : page.children;
             nextObjectCount = page.objectCount;
           } else {
             children = buildObjectGroupPlaceholderNodes({
@@ -3050,7 +3057,7 @@ export const useConnectionStore = defineStore("connection", () => {
               searchFilter: searchFilter || undefined,
               force: options?.force,
             });
-            children = page.hasMore && !searchFilter ? [...page.children, buildLoadMoreNode(node, page.nextOffset, sidebarObjectGroupPageSize())] : page.children;
+            children = page.hasMore && !searchFilter ? appendTableTreeLoadMoreNode(page.children, buildLoadMoreNode(node, page.nextOffset, sidebarObjectGroupPageSize()), page.loadMoreParent) : page.children;
             nextObjectCount = page.objectCount;
           } else {
             const objects = await loadCachedMetadataListPage<ObjectInfo[]>(
@@ -3166,11 +3173,11 @@ export const useConnectionStore = defineStore("connection", () => {
               pageSize: loadMore.pageSize,
               force: false,
             });
-            const currentChildren = withoutLoadMoreNodes(parent.children);
+            const currentChildren = withoutTableTreeLoadMoreNodes(parent.children);
             const mergedChildren = mergeTableTreePageChildren(currentChildren, page.children, parentConnectionId, parentDatabase);
-            const nextChildren = page.hasMore ? [...mergedChildren, buildLoadMoreNode(parent, page.nextOffset, loadMore.pageSize)] : mergedChildren;
+            const nextChildren = page.hasMore ? appendTableTreeLoadMoreNode(mergedChildren, buildLoadMoreNode(parent, page.nextOffset, loadMore.pageSize), page.loadMoreParent) : mergedChildren;
             if (!canApplyTreeMetadataResult(parent)) return;
-            parent.objectCount = (parent.objectCount ?? currentChildren.length) + page.objectCount;
+            parent.objectCount = mergedChildren.length;
             setChildren(parent, nextChildren);
             await savePersistedTreeChildren(schemaCacheKey(parentConnectionId, parentDatabase, parent.schema || "", "objects-simple-v3"), nextChildren);
             parent.isExpanded = true;
@@ -3196,11 +3203,11 @@ export const useConnectionStore = defineStore("connection", () => {
             pageSize: loadMore.pageSize,
             force: false,
           });
-          const currentChildren = withoutLoadMoreNodes(parent.children);
+          const currentChildren = withoutTableTreeLoadMoreNodes(parent.children);
           const mergedChildren = mergeTableTreePageChildren(currentChildren, page.children, parentConnectionId, parentDatabase);
-          const nextChildren = page.hasMore ? [...mergedChildren, buildLoadMoreNode(parent, page.nextOffset, loadMore.pageSize)] : mergedChildren;
+          const nextChildren = page.hasMore ? appendTableTreeLoadMoreNode(mergedChildren, buildLoadMoreNode(parent, page.nextOffset, loadMore.pageSize), page.loadMoreParent) : mergedChildren;
           if (!canApplyTreeMetadataResult(parent)) return;
-          parent.objectCount = (parent.objectCount ?? currentChildren.length) + page.objectCount;
+          parent.objectCount = mergedChildren.length;
           setChildren(parent, nextChildren);
           await savePersistedTreeChildren(objectGroupCacheKey(parent), nextChildren);
           parent.isExpanded = true;
@@ -3313,11 +3320,11 @@ export const useConnectionStore = defineStore("connection", () => {
         await loadObjectGroupChildren(parent);
       }
 
-      let loadMoreNode = parent.children?.find((child) => child.type === "load-more");
+      let loadMoreNode = findTreeNodes(parent.children ?? [], (child) => child.type === "load-more")[0];
       while (loadMoreNode?.loadMore) {
         loadMoreNode.isLoading = true;
         await loadMoreObjectGroupChildren(loadMoreNode);
-        loadMoreNode = parent.children?.find((child) => child.type === "load-more");
+        loadMoreNode = findTreeNodes(parent.children ?? [], (child) => child.type === "load-more")[0];
       }
       parent.isExpanded = true;
     } catch (e) {

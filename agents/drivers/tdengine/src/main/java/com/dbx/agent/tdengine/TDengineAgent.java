@@ -25,7 +25,6 @@ import java.sql.Types;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -101,14 +100,19 @@ public final class TDengineAgent extends BaseDatabaseAgent {
         return unchecked(() -> {
             List<TableInfo> result = new ArrayList<>();
             result.addAll(queryTables("SHOW " + quoteQualifiedPrefix(schema) + "STABLES", "STABLE"));
-            result.addAll(queryTables("SHOW " + quoteQualifiedPrefix(schema) + "TABLES", "TABLE"));
+            try {
+                result.addAll(queryTablesWithStableParents());
+            } catch (Exception ignored) {
+                // TDengine 2.x does not expose information_schema.ins_tables.
+                result.addAll(queryTables("SHOW " + quoteQualifiedPrefix(schema) + "TABLES", "TABLE"));
+            }
 
             Map<String, TableInfo> distinct = new LinkedHashMap<>();
             for (TableInfo table : result) {
                 distinct.putIfAbsent(table.getTable_type() + ":" + table.getName(), table);
             }
             List<TableInfo> sorted = new ArrayList<>(distinct.values());
-            sorted.sort(Comparator.comparing(table -> table.getName().toLowerCase(Locale.ROOT)));
+            sortTablesForHierarchy(sorted);
             return sorted;
         });
     }
@@ -230,6 +234,49 @@ public final class TDengineAgent extends BaseDatabaseAgent {
             }
         }
         return result;
+    }
+
+    private List<TableInfo> queryTablesWithStableParents() throws Exception {
+        List<TableInfo> result = new ArrayList<>();
+        String sql = "SELECT table_name, stable_name, table_comment "
+            + "FROM information_schema.ins_tables WHERE db_name = DATABASE()";
+        try (java.sql.Statement stmt = requireConnected().createStatement();
+             ResultSet rs = stmt.executeQuery(sql)) {
+            while (rs.next()) {
+                result.add(new TableInfo(
+                    rs.getString(1),
+                    "TABLE",
+                    optionalString(rs, 3),
+                    null,
+                    optionalString(rs, 2)
+                ));
+            }
+        }
+        return result;
+    }
+
+    static void sortTablesForHierarchy(List<TableInfo> tables) {
+        tables.sort((left, right) -> {
+            String leftGroup = hierarchyGroupName(left);
+            String rightGroup = hierarchyGroupName(right);
+            int groupCompared = leftGroup.compareTo(rightGroup);
+            if (groupCompared != 0) {
+                return groupCompared;
+            }
+
+            boolean leftIsParent = left.getParent_name() == null;
+            boolean rightIsParent = right.getParent_name() == null;
+            if (leftIsParent != rightIsParent) {
+                return leftIsParent ? -1 : 1;
+            }
+            return left.getName().toLowerCase(Locale.ROOT).compareTo(right.getName().toLowerCase(Locale.ROOT));
+        });
+    }
+
+    private static String hierarchyGroupName(TableInfo table) {
+        String parentName = table.getParent_name();
+        String groupName = parentName == null || parentName.trim().isEmpty() ? table.getName() : parentName;
+        return groupName.toLowerCase(Locale.ROOT);
     }
 
     private static List<ColumnInfo> readDescribeColumns(ResultSet rs) throws Exception {

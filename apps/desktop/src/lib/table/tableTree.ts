@@ -292,7 +292,7 @@ function buildPartitionTree(entries: TableTreeEntry[], connectionId: string, dat
 
     const partitionGroup: TreeNode = {
       id: `${entry.node.id}:__partitions`,
-      label: "tree.partitions",
+      label: childTableGroupLabel(entry.node),
       type: "group-partitions",
       connectionId,
       database,
@@ -300,7 +300,7 @@ function buildPartitionTree(entries: TableTreeEntry[], connectionId: string, dat
       catalog: entry.node.catalog,
       tableName: entry.node.label,
       objectCount: partitionChildren.length,
-      isExpanded: false,
+      isExpanded: isSuperTable(entry.node),
       children: partitionChildren.map(materialize),
     };
     entry.node.children = [partitionGroup];
@@ -309,6 +309,14 @@ function buildPartitionTree(entries: TableTreeEntry[], connectionId: string, dat
   };
 
   return orderedEntries.filter((entry) => !childKeys.has(entry.key)).map(materialize);
+}
+
+function isSuperTable(parent: TreeNode): boolean {
+  return parent.tableType?.trim().toUpperCase() === "STABLE";
+}
+
+function childTableGroupLabel(parent: TreeNode): string {
+  return isSuperTable(parent) ? "tree.childTables" : "tree.partitions";
 }
 
 function partitionGroupChildren(node: TreeNode): TreeNode[] {
@@ -323,6 +331,43 @@ export function tablePartitionGroups(node: TreeNode): TreeNode[] {
 
 export function hasTablePartitionGroups(node: TreeNode): boolean {
   return partitionGroupChildren(node).length > 0;
+}
+
+export type TableTreeLoadMoreParent = {
+  schema?: string | null;
+  name: string;
+};
+
+function findTableTreeNode(nodes: readonly TreeNode[], parent: TableTreeLoadMoreParent): TreeNode | undefined {
+  for (const node of nodes) {
+    const sameSchema = !parent.schema || (node.schema || "").toLowerCase() === parent.schema.toLowerCase();
+    if (node.type === "table" && sameSchema && node.label.toLowerCase() === parent.name.toLowerCase()) return node;
+
+    const child = findTableTreeNode(node.children ?? [], parent);
+    if (child) return child;
+    const hiddenChild = findTableTreeNode(node.hiddenChildren?.filter((item) => !(node.children ?? []).includes(item)) ?? [], parent);
+    if (hiddenChild) return hiddenChild;
+  }
+  return undefined;
+}
+
+export function appendTableTreeLoadMoreNode(children: TreeNode[], loadMoreNode: TreeNode, parent?: TableTreeLoadMoreParent): TreeNode[] {
+  const parentNode = parent ? findTableTreeNode(children, parent) : undefined;
+  const childGroup = parentNode ? tablePartitionGroups(parentNode)[0] : undefined;
+  if (!childGroup) return [...children, loadMoreNode];
+
+  childGroup.children = [...(childGroup.children ?? []), loadMoreNode];
+  return children;
+}
+
+export function withoutTableTreeLoadMoreNodes(nodes: TreeNode[] | undefined): TreeNode[] {
+  return (nodes ?? [])
+    .filter((node) => node.type !== "load-more")
+    .map((node) => {
+      if (node.children) node.children = withoutTableTreeLoadMoreNodes(node.children);
+      if (node.hiddenChildren) node.hiddenChildren = withoutTableTreeLoadMoreNodes(node.hiddenChildren);
+      return node;
+    });
 }
 
 export function mergeTableTreePageChildren(currentChildren: TreeNode[], pageChildren: TreeNode[], connectionId: string, database: string): TreeNode[] {
@@ -351,14 +396,14 @@ export function mergeTableTreePageChildren(currentChildren: TreeNode[], pageChil
     if (existing) return existing;
     const group: TreeNode = {
       id: `${parent.id}:__partitions`,
-      label: "tree.partitions",
+      label: childTableGroupLabel(parent),
       type: "group-partitions",
       connectionId,
       database,
       schema: parent.schema,
       tableName: parent.label,
       objectCount: 0,
-      isExpanded: false,
+      isExpanded: isSuperTable(parent),
       children: [],
     };
     parent.children = [...(parent.children ?? []), group];

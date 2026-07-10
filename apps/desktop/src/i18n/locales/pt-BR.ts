@@ -1584,6 +1584,7 @@ export default withEnglishFallback({
     sequences: "Sequências",
     packages: "Pacotes",
     partitions: "Partições",
+    childTables: "Subtabelas",
     loadMore: "Carregar mais...",
     objectBrowser: "Navegar no Navegador de Objetos ({count})",
     extensions: "Extensões",

@@ -8,7 +8,10 @@ use data_grid_neo4j_sql::{build_neo4j_data_grid_rollback_statements, build_neo4j
 
 #[path = "data_grid_tdengine_sql.rs"]
 mod data_grid_tdengine_sql;
-use data_grid_tdengine_sql::build_tdengine_data_grid_save_statements;
+use data_grid_tdengine_sql::{
+    build_tdengine_data_grid_rollback_statements, build_tdengine_data_grid_save_statements,
+    validate_tdengine_deleted_rows, validate_tdengine_inserted_rows,
+};
 
 use crate::models::connection::DatabaseType;
 use crate::sql_dialect::{
@@ -643,7 +646,13 @@ fn build_neo4j_data_grid_column_distinct_values_sql(options: &DataGridColumnDist
 }
 
 fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<String> {
+    if let Some(error) = validate_tdengine_inserted_rows(options) {
+        return Some(error);
+    }
     if let Some(error) = validate_inserted_primary_keys(options) {
+        return Some(error);
+    }
+    if let Some(error) = validate_tdengine_deleted_rows(options) {
         return Some(error);
     }
 
@@ -890,6 +899,9 @@ fn build_data_grid_save_statements(options: &DataGridSaveStatementOptions) -> Ve
 fn build_data_grid_rollback_statements(options: &DataGridSaveStatementOptions) -> Vec<String> {
     if options.database_type == Some(DatabaseType::Neo4j) {
         return build_neo4j_data_grid_rollback_statements(options);
+    }
+    if options.database_type == Some(DatabaseType::Tdengine) {
+        return build_tdengine_data_grid_rollback_statements(options);
     }
     if options.database_type == Some(DatabaseType::ClickHouse) {
         return Vec::new();
@@ -2940,6 +2952,199 @@ mod tests {
                 "INSERT INTO [game].[player states] ([role id], [state], [updated at]) VALUES (43, N'new', N'2026-05-05');",
             ]
         );
+    }
+
+    #[test]
+    fn prepares_tdengine_child_table_delete_from_stable_row() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "meters".to_string(),
+                primary_keys: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string()],
+                columns: Some(vec![column("ts", "TIMESTAMP", false, None), column("voltage", "FLOAT", true, None)]),
+            },
+            columns: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string(), "voltage".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("codex_delete_verify"), json!("2026-07-10T13:59:00.456+08:00"), json!(221.5)]],
+            dirty_rows: vec![],
+            deleted_rows: vec![0],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec!["DELETE FROM `dbx_tdengine_demo`.`codex_delete_verify` WHERE `ts` = '2026-07-10T13:59:00.456+08:00';"]
+        );
+        assert_eq!(
+            result.rollback_statements,
+            vec!["INSERT INTO `dbx_tdengine_demo`.`meters` (`tbname`, `ts`, `voltage`) VALUES ('codex_delete_verify', '2026-07-10T13:59:00.456+08:00', 221.5);"]
+        );
+    }
+
+    #[test]
+    fn prepares_tdengine_delete_from_direct_child_table_row() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "codex_grid_accept_20260710".to_string(),
+                primary_keys: vec!["ts".to_string()],
+                columns: Some(vec![column("ts", "TIMESTAMP", false, None), column("voltage", "FLOAT", true, None)]),
+            },
+            columns: vec!["ts".to_string(), "voltage".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("2026-07-10T16:00:00.111+08:00"), json!(220.1)]],
+            dirty_rows: vec![],
+            deleted_rows: vec![0],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec!["DELETE FROM `dbx_tdengine_demo`.`codex_grid_accept_20260710` WHERE `ts` = '2026-07-10T16:00:00.111+08:00';"]
+        );
+        assert_eq!(
+            result.rollback_statements,
+            vec!["INSERT INTO `dbx_tdengine_demo`.`codex_grid_accept_20260710` (`ts`, `voltage`) VALUES ('2026-07-10T16:00:00.111+08:00', 220.1);"]
+        );
+    }
+
+    #[test]
+    fn prepares_tdengine_overwrite_for_direct_child_table_row() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "codex_grid_update_verify_20260710".to_string(),
+                primary_keys: vec!["ts".to_string()],
+                columns: Some(vec![
+                    column("ts", "TIMESTAMP", false, None),
+                    column("voltage", "FLOAT", true, None),
+                    column("current", "FLOAT", true, None),
+                ]),
+            },
+            columns: vec!["ts".to_string(), "voltage".to_string(), "current".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("2026-07-10T16:30:00.444+08:00"), json!(220.0), json!(1.0)]],
+            dirty_rows: vec![(0, vec![(1, json!(229.9))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec!["INSERT INTO `dbx_tdengine_demo`.`codex_grid_update_verify_20260710` (`ts`, `voltage`, `current`) VALUES ('2026-07-10T16:30:00.444+08:00', 229.9, 1.0);"]
+        );
+        assert_eq!(
+            result.rollback_statements,
+            vec!["INSERT INTO `dbx_tdengine_demo`.`codex_grid_update_verify_20260710` (`ts`, `voltage`, `current`) VALUES ('2026-07-10T16:30:00.444+08:00', 220.0, 1.0);"]
+        );
+    }
+
+    #[test]
+    fn prepares_tdengine_stable_insert_with_child_table_identity() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "issue_3121_devices".to_string(),
+                primary_keys: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string()],
+                columns: Some(vec![
+                    column("ts", "TIMESTAMP", false, None),
+                    column("reading", "FLOAT", true, None),
+                    column("site", "VARCHAR", true, Some("TAG")),
+                ]),
+            },
+            columns: vec![
+                DBX_TDENGINE_TBNAME_COLUMN.to_string(),
+                "ts".to_string(),
+                "reading".to_string(),
+                "site".to_string(),
+            ],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![
+                json!("codex_issue3121_insert_verify"),
+                json!("2026-07-10T17:48:51.000+08:00"),
+                json!(1.0),
+                json!("codex-lab"),
+            ]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec!["INSERT INTO `dbx_tdengine_demo`.`issue_3121_devices` (`tbname`, `ts`, `reading`, `site`) VALUES ('codex_issue3121_insert_verify', '2026-07-10T17:48:51.000+08:00', 1.0, 'codex-lab');"]
+        );
+        assert_eq!(
+            result.rollback_statements,
+            vec!["DELETE FROM `dbx_tdengine_demo`.`codex_issue3121_insert_verify` WHERE `ts` = '2026-07-10T17:48:51.000+08:00';"]
+        );
+    }
+
+    #[test]
+    fn rejects_tdengine_stable_insert_without_child_table_identity() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "issue_3121_devices".to_string(),
+                primary_keys: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string()],
+                columns: Some(vec![column("ts", "TIMESTAMP", false, None), column("reading", "FLOAT", true, None)]),
+            },
+            columns: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string(), "reading".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![Value::Null, json!("2026-07-10T17:48:51.000+08:00"), json!(1.0)]],
+        });
+
+        assert_eq!(
+            result.validation_error,
+            Some("TDengine STABLE inserts require a child table name (tbname).".to_string())
+        );
+        assert!(result.statements.is_empty());
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn rejects_tdengine_delete_without_child_table_identity() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "meters".to_string(),
+                primary_keys: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string()],
+                columns: Some(vec![column("ts", "TIMESTAMP", false, None)]),
+            },
+            columns: vec!["ts".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("2026-07-10T13:59:00.456+08:00")]],
+            dirty_rows: vec![],
+            deleted_rows: vec![0],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.validation_error,
+            Some(
+                "TDengine row deletion requires the child table name (tbname) and primary timestamp value.".to_string()
+            )
+        );
+        assert!(result.statements.is_empty());
     }
 
     #[test]

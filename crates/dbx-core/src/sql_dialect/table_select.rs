@@ -248,6 +248,9 @@ pub(super) fn build_select_columns(
     include_tdengine_tbname: bool,
 ) -> String {
     if columns.is_empty() {
+        if database_type == Some(DatabaseType::Tdengine) && include_tdengine_tbname {
+            return format!("{DBX_TDENGINE_TBNAME_COLUMN}, *");
+        }
         return "*".to_string();
     }
     if database_type == Some(DatabaseType::Tdengine) {

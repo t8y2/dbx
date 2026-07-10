@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { DBX_ROWID_COLUMN, canEditExistingTableRows, canUseKeylessRowPredicate, editablePrimaryKeys, editableRowIdentifierColumns, isClickHouseExistingRowReadonlyColumn, isTableDataEditable, supportsDataGridTransaction, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
+import {
+  DBX_ROWID_COLUMN,
+  DBX_TDENGINE_TBNAME_COLUMN,
+  canEditExistingTableRows,
+  canUseKeylessRowPredicate,
+  editablePrimaryKeys,
+  editableRowIdentifierColumns,
+  isClickHouseExistingRowReadonlyColumn,
+  isTableDataEditable,
+  supportsDataGridTransaction,
+  usesSyntheticRowIdKey,
+} from "@/lib/table/tableEditing";
 import type { ColumnInfo, IndexInfo } from "@/types/database";
 
 function column(name: string, isPrimaryKey = false): ColumnInfo {
@@ -57,6 +68,14 @@ describe("tableEditing", () => {
     expect(supportsDataGridTransaction("clickhouse")).toBe(false);
     expect(isTableDataEditable("clickhouse", [], "BASE TABLE")).toBe(true);
     expect(canEditExistingTableRows("clickhouse", undefined, [])).toBe(false);
+  });
+
+  it("uses tbname only when editing TDengine stable rows", () => {
+    const columns = [column("ts", true), column("voltage")];
+    expect(editablePrimaryKeys("tdengine", columns, "STABLE")).toEqual([DBX_TDENGINE_TBNAME_COLUMN, "ts"]);
+    expect(editablePrimaryKeys("tdengine", columns, "TABLE")).toEqual(["ts"]);
+    expect(canEditExistingTableRows("tdengine", undefined, ["ts"])).toBe(true);
+    expect(canEditExistingTableRows("tdengine", undefined, [])).toBe(false);
   });
 
   it("treats ClickHouse row identifier cells as readonly on existing rows", () => {

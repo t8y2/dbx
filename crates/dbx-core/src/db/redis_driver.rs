@@ -185,6 +185,7 @@ pub enum RedisCollectionPage {
 #[serde(rename_all = "snake_case")]
 pub enum RedisCommandSafety {
     Allowed,
+    Write,
     Confirm,
     Blocked,
 }
@@ -1331,11 +1332,16 @@ pub fn classify_command(command: &str) -> RedisCommandSafety {
     match command.to_ascii_uppercase().as_str() {
         "KEYS" | "FLUSHALL" | "SHUTDOWN" | "CONFIG" | "SAVE" | "BGSAVE" | "SLAVEOF" | "REPLICAOF" | "MIGRATE"
         | "MODULE" | "SCRIPT" | "EVAL" | "EVALSHA" => RedisCommandSafety::Blocked,
-        "DEL" | "UNLINK" | "EXPIRE" | "EXPIREAT" | "PEXPIRE" | "PEXPIREAT" | "PERSIST" | "RENAME" | "RENAMENX"
-        | "SET" | "SETEX" | "PSETEX" | "SETNX" | "MSET" | "MSETNX" | "HSET" | "HDEL" | "LPUSH" | "RPUSH" | "LPOP"
-        | "RPOP" | "LSET" | "LREM" | "SADD" | "SREM" | "ZADD" | "ZREM" | "XADD" | "XDEL" | "FLUSHDB" => {
-            RedisCommandSafety::Confirm
-        }
+        "DEL" | "UNLINK" | "EXPIRE" | "EXPIREAT" | "PEXPIRE" | "PEXPIREAT" | "RENAME" | "RENAMENX" | "GETDEL"
+        | "HDEL" | "LPOP" | "RPOP" | "LREM" | "LTRIM" | "SPOP" | "SREM" | "ZREM" | "ZPOPMAX" | "ZPOPMIN" | "ZMPOP"
+        | "ZREMRANGEBYLEX" | "ZREMRANGEBYRANK" | "ZREMRANGEBYSCORE" | "XDEL" | "XTRIM" | "MOVE" | "SORT"
+        | "SDIFFSTORE" | "SINTERSTORE" | "SUNIONSTORE" | "ZDIFFSTORE" | "ZINTERSTORE" | "ZRANGESTORE"
+        | "ZUNIONSTORE" | "PFMERGE" | "GEOSEARCHSTORE" | "FLUSHDB" => RedisCommandSafety::Confirm,
+        "APPEND" | "BITFIELD" | "BITOP" | "COPY" | "DECR" | "DECRBY" | "GEOADD" | "GEORADIUS" | "GEORADIUSBYMEMBER"
+        | "GETSET" | "INCR" | "INCRBY" | "INCRBYFLOAT" | "SET" | "SETEX" | "PSETEX" | "SETNX" | "SETRANGE" | "MSET"
+        | "MSETNX" | "PERSIST" | "HSET" | "HMSET" | "HINCRBY" | "HINCRBYFLOAT" | "HSETNX" | "LINSERT" | "LSET"
+        | "LMOVE" | "LPUSH" | "LPUSHX" | "PFADD" | "RPUSH" | "RPUSHX" | "RESTORE" | "SADD" | "ZADD" | "ZINCRBY"
+        | "SETBIT" | "XADD" | "XACK" | "XAUTOCLAIM" | "XCLAIM" | "XSETID" => RedisCommandSafety::Write,
         _ => RedisCommandSafety::Allowed,
     }
 }
@@ -2909,7 +2915,9 @@ mod tests {
     #[test]
     fn classifies_safe_confirmed_and_blocked_commands() {
         assert_eq!(classify_command("GET"), RedisCommandSafety::Allowed);
-        assert_eq!(classify_command("set"), RedisCommandSafety::Confirm);
+        assert_eq!(classify_command("set"), RedisCommandSafety::Write);
+        assert_eq!(classify_command("hset"), RedisCommandSafety::Write);
+        assert_eq!(classify_command("del"), RedisCommandSafety::Confirm);
         assert_eq!(classify_command("flushdb"), RedisCommandSafety::Confirm);
         assert_eq!(classify_command("KEYS"), RedisCommandSafety::Blocked);
         assert_eq!(classify_command("flushall"), RedisCommandSafety::Blocked);

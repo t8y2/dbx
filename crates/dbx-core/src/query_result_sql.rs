@@ -803,6 +803,33 @@ fn has_top_level_limit(sql: &str) -> bool {
     top_level_sql_tokens(sql).iter().any(|token| token.text == "LIMIT")
 }
 
+fn top_level_limit_row_count(sql: &str) -> Option<usize> {
+    let token = top_level_sql_tokens(sql).into_iter().find(|token| token.text == "LIMIT")?;
+    parse_standard_limit_row_count(sql, token.start + token.text.len())
+}
+
+fn parse_standard_limit_row_count(sql: &str, start: usize) -> Option<usize> {
+    let mut cursor = skip_sql_whitespace(sql, start);
+    let first = parse_usize_literal(sql, &mut cursor)?;
+    cursor = skip_sql_whitespace(sql, cursor);
+    if sql.get(cursor..)?.starts_with(',') {
+        cursor = skip_sql_whitespace(sql, cursor + 1);
+        return parse_usize_literal(sql, &mut cursor);
+    }
+    Some(first)
+}
+
+fn parse_usize_literal(sql: &str, cursor: &mut usize) -> Option<usize> {
+    let start = *cursor;
+    while *cursor < sql.len() && sql.as_bytes()[*cursor].is_ascii_digit() {
+        *cursor += 1;
+    }
+    if *cursor == start {
+        return None;
+    }
+    sql[start..*cursor].parse().ok()
+}
+
 fn has_top_level_informix_row_limit(sql: &str) -> bool {
     if has_top_level_limit(sql) {
         return true;
@@ -914,7 +941,9 @@ fn add_standard_limit(
             // ordering across pages in distributed databases like Doris.
             return add_outer_standard_limit(statement, database_type, limit, offset, &order_sql);
         }
-        if offset > 0 {
+        // A user/top-level LIMIT can still be wider than the selected grid page size.
+        // Wrap it so the first page respects the UI page limit while preserving the user's cap.
+        if offset > 0 || top_level_limit_row_count(statement).is_some_and(|row_count| row_count > limit) {
             return add_outer_standard_limit(statement, database_type, limit, offset, "");
         }
         return format!("{statement};");
@@ -1909,6 +1938,36 @@ WHERE u.id = picked.id;
         });
 
         assert_eq!(result.sql.unwrap(), "SELECT id FROM users LIMIT 20;");
+    }
+
+    #[test]
+    fn mysql_pagination_wraps_wide_existing_limit_on_first_page() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT * FROM dy_promotion_item WHERE create_time < '2026-06-01' LIMIT 10000;".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+            limit: 500,
+            offset: 0,
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT * FROM dy_promotion_item WHERE create_time < '2026-06-01' LIMIT 10000) `dbx_page` LIMIT 500 OFFSET 0;"
+        );
+    }
+
+    #[test]
+    fn mysql_pagination_wraps_comma_limit_row_count_on_first_page() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT * FROM users LIMIT 20, 10000;".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+            limit: 500,
+            offset: 0,
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT * FROM users LIMIT 20, 10000) `dbx_page` LIMIT 500 OFFSET 0;"
+        );
     }
 
     #[test]

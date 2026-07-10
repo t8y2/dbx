@@ -37,13 +37,11 @@ test("flags wrong arity (too many arguments)", () => {
 });
 
 test("respects variable arity (negative arity is a minimum)", () => {
-  // MSET arity -3 → at least 2 args; 2 args (3 tokens) is valid (still flagged write-warning).
+  // MSET arity -3 → at least 2 args; 2 args (3 tokens) is valid.
   const ok3 = buildRedisSyntaxDiagnostics("MSET k1 v1");
-  assert.equal(ok3.length, 1);
-  assert.equal(ok3[0].severity, "warning");
+  assert.equal(ok3.length, 0);
   const ok4 = buildRedisSyntaxDiagnostics("MSET k1 v1 k2 v2");
-  assert.equal(ok4.length, 1);
-  assert.equal(ok4[0].severity, "warning");
+  assert.equal(ok4.length, 0);
   // Too few → arity error takes precedence.
   const diags = buildRedisSyntaxDiagnostics("MSET k1");
   assert.equal(diags.length, 1);
@@ -58,11 +56,11 @@ test("flags unclosed quote and spans to end of line", () => {
   assert.equal(diags[0].span.start_column, 5); // quote starts at column 5
 });
 
-test("highlights write commands as warning", () => {
+test("highlights destructive commands as warning", () => {
   const diags = buildRedisSyntaxDiagnostics("DEL x");
   assert.equal(diags.length, 1);
   assert.equal(diags[0].severity, "warning");
-  assert.match(diags[0].message, /Write command 'DEL'/);
+  assert.match(diags[0].message, /Dangerous command 'DEL'/);
 });
 
 test("highlights flushall as blocked error but flushdb as confirm warning", () => {
@@ -75,22 +73,19 @@ test("highlights flushall as blocked error but flushdb as confirm warning", () =
   const db = buildRedisSyntaxDiagnostics("FLUSHDB");
   assert.equal(db.length, 1);
   assert.equal(db[0].severity, "warning");
-  assert.match(db[0].message, /Write command 'FLUSHDB'/);
+  assert.match(db[0].message, /Dangerous command 'FLUSHDB'/);
 });
 
 test("subcommands resolve via MAIN SUB key", () => {
-  // XGROUP CREATE stream group id MKSTREAM → 6 tokens, satisfies arity -6, confirm → warning.
+  // XGROUP CREATE stream group id MKSTREAM → 6 tokens, satisfies arity -6.
   const diags = buildRedisSyntaxDiagnostics("XGROUP CREATE stream group $ MKSTREAM");
-  assert.equal(diags.length, 1);
-  assert.equal(diags[0].severity, "warning");
-  assert.match(diags[0].message, /Write command 'XGROUP'/);
+  assert.equal(diags.length, 0);
 });
 
 test("treats command names case-insensitively", () => {
   assert.deepEqual(messages("get foo"), []);
   const setDiag = buildRedisSyntaxDiagnostics("Set a b");
-  assert.equal(setDiag.length, 1);
-  assert.equal(setDiag[0].severity, "warning");
+  assert.equal(setDiag.length, 0);
   const diags = buildRedisSyntaxDiagnostics("flushall");
   assert.match(diags[0].message, /Blocked command 'flushall'/);
 });
@@ -127,11 +122,17 @@ test("shouldRunRedisDiagnostics waits while typing the command name", () => {
 test("tokenizeRedisLine preserves quoted values with spaces", () => {
   const { argv, unclosedQuote } = tokenizeRedisLine('SET mykey "hello world"');
   assert.equal(unclosedQuote, false);
-  assert.deepEqual(argv.map((t) => t.value), ["SET", "mykey", "hello world"]);
+  assert.deepEqual(
+    argv.map((t) => t.value),
+    ["SET", "mykey", "hello world"],
+  );
   assert.equal(argv[2]!.startColumn, 11);
 });
 
 test("tokenizeRedisLine handles backslash escapes", () => {
-  const { argv } = tokenizeRedisLine('SET k a\\ b');
-  assert.deepEqual(argv.map((t) => t.value), ["SET", "k", "a b"]);
+  const { argv } = tokenizeRedisLine("SET k a\\ b");
+  assert.deepEqual(
+    argv.map((t) => t.value),
+    ["SET", "k", "a b"],
+  );
 });

@@ -453,6 +453,13 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     await copyText(formatSelectionAsTsv({ columns: columns.value, rows }));
   }
 
+  async function copySelectedRowsTsvWithHeaders() {
+    if (!hasRowSelection.value || selectedRowIds.value.size === 0) return;
+    const rows = displayItems.value.filter((item) => selectedRowIds.value.has(item.id) && !item.isDraft).map((item) => item.data);
+    if (rows.length === 0) return;
+    await copyText(formatSelectionAsTsv({ columns: columns.value, rows }, true));
+  }
+
   async function copyColumnNames() {
     if (columns.value.length === 0) return;
     await copyText(columns.value.join("\t"));
@@ -1112,6 +1119,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     copySelectionJson,
     copySelectionSqlInList,
     copySelectedRowsTsv,
+    copySelectedRowsTsvWithHeaders,
     copyColumnNames,
     exportCsv,
     exportCurrentPageCsv,

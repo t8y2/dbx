@@ -13,11 +13,13 @@ const props = withDefaults(
     variant?: "cell" | "inline";
     cellLayout?: "grid" | "transpose";
     commitOnClose?: boolean;
+    fractionPrecision?: number;
   }>(),
   {
     variant: "cell",
     cellLayout: "grid",
     commitOnClose: true,
+    fractionPrecision: 0,
   },
 );
 
@@ -37,6 +39,14 @@ let skipCommitOnClose = false;
 
 const hasDate = computed(() => props.kind !== "time");
 const hasTime = computed(() => props.kind !== "date");
+const normalizedFractionPrecision = computed(() => Math.max(0, Math.min(9, props.fractionPrecision || 0)));
+const existingFractionDigits = computed(() => parseFractionDigits(timeValue.value));
+const fractionInputLength = computed(() => normalizedFractionPrecision.value || existingFractionDigits.value.length);
+const fractionInputMaxLength = computed(() => Math.max(1, fractionInputLength.value));
+const showFractionInput = computed(() => hasTime.value && (normalizedFractionPrecision.value > 0 || existingFractionDigits.value.length > 0));
+const timeGridStyle = computed(() => ({
+  gridTemplateColumns: showFractionInput.value ? "3.5rem 0.5rem 3.5rem 0.5rem 3.5rem 0.5rem 5rem" : "3.5rem 0.5rem 3.5rem 0.5rem 3.5rem",
+}));
 const editorRootClass = computed(() => (props.variant === "inline" ? "relative h-9 w-full" : "absolute inset-0 z-10"));
 const inputClass = computed(() =>
   props.variant === "inline"
@@ -64,7 +74,9 @@ const timeValue = computed(() => {
 });
 
 const timeParts = computed(() => {
-  const [hour = "00", minute = "00", second = "00"] = timeValue.value.split(":");
+  const match = /^(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?$/.exec(timeValue.value);
+  if (!match) return { hour: "00", minute: "00", second: "00" };
+  const [, hour = "00", minute = "00", second = "00"] = match;
   return { hour, minute, second };
 });
 
@@ -118,7 +130,7 @@ function stepDate(part: "day" | "month" | "year", delta: number) {
 
 function updateTime(part: "hour" | "minute" | "second", rawValue: string | number) {
   const parts = { ...timeParts.value, [part]: normalizeTimePart(rawValue, part === "hour" ? 23 : 59) };
-  const nextTime = `${parts.hour}:${parts.minute}:${parts.second}`;
+  const nextTime = `${parts.hour}:${parts.minute}:${parts.second}${fractionSuffix.value}`;
   if (props.kind === "time") {
     setModelValue(nextTime);
     return;
@@ -134,6 +146,26 @@ function stepTime(part: "hour" | "minute" | "second", delta: number) {
   setModelValue(stepTemporalInputValue(localValue.value, props.kind, part, delta));
 }
 
+const fractionSuffix = computed(() => {
+  const digits = existingFractionDigits.value;
+  return digits ? `.${digits}` : "";
+});
+
+function updateFraction(event: Event) {
+  updateFractionValue((event.target as HTMLInputElement).value);
+}
+
+function updateFractionValue(rawValue: string) {
+  const maxLength = Math.max(1, fractionInputLength.value);
+  const digits = rawValue.replace(/\D/g, "").slice(0, maxLength);
+  const nextTime = `${timeParts.value.hour}:${timeParts.value.minute}:${timeParts.value.second}${digits ? `.${digits}` : ""}`;
+  if (props.kind === "time") {
+    setModelValue(nextTime);
+    return;
+  }
+  setDateTimeValue(dateParts.value.year, dateParts.value.month, dateParts.value.day, nextTime);
+}
+
 function flushInputValue(target: EventTarget | null) {
   if (!(target instanceof HTMLInputElement)) return;
   const part = target.dataset.temporalPart;
@@ -141,6 +173,8 @@ function flushInputValue(target: EventTarget | null) {
     updateDate(part, target.value);
   } else if (part === "hour" || part === "minute" || part === "second") {
     updateTime(part, target.value);
+  } else if (part === "fraction") {
+    updateFractionValue(target.value);
   }
 }
 
@@ -155,7 +189,7 @@ function setNull() {
 function setNow() {
   const now = new Date();
   const dateText = [String(now.getFullYear()).padStart(4, "0"), String(now.getMonth() + 1).padStart(2, "0"), String(now.getDate()).padStart(2, "0")].join("-");
-  const nextTime = [String(now.getHours()).padStart(2, "0"), String(now.getMinutes()).padStart(2, "0"), String(now.getSeconds()).padStart(2, "0")].join(":");
+  const nextTime = [String(now.getHours()).padStart(2, "0"), String(now.getMinutes()).padStart(2, "0"), String(now.getSeconds()).padStart(2, "0")].join(":") + nowFractionSuffix(now);
   if (props.kind === "date") setModelValue(dateText);
   else if (props.kind === "time") setModelValue(nextTime);
   else setModelValue(`${dateText} ${nextTime}`);
@@ -234,6 +268,16 @@ function setDateTimeValue(year: number, month: number, day: number, time: string
   else setModelValue(`${dateText} ${time}`);
 }
 
+function parseFractionDigits(value: string): string {
+  return value.match(/\.(\d{1,9})/)?.[1] ?? "";
+}
+
+function nowFractionSuffix(now: Date): string {
+  const precision = normalizedFractionPrecision.value;
+  if (precision <= 0) return "";
+  return `.${String(now.getMilliseconds()).padStart(3, "0").padEnd(precision, "0").slice(0, precision)}`;
+}
+
 function daysInMonth(year: number, month: number): number {
   return new Date(year, month, 0).getDate();
 }
@@ -295,7 +339,7 @@ function twoDigit(value: string | number): string {
         </div>
       </div>
 
-      <div v-if="hasTime" class="grid grid-cols-[3.5rem_0.5rem_3.5rem_0.5rem_3.5rem] items-center gap-1.5">
+      <div v-if="hasTime" class="grid items-center gap-1.5" :style="timeGridStyle">
         <div class="grid h-7 min-w-0 grid-cols-[1fr_1.35rem] overflow-hidden rounded-md border border-input bg-background">
           <input :value="twoDigit(timeParts.hour)" data-temporal-part="hour" inputmode="numeric" class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none" @input="updateTimeFromInput('hour', $event)" />
           <div class="grid border-l">
@@ -331,6 +375,12 @@ function twoDigit(value: string | number): string {
             </button>
           </div>
         </div>
+        <template v-if="showFractionInput">
+          <span class="text-center text-xs text-muted-foreground">.</span>
+          <div class="grid h-7 min-w-0 overflow-hidden rounded-md border border-input bg-background">
+            <input :value="existingFractionDigits" data-temporal-part="fraction" inputmode="numeric" :maxlength="fractionInputMaxLength" class="min-w-0 bg-transparent px-1 text-center text-[13px] tabular-nums outline-none" placeholder="0" @input="updateFraction" />
+          </div>
+        </template>
       </div>
 
       <div class="flex items-center justify-between gap-1">

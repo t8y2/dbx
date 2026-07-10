@@ -97,8 +97,8 @@ test("data reload executes before slow metadata refresh completes", async () => 
     const actions = useDataGridActions(computed(() => tab));
     const reload = actions.onReloadData(undefined, undefined, undefined, undefined, 50, 0);
 
-    await waitFor(() => !!executeBody);
-    assert.equal(executeBody.clientSessionId, undefined);
+    await waitFor(() => !!executeBody, 5_000);
+    assert.equal(executeBody.clientSessionId, tabId);
     assert.deepEqual(tab.result?.rows, [[1]]);
 
     await waitFor(() => typeof resolveColumns === "function");

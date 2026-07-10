@@ -1656,7 +1656,12 @@ function triggerAction(action: AiAction, instruction?: string) {
   send();
 }
 
-defineExpose({ triggerAction });
+function setPrompt(text: string) {
+  prompt.value = text;
+  nextTick(() => promptTextareaRef.value?.focus());
+}
+
+defineExpose({ triggerAction, setPrompt });
 
 const messageRenderer = computed(() => {
   const appearance = aiCodeAppearance.value;

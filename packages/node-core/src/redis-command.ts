@@ -1,6 +1,6 @@
 import type { SqlSafetyOptions } from "./sql-safety.js";
 
-export type RedisCommandSafety = "allowed" | "confirm" | "blocked";
+export type RedisCommandSafety = "allowed" | "write" | "confirm" | "blocked";
 
 export interface RedisCommandResult {
   command: string;
@@ -21,21 +21,7 @@ export interface RedisCommandSafetyDecision {
   skipSafetyCheck?: boolean;
 }
 
-const BLOCKED_REDIS_COMMANDS = new Set([
-  "KEYS",
-  "FLUSHALL",
-  "SHUTDOWN",
-  "CONFIG",
-  "SAVE",
-  "BGSAVE",
-  "SLAVEOF",
-  "REPLICAOF",
-  "MIGRATE",
-  "MODULE",
-  "SCRIPT",
-  "EVAL",
-  "EVALSHA",
-]);
+const BLOCKED_REDIS_COMMANDS = new Set(["KEYS", "FLUSHALL", "SHUTDOWN", "CONFIG", "SAVE", "BGSAVE", "SLAVEOF", "REPLICAOF", "MIGRATE", "MODULE", "SCRIPT", "EVAL", "EVALSHA"]);
 
 const CONFIRM_REDIS_COMMANDS = new Set([
   "DEL",
@@ -44,30 +30,84 @@ const CONFIRM_REDIS_COMMANDS = new Set([
   "EXPIREAT",
   "PEXPIRE",
   "PEXPIREAT",
-  "PERSIST",
   "RENAME",
   "RENAMENX",
+  "GETDEL",
+  "HDEL",
+  "LPOP",
+  "RPOP",
+  "LREM",
+  "LTRIM",
+  "SPOP",
+  "SREM",
+  "ZREM",
+  "ZPOPMAX",
+  "ZPOPMIN",
+  "ZMPOP",
+  "ZREMRANGEBYLEX",
+  "ZREMRANGEBYRANK",
+  "ZREMRANGEBYSCORE",
+  "XDEL",
+  "XTRIM",
+  "MOVE",
+  "SORT",
+  "SDIFFSTORE",
+  "SINTERSTORE",
+  "SUNIONSTORE",
+  "ZDIFFSTORE",
+  "ZINTERSTORE",
+  "ZRANGESTORE",
+  "ZUNIONSTORE",
+  "PFMERGE",
+  "GEOSEARCHSTORE",
+  "FLUSHDB",
+]);
+
+const WRITE_REDIS_COMMANDS = new Set([
+  "APPEND",
+  "BITFIELD",
+  "BITOP",
+  "COPY",
+  "DECR",
+  "DECRBY",
+  "GEOADD",
+  "GEORADIUS",
+  "GEORADIUSBYMEMBER",
+  "GETSET",
+  "INCR",
+  "INCRBY",
+  "INCRBYFLOAT",
   "SET",
   "SETEX",
   "PSETEX",
   "SETNX",
+  "SETRANGE",
   "MSET",
   "MSETNX",
+  "PERSIST",
   "HSET",
-  "HDEL",
-  "LPUSH",
-  "RPUSH",
-  "LPOP",
-  "RPOP",
+  "HMSET",
+  "HINCRBY",
+  "HINCRBYFLOAT",
+  "HSETNX",
+  "LINSERT",
   "LSET",
-  "LREM",
+  "LMOVE",
+  "LPUSH",
+  "LPUSHX",
+  "PFADD",
+  "RPUSH",
+  "RPUSHX",
+  "RESTORE",
   "SADD",
-  "SREM",
   "ZADD",
-  "ZREM",
+  "ZINCRBY",
+  "SETBIT",
   "XADD",
-  "XDEL",
-  "FLUSHDB",
+  "XACK",
+  "XAUTOCLAIM",
+  "XCLAIM",
+  "XSETID",
 ]);
 
 export function firstRedisCommandToken(commandText: string): string | undefined {
@@ -84,6 +124,7 @@ export function classifyRedisCommand(commandText: string): RedisCommandSafety {
   if (!command) return "blocked";
   if (BLOCKED_REDIS_COMMANDS.has(command)) return "blocked";
   if (CONFIRM_REDIS_COMMANDS.has(command)) return "confirm";
+  if (WRITE_REDIS_COMMANDS.has(command)) return "write";
   return "allowed";
 }
 
@@ -124,7 +165,7 @@ export function parseRedisCommandArgv(commandText: string): string[] {
   const trimmed = commandText.trimEnd().replace(/;+$/, "");
   const argv: string[] = [];
   let current = "";
-  let quote: "\"" | "'" | undefined;
+  let quote: '"' | "'" | undefined;
   let escaping = false;
 
   for (const ch of trimmed) {
@@ -148,7 +189,7 @@ export function parseRedisCommandArgv(commandText: string): string[] {
       continue;
     }
 
-    if (ch === "\"" || ch === "'") {
+    if (ch === '"' || ch === "'") {
       quote = ch;
       continue;
     }

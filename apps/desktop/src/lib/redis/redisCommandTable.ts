@@ -2,15 +2,17 @@
  * Static Redis command metadata, distilled from the official Redis command table
  * (redis-doc `commands.json` / the `COMMAND` output). Kept offline and lightweight:
  * we only retain what the editor syntax diagnostics need — `arity` and `group` —
- * plus a `safety` hint for danger/write-command highlighting.
+ * plus a `safety` hint for command gating and write-command highlighting.
  *
  * Arity semantics (matches the Redis `COMMAND` reply, command name INCLUDED in the count):
  *   arity > 0  → the command takes exactly `arity` tokens (e.g. GET key → arity 2).
  *   arity < 0  → the command takes AT LEAST `-arity` tokens (e.g. MSET k v [k v ...] → arity -3).
  *
  * `safety` is aligned with the token-level sets in `redisCommandSafety.ts` (used to gate
- * execution). Here it is recorded per-command (including subcommands) so diagnostics can
- * be more precise than the first-token classification.
+ * execution). `write` commands mutate data without a confirmation prompt; `confirm`
+ * commands are destructive/structural enough to ask first. Here it is recorded
+ * per-command (including subcommands) so diagnostics can be more precise than the
+ * first-token classification.
  *
  * Subcommands are keyed as `"MAIN SUB"` in UPPER CASE (e.g. `"CONFIG GET"`, `"XGROUP CREATE"`).
  */
@@ -26,6 +28,57 @@ export interface RedisCommandSpec {
 }
 
 type Spec = [arity: number, group: string, safety?: RedisCommandSafety];
+
+const WRITE_WITHOUT_CONFIRM = new Set([
+  "APPEND",
+  "BITFIELD",
+  "BITOP",
+  "CLIENT SETINFO",
+  "CLIENT SETNAME",
+  "COPY",
+  "DECR",
+  "DECRBY",
+  "GEOADD",
+  "GEORADIUS",
+  "GEORADIUSBYMEMBER",
+  "GETSET",
+  "HINCRBY",
+  "HINCRBYFLOAT",
+  "HMSET",
+  "HSET",
+  "HSETNX",
+  "INCR",
+  "INCRBY",
+  "INCRBYFLOAT",
+  "LINSERT",
+  "LMOVE",
+  "LPUSH",
+  "LPUSHX",
+  "MSET",
+  "MSETNX",
+  "PERSIST",
+  "PFADD",
+  "PSETEX",
+  "RESTORE",
+  "RPUSH",
+  "RPUSHX",
+  "SADD",
+  "SET",
+  "SETBIT",
+  "SETEX",
+  "SETNX",
+  "SETRANGE",
+  "XACK",
+  "XADD",
+  "XAUTOCLAIM",
+  "XCLAIM",
+  "XGROUP CREATE",
+  "XGROUP CREATECONSUMER",
+  "XGROUP SETID",
+  "XSETID",
+  "ZADD",
+  "ZINCRBY",
+]);
 
 // Compact tuple form → expanded into the record below.
 const RAW_COMMANDS: Record<string, Spec> = {
@@ -367,7 +420,12 @@ const RAW_COMMANDS: Record<string, Spec> = {
   READWRITE: [1, "cluster"],
 };
 
-export const REDIS_COMMAND_TABLE: Record<string, RedisCommandSpec> = Object.fromEntries(Object.entries(RAW_COMMANDS).map(([name, [arity, group, safety]]) => [name.toUpperCase(), { arity, group, safety: safety ?? "allowed" }]));
+function commandTableSafety(name: string, safety?: RedisCommandSafety): RedisCommandSafety {
+  if (safety === "confirm" && WRITE_WITHOUT_CONFIRM.has(name.toUpperCase())) return "write";
+  return safety ?? "allowed";
+}
+
+export const REDIS_COMMAND_TABLE: Record<string, RedisCommandSpec> = Object.fromEntries(Object.entries(RAW_COMMANDS).map(([name, [arity, group, safety]]) => [name.toUpperCase(), { arity, group, safety: commandTableSafety(name, safety) }]));
 
 /**
  * Resolve a command spec. Handles two-token subcommands (e.g. `XGROUP CREATE`,
@@ -442,7 +500,7 @@ const NON_MUTATING_BLOCKED = new Set(["KEYS", "BGSAVE", "SAVE", "SHUTDOWN", "REP
  * completion for that db is potentially stale and should be dropped.
  *
  * Mapping from the diagnostic `safety` field:
- *   - `confirm`  → every write command mutates keys (SET/DEL/INCR/HSET/...).
+ *   - `write`/`confirm` → every write command mutates keys (SET/DEL/INCR/HSET/...).
  *   - `blocked`  → mostly destructive/admin; we keep the ones that may touch keys
  *                  (FLUSHALL, MIGRATE, EVAL[ESHA]) and exclude the read-only/admin
  *                  ones in `NON_MUTATING_BLOCKED`.
@@ -455,7 +513,7 @@ export function isRedisMutatingCommand(command: string): boolean {
   const argv = firstRedisArgvUpper(command);
   const spec = resolveRedisCommandSpec(argv);
   if (!spec) return false;
-  if (spec.safety === "confirm") return true;
+  if (spec.safety === "write" || spec.safety === "confirm") return true;
   if (spec.safety === "blocked") {
     return !NON_MUTATING_BLOCKED.has(argv[0]);
   }

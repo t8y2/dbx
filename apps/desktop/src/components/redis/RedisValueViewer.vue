@@ -102,7 +102,7 @@ const redisJsonWordWrap = ref(readRedisJsonWordWrap());
 const redisJsonHighlighter = ref<RedisJsonHighlighter>();
 
 // Auto-refresh
-const autoRefreshEnabled = ref(false);
+const autoRefreshEnabled = ref(true);
 const countdownTtl = ref(0);
 let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -130,10 +130,7 @@ function startAutoRefresh() {
       load()
         .then(() => {
           if (!autoRefreshEnabled.value) return;
-          if (data.value && !shouldStopAutoRefresh(data.value.ttl)) {
-            countdownTtl.value = data.value.ttl;
-          } else {
-            // Key expired or has no TTL — stop auto-refresh to avoid infinite loop
+          if (!data.value || shouldStopAutoRefresh(data.value.ttl)) {
             stopAutoRefresh();
             autoRefreshEnabled.value = false;
           }
@@ -492,10 +489,6 @@ async function load(options: { selectDefaultMember?: boolean } = {}) {
   try {
     const loadedValue = await api.redisGetValue(props.connectionId, props.db, props.keyRaw);
     data.value = loadedValue;
-    // Reset auto-refresh countdown if active
-    if (autoRefreshEnabled.value) {
-      countdownTtl.value = shouldStopAutoRefresh(loadedValue.ttl) ? 0 : loadedValue.ttl;
-    }
     emit("loaded", loadedValue);
     scanCursor.value = redisValueCollectionScanCursor(loadedValue);
     collectionItems.value = redisValueCollectionItems(loadedValue);
@@ -519,6 +512,9 @@ async function load(options: { selectDefaultMember?: boolean } = {}) {
     }
   } finally {
     loading.value = false;
+    if (autoRefreshEnabled.value && data.value && data.value.ttl > 0) {
+      startAutoRefresh();
+    }
   }
 }
 

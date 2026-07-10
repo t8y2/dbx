@@ -245,7 +245,7 @@ test("redis command tool blocks write commands in read-only MCP sessions", async
     findConnection: async () => redisConnection,
     executeRedisCommand: async () => {
       executed = true;
-      return { command: "SET", safety: "confirm", value: "OK" };
+      return { command: "SET", safety: "write", value: "OK" };
     },
   };
 

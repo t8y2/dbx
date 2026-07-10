@@ -49,6 +49,13 @@ pub async fn list_installed_agents(State(state): State<Arc<WebState>>) -> Result
     Ok(Json(build_agent_list(&state.app.agent_manager, registry.as_ref())))
 }
 
+pub async fn is_agent_installed(
+    State(state): State<Arc<WebState>>,
+    Path(db_type): Path<String>,
+) -> Result<Json<bool>, AppError> {
+    Ok(Json(state.app.agent_manager.is_driver_installed(&db_type)))
+}
+
 pub async fn get_driver_store_usage(State(state): State<Arc<WebState>>) -> Result<Json<DriverStoreUsage>, AppError> {
     Ok(Json(state.app.agent_manager.collect_driver_store_usage(state.app.plugins.root_dir())))
 }

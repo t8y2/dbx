@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onBeforeUnmount, ref, watch } from "vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import {
@@ -48,7 +48,7 @@ import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomC
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
 import * as api from "@/lib/backend/api";
-import type { ConnectionConfig, ForeignKeyInfo, ObjectInfo, ObjectSourceKind, ObjectStatistics } from "@/types/database";
+import type { ConnectionConfig, ForeignKeyInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics } from "@/types/database";
 import { sortTablesByFkDependency, type TableWithFk } from "@/lib/table/tableDependencySort";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
@@ -94,11 +94,13 @@ const props = defineProps<{
   connection: ConnectionConfig;
   database: string;
   schema?: string;
+  viewport?: ObjectBrowserViewport;
 }>();
 
 const emit = defineEmits<{
   openTable: [target: { tableName: string; schema?: string; tableType?: string }];
   schemaChange: [schema: string | undefined];
+  viewportChange: [viewport: ObjectBrowserViewport];
 }>();
 
 const { t } = useI18n();
@@ -180,6 +182,7 @@ const objectColumnWidths = ref<Record<ObjectBrowserColumnKey, number>>({
 });
 let loadId = 0;
 let stopColumnResize: (() => void) | null = null;
+let preserveObjectFilterScrollOnce = false;
 
 // Export via background tracker
 const { addTask: addExportTask } = useExportTracker();
@@ -222,19 +225,106 @@ const hasUpdatedAt = computed(() => rows.value.some((row) => row.updated_at?.tri
 const hasAnyComment = computed(() => rows.value.some((row) => row.comment?.trim()));
 const isListView = computed(() => settingsStore.editorSettings.objectBrowserViewMode !== "grid");
 
-// RecycleScroller exposes scrollToItem on its component instance (see
-// vue-virtual-scroller). Typed loosely to match the DataGrid usage pattern.
-const listScrollerRef = ref<{ scrollToItem?: (index: number) => void } | null>(null);
-const gridScrollerRef = ref<{ scrollToItem?: (index: number) => void } | null>(null);
+type ObjectBrowserScroller =
+  | HTMLElement
+  | {
+      scrollToItem?: (index: number) => void;
+      scrollToPosition?: (position: number) => void;
+      $el?: HTMLElement;
+      el?: HTMLElement | { value?: HTMLElement | null };
+    };
+
+// RecycleScroller exposes scroll helpers on its component instance. Keep the
+// type loose because vue-virtual-scroller does not ship complete ref typings.
+const listScrollerRef = ref<ObjectBrowserScroller | null>(null);
+const gridScrollerRef = ref<ObjectBrowserScroller | null>(null);
+let viewportFrame = 0;
+let restoreViewportFrame = 0;
+
+function objectBrowserViewMode(): ObjectBrowserViewMode {
+  return isListView.value ? "list" : "grid";
+}
+
+function activeScroller() {
+  return isListView.value ? listScrollerRef.value : gridScrollerRef.value;
+}
+
+function scrollerElement(scroller: ObjectBrowserScroller | null = activeScroller()): HTMLElement | null {
+  if (!scroller) return null;
+  if (scroller instanceof HTMLElement) return scroller;
+  if (scroller.$el instanceof HTMLElement) return scroller.$el;
+  if (scroller.el instanceof HTMLElement) return scroller.el;
+  if (scroller.el?.value instanceof HTMLElement) return scroller.el.value;
+  return null;
+}
+
+function emitViewportChange(scrollTop: number) {
+  const viewport: ObjectBrowserViewport = {
+    scrollTop: Math.max(0, Math.round(scrollTop)),
+    viewMode: objectBrowserViewMode(),
+  };
+  if (props.viewport?.scrollTop === viewport.scrollTop && props.viewport.viewMode === viewport.viewMode) return;
+  emit("viewportChange", viewport);
+}
+
+function onObjectsScroll() {
+  if (viewportFrame) return;
+  viewportFrame = window.requestAnimationFrame(() => {
+    viewportFrame = 0;
+    const el = scrollerElement();
+    if (!el) return;
+    emitViewportChange(el.scrollTop);
+  });
+}
+
+function applyObjectBrowserScrollTop(scrollTop: number) {
+  const scroller = activeScroller();
+  if (scroller && !(scroller instanceof HTMLElement)) {
+    scroller.scrollToPosition?.(scrollTop);
+    if (scrollTop === 0) scroller.scrollToItem?.(0);
+  }
+  const el = scrollerElement(scroller);
+  if (el) el.scrollTop = scrollTop;
+}
+
+function restoreObjectBrowserViewport() {
+  const viewport = props.viewport;
+  if (!viewport || viewport.viewMode !== objectBrowserViewMode()) return;
+  if (restoreViewportFrame) window.cancelAnimationFrame(restoreViewportFrame);
+  const scrollTop = Math.max(0, viewport.scrollTop);
+  nextTick(() => {
+    applyObjectBrowserScrollTop(scrollTop);
+    restoreViewportFrame = window.requestAnimationFrame(() => {
+      applyObjectBrowserScrollTop(scrollTop);
+      restoreViewportFrame = 0;
+    });
+  });
+}
 
 function scrollObjectsToTop() {
   // Read the active scroller inside nextTick so that after a list <-> grid
   // switch the (re)mounted scroller is the one we reset.
+  emitViewportChange(0);
   nextTick(() => {
-    const scroller = isListView.value ? listScrollerRef.value : gridScrollerRef.value;
-    scroller?.scrollToItem?.(0);
+    applyObjectBrowserScrollTop(0);
   });
 }
+
+watch(
+  [listScrollerRef, gridScrollerRef, isListView],
+  (_value, _oldValue, onCleanup) => {
+    const el = scrollerElement();
+    if (!el) return;
+    el.addEventListener("scroll", onObjectsScroll, { passive: true });
+    restoreObjectBrowserViewport();
+    onCleanup(() => el.removeEventListener("scroll", onObjectsScroll));
+  },
+  { flush: "post" },
+);
+
+onActivated(() => {
+  restoreObjectBrowserViewport();
+});
 
 function setViewMode(mode: "list" | "grid") {
   settingsStore.updateEditorSettings({ objectBrowserViewMode: mode });
@@ -251,7 +341,13 @@ watch([sortKey, sortDirection], () => scrollObjectsToTop());
 // Also jump to the top when the search query or object-type filter changes —
 // filtered results bear no relation to the previous scroll position.
 watch(search, () => scrollObjectsToTop());
-watch(objectFilter, () => scrollObjectsToTop());
+watch(objectFilter, () => {
+  if (preserveObjectFilterScrollOnce) {
+    preserveObjectFilterScrollOnce = false;
+    return;
+  }
+  scrollObjectsToTop();
+});
 
 const showCheckboxColumn = computed(() => settingsStore.editorSettings.objectBrowserShowCheckbox || selectedTableCount.value > 0);
 
@@ -356,6 +452,8 @@ watch(
 onBeforeUnmount(() => {
   gridResizeObserver?.disconnect();
   gridResizeObserver = null;
+  if (viewportFrame) window.cancelAnimationFrame(viewportFrame);
+  if (restoreViewportFrame) window.cancelAnimationFrame(restoreViewportFrame);
 });
 
 const gridRows = computed(() => {
@@ -1498,8 +1596,12 @@ async function loadObjects() {
     if (id === loadId) {
       loadingObjects.value = false;
       if (!userHasSelectedFilter.value && tableCount.value > 0) {
+        // The default table filter is a presentation choice, not a user query
+        // change, so preserve the tab's saved scroll offset across remounts.
+        preserveObjectFilterScrollOnce = objectFilter.value !== "tables";
         objectFilter.value = "tables";
       }
+      restoreObjectBrowserViewport();
     }
   }
 }

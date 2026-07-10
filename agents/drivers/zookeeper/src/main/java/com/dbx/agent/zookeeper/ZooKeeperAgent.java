@@ -17,7 +17,13 @@ import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public final class ZooKeeperAgent {
     private static final Gson GSON = new GsonBuilder().serializeNulls().create();
@@ -26,6 +32,16 @@ public final class ZooKeeperAgent {
     private static final int DEFAULT_CONNECTION_TIMEOUT_MS = 15000;
     private static final int DEFAULT_BASE_SLEEP_TIME_MS = 1000;
     private static final int DEFAULT_MAX_RETRIES = 3;
+    private static final String STAT_LOOKUP_CONCURRENCY_PROPERTY = "dbx.zookeeper.statLookupConcurrency";
+    private static final String STAT_LOOKUP_CONCURRENCY_ENV = "DBX_ZOOKEEPER_STAT_LOOKUP_CONCURRENCY";
+    private static final int DEFAULT_STAT_LOOKUP_CONCURRENCY = 16;
+    private static final int MIN_STAT_LOOKUP_CONCURRENCY = 1;
+    private static final int MAX_STAT_LOOKUP_CONCURRENCY = 64;
+    private static final int STAT_LOOKUP_CONCURRENCY = configuredStatLookupConcurrency();
+    private static final ExecutorService STAT_LOOKUP_EXECUTOR = Executors.newFixedThreadPool(
+        STAT_LOOKUP_CONCURRENCY,
+        daemonThreadFactory("dbx-zookeeper-stat-lookup-")
+    );
     private static final List<String> CAPABILITIES = Collections.unmodifiableList(Arrays.asList(
         AgentProtocol.CAPABILITY_CONNECT,
         AgentProtocol.CAPABILITY_TEST_CONNECTION,
@@ -143,16 +159,7 @@ public final class ZooKeeperAgent {
         Collections.sort(paths);
         int offset = cursor == null ? 0 : Math.max(0, cursor.offset);
         int end = Math.min(paths.size(), offset + limit);
-        for (int index = offset; index < end; index++) {
-            Stat stat = active.checkExists().forPath(paths.get(index));
-            if (stat == null) {
-                continue;
-            }
-            Map<String, Object> row = new LinkedHashMap<>();
-            row.put("key", paths.get(index));
-            row.putAll(statMetadata(stat));
-            keys.add(row);
-        }
+        keys.addAll(listRowsWithMetadata(active, paths.subList(offset, end)));
 
         result.put("keys", keys);
         result.put("continuation", end < paths.size() ? encodeCursor(new Cursor(root, recursive, end)) : null);
@@ -278,6 +285,7 @@ public final class ZooKeeperAgent {
             }
             case AgentProtocol.METHOD_SHUTDOWN -> {
                 closeClient();
+                STAT_LOOKUP_EXECUTOR.shutdownNow();
                 System.exit(0);
                 yield Collections.singletonMap("ok", true);
             }
@@ -449,6 +457,55 @@ public final class ZooKeeperAgent {
         return result;
     }
 
+    private static List<Map<String, Object>> listRowsWithMetadata(CuratorFramework active, List<String> paths) throws Exception {
+        if (paths.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        try {
+            List<Future<Map<String, Object>>> futures = new ArrayList<>();
+            for (String path : paths) {
+                futures.add(STAT_LOOKUP_EXECUTOR.submit(() -> rowWithMetadata(active, path)));
+            }
+
+            List<Map<String, Object>> rows = new ArrayList<>();
+            for (Future<Map<String, Object>> future : futures) {
+                Map<String, Object> row = future.get();
+                if (row != null) {
+                    rows.add(row);
+                }
+            }
+            return rows;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw e;
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof Exception exception) {
+                throw exception;
+            }
+            if (cause instanceof Error error) {
+                throw error;
+            }
+            throw new RuntimeException(cause);
+        }
+    }
+
+    private static Map<String, Object> rowWithMetadata(CuratorFramework active, String path) throws Exception {
+        try {
+            Stat stat = active.checkExists().forPath(path);
+            if (stat == null) {
+                return null;
+            }
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("key", path);
+            row.putAll(statMetadata(stat));
+            return row;
+        } catch (KeeperException.NoNodeException e) {
+            return null;
+        }
+    }
+
     private static void collectRecursive(CuratorFramework active, String path, List<String> result) throws Exception {
         List<String> children;
         try {
@@ -523,6 +580,35 @@ public final class ZooKeeperAgent {
     private static boolean boolOrDefault(JsonObject object, String key, boolean fallback) {
         JsonElement element = object.get(key);
         return element == null || element.isJsonNull() ? fallback : element.getAsBoolean();
+    }
+
+    static int configuredStatLookupConcurrency(String propertyValue, String envValue) {
+        String configured = firstNonBlank(propertyValue, envValue);
+        if (configured == null) {
+            return DEFAULT_STAT_LOOKUP_CONCURRENCY;
+        }
+        try {
+            int parsed = Integer.parseInt(configured.trim());
+            return Math.max(MIN_STAT_LOOKUP_CONCURRENCY, Math.min(MAX_STAT_LOOKUP_CONCURRENCY, parsed));
+        } catch (NumberFormatException e) {
+            return DEFAULT_STAT_LOOKUP_CONCURRENCY;
+        }
+    }
+
+    private static int configuredStatLookupConcurrency() {
+        return configuredStatLookupConcurrency(
+            System.getProperty(STAT_LOOKUP_CONCURRENCY_PROPERTY),
+            System.getenv(STAT_LOOKUP_CONCURRENCY_ENV)
+        );
+    }
+
+    private static ThreadFactory daemonThreadFactory(String prefix) {
+        AtomicInteger sequence = new AtomicInteger(1);
+        return runnable -> {
+            Thread thread = new Thread(runnable, prefix + sequence.getAndIncrement());
+            thread.setDaemon(true);
+            return thread;
+        };
     }
 
     private static String firstNonBlank(String... values) {

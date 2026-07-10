@@ -120,6 +120,7 @@ test("tracks data transfer progress and routes cancel to transfer API", async ()
     totalRows: 500,
     status: "running",
     error: null,
+    terminal: false,
   });
 
   assert.equal(task.kind, "data-transfer");
@@ -134,7 +135,7 @@ test("tracks data transfer progress and routes cancel to transfer API", async ()
   assert.equal(apiMock.cancelTransfer.mock.calls[0][0], "transfer-1");
 });
 
-test("keeps data transfer failed when final progress arrives after a table error", () => {
+test("keeps data transfer active after a non-terminal table error", () => {
   const tracker = useExportTracker();
   const task = tracker.addDataTransferTask("transfer-error-1", "source → target", 2);
 
@@ -147,22 +148,67 @@ test("keeps data transfer failed when final progress arrives after a table error
     totalRows: null,
     status: "error",
     error: "permission denied",
+    terminal: false,
   });
+
+  assert.equal(task.status, "Running");
+  assert.equal(task.errorMessage, "permission denied");
+
+  tracker.clearFinished();
+  assert.equal(
+    tracker.tasks.value.some((item) => item.exportId === "transfer-error-1"),
+    true,
+  );
+
   tracker.updateDataTransferTask("transfer-error-1", {
     transferId: "transfer-error-1",
+    table: "orders",
+    tableIndex: 1,
+    totalTables: 2,
+    rowsTransferred: 10,
+    totalRows: 50,
+    status: "running",
+    error: null,
+    terminal: false,
+  });
+
+  assert.equal(task.status, "Running");
+  assert.equal(task.errorMessage, "permission denied");
+  assert.equal(task.currentTable, "orders");
+  assert.equal(task.tableIndex, 1);
+  assert.equal(task.rowsExported, 10);
+});
+
+test("marks data transfer failed only on terminal error summary", () => {
+  const tracker = useExportTracker();
+  const task = tracker.addDataTransferTask("transfer-terminal-error-1", "source → target", 2);
+
+  tracker.updateDataTransferTask("transfer-terminal-error-1", {
+    transferId: "transfer-terminal-error-1",
+    table: "users",
+    tableIndex: 0,
+    totalTables: 2,
+    rowsTransferred: 0,
+    totalRows: null,
+    status: "error",
+    error: "permission denied",
+    terminal: false,
+  });
+  tracker.updateDataTransferTask("transfer-terminal-error-1", {
+    transferId: "transfer-terminal-error-1",
     table: "",
     tableIndex: 2,
     totalTables: 2,
     rowsTransferred: 0,
     totalRows: null,
-    status: "done",
-    error: null,
+    status: "error",
+    error: "1 table(s) failed: users",
+    terminal: true,
   });
 
   assert.equal(task.status, "Error");
-  assert.equal(task.errorMessage, "permission denied");
+  assert.equal(task.errorMessage, "1 table(s) failed: users");
   assert.equal(task.tableIndex, 2);
-  assert.equal(task.rowsExported, 0);
 });
 
 test("keeps data transfer row counts when terminal summary does not include rows", () => {
@@ -178,6 +224,7 @@ test("keeps data transfer row counts when terminal summary does not include rows
     totalRows: 200,
     status: "tableDone",
     error: null,
+    terminal: false,
   });
   tracker.updateDataTransferTask("transfer-rows-1", {
     transferId: "transfer-rows-1",
@@ -188,6 +235,7 @@ test("keeps data transfer row counts when terminal summary does not include rows
     totalRows: null,
     status: "done",
     error: null,
+    terminal: true,
   });
 
   assert.equal(task.status, "Done");
@@ -244,6 +292,7 @@ test("starts independent data transfer background tasks and routes progress by t
     totalRows: 100,
     status: "running",
     error: null,
+    terminal: false,
   });
   callbacks.get("parallel-transfer-1")?.({
     transferId: "parallel-transfer-1",
@@ -254,6 +303,7 @@ test("starts independent data transfer background tasks and routes progress by t
     totalRows: 50,
     status: "running",
     error: null,
+    terminal: false,
   });
 
   assert.equal(firstTask.currentTable, "users");
@@ -270,6 +320,7 @@ test("starts independent data transfer background tasks and routes progress by t
     totalRows: 50,
     status: "done",
     error: null,
+    terminal: true,
   });
   resolvers.get("parallel-transfer-1")?.();
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -319,5 +370,6 @@ test("blocks concurrent data transfers that write the same target table", () => 
     totalRows: null,
     status: "done",
     error: null,
+    terminal: true,
   });
 });

@@ -151,6 +151,11 @@ const dangerConfirmLabel = computed(() => {
   if (pendingDanger.value?.kind === "command") return t("dangerDialog.confirm");
   return t("dangerDialog.deleteConfirm");
 });
+const dangerMessage = computed(() => {
+  // Redis write commands such as SET/HSET are mutating but not necessarily delete operations.
+  if (pendingDanger.value?.kind === "command") return t("dangerDialog.redisCommandMessage");
+  return t("dangerDialog.deleteMessage");
+});
 const commandPrompt = computed(() => `db${commandDb.value}>`);
 const createKeyTypeOptions = computed<{ value: RedisCreateKeyType; label: string }[]>(() => [
   { value: "string", label: "String" },
@@ -518,12 +523,11 @@ async function runRedisCommand(command: string) {
     // The db this command ran on — capture before nextRedisCommandDb() advances it.
     const executedDb = commandDb.value;
     commandDb.value = nextRedisCommandDb(commandDb.value, command, result.value);
-    if (result.safety === "confirm") {
-      await loadKeys();
-    }
     // Drop the cached key-name completion for this db so the editor's autocomplete
     // reflects keys added/removed/renamed by SET/DEL/RENAME/...
-    if (isRedisMutatingCommand(command)) {
+    const mutatesKeys = isRedisMutatingCommand(command);
+    if (mutatesKeys) {
+      await loadKeys();
       connectionStore.invalidateCompletionCache(props.connectionId, String(executedDb));
       // Refresh the sidebar db key counts (INFO keyspace) so `dbN (count)` stays accurate
       // after the write. Fire-and-forget so the terminal stays responsive.
@@ -1224,7 +1228,7 @@ defineExpose({ focusSearch });
       </Pane>
     </Splitpanes>
 
-    <DangerConfirmDialog v-model:open="showDangerConfirm" :message="t('dangerDialog.deleteMessage')" :details="dangerDetails" :confirm-label="dangerConfirmLabel" @confirm="applyDangerAction" />
+    <DangerConfirmDialog v-model:open="showDangerConfirm" :message="dangerMessage" :details="dangerDetails" :confirm-label="dangerConfirmLabel" @confirm="applyDangerAction" />
 
     <Dialog v-model:open="showCreateKeyDialog">
       <DialogContent class="sm:max-w-md" :style="editorFontFamilyStyle">

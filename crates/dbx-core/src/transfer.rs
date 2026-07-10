@@ -99,6 +99,7 @@ pub struct TransferProgress {
     pub total_rows: Option<u64>,
     pub status: TransferStatus,
     pub error: Option<String>,
+    pub terminal: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -393,6 +394,9 @@ fn postgres_column_type_sql(
     source_db: &DatabaseType,
     target_db: &DatabaseType,
 ) -> String {
+    if let Some(mapped_type) = clickhouse_temporal_column_type(column, source_db, target_db) {
+        return mapped_type;
+    }
     if is_postgres_compat_transfer(source_db, target_db) {
         let trimmed = column.data_type.trim();
         if !trimmed.is_empty() {
@@ -400,6 +404,43 @@ fn postgres_column_type_sql(
         }
     }
     map_column_type(&column.data_type, source_db, target_db)
+}
+
+fn clickhouse_temporal_column_type(
+    column: &db::ColumnInfo,
+    source_db: &DatabaseType,
+    target_db: &DatabaseType,
+) -> Option<String> {
+    if !matches!(target_db, DatabaseType::ClickHouse) || source_db == target_db {
+        return None;
+    }
+
+    let source_type = column.data_type.trim();
+    let lower = source_type.to_ascii_lowercase();
+    let base = lower.split(['(', ' ', '\t', '\n']).next().unwrap_or("").trim();
+    if !matches!(base, "datetime" | "timestamp" | "timestamptz") {
+        return None;
+    }
+
+    let scale = clickhouse_datetime64_scale(column);
+    // ClickHouse DateTime stores whole seconds, and older versions reject
+    // fractional timestamp strings such as Dameng's TIMESTAMP(6) output.
+    Some(format!("DateTime64({scale})"))
+}
+
+fn clickhouse_datetime64_scale(column: &db::ColumnInfo) -> u8 {
+    let scale = parse_temporal_type_scale(&column.data_type).or(column.numeric_scale).unwrap_or(6);
+    scale.clamp(0, 9) as u8
+}
+
+fn parse_temporal_type_scale(source_type: &str) -> Option<i32> {
+    let start = source_type.find('(')? + 1;
+    let rest = &source_type[start..];
+    let digits = rest.bytes().take_while(|byte| byte.is_ascii_digit()).collect::<Vec<_>>();
+    if digits.is_empty() {
+        return None;
+    }
+    std::str::from_utf8(&digits).ok()?.parse::<i32>().ok()
 }
 
 fn postgres_default_clause(
@@ -1011,6 +1052,9 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             if let Some(binary_literal) = format_postgres_binary_sql_literal(s, db_type, column_type) {
                 return binary_literal;
             }
+            if let Some(binary_literal) = format_mysql_binary_sql_literal(s, db_type, column_type) {
+                return binary_literal;
+            }
             if let Some(numeric_literal) = format_mysql_numeric_string_literal(s, db_type, column_type) {
                 return numeric_literal;
             }
@@ -1103,6 +1147,20 @@ fn format_postgres_binary_sql_literal(
     }
 
     Some(format!("decode('{hex}', 'hex')"))
+}
+
+fn format_mysql_binary_sql_literal(value: &str, db_type: &DatabaseType, column_type: Option<&str>) -> Option<String> {
+    if !matches!(db_type, DatabaseType::Mysql) || !column_type.is_some_and(is_binary_transfer_column_type) {
+        return None;
+    }
+
+    let trimmed = value.trim();
+    let hex = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X"))?;
+    if hex.as_bytes().iter().all(|byte| byte.is_ascii_hexdigit()) {
+        Some(if hex.is_empty() { "X''".to_string() } else { format!("0x{hex}") })
+    } else {
+        None
+    }
 }
 
 fn format_oracle_date_sql_literal(value: &str, db_type: &DatabaseType, column_type: Option<&str>) -> Option<String> {
@@ -1488,11 +1546,13 @@ pub fn map_column_type(source_type: &str, _source_db: &DatabaseType, target_db: 
         "time" => "TIME".into(),
         "datetime" => match target_db {
             DatabaseType::Postgres => "TIMESTAMP".into(),
+            DatabaseType::ClickHouse => "DateTime64(6)".into(),
             _ => "DATETIME".into(),
         },
         "timestamp" | "timestamptz" | "timestamp with time zone" | "timestamp without time zone" => match target_db {
             DatabaseType::Mysql => "DATETIME".into(),
             DatabaseType::SqlServer => "DATETIME2".into(),
+            DatabaseType::ClickHouse => "DateTime64(6)".into(),
             _ => "TIMESTAMP".into(),
         },
         "longblob" => match target_db {
@@ -3772,6 +3832,7 @@ where
             total_rows,
             status: TransferStatus::Running,
             error: None,
+            terminal: false,
         });
 
         if row_count < batch_size {
@@ -4131,6 +4192,7 @@ where
             total_rows,
             status: TransferStatus::Running,
             error: None,
+            terminal: false,
         });
 
         if row_count < batch_size {
@@ -4215,6 +4277,7 @@ where
             total_rows: Some(total_steps as u64),
             status: TransferStatus::Running,
             error: None,
+            terminal: false,
         });
         execute_on_pool(state, target_pool_key, &generate_postgres_extension_ddl(&extension, &request.target_schema))
             .await
@@ -4235,6 +4298,7 @@ where
             total_rows: Some(total_steps as u64),
             status: TransferStatus::Running,
             error: None,
+            terminal: false,
         });
         execute_on_pool(state, target_pool_key, &generate_postgres_enum_ddl(&enum_type, &request.target_schema))
             .await
@@ -4255,6 +4319,7 @@ where
             total_rows: Some(total_steps as u64),
             status: TransferStatus::Running,
             error: None,
+            terminal: false,
         });
         execute_on_pool(state, target_pool_key, &generate_postgres_domain_ddl(&domain, &request.target_schema))
             .await
@@ -4356,6 +4421,7 @@ where
             total_rows: Some(total_steps as u64),
             status: TransferStatus::Running,
             error: None,
+            terminal: false,
         });
 
         let rewritten_source = match object.object_type {
@@ -4397,6 +4463,7 @@ where
                 total_rows: Some(total_steps as u64),
                 status: TransferStatus::Running,
                 error: None,
+                terminal: false,
             });
             execute_on_pool(state, target_pool_key, &statement)
                 .await
@@ -4418,6 +4485,7 @@ where
             total_rows: Some(total_steps as u64),
             status: TransferStatus::Running,
             error: None,
+            terminal: false,
         });
         let full_table = qualified_table(&trigger.table_name, &request.target_schema, &DatabaseType::Postgres);
         let drop_sql = format!(
@@ -4437,6 +4505,7 @@ where
             total_rows: Some(total_steps as u64),
             status: TransferStatus::Running,
             error: None,
+            terminal: false,
         });
         let create_sql = rewrite_postgres_trigger_table_schema(
             &ensure_sql_statement_terminated(&trigger.source),
@@ -4463,6 +4532,7 @@ where
             total_rows: Some(total_steps as u64),
             status: TransferStatus::Running,
             error: None,
+            terminal: false,
         });
         execute_on_pool(state, target_pool_key, &statement)
             .await
@@ -4483,6 +4553,7 @@ where
             total_rows: Some(total_steps as u64),
             status: TransferStatus::Running,
             error: None,
+            terminal: false,
         });
         let ownership_owner = if matches!(request.ownership_policy, TransferOwnershipPolicy::ReassignMissing)
             && !ownership_existing_roles.contains(&statement.owner)
@@ -4513,6 +4584,7 @@ where
             total_rows: Some(total_steps as u64),
             status: TransferStatus::Running,
             error: None,
+            terminal: false,
         });
         execute_on_pool(state, target_pool_key, &statement)
             .await
@@ -5064,6 +5136,29 @@ mod tests {
 
         assert!(ddl.contains("ENGINE = MergeTree() ORDER BY tuple()"));
         assert!(!ddl.contains("PRIMARY KEY"));
+    }
+
+    #[test]
+    fn clickhouse_transfer_maps_fractional_timestamp_to_datetime64() {
+        let cols = vec![db::ColumnInfo { numeric_scale: Some(6), ..test_column("created_at", "TIMESTAMP") }];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "events",
+            "SYSDBA",
+            "",
+            &DatabaseType::ClickHouse,
+            &DatabaseType::Dameng,
+            None,
+        );
+
+        assert!(ddl.contains("`created_at` DateTime64(6)"), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn clickhouse_transfer_uses_datetime64_fallback_for_timestamp_types() {
+        assert_eq!(map_column_type("datetime", &DatabaseType::Dameng, &DatabaseType::ClickHouse), "DateTime64(6)");
+        assert_eq!(map_column_type("timestamp", &DatabaseType::Dameng, &DatabaseType::ClickHouse), "DateTime64(6)");
     }
 
     #[test]
@@ -5924,6 +6019,47 @@ mod tests {
             sql,
             r#"INSERT INTO "public"."files" ("id", "payload", "note") VALUES
 (1, decode('48656c6c6f', 'hex'), '0x48656c6c6f')"#
+        );
+    }
+
+    #[test]
+    fn mysql_insert_formats_blob_prefixed_hex_as_binary_literal() {
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("payload"), String::from("empty_blob"), String::from("note")],
+            &[
+                Some(String::from("int")),
+                Some(String::from("MEDIUMBLOB")),
+                Some(String::from("blob")),
+                Some(String::from("varchar(64)")),
+            ],
+            &[vec![json!(1), json!("0x0001ABff"), json!("0X"), json!("0x0001ABff")]],
+            "files",
+            "",
+            &DatabaseType::Mysql,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT INTO `files` (`id`, `payload`, `empty_blob`, `note`) VALUES
+(1, 0x0001ABff, X'', '0x0001ABff')"#
+        );
+    }
+
+    #[test]
+    fn mysql_insert_keeps_invalid_blob_hex_as_string_literal() {
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("payload")],
+            &[Some(String::from("int")), Some(String::from("mediumblob"))],
+            &[vec![json!(1), json!("0xnothex")]],
+            "files",
+            "",
+            &DatabaseType::Mysql,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT INTO `files` (`id`, `payload`) VALUES
+(1, '0xnothex')"#
         );
     }
 

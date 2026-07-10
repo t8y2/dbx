@@ -28,7 +28,7 @@ import { PRESET_FIELDS_TEMPLATE_ID, createTableColumnTemplateDrafts } from "@/li
 import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { canAddTableStructureColumn, getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
 import { connectionObjectTreeQuerySchema, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
-import type { TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget } from "@/types/database";
+import type { TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
 import {
   buildStructureTargetLabel,
   combineDataTypeForDatabase,
@@ -62,6 +62,12 @@ const historyStore = useHistoryStore();
 const settingsStore = useSettingsStore();
 const { toast } = useToast();
 const rootRef = ref<HTMLElement>();
+type StructureScrollerRef = HTMLElement | { $el?: HTMLElement };
+const columnsScrollerRef = ref<StructureScrollerRef>();
+const indexesScrollerRef = ref<StructureScrollerRef>();
+const foreignKeysScrollerRef = ref<StructureScrollerRef>();
+const triggersScrollerRef = ref<StructureScrollerRef>();
+const ddlScrollerRef = ref<StructureScrollerRef>();
 const dynamicDataTypeOptionsCache = new Map<string, string[]>();
 
 const sqlHighlighter = ref<SqlHighlighter>();
@@ -734,6 +740,7 @@ let restoringDraft = false;
 let syncingDraft = false;
 let draftHydrated = false;
 let hydratingRestoredDraft = false;
+let structureScrollFrame = 0;
 // A context-menu target may arrive before metadata rows render, so search text
 // and row scrolling are tracked separately for each request.
 let appliedInitialTargetSearchKey = "";
@@ -741,6 +748,54 @@ let appliedInitialTargetScrollKey = "";
 
 function cloneDraftValue<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+const structureScrollPositions = ref<Partial<Record<TableInfoTab, TableStructureEditorViewport>>>({});
+
+function structureScrollerElement(scroller: StructureScrollerRef | undefined): HTMLElement | undefined {
+  if (!scroller) return undefined;
+  if (scroller instanceof HTMLElement) return scroller;
+  return scroller.$el instanceof HTMLElement ? scroller.$el : undefined;
+}
+
+function structureScrollerForTab(tab: TableInfoTab): HTMLElement | undefined {
+  if (tab === "columns") return structureScrollerElement(columnsScrollerRef.value);
+  if (tab === "indexes") return structureScrollerElement(indexesScrollerRef.value);
+  if (tab === "foreignKeys") return structureScrollerElement(foreignKeysScrollerRef.value);
+  if (tab === "triggers") return structureScrollerElement(triggersScrollerRef.value);
+  if (tab === "ddl") return structureScrollerElement(ddlScrollerRef.value);
+  return undefined;
+}
+
+function restoreStructureScrollPosition(tab = activeTab.value) {
+  const position = structureScrollPositions.value[tab];
+  if (!position) return;
+  nextTick(() => {
+    const scroller = structureScrollerForTab(tab);
+    if (!scroller) return;
+    scroller.scrollTop = Math.max(0, position.scrollTop);
+    scroller.scrollLeft = Math.max(0, position.scrollLeft);
+  });
+}
+
+function onStructureContentScroll(tab: TableInfoTab, event: Event) {
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLElement)) return;
+  const position: TableStructureEditorViewport = {
+    scrollTop: Math.max(0, Math.round(target.scrollTop)),
+    scrollLeft: Math.max(0, Math.round(target.scrollLeft)),
+  };
+  const previous = structureScrollPositions.value[tab];
+  if (previous?.scrollTop === position.scrollTop && previous.scrollLeft === position.scrollLeft) return;
+  structureScrollPositions.value = {
+    ...structureScrollPositions.value,
+    [tab]: position,
+  };
+  if (structureScrollFrame) return;
+  structureScrollFrame = window.requestAnimationFrame(() => {
+    structureScrollFrame = 0;
+    syncDraftToParent();
+  });
 }
 
 function createCurrentDraft(initialized = true): TableStructureEditorDraft {
@@ -753,6 +808,7 @@ function createCurrentDraft(initialized = true): TableStructureEditorDraft {
     indexes: cloneDraftValue(indexes.value),
     foreignKeys: cloneDraftValue(foreignKeys.value),
     triggers: cloneDraftValue(triggers.value),
+    scrollPositions: cloneDraftValue(structureScrollPositions.value),
     initialized,
   };
 }
@@ -776,8 +832,10 @@ function restoreDraft(draft: TableStructureEditorDraft) {
   indexes.value = cloneDraftValue(draft.indexes || []);
   foreignKeys.value = cloneDraftValue(draft.foreignKeys || []);
   triggers.value = cloneDraftValue(draft.triggers || []);
+  structureScrollPositions.value = cloneDraftValue(draft.scrollPositions || {});
   restoringDraft = false;
   draftHydrated = !needsColumnDraftMetadataHydration();
+  restoreStructureScrollPosition();
 }
 
 function needsColumnDraftMetadataHydration() {
@@ -1930,6 +1988,7 @@ onActivated(() => {
     applyInitialStructureTarget();
     void hydrateRestoredDraftFromDatabase().then(() => applyInitialStructureTarget());
   }
+  restoreStructureScrollPosition();
 });
 onDeactivated(unregisterStructureEditorShortcuts);
 onBeforeUnmount(() => {
@@ -1938,6 +1997,7 @@ onBeforeUnmount(() => {
   clearSqlPreviewState();
   if (columnHighlightTimer) window.clearTimeout(columnHighlightTimer);
   if (indexHighlightTimer) window.clearTimeout(indexHighlightTimer);
+  if (structureScrollFrame) window.cancelAnimationFrame(structureScrollFrame);
   persistStructureDensity();
 });
 
@@ -2029,6 +2089,7 @@ watch(
 watch(activeTab, () => {
   highlightedColumnId.value = null;
   highlightedIndexId.value = null;
+  restoreStructureScrollPosition();
   syncDraftToParent();
 });
 
@@ -2200,7 +2261,7 @@ watch(activeTab, (tab) => {
             </div>
           </div>
 
-          <TabsContent v-if="tableMetadataCapabilities.columns" value="columns" class="m-0 min-h-0 flex-1 overflow-auto p-0">
+          <TabsContent ref="columnsScrollerRef" v-if="tableMetadataCapabilities.columns" value="columns" class="m-0 min-h-0 flex-1 overflow-auto p-0" @scroll.passive="onStructureContentScroll('columns', $event)">
             <table class="border-separate border-spacing-0 text-[length:var(--structure-font-size)] leading-[var(--structure-line-height)]" :style="{ minWidth: visibleColWidths.reduce((a, w) => a + w, 0) + 'px' }">
               <thead class="sticky top-0 z-10 bg-background">
                 <tr>
@@ -2471,7 +2532,7 @@ watch(activeTab, (tab) => {
             </table>
           </TabsContent>
 
-          <TabsContent v-if="tableMetadataCapabilities.indexes" value="indexes" class="m-0 min-h-0 flex-1 overflow-auto p-0">
+          <TabsContent ref="indexesScrollerRef" v-if="tableMetadataCapabilities.indexes" value="indexes" class="m-0 min-h-0 flex-1 overflow-auto p-0" @scroll.passive="onStructureContentScroll('indexes', $event)">
             <div v-if="indexesLoading" class="flex items-center justify-center gap-2 py-10 text-muted-foreground">
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
@@ -2575,7 +2636,7 @@ watch(activeTab, (tab) => {
             </table>
           </TabsContent>
 
-          <TabsContent v-if="tableMetadataCapabilities.foreignKeys" value="foreignKeys" class="m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]">
+          <TabsContent ref="foreignKeysScrollerRef" v-if="tableMetadataCapabilities.foreignKeys" value="foreignKeys" class="m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]" @scroll.passive="onStructureContentScroll('foreignKeys', $event)">
             <div v-if="foreignKeysLoading" class="flex items-center justify-center gap-2 py-10 text-muted-foreground">
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
@@ -2625,7 +2686,7 @@ watch(activeTab, (tab) => {
             </div>
           </TabsContent>
 
-          <TabsContent v-if="tableMetadataCapabilities.triggers" value="triggers" class="m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]">
+          <TabsContent ref="triggersScrollerRef" v-if="tableMetadataCapabilities.triggers" value="triggers" class="m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]" @scroll.passive="onStructureContentScroll('triggers', $event)">
             <div v-if="triggersLoading" class="flex items-center justify-center gap-2 py-10 text-muted-foreground">
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
@@ -2674,7 +2735,7 @@ watch(activeTab, (tab) => {
             </div>
           </TabsContent>
 
-          <TabsContent v-if="tableMetadataCapabilities.ddl" value="ddl" class="m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]">
+          <TabsContent ref="ddlScrollerRef" v-if="tableMetadataCapabilities.ddl" value="ddl" class="m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]" @scroll.passive="onStructureContentScroll('ddl', $event)">
             <div v-if="ddlLoading" class="flex items-center justify-center gap-2 py-10 text-muted-foreground">
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}

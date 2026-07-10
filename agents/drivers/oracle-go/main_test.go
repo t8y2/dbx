@@ -129,6 +129,32 @@ func TestGetTableDDLResultMarshalsAsString(t *testing.T) {
 	}
 }
 
+func TestNormalizeValueFormatsOracleBinaryColumnsAsHex(t *testing.T) {
+	tests := map[string]string{
+		"RAW":            "0x000f10ff",
+		"raw":            "0x000f10ff",
+		"LongRaw":        "0x000f10ff",
+		"LONG RAW":       "0x000f10ff",
+		"LongVarRaw":     "0x000f10ff",
+		"OCIBlobLocator": "0x000f10ff",
+	}
+
+	for columnType, want := range tests {
+		if got := normalizeValue([]byte{0x00, 0x0f, 0x10, 0xff}, columnType); got != want {
+			t.Fatalf("normalizeValue RAW bytes for %q = %#v, want %q", columnType, got, want)
+		}
+	}
+}
+
+func TestNormalizeValueKeepsNonBinaryBytesAsText(t *testing.T) {
+	if got := normalizeValue([]byte("hello"), "VARCHAR2"); got != "hello" {
+		t.Fatalf("normalizeValue text bytes = %#v, want %q", got, "hello")
+	}
+	if got := normalizeValue([]byte("legacy"), ""); got != "legacy" {
+		t.Fatalf("normalizeValue bytes without metadata = %#v, want %q", got, "legacy")
+	}
+}
+
 func TestNormalizeDDLObjectType(t *testing.T) {
 	tests := map[string]string{
 		"":                  "",

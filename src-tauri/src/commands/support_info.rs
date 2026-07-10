@@ -101,8 +101,18 @@ fn platform_product_name() -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn platform_product_version() -> Option<String> {
-    command_first_line("cmd", &["/C", "ver"])
-        .map(|line| line.trim_matches(|ch| ch == '\r' || ch == '\n').trim().to_string())
+    command_first_line("cmd", &["/C", "ver"]).and_then(|line| extract_windows_version(&line))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn extract_windows_version(line: &str) -> Option<String> {
+    line.split(|ch: char| !ch.is_ascii_digit() && ch != '.')
+        .filter(|token| {
+            token.contains('.')
+                && token.split('.').all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        })
+        .max_by_key(|token| token.len())
+        .map(ToOwned::to_owned)
 }
 
 #[cfg(target_os = "linux")]
@@ -127,7 +137,9 @@ fn platform_product_version() -> Option<String> {
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn command_first_line(command: &str, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new(command).args(args).output().ok()?;
+    let mut process = dbx_core::process::new_std_command(command);
+    process.args(args);
+    let output = process.output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -173,8 +185,8 @@ fn unquote_os_release_value(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_support_info_for_clipboard, format_support_info_for_native_about, normalize_app_version,
-        parse_os_release_value, unknown_if_empty, unquote_os_release_value,
+        extract_windows_version, format_support_info_for_clipboard, format_support_info_for_native_about,
+        normalize_app_version, parse_os_release_value, unknown_if_empty, unquote_os_release_value,
     };
 
     #[test]
@@ -223,6 +235,62 @@ PRETTY_NAME="Ubuntu 24.04.1 LTS"
     #[test]
     fn returns_none_for_missing_linux_os_release_value() {
         assert_eq!(parse_os_release_value("NAME=Ubuntu\n", "PRETTY_NAME"), None);
+    }
+
+    #[test]
+    fn extracts_windows_version_from_english_output() {
+        assert_eq!(
+            extract_windows_version("Microsoft Windows [Version 10.0.26200.8655]").as_deref(),
+            Some("10.0.26200.8655")
+        );
+    }
+
+    #[test]
+    fn extracts_windows_version_from_lossy_output() {
+        assert_eq!(
+            extract_windows_version("Microsoft Windows [�汾 10.0.26200.8655]").as_deref(),
+            Some("10.0.26200.8655")
+        );
+    }
+
+    #[test]
+    fn returns_none_for_missing_windows_version() {
+        assert_eq!(extract_windows_version("Microsoft Windows"), None);
+    }
+
+    #[test]
+    fn rejects_malformed_windows_version_tokens() {
+        assert_eq!(extract_windows_version(""), None);
+        assert_eq!(extract_windows_version("10."), None);
+        assert_eq!(extract_windows_version(".10"), None);
+        assert_eq!(extract_windows_version("1..2"), None);
+        assert_eq!(extract_windows_version("..."), None);
+    }
+
+    #[test]
+    fn picks_longest_windows_version_candidate() {
+        assert_eq!(extract_windows_version("cmd 1.0 build 10.0.26200.8655").as_deref(), Some("10.0.26200.8655"));
+    }
+
+    #[test]
+    fn extracts_windows_version_from_gbk_bytes_decoded_lossily() {
+        let mut raw = b"Microsoft Windows [".to_vec();
+        raw.extend_from_slice(&[0xB0, 0xE6, 0xB1, 0xBE]);
+        raw.extend_from_slice(b" 10.0.26200.8655]");
+        let line = String::from_utf8_lossy(&raw);
+        assert_eq!(extract_windows_version(&line).as_deref(), Some("10.0.26200.8655"));
+    }
+
+    #[test]
+    fn formats_windows_operating_system_without_duplicated_name() {
+        let info = super::AppSupportInfo {
+            app_version: "0.5.52".to_string(),
+            runtime: "desktop",
+            os_name: "Windows".to_string(),
+            os_version: Some("10.0.26200.8655".to_string()),
+            arch: "x86_64".to_string(),
+        };
+        assert_eq!(super::format_operating_system(&info), "Windows 10.0.26200.8655");
     }
 
     #[test]

@@ -38,6 +38,7 @@ import type { CollectionInfo } from "@/types/database";
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
 import type { AiConfig, AiTestConnectionResult } from "@/stores/settingsStore";
 import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
+import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import type {
   DataGridColumnDistinctValuesSqlOptions,
   DataGridColumnValueFilterConditionOptions,
@@ -1121,6 +1122,10 @@ export async function listInstalledAgents(): Promise<AgentDriverInfo[]> {
   return invoke("list_installed_agents");
 }
 
+export async function isAgentInstalled(dbType: string): Promise<boolean> {
+  return invoke("is_agent_installed", { dbType });
+}
+
 export async function getDriverStoreUsage(): Promise<DriverStoreUsage> {
   return invoke("get_driver_store_usage");
 }
@@ -1390,7 +1395,7 @@ export interface RedisScanResult {
   total_keys: number;
 }
 
-export type RedisCommandSafety = "allowed" | "confirm" | "blocked";
+export type RedisCommandSafety = "allowed" | "write" | "confirm" | "blocked";
 
 export interface RedisCommandResult {
   command: string;
@@ -1942,6 +1947,7 @@ export interface TransferProgress {
   totalRows: number | null;
   status: "running" | "tableDone" | "done" | "error" | "cancelled";
   error: string | null;
+  terminal: boolean;
 }
 
 export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void): Promise<void> {
@@ -1952,7 +1958,7 @@ export async function startTransfer(request: TransferRequest, onProgress: (progr
         unlisten = await listen<TransferProgress>("transfer-progress", (event) => {
           if (event.payload.transferId !== request.transferId) return;
           onProgress(event.payload);
-          if (event.payload.status === "done" || event.payload.status === "error" || event.payload.status === "cancelled") {
+          if (isTerminalTransferProgress(event.payload)) {
             unlisten?.();
             resolve();
           }

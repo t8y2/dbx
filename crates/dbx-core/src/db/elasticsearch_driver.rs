@@ -848,6 +848,35 @@ fn parse_elasticsearch_response(
 ) -> Result<crate::types::QueryResult, String> {
     if let Some(result) = parse_sql_response(&body, start) {
         Ok(result)
+    } else if let Some(aggs) = body.get("aggregations").or_else(|| body.get("aggs")).and_then(|v| v.as_object()) {
+        let (columns, rows) = parse_aggregations(aggs);
+        if !columns.is_empty() {
+            let row_count = rows.len() as u64;
+            Ok(crate::types::QueryResult {
+                columns,
+                column_types: Vec::new(),
+                column_sortables: vec![],
+                rows,
+                affected_rows: row_count,
+                execution_time_ms: start.elapsed().as_millis(),
+                truncated: false,
+                session_id: None,
+                has_more: false,
+            })
+        } else {
+            let pretty = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
+            Ok(crate::types::QueryResult {
+                columns: vec!["status".to_string(), "response".to_string()],
+                column_types: Vec::new(),
+                column_sortables: vec![],
+                rows: vec![vec![serde_json::Value::Number(status.into()), serde_json::Value::String(pretty)]],
+                affected_rows: 0,
+                execution_time_ms: start.elapsed().as_millis(),
+                truncated: false,
+                session_id: None,
+                has_more: false,
+            })
+        }
     } else if let Some(hits) = body.pointer("/hits/hits").and_then(|v| v.as_array()) {
         // Treat any `_search`-shaped body as the hits result, even when empty —
         // a 0-row match is a valid empty result, not a reason to fall back to
@@ -910,35 +939,6 @@ fn parse_elasticsearch_response(
             session_id: None,
             has_more: false,
         })
-    } else if let Some(aggs) = body.get("aggregations").or_else(|| body.get("aggs")).and_then(|v| v.as_object()) {
-        let (columns, rows) = parse_aggregations(aggs);
-        if !columns.is_empty() {
-            let row_count = rows.len() as u64;
-            Ok(crate::types::QueryResult {
-                columns,
-                column_types: Vec::new(),
-                column_sortables: vec![],
-                rows,
-                affected_rows: row_count,
-                execution_time_ms: start.elapsed().as_millis(),
-                truncated: false,
-                session_id: None,
-                has_more: false,
-            })
-        } else {
-            let pretty = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
-            Ok(crate::types::QueryResult {
-                columns: vec!["status".to_string(), "response".to_string()],
-                column_types: Vec::new(),
-                column_sortables: vec![],
-                rows: vec![vec![serde_json::Value::Number(status.into()), serde_json::Value::String(pretty)]],
-                affected_rows: 0,
-                execution_time_ms: start.elapsed().as_millis(),
-                truncated: false,
-                session_id: None,
-                has_more: false,
-            })
-        }
     } else {
         let pretty = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
         Ok(crate::types::QueryResult {
@@ -1719,6 +1719,40 @@ mod tests {
 
         let routing_idx = result.columns.iter().position(|column| column == "_routing").unwrap();
         assert_eq!(result.rows[0][routing_idx], json!("tenant-1"));
+    }
+
+    #[test]
+    fn parses_aggregation_response_before_empty_hits() {
+        let result = super::parse_elasticsearch_response(
+            200,
+            json!({
+                "hits": {
+                    "total": { "value": 5, "relation": "eq" },
+                    "hits": []
+                },
+                "aggregations": {
+                    "by_status": {
+                        "doc_count_error_upper_bound": 0,
+                        "sum_other_doc_count": 0,
+                        "buckets": [
+                            { "key": "paid", "doc_count": 3 },
+                            { "key": "cancelled", "doc_count": 1 },
+                            { "key": "pending", "doc_count": 1 }
+                        ]
+                    }
+                }
+            }),
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+        let key_idx = result.columns.iter().position(|column| column == "key").unwrap();
+        let count_idx = result.columns.iter().position(|column| column == "doc_count").unwrap();
+
+        assert_eq!(result.rows.len(), 3);
+        assert_eq!(result.rows[0][key_idx], json!("paid"));
+        assert_eq!(result.rows[0][count_idx], json!("3"));
+        assert_eq!(result.affected_rows, 3);
     }
 
     #[test]

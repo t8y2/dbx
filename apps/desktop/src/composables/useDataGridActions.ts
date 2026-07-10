@@ -13,6 +13,7 @@ import { effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from 
 import { applyMongoFindSort } from "@/lib/mongo/mongoShellCommand";
 import { uuid } from "@/lib/common/utils";
 import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
+import { queryResultBaseSql, queryResultExecutionSql } from "@/lib/tabs/tabPresentation";
 
 const DATA_TAB_METADATA_TTL_MS = 30_000;
 
@@ -172,16 +173,18 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const tab = activeTab.value;
     if (!tab) return;
     if (tab.mode !== "data") {
-      const baseSql = tab.resultSortedSql ?? tab.resultBaseSql ?? tab.lastExecutedSql ?? tab.sql;
+      const baseSql = queryResultExecutionSql(tab);
       if (!baseSql.trim()) return;
       const expectedNextOffset = (tab.resultPageOffset ?? 0) + (tab.resultPageLimit ?? limit);
       const sessionId = tab.result?.has_more && tab.result?.session_id && offset === expectedNextOffset && limit === tab.resultPageLimit ? tab.result.session_id : undefined;
+      const resultBaseSql = queryResultBaseSql(tab);
       await queryStore.executeTabSql(tab.id, baseSql, {
-        resultBaseSql: tab.resultBaseSql ?? tab.sql,
+        resultBaseSql,
         resultSortedSql: tab.resultSortedSql,
         pagination: { offset, limit, sessionId },
         preserveResultDuringExecution: true,
         preserveTotalRowCountDuringExecution: true,
+        replaceActiveResultInGroup: true,
       });
       return;
     }
@@ -225,7 +228,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       return;
     }
 
-    const baseSql = tab.resultBaseSql ?? tab.sql;
+    const baseSql = queryResultBaseSql(tab);
     if (!baseSql.trim()) return;
 
     if (!direction) {
@@ -234,6 +237,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
         resultSortedSql: undefined,
         preserveResultDuringExecution: true,
         preserveTotalRowCountDuringExecution: true,
+        replaceActiveResultInGroup: true,
       });
       return;
     }
@@ -251,6 +255,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
         resultSortedSql: sortedSql,
         preserveResultDuringExecution: true,
         preserveTotalRowCountDuringExecution: true,
+        replaceActiveResultInGroup: true,
       });
       return;
     }
@@ -273,6 +278,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       resultSortedSql: built.sql,
       preserveResultDuringExecution: true,
       preserveTotalRowCountDuringExecution: true,
+      replaceActiveResultInGroup: true,
     });
   }
 

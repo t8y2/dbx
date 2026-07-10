@@ -8,9 +8,6 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::Notify;
 
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
-
 #[derive(Debug, Clone)]
 pub struct CliAgentRunOptions {
     pub connection_id: String,
@@ -103,19 +100,7 @@ pub fn model_infos(ids: &[&str]) -> Vec<AiModelInfo> {
 }
 
 pub fn cli_command(program: impl AsRef<OsStr>) -> Command {
-    let command = Command::new(program);
-    configure_cli_command(command)
-}
-
-#[cfg(windows)]
-fn configure_cli_command(mut command: Command) -> Command {
-    command.creation_flags(CREATE_NO_WINDOW);
-    command
-}
-
-#[cfg(not(windows))]
-fn configure_cli_command(command: Command) -> Command {
-    command
+    crate::process::new_tokio_command(program)
 }
 
 pub async fn list_json_models_or_default(

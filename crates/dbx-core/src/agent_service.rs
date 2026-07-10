@@ -1325,7 +1325,7 @@ fn db_type_for_native_offline_entry(registry: &AgentRegistry, platform: &str, na
 
 fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
-    let status = std::process::Command::new("tar")
+    let status = crate::process::new_std_command("tar")
         .args(["xzf", &archive.to_string_lossy(), "-C", &dest.to_string_lossy(), "--strip-components=1"])
         .status()
         .map_err(|e| format!("Failed to extract archive: {e}"))?;

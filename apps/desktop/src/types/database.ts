@@ -644,7 +644,20 @@ export interface TableStructureEditorDraft {
   indexes: import("@/lib/table/tableStructureEditorSql").EditableStructureIndex[];
   foreignKeys: import("@/lib/table/tableStructureEditorSql").EditableStructureForeignKey[];
   triggers: import("@/lib/table/tableStructureEditorSql").EditableStructureTrigger[];
+  scrollPositions?: Partial<Record<TableInfoTab, TableStructureEditorViewport>>;
   initialized: boolean;
+}
+
+export interface TableStructureEditorViewport {
+  scrollTop: number;
+  scrollLeft: number;
+}
+
+export type ObjectBrowserViewMode = "list" | "grid";
+
+export interface ObjectBrowserViewport {
+  scrollTop: number;
+  viewMode: ObjectBrowserViewMode;
 }
 
 export interface QueryTab {
@@ -715,6 +728,7 @@ export interface QueryTab {
   objectBrowser?: {
     schema?: string;
     objectType?: "tables";
+    viewport?: ObjectBrowserViewport;
   };
   objectSource?: {
     schema?: string;

@@ -14,7 +14,8 @@ test("parseRedisCommandArgv handles quoted values and escapes", () => {
 
 test("classifyRedisCommand mirrors DBX redis command safety classes", () => {
   assert.equal(classifyRedisCommand("GET session:1"), "allowed");
-  assert.equal(classifyRedisCommand("SET session:1 value"), "confirm");
+  assert.equal(classifyRedisCommand("SET session:1 value"), "write");
+  assert.equal(classifyRedisCommand("DEL session:1"), "confirm");
   assert.equal(classifyRedisCommand("KEYS *"), "blocked");
 });
 

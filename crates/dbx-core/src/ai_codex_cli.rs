@@ -11,7 +11,6 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Instant;
-use tokio::process::Command;
 use tokio::sync::Notify;
 
 const DEFAULT_CODEX_MODELS: &[&str] = &["default", "gpt-5.5", "gpt-5.4-mini"];
@@ -186,7 +185,7 @@ fn program_path_candidates(dir: &Path, program: &str) -> Vec<PathBuf> {
 #[cfg(not(windows))]
 async fn shell_program_path(program: &str) -> Option<String> {
     let script = shell_resolve_script(program);
-    let mut command = Command::new(user_shell());
+    let mut command = cli_command(user_shell());
     command.args(user_shell_args(&script));
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     let output = command.output().await.ok()?;
@@ -204,7 +203,7 @@ async fn shell_program_path(program: &str) -> Option<String> {
 #[cfg(windows)]
 async fn shell_program_path(program: &str) -> Option<String> {
     let script = format!("(Get-Command -All {} -ErrorAction SilentlyContinue).Source", windows_shell_quote(program));
-    let mut command = Command::new("powershell.exe");
+    let mut command = cli_command("powershell.exe");
     command.args(["-NoProfile", "-Command", &script]);
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     let output = command.output().await.ok()?;

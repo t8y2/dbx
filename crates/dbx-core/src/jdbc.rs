@@ -5,7 +5,6 @@ use crate::update::{fetch_latest_release, is_newer_version, JdbcPluginLatest};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use tokio::process::Command;
 
 const JDBC_PLUGIN_DOWNLOAD_URL: &str =
     "https://github.com/t8y2/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip";
@@ -153,7 +152,7 @@ pub async fn install_jdbc_driver_from_maven(
     let local_repo = plugin_dir.join("maven-cache");
     std::fs::create_dir_all(&local_repo).map_err(|err| err.to_string())?;
 
-    let mut command = Command::new(&resolver);
+    let mut command = crate::process::new_tokio_command(&resolver);
     env.apply_to(&mut command);
     command.arg("resolve").arg("--coordinate").arg(&coordinate).arg("--local-repo").arg(&local_repo);
     for repo in &repositories {

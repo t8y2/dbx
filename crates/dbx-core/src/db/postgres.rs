@@ -1451,7 +1451,8 @@ pub async fn completion_assistant_search(
     pool: &Pool,
     request: &CompletionAssistantRequest,
 ) -> Result<CompletionAssistantResponse, String> {
-    let schema = request.schema.as_deref().or(request.parent_schema.as_deref()).unwrap_or("public");
+    let schema = request.schema.as_deref().or(request.parent_schema.as_deref());
+    let routine_schema = schema.unwrap_or("public");
     let limit = request.max_results.unwrap_or(100).clamp(1, 1000);
     let kinds = if request.object_kinds.is_empty() {
         vec![CompletionAssistantObjectKind::Table, CompletionAssistantObjectKind::View]
@@ -1521,7 +1522,7 @@ pub async fn completion_assistant_search(
         let rows = postgres_query_cached(
             &client,
             postgres_completion_routines_sql(),
-            &[&schema, &pattern, &prokinds, &((limit - candidates.len()) as i64)],
+            &[&routine_schema, &pattern, &prokinds, &((limit - candidates.len()) as i64)],
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -1547,10 +1548,23 @@ pub async fn completion_assistant_search(
     if candidates.len() < limit && kinds.iter().any(|kind| matches!(kind, CompletionAssistantObjectKind::Column)) {
         let table = request.parent_name.as_deref().unwrap_or("");
         if !table.is_empty() {
+            // Unqualified PostgreSQL objects resolve through search_path, so column
+            // metadata must use the same visible relation instead of assuming public.
+            let resolved_schema = match schema {
+                Some(schema) => Some(schema.to_string()),
+                None => postgres_query_cached(&client, postgres_visible_table_schema_sql(), &[&table])
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .first()
+                    .map(|row| pg_row_try_string(row, 0)),
+            };
+            let Some(resolved_schema) = resolved_schema else {
+                return Ok(CompletionAssistantResponse { incomplete: false, candidates, fallback_used: false });
+            };
             let rows = postgres_query_cached(
                 &client,
                 postgres_completion_columns_sql(),
-                &[&schema, &table, &pattern, &((limit - candidates.len()) as i64)],
+                &[&resolved_schema, &table, &pattern, &((limit - candidates.len()) as i64)],
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -1559,8 +1573,8 @@ pub async fn completion_assistant_search(
                     name: pg_row_try_string(&row, 0),
                     kind: CompletionAssistantCandidateKind::Column,
                     database: Some(request.database.clone()),
-                    schema: Some(schema.to_string()),
-                    parent_schema: Some(schema.to_string()),
+                    schema: Some(resolved_schema.clone()),
+                    parent_schema: Some(resolved_schema.clone()),
                     parent_name: Some(table.to_string()),
                     comment: row.try_get::<_, Option<String>>(2).ok().flatten(),
                     data_type: Some(pg_row_try_string(&row, 1)),
@@ -1583,7 +1597,9 @@ fn postgres_completion_tables_sql() -> &'static str {
      LEFT JOIN pg_catalog.pg_inherits i ON i.inhrelid = c.oid \
      LEFT JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent \
      LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace \
-     WHERE n.nspname = $1 AND c.relkind = ANY($3) \
+     WHERE ($1::text IS NOT NULL AND n.nspname = $1 \
+            OR $1::text IS NULL AND pg_catalog.pg_table_is_visible(c.oid)) \
+       AND c.relkind = ANY($3) \
        AND ($2 = '%%' OR c.relname ILIKE $2 ESCAPE '~') \
      ORDER BY c.relname LIMIT $4"
 }
@@ -1606,6 +1622,13 @@ fn postgres_completion_columns_sql() -> &'static str {
      WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped \
        AND ($3 = '%%' OR a.attname ILIKE $3 ESCAPE '~') \
      ORDER BY a.attnum LIMIT $4"
+}
+
+fn postgres_visible_table_schema_sql() -> &'static str {
+    "SELECT n.nspname FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     WHERE c.relname = $1 AND pg_catalog.pg_table_is_visible(c.oid) \
+     LIMIT 1"
 }
 
 fn postgres_completion_relkinds(kinds: &[CompletionAssistantObjectKind]) -> Vec<String> {
@@ -4116,8 +4139,11 @@ mod tests {
     #[test]
     fn postgres_completion_sql_filters_before_limit() {
         assert!(postgres_completion_tables_sql().contains("c.relname ILIKE $2 ESCAPE '~'"));
+        assert!(postgres_completion_tables_sql().contains("pg_catalog.pg_table_is_visible(c.oid)"));
         assert!(postgres_completion_tables_sql().contains("ORDER BY c.relname LIMIT $4"));
         assert!(postgres_completion_routines_sql().contains("p.proname ILIKE $2 ESCAPE '~'"));
+        assert!(postgres_completion_routines_sql().contains("ORDER BY p.proname LIMIT $4"));
         assert!(postgres_completion_columns_sql().contains("a.attname ILIKE $3 ESCAPE '~'"));
+        assert!(postgres_visible_table_schema_sql().contains("pg_catalog.pg_table_is_visible(c.oid)"));
     }
 }

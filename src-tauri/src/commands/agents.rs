@@ -30,6 +30,11 @@ pub async fn list_installed_agents(state: State<'_, Arc<AppState>>) -> Result<Ve
 }
 
 #[tauri::command]
+pub async fn is_agent_installed(state: State<'_, Arc<AppState>>, db_type: String) -> Result<bool, String> {
+    Ok(state.agent_manager.is_driver_installed(&db_type))
+}
+
+#[tauri::command]
 pub async fn get_driver_store_usage(state: State<'_, Arc<AppState>>) -> Result<DriverStoreUsage, String> {
     Ok(state.agent_manager.collect_driver_store_usage(state.plugins.root_dir()))
 }

@@ -1,5 +1,6 @@
 import { reactive, computed } from "vue";
 import * as api from "@/lib/backend/api";
+import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 
 export type BackgroundTaskKind = "table-export" | "database-export" | "sql-file" | "data-transfer";
 export type BackgroundTaskStatus = "Running" | "Writing" | "Done" | "Error" | "Cancelled";
@@ -46,9 +47,9 @@ function normalizeSqlFileStatus(status: api.SqlFileStatus): BackgroundTaskStatus
   return "Running";
 }
 
-function normalizeTransferStatus(status: api.TransferProgress["status"]): BackgroundTaskStatus {
+function normalizeTransferStatus(status: api.TransferProgress["status"], terminal: boolean): BackgroundTaskStatus {
   if (status === "done") return "Done";
-  if (status === "error") return "Error";
+  if (status === "error") return terminal ? "Error" : "Running";
   if (status === "cancelled") return "Cancelled";
   return "Running";
 }
@@ -200,7 +201,7 @@ export function useExportTracker() {
     void (async () => {
       try {
         await api.startTransfer(request, (progress) => {
-          terminalStatus = progress.status === "done" || progress.status === "error" || progress.status === "cancelled" ? progress.status : terminalStatus;
+          terminalStatus = isTerminalTransferProgress(progress) ? progress.status : terminalStatus;
           updateDataTransferTask(progress.transferId, progress);
         });
 
@@ -217,6 +218,7 @@ export function useExportTracker() {
           totalRows: task.totalRows,
           status: "error",
           error: e?.message || String(e),
+          terminal: true,
         });
       } finally {
         activeTransferRuns.delete(request.transferId);
@@ -266,7 +268,7 @@ export function useExportTracker() {
   function updateDataTransferTask(transferId: string, progress: api.TransferProgress) {
     const task = taskMap.get(transferId);
     if (!task) return;
-    const nextStatus = normalizeTransferStatus(progress.status);
+    const nextStatus = normalizeTransferStatus(progress.status, progress.terminal);
     const hadError = task.status === "Error";
     task.status = hadError && nextStatus === "Done" ? "Error" : nextStatus;
     task.errorMessage = progress.error || task.errorMessage || null;

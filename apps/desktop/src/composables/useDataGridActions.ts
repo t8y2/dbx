@@ -165,7 +165,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     if (tab.resultSortedSql) {
       const sortColumns = visibleQuerySortColumns(tab.result?.columns ?? [], tab.result?.hidden_column_indexes, tab.resultSortColumnIndex ?? -1);
       const rebuildHiddenKeySort = !!tab.result?.hidden_column_indexes?.length && tab.resultSortMode === "database" && !!tab.resultSortDirection && !!tab.resultSortColumn && !!sortColumns;
-      await queryStore.executeTabSql(tab.id, rebuildHiddenKeySort ? tab.resultBaseSql ?? tab.sql : tab.resultSortedSql, {
+      await queryStore.executeTabSql(tab.id, rebuildHiddenKeySort ? (tab.resultBaseSql ?? tab.sql) : tab.resultSortedSql, {
         resultBaseSql: tab.resultBaseSql ?? tab.sql,
         ...(rebuildHiddenKeySort
           ? {

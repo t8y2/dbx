@@ -117,14 +117,7 @@ describe("queryStore hidden primary key editing", () => {
       column: "name",
       direction: "asc",
     });
-    expect(executeMulti).toHaveBeenCalledWith(
-      "mysql-1",
-      "app",
-      "SELECT name, `id` AS `__DBX_PK_0` FROM users ORDER BY name ASC",
-      undefined,
-      expect.any(String),
-      expect.objectContaining({ timeoutSecs: 30 }),
-    );
+    expect(executeMulti).toHaveBeenCalledWith("mysql-1", "app", "SELECT name, `id` AS `__DBX_PK_0` FROM users ORDER BY name ASC", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
     const tab = store.tabs.find((item) => item.id === tabId)!;
     expect(tab.result?.hidden_column_indexes).toEqual([1]);
     expect(tab.resultSortedSql).toBe("SELECT name, `id` AS `__DBX_PK_0` FROM users ORDER BY name ASC");

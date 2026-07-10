@@ -1156,6 +1156,7 @@ export interface SqlCompletionContext {
   deleteTarget?: { table: string; schema?: string };
   oracleTableFunctionContext?: boolean;
   autoAliasTableCompletions: boolean;
+  tableAliasAfterCursor?: boolean;
   contextKind: SqlCompletionContextKind;
 }
 
@@ -1284,7 +1285,7 @@ class SqlCompletionProvider {
     }
 
     const emptyTableNameCompletion = !context.prefix && (context.suggestTables || context.exclusiveTableSuggestions);
-    if (!pendingJoinKeyword && !emptyTableNameCompletion && context.referencedTables.length > 0 && !context.suggestColumns && !context.insertTable) {
+    if (!pendingJoinKeyword && !emptyTableNameCompletion && !context.tableAliasAfterCursor && context.referencedTables.length > 0 && !context.suggestColumns && !context.insertTable) {
       this.items.push(...buildAliasItems(context, this.databaseType));
     }
 
@@ -1604,6 +1605,40 @@ function isCallRoutineContext(beforeToken: string): boolean {
   return /\bcall\s+(?:[A-Za-z_][\w$]*\.)?$/i.test(beforeToken) || /\bcall\s+(?:[A-Za-z_][\w$]*\.)?[A-Za-z_][\w$]*$/i.test(beforeToken);
 }
 
+function hasTableAliasAfterCursor(sql: string, cursor: number): boolean {
+  if (hasAliasMarkerAt(sql, cursor, false)) return true;
+  let pos = cursor;
+  while (isIdentifierPart(sql[pos]) || sql[pos] === ".") pos++;
+  if (sql[pos] === '"' || sql[pos] === "`" || sql[pos] === "]") pos++;
+  return hasAliasMarkerAt(sql, pos, true);
+}
+
+function hasAliasMarkerAt(sql: string, pos: number, allowImplicitAlias: boolean): boolean {
+  const following = sql.slice(skipSqlWhitespaceAndComments(sql, pos));
+  if (/^as\b/i.test(following)) return true;
+  if (/^(?:"[^"]+"|`[^`]+`|\[[^\]]+\])/.test(following)) return true;
+  if (!allowImplicitAlias) return false;
+  const implicitAlias = /^([A-Za-z_][\w$]*)/.exec(following)?.[1]?.toLowerCase();
+  return !!implicitAlias && !isUnsafeSqlAlias(implicitAlias);
+}
+
+function skipSqlWhitespaceAndComments(sql: string, pos: number): number {
+  for (;;) {
+    while (pos < sql.length && /\s/.test(sql[pos])) pos++;
+    if (sql.startsWith("--", pos)) {
+      const newline = sql.indexOf("\n", pos + 2);
+      if (newline === -1) return sql.length;
+      pos = newline + 1;
+    } else if (sql.startsWith("/*", pos)) {
+      const end = sql.indexOf("*/", pos + 2);
+      if (end === -1) return sql.length;
+      pos = end + 2;
+    } else {
+      return pos;
+    }
+  }
+}
+
 export function getSqlCompletionContext(sql: string, cursor: number): SqlCompletionContext {
   // Extract the full statement at cursor position for referenced tables
   const fullStatement = extractStatementAt(sql, cursor);
@@ -1651,7 +1686,8 @@ export function getSqlCompletionContext(sql: string, cursor: number): SqlComplet
 
   const afterTableTrigger = TABLE_TRIGGER_KEYWORDS.has(lastWord) || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || isInTableListContext(beforeToken);
   const exclusiveTableSuggestions = EXCLUSIVE_TABLE_TRIGGER_KEYWORDS.has(lastWord) || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || isInTableListContext(beforeToken);
-  const autoAliasTableCompletions = lastWord === "from" || lastWord === "join" || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || isInTableListContext(beforeToken);
+  const tableAliasAfterCursor = hasTableAliasAfterCursor(sql, cursor);
+  const autoAliasTableCompletions = (lastWord === "from" || lastWord === "join" || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || isInTableListContext(beforeToken)) && !tableAliasAfterCursor;
   const exclusiveColumnSuggestions = !!qualifier && !exclusiveTableSuggestions && !insertInfo;
   const activePrefixIsCte = cteDefs.some((cte) => normalizeIdentifierPart(cte.name) === normalizeIdentifierPart(prefix));
   if (exclusiveTableSuggestions && prefix && !activePrefixIsCte && referencedTables.length > 1) {
@@ -1715,6 +1751,7 @@ export function getSqlCompletionContext(sql: string, cursor: number): SqlComplet
     deleteTarget: deleteInfo?.target,
     oracleTableFunctionContext,
     autoAliasTableCompletions,
+    tableAliasAfterCursor,
     contextKind,
   };
 }

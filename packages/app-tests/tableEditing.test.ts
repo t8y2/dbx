@@ -39,8 +39,10 @@ test("does not synthesize ROWID for non-Oracle keyless tables", () => {
   assert.deepEqual(editablePrimaryKeys("mysql", [column("ID"), column("CITY")]), []);
 });
 
-test("uses tbname and timestamp as TDengine editable keys", () => {
-  assert.deepEqual(editablePrimaryKeys("tdengine", [column("ts", true), column("current")]), [DBX_TDENGINE_TBNAME_COLUMN, "ts"]);
+test("uses table-specific TDengine editable keys", () => {
+  const columns = [column("ts", true), column("current")];
+  assert.deepEqual(editablePrimaryKeys("tdengine", columns, "STABLE"), [DBX_TDENGINE_TBNAME_COLUMN, "ts"]);
+  assert.deepEqual(editablePrimaryKeys("tdengine", columns, "TABLE"), ["ts"]);
 });
 
 test("allows updateable SQL table data editing even without declared primary keys", () => {
@@ -97,7 +99,8 @@ test("allows existing row edits according to database-specific key requirements"
   assert.equal(canEditExistingTableRows("duckdb", undefined, ["id"]), true);
   assert.equal(canEditExistingTableRows("informix", undefined, []), true);
   assert.equal(canEditExistingTableRows("informix", undefined, ["id"]), true);
-  assert.equal(canEditExistingTableRows("tdengine", undefined, ["ts"]), false);
+  assert.equal(canEditExistingTableRows("tdengine", undefined, []), false);
+  assert.equal(canEditExistingTableRows("tdengine", undefined, ["ts"]), true);
   assert.equal(canEditExistingTableRows("tdengine", undefined, [DBX_TDENGINE_TBNAME_COLUMN, "ts"]), true);
   assert.equal(canEditExistingTableRows("postgres", undefined), true);
 });

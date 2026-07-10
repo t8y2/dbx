@@ -1722,6 +1722,7 @@ export default withEnglishFallback({
     characterSet: "字元集",
     charsetPlaceholder: "字元集",
     collationPlaceholder: "排序規則",
+    collation: "排序規則",
   },
   diagram: {
     title: "關係圖",

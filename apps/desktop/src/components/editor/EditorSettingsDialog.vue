@@ -75,7 +75,7 @@ import { eventToShortcut } from "@/lib/editor/keyboardShortcuts";
 import { SHORTCUT_DEFINITIONS, findShortcutConflict, normalizeShortcutSettings, type ShortcutActionId } from "@/lib/editor/shortcutRegistry";
 import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
-import { currentStatementFrameRangeTo, visualSqlColumns } from "@/lib/sql/currentStatementFrame";
+import { currentStatementFrameRangeTo, visualSqlColumnsWithInlineHints } from "@/lib/sql/currentStatementFrame";
 import { normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { currentExecutableStatementRange, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeCacheForDoc, executableStatementRangeStartingAt, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
@@ -2240,7 +2240,7 @@ function buildPreviewCurrentStatementFrameExtension(viewModule: Pick<typeof impo
         for (let lineNumber = startLine.number; lineNumber <= endLine.number; lineNumber += 1) {
           const line = view.state.doc.line(lineNumber);
           const lineRangeTo = Math.min(line.to, frameTo);
-          maxWidth = Math.max(maxWidth, visualSqlColumns(view.state.doc.sliceString(line.from, lineRangeTo)));
+          maxWidth = Math.max(maxWidth, visualSqlColumnsWithInlineHints(view.state.doc.sliceString(line.from, lineRangeTo), line.from, lineRangeTo));
         }
 
         const deco: any[] = [];

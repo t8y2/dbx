@@ -12,7 +12,8 @@ import { copyToClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
 import { resolveExecutableSql, type SqlExecutionSnapshot, type SqlExecutionOverride, type SqlExecutionCandidate } from "@/lib/sql/sqlExecutionTarget";
 import { buildExecutionCandidates, hasMultipleExecutionTargets, supportsExecutionTargetPicker, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, executableStatementRangeStartingAt as executableStatementRangeStartingAtLine, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
-import { currentStatementFrameRangeTo, visualSqlColumns } from "@/lib/sql/currentStatementFrame";
+import { currentStatementFrameRangeTo, visualSqlColumnsWithInlineHints } from "@/lib/sql/currentStatementFrame";
+import { parseInsertValueHints } from "@/lib/sql/insertValueHints";
 import { formatSqlText, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { buildSqlInConditionFromPasteSource, insertTextForSqlInCondition } from "@/lib/sql/sqlInListPaste";
 import { resolveSqlSingleQuoteKeyAction } from "@/lib/sql/sqlQuoteCaret";
@@ -2729,11 +2730,13 @@ onMounted(async () => {
         const startLine = view.state.doc.lineAt(range.from);
         const frameTo = currentStatementFrameTo(view, range);
         const endLine = view.state.doc.lineAt(Math.max(range.from, frameTo - 1));
+        const insertValueHints =
+          settingsStore.editorSettings.showInsertValueHints && props.databaseType !== "redis" && props.databaseType !== "mongodb" && props.databaseType !== "elasticsearch" ? parseInsertValueHints(view.state.doc.toString(), { resolveTableColumns: getInsertValueHintTableColumns }) : [];
         let maxWidth = 1;
         for (let lineNumber = startLine.number; lineNumber <= endLine.number; lineNumber += 1) {
           const line = view.state.doc.line(lineNumber);
           const lineRangeTo = Math.min(line.to, frameTo);
-          maxWidth = Math.max(maxWidth, visualSqlColumns(view.state.doc.sliceString(line.from, lineRangeTo)));
+          maxWidth = Math.max(maxWidth, visualSqlColumnsWithInlineHints(view.state.doc.sliceString(line.from, lineRangeTo), line.from, lineRangeTo, insertValueHints));
         }
 
         const deco: any[] = [];

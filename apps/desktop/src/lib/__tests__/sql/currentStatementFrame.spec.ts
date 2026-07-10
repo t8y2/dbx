@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { currentStatementFrameRangeTo, isWideSqlChar, visualSqlColumns } from "@/lib/sql/currentStatementFrame";
+import { currentStatementFrameRangeTo, estimateInlineHintVisualColumns, isWideSqlChar, visualSqlColumns, visualSqlColumnsWithInlineHints } from "@/lib/sql/currentStatementFrame";
 import type { SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 
 describe("currentStatementFrameRangeTo", () => {
@@ -23,5 +23,24 @@ describe("visualSqlColumns", () => {
     expect(isWideSqlChar("中")).toBe(true);
     expect(isWideSqlChar("Ａ")).toBe(true);
     expect(isWideSqlChar("A")).toBe(false);
+  });
+});
+
+describe("visualSqlColumnsWithInlineHints", () => {
+  it("adds estimated columns for insert-value hints on the line", () => {
+    const text = "VALUES (12, 'a')";
+    const lineFrom = 0;
+    const lineTo = text.length;
+    const withoutHints = visualSqlColumns(text);
+    const withHints = visualSqlColumnsWithInlineHints(text, lineFrom, lineTo, [
+      { from: 8, column: "id" },
+      { from: 12, column: "name" },
+    ]);
+    expect(withHints).toBe(withoutHints + estimateInlineHintVisualColumns("id") + estimateInlineHintVisualColumns("name"));
+  });
+
+  it("ignores hints that belong to other lines", () => {
+    const text = "VALUES (1)";
+    expect(visualSqlColumnsWithInlineHints(text, 0, text.length, [{ from: 100, column: "id" }])).toBe(visualSqlColumns(text));
   });
 });

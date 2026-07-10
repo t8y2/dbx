@@ -1747,6 +1747,7 @@ async function duplicateConnection() {
 const showDropTableConfirm = ref(false);
 const showDropTableChildObjectConfirm = ref(false);
 const showBatchDropConfirm = ref(false);
+const showBatchEmptyConfirm = ref(false);
 const showBatchTruncateConfirm = ref(false);
 const showStructurePreviewDialog = ref(false);
 const showStructureDocCopyDialog = ref(false);
@@ -1772,6 +1773,7 @@ const truncateTableCascade = ref(false);
 const dropObjectPreviewSql = ref("");
 const dropTableChildObjectPreviewSql = ref("");
 const batchDropPreviewSql = ref("");
+const batchEmptyPreviewSql = ref("");
 const batchTruncatePreviewSql = ref("");
 const batchTruncateCascade = ref(false);
 const dropDatabasePreviewSql = ref("");
@@ -2077,6 +2079,10 @@ function selectedBatchTruncateTargets(): TreeNode[] {
   return targets.every((node) => supportsTableTruncate(databaseTypeForNode(node))) ? targets : [];
 }
 
+function selectedBatchEmptyTargets(): TreeNode[] {
+  return selectedBatchTableTargets();
+}
+
 function selectedBatchMongoIndexTargets(): TreeNode[] {
   const targets = selectedBatchDropTargets();
   return targets.length > 1 && targets.every((node) => canDropMongoIndexNode(node)) ? targets : [];
@@ -2118,6 +2124,18 @@ function batchTruncateMenuLabel(): string {
   return t("contextMenu.batchTruncate", { count: selectedBatchTruncateTargets().length });
 }
 
+function batchEmptyMenuLabel(): string {
+  return t("contextMenu.batchEmpty", { count: selectedBatchEmptyTargets().length });
+}
+
+function batchEmptyConfirmTitle(): string {
+  return t("contextMenu.confirmBatchEmptyTitle", { count: selectedBatchEmptyTargets().length });
+}
+
+function batchEmptyConfirmMessage(): string {
+  return t("contextMenu.confirmBatchEmptyMessage", { count: selectedBatchEmptyTargets().length });
+}
+
 function batchTruncateConfirmTitle(): string {
   return t("contextMenu.confirmBatchTruncateTitle", { count: selectedBatchTruncateTargets().length });
 }
@@ -2155,6 +2173,15 @@ async function truncateSqlForTreeNode(node: TreeNode, options?: { cascade?: bool
   });
 }
 
+async function emptySqlForTreeNode(node: TreeNode): Promise<string | null> {
+  if (node.type !== "table" || !node.connectionId || !node.database) return null;
+  return buildEmptyTableSql({
+    databaseType: databaseTypeForNode(node),
+    schema: node.schema,
+    tableName: node.label,
+  });
+}
+
 async function refreshBatchDropPreviewSql() {
   const targets = selectedBatchDropTargets();
   const mongoIndexTargets = selectedBatchMongoIndexTargets();
@@ -2182,6 +2209,15 @@ async function refreshBatchTruncatePreviewSql() {
   batchTruncatePreviewSql.value = statements.join("\n");
 }
 
+async function refreshBatchEmptyPreviewSql() {
+  const statements: string[] = [];
+  for (const target of selectedBatchEmptyTargets()) {
+    const sql = await emptySqlForTreeNode(target);
+    if (sql) statements.push(sql);
+  }
+  batchEmptyPreviewSql.value = statements.join("\n");
+}
+
 function requestBatchDrop() {
   if (!selectedBatchDropTargets().length) return;
   batchDropCascade.value = false;
@@ -2194,6 +2230,12 @@ function requestBatchTruncate() {
   batchTruncateCascade.value = false;
   void refreshBatchTruncatePreviewSql();
   showBatchTruncateConfirm.value = true;
+}
+
+function requestBatchEmpty() {
+  if (!selectedBatchEmptyTargets().length) return;
+  void refreshBatchEmptyPreviewSql();
+  showBatchEmptyConfirm.value = true;
 }
 
 function requestDropSelectedNodes(): boolean {
@@ -2419,6 +2461,24 @@ async function confirmBatchTruncate() {
     }
     toast(t("contextMenu.batchTruncateSuccess", { count: targets.length }), 3000);
     showBatchTruncateConfirm.value = false;
+  } catch (e: any) {
+    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+async function confirmBatchEmpty() {
+  const targets = selectedBatchEmptyTargets();
+  if (!targets.length) return;
+  try {
+    for (const target of targets) {
+      if (!target.connectionId || !target.database) continue;
+      await connectionStore.ensureConnected(target.connectionId);
+      const sql = await emptySqlForTreeNode(target);
+      if (!sql) continue;
+      await api.executeQuery(target.connectionId, target.database, sql, target.schema);
+    }
+    toast(t("contextMenu.batchEmptySuccess", { count: targets.length }), 3000);
+    showBatchEmptyConfirm.value = false;
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
@@ -4505,11 +4565,14 @@ function treeItemMenuItems(): ContextMenuItem[] {
   const node = props.node;
   const items: ContextMenuItem[] = [];
   const batchDropCount = selectedBatchDropTargets().length;
+  const batchEmptyCount = selectedBatchEmptyTargets().length;
   const batchTruncateCount = selectedBatchTruncateTargets().length;
   const deleteMenuLabel = (singleLabel: string) => (batchDropCount > 1 ? batchDropMenuLabel() : singleLabel);
   const deleteMenuAction = (singleAction: () => void) => (batchDropCount > 1 ? requestBatchDrop : singleAction);
   const truncateMenuLabel = (singleLabel: string) => (batchTruncateCount > 1 ? batchTruncateMenuLabel() : singleLabel);
   const truncateMenuAction = (singleAction: () => void) => (batchTruncateCount > 1 ? requestBatchTruncate : singleAction);
+  const emptyMenuLabel = (singleLabel: string) => (batchEmptyCount > 1 ? batchEmptyMenuLabel() : singleLabel);
+  const emptyMenuAction = (singleAction: () => void) => (batchEmptyCount > 1 ? requestBatchEmpty : singleAction);
 
   // 1. Pin toggle
   if (canPin.value) {
@@ -4934,8 +4997,8 @@ function treeItemMenuItems(): ContextMenuItem[] {
         });
       }
       destructiveActions.push({
-        label: t("contextMenu.emptyTable"),
-        action: emptyTable,
+        label: emptyMenuLabel(t("contextMenu.emptyTable")),
+        action: emptyMenuAction(emptyTable),
         icon: Eraser,
         variant: "destructive" as const,
       });
@@ -5387,6 +5450,8 @@ function treeItemMenuItems(): ContextMenuItem[] {
   </DangerConfirmDialog>
 
   <DangerConfirmDialog v-model:open="showEmptyTableConfirm" :title="t('contextMenu.confirmEmptyTableTitle')" :message="t('contextMenu.confirmEmptyTableMessage', { name: node.label })" :sql="emptyTablePreviewSql" :confirm-label="t('contextMenu.emptyTable')" @confirm="confirmEmptyTable" />
+
+  <DangerConfirmDialog v-model:open="showBatchEmptyConfirm" :title="batchEmptyConfirmTitle()" :message="batchEmptyConfirmMessage()" :sql="batchEmptyPreviewSql" :confirm-label="batchEmptyMenuLabel()" @confirm="confirmBatchEmpty" />
 
   <DangerConfirmDialog
     v-model:open="showTruncateTableConfirm"

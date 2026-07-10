@@ -2,6 +2,7 @@
 import { computed, defineComponent, h, ref, type VNodeChild } from "vue";
 import { ChevronDown, ChevronRight } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
+import { isLosslessJsonNumber } from "@/lib/common/safeJsonFormat";
 
 defineOptions({ name: "RedisJsonTree" });
 
@@ -38,7 +39,7 @@ const rootNode = computed<JsonNode>(() => ({
 }));
 
 function isContainer(value: unknown): value is Record<string, unknown> | unknown[] {
-  return value !== null && typeof value === "object";
+  return value !== null && typeof value === "object" && !isLosslessJsonNumber(value);
 }
 
 function containerKind(value: unknown): "array" | "object" {
@@ -74,6 +75,7 @@ function nodeSummary(value: unknown): string {
 }
 
 function scalarClass(value: unknown): string {
+  if (isLosslessJsonNumber(value)) return "json-tree-number";
   if (typeof value === "string") return "json-tree-string";
   if (typeof value === "number") return "json-tree-number";
   if (typeof value === "boolean") return "json-tree-boolean";
@@ -82,6 +84,7 @@ function scalarClass(value: unknown): string {
 }
 
 function scalarText(value: unknown): string {
+  if (isLosslessJsonNumber(value)) return value.raw;
   if (typeof value === "string") return JSON.stringify(value);
   if (value === null) return "null";
   return String(value);

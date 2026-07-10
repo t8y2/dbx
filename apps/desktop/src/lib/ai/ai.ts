@@ -93,6 +93,7 @@ export interface AiRequestInput {
   mode?: AiAssistantMode;
   instruction: string;
   context: AiContext;
+  allowWriteSql?: boolean;
 }
 
 function buildAgentRequest(input: AiRequestInput, history?: api.AiMessage[]): { messages: api.AiMessage[]; systemPrompt: string; taskContract: api.AiTaskContract; maxTokens: number } {
@@ -163,6 +164,7 @@ export async function runAgentStream(input: AiRequestInput, history: api.AiMessa
     input.context.databaseType,
     onEvent,
     input.mode || "ask",
+    input.allowWriteSql || false,
   );
 }
 

@@ -433,8 +433,8 @@ pub fn build_codex_exec_command(config: &AiConfig, _prompt: &str, options: &Code
     CodexCommandSpec { program: codex_program(config), args }
 }
 
-pub fn build_codex_prompt(system_prompt: &str, messages: &[crate::ai::AiMessage]) -> String {
-    build_cli_agent_prompt("Codex", system_prompt, messages)
+pub fn build_codex_prompt(system_prompt: &str, messages: &[crate::ai::AiMessage], allow_write_sql: bool) -> String {
+    build_cli_agent_prompt("Codex", system_prompt, messages, allow_write_sql)
 }
 
 pub async fn list_codex_models(config: &AiConfig) -> Result<Vec<AiModelInfo>, String> {
@@ -622,6 +622,8 @@ mod tests {
             connection_name: "local".to_string(),
             database: "demo".to_string(),
             agent_mode: true,
+            allow_writes: false,
+            allow_dangerous: false,
             mcp_server_command: None,
         }
     }
@@ -639,6 +641,7 @@ mod tests {
         assert!(spec.args.contains(&"mcp_servers.dbx.command=\"dbx-mcp-server\"".to_string()));
         assert!(spec.args.contains(&"mcp_servers.dbx.default_tools_approval_mode=\"approve\"".to_string()));
         assert!(spec.args.contains(&"mcp_servers.dbx.env.DBX_MCP_ALLOW_WRITES=\"0\"".to_string()));
+        assert!(spec.args.contains(&"mcp_servers.dbx.env.DBX_MCP_ALLOW_DANGEROUS_SQL=\"0\"".to_string()));
         assert!(spec.args.contains(&"mcp_servers.dbx.env.DBX_MCP_SCOPE_CONNECTION_ID=\"conn-1\"".to_string()));
         assert!(spec.args.iter().any(|arg| arg.contains("dbx_execute_query")));
     }

@@ -999,6 +999,13 @@ onMounted(async () => {
       upgradingIndex.value = payload.current ?? 0;
       upgradingTotal.value = payload.total_drivers ?? 0;
     }
+    // During a batch upgrade, refresh the list as soon as each driver finishes
+    // (step="done") so its "Update" button disappears immediately instead of
+    // staying disabled until the whole batch completes (step="all-done").
+    // Single-driver installs (upgradingAll=false) are refreshed by runDriverInstall.
+    if (upgradingAll.value && payload.step === "done") {
+      void refreshAgents();
+    }
   });
   void loadJdbcDrivers();
   void loadJdbcPluginStatus();

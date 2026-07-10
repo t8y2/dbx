@@ -70,6 +70,39 @@ test("recognizes single-table explicit columns mixed with alias star", () => {
   ]);
 });
 
+test("treats DISTINCT single-table projections as update-only", () => {
+  const result = analyzeEditableQueryEditability("select distinct id, name from users");
+
+  assert.equal(result.editable, true);
+  assert.equal(result.analysis.distinct, true);
+  assert.equal(result.analysis.allowInsertDelete, false);
+  assert.deepEqual(result.analysis.columns, [
+    { sourceName: "id", sourceNameQuoted: false, resultName: "id", expression: "id" },
+    { sourceName: "name", sourceNameQuoted: false, resultName: "name", expression: "name" },
+  ]);
+});
+
+test("maps a DISTINCT qualified star to one joined source", () => {
+  const result = analyzeEditableQueryEditability("select distinct u.* from users u left join orders o on o.user_id = u.id");
+
+  assert.equal(result.editable, true);
+  assert.equal(result.analysis.distinct, true);
+  assert.equal(result.analysis.multiSource, true);
+  assert.equal(result.analysis.allowInsertDelete, false);
+  assert.deepEqual(result.analysis.columns, [{ star: true, sourceQualifier: "u", sourceKey: "u:0", resultName: "*", expression: "u.*" }]);
+});
+
+test("keeps ambiguous DISTINCT projections read-only", () => {
+  assert.deepEqual(analyzeEditableQueryEditability("select distinct * from users u join orders o on o.user_id = u.id"), {
+    editable: false,
+    reason: "complex-source",
+  });
+  assert.deepEqual(analyzeEditableQueryEditability("select distinct on (user_id) id, user_id from orders order by user_id, id desc"), {
+    editable: false,
+    reason: "aggregation",
+  });
+});
+
 test("reports DuckDB external file scans as read-only external sources", () => {
   const result = analyzeEditableQueryEditability("SELECT * FROM '/tmp/duckdb_excel_extension_test.xlsx'");
 

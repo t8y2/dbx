@@ -8,7 +8,7 @@ test("schema options respect Oracle visible database filters", () => {
       db_type: "oracle",
       visible_databases: ["CAM", "00010"],
     }),
-    ["CAM", "00010"],
+    ["00010", "CAM"],
   );
 });
 

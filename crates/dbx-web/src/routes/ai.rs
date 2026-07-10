@@ -83,6 +83,8 @@ pub struct AiAgentStreamRequest {
     /// Defaults to "ask" if not provided.
     #[serde(default = "default_agent_mode")]
     pub mode: String,
+    #[serde(default)]
+    pub allow_write_sql: bool,
 }
 
 fn default_agent_mode() -> String {
@@ -265,6 +267,10 @@ pub async fn ai_agent_stream(
         database: body.database,
         db_type: parsed_db_type,
         cli_mcp_server_command: None,
+        sql_permissions: dbx_core::agent_tools::AgentSqlPermissions {
+            allow_writes: body.allow_write_sql,
+            allow_dangerous: body.allow_write_sql,
+        },
     };
 
     let sid = session_id.clone();

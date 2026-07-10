@@ -159,6 +159,10 @@ const MESSAGE_SCROLL_BUTTON_HIDE_THRESHOLD_PX = 48;
 let messageScrollViewport: HTMLElement | null = null;
 let messageTouchStartY: number | null = null;
 let lastMessageScrollTop = 0;
+let assistantDeltaFrame: number | null = null;
+let pendingAssistantDelta = "";
+let pendingAssistantReasoning = "";
+let pendingAssistantIndex = -1;
 
 function startEditMessage(visibleIndex: number) {
   if (isGenerating.value) return;
@@ -488,6 +492,12 @@ const proposalConfirmMessage = computed<ChatMessage | null>(() => {
   return null;
 });
 
+let allowWriteSqlForNextRun = false;
+
+function proposalContainsWriteSql(content: string) {
+  return /\b(insert|update|delete|replace|merge|create|alter|drop|truncate|rename|grant|revoke)\b/i.test(content);
+}
+
 function sendProposalReply(positive: boolean) {
   // Disable while a stream is in flight or no proposal is currently active.
   if (isGenerating.value) return;
@@ -497,6 +507,7 @@ function sendProposalReply(positive: boolean) {
   const replyZh = positive ? "请执行上面你刚提议的操作，不要再反问确认。" : "不用执行上面提到的操作，继续当前对话。";
   const replyEn = positive ? "Execute the action you just proposed above; do not ask for confirmation again." : "Do not execute the action mentioned above; continue the current conversation.";
   prompt.value = isZh ? replyZh : replyEn;
+  allowWriteSqlForNextRun = positive && assistantMode.value === "agent" && proposalContainsWriteSql(target.content);
   // Use the existing send pipeline so the message is added to history, persisted, etc.
   send();
 }
@@ -596,19 +607,41 @@ function changeDatabase(value: string) {
   queryStore.updateDatabase(tab.id, decodeSelectableDatabaseValue(connection.db_type, value));
 }
 
-function appendAssistantDelta(assistantIdx: number, delta: string) {
-  const msg = messages.value[assistantIdx];
-  if (msg.isThinking) msg.isThinking = false;
-  msg.content += delta;
+function flushAssistantDeltas() {
+  assistantDeltaFrame = null;
+  const msg = messages.value[pendingAssistantIndex];
+  if (!msg) return;
+  if (pendingAssistantReasoning) {
+    msg.reasoning = (msg.reasoning || "") + pendingAssistantReasoning;
+    msg.isThinking = true;
+  }
+  if (pendingAssistantDelta) {
+    msg.isThinking = false;
+    msg.content += pendingAssistantDelta;
+  }
+  pendingAssistantDelta = "";
+  pendingAssistantReasoning = "";
   scrollToBottom();
 }
 
-function appendAssistantReasoning(assistantIdx: number, delta: string) {
+function scheduleAssistantDeltaFlush(assistantIdx: number) {
+  pendingAssistantIndex = assistantIdx;
+  if (assistantDeltaFrame !== null) return;
+  // Providers can emit many tiny chunks. Render once per animation frame so
+  // Markdown parsing, highlighting, and layout do not run for every token.
+  assistantDeltaFrame = requestAnimationFrame(flushAssistantDeltas);
+}
+
+function appendAssistantDelta(assistantIdx: number, delta: string) {
   const msg = messages.value[assistantIdx];
-  if (!msg.reasoning) msg.reasoning = "";
-  msg.reasoning += delta;
-  msg.isThinking = true;
-  scrollToBottom();
+  if (msg.isThinking) msg.isThinking = false;
+  pendingAssistantDelta += delta;
+  scheduleAssistantDeltaFlush(assistantIdx);
+}
+
+function appendAssistantReasoning(assistantIdx: number, delta: string) {
+  pendingAssistantReasoning += delta;
+  scheduleAssistantDeltaFlush(assistantIdx);
 }
 
 const reasoningExpanded = ref(false);
@@ -1358,6 +1391,8 @@ async function send() {
 
   const requestedAction = activeAction.value;
   const requestedMode = assistantMode.value;
+  const allowWriteSql = requestedMode === "agent" && allowWriteSqlForNextRun;
+  allowWriteSqlForNextRun = false;
   isGenerating.value = true;
   messages.value.push({ role: "assistant", content: "" });
   const assistantIdx = messages.value.length - 1;
@@ -1379,6 +1414,7 @@ async function send() {
         mode: requestedMode,
         instruction: modelInstruction,
         context,
+        allowWriteSql,
       },
       history,
       (event: AgentEvent) => {
@@ -1420,6 +1456,8 @@ async function send() {
     const message = e instanceof Error ? e.message : String(e);
     messages.value[assistantIdx].content = `Error: ${message}`;
   } finally {
+    if (assistantDeltaFrame !== null) cancelAnimationFrame(assistantDeltaFrame);
+    flushAssistantDeltas();
     const msg = messages.value[assistantIdx];
     if (msg) msg.isThinking = false;
     isGenerating.value = false;
@@ -1628,6 +1666,7 @@ function stopResize() {
 }
 
 onUnmounted(() => {
+  if (assistantDeltaFrame !== null) cancelAnimationFrame(assistantDeltaFrame);
   clearTimeout(mentionTimer);
   cancelStream();
   detachMessageScrollListener();
@@ -1838,7 +1877,8 @@ async function openExternalUrl(url: string) {
                     </div>
                   </div>
                 </div>
-                <template v-for="(seg, j) in messageRenderer.render(msg.content)" :key="j">
+                <div v-if="isGenerating && msg === messages[messages.length - 1]" class="whitespace-pre-wrap break-words text-sm leading-relaxed">{{ msg.content }}</div>
+                <template v-else v-for="(seg, j) in messageRenderer.render(msg.content)" :key="j">
                   <div v-if="seg.type === 'text'" class="ai-markdown whitespace-normal" @click.capture="onMarkdownClick">
                     <div v-html="seg.html" />
                   </div>

@@ -1229,7 +1229,7 @@ test("normalizes unquoted Oracle query identifiers before loading editable metad
   }
 });
 
-test("binds joined query edits to the single safe source table", async () => {
+test("binds DISTINCT qualified-star edits to the single safe joined source", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());
   const connectionStore = useConnectionStore();
@@ -1245,8 +1245,8 @@ test("binds joined query edits to the single safe source table", async () => {
       return new Response(
         JSON.stringify([
           {
-            columns: ["user_id", "name", "total"],
-            rows: [[1, "Ada", 42]],
+            columns: ["id", "name"],
+            rows: [[1, "Ada"]],
             affected_rows: 0,
             execution_time_ms: 1,
           },
@@ -1256,7 +1256,7 @@ test("binds joined query edits to the single safe source table", async () => {
     }
     if (url === "/api/query/analyze-editability") {
       const body = JSON.parse(String(init?.body ?? "{}"));
-      assert.equal(body.sql, "select u.id as user_id, u.name, o.total from users u join orders o on o.user_id = u.id");
+      assert.equal(body.sql, "select distinct u.* from users u join orders o on o.user_id = u.id");
       return new Response(
         JSON.stringify({
           editable: true,
@@ -1267,17 +1267,14 @@ test("binds joined query edits to the single safe source table", async () => {
             tableNameQuoted: false,
             tableAlias: "u",
             selectStar: false,
+            distinct: true,
             multiSource: true,
             allowInsertDelete: false,
             sources: [
               { key: "u:0", tableName: "users", tableNameQuoted: false, schemaQuoted: false, alias: "u" },
               { key: "o:1", tableName: "orders", tableNameQuoted: false, schemaQuoted: false, alias: "o" },
             ],
-            columns: [
-              { sourceName: "id", sourceNameQuoted: false, sourceQualifier: "u", sourceKey: "u:0", resultName: "user_id", expression: "u.id" },
-              { sourceName: "name", sourceNameQuoted: false, sourceQualifier: "u", sourceKey: "u:0", resultName: "name", expression: "u.name" },
-              { sourceName: "total", sourceNameQuoted: false, sourceQualifier: "o", sourceKey: "o:1", resultName: "total", expression: "o.total" },
-            ],
+            columns: [{ star: true, sourceQualifier: "u", sourceKey: "u:0", resultName: "*", expression: "u.*" }],
           },
         }),
         { status: 200, headers: { "Content-Type": "application/json" } },
@@ -1311,7 +1308,7 @@ test("binds joined query edits to the single safe source table", async () => {
   });
 
   try {
-    const sql = "select u.id as user_id, u.name, o.total from users u join orders o on o.user_id = u.id";
+    const sql = "select distinct u.* from users u join orders o on o.user_id = u.id";
     const tabId = store.createTab("pg-join-1", "appdb", "Query 1", "query");
     await store.executeTabSql(tabId, sql);
 
@@ -1323,9 +1320,10 @@ test("binds joined query edits to the single safe source table", async () => {
     ]);
     assert.equal(tab?.queryEditabilityReason, undefined);
     assert.equal(tab?.queryAnalysis?.multiSource, true);
+    assert.equal(tab?.queryAnalysis?.distinct, true);
     assert.equal(tab?.queryAnalysis?.allowInsertDelete, false);
     assert.equal(tab?.tableMeta?.tableName, "users");
-    assert.deepEqual(tab?.querySourceColumns, ["id", "name", undefined]);
+    assert.deepEqual(tab?.querySourceColumns, ["id", "name"]);
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

@@ -1301,8 +1301,10 @@ const mcpStatusLoading = ref(false);
 const mcpStatusError = ref("");
 const mcpCopied = ref<"" | McpCopyKind>("");
 const mcpConfigTab = ref<McpConfigTab>("claude");
-const mcpReadonlyMode = ref(false);
-const mcpAllowDangerous = ref(false);
+const MCP_READONLY_STORAGE_KEY = "dbx-mcp-config-readonly";
+const MCP_ALLOW_DANGEROUS_STORAGE_KEY = "dbx-mcp-config-allow-dangerous";
+const mcpReadonlyMode = ref(localStorage.getItem(MCP_READONLY_STORAGE_KEY) === "true");
+const mcpAllowDangerous = ref(localStorage.getItem(MCP_ALLOW_DANGEROUS_STORAGE_KEY) === "true");
 const mcpInstalling = ref(false);
 const mcpInstallMessage = ref("");
 const mcpInstallError = ref(false);
@@ -1355,7 +1357,12 @@ const mcpCommand = computed(() => {
 });
 
 watch(mcpReadonlyMode, (value) => {
+  localStorage.setItem(MCP_READONLY_STORAGE_KEY, String(value));
   if (value) mcpAllowDangerous.value = false;
+});
+
+watch(mcpAllowDangerous, (value) => {
+  localStorage.setItem(MCP_ALLOW_DANGEROUS_STORAGE_KEY, String(value));
 });
 
 async function refreshMcpStatus() {
@@ -4025,6 +4032,7 @@ onUnmounted(cleanupPreviewEditor);
               </div>
 
               <div class="space-y-2">
+                <p class="text-xs text-muted-foreground">{{ t("settings.mcpConfigOptionsHint") }}</p>
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="mcp-readonly-mode">{{ t("settings.mcpReadonlyMode") }}</Label>

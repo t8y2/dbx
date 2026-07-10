@@ -223,7 +223,7 @@ function cloneAnalysisForSource(analysis: EditableQueryInfo, source: EditableQue
     tableNameQuoted: source.tableNameQuoted,
     tableAlias: source.alias,
     editableSourceKey: source.key,
-    allowInsertDelete: analysis.sources?.length ? false : analysis.allowInsertDelete,
+    allowInsertDelete: analysis.sources?.length || analysis.distinct ? false : analysis.allowInsertDelete,
   };
 }
 

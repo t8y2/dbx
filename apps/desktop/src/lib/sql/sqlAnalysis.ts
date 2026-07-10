@@ -23,6 +23,7 @@ export interface EditableQueryInfo {
   editableSourceKey?: string;
   multiSource?: boolean;
   allowInsertDelete?: boolean;
+  distinct?: boolean;
 }
 
 export interface EditableQueryColumn {
@@ -80,8 +81,12 @@ export function analyzeEditableQueryEditability(sql: string): QueryEditability {
   const fromIndex = findTopLevelKeyword(normalized, "FROM", 0);
   if (fromIndex < 0) return { editable: false, reason: "no-table" };
 
-  const selectBody = normalized.slice("SELECT".length, fromIndex).trim();
-  if (/^DISTINCT\b/i.test(selectBody)) return { editable: false, reason: "aggregation" };
+  const rawSelectBody = normalized.slice("SELECT".length, fromIndex).trim();
+  const distinct = /^DISTINCT\b/i.test(rawSelectBody);
+  const selectBody = distinct ? rawSelectBody.replace(/^DISTINCT\b/i, "").trimStart() : rawSelectBody;
+  // DISTINCT ON selects a representative row using database-specific ordering,
+  // so it cannot be mapped to base rows like an ordinary DISTINCT projection.
+  if (distinct && /^ON\b/i.test(selectBody)) return { editable: false, reason: "aggregation" };
 
   const groupIndex = findTopLevelKeyword(normalized, "GROUP", fromIndex + 4);
   const havingIndex = findTopLevelKeyword(normalized, "HAVING", fromIndex + 4);
@@ -95,11 +100,11 @@ export function analyzeEditableQueryEditability(sql: string): QueryEditability {
   const source = sources[0]!;
 
   const selectStar = sources.length === 1 && isSelectStar(selectBody, source.alias);
-  if (sources.length > 1 && /(^|,)\s*(?:\*|(?:[A-Za-z_][\w$]*|"[^"]+"|`[^`]+`|\[[^\]]+\])\s*\.\s*\*)\s*(?:,|$)/.test(selectBody)) {
-    return { editable: false, reason: "complex-source" };
-  }
   const columns = selectStar ? [] : parseSelectColumns(selectBody, sources);
   if (!selectStar && columns.length === 0) return { editable: false, reason: "computed-columns" };
+  if (sources.length > 1 && columns.some((column) => column.star && !column.sourceKey)) {
+    return { editable: false, reason: "complex-source" };
+  }
 
   const analysis: EditableQueryInfo = {
     catalog: source.catalog,
@@ -111,6 +116,7 @@ export function analyzeEditableQueryEditability(sql: string): QueryEditability {
     tableAlias: source.alias,
     selectStar,
     columns,
+    ...(distinct ? { distinct: true, allowInsertDelete: false } : {}),
   };
   if (sources.length > 1) {
     analysis.sources = sources;

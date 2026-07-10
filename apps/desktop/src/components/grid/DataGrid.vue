@@ -6161,7 +6161,6 @@ const {
   prefetchRowAsInsertStatement,
   canCopyRowAsInsert,
   prefetchRowAsUpdateStatement,
-  canCopyPreparedUpdate,
   copyRowAsUpdate,
   canCopyRowAsInsertWithoutPrimaryKeys,
   canCopyRowAsUpdate,
@@ -8355,7 +8354,7 @@ function copySubmenu(): ContextMenuItem {
     }
   }
   if (canCopyRowAsUpdate.value) {
-    items.push({ label: labels.update, action: copyRowAsUpdate, disabled: !canCopyPreparedUpdate() });
+    items.push({ label: labels.update, action: copyRowAsUpdate });
   }
   items.push({ label: t("grid.copyAll"), action: copyAll });
   items.push({ label: t("grid.copyColumnNames"), action: copyColumnNames });

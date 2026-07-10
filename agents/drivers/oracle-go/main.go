@@ -1554,7 +1554,9 @@ func (s *server) getExplainInfo(sqlText, database, schema string, timeoutSecs in
 
 	statementID := "DBX_" + strings.ToUpper(strconv.FormatInt(time.Now().UnixNano(), 36))
 	defer cleanupOracleExplainPlan(conn, statementID)
-	if _, err := conn.ExecContext(ctx, "EXPLAIN PLAN SET STATEMENT_ID = '"+statementID+"' FOR "+trimStatementSQL(sqlText)); err != nil {
+	statementSQL := trimStatementSQL(sqlText)
+	explainArgs := oracleExplainPlanBindArgs(statementSQL)
+	if _, err := conn.ExecContext(ctx, "EXPLAIN PLAN SET STATEMENT_ID = '"+statementID+"' FOR "+statementSQL, explainArgs...); err != nil {
 		return "", err
 	}
 	planRows, err := conn.QueryContext(
@@ -1582,6 +1584,87 @@ func cleanupOracleExplainPlan(conn *sql.Conn, statementID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, _ = conn.ExecContext(ctx, "DELETE FROM PLAN_TABLE WHERE STATEMENT_ID = :1", statementID)
+}
+
+type oracleBindParam struct {
+	Name       string
+	Positional bool
+}
+
+func oracleExplainPlanBindArgs(sqlText string) []any {
+	params := oracleExplainPlanBindParams(sqlText)
+	args := make([]any, 0, len(params))
+	for _, param := range params {
+		if param.Positional {
+			args = append(args, nil)
+			continue
+		}
+		args = append(args, sql.Named(param.Name, nil))
+	}
+	return args
+}
+
+func oracleExplainPlanBindParams(sqlText string) []oracleBindParam {
+	params := make([]oracleBindParam, 0)
+	seenNamed := map[string]bool{}
+	for pos := 0; pos < len(sqlText); pos++ {
+		switch sqlText[pos] {
+		case '\'':
+			pos = skipSingleQuotedSQL(sqlText, pos)
+		case '"':
+			pos = skipDoubleQuotedSQL(sqlText, pos)
+		case 'q', 'Q':
+			if end, ok := skipOracleAlternativeQuotedSQL(sqlText, pos); ok {
+				pos = end
+			}
+		case '-':
+			if pos+1 < len(sqlText) && sqlText[pos+1] == '-' {
+				pos = skipLineCommentSQL(sqlText, pos)
+			}
+		case '/':
+			if pos+1 < len(sqlText) && sqlText[pos+1] == '*' {
+				pos = skipBlockCommentSQL(sqlText, pos)
+			}
+		case ':':
+			param, end, ok := readOracleBindParam(sqlText, pos)
+			if !ok {
+				continue
+			}
+			if param.Positional {
+				params = append(params, param)
+			} else if key := strings.ToUpper(param.Name); !seenNamed[key] {
+				seenNamed[key] = true
+				params = append(params, param)
+			}
+			pos = end - 1
+		}
+	}
+	return params
+}
+
+func readOracleBindParam(sqlText string, pos int) (oracleBindParam, int, bool) {
+	if pos < 0 || pos+1 >= len(sqlText) || sqlText[pos] != ':' {
+		return oracleBindParam{}, pos, false
+	}
+	if pos > 0 && sqlText[pos-1] == ':' {
+		return oracleBindParam{}, pos, false
+	}
+	next := sqlText[pos+1]
+	if next >= '0' && next <= '9' {
+		end := pos + 2
+		for end < len(sqlText) && sqlText[end] >= '0' && sqlText[end] <= '9' {
+			end++
+		}
+		return oracleBindParam{Name: sqlText[pos+1 : end], Positional: true}, end, true
+	}
+	if !isOracleIdentifierStart(next) {
+		return oracleBindParam{}, pos, false
+	}
+	end := pos + 2
+	for end < len(sqlText) && isOracleIdentifierPart(sqlText[end]) {
+		end++
+	}
+	return oracleBindParam{Name: sqlText[pos+1 : end]}, end, true
 }
 
 func restoreOracleCurrentSchema(conn *sql.Conn, schema string) {
@@ -2515,6 +2598,30 @@ func skipSingleQuotedSQL(value string, pos int) int {
 		pos++
 	}
 	return len(value) - 1
+}
+
+func skipOracleAlternativeQuotedSQL(value string, pos int) (int, bool) {
+	if pos+2 >= len(value) || (value[pos] != 'q' && value[pos] != 'Q') || value[pos+1] != '\'' {
+		return pos, false
+	}
+	open := value[pos+2]
+	close := open
+	switch open {
+	case '[':
+		close = ']'
+	case '{':
+		close = '}'
+	case '(':
+		close = ')'
+	case '<':
+		close = '>'
+	}
+	for end := pos + 3; end+1 < len(value); end++ {
+		if value[end] == close && value[end+1] == '\'' {
+			return end + 1, true
+		}
+	}
+	return len(value) - 1, true
 }
 
 func skipDoubleQuotedSQL(value string, pos int) int {

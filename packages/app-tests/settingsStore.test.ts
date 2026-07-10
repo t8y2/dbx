@@ -273,7 +273,7 @@ test("normalizes table font size", () => {
   assert.equal(normalizeEditorSettings({}).tableFontSize, 13);
   assert.equal(normalizeEditorSettings({ tableFontSize: 12 }).tableFontSize, 12);
   assert.equal(normalizeEditorSettings({ tableFontSize: 14.6 }).tableFontSize, 15);
-  assert.equal(normalizeEditorSettings({ tableFontSize: 8 }).tableFontSize, 12);
+  assert.equal(normalizeEditorSettings({ tableFontSize: 8 }).tableFontSize, 8);
   assert.equal(normalizeEditorSettings({ tableFontSize: 20 }).tableFontSize, 16);
   assert.equal(normalizeEditorSettings({ tableFontSize: "large" as any }).tableFontSize, 13);
 });

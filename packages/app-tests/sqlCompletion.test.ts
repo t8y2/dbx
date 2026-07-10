@@ -984,6 +984,87 @@ test("ranks exact table matches above prefix and fuzzy matches", () => {
   );
 });
 
+test("ranks exact keyword matches above prefix-matching routines (#3002)", () => {
+  const sql = "create table t (id int";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [],
+    objects: [
+      { name: "int_proc_sync", type: "procedure" },
+      { name: "sp_interface", type: "procedure" },
+      { name: "fn_to_int", type: "function" },
+    ],
+    columnsByTable: new Map(),
+    databaseType: "sqlserver",
+  });
+
+  assert.equal(items[0]?.label, "INT");
+  assert.equal(items[0]?.type, "keyword");
+});
+
+test("ranks an exact table label match first", () => {
+  const sql = "select * from orders";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "orders", type: "table" },
+      { name: "orders_archive", type: "table" },
+    ],
+    columnsByTable: new Map(),
+  });
+
+  assert.equal(items[0]?.label, "orders");
+  assert.equal(items[0]?.type, "table");
+});
+
+test("ranks an exact column match above an exact keyword match", () => {
+  const sql = "select limit from t";
+  const items = buildSqlCompletionItems(sql, "select limit".length, {
+    tables: [{ name: "t", type: "table" }],
+    columnsByTable: new Map([["t", [{ name: "limit", table: "t", dataType: "text" }]]]),
+  });
+  const columnIndex = items.findIndex((item) => item.type === "column" && item.label === "limit");
+  const keywordIndex = items.findIndex((item) => item.type === "keyword" && item.label === "LIMIT");
+
+  assert.ok(columnIndex >= 0);
+  assert.ok(keywordIndex >= 0);
+  assert.ok(columnIndex < keywordIndex);
+});
+
+test("ranks an exact table match above foreign-key related prefix matches", () => {
+  const sql = "select * from orders join customers";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "orders", type: "table" },
+      { name: "customers", type: "table" },
+      { name: "customers_ext", type: "table" },
+    ],
+    columnsByTable: new Map(),
+    foreignKeysByTable: new Map([["orders", [{ column: "customer_id", ref_table: "customers_ext", ref_column: "id" }]]]),
+  });
+
+  assert.equal(items[0]?.label, "customers");
+  assert.equal(items[0]?.type, "table");
+});
+
+test("ranks an exact match first even when a fuzzy candidate outscores the numeric boost", () => {
+  // A long tight-fuzzy foreign-key candidate accumulates boundary bonuses beyond
+  // EXACT_LABEL_MATCH_BOOST; only the exactMatch comparator key keeps the exact item first.
+  const exactName = "ab".repeat(300);
+  const fuzzyName = Array.from({ length: 300 }, () => "ab").join("_");
+  const sql = `select * from orders join ${exactName}`;
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "orders", type: "table" },
+      { name: exactName, type: "table" },
+      { name: fuzzyName, type: "table" },
+    ],
+    columnsByTable: new Map(),
+    foreignKeysByTable: new Map([["orders", [{ column: "x_id", ref_table: fuzzyName, ref_column: "id" }]]]),
+  });
+
+  assert.equal(items[0]?.label, exactName);
+  assert.equal(items[0]?.type, "table");
+});
+
 test("does not reuse table completion results across typed prefixes", () => {
   const validFor = getSqlCompletionResultValidFor("select * from ", "select * from ".length);
 

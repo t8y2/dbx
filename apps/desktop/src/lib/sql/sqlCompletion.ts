@@ -524,6 +524,7 @@ const EXCLUSIVE_TABLE_TRIGGER_KEYWORDS = new Set(["from", "join", "update", "int
 const JOIN_MODIFIERS = new Set(["left", "right", "inner", "outer", "cross", "full", "natural"]);
 const JOIN_MODIFIER_KEYWORD_PHRASES = ["LEFT JOIN", "RIGHT JOIN", "INNER JOIN", "FULL JOIN", "CROSS JOIN", "NATURAL JOIN", "LEFT OUTER JOIN", "RIGHT OUTER JOIN", "FULL OUTER JOIN"];
 const MAX_TABLE_COMPLETION_ITEMS = 200;
+const EXACT_LABEL_MATCH_BOOST = 10000;
 
 // Keywords that only make sense in DDL / statement-start contexts (not inside SELECT/INSERT/UPDATE/DELETE)
 const DDL_ONLY_KEYWORDS = new Set([
@@ -1112,6 +1113,7 @@ export interface SqlCompletionItem {
   info?: string;
   apply?: string;
   boost: number;
+  exactMatch?: boolean;
 }
 
 export type SqlKeywordCase = "preserve" | "upper" | "lower";
@@ -1310,6 +1312,17 @@ class SqlCompletionProvider {
     if (context.onStar) {
       const starItem = buildStarExpansionItem(context, this.input.columnsByTable, this.t, this.dialect);
       if (starItem) this.items.push(starItem);
+    }
+
+    if (context.prefix) {
+      for (const item of this.items) {
+        // Alias snippets reuse the prefix as a label while applying alias SQL, so they are not exact name matches.
+        const isAliasSnippet = item.type === "snippet" && item.apply === formatAliasCompletionApply(item.label, this.databaseType);
+        if (!isAliasSnippet && item.label.toLowerCase() === context.prefix.toLowerCase()) {
+          item.exactMatch = true;
+          item.boost += EXACT_LABEL_MATCH_BOOST;
+        }
+      }
     }
 
     return dedupeAndSort(this.items);
@@ -3915,6 +3928,7 @@ function dedupeAndSort(items: SqlCompletionItem[]): SqlCompletionItem[] {
 }
 
 function compareCompletionItems(left: SqlCompletionItem, right: SqlCompletionItem): number {
+  if (!left.exactMatch !== !right.exactMatch) return left.exactMatch ? -1 : 1;
   const leftBonus = getHistoryBoost(left.label, left.type);
   const rightBonus = getHistoryBoost(right.label, right.type);
   return right.boost + rightBonus + getTypePriorityBoost(right.type) - (left.boost + leftBonus + getTypePriorityBoost(left.type));

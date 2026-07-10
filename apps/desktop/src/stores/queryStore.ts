@@ -5,7 +5,7 @@ import { useI18n } from "vue-i18n";
 import type { DatabaseType, ObjectBrowserViewport, QueryResult, QueryTab, TableInfoTab, TableStructureEditorTarget } from "@/types/database";
 import { orderPinnedFirst } from "@/lib/app/pinnedItems";
 import { canCancelQueryExecution } from "@/lib/sql/queryExecutionState";
-import { buildExplainSql, parseExplainResult, parseDamengExplainText } from "@/lib/diagram/explainPlan";
+import { buildExplainSql, parseExplainResult, parseDamengExplainText, parseOracleExplainText } from "@/lib/diagram/explainPlan";
 import { allEditableColumnsWriteable, allPrimaryKeysPresent, sourceColumnsForResult, type EditableQueryInfo, type EditableQuerySource } from "@/lib/sql/sqlAnalysis";
 import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY, restoreOpenTabsPayload, restoreOpenTabsState, serializeOpenTabs } from "@/lib/app/openTabsPersistence";
 import {
@@ -2736,10 +2736,23 @@ export const useQueryStore = defineStore("query", () => {
     tab.explainError = undefined;
     tab.lastExplainedSql = sql;
 
-    // DM uses native getExplainInfo via JDBC (supports explain + autotrace modes)
-    // Autotrace mode executes the SQL — reject dangerous statements
-    if (databaseType === "dameng") {
-      if (explainMode === "autotrace") {
+    // DM and Oracle agents expose native text plans. DM also supports autotrace.
+    if (databaseType === "dameng" || databaseType === "oracle") {
+      let explainSql = sql;
+      if (databaseType === "oracle") {
+        const built = await buildExplainSql(databaseType, sql);
+        if (!built.ok) {
+          tab.isExplaining = false;
+          tab.explainExecutionId = undefined;
+          tab.explainPlan = undefined;
+          tab.explainError = built.reason;
+          return built;
+        }
+        explainSql = built.sql;
+      }
+
+      // Autotrace executes the SQL, so keep its stricter safety check.
+      if (databaseType === "dameng" && explainMode === "autotrace") {
         const DANGER_RE = /^\s*(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
         const cleaned = sql
           .replace(/\/\*[\s\S]*?\*\//g, " ")
@@ -2752,13 +2765,13 @@ export const useQueryStore = defineStore("query", () => {
         }
       }
       try {
-        const mode = explainMode === "autotrace" ? "autotrace" : "explain";
+        const mode = databaseType === "dameng" && explainMode === "autotrace" ? "autotrace" : "explain";
         const planText = (await api.getExplainInfo(tab.connectionId, tab.database, tab.schema, sql, mode)) as string | undefined;
         const current = tabs.value.find((t) => t.id === id);
         if (current?.explainExecutionId === executionId) {
           if (planText && planText.length > 0) {
-            current.explainPlan = parseDamengExplainText(planText);
-            current.explainSql = sql;
+            current.explainPlan = databaseType === "oracle" ? parseOracleExplainText(planText) : parseDamengExplainText(planText);
+            current.explainSql = explainSql;
             current.explainError = undefined;
           } else {
             current.explainPlan = undefined;
@@ -2775,9 +2788,10 @@ export const useQueryStore = defineStore("query", () => {
         const current = tabs.value.find((t) => t.id === id);
         if (current?.explainExecutionId === executionId) {
           current.isExplaining = false;
+          current.explainExecutionId = undefined;
         }
       }
-      return { ok: true as const };
+      return { ok: true as const, sql: explainSql };
     }
 
     const built = await buildExplainSql(databaseType, sql);

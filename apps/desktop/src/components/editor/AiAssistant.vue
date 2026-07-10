@@ -67,7 +67,7 @@ import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { decodeSelectableDatabaseValue, encodeSelectableDatabaseValue, formatDatabaseLabel, resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import ExplainPlanViewer from "@/components/explain/ExplainPlanViewer.vue";
-import { parseExplainResult, type ParsedExplainPlan } from "@/lib/diagram/explainPlan";
+import { parseExplainResult, parseOracleExplainText, type ParsedExplainPlan } from "@/lib/diagram/explainPlan";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { AI_TABLE_MENTION_CANDIDATE_LIMIT, AI_TABLE_MENTION_SCHEMA_LIMIT, filterAiTableMentionCandidates, formatAiTableMention, parseAiTableMentions, type AiTableMention } from "@/lib/ai/aiTableMentions";
 import { isAiPromptImeCompositionEvent, shouldSubmitAiPromptOnKeydown } from "@/lib/ai/aiPromptKeyboard";
@@ -707,6 +707,9 @@ function extractExplainData(result: unknown): unknown | undefined {
 
 /** Parse explain_data (a serialized QueryResult) into ParsedExplainPlan */
 function parseExplainFromData(explainData: unknown, dbType: string): ParsedExplainPlan | undefined {
+  if (dbType === "oracle" && typeof explainData === "string") {
+    return parseOracleExplainText(explainData);
+  }
   if (!explainData || typeof explainData !== "object") return undefined;
   const supportedTypes = ["mysql", "postgres", "dameng", "questdb"] as const;
   if (!supportedTypes.includes(dbType as (typeof supportedTypes)[number])) return undefined;

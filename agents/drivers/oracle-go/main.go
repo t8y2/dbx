@@ -468,7 +468,12 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		return result, false, err
 	case "get_explain_info":
 		sqlText := stringParam(params, "sql")
-		plan, err := s.getExplainInfo(sqlText)
+		plan, err := s.getExplainInfo(
+			sqlText,
+			stringParam(params, "database"),
+			stringParam(params, "schema"),
+			intParam(params, "timeoutSecs"),
+		)
 		return map[string]any{"plan": plan, "has_actual_stats": false}, false, err
 	case "execute_transaction":
 		result, err := s.executeTransaction(params)
@@ -1506,16 +1511,57 @@ func isOracleCharacterType(dataType string) bool {
 	}
 }
 
-func (s *server) getExplainInfo(sqlText string) (string, error) {
+func (s *server) getExplainInfo(sqlText, database, schema string, timeoutSecs int) (string, error) {
 	if strings.TrimSpace(sqlText) == "" {
 		return "", errors.New("sql is required")
 	}
-	rows, err := s.queryRows("EXPLAIN PLAN FOR "+trimStatementSQL(sqlText), nil)
+	db, err := s.requireDB()
 	if err != nil {
 		return "", err
 	}
-	rows.Close()
-	planRows, err := s.queryRows("SELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY())", nil)
+
+	ctx := context.Background()
+	var cancel context.CancelFunc
+	if timeoutSecs > 0 {
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(timeoutSecs)*time.Second)
+	} else {
+		ctx, cancel = context.WithCancel(ctx)
+	}
+	defer cancel()
+
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+
+	targetSchema := strings.TrimSpace(schema)
+	if targetSchema == "" && !strings.EqualFold(strings.TrimSpace(database), strings.TrimSpace(s.params.Database)) {
+		targetSchema = strings.TrimSpace(database)
+	}
+	if targetSchema != "" {
+		var originalSchema string
+		if err := conn.QueryRowContext(ctx, "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL").Scan(&originalSchema); err != nil {
+			return "", err
+		}
+		if !strings.EqualFold(originalSchema, targetSchema) {
+			if _, err := conn.ExecContext(ctx, "ALTER SESSION SET CURRENT_SCHEMA = "+quoteIdentifier(targetSchema)); err != nil {
+				return "", err
+			}
+			defer restoreOracleCurrentSchema(conn, originalSchema)
+		}
+	}
+
+	statementID := "DBX_" + strings.ToUpper(strconv.FormatInt(time.Now().UnixNano(), 36))
+	defer cleanupOracleExplainPlan(conn, statementID)
+	if _, err := conn.ExecContext(ctx, "EXPLAIN PLAN SET STATEMENT_ID = '"+statementID+"' FOR "+trimStatementSQL(sqlText)); err != nil {
+		return "", err
+	}
+	planRows, err := conn.QueryContext(
+		ctx,
+		"SELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', :1, 'TYPICAL +PREDICATE'))",
+		statementID,
+	)
 	if err != nil {
 		return "", err
 	}
@@ -1530,6 +1576,18 @@ func (s *server) getExplainInfo(sqlText string) (string, error) {
 		builder.WriteByte('\n')
 	}
 	return strings.TrimSpace(builder.String()), planRows.Err()
+}
+
+func cleanupOracleExplainPlan(conn *sql.Conn, statementID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _ = conn.ExecContext(ctx, "DELETE FROM PLAN_TABLE WHERE STATEMENT_ID = :1", statementID)
+}
+
+func restoreOracleCurrentSchema(conn *sql.Conn, schema string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _ = conn.ExecContext(ctx, "ALTER SESSION SET CURRENT_SCHEMA = "+quoteIdentifier(schema))
 }
 
 func (s *server) executeTransaction(params map[string]json.RawMessage) (queryResult, error) {

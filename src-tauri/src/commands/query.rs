@@ -583,59 +583,15 @@ pub async fn get_explain_info(
     sql: String,
     mode: Option<String>,
 ) -> Result<String, String> {
-    let database_for_pool = database.as_deref().filter(|database| !database.trim().is_empty());
-    state.get_or_create_pool(&connection_id, database_for_pool).await?;
-
-    let client = {
-        let connections = state.connections.read().await;
-        let pool = connections.get(&connection_id).ok_or_else(|| "Connection not found".to_string())?;
-        match pool {
-            dbx_core::connection::PoolKind::Agent(client) => client.clone(),
-            _ => return Err("Connection is not an agent-based connection".to_string()),
-        }
-    };
-
-    let config = {
-        let configs = state.configs.read().await;
-        configs.get(&connection_id).cloned()
-    };
-    let config = config.ok_or_else(|| "Connection config not found".to_string())?;
-    let timeout_secs = config.query_timeout_secs;
-
-    let mut client = client.lock().await;
-    let mode = mode.unwrap_or_else(|| "explain".to_string());
-    if mode.eq_ignore_ascii_case("autotrace") && !dbx_core::query_execution_sql::is_safe_dameng_autotrace_sql(&sql) {
-        return Err("unsafe".to_string());
-    }
-    let params = serde_json::json!({
-        "sql": sql,
-        "database": database.unwrap_or_default(),
-        "schema": schema.unwrap_or_default(),
-        "timeoutSecs": timeout_secs as i64,
-        "mode": mode,
-    });
-
-    let result: Result<serde_json::Value, String> = client.get_explain_info::<serde_json::Value>(params).await;
-    match result {
-        Ok(serde_json::Value::String(s)) => {
-            eprintln!("[get_explain_info] OK string, len={}", s.len());
-            Ok(s)
-        }
-        Ok(serde_json::Value::Object(obj)) => {
-            let plan = obj.get("plan").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let has_stats = obj.get("has_actual_stats").and_then(|v| v.as_bool()).unwrap_or(false);
-            eprintln!("[get_explain_info] OK object, plan_len={}, has_actual_stats={}", plan.len(), has_stats);
-            Ok(plan)
-        }
-        Ok(val) => {
-            eprintln!("[get_explain_info] OK unexpected type: {:?}", val);
-            Err(format!("Unexpected result type from getExplainInfo: {:?}", val))
-        }
-        Err(e) => {
-            eprintln!("[get_explain_info] error: {e}");
-            Err(e)
-        }
-    }
+    dbx_core::agent_explain::get_agent_explain_info_core(
+        &state,
+        &connection_id,
+        database.as_deref(),
+        schema.as_deref(),
+        &sql,
+        mode.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]

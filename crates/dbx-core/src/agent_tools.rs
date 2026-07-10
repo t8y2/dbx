@@ -598,6 +598,22 @@ async fn execute_explain_query(
         }
     }
 
+    if *db_type == DatabaseType::Oracle {
+        return match crate::agent_explain::get_agent_explain_info_core(
+            state,
+            connection_id,
+            Some(database),
+            None,
+            sql,
+            Some("explain"),
+        )
+        .await
+        {
+            Ok(plan) => (Ok(plan.clone()), Some(serde_json::Value::String(plan))),
+            Err(error) => (Err(error), None),
+        };
+    }
+
     // Build the database-specific EXPLAIN SQL
     let explain_result = build_explain_sql(ExplainSqlOptions { database_type: Some(*db_type), sql: sql.to_string() });
 
@@ -803,7 +819,6 @@ mod tests {
         assert_eq!(names, vec!["list_collections", "browse_collection"]);
     }
 
-    #[test]
     fn confirmed_sql_permissions_update_execute_query_contract() {
         let tools = all_tools(DatabaseType::Mysql, AgentSqlPermissions { allow_writes: true, allow_dangerous: true });
         let execute_query = tools.iter().find(|tool| tool.name == "execute_query").unwrap();
@@ -821,6 +836,14 @@ mod tests {
             SqlRisk::Transaction,
             AgentSqlPermissions { allow_writes: true, allow_dangerous: true }
         ));
+    }
+
+    #[test]
+    fn oracle_agent_tools_include_explain_query() {
+        let tools = all_tools(DatabaseType::Oracle, AgentSqlPermissions::default());
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+
+        assert!(names.contains(&"explain_query"));
     }
 
     #[test]

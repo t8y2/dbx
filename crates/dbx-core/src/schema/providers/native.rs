@@ -82,7 +82,7 @@ pub(in crate::schema) async fn list_objects(
         PoolKind::Mysql(p, _) if config.is_some_and(is_doris_family_config) => {
             db::mysql::list_table_objects_show(p, database).await.map(Some)
         }
-        PoolKind::Mysql(p, _) => db::mysql::list_objects(p, database).await.map(Some),
+        PoolKind::Mysql(p, _) => db::mysql::list_objects(p, database, None, None).await.map(Some),
         PoolKind::Postgres(p) if config.is_some_and(is_questdb_config) => {
             db::questdb::list_objects(p, schema).await.map(Some)
         }

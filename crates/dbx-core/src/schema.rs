@@ -3546,6 +3546,10 @@ async fn list_objects_once(
 ) -> Result<Vec<db::ObjectInfo>, String> {
     let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
     let db_config = connection_config(state, connection_id).await;
+    let mysql_limit_hint = filter
+        .is_none_or(|value| value.trim().is_empty())
+        .then(|| limit.and_then(|limit| offset.unwrap_or(0).checked_add(limit)))
+        .flatten();
 
     {
         let connections = state.connections.read().await;
@@ -3704,7 +3708,7 @@ async fn list_objects_once(
             } else if db_config.as_ref().is_some_and(is_doris_family_config) {
                 db::mysql::list_table_objects_show(p, database).await
             } else {
-                db::mysql::list_objects(p, database).await
+                db::mysql::list_objects(p, database, object_types, mysql_limit_hint).await
             }
         }
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_questdb_config) => {

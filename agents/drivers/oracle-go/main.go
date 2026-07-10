@@ -620,7 +620,7 @@ func buildDSN(params connectParams) string {
 	if strings.HasPrefix(strings.ToLower(connectionString), "oracle://") {
 		return connectionString
 	}
-	username := oracleAuthUsername(params.Username)
+	username := params.Username
 	options := parseURLParams(params.URLParams)
 	if params.SysDBA {
 		options["AUTH TYPE"] = "SYSDBA"
@@ -653,42 +653,6 @@ func buildDSN(params connectParams) string {
 	return buildGoOraURL(params.Host, port, service, username, params.Password, options)
 }
 
-func oracleAuthUsername(username string) string {
-	if username == "" || isQuotedOracleUsername(username) || !oracleUsernameRequiresQuoting(username) {
-		return username
-	}
-	// Oracle logon accepts quoted identifiers for users that cannot be
-	// represented as regular identifiers, such as bastion usernames with ':'.
-	return `"` + strings.ReplaceAll(username, `"`, `""`) + `"`
-}
-
-func isQuotedOracleUsername(username string) bool {
-	return len(username) >= 2 && strings.HasPrefix(username, `"`) && strings.HasSuffix(username, `"`)
-}
-
-func oracleUsernameRequiresQuoting(username string) bool {
-	for index, ch := range username {
-		if index == 0 {
-			if !isAsciiLetter(ch) {
-				return true
-			}
-			continue
-		}
-		if !isAsciiLetter(ch) && !isAsciiDigit(ch) && ch != '_' && ch != '$' && ch != '#' {
-			return true
-		}
-	}
-	return false
-}
-
-func isAsciiLetter(ch rune) bool {
-	return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')
-}
-
-func isAsciiDigit(ch rune) bool {
-	return ch >= '0' && ch <= '9'
-}
-
 func buildGoOraJDBC(user, password, connStr string, options map[string]string) string {
 	if options == nil {
 		options = make(map[string]string)
@@ -699,7 +663,8 @@ func buildGoOraJDBC(user, password, connStr string, options map[string]string) s
 
 func buildGoOraURL(server string, port int, service, user, password string, options map[string]string) string {
 	// go-ora v2.9.0 uses path escaping for user/password, leaving ':' unescaped.
-	// Userinfo escaping keeps usernames such as "9008888:reader" intact.
+	// Userinfo escaping keeps bastion usernames such as 9008888:reader intact
+	// without changing their authentication semantics.
 	ret := fmt.Sprintf(
 		"oracle://%s@%s/%s",
 		url.UserPassword(user, password).String(),

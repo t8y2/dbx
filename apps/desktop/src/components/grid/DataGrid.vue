@@ -2705,10 +2705,13 @@ function scrollToColumnIndex(columnIndex: number) {
 }
 
 // --- Column resize composable ---
+const columnWidthDensity = computed(() => settingsStore.editorSettings.columnWidthDensity);
 const { initColumnWidths, onResizeStart, autoFitColumn, renderedColumnWidths, totalWidth, columnVars, getIsResizing } = useDataGridColumnResize({
   columns: visibleColumns,
   sourceRows: computed(() => props.result.rows),
   columnIndexes: visibleColumnIndexes,
+  density: columnWidthDensity,
+  compactColumnHeaderActions,
 });
 const gridStyle = computed(() => ({
   ...columnVars.value,
@@ -3431,7 +3434,10 @@ watch(isScrolling, (scrolling) => {
 });
 
 initColumnWidths();
-watch(() => visibleColumns.value.length, initColumnWidths);
+watch(
+  () => visibleColumns.value.length,
+  () => initColumnWidths(),
+);
 watch(
   () => [visibleColumnCount.value, renderedColumnWidths.value.length],
   () => {
@@ -8968,6 +8974,31 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             </Tooltip>
             <DropdownMenu>
               <DropdownMenuTrigger as-child>
+                <Button variant="ghost" size="sm" :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '']">
+                  <PencilRuler class="data-grid-topbar-action-icon w-3 h-3" />
+                  <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t("grid.columnWidth") }}</span>
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" class="w-36">
+                <DropdownMenuItem class="gap-2" :class="{ 'bg-primary/10 text-primary': columnWidthDensity === 'compact' }" @select="settingsStore.updateEditorSettings({ columnWidthDensity: 'compact' })">
+                  <Check v-if="columnWidthDensity === 'compact'" class="h-3.5 w-3.5" />
+                  <span v-else class="h-3.5 w-3.5" />
+                  {{ t("grid.columnWidthCompact") }}
+                </DropdownMenuItem>
+                <DropdownMenuItem class="gap-2" :class="{ 'bg-primary/10 text-primary': columnWidthDensity === 'standard' }" @select="settingsStore.updateEditorSettings({ columnWidthDensity: 'standard' })">
+                  <Check v-if="columnWidthDensity === 'standard'" class="h-3.5 w-3.5" />
+                  <span v-else class="h-3.5 w-3.5" />
+                  {{ t("grid.columnWidthStandard") }}
+                </DropdownMenuItem>
+                <DropdownMenuItem class="gap-2" :class="{ 'bg-primary/10 text-primary': columnWidthDensity === 'comfortable' }" @select="settingsStore.updateEditorSettings({ columnWidthDensity: 'comfortable' })">
+                  <Check v-if="columnWidthDensity === 'comfortable'" class="h-3.5 w-3.5" />
+                  <span v-else class="h-3.5 w-3.5" />
+                  {{ t("grid.columnWidthComfortable") }}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <DropdownMenu>
+              <DropdownMenuTrigger as-child>
                 <Button
                   variant="ghost"
                   size="sm"
@@ -9367,314 +9398,316 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                             {{ headerColumnComment(col.name) }}
                           </span>
                         </span>
-                        <LightDropdownMenu
-                          v-if="headerColumnSortable(col.actualColIdx)"
-                          :items="sortMenuItems(col.name, col.actualColIdx)"
-                          :open="headerSortMenuOpenColumn === col.actualColIdx"
-                          :selected-value="selectedSortMenuValue(col.name, col.actualColIdx)"
-                          align="end"
-                          content-class="w-max min-w-28 p-0.5"
-                          item-class="gap-1 px-1.5 py-0.5 text-xs"
-                          item-icon-class="h-3 w-3"
-                          :match-trigger-width="false"
-                          @update:open="(value: boolean) => (headerSortMenuOpenColumn = value ? col.actualColIdx : null)"
-                          @select="(value: string) => selectHeaderSort(value, col.name, col.actualColIdx)"
-                        >
-                          <template #trigger="{ open, toggle }">
-                            <button
-                              type="button"
-                              class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-gray-200 dark:hover:bg-gray-800 hover:text-foreground"
-                              :class="columnIsSorted(col.name, col.actualColIdx) ? 'text-primary opacity-100' : 'opacity-80'"
-                              :title="t('grid.sort')"
-                              :aria-expanded="open"
-                              @mousedown.stop
-                              @click.stop="toggle"
-                            >
-                              <ArrowUp v-if="columnIsSorted(col.name, col.actualColIdx) && sortDir === 'asc'" class="h-3 w-3 shrink-0" />
-                              <ArrowDown v-else-if="columnIsSorted(col.name, col.actualColIdx) && sortDir === 'desc'" class="h-3 w-3 shrink-0" />
-                              <ArrowUpDown v-else class="h-3 w-3 shrink-0" />
-                            </button>
-                          </template>
-                        </LightDropdownMenu>
-                        <LightDropdownMenu
-                          v-if="compactColumnHeaderActions"
-                          :items="compactColumnActionMenuItems(col.name)"
-                          :open="headerActionMenuOpenColumn === col.actualColIdx"
-                          align="end"
-                          content-class="w-max min-w-28 max-w-48 p-0.5"
-                          item-class="gap-1 px-1.5 py-0.5 text-xs"
-                          item-icon-class="h-3 w-3"
-                          :match-trigger-width="false"
-                          @update:open="(value: boolean) => (headerActionMenuOpenColumn = value ? col.actualColIdx : null)"
-                          @select="(value: string) => selectCompactColumnAction(value, col.actualColIdx)"
-                        >
-                          <template #trigger="{ open, toggle }">
-                            <button
-                              type="button"
-                              class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-gray-200 dark:hover:bg-gray-800 hover:text-foreground"
-                              :class="columnHasFormatter(col.actualColIdx) || localFilterActive(col.actualColIdx) ? 'text-primary opacity-90' : 'opacity-80'"
-                              :title="t('grid.columnActions')"
-                              :aria-expanded="open"
-                              @click.stop="toggle"
-                            >
-                              <ChevronDown class="h-3 w-3" />
-                            </button>
-                          </template>
-                        </LightDropdownMenu>
-                        <Popover :open="formatterOpenColumn === col.actualColIdx" @update:open="(value: boolean) => handleColumnFormatterOpenChange(value, col.actualColIdx)">
-                          <PopoverAnchor v-if="compactColumnHeaderActions" as-child>
-                            <span class="pointer-events-none absolute right-3 top-1/2 h-px w-px -translate-y-1/2" />
-                          </PopoverAnchor>
-                          <PopoverTrigger v-else as-child>
-                            <button
-                              type="button"
-                              class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-gray-200 dark:hover:bg-gray-800 hover:text-foreground"
-                              :class="columnHasFormatter(col.actualColIdx) ? 'text-primary opacity-100' : 'opacity-80'"
-                              :disabled="!formatterKeyForColumn(col.name)"
-                              :title="t('grid.columnFormatter')"
-                              @click.stop
-                            >
-                              <Code2 class="h-3.5 w-3.5" />
-                            </button>
-                          </PopoverTrigger>
-                          <PopoverContent align="start" side="bottom" class="w-[420px] max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-xl border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>
-                            <div class="border-b bg-muted/40 px-3 py-2">
-                              <div class="text-sm font-semibold">
-                                {{ t("grid.columnFormatterFor", { column: col.name }) }}
-                              </div>
-                              <div class="mt-0.5 text-[11px] text-muted-foreground">
-                                {{ t("grid.columnFormatterHint") }}
-                              </div>
-                            </div>
-                            <div class="space-y-3 p-3">
-                              <div class="space-y-1.5">
-                                <div class="text-xs font-medium text-muted-foreground">
-                                  {{ t("grid.formatterType") }}
+                        <span class="flex shrink-0 items-center gap-1" :class="{ 'flex-col !gap-0': columnWidthDensity === 'compact' }">
+                          <LightDropdownMenu
+                            v-if="headerColumnSortable(col.actualColIdx)"
+                            :items="sortMenuItems(col.name, col.actualColIdx)"
+                            :open="headerSortMenuOpenColumn === col.actualColIdx"
+                            :selected-value="selectedSortMenuValue(col.name, col.actualColIdx)"
+                            align="end"
+                            content-class="w-max min-w-28 p-0.5"
+                            item-class="gap-1 px-1.5 py-0.5 text-xs"
+                            item-icon-class="h-3 w-3"
+                            :match-trigger-width="false"
+                            @update:open="(value: boolean) => (headerSortMenuOpenColumn = value ? col.actualColIdx : null)"
+                            @select="(value: string) => selectHeaderSort(value, col.name, col.actualColIdx)"
+                          >
+                            <template #trigger="{ open, toggle }">
+                              <button
+                                type="button"
+                                class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-gray-200 dark:hover:bg-gray-800 hover:text-foreground"
+                                :class="columnIsSorted(col.name, col.actualColIdx) ? 'text-primary opacity-100' : 'opacity-80'"
+                                :title="t('grid.sort')"
+                                :aria-expanded="open"
+                                @mousedown.stop
+                                @click.stop="toggle"
+                              >
+                                <ArrowUp v-if="columnIsSorted(col.name, col.actualColIdx) && sortDir === 'asc'" class="h-3 w-3 shrink-0" />
+                                <ArrowDown v-else-if="columnIsSorted(col.name, col.actualColIdx) && sortDir === 'desc'" class="h-3 w-3 shrink-0" />
+                                <ArrowUpDown v-else class="h-3 w-3 shrink-0" />
+                              </button>
+                            </template>
+                          </LightDropdownMenu>
+                          <LightDropdownMenu
+                            v-if="compactColumnHeaderActions"
+                            :items="compactColumnActionMenuItems(col.name)"
+                            :open="headerActionMenuOpenColumn === col.actualColIdx"
+                            align="end"
+                            content-class="w-max min-w-28 max-w-48 p-0.5"
+                            item-class="gap-1 px-1.5 py-0.5 text-xs"
+                            item-icon-class="h-3 w-3"
+                            :match-trigger-width="false"
+                            @update:open="(value: boolean) => (headerActionMenuOpenColumn = value ? col.actualColIdx : null)"
+                            @select="(value: string) => selectCompactColumnAction(value, col.actualColIdx)"
+                          >
+                            <template #trigger="{ open, toggle }">
+                              <button
+                                type="button"
+                                class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-gray-200 dark:hover:bg-gray-800 hover:text-foreground"
+                                :class="columnHasFormatter(col.actualColIdx) || localFilterActive(col.actualColIdx) ? 'text-primary opacity-90' : 'opacity-80'"
+                                :title="t('grid.columnActions')"
+                                :aria-expanded="open"
+                                @click.stop="toggle"
+                              >
+                                <ChevronDown class="h-3 w-3" />
+                              </button>
+                            </template>
+                          </LightDropdownMenu>
+                          <Popover :open="formatterOpenColumn === col.actualColIdx" @update:open="(value: boolean) => handleColumnFormatterOpenChange(value, col.actualColIdx)">
+                            <PopoverAnchor v-if="compactColumnHeaderActions" as-child>
+                              <span class="pointer-events-none absolute right-3 top-1/2 h-px w-px -translate-y-1/2" />
+                            </PopoverAnchor>
+                            <PopoverTrigger v-else as-child>
+                              <button
+                                type="button"
+                                class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-gray-200 dark:hover:bg-gray-800 hover:text-foreground"
+                                :class="columnHasFormatter(col.actualColIdx) ? 'text-primary opacity-100' : 'opacity-80'"
+                                :disabled="!formatterKeyForColumn(col.name)"
+                                :title="t('grid.columnFormatter')"
+                                @click.stop
+                              >
+                                <Code2 class="h-3.5 w-3.5" />
+                              </button>
+                            </PopoverTrigger>
+                            <PopoverContent align="start" side="bottom" class="w-[420px] max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-xl border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>
+                              <div class="border-b bg-muted/40 px-3 py-2">
+                                <div class="text-sm font-semibold">
+                                  {{ t("grid.columnFormatterFor", { column: col.name }) }}
                                 </div>
-                                <Select :model-value="formatterKind" @update:model-value="(value: any) => (formatterKind = value)">
-                                  <SelectTrigger class="h-8 text-xs">
-                                    <SelectValue />
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    <SelectItem value="datetime">{{ t("grid.formatterDatetime") }}</SelectItem>
-                                    <SelectItem value="json-path">{{ t("grid.formatterJsonPath") }}</SelectItem>
-                                    <SelectItem value="mask">{{ t("grid.formatterMask") }}</SelectItem>
-                                    <SelectItem value="custom-template">{{ t("grid.formatterCustomTemplate") }}</SelectItem>
-                                  </SelectContent>
-                                </Select>
+                                <div class="mt-0.5 text-[11px] text-muted-foreground">
+                                  {{ t("grid.columnFormatterHint") }}
+                                </div>
                               </div>
-
-                              <div v-if="formatterKind === 'datetime'" class="flex gap-2">
+                              <div class="space-y-3 p-3">
                                 <div class="space-y-1.5">
                                   <div class="text-xs font-medium text-muted-foreground">
-                                    {{ t("grid.formatterTimestampUnit") }}
+                                    {{ t("grid.formatterType") }}
                                   </div>
-                                  <Select :model-value="formatterDateUnit" @update:model-value="(value: any) => (formatterDateUnit = value)">
+                                  <Select :model-value="formatterKind" @update:model-value="(value: any) => (formatterKind = value)">
                                     <SelectTrigger class="h-8 text-xs">
                                       <SelectValue />
                                     </SelectTrigger>
                                     <SelectContent>
-                                      <SelectItem value="auto">{{ t("grid.formatterUnitAuto") }}</SelectItem>
-                                      <SelectItem value="seconds">{{ t("grid.formatterUnitSeconds") }}</SelectItem>
-                                      <SelectItem value="milliseconds">{{ t("grid.formatterUnitMilliseconds") }}</SelectItem>
+                                      <SelectItem value="datetime">{{ t("grid.formatterDatetime") }}</SelectItem>
+                                      <SelectItem value="json-path">{{ t("grid.formatterJsonPath") }}</SelectItem>
+                                      <SelectItem value="mask">{{ t("grid.formatterMask") }}</SelectItem>
+                                      <SelectItem value="custom-template">{{ t("grid.formatterCustomTemplate") }}</SelectItem>
                                     </SelectContent>
                                   </Select>
                                 </div>
-                                <div class="space-y-1.5 flex-1">
+
+                                <div v-if="formatterKind === 'datetime'" class="flex gap-2">
+                                  <div class="space-y-1.5">
+                                    <div class="text-xs font-medium text-muted-foreground">
+                                      {{ t("grid.formatterTimestampUnit") }}
+                                    </div>
+                                    <Select :model-value="formatterDateUnit" @update:model-value="(value: any) => (formatterDateUnit = value)">
+                                      <SelectTrigger class="h-8 text-xs">
+                                        <SelectValue />
+                                      </SelectTrigger>
+                                      <SelectContent>
+                                        <SelectItem value="auto">{{ t("grid.formatterUnitAuto") }}</SelectItem>
+                                        <SelectItem value="seconds">{{ t("grid.formatterUnitSeconds") }}</SelectItem>
+                                        <SelectItem value="milliseconds">{{ t("grid.formatterUnitMilliseconds") }}</SelectItem>
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
+                                  <div class="space-y-1.5 flex-1">
+                                    <div class="text-xs font-medium text-muted-foreground">
+                                      {{ t("grid.formatterDatetimePattern") }}
+                                    </div>
+                                    <SearchableSelect
+                                      :model-value="formatterDatetimePattern"
+                                      :options="DateTimePatterns"
+                                      :placeholder="t('grid.formatterDatetimePatternPlaceholder')"
+                                      :search-placeholder="t('grid.formatterDatetimePatternPlaceholder')"
+                                      :empty-text="t('grid.formatterDatetimePatternEmpty')"
+                                      :loading-text="t('common.loading')"
+                                      :allow-custom="true"
+                                      :trigger-class="['border border-input h-8 w-72 pl-2.5 text-xs']"
+                                      content-class="w-72"
+                                      item-class="h-auto min-h-8 px-2 py-1.5 text-xs"
+                                      @update:model-value="(value: any) => (formatterDatetimePattern = value)"
+                                    />
+                                  </div>
+                                </div>
+
+                                <div v-else-if="formatterKind === 'json-path'" class="space-y-1.5">
                                   <div class="text-xs font-medium text-muted-foreground">
-                                    {{ t("grid.formatterDatetimePattern") }}
+                                    {{ t("grid.formatterJsonPathInput") }}
                                   </div>
-                                  <SearchableSelect
-                                    :model-value="formatterDatetimePattern"
-                                    :options="DateTimePatterns"
-                                    :placeholder="t('grid.formatterDatetimePatternPlaceholder')"
-                                    :search-placeholder="t('grid.formatterDatetimePatternPlaceholder')"
-                                    :empty-text="t('grid.formatterDatetimePatternEmpty')"
-                                    :loading-text="t('common.loading')"
-                                    :allow-custom="true"
-                                    :trigger-class="['border border-input h-8 w-72 pl-2.5 text-xs']"
-                                    content-class="w-72"
-                                    item-class="h-auto min-h-8 px-2 py-1.5 text-xs"
-                                    @update:model-value="(value: any) => (formatterDatetimePattern = value)"
-                                  />
+                                  <input v-model="formatterJsonPath" autocapitalize="off" autocorrect="off" spellcheck="false" class="h-8 w-full rounded border bg-background px-2 font-mono text-xs outline-none focus:border-primary" placeholder="$.user.name" />
                                 </div>
-                              </div>
 
-                              <div v-else-if="formatterKind === 'json-path'" class="space-y-1.5">
-                                <div class="text-xs font-medium text-muted-foreground">
-                                  {{ t("grid.formatterJsonPathInput") }}
+                                <div v-else-if="formatterKind === 'mask'" class="grid grid-cols-2 gap-2">
+                                  <label class="space-y-1.5">
+                                    <span class="text-xs font-medium text-muted-foreground">
+                                      {{ t("grid.formatterMaskPrefix") }}
+                                    </span>
+                                    <input v-model.number="formatterMaskPrefix" type="number" min="0" class="h-8 w-full rounded border bg-background px-2 text-xs outline-none focus:border-primary" />
+                                  </label>
+                                  <label class="space-y-1.5">
+                                    <span class="text-xs font-medium text-muted-foreground">
+                                      {{ t("grid.formatterMaskSuffix") }}
+                                    </span>
+                                    <input v-model.number="formatterMaskSuffix" type="number" min="0" class="h-8 w-full rounded border bg-background px-2 text-xs outline-none focus:border-primary" />
+                                  </label>
                                 </div>
-                                <input v-model="formatterJsonPath" autocapitalize="off" autocorrect="off" spellcheck="false" class="h-8 w-full rounded border bg-background px-2 font-mono text-xs outline-none focus:border-primary" placeholder="$.user.name" />
-                              </div>
 
-                              <div v-else-if="formatterKind === 'mask'" class="grid grid-cols-2 gap-2">
-                                <label class="space-y-1.5">
-                                  <span class="text-xs font-medium text-muted-foreground">
-                                    {{ t("grid.formatterMaskPrefix") }}
-                                  </span>
-                                  <input v-model.number="formatterMaskPrefix" type="number" min="0" class="h-8 w-full rounded border bg-background px-2 text-xs outline-none focus:border-primary" />
-                                </label>
-                                <label class="space-y-1.5">
-                                  <span class="text-xs font-medium text-muted-foreground">
-                                    {{ t("grid.formatterMaskSuffix") }}
-                                  </span>
-                                  <input v-model.number="formatterMaskSuffix" type="number" min="0" class="h-8 w-full rounded border bg-background px-2 text-xs outline-none focus:border-primary" />
-                                </label>
-                              </div>
+                                <div v-else class="space-y-2">
+                                  <div v-if="savedCustomFormatters.length" class="space-y-1.5">
+                                    <div class="text-xs font-medium text-muted-foreground">
+                                      {{ t("grid.formatterSavedCustom") }}
+                                    </div>
+                                    <Select :model-value="formatterCustomId" @update:model-value="(value: any) => selectCustomFormatter(String(value))">
+                                      <SelectTrigger class="h-8 text-xs">
+                                        <SelectValue />
+                                      </SelectTrigger>
+                                      <SelectContent>
+                                        <SelectItem :value="CUSTOM_FORMATTER_NEW">{{ t("grid.formatterNewCustom") }}</SelectItem>
+                                        <SelectItem v-for="formatter in savedCustomFormatters" :key="formatter.id" :value="formatter.id">
+                                          {{ formatter.name }}
+                                        </SelectItem>
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
+                                  <label class="block space-y-1.5">
+                                    <span class="text-xs font-medium text-muted-foreground">
+                                      {{ t("grid.formatterCustomName") }}
+                                    </span>
+                                    <input v-model="formatterCustomName" class="h-8 w-full rounded border bg-background px-2 text-xs outline-none focus:border-primary" :placeholder="t('grid.formatterCustomNamePlaceholder')" />
+                                  </label>
+                                  <label class="block space-y-1.5">
+                                    <span class="text-xs font-medium text-muted-foreground">
+                                      {{ t("grid.formatterCustomTemplateInput") }}
+                                    </span>
+                                    <input v-model="formatterCustomTemplate" autocapitalize="off" autocorrect="off" spellcheck="false" class="h-8 w-full rounded border bg-background px-2 font-mono text-xs outline-none focus:border-primary" placeholder="ID-${value}" />
+                                  </label>
+                                  <div class="text-[11px] leading-4 text-muted-foreground">
+                                    {{ t("grid.formatterCustomTemplateHint") }}
+                                  </div>
+                                </div>
 
-                              <div v-else class="space-y-2">
-                                <div v-if="savedCustomFormatters.length" class="space-y-1.5">
+                                <div class="space-y-1.5">
                                   <div class="text-xs font-medium text-muted-foreground">
-                                    {{ t("grid.formatterSavedCustom") }}
+                                    {{ t("grid.formatterPreview") }}
                                   </div>
-                                  <Select :model-value="formatterCustomId" @update:model-value="(value: any) => selectCustomFormatter(String(value))">
-                                    <SelectTrigger class="h-8 text-xs">
-                                      <SelectValue />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                      <SelectItem :value="CUSTOM_FORMATTER_NEW">{{ t("grid.formatterNewCustom") }}</SelectItem>
-                                      <SelectItem v-for="formatter in savedCustomFormatters" :key="formatter.id" :value="formatter.id">
-                                        {{ formatter.name }}
-                                      </SelectItem>
-                                    </SelectContent>
-                                  </Select>
-                                </div>
-                                <label class="block space-y-1.5">
-                                  <span class="text-xs font-medium text-muted-foreground">
-                                    {{ t("grid.formatterCustomName") }}
-                                  </span>
-                                  <input v-model="formatterCustomName" class="h-8 w-full rounded border bg-background px-2 text-xs outline-none focus:border-primary" :placeholder="t('grid.formatterCustomNamePlaceholder')" />
-                                </label>
-                                <label class="block space-y-1.5">
-                                  <span class="text-xs font-medium text-muted-foreground">
-                                    {{ t("grid.formatterCustomTemplateInput") }}
-                                  </span>
-                                  <input v-model="formatterCustomTemplate" autocapitalize="off" autocorrect="off" spellcheck="false" class="h-8 w-full rounded border bg-background px-2 font-mono text-xs outline-none focus:border-primary" placeholder="ID-${value}" />
-                                </label>
-                                <div class="text-[11px] leading-4 text-muted-foreground">
-                                  {{ t("grid.formatterCustomTemplateHint") }}
-                                </div>
-                              </div>
-
-                              <div class="space-y-1.5">
-                                <div class="text-xs font-medium text-muted-foreground">
-                                  {{ t("grid.formatterPreview") }}
-                                </div>
-                                <div class="max-h-40 overflow-auto rounded border bg-muted/20">
-                                  <div v-for="row in formatterPreviewRows(col.actualColIdx)" :key="row.index" class="grid grid-cols-[2rem_minmax(0,1fr)_minmax(0,1fr)] gap-2 border-b px-2 py-1.5 text-[11px] last:border-b-0">
-                                    <span class="text-muted-foreground">{{ row.index }}</span>
-                                    <span class="truncate font-mono text-muted-foreground">{{ row.raw }}</span>
-                                    <span class="truncate font-mono">{{ row.formatted }}</span>
+                                  <div class="max-h-40 overflow-auto rounded border bg-muted/20">
+                                    <div v-for="row in formatterPreviewRows(col.actualColIdx)" :key="row.index" class="grid grid-cols-[2rem_minmax(0,1fr)_minmax(0,1fr)] gap-2 border-b px-2 py-1.5 text-[11px] last:border-b-0">
+                                      <span class="text-muted-foreground">{{ row.index }}</span>
+                                      <span class="truncate font-mono text-muted-foreground">{{ row.raw }}</span>
+                                      <span class="truncate font-mono">{{ row.formatted }}</span>
+                                    </div>
                                   </div>
                                 </div>
                               </div>
-                            </div>
 
-                            <div class="flex items-center justify-between gap-2 border-t bg-muted/30 px-3 py-2">
-                              <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" :disabled="!columnHasFormatter(col.actualColIdx)" @click="clearColumnFormatter(col.actualColIdx)">
-                                {{ t("grid.clearFormatter") }}
-                              </Button>
-                              <div class="flex items-center gap-2">
-                                <Button variant="outline" size="sm" class="h-7 px-2 text-xs" @click="closeColumnFormatter">
-                                  {{ t("dangerDialog.cancel") }}
+                              <div class="flex items-center justify-between gap-2 border-t bg-muted/30 px-3 py-2">
+                                <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" :disabled="!columnHasFormatter(col.actualColIdx)" @click="clearColumnFormatter(col.actualColIdx)">
+                                  {{ t("grid.clearFormatter") }}
                                 </Button>
-                                <Button size="sm" class="h-7 px-2 text-xs" :disabled="!formatterDraftIsSavable()" @click="saveColumnFormatter(col.actualColIdx)">
-                                  {{ t("grid.saveFormatter") }}
-                                </Button>
+                                <div class="flex items-center gap-2">
+                                  <Button variant="outline" size="sm" class="h-7 px-2 text-xs" @click="closeColumnFormatter">
+                                    {{ t("dangerDialog.cancel") }}
+                                  </Button>
+                                  <Button size="sm" class="h-7 px-2 text-xs" :disabled="!formatterDraftIsSavable()" @click="saveColumnFormatter(col.actualColIdx)">
+                                    {{ t("grid.saveFormatter") }}
+                                  </Button>
+                                </div>
                               </div>
-                            </div>
-                          </PopoverContent>
-                        </Popover>
-                        <Popover :open="localFilterOpenColumn === col.actualColIdx" @update:open="(value: boolean) => handleLocalFilterOpenChange(value, col.actualColIdx)">
-                          <PopoverAnchor v-if="compactColumnHeaderActions" as-child>
-                            <span class="pointer-events-none absolute right-3 top-1/2 h-px w-px -translate-y-1/2" />
-                          </PopoverAnchor>
-                          <PopoverTrigger v-else as-child>
-                            <button
-                              type="button"
-                              class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-gray-200 dark:hover:bg-gray-800 hover:text-foreground"
-                              :class="localFilterActive(col.actualColIdx) ? 'text-primary opacity-100' : 'opacity-80'"
-                              :title="t('grid.localFilter')"
-                              @click.stop
-                            >
-                              <Filter class="h-3.5 w-3.5" />
-                            </button>
-                          </PopoverTrigger>
-                          <PopoverContent align="start" side="bottom" class="w-[300px] max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-xl border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>
-                            <div class="border-b bg-muted/40 px-2 py-1.5 text-center text-xs font-semibold">
-                              {{ columnFilterPanelTitle(col.name) }}
-                            </div>
-                            <div class="flex items-center gap-1.5 border-b px-2 py-1.5">
-                              <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                              <input v-model="localFilterSearch" autocapitalize="off" autocorrect="off" spellcheck="false" class="h-7 min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground" :placeholder="t('grid.searchValues')" />
-                            </div>
-                            <div class="grid grid-cols-[1.75rem_minmax(0,1fr)_3.5rem] border-b bg-muted/40 px-2 py-1 text-xs font-medium text-muted-foreground">
-                              <button type="button" class="flex h-4 w-4 items-center justify-center rounded border" :class="localFilterAllVisibleSelected ? 'border-blue-600 bg-blue-600 text-white' : 'border-border bg-background text-foreground/70'" @click="toggleAllLocalFilterOptions">
-                                <Check v-if="localFilterAllVisibleSelected" class="h-3 w-3 stroke-[3]" />
+                            </PopoverContent>
+                          </Popover>
+                          <Popover :open="localFilterOpenColumn === col.actualColIdx" @update:open="(value: boolean) => handleLocalFilterOpenChange(value, col.actualColIdx)">
+                            <PopoverAnchor v-if="compactColumnHeaderActions" as-child>
+                              <span class="pointer-events-none absolute right-3 top-1/2 h-px w-px -translate-y-1/2" />
+                            </PopoverAnchor>
+                            <PopoverTrigger v-else as-child>
+                              <button
+                                type="button"
+                                class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-gray-200 dark:hover:bg-gray-800 hover:text-foreground"
+                                :class="localFilterActive(col.actualColIdx) ? 'text-primary opacity-100' : 'opacity-80'"
+                                :title="t('grid.localFilter')"
+                                @click.stop
+                              >
+                                <Filter class="h-3.5 w-3.5" />
                               </button>
-                              <span>{{ t("grid.value") }}</span>
-                              <span class="text-right">{{ t("grid.count") }}</span>
-                            </div>
-                            <div v-if="localFilterDraft?.mode === 'server' && (serverFilterLoading || serverFilterError || serverFilterLimited)" class="flex items-center gap-1.5 border-b px-2 py-1 text-[11px] text-muted-foreground">
-                              <Loader2 v-if="serverFilterLoading" class="h-3 w-3 animate-spin" />
-                              <span class="min-w-0 truncate">
-                                <template v-if="serverFilterLoading">{{ t("grid.loadingValues") }}</template>
-                                <template v-else-if="serverFilterError">{{ serverFilterError }}</template>
-                                <template v-else>{{ t("grid.serverValuesLimited", { count: SERVER_COLUMN_FILTER_LIMIT }) }}</template>
-                              </span>
-                            </div>
-                            <div class="max-h-72 overflow-auto py-0.5">
-                              <button v-for="option in localFilterOptions" :key="option.key" type="button" class="grid w-full grid-cols-[1.75rem_minmax(0,1fr)_3.5rem] items-center px-2 py-1 text-left text-xs hover:bg-accent" @click="toggleLocalFilterValue(option.key)">
-                                <span class="flex h-4 w-4 items-center justify-center rounded border" :class="localFilterDraft?.values.has(option.key) ? 'border-blue-600 bg-blue-600 text-white' : 'border-border bg-background text-foreground/70'">
-                                  <Check v-if="localFilterDraft?.values.has(option.key)" class="h-3 w-3 stroke-[3]" />
-                                </span>
-                                <span class="truncate font-mono" :class="{ 'italic text-muted-foreground': option.value === null }">
-                                  {{ option.label }}
-                                </span>
-                                <span class="text-right tabular-nums text-muted-foreground text-xs">{{ option.count ?? "" }}</span>
-                              </button>
-                              <div v-if="localFilterDraft?.mode === 'local' && localFilterAllOptions.length > localFilterOptions.length" class="px-2 py-0.5 text-center text-[10px] text-muted-foreground">
-                                {{
-                                  t("grid.moreValues", {
-                                    count: localFilterAllOptions.length - localFilterOptions.length,
-                                  })
-                                }}
+                            </PopoverTrigger>
+                            <PopoverContent align="start" side="bottom" class="w-[300px] max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-xl border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>
+                              <div class="border-b bg-muted/40 px-2 py-1.5 text-center text-xs font-semibold">
+                                {{ columnFilterPanelTitle(col.name) }}
                               </div>
-                              <button v-if="canApplyTypedLocalFilterValue" type="button" class="grid w-full grid-cols-[1.75rem_minmax(0,1fr)] items-center px-2 py-1 text-left text-xs text-primary hover:bg-accent" @click="applyTypedLocalFilterValue">
-                                <Search class="h-3.5 w-3.5" />
-                                <span class="truncate font-mono">
-                                  {{ t("grid.filterTypedValue", { value: localFilterTypedValue }) }}
-                                </span>
-                              </button>
-                              <div v-if="localFilterOptions.length === 0 && !canApplyTypedLocalFilterValue && !serverFilterLoading" class="px-2 py-6 text-center text-xs text-muted-foreground">
-                                {{ t("grid.noSearchResults") }}
+                              <div class="flex items-center gap-1.5 border-b px-2 py-1.5">
+                                <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                                <input v-model="localFilterSearch" autocapitalize="off" autocorrect="off" spellcheck="false" class="h-7 min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground" :placeholder="t('grid.searchValues')" />
                               </div>
-                            </div>
-                            <div class="flex items-center justify-between gap-2 border-t bg-muted/40 px-2 py-1.5">
-                              <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="clearLocalFilter(col.actualColIdx)">
-                                {{ t("grid.clearFilter") }}
-                              </Button>
-                              <div class="flex items-center gap-2">
-                                <Button variant="outline" size="sm" class="h-7 px-2 text-xs" @click="closeLocalFilter">
-                                  {{ t("dangerDialog.cancel") }}
+                              <div class="grid grid-cols-[1.75rem_minmax(0,1fr)_3.5rem] border-b bg-muted/40 px-2 py-1 text-xs font-medium text-muted-foreground">
+                                <button type="button" class="flex h-4 w-4 items-center justify-center rounded border" :class="localFilterAllVisibleSelected ? 'border-blue-600 bg-blue-600 text-white' : 'border-border bg-background text-foreground/70'" @click="toggleAllLocalFilterOptions">
+                                  <Check v-if="localFilterAllVisibleSelected" class="h-3 w-3 stroke-[3]" />
+                                </button>
+                                <span>{{ t("grid.value") }}</span>
+                                <span class="text-right">{{ t("grid.count") }}</span>
+                              </div>
+                              <div v-if="localFilterDraft?.mode === 'server' && (serverFilterLoading || serverFilterError || serverFilterLimited)" class="flex items-center gap-1.5 border-b px-2 py-1 text-[11px] text-muted-foreground">
+                                <Loader2 v-if="serverFilterLoading" class="h-3 w-3 animate-spin" />
+                                <span class="min-w-0 truncate">
+                                  <template v-if="serverFilterLoading">{{ t("grid.loadingValues") }}</template>
+                                  <template v-else-if="serverFilterError">{{ serverFilterError }}</template>
+                                  <template v-else>{{ t("grid.serverValuesLimited", { count: SERVER_COLUMN_FILTER_LIMIT }) }}</template>
+                                </span>
+                              </div>
+                              <div class="max-h-72 overflow-auto py-0.5">
+                                <button v-for="option in localFilterOptions" :key="option.key" type="button" class="grid w-full grid-cols-[1.75rem_minmax(0,1fr)_3.5rem] items-center px-2 py-1 text-left text-xs hover:bg-accent" @click="toggleLocalFilterValue(option.key)">
+                                  <span class="flex h-4 w-4 items-center justify-center rounded border" :class="localFilterDraft?.values.has(option.key) ? 'border-blue-600 bg-blue-600 text-white' : 'border-border bg-background text-foreground/70'">
+                                    <Check v-if="localFilterDraft?.values.has(option.key)" class="h-3 w-3 stroke-[3]" />
+                                  </span>
+                                  <span class="truncate font-mono" :class="{ 'italic text-muted-foreground': option.value === null }">
+                                    {{ option.label }}
+                                  </span>
+                                  <span class="text-right tabular-nums text-muted-foreground text-xs">{{ option.count ?? "" }}</span>
+                                </button>
+                                <div v-if="localFilterDraft?.mode === 'local' && localFilterAllOptions.length > localFilterOptions.length" class="px-2 py-0.5 text-center text-[10px] text-muted-foreground">
+                                  {{
+                                    t("grid.moreValues", {
+                                      count: localFilterAllOptions.length - localFilterOptions.length,
+                                    })
+                                  }}
+                                </div>
+                                <button v-if="canApplyTypedLocalFilterValue" type="button" class="grid w-full grid-cols-[1.75rem_minmax(0,1fr)] items-center px-2 py-1 text-left text-xs text-primary hover:bg-accent" @click="applyTypedLocalFilterValue">
+                                  <Search class="h-3.5 w-3.5" />
+                                  <span class="truncate font-mono">
+                                    {{ t("grid.filterTypedValue", { value: localFilterTypedValue }) }}
+                                  </span>
+                                </button>
+                                <div v-if="localFilterOptions.length === 0 && !canApplyTypedLocalFilterValue && !serverFilterLoading" class="px-2 py-6 text-center text-xs text-muted-foreground">
+                                  {{ t("grid.noSearchResults") }}
+                                </div>
+                              </div>
+                              <div class="flex items-center justify-between gap-2 border-t bg-muted/40 px-2 py-1.5">
+                                <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="clearLocalFilter(col.actualColIdx)">
+                                  {{ t("grid.clearFilter") }}
                                 </Button>
-                                <Button size="sm" class="h-7 px-2 text-xs" @click="applyLocalFilter">
-                                  {{ t("grid.applyFilter") }}
-                                </Button>
+                                <div class="flex items-center gap-2">
+                                  <Button variant="outline" size="sm" class="h-7 px-2 text-xs" @click="closeLocalFilter">
+                                    {{ t("dangerDialog.cancel") }}
+                                  </Button>
+                                  <Button size="sm" class="h-7 px-2 text-xs" @click="applyLocalFilter">
+                                    {{ t("grid.applyFilter") }}
+                                  </Button>
+                                </div>
                               </div>
-                            </div>
-                          </PopoverContent>
-                        </Popover>
-                        <button
-                          v-if="!compactColumnHeaderActions && canUseServerColumnFilter"
-                          type="button"
-                          class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-gray-200 dark:hover:bg-gray-800 hover:text-foreground"
-                          :class="localFilterOpenColumn === col.actualColIdx && localFilterDraft?.mode === 'server' ? 'text-primary opacity-100' : 'opacity-80'"
-                          :title="t('grid.databaseValueFilter')"
-                          @click.stop="openLocalFilter(col.actualColIdx, 'server')"
-                        >
-                          <Database class="h-3.5 w-3.5" />
-                        </button>
+                            </PopoverContent>
+                          </Popover>
+                          <button
+                            v-if="!compactColumnHeaderActions && canUseServerColumnFilter"
+                            type="button"
+                            class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-gray-200 dark:hover:bg-gray-800 hover:text-foreground"
+                            :class="localFilterOpenColumn === col.actualColIdx && localFilterDraft?.mode === 'server' ? 'text-primary opacity-100' : 'opacity-80'"
+                            :title="t('grid.databaseValueFilter')"
+                            @click.stop="openLocalFilter(col.actualColIdx, 'server')"
+                          >
+                            <Database class="h-3.5 w-3.5" />
+                          </button>
+                        </span>
                       </span>
                       <div data-column-resize-handle class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="startColumnHeaderResize(col.visibleColIdx, $event)" @click.stop.prevent @dblclick.stop="autoFitColumn(col.visibleColIdx)" />
                     </div>

@@ -1,13 +1,15 @@
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { describe, expect, it } from "vitest";
 import { DATA_GRID_COL_AUTO_FIT_MAX_WIDTH, DATA_GRID_COL_MAX_WIDTH, DATA_GRID_COL_MIN_WIDTH } from "@/lib/dataGrid/dataGridColumnWidth";
 import { DATA_GRID_ROW_NUM_WIDTH, resizeDataGridColumnWidth, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
 
-function createResizeState(options: { columns: string[]; rows: Array<Array<string | number | boolean | null>>; columnIndexes?: number[] }) {
+function createResizeState(options: { columns: string[]; rows: Array<Array<string | number | boolean | null>>; columnIndexes?: number[]; density?: "compact" | "standard" | "comfortable" }) {
   return useDataGridColumnResize({
     columns: computed(() => options.columns),
     sourceRows: computed(() => options.rows),
     columnIndexes: computed(() => options.columnIndexes ?? options.columns.map((_, index) => index)),
+    density: ref(options.density ?? "standard"),
+    compactColumnHeaderActions: computed(() => true),
   });
 }
 

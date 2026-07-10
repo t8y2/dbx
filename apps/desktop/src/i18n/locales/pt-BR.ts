@@ -3006,6 +3006,8 @@ export default withEnglishFallback({
     showStatementRunButtonsDescription: "Mostra botões para executar cada instrução na margem do editor SQL. Atalhos de teclado e execução pelo menu de contexto continuam funcionando quando desativado.",
     showCurrentStatementFrame: "Mostrar moldura da instrução atual",
     showCurrentStatementFrameDescription: "Quando ativado, o editor SQL desenha um contorno ao redor da instrução executável atual; quando desativado, o contorno fica oculto.",
+    showInsertValueHints: "Mostrar dicas de colunas em VALUES de INSERT",
+    showInsertValueHintsDescription: "Quando ativado, o editor SQL mostra o nome da coluna ao lado de cada valor em cláusulas INSERT ... VALUES.",
     previewStatementRunButton: "Botão de execução de instrução na prévia",
     wordWrap: "Quebra de linha",
     wordWrapDescription: "Quebrar linhas SQL longas dentro da largura do editor",

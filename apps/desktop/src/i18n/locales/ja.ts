@@ -2996,6 +2996,8 @@ export default withEnglishFallback({
     showStatementRunButtonsDescription: "SQLエディタのガターに文ごとの実行ボタンを表示します。無効にしてもキーボードショートカットとコンテキストメニューからの実行は引き続き使えます。",
     showCurrentStatementFrame: "現在の文の枠線を表示",
     showCurrentStatementFrameDescription: "有効にすると、SQLエディタで現在実行可能な文を枠線で示します。無効にすると枠線を表示しません。",
+    showInsertValueHints: "INSERT 値の列名ヒントを表示",
+    showInsertValueHintsDescription: "有効にすると、INSERT ... VALUES 句の各値の横に対応する列名ヒントを表示します。",
     previewStatementRunButton: "文の実行ボタンのプレビュー",
     wordWrap: "折り返し",
     wordWrapDescription: "長いSQL行をエディタ幅内で折り返します",

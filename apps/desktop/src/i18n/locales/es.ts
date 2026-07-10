@@ -3007,6 +3007,8 @@ export default withEnglishFallback({
     showStatementRunButtonsDescription: "Muestra botones para ejecutar cada sentencia en el margen del editor SQL. Los atajos de teclado y el menú contextual seguirán funcionando al desactivarlo.",
     showCurrentStatementFrame: "Mostrar marco de la sentencia actual",
     showCurrentStatementFrameDescription: "Al activarlo, el editor SQL dibuja un contorno alrededor de la sentencia ejecutable actual; al desactivarlo, se oculta.",
+    showInsertValueHints: "Mostrar pistas de columnas en VALUES de INSERT",
+    showInsertValueHintsDescription: "Al activarlo, el editor SQL muestra el nombre de columna junto a cada valor en cláusulas INSERT ... VALUES.",
     previewStatementRunButton: "Botón de ejecución de sentencia en vista previa",
     wordWrap: "Ajuste de línea",
     wordWrapDescription: "Ajustar las líneas largas de SQL al ancho del editor",

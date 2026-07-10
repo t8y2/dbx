@@ -3106,6 +3106,8 @@ export default {
     showStatementRunButtonsDescription: "Show per-statement run buttons in the SQL editor gutter. Keyboard shortcuts and context menu execution still work when disabled.",
     showCurrentStatementFrame: "Show current statement frame",
     showCurrentStatementFrameDescription: "When enabled, the SQL editor draws an outline around the current executable statement; when disabled, the outline is hidden.",
+    showInsertValueHints: "Show INSERT value column hints",
+    showInsertValueHintsDescription: "When enabled, the SQL editor shows column-name hints next to each value in INSERT ... VALUES clauses.",
     previewStatementRunButton: "Preview statement run button",
     wordWrap: "Word wrap",
     wordWrapDescription: "Wrap long SQL lines within the editor width",

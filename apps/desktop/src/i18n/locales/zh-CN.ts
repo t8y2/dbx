@@ -3105,6 +3105,8 @@ export default withEnglishFallback({
     showStatementRunButtonsDescription: "在 SQL 编辑器左侧显示按语句执行的快捷按钮。关闭后仍可通过快捷键和右键菜单执行。",
     showCurrentStatementFrame: "显示当前语句外框线",
     showCurrentStatementFrameDescription: "开启后，在 SQL 编辑器中用外框线标出当前可执行语句；关闭后不显示外框线。",
+    showInsertValueHints: "显示 INSERT 值列名提示",
+    showInsertValueHintsDescription: "开启后，在 INSERT ... VALUES 子句的每个值旁显示对应列名提示。",
     previewStatementRunButton: "预览语句执行按钮",
     wordWrap: "自动换行",
     wordWrapDescription: "长 SQL 在编辑器宽度内自动折行显示",

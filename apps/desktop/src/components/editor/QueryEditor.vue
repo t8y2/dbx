@@ -56,6 +56,7 @@ import { clampEditorFontSize, createEditorZoomCommitScheduler, fontSizeFromGestu
 import { normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
 import { selectionMatchOccurrences } from "@/lib/editor/codemirrorSelectionMatches";
+import { createInsertValueHintsExtension, requestInsertValueHintsRefresh } from "@/lib/editor/codemirrorInsertValueHints";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { isSchemaAware, isSingleDatabase, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
 import { usesLocalOnlyEditorCompletionMetadata, usesOnDemandOnlyEditorColumnMetadata } from "@/lib/metadata/completionMetadataPolicy";
@@ -295,6 +296,7 @@ const queryEditorAppearanceSettings = computed(() => {
     vimModeEnabled: settings.vimModeEnabled,
     autoCloseBrackets: settings.autoCloseBrackets,
     showCurrentStatementFrame: settings.showCurrentStatementFrame,
+    showInsertValueHints: settings.showInsertValueHints,
     shortcuts: settings.shortcuts,
     showStatementRunButtons: settings.showStatementRunButtons,
   };
@@ -1095,6 +1097,36 @@ function identifierRangeAt(sql: string, pos: number): { from: number; to: number
 function completionCacheKey(table: { name: string; schema?: string | null }) {
   const schema = table.schema ?? props.schema;
   return schema ? `${schema}.${table.name}` : table.name;
+}
+
+const pendingInsertValueHintColumnLoads = new Set<string>();
+
+function getInsertValueHintTableColumns(table: string, schema?: string): string[] | undefined {
+  const cacheKey = completionCacheKey({ name: table, schema });
+  const cached = cachedColumnsByTable.get(cacheKey);
+  if (!cached) return undefined;
+  return cached.map((column) => column.name);
+}
+
+function requestInsertValueHintTableColumns(table: string, schema?: string) {
+  if (!props.connectionId || props.database == null) return;
+  if (props.databaseType === "redis" || props.databaseType === "mongodb" || props.databaseType === "elasticsearch") return;
+  const cacheKey = completionCacheKey({ name: table, schema });
+  if (cachedColumnsByTable.has(cacheKey) || pendingInsertValueHintColumnLoads.has(cacheKey)) return;
+  const target = completionMetadataTarget({ name: table, schema });
+  if (!target) return;
+  pendingInsertValueHintColumnLoads.add(cacheKey);
+  void connectionStore
+    .listCompletionColumns(props.connectionId, target.database, table, target.schema)
+    .then((columns) => {
+      cachedColumnsByTable.set(cacheKey, columns);
+      loadedColumnsByTable.add(cacheKey.toLowerCase());
+      if (view.value) requestInsertValueHintsRefresh(view.value);
+    })
+    .catch(() => {})
+    .finally(() => {
+      pendingInsertValueHintColumnLoads.delete(cacheKey);
+    });
 }
 
 function supportsDatabaseQualifierCompletion(): boolean {
@@ -2807,6 +2839,11 @@ onMounted(async () => {
       hoverTooltip((currentView, pos) => resolveSqlHoverTooltip(currentView, pos)),
       buildSqlSignatureExtension(),
       diagnosticComp.of(buildSqlDiagnosticExtension()),
+      createInsertValueHintsExtension({
+        isEnabled: () => settingsStore.editorSettings.showInsertValueHints && props.databaseType !== "redis" && props.databaseType !== "mongodb" && props.databaseType !== "elasticsearch",
+        getTableColumns: getInsertValueHintTableColumns,
+        requestTableColumns: requestInsertValueHintTableColumns,
+      }),
       previewRangeComp.of(buildPreviewRangeExtension()),
       Prec.highest(
         keymap.of([
@@ -3206,6 +3243,13 @@ watch(
     }
     clearScheduledSemanticDiagnostics();
     setSemanticDiagnostics([]);
+  },
+);
+
+watch(
+  () => settingsStore.editorSettings.showInsertValueHints,
+  () => {
+    if (view.value) requestInsertValueHintsRefresh(view.value);
   },
 );
 

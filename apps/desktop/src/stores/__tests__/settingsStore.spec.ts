@@ -18,6 +18,14 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ showCurrentStatementFrame: false }).showCurrentStatementFrame).toBe(false);
   });
 
+  it("shows INSERT value column hints by default", () => {
+    expect(normalizeEditorSettings({}).showInsertValueHints).toBe(true);
+  });
+
+  it("preserves disabled INSERT value column hints", () => {
+    expect(normalizeEditorSettings({ showInsertValueHints: false }).showInsertValueHints).toBe(false);
+  });
+
   it("keeps SQL semantic diagnostics in auto mode and disabled by default", () => {
     const settings = normalizeEditorSettings({});
     expect(settings.sqlSemanticDiagnosticsMode).toBe("auto");

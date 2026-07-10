@@ -3005,6 +3005,8 @@ export default withEnglishFallback({
     showStatementRunButtonsDescription: "Mostra nel margine dell'editor SQL i pulsanti per eseguire ogni istruzione. Scorciatoie da tastiera e menu contestuale continuano a funzionare quando disattivati.",
     showCurrentStatementFrame: "Mostra cornice istruzione corrente",
     showCurrentStatementFrameDescription: "Se attivo, l'editor SQL disegna un contorno intorno all'istruzione eseguibile corrente; se disattivato, il contorno è nascosto.",
+    showInsertValueHints: "Mostra suggerimenti colonne nei VALUES di INSERT",
+    showInsertValueHintsDescription: "Se attivo, l'editor SQL mostra il nome della colonna accanto a ogni valore nelle clausole INSERT ... VALUES.",
     previewStatementRunButton: "Pulsante di esecuzione istruzione in anteprima",
     wordWrap: "A capo automatico",
     wordWrapDescription: "Incolonna le righe SQL lunghe entro la larghezza dell'editor",

@@ -2,7 +2,7 @@ import { defineStore } from "pinia";
 import { uuid } from "@/lib/common/utils";
 import { markRaw, ref, watch, computed } from "vue";
 import { useI18n } from "vue-i18n";
-import type { DatabaseType, QueryResult, QueryTab, TableInfoTab, TableStructureEditorTarget } from "@/types/database";
+import type { DatabaseType, ObjectBrowserViewport, QueryResult, QueryTab, TableInfoTab, TableStructureEditorTarget } from "@/types/database";
 import { orderPinnedFirst } from "@/lib/app/pinnedItems";
 import { canCancelQueryExecution } from "@/lib/sql/queryExecutionState";
 import { buildExplainSql, parseExplainResult, parseDamengExplainText } from "@/lib/diagram/explainPlan";
@@ -40,6 +40,7 @@ import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
 import { buildTabResultSnapshot, deleteTabResultSnapshot, readTabResultSnapshot, tabResultCacheKey, writeTabResultSnapshot } from "@/lib/tabs/tabResultCache";
+import { queryResultBaseSql, queryResultExecutionSql } from "@/lib/tabs/tabPresentation";
 import { decodeQueryResultArchive, encodeQueryResultArchive, type DecodedQueryResultArchive } from "@/lib/query/queryResultArchive";
 import * as api from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -322,6 +323,9 @@ export const useQueryStore = defineStore("query", () => {
   const closeConfirmContext = ref<CloseConfirmContext>("tab");
   const tableStructureRefreshVersions = ref<Record<string, number>>({});
   const savedSqlEditorPositionTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  let resultCacheTrimScheduled = false;
+  let resultCacheTrimRunning = false;
+  let resultCacheTrimRequested = false;
 
   function tableStructureKey(connectionId: string, database: string, schema: string | undefined, tableName: string): string {
     return [connectionId, database, schema || "", tableName].map((part) => part.toLowerCase()).join("\u0000");
@@ -1561,6 +1565,7 @@ export const useQueryStore = defineStore("query", () => {
   function updateEditorViewport(id: string, viewport: { scrollTop: number; scrollLeft: number }) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab) return;
+    if (tab.editorViewport?.scrollTop === viewport.scrollTop && tab.editorViewport?.scrollLeft === viewport.scrollLeft) return;
     tab.editorViewport = viewport;
     queueSavedSqlEditorPositionPersist(tab);
   }
@@ -1570,6 +1575,14 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab) return;
     tab.editorSelection = selection;
     queueSavedSqlEditorPositionPersist(tab);
+  }
+
+  function updateObjectBrowserViewport(id: string, viewport: ObjectBrowserViewport) {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab || tab.mode !== "objects") return;
+    const previous = tab.objectBrowser?.viewport;
+    if (previous?.scrollTop === viewport.scrollTop && previous.viewMode === viewport.viewMode) return;
+    tab.objectBrowser = { ...tab.objectBrowser, viewport };
   }
 
   function renameTab(id: string, title: string) {
@@ -1714,7 +1727,7 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab || tab.schema === schema) return;
     rollbackTabTransaction(tab);
     tab.schema = schema;
-    if (tab.mode === "objects") tab.objectBrowser = { ...tab.objectBrowser, schema };
+    if (tab.mode === "objects") tab.objectBrowser = { ...tab.objectBrowser, schema, viewport: undefined };
   }
 
   function updateConnection(id: string, connectionId: string, database = "") {
@@ -2147,6 +2160,7 @@ export const useQueryStore = defineStore("query", () => {
       mongoSafety?: MongoAggregateSafetyOptions;
       preserveResultDuringExecution?: boolean;
       preserveTotalRowCountDuringExecution?: boolean;
+      replaceActiveResultInGroup?: boolean;
       skipRedisSafetyCheck?: boolean;
       sourceTraceId?: string;
       skipEnsureConnected?: boolean;
@@ -2541,9 +2555,9 @@ export const useQueryStore = defineStore("query", () => {
         executionPromise = api.executeInManualTransaction(tab.txnSessionId, sqlToExecute, tab.database, executionSchema, pageLimit);
       } else {
         console.info("[DBX][executeTabSql:execute-multi:start]", { traceId, elapsed: elapsed() });
-        // Data tabs should reuse the already-open pool; session pools are reserved
-        // for query tabs/background tasks that need connection-local state isolation.
-        const clientSessionId = tab.mode === "query" ? tabClientSessionId(tab) : undefined;
+        // Query and data tabs use a tab-scoped pool so repeated executions keep
+        // connection-local state and avoid MySQL pool resets on every refresh.
+        const clientSessionId = tab.mode === "query" || tab.mode === "data" ? tabClientSessionId(tab) : undefined;
         const executionOptions = {
           ...(typeof pageLimit === "number"
             ? useAgentResultSession
@@ -2576,7 +2590,14 @@ export const useQueryStore = defineStore("query", () => {
       });
       const current = tabs.value.find((t) => t.id === id);
       if (current?.executionId === executionId) {
-        if (results.length > 1) {
+        const activeGroupIndex = current.activeResultIndex;
+        const activeGroupResults = current.results;
+        const shouldReplaceActiveResultInGroup = options?.replaceActiveResultInGroup === true && results.length === 1 && Array.isArray(activeGroupResults) && typeof activeGroupIndex === "number" && activeGroupIndex >= 0 && activeGroupIndex < activeGroupResults.length;
+        if (shouldReplaceActiveResultInGroup) {
+          current.results = activeGroupResults.slice();
+          current.results[activeGroupIndex] = results[0];
+          current.result = results[0];
+        } else if (results.length > 1) {
           const activeResultIndex = results.findIndex((result) => result.columns.length > 0);
           const resultIndex = activeResultIndex >= 0 ? activeResultIndex : 0;
           current.results = results;
@@ -2655,9 +2676,19 @@ export const useQueryStore = defineStore("query", () => {
       }
       const current = tabs.value.find((t) => t.id === id);
       if (current?.executionId === executionId) {
-        current.result = toErrorResult(e);
-        current.results = undefined;
-        current.activeResultIndex = undefined;
+        const errorResult = toErrorResult(e);
+        const activeGroupIndex = current.activeResultIndex;
+        const activeGroupResults = current.results;
+        const shouldReplaceActiveResultInGroup = options?.replaceActiveResultInGroup === true && Array.isArray(activeGroupResults) && typeof activeGroupIndex === "number" && activeGroupIndex >= 0 && activeGroupIndex < activeGroupResults.length;
+        if (shouldReplaceActiveResultInGroup) {
+          current.results = activeGroupResults.slice();
+          current.results[activeGroupIndex] = errorResult;
+          current.result = errorResult;
+        } else {
+          current.result = errorResult;
+          current.results = undefined;
+          current.activeResultIndex = undefined;
+        }
         current.queryAnalysis = undefined;
         current.querySourceColumns = undefined;
         current.queryEditabilityReason = undefined;
@@ -2691,7 +2722,7 @@ export const useQueryStore = defineStore("query", () => {
         });
       }
     }
-    await trimResultCache();
+    scheduleResultCacheTrim();
   }
 
   async function explainTabSql(id: string, sql: string, databaseType?: DatabaseType, explainMode?: string) {
@@ -2855,6 +2886,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortColumnIndex = undefined;
     tab.resultSortDirection = undefined;
     tab.resultSortMode = undefined;
+    tab.resultSortedSql = undefined;
     touchResult(tab);
     tab.queryAnalysis = undefined;
     tab.querySourceColumns = undefined;
@@ -2884,6 +2916,39 @@ export const useQueryStore = defineStore("query", () => {
     if (inactive.length > MAX_CACHED_RESULTS) {
       const toEvict = inactive.slice(0, inactive.length - MAX_CACHED_RESULTS);
       await Promise.all(toEvict.map((t) => evictCachedResult(t)));
+    }
+  }
+
+  function scheduleResultCacheTrim() {
+    resultCacheTrimRequested = true;
+    if (resultCacheTrimScheduled || resultCacheTrimRunning) return;
+    resultCacheTrimScheduled = true;
+
+    const run = () => {
+      resultCacheTrimScheduled = false;
+      void runRequestedResultCacheTrim();
+    };
+
+    // Eviction serializes large result payloads; schedule it after the result
+    // assignment so the grid can paint before cache maintenance starts.
+    if (typeof window !== "undefined" && "requestIdleCallback" in window) {
+      window.requestIdleCallback(run, { timeout: 1500 });
+    } else {
+      setTimeout(run, 0);
+    }
+  }
+
+  async function runRequestedResultCacheTrim() {
+    if (resultCacheTrimRunning) return;
+    resultCacheTrimRunning = true;
+    try {
+      while (resultCacheTrimRequested) {
+        resultCacheTrimRequested = false;
+        await trimResultCache();
+      }
+    } finally {
+      resultCacheTrimRunning = false;
+      if (resultCacheTrimRequested) scheduleResultCacheTrim();
     }
   }
 
@@ -3086,7 +3151,7 @@ export const useQueryStore = defineStore("query", () => {
 
     if (tab.mode !== "query") return tab.result;
 
-    const sql = tab.resultSortedSql ?? tab.resultBaseSql ?? tab.lastExecutedSql ?? tab.sql;
+    const sql = queryResultExecutionSql(tab);
     if (!sql.trim()) return tab.result;
 
     const connStore = useConnectionStore();
@@ -3095,7 +3160,7 @@ export const useQueryStore = defineStore("query", () => {
     const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
     const queryTimeoutSecs = queryTimeoutSecsForConnection(conn);
     const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
-    const queryBaseSql = tab.resultBaseSql ?? sql;
+    const queryBaseSql = queryResultBaseSql(tab);
     const exportSettings = useSettingsStore().editorSettings;
     const exportRowLimit = exportSettings.exportRowLimitEnabled ? exportSettings.exportRowLimit : Number.POSITIVE_INFINITY;
     const agentExportMaxRows = exportSettings.exportRowLimitEnabled ? exportSettings.exportRowLimit : 2_147_483_647;
@@ -3165,7 +3230,7 @@ export const useQueryStore = defineStore("query", () => {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab?.result || tab.mode !== "query") return undefined;
 
-    const sql = tab.resultSortedSql ?? tab.resultBaseSql ?? tab.lastExecutedSql ?? tab.sql;
+    const sql = queryResultExecutionSql(tab);
     if (!sql.trim()) return undefined;
 
     const connStore = useConnectionStore();
@@ -3175,7 +3240,7 @@ export const useQueryStore = defineStore("query", () => {
     const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
     if (!effectiveDbType) return undefined;
     const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
-    const queryBaseSql = tab.resultBaseSql ?? sql;
+    const queryBaseSql = queryResultBaseSql(tab);
     const rowLimit = settings.exportRowLimitEnabled ? settings.exportRowLimit : null;
     const totalRows = typeof tab.resultTotalRowCount === "number" ? (rowLimit === null ? tab.resultTotalRowCount : Math.min(tab.resultTotalRowCount, rowLimit)) : null;
     const clientSessionId = tabClientSessionId(tab, "export");
@@ -3244,6 +3309,7 @@ export const useQueryStore = defineStore("query", () => {
     updateSql,
     updateEditorViewport,
     updateEditorSelection,
+    updateObjectBrowserViewport,
     setAutoCommit,
     commitTransaction,
     rollbackTransaction,

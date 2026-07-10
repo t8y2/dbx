@@ -4,6 +4,16 @@ export interface SqlSingleQuoteCaretOptions {
   selectionStart: number | null | undefined;
 }
 
+export type SqlSingleQuoteKeyAction = "pass" | "skipClosingQuote" | "insertEscapedQuote";
+
+export function resolveSqlSingleQuoteKeyAction(options: { previousChar?: string; nextChar?: string; autoCloseBrackets?: boolean }): SqlSingleQuoteKeyAction {
+  const { previousChar = "", nextChar = "", autoCloseBrackets = true } = options;
+  if (!autoCloseBrackets) return "pass";
+  if (previousChar === "'" && nextChar === "'") return "skipClosingQuote";
+  if (previousChar === "'") return "insertEscapedQuote";
+  return "pass";
+}
+
 export function insertedSqlSingleQuoteAtCaret(options: SqlSingleQuoteCaretOptions): boolean {
   const { previousValue, nextValue, selectionStart } = options;
   if (typeof selectionStart !== "number" || selectionStart < 1) return false;

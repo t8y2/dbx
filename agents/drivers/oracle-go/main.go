@@ -1801,7 +1801,7 @@ func readQuerySessionPage(session *querySession, pageSize int) (queryPageResult,
 		if !session.rows.Next() {
 			return result, session.rows.Err()
 		}
-		row, err := scanRow(session.rows, len(session.columns))
+		row, err := scanRow(session.rows, len(session.columns), session.columnTypes)
 		if err != nil {
 			return queryPageResult{}, err
 		}
@@ -1813,7 +1813,7 @@ func readQuerySessionPage(session *querySession, pageSize int) (queryPageResult,
 		return result, nil
 	}
 	if session.rows.Next() {
-		row, err := scanRow(session.rows, len(session.columns))
+		row, err := scanRow(session.rows, len(session.columns), session.columnTypes)
 		if err != nil {
 			return queryPageResult{}, err
 		}
@@ -1863,13 +1863,14 @@ func (s *server) executeSelect(sqlText string, maxRows int) (queryResult, error)
 	if err != nil {
 		return queryResult{}, err
 	}
-	result := queryResult{Columns: columns, ColumnTypes: columnTypeNames(rows), Rows: [][]any{}}
+	columnTypes := columnTypeNames(rows)
+	result := queryResult{Columns: columns, ColumnTypes: columnTypes, Rows: [][]any{}}
 	for rows.Next() {
 		if len(result.Rows) >= maxRows {
 			result.Truncated = true
 			break
 		}
-		values, err := scanRow(rows, len(columns))
+		values, err := scanRow(rows, len(columns), columnTypes)
 		if err != nil {
 			return queryResult{}, err
 		}
@@ -1878,7 +1879,7 @@ func (s *server) executeSelect(sqlText string, maxRows int) (queryResult, error)
 	return result, rows.Err()
 }
 
-func scanRow(rows *sql.Rows, columnCount int) ([]any, error) {
+func scanRow(rows *sql.Rows, columnCount int, columnTypes []string) ([]any, error) {
 	values := make([]any, columnCount)
 	scanTargets := make([]any, columnCount)
 	for i := range values {
@@ -1888,9 +1889,16 @@ func scanRow(rows *sql.Rows, columnCount int) ([]any, error) {
 		return nil, err
 	}
 	for i, value := range values {
-		values[i] = normalizeValue(value)
+		values[i] = normalizeValue(value, columnTypeAt(columnTypes, i))
 	}
 	return values, nil
+}
+
+func columnTypeAt(columnTypes []string, index int) string {
+	if index < 0 || index >= len(columnTypes) {
+		return ""
+	}
+	return columnTypes[index]
 }
 
 func columnTypeNames(rows *sql.Rows) []string {
@@ -2702,11 +2710,15 @@ func quoteIdentifier(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
 }
 
-func normalizeValue(value any) any {
+func normalizeValue(value any, columnTypeName string) any {
 	switch v := value.(type) {
 	case nil:
 		return nil
 	case []byte:
+		// Oracle RAW-like columns are binary data; decoding them as text produces mojibake.
+		if isOracleBinaryColumnType(columnTypeName) {
+			return bytesToHex(v)
+		}
 		return string(v)
 	case time.Time:
 		return v.Format(time.RFC3339Nano)
@@ -2717,6 +2729,28 @@ func normalizeValue(value any) any {
 	default:
 		return fmt.Sprint(v)
 	}
+}
+
+func isOracleBinaryColumnType(columnTypeName string) bool {
+	normalized := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(columnTypeName), " ", ""))
+	switch normalized {
+	case "RAW", "VARRAW", "LONGRAW", "LONGVARRAW", "BLOB", "BFILE", "OCIBLOBLOCATOR", "OCIFILELOCATOR":
+		return true
+	default:
+		return false
+	}
+}
+
+func bytesToHex(bytes []byte) string {
+	const digits = "0123456789abcdef"
+	result := make([]byte, 2+len(bytes)*2)
+	result[0] = '0'
+	result[1] = 'x'
+	for i, b := range bytes {
+		result[2+i*2] = digits[b>>4]
+		result[3+i*2] = digits[b&0x0f]
+	}
+	return string(result)
 }
 
 func emptyIfNil[T any](values []T) []T {

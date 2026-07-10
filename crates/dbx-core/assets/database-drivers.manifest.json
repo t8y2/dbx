@@ -212,6 +212,12 @@
       "skipTcpProbe": false,
       "defaultPort": 1433,
       "supportLevel": "operate",
+      "driverProfiles": [
+        {
+          "profile": "sqlserver-legacy",
+          "agentKey": "sqlserver-legacy"
+        }
+      ],
       "capabilities": {
         "queryExecution": true,
         "metadataBrowse": true,

@@ -150,6 +150,14 @@ export function resultSqlForGrid(tab: Pick<QueryTab, "result" | "resultBaseSql" 
   return tab.result?.sourceStatement || tab.resultBaseSql || tab.lastExecutedSql || tab.sql;
 }
 
+export function queryResultBaseSql(tab: Pick<QueryTab, "result" | "resultBaseSql" | "lastExecutedSql" | "sql">): string {
+  return resultSqlForGrid(tab);
+}
+
+export function queryResultExecutionSql(tab: Pick<QueryTab, "result" | "resultBaseSql" | "resultSortedSql" | "lastExecutedSql" | "sql">): string {
+  return tab.resultSortedSql || resultSqlForGrid(tab);
+}
+
 export function tabularResultItems(results: QueryResult[] | undefined): { result: QueryResult; index: number; n: number; label?: string; title?: string }[] {
   if (!results) return [];
   return results

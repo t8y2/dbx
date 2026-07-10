@@ -42,6 +42,7 @@ import { appendConnectionErrorHints } from "@/lib/connection/connectionErrorHint
 import { normalizeKafkaBootstrapServers } from "@/lib/connection/kafkaBootstrapServers";
 import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } from "@/lib/connection/mqAuth";
 import { driverInstallProgressPercent, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
+import { isSqlServerLegacyCompatibilityMode, requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityMode, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
 import { ArrowLeft, ArrowDown, ArrowUp, CheckSquare, ChevronRight, CircleHelp, Copy, ExternalLink, FilePlus2, FolderOpen, GripVertical, Grid3X3, KeyRound, Link2, List, ListFilter, Loader2, Pencil, Pipette, Plus, Search, ShieldCheck, Square, Trash2 } from "@lucide/vue";
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleDatabaseSelectionIsStale } from "@/lib/connection/connectionVisibleDatabases";
 import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, isSystemDatabaseName, normalizeVisibleDatabaseSelection, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
@@ -1070,6 +1071,10 @@ function formatInstallSize(bytes: number): string {
 }
 
 async function ensureRequiredAgentDriverInstalled(config: ConnectionConfig): Promise<void> {
+  if (requiresSqlServerLegacyCompatibilityComponent(config)) {
+    await installSqlServerLegacyCompatibilityComponentIfNeeded();
+  }
+
   const driverKey = agentDriverInstallKey(config.db_type, config.driver_profile);
   if (!driverKey) return;
 
@@ -1094,29 +1099,42 @@ async function ensureRequiredAgentDriverInstalled(config: ConnectionConfig): Pro
   }
 }
 
-function isSqlServerLegacyUnencryptedMode(params: string | undefined): boolean {
-  const normalized = (params || "").trim().replace(/^\?/, "").replace(/;/g, "&");
-  if (!normalized) return false;
-  const parsed = new URLSearchParams(normalized);
-  for (const [key, value] of parsed.entries()) {
-    const normalizedKey = key.trim().toLowerCase();
-    if (normalizedKey === "sqlserverencryption" || normalizedKey === "encrypt") {
-      // Accept JDBC-style `encrypt=false` from imported SQL Server URLs as the same opt-in.
-      if (["disabled", "disable", "false", "0", "off", "no"].includes(value.trim().toLowerCase())) return true;
-    }
+async function installSqlServerLegacyCompatibilityComponentIfNeeded(): Promise<boolean> {
+  if (await api.isAgentInstalled(SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY)) return true;
+
+  const label = t("connection.sqlServerLegacyCompatibilityComponent");
+  testResult.value = { ok: true, message: t("connection.sqlServerLegacyCompatibilityComponentInstalling") };
+  beginAgentDriverInstall(SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY, label);
+  try {
+    await api.installAgent(SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY);
+    await refreshLocalAgentDrivers();
+    finishAgentDriverInstall();
+  } catch (error) {
+    testResult.value = { ok: false, message: errorMessage(error) };
+    failAgentDriverInstall(error);
+    throw error;
   }
-  return false;
+  return true;
 }
 
-function setSqlServerLegacyUnencryptedMode(params: string | undefined, enabled: boolean): string {
-  const normalized = (params || "").trim().replace(/^\?/, "").replace(/;/g, "&");
-  const parsed = new URLSearchParams(normalized);
-  for (const key of Array.from(parsed.keys())) {
-    const normalizedKey = key.trim().toLowerCase();
-    if (normalizedKey === "sqlserverencryption" || normalizedKey === "encrypt") parsed.delete(key);
+async function onSqlServerLegacyCompatibilityModeChange(event: Event) {
+  if (form.value.db_type !== "sqlserver") return;
+  const input = event.target instanceof HTMLInputElement ? event.target : null;
+  const enabled = input?.checked === true;
+  if (!enabled) {
+    form.value.url_params = setSqlServerLegacyCompatibilityMode(form.value.url_params, false);
+    return;
   }
-  if (enabled) parsed.set("sqlserverEncryption", "disabled");
-  return parsed.toString();
+
+  if (input) input.checked = false;
+  try {
+    await installSqlServerLegacyCompatibilityComponentIfNeeded();
+    form.value.url_params = setSqlServerLegacyCompatibilityMode(form.value.url_params, true);
+    testResult.value = { ok: true, message: t("connection.sqlServerLegacyCompatibilityModeEnabled") };
+  } catch {
+    form.value.url_params = setSqlServerLegacyCompatibilityMode(form.value.url_params, false);
+    if (input) input.checked = false;
+  }
 }
 
 function isSqlServerTlsHandshakeFailure(message: string): boolean {
@@ -1917,13 +1935,7 @@ const agentInstallProgressLabel = computed(() => {
   return `${label} ${formatInstallSize(progress.downloaded ?? 0)} / ${formatInstallSize(progress.total)} (${agentInstallPercent.value ?? 0}%)`;
 });
 const canCloseAgentInstallDialog = computed(() => !agentInstallRunning.value || !!agentInstallError.value);
-const sqlServerLegacyUnencryptedModeEnabled = computed({
-  get: () => form.value.db_type === "sqlserver" && isSqlServerLegacyUnencryptedMode(form.value.url_params),
-  set: (enabled: boolean) => {
-    if (form.value.db_type !== "sqlserver") return;
-    form.value.url_params = setSqlServerLegacyUnencryptedMode(form.value.url_params, enabled);
-  },
-});
+const sqlServerLegacyCompatibilityModeEnabled = computed(() => form.value.db_type === "sqlserver" && isSqlServerLegacyCompatibilityMode(form.value.url_params));
 const shouldUseWideConnectionDialog = computed(() => dialogStep.value === "config" && (canChooseVisibleDatabases.value || (canChooseVisibleSchemas.value && !visibleFilterUsesSchemas.value)));
 const connectionDialogContentClass = computed(() => {
   if (dialogStep.value === "select") return "sm:max-w-[760px]";
@@ -2019,7 +2031,7 @@ async function testConnection() {
     const message = config ? connectionErrorWithDriverUpdateHint(config, rawMessage) : rawMessage;
     const fallbackMessage = config ? await tryNacosDockerConsoleFallback(config, message, runId) : null;
     if (runId !== testRunId) return;
-    const shouldShowSqlServerLegacyMode = !fallbackMessage && config?.db_type === "sqlserver" && !isSqlServerLegacyUnencryptedMode(config.url_params) && isSqlServerTlsHandshakeFailure(message);
+    const shouldShowSqlServerLegacyMode = !fallbackMessage && config?.db_type === "sqlserver" && !isSqlServerLegacyCompatibilityMode(config.url_params) && isSqlServerTlsHandshakeFailure(message);
     if (shouldShowSqlServerLegacyMode) {
       configTab.value = "advanced";
     }
@@ -5027,14 +5039,14 @@ function openExternalUrl(url: string) {
                   </label>
                 </div>
                 <div v-show="form.db_type === 'sqlserver'" class="grid grid-cols-4 items-start gap-4">
-                  <Label :class="connectionLabelSmallClass">{{ t("connection.sqlServerLegacyUnencryptedMode") }}</Label>
+                  <Label :class="connectionLabelSmallClass">{{ t("connection.sqlServerLegacyCompatibilityMode") }}</Label>
                   <div class="col-span-3 flex flex-col gap-1">
                     <label class="flex h-5 cursor-pointer items-center gap-2">
-                      <input type="checkbox" v-model="sqlServerLegacyUnencryptedModeEnabled" class="mr-0" />
-                      <span class="text-xs text-foreground">{{ t("connection.sqlServerLegacyUnencryptedModeEnable") }}</span>
+                      <input type="checkbox" :checked="sqlServerLegacyCompatibilityModeEnabled" :disabled="agentInstallRunning" class="mr-0" @change="onSqlServerLegacyCompatibilityModeChange" />
+                      <span class="text-xs text-foreground">{{ t("connection.sqlServerLegacyCompatibilityModeEnable") }}</span>
                     </label>
                     <p class="m-0 whitespace-pre-line text-xs leading-5 text-muted-foreground">
-                      {{ t("connection.sqlServerLegacyUnencryptedModeHint") }}
+                      {{ t("connection.sqlServerLegacyCompatibilityModeHint") }}
                     </p>
                   </div>
                 </div>

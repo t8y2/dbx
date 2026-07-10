@@ -250,6 +250,7 @@ async fn main() {
         // Agent drivers
         .route("/agents/installed-local", get(routes::agents::list_installed_agents_local))
         .route("/agents/installed", get(routes::agents::list_installed_agents))
+        .route("/agents/installed/{dbType}", get(routes::agents::is_agent_installed))
         .route("/agents/storage-usage", get(routes::agents::get_driver_store_usage))
         .route("/agents/download-cache", delete(routes::agents::clear_driver_download_cache))
         .route("/agents/runtime", get(routes::agents::get_driver_runtime_summary))

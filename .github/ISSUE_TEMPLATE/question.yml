@@ -12,24 +12,16 @@ body:
     validations:
       required: true
 
-  - type: input
-    id: app-version
+  - type: textarea
+    id: support-info
     attributes:
-      label: DBX 版本
-      placeholder: "例如：v0.1.0"
-    validations:
-      required: true
-
-  - type: dropdown
-    id: os
-    attributes:
-      label: 操作系统
-      multiple: true
-      options:
-        - macOS
-        - Windows
-        - Linux
-        - 其他
+      label: 支持信息
+      description: 打开 DBX 的“设置 → 关于我们”，点击“复制支持信息”，然后粘贴到这里。如无法打开应用，请说明原因。
+      placeholder: |
+        DBX 版本：v0.5.52
+        运行环境：桌面端
+        操作系统：macOS 26.4
+        系统架构：aarch64
     validations:
       required: true
 

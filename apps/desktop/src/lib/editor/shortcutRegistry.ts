@@ -49,7 +49,8 @@ export type ShortcutActionId =
   | "toggleSidebar"
   | "copySidebarSelection"
   | "pasteSidebarSelection"
-  | "editSidebarConnection";
+  | "editSidebarConnection"
+  | "sendSelectionToAi";
 
 export type ShortcutScope = "global" | "editor" | "grid" | "search" | "sidebar";
 
@@ -356,6 +357,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutEditSidebarConnection",
     scope: "sidebar",
     defaultShortcut: "Mod+E",
+  },
+  {
+    id: "sendSelectionToAi",
+    labelKey: "settings.shortcutSendSelectionToAi",
+    scope: "editor",
+    defaultShortcut: "Mod+Shift+A",
   },
 ];
 

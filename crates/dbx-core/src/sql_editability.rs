@@ -160,6 +160,7 @@ pub fn analyze_editable_query_editability(sql: &str) -> QueryEditability {
     } else {
         (raw_select_body, false)
     };
+    let select_body = strip_sql_server_top_clause(select_body);
 
     let group_index = find_top_level_keyword(&normalized, "GROUP", from_index + "FROM".len());
     let having_index = find_top_level_keyword(&normalized, "HAVING", from_index + "FROM".len());
@@ -399,6 +400,72 @@ fn strip_leading_as(text: &str) -> Option<&str> {
         Some(rest)
     } else {
         None
+    }
+}
+
+fn strip_sql_server_top_clause(body: &str) -> &str {
+    let trimmed = body.trim_start();
+    if !starts_with_keyword(trimmed, "TOP") {
+        return trimmed;
+    }
+
+    let mut pos = skip_whitespace(trimmed, "TOP".len());
+    if trimmed[pos..].starts_with('(') {
+        let mut depth = 0i32;
+        let mut quote: Option<char> = None;
+        let mut end = None;
+        for (offset, ch) in trimmed[pos..].char_indices() {
+            if let Some(close) = quote {
+                if ch == close {
+                    quote = None;
+                }
+                continue;
+            }
+            match ch {
+                '\'' | '"' | '`' => quote = Some(ch),
+                '[' => quote = Some(']'),
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(pos + offset + ch.len_utf8());
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else {
+            return trimmed;
+        };
+        pos = end;
+    } else {
+        let number_end = trimmed[pos..]
+            .char_indices()
+            .take_while(|(_, ch)| ch.is_ascii_digit())
+            .last()
+            .map(|(offset, ch)| pos + offset + ch.len_utf8());
+        let Some(end) = number_end else {
+            return trimmed;
+        };
+        pos = end;
+    }
+
+    pos = skip_whitespace(trimmed, pos);
+    if starts_with_keyword_at(trimmed, pos, "PERCENT") {
+        pos = skip_whitespace(trimmed, pos + "PERCENT".len());
+    }
+    if starts_with_keyword_at(trimmed, pos, "WITH") {
+        let ties_pos = skip_whitespace(trimmed, pos + "WITH".len());
+        if starts_with_keyword_at(trimmed, ties_pos, "TIES") {
+            pos = skip_whitespace(trimmed, ties_pos + "TIES".len());
+        }
+    }
+    let remaining = trimmed[pos..].trim_start();
+    if remaining.is_empty() {
+        trimmed
+    } else {
+        remaining
     }
 }
 
@@ -775,6 +842,24 @@ mod tests {
                 column(Some("name"), false, None, None, "name", "name"),
             ]
         );
+    }
+
+    #[test]
+    fn recognizes_sql_server_top_selects_as_editable() {
+        for sql in [
+            "SELECT TOP 2 name, note FROM dbo.users ORDER BY name",
+            "SELECT TOP(2) name, note FROM dbo.users ORDER BY name",
+            "SELECT TOP (2) name, note FROM dbo.users ORDER BY name",
+            "SELECT TOP 10 PERCENT name, note FROM dbo.users ORDER BY name",
+            "SELECT TOP (2) WITH TIES name, note FROM dbo.users ORDER BY name",
+        ] {
+            let result = analyze_editable_query_editability(sql);
+            assert!(result.editable, "{sql}: {:?}", result.reason);
+            let analysis = result.analysis.unwrap();
+            assert_eq!(analysis.table_name, "users");
+            assert_eq!(analysis.columns[0].source_name.as_deref(), Some("name"));
+            assert_eq!(analysis.columns[1].source_name.as_deref(), Some("note"));
+        }
     }
 
     #[test]

@@ -2,11 +2,12 @@ import { defineStore } from "pinia";
 import { uuid } from "@/lib/common/utils";
 import { markRaw, ref, watch, computed } from "vue";
 import { useI18n } from "vue-i18n";
-import type { DatabaseType, ObjectBrowserViewport, QueryResult, QueryTab, TableInfoTab, TableStructureEditorTarget } from "@/types/database";
+import type { ConnectionConfig, DatabaseType, ObjectBrowserViewport, QueryResult, QueryTab, TableInfoTab, TableStructureEditorTarget } from "@/types/database";
 import { orderPinnedFirst } from "@/lib/app/pinnedItems";
 import { canCancelQueryExecution } from "@/lib/sql/queryExecutionState";
 import { buildExplainSql, parseExplainResult, parseDamengExplainText, parseOracleExplainText } from "@/lib/diagram/explainPlan";
-import { allEditableColumnsWriteable, allPrimaryKeysPresent, sourceColumnsForResult, type EditableQueryInfo, type EditableQuerySource } from "@/lib/sql/sqlAnalysis";
+import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQueryEditability, sourceColumnsForResult, type EditableQueryInfo, type EditableQuerySource } from "@/lib/sql/sqlAnalysis";
+import { buildQueryWithHiddenPrimaryKeys, hiddenResultColumnIndexes, type HiddenPrimaryKeyProjection } from "@/lib/sql/editableQueryHiddenKeys";
 import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY, restoreOpenTabsPayload, restoreOpenTabsState, serializeOpenTabs } from "@/lib/app/openTabsPersistence";
 import {
   evaluateMongoAggregateSafety,
@@ -54,6 +55,7 @@ import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeS
 import type { SavedSqlFile } from "@/types/database";
 
 const ORACLE_LIKE_METADATA_TYPES = new Set<string>(["oracle", "dameng", "oceanbase-oracle"]);
+const HIDDEN_QUERY_KEY_DATABASE_TYPES = new Set<DatabaseType>(["mysql", "postgres", "sqlserver", "oracle"]);
 const BACKGROUND_CLIENT_SESSION_SUFFIXES = ["count", "explain", "export"] as const;
 const CANCEL_QUERY_TIMEOUT_MS = 10_000;
 const CANCEL_ACK_SETTLE_TIMEOUT_MS = 2_000;
@@ -1889,12 +1891,139 @@ export const useQueryStore = defineStore("query", () => {
 
   type QueryMetadataPatch = Pick<QueryTab, "queryAnalysis" | "querySourceColumns" | "queryEditabilityReason" | "tableMeta">;
 
+  type LoadedEditableSource = {
+    source: EditableQuerySource;
+    analysis: EditableQueryInfo;
+    tableMeta: NonNullable<QueryTab["tableMeta"]>;
+  };
+
+  interface EditableQueryExecutionPreparation {
+    sql: string;
+    metadataSql: string;
+    hiddenPrimaryKeys: HiddenPrimaryKeyProjection[];
+  }
+
   function applyQueryMetadataPatch(tab: QueryTab, patch: QueryMetadataPatch) {
     tab.queryAnalysis = patch.queryAnalysis;
     tab.querySourceColumns = patch.querySourceColumns;
     tab.queryEditabilityReason = patch.queryEditabilityReason;
     tab.mongoEditTarget = undefined;
     tab.tableMeta = patch.tableMeta;
+  }
+
+  async function loadEditableQuerySource(tab: QueryTab, analysis: EditableQueryInfo, source: EditableQuerySource, conn: ConnectionConfig | undefined, dbType: string, traceId?: string, elapsed?: () => string): Promise<LoadedEditableSource> {
+    let schema = source.schema || tab.schema;
+    if (!schema) {
+      if (dbType === "postgres" || dbType === "kwdb") schema = "public";
+      else schema = "";
+    }
+    // Oracle-family connection databases are service names, not schemas. When
+    // the query does not qualify a schema, let the driver resolve the current
+    // login user's schema instead of looking up metadata under the service name.
+    const resolvedSchema = ORACLE_LIKE_METADATA_TYPES.has(dbType) && !schema ? "" : metadataSchemaForConnection(conn, tab.database, schema || undefined);
+    const metadataSchema = normalizeOracleLikeMetadataIdentifier(dbType, resolvedSchema || undefined, source.schema ? source.schemaQuoted : false) || "";
+    const metadataTableName = normalizeOracleLikeMetadataIdentifier(dbType, source.tableName, source.tableNameQuoted)!;
+    const metadataCatalog = normalizeOracleLikeMetadataIdentifier(dbType, source.catalog, source.catalogQuoted);
+    const metadataSource: EditableQuerySource = {
+      ...source,
+      catalog: metadataCatalog,
+      schema: metadataSchema || undefined,
+      tableName: metadataTableName,
+    };
+    const knownTableType = tab.tableMeta?.tableName.toLowerCase() === metadataTableName.toLowerCase() && normalizeOptionalSchema(tab.tableMeta.schema) === normalizeOptionalSchema(metadataSchema) ? tab.tableMeta.tableType : undefined;
+    console.info("[DBX][executeTabSql:metadata:table:start]", {
+      traceId,
+      schema: metadataSchema,
+      table: metadataTableName,
+      alias: source.alias,
+      elapsed: elapsed?.(),
+    });
+    const loadedMetadata = await loadTableMetadata({
+      connectionId: tab.connectionId,
+      database: tab.database,
+      schema: metadataSchema,
+      tableName: metadataTableName,
+      tableType: knownTableType,
+      databaseType: dbType,
+      driverProfile: conn?.driver_profile || conn?.db_type,
+      catalog: metadataCatalog,
+      traceLogger: (event) => console.debug("[DBX][executeTabSql:metadata:table-trace]", { sourceTraceId: traceId, ...event }),
+    });
+    const columns = loadedMetadata.metadata.columns;
+    const primaryKeys = loadedMetadata.metadata.primaryKeys;
+    console.info("[DBX][executeTabSql:metadata:table:done]", {
+      traceId,
+      columnCount: columns.length,
+      primaryKeyCount: primaryKeys.length,
+      cacheStatus: loadedMetadata.cacheStatus,
+      ageMs: Math.round(loadedMetadata.ageMs),
+      elapsed: elapsed?.(),
+    });
+    return {
+      source: metadataSource,
+      analysis: normalizeOracleLikeQueryAnalysis(dbType, cloneAnalysisForSource(analysis, metadataSource), metadataSchema || undefined, metadataTableName),
+      tableMeta: {
+        catalog: metadataCatalog,
+        schema: metadataSchema || undefined,
+        tableName: metadataTableName,
+        tableType: loadedMetadata.metadata.tableType,
+        columns,
+        primaryKeys,
+      },
+    };
+  }
+
+  function missingPrimaryKeysForSource(primaryKeys: string[], analysis: EditableQueryInfo, sourceKey: string): string[] {
+    if (analysis.selectStar) return [];
+    const selectedColumns = new Set(analysis.columns.flatMap((column) => (column.sourceName && column.sourceKey === sourceKey ? [column.sourceName.toLowerCase()] : [])));
+    return primaryKeys.filter((primaryKey) => !selectedColumns.has(primaryKey.toLowerCase()));
+  }
+
+  async function prepareEditableQueryExecution(tab: QueryTab, sql: string, conn: ConnectionConfig | undefined, databaseType: DatabaseType | undefined, traceId: string, elapsed: () => string): Promise<EditableQueryExecutionPreparation> {
+    const unchanged = { sql, metadataSql: sql, hiddenPrimaryKeys: [] };
+    if (!databaseType || !HIDDEN_QUERY_KEY_DATABASE_TYPES.has(databaseType) || !tab.connectionId || !tab.database) return unchanged;
+
+    try {
+      const editability = analyzeEditableQueryEditability(sql);
+      if (!editability.editable || !editability.analysis) return unchanged;
+      const analysis = editability.analysis;
+      const sources = editableQuerySources(analysis);
+      if (sources.length !== 1 || analysis.distinct || analysis.selectStar) return unchanged;
+
+      const loaded = await loadEditableQuerySource(tab, analysis, sources[0]!, conn, databaseType, traceId, elapsed);
+      if (loaded.tableMeta.tableType?.toUpperCase().includes("VIEW")) return unchanged;
+      const metadataAnalysis = expandStarProjectionColumnsForSource(bindUnqualifiedColumnsForSource(loaded.analysis, loaded.source, loaded.tableMeta.columns), loaded.source, loaded.tableMeta.columns);
+      // Hidden row identifiers are limited to declared primary keys. Unique
+      // indexes, views, and synthetic ROWID fallbacks keep the prior behavior.
+      const primaryKeys = loaded.tableMeta.columns.filter((column) => column.is_primary_key).map((column) => column.name);
+      if (primaryKeys.length === 0) return unchanged;
+
+      const missingPrimaryKeys = missingPrimaryKeysForSource(primaryKeys, metadataAnalysis, loaded.source.key);
+      if (missingPrimaryKeys.length === 0) return unchanged;
+      const primaryKeySet = new Set(primaryKeys.map((primaryKey) => primaryKey.toLowerCase()));
+      const hasWritableProjection = metadataAnalysis.columns.some((column) => column.sourceName && column.sourceKey === loaded.source.key && !primaryKeySet.has(column.sourceName.toLowerCase()));
+      if (!hasWritableProjection) return unchanged;
+
+      const rewritten = buildQueryWithHiddenPrimaryKeys({
+        sql,
+        databaseType,
+        primaryKeys: missingPrimaryKeys,
+        existingResultNames: metadataAnalysis.columns.map((column) => column.resultName),
+      });
+      if (!rewritten) return unchanged;
+      console.info("[DBX][executeTabSql:hidden-primary-keys]", {
+        traceId,
+        table: loaded.tableMeta.tableName,
+        keyCount: rewritten.projections.length,
+        elapsed: elapsed(),
+      });
+      return { sql: rewritten.sql, metadataSql: rewritten.sql, hiddenPrimaryKeys: rewritten.projections };
+    } catch (error) {
+      // Metadata enrichment is optional. Query execution must retain its prior
+      // behavior when metadata is unavailable or the SQL cannot be rewritten.
+      console.warn("[DBX][executeTabSql:hidden-primary-keys:skip]", { traceId, error, elapsed: elapsed() });
+      return unchanged;
+    }
   }
 
   async function buildQueryMetadataPatch(tab: QueryTab, sql: string, traceId?: string, elapsed?: () => string): Promise<QueryMetadataPatch | undefined> {
@@ -1939,71 +2068,10 @@ export const useQueryStore = defineStore("query", () => {
     const conn = connStore.getConfig(tab.connectionId);
     const dbType = conn?.db_type || "";
     const sources = editableQuerySources(analysis);
-    type LoadedEditableSource = {
-      source: EditableQuerySource;
-      analysis: EditableQueryInfo;
-      tableMeta: NonNullable<QueryTab["tableMeta"]>;
-    };
     const loadedSources: LoadedEditableSource[] = [];
     try {
       for (const source of sources) {
-        let schema = source.schema || tab.schema;
-        if (!schema) {
-          if (dbType === "postgres" || dbType === "kwdb") schema = "public";
-          else schema = "";
-        }
-        const resolvedSchema = metadataSchemaForConnection(conn, tab.database, schema || undefined);
-        const metadataSchema = normalizeOracleLikeMetadataIdentifier(dbType, resolvedSchema || undefined, source.schema ? source.schemaQuoted : false) || "";
-        const metadataTableName = normalizeOracleLikeMetadataIdentifier(dbType, source.tableName, source.tableNameQuoted)!;
-        const metadataCatalog = normalizeOracleLikeMetadataIdentifier(dbType, source.catalog, source.catalogQuoted);
-        const metadataSource: EditableQuerySource = {
-          ...source,
-          catalog: metadataCatalog,
-          schema: metadataSchema || undefined,
-          tableName: metadataTableName,
-        };
-        console.info("[DBX][executeTabSql:metadata:table:start]", {
-          traceId,
-          schema: metadataSchema,
-          table: metadataTableName,
-          alias: source.alias,
-          elapsed: elapsed?.(),
-        });
-        const loadedMetadata = await loadTableMetadata({
-          connectionId: tab.connectionId,
-          database: tab.database,
-          schema: metadataSchema,
-          tableName: metadataTableName,
-          tableType: tab.tableMeta?.tableType,
-          databaseType: dbType,
-          driverProfile: conn?.driver_profile || conn?.db_type,
-          catalog: metadataCatalog,
-          traceLogger: (event) => console.debug("[DBX][executeTabSql:metadata:table-trace]", { sourceTraceId: traceId, ...event }),
-        });
-        const columns = loadedMetadata.metadata.columns;
-        const primaryKeys = loadedMetadata.metadata.primaryKeys;
-        console.info("[DBX][executeTabSql:metadata:table:done]", {
-          traceId,
-          columnCount: columns.length,
-          primaryKeyCount: primaryKeys.length,
-          cacheStatus: loadedMetadata.cacheStatus,
-          ageMs: Math.round(loadedMetadata.ageMs),
-          elapsed: elapsed?.(),
-        });
-        const tableType = loadedMetadata.metadata.tableType;
-        const tableMeta = {
-          catalog: metadataCatalog,
-          schema: metadataSchema || undefined,
-          tableName: metadataTableName,
-          tableType,
-          columns,
-          primaryKeys,
-        };
-        loadedSources.push({
-          source: metadataSource,
-          analysis: normalizeOracleLikeQueryAnalysis(dbType, cloneAnalysisForSource(analysis, metadataSource), metadataSchema || undefined, metadataTableName),
-          tableMeta,
-        });
+        loadedSources.push(await loadEditableQuerySource(tab, analysis, source, conn, dbType, traceId, elapsed));
       }
 
       const allSourceColumns = loadedSources.map((source) => ({ source: source.source, columns: source.tableMeta.columns }));
@@ -2109,12 +2177,15 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
-  function analyzeQueryMetadataInBackground(tabId: string, sql: string, result: QueryResult, traceId: string, elapsed: () => string) {
+  function analyzeQueryMetadataInBackground(tabId: string, sql: string, result: QueryResult, traceId: string, elapsed: () => string, hiddenPrimaryKeys: HiddenPrimaryKeyProjection[] = []) {
     void (async () => {
       const tab = tabs.value.find((t) => t.id === tabId);
       if (!tab || tab.result !== result) return;
       console.info("[DBX][executeTabSql:metadata:start]", { traceId, elapsed: elapsed() });
       const patch = await buildQueryMetadataPatch(tab, sql, traceId, elapsed);
+      if (patch?.queryAnalysis && hiddenPrimaryKeys.length > 0) {
+        patch.queryAnalysis = { ...patch.queryAnalysis, allowInsert: false };
+      }
       const current = tabs.value.find((t) => t.id === tabId);
       if (patch && current?.result === result) {
         applyQueryMetadataPatch(current, patch);
@@ -2236,6 +2307,8 @@ export const useQueryStore = defineStore("query", () => {
     });
     const queryBaseSql = options?.resultBaseSql ?? sql;
     let sqlToExecute = sql;
+    let queryMetadataSql = queryBaseSql;
+    let hiddenPrimaryKeys: HiddenPrimaryKeyProjection[] = [];
     let pageSql: string | undefined;
     let pageLimit: number | undefined;
     let pageOffset: number | undefined;
@@ -2553,13 +2626,18 @@ export const useQueryStore = defineStore("query", () => {
       }
 
       if (tab.mode === "query") {
+        const prepared = await prepareEditableQueryExecution(tab, sqlToExecute, conn, effectiveDbType, traceId, elapsed);
+        sqlToExecute = prepared.sql;
+        queryMetadataSql = prepared.metadataSql;
+        hiddenPrimaryKeys = prepared.hiddenPrimaryKeys;
         const pagination = options?.pagination ?? { limit: settingsStore.editorSettings.pageSize, offset: 0 };
         const plan = await api.prepareQueryPaginationExecutionPlan({
-          sql,
+          sql: sqlToExecute,
           queryBaseSql,
           databaseType: effectiveDbType,
           pagination,
           useAgentCursor,
+          firstPageUsesActualSql: hiddenPrimaryKeys.length > 0,
         });
         sqlToExecute = plan.sqlToExecute;
         pageSql = plan.pageSql;
@@ -2613,6 +2691,13 @@ export const useQueryStore = defineStore("query", () => {
         executionPromise = api.executeMulti(tab.connectionId, executionDatabase, sqlToExecute, executionSchema, executionId, executionOptions);
       }
       const results = annotateQueryResultSources(markQueryResultsRowsRaw(await withFrontendQueryTimeout(executionPromise, frontendTimeoutSecs, t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs }))), queryBaseSql, sourceLabelDatabase, effectiveDbType);
+      if (hiddenPrimaryKeys.length > 0 && results.length === 1) {
+        const hiddenIndexes = hiddenResultColumnIndexes(results[0]!.columns, hiddenPrimaryKeys);
+        if (hiddenIndexes.length > 0) results[0]!.hidden_column_indexes = hiddenIndexes;
+        if (hiddenIndexes.length !== hiddenPrimaryKeys.length) queryMetadataSql = queryBaseSql;
+      } else if (hiddenPrimaryKeys.length > 0) {
+        queryMetadataSql = queryBaseSql;
+      }
       console.info("[DBX][executeTabSql:execute-multi:done]", {
         traceId,
         resultCount: results.length,
@@ -2685,7 +2770,7 @@ export const useQueryStore = defineStore("query", () => {
           backendMs: current.result?.execution_time_ms,
           elapsed: elapsed(),
         });
-        if (current.mode === "query" && current.result) analyzeQueryMetadataInBackground(id, queryBaseSql, current.result, traceId, elapsed);
+        if (current.mode === "query" && current.result) analyzeQueryMetadataInBackground(id, queryMetadataSql, current.result, traceId, elapsed, hiddenPrimaryKeys);
       } else {
         console.warn("[DBX][executeTabSql:stale-result]", {
           traceId,

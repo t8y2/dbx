@@ -17,6 +17,19 @@ import { queryResultBaseSql, queryResultExecutionSql } from "@/lib/tabs/tabPrese
 
 const DATA_TAB_METADATA_TTL_MS = 30_000;
 
+function visibleQuerySortColumns(columns: string[], hiddenColumnIndexes: number[] | undefined, columnIndex: number): { resultColumns: string[]; columnIndex: number } | undefined {
+  const hiddenIndexes = new Set(hiddenColumnIndexes ?? []);
+  const resultColumns: string[] = [];
+  let visibleColumnIndex: number | undefined;
+  for (const [index, resultColumn] of columns.entries()) {
+    if (hiddenIndexes.has(index)) continue;
+    if (index === columnIndex) visibleColumnIndex = resultColumns.length;
+    resultColumns.push(resultColumn);
+  }
+  if (visibleColumnIndex === undefined) return undefined;
+  return { resultColumns, columnIndex: visibleColumnIndex };
+}
+
 export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>) {
   const { t } = useI18n();
   const { toast } = useToast();
@@ -260,11 +273,16 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       return;
     }
 
+    const sortColumns = visibleQuerySortColumns(tab.result?.columns ?? [], tab.result?.hidden_column_indexes, columnIndex);
+    if (!sortColumns) {
+      toast(t("grid.sortUnsupported"), 5000);
+      return;
+    }
     const built = await api.buildSortedQuerySql({
       originalSql: baseSql,
       databaseType: effectiveDatabaseTypeForConnection(config),
-      resultColumns: tab.result?.columns ?? [],
-      columnIndex,
+      resultColumns: sortColumns.resultColumns,
+      columnIndex: sortColumns.columnIndex,
       column,
       direction,
     });

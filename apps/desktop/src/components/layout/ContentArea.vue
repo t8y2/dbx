@@ -1247,7 +1247,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                 :source-columns="activeTab.querySourceColumns"
                 :custom-save-handler="mongoQueryResultSaveHandler"
                 :query-editability-reason="activeTab.queryEditabilityReason"
-                :allow-insert-rows="activeTab.queryAnalysis?.allowInsertDelete !== false"
+                :allow-insert-rows="activeTab.queryAnalysis?.allowInsert !== false && activeTab.queryAnalysis?.allowInsertDelete !== false"
                 :allow-delete-rows="activeTab.queryAnalysis?.allowInsertDelete !== false"
                 context="results"
                 :database-type="activeEffectiveDatabaseType"

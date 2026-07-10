@@ -1798,6 +1798,7 @@ export default withEnglishFallback({
     comment: "コメント",
     characterSet: "文字セット",
     charsetPlaceholder: "文字セット",
+    collation: "照合順序",
     collationPlaceholder: "照合順序",
     editComment: "コメントを編集",
     commentPlaceholder: "列コメントを入力...",

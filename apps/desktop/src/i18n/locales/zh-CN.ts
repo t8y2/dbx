@@ -1833,6 +1833,7 @@ export default withEnglishFallback({
     comment: "注释",
     characterSet: "字符集",
     charsetPlaceholder: "字符集",
+    collation: "排序规则",
     collationPlaceholder: "排序规则",
     editComment: "编辑注释",
     commentPlaceholder: "输入字段注释...",

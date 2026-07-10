@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { combineDataTypeForDatabase, createColumnDrafts, dataTypeLengthInputValue, isDataTypeLengthDisabled, isSqlServerIdentityCompatibleDataType, splitDataType } from "@/lib/table/tableStructureEditorState";
+import { combineDataTypeForDatabase, createColumnDrafts, dataTypeLengthInputValue, isDataTypeLengthDisabled, isMysqlCharacterDataType, isSqlServerIdentityCompatibleDataType, splitDataType } from "@/lib/table/tableStructureEditorState";
 
 describe("tableStructureEditorState", () => {
   it("keeps mysql unsigned attributes in the editable base type", () => {
@@ -86,5 +86,29 @@ describe("tableStructureEditorState", () => {
     expect(isSqlServerIdentityCompatibleDataType("decimal(10)")).toBe(true);
     expect(isSqlServerIdentityCompatibleDataType("varchar(255)")).toBe(false);
     expect(isSqlServerIdentityCompatibleDataType("numeric(18, 2)")).toBe(false);
+  });
+
+  it("identifies MySQL character data types that accept charset/collation", () => {
+    expect(isMysqlCharacterDataType("char(1)")).toBe(true);
+    expect(isMysqlCharacterDataType("varchar(255)")).toBe(true);
+    expect(isMysqlCharacterDataType("tinytext")).toBe(true);
+    expect(isMysqlCharacterDataType("text")).toBe(true);
+    expect(isMysqlCharacterDataType("mediumtext")).toBe(true);
+    expect(isMysqlCharacterDataType("longtext")).toBe(true);
+    expect(isMysqlCharacterDataType("enum('a','b')")).toBe(true);
+    expect(isMysqlCharacterDataType("set('x','y')")).toBe(true);
+    expect(isMysqlCharacterDataType("int")).toBe(false);
+    expect(isMysqlCharacterDataType("bigint(20) unsigned")).toBe(false);
+    expect(isMysqlCharacterDataType("decimal(10,2)")).toBe(false);
+    expect(isMysqlCharacterDataType("float")).toBe(false);
+    expect(isMysqlCharacterDataType("double")).toBe(false);
+    expect(isMysqlCharacterDataType("date")).toBe(false);
+    expect(isMysqlCharacterDataType("datetime")).toBe(false);
+    expect(isMysqlCharacterDataType("timestamp")).toBe(false);
+    expect(isMysqlCharacterDataType("json")).toBe(false);
+    expect(isMysqlCharacterDataType("binary(16)")).toBe(false);
+    expect(isMysqlCharacterDataType("varbinary(255)")).toBe(false);
+    expect(isMysqlCharacterDataType("blob")).toBe(false);
+    expect(isMysqlCharacterDataType("geometry")).toBe(false);
   });
 });

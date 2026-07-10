@@ -1765,6 +1765,7 @@ export default withEnglishFallback({
     comment: "Comentário",
     characterSet: "Conjunto de caracteres",
     charsetPlaceholder: "Charset",
+    collation: "Collation",
     collationPlaceholder: "Collation",
     editComment: "Editar comentário",
     commentPlaceholder: "Insira o comentário da coluna...",

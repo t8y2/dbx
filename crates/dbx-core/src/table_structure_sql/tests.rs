@@ -2636,3 +2636,174 @@ fn postgres_integer_default_is_not_quoted() {
 
     assert_eq!(result.statements, vec!["ALTER TABLE \"core\".\"products\" ALTER COLUMN \"stock\" SET DEFAULT 0;"]);
 }
+
+#[test]
+fn mysql_character_column_add_with_charset_collation() {
+    let mut col = column("name");
+    col.data_type = "varchar(255)".to_string();
+    col.character_set = "utf8mb4".to_string();
+    col.collation = "utf8mb4_unicode_ci".to_string();
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "users".to_string(),
+        columns: vec![col],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `users` ADD COLUMN `name` varchar(255) CHARACTER SET `utf8mb4` COLLATE `utf8mb4_unicode_ci`;"
+        ]
+    );
+}
+
+#[test]
+fn mysql_numeric_column_omits_charset_collation_in_column_definition() {
+    let mut col = column("score");
+    col.data_type = "int".to_string();
+    // Even if charset/collation are set on the editable column, they must NOT
+    // appear in the DDL because int does not accept CHARACTER SET or COLLATE.
+    col.character_set = "utf8mb4".to_string();
+    col.collation = "utf8mb4_unicode_ci".to_string();
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "games".to_string(),
+        columns: vec![col],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(result.statements.len() == 1);
+    let sql = &result.statements[0];
+    assert!(!sql.contains("CHARACTER SET"));
+    assert!(!sql.contains("COLLATE"));
+    assert!(sql.contains("int"));
+}
+
+#[test]
+fn mysql_numeric_column_ignores_charset_collation_in_change_detection() {
+    // When an existing INT column has no original character_set / collation but
+    // the editable draft carries stale values, the column should NOT be flagged
+    // as having an attribute change.
+    let mut col = column("score");
+    col.data_type = "int".to_string();
+    col.character_set = "utf8mb4".to_string();
+    col.collation = "utf8mb4_unicode_ci".to_string();
+    col.original = Some(ColumnInfo {
+        name: "score".to_string(),
+        data_type: "int".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "games".to_string(),
+        columns: vec![col],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    // No ALTER should be emitted — charset/collation changes on
+    // non-character columns are no-ops.
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, Vec::<String>::new());
+}
+
+#[test]
+fn mysql_character_column_detects_charset_collation_change() {
+    let mut col = column("name");
+    col.data_type = "varchar(255)".to_string();
+    col.character_set = "utf8mb4".to_string();
+    col.collation = "utf8mb4_unicode_ci".to_string();
+    col.original = Some(ColumnInfo {
+        name: "name".to_string(),
+        data_type: "varchar(255)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "users".to_string(),
+        columns: vec![col],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE `users` MODIFY COLUMN `name` varchar(255) CHARACTER SET `utf8mb4` COLLATE `utf8mb4_unicode_ci`;"]
+    );
+}
+
+#[test]
+fn mysql_character_column_preserves_charset_collation_on_other_change() {
+    // Changing the default value on a character column should still
+    // re-emit the charset/collation clauses so they are not lost.
+    let mut col = column("name");
+    col.data_type = "varchar(255)".to_string();
+    col.character_set = "utf8mb4".to_string();
+    col.collation = "utf8mb4_unicode_ci".to_string();
+    col.default_value = "guest".to_string();
+    col.original = Some(ColumnInfo {
+        name: "name".to_string(),
+        data_type: "varchar(255)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        character_set: Some("utf8mb4".to_string()),
+        collation: Some("utf8mb4_unicode_ci".to_string()),
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "users".to_string(),
+        columns: vec![col],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE `users` MODIFY COLUMN `name` varchar(255) CHARACTER SET `utf8mb4` COLLATE `utf8mb4_unicode_ci` DEFAULT 'guest';"]
+    );
+}

@@ -1764,6 +1764,7 @@ export default withEnglishFallback({
     comment: "Commento",
     characterSet: "Set di caratteri",
     charsetPlaceholder: "Charset",
+    collation: "Regole di confronto",
     collationPlaceholder: "Regole di confronto",
     editComment: "Modifica commento",
     commentPlaceholder: "Inserisci commento colonna...",

@@ -10,8 +10,8 @@ pub(super) fn column_definition(dialect: StructureDialect, column: &EditableStru
         parts.insert(0, "IF NOT EXISTS".to_string());
         return parts.join(" ");
     }
-    // CHARACTER SET / COLLATE (MySQL only)
-    if dialect == StructureDialect::Mysql {
+    // CHARACTER SET / COLLATE — MySQL character data types only
+    if dialect == StructureDialect::Mysql && is_mysql_character_data_type(&column.data_type) {
         if !column.character_set.trim().is_empty() {
             parts.push(format!("CHARACTER SET {}", quote_ident(dialect, &column.character_set)));
         }
@@ -337,4 +337,21 @@ pub(super) fn questdb_column_type(column: &EditableStructureColumn) -> String {
         }
         None => data_type,
     }
+}
+
+/// Returns `true` when the data type is a MySQL character/string type that accepts
+/// `CHARACTER SET` and `COLLATE` clauses in column definitions.
+///
+/// Character types that support per-column charset/collation:
+///   `char`, `varchar`, `tinytext`, `text`, `mediumtext`, `longtext`, `enum`, `set`
+///
+/// Numeric, temporal, spatial, binary/blob, and JSON types do NOT support these clauses.
+pub(super) fn is_mysql_character_data_type(data_type: &str) -> bool {
+    let trimmed = data_type.trim();
+    let base_type = match trimmed.find('(') {
+        Some(open_index) => trimmed[..open_index].trim(),
+        None => trimmed,
+    };
+    let normalized = base_type.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    matches!(normalized.as_str(), "char" | "varchar" | "tinytext" | "text" | "mediumtext" | "longtext" | "enum" | "set")
 }

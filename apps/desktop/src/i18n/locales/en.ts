@@ -1834,6 +1834,7 @@ export default {
     comment: "Comment",
     characterSet: "Charset",
     charsetPlaceholder: "Charset",
+    collation: "Collation",
     collationPlaceholder: "Collation",
     editComment: "Edit comment",
     commentPlaceholder: "Enter column comment...",

@@ -811,6 +811,14 @@ export function splitDataType(raw: string): { baseType: string; params: string }
   return { baseType, params };
 }
 
+/** MySQL character/text types that accept `CHARACTER SET` and `COLLATE`. */
+const MYSQL_CHARACTER_DATA_TYPES = new Set(["char", "varchar", "tinytext", "text", "mediumtext", "longtext", "enum", "set"]);
+
+export function isMysqlCharacterDataType(dataType: string): boolean {
+  const { baseType } = splitDataType(dataType);
+  return MYSQL_CHARACTER_DATA_TYPES.has(baseType.trim().replace(/\s+/g, " ").toLowerCase());
+}
+
 export function isSqlServerIdentityCompatibleDataType(rawDataType: string): boolean {
   const { baseType, params } = splitDataType(rawDataType);
   const normalized = baseType.trim().replace(/\s+/g, " ").toLowerCase();

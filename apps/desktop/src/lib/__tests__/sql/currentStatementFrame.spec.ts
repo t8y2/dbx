@@ -43,4 +43,14 @@ describe("visualSqlColumnsWithInlineHints", () => {
     const text = "VALUES (1)";
     expect(visualSqlColumnsWithInlineHints(text, 0, text.length, [{ from: 100, column: "id" }])).toBe(visualSqlColumns(text));
   });
+
+  it("dedupes hints that share the same document offset", () => {
+    const text = "VALUES (1)";
+    const once = visualSqlColumnsWithInlineHints(text, 0, text.length, [{ from: 8, column: "id" }]);
+    const twice = visualSqlColumnsWithInlineHints(text, 0, text.length, [
+      { from: 8, column: "id" },
+      { from: 8, column: "id" },
+    ]);
+    expect(twice).toBe(once);
+  });
 });

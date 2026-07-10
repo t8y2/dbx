@@ -24,8 +24,9 @@ export function isWideSqlChar(ch: string): boolean {
 
 /** Approximate visual columns for a `.cm-insert-value-hint` widget (0.85em text + padding/margin). */
 export function estimateInlineHintVisualColumns(label: string): number {
-  // font-size 0.85em, padding 0 0.3em, margin-right 0.35em ≈ 0.95em chrome
-  return Math.max(1, Math.ceil(label.length * 0.85 + 0.95));
+  // Slightly generous vs CSS (0.85em font + 0.3em*2 padding + 0.35em margin) so the
+  // statement frame does not clip past inlay hints.
+  return Math.max(2, Math.ceil(label.length * 0.9 + 2.2));
 }
 
 export interface InlineHintForFrameWidth {
@@ -36,10 +37,23 @@ export interface InlineHintForFrameWidth {
 /** Document text columns plus inline widget hints that sit on `[lineFrom, lineTo)`. */
 export function visualSqlColumnsWithInlineHints(text: string, lineFrom: number, lineTo: number, hints: readonly InlineHintForFrameWidth[] = []): number {
   let columns = visualSqlColumns(text);
+  const seen = new Set<number>();
   for (const hint of hints) {
-    if (hint.from >= lineFrom && hint.from < lineTo) {
-      columns += estimateInlineHintVisualColumns(hint.column);
-    }
+    if (hint.from < lineFrom || hint.from >= lineTo) continue;
+    if (seen.has(hint.from)) continue;
+    seen.add(hint.from);
+    columns += estimateInlineHintVisualColumns(hint.column);
   }
   return columns;
+}
+
+/** Measure rendered line width in CSS pixels, including inline widgets already in the DOM. */
+export function measureSqlLineWidthPx(view: { coordsAtPos: (pos: number, side?: -1 | 1) => { left: number; right: number; top: number; bottom: number } | null }, from: number, to: number): number | null {
+  if (to < from) return null;
+  const start = view.coordsAtPos(from, 1);
+  const end = view.coordsAtPos(to, -1);
+  if (!start || !end) return null;
+  // Ignore cross-line measurements (wrapping / mismatched sides).
+  if (Math.abs(start.top - end.top) > 2) return null;
+  return Math.max(0, end.right - start.left);
 }

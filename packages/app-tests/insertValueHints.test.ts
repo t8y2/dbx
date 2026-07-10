@@ -1,6 +1,12 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildInsertValueHints, parseInsertValueHints, parseInsertValuesClauses } from "../../apps/desktop/src/lib/sql/insertValueHints.ts";
+import {
+  buildInsertValueHints,
+  expandToSqlStatementWindow,
+  parseInsertValueHints,
+  parseInsertValueHintsInRanges,
+  parseInsertValuesClauses,
+} from "../../apps/desktop/src/lib/sql/insertValueHints.ts";
 
 test("maps explicit column list to single-row VALUES", () => {
   const sql = "INSERT INTO auth_user (id, password, last_login) VALUES (5, 'hash', NULL)";
@@ -86,7 +92,61 @@ test("parses schema-qualified table without column list", () => {
   assert.equal(clauses.length, 1);
   assert.equal(clauses[0]?.table, "Users");
   assert.equal(clauses[0]?.schema, "dbo");
+  assert.equal(clauses[0]?.database, undefined);
   assert.equal(clauses[0]?.columns, null);
+});
+
+test("preserves three-part database.schema.table qualifiers", () => {
+  const clauses = parseInsertValuesClauses("INSERT INTO OtherDb.dbo.Users VALUES (1, 'a')");
+  assert.equal(clauses.length, 1);
+  assert.equal(clauses[0]?.database, "OtherDb");
+  assert.equal(clauses[0]?.schema, "dbo");
+  assert.equal(clauses[0]?.table, "Users");
+});
+
+test("preserves quoted three-part database.schema.table qualifiers", () => {
+  const clauses = parseInsertValuesClauses('INSERT INTO "OtherDb"."dbo"."Users" VALUES (1)');
+  assert.equal(clauses[0]?.database, "OtherDb");
+  assert.equal(clauses[0]?.schema, "dbo");
+  assert.equal(clauses[0]?.table, "Users");
+});
+
+test("routes three-part names through resolveTableColumns database argument", () => {
+  const sql = "INSERT INTO OtherDb.dbo.Users VALUES (1, 'a')";
+  const calls: Array<{ table: string; schema?: string; database?: string }> = [];
+  const hints = parseInsertValueHints(sql, {
+    resolveTableColumns: (table, schema, database) => {
+      calls.push({ table, schema, database });
+      if (database === "OtherDb" && schema === "dbo" && table === "Users") return ["id", "name"];
+      return ["wrong_id"];
+    },
+  });
+  assert.deepEqual(calls, [{ table: "Users", schema: "dbo", database: "OtherDb" }]);
+  assert.deepEqual(
+    hints.map((hint) => hint.column),
+    ["id", "name"],
+  );
+});
+
+test("parses only statement windows covering provided ranges", () => {
+  const prefix = `${"SELECT 1;\n".repeat(200)}`;
+  const insert = "INSERT INTO t (id, name) VALUES (1, 'x');";
+  const suffix = `\n${"SELECT 2;\n".repeat(200)}`;
+  const sql = `${prefix}${insert}${suffix}`;
+  const insertFrom = prefix.length;
+  const hints = parseInsertValueHintsInRanges(sql, [{ from: insertFrom, to: insertFrom + 10 }]);
+  assert.deepEqual(
+    hints.map((hint) => hint.column),
+    ["id", "name"],
+  );
+  assert.equal(sql.slice(hints[0]!.from, hints[0]!.from + 1), "1");
+});
+
+test("expandToSqlStatementWindow stops at neighboring statements", () => {
+  const sql = "SELECT 1; INSERT INTO t (a) VALUES (1); SELECT 2;";
+  const insertAt = sql.indexOf("INSERT");
+  const window = expandToSqlStatementWindow(sql, insertAt, insertAt + 6);
+  assert.equal(sql.slice(window.from, window.to), "INSERT INTO t (a) VALUES (1)");
 });
 
 test("ignores statements that are not INSERT VALUES", () => {

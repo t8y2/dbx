@@ -1102,19 +1102,34 @@ function completionCacheKey(table: { name: string; schema?: string | null }) {
 
 const pendingInsertValueHintColumnLoads = new Set<string>();
 
-function getInsertValueHintTableColumns(table: string, schema?: string): string[] | undefined {
-  const cacheKey = completionCacheKey({ name: table, schema });
+function insertHintCacheKey(table: { name: string; schema?: string | null; database?: string | null }) {
+  if (table.database) {
+    return table.schema ? `${table.database}.${table.schema}.${table.name}` : `${table.database}.${table.name}`;
+  }
+  return completionCacheKey(table);
+}
+
+function insertHintMetadataTarget(table: { name: string; schema?: string | null; database?: string | null }): { database: string; schema?: string } | null {
+  if (props.database == null) return null;
+  if (table.database) {
+    return { database: table.database, schema: table.schema ?? undefined };
+  }
+  return completionMetadataTarget(table);
+}
+
+function getInsertValueHintTableColumns(table: string, schema?: string, database?: string): string[] | undefined {
+  const cacheKey = insertHintCacheKey({ name: table, schema, database });
   const cached = cachedColumnsByTable.get(cacheKey);
   if (!cached) return undefined;
   return cached.map((column) => column.name);
 }
 
-function requestInsertValueHintTableColumns(table: string, schema?: string) {
+function requestInsertValueHintTableColumns(table: string, schema?: string, database?: string) {
   if (!props.connectionId || props.database == null) return;
   if (props.databaseType === "redis" || props.databaseType === "mongodb" || props.databaseType === "elasticsearch") return;
-  const cacheKey = completionCacheKey({ name: table, schema });
+  const cacheKey = insertHintCacheKey({ name: table, schema, database });
   if (cachedColumnsByTable.has(cacheKey) || pendingInsertValueHintColumnLoads.has(cacheKey)) return;
-  const target = completionMetadataTarget({ name: table, schema });
+  const target = insertHintMetadataTarget({ name: table, schema, database });
   if (!target) return;
   pendingInsertValueHintColumnLoads.add(cacheKey);
   void connectionStore
@@ -2730,8 +2745,17 @@ onMounted(async () => {
         const startLine = view.state.doc.lineAt(range.from);
         const frameTo = currentStatementFrameTo(view, range);
         const endLine = view.state.doc.lineAt(Math.max(range.from, frameTo - 1));
-        const insertValueHints =
-          settingsStore.editorSettings.showInsertValueHints && props.databaseType !== "redis" && props.databaseType !== "mongodb" && props.databaseType !== "elasticsearch" ? parseInsertValueHints(view.state.doc.toString(), { resolveTableColumns: getInsertValueHintTableColumns }) : [];
+        let insertValueHints: Array<{ from: number; column: string }> = [];
+        try {
+          if (settingsStore.editorSettings.showInsertValueHints && props.databaseType !== "redis" && props.databaseType !== "mongodb" && props.databaseType !== "elasticsearch") {
+            insertValueHints = parseInsertValueHints(view.state.doc.sliceString(range.from, range.to), { resolveTableColumns: getInsertValueHintTableColumns }).map((hint) => ({
+              ...hint,
+              from: hint.from + range.from,
+            }));
+          }
+        } catch {
+          insertValueHints = [];
+        }
         let maxWidth = 1;
         for (let lineNumber = startLine.number; lineNumber <= endLine.number; lineNumber += 1) {
           const line = view.state.doc.line(lineNumber);

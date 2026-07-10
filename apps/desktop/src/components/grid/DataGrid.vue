@@ -7724,6 +7724,14 @@ watch(activeTableInfoTab, () => {
   searchQuery.value = "";
 });
 
+watch([activeTableInfoTab, ddlLoading], ([tab, loading]) => {
+  if (tab === "ddl" && !loading) {
+    void nextTick(() => {
+      ddlPreRef.value?.focus();
+    });
+  }
+});
+
 watch(
   () => settingsStore.editorSettings.tableInfoDrawerWidth,
   (width) => {

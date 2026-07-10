@@ -6,6 +6,10 @@ import com.dbx.agent.JdbcAgentProfile;
 import com.dbx.agent.JsonRpcServer;
 
 import java.security.Security;
+import java.sql.Connection;
+import java.sql.Driver;
+import java.sql.DriverManager;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -55,6 +59,15 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
         return legacyTlsUrl(params);
     }
 
+    @Override
+    protected Connection openConnection(ConnectParams params) throws Exception {
+        try {
+            return super.openConnection(params);
+        } catch (SQLException error) {
+            throw withLegacyTlsDiagnostics(error);
+        }
+    }
+
     static String legacyTlsUrl(ConnectParams params) {
         Map<String, String> properties = baseConnectionProperties(params);
         properties.put("encrypt", "true");
@@ -79,6 +92,53 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
             }
         }
         return String.join(", ", kept);
+    }
+
+    static String legacyTlsDiagnostics() {
+        String disabledAlgorithms = Security.getProperty(TLS_DISABLED_ALGORITHMS_KEY);
+        return "DBX SQL Server legacy TLS diagnostics: java=" + System.getProperty("java.version", "unknown")
+            + ", javaVendor=" + System.getProperty("java.vendor", "unknown")
+            + ", jdbc=" + jdbcDriverVersion()
+            + ", sslProtocol=TLSv1"
+            + ", tlsV1Disabled=" + isDisabled(disabledAlgorithms, "TLSV1")
+            + ", 3desDisabled=" + isDisabled(disabledAlgorithms, "3DES_EDE_CBC")
+            + ", rc4Disabled=" + isDisabled(disabledAlgorithms, "RC4");
+    }
+
+    static SQLException withLegacyTlsDiagnostics(SQLException error) {
+        String message = error.getMessage() == null ? error.toString() : error.getMessage();
+        return new SQLException(
+            message + "\n\n" + legacyTlsDiagnostics(),
+            error.getSQLState(),
+            error.getErrorCode(),
+            error
+        );
+    }
+
+    private static boolean isDisabled(String disabledAlgorithms, String algorithm) {
+        if (disabledAlgorithms == null || disabledAlgorithms.trim().isEmpty()) {
+            return false;
+        }
+        for (String rawPart : disabledAlgorithms.split(",")) {
+            if (algorithm.equals(rawPart.trim().toUpperCase(Locale.ROOT))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String jdbcDriverVersion() {
+        try {
+            Driver driver = DriverManager.getDriver("jdbc:sqlserver://localhost");
+            Package driverPackage = driver.getClass().getPackage();
+            String implementationVersion = driverPackage == null ? null : driverPackage.getImplementationVersion();
+            if (implementationVersion != null && !implementationVersion.trim().isEmpty()) {
+                return implementationVersion;
+            }
+            return driver.getMajorVersion() + "." + driver.getMinorVersion();
+        } catch (SQLException ignored) {
+            return "unknown";
+        }
     }
 
     private static void enableLegacyTlsAlgorithms() {

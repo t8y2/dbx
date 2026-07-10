@@ -2289,9 +2289,13 @@ function extractReferencedTables(sql: string): SqlCompletionReferencedTable[] {
 
   const pattern = /\b(?:from|join|update|apply)\s+((?:"[^"]+"|`[^`]+`|[^\s,;()]+)(?:\.(?:"[^"]+"|`[^`]+`|[^\s,;()]+))?)(?:\s+(?:as\s+)?([A-Za-z_][\w$]*))?/gi;
   const referenced: SqlCompletionReferencedTable[] = [];
-  for (const match of sql.matchAll(pattern)) {
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(sql)) !== null) {
     const rawName = match[1];
     const alias = match[2];
+    if (alias && ALIAS_BLACKLIST.has(alias.toLowerCase())) {
+      pattern.lastIndex = match.index + match[0].length - alias.length;
+    }
     const quotedName = !!rawName && (rawName.startsWith('"') || rawName.startsWith("`"));
     if (!quotedName && rawName && ALIAS_BLACKLIST.has(rawName.toLowerCase())) continue;
     // Filter out SQL keywords that accidentally matched as aliases

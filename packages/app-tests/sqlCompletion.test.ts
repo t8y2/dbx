@@ -967,6 +967,74 @@ test("keeps completed references while removing active JOIN table prefixes", () 
   );
 });
 
+test("extracts JOIN tables without explicit aliases", () => {
+  const sql = "select * from a join b on a.id = b.id";
+  const context = getSqlCompletionContext(sql, sql.length);
+
+  assert.deepEqual(
+    context.referencedTables.map((table) => table.name),
+    ["a", "b"],
+  );
+});
+
+test("extracts MySQL backtick-qualified tables across a JOIN", () => {
+  const sql = [
+    "select",
+    "  `jobdb`.`job_application_ats_process`.`process_id`,",
+    "  count(*)",
+    "from",
+    "  `jobdb`.`job_application`",
+    "join `jobdb`.`job_application_ats_process` on",
+    "  `jobdb`.`job_application`.`id` = `jobdb`.`job_application_ats_process`.`app_id`",
+  ].join("\n");
+  const context = getSqlCompletionContext(sql, sql.length);
+
+  assert.deepEqual(
+    context.referencedTables.map(({ schema, name }) => ({ schema, name })),
+    [
+      { schema: "jobdb", name: "job_application" },
+      { schema: "jobdb", name: "job_application_ats_process" },
+    ],
+  );
+});
+
+test("extracts every table across consecutive JOINs", () => {
+  const sql = "select * from db.a join db.b on 1=1 join db.c on 2=2";
+  const context = getSqlCompletionContext(sql, sql.length);
+
+  assert.deepEqual(
+    context.referencedTables.map(({ schema, name }) => ({ schema, name })),
+    [
+      { schema: "db", name: "a" },
+      { schema: "db", name: "b" },
+      { schema: "db", name: "c" },
+    ],
+  );
+});
+
+test("keeps explicit table aliases across a JOIN", () => {
+  const sql = "select * from db.a x join db.b y";
+  const context = getSqlCompletionContext(sql, sql.length);
+
+  assert.deepEqual(
+    context.referencedTables.map(({ schema, name, alias }) => ({ schema, name, alias })),
+    [
+      { schema: "db", name: "a", alias: "x" },
+      { schema: "db", name: "b", alias: "y" },
+    ],
+  );
+});
+
+test("does not treat WHERE as a table alias", () => {
+  const sql = "select * from a where id = 1";
+  const context = getSqlCompletionContext(sql, sql.length);
+
+  assert.deepEqual(
+    context.referencedTables.map(({ name, alias }) => ({ name, alias })),
+    [{ name: "a", alias: undefined }],
+  );
+});
+
 test("ranks exact table matches above prefix and fuzzy matches", () => {
   const items = buildSqlCompletionItems("select * from toh", "select * from toh".length, {
     tables: [

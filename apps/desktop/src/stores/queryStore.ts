@@ -487,7 +487,7 @@ export const useQueryStore = defineStore("query", () => {
     return true;
   }
 
-  function removeResultRun(id: string, runId: string) {
+  async function removeResultRun(id: string, runId: string) {
     const tab = tabs.value.find((t) => t.id === id);
     const runIndex = tab?.resultRuns?.findIndex((run) => run.id === runId) ?? -1;
     if (!tab || !tab.resultRuns || runIndex < 0) return false;
@@ -502,7 +502,7 @@ export const useQueryStore = defineStore("query", () => {
 
     const nextRun = remainingRuns[Math.min(runIndex, remainingRuns.length - 1)];
     if (nextRun) {
-      projectResultRun(tab, nextRun);
+      await setActiveResultRun(id, nextRun.id);
       return true;
     }
 

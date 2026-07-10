@@ -696,9 +696,9 @@ function toggleExecutionSummary() {
   emit("update:activeOutputView", nextExecutionSummaryView(props.activeOutputView, canShowResultOutput.value));
 }
 
-function removeResultRun(runId: string) {
+async function removeResultRun(runId: string) {
   const removedActiveRun = props.activeTab.activeResultRunId === runId;
-  const removed = queryStore.removeResultRun(props.activeTab.id, runId);
+  const removed = await queryStore.removeResultRun(props.activeTab.id, runId);
   if (removed && removedActiveRun) emit("update:activeOutputView", "result");
 }
 

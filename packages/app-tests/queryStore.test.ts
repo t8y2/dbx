@@ -803,7 +803,7 @@ test("removing the active result run selects an adjacent run", async () => {
   ];
   await store.setActiveResultRun(tabId, "run-2");
 
-  assert.equal(store.removeResultRun(tabId, "run-2"), true);
+  assert.equal(await store.removeResultRun(tabId, "run-2"), true);
 
   assert.deepEqual(
     tab.resultRuns?.map((run) => run.id),
@@ -814,7 +814,7 @@ test("removing the active result run selects an adjacent run", async () => {
   assert.deepEqual(tab.result?.rows, [[3]]);
   assert.equal(tab.sql, "select draft");
 
-  assert.equal(store.removeResultRun(tabId, "run-3"), true);
+  assert.equal(await store.removeResultRun(tabId, "run-3"), true);
 
   assert.deepEqual(
     tab.resultRuns?.map((run) => run.id),
@@ -852,9 +852,9 @@ test("removed result runs are excluded from result archives", async () => {
       resultBaseSql: "select 2",
     },
   ];
-  store.setActiveResultRun(tabId, "run-2");
+  await store.setActiveResultRun(tabId, "run-2");
 
-  assert.equal(store.removeResultRun(tabId, "run-1"), true);
+  assert.equal(await store.removeResultRun(tabId, "run-1"), true);
   const archive = await store.exportResultArchive(tabId);
   assert.ok(archive);
   const decoded = await decodeQueryResultArchive(archive);
@@ -885,9 +885,9 @@ test("removing the last result run clears output and makes result archive unavai
       resultBaseSql: "select 1",
     },
   ];
-  store.setActiveResultRun(tabId, "run-1");
+  await store.setActiveResultRun(tabId, "run-1");
 
-  assert.equal(store.removeResultRun(tabId, "run-1"), true);
+  assert.equal(await store.removeResultRun(tabId, "run-1"), true);
 
   assert.deepEqual(tab.resultRuns, []);
   assert.equal(tab.activeResultRunId, undefined);
@@ -1077,6 +1077,74 @@ test("kept result runs evict inactive payloads without losing switch or archive 
       decoded?.snapshot.resultRuns?.map((run) => run.result?.rows),
       [[[1]], [[2]]],
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("removing the active result run restores a disk-backed adjacent run", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const runtimeCache = new Map<string, string>();
+  let executeCount = 0;
+
+  connectionStore.addEphemeralConnection(conn("conn-1"));
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/prepare-pagination-plan") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify({ sqlToExecute: body.options.sql, useAgentResultSession: false }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/query/execute-multi") {
+      executeCount++;
+      return new Response(JSON.stringify([{ columns: [`run_${executeCount}`], rows: [[executeCount]], affected_rows: 0, execution_time_ms: 1 }]), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url === "/api/query/analyze-editability") {
+      return new Response(JSON.stringify({ editable: false, reason: "complex-source" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/tab-runtime-cache" && init?.method === "POST") {
+      const body = JSON.parse(String(init.body ?? "{}")) as { key: string; payloadBase64: string };
+      runtimeCache.set(body.key, body.payloadBase64);
+      return new Response(JSON.stringify(true), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url.startsWith("/api/tab-runtime-cache?")) {
+      const key = new URL(url, "http://localhost").searchParams.get("key") ?? "";
+      if (init?.method === "DELETE") {
+        runtimeCache.delete(key);
+        return new Response(JSON.stringify(true), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ payloadBase64: runtimeCache.get(key) }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const tabId = store.createTab("conn-1", "db", "Query");
+    store.toggleResultAutoSave(tabId);
+    await store.executeTabSql(tabId, "select 1");
+    await store.executeTabSql(tabId, "select 2");
+
+    const tab = store.tabs.find((item) => item.id === tabId);
+    assert.ok(tab?.resultRuns?.[0]);
+    assert.ok(tab.resultRuns[1]);
+    await waitFor(() => tab.resultRuns?.[0]?.result === undefined && tab.resultRuns?.[0]?.resultCacheState === "disk");
+
+    assert.equal(await store.removeResultRun(tabId, tab.resultRuns[1].id), true);
+
+    assert.equal(tab.activeResultRunId, tab.resultRuns[0]?.id);
+    assert.deepEqual(tab.result?.columns, ["run_1"]);
+    assert.deepEqual(tab.result?.rows, [[1]]);
+    assert.deepEqual(tab.resultRuns[0]?.result?.columns, ["run_1"]);
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

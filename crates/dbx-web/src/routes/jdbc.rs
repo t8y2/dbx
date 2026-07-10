@@ -3,7 +3,9 @@ use std::sync::Arc;
 use axum::extract::{Multipart, Path, State};
 use axum::Json;
 use dbx_core::agent_service::AgentProgressEvent;
-use dbx_core::jdbc::{self, JdbcDriverInfo, JdbcMavenBundleInfo, JdbcMavenInstallRequest, JdbcPluginStatus};
+use dbx_core::jdbc::{
+    self, JdbcDriverInfo, JdbcLocalBundleInfo, JdbcMavenBundleInfo, JdbcMavenInstallRequest, JdbcPluginStatus,
+};
 use dbx_core::plugins::PluginRuntimeEnv;
 use tokio::sync::broadcast;
 
@@ -22,6 +24,13 @@ pub async fn list_jdbc_maven_bundles(
 ) -> Result<Json<Vec<JdbcMavenBundleInfo>>, AppError> {
     let root = state.app.plugins.root_dir();
     Ok(Json(jdbc::list_jdbc_maven_bundles(root).map_err(AppError::internal)?))
+}
+
+pub async fn list_jdbc_local_bundles(
+    State(state): State<Arc<WebState>>,
+) -> Result<Json<Vec<JdbcLocalBundleInfo>>, AppError> {
+    let root = state.app.plugins.root_dir();
+    Ok(Json(jdbc::list_jdbc_local_bundles(root).map_err(AppError::internal)?))
 }
 
 pub async fn install_jdbc_driver_from_maven(
@@ -48,8 +57,8 @@ pub async fn import_jdbc_drivers(
     mut multipart: Multipart,
 ) -> Result<Json<Vec<JdbcDriverInfo>>, AppError> {
     let root = state.app.plugins.root_dir();
-    let drivers_dir = root.join("jdbc").join("drivers");
-    std::fs::create_dir_all(&drivers_dir).map_err(|e| AppError::internal(e.to_string()))?;
+    let upload_dir = root.join("jdbc").join("upload_tmp").join(uuid::Uuid::new_v4().simple().to_string());
+    std::fs::create_dir_all(&upload_dir).map_err(|e| AppError::internal(e.to_string()))?;
 
     let mut imported = Vec::new();
     while let Ok(Some(field)) = multipart.next_field().await {
@@ -58,12 +67,18 @@ pub async fn import_jdbc_drivers(
             return Err(AppError::bad_request("Only .jar files can be imported"));
         }
         let data = field.bytes().await.map_err(|e| AppError::internal(e.to_string()))?;
-        let target = jdbc::unique_target_path(&drivers_dir, &file_name);
+        let target = jdbc::unique_target_path(&upload_dir, &file_name);
         std::fs::write(&target, &data).map_err(|e| AppError::internal(e.to_string()))?;
         imported.push(target);
     }
-
-    jdbc::list_jdbc_drivers(root).map(Json).map_err(AppError::internal)
+    if imported.is_empty() {
+        let _ = std::fs::remove_dir_all(&upload_dir);
+        return Err(AppError::bad_request("No file uploaded"));
+    }
+    let paths = imported.iter().map(|path| path.to_string_lossy().to_string()).collect::<Vec<_>>();
+    let result = jdbc::import_jdbc_drivers(root, &paths).map(Json).map_err(AppError::internal);
+    let _ = std::fs::remove_dir_all(&upload_dir);
+    result
 }
 
 pub async fn delete_jdbc_driver(
@@ -85,6 +100,14 @@ pub async fn delete_jdbc_maven_bundle(
 ) -> Result<Json<Vec<JdbcDriverInfo>>, AppError> {
     let root = state.app.plugins.root_dir();
     Ok(Json(jdbc::delete_jdbc_maven_bundle(root, &bundle_id).map_err(AppError::internal)?))
+}
+
+pub async fn delete_jdbc_local_bundle(
+    State(state): State<Arc<WebState>>,
+    Path(bundle_id): Path<String>,
+) -> Result<Json<Vec<JdbcDriverInfo>>, AppError> {
+    let root = state.app.plugins.root_dir();
+    Ok(Json(jdbc::delete_jdbc_local_bundle(root, &bundle_id).map_err(AppError::internal)?))
 }
 
 // ---- JDBC Plugin ----

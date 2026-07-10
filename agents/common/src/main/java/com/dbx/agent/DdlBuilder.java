@@ -1,6 +1,7 @@
 package com.dbx.agent;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 
@@ -38,6 +39,28 @@ public final class DdlBuilder {
         boolean useBacktick,
         boolean includeColumnComments
     ) {
+        return buildTableDdl(
+            schema,
+            table,
+            columns,
+            indexes,
+            foreignKeys,
+            Collections.emptyList(),
+            useBacktick,
+            includeColumnComments
+        );
+    }
+
+    public static String buildTableDdl(
+        String schema,
+        String table,
+        List<ColumnInfo> columns,
+        List<IndexInfo> indexes,
+        List<ForeignKeyInfo> foreignKeys,
+        List<CheckConstraintInfo> checkConstraints,
+        boolean useBacktick,
+        boolean includeColumnComments
+    ) {
         String tableRef = qualifiedName(schema, table, useBacktick);
         List<String> columnLines = new ArrayList<>();
         for (ColumnInfo column : columns) {
@@ -72,6 +95,16 @@ public final class DdlBuilder {
                     + " FOREIGN KEY (" + quoteIdent(fk.getColumn(), useBacktick) + ") "
                     + "REFERENCES " + quoteIdent(fk.getRef_table(), useBacktick) + "(" + quoteIdent(fk.getRef_column(), useBacktick) + ")"
             );
+        }
+
+        for (CheckConstraintInfo constraint : checkConstraints) {
+            if (!notBlank(constraint.getDefinition())) {
+                continue;
+            }
+            String name = notBlank(constraint.getName())
+                ? "CONSTRAINT " + quoteIdent(constraint.getName(), useBacktick) + " "
+                : "";
+            columnLines.add("  " + name + constraint.getDefinition());
         }
 
         StringBuilder ddl = new StringBuilder();

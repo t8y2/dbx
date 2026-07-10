@@ -54,7 +54,12 @@ impl CloseBehaviorState {
 const MACOS_TRAY_ICON: tauri::image::Image<'_> = tauri::include_image!("icons/tray-macos-template.png");
 #[cfg(target_os = "macos")]
 const ABOUT_APP_ICON: tauri::image::Image<'_> = tauri::include_image!("icons/icon.png");
+#[cfg(not(target_os = "macos"))]
 const BLACK_APP_ICON: tauri::image::Image<'_> = tauri::include_image!("icons/icon-black.png");
+#[cfg(target_os = "macos")]
+const MACOS_DEFAULT_APP_ICON: &[u8] = include_bytes!("../icons/icon.icns");
+#[cfg(target_os = "macos")]
+const MACOS_DARK_APP_ICON: &[u8] = include_bytes!("../icons/icon-macos-dark.icns");
 
 pub(crate) fn apply_debug_log_level(debug_logging_enabled: bool) {
     log::set_max_level(if debug_logging_enabled { log::LevelFilter::Debug } else { log::LevelFilter::Off });
@@ -66,6 +71,11 @@ fn should_hide_window_on_close(target_os: &str) -> bool {
 
 fn should_setup_desktop_tray(target_os: &str, show_tray_icon: bool) -> bool {
     show_tray_icon && matches!(target_os, "macos" | "windows")
+}
+
+#[cfg(test)]
+fn uses_application_level_icon(target_os: &str) -> bool {
+    target_os == "macos"
 }
 
 fn should_show_main_window_after_setup() -> bool {
@@ -384,7 +394,37 @@ fn setup_desktop_tray<R: tauri::Runtime, M: Manager<R>>(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn apply_macos_app_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconTheme) -> tauri::Result<()> {
+    use objc2::{AllocAnyThread, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
+
+    let icon_bytes = match icon_theme {
+        DesktopIconTheme::Default => MACOS_DEFAULT_APP_ICON,
+        DesktopIconTheme::Black => MACOS_DARK_APP_ICON,
+    };
+    app.run_on_main_thread(move || {
+        // macOS has no per-window icon. Update NSApplication so the Dock and
+        // app switcher reflect the selected theme immediately.
+        let marker = unsafe { MainThreadMarker::new_unchecked() };
+        let application = NSApplication::sharedApplication(marker);
+        let data = NSData::with_bytes(icon_bytes);
+        if let Some(icon) = NSImage::initWithData(NSImage::alloc(), &data) {
+            unsafe { application.setApplicationIconImage(Some(&icon)) };
+        } else {
+            log::warn!("Failed to decode the selected macOS application icon");
+        }
+    })
+}
+
 fn apply_desktop_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconTheme) -> tauri::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        return apply_macos_app_icon_theme(app, icon_theme);
+    }
+
+    #[cfg(not(target_os = "macos"))]
     if let Some(window) = app.get_webview_window("main") {
         match icon_theme {
             DesktopIconTheme::Default => {
@@ -395,6 +435,7 @@ fn apply_desktop_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconTheme
             DesktopIconTheme::Black => window.set_icon(BLACK_APP_ICON)?,
         }
     }
+    #[cfg(not(target_os = "macos"))]
     Ok(())
 }
 
@@ -437,6 +478,7 @@ mod tests {
         linux_appimage_system_gtk_immodules_cache, linux_appimage_wayland_backend_override,
         linux_webkit_rendering_workarounds, native_window_decorations_override, should_confirm_app_exit_request,
         should_hide_window_on_close, should_setup_desktop_tray, should_show_main_window_after_setup,
+        uses_application_level_icon,
     };
     use std::ffi::OsStr;
 
@@ -460,6 +502,37 @@ mod tests {
         assert!(!should_setup_desktop_tray("windows", false));
         assert!(!should_setup_desktop_tray("macos", false));
         assert!(!should_setup_desktop_tray("linux", true));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_tray_icon_remains_a_system_template() {
+        // Menu bar template images are intentionally independent from the app
+        // icon theme so macOS can recolor them for light and dark menu bars.
+        assert_eq!(super::MACOS_TRAY_ICON.width(), 36);
+        assert_eq!(super::MACOS_TRAY_ICON.height(), 36);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_icon_themes_use_packaged_dock_assets() {
+        use objc2::AllocAnyThread;
+        use objc2_app_kit::NSImage;
+        use objc2_foundation::NSData;
+
+        assert!(super::MACOS_DEFAULT_APP_ICON.starts_with(b"icns"));
+        assert!(super::MACOS_DARK_APP_ICON.starts_with(b"icns"));
+        for bytes in [super::MACOS_DEFAULT_APP_ICON, super::MACOS_DARK_APP_ICON] {
+            let data = NSData::with_bytes(bytes);
+            assert!(NSImage::initWithData(NSImage::alloc(), &data).is_some());
+        }
+    }
+
+    #[test]
+    fn macos_icon_theme_targets_the_application_instead_of_a_window() {
+        assert!(uses_application_level_icon("macos"));
+        assert!(!uses_application_level_icon("windows"));
+        assert!(!uses_application_level_icon("linux"));
     }
 
     #[test]
@@ -816,11 +889,13 @@ pub fn run() {
             commands::plugins::list_plugins,
             commands::plugins::list_jdbc_drivers,
             commands::plugins::list_jdbc_maven_bundles,
+            commands::plugins::list_jdbc_local_bundles,
             commands::plugins::import_jdbc_drivers,
             commands::plugins::install_jdbc_driver_from_maven,
             commands::plugins::install_prestosql_jdbc_driver,
             commands::plugins::delete_jdbc_driver,
             commands::plugins::delete_jdbc_maven_bundle,
+            commands::plugins::delete_jdbc_local_bundle,
             commands::plugins::jdbc_plugin_status,
             commands::plugins::install_jdbc_plugin,
             commands::plugins::install_jdbc_plugin_local,
@@ -905,6 +980,8 @@ pub fn run() {
             commands::query::build_routine_rename_object_source_statements,
             commands::query::build_view_ddl_sql,
             commands::query::build_table_structure_change_sql,
+            commands::query::preview_sqlite_table_structure_change,
+            commands::query::apply_sqlite_table_structure_change,
             commands::query::build_create_table_sql,
             commands::query::build_single_column_alter_sql,
             commands::query::analyze_editable_query_editability,

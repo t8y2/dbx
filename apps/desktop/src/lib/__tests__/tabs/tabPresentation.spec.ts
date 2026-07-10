@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { queryResultBaseSql, queryResultExecutionSql } from "@/lib/tabs/tabPresentation";
+import { queryResultBaseSql, queryResultExecutionSql, tabularResultItems } from "@/lib/tabs/tabPresentation";
 import type { QueryTab } from "@/types/database";
 
 function queryTab(overrides: Partial<QueryTab>): QueryTab {
@@ -49,5 +49,38 @@ describe("query result SQL selection", () => {
 
     expect(queryResultBaseSql(tab)).toBe("SELECT * FROM dbo.second");
     expect(queryResultExecutionSql(tab)).toBe("SELECT * FROM dbo.second ORDER BY id DESC");
+  });
+});
+
+describe("query result labels", () => {
+  it("uses source labels while keeping the full statement as the title", () => {
+    const [item] = tabularResultItems([
+      {
+        columns: ["id"],
+        rows: [[1]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+        sourceLabel: "app.users",
+        sourceStatement: "SELECT * FROM users",
+      },
+    ]);
+
+    expect(item?.label).toBe("app.users");
+    expect(item?.title).toBe("SELECT * FROM users");
+  });
+
+  it("does not expose SQL text as a visible fallback label", () => {
+    const [item] = tabularResultItems([
+      {
+        columns: ["value"],
+        rows: [[1]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+        sourceStatement: "SELECT 1",
+      },
+    ]);
+
+    expect(item?.label).toBeUndefined();
+    expect(item?.title).toBe("SELECT 1");
   });
 });

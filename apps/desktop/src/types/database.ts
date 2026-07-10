@@ -272,6 +272,21 @@ export interface JdbcMavenBundleInfo {
   artifacts: JdbcMavenArtifactInfo[];
 }
 
+export interface JdbcLocalArtifactInfo {
+  file_name: string;
+  path: string;
+  size: number;
+  sha256: string;
+}
+
+export interface JdbcLocalBundleInfo {
+  id: string;
+  name: string;
+  installed_at: string;
+  path: string;
+  artifacts: JdbcLocalArtifactInfo[];
+}
+
 export interface JdbcPluginStatus {
   installed: boolean;
   version?: string | null;
@@ -430,6 +445,8 @@ export interface OwnerInfo {
 
 export interface QueryResult {
   columns: string[];
+  /** Internal row identifiers appended to editable query results. */
+  hidden_column_indexes?: number[];
   /**
    * Database type name for each column, parallel to `columns`. Optional and may
    * be shorter/empty when a driver cannot supply types (schemaless stores,
@@ -758,6 +775,7 @@ export interface QueryTab {
     selectStar: boolean;
     editableSourceKey?: string;
     multiSource?: boolean;
+    allowInsert?: boolean;
     allowInsertDelete?: boolean;
     sources?: {
       key: string;

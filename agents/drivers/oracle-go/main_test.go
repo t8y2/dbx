@@ -1,10 +1,12 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/url"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -244,6 +246,67 @@ func TestTrimStatementSQLStripsSlashDelimiterAfterCreatePLSQLObject(t *testing.T
 func TestTrimStatementSQLRemovesRegularStatementSemicolon(t *testing.T) {
 	if got := trimStatementSQL("SELECT 1 FROM DUAL;"); got != "SELECT 1 FROM DUAL" {
 		t.Fatalf("trimStatementSQL() = %q, want regular statement without semicolon", got)
+	}
+}
+
+func TestOracleExplainPlanBindParamsIncludesNamedParameters(t *testing.T) {
+	sqlText := `
+SELECT *
+FROM orders
+WHERE id = :id
+  AND status = :status
+  AND parent_id = :id`
+
+	want := []oracleBindParam{
+		{Name: "id"},
+		{Name: "status"},
+	}
+	if got := oracleExplainPlanBindParams(sqlText); !reflect.DeepEqual(got, want) {
+		t.Fatalf("oracleExplainPlanBindParams() = %#v, want %#v", got, want)
+	}
+}
+
+func TestOracleExplainPlanBindParamsSkipsQuotedTextAndComments(t *testing.T) {
+	sqlText := `
+SELECT ':literal' AS literal_value,
+       q'[not :q_param]' AS q_literal,
+       "COL:NAME" AS quoted_identifier
+FROM orders
+WHERE id = :id
+  -- ignored :comment_param
+  AND note <> 'escaped '' :text_param'
+  /* ignored :block_param */`
+
+	want := []oracleBindParam{{Name: "id"}}
+	if got := oracleExplainPlanBindParams(sqlText); !reflect.DeepEqual(got, want) {
+		t.Fatalf("oracleExplainPlanBindParams() = %#v, want %#v", got, want)
+	}
+}
+
+func TestOracleExplainPlanBindParamsIncludesPositionalParameters(t *testing.T) {
+	sqlText := "SELECT * FROM orders WHERE id = :1 AND status = :status"
+
+	want := []oracleBindParam{
+		{Name: "1", Positional: true},
+		{Name: "status"},
+	}
+	if got := oracleExplainPlanBindParams(sqlText); !reflect.DeepEqual(got, want) {
+		t.Fatalf("oracleExplainPlanBindParams() = %#v, want %#v", got, want)
+	}
+}
+
+func TestOracleExplainPlanBindArgsUsesNamedArguments(t *testing.T) {
+	args := oracleExplainPlanBindArgs("SELECT * FROM orders WHERE id = :id")
+
+	if len(args) != 1 {
+		t.Fatalf("expected one bind argument, got %#v", args)
+	}
+	named, ok := args[0].(sql.NamedArg)
+	if !ok {
+		t.Fatalf("expected sql.NamedArg, got %#v", args[0])
+	}
+	if named.Name != "id" || named.Value != nil {
+		t.Fatalf("unexpected named bind argument: %#v", named)
 	}
 }
 

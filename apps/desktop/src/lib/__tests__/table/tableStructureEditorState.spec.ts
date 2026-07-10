@@ -1,5 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { combineDataTypeForDatabase, createColumnDrafts, dataTypeLengthInputValue, isDataTypeLengthDisabled, isMysqlCharacterDataType, isSqlServerIdentityCompatibleDataType, splitDataType } from "@/lib/table/tableStructureEditorState";
+import {
+  combineDataTypeForDatabase,
+  createColumnDrafts,
+  dataTypeLengthInputValue,
+  getDefaultLengthForType,
+  hasExistingColumnTypeChange,
+  isDataTypeLengthDisabled,
+  isMysqlCharacterDataType,
+  isMysqlEnumDataType,
+  isSqlServerIdentityCompatibleDataType,
+  mysqlEnumDataType,
+  rehydrateColumnDraftsFromMetadata,
+  splitDataType,
+} from "@/lib/table/tableStructureEditorState";
 
 describe("tableStructureEditorState", () => {
   it("keeps mysql unsigned attributes in the editable base type", () => {
@@ -28,12 +41,95 @@ describe("tableStructureEditorState", () => {
     expect(dataTypeLengthInputValue("mysql", "set('manual','auto')")).toBe("");
   });
 
+  it("hydrates mysql enum values into an editable canonical type", () => {
+    const [draft] = createColumnDrafts(
+      [
+        {
+          name: "status",
+          data_type: "enum",
+          enum_values: ["", "pending", "it's", "path\\name"],
+          is_nullable: false,
+          column_default: "'pending'",
+          is_primary_key: false,
+          extra: null,
+        },
+      ],
+      "mysql",
+    );
+
+    expect(draft?.enumValues).toEqual(["", "pending", "it's", "path\\name"]);
+    expect(draft?.dataType).toBe("enum('','pending','it''s','path\\\\name')");
+    expect(draft?.original?.data_type).toBe(draft?.dataType);
+  });
+
+  it("builds mysql enum types without confusing values with length", () => {
+    expect(isMysqlEnumDataType("mysql", "ENUM('a','b')")).toBe(true);
+    expect(isMysqlEnumDataType("postgres", "enum")).toBe(false);
+    expect(mysqlEnumDataType(["", "a'b", "a\\b"])).toBe("enum('','a''b','a\\\\b')");
+  });
+
+  it("rehydrates enum values into drafts saved before enum editing existed", () => {
+    const metadata = {
+      name: "status",
+      data_type: "enum",
+      enum_values: ["pending", "active"],
+      is_nullable: false,
+      column_default: "'pending'",
+      is_primary_key: false,
+      extra: null,
+    };
+    const [legacyDraft] = createColumnDrafts([metadata], "mysql");
+    legacyDraft!.dataType = "enum";
+    legacyDraft!.enumValues = undefined;
+    legacyDraft!.original = { ...metadata };
+
+    const [rehydrated] = rehydrateColumnDraftsFromMetadata([legacyDraft!], [metadata], "mysql");
+
+    expect(rehydrated?.enumValues).toEqual(["pending", "active"]);
+    expect(rehydrated?.dataType).toBe("enum('pending','active')");
+    expect(rehydrated?.original?.data_type).toBe("enum('pending','active')");
+  });
+
   it("does not expose Oracle-like integer display widths as editable length", () => {
     expect(isDataTypeLengthDisabled("dameng", "integer")).toBe(true);
     expect(dataTypeLengthInputValue("dameng", "integer(11)")).toBe("");
     expect(combineDataTypeForDatabase("dameng", "integer", "11")).toBe("integer");
     expect(combineDataTypeForDatabase("oracle", "number", "10,0")).toBe("number(10,0)");
     expect(combineDataTypeForDatabase("mysql", "integer", "11")).toBe("integer(11)");
+  });
+
+  it("does not add MySQL display lengths when choosing SQLite-family types", () => {
+    for (const databaseType of ["sqlite", "rqlite", "turso"] as const) {
+      expect(getDefaultLengthForType(databaseType, "integer")).toBe("");
+      expect(getDefaultLengthForType(databaseType, "real")).toBe("");
+      expect(combineDataTypeForDatabase(databaseType, "integer", getDefaultLengthForType(databaseType, "integer"))).toBe("integer");
+    }
+
+    expect(getDefaultLengthForType("mysql", "integer")).toBe("11");
+  });
+
+  it("requires a SQLite rebuild only for a retained existing column type change", () => {
+    const [column] = createColumnDrafts(
+      [
+        {
+          name: "status",
+          data_type: "integer",
+          is_nullable: false,
+          column_default: null,
+          is_primary_key: false,
+          extra: null,
+        },
+      ],
+      "sqlite",
+    );
+
+    expect(hasExistingColumnTypeChange([column])).toBe(false);
+    column.name = "state";
+    expect(hasExistingColumnTypeChange([column])).toBe(false);
+    column.dataType = "text";
+    expect(hasExistingColumnTypeChange([column])).toBe(true);
+    column.markedForDrop = true;
+    expect(hasExistingColumnTypeChange([column])).toBe(false);
   });
 
   it("strips SQL Server metadata parentheses from editable defaults", () => {

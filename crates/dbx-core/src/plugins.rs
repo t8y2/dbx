@@ -336,6 +336,15 @@ impl PluginDriverSession {
         let process = self.process.lock().await;
         process.child.id()
     }
+
+    #[cfg(test)]
+    pub(crate) async fn start_for_test(
+        plugin: InstalledPlugin,
+        driver_id: String,
+        env: PluginRuntimeEnv,
+    ) -> Result<Self, String> {
+        Self::start(plugin, driver_id, env).await
+    }
 }
 
 async fn invoke_plugin<T>(

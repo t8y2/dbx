@@ -23,9 +23,9 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
-import { type EditableStructureColumn, type EditableStructureForeignKey, type EditableStructureIndex, type EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql";
+import { type BuildTableStructureChangeSqlOptions, type EditableStructureColumn, type EditableStructureForeignKey, type EditableStructureIndex, type EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql";
 import { PRESET_FIELDS_TEMPLATE_ID, createTableColumnTemplateDrafts } from "@/lib/table/tableColumnTemplates";
-import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
+import { getTableMetadataCapabilities, firstStructureMetadataTab, isStructureMetadataTabSupported } from "@/lib/table/tableMetadataCapabilities";
 import { canAddTableStructureColumn, getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
 import { connectionObjectTreeQuerySchema, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import type { TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
@@ -44,10 +44,13 @@ import {
   getColumnEditorControls,
   getDataTypeOptions,
   getDefaultLengthForType,
+  hasExistingColumnTypeChange,
   isDataTypeLengthDisabled,
+  isMysqlEnumDataType,
   isMysqlCharacterDataType,
   isProtectedManticoreIdColumn,
   isSqlServerIdentityCompatibleDataType,
+  mysqlEnumDataType,
   parseExtraToColumnExtra,
   rehydrateColumnDraftsFromMetadata,
   splitDataType,
@@ -105,7 +108,7 @@ const emit = defineEmits<{
   openSettings: [initialTab?: string, initialSection?: string];
 }>();
 
-const activeTab = ref<TableInfoTab>("columns");
+const activeTab = ref<TableInfoTab>("ddl");
 const loading = ref(false);
 const saving = ref(false);
 const postSaveRefreshing = ref(false);
@@ -115,6 +118,19 @@ const foreignKeysLoading = ref(false);
 const triggersLoading = ref(false);
 const ddlContent = ref("");
 const ddlLoading = ref(false);
+const ddlPreRef = ref<HTMLPreElement | null>(null);
+function onDdlKeydown(e: KeyboardEvent) {
+  if ((e.ctrlKey || e.metaKey) && e.key === "a") {
+    e.preventDefault();
+    const el = ddlPreRef.value;
+    if (!el) return;
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+  }
+}
 const ddlFetched = ref(false);
 
 async function fetchDdl() {
@@ -136,6 +152,7 @@ const columns = ref<EditableStructureColumn[]>([]);
 const indexes = ref<EditableStructureIndex[]>([]);
 const pendingStatements = ref<string[]>([]);
 const warnings = ref<string[]>([]);
+const sqliteSchemaRevision = ref<string>();
 const foreignKeys = ref<EditableStructureForeignKey[]>([]);
 const triggers = ref<EditableStructureTrigger[]>([]);
 const secondaryMetadataLoading = computed(() => indexesLoading.value || foreignKeysLoading.value || triggersLoading.value);
@@ -576,7 +593,7 @@ function onIndexColResize(e: MouseEvent, col: number) {
 
 const connection = computed(() => (props.connectionId ? store.getConfig(props.connectionId) : undefined));
 const databaseType = computed(() => tableStructureDatabaseTypeForConnection(connection.value));
-const structureCapabilities = computed(() => getTableStructureCapabilities(databaseType.value));
+const structureCapabilities = computed(() => getTableStructureCapabilities(databaseType.value, connection.value?.db_type));
 const tableMetadataCapabilities = computed(() => getTableMetadataCapabilities(databaseType.value));
 const structureDialect = computed(() => structureCapabilities.value.dialect);
 const isTableCommentDisabled = computed(() => !structureCapabilities.value.comment);
@@ -775,6 +792,8 @@ const triggerEventOptions = ["INSERT", "UPDATE", "DELETE"];
 const metadataSchema = computed(() => connectionObjectTreeQuerySchema(connection.value, props.database, props.schema));
 const refreshVersion = computed(() => (props.connectionId && props.tableName ? queryStore.tableStructureRefreshVersion(props.connectionId, props.database, props.schema, props.tableName) : 0));
 const isCreateMode = computed(() => !props.tableName);
+const usesSqliteRebuildStrategy = computed(() => !isCreateMode.value && structureCapabilities.value.alterStrategy === "sqlite-rebuild");
+const hasSqliteTypeChange = computed(() => usesSqliteRebuildStrategy.value && hasExistingColumnTypeChange(columns.value));
 const canAddColumn = computed(() => canAddTableStructureColumn(databaseType.value, isCreateMode.value));
 const newTableName = ref("");
 const tableComment = ref("");
@@ -962,6 +981,7 @@ function clearSqlPreviewState() {
   sqlPreviewLoading.value = false;
   pendingStatements.value = [];
   warnings.value = [];
+  sqliteSchemaRevision.value = undefined;
 }
 
 function dataTypeOptionsCacheKey(connectionId: string, database: string) {
@@ -1016,49 +1036,33 @@ async function loadDynamicDataTypeOptions() {
 }
 
 function scheduleSqlPreviewRefresh() {
-  if (hydratingRestoredDraft || needsColumnDraftMetadataHydration()) {
-    if (sqlPreviewDebounceTimer) {
-      clearTimeout(sqlPreviewDebounceTimer);
-      sqlPreviewDebounceTimer = undefined;
-    }
-    sqlPreviewRequestId++;
-    deferredSqlPreviewRefresh = false;
-    pendingStatements.value = [];
-    warnings.value = [];
-    sqlPreviewLoading.value = true;
-    return;
+  if (sqlPreviewDebounceTimer) {
+    clearTimeout(sqlPreviewDebounceTimer);
+    sqlPreviewDebounceTimer = undefined;
   }
-  if (!hasPendingStructureChanges()) {
-    clearSqlPreviewState();
-    return;
-  }
-  if (!isCreateMode.value && secondaryMetadataLoading.value) {
-    if (sqlPreviewDebounceTimer) {
-      clearTimeout(sqlPreviewDebounceTimer);
-      sqlPreviewDebounceTimer = undefined;
-    }
-    deferredSqlPreviewRefresh = true;
-    sqlPreviewLoading.value = true;
-    return;
-  }
+  sqlPreviewRequestId++;
   deferredSqlPreviewRefresh = false;
-  if (sqlPreviewDebounceTimer) clearTimeout(sqlPreviewDebounceTimer);
+  pendingStatements.value = [];
+  warnings.value = [];
+  sqliteSchemaRevision.value = undefined;
+  if (!hasPendingStructureChanges()) {
+    sqlPreviewLoading.value = false;
+    return;
+  }
+  sqlPreviewLoading.value = true;
+  if (hydratingRestoredDraft || needsColumnDraftMetadataHydration()) return;
+  if (!isCreateMode.value && secondaryMetadataLoading.value) {
+    deferredSqlPreviewRefresh = true;
+    return;
+  }
   sqlPreviewDebounceTimer = setTimeout(() => {
     sqlPreviewDebounceTimer = undefined;
     void refreshSqlPreview();
   }, 80);
 }
 
-async function refreshSqlPreview() {
-  const requestId = ++sqlPreviewRequestId;
-  if (!hasPendingStructureChanges()) {
-    pendingStatements.value = [];
-    warnings.value = [];
-    sqlPreviewLoading.value = false;
-    return;
-  }
-  sqlPreviewLoading.value = true;
-  const options = {
+function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
+  return {
     databaseType: databaseType.value,
     schema: props.schema,
     tableName: isCreateMode.value ? newTableName.value : props.tableName || "",
@@ -1069,22 +1073,47 @@ async function refreshSqlPreview() {
     tableComment: tableComment.value,
     originalTableComment: isCreateMode.value ? undefined : originalTableComment.value,
   };
+}
+
+async function refreshSqlPreview() {
+  const requestId = ++sqlPreviewRequestId;
+  if (!hasPendingStructureChanges()) {
+    pendingStatements.value = [];
+    warnings.value = [];
+    sqliteSchemaRevision.value = undefined;
+    sqlPreviewLoading.value = false;
+    return;
+  }
+  sqlPreviewLoading.value = true;
+  const options = structureChangeOptions();
   try {
-    const result = isCreateMode.value ? await api.buildCreateTableSql(options) : await api.buildTableStructureChangeSql(options);
+    const result = isCreateMode.value ? await api.buildCreateTableSql(options) : hasSqliteTypeChange.value ? await api.previewSqliteTableStructureChange(props.connectionId, props.database, options) : await api.buildTableStructureChangeSql(options);
     if (requestId !== sqlPreviewRequestId) return;
     pendingStatements.value = result.statements;
     warnings.value = result.warnings;
+    sqliteSchemaRevision.value = "schemaRevision" in result && typeof result.schemaRevision === "string" ? result.schemaRevision : undefined;
   } catch (e: any) {
     if (requestId !== sqlPreviewRequestId) return;
     pendingStatements.value = [];
     warnings.value = [e?.message || String(e)];
+    sqliteSchemaRevision.value = undefined;
   } finally {
     if (requestId === sqlPreviewRequestId) sqlPreviewLoading.value = false;
   }
 }
 
 const canApply = computed(
-  () => !loading.value && !saving.value && !postSaveRefreshing.value && !secondaryMetadataLoading.value && !sqlPreviewLoading.value && pendingStatements.value.length > 0 && warnings.value.length === 0 && !!props.connectionId && (isCreateMode.value ? !!newTableName.value.trim() : !!props.tableName),
+  () =>
+    !loading.value &&
+    !saving.value &&
+    !postSaveRefreshing.value &&
+    !secondaryMetadataLoading.value &&
+    !sqlPreviewLoading.value &&
+    pendingStatements.value.length > 0 &&
+    warnings.value.length === 0 &&
+    (!hasSqliteTypeChange.value || !!sqliteSchemaRevision.value) &&
+    !!props.connectionId &&
+    (isCreateMode.value ? !!newTableName.value.trim() : !!props.tableName),
 );
 
 function clearDraft() {
@@ -1093,7 +1122,6 @@ function clearDraft() {
 }
 
 function resetState() {
-  activeTab.value = "columns";
   loading.value = false;
   saving.value = false;
   postSaveRefreshing.value = false;
@@ -1106,6 +1134,7 @@ function resetState() {
   indexes.value = [];
   pendingStatements.value = [];
   warnings.value = [];
+  sqliteSchemaRevision.value = undefined;
   foreignKeys.value = [];
   triggers.value = [];
   ddlContent.value = "";
@@ -1247,6 +1276,7 @@ async function addColumn() {
     id: `new:${uuid()}`,
     name: "",
     dataType,
+    enumValues: [],
     isNullable: true,
     defaultValue: "",
     comment: "",
@@ -1377,13 +1407,36 @@ function updateSqlServerIdentityIncrement(column: EditableStructureColumn, value
 }
 
 function updateColumnDataType(column: EditableStructureColumn, baseType: string) {
-  column.dataType = combineDataTypeForDatabase(databaseType.value, baseType, getDefaultLengthForType(databaseType.value, baseType));
+  if (isMysqlEnumDataType(databaseType.value, baseType)) {
+    if (!column.enumValues?.length) column.enumValues = [""];
+    column.dataType = mysqlEnumDataType(column.enumValues);
+  } else {
+    column.dataType = combineDataTypeForDatabase(databaseType.value, baseType, getDefaultLengthForType(databaseType.value, baseType));
+  }
   syncSqlServerIdentityForDataType(column);
   // Clear charset/collation when switching to a non-character MySQL type
   if (showCharacterSet.value && !isMysqlCharacterDataType(column.dataType)) {
     column.characterSet = "";
     column.collation = "";
   }
+}
+
+function updateMysqlEnumValue(column: EditableStructureColumn, index: number, value: string | number) {
+  if (!column.enumValues || index < 0 || index >= column.enumValues.length) return;
+  column.enumValues[index] = String(value);
+  column.dataType = mysqlEnumDataType(column.enumValues);
+}
+
+function addMysqlEnumValue(column: EditableStructureColumn) {
+  column.enumValues ??= [];
+  column.enumValues.push("");
+  column.dataType = mysqlEnumDataType(column.enumValues);
+}
+
+function removeMysqlEnumValue(column: EditableStructureColumn, index: number) {
+  if (!column.enumValues || column.enumValues.length <= 1) return;
+  column.enumValues.splice(index, 1);
+  column.dataType = mysqlEnumDataType(column.enumValues);
 }
 
 function updateColumnDataTypeLength(column: EditableStructureColumn, value: string | number) {
@@ -1927,7 +1980,7 @@ async function recordStructureHistory(sql: string, start: number, success: boole
       success,
       error,
       activity_kind: "schema_change",
-      operation: primarySqlOperation(sql),
+      operation: hasSqliteTypeChange.value ? "ALTER TABLE" : primarySqlOperation(sql),
       target: isCreateMode.value ? newTableName.value.trim() : props.tableName,
       affected_rows: success ? result?.affected_rows : undefined,
     });
@@ -1960,12 +2013,14 @@ async function applyChanges() {
   const startedAt = Date.now();
   try {
     const connection = store.getConfig(props.connectionId);
-    const timeoutSecs = queryTimeoutSecsForConnection(connection);
-    const result = await api.executeBatch(props.connectionId, props.database, pendingStatements.value, props.schema, timeoutSecs);
+    const result = hasSqliteTypeChange.value
+      ? await api.applySqliteTableStructureChange(props.connectionId, props.database, structureChangeOptions(), sqliteSchemaRevision.value!)
+      : await api.executeBatch(props.connectionId, props.database, pendingStatements.value, props.schema, queryTimeoutSecsForConnection(connection));
     await recordStructureHistory(sql, startedAt, true, result);
     toast(t("structureEditor.saved"), 2500);
     pendingStatements.value = [];
     warnings.value = [];
+    sqliteSchemaRevision.value = undefined;
     ddlFetched.value = false;
     ddlContent.value = "";
     if (isCreateMode.value) {
@@ -2049,7 +2104,8 @@ onMounted(() => {
   void loadDynamicDataTypeOptions();
   if (props.draft?.initialized) {
     restoreDraft(props.draft);
-    applyInitialStructureTab();
+    // A restored draft owns its saved tab unless navigation explicitly requested another one.
+    applyInitialStructureTab(false);
     applyInitialStructureTarget();
     void hydrateRestoredDraftFromDatabase().then(() => applyInitialStructureTarget());
   } else if (isCreateMode.value) {
@@ -2080,27 +2136,25 @@ onBeforeUnmount(() => {
   persistStructureDensity();
 });
 
-function firstStructureMetadataTab(capabilities = tableMetadataCapabilities.value) {
-  if (capabilities.columns) return "columns";
-  if (capabilities.indexes) return "indexes";
-  if (capabilities.foreignKeys) return "foreignKeys";
-  if (capabilities.triggers) return "triggers";
-  if (capabilities.ddl && !isCreateMode.value) return "ddl";
-  return "columns";
+function localFirstStructureMetadataTab(capabilities = tableMetadataCapabilities.value) {
+  return firstStructureMetadataTab(capabilities, isCreateMode.value);
 }
 
-function isStructureMetadataTabSupported(tab: TableInfoTab, capabilities = tableMetadataCapabilities.value) {
-  return (tab === "columns" && capabilities.columns) || (tab === "indexes" && capabilities.indexes) || (tab === "foreignKeys" && capabilities.foreignKeys) || (tab === "triggers" && capabilities.triggers) || (tab === "ddl" && capabilities.ddl && !isCreateMode.value);
+function localIsStructureMetadataTabSupported(tab: TableInfoTab, capabilities = tableMetadataCapabilities.value) {
+  return isStructureMetadataTabSupported(tab, capabilities, isCreateMode.value);
 }
 
 function resolveStructureMetadataTab(tab: TableInfoTab | undefined, capabilities = tableMetadataCapabilities.value): TableInfoTab {
-  if (tab && isStructureMetadataTabSupported(tab, capabilities)) return tab;
-  return firstStructureMetadataTab(capabilities);
+  if (tab && localIsStructureMetadataTabSupported(tab, capabilities)) return tab;
+  return localFirstStructureMetadataTab(capabilities);
 }
 
-function applyInitialStructureTab() {
-  if (!props.initialTab) return;
-  activeTab.value = resolveStructureMetadataTab(props.initialTab);
+function applyInitialStructureTab(useDefault = true) {
+  if (props.initialTab) {
+    activeTab.value = resolveStructureMetadataTab(props.initialTab);
+  } else if (useDefault) {
+    activeTab.value = resolveStructureMetadataTab(undefined);
+  }
 }
 
 function initialTargetKey(target: TableStructureEditorTarget): string {
@@ -2140,7 +2194,7 @@ function applyInitialStructureTarget() {
 }
 
 watch(tableMetadataCapabilities, (capabilities) => {
-  if (!isStructureMetadataTabSupported(activeTab.value, capabilities)) activeTab.value = firstStructureMetadataTab(capabilities);
+  if (!localIsStructureMetadataTabSupported(activeTab.value, capabilities)) activeTab.value = localFirstStructureMetadataTab(capabilities);
 });
 
 watch([() => props.initialTab, () => props.initialTabRequestId, () => props.initialTarget], () => {
@@ -2157,7 +2211,7 @@ watch([() => props.connectionId, () => props.database, databaseType], () => {
 });
 
 watch(
-  [isCreateMode, databaseType, () => props.schema, () => props.tableName, newTableName, tableComment, columns, indexes, foreignKeys, triggers],
+  [isCreateMode, () => props.connectionId, () => props.database, databaseType, () => props.schema, () => props.tableName, newTableName, tableComment, columns, indexes, foreignKeys, triggers],
   () => {
     scheduleSqlPreviewRefresh();
     syncDraftToParent();
@@ -2192,9 +2246,21 @@ watch(refreshVersion, (version, previous) => {
   void loadStructure(true);
 });
 
-watch(activeTab, (tab) => {
-  if (tab === "ddl") {
-    void fetchDdl();
+watch(
+  activeTab,
+  (tab) => {
+    if (tab === "ddl") {
+      void fetchDdl();
+    }
+  },
+  { immediate: true },
+);
+
+watch([activeTab, ddlLoading], ([tab, loading]) => {
+  if (tab === "ddl" && !loading) {
+    void nextTick(() => {
+      ddlPreRef.value?.focus();
+    });
   }
 });
 </script>
@@ -2237,11 +2303,11 @@ watch(activeTab, (tab) => {
         <Tabs v-model="activeTab" class="flex h-full min-h-0 flex-col">
           <div class="flex shrink-0 items-center justify-between gap-2 border-b px-2 py-[var(--structure-header-py)]">
             <TabsList>
+              <TabsTrigger v-if="tableMetadataCapabilities.ddl && !isCreateMode" value="ddl">DDL</TabsTrigger>
               <TabsTrigger v-if="tableMetadataCapabilities.columns" value="columns">{{ t("structureEditor.columns") }}</TabsTrigger>
               <TabsTrigger v-if="tableMetadataCapabilities.indexes" value="indexes">{{ t("structureEditor.indexes") }}</TabsTrigger>
               <TabsTrigger v-if="tableMetadataCapabilities.foreignKeys" value="foreignKeys">{{ t("structureEditor.foreignKeys") }}</TabsTrigger>
               <TabsTrigger v-if="tableMetadataCapabilities.triggers" value="triggers">{{ t("structureEditor.triggers") }}</TabsTrigger>
-              <TabsTrigger v-if="tableMetadataCapabilities.ddl && !isCreateMode" value="ddl">DDL</TabsTrigger>
             </TabsList>
             <div class="flex shrink-0 items-center gap-1.5">
               <div class="flex items-center gap-1.5">
@@ -2385,7 +2451,32 @@ watch(activeTab, (tab) => {
                     <Input v-else :model-value="splitDataType(column.dataType).baseType" :class="[structureMonoControlClass, 'w-full']" disabled />
                   </td>
                   <td v-if="columnEditorControls.length" :class="structureCellClass">
-                    <Input :model-value="dataTypeLengthInputValue(databaseType, column.dataType)" :class="structureMonoControlClass" :disabled="isColumnLengthDisabled(column)" @update:model-value="updateColumnDataTypeLength(column, $event)" />
+                    <Popover v-if="isMysqlEnumDataType(databaseType, column.dataType)">
+                      <PopoverTrigger as-child>
+                        <Button variant="outline" size="sm" :class="[structureMonoControlClass, 'w-full justify-between px-2']" :disabled="isColumnTypeDisabled(column)">
+                          <span>{{ t("structureEditor.enumValueCount", { count: column.enumValues?.length ?? 0 }) }}</span>
+                          <ListChevronsUpDown :class="structureIconClass" />
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent class="w-80 p-3" align="start">
+                        <div class="mb-2 flex items-center justify-between gap-2">
+                          <span class="text-sm font-medium">{{ t("structureEditor.enumValues") }}</span>
+                          <Button variant="outline" size="sm" class="h-7 px-2" @click="addMysqlEnumValue(column)">
+                            <Plus class="mr-1 h-3.5 w-3.5" />
+                            {{ t("structureEditor.addEnumValue") }}
+                          </Button>
+                        </div>
+                        <div class="max-h-64 space-y-1.5 overflow-y-auto pr-1">
+                          <div v-for="(value, valueIndex) in column.enumValues" :key="valueIndex" class="flex items-center gap-1.5">
+                            <Input :model-value="value" :class="structureMonoControlClass" :placeholder="t('structureEditor.enumValuePlaceholder')" @update:model-value="updateMysqlEnumValue(column, valueIndex, $event)" />
+                            <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0" :disabled="(column.enumValues?.length ?? 0) <= 1" :title="t('structureEditor.removeEnumValue')" @click="removeMysqlEnumValue(column, valueIndex)">
+                              <Trash2 class="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        </div>
+                      </PopoverContent>
+                    </Popover>
+                    <Input v-else :model-value="dataTypeLengthInputValue(databaseType, column.dataType)" :class="structureMonoControlClass" :disabled="isColumnLengthDisabled(column)" @update:model-value="updateColumnDataTypeLength(column, $event)" />
                   </td>
                   <td v-if="columnEditorControls.nullable" :class="structureCellClass">
                     <label class="flex items-center gap-1.5">
@@ -2845,7 +2936,7 @@ watch(activeTab, (tab) => {
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
             </div>
-            <pre v-else class="m-0 min-h-0 flex-1 whitespace-pre p-3 font-mono text-xs leading-5 select-text" v-html="ddlContent ? (sqlHighlighter?.(ddlContent) ?? ddlContent) : t('structureEditor.emptyReadonly')"></pre>
+            <pre v-else ref="ddlPreRef" tabindex="0" class="m-0 min-h-0 flex-1 whitespace-pre p-3 font-mono text-xs leading-5 select-text outline-none" v-html="ddlContent ? (sqlHighlighter?.(ddlContent) ?? ddlContent) : t('structureEditor.emptyReadonly')" @keydown="onDdlKeydown"></pre>
           </TabsContent>
         </Tabs>
       </div>
@@ -2881,6 +2972,10 @@ watch(activeTab, (tab) => {
           </div>
         </div>
         <div v-if="!sqlPreviewCollapsed" class="min-h-0 flex-1 overflow-auto p-2.5">
+          <div v-if="hasSqliteTypeChange" class="mb-2 flex gap-1.5 rounded-md border border-blue-300/40 bg-blue-500/10 px-[var(--structure-cell-px)] py-[var(--structure-cell-py)] text-[length:var(--structure-font-size)] text-blue-700 dark:text-blue-300">
+            <Info :class="[structureIconClass, 'mt-0.5 shrink-0']" />
+            <span>{{ t("structureEditor.sqliteRebuildNotice") }}</span>
+          </div>
           <div v-if="warnings.length" class="mb-2 space-y-1">
             <div v-for="warning in warnings" :key="warning" class="flex gap-1.5 rounded-md border border-yellow-300/40 bg-yellow-500/10 px-[var(--structure-cell-px)] py-[var(--structure-cell-py)] text-[length:var(--structure-font-size)] text-yellow-700 dark:text-yellow-300">
               <AlertTriangle :class="[structureIconClass, 'mt-0.5 shrink-0']" />

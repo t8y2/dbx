@@ -2,10 +2,12 @@ package com.dbx.agent.gbase8a;
 
 import com.dbx.agent.ConfiguredJdbcAgent;
 import com.dbx.agent.ExecuteQueryOptions;
+import com.dbx.agent.JdbcIdentifiers;
 import com.dbx.agent.JdbcAgentProfile;
 import com.dbx.agent.JsonRpcServer;
 import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
+import com.dbx.agent.ObjectSource;
 import com.dbx.agent.QueryPageOptions;
 import com.dbx.agent.QueryPageResult;
 import com.dbx.agent.QueryResult;
@@ -14,6 +16,8 @@ import com.dbx.agent.TableInfo;
 
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -31,7 +35,7 @@ public final class Gbase8aAgent extends ConfiguredJdbcAgent {
         "USE",
         true,
         false,
-        false,
+        true,
         false
     );
 
@@ -164,6 +168,40 @@ public final class Gbase8aAgent extends ConfiguredJdbcAgent {
                 }
             }
         }
+    }
+
+    @Override
+    public ObjectSource getObjectSource(String schema, String name, String objectType) {
+        return unchecked(() -> {
+            String normalizedType = objectType.toUpperCase(Locale.ROOT);
+            String sql = switch (normalizedType) {
+                case "VIEW" -> "SHOW CREATE VIEW ";
+                case "PROCEDURE" -> "SHOW CREATE PROCEDURE ";
+                case "FUNCTION" -> "SHOW CREATE FUNCTION ";
+                default -> throw new IllegalArgumentException("Unsupported object type: " + objectType);
+            };
+            String qualifiedName = hasSchema(schema)
+                ? JdbcIdentifiers.INSTANCE.backtick(schema) + "." + JdbcIdentifiers.INSTANCE.backtick(name)
+                : JdbcIdentifiers.INSTANCE.backtick(name);
+
+            String source = "";
+            try (Statement stmt = requireConnection().createStatement();
+                 ResultSet rs = stmt.executeQuery(sql + qualifiedName)) {
+                if (rs.next()) {
+                    // SHOW CREATE result layouts vary by GBase driver version, so locate the definition column by label.
+                    ResultSetMetaData metadata = rs.getMetaData();
+                    for (int index = 1; index <= metadata.getColumnCount(); index++) {
+                        String label = metadata.getColumnLabel(index);
+                        if (label != null && label.toUpperCase(Locale.ROOT).startsWith("CREATE ")) {
+                            String value = rs.getString(index);
+                            source = value == null ? "" : value;
+                            break;
+                        }
+                    }
+                }
+            }
+            return new ObjectSource(name, normalizedType, schema, source);
+        });
     }
 
     private static void appendGbase8aTableTypePredicate(

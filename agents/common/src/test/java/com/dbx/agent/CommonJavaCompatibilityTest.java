@@ -303,6 +303,17 @@ class CommonJavaCompatibilityTest {
     }
 
     @Test
+    void metadataConstraintsTreatTdengineStableAsTable() {
+        MetadataListConstraints constraints =
+            new MetadataListConstraints(null, null, null, Collections.singletonList("TABLE"));
+        TableInfo stable = new TableInfo("meters", "STABLE", null, null, null);
+
+        List<TableInfo> tables = constraints.filterTables(Collections.singletonList(stable));
+
+        assertEquals(Collections.singletonList(stable), tables);
+    }
+
+    @Test
     void metadataConstraintsMatchTableAndObjectComments() {
         MetadataListConstraints tableConstraints =
             new MetadataListConstraints("account", null, null, Collections.singletonList("TABLE"));

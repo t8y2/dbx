@@ -7,6 +7,7 @@ import com.dbx.agent.DatabaseInfo;
 import com.dbx.agent.ExecuteQueryOptions;
 import com.dbx.agent.JdbcAgentProfile;
 import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.IndexInfo;
 import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.QueryResult;
@@ -18,9 +19,11 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 public final class Gbase8sAgent extends ConfiguredJdbcAgent {
@@ -163,9 +166,14 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             }
             List<TableInfo> result = new ArrayList<>();
             String owner = trim(schema);
-            String sql = "SELECT tabname, tabtype FROM systables WHERE tabid >= 100 AND tabtype IN ('T', 'V')";
+            String sql = """
+                SELECT t.tabname, t.tabtype, c.comments
+                FROM systables t
+                LEFT JOIN syscomms c ON c.tabid = t.tabid
+                WHERE t.tabid >= 100 AND t.tabtype IN ('T', 'V')
+                """.stripIndent().trim();
             if (!owner.isEmpty()) {
-                sql += " AND owner = ?";
+                sql += " AND t.owner = ?";
             }
             sql += " ORDER BY tabname";
             try (PreparedStatement stmt = requireConnection().prepareStatement(sql)) {
@@ -176,7 +184,8 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
                     while (rs.next()) {
                         result.add(new TableInfo(
                             trim(rs.getString("tabname")),
-                            tableType(rs.getString("tabtype"))
+                            tableType(rs.getString("tabtype")),
+                            emptyToNull(trim(rs.getString("comments")))
                         ));
                     }
                 }
@@ -207,9 +216,10 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             List<Object> args = new ArrayList<>();
             args.add(table);
             StringBuilder sql = new StringBuilder("""
-                SELECT c.colname, c.coltype, c.colno, c.collength
+                SELECT c.colname, c.coltype, c.colno, c.collength, cc.comments
                 FROM syscolumns c
                 JOIN systables t ON t.tabid = c.tabid
+                LEFT JOIN syscolcomms cc ON cc.tabid = c.tabid AND cc.colno = c.colno
                 WHERE t.tabid >= 100 AND t.tabname = ?
                 """.stripIndent().trim());
             if (!owner.isEmpty()) {
@@ -234,10 +244,64 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
                             null,
                             primaryKeyColumns.contains(rs.getInt("colno")),
                             null,
-                            null,
+                            emptyToNull(trim(rs.getString("comments"))),
                             numericPrecision(baseType, length),
                             numericScale(baseType, length),
                             characterMaximumLength(baseType, length)
+                        ));
+                    }
+                }
+            }
+            return result;
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public List<IndexInfo> listIndexes(String schema, String table) {
+        try {
+            String owner = trim(schema);
+            List<Object> args = new ArrayList<>();
+            args.add(table);
+            StringBuilder sql = new StringBuilder("""
+                SELECT i.idxname, i.idxtype, c.constrtype,
+                       i.part1, i.part2, i.part3, i.part4, i.part5, i.part6, i.part7, i.part8,
+                       i.part9, i.part10, i.part11, i.part12, i.part13, i.part14, i.part15, i.part16
+                FROM sysindexes i
+                JOIN systables t ON t.tabid = i.tabid
+                LEFT JOIN sysconstraints c ON c.tabid = i.tabid AND c.idxname = i.idxname
+                WHERE t.tabid >= 100 AND t.tabname = ?
+                """.stripIndent().trim());
+            if (!owner.isEmpty()) {
+                sql.append(" AND t.owner = ?");
+                args.add(owner);
+            }
+            sql.append(" ORDER BY i.idxname");
+
+            Map<Integer, String> columnNames = loadColumnNamesByNumber(owner, table);
+            List<IndexInfo> result = new ArrayList<>();
+            try (PreparedStatement stmt = requireConnection().prepareStatement(sql.toString())) {
+                bind(stmt, args);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        String name = trim(rs.getString("idxname"));
+                        if (name.isEmpty()) {
+                            continue;
+                        }
+                        List<Integer> parts = readIndexParts(rs);
+                        List<String> columns = resolveIndexColumns(parts, columnNames);
+                        String indexType = trim(rs.getString("idxtype"));
+                        String constraintType = trim(rs.getString("constrtype"));
+                        result.add(new IndexInfo(
+                            name,
+                            columns,
+                            indexType.toUpperCase(Locale.ROOT).startsWith("U"),
+                            "P".equalsIgnoreCase(constraintType),
+                            null,
+                            indexType,
+                            null,
+                            null
                         ));
                     }
                 }
@@ -281,24 +345,25 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             if (constraints.hasLimit()) {
                 sql.append("FIRST ").append(constraints.getLimit()).append(' ');
             }
-            sql.append("tabname, tabtype FROM systables WHERE tabid >= 100");
+            sql.append("t.tabname, t.tabtype, c.comments FROM systables t LEFT JOIN syscomms c ON c.tabid = t.tabid WHERE t.tabid >= 100");
             appendGbase8sTableTypePredicate(sql, constraints);
             if (!owner.isEmpty()) {
-                sql.append(" AND owner = ?");
+                sql.append(" AND t.owner = ?");
                 args.add(owner);
             }
             if (constraints.hasFilter()) {
-                sql.append(" AND UPPER(tabname) LIKE ? ESCAPE '\\\\'");
+                sql.append(" AND UPPER(t.tabname) LIKE ? ESCAPE '\\\\'");
                 args.add(constraints.fuzzyLikePattern().toUpperCase(Locale.ROOT));
             }
-            sql.append(" ORDER BY tabname");
+            sql.append(" ORDER BY t.tabname");
             try (PreparedStatement stmt = requireConnection().prepareStatement(sql.toString())) {
                 bind(stmt, args);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
                         result.add(new TableInfo(
                             trim(rs.getString("tabname")),
-                            tableType(rs.getString("tabtype"))
+                            tableType(rs.getString("tabtype")),
+                            emptyToNull(trim(rs.getString("comments")))
                         ));
                     }
                 }
@@ -552,6 +617,56 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             }
         }
         return result;
+    }
+
+    static List<String> resolveIndexColumns(List<Integer> parts, Map<Integer, String> columnNames) {
+        List<String> result = new ArrayList<>();
+        for (Integer part : parts) {
+            if (part == null || part == 0) {
+                continue;
+            }
+            // Informix-compatible catalogs encode descending index columns as negative column numbers.
+            String columnName = columnNames.get(Math.abs(part));
+            if (columnName != null && !columnName.isEmpty()) {
+                result.add(columnName);
+            }
+        }
+        return result;
+    }
+
+    private Map<Integer, String> loadColumnNamesByNumber(String owner, String table) throws Exception {
+        List<Object> args = new ArrayList<>();
+        args.add(table);
+        StringBuilder sql = new StringBuilder("""
+            SELECT c.colno, c.colname
+            FROM syscolumns c
+            JOIN systables t ON t.tabid = c.tabid
+            WHERE t.tabid >= 100 AND t.tabname = ?
+            """.stripIndent().trim());
+        if (!owner.isEmpty()) {
+            sql.append(" AND t.owner = ?");
+            args.add(owner);
+        }
+
+        Map<Integer, String> result = new LinkedHashMap<>();
+        try (PreparedStatement stmt = requireConnection().prepareStatement(sql.toString())) {
+            bind(stmt, args);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    result.put(rs.getInt("colno"), trim(rs.getString("colname")));
+                }
+            }
+        }
+        return result;
+    }
+
+    private static List<Integer> readIndexParts(ResultSet rs) throws Exception {
+        List<Integer> parts = new ArrayList<>();
+        for (int index = 1; index <= 16; index += 1) {
+            int value = rs.getInt("part" + index);
+            parts.add(rs.wasNull() ? null : value);
+        }
+        return parts;
     }
 
     private Set<Integer> getPrimaryKeyColumnNumbers(Connection conn, String owner, String table) throws Exception {

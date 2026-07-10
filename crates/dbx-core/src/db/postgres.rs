@@ -1688,6 +1688,8 @@ fn postgres_table_comment_sql() -> &'static str {
 }
 
 fn postgres_tables_sql() -> &'static str {
+    // PostgreSQL and Redshift can infer different wire types for LIMIT/OFFSET
+    // placeholders. Keep them explicit so the shared i64 parameters serialize reliably.
     "SELECT c.relname AS table_name, \
          CASE c.relkind WHEN 'r' THEN 'BASE TABLE' WHEN 'v' THEN 'VIEW' \
            WHEN 'm' THEN 'MATERIALIZED_VIEW' WHEN 'f' THEN 'FOREIGN TABLE' \
@@ -1703,7 +1705,7 @@ fn postgres_tables_sql() -> &'static str {
          WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p') \
            AND ($2 = '%%' OR c.relname ILIKE $2 ESCAPE '~' OR ($3 <> '' AND c.relname ILIKE $3 ESCAPE '~')) \
          ORDER BY c.relname \
-         LIMIT $4 OFFSET $5"
+         LIMIT CAST($4 AS BIGINT) OFFSET CAST($5 AS BIGINT)"
 }
 
 fn like_contains_pattern(value: &str) -> String {
@@ -4124,7 +4126,7 @@ mod tests {
         assert!(sql.contains("ILIKE $2 ESCAPE '~'"));
         assert!(sql.contains("$3 <> ''"));
         assert!(sql.contains("ILIKE $3 ESCAPE '~'"));
-        assert!(sql.contains("LIMIT $4 OFFSET $5"));
+        assert!(sql.contains("LIMIT CAST($4 AS BIGINT) OFFSET CAST($5 AS BIGINT)"));
     }
 
     #[test]

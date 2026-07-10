@@ -127,7 +127,6 @@ const showConnectionDialog = ref(false);
 const connectionDialogPrefill = ref<ConnectionDeepLinkDraft | null>(null);
 const connectionDialogInitialTab = ref<ConfigTab | undefined>(undefined);
 const settingsPageTabOpen = ref(false);
-const settingsPageActive = ref(false);
 const settingsInitialTab = ref("appearance");
 const settingsInitialSection = ref<string | undefined>(undefined);
 const showQueryEditorDdlDialog = ref(false);
@@ -135,7 +134,7 @@ const driverStoreTabOpen = ref(false);
 const driverStoreActive = ref(false);
 const settingsReturnSurface = ref<"query" | "driverStore" | "welcome">("welcome");
 const showDriverStore = computed(() => driverStoreTabOpen.value && driverStoreActive.value);
-const showSettingsPage = computed(() => settingsPageTabOpen.value && settingsPageActive.value);
+const showSettingsPage = computed(() => settingsPageTabOpen.value && settingsStore.settingsPageActive);
 const showQuickOpen = ref(false);
 const agentDriverUpdateCount = ref(0);
 const showHistory = ref(false);
@@ -276,7 +275,7 @@ const updateNotificationsEnabled = computed(() => settingsStore.editorSettings.u
 function openSettings(initialTab = "appearance", initialSection?: string) {
   settingsInitialTab.value = initialTab;
   settingsInitialSection.value = initialSection;
-  if (!settingsPageActive.value) {
+  if (!settingsStore.settingsPageActive) {
     settingsReturnSurface.value = showDriverStore.value ? "driverStore" : activeTab.value ? "query" : "welcome";
   }
   activateSettingsPage();
@@ -284,13 +283,13 @@ function openSettings(initialTab = "appearance", initialSection?: string) {
 
 function activateSettingsPage() {
   settingsPageTabOpen.value = true;
-  settingsPageActive.value = true;
+  settingsStore.settingsPageActive = true;
   driverStoreActive.value = false;
 }
 
 function closeSettingsPage() {
   settingsPageTabOpen.value = false;
-  settingsPageActive.value = false;
+  settingsStore.settingsPageActive = false;
   if (settingsReturnSurface.value === "driverStore" && driverStoreTabOpen.value) {
     driverStoreActive.value = true;
     return;
@@ -301,7 +300,7 @@ function closeSettingsPage() {
 function openDriverStorePage() {
   driverStoreTabOpen.value = true;
   driverStoreActive.value = true;
-  settingsPageActive.value = false;
+  settingsStore.settingsPageActive = false;
 }
 
 function closeDriverStorePage() {
@@ -432,7 +431,7 @@ watch(
     }
     if (id) newQueryContextSource.value = "tab";
     if (id && driverStoreActive.value) driverStoreActive.value = false;
-    if (id && settingsPageActive.value) settingsPageActive.value = false;
+    if (id && settingsStore.settingsPageActive) settingsStore.settingsPageActive = false;
     selectedSql.value = "";
     activeOutputView.value = "result";
     if (id) queryStore.reloadEvictedTab(id);
@@ -1422,7 +1421,7 @@ function activateQueryTab(tabId: string): boolean {
   dispatchBeforeTabSwitch(tabId);
   queryStore.activeTabId = tabId;
   driverStoreActive.value = false;
-  settingsPageActive.value = false;
+  settingsStore.settingsPageActive = false;
   return true;
 }
 
@@ -1798,13 +1797,13 @@ onUnmounted(() => {
                 :driver-store-open="driverStoreTabOpen"
                 :driver-store-active="driverStoreActive"
                 :settings-page-open="settingsPageTabOpen"
-                :settings-page-active="settingsPageActive"
+                :settings-page-active="settingsStore.settingsPageActive"
                 :agent-driver-update-count="toolbarAgentDriverUpdateCount"
                 @activate-driver-store="openDriverStorePage"
                 @activate-settings-page="activateSettingsPage"
                 @activate-tab="
                   driverStoreActive = false;
-                  settingsPageActive = false;
+                  settingsStore.settingsPageActive = false;
                 "
                 @close-driver-store="closeDriverStorePage"
                 @close-settings-page="closeSettingsPage"
@@ -1817,7 +1816,7 @@ onUnmounted(() => {
               <DriverStorePage v-if="driverStoreTabOpen" v-show="driverStoreActive" class="flex-1 min-h-0" :update-notifications-enabled="updateNotificationsEnabled" @update-count-change="updateAgentDriverUpdateCount" />
               <EditorSettingsPage
                 v-if="settingsPageTabOpen"
-                v-show="settingsPageActive"
+                v-show="settingsStore.settingsPageActive"
                 variant="page"
                 :open="settingsPageTabOpen"
                 :initial-tab="settingsInitialTab"
@@ -1826,7 +1825,7 @@ onUnmounted(() => {
                 class="flex-1 min-h-0"
                 @update:open="(open: boolean) => (open ? activateSettingsPage() : closeSettingsPage())"
               />
-              <div v-if="activeTab" v-show="!driverStoreActive && !settingsPageActive" class="flex flex-col flex-1 min-h-0">
+              <div v-if="activeTab" v-show="!driverStoreActive && !settingsStore.settingsPageActive" class="flex flex-col flex-1 min-h-0">
                 <EditorToolbar
                   v-if="activeTab.mode === 'query' && !isPreviewTab(activeTab)"
                   :active-tab="activeTab"
@@ -1932,7 +1931,7 @@ onUnmounted(() => {
                 </KeepAlive>
               </div>
               <WelcomeScreen
-                v-else-if="!driverStoreActive && !settingsPageActive"
+                v-else-if="!driverStoreActive && !settingsStore.settingsPageActive"
                 :connection-stats="connectionStats"
                 :recent-connections="recentConnections"
                 :saved-sql-history-items="savedSqlHistoryItems"

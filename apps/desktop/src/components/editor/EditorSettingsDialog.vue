@@ -3009,7 +3009,7 @@ onUnmounted(cleanupPreviewEditor);
                 <div class="grid grid-cols-2 gap-2">
                   <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editIconTheme === 'default' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setIconTheme('default')">
                     <div class="flex items-center gap-3 text-left w-full min-w-0">
-                      <img src="/logo.png" alt="DBX" class="h-8 w-8 rounded-md" />
+                      <img src="/icon-preview-default.png" alt="DBX" class="h-12 w-12 shrink-0" />
                       <TooltipProvider>
                         <Tooltip>
                           <TooltipTrigger as-child>
@@ -3027,7 +3027,7 @@ onUnmounted(cleanupPreviewEditor);
                   </Button>
                   <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editIconTheme === 'black' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setIconTheme('black')">
                     <div class="flex items-center gap-3 text-left w-full min-w-0">
-                      <img src="/logo-black.png" alt="DBX" class="h-8 w-8 dark:invert shrink-0" />
+                      <img src="/icon-preview-black.png" alt="DBX" class="h-12 w-12 shrink-0" />
                       <TooltipProvider>
                         <Tooltip>
                           <TooltipTrigger as-child>

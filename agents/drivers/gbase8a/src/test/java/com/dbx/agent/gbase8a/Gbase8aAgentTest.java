@@ -2,6 +2,7 @@ package com.dbx.agent.gbase8a;
 
 import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
+import com.dbx.agent.ObjectSource;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.test.TestSupport;
 import org.junit.jupiter.api.Assertions;
@@ -13,6 +14,8 @@ import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -95,6 +98,57 @@ class Gbase8aAgentTest {
         Assertions.assertTrue(sql.get(0).contains("LIMIT ?"), sql.get(0));
     }
 
+    @Test
+    void getObjectSourceUsesShowCreateForRoutines() {
+        List<String> sql = new ArrayList<>();
+        Gbase8aAgent agent = new Gbase8aAgent();
+        TestSupport.setPrivateConnection(agent, statementConnection(sql, resultSet(
+            new String[]{"Procedure", "sql_mode", "Create Procedure"},
+            new Object[][]{{"refresh_orders", "", "CREATE PROCEDURE `refresh_orders`() SELECT 1"}}
+        )));
+
+        ObjectSource source = agent.getObjectSource("app", "refresh_orders", "procedure");
+
+        Assertions.assertEquals("PROCEDURE", source.getObject_type());
+        Assertions.assertEquals("app", source.getSchema());
+        Assertions.assertEquals("CREATE PROCEDURE `refresh_orders`() SELECT 1", source.getSource());
+        Assertions.assertEquals("SHOW CREATE PROCEDURE `app`.`refresh_orders`", sql.get(0));
+    }
+
+    @Test
+    void getObjectSourceFindsDefinitionAcrossDriverResultLayouts() {
+        List<String> sql = new ArrayList<>();
+        Gbase8aAgent agent = new Gbase8aAgent();
+        TestSupport.setPrivateConnection(agent, statementConnection(sql, resultSet(
+            new String[]{"Function", "Create Function", "character_set_client", "Database Collation"},
+            new Object[][]{{"format_order", "CREATE FUNCTION `format_order`() RETURNS INT RETURN 1", "utf8", "utf8_bin"}}
+        )));
+
+        ObjectSource source = agent.getObjectSource("app`prod", "format`order", "FUNCTION");
+
+        Assertions.assertEquals("CREATE FUNCTION `format_order`() RETURNS INT RETURN 1", source.getSource());
+        Assertions.assertEquals("SHOW CREATE FUNCTION `app``prod`.`format``order`", sql.get(0));
+    }
+
+    @Test
+    void getObjectSourceSupportsViewsAndRejectsOtherObjectTypes() {
+        List<String> sql = new ArrayList<>();
+        Gbase8aAgent agent = new Gbase8aAgent();
+        TestSupport.setPrivateConnection(agent, statementConnection(sql, resultSet(
+            new String[]{"View", "Create View"},
+            new Object[][]{{"active_orders", "CREATE VIEW `active_orders` AS SELECT 1"}}
+        )));
+
+        ObjectSource source = agent.getObjectSource("app", "active_orders", "VIEW");
+
+        Assertions.assertEquals("CREATE VIEW `active_orders` AS SELECT 1", source.getSource());
+        Assertions.assertEquals("SHOW CREATE VIEW `app`.`active_orders`", sql.get(0));
+        Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> agent.getObjectSource("app", "orders", "TABLE")
+        );
+    }
+
     private static Connection preparedConnection(List<String> sql, ResultSet... resultSets) {
         int[] resultSetIndex = {0};
         PreparedStatement statement = proxy(PreparedStatement.class, (method, args) -> {
@@ -120,8 +174,39 @@ class Gbase8aAgentTest {
         });
     }
 
+    private static Connection statementConnection(List<String> sql, ResultSet resultSet) {
+        Statement statement = proxy(Statement.class, (method, args) -> {
+            if ("executeQuery".equals(method.getName())) {
+                sql.add(String.valueOf(args[0]));
+                return resultSet;
+            }
+            if ("close".equals(method.getName())) {
+                return null;
+            }
+            return defaultValue(method.getReturnType());
+        });
+        return proxy(Connection.class, (method, args) -> {
+            if ("createStatement".equals(method.getName())) {
+                return statement;
+            }
+            if ("isClosed".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
     private static ResultSet resultSet(String[] columns, Object[][] rows) {
         int[] index = {-1};
+        ResultSetMetaData metadata = proxy(ResultSetMetaData.class, (method, args) -> {
+            if ("getColumnCount".equals(method.getName())) {
+                return columns.length;
+            }
+            if ("getColumnLabel".equals(method.getName())) {
+                return columns[((Number) args[0]).intValue() - 1];
+            }
+            return defaultValue(method.getReturnType());
+        });
         return proxy(ResultSet.class, (method, args) -> {
             switch (method.getName()) {
                 case "next":
@@ -130,6 +215,8 @@ class Gbase8aAgentTest {
                 case "getString":
                     Object value = columnValue(columns, rows[index[0]], args[0]);
                     return value == null ? null : String.valueOf(value);
+                case "getMetaData":
+                    return metadata;
                 case "close":
                     return null;
                 default:

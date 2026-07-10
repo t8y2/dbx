@@ -41,7 +41,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
         existing.title = tabTitle;
         existing.schema = target.schema;
         existing.tableInfoTab = options.tableInfoTab;
-        queryStore.activeTabId = existing.id;
+        queryStore.switchTab(existing.id);
         return existing.id;
       }
     }

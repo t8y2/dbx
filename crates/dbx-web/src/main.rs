@@ -237,8 +237,10 @@ async fn main() {
             "/jdbc/drivers/maven",
             get(routes::jdbc::list_jdbc_maven_bundles).post(routes::jdbc::install_jdbc_driver_from_maven),
         )
+        .route("/jdbc/drivers/local", get(routes::jdbc::list_jdbc_local_bundles))
         .route("/jdbc/drivers/prestosql", post(routes::jdbc::install_prestosql_jdbc_driver))
         .route("/jdbc/drivers/maven/{bundle_id}", delete(routes::jdbc::delete_jdbc_maven_bundle))
+        .route("/jdbc/drivers/local/{bundle_id}", delete(routes::jdbc::delete_jdbc_local_bundle))
         .route("/jdbc/drivers/{name}", delete(routes::jdbc::delete_jdbc_driver))
         .route("/jdbc/plugin/status", get(routes::jdbc::get_jdbc_plugin_status))
         .route("/jdbc/plugin/install", post(routes::jdbc::install_jdbc_plugin))
@@ -352,6 +354,11 @@ async fn main() {
         )
         .route("/query/build-view-ddl-sql", post(routes::query::build_view_ddl_sql))
         .route("/query/build-table-structure-change-sql", post(routes::query::build_table_structure_change_sql))
+        .route(
+            "/query/preview-sqlite-table-structure-change",
+            post(routes::query::preview_sqlite_table_structure_change),
+        )
+        .route("/query/apply-sqlite-table-structure-change", post(routes::query::apply_sqlite_table_structure_change))
         .route("/query/build-create-table-sql", post(routes::query::build_create_table_sql))
         .route("/query/build-single-column-alter-sql", post(routes::query::build_single_column_alter_sql))
         .route("/query/analyze-editability", post(routes::query::analyze_editable_query_editability))

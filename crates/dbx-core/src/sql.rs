@@ -974,6 +974,7 @@ fn split_sql_batch_ranges(sql: &str, profile: SqlDialectProfile) -> Vec<SqlState
     let mut current_start = 0;
     let lines: Vec<&str> = sql.split('\n').collect();
     let mut offset = 0;
+    let mut scanner = SqlScanner::with_profile(profile);
 
     for line in &lines {
         let line_start = offset;
@@ -981,15 +982,23 @@ fn split_sql_batch_ranges(sql: &str, profile: SqlDialectProfile) -> Vec<SqlState
         offset = line_end + 1; // +1 for the '\n'
 
         let trimmed = line.trim();
-        if profile.supports_go_batch_separator
+        let is_batch_separator = profile.supports_go_batch_separator
+            && !scanner.is_masked()
             && (trimmed.eq_ignore_ascii_case("go")
-                || trimmed.to_ascii_lowercase().starts_with("go ") && trimmed[2..].trim().is_empty())
-        {
+                || trimmed.to_ascii_lowercase().starts_with("go ") && trimmed[2..].trim().is_empty());
+        if is_batch_separator {
             push_batch_range(&mut batches, sql, current_start, line_start);
             current_start = line_end.min(sql.len());
             if current_start < sql.len() && sql.as_bytes()[current_start] == b'\n' {
                 current_start += 1;
             }
+        } else {
+            for (relative_idx, ch) in line.char_indices() {
+                scanner.step(sql, line_start + relative_idx, ch);
+            }
+        }
+        if line_end < sql.len() {
+            scanner.step(sql, line_end, '\n');
         }
     }
 
@@ -2739,6 +2748,22 @@ mod tests {
     #[test]
     fn split_batches_trailing_go() {
         assert_eq!(super::split_sql_batches("SELECT 1\nGO"), vec!["SELECT 1"]);
+    }
+
+    #[test]
+    fn split_batches_keeps_go_inside_multiline_string() {
+        assert_eq!(
+            super::split_sql_batches("SELECT 'first line\nGO\nlast line';\nGO\nSELECT 2"),
+            vec!["SELECT 'first line\nGO\nlast line';", "SELECT 2"]
+        );
+    }
+
+    #[test]
+    fn split_batches_keeps_go_inside_block_comment() {
+        assert_eq!(
+            super::split_sql_batches("SELECT 1;\n/*\nGO\n*/\nSELECT 2;\nGO\nSELECT 3;"),
+            vec!["SELECT 1;\n/*\nGO\n*/\nSELECT 2;", "SELECT 3;"]
+        );
     }
 
     // --- DELIMITER support ---

@@ -103,7 +103,14 @@ function column(name: string, isPrimaryKey = false, extra: string | null = null)
   };
 }
 
-function createQuickEntryEditor(options: { quickEntryEnabled: boolean; cacheKey?: string; rowStatusFilter?: ReturnType<typeof ref<RowStatusFilter>>; filterRowsInGetRowItem?: boolean; supportsInsert?: boolean; save?: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; newRows: CellValue[][] }) => Promise<void> }) {
+function createQuickEntryEditor(options: {
+  quickEntryEnabled: boolean;
+  cacheKey?: string;
+  rowStatusFilter?: ReturnType<typeof ref<RowStatusFilter>>;
+  filterRowsInGetRowItem?: boolean;
+  supportsInsert?: boolean;
+  save?: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; newRows: CellValue[][] }) => Promise<void>;
+}) {
   const result = computed(() => ({
     columns: ["id", "name"],
     rows: [[1, "Ada"] as CellValue[]],
@@ -668,11 +675,7 @@ test("batch row delete records a single undo snapshot", () => {
 
   const result = computed(() => ({
     columns: ["id", "name"],
-    rows: [
-      [1, "Ada"] as CellValue[],
-      [2, "Linus"] as CellValue[],
-      [3, "Grace"] as CellValue[],
-    ],
+    rows: [[1, "Ada"] as CellValue[], [2, "Linus"] as CellValue[], [3, "Grace"] as CellValue[]],
   }));
   const rowStatusFilter = ref<"all" | "changed" | "edited" | "new" | "deleted">("all");
   let editor: ReturnType<typeof useDataGridEditor>;
@@ -1064,6 +1067,26 @@ test("quick entry off keeps blur edits pending without saving", async () => {
   assert.equal(editor.dirtyRows.value.get(0)?.get(1), "Ada Lovelace");
 });
 
+test("explicit enum commits distinguish NULL, empty string, and the literal NULL", async () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const nullEditor = createPeopleGridEditor();
+  nullEditor.startEdit(0, 1);
+  await nullEditor.commitEditAndMaybeAutoSave({ explicitValue: null });
+  assert.equal(nullEditor.dirtyRows.value.get(0)?.get(1), null);
+
+  const emptyEditor = createPeopleGridEditor();
+  emptyEditor.startEdit(0, 1);
+  await emptyEditor.commitEditAndMaybeAutoSave({ explicitValue: "" });
+  assert.equal(emptyEditor.dirtyRows.value.get(0)?.get(1), "");
+
+  const literalEditor = createPeopleGridEditor();
+  literalEditor.startEdit(0, 1);
+  await literalEditor.commitEditAndMaybeAutoSave({ explicitValue: "NULL" });
+  assert.equal(literalEditor.dirtyRows.value.get(0)?.get(1), "NULL");
+});
+
 test("quick entry on saves existing row edits on blur", async () => {
   setActivePinia(createPinia());
   installBrowserTestGlobals();
@@ -1158,10 +1181,7 @@ test("quick entry queues blur saves made while a save is running", async () => {
   await firstCommit;
 
   assert.equal(saveCalls, 2);
-  assert.deepEqual(savedDirtyRows, [
-    [[0, [[1, "Ada 1"]]]],
-    [[0, [[1, "Ada 2"]]]],
-  ]);
+  assert.deepEqual(savedDirtyRows, [[[0, [[1, "Ada 1"]]]], [[0, [[1, "Ada 2"]]]]]);
   assert.equal(editor.dirtyRows.value.size, 0);
   assert.equal(editor.saveError.value, "");
 });
@@ -1212,10 +1232,7 @@ test("quick entry replays queued saves when row-status filters hide the saved ro
   await firstCommit;
 
   assert.equal(saveCalls, 2);
-  assert.deepEqual(savedDirtyRows, [
-    [[0, [[1, "Ada 1"]]]],
-    [[0, [[1, "Ada 2"]]]],
-  ]);
+  assert.deepEqual(savedDirtyRows, [[[0, [[1, "Ada 1"]]]], [[0, [[1, "Ada 2"]]]]]);
   assert.equal(editor.dirtyRows.value.size, 0);
   assert.equal(editor.saveError.value, "");
 });
@@ -1267,10 +1284,7 @@ test("quick entry preserves an active edit when auto-save clears the row from a 
   await editor.commitEditFromBlur();
 
   assert.equal(saveCalls, 2);
-  assert.deepEqual(savedDirtyRows, [
-    [[0, [[1, "Ada 1"]]]],
-    [[0, [[0, 2]]]],
-  ]);
+  assert.deepEqual(savedDirtyRows, [[[0, [[1, "Ada 1"]]]], [[0, [[0, 2]]]]]);
   assert.equal(editor.dirtyRows.value.size, 0);
 });
 
@@ -1316,10 +1330,7 @@ test("quick entry keeps queued blur save after an earlier auto-save fails", asyn
   await firstCommit;
 
   assert.equal(saveCalls, 2);
-  assert.deepEqual(savedDirtyRows, [
-    [[0, [[1, "Ada 1"]]]],
-    [[0, [[1, "Ada 2"]]]],
-  ]);
+  assert.deepEqual(savedDirtyRows, [[[0, [[1, "Ada 1"]]]], [[0, [[1, "Ada 2"]]]]]);
   assert.equal(editor.dirtyRows.value.size, 0);
   assert.equal(editor.saveError.value, "");
 });
@@ -1365,10 +1376,7 @@ test("quick entry saves a queued revert made while an earlier auto-save is runni
   await firstCommit;
 
   assert.equal(saveCalls, 2);
-  assert.deepEqual(savedDirtyRows, [
-    [[0, [[1, "Ada 1"]]]],
-    [[0, [[1, "Ada"]]]],
-  ]);
+  assert.deepEqual(savedDirtyRows, [[[0, [[1, "Ada 1"]]]], [[0, [[1, "Ada"]]]]]);
   assert.equal(editor.dirtyRows.value.size, 0);
   assert.equal(editor.saveError.value, "");
 });

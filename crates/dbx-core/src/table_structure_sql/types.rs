@@ -213,6 +213,14 @@ pub struct TableStructureSqlResult {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqliteTableStructurePreview {
+    pub statements: Vec<String>,
+    pub warnings: Vec<String>,
+    pub schema_revision: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SingleColumnAlterSqlOptions {

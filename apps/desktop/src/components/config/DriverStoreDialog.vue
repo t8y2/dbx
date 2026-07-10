@@ -14,7 +14,7 @@ import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { countAvailableDriverUpdates } from "@/lib/connection/agentDriverUpdateBadge";
-import type { JdbcDriverInfo, JdbcMavenBundleInfo, JdbcPluginStatus } from "@/types/database";
+import type { JdbcDriverInfo, JdbcLocalBundleInfo, JdbcMavenBundleInfo, JdbcPluginStatus } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import type { AgentDriverInfo, DriverRuntimeInfo, DriverRuntimeSummary, DriverStoreUsage, JavaRuntimeConfig } from "@/lib/backend/api";
 import { formatRuntimeBytes, formatRuntimeCpu, formatRuntimeUptime, runtimeHealthClass, runtimeStatusClass, runtimeStatusDotClass } from "@/lib/connection/driverRuntimePresentation";
@@ -602,6 +602,7 @@ function formatSize(bytes: number): string {
 
 const jdbcDrivers = ref<JdbcDriverInfo[]>([]);
 const jdbcMavenBundles = ref<JdbcMavenBundleInfo[]>([]);
+const jdbcLocalBundles = ref<JdbcLocalBundleInfo[]>([]);
 const jdbcDriverSearch = ref("");
 const isLoadingJdbcDrivers = ref(false);
 const jdbcPluginStatus = ref<JdbcPluginStatus | null>(null);
@@ -632,6 +633,15 @@ type JdbcDriverListItem =
       driver: JdbcDriverInfo;
     }
   | {
+      kind: "local";
+      id: string;
+      title: string;
+      subtitle: string;
+      source: string;
+      size: number;
+      bundle: JdbcLocalBundleInfo;
+    }
+  | {
       kind: "maven";
       id: string;
       title: string;
@@ -648,6 +658,15 @@ const filteredAgentDrivers = computed(() => {
 });
 
 const jdbcDriverListItems = computed<JdbcDriverListItem[]>(() => {
+  const localBundleItems = jdbcLocalBundles.value.map((bundle) => ({
+    kind: "local" as const,
+    id: `local:${bundle.id}`,
+    title: bundle.name,
+    subtitle: `${bundle.artifacts.length} JARs - ${bundle.artifacts.map((artifact) => artifact.file_name).join(", ")}`,
+    source: t("driverStore.jdbcSourceManual"),
+    size: bundle.artifacts.reduce((total, artifact) => total + Number(artifact.size || 0), 0),
+    bundle,
+  }));
   const bundleItems = jdbcMavenBundles.value.map((bundle) => ({
     kind: "maven" as const,
     id: `maven:${bundle.id}`,
@@ -668,7 +687,7 @@ const jdbcDriverListItems = computed<JdbcDriverListItem[]>(() => {
       size: driver.size,
       driver,
     }));
-  return [...bundleItems, ...manualItems].sort((a, b) => a.title.localeCompare(b.title));
+  return [...localBundleItems, ...bundleItems, ...manualItems].sort((a, b) => a.title.localeCompare(b.title));
 });
 
 const filteredJdbcDrivers = computed(() => {
@@ -792,9 +811,10 @@ function jreUsageLabel(key: string) {
 async function loadJdbcDrivers() {
   isLoadingJdbcDrivers.value = true;
   try {
-    const [drivers, bundles] = await Promise.all([api.listJdbcDrivers(), api.listJdbcMavenBundles()]);
+    const [drivers, bundles, localBundles] = await Promise.all([api.listJdbcDrivers(), api.listJdbcMavenBundles(), api.listJdbcLocalBundles()]);
     jdbcDrivers.value = drivers;
     jdbcMavenBundles.value = bundles;
+    jdbcLocalBundles.value = localBundles;
   } catch (e: any) {
     toast(String(e?.message || e), 5000);
   } finally {
@@ -898,6 +918,7 @@ async function importJdbcDriverPaths(paths: string[]) {
   if (!paths.length) return;
   try {
     jdbcDrivers.value = await api.importJdbcDrivers(paths);
+    jdbcLocalBundles.value = await api.listJdbcLocalBundles();
     jdbcDriverPathInput.value = "";
     void loadDriverStoreUsage();
     toast(t("settings.jdbcImportSuccess", { count: paths.length }));
@@ -912,6 +933,7 @@ async function importJdbcDrivers() {
     if (!files || !files.length) return;
     try {
       jdbcDrivers.value = await api.importJdbcDrivers(files);
+      jdbcLocalBundles.value = await api.listJdbcLocalBundles();
       void loadDriverStoreUsage();
       toast(t("settings.jdbcImportSuccess", { count: files.length }));
     } catch (e: any) {
@@ -971,6 +993,17 @@ async function deleteJdbcMavenBundle(bundleId: string) {
   try {
     jdbcDrivers.value = await api.deleteJdbcMavenBundle(bundleId);
     jdbcMavenBundles.value = await api.listJdbcMavenBundles();
+    void loadDriverStoreUsage();
+    toast(t("settings.jdbcDeleteSuccess"));
+  } catch (e: any) {
+    toast(String(e?.message || e), 5000);
+  }
+}
+
+async function deleteJdbcLocalBundle(bundleId: string) {
+  try {
+    jdbcDrivers.value = await api.deleteJdbcLocalBundle(bundleId);
+    jdbcLocalBundles.value = await api.listJdbcLocalBundles();
     void loadDriverStoreUsage();
     toast(t("settings.jdbcDeleteSuccess"));
   } catch (e: any) {
@@ -1300,7 +1333,7 @@ watch(driverStoreTab, (tab) => {
                     <div class="truncate text-xs text-muted-foreground">{{ item.subtitle }}</div>
                   </div>
                   <div class="shrink-0 text-xs text-muted-foreground">{{ formatBytes(item.size) }}</div>
-                  <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0 rounded-[6px]" @click="item.kind === 'maven' ? deleteJdbcMavenBundle(item.bundle.id) : deleteJdbcDriver(item.driver.path)">
+                  <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0 rounded-[6px]" @click="item.kind === 'maven' ? deleteJdbcMavenBundle(item.bundle.id) : item.kind === 'local' ? deleteJdbcLocalBundle(item.bundle.id) : deleteJdbcDriver(item.driver.path)">
                     <Trash2 class="h-4 w-4" />
                   </Button>
                 </div>

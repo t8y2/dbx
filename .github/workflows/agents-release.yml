@@ -174,7 +174,7 @@ jobs:
         include:
           - jre-key: "21"
             java-version: "21"
-            modules: "java.base,java.sql,java.sql.rowset,java.naming,java.management,java.desktop,java.security.jgss,java.security.sasl,jdk.charsets,java.scripting"
+            modules: "java.base,java.sql,java.sql.rowset,java.naming,java.management,java.desktop,java.security.jgss,java.security.sasl,jdk.charsets,java.scripting,java.compiler"
     steps:
       - uses: actions/setup-java@v4
         with:

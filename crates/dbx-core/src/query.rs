@@ -1427,7 +1427,7 @@ pub async fn do_execute(
                 } else if options.page_size.is_some() {
                     let params =
                         external_driver_query_params(config.as_ref(), &sql, &database, schema.as_deref(), &options);
-                    session.invoke_with_timeout::<db::QueryResult>("executeQueryPage", params, plugin_timeout).await
+                    invoke_external_driver_query_page(session.as_ref(), params, plugin_timeout).await
                 } else {
                     let params =
                         external_driver_query_params(config.as_ref(), &sql, &database, schema.as_deref(), &options);
@@ -1439,6 +1439,33 @@ pub async fn do_execute(
         }
     };
     result.map(normalize_query_result_for_js)
+}
+
+async fn invoke_external_driver_query_page(
+    session: &crate::plugins::PluginDriverSession,
+    params: serde_json::Value,
+    plugin_timeout: Option<Duration>,
+) -> Result<db::QueryResult, String> {
+    match session.invoke_with_timeout::<db::QueryResult>("executeQueryPage", params.clone(), plugin_timeout).await {
+        Ok(result) => Ok(result),
+        Err(error) if is_external_driver_method_unsupported(&error, "executeQueryPage") => {
+            // Plugins installed by older DBX releases predate cursor pagination. Keep
+            // basic queries usable until the user updates the plugin, without retrying
+            // actual JDBC/SQL failures that may have side effects.
+            log::warn!("[query][external-driver] executeQueryPage unsupported; falling back to executeQuery");
+            session.invoke_with_timeout::<db::QueryResult>("executeQuery", params, plugin_timeout).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn is_external_driver_method_unsupported(error: &str, method: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    let method = method.to_ascii_lowercase();
+    normalized.contains(&method)
+        && (normalized.contains("unsupported jdbc plugin method")
+            || normalized.contains("unknown method")
+            || normalized.contains("method not found"))
 }
 
 fn external_driver_query_params(
@@ -2968,6 +2995,10 @@ pub async fn rollback_manual_transaction(state: &AppState, txn_session_id: &str)
 mod tests {
     use super::*;
     use crate::models::connection::{default_redis_key_separator, ConnectionConfig, DatabaseType};
+    #[cfg(unix)]
+    use crate::plugins::{
+        InstalledPlugin, PluginDriverManifest, PluginDriverSession, PluginManifest, PluginRuntimeEnv,
+    };
     #[cfg(feature = "duckdb-bundled")]
     use crate::storage::Storage;
 
@@ -3032,6 +3063,151 @@ mod tests {
     fn agent_execute_batch_unsupported_ignores_unrelated_errors() {
         assert!(!is_agent_execute_batch_unsupported("ORA-00955: name is already used by an existing object"));
         assert!(!is_agent_execute_batch_unsupported("Agent RPC error (-1): unknown method: execute_query"));
+    }
+
+    #[test]
+    fn external_driver_method_unsupported_detects_legacy_plugin_errors() {
+        assert!(is_external_driver_method_unsupported(
+            "Unsupported JDBC plugin method: executeQueryPage",
+            "executeQueryPage"
+        ));
+        assert!(is_external_driver_method_unsupported(
+            "Plugin RPC error (-32601): Method not found: executeQueryPage",
+            "executeQueryPage"
+        ));
+        assert!(is_external_driver_method_unsupported("Unknown method executeQueryPage", "executeQueryPage"));
+    }
+
+    #[test]
+    fn external_driver_method_unsupported_ignores_query_and_other_method_errors() {
+        assert!(!is_external_driver_method_unsupported(
+            "The JDBC driver does not support this SQL operation",
+            "executeQueryPage"
+        ));
+        assert!(!is_external_driver_method_unsupported(
+            "Unsupported JDBC plugin method: listTables",
+            "executeQueryPage"
+        ));
+        assert!(!is_external_driver_method_unsupported(
+            "Unknown column executeQueryPage in field list",
+            "executeQueryPage"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn external_driver_query_page_falls_back_to_legacy_execute_query() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("dbx-legacy-jdbc-plugin-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("plugin.sh");
+        let calls = dir.join("calls.log");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nwhile IFS= read -r line; do\n  id=$(printf '%s' \"$line\" | sed -E 's/.*\"id\":([0-9]+).*/\\1/')\n  case \"$line\" in\n    *'\"method\":\"executeQueryPage\"'*)\n      echo executeQueryPage >> '{}'\n      printf '{{\"id\":%s,\"error\":{{\"message\":\"Unsupported JDBC plugin method: executeQueryPage\"}}}}\\n' \"$id\"\n      ;;\n    *'\"method\":\"executeQuery\"'*)\n      echo executeQuery >> '{}'\n      printf '{{\"id\":%s,\"result\":{{\"columns\":[\"value\"],\"rows\":[[42]],\"affected_rows\":0,\"execution_time_ms\":1,\"truncated\":false}}}}\\n' \"$id\"\n      ;;\n  esac\ndone\n",
+                calls.display(),
+                calls.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let plugin = InstalledPlugin {
+            manifest: PluginManifest {
+                id: "jdbc".to_string(),
+                name: "JDBC".to_string(),
+                version: "legacy".to_string(),
+                protocol_version: 1,
+                description: String::new(),
+                executable: Some("plugin.sh".to_string()),
+                drivers: vec![PluginDriverManifest {
+                    id: "jdbc".to_string(),
+                    label: "JDBC".to_string(),
+                    kind: "external".to_string(),
+                    database_type: Some("jdbc".to_string()),
+                }],
+            },
+            path: dir.clone(),
+        };
+        let session = PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
+            .await
+            .expect("legacy plugin should start");
+
+        let result = invoke_external_driver_query_page(
+            &session,
+            serde_json::json!({ "sql": "SELECT 42", "pageSize": 100 }),
+            Some(Duration::from_secs(5)),
+        )
+        .await
+        .expect("legacy executeQuery fallback should succeed");
+
+        assert_eq!(result.columns, vec!["value"]);
+        assert_eq!(result.rows, vec![vec![serde_json::json!(42)]]);
+        assert_eq!(std::fs::read_to_string(&calls).unwrap(), "executeQueryPage\nexecuteQuery\n");
+
+        session.shutdown().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn external_driver_query_page_does_not_retry_jdbc_errors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("dbx-jdbc-query-error-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("plugin.sh");
+        let calls = dir.join("calls.log");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nwhile IFS= read -r line; do\n  id=$(printf '%s' \"$line\" | sed -E 's/.*\"id\":([0-9]+).*/\\1/')\n  echo request >> '{}'\n  printf '{{\"id\":%s,\"error\":{{\"message\":\"Incorrect syntax near SELECT\"}}}}\\n' \"$id\"\ndone\n",
+                calls.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let plugin = InstalledPlugin {
+            manifest: PluginManifest {
+                id: "jdbc".to_string(),
+                name: "JDBC".to_string(),
+                version: "current".to_string(),
+                protocol_version: 1,
+                description: String::new(),
+                executable: Some("plugin.sh".to_string()),
+                drivers: vec![PluginDriverManifest {
+                    id: "jdbc".to_string(),
+                    label: "JDBC".to_string(),
+                    kind: "external".to_string(),
+                    database_type: Some("jdbc".to_string()),
+                }],
+            },
+            path: dir.clone(),
+        };
+        let session = PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
+            .await
+            .expect("plugin should start");
+
+        let error = invoke_external_driver_query_page(
+            &session,
+            serde_json::json!({ "sql": "SELECT broken", "pageSize": 100 }),
+            Some(Duration::from_secs(5)),
+        )
+        .await
+        .expect_err("JDBC query errors must be returned without retrying");
+
+        assert_eq!(error, "Incorrect syntax near SELECT");
+        assert_eq!(std::fs::read_to_string(&calls).unwrap(), "request\n");
+
+        session.shutdown().await;
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

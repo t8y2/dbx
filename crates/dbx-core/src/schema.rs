@@ -3216,14 +3216,15 @@ pub async fn list_objects_core(
     retry_metadata_connection(state, connection_id, Some(database), || async {
         let objects = list_objects_once(state, connection_id, database, schema, filter, limit, offset, object_types)
             .await
-            .map(|objects| {
-                let final_offset = if oracle_agent_paging_likely_applied(use_oracle_agent_paging, limit, objects.len())
+            .map(|outcome| {
+                let final_offset = if outcome.paging_applied
+                    || oracle_agent_paging_likely_applied(use_oracle_agent_paging, limit, outcome.objects.len())
                 {
                     Some(0)
                 } else {
                     offset
                 };
-                filter_object_infos(objects, filter, limit, final_offset, object_types)
+                filter_object_infos(outcome.objects, filter, limit, final_offset, object_types)
             })?;
         Ok(objects)
     })
@@ -3534,6 +3535,15 @@ async fn list_object_statistics_once(
     }
 }
 
+struct ObjectListOutcome {
+    objects: Vec<db::ObjectInfo>,
+    paging_applied: bool,
+}
+
+fn unpaged_object_list(objects: Vec<db::ObjectInfo>) -> ObjectListOutcome {
+    ObjectListOutcome { objects, paging_applied: false }
+}
+
 async fn list_objects_once(
     state: &AppState,
     connection_id: &str,
@@ -3543,9 +3553,11 @@ async fn list_objects_once(
     limit: Option<usize>,
     offset: Option<usize>,
     object_types: Option<&[String]>,
-) -> Result<Vec<db::ObjectInfo>, String> {
+) -> Result<ObjectListOutcome, String> {
     let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
     let db_config = connection_config(state, connection_id).await;
+    let (mysql_limit, mysql_offset) =
+        if filter.is_none_or(|value| value.trim().is_empty()) { (limit, offset) } else { (None, None) };
 
     {
         let connections = state.connections.read().await;
@@ -3553,7 +3565,7 @@ async fn list_objects_once(
         if let Some(ext_pool) = extract_pool!(&connections, &pool_key, ExternalTabular) {
             drop(connections);
             let cache = ext_pool.cache.clone();
-            return tokio::task::spawn_blocking(move || {
+            let objects = tokio::task::spawn_blocking(move || {
                 let con = cache.lock().map_err(|e| e.to_string())?;
                 Ok(duckdb_query_tables(&con)?
                     .into_iter()
@@ -3572,6 +3584,7 @@ async fn list_objects_once(
             })
             .await
             .map_err(|e| e.to_string())?;
+            return objects.map(unpaged_object_list);
         }
         if let Some(PoolKind::ExternalDriver { config, session, .. }) = connections.get(&pool_key) {
             let config = config.clone();
@@ -3586,7 +3599,8 @@ async fn list_objects_once(
                     filter,
                     object_types,
                 )
-                .await;
+                .await
+                .map(unpaged_object_list);
             }
             let mut params =
                 serde_json::json!({ "connection": config.as_ref(), "database": database, "schema": schema });
@@ -3602,9 +3616,14 @@ async fn list_objects_once(
                     params,
                     agent_metadata_timeout(Some(config.as_ref())),
                 )
-                .await;
+                .await
+                .map(unpaged_object_list);
         }
-        try_sqlserver!(connections, &pool_key, list_objects, schema);
+        if let Some(client) = extract_pool!(&connections, &pool_key, SqlServer) {
+            drop(connections);
+            let mut client = client.lock().await;
+            return db::sqlserver::list_objects(&mut client, schema).await.map(unpaged_object_list);
+        }
         if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
             let is_oracle = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle);
             let use_oracle_agent_paging = db_config.as_ref().is_some_and(is_default_oracle_agent_config);
@@ -3614,7 +3633,9 @@ async fn list_objects_once(
             let fallback_config = db_config.clone();
             drop(connections);
             if is_oracle && !use_oracle_agent_paging {
-                return oracle_agent_list_objects(client, database, schema, timeout_duration).await;
+                return oracle_agent_list_objects(client, database, schema, timeout_duration)
+                    .await
+                    .map(unpaged_object_list);
             }
             let mut client = client.lock().await;
             let agent_filter = if filter_locally_after_oracle_comments { None } else { filter };
@@ -3655,13 +3676,15 @@ async fn list_objects_once(
                         )
                         .await?;
                     }
-                    return Ok(objects);
+                    return Ok(unpaged_object_list(objects));
                 }
                 Ok(objects) => {
                     if let Some(config) = fallback_config.as_ref() {
                         match native_postgres_metadata_pool(state, connection_id, database, config).await {
-                            Ok(Some(pool)) => return db::postgres::list_objects(&pool, schema).await,
-                            Ok(None) => return Ok(objects),
+                            Ok(Some(pool)) => {
+                                return db::postgres::list_objects(&pool, schema).await.map(unpaged_object_list)
+                            }
+                            Ok(None) => return Ok(unpaged_object_list(objects)),
                             Err(error) => {
                                 log::warn!(
                                     "[schema][agent:list_objects:fallback-failed] connection_id={} database={} schema={} error={}",
@@ -3673,16 +3696,20 @@ async fn list_objects_once(
                             }
                         }
                     }
-                    return Ok(objects);
+                    return Ok(unpaged_object_list(objects));
                 }
                 Err(agent_error) => {
                     if let Some(config) = fallback_config.as_ref() {
                         if let Some(pool) =
                             native_postgres_metadata_pool(state, connection_id, database, config).await?
                         {
-                            return db::postgres::list_objects(&pool, schema).await.map_err(|fallback_error| {
-                                format!("{agent_error}\n\nNative PostgreSQL metadata fallback failed: {fallback_error}")
-                            });
+                            return db::postgres::list_objects(&pool, schema).await.map(unpaged_object_list).map_err(
+                                |fallback_error| {
+                                    format!(
+                                        "{agent_error}\n\nNative PostgreSQL metadata fallback failed: {fallback_error}"
+                                    )
+                                },
+                            );
                         }
                     }
                     return Err(agent_error);
@@ -3698,36 +3725,40 @@ async fn list_objects_once(
         PoolKind::Mysql(p, mode) => {
             // Note: mysql and ob_oracle take different second args (database vs schema)
             if *mode == MysqlMode::OceanBaseOracle {
-                db::ob_oracle::list_objects(p, schema).await
+                db::ob_oracle::list_objects(p, schema).await.map(unpaged_object_list)
             } else if db_config.as_ref().is_some_and(is_manticoresearch_config) {
-                db::manticoresearch::list_objects(p, database).await
+                db::manticoresearch::list_objects(p, database).await.map(unpaged_object_list)
             } else if db_config.as_ref().is_some_and(is_doris_family_config) {
-                db::mysql::list_table_objects_show(p, database).await
+                db::mysql::list_table_objects_show(p, database).await.map(unpaged_object_list)
             } else {
-                db::mysql::list_objects(p, database).await
+                db::mysql::list_objects(p, database, object_types, mysql_limit, mysql_offset)
+                    .await
+                    .map(|result| ObjectListOutcome { objects: result.objects, paging_applied: result.paging_applied })
             }
         }
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_questdb_config) => {
-            db::questdb::list_objects(p, schema).await
+            db::questdb::list_objects(p, schema).await.map(unpaged_object_list)
         }
-        PoolKind::Postgres(p) => db::postgres::list_objects(p, schema).await,
+        PoolKind::Postgres(p) => db::postgres::list_objects(p, schema).await.map(unpaged_object_list),
         _ => {
             drop(connections);
-            Ok(list_tables_core(state, connection_id, database, schema, None, None, None, None)
-                .await?
-                .into_iter()
-                .map(|table| db::ObjectInfo {
-                    name: table.name,
-                    object_type: table.table_type,
-                    schema: if schema.is_empty() { None } else { Some(schema.to_string()) },
-                    signature: None,
-                    comment: table.comment,
-                    created_at: None,
-                    updated_at: None,
-                    parent_schema: table.parent_schema,
-                    parent_name: table.parent_name,
-                })
-                .collect())
+            Ok(unpaged_object_list(
+                list_tables_core(state, connection_id, database, schema, None, None, None, None)
+                    .await?
+                    .into_iter()
+                    .map(|table| db::ObjectInfo {
+                        name: table.name,
+                        object_type: table.table_type,
+                        schema: if schema.is_empty() { None } else { Some(schema.to_string()) },
+                        signature: None,
+                        comment: table.comment,
+                        created_at: None,
+                        updated_at: None,
+                        parent_schema: table.parent_schema,
+                        parent_name: table.parent_name,
+                    })
+                    .collect(),
+            ))
         }
     }
 }
@@ -3826,8 +3857,8 @@ async fn list_completion_objects_once(
         PoolKind::Postgres(p) => db::postgres::list_objects(p, schema).await.map(filter_completion_objects),
         PoolKind::SqlServer(_) => {
             drop(connections);
-            let objects = list_objects_once(state, connection_id, database, schema, None, None, None, None).await?;
-            Ok(filter_completion_objects(objects))
+            let outcome = list_objects_once(state, connection_id, database, schema, None, None, None, None).await?;
+            Ok(filter_completion_objects(outcome.objects))
         }
         _ => Ok(Vec::new()),
     }

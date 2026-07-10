@@ -27,3 +27,7 @@ export function resolveHeaderColumnType({ tableColumnType, resultColumnTypes, ac
   const fromResult = resultColumnTypes?.[actualColIdx]?.trim();
   return fromResult ? fromResult : undefined;
 }
+
+export function compactHeaderColumnType(dataType: string): string {
+  return /^enum\s*\(/i.test(dataType.trim()) ? "enum" : dataType;
+}

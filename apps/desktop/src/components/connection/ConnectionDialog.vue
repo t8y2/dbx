@@ -13,7 +13,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
-import type { ConnectionConfig, DatabaseType, HttpTunnelConfig, JdbcDriverInfo, JdbcMavenBundleInfo, ProxyTunnelConfig, SshConfigHostEntry, SshTunnelConfig, TransportLayerConfig } from "@/types/database";
+import type { ConnectionConfig, DatabaseType, HttpTunnelConfig, JdbcDriverInfo, JdbcLocalBundleInfo, JdbcMavenBundleInfo, ProxyTunnelConfig, SshConfigHostEntry, SshTunnelConfig, TransportLayerConfig } from "@/types/database";
 import type { InfluxDbExternalConfig, InfluxDbVersion } from "@/types/influxdb";
 import type { MqAdminConfig, MqAuth, MqSystemKind } from "@/types/mq";
 import type { NacosAdminConfig, NacosAuthConfig } from "@/types/nacos";
@@ -369,6 +369,7 @@ const mongoUseUrl = ref(false);
 const jdbcDriverPathsInput = ref("");
 const jdbcDrivers = ref<JdbcDriverInfo[]>([]);
 const jdbcMavenBundles = ref<JdbcMavenBundleInfo[]>([]);
+const jdbcLocalBundles = ref<JdbcLocalBundleInfo[]>([]);
 const sshConfigHosts = ref<SshConfigHostEntry[]>([]);
 const agentDrivers = ref<AgentDriverInstallState[]>([]);
 const selectedJdbcDriverPath = ref("");
@@ -457,6 +458,11 @@ const customColorInput = ref("");
 const customColorOpen = ref(false);
 
 const jdbcDriverSelectItems = computed<JdbcDriverSelectItem[]>(() => {
+  const localBundles = jdbcLocalBundles.value.map((bundle) => ({
+    id: `local:${bundle.id}`,
+    label: bundle.name,
+    paths: bundle.artifacts.map((artifact) => artifact.path),
+  }));
   const bundles = jdbcMavenBundles.value.map((bundle) => ({
     id: `maven:${bundle.id}`,
     label: bundle.coordinate,
@@ -469,7 +475,7 @@ const jdbcDriverSelectItems = computed<JdbcDriverSelectItem[]>(() => {
       label: driver.name,
       paths: [driver.path],
     }));
-  return [...bundles, ...manual].sort((left, right) => left.label.localeCompare(right.label));
+  return [...localBundles, ...bundles, ...manual].sort((left, right) => left.label.localeCompare(right.label));
 });
 
 const jdbcDriverSelectItemById = computed(() => new Map(jdbcDriverSelectItems.value.map((item) => [item.id, item])));
@@ -3479,13 +3485,15 @@ async function browseJdbcDriverPaths() {
 async function loadJdbcDrivers() {
   if (!isDesktop) return;
   try {
-    const [drivers, bundles] = await Promise.all([api.listJdbcDrivers(), api.listJdbcMavenBundles()]);
+    const [drivers, bundles, localBundles] = await Promise.all([api.listJdbcDrivers(), api.listJdbcMavenBundles(), api.listJdbcLocalBundles()]);
     jdbcDrivers.value = drivers;
     jdbcMavenBundles.value = bundles;
+    jdbcLocalBundles.value = localBundles;
     applyPrestoSqlBuiltinDriverPathsIfAvailable();
   } catch {
     jdbcDrivers.value = [];
     jdbcMavenBundles.value = [];
+    jdbcLocalBundles.value = [];
   }
 }
 

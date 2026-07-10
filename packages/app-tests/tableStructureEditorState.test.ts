@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import {
   applyManticoreDdlColumnExtras,
@@ -13,13 +14,16 @@ import {
   getColumnEditorControls,
   getDataTypeOptions,
   isProtectedManticoreIdColumn,
+  isMysqlEnumDataType,
   isSqlServerIdentityCompatibleDataType,
+  mysqlEnumDataType,
   normalizeDataTypeParams,
   parseExtraToColumnExtra,
   rehydrateColumnDraftsFromMetadata,
   toColumnNames,
 } from "../../apps/desktop/src/lib/table/tableStructureEditorState.ts";
-import type { ColumnInfo, IndexInfo } from "../../apps/desktop/src/types/database.ts";
+import { firstStructureMetadataTab, isStructureMetadataTabSupported } from "../../apps/desktop/src/lib/table/tableMetadataCapabilities.ts";
+import type { ColumnInfo, IndexInfo, TableInfoTab } from "../../apps/desktop/src/types/database.ts";
 
 const columns: ColumnInfo[] = [
   {
@@ -292,6 +296,29 @@ test("does not add MySQL-style display widths to SQL Server integer types", () =
   assert.equal(combineDataTypeForDatabase("sqlserver", "float", "53"), "float(53)");
 });
 
+test("hydrates and serializes MySQL enum values for structure editing", () => {
+  const [draft] = createColumnDrafts(
+    [
+      {
+        name: "status",
+        data_type: "enum",
+        enum_values: ["", "pending", "it's", "path\\name"],
+        is_nullable: false,
+        column_default: "'pending'",
+        is_primary_key: false,
+        extra: null,
+      },
+    ],
+    "mysql",
+  );
+
+  assert.deepEqual(draft?.enumValues, ["", "pending", "it's", "path\\name"]);
+  assert.equal(draft?.dataType, "enum('','pending','it''s','path\\\\name')");
+  assert.equal(draft?.original?.data_type, draft?.dataType);
+  assert.equal(isMysqlEnumDataType("mysql", draft?.dataType ?? ""), true);
+  assert.equal(mysqlEnumDataType(["a'b", "a\\b"]), "enum('a''b','a\\\\b')");
+});
+
 test("parses Manticore Search text properties to ColumnExtra", () => {
   assert.deepEqual(parseExtraToColumnExtra("stored indexed", "manticoresearch"), {
     manticoreStored: true,
@@ -406,4 +433,44 @@ test("allows Manticore Search column properties only before the column exists", 
   assert.equal(canEditManticoreColumnProperties("manticoresearch", false), true);
   assert.equal(canEditManticoreColumnProperties("manticoresearch", true), false);
   assert.equal(canEditManticoreColumnProperties("mysql", false), false);
+});
+
+const fullCapabilities = { columns: true, indexes: true, foreignKeys: true, triggers: true, ddl: true };
+const noDdlCapabilities = { columns: true, indexes: true, foreignKeys: true, triggers: true, ddl: false };
+
+test("defaults to DDL tab for edit mode with full capabilities", () => {
+  assert.equal(firstStructureMetadataTab(fullCapabilities, false), "ddl");
+});
+
+test("defaults to columns tab for create mode", () => {
+  assert.equal(firstStructureMetadataTab(fullCapabilities, true), "columns");
+});
+
+test("falls back to columns tab when DDL is not available in edit mode", () => {
+  assert.equal(firstStructureMetadataTab(noDdlCapabilities, false), "columns");
+});
+
+test("preserves a restored structure draft tab without an explicit initial tab", () => {
+  const source = readFileSync("apps/desktop/src/components/structure/TableStructureEditor.vue", "utf8");
+  const restoredDraftBlock = source.match(/if \(props\.draft\?\.initialized\) \{[\s\S]*?\n  \} else if/);
+
+  assert.ok(restoredDraftBlock);
+  assert.match(restoredDraftBlock[0], /restoreDraft\(props\.draft\);[\s\S]*applyInitialStructureTab\(false\);/);
+});
+
+test("supports DDL tab in edit mode", () => {
+  assert.equal(isStructureMetadataTabSupported("ddl", fullCapabilities, false), true);
+});
+
+test("does not support DDL tab in create mode", () => {
+  assert.equal(isStructureMetadataTabSupported("ddl", fullCapabilities, true), false);
+});
+
+test("does not support DDL tab when capability is disabled", () => {
+  assert.equal(isStructureMetadataTabSupported("ddl", noDdlCapabilities, false), false);
+});
+
+test("supports columns tab in both modes", () => {
+  assert.equal(isStructureMetadataTabSupported("columns", fullCapabilities, false), true);
+  assert.equal(isStructureMetadataTabSupported("columns", fullCapabilities, true), true);
 });

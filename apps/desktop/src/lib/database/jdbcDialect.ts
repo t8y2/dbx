@@ -3,6 +3,8 @@ import { isSchemaAware, usesDatabaseObjectTreeMode, usesTreeSchemaMode } from "@
 
 type JdbcDialectConnection = Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths">>;
 
+const DATABASE_AS_EXECUTION_SCHEMA_TYPES = new Set<DatabaseType>(["hive", "spark"]);
+
 const JDBC_DIALECT_MATCHERS: Array<{ type: DatabaseType; patterns: RegExp[] }> = [
   { type: "databend", patterns: [/jdbc:databend:/i, /com\.databend\.jdbc\.DatabendDriver/i, /databend-jdbc/i] },
   { type: "starrocks", patterns: [/starrocks/i] },
@@ -54,6 +56,16 @@ export function connectionUsesDatabaseObjectTreeMode(connection?: JdbcDialectCon
 
 export function connectionUsesSchemaExecutionContext(connection?: Pick<ConnectionConfig, "db_type" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths">): boolean {
   return connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend";
+}
+
+export function connectionQueryExecutionSchema(connection: JdbcDialectConnection | undefined, database: string | undefined, schema: string | undefined, dataMode: boolean): string | undefined {
+  if (connectionUsesSchemaExecutionContext(connection)) return schema || database || undefined;
+  if (dataMode || connectionUsesDatabaseObjectTreeMode(connection)) return undefined;
+  if (schema) return schema;
+  const type = effectiveDatabaseTypeForConnection(connection);
+  // Hive and Spark display their SQL namespace in the database selector, but
+  // their agents switch it with USE through the schema execution parameter.
+  return type && DATABASE_AS_EXECUTION_SCHEMA_TYPES.has(type) ? database || undefined : undefined;
 }
 
 export function connectionObjectTreeQuerySchema(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string {

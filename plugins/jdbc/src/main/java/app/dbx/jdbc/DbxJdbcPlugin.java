@@ -216,12 +216,21 @@ public final class DbxJdbcPlugin {
             }
             registerDrivers(connection);
             response.set("result", handle(method, params, connection));
-        } catch (Exception error) {
+        } catch (Throwable error) {
+            // The plugin protocol boundary must report linkage errors from vendor drivers instead of exiting silently.
             ObjectNode errorNode = MAPPER.createObjectNode();
-            errorNode.put("message", error.getMessage() == null ? error.toString() : error.getMessage());
+            errorNode.put("message", throwableMessage(error));
             response.set("error", errorNode);
         }
         return response;
+    }
+
+    private static String throwableMessage(Throwable error) {
+        Throwable cause = error;
+        while (cause.getCause() != null && cause.getCause() != cause) {
+            cause = cause.getCause();
+        }
+        return cause.getMessage() == null ? cause.toString() : cause.getMessage();
     }
 
     private static JsonNode handle(String method, JsonNode params, JsonNode connection) throws Exception {

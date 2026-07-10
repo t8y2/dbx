@@ -15,6 +15,7 @@ import { expandNestedJsonStringsForCopy } from "@/lib/common/jsonCopyValue";
 import { buildMongoCopyInsertDocument, formatMongoShellLiteral, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import type { DatabaseType, QueryResult } from "@/types/database";
 import type { QueryResultExportRequest } from "@/lib/backend/api";
+import { DBX_ROWID_COLUMN } from "@/lib/table/tableEditing";
 
 interface RowItem {
   id: number;
@@ -90,6 +91,7 @@ interface CopyStatementCache {
   text: string;
   loading: boolean;
   ready: boolean;
+  promise?: Promise<string | undefined>;
 }
 
 export function useDataGridExport(options: UseDataGridExportOptions) {
@@ -276,6 +278,14 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   async function prefetchRowAsInsertStatement(excludePrimaryKeys: boolean, insertMode: DataGridCopyInsertMode = "merged") {
+    try {
+      await prepareRowAsInsertStatement(excludePrimaryKeys, insertMode);
+    } catch {
+      // Prefetch failures are reported only if the user invokes the copy action.
+    }
+  }
+
+  async function prepareRowAsInsertStatement(excludePrimaryKeys: boolean, insertMode: DataGridCopyInsertMode = "merged"): Promise<string | undefined> {
     const rows = insertEligibleRows();
     if (!rows.length) {
       setInsertCopyCache(excludePrimaryKeys, insertMode, {
@@ -288,16 +298,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     }
     const key = insertCopyKey(excludePrimaryKeys, insertMode);
     const current = insertCopyCache(excludePrimaryKeys, insertMode);
-    if ((current.loading || current.ready) && current.key === key) return;
+    if (current.ready && current.key === key) return current.text;
+    if (current.loading && current.key === key && current.promise) return current.promise;
 
-    setInsertCopyCache(excludePrimaryKeys, insertMode, {
-      key,
-      text: "",
-      loading: true,
-      ready: false,
-    });
-
-    try {
+    const promise = Promise.resolve().then(async () => {
       const statement =
         databaseType.value === "mongodb"
           ? buildMongoCopyInsertStatement({
@@ -319,22 +323,37 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
               insertMode,
             });
       const latest = insertCopyCache(excludePrimaryKeys, insertMode);
-      if (latest.key !== key) return;
+      if (latest.key !== key || latest.promise !== promise) return undefined;
       setInsertCopyCache(excludePrimaryKeys, insertMode, {
         key,
         text: statement ?? "",
         loading: false,
         ready: !!statement,
       });
-    } catch {
+      return statement;
+    });
+
+    setInsertCopyCache(excludePrimaryKeys, insertMode, {
+      key,
+      text: "",
+      loading: true,
+      ready: false,
+      promise,
+    });
+
+    try {
+      return await promise;
+    } catch (error) {
       const latest = insertCopyCache(excludePrimaryKeys, insertMode);
-      if (latest.key !== key) return;
-      setInsertCopyCache(excludePrimaryKeys, insertMode, {
-        key,
-        text: "",
-        loading: false,
-        ready: false,
-      });
+      if (latest.key === key && latest.promise === promise) {
+        setInsertCopyCache(excludePrimaryKeys, insertMode, {
+          key,
+          text: "",
+          loading: false,
+          ready: false,
+        });
+      }
+      throw error;
     }
   }
 
@@ -343,14 +362,29 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return cache.ready && cache.key === insertCopyKey(excludePrimaryKeys, insertMode);
   }
 
-  function copyPreparedRowAsInsert(excludePrimaryKeys: boolean, insertMode: DataGridCopyInsertMode = "merged"): boolean {
-    if (!canCopyPreparedInsert(excludePrimaryKeys, insertMode)) return false;
-    void copyText(insertCopyCache(excludePrimaryKeys, insertMode).text);
-    return true;
+  async function copyPreparedRowAsInsert(excludePrimaryKeys: boolean, insertMode: DataGridCopyInsertMode = "merged"): Promise<boolean> {
+    try {
+      const statement = await prepareRowAsInsertStatement(excludePrimaryKeys, insertMode);
+      if (!statement) return false;
+      await copyText(statement);
+      return true;
+    } catch (error: any) {
+      toast(t("grid.copyFailed", { message: error?.message || String(error) }), 5000);
+      return false;
+    }
   }
 
   async function prefetchRowAsUpdateStatement() {
-    if (!tableMeta.value?.primaryKeys.length) {
+    try {
+      await prepareRowAsUpdateStatement();
+    } catch {
+      // Prefetch failures are reported only if the user invokes the copy action.
+    }
+  }
+
+  async function prepareRowAsUpdateStatement(): Promise<string | undefined> {
+    const currentTableMeta = tableMeta.value;
+    if (!currentTableMeta?.primaryKeys.length) {
       setUpdateCopyCache({
         key: "",
         text: "",
@@ -371,25 +405,19 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     }
     const key = updateCopyKey();
     const current = copyRowUpdateCache.value;
-    if ((current.loading || current.ready) && current.key === key) return;
+    if (current.ready && current.key === key) return current.text;
+    if (current.loading && current.key === key && current.promise) return current.promise;
 
-    setUpdateCopyCache({
-      key,
-      text: "",
-      loading: true,
-      ready: false,
-    });
-
-    try {
+    const promise = Promise.resolve().then(async () => {
       const statements = await buildDataGridCopyUpdateStatements({
         databaseType: databaseType.value,
-        tableMeta: tableMeta.value,
+        tableMeta: currentTableMeta,
         columns: columns.value,
         sourceColumns: sourceColumns.value,
         rows: rows.map((item) => item.data),
       });
       const latest = copyRowUpdateCache.value;
-      if (latest.key !== key) return;
+      if (latest.key !== key || latest.promise !== promise) return undefined;
       const text = statements.join("\n");
       setUpdateCopyCache({
         key,
@@ -397,15 +425,30 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         loading: false,
         ready: statements.length > 0,
       });
-    } catch {
+      return text || undefined;
+    });
+
+    setUpdateCopyCache({
+      key,
+      text: "",
+      loading: true,
+      ready: false,
+      promise,
+    });
+
+    try {
+      return await promise;
+    } catch (error) {
       const latest = copyRowUpdateCache.value;
-      if (latest.key !== key) return;
-      setUpdateCopyCache({
-        key,
-        text: "",
-        loading: false,
-        ready: false,
-      });
+      if (latest.key === key && latest.promise === promise) {
+        setUpdateCopyCache({
+          key,
+          text: "",
+          loading: false,
+          ready: false,
+        });
+      }
+      throw error;
     }
   }
 
@@ -414,10 +457,16 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return cache.ready && cache.key === updateCopyKey();
   }
 
-  function copyPreparedRowAsUpdate(): boolean {
-    if (!canCopyPreparedUpdate()) return false;
-    void copyText(copyRowUpdateCache.value.text);
-    return true;
+  async function copyPreparedRowAsUpdate(): Promise<boolean> {
+    try {
+      const statement = await prepareRowAsUpdateStatement();
+      if (!statement) return false;
+      await copyText(statement);
+      return true;
+    } catch (error: any) {
+      toast(t("grid.copyFailed", { message: error?.message || String(error) }), 5000);
+      return false;
+    }
   }
 
   // --- Selection copy functions ---
@@ -512,15 +561,15 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   async function copyRowAsInsert(insertMode: DataGridCopyInsertMode = "merged") {
-    copyPreparedRowAsInsert(false, insertMode);
+    await copyPreparedRowAsInsert(false, insertMode);
   }
 
   async function copyRowAsInsertWithoutPrimaryKeys(insertMode: DataGridCopyInsertMode = "merged") {
-    copyPreparedRowAsInsert(true, insertMode);
+    await copyPreparedRowAsInsert(true, insertMode);
   }
 
   async function copyRowAsUpdate() {
-    copyPreparedRowAsUpdate();
+    await copyPreparedRowAsUpdate();
   }
 
   const canCopyRowAsUpdate = computed(() => {
@@ -535,14 +584,19 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return saveColumns.some((column) => column && !primaryKeySet.has(normalizeColumnName(column)));
   });
 
+  function insertableCopyColumnCount(excludePrimaryKeys: boolean): number {
+    const primaryKeySet = new Set((tableMeta.value?.primaryKeys ?? []).map(normalizeColumnName));
+    return effectiveColumns(sourceColumns.value, columns.value).filter((column): column is string => !!column && !isCopyInsertOmittedColumn(databaseType.value, column, tableMeta.value) && (!excludePrimaryKeys || !primaryKeySet.has(normalizeColumnName(column)))).length;
+  }
+
+  const canCopyRowAsInsert = computed(() => insertEligibleRows().length > 0 && insertableCopyColumnCount(false) > 0);
+
   const canCopyRowAsInsertWithoutPrimaryKeys = computed(() => {
     if (!tableMeta.value?.primaryKeys.length) return false;
     const rows = insertEligibleRows();
     if (!rows.length) return false;
-    const saveColumns = effectiveColumns(sourceColumns.value, columns.value);
-    const primaryKeySet = new Set(tableMeta.value.primaryKeys.map(normalizeColumnName));
-    const insertableCount = saveColumns.filter(Boolean).length;
-    const insertColumnsCount = saveColumns.filter((column) => column && !primaryKeySet.has(normalizeColumnName(column))).length;
+    const insertableCount = insertableCopyColumnCount(false);
+    const insertColumnsCount = insertableCopyColumnCount(true);
     return insertColumnsCount > 0 && insertColumnsCount < insertableCount;
   });
 
@@ -886,7 +940,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
   async function exportFullTableDataViaBackend(format: "csv" | "xlsx" | "json" | "markdown" | "sql", rowIds?: number[]): Promise<boolean> {
     const meta = tableMeta.value;
-    if (rowIds !== undefined || context.value !== "table-data" || !meta || !connectionId.value || !database.value) {
+    // The backend table exporter currently builds two-part table names. External
+    // Doris/StarRocks catalogs need the data-tab paginator's three-part SQL.
+    if (rowIds !== undefined || context.value !== "table-data" || !meta || meta.catalog || !connectionId.value || !database.value) {
       return false;
     }
 
@@ -1106,6 +1162,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     prefetchRowAsInsertStatement,
     canCopyPreparedInsert,
     copyPreparedRowAsInsert,
+    canCopyRowAsInsert,
     prefetchRowAsUpdateStatement,
     canCopyPreparedUpdate,
     copyPreparedRowAsUpdate,
@@ -1209,6 +1266,15 @@ function compactLocalTimestamp(date = new Date()): string {
 function effectiveColumns(sourceColumns: Array<string | undefined> | undefined, columns: string[]): Array<string | undefined> {
   if (!sourceColumns || sourceColumns.length !== columns.length) return columns;
   return sourceColumns;
+}
+
+function isCopyInsertOmittedColumn(databaseType: DatabaseType | undefined, column: string, tableMeta: DataGridTableMeta | undefined): boolean {
+  if (databaseType === "oracle" && column.toUpperCase() === DBX_ROWID_COLUMN) return true;
+  const columnInfo = tableMeta?.columns?.find((item) => normalizeColumnName(item.name) === normalizeColumnName(column));
+  const normalizedType = columnInfo?.data_type.trim().replace(/^"|"$/g, "").toLowerCase();
+  if (databaseType === "postgres" && (normalizedType === "tsvector" || normalizedType?.endsWith(".tsvector"))) return true;
+  const extra = columnInfo?.extra?.toLowerCase() ?? "";
+  return /\b(auto_increment|autoincrement|identity)\b/.test(extra) || (extra.includes("generated always as") && !extra.includes("identity"));
 }
 
 function findColumnIndex(columns: Array<string | undefined>, target: string): number {

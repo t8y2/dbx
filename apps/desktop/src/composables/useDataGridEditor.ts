@@ -39,6 +39,7 @@ type CommitEditResult =
 
 interface CommitEditOptions {
   promoteDraft?: boolean;
+  explicitValue?: string | null;
 }
 
 type GridScrollerRef =
@@ -624,7 +625,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (item.isDraft) {
       ensureQuickEntryDraftRow();
       const oldVal = quickEntryDraftRow.value[col] ?? null;
-      const newVal = coerceCellValue(editValue.value, oldVal, col);
+      const newVal = options.explicitValue !== undefined ? options.explicitValue : coerceCellValue(editValue.value, oldVal, col);
       const nextDraftRow = [...quickEntryDraftRow.value];
       nextDraftRow[col] = newVal;
       if (newVal !== oldVal) pushUndoSnapshot();
@@ -650,7 +651,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
     if (item.isNew && item.newIndex !== undefined) {
       const oldVal = newRows.value[item.newIndex]?.[col];
-      const newVal = coerceCellValue(editValue.value, oldVal, col);
+      const newVal = options.explicitValue !== undefined ? options.explicitValue : coerceCellValue(editValue.value, oldVal, col);
       const changed = newVal !== oldVal;
       if (changed) pushUndoSnapshot();
       if (newRows.value[item.newIndex]) {
@@ -675,7 +676,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     }
 
     const oldVal = result.value.rows[item.sourceIndex]?.[col];
-    const newVal = coerceCellValue(editValue.value, oldVal, col);
+    const newVal = options.explicitValue !== undefined ? options.explicitValue : coerceCellValue(editValue.value, oldVal, col);
     const changed = newVal !== item.data[col];
     if (newVal !== oldVal) {
       if (changed) pushUndoSnapshot();

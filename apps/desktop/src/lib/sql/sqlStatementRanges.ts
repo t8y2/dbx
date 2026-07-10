@@ -469,6 +469,8 @@ function rangeForCursorInSoftRanges(sql: string, ranges: RawStatement[], pos: nu
 function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, databaseType?: DatabaseType): RawStatement[] {
   if (isOraclePlSqlStatement(statement.sql, databaseType)) return [statement];
   if (isSapHanaScriptBlockStatement(statement.sql, databaseType)) return [statement];
+  // Routine bodies contain top-level-looking SET/INSERT/SELECT lines that are not independent statements.
+  if (isMysqlRoutineBlockDatabase(databaseType) && startsWithMysqlRoutineBlock(statement.sql)) return [statement];
 
   const lineStarts = topLevelSoftStatementLineStarts(sql, statement, databaseType);
   if (lineStarts.length <= 1) return [statement];

@@ -37,7 +37,7 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
     if source.is_empty() {
         return explain_err("empty");
     }
-    if !is_safe_explain_source(&source) {
+    if !is_safe_explain_sql(&source) {
         return explain_err("unsafe");
     }
 
@@ -48,6 +48,7 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
         Some(DatabaseType::Dameng | DatabaseType::Questdb) => {
             format!("EXPLAIN {source}")
         }
+        Some(DatabaseType::Oracle) => format!("EXPLAIN PLAN FOR {source}"),
         _ => format!("EXPLAIN FORMAT=JSON {source}"),
     };
     ExplainSqlBuildResult { ok: true, sql: Some(sql), reason: None }
@@ -75,8 +76,22 @@ pub fn build_dropped_file_preview_sql(options: DroppedFilePreviewSqlOptions) -> 
 pub fn supports_explain_plan(database_type: Option<DatabaseType>) -> bool {
     matches!(
         database_type,
-        Some(DatabaseType::Mysql | DatabaseType::Postgres | DatabaseType::Questdb | DatabaseType::Dameng)
+        Some(
+            DatabaseType::Mysql
+                | DatabaseType::Postgres
+                | DatabaseType::Questdb
+                | DatabaseType::Dameng
+                | DatabaseType::Oracle
+        )
     )
+}
+
+pub fn is_safe_explain_sql(sql: &str) -> bool {
+    let source = strip_trailing_semicolons(sql.trim());
+    !source.is_empty()
+        && !has_extra_statement_after_semicolon(&source)
+        && is_safe_explain_source(&source)
+        && !contains_dangerous_sql_keyword(&source)
 }
 
 /// Returns true for databases that support SQL query execution (execute_query / get_sample_data).
@@ -421,6 +436,23 @@ mod tests {
     }
 
     #[test]
+    fn builds_oracle_explain_plan_sql() {
+        let result = build_explain_sql(ExplainSqlOptions {
+            database_type: Some(DatabaseType::Oracle),
+            sql: "WITH rows AS (SELECT 1 AS id FROM dual) SELECT * FROM rows;".to_string(),
+        });
+
+        assert_eq!(
+            result,
+            ExplainSqlBuildResult {
+                ok: true,
+                sql: Some("EXPLAIN PLAN FOR WITH rows AS (SELECT 1 AS id FROM dual) SELECT * FROM rows".to_string()),
+                reason: None,
+            }
+        );
+    }
+
+    #[test]
     fn validates_dameng_autotrace_sql_safety() {
         assert!(is_safe_dameng_autotrace_sql("SELECT * FROM t WHERE name = 'delete';"));
         assert!(is_safe_dameng_autotrace_sql("/* comment */ WITH q AS (SELECT 1) SELECT * FROM q"));
@@ -448,6 +480,14 @@ mod tests {
             build_explain_sql(ExplainSqlOptions {
                 database_type: Some(DatabaseType::Mysql),
                 sql: "delete from users".to_string(),
+            }),
+            ExplainSqlBuildResult { ok: false, sql: None, reason: Some("unsafe".to_string()) }
+        );
+
+        assert_eq!(
+            build_explain_sql(ExplainSqlOptions {
+                database_type: Some(DatabaseType::Mysql),
+                sql: "SELECT * FROM users; DELETE FROM users".to_string(),
             }),
             ExplainSqlBuildResult { ok: false, sql: None, reason: Some("unsafe".to_string()) }
         );

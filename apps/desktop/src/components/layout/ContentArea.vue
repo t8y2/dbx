@@ -2,6 +2,7 @@
 import { computed, ref, defineAsyncComponent, watch, nextTick, onMounted, onUnmounted } from "vue";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
+import { canReloadUnavailableDataTab } from "@/lib/table/tableDataRefresh";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
 import { Check, Columns3, EyeOff, Loader2, Search, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Timer, Wrench, Toolbox, ListChecks, Database, Download, Upload, X, Pin, Rows3, SquareDashed, Minus, Plus } from "@lucide/vue";
@@ -63,6 +64,7 @@ import { defaultQueryResultArchiveFileName } from "@/lib/query/queryResultArchiv
 import { saveQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
 import { isTableDataEditable } from "@/lib/table/tableEditing";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
+import { dataTabExecutionDatabase } from "@/lib/table/dataTabExecutionDatabase";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { chartableColumnIndexes } from "@/lib/dataGrid/chartData";
@@ -71,6 +73,7 @@ import { buildMongoUpdateDocument, formatMongoShellLiteral, type MongoInputValue
 import type { SqlExecutionOverride } from "@/lib/sql/sqlExecutionTarget";
 import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import { useTabScroll } from "@/composables/useTabScroll";
+import { nextResultToolbarLayout } from "@/lib/tabs/resultToolbarLayout";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
 import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
 import type { QueryTab, ConnectionConfig, TableInfoTab, TreeNode, VectorCollectionMeta, ObjectBrowserViewport } from "@/types/database";
@@ -151,7 +154,7 @@ const emit = defineEmits<{
   openConnectionSettings: [connectionId: string, initialTab: "advanced"];
 }>();
 
-const { t } = useI18n();
+const { t, locale } = useI18n();
 const queryStore = useQueryStore();
 const connectionStore = useConnectionStore();
 const settingsStore = useSettingsStore();
@@ -183,6 +186,7 @@ const columnInfoLoading = ref(false);
 const columnInfoError = ref<string | undefined>(undefined);
 const dataGridRef = ref<DataGridHandle>();
 const queryEditorRef = ref<InstanceType<typeof QueryEditor>>();
+const resultToolbarRef = ref<HTMLElement | null>(null);
 const resultTabsScrollerRef = ref<HTMLElement | null>(null);
 const columnVisibilitySearch = ref("");
 const columnVisibilityOptions = computed(() => dataGridRef.value?.filteredColumnVisibilityOptions(columnVisibilitySearch.value) ?? []);
@@ -197,6 +201,7 @@ const objectBrowserRef = ref<SearchableBrowserHandle>();
 const activeTableMeta = computed(() => props.activeTab.tableMeta);
 const activeDataTabTableMeta = computed(() => tableMetaForDataTab(props.activeTab));
 const activeEffectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(props.activeConnection));
+const activeDataTabExecutionDatabase = computed(() => dataTabExecutionDatabase(props.activeConnection, props.activeTab.database, activeDataTabTableMeta.value?.catalog));
 
 function findNodeInTree(nodes: TreeNode[], id: string): TreeNode | undefined {
   for (const node of nodes) {
@@ -321,6 +326,80 @@ const hasTabularResult = computed(() => {
   return visibleResultItems.value.length > 0;
 });
 const canShowResultOutput = computed(() => hasTabularResult.value || props.activeTab.isExecuting);
+const resultToolbarCompact = ref(false);
+const resultToolbarExpandedRequiredWidth = ref<number>();
+let resultToolbarResizeObserver: ResizeObserver | undefined;
+let resultToolbarLayoutFrame = 0;
+
+function updateResultToolbarLayout() {
+  const toolbar = resultToolbarRef.value;
+  const tabs = resultTabsScrollerRef.value;
+  if (!toolbar || !tabs) return;
+
+  const next = nextResultToolbarLayout({
+    resultCount: visibleResultItems.value.length,
+    compact: resultToolbarCompact.value,
+    expandedRequiredWidth: resultToolbarExpandedRequiredWidth.value,
+    toolbarWidth: toolbar.clientWidth,
+    tabsViewportWidth: tabs.clientWidth,
+    tabsContentWidth: tabs.scrollWidth,
+  });
+  const compactChanged = next.compact !== resultToolbarCompact.value;
+  resultToolbarCompact.value = next.compact;
+  resultToolbarExpandedRequiredWidth.value = next.expandedRequiredWidth;
+  if (compactChanged) {
+    nextTick(() => {
+      updateResultTabsScrollbar();
+      scheduleResultToolbarLayout();
+    });
+  }
+}
+
+function scheduleResultToolbarLayout() {
+  if (resultToolbarLayoutFrame) return;
+  resultToolbarLayoutFrame = window.requestAnimationFrame(() => {
+    resultToolbarLayoutFrame = 0;
+    updateResultToolbarLayout();
+  });
+}
+
+function resetResultToolbarLayout() {
+  resultToolbarCompact.value = false;
+  resultToolbarExpandedRequiredWidth.value = undefined;
+  nextTick(() => {
+    updateResultTabsScrollbar();
+    scheduleResultToolbarLayout();
+  });
+}
+
+function observeResultToolbarLayout() {
+  resultToolbarResizeObserver?.disconnect();
+  resultToolbarResizeObserver = undefined;
+  const toolbar = resultToolbarRef.value;
+  const tabs = resultTabsScrollerRef.value;
+  if (typeof ResizeObserver !== "undefined" && toolbar && tabs) {
+    resultToolbarResizeObserver = new ResizeObserver(scheduleResultToolbarLayout);
+    resultToolbarResizeObserver.observe(toolbar);
+    resultToolbarResizeObserver.observe(tabs);
+  }
+  scheduleResultToolbarLayout();
+}
+
+const resultToolbarLayoutSignature = computed(() =>
+  JSON.stringify({
+    locale: locale.value,
+    results: visibleResultItems.value.map((item) => [item.index, item.label, item.n]),
+    outputView: props.activeOutputView,
+    canExportResultArchive: canExportResultArchive.value,
+    hasResult: !!props.activeTab.result,
+    hasTabularResult: hasTabularResult.value,
+    autoRefreshEnabled: queryResultAutoRefreshEnabled.value,
+    autoRefreshInterval: queryResultAutoRefreshIntervalSeconds.value,
+  }),
+);
+
+watch([resultToolbarRef, resultTabsScrollerRef], observeResultToolbarLayout, { flush: "post" });
+watch(resultToolbarLayoutSignature, resetResultToolbarLayout, { flush: "post" });
 type MongoQueryGridChanges = {
   dirtyRows: Map<number, Map<number, MongoInputValue>>;
   deletedRows: Set<number>;
@@ -422,6 +501,8 @@ watch(() => [props.activeTab.id, props.activeTab.isExecuting, props.activeTab.qu
 onUnmounted(() => {
   stopQueryRunningElapsedTimer();
   stopQueryResultAutoRefreshTimer();
+  resultToolbarResizeObserver?.disconnect();
+  if (resultToolbarLayoutFrame) window.cancelAnimationFrame(resultToolbarLayoutFrame);
   window.removeEventListener("dbx-refresh-active-kv-browser", onRefreshActiveKvBrowser);
 });
 
@@ -663,6 +744,11 @@ function stopQueryResultAutoRefresh() {
 function refreshData(): boolean {
   if (props.activeTab.mode === "etcd") return etcdKeyBrowserRef.value?.refresh?.() ?? false;
   if (props.activeTab.mode === "zookeeper") return zookeeperKeyBrowserRef.value?.refresh?.() ?? false;
+  // Restored data tabs intentionally omit row data, so refresh must work before DataGrid mounts.
+  if (canReloadUnavailableDataTab(props.activeTab)) {
+    emit("reload");
+    return true;
+  }
   if (!dataGridRef.value) return false;
   void dataGridRef.value.onToolbarRefresh();
   return true;
@@ -696,9 +782,9 @@ function toggleExecutionSummary() {
   emit("update:activeOutputView", nextExecutionSummaryView(props.activeOutputView, canShowResultOutput.value));
 }
 
-function removeResultRun(runId: string) {
+async function removeResultRun(runId: string) {
   const removedActiveRun = props.activeTab.activeResultRunId === runId;
-  const removed = queryStore.removeResultRun(props.activeTab.id, runId);
+  const removed = await queryStore.removeResultRun(props.activeTab.id, runId);
   if (removed && removedActiveRun) emit("update:activeOutputView", "result");
 }
 
@@ -719,10 +805,7 @@ function handleModRTarget(target: Element): boolean {
   if (target.closest("[data-query-editor-root]")) return queryEditorRef.value?.openReplace() ?? false;
   if (target.closest("[data-cell-detail-editor-root]")) return dataGridRef.value?.openCellDetailSearch() ?? false;
   if (target.closest("[data-grid-root]")) return refreshData();
-  if (props.activeTab.mode === "data" && !props.activeTab.result && !props.activeTab.isExecuting) {
-    emit("reload");
-    return true;
-  }
+  if (canReloadUnavailableDataTab(props.activeTab)) return refreshData();
   return false;
 }
 
@@ -784,7 +867,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
         </Pane>
         <Pane v-if="resultsPaneOpen" class="min-h-0" :size="resultsPaneSize" :min-size="20">
           <div class="h-full flex flex-col">
-            <div v-if="hasQueryOutput" class="flex h-10 shrink-0 items-center gap-1 border-b bg-muted/20 px-2">
+            <div v-if="hasQueryOutput" ref="resultToolbarRef" class="flex h-10 shrink-0 items-center gap-1 border-b bg-muted/20 px-2">
               <div class="flex shrink-0 items-center gap-1">
                 <Button size="sm" :variant="activeOutputView === 'result' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs" :disabled="!hasTabularResult && !activeTab.isExecuting" @click="emit('update:activeOutputView', 'result')">
                   {{ t("tabs.tableData") }}
@@ -854,25 +937,70 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                   </div>
                 </div>
               </template>
-              <div class="ml-auto flex shrink-0 items-center gap-1">
-                <Button size="sm" :variant="activeOutputView === 'summary' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" :disabled="!hasExecutionSummary" @click="toggleExecutionSummary">
-                  <ListChecks class="h-3.5 w-3.5" />
-                  {{ t("tabs.executionSummary") }}
-                </Button>
-                <Button size="sm" :variant="activeOutputView === 'chart' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" :disabled="!hasNumericData" @click="emit('update:activeOutputView', 'chart')">
-                  <BarChart3 class="h-3.5 w-3.5" />
-                  {{ t("chart.title") }}
-                </Button>
+              <div class="ml-auto flex shrink-0 items-center gap-1" :data-compact="resultToolbarCompact || undefined">
+                <LightTooltip :text="t('tabs.executionSummary')" :disabled="!resultToolbarCompact" side="bottom" :delay="0" :close-delay="0" nowrap>
+                  <Button
+                    size="sm"
+                    :variant="activeOutputView === 'summary' ? 'secondary' : 'ghost'"
+                    class="h-6 text-xs"
+                    :class="resultToolbarCompact ? 'w-7 gap-0 px-0' : 'gap-1 px-2'"
+                    :title="t('tabs.executionSummary')"
+                    :aria-label="t('tabs.executionSummary')"
+                    :disabled="!hasExecutionSummary"
+                    @click="toggleExecutionSummary"
+                  >
+                    <ListChecks class="h-3.5 w-3.5" />
+                    <span v-if="!resultToolbarCompact">{{ t("tabs.executionSummary") }}</span>
+                  </Button>
+                </LightTooltip>
+                <LightTooltip :text="t('chart.title')" :disabled="!resultToolbarCompact" side="bottom" :delay="0" :close-delay="0" nowrap>
+                  <Button
+                    size="sm"
+                    :variant="activeOutputView === 'chart' ? 'secondary' : 'ghost'"
+                    class="h-6 text-xs"
+                    :class="resultToolbarCompact ? 'w-7 gap-0 px-0' : 'gap-1 px-2'"
+                    :title="t('chart.title')"
+                    :aria-label="t('chart.title')"
+                    :disabled="!hasNumericData"
+                    @click="emit('update:activeOutputView', 'chart')"
+                  >
+                    <BarChart3 class="h-3.5 w-3.5" />
+                    <span v-if="!resultToolbarCompact">{{ t("chart.title") }}</span>
+                  </Button>
+                </LightTooltip>
                 <span class="mx-1 h-4 w-px shrink-0 bg-border" />
-                <Button size="sm" :variant="activeOutputView === 'explain' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" :disabled="!activeTab.explainPlan && !activeTab.explainError && !activeTab.isExplaining" @click="emit('update:activeOutputView', 'explain')">
-                  <GitBranch class="h-3.5 w-3.5" />
-                  {{ t("explain.title") }}
-                </Button>
-                <Button v-if="canExportResultArchive" variant="ghost" size="sm" class="h-6 shrink-0 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground" :disabled="resultArchiveExporting" @click="exportResultArchive">
-                  <Loader2 v-if="resultArchiveExporting" class="h-3.5 w-3.5 animate-spin" />
-                  <Upload v-else class="h-3.5 w-3.5" />
-                  {{ t("tabs.exportResultArchive") }}
-                </Button>
+                <LightTooltip :text="t('explain.title')" :disabled="!resultToolbarCompact" side="bottom" :delay="0" :close-delay="0" nowrap>
+                  <Button
+                    size="sm"
+                    :variant="activeOutputView === 'explain' ? 'secondary' : 'ghost'"
+                    class="h-6 text-xs"
+                    :class="resultToolbarCompact ? 'w-7 gap-0 px-0' : 'gap-1 px-2'"
+                    :title="t('explain.title')"
+                    :aria-label="t('explain.title')"
+                    :disabled="!activeTab.explainPlan && !activeTab.explainError && !activeTab.isExplaining"
+                    @click="emit('update:activeOutputView', 'explain')"
+                  >
+                    <GitBranch class="h-3.5 w-3.5" />
+                    <span v-if="!resultToolbarCompact">{{ t("explain.title") }}</span>
+                  </Button>
+                </LightTooltip>
+                <LightTooltip v-if="canExportResultArchive" :text="t('tabs.exportResultArchive')" :disabled="!resultToolbarCompact" side="bottom" :delay="0" :close-delay="0" nowrap>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    class="h-6 shrink-0 text-xs text-muted-foreground hover:text-foreground"
+                    :class="resultToolbarCompact ? 'w-7 gap-0 px-0' : 'gap-1 px-2'"
+                    :title="t('tabs.exportResultArchive')"
+                    :aria-label="t('tabs.exportResultArchive')"
+                    :aria-busy="resultArchiveExporting"
+                    :disabled="resultArchiveExporting"
+                    @click="exportResultArchive"
+                  >
+                    <Loader2 v-if="resultArchiveExporting" class="h-3.5 w-3.5 animate-spin" />
+                    <Upload v-else class="h-3.5 w-3.5" />
+                    <span v-if="!resultToolbarCompact">{{ t("tabs.exportResultArchive") }}</span>
+                  </Button>
+                </LightTooltip>
                 <Popover v-if="activeOutputView === 'result' && activeTab.result">
                   <PopoverTrigger as-child>
                     <Button variant="ghost" size="icon" class="h-6 w-7 shrink-0 text-foreground hover:bg-accent" :title="t('grid.viewOptions')" :aria-label="t('grid.viewOptions')">
@@ -999,44 +1127,68 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                   </PopoverContent>
                 </Popover>
                 <div v-if="activeOutputView === 'result' && hasTabularResult" class="flex h-6 shrink-0 items-center">
-                  <Button variant="ghost" size="sm" class="h-6 rounded-r-none gap-1 px-2 text-xs text-muted-foreground hover:text-foreground" :disabled="activeTab.isExecuting" @click="refreshData">
-                    <Loader2 v-if="activeTab.isExecuting" class="h-3.5 w-3.5 animate-spin" />
-                    <RefreshCcw v-else class="h-3.5 w-3.5" />
-                    {{ t("grid.refresh") }}
-                  </Button>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger as-child>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        class="h-6 rounded-l-none border-l border-border/60 px-1.5 text-xs"
-                        :class="queryResultAutoRefreshEnabled ? 'bg-primary/10 text-primary hover:bg-primary/15' : 'text-muted-foreground hover:text-foreground'"
-                        :title="queryResultAutoRefreshLabel"
-                        :aria-label="queryResultAutoRefreshLabel"
-                        :aria-pressed="queryResultAutoRefreshEnabled"
-                      >
-                        <Timer class="h-3.5 w-3.5" />
-                        <span class="tabular-nums">{{ queryResultAutoRefreshEnabled ? `${queryResultAutoRefreshIntervalSeconds}s` : t("tabs.autoRefreshShort") }}</span>
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" class="w-40">
-                      <DropdownMenuItem class="gap-2" @select="toggleQueryResultAutoRefresh">
-                        <Check v-if="queryResultAutoRefreshEnabled" class="h-3.5 w-3.5" />
-                        <span v-else class="h-3.5 w-3.5" />
-                        {{ queryResultAutoRefreshEnabled ? t("tabs.stopAutoRefresh") : t("tabs.startAutoRefresh") }}
-                      </DropdownMenuItem>
-                      <DropdownMenuItem v-for="seconds in QUERY_RESULT_AUTO_REFRESH_INTERVAL_OPTIONS" :key="seconds" class="gap-2" @select="setQueryResultAutoRefreshInterval(seconds)">
-                        <Check v-if="queryResultAutoRefreshIntervalSeconds === seconds" class="h-3.5 w-3.5" />
-                        <span v-else class="h-3.5 w-3.5" />
-                        {{ t("tabs.autoRefreshEvery", { seconds }) }}
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                  <LightTooltip :text="t('grid.refresh')" :disabled="!resultToolbarCompact" side="bottom" :delay="0" :close-delay="0" nowrap>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      class="h-6 rounded-r-none text-xs text-muted-foreground hover:text-foreground"
+                      :class="resultToolbarCompact ? 'w-7 gap-0 px-0' : 'gap-1 px-2'"
+                      :title="t('grid.refresh')"
+                      :aria-label="t('grid.refresh')"
+                      :aria-busy="activeTab.isExecuting"
+                      :disabled="activeTab.isExecuting"
+                      @click="refreshData"
+                    >
+                      <Loader2 v-if="activeTab.isExecuting" class="h-3.5 w-3.5 animate-spin" />
+                      <RefreshCcw v-else class="h-3.5 w-3.5" />
+                      <span v-if="!resultToolbarCompact">{{ t("grid.refresh") }}</span>
+                    </Button>
+                  </LightTooltip>
+                  <LightTooltip :text="queryResultAutoRefreshLabel" :disabled="!resultToolbarCompact" side="bottom" :delay="0" :close-delay="0" nowrap>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger as-child>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          class="h-6 rounded-l-none border-l border-border/60 text-xs"
+                          :class="[resultToolbarCompact ? 'w-7 gap-0 px-0' : 'px-1.5', queryResultAutoRefreshEnabled ? 'bg-primary/10 text-primary hover:bg-primary/15' : 'text-muted-foreground hover:text-foreground']"
+                          :title="queryResultAutoRefreshLabel"
+                          :aria-label="queryResultAutoRefreshLabel"
+                          :aria-pressed="queryResultAutoRefreshEnabled"
+                        >
+                          <Timer class="h-3.5 w-3.5" />
+                          <span v-if="!resultToolbarCompact" class="tabular-nums">{{ queryResultAutoRefreshEnabled ? `${queryResultAutoRefreshIntervalSeconds}s` : t("tabs.autoRefreshShort") }}</span>
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" class="w-40">
+                        <DropdownMenuItem class="gap-2" @select="toggleQueryResultAutoRefresh">
+                          <Check v-if="queryResultAutoRefreshEnabled" class="h-3.5 w-3.5" />
+                          <span v-else class="h-3.5 w-3.5" />
+                          {{ queryResultAutoRefreshEnabled ? t("tabs.stopAutoRefresh") : t("tabs.startAutoRefresh") }}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem v-for="seconds in QUERY_RESULT_AUTO_REFRESH_INTERVAL_OPTIONS" :key="seconds" class="gap-2" @select="setQueryResultAutoRefreshInterval(seconds)">
+                          <Check v-if="queryResultAutoRefreshIntervalSeconds === seconds" class="h-3.5 w-3.5" />
+                          <span v-else class="h-3.5 w-3.5" />
+                          {{ t("tabs.autoRefreshEvery", { seconds }) }}
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </LightTooltip>
                 </div>
-                <Button variant="ghost" size="sm" class="h-6 shrink-0 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground" @click="resultsPaneOpen = false">
-                  <ChevronDown class="h-3.5 w-3.5" />
-                  {{ t("editor.hideResultsPane") }}
-                </Button>
+                <LightTooltip :text="t('editor.hideResultsPane')" :disabled="!resultToolbarCompact" side="bottom" :delay="0" :close-delay="0" nowrap>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    class="h-6 shrink-0 text-xs text-muted-foreground hover:text-foreground"
+                    :class="resultToolbarCompact ? 'w-7 gap-0 px-0' : 'gap-1 px-2'"
+                    :title="t('editor.hideResultsPane')"
+                    :aria-label="t('editor.hideResultsPane')"
+                    @click="resultsPaneOpen = false"
+                  >
+                    <ChevronDown class="h-3.5 w-3.5" />
+                    <span v-if="!resultToolbarCompact">{{ t("editor.hideResultsPane") }}</span>
+                  </Button>
+                </LightTooltip>
               </div>
             </div>
 
@@ -1098,7 +1250,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                 :source-columns="activeTab.querySourceColumns"
                 :custom-save-handler="mongoQueryResultSaveHandler"
                 :query-editability-reason="activeTab.queryEditabilityReason"
-                :allow-insert-rows="activeTab.queryAnalysis?.allowInsertDelete !== false"
+                :allow-insert-rows="activeTab.queryAnalysis?.allowInsert !== false && activeTab.queryAnalysis?.allowInsertDelete !== false"
                 :allow-delete-rows="activeTab.queryAnalysis?.allowInsertDelete !== false"
                 context="results"
                 :database-type="activeEffectiveDatabaseType"
@@ -1388,6 +1540,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
           :database-type="activeEffectiveDatabaseType"
           :connection-id="activeTab.connectionId"
           :database="activeTab.database"
+          :execution-database="activeDataTabExecutionDatabase"
           :table-meta="activeDataTabTableMeta"
           :table-info-tab="activeTab.tableInfoTab"
           :page-offset="activeTab.resultPageOffset"

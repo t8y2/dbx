@@ -10,9 +10,9 @@ use crate::query::{
     QueryExecutionOptions,
 };
 use crate::sql::{
-    optimize_sql_file_import_statements, prepare_sql_file_statement, statement_summary, SqlFileImportStatement,
-    SqlFileImportStatementKind, SqlFileProgress, SqlFileRequest, SqlFileStatementAction, SqlFileStatus,
-    SqlParsingOptions, SqlStatementSplitter,
+    optimize_sql_file_import_statements, prepare_sql_file_statement, split_sql_batches, statement_summary,
+    SqlFileImportStatement, SqlFileImportStatementKind, SqlFileProgress, SqlFileRequest, SqlFileStatementAction,
+    SqlFileStatus, SqlParsingOptions, SqlStatementSplitter,
 };
 use crate::types::QueryResult;
 
@@ -232,11 +232,8 @@ pub async fn execute_sql_file_content(
     mut emit: impl FnMut(SqlFileProgress),
 ) -> Result<(), String> {
     let import_target = sql_file_import_target(state, &request.connection_id).await;
-    let options =
-        import_target.as_ref().map(|target| SqlParsingOptions::for_database_type(target.db_type)).unwrap_or_default();
-    let mut splitter = SqlStatementSplitter::with_options(options);
-    let mut statements = splitter.push_chunk(file_content);
-    statements.extend(splitter.finish());
+    let statements =
+        split_sql_file_import_statements(file_content, import_target.as_ref().map(|target| target.db_type));
 
     let planned_statements = optimize_sql_file_import_statements(
         &statements,
@@ -256,6 +253,20 @@ pub async fn execute_sql_file_content(
         &mut emit,
     )
     .await
+}
+
+fn split_sql_file_import_statements(file_content: &str, db_type: Option<DatabaseType>) -> Vec<String> {
+    if db_type == Some(DatabaseType::SqlServer) {
+        // GO is a client-side batch delimiter, not T-SQL. SQL Server module DDL
+        // must also remain a complete batch because procedure bodies contain semicolons.
+        return split_sql_batches(file_content);
+    }
+
+    let options = db_type.map(SqlParsingOptions::for_database_type).unwrap_or_default();
+    let mut splitter = SqlStatementSplitter::with_options(options);
+    let mut statements = splitter.push_chunk(file_content);
+    statements.extend(splitter.finish());
+    statements
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -899,6 +910,42 @@ fn statement_error_decision(
 mod tests {
     use super::*;
     use crate::models::connection::DatabaseType;
+
+    #[test]
+    fn sqlserver_sql_file_splits_go_batches_without_sending_delimiters() {
+        let statements = split_sql_file_import_statements(
+            "CREATE TABLE dbo.items (id INT);\nGO\nINSERT INTO dbo.items VALUES (1);\nGO\nSELECT * FROM dbo.items;",
+            Some(DatabaseType::SqlServer),
+        );
+
+        assert_eq!(
+            statements,
+            vec!["CREATE TABLE dbo.items (id INT);", "INSERT INTO dbo.items VALUES (1);", "SELECT * FROM dbo.items;"]
+        );
+        assert!(statements
+            .iter()
+            .all(|statement| !statement.lines().any(|line| line.trim().eq_ignore_ascii_case("go"))));
+    }
+
+    #[test]
+    fn sqlserver_sql_file_keeps_module_body_in_one_batch() {
+        let statements = split_sql_file_import_statements(
+            "CREATE PROCEDURE dbo.demo AS\nBEGIN\n  SELECT 1;\n  SELECT 2;\nEND\nGO\nSELECT 3;",
+            Some(DatabaseType::SqlServer),
+        );
+
+        assert_eq!(statements.len(), 2);
+        assert_eq!(statements[0], "CREATE PROCEDURE dbo.demo AS\nBEGIN\n  SELECT 1;\n  SELECT 2;\nEND");
+        assert_eq!(statements[1], "SELECT 3;");
+    }
+
+    #[test]
+    fn non_sqlserver_sql_file_keeps_statement_splitting_behavior() {
+        assert_eq!(
+            split_sql_file_import_statements("SELECT 1; SELECT 2;", Some(DatabaseType::Postgres)),
+            vec!["SELECT 1", "SELECT 2"]
+        );
+    }
 
     #[test]
     fn stop_on_error_returns_err_with_terminal_error_progress() {

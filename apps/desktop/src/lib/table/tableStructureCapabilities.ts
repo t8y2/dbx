@@ -1,9 +1,11 @@
 import type { DatabaseType } from "@/types/database";
 
 export type TableStructureDialect = "mysql" | "postgres" | "sqlite" | "duckdb" | "sqlserver" | "oracle" | "h2" | "clickhouse" | "informix" | "influxdb" | "unsupported";
+export type TableStructureAlterStrategy = "none" | "direct" | "sqlite-rebuild";
 
 export interface TableStructureCapabilities {
   dialect: TableStructureDialect;
+  alterStrategy: TableStructureAlterStrategy;
   createTable: boolean;
   addColumn: boolean;
   dropColumn: boolean;
@@ -27,6 +29,7 @@ export interface TableStructureCapabilities {
 
 const unsupportedCapabilities: TableStructureCapabilities = {
   dialect: "unsupported",
+  alterStrategy: "none",
   createTable: false,
   addColumn: false,
   dropColumn: false,
@@ -49,7 +52,11 @@ const unsupportedCapabilities: TableStructureCapabilities = {
 };
 
 function capabilities(overrides: Partial<TableStructureCapabilities>): TableStructureCapabilities {
-  return { ...unsupportedCapabilities, ...overrides };
+  const resolved = { ...unsupportedCapabilities, ...overrides };
+  if (overrides.alterStrategy === undefined && resolved.alterExistingColumn) {
+    resolved.alterStrategy = "direct";
+  }
+  return resolved;
 }
 
 const mysqlCapabilities = capabilities({
@@ -126,6 +133,13 @@ const sqliteCapabilities = capabilities({
   dropIndex: true,
   rebuildIndex: true,
   indexFilter: true,
+});
+
+const nativeSqliteCapabilities = capabilities({
+  ...sqliteCapabilities,
+  alterStrategy: "sqlite-rebuild",
+  alterExistingColumn: true,
+  alterType: true,
 });
 
 const duckdbCapabilities = capabilities({
@@ -315,7 +329,8 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   manticoresearch: manticoreSearchCapabilities,
 };
 
-export function getTableStructureCapabilities(dbType?: DatabaseType): TableStructureCapabilities {
+export function getTableStructureCapabilities(dbType?: DatabaseType, connectionDbType?: DatabaseType): TableStructureCapabilities {
+  if (dbType === "sqlite" && connectionDbType === "sqlite") return nativeSqliteCapabilities;
   return dbType ? (capabilityByType[dbType] ?? unsupportedCapabilities) : unsupportedCapabilities;
 }
 

@@ -15,6 +15,7 @@ import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
 
+import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
@@ -27,6 +28,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
+    private static final long MICROS_PER_SECOND = 1_000_000L;
     private static final String COMPATIBLE_OJDBC_VERSION = "compatibleOjdbcVersion";
     private static final String DEFAULT_COMPATIBLE_OJDBC_VERSION = "compatibleOjdbcVersion=8";
     private static final Set<String> SYSTEM_SCHEMAS = Set.of(
@@ -64,6 +66,22 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
 
     static String buildUrl(ConnectParams params) {
         return appendDefaultCompatibilityOption(OCEANBASE_ORACLE_PROFILE.buildUrl(params));
+    }
+
+    @Override
+    protected void beforeQueryExecution(Connection connection, int timeoutSecs) throws SQLException {
+        // Connector/J's Statement timeout does not update OceanBase's stricter
+        // session variable, so synchronize both limits before every execution.
+        try (var stmt = connection.createStatement()) {
+            stmt.execute(queryTimeoutSql(timeoutSecs));
+        }
+    }
+
+    static String queryTimeoutSql(int timeoutSecs) {
+        if (timeoutSecs < 0) {
+            throw new IllegalArgumentException("Query timeout cannot be negative: " + timeoutSecs);
+        }
+        return "ALTER SESSION SET ob_query_timeout = " + timeoutSecs * MICROS_PER_SECOND;
     }
 
     @Override

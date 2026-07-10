@@ -65,20 +65,30 @@ This guide gets you through three things:
 
     ```bash
     docker run -d \
+      --pull=always \
       --name dbx \
       -p 4224:4224 \
       -v dbx-data:/app/data \
-      t8y2/dbx
+      t8y2/dbx:latest
     ```
+
+    The `latest` tag pulls the current release. This uses the cross-platform `dbx-data` named volume. For faster pulls in China, use `docker.cnb.cool/dbxio.com/dbx:latest` instead.
 
     Then open `http://localhost:4224`.
 
-    Docker Compose:
+    `deploy/docker-compose.yml` builds the current checkout. To deploy a published image, use `deploy/docker-compose.release.yml`:
+
+    ```bash
+    docker compose -f deploy/docker-compose.release.yml up -d
+    ```
 
     ```yaml
     services:
       dbx:
-        image: t8y2/dbx
+        image: t8y2/dbx:latest
+        # For faster pulls in China, use the CNB image instead:
+        # image: docker.cnb.cool/dbxio.com/dbx:latest
+        pull_policy: always
         ports:
           - "4224:4224"
         volumes:

@@ -1957,7 +1957,29 @@ pub async fn list_tables_show(pool: &MySqlPool, database: &str) -> Result<Vec<Ta
     list_tables_show_with_status(pool, database).await.map(|(tables, _)| tables)
 }
 
-fn list_tables_objects_sql(database: &str) -> String {
+fn requested_object_type(object_types: Option<&[String]>, object_type: &str) -> bool {
+    object_types.is_none_or(|types| {
+        types.is_empty() || types.iter().any(|candidate| candidate.eq_ignore_ascii_case(object_type))
+    })
+}
+
+fn sql_pagination(limit: Option<usize>, offset: Option<usize>) -> String {
+    limit.map_or_else(String::new, |limit| format!(" LIMIT {limit} OFFSET {}", offset.unwrap_or(0)))
+}
+
+fn list_tables_objects_sql(
+    database: &str,
+    object_types: Option<&[String]>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> String {
+    let wants_tables = requested_object_type(object_types, "TABLE");
+    let wants_views = requested_object_type(object_types, "VIEW");
+    let type_filter = match (wants_tables, wants_views) {
+        (true, false) => " AND TABLE_TYPE <> 'VIEW'",
+        (false, true) => " AND TABLE_TYPE = 'VIEW'",
+        _ => "",
+    };
     format!(
         "SELECT TABLE_NAME AS object_name, \
            CASE WHEN TABLE_TYPE = 'VIEW' THEN 'VIEW' ELSE 'TABLE' END AS object_type, \
@@ -1967,22 +1989,37 @@ fn list_tables_objects_sql(database: &str) -> String {
            NULL AS parent_schema, NULL AS parent_name, \
            CASE WHEN TABLE_TYPE = 'VIEW' THEN 1 ELSE 0 END AS sort_order \
          FROM information_schema.TABLES \
-         WHERE TABLE_SCHEMA = {db} \
-         ORDER BY sort_order, object_name",
+         WHERE TABLE_SCHEMA = {db}{type_filter} \
+         ORDER BY sort_order, object_name{pagination}",
         db = quote_value(database),
+        pagination = sql_pagination(limit, offset),
     )
 }
 
-fn list_routines_sql(database: &str) -> String {
+fn list_routines_sql(
+    database: &str,
+    object_types: Option<&[String]>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> String {
+    let routine_types = [
+        ("PROCEDURE", requested_object_type(object_types, "PROCEDURE")),
+        ("FUNCTION", requested_object_type(object_types, "FUNCTION")),
+    ]
+    .into_iter()
+    .filter_map(|(routine_type, requested)| requested.then_some(format!("'{}'", routine_type)))
+    .collect::<Vec<_>>()
+    .join(", ");
     format!(
         "SELECT ROUTINE_NAME AS object_name, ROUTINE_TYPE AS object_type, NULL AS object_comment, \
            NULL AS created_at, NULL AS updated_at, \
            NULL AS parent_schema, NULL AS parent_name, \
            CASE WHEN ROUTINE_TYPE = 'PROCEDURE' THEN 2 ELSE 3 END AS sort_order \
          FROM information_schema.ROUTINES \
-         WHERE ROUTINE_SCHEMA = {db} AND ROUTINE_TYPE IN ('PROCEDURE', 'FUNCTION') \
-         ORDER BY sort_order, object_name",
+         WHERE ROUTINE_SCHEMA = {db} AND ROUTINE_TYPE IN ({routine_types}) \
+         ORDER BY sort_order, object_name{pagination}",
         db = quote_value(database),
+        pagination = sql_pagination(limit, offset),
     )
 }
 
@@ -2015,47 +2052,91 @@ fn row_to_object(row: &mysql_async::Row, database: &str) -> ObjectInfo {
     }
 }
 
-pub async fn list_objects(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectInfo>, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+pub struct PagedObjectList {
+    pub objects: Vec<ObjectInfo>,
+    pub paging_applied: bool,
+}
 
-    let tables_sql = list_tables_objects_sql(database);
-    let result = match conn.query_iter(&tables_sql).await {
-        Ok(result) => result,
-        Err(err) => {
-            log::debug!(
-                "Falling back to SHOW TABLES for object browser database `{database}` after information_schema.TABLES failed: {err}"
-            );
-            return list_table_objects_show(pool, database).await;
-        }
+fn object_query_supports_paging(object_types: Option<&[String]>) -> bool {
+    let Some(object_types) = object_types.filter(|types| !types.is_empty()) else {
+        return false;
     };
-    let table_rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
-    if table_rows.is_empty() {
-        log::debug!(
-            "Falling back to SHOW TABLES for object browser database `{database}` after information_schema.TABLES returned no named tables"
-        );
-        return list_table_objects_show(pool, database).await;
+    let uses_table_source = object_types
+        .iter()
+        .any(|object_type| object_type.eq_ignore_ascii_case("TABLE") || object_type.eq_ignore_ascii_case("VIEW"));
+    let uses_routine_source = object_types.iter().any(|object_type| {
+        object_type.eq_ignore_ascii_case("PROCEDURE") || object_type.eq_ignore_ascii_case("FUNCTION")
+    });
+    let all_types_supported = object_types.iter().all(|object_type| {
+        object_type.eq_ignore_ascii_case("TABLE")
+            || object_type.eq_ignore_ascii_case("VIEW")
+            || object_type.eq_ignore_ascii_case("PROCEDURE")
+            || object_type.eq_ignore_ascii_case("FUNCTION")
+    });
+    all_types_supported && uses_table_source != uses_routine_source
+}
+
+pub async fn list_objects(
+    pool: &MySqlPool,
+    database: &str,
+    object_types: Option<&[String]>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<PagedObjectList, String> {
+    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let wants_tables = requested_object_type(object_types, "TABLE") || requested_object_type(object_types, "VIEW");
+    let wants_routines =
+        requested_object_type(object_types, "PROCEDURE") || requested_object_type(object_types, "FUNCTION");
+    let paging_applied = limit.is_some() && object_query_supports_paging(object_types);
+    let (query_limit, query_offset) = if paging_applied { (limit, offset) } else { (None, None) };
+    let mut objects = Vec::new();
+
+    if wants_tables {
+        let tables_sql = list_tables_objects_sql(database, object_types, query_limit, query_offset);
+        let result = match conn.query_iter(&tables_sql).await {
+            Ok(result) => result,
+            Err(err) => {
+                log::debug!(
+                    "Falling back to SHOW TABLES for object browser database `{database}` after information_schema.TABLES failed: {err}"
+                );
+                return list_table_objects_show(pool, database)
+                    .await
+                    .map(|objects| PagedObjectList { objects, paging_applied: false });
+            }
+        };
+        let table_rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+        if table_rows.is_empty() && !wants_routines {
+            log::debug!(
+                "Falling back to SHOW TABLES for object browser database `{database}` after information_schema.TABLES returned no named tables"
+            );
+            return list_table_objects_show(pool, database)
+                .await
+                .map(|objects| PagedObjectList { objects, paging_applied: false });
+        }
+        objects.extend(table_rows.iter().map(|row| row_to_object(row, database)));
     }
-    let mut objects: Vec<ObjectInfo> = table_rows.iter().map(|row| row_to_object(row, database)).collect();
 
     // Routines are queried separately: some MySQL-compatible servers (sharding proxies,
     // OceanBase/TiDB variants, restricted accounts) reject information_schema.ROUTINES with
     // ER_UNKNOWN_ERROR (1105). Degrading gracefully keeps tables/views usable.
-    let routines_sql = list_routines_sql(database);
-    match conn.query_iter(&routines_sql).await {
-        Ok(result) => match result.collect_and_drop::<mysql_async::Row>().await {
-            Ok(routine_rows) => {
-                objects.extend(routine_rows.iter().map(|row| row_to_object(row, database)));
-            }
+    if wants_routines {
+        let routines_sql = list_routines_sql(database, object_types, query_limit, query_offset);
+        match conn.query_iter(&routines_sql).await {
+            Ok(result) => match result.collect_and_drop::<mysql_async::Row>().await {
+                Ok(routine_rows) => {
+                    objects.extend(routine_rows.iter().map(|row| row_to_object(row, database)));
+                }
+                Err(e) => {
+                    log::warn!("Skipping routines for database `{}` in object browser: {}", database, e);
+                }
+            },
             Err(e) => {
                 log::warn!("Skipping routines for database `{}` in object browser: {}", database, e);
             }
-        },
-        Err(e) => {
-            log::warn!("Skipping routines for database `{}` in object browser: {}", database, e);
         }
     }
 
-    Ok(objects)
+    Ok(PagedObjectList { objects, paging_applied })
 }
 
 pub async fn list_object_statistics(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectStatistics>, String> {
@@ -2115,7 +2196,7 @@ pub async fn list_table_objects_show(pool: &MySqlPool, database: &str) -> Result
 
 async fn list_routine_objects(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectInfo>, String> {
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
-    let routines_sql = list_routines_sql(database);
+    let routines_sql = list_routines_sql(database, None, None, None);
     let result = conn.query_iter(&routines_sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
     Ok(rows.iter().map(|row| row_to_object(row, database)).collect())
@@ -2125,7 +2206,7 @@ pub async fn list_completion_objects(pool: &MySqlPool, database: &str) -> Result
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
     let mut objects = Vec::new();
 
-    let routines_sql = list_routines_sql(database);
+    let routines_sql = list_routines_sql(database, None, None, None);
     match conn.query_iter(&routines_sql).await {
         Ok(result) => match result.collect_and_drop::<mysql_async::Row>().await {
             Ok(rows) => objects.extend(rows.iter().map(|row| row_to_object(row, database))),
@@ -3797,7 +3878,7 @@ mod tests {
 
     #[test]
     fn mysql_list_tables_objects_sql_includes_timestamps() {
-        let sql = list_tables_objects_sql("app");
+        let sql = list_tables_objects_sql("app", None, None, None);
 
         assert!(sql.contains("information_schema.TABLES"));
         assert!(!sql.contains("information_schema.ROUTINES"));
@@ -3939,7 +4020,7 @@ mod tests {
 
     #[test]
     fn mysql_list_routines_sql_is_independent_of_tables() {
-        let sql = list_routines_sql("app");
+        let sql = list_routines_sql("app", None, None, None);
 
         assert!(sql.contains("information_schema.ROUTINES"));
         assert!(!sql.contains("information_schema.TABLES"));
@@ -3948,6 +4029,33 @@ mod tests {
         assert!(sql.contains("'FUNCTION'"));
         assert!(!sql.contains("LAST_ALTERED"));
         assert!(!sql.contains("CREATED AS created_at"));
+    }
+
+    #[test]
+    fn mysql_list_routines_sql_honors_requested_type_and_paging() {
+        let object_types = vec!["PROCEDURE".to_string()];
+        let sql = list_routines_sql("app", Some(&object_types), Some(101), Some(200));
+
+        assert!(sql.contains("ROUTINE_TYPE IN ('PROCEDURE')"));
+        assert!(!sql.contains("'FUNCTION'"));
+        assert!(sql.ends_with("LIMIT 101 OFFSET 200"));
+    }
+
+    #[test]
+    fn mysql_list_tables_objects_sql_honors_requested_type_and_paging() {
+        let object_types = vec!["VIEW".to_string()];
+        let sql = list_tables_objects_sql("app", Some(&object_types), Some(51), Some(100));
+
+        assert!(sql.contains("TABLE_TYPE = 'VIEW'"));
+        assert!(sql.ends_with("LIMIT 51 OFFSET 100"));
+    }
+
+    #[test]
+    fn mysql_object_query_only_pages_within_one_metadata_source() {
+        assert!(object_query_supports_paging(Some(&["PROCEDURE".to_string()])));
+        assert!(object_query_supports_paging(Some(&["TABLE".to_string(), "VIEW".to_string()])));
+        assert!(!object_query_supports_paging(Some(&["TABLE".to_string(), "PROCEDURE".to_string()])));
+        assert!(!object_query_supports_paging(None));
     }
 
     #[test]

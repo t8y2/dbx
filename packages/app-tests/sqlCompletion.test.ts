@@ -967,6 +967,87 @@ test("keeps completed references while removing active JOIN table prefixes", () 
   );
 });
 
+test("extracts JOIN tables without explicit aliases", () => {
+  const sql = "select * from a join b on a.id = b.id";
+  const context = getSqlCompletionContext(sql, sql.length);
+
+  assert.deepEqual(
+    context.referencedTables.map((table) => table.name),
+    ["a", "b"],
+  );
+});
+
+test("extracts MySQL backtick-qualified tables across a JOIN", () => {
+  const sql = [
+    "select",
+    "  `jobdb`.`job_application_ats_process`.`process_id`,",
+    "  count(*)",
+    "from",
+    "  `jobdb`.`job_application`",
+    "join `jobdb`.`job_application_ats_process` on",
+    "  `jobdb`.`job_application`.`id` = `jobdb`.`job_application_ats_process`.`app_id`",
+  ].join("\n");
+  const context = getSqlCompletionContext(sql, sql.length);
+
+  assert.deepEqual(
+    context.referencedTables.map(({ schema, name }) => ({ schema, name })),
+    [
+      { schema: "jobdb", name: "job_application" },
+      { schema: "jobdb", name: "job_application_ats_process" },
+    ],
+  );
+});
+
+test("extracts every table across consecutive JOINs", () => {
+  const sql = "select * from db.a join db.b on 1=1 join db.c on 2=2";
+  const context = getSqlCompletionContext(sql, sql.length);
+
+  assert.deepEqual(
+    context.referencedTables.map(({ schema, name }) => ({ schema, name })),
+    [
+      { schema: "db", name: "a" },
+      { schema: "db", name: "b" },
+      { schema: "db", name: "c" },
+    ],
+  );
+});
+
+test("extracts tables across a MySQL STRAIGHT_JOIN", () => {
+  const sql = "select * from db.a straight_join db.b on db.a.id = db.b.id";
+  const context = getSqlCompletionContext(sql, sql.length);
+
+  assert.deepEqual(
+    context.referencedTables.map(({ schema, name, alias }) => ({ schema, name, alias })),
+    [
+      { schema: "db", name: "a", alias: undefined },
+      { schema: "db", name: "b", alias: undefined },
+    ],
+  );
+});
+
+test("keeps explicit table aliases across a JOIN", () => {
+  const sql = "select * from db.a x join db.b y";
+  const context = getSqlCompletionContext(sql, sql.length);
+
+  assert.deepEqual(
+    context.referencedTables.map(({ schema, name, alias }) => ({ schema, name, alias })),
+    [
+      { schema: "db", name: "a", alias: "x" },
+      { schema: "db", name: "b", alias: "y" },
+    ],
+  );
+});
+
+test("does not treat WHERE as a table alias", () => {
+  const sql = "select * from a where id = 1";
+  const context = getSqlCompletionContext(sql, sql.length);
+
+  assert.deepEqual(
+    context.referencedTables.map(({ name, alias }) => ({ name, alias })),
+    [{ name: "a", alias: undefined }],
+  );
+});
+
 test("ranks exact table matches above prefix and fuzzy matches", () => {
   const items = buildSqlCompletionItems("select * from toh", "select * from toh".length, {
     tables: [
@@ -982,6 +1063,102 @@ test("ranks exact table matches above prefix and fuzzy matches", () => {
     tableItems.map((item) => item.label),
     ["toh", "toh_archive", "to_his_rec"],
   );
+});
+
+test("ranks exact keyword matches above prefix-matching routines (#3002)", () => {
+  const sql = "create table t (id int";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [],
+    objects: [
+      { name: "int_proc_sync", type: "procedure" },
+      { name: "sp_interface", type: "procedure" },
+      { name: "fn_to_int", type: "function" },
+    ],
+    columnsByTable: new Map(),
+    databaseType: "sqlserver",
+  });
+
+  assert.equal(items[0]?.label, "INT");
+  assert.equal(items[0]?.type, "keyword");
+});
+
+test("preserves an exact routine match before truncating candidates", () => {
+  const sql = "select aaa";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [],
+    objects: [
+      ...Array.from({ length: 200 }, (_, index) => ({ name: `a_a_a_${index}`, type: "procedure" as const })),
+      { name: "aaa", type: "function" },
+    ],
+    columnsByTable: new Map(),
+  });
+
+  assert.equal(items[0]?.label, "aaa");
+  assert.equal(items[0]?.type, "function");
+});
+
+test("ranks an exact table label match first", () => {
+  const sql = "select * from orders";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "orders", type: "table" },
+      { name: "orders_archive", type: "table" },
+    ],
+    columnsByTable: new Map(),
+  });
+
+  assert.equal(items[0]?.label, "orders");
+  assert.equal(items[0]?.type, "table");
+});
+
+test("ranks an exact column match above an exact keyword match", () => {
+  const sql = "select limit from t";
+  const items = buildSqlCompletionItems(sql, "select limit".length, {
+    tables: [{ name: "t", type: "table" }],
+    columnsByTable: new Map([["t", [{ name: "limit", table: "t", dataType: "text" }]]]),
+  });
+  const columnIndex = items.findIndex((item) => item.type === "column" && item.label === "limit");
+  const keywordIndex = items.findIndex((item) => item.type === "keyword" && item.label === "LIMIT");
+
+  assert.ok(columnIndex >= 0);
+  assert.ok(keywordIndex >= 0);
+  assert.ok(columnIndex < keywordIndex);
+});
+
+test("ranks an exact table match above foreign-key related prefix matches", () => {
+  const sql = "select * from orders join customers";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "orders", type: "table" },
+      { name: "customers", type: "table" },
+      { name: "customers_ext", type: "table" },
+    ],
+    columnsByTable: new Map(),
+    foreignKeysByTable: new Map([["orders", [{ column: "customer_id", ref_table: "customers_ext", ref_column: "id" }]]]),
+  });
+
+  assert.equal(items[0]?.label, "customers");
+  assert.equal(items[0]?.type, "table");
+});
+
+test("ranks an exact match first even when a fuzzy candidate outscores the numeric boost", () => {
+  // A long tight-fuzzy foreign-key candidate accumulates boundary bonuses beyond
+  // EXACT_LABEL_MATCH_BOOST; only the exactMatch comparator key keeps the exact item first.
+  const exactName = "ab".repeat(300);
+  const fuzzyName = Array.from({ length: 300 }, () => "ab").join("_");
+  const sql = `select * from orders join ${exactName}`;
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "orders", type: "table" },
+      { name: exactName, type: "table" },
+      { name: fuzzyName, type: "table" },
+    ],
+    columnsByTable: new Map(),
+    foreignKeysByTable: new Map([["orders", [{ column: "x_id", ref_table: fuzzyName, ref_column: "id" }]]]),
+  });
+
+  assert.equal(items[0]?.label, exactName);
+  assert.equal(items[0]?.type, "table");
 });
 
 test("does not reuse table completion results across typed prefixes", () => {

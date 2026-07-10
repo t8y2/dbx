@@ -1,6 +1,10 @@
 import type { ColumnInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database.ts";
 import type { ColumnExtra, EditableStructureColumn, EditableStructureForeignKey, EditableStructureIndex, EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql.ts";
 
+export function hasExistingColumnTypeChange(columns: readonly EditableStructureColumn[]): boolean {
+  return columns.some((column) => !!column.original && !column.markedForDrop && column.dataType !== column.original.data_type);
+}
+
 export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
   mysql: [
     "tinyint",
@@ -294,6 +298,16 @@ const DATA_TYPE_OPTION_ALIASES: Partial<Record<DatabaseType, string>> = {
 export function getDataTypeOptions(dbType: DatabaseType | undefined): string[] {
   const key = dbType ? (DATA_TYPE_OPTION_ALIASES[dbType] ?? dbType) : "";
   return DATA_TYPE_OPTIONS[key] ?? [];
+}
+
+export function isMysqlEnumDataType(dbType: DatabaseType | undefined, dataType: string): boolean {
+  return dbType === "mysql" && splitDataType(dataType).baseType.trim().toLowerCase() === "enum";
+}
+
+export function mysqlEnumDataType(values: readonly string[]): string {
+  // Match MySQL's canonical ENUM literal escaping, including values returned by SHOW CREATE TABLE.
+  const literals = values.map((value) => `'${value.replace(/\\/g, "\\\\").replace(/'/g, "''")}'`);
+  return `enum(${literals.join(",")})`;
 }
 
 export interface ColumnEditorControls {
@@ -606,10 +620,13 @@ function columnDefaultForEditor(column: ColumnInfo, databaseType?: DatabaseType)
 export function createColumnDrafts(columns: ColumnInfo[], databaseType?: DatabaseType): EditableStructureColumn[] {
   return columns.map((column, index) => {
     const defaultValue = columnDefaultForEditor(column, databaseType);
+    const enumValues = isMysqlEnumDataType(databaseType, column.data_type) ? [...(column.enum_values ?? [])] : undefined;
+    const dataType = enumValues?.length ? mysqlEnumDataType(enumValues) : column.data_type;
     return {
       id: `existing:${column.name}`,
       name: column.name,
-      dataType: column.data_type,
+      dataType,
+      enumValues,
       isNullable: column.is_nullable,
       defaultValue,
       comment: column.comment ?? "",
@@ -617,7 +634,7 @@ export function createColumnDrafts(columns: ColumnInfo[], databaseType?: Databas
       characterSet: column.character_set ?? "",
       collation: column.collation ?? "",
       extra: parseExtraToColumnExtra(column.extra, databaseType),
-      original: { ...column, column_default: column.column_default === null ? null : defaultValue },
+      original: { ...column, data_type: dataType, column_default: column.column_default === null ? null : defaultValue },
       originalPosition: index,
       markedForDrop: false,
     };
@@ -674,12 +691,15 @@ export function rehydrateColumnDraftsFromMetadata(draftColumns: EditableStructur
     const metadataIndex = findColumnDraftByName(metadataDrafts, candidates, usedMetadataIndexes);
     if (metadataIndex === undefined) return column;
     usedMetadataIndexes.add(metadataIndex);
-    if (!needsHydration) return column;
-
     const metadataDraft = metadataDrafts[metadataIndex]!;
+    const shouldHydrateEnum = isMysqlEnumDataType(databaseType, column.dataType) && column.enumValues === undefined && metadataDraft.enumValues !== undefined;
+    if (!needsHydration && !shouldHydrateEnum) return column;
+
     return {
       ...column,
-      original: column.original ?? metadataDraft.original,
+      dataType: shouldHydrateEnum ? metadataDraft.dataType : column.dataType,
+      enumValues: column.enumValues ?? metadataDraft.enumValues,
+      original: shouldHydrateEnum ? metadataDraft.original : (column.original ?? metadataDraft.original),
       originalPosition: column.originalPosition ?? metadataDraft.originalPosition,
     };
   });
@@ -922,7 +942,9 @@ function isValidTemporalPrecision(dbType: DatabaseType | undefined, params: stri
 
 export function getDefaultLengthForType(_dbType: DatabaseType | undefined, baseType: string): string {
   const key = baseType.trim().toLowerCase();
-  if (_dbType === "questdb") {
+  if (_dbType === "sqlite" || _dbType === "rqlite" || _dbType === "turso") {
+    return "";
+  } else if (_dbType === "questdb") {
     return QUESTDB_TYPE_LENGTHS[key] ?? "";
   } else if (_dbType === "sqlserver") {
     return SQLSERVER_TYPE_LENGTHS[key] ?? "";

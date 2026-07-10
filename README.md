@@ -46,6 +46,7 @@
     <img src="https://img.shields.io/badge/JDBC-4B5563?logoColor=white" />
     <img src="https://img.shields.io/badge/and%20more...-555555?logoColor=white" />
     <a href="https://atomgit.com/t8y2/dbx"><img src="https://atomgit.com/t8y2/dbx/star/badge.svg" alt="AtomGit Stars" /></a>
+    <a href="https://cnb.cool/dbxio.com/dbx"><img src="https://img.shields.io/badge/CNB-dbx-F76945?logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAAppJREFUOE9tk01rE1EUhs+5H5lJ0iQT3FRX2Yi4avoLkv4CWxBcNt11oZiuFKGmXQhFN6kuRESSgitXKf6A5g+I6cqFLiKCiptOkraZ5H4cuZOkH9oLw+UO8z7nvGfei3DFohoEQLAKCGWyGJCSbQZsD3ei7r+f45WATV6xmjdISyAlYLaDliveux+ti5ozwLAaFPhIlk6G6f18sxuO7l9bBiWbVoncDGCMWMl++PI/gJ7IohkmD0zkBxT5oRn5LTpN7ULqBByEtFywWvRyHz8Fx3dvN0UwuMPyR0uJFycddH7tKPHZRn7BjnwwkQcUud0HO/K7oOENcTYPRCEAFERmsCpyfZDZfpdnBosOUKGx13BC60QTIdjpmSzrEWDR+UagjsgMciLXAwfhc4MNpKfQtOPE6mVh0gEOaeTXtWXXEdADpJAR/GaZ/rrM9Us82wORPd5zHbRp7JVcyxR5PRP5LTPy6uo0HXIlG9awMgLuEUABkBYI7VLyxs+yyPW3+Nyg4zqoG+UV7TDRlMBbWA/D43u3qlbLGmgRWM2BjFxjQjWQGQBuu4bYYvrm14JMnQSXcjBcny9A5DXIiDJp9/8FWCXAAOaFUEfILTgIcttOvf+2NJnLdI0fBFUyskZKBGTEJEAmBuzr9LCSUDwGQAwwgMzu+m9/VWOAeZSsk+YP48C4li/sRok1nlBd5PogBjgxNw70PfHyqBADyEVXicasZXCVpxYiLfO+HxVZDHCVYwvu2ebPT7fOLNAm65AWLnEAzvsEcOi9/lPU1aACXDfOLdhD9kxNszGdweQGYstqXgItJwDFNxKvwrp57G8h0zVwldHuA0IFt8El83yIs2FSDcpgxDJpUUTwK7gTduN3AK5iG7ehc/E2/gUPD3q3eY4awwAAAABJRU5ErkJggg==" alt="CNB" /></a>
   </p>
 	  <p>
     English | <a href="README.zh-CN.md">前往中文版本</a>
@@ -214,18 +215,31 @@ winget install t8y2.dbx
 
 ## Self-Hosted (Docker)
 
-DBX provides a web version that can be deployed via Docker.
+DBX provides a web version that can be deployed via Docker. The examples use
+the `latest` tag to pull the current release.
 
 ```bash
-docker run -d --name dbx -p 4224:4224 -v dbx-data:/app/data t8y2/dbx
+docker run -d --pull=always --name dbx -p 4224:4224 -v dbx-data:/app/data t8y2/dbx:latest
 ```
 
-Or with Docker Compose. A ready-to-use example lives at `deploy/docker-compose.yml`:
+This uses the cross-platform `dbx-data` named volume. Users in China can use
+the CNB image, `docker.cnb.cool/dbxio.com/dbx:latest`, for faster pulls.
+
+For Docker Compose, `deploy/docker-compose.yml` remains the source-build
+configuration. To deploy a published image, use
+`deploy/docker-compose.release.yml`:
+
+```bash
+docker compose -f deploy/docker-compose.release.yml up -d
+```
 
 ```yaml
 services:
   dbx:
-    image: t8y2/dbx
+    image: t8y2/dbx:latest
+    # For faster pulls in China, use the CNB image instead:
+    # image: docker.cnb.cool/dbxio.com/dbx:latest
+    pull_policy: always
     ports:
       - "4224:4224"
     volumes:

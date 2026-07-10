@@ -27,6 +27,7 @@ import type {
   DatabaseType,
   InstalledPlugin,
   JdbcDriverInfo,
+  JdbcLocalBundleInfo,
   JdbcMavenBundleInfo,
   JdbcPluginStatus,
   SavedSqlFile,
@@ -52,7 +53,7 @@ import type {
 } from "@/lib/dataGrid/dataGridSql";
 import type { DataCompareFromTablesOptions, DataCompareFromTablesPreparation, DataCompareSyncPlan, DataCompareSyncPlanOptions, DataComparePreparation, DataComparePreparationOptions } from "@/lib/dataGrid/dataCompare";
 import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, TableDiff, FunctionDiff, SequenceDiff, RuleDiff, OwnerDiff } from "@/lib/schema/schemaDiff";
-import type { BuildTableStructureChangeSqlOptions, BuildSingleColumnAlterSqlOptions, TableStructureChangeSql } from "@/lib/table/tableStructureEditorSql";
+import type { BuildTableStructureChangeSqlOptions, BuildSingleColumnAlterSqlOptions, SqliteTableStructureChangePreview, TableStructureChangeSql } from "@/lib/table/tableStructureEditorSql";
 import type { BuildTableSelectSqlOptions } from "@/lib/table/tableSelectSql";
 import type { DatabaseSearchSql, DatabaseSearchSqlOptions, SearchResultWhereOptions } from "@/lib/database/databaseSearch";
 import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceInput } from "@/lib/table/objectSourceEditor";
@@ -946,6 +947,14 @@ export async function buildTableStructureChangeSql(options: BuildTableStructureC
   return invoke("build_table_structure_change_sql", { options });
 }
 
+export async function previewSqliteTableStructureChange(connectionId: string, database: string, options: BuildTableStructureChangeSqlOptions): Promise<SqliteTableStructureChangePreview> {
+  return invoke("preview_sqlite_table_structure_change", { connectionId, database, options });
+}
+
+export async function applySqliteTableStructureChange(connectionId: string, database: string, options: BuildTableStructureChangeSqlOptions, schemaRevision: string): Promise<QueryResult> {
+  return invoke("apply_sqlite_table_structure_change", { connectionId, database, options, schemaRevision });
+}
+
 export async function buildCreateTableSql(options: BuildTableStructureChangeSqlOptions): Promise<TableStructureChangeSql> {
   return invoke("build_create_table_sql", { options });
 }
@@ -1123,6 +1132,10 @@ export async function listJdbcMavenBundles(): Promise<JdbcMavenBundleInfo[]> {
   return invoke("list_jdbc_maven_bundles");
 }
 
+export async function listJdbcLocalBundles(): Promise<JdbcLocalBundleInfo[]> {
+  return invoke("list_jdbc_local_bundles");
+}
+
 export async function importJdbcDrivers(paths: (string | File)[]): Promise<JdbcDriverInfo[]> {
   if (paths.some((path) => typeof path !== "string")) {
     throw new Error("Desktop JDBC driver import requires local file paths");
@@ -1144,6 +1157,10 @@ export async function deleteJdbcDriver(path: string): Promise<JdbcDriverInfo[]> 
 
 export async function deleteJdbcMavenBundle(bundleId: string): Promise<JdbcDriverInfo[]> {
   return invoke("delete_jdbc_maven_bundle", { bundleId });
+}
+
+export async function deleteJdbcLocalBundle(bundleId: string): Promise<JdbcDriverInfo[]> {
+  return invoke("delete_jdbc_local_bundle", { bundleId });
 }
 
 export async function jdbcPluginStatus(): Promise<JdbcPluginStatus> {

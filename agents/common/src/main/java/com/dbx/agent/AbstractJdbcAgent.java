@@ -104,8 +104,10 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
 
     @Override
     public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
+        Connection conn = requireConnected();
+        uncheckedVoid(() -> beforeQueryExecution(conn, options.getTimeoutSecs()));
         return JdbcExecutor.INSTANCE.execute(
-            requireConnected(),
+            conn,
             sql,
             schema,
             this::setSchemaSQL,
@@ -118,8 +120,10 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
 
     @Override
     public QueryPageResult executeQueryPage(String sql, String schema, QueryPageOptions options) {
+        Connection conn = requireConnected();
+        uncheckedVoid(() -> beforeQueryExecution(conn, options.getTimeoutSecs()));
         return JdbcExecutor.INSTANCE.executePage(
-            requireConnected(),
+            conn,
             sql,
             schema,
             this::setSchemaSQL,
@@ -140,8 +144,10 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
 
     @Override
     public QueryPageResult startTableRead(String sql, String schema, QueryPageOptions options) {
+        Connection conn = requireConnected();
+        uncheckedVoid(() -> beforeQueryExecution(conn, options.getTimeoutSecs()));
         return JdbcExecutor.INSTANCE.startTableRead(
-            requireConnected(),
+            conn,
             sql,
             schema,
             this::setSchemaSQL,
@@ -184,6 +190,9 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
     }
 
     protected void afterConnect(ConnectParams params, Connection connection) throws Exception {
+    }
+
+    protected void beforeQueryExecution(Connection connection, int timeoutSecs) throws Exception {
     }
 
     protected String getConfiguredDatabase() {

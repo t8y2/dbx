@@ -1214,21 +1214,21 @@ async function openData() {
   };
 
   if (existingSameTableTab && canActivateExistingDataTableTab(existingSameTableTab)) {
-    queryStore.activeTabId = existingSameTableTab.id;
+    queryStore.switchTab(existingSameTableTab.id);
     logPhase("existing-tab-activated", { table: node.label });
     return;
   }
 
   const tabId = (() => {
     if (existingSameTableTab) {
-      queryStore.activeTabId = existingSameTableTab.id;
+      queryStore.switchTab(existingSameTableTab.id);
       resetReusedDataTabState(existingSameTableTab);
       return existingSameTableTab.id;
     }
     if (settingsStore.editorSettings.reuseDataTab) {
       const existing = queryStore.tabs.find((tab) => tab.mode === "data" && tab.connectionId === node.connectionId && tab.database === node.database);
       if (existing) {
-        queryStore.activeTabId = existing.id;
+        queryStore.switchTab(existing.id);
         resetReusedDataTabState(existing);
         return existing.id;
       }

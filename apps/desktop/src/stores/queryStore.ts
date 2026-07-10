@@ -2258,6 +2258,12 @@ export const useQueryStore = defineStore("query", () => {
     options?: {
       resultBaseSql?: string;
       resultSortedSql?: string | undefined;
+      querySort?: {
+        resultColumns: string[];
+        columnIndex: number;
+        column: string;
+        direction: "asc" | "desc";
+      };
       pagination?: { limit: number; offset: number; sessionId?: string };
       mongoSafety?: MongoAggregateSafetyOptions;
       preserveResultDuringExecution?: boolean;
@@ -2307,6 +2313,7 @@ export const useQueryStore = defineStore("query", () => {
     });
     const queryBaseSql = options?.resultBaseSql ?? sql;
     let sqlToExecute = sql;
+    let resultSortedSql = options?.resultSortedSql;
     let queryMetadataSql = queryBaseSql;
     let hiddenPrimaryKeys: HiddenPrimaryKeyProjection[] = [];
     let pageSql: string | undefined;
@@ -2630,6 +2637,19 @@ export const useQueryStore = defineStore("query", () => {
         sqlToExecute = prepared.sql;
         queryMetadataSql = prepared.metadataSql;
         hiddenPrimaryKeys = prepared.hiddenPrimaryKeys;
+        if (options?.querySort) {
+          const sorted = await api.buildSortedQuerySql({
+            originalSql: sqlToExecute,
+            databaseType: effectiveDbType,
+            resultColumns: [...options.querySort.resultColumns, ...hiddenPrimaryKeys.map((projection) => projection.alias)],
+            columnIndex: options.querySort.columnIndex,
+            column: options.querySort.column,
+            direction: options.querySort.direction,
+          });
+          if (!sorted.ok || !sorted.sql) throw new Error("Unable to build sorted query SQL");
+          sqlToExecute = sorted.sql;
+          resultSortedSql = sorted.sql;
+        }
         const pagination = options?.pagination ?? { limit: settingsStore.editorSettings.pageSize, offset: 0 };
         const plan = await api.prepareQueryPaginationExecutionPlan({
           sql: sqlToExecute,
@@ -2726,7 +2746,7 @@ export const useQueryStore = defineStore("query", () => {
           current.result = results[0];
         }
         current.resultBaseSql = queryBaseSql;
-        current.resultSortedSql = options?.resultSortedSql;
+        current.resultSortedSql = resultSortedSql;
         current.resultPageSql = pageSql;
         current.resultPageLimit = pageLimit;
         current.resultPageOffset = pageOffset;
@@ -2812,7 +2832,7 @@ export const useQueryStore = defineStore("query", () => {
         current.mongoEditTarget = undefined;
         if (current.mode !== "data") current.tableMeta = undefined;
         current.resultBaseSql = queryBaseSql;
-        current.resultSortedSql = options?.resultSortedSql;
+        current.resultSortedSql = resultSortedSql;
         current.resultPageSql = pageSql;
         current.resultPageLimit = pageLimit;
         current.resultPageOffset = pageOffset;

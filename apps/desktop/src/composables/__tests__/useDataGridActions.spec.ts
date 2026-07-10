@@ -71,20 +71,17 @@ describe("useDataGridActions", () => {
 
     await actions.onSort("email", 2, "asc");
 
-    expect(mocks.buildSortedQuerySql).toHaveBeenCalledWith({
-      originalSql: "SELECT name, email FROM users",
-      databaseType: "postgres",
-      resultColumns: ["name", "email"],
-      columnIndex: 1,
-      column: "email",
-      direction: "asc",
-    });
     expect(mocks.executeTabSql).toHaveBeenCalledWith(
       "tab-1",
-      "SELECT sorted",
+      "SELECT name, email FROM users",
       expect.objectContaining({
         resultBaseSql: "SELECT name, email FROM users",
-        resultSortedSql: "SELECT sorted",
+        querySort: {
+          resultColumns: ["name", "email"],
+          columnIndex: 1,
+          column: "email",
+          direction: "asc",
+        },
       }),
     );
   });

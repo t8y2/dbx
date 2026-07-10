@@ -6,9 +6,11 @@ const analyzeEditableQueryEditability = vi.fn();
 const getColumns = vi.fn();
 const listIndexes = vi.fn();
 const getConnectionConfig = vi.fn();
+const buildSortedQuerySql = vi.fn();
 
 vi.mock("@/lib/backend/api", () => ({
   analyzeEditableQueryEditability,
+  buildSortedQuerySql,
   closeClientConnectionSession: vi.fn().mockResolvedValue(undefined),
   closeQuerySession: vi.fn().mockResolvedValue(undefined),
   executeMulti,
@@ -65,6 +67,7 @@ describe("queryStore hidden primary key editing", () => {
     ]);
     listIndexes.mockResolvedValue([]);
     analyzeEditableQueryEditability.mockImplementation(async (sql: string) => queryAnalysis(sql));
+    buildSortedQuerySql.mockImplementation(async (options) => ({ ok: true, sql: `${options.originalSql} ORDER BY ${options.column} ${options.direction.toUpperCase()}` }));
     executeMulti.mockResolvedValue([
       {
         columns: ["name", "__DBX_PK_0"],
@@ -89,6 +92,44 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.queryAnalysis).toBeDefined();
     expect(tab.queryAnalysis?.allowInsert).toBe(false);
     expect(tab.queryEditabilityReason).toBeUndefined();
+  });
+
+  it("keeps hidden primary keys and editability after database sorting", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+
+    await store.executeTabSql(tabId, "SELECT name FROM users", {
+      resultBaseSql: "SELECT name FROM users",
+      querySort: {
+        resultColumns: ["name"],
+        columnIndex: 0,
+        column: "name",
+        direction: "asc",
+      },
+    });
+
+    expect(buildSortedQuerySql).toHaveBeenCalledWith({
+      originalSql: "SELECT name, `id` AS `__DBX_PK_0` FROM users",
+      databaseType: "mysql",
+      resultColumns: ["name", "__DBX_PK_0"],
+      columnIndex: 0,
+      column: "name",
+      direction: "asc",
+    });
+    expect(executeMulti).toHaveBeenCalledWith(
+      "mysql-1",
+      "app",
+      "SELECT name, `id` AS `__DBX_PK_0` FROM users ORDER BY name ASC",
+      undefined,
+      expect.any(String),
+      expect.objectContaining({ timeoutSecs: 30 }),
+    );
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.result?.hidden_column_indexes).toEqual([1]);
+    expect(tab.resultSortedSql).toBe("SELECT name, `id` AS `__DBX_PK_0` FROM users ORDER BY name ASC");
+    await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["name", "id"]));
+    expect(tab.queryAnalysis).toBeDefined();
   });
 
   it("preserves the original query behavior when the primary key is already returned", async () => {

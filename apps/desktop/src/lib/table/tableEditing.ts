@@ -64,6 +64,13 @@ export function canEditExistingTableRows(databaseType: DatabaseType | undefined,
   return true;
 }
 
+export function hasCompleteTdengineRowIdentity(databaseType: DatabaseType | undefined, primaryKeys: readonly string[], resultColumns: readonly (string | undefined)[]): boolean {
+  if (databaseType !== "tdengine") return true;
+  if (primaryKeys.length === 0) return false;
+  const availableColumns = new Set(resultColumns.filter((column): column is string => !!column).map((column) => column.toLowerCase()));
+  return primaryKeys.every((primaryKey) => availableColumns.has(primaryKey.toLowerCase()));
+}
+
 export function hiveTablePropertiesIndicateTransactional(result: { rows: readonly (readonly unknown[])[] }): boolean {
   return result.rows.some((row) => {
     const name = String(row[0] ?? "")

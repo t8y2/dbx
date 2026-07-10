@@ -50,6 +50,8 @@ public final class TDengineAgent extends BaseDatabaseAgent {
         Pattern.compile("(?i)^(decimal|numeric)\\(\\d+,\\s*(\\d+)\\)");
     private static final Pattern CHARACTER_LENGTH_PATTERN =
         Pattern.compile("(?i)^(binary|nchar|varchar|varbinary)\\((\\d+)\\)");
+    private static final Pattern COMPOSITE_KEY_PATTERN =
+        Pattern.compile("(?i)\\bCOMPOSITE\\s+KEY\\b");
 
     private Connection connection;
 
@@ -232,7 +234,7 @@ public final class TDengineAgent extends BaseDatabaseAgent {
         return result;
     }
 
-    private static List<ColumnInfo> readDescribeColumns(ResultSet rs) throws Exception {
+    static List<ColumnInfo> readDescribeColumns(ResultSet rs) throws Exception {
         List<ColumnInfo> result = new ArrayList<>();
         int ordinal = 0;
         while (rs.next()) {
@@ -241,12 +243,13 @@ public final class TDengineAgent extends BaseDatabaseAgent {
             String dataType = coalesce(rs.getString(2));
             String note = optionalString(rs, 4);
             boolean isTag = note != null && note.toUpperCase(Locale.ROOT).contains("TAG");
+            boolean isPrimaryKey = !isTag && (ordinal == 1 || (note != null && COMPOSITE_KEY_PATTERN.matcher(note).find()));
             result.add(new ColumnInfo(
                 name,
                 dataType,
-                ordinal != 1,
+                !isPrimaryKey,
                 null,
-                ordinal == 1 && !isTag,
+                isPrimaryKey,
                 note,
                 isTag ? "TAG" : null,
                 parseNumericPrecision(dataType),

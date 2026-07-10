@@ -107,8 +107,10 @@ pub(super) fn validate_tdengine_inserted_rows(options: &DataGridSaveStatementOpt
     None
 }
 
-pub(super) fn validate_tdengine_deleted_rows(options: &DataGridSaveStatementOptions) -> Option<String> {
-    if options.database_type != Some(DatabaseType::Tdengine) || options.deleted_rows.is_empty() {
+pub(super) fn validate_tdengine_existing_rows(options: &DataGridSaveStatementOptions) -> Option<String> {
+    if options.database_type != Some(DatabaseType::Tdengine)
+        || (options.deleted_rows.is_empty() && options.dirty_rows.is_empty())
+    {
         return None;
     }
 
@@ -126,12 +128,24 @@ pub(super) fn validate_tdengine_deleted_rows(options: &DataGridSaveStatementOpti
         || primary_keys.is_empty()
         || primary_keys.iter().any(|primary_key| find_column_index(&save_columns, primary_key).is_none())
     {
-        return Some(tdengine_delete_identity_error());
+        return Some(tdengine_row_identity_error());
     }
 
-    for row_index in &options.deleted_rows {
-        let Some(row) = options.rows.get(*row_index) else {
-            return Some(tdengine_delete_identity_error());
+    if options.dirty_rows.iter().any(|(_, changes)| {
+        changes.iter().any(|(column_index, _)| {
+            save_columns.get(*column_index).and_then(Option::as_deref).is_some_and(|column| {
+                options.table_meta.primary_keys.iter().any(|primary_key| primary_key.eq_ignore_ascii_case(column))
+            })
+        })
+    }) {
+        return Some(tdengine_row_identity_readonly_error());
+    }
+
+    for row_index in
+        options.deleted_rows.iter().copied().chain(options.dirty_rows.iter().map(|(row_index, _)| *row_index))
+    {
+        let Some(row) = options.rows.get(row_index) else {
+            return Some(tdengine_row_identity_error());
         };
         if (requires_tbname && tdengine_tbname_value(&save_columns, row).is_none_or(|tbname| tbname.trim().is_empty()))
             || primary_keys.iter().any(|primary_key| {
@@ -140,7 +154,7 @@ pub(super) fn validate_tdengine_deleted_rows(options: &DataGridSaveStatementOpti
                     .is_none_or(Value::is_null)
             })
         {
-            return Some(tdengine_delete_identity_error());
+            return Some(tdengine_row_identity_error());
         }
     }
 
@@ -181,8 +195,12 @@ fn tdengine_row_primary_keys(options: &DataGridSaveStatementOptions) -> Vec<Stri
         .collect()
 }
 
-fn tdengine_delete_identity_error() -> String {
-    "TDengine row deletion requires the child table name (tbname) and primary timestamp value.".to_string()
+fn tdengine_row_identity_error() -> String {
+    "TDengine row editing requires all row identifier columns in the result.".to_string()
+}
+
+fn tdengine_row_identity_readonly_error() -> String {
+    "TDengine row identifier columns cannot be edited.".to_string()
 }
 
 fn tdengine_insert_identity_error() -> String {

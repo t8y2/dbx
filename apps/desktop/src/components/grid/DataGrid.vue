@@ -61,7 +61,7 @@ import {
   TableProperties,
   Database,
   Columns3,
-  PencilRuler,
+  Columns3Cog,
   Timer,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
@@ -8975,7 +8975,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             <DropdownMenu>
               <DropdownMenuTrigger as-child>
                 <Button variant="ghost" size="sm" :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '']">
-                  <PencilRuler class="data-grid-topbar-action-icon w-3 h-3" />
+                  <Columns3Cog class="data-grid-topbar-action-icon w-3 h-3" />
                   <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t("grid.columnWidth") }}</span>
                 </Button>
               </DropdownMenuTrigger>
@@ -10032,7 +10032,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 </Button>
               </div>
               <Button v-if="canOpenTableStructureEditor" variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs" :title="t('contextMenu.editStructure')" :aria-label="t('contextMenu.editStructure')" @click="openTableStructureEditor">
-                <PencilRuler class="w-3 h-3" />
+                <Columns3Cog class="w-3 h-3" />
                 <span class="table-info-action-label">{{ t("contextMenu.editStructure") }}</span>
               </Button>
               <Button variant="ghost" size="icon" class="h-5 w-5" @click="showTableInfo = false">

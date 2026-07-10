@@ -525,6 +525,10 @@ fn is_kimi_model(model: &str) -> bool {
     }
 }
 
+fn should_send_extra_body_thinking_toggle(config: &AiConfig) -> bool {
+    !config.enable_thinking && !matches!(config.provider, AiProvider::Ollama) && !is_kimi_model(&config.model)
+}
+
 fn responses_text(data: &serde_json::Value) -> String {
     if let Some(text) = data["output_text"].as_str().filter(|text| !text.is_empty()) {
         return text.to_string();
@@ -904,7 +908,7 @@ pub async fn call_openai_compatible(client: &reqwest::Client, request: AiComplet
         "messages": messages,
     });
     set_chat_completion_token_limit(&mut body_obj, &request.config, request.max_tokens.unwrap_or(2048));
-    if !request.config.enable_thinking && !is_kimi_model(&request.config.model) {
+    if should_send_extra_body_thinking_toggle(&request.config) {
         body_obj["extra_body"] = json!({
             "chat_template_kwargs": { "enable_thinking": false }
         });
@@ -1162,7 +1166,7 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
                 set_chat_completion_token_limit(&mut body, config, 16);
                 body
             };
-            if config.api_style != AiApiStyle::Responses && !config.enable_thinking && !is_kimi_model(&config.model) {
+            if config.api_style != AiApiStyle::Responses && should_send_extra_body_thinking_toggle(config) {
                 body_obj["extra_body"] = json!({
                     "chat_template_kwargs": { "enable_thinking": false }
                 });
@@ -1417,7 +1421,7 @@ async fn stream_openai(
         "stream": true,
     });
     set_chat_completion_token_limit(&mut body_obj, &request.config, request.max_tokens.unwrap_or(2048));
-    if !request.config.enable_thinking && !is_kimi_model(&request.config.model) {
+    if should_send_extra_body_thinking_toggle(&request.config) {
         body_obj["extra_body"] = json!({
             "chat_template_kwargs": { "enable_thinking": false }
         });
@@ -2470,10 +2474,10 @@ mod tests {
         drain_next_stream_line, emit_responses_function_call_item, gemini_text, is_kimi_model, openai_response_text,
         openai_stream_reasoning, openai_stream_text, parse_model_list_response, resolve_endpoint,
         resolve_model_list_endpoint, responses_function_tool, responses_max_output_tokens, responses_stream_text,
-        responses_text, responses_token_usage, set_chat_completion_token_limit, stream_data_payload,
-        uses_anthropic_messages_api, validate_config, AiApiStyle, AiAuthMethod, AiConfig, AiMessage, AiModelInfo,
-        AiProvider, AiReasoningLevel, StreamToolEvent, StreamingToolCallAccumulator, ToolCallRef, AUTHORIZATION,
-        CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
+        responses_text, responses_token_usage, set_chat_completion_token_limit, should_send_extra_body_thinking_toggle,
+        stream_data_payload, uses_anthropic_messages_api, validate_config, AiApiStyle, AiAuthMethod, AiConfig,
+        AiMessage, AiModelInfo, AiProvider, AiReasoningLevel, StreamToolEvent, StreamingToolCallAccumulator,
+        ToolCallRef, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
     };
 
     /// Reproduce the "Unknown tool:" bug: some OpenAI-compatible providers
@@ -3176,6 +3180,27 @@ mod tests {
         }
 
         assert!(body.get("extra_body").is_none());
+    }
+
+    #[test]
+    fn omits_extra_body_thinking_toggle_for_ollama() {
+        let config = AiConfig {
+            provider: AiProvider::Ollama,
+            api_key: String::new(),
+            auth_method: AiAuthMethod::Bearer,
+            endpoint: "http://localhost:11434/v1".to_string(),
+            model: "deepseek-r1:14b".to_string(),
+            api_style: AiApiStyle::Completions,
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            enable_thinking: false,
+            reasoning_level: AiReasoningLevel::Default,
+            context_window: None,
+            codex_cli_path: None,
+            codex_cli_env: Default::default(),
+        };
+
+        assert!(!should_send_extra_body_thinking_toggle(&config));
     }
 
     #[test]

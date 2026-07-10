@@ -2827,6 +2827,7 @@ onMounted(async () => {
       rectangularSelection({ eventFilter: (e: MouseEvent) => e.altKey || e.button === 1 }),
       EditorView.updateListener.of((update) => {
         if (update.docChanged) {
+          searchPanelRef.value?.scheduleDocumentSearchUpdate();
           if (isEditorComposing(update.view)) {
             pendingImeModelEmit = true;
             completionEpoch++;

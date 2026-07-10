@@ -824,6 +824,42 @@ test("removing the active result run selects an adjacent run", async () => {
   assert.deepEqual(tab.result?.columns, ["one"]);
 });
 
+test("removing the active result run clears output when remaining caches are unavailable", async () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const tabId = store.createTab("conn-1", "db");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+
+  tab.resultRuns = [
+    {
+      id: "run-1",
+      title: "Run 1",
+      sequence: 1,
+      sql: "select 1",
+      createdAt: 1,
+      result: { columns: ["one"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 },
+    },
+    {
+      id: "run-2",
+      title: "Run 2",
+      sequence: 2,
+      sql: "select 2",
+      createdAt: 2,
+      resultCacheKey: `missing-result-run-${Date.now()}`,
+      resultCacheState: "disk",
+      resultEvicted: true,
+    },
+  ];
+  await store.setActiveResultRun(tabId, "run-1");
+
+  assert.equal(await store.removeResultRun(tabId, "run-1"), true);
+  assert.equal(tab.activeResultRunId, undefined);
+  assert.equal(tab.result, undefined);
+  assert.equal(tab.results, undefined);
+  assert.deepEqual(tab.resultRuns?.map((run) => run.id), ["run-2"]);
+});
+
 test("removed result runs are excluded from result archives", async () => {
   setActivePinia(createPinia());
   const store = useQueryStore();

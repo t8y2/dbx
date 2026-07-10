@@ -500,10 +500,11 @@ export const useQueryStore = defineStore("query", () => {
 
     if (!wasActive) return true;
 
-    const nextRun = remainingRuns[Math.min(runIndex, remainingRuns.length - 1)];
-    if (nextRun) {
-      await setActiveResultRun(id, nextRun.id);
-      return true;
+    const adjacentIndex = Math.min(runIndex, remainingRuns.length - 1);
+    for (let offset = 0; offset < remainingRuns.length; offset += 1) {
+      const candidate = remainingRuns[(adjacentIndex + offset) % remainingRuns.length];
+      // Disk-backed runs may have missing or unreadable snapshots; keep searching before clearing output.
+      if (candidate && (await setActiveResultRun(id, candidate.id))) return true;
     }
 
     tab.activeResultRunId = undefined;

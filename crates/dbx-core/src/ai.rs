@@ -34,6 +34,14 @@ pub async fn unregister_stream(session_id: &str) {
     AI_STREAMS.write().await.remove(session_id);
 }
 
+/// Error returned by streaming functions when the user cancels mid-stream.
+///
+/// `run_agent_loop` matches on this exact string to distinguish a cancellation
+/// from a normal completion and stop the loop cleanly. Streaming functions MUST
+/// return this (not `Ok`) when `cancelled` fires, otherwise the agent loop
+/// treats the truncated turn as a normal completion and keeps going.
+pub const AGENT_CANCELLED_ERROR: &str = "Agent loop cancelled";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -193,6 +201,8 @@ pub struct AiStreamChunk {
 pub struct AiChatMessage {
     pub role: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mentions: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1907,7 +1917,9 @@ async fn stream_claude_with_tools(
 
                 if finished { break; }
             }
-            _ = cancelled.notified() => { break; }
+            _ = cancelled.notified() => {
+                return Err(AGENT_CANCELLED_ERROR.to_string());
+            }
         }
     }
 
@@ -1963,6 +1975,11 @@ async fn stream_openai_with_tools(
         "stream_options": { "include_usage": true },
     });
     set_chat_completion_token_limit(&mut body, &request.config, request.max_tokens.unwrap_or(4096));
+
+    // DeepSeek API requires {"thinking": {"type": "disabled"}} to disable thinking
+    if !request.config.enable_thinking && matches!(request.config.provider, AiProvider::Deepseek) {
+        body["thinking"] = json!({ "type": "disabled" });
+    }
 
     let res = client
         .post(resolve_endpoint(&request.config))
@@ -2047,7 +2064,9 @@ async fn stream_openai_with_tools(
 
                 if finished { break; }
             }
-            _ = cancelled.notified() => { break; }
+            _ = cancelled.notified() => {
+                return Err(AGENT_CANCELLED_ERROR.to_string());
+            }
         }
     }
 
@@ -2173,7 +2192,9 @@ async fn stream_responses_with_tools(
 
                 if finished { break; }
             }
-            _ = cancelled.notified() => { break; }
+            _ = cancelled.notified() => {
+                return Err(AGENT_CANCELLED_ERROR.to_string());
+            }
         }
     }
 
@@ -2319,7 +2340,9 @@ async fn stream_gemini_with_tools(
                     }
                 }
             }
-            _ = cancelled.notified() => { break; }
+            _ = cancelled.notified() => {
+                return Err(AGENT_CANCELLED_ERROR.to_string());
+            }
         }
     }
 

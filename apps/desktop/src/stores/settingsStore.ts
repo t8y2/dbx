@@ -12,6 +12,7 @@ import { DEFAULT_SQL_SNIPPETS } from "@/lib/sql/sqlCompletion";
 import { setDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS, normalizeTableColumnTemplateFields } from "@/lib/table/tableColumnTemplates";
 import { DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
+import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
 
 export type AiProvider = "claude" | "openai" | "gemini" | "deepseek" | "qwen" | "ollama" | "openai-compatible" | "codex-cli" | "custom";
 export type AiApiStyle = "completions" | "responses" | "anthropic-messages";
@@ -48,6 +49,8 @@ export interface DesktopSettings {
   quit_on_close: boolean;
   close_action_prompted: boolean;
   debug_logging_enabled: boolean;
+  duckdb_worker_process_isolation: boolean;
+  duckdb_worker_max_processes: number;
   saved_sql_sync_dir?: string | null;
   driver_store_dir?: string | null;
   plugin_store_dir?: string | null;
@@ -64,6 +67,9 @@ export type SqlSemanticDiagnosticsMode = "auto" | "enabled" | "disabled";
 export type OpenTabsRestoreMode = "all" | "pinned" | "none";
 
 export const DEFAULT_SIDEBAR_TABLE_PAGE_SIZE = 1000;
+export const DUCKDB_WORKER_MAX_PROCESSES_MIN = 1;
+export const DUCKDB_WORKER_MAX_PROCESSES_MAX = 16;
+export const DUCKDB_WORKER_MAX_PROCESSES_DEFAULT = 4;
 const SQL_SEMANTIC_DIAGNOSTICS_AUTO_ENABLED = false;
 
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
@@ -72,6 +78,8 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   quit_on_close: false,
   close_action_prompted: false,
   debug_logging_enabled: false,
+  duckdb_worker_process_isolation: false,
+  duckdb_worker_max_processes: DUCKDB_WORKER_MAX_PROCESSES_DEFAULT,
   saved_sql_sync_dir: null,
   driver_store_dir: null,
   plugin_store_dir: null,
@@ -79,7 +87,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   sidebar_table_page_size: DEFAULT_SIDEBAR_TABLE_PAGE_SIZE,
 };
 
-function normalizeDesktopSettings(settings: Partial<DesktopSettings> | null | undefined): DesktopSettings {
+export function normalizeDesktopSettings(settings: Partial<DesktopSettings> | null | undefined): DesktopSettings {
   const iconTheme = settings?.icon_theme === "black" ? "black" : DEFAULT_DESKTOP_SETTINGS.icon_theme;
   const sidebarTablePageSize = typeof settings?.sidebar_table_page_size === "number" && settings.sidebar_table_page_size > 0 ? settings.sidebar_table_page_size : DEFAULT_DESKTOP_SETTINGS.sidebar_table_page_size;
   return {
@@ -88,12 +96,19 @@ function normalizeDesktopSettings(settings: Partial<DesktopSettings> | null | un
     quit_on_close: settings?.quit_on_close ?? DEFAULT_DESKTOP_SETTINGS.quit_on_close,
     close_action_prompted: settings?.close_action_prompted ?? DEFAULT_DESKTOP_SETTINGS.close_action_prompted,
     debug_logging_enabled: settings?.debug_logging_enabled ?? DEFAULT_DESKTOP_SETTINGS.debug_logging_enabled,
+    duckdb_worker_process_isolation: settings?.duckdb_worker_process_isolation ?? DEFAULT_DESKTOP_SETTINGS.duckdb_worker_process_isolation,
+    duckdb_worker_max_processes: normalizeDuckDbWorkerMaxProcesses(settings?.duckdb_worker_max_processes),
     saved_sql_sync_dir: settings?.saved_sql_sync_dir?.trim() || DEFAULT_DESKTOP_SETTINGS.saved_sql_sync_dir,
     driver_store_dir: settings?.driver_store_dir?.trim() || DEFAULT_DESKTOP_SETTINGS.driver_store_dir,
     plugin_store_dir: settings?.plugin_store_dir?.trim() || DEFAULT_DESKTOP_SETTINGS.plugin_store_dir,
     agent_store_dir: settings?.agent_store_dir?.trim() || DEFAULT_DESKTOP_SETTINGS.agent_store_dir,
     sidebar_table_page_size: sidebarTablePageSize,
   };
+}
+
+export function normalizeDuckDbWorkerMaxProcesses(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DUCKDB_WORKER_MAX_PROCESSES_DEFAULT;
+  return Math.min(DUCKDB_WORKER_MAX_PROCESSES_MAX, Math.max(DUCKDB_WORKER_MAX_PROCESSES_MIN, Math.round(value)));
 }
 
 export interface AiProviderPreset extends Omit<AiConfig, "apiKey"> {
@@ -249,7 +264,27 @@ function inferAiProviderFromConfig(config: Partial<AiConfig> | null | undefined)
   return "claude";
 }
 
-export type EditorTheme = "app" | "one-dark" | "vscode-dark" | "vscode-light" | "nord" | "okaidia" | "material" | "duotone-light" | "duotone-dark" | "xcode" | "custom";
+export type EditorTheme =
+  | "app"
+  | "one-dark"
+  | "vscode-dark"
+  | "vscode-light"
+  | "nord"
+  | "okaidia"
+  | "material"
+  | "duotone-light"
+  | "duotone-dark"
+  | "xcode"
+  | "xcode-dark"
+  | "idea-light"
+  | "idea-dark"
+  | "jetbrains-light"
+  | "jetbrains-dark"
+  | "cursor-light"
+  | "cursor-dark"
+  | "claude-light"
+  | "claude-dark"
+  | "custom";
 
 const STRUCTURE_EDITOR_DENSITIES = ["compact", "standard", "comfortable"] as const;
 export type StructureEditorDensity = (typeof STRUCTURE_EDITOR_DENSITIES)[number];
@@ -259,7 +294,7 @@ const DATA_GRID_RENDER_MODES = ["dom", "canvas"] as const;
 export type DataGridRenderMode = (typeof DATA_GRID_RENDER_MODES)[number];
 const DATA_GRID_SEARCH_MODES = ["filter", "highlight"] as const;
 export type DataGridSearchMode = (typeof DATA_GRID_SEARCH_MODES)[number];
-export const TABLE_FONT_SIZE_MIN = 12;
+export const TABLE_FONT_SIZE_MIN = 8;
 export const TABLE_FONT_SIZE_MAX = 16;
 export const TABLE_FONT_SIZE_DEFAULT = 13;
 const DISCONNECT_TAB_HANDLING_MODES = ["close-tabs", "keep-tabs-clear-results", "keep-tabs-keep-results"] as const;
@@ -335,9 +370,12 @@ export interface EditorSettings {
   activeCustomThemeId: string;
   executeMode: "all" | "current";
   showExecutionTargetPicker: boolean;
+  showStatementRunButtons: boolean;
+  showCurrentStatementFrame: boolean;
   autoAliasTables: boolean;
   wordWrap: boolean;
   vimModeEnabled: boolean;
+  autoCloseBrackets: boolean;
   sqlSemanticDiagnosticsMode: SqlSemanticDiagnosticsMode;
   sqlSemanticDiagnosticsEnabled: boolean;
   confirmDangerousSqlExecution: boolean;
@@ -364,6 +402,7 @@ export interface EditorSettings {
   sqlFormatter: SqlFormatterSettings;
   sidebarActivation: SidebarActivation;
   sidebarObjectDisplay: "grouped" | "simple";
+  sidebarTableSearchEnabled: boolean;
   autoSelectActiveSidebarNode: boolean;
   openTabsRestoreMode: OpenTabsRestoreMode;
   disconnectTabHandlingMode: DisconnectTabHandlingMode;
@@ -382,6 +421,8 @@ export interface EditorSettings {
   queryExportKeysetOptimizationEnabled: boolean;
   updateDownloadSource: UpdateDownloadSource;
   toolbarItems: ToolbarItems;
+  objectBrowserShowCheckbox: boolean;
+  objectBrowserViewMode: "list" | "grid";
 }
 
 export interface ToolbarItems {
@@ -392,6 +433,7 @@ export interface ToolbarItems {
   dataCompare: boolean;
   checkUpdates: boolean;
   sqlLibrary: boolean;
+  sqlFileTree: boolean;
   history: boolean;
   ai: boolean;
   theme: boolean;
@@ -406,6 +448,7 @@ export const DEFAULT_TOOLBAR_ITEMS: ToolbarItems = {
   dataCompare: true,
   checkUpdates: true,
   sqlLibrary: true,
+  sqlFileTree: true,
   history: true,
   ai: true,
   theme: true,
@@ -423,15 +466,24 @@ export const EDITOR_THEMES: { value: EditorTheme; label: string; dark: boolean }
   { value: "duotone-light", label: "Duotone Light", dark: false },
   { value: "duotone-dark", label: "Duotone Dark", dark: true },
   { value: "xcode", label: "Xcode", dark: false },
+  { value: "xcode-dark", label: "Xcode Dark", dark: true },
+  { value: "idea-light", label: "IDEA Light", dark: false },
+  { value: "idea-dark", label: "IDEA Darcula", dark: true },
+  { value: "jetbrains-light", label: "JetBrains Light", dark: false },
+  { value: "jetbrains-dark", label: "JetBrains Dark", dark: true },
+  { value: "cursor-light", label: "Cursor Light", dark: false },
+  { value: "cursor-dark", label: "Cursor Dark", dark: true },
+  { value: "claude-light", label: "Claude Code Light", dark: false },
+  { value: "claude-dark", label: "Claude Code Dark", dark: true },
   { value: "custom", label: "Custom", dark: true },
 ];
 
 const EDITOR_THEME_VALUES = new Set<EditorTheme>(EDITOR_THEMES.map((theme) => theme.value));
 
 export const FONT_FAMILIES: { value: string; label: string }[] = [
+  { value: "'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', monospace", label: "Fira Code" },
   { value: "'JetBrains Mono', 'Fira Code', monospace", label: "JetBrains Mono" },
-  { value: "'Fira Code', monospace", label: "Fira Code" },
-  { value: "'Cascadia Code', monospace", label: "Cascadia Code" },
+  { value: "'Cascadia Code', 'Cascadia Mono', monospace", label: "Cascadia Code" },
   { value: "'Source Code Pro', monospace", label: "Source Code Pro" },
   { value: "'SF Mono', 'Menlo', monospace", label: "SF Mono / Menlo" },
   { value: "'Consolas', 'Courier New', monospace", label: "Consolas" },
@@ -439,7 +491,7 @@ export const FONT_FAMILIES: { value: string; label: string }[] = [
 ];
 
 export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
-  fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+  fontFamily: "'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', monospace",
   fontSize: 13,
   uiFontFamily: DEFAULT_UI_FONT_FAMILY,
   uiScale: 1,
@@ -449,9 +501,12 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   activeCustomThemeId: "default",
   executeMode: "all",
   showExecutionTargetPicker: false,
+  showStatementRunButtons: true,
+  showCurrentStatementFrame: true,
   autoAliasTables: true,
   wordWrap: false,
   vimModeEnabled: false,
+  autoCloseBrackets: true,
   sqlSemanticDiagnosticsMode: "auto",
   sqlSemanticDiagnosticsEnabled: SQL_SEMANTIC_DIAGNOSTICS_AUTO_ENABLED,
   confirmDangerousSqlExecution: true,
@@ -478,6 +533,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sqlFormatter: normalizeSqlFormatterSettings(DEFAULT_SQL_FORMATTER_SETTINGS),
   sidebarActivation: "single",
   sidebarObjectDisplay: "grouped",
+  sidebarTableSearchEnabled: false,
   autoSelectActiveSidebarNode: false,
   openTabsRestoreMode: "all",
   disconnectTabHandlingMode: "close-tabs",
@@ -496,6 +552,8 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   queryExportKeysetOptimizationEnabled: true,
   updateDownloadSource: "official",
   toolbarItems: { ...DEFAULT_TOOLBAR_ITEMS },
+  objectBrowserShowCheckbox: false,
+  objectBrowserViewMode: "list",
 };
 
 export const STORAGE_KEY = "dbx-editor-settings";
@@ -608,7 +666,8 @@ function normalizeSqlSnippets(value: unknown, existing?: SqlSnippet[]): SqlSnipp
     }
     if (seenPrefixes.has(item.prefix)) continue;
     seenPrefixes.add(item.prefix);
-    valid.push({ id: item.id, label: item.label, prefix: item.prefix, body: item.body });
+    // Older settings do not have this field; only an explicit false disables a snippet.
+    valid.push({ id: item.id, label: item.label, prefix: item.prefix, body: item.body, enabled: item.enabled !== false });
   }
   if (valid.length === 0) return existing ?? DEFAULT_SQL_SNIPPETS;
   return valid;
@@ -625,6 +684,7 @@ function normalizeToolbarItems(items: Partial<ToolbarItems> | undefined): Toolba
     dataCompare: items.dataCompare ?? defaults.dataCompare,
     checkUpdates: items.checkUpdates ?? defaults.checkUpdates,
     sqlLibrary: items.sqlLibrary ?? defaults.sqlLibrary,
+    sqlFileTree: items.sqlFileTree ?? defaults.sqlFileTree,
     history: items.history ?? defaults.history,
     ai: items.ai ?? defaults.ai,
     theme: items.theme ?? defaults.theme,
@@ -669,9 +729,12 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     activeCustomThemeId: settings.activeCustomThemeId ?? "default",
     executeMode: settings.executeMode ?? DEFAULT_EDITOR_SETTINGS.executeMode,
     showExecutionTargetPicker: settings.showExecutionTargetPicker ?? DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker,
+    showStatementRunButtons: typeof settings.showStatementRunButtons === "boolean" ? settings.showStatementRunButtons : DEFAULT_EDITOR_SETTINGS.showStatementRunButtons,
+    showCurrentStatementFrame: typeof settings.showCurrentStatementFrame === "boolean" ? settings.showCurrentStatementFrame : DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame,
     autoAliasTables: settings.autoAliasTables ?? DEFAULT_EDITOR_SETTINGS.autoAliasTables,
     wordWrap: settings.wordWrap ?? DEFAULT_EDITOR_SETTINGS.wordWrap,
     vimModeEnabled: typeof settings.vimModeEnabled === "boolean" ? settings.vimModeEnabled : DEFAULT_EDITOR_SETTINGS.vimModeEnabled,
+    autoCloseBrackets: typeof settings.autoCloseBrackets === "boolean" ? settings.autoCloseBrackets : DEFAULT_EDITOR_SETTINGS.autoCloseBrackets,
     sqlSemanticDiagnosticsMode,
     sqlSemanticDiagnosticsEnabled: sqlSemanticDiagnosticsEnabledForMode(sqlSemanticDiagnosticsMode),
     confirmDangerousSqlExecution: settings.confirmDangerousSqlExecution ?? DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution,
@@ -698,6 +761,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sqlFormatter: normalizeSqlFormatterSettings(settings.sqlFormatter),
     sidebarActivation: settings.sidebarActivation === "single" || settings.sidebarActivation === "double" ? settings.sidebarActivation : DEFAULT_EDITOR_SETTINGS.sidebarActivation,
     sidebarObjectDisplay: settings.sidebarObjectDisplay === "simple" || settings.sidebarObjectDisplay === "grouped" ? settings.sidebarObjectDisplay : DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay,
+    sidebarTableSearchEnabled: typeof settings.sidebarTableSearchEnabled === "boolean" ? settings.sidebarTableSearchEnabled : DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled,
     autoSelectActiveSidebarNode: settings.autoSelectActiveSidebarNode ?? DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode,
     openTabsRestoreMode: normalizeOpenTabsRestoreMode((settings as Partial<EditorSettings>).openTabsRestoreMode, (settings as Partial<EditorSettings> & { restoreOpenTabsOnLaunch?: boolean }).restoreOpenTabsOnLaunch),
     disconnectTabHandlingMode: normalizeDisconnectTabHandlingMode((settings as Partial<EditorSettings>).disconnectTabHandlingMode, (settings as Partial<EditorSettings> & { closeQueryTabsOnDisconnect?: boolean }).closeQueryTabsOnDisconnect),
@@ -716,49 +780,39 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     queryExportKeysetOptimizationEnabled: typeof settings.queryExportKeysetOptimizationEnabled === "boolean" ? settings.queryExportKeysetOptimizationEnabled : DEFAULT_EDITOR_SETTINGS.queryExportKeysetOptimizationEnabled,
     updateDownloadSource: normalizeUpdateDownloadSource(settings.updateDownloadSource),
     toolbarItems: normalizeToolbarItems(settings.toolbarItems),
+    objectBrowserShowCheckbox: typeof settings.objectBrowserShowCheckbox === "boolean" ? settings.objectBrowserShowCheckbox : DEFAULT_EDITOR_SETTINGS.objectBrowserShowCheckbox,
+    objectBrowserViewMode: settings.objectBrowserViewMode === "grid" ? "grid" : DEFAULT_EDITOR_SETTINGS.objectBrowserViewMode,
   };
 }
 
-function loadEditorSettings(): EditorSettings {
-  // Try new format first
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
+function loadLegacyEditorSettings(): EditorSettings | null {
+  const raw = safeLocalStorageGet(STORAGE_KEY);
+  if (raw) {
+    try {
       const parsed = JSON.parse(raw) as Partial<EditorSettings>;
-      if (parsed.exportBatchSize === LEGACY_DEFAULT_EXPORT_BATCH_SIZE && localStorage.getItem(EXPORT_BATCH_SIZE_DEFAULT_MIGRATION_KEY) !== "1") {
+      if (parsed.exportBatchSize === LEGACY_DEFAULT_EXPORT_BATCH_SIZE && safeLocalStorageGet(EXPORT_BATCH_SIZE_DEFAULT_MIGRATION_KEY) !== "1") {
         parsed.exportBatchSize = DEFAULT_EDITOR_SETTINGS.exportBatchSize;
-        localStorage.setItem(EXPORT_BATCH_SIZE_DEFAULT_MIGRATION_KEY, "1");
-        const migrated = normalizeEditorSettings(parsed);
-        saveEditorSettings(migrated);
-        return migrated;
       }
       return normalizeEditorSettings(parsed);
+    } catch {
+      return null;
     }
-  } catch {
-    /* ignore */
   }
 
-  // Migrate old font-size key if new settings don't exist
-  try {
-    const oldSize = localStorage.getItem(OLD_FONT_SIZE_KEY);
-    if (oldSize) {
-      const parsed = parseInt(oldSize, 10);
-      if (!isNaN(parsed)) {
-        const migrated = normalizeEditorSettings({ fontSize: parsed });
-        saveEditorSettings(migrated);
-        localStorage.removeItem(OLD_FONT_SIZE_KEY);
-        return migrated;
-      }
-    }
-  } catch {
-    /* ignore */
-  }
+  const oldSize = safeLocalStorageGet(OLD_FONT_SIZE_KEY);
+  if (!oldSize) return null;
+  const parsed = parseInt(oldSize, 10);
+  return Number.isNaN(parsed) ? null : normalizeEditorSettings({ fontSize: parsed });
+}
 
-  return normalizeEditorSettings({});
+function clearLegacyEditorSettings() {
+  safeLocalStorageRemove(STORAGE_KEY);
+  safeLocalStorageRemove(OLD_FONT_SIZE_KEY);
+  safeLocalStorageRemove(EXPORT_BATCH_SIZE_DEFAULT_MIGRATION_KEY);
 }
 
 function saveEditorSettings(settings: EditorSettings) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+  void api.saveEditorSettings(settings).catch(() => {});
 }
 
 export const useSettingsStore = defineStore("settings", () => {
@@ -767,8 +821,33 @@ export const useSettingsStore = defineStore("settings", () => {
   const aiProviderConfigs = ref<Partial<Record<AiProvider, AiConfig>>>({});
   const desktopSettings = ref<DesktopSettings>({ ...DEFAULT_DESKTOP_SETTINGS });
   const isDesktopSettingsLoaded = ref(false);
+  const isEditorSettingsLoaded = ref(false);
 
-  const editorSettings = ref<EditorSettings>(loadEditorSettings());
+  const editorSettings = ref<EditorSettings>(normalizeEditorSettings({}));
+
+  async function initEditorSettings() {
+    if (isEditorSettingsLoaded.value) return;
+    const saved = await api.loadEditorSettings().catch(() => null);
+    if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+      editorSettings.value = normalizeEditorSettings(saved as Partial<EditorSettings>);
+      isEditorSettingsLoaded.value = true;
+      return;
+    }
+
+    const legacy = loadLegacyEditorSettings();
+    if (legacy) {
+      editorSettings.value = legacy;
+      try {
+        await api.saveEditorSettings(legacy);
+        // Existing desktop users keep settings in localStorage; remove them only
+        // after the async store has accepted the migrated value.
+        clearLegacyEditorSettings();
+      } catch {
+        /* keep legacy values for a later migration attempt */
+      }
+    }
+    isEditorSettingsLoaded.value = true;
+  }
 
   async function initDesktopSettings() {
     if (isDesktopSettingsLoaded.value) return;
@@ -888,9 +967,12 @@ export const useSettingsStore = defineStore("settings", () => {
     }
     if (partial.executeMode !== undefined) editorSettings.value.executeMode = partial.executeMode;
     if (partial.showExecutionTargetPicker !== undefined) editorSettings.value.showExecutionTargetPicker = partial.showExecutionTargetPicker;
+    if (partial.showStatementRunButtons !== undefined) editorSettings.value.showStatementRunButtons = partial.showStatementRunButtons === true;
+    if (partial.showCurrentStatementFrame !== undefined) editorSettings.value.showCurrentStatementFrame = partial.showCurrentStatementFrame === true;
     if (partial.autoAliasTables !== undefined) editorSettings.value.autoAliasTables = partial.autoAliasTables;
     if (partial.wordWrap !== undefined) editorSettings.value.wordWrap = partial.wordWrap;
     if (partial.vimModeEnabled !== undefined) editorSettings.value.vimModeEnabled = partial.vimModeEnabled === true;
+    if (partial.autoCloseBrackets !== undefined) editorSettings.value.autoCloseBrackets = partial.autoCloseBrackets === true;
     if (partial.sqlSemanticDiagnosticsMode !== undefined || partial.sqlSemanticDiagnosticsEnabled !== undefined) {
       const nextMode = normalizeSqlSemanticDiagnosticsMode(partial.sqlSemanticDiagnosticsMode, partial.sqlSemanticDiagnosticsEnabled);
       editorSettings.value.sqlSemanticDiagnosticsMode = nextMode;
@@ -921,6 +1003,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sqlFormatter !== undefined) editorSettings.value.sqlFormatter = normalizeSqlFormatterSettings(partial.sqlFormatter);
     if (partial.sidebarActivation !== undefined) editorSettings.value.sidebarActivation = partial.sidebarActivation;
     if (partial.sidebarObjectDisplay !== undefined) editorSettings.value.sidebarObjectDisplay = partial.sidebarObjectDisplay;
+    if (partial.sidebarTableSearchEnabled !== undefined) editorSettings.value.sidebarTableSearchEnabled = partial.sidebarTableSearchEnabled;
     if (partial.autoSelectActiveSidebarNode !== undefined) editorSettings.value.autoSelectActiveSidebarNode = partial.autoSelectActiveSidebarNode;
     if (partial.openTabsRestoreMode !== undefined) editorSettings.value.openTabsRestoreMode = normalizeOpenTabsRestoreMode(partial.openTabsRestoreMode);
     if (partial.disconnectTabHandlingMode !== undefined) editorSettings.value.disconnectTabHandlingMode = normalizeDisconnectTabHandlingMode(partial.disconnectTabHandlingMode);
@@ -939,6 +1022,8 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.queryExportKeysetOptimizationEnabled !== undefined) editorSettings.value.queryExportKeysetOptimizationEnabled = partial.queryExportKeysetOptimizationEnabled;
     if (partial.updateDownloadSource !== undefined) editorSettings.value.updateDownloadSource = normalizeUpdateDownloadSource(partial.updateDownloadSource);
     if (partial.toolbarItems !== undefined) editorSettings.value.toolbarItems = normalizeToolbarItems(partial.toolbarItems);
+    if (partial.objectBrowserShowCheckbox !== undefined) editorSettings.value.objectBrowserShowCheckbox = partial.objectBrowserShowCheckbox === true;
+    if (partial.objectBrowserViewMode !== undefined) editorSettings.value.objectBrowserViewMode = partial.objectBrowserViewMode === "grid" ? "grid" : "list";
     saveEditorSettings(editorSettings.value);
   }
 
@@ -984,8 +1069,10 @@ export const useSettingsStore = defineStore("settings", () => {
     updateAiConfig,
     isConfigured,
     isAiProviderConfigured,
+    isEditorSettingsLoaded,
     editorSettings,
     desktopSettings,
+    initEditorSettings,
     updateEditorSettings,
     initDesktopSettings,
     updateDesktopSettings,

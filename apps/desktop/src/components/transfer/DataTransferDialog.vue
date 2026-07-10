@@ -55,6 +55,11 @@ const transferMode = ref<TransferMode>("append");
 const targetTableNameCase = ref<TransferTableNameCase>("preserve");
 const batchSize = ref(1000);
 const isSubmitting = ref(false);
+const ownershipDialogOpen = ref(false);
+const ownershipMissingOwners = ref<string[]>([]);
+const ownershipTargetOwner = ref("");
+const pendingOwnershipRequest = ref<api.TransferRequest | null>(null);
+const pendingOwnershipRefresh = ref<{ targetConnection: string; targetDatabase: string; targetSchema: string; shouldRefreshTargetTree: boolean } | null>(null);
 
 const filteredTables = computed(() => {
   const q = tableSearch.value.toLowerCase();
@@ -247,6 +252,11 @@ function resetState() {
   targetTableNameCase.value = "preserve";
   batchSize.value = 1000;
   isSubmitting.value = false;
+  ownershipDialogOpen.value = false;
+  ownershipMissingOwners.value = [];
+  ownershipTargetOwner.value = "";
+  pendingOwnershipRequest.value = null;
+  pendingOwnershipRefresh.value = null;
 }
 
 async function startTransfer() {
@@ -272,10 +282,39 @@ async function startTransfer() {
     createTable: createTable.value,
     mode: transferMode.value,
     targetTableNameCase: targetTableNameCase.value,
+    ownershipPolicy: "preserve",
     batchSize: batchSize.value,
   };
 
-  startDataTransferTask(request, `${sourceDatabaseName} → ${targetDatabaseName}`, {
+  if (createTable.value) {
+    try {
+      const preview = await api.previewTransferOwnership(request);
+      if (preview.missingOwners.length > 0) {
+        ownershipMissingOwners.value = preview.missingOwners;
+        ownershipTargetOwner.value = preview.targetOwner;
+        pendingOwnershipRequest.value = request;
+        pendingOwnershipRefresh.value = {
+          targetConnection,
+          targetDatabase: targetDatabaseName,
+          targetSchema: effectiveTargetSchema,
+          shouldRefreshTargetTree,
+        };
+        ownershipDialogOpen.value = true;
+        isSubmitting.value = false;
+        return;
+      }
+    } catch {
+      isSubmitting.value = false;
+      return;
+    }
+  }
+
+  runTransfer(request, targetConnection, targetDatabaseName, effectiveTargetSchema, shouldRefreshTargetTree);
+}
+
+function runTransfer(request: api.TransferRequest, targetConnection: string, targetDatabaseName: string, effectiveTargetSchema: string, shouldRefreshTargetTree: boolean) {
+  isSubmitting.value = true;
+  startDataTransferTask(request, `${request.sourceDatabase} → ${targetDatabaseName}`, {
     formatOverlapError: (tables) => t("transfer.targetTableBusy", { tables: tables.join(", ") }),
     onDone: async () => {
       if (shouldRefreshTargetTree) {
@@ -285,6 +324,21 @@ async function startTransfer() {
   });
   open.value = false;
   resetState();
+}
+
+function resolveOwnershipDecision(policy: api.TransferOwnershipPolicy | null) {
+  const request = pendingOwnershipRequest.value;
+  const refresh = pendingOwnershipRefresh.value;
+  pendingOwnershipRequest.value = null;
+  pendingOwnershipRefresh.value = null;
+  ownershipDialogOpen.value = false;
+  ownershipMissingOwners.value = [];
+  ownershipTargetOwner.value = "";
+  if (!policy || !request || !refresh) {
+    isSubmitting.value = false;
+    return;
+  }
+  runTransfer({ ...request, ownershipPolicy: policy }, refresh.targetConnection, refresh.targetDatabase, refresh.targetSchema, refresh.shouldRefreshTargetTree);
 }
 
 function getConnectionName(id: string) {
@@ -510,6 +564,36 @@ function getConnectionName(id: string) {
           <Loader2 v-if="isSubmitting" class="w-3.5 h-3.5 mr-1.5 animate-spin" />
           <ArrowRightLeft v-else class="w-3.5 h-3.5 mr-1.5" />
           {{ t("transfer.start") }}
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+
+  <Dialog v-model:open="ownershipDialogOpen">
+    <DialogContent class="sm:max-w-[520px]" @interact-outside.prevent>
+      <DialogHeader>
+        <DialogTitle>{{ t("transfer.ownershipTitle") }}</DialogTitle>
+      </DialogHeader>
+      <div class="space-y-3 text-sm">
+        <p class="text-muted-foreground">
+          {{ t("transfer.ownershipMessage", { owners: ownershipMissingOwners.join(", ") }) }}
+        </p>
+        <div class="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+          {{ t("transfer.ownershipSkipDetails") }}
+        </div>
+        <div class="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+          {{ t("transfer.ownershipTargetOwner", { owner: ownershipTargetOwner }) }}
+        </div>
+      </div>
+      <DialogFooter class="gap-2">
+        <Button variant="outline" size="sm" @click="resolveOwnershipDecision(null)">
+          {{ t("transfer.cancel") }}
+        </Button>
+        <Button variant="secondary" size="sm" @click="resolveOwnershipDecision('skip')">
+          {{ t("transfer.ownershipSkip") }}
+        </Button>
+        <Button size="sm" @click="resolveOwnershipDecision('reassignMissing')">
+          {{ t("transfer.ownershipConfirm") }}
         </Button>
       </DialogFooter>
     </DialogContent>

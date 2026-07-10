@@ -7,7 +7,7 @@ import { useToast } from "@/composables/useToast";
 import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import { tryStartExclusiveActivation, type ActionActivationGuard } from "@/lib/connection/actionActivation";
 import { copyToClipboard } from "@/lib/common/clipboard";
-import { buildDataGridCopyInsertStatement, buildDataGridCopyUpdateStatements, type DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
+import { buildDataGridCopyInsertStatement, buildDataGridCopyUpdateStatements, type DataGridCopyInsertMode, type DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 import { formatSqlInsert } from "@/lib/export/exportFormats";
 import { uuid } from "@/lib/common/utils";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -52,6 +52,23 @@ export interface UseDataGridExportOptions {
   hasRowSelection: ComputedRef<boolean>;
   fullExportResult?: (onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => Promise<QueryResult | undefined>;
   queryResultExportRequest?: (options: { exportId: string; filePath: string; format: "csv" | "xlsx" }) => Promise<QueryResultExportRequest | undefined>;
+  /**
+   * True when the in-memory result already holds the complete result set —
+   * i.e. the query ran without server-side pagination, was not truncated, and
+   * has no further pages. When true, full-result exports skip the re-executing
+   * backend/frontend streaming paths and write the local rows directly, so a
+   * slow query is never re-run just to export rows that are already on screen.
+   */
+  hasCompleteLocalResult?: ComputedRef<boolean>;
+  /**
+   * The raw in-memory QueryResult to use for "export all" when
+   * hasCompleteLocalResult is true. Exports the original query result (all
+   * rows, all columns, committed values) so the output matches the original
+   * re-run-SQL semantics — displayItems only covers visible columns and
+   * reflects client-side filters/search and unsaved edits, which would
+   * silently change what "export all data" produces.
+   */
+  completeLocalResult?: ComputedRef<QueryResult | undefined>;
   allExportResults?: ComputedRef<Array<{ sheetName: string; result: QueryResult }> | undefined>;
   currentResultLabel?: ComputedRef<string | undefined>;
   exportFileBaseName?: ComputedRef<string | undefined>;
@@ -85,7 +102,19 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     loading: false,
     ready: false,
   });
+  const copyRowInsertRowByRowCache = ref<CopyStatementCache>({
+    key: "",
+    text: "",
+    loading: false,
+    ready: false,
+  });
   const copyRowInsertWithoutPrimaryKeysCache = ref<CopyStatementCache>({
+    key: "",
+    text: "",
+    loading: false,
+    ready: false,
+  });
+  const copyRowInsertWithoutPrimaryKeysRowByRowCache = ref<CopyStatementCache>({
     key: "",
     text: "",
     loading: false,
@@ -122,6 +151,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     hasRowSelection,
     fullExportResult,
     queryResultExportRequest,
+    hasCompleteLocalResult,
+    completeLocalResult,
     allExportResults,
     currentResultLabel,
     exportFileBaseName,
@@ -146,9 +177,17 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   async function resultToExport(rowIds?: number[], onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void, useFullExport = true): Promise<{ columns: string[]; rows: CellValue[][] }> {
-    if (useFullExport && rowIds === undefined && fullExportResult) {
+    if (useFullExport && rowIds === undefined && fullExportResult && !hasCompleteLocalResult?.value) {
       const result = await fullExportResult(onProgress);
       if (result) return { columns: result.columns, rows: result.rows };
+    }
+    // The full result is already in memory — export the raw QueryResult (all
+    // rows, all columns, committed values) so "export all data" matches the
+    // original re-run-SQL semantics. displayItems only covers visible columns
+    // and reflects client-side filters/search and unsaved edits, which would
+    // silently change what the export contains.
+    if (useFullExport && rowIds === undefined && hasCompleteLocalResult?.value && completeLocalResult?.value) {
+      return { columns: completeLocalResult.value.columns, rows: completeLocalResult.value.rows };
     }
     return {
       columns: columns.value,
@@ -190,7 +229,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     });
   }
 
-  function insertCopyKey(excludePrimaryKeys: boolean): string {
+  function insertCopyKey(excludePrimaryKeys: boolean, insertMode: DataGridCopyInsertMode): string {
     const rows = copyStatementRowsKey(insertEligibleRows());
     return JSON.stringify({
       databaseType: databaseType.value ?? null,
@@ -198,8 +237,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       tableName: tableMeta.value?.tableName ?? null,
       copyInsertTargetLabel: copyInsertTargetLabel?.value ?? null,
       columns: columns.value,
+      columnTypes: columnTypes.value ?? null,
       sourceColumns: sourceColumns.value ?? null,
       excludePrimaryKeys,
+      insertMode,
       rows,
     });
   }
@@ -209,13 +250,22 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return rows.map((item) => ({ id: item.id, data: item.data }));
   }
 
-  function insertCopyCache(excludePrimaryKeys: boolean): CopyStatementCache {
-    return excludePrimaryKeys ? copyRowInsertWithoutPrimaryKeysCache.value : copyRowInsertCache.value;
+  function insertCopyCache(excludePrimaryKeys: boolean, insertMode: DataGridCopyInsertMode): CopyStatementCache {
+    if (excludePrimaryKeys) {
+      return insertMode === "row-by-row" ? copyRowInsertWithoutPrimaryKeysRowByRowCache.value : copyRowInsertWithoutPrimaryKeysCache.value;
+    }
+    return insertMode === "row-by-row" ? copyRowInsertRowByRowCache.value : copyRowInsertCache.value;
   }
 
-  function setInsertCopyCache(excludePrimaryKeys: boolean, cache: CopyStatementCache) {
+  function setInsertCopyCache(excludePrimaryKeys: boolean, insertMode: DataGridCopyInsertMode, cache: CopyStatementCache) {
     if (excludePrimaryKeys) {
-      copyRowInsertWithoutPrimaryKeysCache.value = cache;
+      if (insertMode === "row-by-row") {
+        copyRowInsertWithoutPrimaryKeysRowByRowCache.value = cache;
+      } else {
+        copyRowInsertWithoutPrimaryKeysCache.value = cache;
+      }
+    } else if (insertMode === "row-by-row") {
+      copyRowInsertRowByRowCache.value = cache;
     } else {
       copyRowInsertCache.value = cache;
     }
@@ -225,10 +275,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     copyRowUpdateCache.value = cache;
   }
 
-  async function prefetchRowAsInsertStatement(excludePrimaryKeys: boolean) {
+  async function prefetchRowAsInsertStatement(excludePrimaryKeys: boolean, insertMode: DataGridCopyInsertMode = "merged") {
     const rows = insertEligibleRows();
     if (!rows.length) {
-      setInsertCopyCache(excludePrimaryKeys, {
+      setInsertCopyCache(excludePrimaryKeys, insertMode, {
         key: "",
         text: "",
         loading: false,
@@ -236,11 +286,11 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       });
       return;
     }
-    const key = insertCopyKey(excludePrimaryKeys);
-    const current = insertCopyCache(excludePrimaryKeys);
+    const key = insertCopyKey(excludePrimaryKeys, insertMode);
+    const current = insertCopyCache(excludePrimaryKeys, insertMode);
     if ((current.loading || current.ready) && current.key === key) return;
 
-    setInsertCopyCache(excludePrimaryKeys, {
+    setInsertCopyCache(excludePrimaryKeys, insertMode, {
       key,
       text: "",
       loading: true,
@@ -256,27 +306,30 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
               sourceColumns: sourceColumns.value,
               rows: rows.map((item) => item.data),
               excludePrimaryKeys,
+              insertMode,
             })
           : await buildDataGridCopyInsertStatement({
               databaseType: databaseType.value,
               tableMeta: tableMeta.value,
               columns: columns.value,
+              columnTypes: columnTypes.value,
               sourceColumns: sourceColumns.value,
               rows: rows.map((item) => item.data),
               excludePrimaryKeys,
+              insertMode,
             });
-      const latest = insertCopyCache(excludePrimaryKeys);
+      const latest = insertCopyCache(excludePrimaryKeys, insertMode);
       if (latest.key !== key) return;
-      setInsertCopyCache(excludePrimaryKeys, {
+      setInsertCopyCache(excludePrimaryKeys, insertMode, {
         key,
         text: statement ?? "",
         loading: false,
         ready: !!statement,
       });
     } catch {
-      const latest = insertCopyCache(excludePrimaryKeys);
+      const latest = insertCopyCache(excludePrimaryKeys, insertMode);
       if (latest.key !== key) return;
-      setInsertCopyCache(excludePrimaryKeys, {
+      setInsertCopyCache(excludePrimaryKeys, insertMode, {
         key,
         text: "",
         loading: false,
@@ -285,14 +338,14 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     }
   }
 
-  function canCopyPreparedInsert(excludePrimaryKeys: boolean): boolean {
-    const cache = insertCopyCache(excludePrimaryKeys);
-    return cache.ready && cache.key === insertCopyKey(excludePrimaryKeys);
+  function canCopyPreparedInsert(excludePrimaryKeys: boolean, insertMode: DataGridCopyInsertMode = "merged"): boolean {
+    const cache = insertCopyCache(excludePrimaryKeys, insertMode);
+    return cache.ready && cache.key === insertCopyKey(excludePrimaryKeys, insertMode);
   }
 
-  function copyPreparedRowAsInsert(excludePrimaryKeys: boolean): boolean {
-    if (!canCopyPreparedInsert(excludePrimaryKeys)) return false;
-    void copyText(insertCopyCache(excludePrimaryKeys).text);
+  function copyPreparedRowAsInsert(excludePrimaryKeys: boolean, insertMode: DataGridCopyInsertMode = "merged"): boolean {
+    if (!canCopyPreparedInsert(excludePrimaryKeys, insertMode)) return false;
+    void copyText(insertCopyCache(excludePrimaryKeys, insertMode).text);
     return true;
   }
 
@@ -400,6 +453,13 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     await copyText(formatSelectionAsTsv({ columns: columns.value, rows }));
   }
 
+  async function copySelectedRowsTsvWithHeaders() {
+    if (!hasRowSelection.value || selectedRowIds.value.size === 0) return;
+    const rows = displayItems.value.filter((item) => selectedRowIds.value.has(item.id) && !item.isDraft).map((item) => item.data);
+    if (rows.length === 0) return;
+    await copyText(formatSelectionAsTsv({ columns: columns.value, rows }, true));
+  }
+
   async function copyColumnNames() {
     if (columns.value.length === 0) return;
     await copyText(columns.value.join("\t"));
@@ -451,12 +511,12 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return targetedRows().filter((item) => !item.isDraft);
   }
 
-  async function copyRowAsInsert() {
-    copyPreparedRowAsInsert(false);
+  async function copyRowAsInsert(insertMode: DataGridCopyInsertMode = "merged") {
+    copyPreparedRowAsInsert(false, insertMode);
   }
 
-  async function copyRowAsInsertWithoutPrimaryKeys() {
-    copyPreparedRowAsInsert(true);
+  async function copyRowAsInsertWithoutPrimaryKeys(insertMode: DataGridCopyInsertMode = "merged") {
+    copyPreparedRowAsInsert(true, insertMode);
   }
 
   async function copyRowAsUpdate() {
@@ -512,7 +572,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         if (await exportQueryResultViaBackend("csv", rowIds)) return;
         if (await exportFullTableDataViaBackend("csv", rowIds)) return;
 
-        const needsFullExport = rowIds === undefined && !!fullExportResult;
+        const needsFullExport = rowIds === undefined && !!fullExportResult && !hasCompleteLocalResult?.value;
         if (needsFullExport && exportProgressDialog && exportProgressState) {
           exportProgressState.value = {
             title: t("exportProgress.title"),
@@ -716,7 +776,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           if (!path) return;
           outputPath = path as string;
         }
-        const needsFullExport = rowIds === undefined && !!fullExportResult;
+        const needsFullExport = rowIds === undefined && !!fullExportResult && !hasCompleteLocalResult?.value;
         if (needsFullExport && exportProgressDialog && exportProgressState) {
           exportProgressState.value = {
             title: t("exportProgress.title"),
@@ -908,6 +968,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     if (rowIds !== undefined || context.value !== "results" || !queryResultExportRequest) {
       return false;
     }
+    // The full result is already in memory — don't re-execute the query on the
+    // backend just to stream the same rows back to a file.
+    if (hasCompleteLocalResult?.value) return false;
 
     const extension = format;
     const filterName = format === "csv" ? "CSV" : "Excel";
@@ -1021,9 +1084,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   } {
     const exportColumns = tableMeta.value ? effectiveColumns(sourceColumns.value, result.columns) : result.columns;
     const columnIndexes = exportColumns.map((column, index) => ({ column, index })).filter((item): item is { column: string; index: number } => !!item.column);
+    const exportColumnTypes = columnTypes.value?.length === result.columns.length ? columnTypes.value : undefined;
     return {
       columns: columnIndexes.map((item) => item.column),
-      columnTypes: tableMeta.value ? columnIndexes.map((item) => columnTypes.value?.[item.index]) : undefined,
+      columnTypes: exportColumnTypes ? columnIndexes.map((item) => exportColumnTypes[item.index]) : undefined,
       rows: result.rows.map((row) => columnIndexes.map((item) => row[item.index] ?? null)),
     };
   }
@@ -1055,6 +1119,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     copySelectionJson,
     copySelectionSqlInList,
     copySelectedRowsTsv,
+    copySelectedRowsTsvWithHeaders,
     copyColumnNames,
     exportCsv,
     exportCurrentPageCsv,
@@ -1117,7 +1182,7 @@ function replaceControlCharacters(value: string, replacement: string): string {
     .join("");
 }
 
-function buildMongoCopyInsertStatement(options: { collection: string; columns: string[]; sourceColumns?: Array<string | undefined>; rows: CellValue[][]; excludePrimaryKeys?: boolean }): string | undefined {
+function buildMongoCopyInsertStatement(options: { collection: string; columns: string[]; sourceColumns?: Array<string | undefined>; rows: CellValue[][]; excludePrimaryKeys?: boolean; insertMode?: DataGridCopyInsertMode }): string | undefined {
   const saveColumns = effectiveColumns(options.sourceColumns, options.columns);
   const columnIndexes = saveColumns.map((column, index) => ({ column, index })).filter((item): item is { column: string; index: number } => !!item.column);
   if (columnIndexes.length === 0 || options.rows.length === 0) return undefined;
@@ -1125,6 +1190,9 @@ function buildMongoCopyInsertStatement(options: { collection: string; columns: s
   const documents = options.rows.map((row) => buildMongoCopyInsertDocument(columnIndexes.map((item) => row[item.index]) as MongoInputValue[], documentColumns, { excludePrimaryKeys: options.excludePrimaryKeys }));
   const collection = `db.getCollection(${JSON.stringify(options.collection)})`;
   if (documents.length === 1) return `${collection}.insert(${formatMongoShellLiteral(documents[0])});`;
+  if (options.insertMode === "row-by-row") {
+    return documents.map((document) => `${collection}.insert(${formatMongoShellLiteral(document)});`).join("\n");
+  }
   return `${collection}.insertMany(${formatMongoShellLiteral(documents)});`;
 }
 

@@ -12,19 +12,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 #[cfg(target_os = "macos")]
+use tauri::menu::Menu;
+#[cfg(target_os = "macos")]
 use tauri::menu::{AboutMetadata, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::RunEvent;
 use tauri::{
-    menu::{Menu, MenuBuilder},
+    menu::MenuBuilder,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tauri::{Emitter, Manager};
+#[cfg(target_os = "macos")]
+use tauri_plugin_clipboard_manager::ClipboardExt;
 #[cfg(any(windows, target_os = "linux"))]
 use tauri_plugin_deep_link::DeepLinkExt;
 
 const DESKTOP_TRAY_ID: &str = "main-tray";
 const APP_CLOSE_REQUESTED_EVENT: &str = "dbx-app-close-requested";
+#[cfg(target_os = "macos")]
 const APP_MENU_QUIT_ID: &str = "app-menu-quit";
+#[cfg(target_os = "macos")]
+const APP_MENU_COPY_SUPPORT_INFO_ID: &str = "app-menu-copy-support-info";
 
 pub struct CloseBehaviorState {
     confirmed_exit: AtomicBool,
@@ -39,16 +46,14 @@ impl CloseBehaviorState {
         self.confirmed_exit.store(true, Ordering::Relaxed);
     }
 
-    pub(crate) fn is_exit_confirmed(&self) -> bool {
-        self.confirmed_exit.load(Ordering::Relaxed)
-    }
-
     fn take_confirmed_exit(&self) -> bool {
         self.confirmed_exit.swap(false, Ordering::Relaxed)
     }
 }
 #[cfg(target_os = "macos")]
 const MACOS_TRAY_ICON: tauri::image::Image<'_> = tauri::include_image!("icons/tray-macos-template.png");
+#[cfg(target_os = "macos")]
+const ABOUT_APP_ICON: tauri::image::Image<'_> = tauri::include_image!("icons/icon.png");
 const BLACK_APP_ICON: tauri::image::Image<'_> = tauri::include_image!("icons/icon-black.png");
 
 pub(crate) fn apply_debug_log_level(debug_logging_enabled: bool) {
@@ -67,8 +72,8 @@ fn should_show_main_window_after_setup() -> bool {
     true
 }
 
-fn should_confirm_app_exit_request(exit_code: Option<i32>, confirmed_exit: bool) -> bool {
-    exit_code != Some(tauri::RESTART_EXIT_CODE) && !confirmed_exit
+fn should_confirm_app_exit_request(target_os: &str, exit_code: Option<i32>, confirmed_exit: bool) -> bool {
+    should_hide_window_on_close(target_os) && exit_code != Some(tauri::RESTART_EXIT_CODE) && !confirmed_exit
 }
 
 fn native_window_decorations_override(target_os: &str) -> Option<bool> {
@@ -81,15 +86,16 @@ fn native_window_decorations_override(target_os: &str) -> Option<bool> {
 #[cfg(target_os = "macos")]
 fn build_app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri::Result<Menu<R>> {
     let pkg_info = app_handle.package_info();
-    let config = app_handle.config();
     let app_name = pkg_info.name.clone();
     let about_metadata = AboutMetadata {
         name: Some(app_name.clone()),
         version: Some(pkg_info.version.to_string()),
-        copyright: config.bundle.copyright.clone(),
-        authors: config.bundle.publisher.clone().map(|p| vec![p]),
+        copyright: Some(commands::support_info::format_support_info_for_native_about()),
+        icon: Some(ABOUT_APP_ICON),
         ..Default::default()
     };
+    let copy_support_info_item =
+        MenuItem::with_id(app_handle, APP_MENU_COPY_SUPPORT_INFO_ID, "Copy Support Info", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app_handle, APP_MENU_QUIT_ID, format!("Quit {app_name}"), true, Some("Cmd+Q"))?;
 
     Menu::with_items(
@@ -101,6 +107,7 @@ fn build_app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri:
                 true,
                 &[
                     &PredefinedMenuItem::about(app_handle, None, Some(about_metadata))?,
+                    &copy_support_info_item,
                     &PredefinedMenuItem::separator(app_handle)?,
                     &PredefinedMenuItem::services(app_handle, None)?,
                     &PredefinedMenuItem::separator(app_handle)?,
@@ -143,15 +150,27 @@ fn build_app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri:
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn linux_webkit_rendering_workarounds() -> &'static [(&'static str, &'static str)] {
-    &[
-        // WebKitGTK's DMABUF renderer can produce a blank AppImage window or
-        // Wayland protocol errors on Fedora/Wayland/NVIDIA systems.
-        ("WEBKIT_DISABLE_DMABUF_RENDERER", "1"),
-        // Tauri's Linux graphics guidance recommends this for Wayland explicit
-        // sync issues that can prevent WebKitGTK from creating a usable surface.
-        ("__NV_DISABLE_EXPLICIT_SYNC", "1"),
-    ]
+fn linux_has_nvidia_gpu() -> bool {
+    // Detect the proprietary NVIDIA driver by checking for its kernel device
+    // node / proc entry. This is more reliable than parsing lspci output and
+    // has no external deps. Nouveau (open-source) does not create these nodes
+    // and falls through to the Mesa / DMABuf path, which is the desired behavior.
+    std::path::Path::new("/dev/nvidiactl").exists() || std::path::Path::new("/proc/driver/nvidia/version").exists()
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_webkit_rendering_workarounds(has_nvidia: bool) -> &'static [(&'static str, &'static str)] {
+    if has_nvidia {
+        // NVIDIA + Wayland: the DMABuf renderer triggers blank-window / Wayland
+        // protocol errors (EGL_EXT_image_dma_buf_import mismatch). Disable it
+        // and suppress explicit-sync to avoid a compositor crash.
+        &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1"), ("__NV_DISABLE_EXPLICIT_SYNC", "1")]
+    } else {
+        // AMD / Intel / other Mesa drivers support DMABuf natively.
+        // Keeping DMABUF enabled lets WebKitGTK use GPU compositing, which
+        // dramatically reduces CPU usage and eliminates UI lag on Wayland.
+        &[]
+    }
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -212,7 +231,8 @@ fn linux_appimage_system_gtk_immodules_cache(
 
 #[cfg(target_os = "linux")]
 fn apply_linux_webkit_rendering_workarounds() {
-    for (key, value) in linux_webkit_rendering_workarounds() {
+    let has_nvidia = linux_has_nvidia_gpu();
+    for (key, value) in linux_webkit_rendering_workarounds(has_nvidia) {
         if std::env::var_os(key).is_none() {
             std::env::set_var(key, value);
         }
@@ -449,10 +469,11 @@ mod tests {
 
     #[test]
     fn only_user_requested_app_exit_needs_frontend_confirmation() {
-        assert!(should_confirm_app_exit_request(None, false));
-        assert!(should_confirm_app_exit_request(Some(0), false));
-        assert!(!should_confirm_app_exit_request(Some(0), true));
-        assert!(!should_confirm_app_exit_request(Some(tauri::RESTART_EXIT_CODE), false));
+        assert!(should_confirm_app_exit_request("windows", None, false));
+        assert!(should_confirm_app_exit_request("macos", Some(0), false));
+        assert!(!should_confirm_app_exit_request("windows", Some(0), true));
+        assert!(!should_confirm_app_exit_request("windows", Some(tauri::RESTART_EXIT_CODE), false));
+        assert!(!should_confirm_app_exit_request("linux", Some(0), false));
     }
 
     #[test]
@@ -464,10 +485,13 @@ mod tests {
 
     #[test]
     fn applies_linux_webkit_rendering_workarounds_before_webkit_starts() {
+        // NVIDIA: DMABuf must be disabled to avoid blank window / Wayland protocol errors.
         assert_eq!(
-            linux_webkit_rendering_workarounds(),
+            linux_webkit_rendering_workarounds(true),
             &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1"), ("__NV_DISABLE_EXPLICIT_SYNC", "1")]
         );
+        // AMD / Intel / Mesa: DMABuf is supported — no workarounds needed.
+        assert_eq!(linux_webkit_rendering_workarounds(false), &[]);
     }
 
     #[test]
@@ -610,6 +634,10 @@ pub fn run() {
     let builder = builder.menu(build_app_menu).on_menu_event(|app, event| {
         if event.id() == APP_MENU_QUIT_ID {
             request_app_close(app, "quit");
+        } else if event.id() == APP_MENU_COPY_SUPPORT_INFO_ID {
+            if let Err(err) = app.clipboard().write_text(commands::support_info::format_support_info_for_clipboard()) {
+                log::warn!("Failed to copy support info from app menu: {err}");
+            }
         }
     });
 
@@ -640,7 +668,21 @@ pub fn run() {
                 s
             });
             let desktop_settings = tauri::async_runtime::block_on(storage.load_desktop_settings()).unwrap_or_default();
-            app.handle().plugin(tauri_plugin_log::Builder::default().level(log::LevelFilter::Debug).build())?;
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
+                    .format(|out, message, record| {
+                        out.finish(format_args!(
+                            "[{}][{}][{}] {}",
+                            chrono::Local::now().format("%Y-%m-%d][%H:%M:%S%.3f"),
+                            record.level(),
+                            record.target(),
+                            message
+                        ));
+                    })
+                    .level(log::LevelFilter::Debug)
+                    .build(),
+            )?;
             apply_debug_log_level(desktop_settings.debug_logging_enabled);
             eprintln!("[STARTUP] storage ready in {:?}", t.elapsed());
 
@@ -652,15 +694,18 @@ pub fn run() {
             );
 
             let state = if let Some(agent_dir) = agent_dir {
-                Arc::new(AppState::new_with_plugin_and_agent_dir_and_app_version(
+                AppState::new_with_plugin_and_agent_dir_and_app_version(
                     storage,
                     plugin_dir,
                     agent_dir,
                     env!("CARGO_PKG_VERSION"),
-                ))
+                )
             } else {
-                Arc::new(AppState::new_with_plugin_dir_and_app_version(storage, plugin_dir, env!("CARGO_PKG_VERSION")))
+                AppState::new_with_plugin_dir_and_app_version(storage, plugin_dir, env!("CARGO_PKG_VERSION"))
             };
+            state.set_duckdb_worker_process_isolation_enabled(desktop_settings.duckdb_worker_process_isolation);
+            state.set_duckdb_worker_max_processes(desktop_settings.duckdb_worker_max_processes);
+            let state = Arc::new(state);
             app.manage(state.clone());
             commands::redis_pubsub_server::start_pubsub_server(state.clone());
             app.manage(commands::saved_sql::SavedSqlStorageState { data_dir: data_dir.clone() });
@@ -734,11 +779,21 @@ pub fn run() {
             commands::app_settings::get_driver_store_path,
             commands::app_settings::load_pinned_tree_node_ids,
             commands::app_settings::save_pinned_tree_node_ids,
+            commands::app_settings::load_editor_settings,
+            commands::app_settings::save_editor_settings,
+            commands::app_settings::load_open_tabs_state,
+            commands::app_settings::save_open_tabs_state,
+            commands::app_settings::load_saved_sql_editor_positions,
+            commands::app_settings::save_saved_sql_editor_positions,
             commands::app_settings::load_native_debug_logs,
+            commands::support_info::get_app_support_info,
             commands::cloud_sync::webdav_sync_test,
             commands::cloud_sync::webdav_password_status,
             commands::cloud_sync::save_webdav_saved_password,
             commands::cloud_sync::forget_webdav_saved_password,
+            commands::cloud_sync::webdav_sync_secrets_status,
+            commands::cloud_sync::save_webdav_sync_secrets_preference,
+            commands::cloud_sync::forget_webdav_sync_secrets_passphrase,
             commands::cloud_sync::webdav_sync_upload,
             commands::cloud_sync::webdav_sync_download,
             commands::connection::test_connection,
@@ -765,6 +820,8 @@ pub fn run() {
             commands::plugins::install_jdbc_plugin_local,
             commands::plugins::uninstall_jdbc_plugin,
             commands::schema::list_databases,
+            commands::schema::list_doris_catalogs,
+            commands::schema::list_doris_catalog_databases,
             commands::schema::list_sqlserver_linked_servers,
             commands::schema::list_sqlserver_linked_server_catalogs,
             commands::schema::list_sqlserver_linked_server_schemas,
@@ -788,6 +845,8 @@ pub fn run() {
             commands::schema::list_sequences,
             commands::schema::list_rules,
             commands::schema::list_owners,
+            commands::schema::list_extensions,
+            commands::schema::list_available_extensions,
             commands::schema_diff::prepare_schema_diff,
             commands::schema_diff::generate_schema_sync_sql,
             commands::schema_cache::save_schema_cache,
@@ -830,6 +889,7 @@ pub fn run() {
             commands::query::build_truncate_table_sql,
             commands::query::build_drop_database_sql,
             commands::query::build_create_schema_sql,
+            commands::query::build_update_database_properties_sql,
             commands::query::build_drop_schema_sql,
             commands::query::build_duplicate_table_structure_sql,
             commands::query::build_copy_table_data_sql,
@@ -864,6 +924,7 @@ pub fn run() {
             commands::external_sql::pending_open_sql_files,
             commands::external_sql::read_external_sql_file,
             commands::external_sql::write_external_sql_file,
+            commands::list_sql_files::list_sql_files_in_folder,
             commands::external_db::pending_open_db_files,
             commands::keychain::read_keychain_password,
             commands::keychain::read_keychain_passwords,
@@ -1059,6 +1120,7 @@ pub fn run() {
             commands::update::get_system_proxy_url,
             commands::update::download_and_install_update,
             commands::transfer::start_transfer,
+            commands::transfer::preview_transfer_ownership,
             commands::transfer::cancel_transfer,
             commands::database_export::export_database_sql,
             commands::database_export::cancel_database_export,
@@ -1074,7 +1136,9 @@ pub fn run() {
             commands::text_export::export_query_result_markdown,
             commands::agents::list_installed_agents,
             commands::agents::list_installed_agents_local,
+            commands::agents::is_agent_installed,
             commands::agents::get_driver_store_usage,
+            commands::agents::clear_driver_download_cache,
             commands::agents::get_driver_runtime_summary,
             commands::agents::stop_driver_runtime,
             commands::agents::restart_driver_runtime,
@@ -1091,6 +1155,7 @@ pub fn run() {
             commands::agents::import_agents_from_zip,
             commands::agents::import_agent_jar_cmd,
             commands::system_fonts::list_system_fonts,
+            commands::ssh_config::list_ssh_config_hosts,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -1103,7 +1168,7 @@ pub fn run() {
                     .try_state::<CloseBehaviorState>()
                     .map(|state| state.take_confirmed_exit())
                     .unwrap_or(false);
-                if should_confirm_app_exit_request(*code, confirmed_exit) {
+                if should_confirm_app_exit_request(std::env::consts::OS, *code, confirmed_exit) {
                     api.prevent_exit();
                     request_app_close(app_handle, "quit");
                 }

@@ -16,6 +16,7 @@ export interface BuildTableSelectSqlOptions {
   offset?: number;
   whereInput?: string;
   includeRowId?: boolean;
+  catalog?: string;
 }
 
 export function quoteTableIdentifier(databaseType: DatabaseType | undefined, name: string): string {
@@ -23,7 +24,8 @@ export function quoteTableIdentifier(databaseType: DatabaseType | undefined, nam
   // JDBC connections use the driver-reported identifier quote string
   // (DatabaseMetaData.getIdentifierQuoteString()) — pass through unquoted.
   if (databaseType === "jdbc") return name;
-  if (databaseType === "mysql" || databaseType === "clickhouse" || databaseType === "hive" || databaseType === "databend" || databaseType === "tdengine" || databaseType === "access") return `\`${name.replace(/`/g, "``")}\``;
+  if (databaseType === "mysql" || databaseType === "clickhouse" || databaseType === "hive" || databaseType === "spark" || databaseType === "databend" || databaseType === "tdengine" || databaseType === "access" || databaseType === "doris" || databaseType === "starrocks")
+    return `\`${name.replace(/`/g, "``")}\``;
   if (databaseType === "informix" && /^[A-Za-z_][A-Za-z0-9_$]*$/.test(name)) return name;
   if (databaseType === "neo4j") return quoteCypherIdentifier(name);
   if (databaseType === "sqlserver") return `[${name.replace(/\]/g, "]]")}]`;
@@ -34,8 +36,19 @@ function quoteCypherIdentifier(name: string): string {
   return `\`${name.replace(/`/g, "``")}\``;
 }
 
-export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "databaseType" | "schema" | "tableName">): string {
-  const { databaseType, schema, tableName } = options;
+export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "databaseType" | "schema" | "tableName" | "catalog">): string {
+  const { databaseType, schema, tableName, catalog } = options;
+  // Doris / StarRocks multi-catalog: address external-catalog tables with the
+  // 3-part `catalog.database.table` form, which the engines accept directly.
+  if (catalog && catalog !== "internal" && (databaseType === "doris" || databaseType === "starrocks")) {
+    const quotedCatalog = quoteTableIdentifier(databaseType, catalog);
+    const quotedTable = quoteTableIdentifier(databaseType, tableName);
+    const trimmedSchema = schema?.trim();
+    if (trimmedSchema) {
+      return `${quotedCatalog}.${quoteTableIdentifier(databaseType, trimmedSchema)}.${quotedTable}`;
+    }
+    return `${quotedCatalog}.${quotedTable}`;
+  }
   if (databaseType === "iotdb") {
     const trimmedSchema = schema?.trim();
     if (trimmedSchema && tableName !== trimmedSchema && !tableName.startsWith(`${trimmedSchema}.`)) {

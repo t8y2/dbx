@@ -139,6 +139,98 @@ fn builds_mysql_unsigned_integer_column_with_length_before_attribute() {
 }
 
 #[test]
+fn doris_table_editor_renames_column_without_mysql_change_syntax() {
+    let mut renamed = column("dtp_flag_jt");
+    renamed.data_type = "int".to_string();
+    renamed.comment = "Group DTP".to_string();
+    renamed.original = Some(ColumnInfo {
+        name: "dtp_flag".to_string(),
+        data_type: "int".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: Some("Group DTP".to_string()),
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Doris),
+        schema: Some("qybiprod".to_string()),
+        table_name: "dim_prod_sp_vkorg".to_string(),
+        columns: vec![renamed],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE `dim_prod_sp_vkorg` RENAME COLUMN `dtp_flag` `dtp_flag_jt`;"]);
+}
+
+#[test]
+fn doris_single_column_alter_renames_then_modifies_column_definition() {
+    let mut renamed = column("dtp_flag_jt");
+    renamed.data_type = "int".to_string();
+    renamed.comment = "Group DTP".to_string();
+    renamed.original = Some(ColumnInfo {
+        name: "dtp_flag".to_string(),
+        data_type: "int".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: Some("Division DTP".to_string()),
+    });
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Doris),
+        schema: Some("qybiprod".to_string()),
+        table_name: "dim_prod_sp_vkorg".to_string(),
+        column: renamed,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `dim_prod_sp_vkorg` RENAME COLUMN `dtp_flag` `dtp_flag_jt`;",
+            "ALTER TABLE `dim_prod_sp_vkorg` MODIFY COLUMN `dtp_flag_jt` int COMMENT 'Group DTP';",
+        ]
+    );
+}
+
+#[test]
+fn dameng_integer_column_omits_mysql_display_width() {
+    let mut age = column("age");
+    age.data_type = "integer(11)".to_string();
+    let mut amount = column("amount");
+    amount.data_type = "number(10,0)".to_string();
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Dameng),
+        schema: Some("SYSDBA".to_string()),
+        table_name: "users".to_string(),
+        columns: vec![age, amount],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"SYSDBA\".\"users\" ADD (\"age\" integer);",
+            "ALTER TABLE \"SYSDBA\".\"users\" ADD (\"amount\" number(10,0));",
+        ]
+    );
+}
+
+#[test]
 fn builds_highgo_foreign_key_changes_with_postgres_syntax() {
     let mut old_fk = foreign_key("orders_user_id_fkey", "user_id", "users", "id");
     old_fk.marked_for_drop = true;
@@ -1238,6 +1330,72 @@ fn builds_sql_server_quoted_column_and_index_statements() {
             "CREATE INDEX [idx_users_email] ON [dbo].[users] ([email]);",
         ]
     );
+}
+
+#[test]
+fn sqlserver_strips_mysql_display_width_from_fixed_integer_types() {
+    let mut id = column("id");
+    id.data_type = "int(11)".to_string();
+    id.is_nullable = false;
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "users".to_string(),
+        columns: vec![id],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE [dbo].[users] ADD [id] int NOT NULL;"]);
+}
+
+#[test]
+fn sqlserver_strips_scale_from_float() {
+    let mut amount = column("amount");
+    amount.data_type = "float(10,2)".to_string();
+    amount.is_nullable = true;
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "orders".to_string(),
+        columns: vec![amount],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE [dbo].[orders] ADD [amount] float;"]);
+}
+
+#[test]
+fn sqlserver_preserves_float_mantissa_bits() {
+    let mut value = column("value");
+    value.data_type = "float(53)".to_string();
+    value.is_nullable = false;
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "measurements".to_string(),
+        columns: vec![value],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE [dbo].[measurements] ADD [value] float(53) NOT NULL;"]);
 }
 
 #[test]

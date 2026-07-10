@@ -124,6 +124,16 @@ DuckDB 连接支持两种模式：
 
 SQLite 连接可以使用 `:memory:` 作为文件路径，创建临时的内存数据库。适用于快速实验或临时数据转换。
 
+### Doris / StarRocks 多 Catalog
+
+Doris 与 StarRocks 作为 MPP 引擎，通过 Catalog 联邦访问外部数据源（`SHOW CATALOGS`）。DBX 会列出当前用户有权限读取的所有 Catalog，并以 `Catalog → 数据库 → 表` 的树形结构展示：
+
+- 内置的 `internal` Catalog 展示引擎自身的数据库与表。
+- 外部 Catalog（Hive、Iceberg、Hudi、Paimon、JDBC 等）同样列出其数据库与表。无权限访问的 Catalog 会被静默跳过。
+- 当只存在 `internal` Catalog 时，侧边栏保持扁平结构（不出现 Catalog 分组层），单 Catalog 部署不受影响。
+
+从外部 Catalog 打开表时，数据预览使用三段式 `catalog.database.table` 名称，无需在会话中执行 `SWITCH`。外部 Catalog 仅支持表与视图——存储过程、序列、触发器、外键均不可用。
+
 ## 扩展支持
 
 当目标数据库不在内置类型中，或团队必须使用厂商 JDBC 驱动时，可以使用 [JDBC 插件](/cn/docs/plugins)。JDBC 会把厂商驱动 JAR 放在 DBX 主应用之外，由你决定安装哪些驱动文件。

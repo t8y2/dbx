@@ -1,6 +1,7 @@
 import { ref } from "vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { isSchemaAware as isSchemaAwareType, isSingleDatabase, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
+import { sortSidebarNames } from "@/lib/database/databaseTree";
 import { filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
 import type { ConnectionConfig } from "@/types/database";
 import * as api from "@/lib/backend/api";
@@ -10,7 +11,8 @@ export function hasSchemaOptionsCacheEntry(options: Record<string, string[]>, ke
 }
 
 export function schemaOptionsForConnection(schemaNames: string[], connection: Pick<ConnectionConfig, "db_type" | "driver_profile" | "visible_databases" | "visible_schemas"> | undefined, database = ""): string[] {
-  return filterSchemaNamesForConnection(schemaNames, connection, database);
+  // Keep numeric schema suffixes in human order (SCHEMA2 before SCHEMA10), matching the database tree.
+  return sortSidebarNames(filterSchemaNamesForConnection(schemaNames, connection, database));
 }
 
 export function useSchemaOptions() {

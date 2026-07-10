@@ -65,6 +65,23 @@ test("parseMongoFindCommand accepts Compass-style unquoted keys and ObjectId", (
   assert.deepEqual(JSON.parse(command.filter), { _id: { $oid: "6a045a92d2971e44243771a1" } });
 });
 
+test("parseMongoFindCommand rewrites ISODate into extended JSON $date", () => {
+  const command = parseMongoFindCommand(`db.trainingdocuments.find({
+    createdAt: { $gte: ISODate("2025-02-25T04:57:39.965Z") }
+  })`);
+  assert.ok(command);
+  assert.equal(command.collection, "trainingdocuments");
+  assert.deepEqual(JSON.parse(command.filter), { createdAt: { $gte: { $date: "2025-02-25T04:57:39.965Z" } } });
+});
+
+test("parseMongoFindCommand rewrites new Date and single-quoted ISODate", () => {
+  const command = parseMongoFindCommand("db.events.find({ at: { $lt: new Date('2025-01-01T00:00:00Z'), $gte: ISODate('2024-01-01T00:00:00Z') } })");
+  assert.ok(command);
+  assert.deepEqual(JSON.parse(command.filter), {
+    at: { $lt: { $date: "2025-01-01T00:00:00Z" }, $gte: { $date: "2024-01-01T00:00:00Z" } },
+  });
+});
+
 test("parseMongoFindCommand accepts single-quoted string values and unquoted sort keys", () => {
   const command = parseMongoFindCommand("db.products.find({category: 'Electronics'}).sort({price: -1}).limit(2)");
   assert.ok(command);
@@ -167,11 +184,37 @@ test("parseMongoWriteCommand parses dropIndex and dropIndexes variants", () => {
   });
 });
 
+test("parseMongoWriteCommand parses collection drop commands", () => {
+  assert.deepEqual(parseMongoWriteCommand("db.users.drop()"), {
+    kind: "dropCollection",
+    collection: "users",
+  });
+  assert.deepEqual(parseMongoWriteCommand('db.getCollection("audit.logs").drop();'), {
+    kind: "dropCollection",
+    collection: "audit.logs",
+  });
+  assert.deepEqual(parseMongoCommand("db.users.drop()")?.command, {
+    kind: "dropCollection",
+    collection: "users",
+  });
+});
+
+test("parseMongoWriteCommand rejects collection drop arguments", () => {
+  assert.equal(parseMongoWriteCommand("db.users.drop({ writeConcern: 1 })"), null);
+});
+
 test("parseMongoWriteCommand rejects invalid dropIndex/dropIndexes variants", () => {
   assert.equal(parseMongoWriteCommand("db.users.dropIndex()"), null);
   assert.equal(parseMongoWriteCommand('db.users.dropIndex("*")'), null);
   assert.equal(parseMongoWriteCommand('db.users.dropIndex(["a_1"])'), null);
   assert.equal(parseMongoWriteCommand('db.users.dropIndexes([{"a":1}])'), null);
+});
+
+test("evaluateMongoWriteSafety blocks collection drop unless dangerous writes are enabled", () => {
+  const dropCollection = parseMongoWriteCommand("db.users.drop()");
+  assert.ok(dropCollection);
+  assert.match(evaluateMongoWriteSafety(dropCollection, { allowWrites: true }).reason || "", /DBX_MCP_ALLOW_DANGEROUS_SQL=1/);
+  assert.equal(evaluateMongoWriteSafety(dropCollection, { allowWrites: true, allowDangerous: true }).allowed, true);
 });
 
 test("evaluateMongoWriteSafety blocks dangerous dropIndexes shapes unless enabled", () => {

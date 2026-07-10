@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldReserveMacTrafficLightInset, shouldShowWindowControls } from "@/composables/useWindowControls";
+import { shouldDrawDesktopWindowFrame, shouldReserveMacTrafficLightInset, shouldShowWindowControls } from "@/composables/useWindowControls";
 
 describe("window controls", () => {
   it("shows custom controls for non-macOS desktop windows", () => {
@@ -12,6 +12,12 @@ describe("window controls", () => {
 
   it("does not show desktop controls in web runtime", () => {
     expect(shouldShowWindowControls(false, false)).toBe(false);
+  });
+
+  it("draws an app frame only for self-decorated desktop windows", () => {
+    expect(shouldDrawDesktopWindowFrame(false, true)).toBe(true);
+    expect(shouldDrawDesktopWindowFrame(true, true)).toBe(false);
+    expect(shouldDrawDesktopWindowFrame(false, false)).toBe(false);
   });
 
   it("reserves traffic light inset only for non-fullscreen macOS desktop windows", () => {

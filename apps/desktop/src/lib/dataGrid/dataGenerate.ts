@@ -188,6 +188,12 @@ export interface GeneratorParams {
   disableLinks?: boolean;
 }
 
+export interface GeneratedSqlExpression {
+  __dbxGeneratedSqlExpression: true;
+  sql: string;
+  display: string;
+}
+
 export interface ColumnGenerateConfig {
   columnName: string;
   dataType: string;
@@ -198,6 +204,7 @@ export interface ColumnGenerateConfig {
   generatorCategoryLabel?: string;
   generatorParams?: GeneratorParams;
   isAutoIncrement?: boolean;
+  columnDefault?: string | null;
 }
 
 export interface TableGenerateConfig {
@@ -223,6 +230,133 @@ function randDigit(): number {
 }
 export function randDecimal(min: number, max: number, decimals: number): number {
   return parseFloat((Math.random() * (max - min) + min).toFixed(decimals));
+}
+
+export function isGeneratedSqlExpression(value: unknown): value is GeneratedSqlExpression {
+  return !!value && typeof value === "object" && (value as GeneratedSqlExpression).__dbxGeneratedSqlExpression === true;
+}
+
+function generatedSqlExpression(sql: string, display = sql): GeneratedSqlExpression {
+  return { __dbxGeneratedSqlExpression: true, sql, display };
+}
+
+function trimColumnDefault(defaultValue: string | null | undefined): string | null {
+  const value = defaultValue?.trim();
+  if (!value || value.toLowerCase() === "null") return null;
+  return value;
+}
+
+function isWrappedByOuterParens(value: string): boolean {
+  if (!value.startsWith("(") || !value.endsWith(")")) return false;
+  let depth = 0;
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i];
+    if (quote) {
+      if (ch === quote) {
+        if (quote === "'" && value[i + 1] === "'") {
+          i++;
+        } else {
+          quote = null;
+        }
+      }
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === "(") depth++;
+    if (ch === ")") depth--;
+    if (depth === 0 && i < value.length - 1) return false;
+  }
+  return depth === 0;
+}
+
+function stripOuterParens(value: string): string {
+  let current = value.trim();
+  while (isWrappedByOuterParens(current)) {
+    current = current.slice(1, -1).trim();
+  }
+  return current;
+}
+
+function parseSqlStringLiteral(value: string): string | null {
+  const text = stripOuterParens(value);
+  let start = 0;
+  if ((text[0] === "N" || text[0] === "n" || text[0] === "E" || text[0] === "e") && text[1] === "'") {
+    start = 1;
+  }
+  if (text[start] !== "'") return null;
+
+  let result = "";
+  for (let i = start + 1; i < text.length; i++) {
+    const ch = text[i];
+    if (ch !== "'") {
+      result += ch;
+      continue;
+    }
+    if (text[i + 1] === "'") {
+      result += "'";
+      i++;
+      continue;
+    }
+    const tail = text.slice(i + 1).trim();
+    if (!tail || /^::[\w."[\]\s]+$/.test(tail)) return result;
+    return null;
+  }
+  return null;
+}
+
+function isStringLikeType(dataType: string): boolean {
+  const type = dataType.toLowerCase();
+  return type.includes("char") || type.includes("text") || type.includes("clob") || type.includes("enum") || type.includes("set") || type.includes("uuid") || type.includes("guid") || type.includes("json") || type.includes("xml");
+}
+
+function isTemporalType(dataType: string): boolean {
+  const type = dataType.toLowerCase();
+  return type.includes("date") || type.includes("time") || type.includes("timestamp");
+}
+
+function looksLikeSqlDefaultExpression(value: string): boolean {
+  const text = stripOuterParens(value);
+  const lower = text.toLowerCase();
+  if (/^(current_timestamp|current_date|current_time|localtimestamp|localtime|sysdate|systimestamp)(\(\))?$/i.test(text)) {
+    return true;
+  }
+  if (/\b(nextval|now|uuid|random|rand|gen_random_uuid|uuid_generate_v4)\s*\(/i.test(text)) {
+    return true;
+  }
+  if (/^[a-z_][\w$]*(?:\.[a-z_][\w$]*)?\s*\(/i.test(text)) {
+    return true;
+  }
+  return lower.includes("::") || /\b(case|select)\b/i.test(text);
+}
+
+function generatedDefaultValue(defaultValue: string | null | undefined, dataType: string): unknown | undefined {
+  const trimmed = trimColumnDefault(defaultValue);
+  if (!trimmed) return undefined;
+
+  const value = stripOuterParens(trimmed);
+  const quoted = parseSqlStringLiteral(value);
+  if (quoted !== null) return quoted;
+
+  if (/^(true|false)$/i.test(value)) return value.toLowerCase() === "true";
+
+  if (/^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(value)) {
+    return Number(value);
+  }
+
+  if (isTemporalType(dataType) && /^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?)?$/.test(value)) {
+    return value;
+  }
+
+  if (isStringLikeType(dataType) && !looksLikeSqlDefaultExpression(value)) {
+    return value;
+  }
+
+  // Keep expression defaults as raw SQL so functions like CURRENT_TIMESTAMP run in the database.
+  return generatedSqlExpression(value);
 }
 function parseLocalDate(str: string): Date {
   const [y, m, d] = str.split("-").map(Number);
@@ -1067,6 +1201,10 @@ export function defaultGeneratorParams(_columnName: string, attrs: ColumnAttrs, 
   const precision = attrs.numericPrecision ?? null;
   const scale = attrs.numericScale ?? null;
   const charLen = attrs.characterMaximumLength ?? null;
+  if (!attrs.isAutoIncrement && generatedDefaultValue(attrs.columnDefault, attrs.dataType) !== undefined) {
+    params.includeDefault = true;
+    params.defaultPercent = 100;
+  }
 
   if (generatorKey === "sequence") {
     params.startValue = 1;
@@ -1407,10 +1545,15 @@ export function getGeneratorCategoryAndLabel(key: string): { category: string; c
   return { category: "general", categoryLabel: "通用", label: key };
 }
 
-export function generateValue(columnName: string, dataType: string, generatorKey: string | undefined, rowIndex: number, params?: GeneratorParams): unknown {
+export function generateValue(columnName: string, dataType: string, generatorKey: string | undefined, rowIndex: number, params?: GeneratorParams, columnDefault?: string | null): unknown {
   // null / default overrides
   if (params?.includeNull && params.nullPercent && Math.random() * 100 < params.nullPercent) return null;
-  if (params?.includeDefault && params.defaultPercent && Math.random() * 100 < params.defaultPercent) return null;
+  const defaultValue = generatedDefaultValue(columnDefault, dataType);
+  if (defaultValue !== undefined) {
+    const includeDefault = params?.includeDefault ?? true;
+    const defaultPercent = params?.defaultPercent ?? 100;
+    if (includeDefault && defaultPercent > 0 && Math.random() * 100 < defaultPercent) return defaultValue;
+  }
 
   const key = generatorKey ?? findGeneratorKey(columnName, dataType);
   if ((key === "date" || key === "datetime") && rowIndex === 0) {
@@ -1580,10 +1723,17 @@ function generateByType(type: string, rowIndex: number): unknown {
 }
 
 export function formatGeneratedValue(value: unknown): string {
+  if (isGeneratedSqlExpression(value)) return value.sql;
   if (value === null || value === undefined) return "NULL";
   if (typeof value === "number") return String(value);
   if (typeof value === "boolean") return value ? "1" : "0";
   return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+export function displayGeneratedValue(value: unknown): string {
+  if (isGeneratedSqlExpression(value)) return value.display;
+  if (value === null || value === undefined) return "NULL";
+  return String(value);
 }
 
 export interface GenerateResult {
@@ -1597,7 +1747,7 @@ export function generateTableData(config: TableGenerateConfig, databaseType?: Da
   const rows: unknown[][] = [];
 
   for (let i = 0; i < config.rowCount; i++) {
-    const row = config.columns.map((col) => generateValue(col.columnName, col.dataType, col.generatorKey, i, col.generatorParams));
+    const row = config.columns.map((col) => generateValue(col.columnName, col.dataType, col.generatorKey, i, col.generatorParams, col.isAutoIncrement ? null : col.columnDefault));
     rows.push(row);
   }
 

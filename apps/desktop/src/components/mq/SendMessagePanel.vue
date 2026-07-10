@@ -59,6 +59,7 @@ const selectedTopicRef = computed<TopicRef | null>(() => {
 });
 
 const canBrowseMessages = computed(() => props.isKafkaCluster === true && props.supportsPeekMessages !== false);
+const topicListId = computed(() => `mq-topic-options-${props.connectionId}`);
 
 function clearSuccessLater() {
   if (successTimer) clearTimeout(successTimer);
@@ -253,18 +254,17 @@ watch(
       <div class="form-group">
         <label>目标主题 <span class="required">*</span></label>
         <div class="topic-select-row">
-          <select v-model="topicName" :disabled="readOnly || topicsLoading" class="topic-select">
-            <option value="" disabled>{{ topicsLoading ? "加载中..." : "选择主题..." }}</option>
-            <option v-for="t in topicOptions" :key="t.value" :value="t.value">
-              {{ t.label }}<template v-if="t.partitions != null"> ({{ t.partitions }} 分区)</template>
-            </option>
-          </select>
+          <input v-model="topicName" :list="topicListId" :disabled="readOnly || topicsLoading" class="topic-input" :placeholder="topicsLoading ? '加载中...' : '输入或搜索主题...'" autocomplete="off" />
+          <datalist :id="topicListId">
+            <option v-for="t in topicOptions" :key="t.value" :value="t.value" :label="t.partitions != null ? `${t.label} (${t.partitions} 分区)` : t.label" />
+          </datalist>
           <button @click="loadTopics" :disabled="topicsLoading" class="btn-icon" title="刷新主题列表">
             <span v-if="topicsLoading" class="spin">⟳</span>
             <span v-else>⟳</span>
           </button>
         </div>
         <div v-if="!availableTopics.length && !topicsLoading" class="form-hint">暂无可用主题</div>
+        <div v-else class="form-hint">可输入关键词搜索，也可以直接粘贴 topic 名称。</div>
       </div>
 
       <!-- 消息键 -->
@@ -462,7 +462,7 @@ watch(
   gap: 8px;
 }
 
-.topic-select {
+.topic-input {
   flex: 1;
   padding: 7px 10px;
   border: 1px solid var(--color-border);
@@ -470,11 +470,10 @@ watch(
   background: var(--color-background);
   color: var(--color-text);
   font-size: 13px;
-  cursor: pointer;
-  appearance: auto;
+  min-width: 0;
 }
 
-.topic-select:focus {
+.topic-input:focus {
   outline: none;
   border-color: var(--color-primary);
   box-shadow: 0 0 0 2px var(--color-primary-alpha);

@@ -132,13 +132,10 @@ function isSavedOpenTab(value: unknown): value is SavedOpenTab {
   return typeof tab.id === "string" && typeof tab.title === "string" && typeof tab.connectionId === "string" && typeof tab.database === "string" && (typeof tab.sql === "string" || typeof tab.savedSqlId === "string");
 }
 
-export function restoreOpenTabsState(rawTabs: string | null, rawActiveTabId: string | null, options: { queryOnly?: boolean; filter?: OpenTabsRestoreFilter } = {}): RestoredOpenTabs {
-  if (!rawTabs) return { tabs: [], activeTabId: null };
+function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, options: { queryOnly?: boolean; filter?: OpenTabsRestoreFilter } = {}): RestoredOpenTabs {
+  if (!Array.isArray(parsed)) return { tabs: [], activeTabId: null };
 
   try {
-    const parsed = JSON.parse(rawTabs);
-    if (!Array.isArray(parsed)) return { tabs: [], activeTabId: null };
-
     const saved = parsed.filter(isSavedOpenTab);
     const filtered = saved.filter((tab) => {
       if (options.queryOnly && (tab.mode ?? "query") !== "query") return false;
@@ -181,6 +178,21 @@ export function restoreOpenTabsState(rawTabs: string | null, rawActiveTabId: str
       tabs,
       activeTabId: tabs.some((tab) => tab.id === activeTabId) ? activeTabId : tabs[0]?.id || null,
     };
+  } catch {
+    return { tabs: [], activeTabId: null };
+  }
+}
+
+export function restoreOpenTabsPayload(payload: { tabs?: unknown; activeTabId?: unknown } | null | undefined, options: { queryOnly?: boolean; filter?: OpenTabsRestoreFilter } = {}): RestoredOpenTabs {
+  if (!payload) return { tabs: [], activeTabId: null };
+  return restoreOpenTabsArray(payload.tabs, typeof payload.activeTabId === "string" ? payload.activeTabId : null, options);
+}
+
+export function restoreOpenTabsState(rawTabs: string | null, rawActiveTabId: string | null, options: { queryOnly?: boolean; filter?: OpenTabsRestoreFilter } = {}): RestoredOpenTabs {
+  if (!rawTabs) return { tabs: [], activeTabId: null };
+
+  try {
+    return restoreOpenTabsArray(JSON.parse(rawTabs), rawActiveTabId, options);
   } catch {
     return { tabs: [], activeTabId: null };
   }

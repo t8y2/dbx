@@ -15,7 +15,7 @@ import { ArrowLeft, Copy, Download, Play, Loader2, PlusCircle, XCircle, ArrowRig
 const { t } = useI18n();
 const { toast } = useToast();
 const settingsStore = useSettingsStore();
-const { isDark } = useTheme();
+const { isDark, themePalette } = useTheme();
 
 const props = defineProps<{
   deploySql: string;
@@ -120,7 +120,7 @@ async function initEditor() {
   const fontSize = settingsStore.editorSettings.fontSize;
   const fontFamily = settingsStore.editorSettings.fontFamily;
 
-  const themeExt = await loadEditorTheme(editorTheme, appAppearance);
+  const themeExt = await loadEditorTheme(editorTheme, appAppearance, undefined, themePalette.value);
   const fontExt = editorFontTheme(EditorView, fontSize, fontFamily, { fixedHeight: true, scrollable: true });
 
   const dialect = createDbxCodeMirrorSqlDialect(langSql, "postgres");

@@ -6,3 +6,8 @@ export function displayCellValue(value: CellValue): string {
   if (typeof value === "object") return JSON.stringify(value);
   return String(value);
 }
+
+export function firstLineCellDisplayValue(value: string): string {
+  const lineBreakIndex = value.search(/\r\n|\r|\n/);
+  return lineBreakIndex === -1 ? value : value.slice(0, lineBreakIndex);
+}

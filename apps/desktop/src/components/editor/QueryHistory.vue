@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, nextTick, onBeforeUnmount, onMounted, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { CalendarClock, Copy, Database, RotateCcw, Search, Sparkles, Trash2, X } from "@lucide/vue";
@@ -43,6 +43,9 @@ const isRollingBack = ref(false);
 const showDeleteConfirm = ref(false);
 const showClearConfirm = ref(false);
 const deleteTargetId = ref<string | null>(null);
+const filterScrollRef = ref<HTMLElement | null>(null);
+const filtersScrollable = ref(false);
+let filterScrollResizeObserver: ResizeObserver | null = null;
 
 const filters: HistoryFilter[] = ["all", "query", "data_change", "schema_change", "failed"];
 const hasDateFilter = computed(() => hasHistoryDateRange(dateRange.value));
@@ -137,6 +140,16 @@ function entrySubtitle(entry: HistoryEntry) {
 
 function filterLabel(filter: HistoryFilter) {
   return t(`history.filters.${filter}`);
+}
+
+function updateFilterScrollability() {
+  const el = filterScrollRef.value;
+  if (!el) return;
+  const scrollable = el.scrollWidth > el.clientWidth + 3;
+  filtersScrollable.value = scrollable;
+  if (!scrollable && el.scrollLeft !== 0) {
+    el.scrollLeft = 0;
+  }
 }
 
 function openDateRangeFilter() {
@@ -252,7 +265,27 @@ function getHistoryMenuItems(entry: HistoryEntry): ContextMenuItem[] {
   ];
 }
 
-onMounted(() => store.load());
+watch(
+  () => filters.map((filter) => filterLabel(filter)).join("\0"),
+  () => {
+    void nextTick(updateFilterScrollability);
+  },
+);
+
+onMounted(() => {
+  store.load();
+  void nextTick(updateFilterScrollability);
+
+  if (filterScrollRef.value) {
+    filterScrollResizeObserver = new ResizeObserver(updateFilterScrollability);
+    filterScrollResizeObserver.observe(filterScrollRef.value);
+  }
+});
+
+onBeforeUnmount(() => {
+  filterScrollResizeObserver?.disconnect();
+  filterScrollResizeObserver = null;
+});
 </script>
 
 <template>
@@ -269,7 +302,7 @@ onMounted(() => store.load());
     </div>
 
     <div class="border-b shrink-0">
-      <div class="flex gap-1 overflow-x-auto px-2 pt-2">
+      <div ref="filterScrollRef" class="history-filter-scroll flex gap-1 px-2 pt-2" :class="{ 'history-filter-scroll--scrollable': filtersScrollable }">
         <button v-for="filter in filters" :key="filter" type="button" class="h-6 shrink-0 rounded border px-2 text-xs" :class="activeFilter === filter ? 'border-primary bg-primary text-primary-foreground' : 'bg-background'" @click="activeFilter = filter">
           {{ filterLabel(filter) }}
         </button>
@@ -454,3 +487,30 @@ onMounted(() => store.load());
     </Dialog>
   </div>
 </template>
+
+<style scoped>
+.history-filter-scroll {
+  overflow-x: hidden;
+  overscroll-behavior-x: none;
+}
+
+.history-filter-scroll--scrollable {
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-color: color-mix(in oklab, var(--muted-foreground) 45%, transparent) transparent;
+  scrollbar-width: thin;
+}
+
+.history-filter-scroll--scrollable::-webkit-scrollbar {
+  height: 4px;
+}
+
+.history-filter-scroll--scrollable::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.history-filter-scroll--scrollable::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--muted-foreground) 45%, transparent);
+}
+</style>

@@ -48,6 +48,19 @@ fn api_path_suffix<'a>(path: &'a str, public_base_path: &str) -> Option<&'a str>
     path.strip_prefix(base)?.strip_prefix("/api/")
 }
 
+fn middleware_api_path_suffix<'a>(path: &'a str, public_base_path: &str) -> Option<&'a str> {
+    if let Some(suffix) = api_path_suffix(path, public_base_path) {
+        return Some(suffix);
+    }
+
+    let base = public_base_path.trim_end_matches('/');
+    if !base.is_empty() && base != "/" && path.strip_prefix(base).is_some() {
+        return None;
+    }
+
+    path.strip_prefix('/').filter(|suffix| !suffix.is_empty())
+}
+
 pub async fn login(State(state): State<Arc<WebState>>, Json(body): Json<LoginRequest>) -> Result<Response, StatusCode> {
     let hash_guard = state.password_hash.read().await;
     let hash_str = match hash_guard.as_deref() {
@@ -206,20 +219,23 @@ pub async fn auth_middleware(
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    // No password set — allow everything
-    if state.password_hash.read().await.is_none() {
-        return next.run(req).await;
-    }
-
-    // Auth endpoints are always accessible
-    let api_suffix = api_path_suffix(req.uri().path(), &state.public_base_path);
+    // Auth endpoints are always accessible.
+    let api_suffix = middleware_api_path_suffix(req.uri().path(), &state.public_base_path);
     if api_suffix.is_some_and(|suffix| suffix.starts_with("auth/")) {
         return next.run(req).await;
     }
 
-    // Non-API requests (static files) are always accessible
+    // Non-API requests (static files) are always accessible.
     if api_suffix.is_none() {
         return next.run(req).await;
+    }
+
+    if state.password_disabled {
+        return next.run(req).await;
+    }
+
+    if state.password_hash.read().await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
     }
 
     // Check session token
@@ -234,7 +250,7 @@ pub async fn auth_middleware(
 
 #[cfg(test)]
 mod tests {
-    use super::api_path_suffix;
+    use super::{api_path_suffix, middleware_api_path_suffix};
 
     #[test]
     fn api_path_suffix_handles_root_api_paths() {
@@ -248,5 +264,14 @@ mod tests {
         assert_eq!(api_path_suffix("/dbx/api/auth/check", "/dbx"), Some("auth/check"));
         assert_eq!(api_path_suffix("/tools/dbx/api/query/execute", "/tools/dbx"), Some("query/execute"));
         assert_eq!(api_path_suffix("/dbx/login", "/dbx"), None);
+    }
+
+    #[test]
+    fn middleware_api_path_suffix_handles_nested_router_paths() {
+        assert_eq!(middleware_api_path_suffix("/auth/check", "/"), Some("auth/check"));
+        assert_eq!(middleware_api_path_suffix("/connection/list", "/"), Some("connection/list"));
+        assert_eq!(middleware_api_path_suffix("/api/connection/list", "/"), Some("connection/list"));
+        assert_eq!(middleware_api_path_suffix("/dbx/api/connection/list", "/dbx"), Some("connection/list"));
+        assert_eq!(middleware_api_path_suffix("/dbx/login", "/dbx"), None);
     }
 }

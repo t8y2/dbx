@@ -10,6 +10,7 @@ import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcExecutor;
 import com.dbx.agent.JdbcIdentifiers;
 import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.QueryPageOptions;
@@ -18,6 +19,7 @@ import com.dbx.agent.QueryResult;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
 import java.io.PrintStream;
+import java.io.Reader;
 import java.sql.Blob;
 import java.sql.Clob;
 import java.sql.Connection;
@@ -104,43 +106,55 @@ public final class DamengAgent extends BaseDatabaseAgent {
 
     @Override
     public List<DatabaseInfo> listDatabases() {
-        return unchecked(() -> {
-            List<DatabaseInfo> result = new ArrayList<>();
-            String placeholders = String.join(",", SYSTEM_USERS.stream().map(user -> "?").toList());
-            String sql = "SELECT USERNAME FROM ALL_USERS WHERE USERNAME NOT IN (" + placeholders + ") ORDER BY USERNAME";
-            try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
-                int index = 1;
-                for (String user : SYSTEM_USERS) {
-                    stmt.setString(index++, user);
-                }
-                try (ResultSet rs = stmt.executeQuery()) {
-                    while (rs.next()) {
-                        result.add(new DatabaseInfo(rs.getString(1)));
-                    }
-                }
-            }
-            return result;
-        });
+        return unchecked(() -> listVisibleUsers().stream().map(DatabaseInfo::new).toList());
     }
 
     @Override
     public List<String> listSchemas() {
-        return unchecked(() -> {
-            List<String> result = new ArrayList<>();
-            String sql = "SELECT DISTINCT OWNER FROM ALL_OBJECTS ORDER BY OWNER";
-            try (java.sql.Statement stmt = requireConnected().createStatement();
-                 ResultSet rs = stmt.executeQuery(sql)) {
+        return unchecked(this::listVisibleSchemas);
+    }
+
+    private List<String> listVisibleUsers() throws Exception {
+        List<String> result = new ArrayList<>();
+        String placeholders = String.join(",", SYSTEM_USERS.stream().map(user -> "?").toList());
+        String sql = "SELECT USERNAME FROM ALL_USERS WHERE USERNAME NOT IN (" + placeholders + ") ORDER BY USERNAME";
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            int index = 1;
+            for (String user : SYSTEM_USERS) {
+                stmt.setString(index++, user);
+            }
+            try (ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {
                     result.add(rs.getString(1));
                 }
             }
-            return result;
-        });
+        }
+        return result;
+    }
+
+    private List<String> listVisibleSchemas() throws Exception {
+        List<String> result = new ArrayList<>();
+        String placeholders = String.join(",", SYSTEM_USERS.stream().map(user -> "?").toList());
+        String sql = "SELECT NAME FROM SYS.SYSOBJECTS WHERE TYPE$ = 'SCH' AND NAME NOT IN (" + placeholders + ") ORDER BY NAME";
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            int index = 1;
+            for (String user : SYSTEM_USERS) {
+                stmt.setString(index++, user);
+            }
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    result.add(rs.getString(1));
+                }
+            }
+        }
+        return result;
     }
 
     @Override
     public List<TableInfo> listTables(String schema) {
-        return listTables(schema, null);
+        // Keep this call on the legacy object-type overload; the common agent
+        // also exposes a constraints overload for paged metadata listing.
+        return listTables(schema, (List<String>) null);
     }
 
     @Override
@@ -160,6 +174,60 @@ public final class DamengAgent extends BaseDatabaseAgent {
             result.sort(Comparator.comparing(TableInfo::getName));
             return result;
         });
+    }
+
+    @Override
+    public List<TableInfo> listTables(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        if (isUnconstrained(normalized)) {
+            return listTables(schema);
+        }
+        return queryConstrainedTables(schema, normalized);
+    }
+
+    private List<TableInfo> queryConstrainedTables(String schema, MetadataListConstraints constraints) {
+        if (!constraints.includesTableLikeTypes()) {
+            return List.of();
+        }
+        try {
+            return unchecked(() -> {
+                MetadataQuery query = buildConstrainedTablesQuery(schema, constraints);
+                List<TableInfo> result = new ArrayList<>();
+                try (PreparedStatement stmt = requireConnected().prepareStatement(query.sql())) {
+                    bind(stmt, query.args());
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        while (rs.next()) {
+                            result.add(new TableInfo(rs.getString("TABLE_NAME"), normalizeObjectType(rs.getString("TABLE_TYPE")), rs.getString("COMMENTS")));
+                        }
+                    }
+                }
+                return constraints.withoutPaging().filterTables(result);
+            });
+        } catch (RuntimeException e) {
+            // Restricted Dameng catalog views vary by version; fall back to the
+            // legacy metadata path so browsing still works when pushdown fails.
+            return constraints.filterTables(listTables(schema));
+        }
+    }
+
+    static MetadataQuery buildConstrainedTablesQuery(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        List<Object> args = new ArrayList<>();
+        StringBuilder sql = new StringBuilder("""
+            SELECT o.OBJECT_NAME AS TABLE_NAME,
+                   CASE WHEN o.OBJECT_TYPE = 'MATERIALIZED VIEW' THEN 'MATERIALIZED_VIEW' ELSE o.OBJECT_TYPE END AS TABLE_TYPE,
+                   c.COMMENTS
+            FROM ALL_OBJECTS o
+            LEFT JOIN ALL_TAB_COMMENTS c ON c.OWNER = o.OWNER AND c.TABLE_NAME = o.OBJECT_NAME
+            WHERE o.OWNER = ?
+            """.stripIndent().trim());
+        args.add(schema);
+        appendDamengObjectTypePredicate(sql, args, normalized, true);
+        sql.append(" AND (o.OBJECT_TYPE <> 'TABLE' OR o.OBJECT_NAME NOT LIKE 'MTAB$_%')");
+        appendNameFilter(sql, args, "o.OBJECT_NAME", normalized);
+        sql.append(" ORDER BY o.OBJECT_NAME");
+        appendLimitOffset(sql, args, normalized);
+        return new MetadataQuery(sql.toString(), args);
     }
 
     private void loadTableOrView(String schema, String tableType, Map<String, TableInfo> tablesByName) {
@@ -307,6 +375,111 @@ public final class DamengAgent extends BaseDatabaseAgent {
         return false;
     }
 
+    private static boolean isUnconstrained(MetadataListConstraints constraints) {
+        return !constraints.hasFilter() && !constraints.hasLimit() && !constraints.hasOffset() && !constraints.hasObjectTypes();
+    }
+
+    private static boolean includesSupportedObjectTypes(MetadataListConstraints constraints) {
+        return constraints.includesTableLikeTypes()
+            || constraints.objectTypeAllowed("PROCEDURE")
+            || constraints.objectTypeAllowed("FUNCTION");
+    }
+
+    private static void appendDamengObjectTypePredicate(
+        StringBuilder sql,
+        List<Object> args,
+        MetadataListConstraints constraints,
+        boolean tableOnly
+    ) {
+        List<String> objectTypes = tableOnly ? damengTableObjectTypes(constraints) : damengObjectTypes(constraints);
+        if (objectTypes.isEmpty()) {
+            sql.append(" AND 1 = 0");
+            return;
+        }
+        sql.append(" AND o.OBJECT_TYPE IN (").append(placeholders(objectTypes.size())).append(")");
+        args.addAll(objectTypes);
+    }
+
+    private static List<String> damengTableObjectTypes(MetadataListConstraints constraints) {
+        List<String> result = new ArrayList<>();
+        if (constraints.tableTypeAllowed("TABLE")) {
+            result.add("TABLE");
+        }
+        if (constraints.tableTypeAllowed("VIEW")) {
+            result.add("VIEW");
+        }
+        if (constraints.tableTypeAllowed("MATERIALIZED_VIEW")) {
+            result.add("MATERIALIZED VIEW");
+        }
+        return result;
+    }
+
+    private static List<String> damengObjectTypes(MetadataListConstraints constraints) {
+        List<String> result = damengTableObjectTypes(constraints);
+        if (constraints.objectTypeAllowed("PROCEDURE")) {
+            result.add("PROCEDURE");
+        }
+        if (constraints.objectTypeAllowed("FUNCTION")) {
+            result.add("FUNCTION");
+        }
+        return result;
+    }
+
+    private static void appendNameFilter(StringBuilder sql, List<Object> args, String column, MetadataListConstraints constraints) {
+        if (!constraints.hasFilter()) {
+            return;
+        }
+        sql.append(" AND UPPER(").append(column).append(") LIKE ? ESCAPE '\\\\'");
+        args.add(constraints.fuzzyLikePattern().toUpperCase(Locale.ROOT));
+    }
+
+    private static void appendLimitOffset(StringBuilder sql, List<Object> args, MetadataListConstraints constraints) {
+        if (!constraints.hasLimit()) {
+            return;
+        }
+        sql.append(" LIMIT ?");
+        args.add(constraints.getLimit());
+        if (constraints.hasOffset()) {
+            sql.append(" OFFSET ?");
+            args.add(constraints.getOffset());
+        }
+    }
+
+    private static String placeholders(int count) {
+        return String.join(", ", java.util.Collections.nCopies(count, "?"));
+    }
+
+    private static void bind(PreparedStatement stmt, List<Object> args) throws Exception {
+        for (int index = 0; index < args.size(); index += 1) {
+            Object arg = args.get(index);
+            if (arg instanceof Integer) {
+                stmt.setInt(index + 1, (Integer) arg);
+            } else if (arg == null) {
+                stmt.setObject(index + 1, null);
+            } else {
+                stmt.setString(index + 1, String.valueOf(arg));
+            }
+        }
+    }
+
+    static final class MetadataQuery {
+        private final String sql;
+        private final List<Object> args;
+
+        MetadataQuery(String sql, List<Object> args) {
+            this.sql = sql;
+            this.args = args;
+        }
+
+        String sql() {
+            return sql;
+        }
+
+        List<Object> args() {
+            return args;
+        }
+    }
+
     private static String normalizeObjectType(String value) {
         String upper = value == null ? "" : value.trim().toUpperCase(Locale.ROOT).replace(' ', '_').replace('-', '_');
         if (upper.contains("MATERIALIZED") && upper.contains("VIEW")) {
@@ -350,6 +523,71 @@ public final class DamengAgent extends BaseDatabaseAgent {
     }
 
     @Override
+    public List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        if (isUnconstrained(normalized)) {
+            return listObjects(schema);
+        }
+        return queryConstrainedObjects(schema, normalized);
+    }
+
+    private List<ObjectInfo> queryConstrainedObjects(String schema, MetadataListConstraints constraints) {
+        if (!includesSupportedObjectTypes(constraints)) {
+            return List.of();
+        }
+        try {
+            return unchecked(() -> {
+                MetadataQuery query = buildConstrainedObjectsQuery(schema, constraints);
+                List<ObjectInfo> result = new ArrayList<>();
+                try (PreparedStatement stmt = requireConnected().prepareStatement(query.sql())) {
+                    bind(stmt, query.args());
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        while (rs.next()) {
+                            result.add(new ObjectInfo(
+                                rs.getString("OBJECT_NAME"),
+                                normalizeObjectType(rs.getString("OBJECT_TYPE")),
+                                schema,
+                                rs.getString("COMMENTS")
+                            ));
+                        }
+                    }
+                }
+                return constraints.withoutPaging().filterObjects(result);
+            });
+        } catch (RuntimeException e) {
+            // Keep restricted/older Dameng catalogs usable even if SQL pushdown
+            // is unavailable for a specific connection.
+            return constraints.filterObjects(listObjects(schema));
+        }
+    }
+
+    static MetadataQuery buildConstrainedObjectsQuery(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        List<Object> args = new ArrayList<>();
+        StringBuilder sql = new StringBuilder("""
+            SELECT o.OBJECT_NAME,
+                   CASE WHEN o.OBJECT_TYPE = 'MATERIALIZED VIEW' THEN 'MATERIALIZED_VIEW' ELSE o.OBJECT_TYPE END AS OBJECT_TYPE,
+                   c.COMMENTS
+            FROM ALL_OBJECTS o
+            LEFT JOIN ALL_TAB_COMMENTS c ON c.OWNER = o.OWNER AND c.TABLE_NAME = o.OBJECT_NAME
+            WHERE o.OWNER = ?
+            """.stripIndent().trim());
+        args.add(schema);
+        appendDamengObjectTypePredicate(sql, args, normalized, false);
+        sql.append(" AND (o.OBJECT_TYPE <> 'TABLE' OR o.OBJECT_NAME NOT LIKE 'MTAB$_%')");
+        appendNameFilter(sql, args, "o.OBJECT_NAME", normalized);
+        sql.append(" ORDER BY CASE o.OBJECT_TYPE")
+            .append(" WHEN 'TABLE' THEN 0")
+            .append(" WHEN 'VIEW' THEN 1")
+            .append(" WHEN 'MATERIALIZED VIEW' THEN 2")
+            .append(" WHEN 'PROCEDURE' THEN 3")
+            .append(" WHEN 'FUNCTION' THEN 4")
+            .append(" ELSE 9 END, o.OBJECT_NAME");
+        appendLimitOffset(sql, args, normalized);
+        return new MetadataQuery(sql.toString(), args);
+    }
+
+    @Override
     public ObjectSource getObjectSource(String schema, String name, String objectType) {
         return unchecked(() -> {
             String dbmsType = switch (objectType.toUpperCase(Locale.ROOT)) {
@@ -366,7 +604,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
                 stmt.setString(2, name);
                 stmt.setString(3, schema);
                 try (ResultSet rs = stmt.executeQuery()) {
-                    source = rs.next() ? coalesce(rs.getString(1)) : "";
+                    source = rs.next() ? coalesce(readTextColumn(rs, 1)) : "";
                 }
             }
             return new ObjectSource(name, objectType, schema, source);
@@ -383,7 +621,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
                 stmt.setString(3, schema);
                 try (ResultSet rs = stmt.executeQuery()) {
                     if (rs.next()) {
-                        String ddl = appendTableAndColumnComments(coalesce(rs.getString(1)), schema, table);
+                        String ddl = appendTableAndColumnComments(coalesce(readTextColumn(rs, 1)), schema, table);
                         return appendIndependentIndexDdl(ddl, schema, table);
                     }
                 }
@@ -686,6 +924,24 @@ public final class DamengAgent extends BaseDatabaseAgent {
         return value == null ? null : unchecked(value::getString);
     }
 
+    private static String readTextColumn(ResultSet rs, int columnIndex) throws Exception {
+        try (Reader reader = rs.getCharacterStream(columnIndex)) {
+            String value = readAll(reader);
+            if (value != null) {
+                return value;
+            }
+        } catch (Exception ignored) {
+        }
+        try {
+            Clob clob = rs.getClob(columnIndex);
+            if (clob != null) {
+                return clob.getSubString(1, Math.toIntExact(clob.length()));
+            }
+        } catch (Exception ignored) {
+        }
+        return rs.getString(columnIndex);
+    }
+
     private static String bytesToHex(byte[] bytes) {
         if (bytes == null) {
             return null;
@@ -738,18 +994,22 @@ public final class DamengAgent extends BaseDatabaseAgent {
             }
         } catch (Exception ignored) {
         }
-        try (java.io.Reader reader = rs.getCharacterStream(column)) {
-            if (reader == null) {
-                return null;
-            }
-            StringBuilder sb = new StringBuilder();
-            char[] buf = new char[4096];
-            int n;
-            while ((n = reader.read(buf)) != -1) {
-                sb.append(buf, 0, n);
-            }
-            return sb.toString();
+        try (Reader reader = rs.getCharacterStream(column)) {
+            return readAll(reader);
         }
+    }
+
+    private static String readAll(Reader reader) throws Exception {
+        if (reader == null) {
+            return null;
+        }
+        StringBuilder sb = new StringBuilder();
+        char[] buf = new char[4096];
+        int n;
+        while ((n = reader.read(buf)) != -1) {
+            sb.append(buf, 0, n);
+        }
+        return sb.toString();
     }
 
     private static List<String> splitNonEmpty(String value, String delimiter) {
@@ -834,24 +1094,29 @@ public final class DamengAgent extends BaseDatabaseAgent {
 
     private String appendIndependentIndexDdl(String ddl, String schema, String table) throws Exception {
         StringBuilder result = new StringBuilder(ddl == null ? "" : ddl.trim());
-        for (String indexName : independentIndexNames(schema, table)) {
+        for (IndexInfo index : independentIndexes(schema, table)) {
+            String indexName = index.getName();
+            if (isInternalIndexMetadata(index) || index.getColumns().isEmpty()) {
+                continue;
+            }
             if (containsCreateIndex(result.toString(), schema, indexName)) {
                 continue;
             }
-            String indexDdl = indexDdl(schema, indexName);
-            if (notBlank(indexDdl)) {
-                appendDdlStatement(result, ensureStatementTerminator(indexDdl));
-            }
+            appendDdlStatement(result, indexDdl(schema, table, index));
         }
         return result.toString();
     }
 
-    private List<String> independentIndexNames(String schema, String table) throws Exception {
-        List<String> result = new ArrayList<>();
+    private List<IndexInfo> independentIndexes(String schema, String table) throws Exception {
+        List<IndexInfo> result = new ArrayList<>();
         // Primary-key and unique-constraint backing indexes are already represented in table DDL.
         String sql = """
-            SELECT i.INDEX_NAME
+            SELECT i.INDEX_NAME,
+                LISTAGG(ic.COLUMN_NAME, ',') WITHIN GROUP (ORDER BY ic.COLUMN_POSITION) AS COLUMNS,
+                i.UNIQUENESS,
+                i.INDEX_TYPE
             FROM ALL_INDEXES i
+            JOIN ALL_IND_COLUMNS ic ON i.INDEX_NAME = ic.INDEX_NAME AND i.OWNER = ic.INDEX_OWNER AND i.TABLE_OWNER = ic.TABLE_OWNER
             WHERE i.TABLE_OWNER = ? AND i.TABLE_NAME = ?
                 AND NOT EXISTS (
                     SELECT 1
@@ -861,6 +1126,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
                         AND c.INDEX_NAME = i.INDEX_NAME
                         AND c.CONSTRAINT_TYPE IN ('P', 'U')
                 )
+            GROUP BY i.INDEX_NAME, i.UNIQUENESS, i.INDEX_TYPE
             ORDER BY i.INDEX_NAME
             """.stripIndent().trim();
         try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
@@ -870,7 +1136,16 @@ public final class DamengAgent extends BaseDatabaseAgent {
                 while (rs.next()) {
                     String indexName = rs.getString(1);
                     if (notBlank(indexName)) {
-                        result.add(indexName);
+                        result.add(new IndexInfo(
+                            indexName,
+                            splitNonEmpty(coalesce(rs.getString(2)), ","),
+                            "UNIQUE".equals(rs.getString(3)),
+                            false,
+                            null,
+                            rs.getString(4),
+                            null,
+                            null
+                        ));
                     }
                 }
             }
@@ -878,16 +1153,29 @@ public final class DamengAgent extends BaseDatabaseAgent {
         return result;
     }
 
-    private String indexDdl(String schema, String indexName) throws Exception {
-        String sql = "SELECT DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL";
-        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
-            stmt.setString(1, "INDEX");
-            stmt.setString(2, indexName);
-            stmt.setString(3, schema);
-            try (ResultSet rs = stmt.executeQuery()) {
-                return rs.next() ? rs.getString(1) : null;
-            }
+    private static String indexDdl(String schema, String table, IndexInfo index) {
+        StringBuilder ddl = new StringBuilder("CREATE ");
+        if (index.getIs_unique()) {
+            ddl.append("UNIQUE ");
         }
+        ddl.append("INDEX ")
+            .append(qualifiedName(schema, index.getName()))
+            .append(" ON ")
+            .append(qualifiedName(schema, table))
+            .append(" (");
+        for (int i = 0; i < index.getColumns().size(); i++) {
+            if (i > 0) {
+                ddl.append(", ");
+            }
+            ddl.append(JdbcIdentifiers.INSTANCE.doubleQuote(index.getColumns().get(i)));
+        }
+        ddl.append(");");
+        return ddl.toString();
+    }
+
+    private static boolean isInternalIndexMetadata(IndexInfo index) {
+        String indexType = coalesce(index.getIndex_type()).toUpperCase(Locale.ROOT);
+        return indexType.contains("INNER") || indexType.contains("INTERNAL");
     }
 
     private String tableComment(String schema, String table) throws Exception {

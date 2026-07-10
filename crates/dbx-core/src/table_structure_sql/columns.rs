@@ -1,8 +1,8 @@
 use super::column_alter::{
-    build_clickhouse_existing_column_sql, build_h2_existing_column_sql, build_informix_existing_column_sql,
-    build_mysql_existing_column_sql, build_oracle_like_existing_column_sql, build_postgres_existing_column_sql,
-    build_questdb_existing_column_sql, build_sqlite_existing_column_sql, build_sqlserver_existing_column_sql,
-    has_column_extra_change, has_existing_column_attribute_change,
+    build_clickhouse_existing_column_sql, build_doris_existing_column_sql, build_h2_existing_column_sql,
+    build_informix_existing_column_sql, build_mysql_existing_column_sql, build_oracle_like_existing_column_sql,
+    build_postgres_existing_column_sql, build_questdb_existing_column_sql, build_sqlite_existing_column_sql,
+    build_sqlserver_existing_column_sql, has_column_extra_change, has_existing_column_attribute_change,
 };
 use super::column_format::column_definition;
 use super::comments::build_sqlserver_column_comment_sql;
@@ -142,6 +142,7 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
                 column,
                 if has_position_change { &position_clause } else { "" },
             )),
+            StructureDialect::Doris => statements.extend(build_doris_existing_column_sql(&table, column, "")),
             StructureDialect::Postgres => statements.extend(build_postgres_existing_column_sql(&table, column)),
             StructureDialect::Oracle => {
                 statements.extend(build_oracle_like_existing_column_sql(dialect, &table, column))

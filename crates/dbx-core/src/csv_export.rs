@@ -129,6 +129,7 @@ pub async fn export_table_data_csv_core(state: &AppState, options: TableCsvExpor
             offset: Some(offset),
             where_input: None,
             include_row_id: false,
+            ..Default::default()
         });
         let result = execute_sql_statement_with_options(
             state,

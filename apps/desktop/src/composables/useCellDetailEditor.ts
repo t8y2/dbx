@@ -14,7 +14,7 @@ import { clampEditorFontSize, createEditorZoomCommitScheduler, fontSizeFromGestu
 import i18n from "@/i18n";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import type { EditorTheme } from "@/stores/settingsStore";
-import type { AppThemeAppearance } from "@/lib/app/appTheme";
+import type { AppThemeAppearance, AppThemePalette } from "@/lib/app/appTheme";
 
 export interface UseCellDetailEditorOptions {
   onChange?: (value: string) => void;
@@ -24,6 +24,7 @@ export interface UseCellDetailEditorOptions {
   readOnly?: boolean;
   editorTheme: () => EditorTheme;
   appAppearance: () => AppThemeAppearance;
+  appPalette: () => AppThemePalette;
   fontSize: () => number;
   fontFamily: () => string;
 }
@@ -130,14 +131,14 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
     zoomCommitScheduler.flush(liveFontSize);
   }
 
-  watch([() => options.fontSize(), () => options.fontFamily(), () => options.editorTheme(), () => options.appAppearance()], async ([fontSize, fontFamily, editorTheme, appearance]) => {
+  watch([() => options.fontSize(), () => options.fontFamily(), () => options.editorTheme(), () => options.appAppearance(), () => options.appPalette()], async ([fontSize, fontFamily, editorTheme, appearance, palette]) => {
     const editor = view.value;
     if (!editor || destroyed) return;
     if (!isGestureZooming && !zoomCommitScheduler.hasPendingCommit()) {
       liveFontSize = clampEditorFontSize(fontSize);
     }
     syncEditorFontCssVars(liveFontSize, fontFamily);
-    const theme = await loadEditorTheme(editorTheme, appearance);
+    const theme = await loadEditorTheme(editorTheme, appearance, undefined, palette);
     if (!view.value || destroyed) return;
     view.value.dispatch({
       effects: [themeComp.reconfigure(theme), fontThemeComp.reconfigure(editorFontTheme(EditorView, liveFontSize, fontFamily, { fixedHeight: true, scrollable: true }))],
@@ -150,7 +151,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
     const doc = initialValue ?? "";
     currentIsJson = options.language === "json" || shouldUseJsonMode(columnType, doc);
 
-    const theme = await loadEditorTheme(options.editorTheme(), options.appAppearance());
+    const theme = await loadEditorTheme(options.editorTheme(), options.appAppearance(), undefined, options.appPalette());
     liveFontSize = clampEditorFontSize(options.fontSize());
     const fontTheme = editorFontTheme(EditorView, liveFontSize, options.fontFamily(), { fixedHeight: true, scrollable: true });
     const shortcuts = settingsStore.editorSettings.shortcuts;

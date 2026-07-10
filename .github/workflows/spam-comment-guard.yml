@@ -1,0 +1,41 @@
+name: Spam Comment Guard
+
+on:
+  issue_comment:
+    types: [created]
+
+# 用 PROJECT_AUTOMATION_TOKEN（owner PAT）调 DELETE，GITHUB_TOKEN 本身无需写权限
+permissions:
+  contents: read
+
+jobs:
+  delete-malicious-link:
+    runs-on: ubuntu-latest
+    # 跳过机器人与仓库 owner，避免误删维护者的正当评论
+    if: ${{ github.event.comment.user.type != 'Bot' && github.event.comment.user.login != github.repository_owner }}
+    env:
+      # owner PAT：GITHUB_TOKEN 非 admin 删不掉别人的评论，必须用 owner 令牌
+      GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_TOKEN }}
+      COMMENT_ID: ${{ github.event.comment.id }}
+      COMMENT_BODY: ${{ github.event.comment.body }}
+      COMMENT_USER: ${{ github.event.comment.user.login }}
+      ISSUE_URL: ${{ github.event.issue.html_url }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Delete comment containing malicious attachment link
+        run: |
+          set -euo pipefail
+
+          # 命中外部恶意附件链接即删除评论。两条分支：
+          #   1) 外部 http(s) 直链 .zip（排除 GitHub 自有域名的 release/archive/raw/attachments）
+          #   2) markdown 链接文本以 .zip/.exe/.scr/.7z 结尾且指向外部域名——
+          #      规避手法常把 .zip 放链接文本、URL 用 // 协议相对或 %2E 编码域名
+          # 如需扩展扩展名，修改下方两处列表即可。
+          if ! printf '%s' "$COMMENT_BODY" | grep -qiP 'https?://(?!(?:github\.com|[^/]*\.githubusercontent\.com)/)[^[:space:]<>"]+\.zip([?#][^[:space:]<>"]*)?|\[[^\]]*\.(zip|7z|exe|scr)\]\((?!(?:https?:)?//(?:github\.com|[^/]*\.githubusercontent\.com)/)[^)]*\)'; then
+            echo "No malicious attachment link detected, skipping"
+            exit 0
+          fi
+
+          echo "Detected malicious attachment link in comment by @$COMMENT_USER on $ISSUE_URL — deleting"
+          # 物理删除评论，内容对所有人不可见。DELETE 返回 204 无响应体。
+          gh api -X DELETE "repos/${REPO}/issues/comments/${COMMENT_ID}"

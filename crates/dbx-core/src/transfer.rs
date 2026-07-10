@@ -19,6 +19,7 @@ static CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
 
 const MAX_TRANSFER_WRITE_SQL_BYTES: usize = 512 * 1024;
 const MAX_SQLSERVER_INSERT_ROWS: usize = 1000;
+const MAX_ORACLE_INSERT_ALL_ROWS: usize = 500;
 const MAX_ORACLE_MERGE_ROWS: usize = 500;
 const TRANSFER_TARGET_TABLE_LOOKUP_LIMIT: usize = 1000;
 
@@ -40,6 +41,15 @@ pub enum TransferTableNameCase {
     Upper,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum TransferOwnershipPolicy {
+    #[default]
+    Preserve,
+    Skip,
+    ReassignMissing,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferRequest {
@@ -56,7 +66,16 @@ pub struct TransferRequest {
     pub mode: TransferMode,
     #[serde(default)]
     pub target_table_name_case: TransferTableNameCase,
+    #[serde(default)]
+    pub ownership_policy: TransferOwnershipPolicy,
     pub batch_size: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferOwnershipPreview {
+    pub missing_owners: Vec<String>,
+    pub target_owner: String,
 }
 
 impl TransferRequest {
@@ -80,6 +99,7 @@ pub struct TransferProgress {
     pub total_rows: Option<u64>,
     pub status: TransferStatus,
     pub error: Option<String>,
+    pub terminal: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -374,6 +394,9 @@ fn postgres_column_type_sql(
     source_db: &DatabaseType,
     target_db: &DatabaseType,
 ) -> String {
+    if let Some(mapped_type) = clickhouse_temporal_column_type(column, source_db, target_db) {
+        return mapped_type;
+    }
     if is_postgres_compat_transfer(source_db, target_db) {
         let trimmed = column.data_type.trim();
         if !trimmed.is_empty() {
@@ -381,6 +404,43 @@ fn postgres_column_type_sql(
         }
     }
     map_column_type(&column.data_type, source_db, target_db)
+}
+
+fn clickhouse_temporal_column_type(
+    column: &db::ColumnInfo,
+    source_db: &DatabaseType,
+    target_db: &DatabaseType,
+) -> Option<String> {
+    if !matches!(target_db, DatabaseType::ClickHouse) || source_db == target_db {
+        return None;
+    }
+
+    let source_type = column.data_type.trim();
+    let lower = source_type.to_ascii_lowercase();
+    let base = lower.split(['(', ' ', '\t', '\n']).next().unwrap_or("").trim();
+    if !matches!(base, "datetime" | "timestamp" | "timestamptz") {
+        return None;
+    }
+
+    let scale = clickhouse_datetime64_scale(column);
+    // ClickHouse DateTime stores whole seconds, and older versions reject
+    // fractional timestamp strings such as Dameng's TIMESTAMP(6) output.
+    Some(format!("DateTime64({scale})"))
+}
+
+fn clickhouse_datetime64_scale(column: &db::ColumnInfo) -> u8 {
+    let scale = parse_temporal_type_scale(&column.data_type).or(column.numeric_scale).unwrap_or(6);
+    scale.clamp(0, 9) as u8
+}
+
+fn parse_temporal_type_scale(source_type: &str) -> Option<i32> {
+    let start = source_type.find('(')? + 1;
+    let rest = &source_type[start..];
+    let digits = rest.bytes().take_while(|byte| byte.is_ascii_digit()).collect::<Vec<_>>();
+    if digits.is_empty() {
+        return None;
+    }
+    std::str::from_utf8(&digits).ok()?.parse::<i32>().ok()
 }
 
 fn postgres_default_clause(
@@ -481,7 +541,9 @@ fn looks_like_numeric_literal(raw: &str) -> bool {
     if trimmed.is_empty() {
         return false;
     }
-    trimmed.parse::<i64>().is_ok() || trimmed.parse::<u64>().is_ok() || trimmed.parse::<f64>().is_ok()
+    trimmed.parse::<i64>().is_ok()
+        || trimmed.parse::<u64>().is_ok()
+        || trimmed.parse::<f64>().is_ok_and(|value| value.is_finite())
 }
 
 fn format_mysql_default_literal(raw: &str, data_type: &str) -> String {
@@ -792,12 +854,32 @@ struct PostgresMaterializedViewSource {
     source: String,
 }
 
+#[derive(Debug, Clone)]
+struct PostgresOwnershipStatement {
+    sql_prefix: String,
+    owner: String,
+}
+
 fn json_string_cell(row: &[serde_json::Value], index: usize) -> Option<String> {
     row.get(index).and_then(|value| value.as_str().map(str::to_string))
 }
 
 fn result_rows_to_string_statements(rows: Vec<Vec<serde_json::Value>>) -> Vec<String> {
     rows.into_iter().filter_map(|row| json_string_cell(&row, 0)).filter(|stmt| !stmt.trim().is_empty()).collect()
+}
+
+fn result_rows_to_postgres_ownership_statements(rows: Vec<Vec<serde_json::Value>>) -> Vec<PostgresOwnershipStatement> {
+    rows.into_iter()
+        .filter_map(|row| {
+            let sql_prefix = json_string_cell(&row, 0)?;
+            let owner = json_string_cell(&row, 1)?;
+            if sql_prefix.trim().is_empty() || owner.trim().is_empty() {
+                None
+            } else {
+                Some(PostgresOwnershipStatement { sql_prefix, owner })
+            }
+        })
+        .collect()
 }
 
 fn ensure_sql_statement_terminated(sql: &str) -> String {
@@ -970,6 +1052,15 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             if let Some(binary_literal) = format_postgres_binary_sql_literal(s, db_type, column_type) {
                 return binary_literal;
             }
+            if let Some(binary_literal) = format_mysql_binary_sql_literal(s, db_type, column_type) {
+                return binary_literal;
+            }
+            if let Some(numeric_literal) = format_mysql_numeric_string_literal(s, db_type, column_type) {
+                return numeric_literal;
+            }
+            if let Some(date_literal) = format_oracle_date_sql_literal(s, db_type, column_type) {
+                return date_literal;
+            }
 
             let literal = format_literal_string(s, db_type, column_type);
             let escaped = if is_postgres_family_target(db_type) {
@@ -1004,6 +1095,37 @@ fn is_mysql_bit_type(column_type: &str) -> bool {
     lower == "bit" || lower.starts_with("bit(") || lower.starts_with("bit ")
 }
 
+fn is_mysql_numeric_string_literal_database(db_type: &DatabaseType) -> bool {
+    matches!(
+        db_type,
+        DatabaseType::Mysql
+            | DatabaseType::Doris
+            | DatabaseType::StarRocks
+            | DatabaseType::Goldendb
+            | DatabaseType::Sundb
+    )
+}
+
+fn is_mysql_non_bit_numeric_type(column_type: &str) -> bool {
+    is_mysql_numeric_base_type(column_type) && !is_mysql_bit_type(column_type)
+}
+
+fn format_mysql_numeric_string_literal(
+    value: &str,
+    db_type: &DatabaseType,
+    column_type: Option<&str>,
+) -> Option<String> {
+    if !is_mysql_numeric_string_literal_database(db_type) || !column_type.is_some_and(is_mysql_non_bit_numeric_type) {
+        return None;
+    }
+    let trimmed = value.trim();
+    if looks_like_numeric_literal(trimmed) {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
+}
+
 fn is_binary_transfer_column_type(column_type: &str) -> bool {
     let lower = column_type.trim().to_ascii_lowercase();
     let base = lower.split(['(', ' ', '\t', '\n']).next().unwrap_or("");
@@ -1025,6 +1147,90 @@ fn format_postgres_binary_sql_literal(
     }
 
     Some(format!("decode('{hex}', 'hex')"))
+}
+
+fn format_mysql_binary_sql_literal(value: &str, db_type: &DatabaseType, column_type: Option<&str>) -> Option<String> {
+    if !matches!(db_type, DatabaseType::Mysql) || !column_type.is_some_and(is_binary_transfer_column_type) {
+        return None;
+    }
+
+    let trimmed = value.trim();
+    let hex = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X"))?;
+    if hex.as_bytes().iter().all(|byte| byte.is_ascii_hexdigit()) {
+        Some(if hex.is_empty() { "X''".to_string() } else { format!("0x{hex}") })
+    } else {
+        None
+    }
+}
+
+fn format_oracle_date_sql_literal(value: &str, db_type: &DatabaseType, column_type: Option<&str>) -> Option<String> {
+    if !matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle) {
+        return None;
+    }
+    if temporal_column_kind(column_type) != Some("date") {
+        return None;
+    }
+    let parts = oracle_export_date_parts(value)?;
+    Some(format_oracle_date_sql_literal_parts(&parts))
+}
+
+struct OracleExportDateParts<'a> {
+    date: &'a str,
+    time: &'a str,
+    fraction: Option<&'a str>,
+}
+
+fn format_oracle_date_sql_literal_parts(parts: &OracleExportDateParts<'_>) -> String {
+    if oracle_export_date_parts_are_midnight(parts) {
+        format!("DATE '{}'", parts.date)
+    } else {
+        format!("TO_DATE('{} {}', 'YYYY-MM-DD HH24:MI:SS')", parts.date, parts.time)
+    }
+}
+
+fn oracle_export_date_parts_are_midnight(parts: &OracleExportDateParts<'_>) -> bool {
+    parts.time == "00:00:00"
+        && parts.fraction.map(|fraction| fraction.trim_start_matches('.').chars().all(|ch| ch == '0')).unwrap_or(true)
+}
+
+fn oracle_export_date_parts(value: &str) -> Option<OracleExportDateParts<'_>> {
+    let bytes = value.as_bytes();
+    if bytes.len() < 10 || bytes.get(4) != Some(&b'-') || bytes.get(7) != Some(&b'-') {
+        return None;
+    }
+    let date = &value[..10];
+    if !date.as_bytes().iter().enumerate().all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit()) {
+        return None;
+    }
+    if bytes.len() == 10 {
+        return Some(OracleExportDateParts { date, time: "00:00:00", fraction: None });
+    }
+    let separator = *bytes.get(10)?;
+    if separator != b'T' && separator != b' ' {
+        return None;
+    }
+    if bytes.len() < 19 || bytes.get(13) != Some(&b':') || bytes.get(16) != Some(&b':') {
+        return None;
+    }
+    let time = &value[11..19];
+    if !time.as_bytes().iter().enumerate().all(|(index, byte)| matches!(index, 2 | 5) || byte.is_ascii_digit()) {
+        return None;
+    }
+    let rest = &value[19..];
+    if rest.is_empty() || is_timezone_suffix(rest) {
+        return Some(OracleExportDateParts { date, time, fraction: None });
+    }
+    if let Some(after_dot) = rest.strip_prefix('.') {
+        let digit_count = after_dot.bytes().take_while(|byte| byte.is_ascii_digit()).count();
+        if digit_count == 0 {
+            return None;
+        }
+        let zone = &after_dot[digit_count..];
+        if zone.is_empty() || is_timezone_suffix(zone) {
+            return Some(OracleExportDateParts { date, time, fraction: Some(&value[19..19 + 1 + digit_count]) });
+        }
+    }
+    None
 }
 
 pub fn format_pg_array_sql_literal(arr: &[serde_json::Value]) -> String {
@@ -1340,11 +1546,13 @@ pub fn map_column_type(source_type: &str, _source_db: &DatabaseType, target_db: 
         "time" => "TIME".into(),
         "datetime" => match target_db {
             DatabaseType::Postgres => "TIMESTAMP".into(),
+            DatabaseType::ClickHouse => "DateTime64(6)".into(),
             _ => "DATETIME".into(),
         },
         "timestamp" | "timestamptz" | "timestamp with time zone" | "timestamp without time zone" => match target_db {
             DatabaseType::Mysql => "DATETIME".into(),
             DatabaseType::SqlServer => "DATETIME2".into(),
+            DatabaseType::ClickHouse => "DateTime64(6)".into(),
             _ => "TIMESTAMP".into(),
         },
         "longblob" => match target_db {
@@ -1590,6 +1798,15 @@ pub fn generate_insert_typed(
     let col_list = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
 
     let value_rows = value_rows_sql(rows, column_types, db_type);
+    if matches!(db_type, DatabaseType::Oracle) && rows.len() > 1 {
+        // Oracle 11g does not accept comma-separated multi-row VALUES lists.
+        let into_rows = value_rows
+            .iter()
+            .map(|values| format!("INTO {full_table} ({col_list}) VALUES {values}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return format!("INSERT ALL\n{into_rows}\nSELECT 1 FROM dual");
+    }
 
     format!("INSERT INTO {full_table} ({col_list}) VALUES\n{}", value_rows.join(",\n"))
 }
@@ -1770,6 +1987,7 @@ fn max_transfer_write_rows(db_type: &DatabaseType, mode: &TransferMode) -> usize
     match (db_type, mode) {
         (DatabaseType::SqlServer, TransferMode::Append | TransferMode::Overwrite) => MAX_SQLSERVER_INSERT_ROWS,
         (DatabaseType::Hive, _) => 500,
+        (DatabaseType::Oracle, TransferMode::Append | TransferMode::Overwrite) => MAX_ORACLE_INSERT_ALL_ROWS,
         (DatabaseType::Oracle, TransferMode::Upsert) => MAX_ORACLE_MERGE_ROWS,
         _ => usize::MAX,
     }
@@ -2270,6 +2488,7 @@ fn mongo_columns_from_documents(documents: &[serde_json::Value]) -> Vec<db::Colu
                 numeric_precision: None,
                 numeric_scale: None,
                 character_maximum_length: None,
+                enum_values: None,
             }
         })
         .collect()
@@ -2847,6 +3066,7 @@ async fn get_postgres_schema_object_sources_for_transfer(
             object_type: db::ObjectSourceKind::View,
             schema: Some(schema.to_string()),
             source,
+            editable: None,
         });
     }
     for row in execute_on_pool(state, pool_key, &routines_sql).await?.rows {
@@ -2860,7 +3080,13 @@ async fn get_postgres_schema_object_sources_for_transfer(
         let Some(source) = json_string_cell(&row, 2) else {
             continue;
         };
-        sources.push(db::ObjectSource { name, object_type: kind, schema: Some(schema.to_string()), source });
+        sources.push(db::ObjectSource {
+            name,
+            object_type: kind,
+            schema: Some(schema.to_string()),
+            source,
+            editable: None,
+        });
     }
 
     Ok(sources)
@@ -3068,50 +3294,120 @@ async fn get_postgres_ownership_statements_for_transfer(
     source_schema: &str,
     target_schema: &str,
     tables: &[String],
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<PostgresOwnershipStatement>, String> {
     let table_list = tables.iter().map(|table| quote_string_literal(table)).collect::<Vec<_>>().join(", ");
     let table_filter = if tables.is_empty() { "FALSE".to_string() } else { format!("c.relname IN ({table_list})") };
     let sql = format!(
         "WITH relation_owners AS ( \
              SELECT CASE c.relkind \
-                      WHEN 'm' THEN format('ALTER MATERIALIZED VIEW %I.%I OWNER TO %I', {target_schema}, c.relname, pg_get_userbyid(c.relowner)) \
-                      WHEN 'v' THEN format('ALTER VIEW %I.%I OWNER TO %I', {target_schema}, c.relname, pg_get_userbyid(c.relowner)) \
-                      WHEN 'f' THEN format('ALTER FOREIGN TABLE %I.%I OWNER TO %I', {target_schema}, c.relname, pg_get_userbyid(c.relowner)) \
-                      WHEN 'S' THEN format('ALTER SEQUENCE %I.%I OWNER TO %I', {target_schema}, c.relname, pg_get_userbyid(c.relowner)) \
-                      ELSE format('ALTER TABLE %I.%I OWNER TO %I', {target_schema}, c.relname, pg_get_userbyid(c.relowner)) \
-                    END AS stmt \
+                      WHEN 'm' THEN format('ALTER MATERIALIZED VIEW %I.%I OWNER TO ', {target_schema}, c.relname) \
+                      WHEN 'v' THEN format('ALTER VIEW %I.%I OWNER TO ', {target_schema}, c.relname) \
+                      WHEN 'f' THEN format('ALTER FOREIGN TABLE %I.%I OWNER TO ', {target_schema}, c.relname) \
+                      WHEN 'S' THEN format('ALTER SEQUENCE %I.%I OWNER TO ', {target_schema}, c.relname) \
+                      ELSE format('ALTER TABLE %I.%I OWNER TO ', {target_schema}, c.relname) \
+                    END AS stmt_prefix, \
+                    pg_get_userbyid(c.relowner) AS owner_name \
              FROM pg_catalog.pg_class c \
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = {source_schema} AND (c.relkind IN ('v','m') OR ({table_filter} AND c.relkind IN ('r','p','f','S'))) \
          ), \
          routine_owners AS ( \
-             SELECT format('ALTER %s %I.%I(%s) OWNER TO %I', \
+             SELECT format('ALTER %s %I.%I(%s) OWNER TO ', \
                            CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END, \
-                           {target_schema}, p.proname, pg_get_function_identity_arguments(p.oid), pg_get_userbyid(p.proowner)) AS stmt \
+                           {target_schema}, p.proname, pg_get_function_identity_arguments(p.oid)) AS stmt_prefix, \
+                    pg_get_userbyid(p.proowner) AS owner_name \
              FROM pg_catalog.pg_proc p \
              JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
              WHERE n.nspname = {source_schema} AND p.prokind IN ('p','f') \
          ), \
          type_owners AS ( \
-             SELECT format('ALTER %s %I.%I OWNER TO %I', \
+             SELECT format('ALTER %s %I.%I OWNER TO ', \
                            CASE t.typtype WHEN 'd' THEN 'DOMAIN' ELSE 'TYPE' END, \
-                           {target_schema}, t.typname, pg_get_userbyid(t.typowner)) AS stmt \
+                           {target_schema}, t.typname) AS stmt_prefix, \
+                    pg_get_userbyid(t.typowner) AS owner_name \
              FROM pg_catalog.pg_type t \
              JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
              WHERE n.nspname = {source_schema} AND t.typtype IN ('e','d') \
          ) \
-         SELECT stmt FROM ( \
-             SELECT format('ALTER SCHEMA %I OWNER TO %I', {target_schema}, pg_get_userbyid(n.nspowner)) AS stmt \
+         SELECT stmt_prefix, owner_name FROM ( \
+             SELECT format('ALTER SCHEMA %I OWNER TO ', {target_schema}) AS stmt_prefix, \
+                    pg_get_userbyid(n.nspowner) AS owner_name \
              FROM pg_catalog.pg_namespace n WHERE n.nspname = {source_schema} \
-             UNION ALL SELECT stmt FROM relation_owners \
-             UNION ALL SELECT stmt FROM routine_owners \
-             UNION ALL SELECT stmt FROM type_owners \
-         ) statements",
+             UNION ALL SELECT stmt_prefix, owner_name FROM relation_owners \
+             UNION ALL SELECT stmt_prefix, owner_name FROM routine_owners \
+             UNION ALL SELECT stmt_prefix, owner_name FROM type_owners \
+         ) statements \
+         WHERE stmt_prefix IS NOT NULL AND owner_name IS NOT NULL",
         source_schema = quote_string_literal(source_schema),
         target_schema = quote_string_literal(target_schema),
         table_filter = table_filter,
     );
-    Ok(result_rows_to_string_statements(execute_on_pool(state, pool_key, &sql).await?.rows))
+    Ok(result_rows_to_postgres_ownership_statements(execute_on_pool(state, pool_key, &sql).await?.rows))
+}
+
+fn distinct_postgres_ownership_roles(statements: &[PostgresOwnershipStatement]) -> Vec<String> {
+    let mut roles = statements.iter().map(|statement| statement.owner.clone()).collect::<Vec<_>>();
+    roles.sort();
+    roles.dedup();
+    roles
+}
+
+async fn get_postgres_current_user(state: &AppState, target_pool_key: &str) -> Result<String, String> {
+    let rows = execute_on_pool(state, target_pool_key, "SELECT current_user").await?.rows;
+    rows.first()
+        .and_then(|row| json_string_cell(row, 0))
+        .filter(|user| !user.trim().is_empty())
+        .ok_or_else(|| "Failed to read target PostgreSQL current user".to_string())
+}
+
+async fn get_existing_postgres_roles(
+    state: &AppState,
+    target_pool_key: &str,
+    roles: &[String],
+) -> Result<HashSet<String>, String> {
+    if roles.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let role_list = roles.iter().map(|role| quote_string_literal(role)).collect::<Vec<_>>().join(", ");
+    let sql = format!("SELECT rolname FROM pg_catalog.pg_roles WHERE rolname IN ({role_list})");
+    let rows = execute_on_pool(state, target_pool_key, &sql).await?.rows;
+    Ok(rows.into_iter().filter_map(|row| json_string_cell(&row, 0)).collect())
+}
+
+fn build_postgres_ownership_statement(statement: &PostgresOwnershipStatement, owner: &str) -> String {
+    format!("{}{}", statement.sql_prefix, quote_identifier(owner, &DatabaseType::Postgres))
+}
+
+pub async fn preview_transfer_ownership(
+    state: &AppState,
+    request: &TransferRequest,
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+    source_pool_key: &str,
+    target_pool_key: &str,
+) -> Result<TransferOwnershipPreview, String> {
+    if !request.create_table || !is_postgres_compat_transfer(source_db_type, target_db_type) {
+        return Ok(TransferOwnershipPreview { missing_owners: Vec::new(), target_owner: String::new() });
+    }
+
+    let statements = get_postgres_ownership_statements_for_transfer(
+        state,
+        source_pool_key,
+        &request.source_schema,
+        &request.target_schema,
+        &request.tables,
+    )
+    .await?;
+    let roles = distinct_postgres_ownership_roles(&statements);
+    let existing_roles = get_existing_postgres_roles(state, target_pool_key, &roles).await?;
+    let missing_owners = roles.into_iter().filter(|role| !existing_roles.contains(role)).collect::<Vec<_>>();
+    let target_owner = if missing_owners.is_empty() {
+        String::new()
+    } else {
+        get_postgres_current_user(state, target_pool_key).await?
+    };
+
+    Ok(TransferOwnershipPreview { missing_owners, target_owner })
 }
 
 async fn get_postgres_grant_statements_for_transfer(
@@ -3437,6 +3733,7 @@ where
                         numeric_precision: None,
                         numeric_scale: None,
                         character_maximum_length: None,
+                        enum_values: None,
                     });
                 }
                 sql_target_column_names = sql_target_columns.iter().map(|column| column.name.clone()).collect();
@@ -3535,6 +3832,7 @@ where
             total_rows,
             status: TransferStatus::Running,
             error: None,
+            terminal: false,
         });
 
         if row_count < batch_size {
@@ -3894,6 +4192,7 @@ where
             total_rows,
             status: TransferStatus::Running,
             error: None,
+            terminal: false,
         });
 
         if row_count < batch_size {
@@ -3978,6 +4277,7 @@ where
             total_rows: Some(total_steps as u64),
             status: TransferStatus::Running,
             error: None,
+            terminal: false,
         });
         execute_on_pool(state, target_pool_key, &generate_postgres_extension_ddl(&extension, &request.target_schema))
             .await
@@ -3998,6 +4298,7 @@ where
             total_rows: Some(total_steps as u64),
             status: TransferStatus::Running,
             error: None,
+            terminal: false,
         });
         execute_on_pool(state, target_pool_key, &generate_postgres_enum_ddl(&enum_type, &request.target_schema))
             .await
@@ -4018,6 +4319,7 @@ where
             total_rows: Some(total_steps as u64),
             status: TransferStatus::Running,
             error: None,
+            terminal: false,
         });
         execute_on_pool(state, target_pool_key, &generate_postgres_domain_ddl(&domain, &request.target_schema))
             .await
@@ -4058,14 +4360,31 @@ where
         &request.tables,
     )
     .await?;
-    let ownership_statements = get_postgres_ownership_statements_for_transfer(
-        state,
-        source_pool_key,
-        &request.source_schema,
-        &request.target_schema,
-        &request.tables,
-    )
-    .await?;
+    let ownership_statements = if matches!(request.ownership_policy, TransferOwnershipPolicy::Skip) {
+        Vec::new()
+    } else {
+        get_postgres_ownership_statements_for_transfer(
+            state,
+            source_pool_key,
+            &request.source_schema,
+            &request.target_schema,
+            &request.tables,
+        )
+        .await?
+    };
+    let ownership_existing_roles = if matches!(request.ownership_policy, TransferOwnershipPolicy::ReassignMissing) {
+        let roles = distinct_postgres_ownership_roles(&ownership_statements);
+        get_existing_postgres_roles(state, target_pool_key, &roles).await?
+    } else {
+        HashSet::new()
+    };
+    let ownership_target_user = if matches!(request.ownership_policy, TransferOwnershipPolicy::ReassignMissing)
+        && !ownership_statements.is_empty()
+    {
+        Some(get_postgres_current_user(state, target_pool_key).await?)
+    } else {
+        None
+    };
     let grant_statements = get_postgres_grant_statements_for_transfer(
         state,
         source_pool_key,
@@ -4102,6 +4421,7 @@ where
             total_rows: Some(total_steps as u64),
             status: TransferStatus::Running,
             error: None,
+            terminal: false,
         });
 
         let rewritten_source = match object.object_type {
@@ -4143,6 +4463,7 @@ where
                 total_rows: Some(total_steps as u64),
                 status: TransferStatus::Running,
                 error: None,
+                terminal: false,
             });
             execute_on_pool(state, target_pool_key, &statement)
                 .await
@@ -4164,6 +4485,7 @@ where
             total_rows: Some(total_steps as u64),
             status: TransferStatus::Running,
             error: None,
+            terminal: false,
         });
         let full_table = qualified_table(&trigger.table_name, &request.target_schema, &DatabaseType::Postgres);
         let drop_sql = format!(
@@ -4183,6 +4505,7 @@ where
             total_rows: Some(total_steps as u64),
             status: TransferStatus::Running,
             error: None,
+            terminal: false,
         });
         let create_sql = rewrite_postgres_trigger_table_schema(
             &ensure_sql_statement_terminated(&trigger.source),
@@ -4209,6 +4532,7 @@ where
             total_rows: Some(total_steps as u64),
             status: TransferStatus::Running,
             error: None,
+            terminal: false,
         });
         execute_on_pool(state, target_pool_key, &statement)
             .await
@@ -4229,8 +4553,19 @@ where
             total_rows: Some(total_steps as u64),
             status: TransferStatus::Running,
             error: None,
+            terminal: false,
         });
-        execute_on_pool(state, target_pool_key, &statement)
+        let ownership_owner = if matches!(request.ownership_policy, TransferOwnershipPolicy::ReassignMissing)
+            && !ownership_existing_roles.contains(&statement.owner)
+        {
+            ownership_target_user
+                .as_deref()
+                .ok_or_else(|| "Failed to read target PostgreSQL current user".to_string())?
+        } else {
+            &statement.owner
+        };
+        let ownership_sql = build_postgres_ownership_statement(&statement, ownership_owner);
+        execute_on_pool(state, target_pool_key, &ownership_sql)
             .await
             .map_err(|e| format!("Failed to apply PostgreSQL ownership statement: {e}"))?;
     }
@@ -4249,6 +4584,7 @@ where
             total_rows: Some(total_steps as u64),
             status: TransferStatus::Running,
             error: None,
+            terminal: false,
         });
         execute_on_pool(state, target_pool_key, &statement)
             .await
@@ -4280,6 +4616,7 @@ mod tests {
             driver_profile: None,
             driver_label: None,
             url_params: None,
+            agent_java_options: Vec::new(),
             host: ":memory:".to_string(),
             port: 0,
             username: String::new(),
@@ -4333,6 +4670,7 @@ mod tests {
             numeric_precision: None,
             numeric_scale: None,
             character_maximum_length: None,
+            enum_values: None,
         }
     }
 
@@ -4373,6 +4711,7 @@ mod tests {
             create_table: true,
             mode: TransferMode::Append,
             target_table_name_case: TransferTableNameCase::Preserve,
+            ownership_policy: TransferOwnershipPolicy::Preserve,
             batch_size: 1000,
         }
     }
@@ -4800,6 +5139,29 @@ mod tests {
     }
 
     #[test]
+    fn clickhouse_transfer_maps_fractional_timestamp_to_datetime64() {
+        let cols = vec![db::ColumnInfo { numeric_scale: Some(6), ..test_column("created_at", "TIMESTAMP") }];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "events",
+            "SYSDBA",
+            "",
+            &DatabaseType::ClickHouse,
+            &DatabaseType::Dameng,
+            None,
+        );
+
+        assert!(ddl.contains("`created_at` DateTime64(6)"), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn clickhouse_transfer_uses_datetime64_fallback_for_timestamp_types() {
+        assert_eq!(map_column_type("datetime", &DatabaseType::Dameng, &DatabaseType::ClickHouse), "DateTime64(6)");
+        assert_eq!(map_column_type("timestamp", &DatabaseType::Dameng, &DatabaseType::ClickHouse), "DateTime64(6)");
+    }
+
+    #[test]
     fn transfer_reuses_source_table_ddl_only_when_target_shape_matches() {
         assert!(!can_reuse_source_table_ddl(&DatabaseType::ClickHouse, &DatabaseType::ClickHouse, true));
         assert!(can_reuse_source_table_ddl(&DatabaseType::Postgres, &DatabaseType::Postgres, true));
@@ -5161,6 +5523,7 @@ mod tests {
                     numeric_precision: None,
                     numeric_scale: None,
                     character_maximum_length: None,
+                    enum_values: None,
                 },
                 db::ColumnInfo {
                     name: "identity_id".to_string(),
@@ -5173,6 +5536,7 @@ mod tests {
                     numeric_precision: None,
                     numeric_scale: None,
                     character_maximum_length: None,
+                    enum_values: None,
                 },
                 db::ColumnInfo {
                     name: "computed_id".to_string(),
@@ -5185,6 +5549,7 @@ mod tests {
                     numeric_precision: None,
                     numeric_scale: None,
                     character_maximum_length: None,
+                    enum_values: None,
                 },
             ],
             "users",
@@ -5258,6 +5623,7 @@ mod tests {
                 numeric_precision: None,
                 numeric_scale: None,
                 character_maximum_length: None,
+                enum_values: None,
             },
             db::ColumnInfo {
                 name: "name".to_string(),
@@ -5270,6 +5636,7 @@ mod tests {
                 numeric_precision: None,
                 numeric_scale: None,
                 character_maximum_length: None,
+                enum_values: None,
             },
         ];
         let source_ddl = crate::schema::render_postgres_table_ddl("public", "it_quick_entry", &columns, &[], &[]);
@@ -5443,6 +5810,93 @@ mod tests {
     }
 
     #[test]
+    fn oracle_insert_uses_date_literals_for_date_columns() {
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("created_on"), String::from("created_at"), String::from("raw_text")],
+            &[
+                Some(String::from("NUMBER")),
+                Some(String::from("DATE")),
+                Some(String::from("TIMESTAMP(6)")),
+                Some(String::from("VARCHAR2(64)")),
+            ],
+            &[vec![
+                json!(1),
+                json!("2022-08-25T09:58:43Z"),
+                json!("2022-08-25T09:58:43Z"),
+                json!("2022-08-25T09:58:43Z"),
+            ]],
+            "events",
+            "APP",
+            &DatabaseType::Oracle,
+        );
+
+        assert_eq!(
+            sql,
+            "INSERT INTO \"APP\".\"events\" (\"id\", \"created_on\", \"created_at\", \"raw_text\") VALUES\n(1, TO_DATE('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS'), '2022-08-25T09:58:43Z', '2022-08-25T09:58:43Z')"
+        );
+        assert_eq!(
+            escape_value_typed(&json!("2022-08-25T00:00:00Z"), &DatabaseType::Oracle, Some("DATE")),
+            "DATE '2022-08-25'"
+        );
+    }
+
+    #[test]
+    fn mysql_insert_formats_numeric_strings_from_numeric_columns_as_numeric_literals() {
+        let sql = generate_insert_typed(
+            &[
+                String::from("id"),
+                String::from("amount"),
+                String::from("quantity"),
+                String::from("text_id"),
+                String::from("bad_number"),
+                String::from("missing"),
+            ],
+            &[
+                Some(String::from("bigint(20)")),
+                Some(String::from("decimal(10,2)")),
+                Some(String::from("int unsigned")),
+                Some(String::from("varchar(64)")),
+                Some(String::from("bigint(20)")),
+                Some(String::from("bigint(20)")),
+            ],
+            &[vec![
+                json!("1234567890123"),
+                json!("12.34"),
+                json!("42"),
+                json!("123"),
+                json!("not-a-number"),
+                serde_json::Value::Null,
+            ]],
+            "orders",
+            "",
+            &DatabaseType::Mysql,
+        );
+
+        assert_eq!(
+            sql,
+            "INSERT INTO `orders` (`id`, `amount`, `quantity`, `text_id`, `bad_number`, `missing`) VALUES\n(1234567890123, 12.34, 42, '123', 'not-a-number', NULL)"
+        );
+    }
+
+    #[test]
+    fn mysql_upsert_formats_numeric_strings_from_numeric_columns_as_numeric_literals() {
+        let sql = generate_upsert_typed(
+            &[String::from("id"), String::from("amount")],
+            &[Some(String::from("bigint(20)")), Some(String::from("decimal(10,2)"))],
+            &[vec![json!("1234567890123"), json!("12.34")]],
+            "orders",
+            "",
+            &DatabaseType::Mysql,
+            &[String::from("id")],
+        );
+
+        assert_eq!(
+            sql,
+            "INSERT INTO `orders` (`id`, `amount`) VALUES\n(1234567890123, 12.34)\nON DUPLICATE KEY UPDATE `amount` = VALUES(`amount`)"
+        );
+    }
+
+    #[test]
     fn sqlserver_insert_prefixes_string_literals_as_unicode() {
         let sql = generate_insert_typed(
             &[String::from("name"), String::from("note")],
@@ -5569,6 +6023,47 @@ mod tests {
     }
 
     #[test]
+    fn mysql_insert_formats_blob_prefixed_hex_as_binary_literal() {
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("payload"), String::from("empty_blob"), String::from("note")],
+            &[
+                Some(String::from("int")),
+                Some(String::from("MEDIUMBLOB")),
+                Some(String::from("blob")),
+                Some(String::from("varchar(64)")),
+            ],
+            &[vec![json!(1), json!("0x0001ABff"), json!("0X"), json!("0x0001ABff")]],
+            "files",
+            "",
+            &DatabaseType::Mysql,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT INTO `files` (`id`, `payload`, `empty_blob`, `note`) VALUES
+(1, 0x0001ABff, X'', '0x0001ABff')"#
+        );
+    }
+
+    #[test]
+    fn mysql_insert_keeps_invalid_blob_hex_as_string_literal() {
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("payload")],
+            &[Some(String::from("int")), Some(String::from("mediumblob"))],
+            &[vec![json!(1), json!("0xnothex")]],
+            "files",
+            "",
+            &DatabaseType::Mysql,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT INTO `files` (`id`, `payload`) VALUES
+(1, '0xnothex')"#
+        );
+    }
+
+    #[test]
     fn mysql_insert_keeps_backslash_escape_style() {
         let sql = generate_insert_typed(
             &[String::from("path")],
@@ -5584,6 +6079,64 @@ mod tests {
             r#"INSERT INTO `files` (`path`) VALUES
 ('C:\\tmp\\file.txt')"#
         );
+    }
+
+    #[test]
+    fn oracle_single_row_insert_keeps_values_shape() {
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("name")],
+            &[Some(String::from("number")), Some(String::from("varchar2(64)"))],
+            &[vec![json!(1), json!("Ada")]],
+            "INSTR_CATEGORY",
+            "APP",
+            &DatabaseType::Oracle,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT INTO "APP"."INSTR_CATEGORY" ("id", "name") VALUES
+(1, 'Ada')"#
+        );
+    }
+
+    #[test]
+    fn oracle_multi_row_insert_uses_insert_all() {
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("name")],
+            &[Some(String::from("number")), Some(String::from("varchar2(64)"))],
+            &[vec![json!(1), json!("Ada")], vec![json!(2), json!("O'Brien")]],
+            "INSTR_CATEGORY",
+            "APP",
+            &DatabaseType::Oracle,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT ALL
+INTO "APP"."INSTR_CATEGORY" ("id", "name") VALUES (1, 'Ada')
+INTO "APP"."INSTR_CATEGORY" ("id", "name") VALUES (2, 'O''Brien')
+SELECT 1 FROM dual"#
+        );
+    }
+
+    #[test]
+    fn oracle_transfer_write_batches_limit_insert_all_rows() {
+        let rows = (0..(MAX_ORACLE_INSERT_ALL_ROWS + 1)).map(|index| vec![json!(index)]).collect::<Vec<_>>();
+        let statements = generate_transfer_write_sql_batches(
+            &TransferMode::Append,
+            &[String::from("id")],
+            &[Some(String::from("number"))],
+            &rows,
+            "INSTR_CATEGORY",
+            "APP",
+            &DatabaseType::Oracle,
+            &[],
+        );
+
+        assert_eq!(statements.len(), 2);
+        assert_eq!(statements[0].matches("\nINTO ").count(), MAX_ORACLE_INSERT_ALL_ROWS);
+        assert!(statements[0].starts_with("INSERT ALL\nINTO "));
+        assert!(statements[0].ends_with("SELECT 1 FROM dual"));
     }
 
     #[test]

@@ -84,6 +84,97 @@ test("preserves loaded schema children when the database itself matches search",
   assert.equal(filtered[0]?.children?.[0]?.label, "public");
 });
 
+test("preserves loaded MongoDB collection children when the database itself matches search", () => {
+  const nodes: TreeNode[] = [
+    {
+      id: "conn:analytics",
+      label: "analytics",
+      type: "mongo-db",
+      connectionId: "conn",
+      database: "analytics",
+      isExpanded: true,
+      children: [
+        {
+          id: "conn:analytics:__gridfs",
+          label: "tree.gridfs",
+          type: "mongo-gridfs",
+          connectionId: "conn",
+          database: "analytics",
+          isExpanded: false,
+        },
+        {
+          id: "conn:analytics:orders",
+          label: "orders",
+          type: "mongo-collection",
+          connectionId: "conn",
+          database: "analytics",
+          isExpanded: false,
+        },
+      ],
+    },
+  ];
+
+  const filtered = filterSidebarTree(nodes, "analytics", new Set());
+
+  assert.equal(filtered[0]?.label, "analytics");
+  assert.deepEqual(
+    filtered[0]?.children?.map((child) => child.type),
+    ["mongo-gridfs", "mongo-collection"],
+  );
+  assert.equal(filtered[0]?.children?.[1]?.label, "orders");
+});
+
+test("preserves loaded MongoDB collection groups when the collection itself matches search", () => {
+  const nodes: TreeNode[] = [
+    {
+      id: "conn:analytics",
+      label: "analytics",
+      type: "mongo-db",
+      connectionId: "conn",
+      database: "analytics",
+      isExpanded: true,
+      children: [
+        {
+          id: "conn:analytics:orders",
+          label: "orders",
+          type: "mongo-collection",
+          connectionId: "conn",
+          database: "analytics",
+          isExpanded: true,
+          children: [
+            {
+              id: "conn:analytics:orders:__columns",
+              label: "tree.columns",
+              type: "group-columns",
+              connectionId: "conn",
+              database: "analytics",
+              tableName: "orders",
+              isExpanded: true,
+              children: [
+                {
+                  id: "conn:analytics:orders:__columns:_id",
+                  label: "_id",
+                  type: "column",
+                  connectionId: "conn",
+                  database: "analytics",
+                  tableName: "orders",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  ];
+
+  const filtered = filterSidebarTree(nodes, "orders", new Set());
+
+  const collection = filtered[0]?.children?.[0];
+  assert.equal(collection?.label, "orders");
+  assert.equal(collection?.children?.[0]?.label, "tree.columns");
+  assert.equal(collection?.children?.[0]?.children?.[0]?.label, "_id");
+});
+
 test("preserves loaded children when the connection itself matches search", () => {
   const nodes: TreeNode[] = [
     {

@@ -147,6 +147,36 @@ class CommonJavaCompatibilityTest {
     }
 
     @Test
+    void jsonRpcServerAppliesConstrainedTableMetadataRequests() {
+        MetadataConstraintAgent agent = new MetadataConstraintAgent();
+        JsonRpcServer server = new JsonRpcServer(agent);
+
+        String response = server.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"" + AgentProtocol.METHOD_LIST_TABLES + "\",\"params\":{\"schema\":\"app\",\"filter\":\"us\",\"limit\":1,\"offset\":1,\"object_types\":[\"TABLE\"]}}"
+        );
+
+        JsonArray result = JsonParser.parseString(response).getAsJsonObject().getAsJsonArray("result");
+        assertEquals(1, result.size());
+        assertEquals("user_settings", result.get(0).getAsJsonObject().get("name").getAsString());
+        assertEquals("app", agent.lastSchema);
+    }
+
+    @Test
+    void jsonRpcServerAppliesConstrainedObjectMetadataRequests() {
+        MetadataConstraintAgent agent = new MetadataConstraintAgent();
+        JsonRpcServer server = new JsonRpcServer(agent);
+
+        String response = server.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"" + AgentProtocol.METHOD_LIST_OBJECTS + "\",\"params\":{\"schema\":\"app\",\"filter\":\"fn\",\"limit\":1,\"offset\":1,\"object_types\":[\"FUNCTION\"]}}"
+        );
+
+        JsonArray result = JsonParser.parseString(response).getAsJsonObject().getAsJsonArray("result");
+        assertEquals(1, result.size());
+        assertEquals("fetch_name", result.get(0).getAsJsonObject().get("name").getAsString());
+        assertEquals("FUNCTION", result.get(0).getAsJsonObject().get("object_type").getAsString());
+    }
+
+    @Test
     void jsonRpcServerDispatchesTableReadSessionMethods() {
         TableReadDispatchAgent agent = new TableReadDispatchAgent();
         JsonRpcServer server = new JsonRpcServer(agent);
@@ -254,6 +284,48 @@ class CommonJavaCompatibilityTest {
     }
 
     @Test
+    void databaseAgentDefaultConstraintsFilterLegacyMetadataOverrides() {
+        DatabaseAgent agent = new LegacyObjectTypeAgent();
+
+        List<TableInfo> tables = agent.listTables(
+            "public",
+            new MetadataListConstraints("us", 1, 1, Collections.singletonList("TABLE"))
+        );
+        assertEquals(1, tables.size());
+        assertEquals("user_settings", tables.get(0).getName());
+
+        List<ObjectInfo> objects = agent.listObjects(
+            "public",
+            new MetadataListConstraints("us", 1, 0, Collections.singletonList("VIEW"))
+        );
+        assertEquals(1, objects.size());
+        assertEquals("usage_view", objects.get(0).getName());
+    }
+
+    @Test
+    void metadataConstraintsMatchTableAndObjectComments() {
+        MetadataListConstraints tableConstraints =
+            new MetadataListConstraints("account", null, null, Collections.singletonList("TABLE"));
+        List<TableInfo> tables = tableConstraints.filterTables(Arrays.asList(
+            new TableInfo("orders", "TABLE", "sales archive"),
+            new TableInfo("profile", "TABLE", "customer account data"),
+            new TableInfo("account_view", "VIEW", "ignored by type")
+        ));
+        assertEquals(1, tables.size());
+        assertEquals("profile", tables.get(0).getName());
+
+        MetadataListConstraints objectConstraints =
+            new MetadataListConstraints("revenue", null, null, Collections.singletonList("VIEW"));
+        List<ObjectInfo> objects = objectConstraints.filterObjects(Arrays.asList(
+            new ObjectInfo("order_view", "VIEW", "public", "monthly revenue summary"),
+            new ObjectInfo("sync_user", "PROCEDURE", "public", "sync revenue data"),
+            new ObjectInfo("audit_log", "TABLE", "public", "audit records")
+        ));
+        assertEquals(1, objects.size());
+        assertEquals("order_view", objects.get(0).getName());
+    }
+
+    @Test
     void executesTransactionsOneByOneWhenJdbcDriverDoesNotSupportTransactions() {
         List<String> calls = new ArrayList<>();
         DatabaseAgent agent = new TransactionAgent(nonTransactionalConnection(calls));
@@ -262,7 +334,7 @@ class CommonJavaCompatibilityTest {
 
         assertEquals(2L, result.getAffected_rows());
         assertEquals(
-            Arrays.asList("supportsTransactions", "setSchema:APP", "executeUpdate:UPDATE A SET ID = 1", "executeUpdate:UPDATE B SET ID = 2"),
+            Arrays.asList("supportsTransactions", "execute:SET SCHEMA \"APP\"", "executeUpdate:UPDATE A SET ID = 1", "executeUpdate:UPDATE B SET ID = 2"),
             calls
         );
     }
@@ -394,6 +466,33 @@ class CommonJavaCompatibilityTest {
         }
     }
 
+    private static final class LegacyObjectTypeAgent extends MinimalAgent {
+        @Override
+        public List<TableInfo> listTables(String schema) {
+            return Arrays.asList(
+                new TableInfo("orders", "TABLE"),
+                new TableInfo("usage_view", "VIEW"),
+                new TableInfo("users", "TABLE"),
+                new TableInfo("user_settings", "TABLE")
+            );
+        }
+
+        @Override
+        public List<TableInfo> listTables(String schema, List<String> objectTypes) {
+            List<TableInfo> result = listTables(schema);
+            if (objectTypes == null || objectTypes.isEmpty()) {
+                return result;
+            }
+            List<TableInfo> filtered = new ArrayList<>();
+            for (TableInfo table : result) {
+                if (objectTypes.contains(table.getTable_type())) {
+                    filtered.add(table);
+                }
+            }
+            return filtered;
+        }
+    }
+
     private static final class PreciseNumberAgent extends MinimalAgent {
         @Override
         public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
@@ -469,6 +568,44 @@ class CommonJavaCompatibilityTest {
         public List<TableInfo> listTables(String schema) {
             lastSchema = schema;
             return super.listTables(schema);
+        }
+    }
+
+    private static final class MetadataConstraintAgent extends MinimalAgent {
+        private String lastSchema = "";
+
+        @Override
+        public Connection getConnection() {
+            return proxy(Connection.class, (method, args) -> {
+                if ("isClosed".equals(method.getName())) {
+                    return false;
+                }
+                if ("isValid".equals(method.getName())) {
+                    return true;
+                }
+                return defaultValue(method.getReturnType());
+            });
+        }
+
+        @Override
+        public List<TableInfo> listTables(String schema) {
+            lastSchema = schema;
+            return Arrays.asList(
+                new TableInfo("orders", "TABLE"),
+                new TableInfo("users", "TABLE"),
+                new TableInfo("usage_view", "VIEW"),
+                new TableInfo("user_settings", "TABLE")
+            );
+        }
+
+        @Override
+        public List<ObjectInfo> listObjects(String schema) {
+            return Arrays.asList(
+                new ObjectInfo("orders", "TABLE", schema, null),
+                new ObjectInfo("find_user", "FUNCTION", schema, null),
+                new ObjectInfo("fetch_name", "FUNCTION", schema, null),
+                new ObjectInfo("cleanup_user", "PROCEDURE", schema, null)
+            );
         }
     }
 

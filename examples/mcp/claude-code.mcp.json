@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "dbx": {
+      "command": "dbx-mcp-server"
+    }
+  }
+}

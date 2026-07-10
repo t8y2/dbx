@@ -333,6 +333,7 @@ fn push_mapping_column(
         numeric_precision: None,
         numeric_scale: None,
         character_maximum_length: None,
+        enum_values: None,
     });
 }
 
@@ -794,9 +795,9 @@ pub async fn execute_rest_query(client: &EsClient, input: &str) -> Result<crate:
     .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
 
     let status = resp.status().as_u16();
-    let body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::Value::Null);
+    let body = resp.text().await.map_err(|e| format!("Elasticsearch response read failed: {e}"))?;
 
-    parse_elasticsearch_response(status, body, start)
+    parse_elasticsearch_rest_response(status, &body, start)
 }
 
 // Size to use when `SELECT *` is run without an explicit LIMIT — large enough
@@ -847,6 +848,35 @@ fn parse_elasticsearch_response(
 ) -> Result<crate::types::QueryResult, String> {
     if let Some(result) = parse_sql_response(&body, start) {
         Ok(result)
+    } else if let Some(aggs) = body.get("aggregations").or_else(|| body.get("aggs")).and_then(|v| v.as_object()) {
+        let (columns, rows) = parse_aggregations(aggs);
+        if !columns.is_empty() {
+            let row_count = rows.len() as u64;
+            Ok(crate::types::QueryResult {
+                columns,
+                column_types: Vec::new(),
+                column_sortables: vec![],
+                rows,
+                affected_rows: row_count,
+                execution_time_ms: start.elapsed().as_millis(),
+                truncated: false,
+                session_id: None,
+                has_more: false,
+            })
+        } else {
+            let pretty = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
+            Ok(crate::types::QueryResult {
+                columns: vec!["status".to_string(), "response".to_string()],
+                column_types: Vec::new(),
+                column_sortables: vec![],
+                rows: vec![vec![serde_json::Value::Number(status.into()), serde_json::Value::String(pretty)]],
+                affected_rows: 0,
+                execution_time_ms: start.elapsed().as_millis(),
+                truncated: false,
+                session_id: None,
+                has_more: false,
+            })
+        }
     } else if let Some(hits) = body.pointer("/hits/hits").and_then(|v| v.as_array()) {
         // Treat any `_search`-shaped body as the hits result, even when empty —
         // a 0-row match is a valid empty result, not a reason to fall back to
@@ -909,35 +939,6 @@ fn parse_elasticsearch_response(
             session_id: None,
             has_more: false,
         })
-    } else if let Some(aggs) = body.get("aggregations").or_else(|| body.get("aggs")).and_then(|v| v.as_object()) {
-        let (columns, rows) = parse_aggregations(aggs);
-        if !columns.is_empty() {
-            let row_count = rows.len() as u64;
-            Ok(crate::types::QueryResult {
-                columns,
-                column_types: Vec::new(),
-                column_sortables: vec![],
-                rows,
-                affected_rows: row_count,
-                execution_time_ms: start.elapsed().as_millis(),
-                truncated: false,
-                session_id: None,
-                has_more: false,
-            })
-        } else {
-            let pretty = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
-            Ok(crate::types::QueryResult {
-                columns: vec!["status".to_string(), "response".to_string()],
-                column_types: Vec::new(),
-                column_sortables: vec![],
-                rows: vec![vec![serde_json::Value::Number(status.into()), serde_json::Value::String(pretty)]],
-                affected_rows: 0,
-                execution_time_ms: start.elapsed().as_millis(),
-                truncated: false,
-                session_id: None,
-                has_more: false,
-            })
-        }
     } else {
         let pretty = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
         Ok(crate::types::QueryResult {
@@ -952,6 +953,37 @@ fn parse_elasticsearch_response(
             has_more: false,
         })
     }
+}
+
+fn parse_elasticsearch_rest_response(
+    status: u16,
+    body_text: &str,
+    start: std::time::Instant,
+) -> Result<crate::types::QueryResult, String> {
+    if body_text.trim().is_empty() {
+        return parse_elasticsearch_response(status, serde_json::Value::Null, start);
+    }
+
+    if let Ok(body) = serde_json::from_str::<serde_json::Value>(body_text) {
+        return parse_elasticsearch_response(status, body, start);
+    }
+
+    // CAT APIs default to text/plain for human-readable output. Keep those
+    // responses visible instead of dropping them when JSON parsing is not valid.
+    let rows: Vec<Vec<serde_json::Value>> =
+        body_text.lines().map(|line| vec![serde_json::Value::String(line.to_string())]).collect();
+    let affected_rows = rows.len() as u64;
+    Ok(crate::types::QueryResult {
+        columns: vec!["response".to_string()],
+        column_types: Vec::new(),
+        column_sortables: vec![],
+        rows,
+        affected_rows,
+        execution_time_ms: start.elapsed().as_millis(),
+        truncated: false,
+        session_id: None,
+        has_more: false,
+    })
 }
 
 fn parse_select_star_search_query(input: &str) -> Option<ElasticsearchSearchQuery> {
@@ -1687,6 +1719,84 @@ mod tests {
 
         let routing_idx = result.columns.iter().position(|column| column == "_routing").unwrap();
         assert_eq!(result.rows[0][routing_idx], json!("tenant-1"));
+    }
+
+    #[test]
+    fn parses_aggregation_response_before_empty_hits() {
+        let result = super::parse_elasticsearch_response(
+            200,
+            json!({
+                "hits": {
+                    "total": { "value": 5, "relation": "eq" },
+                    "hits": []
+                },
+                "aggregations": {
+                    "by_status": {
+                        "doc_count_error_upper_bound": 0,
+                        "sum_other_doc_count": 0,
+                        "buckets": [
+                            { "key": "paid", "doc_count": 3 },
+                            { "key": "cancelled", "doc_count": 1 },
+                            { "key": "pending", "doc_count": 1 }
+                        ]
+                    }
+                }
+            }),
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+        let key_idx = result.columns.iter().position(|column| column == "key").unwrap();
+        let count_idx = result.columns.iter().position(|column| column == "doc_count").unwrap();
+
+        assert_eq!(result.rows.len(), 3);
+        assert_eq!(result.rows[0][key_idx], json!("paid"));
+        assert_eq!(result.rows[0][count_idx], json!("3"));
+        assert_eq!(result.affected_rows, 3);
+    }
+
+    #[test]
+    fn parses_plain_text_rest_response_without_dropping_body() {
+        let body =
+            "health status index           docs.count store.size\ngreen  open   app-log-2026-07 42         10mb\n";
+        let result = super::parse_elasticsearch_rest_response(200, body, std::time::Instant::now()).unwrap();
+
+        assert_eq!(result.columns, vec!["response"]);
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[0][0], json!("health status index           docs.count store.size"));
+        assert_eq!(result.rows[1][0], json!("green  open   app-log-2026-07 42         10mb"));
+        assert_eq!(result.affected_rows, 2);
+    }
+
+    #[tokio::test]
+    async fn execute_rest_query_keeps_plain_text_response_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let body =
+            "health status index           docs.count store.size\ngreen  open   app-log-2026-07 42         10mb\n";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let read = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("GET /_cat/indices "));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result = super::execute_rest_query(&client, "GET /_cat/indices").await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result.columns, vec!["response"]);
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[1][0], json!("green  open   app-log-2026-07 42         10mb"));
     }
 
     #[test]

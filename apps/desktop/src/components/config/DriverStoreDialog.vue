@@ -166,6 +166,7 @@ const javaRuntimeConfig = ref<JavaRuntimeConfig>({ mode: "managed", custom_java_
 const customJavaPath = ref("");
 const savingJavaRuntime = ref(false);
 const driverStoreUsage = ref<DriverStoreUsage | null>(null);
+const clearingDownloadCache = ref(false);
 const runtimeSummary = ref<DriverRuntimeSummary | null>(null);
 const runtimeLoading = ref(false);
 const runtimeError = ref("");
@@ -214,7 +215,8 @@ function resetInstallProgress() {
   lastProgressPercent.value = null;
 }
 
-const updatableCount = computed(() => (props.updateNotificationsEnabled ? drivers.value.filter((d) => d.update_available).length : 0));
+const updatableCount = computed(() => drivers.value.filter((d) => d.update_available).length);
+const downloadCacheBytes = computed(() => Number(driverStoreUsage.value?.download_cache_bytes || 0));
 const usageSummary = computed(() => {
   const usage = driverStoreUsage.value;
   if (!usage) return [];
@@ -222,10 +224,12 @@ const usageSummary = computed(() => {
     { key: "total", label: t("driverStore.usageTotalLabel"), bytes: usage.total_bytes },
     { key: "jre", label: t("driverStore.usageManagedJre"), bytes: usage.jre_bytes },
     { key: "agent", label: t("driverStore.usageAgentDrivers"), bytes: usage.agent_driver_bytes },
+    { key: "download-cache", label: t("driverStore.usageDownloadCache"), bytes: usage.download_cache_bytes || 0 },
     { key: "jdbc-plugin", label: t("driverStore.usageJdbcPlugin"), bytes: usage.jdbc_plugin_bytes },
     { key: "jdbc-driver", label: t("driverStore.usageJdbcDriverJars"), bytes: usage.jdbc_driver_bytes },
   ];
 });
+const canClearDownloadCache = computed(() => !clearingDownloadCache.value && installing.value === null && !upgradingAll.value && reinstallingJre.value === null && downloadCacheBytes.value > 0);
 const jreUsageByKey = computed(() => {
   const map = new Map<string, number>();
   for (const item of driverStoreUsage.value?.jres || []) {
@@ -239,8 +243,8 @@ function updateAgentDrivers(nextDrivers: AgentDriverInfo[]) {
   emitDriverUpdateCount();
 }
 
-const agentTabUpdateCount = computed(() => (props.updateNotificationsEnabled ? drivers.value.filter((d) => d.update_available).length : 0));
-const jdbcTabUpdateCount = computed(() => (props.updateNotificationsEnabled && jdbcPluginStatus.value?.update_available ? 1 : 0));
+const agentTabUpdateCount = computed(() => drivers.value.filter((d) => d.update_available).length);
+const jdbcTabUpdateCount = computed(() => (jdbcPluginStatus.value?.update_available ? 1 : 0));
 
 function emitDriverUpdateCount() {
   if (!props.updateNotificationsEnabled) {
@@ -807,6 +811,20 @@ async function loadDriverStoreUsage() {
   }
 }
 
+async function clearDownloadCache() {
+  if (!canClearDownloadCache.value) return;
+  clearingDownloadCache.value = true;
+  try {
+    await api.clearDriverDownloadCache();
+    await loadDriverStoreUsage();
+    toast(t("driverStore.downloadCacheClearSuccess"));
+  } catch (e: any) {
+    toast(t("driverStore.downloadCacheClearFailed", { error: e?.message || String(e) }), 5000);
+  } finally {
+    clearingDownloadCache.value = false;
+  }
+}
+
 async function loadJdbcPluginStatus() {
   try {
     jdbcPluginStatus.value = await api.jdbcPluginStatus();
@@ -968,11 +986,7 @@ onMounted(async () => {
   void loadDriverStoreUsage();
   void loadDriverStorePath();
 
-  if (props.updateNotificationsEnabled) {
-    api.listInstalledAgents().then((result) => {
-      updateAgentDrivers(result);
-    });
-  }
+  void forceRefresh().catch(() => undefined);
 
   unlisten = await api.listenAgentInstallProgress((payload) => {
     if (payload.step === "done" || payload.step === "all-done") {
@@ -985,9 +999,16 @@ onMounted(async () => {
       upgradingIndex.value = payload.current ?? 0;
       upgradingTotal.value = payload.total_drivers ?? 0;
     }
+    // During a batch upgrade, refresh the list as soon as each driver finishes
+    // (step="done") so its "Update" button disappears immediately instead of
+    // staying disabled until the whole batch completes (step="all-done").
+    // Single-driver installs (upgradingAll=false) are refreshed by runDriverInstall.
+    if (upgradingAll.value && payload.step === "done") {
+      void refreshAgents();
+    }
   });
   void loadJdbcDrivers();
-  if (props.updateNotificationsEnabled) void loadJdbcPluginStatus();
+  void loadJdbcPluginStatus();
 });
 
 onUnmounted(() => {
@@ -1112,9 +1133,9 @@ watch(driverStoreTab, (tab) => {
                   {{ upgradingAll ? t("driverStore.upgradingProgress", { current: upgradingIndex, total: upgradingTotal }) : t("driverStore.upgradeAll") }}
                 </Button>
               </div>
-              <div v-for="driver in filteredAgentDrivers" :key="driver.db_type" class="flex items-center gap-3 px-4 py-2.5 transition hover:bg-muted/30">
-                <span class="flex h-9 w-9 items-center justify-center rounded-lg bg-muted/60 shrink-0">
-                  <DatabaseIcon :db-type="driver.db_type" class="h-5 w-5" />
+              <div v-for="driver in filteredAgentDrivers" :key="driver.db_type" class="flex items-center gap-3 px-4 py-2 transition hover:bg-muted/30">
+                <span class="flex h-8 w-8 items-center justify-center rounded-lg bg-muted/60 shrink-0">
+                  <DatabaseIcon :db-type="driver.db_type" class="h-4 w-4" />
                 </span>
                 <div class="min-w-0 flex-1">
                   <div class="text-sm font-medium">{{ driver.label }}</div>
@@ -1293,11 +1314,18 @@ watch(driverStoreTab, (tab) => {
             <div class="rounded-xl border bg-muted/20 p-4 space-y-3">
               <div class="flex items-center justify-between gap-3">
                 <div class="text-sm font-medium">{{ t("driverStore.usageTitle") }}</div>
-                <div class="text-xs text-muted-foreground">
-                  {{ usageSummary.length ? t("driverStore.usageTotal", { size: formatBytes(usageSummary[0].bytes) }) : t("driverStore.calculating") }}
+                <div class="flex shrink-0 items-center gap-2">
+                  <div class="text-xs text-muted-foreground">
+                    {{ usageSummary.length ? t("driverStore.usageTotal", { size: formatBytes(usageSummary[0].bytes) }) : t("driverStore.calculating") }}
+                  </div>
+                  <Button variant="outline" size="sm" class="h-7 gap-1.5 rounded-[6px] text-xs" :disabled="!canClearDownloadCache" @click="clearDownloadCache">
+                    <Loader2 v-if="clearingDownloadCache" class="h-3.5 w-3.5 animate-spin" />
+                    <Trash2 v-else class="h-3.5 w-3.5" />
+                    {{ clearingDownloadCache ? t("common.loading") : t("driverStore.clearDownloadCache") }}
+                  </Button>
                 </div>
               </div>
-              <div v-if="usageSummary.length" class="grid grid-cols-2 gap-2 sm:grid-cols-5">
+              <div v-if="usageSummary.length" class="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
                 <div v-for="item in usageSummary" :key="item.key" class="rounded-lg border bg-background/50 px-2.5 py-2 text-center">
                   <div class="text-[11px] text-muted-foreground">{{ item.label }}</div>
                   <div class="mt-0.5 text-xs font-medium">{{ formatBytes(item.bytes) }}</div>

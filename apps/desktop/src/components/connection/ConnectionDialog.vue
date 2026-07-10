@@ -13,10 +13,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
-import type { ConnectionConfig, DatabaseType, HttpTunnelConfig, JdbcDriverInfo, JdbcMavenBundleInfo, ProxyTunnelConfig, SshTunnelConfig, TransportLayerConfig } from "@/types/database";
+import type { ConnectionConfig, DatabaseType, HttpTunnelConfig, JdbcDriverInfo, JdbcMavenBundleInfo, ProxyTunnelConfig, SshConfigHostEntry, SshTunnelConfig, TransportLayerConfig } from "@/types/database";
+import type { InfluxDbExternalConfig, InfluxDbVersion } from "@/types/influxdb";
 import type { MqAdminConfig, MqAuth, MqSystemKind } from "@/types/mq";
 import type { NacosAdminConfig, NacosAuthConfig } from "@/types/nacos";
-import { useConnectionStore } from "@/stores/connectionStore";
+import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT, REDIS_SCAN_PAGE_SIZE_MIN, REDIS_SCAN_PAGE_SIZE_MAX, REDIS_SCAN_PAGE_SIZE_OPTIONS } from "@/lib/redis/redisKeyPattern";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
@@ -37,7 +38,11 @@ import { agentDriverInstallKey, appendAgentDriverUpdateHint, hasAgentDriverUpdat
 import { prestoSqlBuiltinDriverPaths } from "@/lib/database/prestoSqlBuiltinDriver";
 import { SQLITE_DATABASE_FILE_EXTENSIONS } from "@/lib/database/databaseFileDetection";
 import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connection/connectionAttemptTimeout";
+import { appendConnectionErrorHints } from "@/lib/connection/connectionErrorHints";
+import { normalizeKafkaBootstrapServers } from "@/lib/connection/kafkaBootstrapServers";
+import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } from "@/lib/connection/mqAuth";
 import { driverInstallProgressPercent, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
+import { isSqlServerLegacyCompatibilityMode, requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityMode, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
 import { ArrowLeft, ArrowDown, ArrowUp, CheckSquare, ChevronRight, CircleHelp, Copy, ExternalLink, FilePlus2, FolderOpen, GripVertical, Grid3X3, KeyRound, Link2, List, ListFilter, Loader2, Pencil, Pipette, Plus, Search, ShieldCheck, Square, Trash2 } from "@lucide/vue";
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleDatabaseSelectionIsStale } from "@/lib/connection/connectionVisibleDatabases";
 import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, isSystemDatabaseName, normalizeVisibleDatabaseSelection, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
@@ -45,6 +50,7 @@ import { isSchemaAware } from "@/lib/database/databaseFeatureSupport";
 import VisibleSchemasDialog from "@/components/sidebar/VisibleSchemasDialog.vue";
 import { oceanbaseModeConnectionPatch, oceanbaseSubModeFromConfig } from "@/lib/database/oceanbaseConnectionMode";
 import { translateBackendError } from "@/i18n/backend-errors";
+import { applyHiveKerberosSubmitConfig, hiveKerberosFormConfig, type HiveKerberosAuthMode } from "@/lib/database/hiveKerberosOptions";
 
 type DbOption = { value: string; label: string };
 type DbCategory = { key: string; title: string; options: DbOption[] };
@@ -148,6 +154,7 @@ const defaultForm = (): ConnectionForm => ({
   driver_profile: "mysql",
   driver_label: "MySQL",
   url_params: "",
+  agent_java_options: [],
   host: "127.0.0.1",
   port: 3306,
   username: "root",
@@ -200,7 +207,22 @@ function defaultSshTunnel(): SshTunnelConfig {
     expose_lan: false,
     use_ssh_agent: false,
     ssh_agent_sock_path: "",
+    auth_method: "password",
   };
+}
+
+/**
+ * Infers a login method for connections saved before `auth_method` existed
+ * (or imported from a source that never set it), so the dropdown shows a
+ * sensible current state instead of defaulting blindly to "password".
+ * Mirrors the priority `connect_and_authenticate` actually uses at connect
+ * time (key > password > agent > none) — see `db/ssh_tunnel.rs`.
+ */
+function inferSshAuthMethod(hop: Partial<SshTunnelConfig>): "password" | "key" | "agent" | "none" {
+  if (hop.key_path?.trim()) return "key";
+  if (hop.password) return "password";
+  if (hop.use_ssh_agent) return "agent";
+  return "none";
 }
 
 function normalizeSshTunnel(hop: Partial<SshTunnelConfig>): SshTunnelConfig {
@@ -218,6 +240,7 @@ function normalizeSshTunnel(hop: Partial<SshTunnelConfig>): SshTunnelConfig {
     expose_lan: !!hop.expose_lan,
     use_ssh_agent: !!hop.use_ssh_agent,
     ssh_agent_sock_path: hop.ssh_agent_sock_path || "",
+    auth_method: hop.auth_method || inferSshAuthMethod(hop),
   };
 }
 
@@ -346,6 +369,7 @@ const mongoUseUrl = ref(false);
 const jdbcDriverPathsInput = ref("");
 const jdbcDrivers = ref<JdbcDriverInfo[]>([]);
 const jdbcMavenBundles = ref<JdbcMavenBundleInfo[]>([]);
+const sshConfigHosts = ref<SshConfigHostEntry[]>([]);
 const agentDrivers = ref<AgentDriverInstallState[]>([]);
 const selectedJdbcDriverPath = ref("");
 const jdbcManualClasspathOpen = ref(false);
@@ -358,18 +382,27 @@ const dremioConnectionUrls = ref<Record<DremioConnectionMode, string>>({
   "arrow-flight-sql": DREMIO_ARROW_FLIGHT_SQL_JDBC_URL,
   legacy: DREMIO_LEGACY_JDBC_URL,
 });
+const hiveAuthMode = ref<HiveKerberosAuthMode>("none");
+const hivePrincipal = ref("");
+const hiveKrb5ConfPath = ref("");
+const hiveJaasConfigPath = ref("");
+const hiveUseSubjectCredsOnlyFalse = ref(false);
+const hiveExtraJavaOptions = ref("");
 const dialogStep = ref<DialogStep>("select");
 const dbPickerView = ref<DbPickerView>("icon");
 const dbSearchQuery = ref("");
 const configTab = ref<ConfigTab>("connection");
-type MqAuthKind = MqAuth["kind"];
 const MQ_KAFKA_SECURITY_PROTOCOL_AUTO = "__auto";
 const mqAdminUrl = ref("http://127.0.0.1:8080");
 const mqSystemKind = ref<MqSystemKind>("pulsar");
 const mqKafkaBootstrapServers = ref("127.0.0.1:9092");
 const mqKafkaSecurityProtocol = ref(MQ_KAFKA_SECURITY_PROTOCOL_AUTO);
 const mqKafkaSaslMechanism = ref("PLAIN");
-const mqAuthKind = ref<MqAuthKind>("none");
+const mqKafkaKerberosPrincipal = ref("");
+const mqKafkaKerberosKeytabPath = ref("");
+const mqKafkaKerberosServiceName = ref("kafka");
+const mqKafkaKrb5ConfPath = ref("");
+const mqAuthKind = ref<MqUiAuthKind>("none");
 const mqToken = ref("");
 const mqBasicUsername = ref("");
 const mqBasicPassword = ref("");
@@ -517,10 +550,10 @@ const driverProfiles: Record<
   chromadb: { type: "chromadb", port: 8000, user: "", label: "ChromaDB", icon: "chromadb" },
   mariadb: { type: "mysql", port: 3306, user: "root", label: "MariaDB", icon: "mariadb" },
   tidb: { type: "mysql", port: 4000, user: "root", label: "TiDB", icon: "tidb" },
-  oceanbase: { type: "mysql", port: 2881, user: "root", label: "OceanBase", icon: "oceanbase" },
+  oceanbase: { type: "mysql", port: 2883, user: "root", label: "OceanBase", icon: "oceanbase" },
   "oceanbase-oracle": {
     type: "oceanbase-oracle",
-    port: 2881,
+    port: 2883,
     user: "SYS",
     label: "OceanBase Oracle Mode",
     icon: "oceanbase",
@@ -592,6 +625,7 @@ const driverProfiles: Record<
   trino: { type: "trino", port: 8080, user: "", label: "Trino", icon: "trino" },
   prestosql: { type: "prestosql", port: 8080, user: "", label: "PrestoSQL", icon: "presto" },
   hive: { type: "hive", port: 10000, user: "", label: "Apache Hive", icon: "hive" },
+  spark: { type: "spark", port: 10015, user: "", label: "Apache Spark", icon: "spark-logo.png" },
   db2: { type: "db2", port: 50000, user: "db2inst1", label: "IBM DB2", icon: "db2" },
   informix: { type: "informix", port: 9088, user: "informix", label: "Informix", icon: "informix" },
   dremio: { type: "jdbc", port: 31010, user: "", label: "Dremio", icon: "dremio" },
@@ -664,18 +698,50 @@ function mqExtraString(extra: Record<string, unknown>, key: string): string {
   return typeof value === "string" ? value : "";
 }
 
+function mqExtraProperties(extra: Record<string, unknown>): Record<string, unknown> {
+  const value = extra.properties;
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function mqExtraPropertyString(extra: Record<string, unknown>, key: string): string {
+  const value = mqExtraProperties(extra)[key];
+  return typeof value === "string" ? value : "";
+}
+
+function jaasStringValue(value: string): string {
+  return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+}
+
+function parseJaasStringProperty(value: string, key: string): string {
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = value.match(new RegExp(`${escapedKey}\\s*=\\s*"((?:\\\\.|[^"\\\\])*)"`, "i"));
+  if (!match) return "";
+  return match[1].replace(/\\(["\\])/g, "$1");
+}
+
 function resetMqFields(config?: Partial<MqAdminConfig>) {
   const systemKind = config?.systemKind === "kafka" ? "kafka" : "pulsar";
   const extra = mqExtraRecord(config);
+  const properties = mqExtraProperties(extra);
+  const jaasConfig = mqExtraPropertyString(extra, "sasl.jaas.config");
   mqSystemKind.value = systemKind;
   mqAdminUrl.value = config?.adminUrl?.trim() || (systemKind === "kafka" ? "" : "http://127.0.0.1:8080");
   mqKafkaBootstrapServers.value = mqExtraString(extra, "bootstrapServers") || "127.0.0.1:9092";
   mqKafkaSecurityProtocol.value = mqExtraString(extra, "securityProtocol") || MQ_KAFKA_SECURITY_PROTOCOL_AUTO;
   mqKafkaSaslMechanism.value = mqExtraString(extra, "saslMechanism") || "PLAIN";
+  mqKafkaKerberosPrincipal.value = parseJaasStringProperty(jaasConfig, "principal");
+  mqKafkaKerberosKeytabPath.value = parseJaasStringProperty(jaasConfig, "keyTab");
+  mqKafkaKerberosServiceName.value = typeof properties["sasl.kerberos.service.name"] === "string" ? properties["sasl.kerberos.service.name"] : "kafka";
+  mqKafkaKrb5ConfPath.value = typeof properties["java.security.krb5.conf"] === "string" ? properties["java.security.krb5.conf"] : "";
   mqTlsSkipVerify.value = !!config?.tlsSkipVerify;
   mqPinnedVersion.value = pinnedVersionToSelection(config?.pinnedVersion);
   const auth = (config?.auth || { kind: "none" }) as MqAuth;
-  mqAuthKind.value = systemKind === "kafka" && auth.kind !== "basic" ? "none" : auth.kind || "none";
+  mqAuthKind.value = detectMqUiAuthKind({
+    systemKind,
+    authKind: auth.kind,
+    saslMechanism: mqKafkaSaslMechanism.value,
+    jaasConfig,
+  });
   mqToken.value = auth.token || "";
   mqBasicUsername.value = auth.username || "";
   mqBasicPassword.value = auth.password || "";
@@ -712,10 +778,16 @@ function hydrateMqFields(value: unknown) {
 watch(mqSystemKind, (kind) => {
   if (kind === "kafka") {
     if (!mqKafkaBootstrapServers.value.trim()) mqKafkaBootstrapServers.value = "127.0.0.1:9092";
-    if (!["none", "basic"].includes(mqAuthKind.value)) mqAuthKind.value = "none";
+    if (!isMqAuthKindAllowedForSystem(kind, mqAuthKind.value)) mqAuthKind.value = "none";
     return;
   }
   if (!mqAdminUrl.value.trim()) mqAdminUrl.value = "http://127.0.0.1:8080";
+});
+
+watch(mqAuthKind, (kind) => {
+  if (mqSystemKind.value === "kafka" && kind === "basic" && mqKafkaSaslMechanism.value.toUpperCase() === "GSSAPI") {
+    mqKafkaSaslMechanism.value = "PLAIN";
+  }
 });
 
 function resetNacosFields(config?: Partial<NacosAdminConfig>) {
@@ -738,36 +810,52 @@ function hydrateNacosFields(value: unknown) {
   resetNacosFields(value as Partial<NacosAdminConfig>);
 }
 
+const influxDbVersion = ref<InfluxDbVersion>("1");
+const influxDbOrg = ref("");
+
+function resetInfluxDbFields(config?: Partial<InfluxDbExternalConfig>) {
+  influxDbVersion.value = config?.version === "2" ? "2" : "1";
+  influxDbOrg.value = config?.org?.trim() || "";
+}
+
+function hydrateInfluxDbFields(value: unknown) {
+  if (!value || typeof value !== "object") {
+    resetInfluxDbFields();
+    return;
+  }
+  resetInfluxDbFields(value as Partial<InfluxDbExternalConfig>);
+}
+
+function resetHiveKerberosFields(config?: Pick<ConnectionConfig, "url_params" | "agent_java_options">) {
+  const kerberos = hiveKerberosFormConfig(config?.url_params, config?.agent_java_options);
+  hiveAuthMode.value = kerberos.authMode;
+  hivePrincipal.value = kerberos.principal;
+  hiveKrb5ConfPath.value = kerberos.krb5ConfPath;
+  hiveJaasConfigPath.value = kerberos.jaasConfigPath;
+  hiveUseSubjectCredsOnlyFalse.value = kerberos.useSubjectCredsOnlyFalse;
+  hiveExtraJavaOptions.value = kerberos.extraJavaOptions;
+}
+
+function buildInfluxDbExternalConfig(): InfluxDbExternalConfig {
+  if (influxDbVersion.value !== "2") return { version: "1" };
+  const org = influxDbOrg.value.trim();
+  if (!org) throw new Error("InfluxDB 2.x organization is required");
+  if (!form.value.password.trim()) throw new Error("InfluxDB 2.x token is required");
+  if (!form.value.database?.trim()) throw new Error("InfluxDB 2.x bucket is required");
+  return { version: "2", org };
+}
+
+watch(influxDbVersion, (version) => {
+  if (form.value.db_type !== "influxdb") return;
+  if (version === "2") {
+    form.value.username = "";
+  }
+});
+
 function requireMqField(value: string, message: string): string {
   const trimmed = value.trim();
   if (!trimmed) throw new Error(message);
   return trimmed;
-}
-
-function normalizeMqKafkaBootstrapServer(server: string): string {
-  if (server.includes("://")) {
-    throw new Error("Kafka bootstrap servers must be host:port values without a URL scheme");
-  }
-  let parsed: URL;
-  try {
-    parsed = new URL(`kafka://${server}`);
-  } catch {
-    throw new Error("Kafka bootstrap servers are invalid");
-  }
-  if (!parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash || (parsed.pathname && parsed.pathname !== "/")) {
-    throw new Error("Kafka bootstrap servers are invalid");
-  }
-  return server;
-}
-
-function normalizeMqKafkaBootstrapServers(value: string): string {
-  const servers = requireMqField(value, "Kafka bootstrap servers are required")
-    .split(",")
-    .map((server) => server.trim())
-    .filter(Boolean)
-    .map(normalizeMqKafkaBootstrapServer);
-  if (!servers.length) throw new Error("Kafka bootstrap servers are required");
-  return servers.join(",");
 }
 
 function buildMqAuth(): MqAuth {
@@ -800,6 +888,12 @@ function buildMqAuth(): MqAuth {
   }
 }
 
+function buildKafkaKerberosJaasConfig(): string {
+  const principal = requireMqField(mqKafkaKerberosPrincipal.value, t("connection.kafkaKerberosPrincipalRequired"));
+  const keytab = requireMqField(mqKafkaKerberosKeytabPath.value, t("connection.kafkaKerberosKeytabRequired"));
+  return `com.sun.security.auth.module.Krb5LoginModule required useKeyTab=true storeKey=true keyTab="${jaasStringValue(keytab)}" principal="${jaasStringValue(principal)}";`;
+}
+
 function buildMqTokenSigning() {
   if (mqTokenSigningMode.value === "none") return undefined;
   return {
@@ -811,12 +905,22 @@ function buildMqTokenSigning() {
 function buildMqAdminConfig(): MqAdminConfig {
   const systemKind = mqSystemKind.value;
   if (systemKind === "kafka") {
-    const bootstrapServers = normalizeMqKafkaBootstrapServers(mqKafkaBootstrapServers.value);
-    const extra: Record<string, string> = { bootstrapServers };
+    const bootstrapServers = normalizeKafkaBootstrapServers(mqKafkaBootstrapServers.value);
+    const extra: Record<string, unknown> = { bootstrapServers };
     const securityProtocol = mqKafkaSecurityProtocol.value === MQ_KAFKA_SECURITY_PROTOCOL_AUTO ? "" : mqKafkaSecurityProtocol.value.trim();
-    const saslMechanism = mqKafkaSaslMechanism.value.trim();
+    const saslMechanism = mqAuthKind.value === "kerberos" ? "GSSAPI" : mqKafkaSaslMechanism.value.trim();
+    const properties: Record<string, string> = {};
     if (securityProtocol) extra.securityProtocol = securityProtocol;
     if (mqAuthKind.value === "basic" && saslMechanism) extra.saslMechanism = saslMechanism;
+    if (mqAuthKind.value === "kerberos") {
+      extra.saslMechanism = "GSSAPI";
+      properties["sasl.jaas.config"] = buildKafkaKerberosJaasConfig();
+      properties["sasl.kerberos.service.name"] = mqKafkaKerberosServiceName.value.trim() || "kafka";
+      if (mqKafkaKrb5ConfPath.value.trim()) {
+        properties["java.security.krb5.conf"] = mqKafkaKrb5ConfPath.value.trim();
+      }
+    }
+    if (Object.keys(properties).length) extra.properties = properties;
     return {
       systemKind: mqSystemKind.value,
       adminUrl: "",
@@ -901,6 +1005,7 @@ function errorMessage(error: unknown): string {
 }
 
 function connectionErrorWithDriverUpdateHint(config: ConnectionConfig, message: string): string {
+  message = appendConnectionErrorHints(config, message, t);
   if (!hasAgentDriverUpdate(config.db_type, agentDrivers.value, config.driver_profile)) return message;
   return appendAgentDriverUpdateHint(message, t("connection.agentDriverUpdateConnectionHint"));
 }
@@ -966,6 +1071,10 @@ function formatInstallSize(bytes: number): string {
 }
 
 async function ensureRequiredAgentDriverInstalled(config: ConnectionConfig): Promise<void> {
+  if (requiresSqlServerLegacyCompatibilityComponent(config)) {
+    await installSqlServerLegacyCompatibilityComponentIfNeeded();
+  }
+
   const driverKey = agentDriverInstallKey(config.db_type, config.driver_profile);
   if (!driverKey) return;
 
@@ -990,21 +1099,42 @@ async function ensureRequiredAgentDriverInstalled(config: ConnectionConfig): Pro
   }
 }
 
-function isSqlServerLegacyUnencryptedMode(params: string | undefined): boolean {
-  const normalized = (params || "").trim().replace(/^\?/, "").replace(/;/g, "&");
-  if (!normalized) return false;
-  const parsed = new URLSearchParams(normalized);
-  for (const [key, value] of parsed.entries()) {
-    if (key.trim().toLowerCase() === "sqlserverencryption") {
-      return ["disabled", "disable", "false", "0", "off"].includes(value.trim().toLowerCase());
-    }
+async function installSqlServerLegacyCompatibilityComponentIfNeeded(): Promise<boolean> {
+  if (await api.isAgentInstalled(SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY)) return true;
+
+  const label = t("connection.sqlServerLegacyCompatibilityComponent");
+  testResult.value = { ok: true, message: t("connection.sqlServerLegacyCompatibilityComponentInstalling") };
+  beginAgentDriverInstall(SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY, label);
+  try {
+    await api.installAgent(SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY);
+    await refreshLocalAgentDrivers();
+    finishAgentDriverInstall();
+  } catch (error) {
+    testResult.value = { ok: false, message: errorMessage(error) };
+    failAgentDriverInstall(error);
+    throw error;
   }
-  return false;
+  return true;
 }
 
-function setSqlServerLegacyUnencryptedMode(params: string | undefined, enabled: boolean): string {
-  const normalized = (params || "").trim().replace(/^\?/, "").replace(/;/g, "&");
-  return setUrlParam(normalized, "sqlserverEncryption", enabled ? "disabled" : "");
+async function onSqlServerLegacyCompatibilityModeChange(event: Event) {
+  if (form.value.db_type !== "sqlserver") return;
+  const input = event.target instanceof HTMLInputElement ? event.target : null;
+  const enabled = input?.checked === true;
+  if (!enabled) {
+    form.value.url_params = setSqlServerLegacyCompatibilityMode(form.value.url_params, false);
+    return;
+  }
+
+  if (input) input.checked = false;
+  try {
+    await installSqlServerLegacyCompatibilityComponentIfNeeded();
+    form.value.url_params = setSqlServerLegacyCompatibilityMode(form.value.url_params, true);
+    testResult.value = { ok: true, message: t("connection.sqlServerLegacyCompatibilityModeEnabled") };
+  } catch {
+    form.value.url_params = setSqlServerLegacyCompatibilityMode(form.value.url_params, false);
+    if (input) input.checked = false;
+  }
 }
 
 function isSqlServerTlsHandshakeFailure(message: string): boolean {
@@ -1055,7 +1185,7 @@ function applyMqAdminUrl(config: LegacyConnectionConfig, adminUrl: string) {
 }
 
 function applyMqKafkaBootstrapServers(config: LegacyConnectionConfig, bootstrapServers: string, securityProtocol?: string) {
-  const first = normalizeMqKafkaBootstrapServers(bootstrapServers).split(",")[0];
+  const first = normalizeKafkaBootstrapServers(bootstrapServers).split(",")[0];
   if (!first) throw new Error("Kafka bootstrap servers are required");
   let parsed: URL;
   try {
@@ -1166,6 +1296,7 @@ function applyProfile(val: string, preserveConnectionFields = false) {
     form.value.port = profile.port;
     form.value.username = profile.user;
     form.value.url_params = profile.urlParams || "";
+    form.value.agent_java_options = [];
     if (profile.host) {
       form.value.host = profile.host;
     }
@@ -1216,6 +1347,13 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       form.value.connection_string = undefined;
       form.value.url_params = "";
     }
+    if (profile.type === "influxdb") {
+      resetInfluxDbFields();
+      form.value.database = undefined;
+      form.value.password = "";
+      form.value.connection_string = undefined;
+    }
+    resetHiveKerberosFields(profile.type === "hive" ? form.value : undefined);
   }
 }
 
@@ -1252,6 +1390,7 @@ watch(
         driver_profile: oceanbasePatch?.driver_profile || profile,
         driver_label: config.driver_label || oceanbasePatch?.driver_label || driverProfiles[profile]?.label || config.db_type,
         url_params: config.url_params || "",
+        agent_java_options: config.agent_java_options || [],
         host: config.db_type === "h2" && h2FilePathFromJdbcUrl(config.connection_string) ? h2FilePathFromJdbcUrl(config.connection_string) : config.host,
         port: profile === "tdengine" && (config.port === 0 || config.port === 6030) ? 6041 : config.port,
         username: config.username,
@@ -1283,6 +1422,7 @@ watch(
         redis_scan_page_size: config.redis_scan_page_size ?? REDIS_SCAN_PAGE_SIZE_DEFAULT,
         etcd_endpoints: config.etcd_endpoints || "",
         informix_server: config.informix_server || "",
+        external_config: config.external_config,
         read_only: config.read_only || false,
         visible_databases: config.visible_databases,
       };
@@ -1298,6 +1438,12 @@ watch(
       } else {
         resetNacosFields();
       }
+      if (config.db_type === "influxdb") {
+        hydrateInfluxDbFields(config.external_config);
+      } else {
+        resetInfluxDbFields();
+      }
+      resetHiveKerberosFields(config.db_type === "hive" ? config : undefined);
       h2ConnectionMode.value = h2ConnectionModeForConfig(config);
       customColorInput.value = config.color || "";
       selectedTransportLayerId.value = form.value.transport_layers?.[0]?.id || null;
@@ -1324,6 +1470,8 @@ watch(
       customDriverName.value = "";
       resetMqFields();
       resetNacosFields();
+      resetInfluxDbFields();
+      resetHiveKerberosFields();
       oceanbaseSubMode.value = "mysql";
       h2ConnectionMode.value = "file";
       dremioConnectionMode.value = "legacy";
@@ -1344,9 +1492,14 @@ watch(
   },
 );
 
-const databaseLabel = computed(() => (form.value.db_type === "oracle" ? t("connection.serviceName") : t("connection.database")));
+const databaseLabel = computed(() => {
+  if (form.value.db_type === "oracle") return t("connection.serviceName");
+  if (form.value.db_type === "influxdb" && influxDbVersion.value === "2") return "Bucket";
+  return t("connection.database");
+});
 
 const databasePlaceholder = computed(() => {
+  if (form.value.db_type === "kingbase") return t("connection.databasePlaceholderRequired");
   const fallback = defaultDatabaseForProfile();
   if (!fallback) return t("connection.databasePlaceholder");
   return t("connection.databasePlaceholderWithDefault", { database: fallback });
@@ -1385,7 +1538,7 @@ function defaultDatabaseForProfile() {
   if (selectedType.value === "cockroachdb") return "defaultdb";
   if (form.value.db_type === "highgo") return "highgo";
   if (form.value.db_type === "yashandb") return "yasdb";
-  if (form.value.db_type === "postgres" || form.value.db_type === "kingbase" || form.value.db_type === "vastbase") return "postgres";
+  if (form.value.db_type === "postgres" || form.value.db_type === "vastbase") return "postgres";
   if (form.value.db_type === "sqlserver") return "master";
   if (form.value.db_type === "oracle") return "ORCL";
   if (form.value.db_type === "h2" && h2ConnectionMode.value === "tcp") return "test";
@@ -1480,6 +1633,7 @@ const iconTypeMap: Record<string, string> = {
   trino: "trino",
   prestosql: "prestosql",
   hive: "hive",
+  spark: "spark-logo.png",
   db2: "db2",
   informix: "informix",
   dremio: "dremio",
@@ -1549,6 +1703,7 @@ const dbOptions: DbOption[] = [
   { value: "trino", label: "Trino" },
   { value: "prestosql", label: "PrestoSQL" },
   { value: "hive", label: "Hive" },
+  { value: "spark", label: "Apache Spark" },
   { value: "db2", label: "DB2" },
   { value: "informix", label: "Informix" },
   { value: "neo4j", label: "Neo4j" },
@@ -1663,7 +1818,7 @@ const postgresTlsMode = computed({
   },
   set: (value: string) => {
     form.value.ssl = value !== "disable";
-    form.value.url_params = setUrlParam(form.value.url_params, "sslmode", value === "prefer" ? "" : value);
+    form.value.url_params = setUrlParam(form.value.url_params, "sslmode", value);
   },
 });
 const postgresRootCertPath = computed({
@@ -1780,13 +1935,7 @@ const agentInstallProgressLabel = computed(() => {
   return `${label} ${formatInstallSize(progress.downloaded ?? 0)} / ${formatInstallSize(progress.total)} (${agentInstallPercent.value ?? 0}%)`;
 });
 const canCloseAgentInstallDialog = computed(() => !agentInstallRunning.value || !!agentInstallError.value);
-const sqlServerLegacyUnencryptedModeEnabled = computed({
-  get: () => form.value.db_type === "sqlserver" && isSqlServerLegacyUnencryptedMode(form.value.url_params),
-  set: (enabled: boolean) => {
-    if (form.value.db_type !== "sqlserver") return;
-    form.value.url_params = setSqlServerLegacyUnencryptedMode(form.value.url_params, enabled);
-  },
-});
+const sqlServerLegacyCompatibilityModeEnabled = computed(() => form.value.db_type === "sqlserver" && isSqlServerLegacyCompatibilityMode(form.value.url_params));
 const shouldUseWideConnectionDialog = computed(() => dialogStep.value === "config" && (canChooseVisibleDatabases.value || (canChooseVisibleSchemas.value && !visibleFilterUsesSchemas.value)));
 const connectionDialogContentClass = computed(() => {
   if (dialogStep.value === "select") return "sm:max-w-[760px]";
@@ -1865,8 +2014,9 @@ async function testConnection() {
   const runId = ++testRunId;
   isTesting.value = true;
   testResult.value = null;
-  const config = connectionConfigForSubmit(editingId.value || draftTestConnectionId.value);
+  let config: ConnectionConfig | null = null;
   try {
+    config = connectionConfigForSubmit(editingId.value || draftTestConnectionId.value);
     await ensureRequiredAgentDriverInstalled(config);
     const msg = await testConnectionWithTimeout(config, runId);
     if (runId !== testRunId) return;
@@ -1874,17 +2024,21 @@ async function testConnection() {
       mongoDriverMode.value = "legacy";
     }
     testResult.value = { ok: true, message: msg };
+    clearEditedConnectionErrorAfterSuccessfulTest();
   } catch (e: any) {
     if (runId !== testRunId) return;
-    const message = connectionErrorWithDriverUpdateHint(config, mongodbAuthFailureHint(String(e)));
-    const fallbackMessage = await tryNacosDockerConsoleFallback(config, message, runId);
+    const rawMessage = mongodbAuthFailureHint(errorMessage(e));
+    const message = config ? connectionErrorWithDriverUpdateHint(config, rawMessage) : rawMessage;
+    const fallbackMessage = config ? await tryNacosDockerConsoleFallback(config, message, runId) : null;
     if (runId !== testRunId) return;
-    const shouldShowSqlServerLegacyMode = !fallbackMessage && config.db_type === "sqlserver" && !isSqlServerLegacyUnencryptedMode(config.url_params) && isSqlServerTlsHandshakeFailure(message);
+    const shouldShowSqlServerLegacyMode = !fallbackMessage && config?.db_type === "sqlserver" && !isSqlServerLegacyCompatibilityMode(config.url_params) && isSqlServerTlsHandshakeFailure(message);
     if (shouldShowSqlServerLegacyMode) {
       configTab.value = "advanced";
     }
     testResult.value = fallbackMessage ? { ok: true, message: fallbackMessage } : { ok: false, message };
-    if (!fallbackMessage) {
+    if (fallbackMessage) {
+      clearEditedConnectionErrorAfterSuccessfulTest();
+    } else {
       showConnectionError(message);
     }
   } finally {
@@ -1892,6 +2046,10 @@ async function testConnection() {
       isTesting.value = false;
     }
   }
+}
+
+function clearEditedConnectionErrorAfterSuccessfulTest() {
+  if (editingId.value) store.clearConnectionError(editingId.value);
 }
 
 function applyConnectionUrlToForm(input: string): boolean {
@@ -2037,6 +2195,12 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
   if (!config.name?.trim()) {
     config.name = generateConnectionName();
   }
+  if (config.db_type === "kingbase") {
+    config.database = config.database?.trim() || undefined;
+    if (!config.database) {
+      throw new Error(t("connection.kingbaseDatabaseRequired"));
+    }
+  }
   config.transport_layers = (config.transport_layers || []).map(normalizeTransportLayer);
   config.transport_layers = config.transport_layers.map((layer) => {
     if (layer.type !== "ssh") return layer;
@@ -2056,6 +2220,24 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
   config.keepalive_interval_secs = Number.isFinite(keepaliveInterval) && keepaliveInterval >= 0 ? keepaliveInterval : 30;
   if (config.db_type === "manticoresearch") {
     config.url_params = "";
+  }
+  if (config.db_type === "hive") {
+    if (hiveAuthMode.value === "kerberos" && !hivePrincipal.value.trim()) {
+      throw new Error(t("connection.hiveKerberosPrincipalRequired"));
+    }
+    const hiveKerberos = applyHiveKerberosSubmitConfig({
+      authMode: hiveAuthMode.value,
+      principal: hivePrincipal.value,
+      krb5ConfPath: hiveKrb5ConfPath.value,
+      jaasConfigPath: hiveJaasConfigPath.value,
+      useSubjectCredsOnlyFalse: hiveUseSubjectCredsOnlyFalse.value,
+      extraJavaOptions: hiveExtraJavaOptions.value,
+      urlParams: config.url_params,
+    });
+    config.url_params = hiveKerberos.urlParams;
+    config.agent_java_options = hiveKerberos.agentJavaOptions;
+  } else {
+    config.agent_java_options = undefined;
   }
   if (config.db_type === "informix" && config.informix_server) {
     // Strip INFORMIXSERVER from url_params to avoid duplicate when dedicated field is used
@@ -2091,6 +2273,14 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
     config.database = nacosConfig.namespace || undefined;
     config.connection_string = undefined;
     config.url_params = "";
+  } else if (config.db_type === "influxdb") {
+    config.external_config = buildInfluxDbExternalConfig();
+    config.connection_string = undefined;
+    if (influxDbVersion.value === "2") {
+      config.username = "";
+      config.password = config.password.trim();
+      config.database = config.database?.trim() || undefined;
+    }
   } else {
     config.external_config = undefined;
   }
@@ -2260,6 +2450,7 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
     config.visible_databases = Array.isArray(config.visible_databases) && config.visible_databases.length > 0 ? config.visible_databases : undefined;
   }
   if (config.visible_schemas && Object.keys(config.visible_schemas).length === 0) config.visible_schemas = undefined;
+  if (config.agent_java_options && config.agent_java_options.length === 0) config.agent_java_options = undefined;
   return config as ConnectionConfig;
 }
 
@@ -2333,7 +2524,7 @@ function mysqlTlsModeFromParams(params: string | undefined, ssl: boolean | undef
       return "verify_identity";
   }
 
-  if (!ssl && getUrlParam(params, "require_ssl").toLowerCase() !== "true") return "preferred";
+  if (!ssl && getUrlParam(params, "require_ssl").toLowerCase() !== "true") return "disabled";
   if (getUrlParam(params, "verify_identity").toLowerCase() === "true") return "verify_identity";
   if (getUrlParam(params, "verify_ca").toLowerCase() === "true") return "verify_ca";
   return "required";
@@ -2345,7 +2536,7 @@ function applyMysqlTlsMode(params: string | undefined, mode: string): string {
     return setUrlParam(next, "ssl-mode", "disabled");
   }
   if (mode === "preferred") {
-    return next;
+    return setUrlParam(next, "ssl-mode", "preferred");
   }
 
   next = setUrlParam(next, "require_ssl", "true");
@@ -2494,12 +2685,12 @@ async function preloadVisibleDatabaseNames() {
   if (visibleDatabaseNames.value.length > 0) return;
   isLoadingVisibleDatabases.value = true;
   const draftId = buildDraftVisibleDatabasesConnectionId(uuid());
-  const draftConfig = {
-    ...connectionConfigForSubmit(draftId),
-    id: draftId,
-    one_time: true,
-  };
   try {
+    const draftConfig = {
+      ...connectionConfigForSubmit(draftId),
+      id: draftId,
+      one_time: true,
+    };
     await api.connectDb(draftConfig);
     visibleDatabaseNames.value = await loadVisibleDatabaseNames(draftId, draftConfig);
   } catch {
@@ -2518,13 +2709,13 @@ async function openVisibleDatabasesPicker() {
   visibleDatabaseError.value = "";
   visibleDatabaseSearchText.value = "";
   const draftId = buildDraftVisibleDatabasesConnectionId(uuid());
-  const draftConfig = {
-    ...connectionConfigForSubmit(draftId),
-    id: draftId,
-    one_time: true,
-  };
 
   try {
+    const draftConfig = {
+      ...connectionConfigForSubmit(draftId),
+      id: draftId,
+      one_time: true,
+    };
     await api.connectDb(draftConfig);
     const names = await loadVisibleDatabaseNames(draftId, draftConfig);
     visibleDatabaseNames.value = names;
@@ -2536,8 +2727,9 @@ async function openVisibleDatabasesPicker() {
   } catch (e: any) {
     visibleDatabaseNames.value = [];
     visibleDatabaseSelection.value = new Set();
-    visibleDatabaseError.value = mongodbAuthFailureHint(String(e?.message || e));
+    visibleDatabaseError.value = mongodbAuthFailureHint(errorMessage(e));
     testResult.value = { ok: false, message: visibleDatabaseError.value };
+    showVisibleDatabasesDialog.value = true;
   } finally {
     await api.disconnectDb(draftId).catch(() => undefined);
     isLoadingVisibleDatabases.value = false;
@@ -2796,6 +2988,7 @@ watch(
     if (!props.prefillConfig?.oneTime) {
       void loadJdbcDrivers();
       void loadAgentDrivers();
+      void loadSshConfigHosts();
     }
     // Preload database names so the summary count is accurate right away.
     void nextTick(() => {
@@ -2930,6 +3123,33 @@ function updateSelectedProxyType(value: unknown) {
   resetTestState();
 }
 
+/**
+ * "agent" is legacy-only: it's never chosen from this dropdown, only ever
+ * inherited from a connection saved before this selector existed. Once the
+ * user picks something else, the option (and its underlying checkbox) is
+ * gone from the form for good.
+ */
+function isLegacySshAgentMethod(hop: Partial<SshTunnelConfig> | null | undefined) {
+  return hop?.auth_method === "agent";
+}
+
+function updateSelectedSshAuthMethod(value: unknown) {
+  const layer = selectedSshLayer.value;
+  if (!layer) return;
+  layer.auth_method = value === "key" ? "key" : value === "none" ? "none" : "password";
+  // Scrub credential fields that do not apply to the selected method so
+  // they are not accidentally submitted or used by the backend fallback.
+  if (layer.auth_method !== "password") layer.password = "";
+  if (layer.auth_method !== "key") {
+    layer.key_path = "";
+    layer.key_passphrase = "";
+  }
+  if (layer.auth_method !== "key") {
+    layer.use_ssh_agent = false;
+  }
+  resetTestState();
+}
+
 function validateTransportLayers(config: LegacyConnectionConfig) {
   const layers = config.transport_layers || [];
   layers.forEach((layer, index) => {
@@ -2991,8 +3211,10 @@ async function save() {
           emit("connectSucceeded", config.name);
         })
         .catch((e: any) => {
+          const message = String(e?.message || e);
+          if (message.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
           if (config.one_time) void store.removeConnection(config.id);
-          emit("connectFailed", mongodbAuthFailureHint(String(e?.message || e)));
+          emit("connectFailed", appendConnectionErrorHints(config, mongodbAuthFailureHint(message), t));
         });
       return;
     }
@@ -3010,6 +3232,28 @@ const dialogTitle = ref("");
 watch([() => editingId.value, () => open.value], () => {
   dialogTitle.value = editingId.value ? t("connection.editTitle") : t("connection.title");
 });
+
+const sshConfigHostAliases = computed(() => sshConfigHosts.value.map((entry) => entry.alias));
+
+/**
+ * Prefills user/port/key_path from a matching ~/.ssh/config alias, without
+ * overwriting values the user already changed away from the form defaults.
+ * This is a UX preview only — the authoritative resolution happens in the
+ * Rust backend at connect time (see resolve_ssh_tunnel_config), so imported
+ * configs that never touched this UI still resolve correctly.
+ */
+function applySshConfigHostAliasPrefill(target: SshTunnelConfig) {
+  const entry = sshConfigHosts.value.find((candidate) => candidate.alias === target.host);
+  if (!entry) return;
+  if (target.user === DEFAULT_SSH_USER && entry.user) target.user = entry.user;
+  if (target.port === 22 && entry.port) target.port = entry.port;
+  if (!target.key_path && entry.identity_file) {
+    target.key_path = entry.identity_file;
+    if ((!target.auth_method || target.auth_method === "password") && !target.password?.trim()) {
+      target.auth_method = "key";
+    }
+  }
+}
 
 async function browseSshKeyPath(target?: SshTunnelConfig | null) {
   if (isTauriRuntime()) {
@@ -3102,6 +3346,24 @@ async function browseEtcdTlsFile(target: "ca" | "cert" | "key") {
         form.value.client_cert_path = selected;
       } else {
         form.value.client_key_path = selected;
+      }
+    }
+  }
+}
+
+async function browseHiveKerberosFile(target: "krb5" | "jaas") {
+  if (isTauriRuntime()) {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      title: target === "krb5" ? t("connection.hiveKrb5ConfBrowse") : t("connection.hiveJaasConfigBrowse"),
+      multiple: false,
+      filters: [{ name: "Config", extensions: ["conf", "ini", "properties", "*"] }],
+    });
+    if (selected && typeof selected === "string") {
+      if (target === "krb5") {
+        hiveKrb5ConfPath.value = selected;
+      } else {
+        hiveJaasConfigPath.value = selected;
       }
     }
   }
@@ -3224,6 +3486,14 @@ async function loadJdbcDrivers() {
   } catch {
     jdbcDrivers.value = [];
     jdbcMavenBundles.value = [];
+  }
+}
+
+async function loadSshConfigHosts() {
+  try {
+    sshConfigHosts.value = await api.listSshConfigHosts();
+  } catch {
+    sshConfigHosts.value = [];
   }
 }
 
@@ -3622,6 +3892,10 @@ function openExternalUrl(url: string) {
                       </p>
                     </div>
                   </div>
+                  <div v-if="form.db_type === 'sqlite'" class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.sqliteCipherKey") }}</Label>
+                    <PasswordInput v-model="form.password" class="col-span-3" :placeholder="t('connection.sqliteCipherKeyPlaceholder')" />
+                  </div>
                   <div v-if="form.db_type === 'sqlite'" class="grid grid-cols-4 items-start gap-4">
                     <Label :class="connectionLabelTopClass">{{ t("connection.sqliteExtensions") }}</Label>
                     <div class="col-span-3 space-y-1">
@@ -3704,6 +3978,7 @@ function openExternalUrl(url: string) {
                       <Button size="sm" :variant="mqAuthKind === 'none' ? 'default' : 'outline'" @click="mqAuthKind = 'none'">None</Button>
                       <Button v-if="mqSystemKind !== 'kafka'" size="sm" :variant="mqAuthKind === 'token' ? 'default' : 'outline'" @click="mqAuthKind = 'token'">Token</Button>
                       <Button size="sm" :variant="mqAuthKind === 'basic' ? 'default' : 'outline'" @click="mqAuthKind = 'basic'">Basic</Button>
+                      <Button v-if="mqSystemKind === 'kafka'" size="sm" :variant="mqAuthKind === 'kerberos' ? 'default' : 'outline'" @click="mqAuthKind = 'kerberos'">Kerberos</Button>
                       <Button v-if="mqSystemKind !== 'kafka'" size="sm" :variant="mqAuthKind === 'apiKey' ? 'default' : 'outline'" @click="mqAuthKind = 'apiKey'">API Key</Button>
                       <Button v-if="mqSystemKind !== 'kafka'" size="sm" :variant="mqAuthKind === 'oauth2' ? 'default' : 'outline'" @click="mqAuthKind = 'oauth2'">OAuth2</Button>
                     </div>
@@ -3735,6 +4010,31 @@ function openExternalUrl(url: string) {
                           </SelectItem>
                         </SelectContent>
                       </Select>
+                    </div>
+                  </template>
+                  <template v-else-if="mqSystemKind === 'kafka' && mqAuthKind === 'kerberos'">
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.kafkaKerberosPrincipal") }}</Label>
+                      <Input v-model="mqKafkaKerberosPrincipal" class="col-span-3" placeholder="user@EXAMPLE.COM" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.kafkaKerberosKeytab") }}</Label>
+                      <Input v-model="mqKafkaKerberosKeytabPath" class="col-span-3" :placeholder="t('connection.kafkaKerberosKeytabPlaceholder')" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.kafkaKerberosServiceName") }}</Label>
+                      <Input v-model="mqKafkaKerberosServiceName" class="col-span-3" placeholder="kafka" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.kafkaKerberosKrb5Conf") }}</Label>
+                      <Input v-model="mqKafkaKrb5ConfPath" class="col-span-3" :placeholder="t('connection.kafkaKerberosKrb5ConfPlaceholder')" />
+                    </div>
+                    <div class="grid grid-cols-4 items-start gap-4">
+                      <div></div>
+                      <div class="col-span-3 space-y-1 text-xs leading-5 text-muted-foreground">
+                        <p>{{ t("connection.kafkaKerberosPathHint") }}</p>
+                        <p>{{ t("connection.kafkaKerberosAuthHint") }}</p>
+                      </div>
                     </div>
                   </template>
                   <template v-else-if="mqAuthKind === 'apiKey'">
@@ -4122,6 +4422,66 @@ function openExternalUrl(url: string) {
                   </template>
                 </template>
 
+                <!-- InfluxDB: v1 username/password or v2 token/org/bucket -->
+                <template v-else-if="form.db_type === 'influxdb'">
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.version") }}</Label>
+                    <Select v-model="influxDbVersion">
+                      <SelectTrigger class="col-span-3">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="1">InfluxDB 1.x</SelectItem>
+                        <SelectItem value="2">InfluxDB 2.x</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.host") }}</Label>
+                    <Input v-model="form.host" class="col-span-2" />
+                    <Input v-model.number="form.port" type="number" class="col-span-1" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <span />
+                    <label class="col-span-3 flex items-center gap-2 text-sm">
+                      <input type="checkbox" v-model="form.ssl" class="mr-0" />
+                      <span>{{ t("connection.sslEnable") }}</span>
+                    </label>
+                  </div>
+                  <template v-if="influxDbVersion === '2'">
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">Organization</Label>
+                      <Input v-model="influxDbOrg" class="col-span-3" placeholder="my-org" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">Bucket</Label>
+                      <Input v-model="form.database" class="col-span-3" placeholder="my-bucket" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">Token</Label>
+                      <PasswordInput v-model="form.password" class="col-span-3" />
+                    </div>
+                  </template>
+                  <template v-else>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.user") }}</Label>
+                      <Input v-model="form.username" class="col-span-3" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.password") }}</Label>
+                      <PasswordInput v-model="form.password" class="col-span-3" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.database") }}</Label>
+                      <Input v-model="form.database" class="col-span-3" :placeholder="t('connection.databasePlaceholder')" />
+                    </div>
+                  </template>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.urlParams") }}</Label>
+                    <Input v-model="form.url_params" class="col-span-3" :placeholder="influxDbVersion === '2' ? 'precision=ns' : 'epoch=ms'" />
+                  </div>
+                </template>
+
                 <!-- Turso: simplified form (URL + Token) -->
                 <template v-else-if="form.db_type === 'turso'">
                   <div class="grid grid-cols-4 items-center gap-4">
@@ -4183,6 +4543,76 @@ function openExternalUrl(url: string) {
                     <Input v-model="form.database" class="col-span-3" :placeholder="databasePlaceholder" />
                   </div>
 
+                  <template v-if="form.db_type === 'hive'">
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.hiveAuthMode") }}</Label>
+                      <div class="col-span-3 grid h-8 grid-cols-2 overflow-hidden rounded-md border border-input bg-muted/30 p-0.5">
+                        <button type="button" class="h-7 rounded-sm px-3 text-sm transition-colors" :class="hiveAuthMode === 'none' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" :aria-pressed="hiveAuthMode === 'none'" @click="hiveAuthMode = 'none'">
+                          {{ t("connection.hiveAuthNone") }}
+                        </button>
+                        <button
+                          type="button"
+                          class="h-7 rounded-sm px-3 text-sm transition-colors"
+                          :class="hiveAuthMode === 'kerberos' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                          :aria-pressed="hiveAuthMode === 'kerberos'"
+                          @click="hiveAuthMode = 'kerberos'"
+                        >
+                          Kerberos
+                        </button>
+                      </div>
+                    </div>
+
+                    <template v-if="hiveAuthMode === 'kerberos'">
+                      <div class="grid grid-cols-4 items-center gap-4">
+                        <Label :class="connectionLabelSmallClass">{{ t("connection.hivePrincipal") }}</Label>
+                        <Input v-model="hivePrincipal" class="col-span-3" placeholder="hive/_HOST@EXAMPLE.COM" />
+                      </div>
+                      <div class="grid grid-cols-4 items-center gap-4">
+                        <Label :class="connectionLabelSmallClass">krb5.conf</Label>
+                        <div class="col-span-3 flex items-center gap-1">
+                          <Input v-model="hiveKrb5ConfPath" class="flex-1" placeholder="/etc/krb5.conf" />
+                          <Tooltip v-if="isDesktop">
+                            <TooltipTrigger as-child>
+                              <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" @click="browseHiveKerberosFile('krb5')">
+                                <FolderOpen class="h-4 w-4" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>{{ t("connection.hiveKrb5ConfBrowse") }}</TooltipContent>
+                          </Tooltip>
+                        </div>
+                      </div>
+                      <div class="grid grid-cols-4 items-center gap-4">
+                        <Label :class="connectionLabelSmallClass">JAAS</Label>
+                        <div class="col-span-3 flex items-center gap-1">
+                          <Input v-model="hiveJaasConfigPath" class="flex-1" placeholder="/etc/hive-jaas.conf" />
+                          <Tooltip v-if="isDesktop">
+                            <TooltipTrigger as-child>
+                              <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" @click="browseHiveKerberosFile('jaas')">
+                                <FolderOpen class="h-4 w-4" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>{{ t("connection.hiveJaasConfigBrowse") }}</TooltipContent>
+                          </Tooltip>
+                        </div>
+                      </div>
+                      <div class="grid grid-cols-4 items-center gap-4">
+                        <Label :class="connectionLabelSmallClass">{{ t("connection.hiveTicketCache") }}</Label>
+                        <label class="col-span-3 flex items-center gap-2 cursor-pointer">
+                          <input type="checkbox" v-model="hiveUseSubjectCredsOnlyFalse" class="mr-0" />
+                          <span class="text-xs text-muted-foreground">{{ t("connection.hiveTicketCacheFallback") }}</span>
+                        </label>
+                      </div>
+                      <div class="grid grid-cols-4 items-start gap-4">
+                        <Label :class="connectionLabelTopClass">{{ t("connection.hiveJvmOptions") }}</Label>
+                        <textarea
+                          v-model="hiveExtraJavaOptions"
+                          class="col-span-3 min-h-16 rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                          :placeholder="t('connection.hiveJvmOptionsPlaceholder')"
+                        />
+                      </div>
+                    </template>
+                  </template>
+
                   <div v-if="form.db_type === 'oracle'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">{{ t("connection.mode") }}</Label>
                     <div class="col-span-3 grid h-8 grid-cols-2 overflow-hidden rounded-md border border-input bg-muted/30 p-0.5">
@@ -4239,9 +4669,11 @@ function openExternalUrl(url: string) {
                                 ? 'OAuthType=0;OAuthServiceAcctEmail=svc@project.iam.gserviceaccount.com;OAuthPvtKeyPath=/path/key.json'
                                 : form.db_type === 'informix'
                                   ? 'CLIENT_LOCALE=en_US.utf8;DB_LOCALE=en_US.utf8'
-                                  : form.db_type === 'influxdb'
-                                    ? 'epoch=ms'
-                                    : 'sslmode=disable'
+                                  : form.db_type === 'spark'
+                                    ? 'catalog=paimon_catalog'
+                                    : form.db_type === 'cassandra'
+                                      ? 'localdatacenter=dc1'
+                                      : 'sslmode=disable'
                       "
                     />
                   </div>
@@ -4411,8 +4843,8 @@ function openExternalUrl(url: string) {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="preferred">{{ t("connection.mysqlTlsModePreferred") }}</SelectItem>
                         <SelectItem value="disabled">{{ t("connection.mysqlTlsModeDisabled") }}</SelectItem>
+                        <SelectItem value="preferred">{{ t("connection.mysqlTlsModePreferred") }}</SelectItem>
                         <SelectItem value="required">{{ t("connection.mysqlTlsModeRequired") }}</SelectItem>
                         <SelectItem value="verify_ca">{{ t("connection.mysqlTlsModeVerifyCa") }}</SelectItem>
                         <SelectItem value="verify_identity">{{ t("connection.mysqlTlsModeVerifyIdentity") }}</SelectItem>
@@ -4607,14 +5039,14 @@ function openExternalUrl(url: string) {
                   </label>
                 </div>
                 <div v-show="form.db_type === 'sqlserver'" class="grid grid-cols-4 items-start gap-4">
-                  <Label :class="connectionLabelSmallClass">{{ t("connection.sqlServerLegacyUnencryptedMode") }}</Label>
+                  <Label :class="connectionLabelSmallClass">{{ t("connection.sqlServerLegacyCompatibilityMode") }}</Label>
                   <div class="col-span-3 flex flex-col gap-1">
                     <label class="flex h-5 cursor-pointer items-center gap-2">
-                      <input type="checkbox" v-model="sqlServerLegacyUnencryptedModeEnabled" class="mr-0" />
-                      <span class="text-xs text-foreground">{{ t("connection.sqlServerLegacyUnencryptedModeEnable") }}</span>
+                      <input type="checkbox" :checked="sqlServerLegacyCompatibilityModeEnabled" :disabled="agentInstallRunning" class="mr-0" @change="onSqlServerLegacyCompatibilityModeChange" />
+                      <span class="text-xs text-foreground">{{ t("connection.sqlServerLegacyCompatibilityModeEnable") }}</span>
                     </label>
                     <p class="m-0 whitespace-pre-line text-xs leading-5 text-muted-foreground">
-                      {{ t("connection.sqlServerLegacyUnencryptedModeHint") }}
+                      {{ t("connection.sqlServerLegacyCompatibilityModeHint") }}
                     </p>
                   </div>
                 </div>
@@ -4731,7 +5163,10 @@ function openExternalUrl(url: string) {
                   <template v-if="selectedSshLayer">
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.sshHost") }}</Label>
-                      <Input v-model="selectedSshLayer.host" class="col-span-2" placeholder="ssh.example.com" :disabled="selectedSshLayer.enabled === false" />
+                      <Input v-model="selectedSshLayer.host" class="col-span-2" list="ssh-config-host-aliases" :placeholder="t('connection.sshHostPlaceholder')" :disabled="selectedSshLayer.enabled === false" @change="applySshConfigHostAliasPrefill(selectedSshLayer!)" />
+                      <datalist id="ssh-config-host-aliases">
+                        <option v-for="alias in sshConfigHostAliases" :key="alias" :value="alias" />
+                      </datalist>
                       <Input v-model.number="selectedSshLayer.port" type="number" min="1" max="65535" class="col-span-1" :disabled="selectedSshLayer.enabled === false" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
@@ -4739,10 +5174,20 @@ function openExternalUrl(url: string) {
                       <Input v-model="selectedSshLayer.user" class="col-span-3" placeholder="root" :disabled="selectedSshLayer.enabled === false" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelSmallClass">{{ t("connection.sshPassword") }}</Label>
-                      <PasswordInput v-model="selectedSshLayer.password" class="col-span-3" :placeholder="t('connection.sshPasswordPlaceholder')" :disabled="selectedSshLayer.enabled === false" />
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.sshAuthMethod") }}</Label>
+                      <Select :model-value="selectedSshLayer.auth_method || 'password'" :disabled="selectedSshLayer.enabled === false" @update:model-value="updateSelectedSshAuthMethod">
+                        <SelectTrigger class="col-span-3 h-9">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="password">{{ t("connection.sshAuthMethodPassword") }}</SelectItem>
+                          <SelectItem value="key">{{ t("connection.sshAuthMethodKey") }}</SelectItem>
+                          <SelectItem value="none">{{ t("connection.sshAuthMethodNone") }}</SelectItem>
+                          <SelectItem v-if="isLegacySshAgentMethod(selectedSshLayer)" value="agent" disabled>{{ t("connection.sshAuthMethodAgentLegacy") }}</SelectItem>
+                        </SelectContent>
+                      </Select>
                     </div>
-                    <div class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="selectedSshLayer.auth_method === 'key'" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.sshKeyPath") }}</Label>
                       <div class="col-span-3 flex items-center gap-1">
                         <Input v-model="selectedSshLayer.key_path" class="flex-1" placeholder="~/.ssh/id_rsa" :disabled="selectedSshLayer.enabled === false" />
@@ -4756,21 +5201,31 @@ function openExternalUrl(url: string) {
                         </Tooltip>
                       </div>
                     </div>
-                    <div class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="selectedSshLayer.auth_method === 'key'" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.sshKeyPassphrase") }}</Label>
                       <PasswordInput v-model="selectedSshLayer.key_passphrase" class="col-span-3" :placeholder="t('connection.sshKeyPassphrasePlaceholder')" :disabled="selectedSshLayer.enabled === false" />
                     </div>
-                    <div class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="!selectedSshLayer.auth_method || selectedSshLayer.auth_method === 'password'" class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.sshPassword") }}</Label>
+                      <PasswordInput v-model="selectedSshLayer.password" class="col-span-3" :placeholder="t('connection.sshPasswordPlaceholder')" :disabled="selectedSshLayer.enabled === false" />
+                    </div>
+                    <div v-if="selectedSshLayer.auth_method === 'none'" class="grid grid-cols-4 items-center gap-4">
                       <span />
-                      <label class="col-span-3 flex items-center gap-2 cursor-pointer">
-                        <input type="checkbox" v-model="selectedSshLayer.use_ssh_agent" class="mr-0" :disabled="selectedSshLayer.enabled === false" />
-                        <span class="text-xs text-muted-foreground">{{ t("connection.sshUseAgent") }}</span>
-                      </label>
+                      <p class="col-span-3 text-xs text-muted-foreground">{{ t("connection.sshAuthMethodNoneHint") }}</p>
                     </div>
-                    <div v-if="selectedSshLayer.use_ssh_agent" class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelSmallClass">{{ t("connection.sshAgentSockPath") }}</Label>
-                      <Input v-model="selectedSshLayer.ssh_agent_sock_path" class="col-span-3" :placeholder="t('connection.sshAgentSockPathPlaceholder')" :disabled="selectedSshLayer.enabled === false" />
-                    </div>
+                    <template v-if="isLegacySshAgentMethod(selectedSshLayer)">
+                      <div class="grid grid-cols-4 items-center gap-4">
+                        <span />
+                        <label class="col-span-3 flex items-center gap-2 cursor-pointer">
+                          <input type="checkbox" v-model="selectedSshLayer.use_ssh_agent" class="mr-0" :disabled="selectedSshLayer.enabled === false" />
+                          <span class="text-xs text-muted-foreground">{{ t("connection.sshUseAgent") }}</span>
+                        </label>
+                      </div>
+                      <div v-if="selectedSshLayer.use_ssh_agent" class="grid grid-cols-4 items-center gap-4">
+                        <Label :class="connectionLabelSmallClass">{{ t("connection.sshAgentSockPath") }}</Label>
+                        <Input v-model="selectedSshLayer.ssh_agent_sock_path" class="col-span-3" :placeholder="t('connection.sshAgentSockPathPlaceholder')" :disabled="selectedSshLayer.enabled === false" />
+                      </div>
+                    </template>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <span />
                       <label class="col-span-3 flex items-center gap-2 cursor-pointer">

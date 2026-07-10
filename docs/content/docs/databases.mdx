@@ -124,6 +124,16 @@ Create a new DuckDB database file directly from the connection form by entering 
 
 SQLite connections can use `:memory:` as the file path for ephemeral, in-memory databases. This is useful for quick experiments or temporary data transformations.
 
+### Doris / StarRocks Multi-Catalog
+
+Doris and StarRocks are MPP engines that federate external data through catalogs (`SHOW CATALOGS`). DBX lists every catalog the current user can read and renders them as a `catalog → database → table` tree:
+
+- The built-in `internal` catalog shows the engine's own databases and tables.
+- External catalogs (Hive, Iceberg, Hudi, Paimon, JDBC, etc.) list their databases and tables the same way. Catalogs you lack permission to read are skipped silently.
+- When only the `internal` catalog is present, the sidebar stays flat (no catalog grouping layer) so single-catalog deployments are unaffected.
+
+Opening a table from an external catalog previews its data using the 3-part `catalog.database.table` name, so no session `SWITCH` is needed. External catalogs expose tables and views only — routines, sequences, triggers, and foreign keys are not available.
+
 ## Extending Support
 
 Use the [JDBC Plugin](/en/docs/plugins) when a database is not covered by the built-in profiles or when your team must use a vendor JDBC driver. JDBC keeps vendor driver JARs outside the main DBX app, so you control which driver files are installed.

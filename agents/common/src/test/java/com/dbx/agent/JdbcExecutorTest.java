@@ -5,10 +5,15 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.sql.Types;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.sql.rowset.serial.SerialBlob;
 
@@ -62,8 +67,59 @@ class JdbcExecutorTest {
         assertEquals(2, fixture.getColumnTypeCalls());
     }
 
+    @Test
+    void schemaSwitcherPrefersDriverSpecificSql() throws Exception {
+        List<String> calls = new ArrayList<>();
+
+        JdbcSchemaSwitcher.apply(schemaConnection(calls, false), "APP", schema -> "USE " + schema);
+
+        assertEquals(Arrays.asList("execute:USE APP"), calls);
+    }
+
+    @Test
+    void schemaSwitcherFallsBackToSetSchemaWhenSqlFails() throws Exception {
+        List<String> calls = new ArrayList<>();
+
+        JdbcSchemaSwitcher.apply(schemaConnection(calls, true), "APP", schema -> "USE " + schema);
+
+        assertEquals(Arrays.asList("execute:USE APP", "setSchema:APP"), calls);
+    }
+
     private static ResultSet resultSet(byte[] bytes, StringSupplier stringSupplier) {
         return resultSet(bytes, stringSupplier, false);
+    }
+
+    private static Connection schemaConnection(List<String> calls, boolean failSchemaSql) {
+        InvocationHandler handler = (Object unused, Method method, Object[] args) -> {
+            switch (method.getName()) {
+                case "createStatement":
+                    return schemaStatement(calls, failSchemaSql);
+                case "setSchema":
+                    calls.add("setSchema:" + args[0]);
+                    return null;
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        };
+        return (Connection) Proxy.newProxyInstance(Connection.class.getClassLoader(), new Class<?>[]{Connection.class}, handler);
+    }
+
+    private static Statement schemaStatement(List<String> calls, boolean failSchemaSql) {
+        InvocationHandler handler = (Object unused, Method method, Object[] args) -> {
+            switch (method.getName()) {
+                case "execute":
+                    calls.add("execute:" + args[0]);
+                    if (failSchemaSql) {
+                        throw new SQLException("unsupported schema SQL");
+                    }
+                    return false;
+                case "close":
+                    return null;
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        };
+        return (Statement) Proxy.newProxyInstance(Statement.class.getClassLoader(), new Class<?>[]{Statement.class}, handler);
     }
 
     private static CountingResultSetFixture countingResultSet(Object[][] rows) {

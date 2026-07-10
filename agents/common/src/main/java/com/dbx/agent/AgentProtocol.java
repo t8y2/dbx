@@ -44,6 +44,9 @@ public final class AgentProtocol {
      */
     public static final String MONGO_METHOD_FIND_DOCUMENTS_EXTENDED_JSON = "find_documents_extended_json";
     public static final String MONGO_METHOD_SERVER_VERSION = "server_version";
+    public static final String MONGO_METHOD_CREATE_INDEX = "create_index";
+    public static final String MONGO_METHOD_DROP_INDEXES = "drop_indexes";
+    public static final String MONGO_METHOD_DROP_COLLECTION = "drop_collection";
     public static final String MONGO_METHOD_INSERT_DOCUMENT = "insert_document";
     public static final String MONGO_METHOD_UPDATE_DOCUMENT = "update_document";
     public static final String MONGO_METHOD_UPDATE_DOCUMENTS = "update_documents";
@@ -122,6 +125,9 @@ public final class AgentProtocol {
         MONGO_METHOD_FIND_DOCUMENTS,
         MONGO_METHOD_FIND_DOCUMENTS_EXTENDED_JSON,
         MONGO_METHOD_SERVER_VERSION,
+        MONGO_METHOD_CREATE_INDEX,
+        MONGO_METHOD_DROP_INDEXES,
+        MONGO_METHOD_DROP_COLLECTION,
         MONGO_METHOD_INSERT_DOCUMENT,
         MONGO_METHOD_UPDATE_DOCUMENT,
         MONGO_METHOD_UPDATE_DOCUMENTS,

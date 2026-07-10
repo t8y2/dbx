@@ -10,6 +10,8 @@ export function isBinaryType(dataType: string): boolean {
 }
 
 export interface EditableQueryInfo {
+  catalog?: string;
+  catalogQuoted?: boolean;
   schema: string | undefined;
   schemaQuoted?: boolean;
   tableName: string;
@@ -17,13 +19,32 @@ export interface EditableQueryInfo {
   tableAlias?: string;
   selectStar: boolean;
   columns: EditableQueryColumn[]; // empty array if SELECT *
+  sources?: EditableQuerySource[];
+  editableSourceKey?: string;
+  multiSource?: boolean;
+  allowInsertDelete?: boolean;
+  distinct?: boolean;
 }
 
 export interface EditableQueryColumn {
   sourceName?: string;
   sourceNameQuoted?: boolean;
+  sourceQualifier?: string;
+  sourceKey?: string;
+  star?: boolean;
   resultName: string;
   expression: string;
+}
+
+export interface EditableQuerySource {
+  key: string;
+  catalog?: string;
+  catalogQuoted?: boolean;
+  schema?: string;
+  schemaQuoted?: boolean;
+  tableName: string;
+  tableNameQuoted?: boolean;
+  alias?: string;
 }
 
 export type QueryEditabilityReason = "not-select" | "cte" | "set-operation" | "aggregation" | "external-source" | "complex-source" | "computed-columns" | "no-table" | "no-primary-key" | "primary-key-not-returned" | "aliased-columns" | "metadata-unavailable";
@@ -32,10 +53,13 @@ export type QueryEditability = { editable: true; analysis: EditableQueryInfo } |
 
 /**
  * Parse a SELECT statement to determine if it's editable.
- * Only simple single-table SELECT queries are considered editable:
- * - No JOIN, GROUP BY, HAVING, UNION, subqueries, CTEs, DISTINCT, aggregations
- * - Must have a single FROM clause with one table
- * - WHERE, ORDER BY, LIMIT are allowed
+ * Parse a SELECT statement to determine whether DBX can bind result columns to
+ * base-table columns. DBeaver uses result metadata for the same idea; DBX has to
+ * recover enough source mapping from SQL text before table metadata is loaded.
+ *
+ * Aggregated/set/query-derived results remain read-only. Multi-source queries
+ * may still be editable later if metadata proves that exactly one source table
+ * has a complete row identifier in the returned columns.
  */
 export function analyzeEditableQuery(sql: string): EditableQueryInfo | null {
   const result = analyzeEditableQueryEditability(sql);
@@ -57,8 +81,12 @@ export function analyzeEditableQueryEditability(sql: string): QueryEditability {
   const fromIndex = findTopLevelKeyword(normalized, "FROM", 0);
   if (fromIndex < 0) return { editable: false, reason: "no-table" };
 
-  const selectBody = normalized.slice("SELECT".length, fromIndex).trim();
-  if (/^DISTINCT\b/i.test(selectBody)) return { editable: false, reason: "aggregation" };
+  const rawSelectBody = normalized.slice("SELECT".length, fromIndex).trim();
+  const distinct = /^DISTINCT\b/i.test(rawSelectBody);
+  const selectBody = distinct ? rawSelectBody.replace(/^DISTINCT\b/i, "").trimStart() : rawSelectBody;
+  // DISTINCT ON selects a representative row using database-specific ordering,
+  // so it cannot be mapped to base rows like an ordinary DISTINCT projection.
+  if (distinct && /^ON\b/i.test(selectBody)) return { editable: false, reason: "aggregation" };
 
   const groupIndex = findTopLevelKeyword(normalized, "GROUP", fromIndex + 4);
   const havingIndex = findTopLevelKeyword(normalized, "HAVING", fromIndex + 4);
@@ -67,45 +95,45 @@ export function analyzeEditableQueryEditability(sql: string): QueryEditability {
   const fromEnd = firstTopLevelKeywordIndex(normalized, ["WHERE", "ORDER", "LIMIT", "OFFSET", "FETCH"], fromIndex + 4);
   const fromBody = normalized.slice(fromIndex + 4, fromEnd < 0 ? normalized.length : fromEnd).trim();
   if (isExternalFromSource(fromBody)) return { editable: false, reason: "external-source" };
-  const source = parseFromSource(fromBody);
-  if (!source) return { editable: false, reason: "complex-source" };
+  const sources = parseFromSources(fromBody);
+  if (!sources.length) return { editable: false, reason: "complex-source" };
+  const source = sources[0]!;
 
-  const selectStar = isSelectStar(selectBody, source.alias);
-  const columns = selectStar ? [] : parseSelectColumns(selectBody);
+  const selectStar = sources.length === 1 && isSelectStar(selectBody, source.alias);
+  const columns = selectStar ? [] : parseSelectColumns(selectBody, sources);
   if (!selectStar && columns.length === 0) return { editable: false, reason: "computed-columns" };
+  if (sources.length > 1 && columns.some((column) => column.star && !column.sourceKey)) {
+    return { editable: false, reason: "complex-source" };
+  }
 
+  const analysis: EditableQueryInfo = {
+    catalog: source.catalog,
+    catalogQuoted: source.catalogQuoted,
+    schema: source.schema,
+    schemaQuoted: source.schemaQuoted,
+    tableName: source.tableName,
+    tableNameQuoted: source.tableNameQuoted,
+    tableAlias: source.alias,
+    selectStar,
+    columns,
+    ...(distinct ? { distinct: true, allowInsertDelete: false } : {}),
+  };
+  if (sources.length > 1) {
+    analysis.sources = sources;
+    analysis.multiSource = true;
+    analysis.allowInsertDelete = false;
+  }
   return {
     editable: true,
-    analysis: {
-      schema: source.schema,
-      schemaQuoted: source.schemaQuoted,
-      tableName: source.tableName,
-      tableNameQuoted: source.tableNameQuoted,
-      tableAlias: source.alias,
-      selectStar,
-      columns,
-    },
+    analysis,
   };
 }
 
 export function queryEditabilityMessageKey(reason: QueryEditabilityReason): string {
-  return {
-    "not-select": "grid.queryEditUnsupportedNotSelect",
-    cte: "grid.queryEditUnsupportedCte",
-    "set-operation": "grid.queryEditUnsupportedSetOperation",
-    aggregation: "grid.queryEditUnsupportedAggregation",
-    "external-source": "grid.queryEditUnsupportedExternalSource",
-    "complex-source": "grid.queryEditUnsupportedComplexSource",
-    "computed-columns": "grid.queryEditUnsupportedComputedColumns",
-    "no-table": "grid.queryEditUnsupportedNoTable",
-    "no-primary-key": "grid.queryEditUnsupportedNoPrimaryKey",
-    "primary-key-not-returned": "grid.queryEditUnsupportedPrimaryKeyNotReturned",
-    "aliased-columns": "grid.queryEditUnsupportedAliasedColumns",
-    "metadata-unavailable": "grid.queryEditUnsupportedMetadataUnavailable",
-  }[reason];
+  return `grid.queryEditUnsupported.${reason}`;
 }
 
-function parseSelectColumns(body: string): EditableQueryColumn[] {
+function parseSelectColumns(body: string, sources?: EditableQuerySource[]): EditableQueryColumn[] {
   const cols: EditableQueryColumn[] = [];
   let depth = 0;
   let current = "";
@@ -122,7 +150,7 @@ function parseSelectColumns(body: string): EditableQueryColumn[] {
     else if (ch === "(") depth++;
     else if (ch === ")") depth--;
     else if (ch === "," && depth === 0) {
-      const col = parseSelectColumn(current.trim());
+      const col = parseSelectColumn(current.trim(), sources);
       if (!col) return [];
       cols.push(col);
       current = "";
@@ -131,23 +159,52 @@ function parseSelectColumns(body: string): EditableQueryColumn[] {
     current += ch;
   }
   if (current.trim()) {
-    const col = parseSelectColumn(current.trim());
+    const col = parseSelectColumn(current.trim(), sources);
     if (!col) return [];
     cols.push(col);
   }
   return cols;
 }
 
-function parseSelectColumn(col: string): EditableQueryColumn | null {
+function parseSelectColumn(col: string, sources?: EditableQuerySource[]): EditableQueryColumn | null {
+  const star = parseStarSelectColumn(col, sources);
+  if (star) return star;
   const source = parseQualifiedIdentifier(col);
   if (!source) return parseComputedSelectColumn(col);
   const alias = parseColumnAlias(source.rest);
   if (alias === null) return parseComputedSelectColumn(col);
+  const sourceName = source.parts[source.parts.length - 1];
+  const qualifier = source.parts.length >= 2 ? source.parts[source.parts.length - 2] : undefined;
+  const sourceKey = qualifier ? sourceKeyForQualifier(sources, qualifier) : undefined;
   return {
-    sourceName: source.parts[source.parts.length - 1],
+    sourceName,
     sourceNameQuoted: source.quoted[source.quoted.length - 1],
-    resultName: alias ?? source.parts[source.parts.length - 1],
+    ...(qualifier ? { sourceQualifier: qualifier } : {}),
+    ...(sourceKey ? { sourceKey } : {}),
+    resultName: alias ?? sourceName,
     expression: col.slice(0, source.end).trim(),
+  };
+}
+
+function parseStarSelectColumn(col: string, sources?: EditableQuerySource[]): EditableQueryColumn | null {
+  if (col === "*") {
+    return {
+      star: true,
+      resultName: "*",
+      expression: col,
+    };
+  }
+  const starMatch = col.match(/^((?:[A-Za-z_][\w$]*|"[^"]+"|`[^`]+`|\[[^\]]+\]))\s*\.\s*\*$/);
+  if (!starMatch) return null;
+  const qualifier = readIdentifier(starMatch[1]!, 0);
+  if (!qualifier) return null;
+  const sourceKey = sourceKeyForQualifier(sources, qualifier.value);
+  return {
+    star: true,
+    sourceQualifier: qualifier.value,
+    ...(sourceKey ? { sourceKey } : {}),
+    resultName: "*",
+    expression: col,
   };
 }
 
@@ -188,28 +245,103 @@ function isSelectStar(body: string, alias: string | undefined): boolean {
   return new RegExp(`^${escapeRegExp(alias)}\\s*\\.\\s*\\*$`, "i").test(trimmed);
 }
 
-function parseFromSource(body: string): { schema?: string; schemaQuoted?: boolean; tableName: string; tableNameQuoted?: boolean; alias?: string } | null {
-  if (!body || /[,()]/.test(body) || /\bJOIN\b/i.test(body)) return null;
-  const ident = parseQualifiedIdentifier(body);
-  if (!ident || ident.parts.length < 1 || ident.parts.length > 2) return null;
-  const tail = ident.rest.trim();
-  let alias: string | undefined;
-  if (tail) {
-    const aliasText = tail.replace(/^AS\s+/i, "").trim();
-    const aliasIdent = readIdentifier(aliasText, 0);
-    if (!aliasIdent || aliasIdent.end !== aliasText.length) return null;
-    alias = aliasIdent.value;
+function parseFromSources(body: string): EditableQuerySource[] {
+  if (!body || /[()]/.test(body)) return [];
+  const sources: EditableQuerySource[] = [];
+  let pos = 0;
+  const first = parseTableSourceAt(body, pos, sources.length);
+  if (!first) return [];
+  sources.push(first.source);
+  pos = first.end;
+
+  while (pos < body.length) {
+    pos = skipWhitespace(body, pos);
+    if (pos >= body.length) break;
+    if (body[pos] === ",") {
+      const next = parseTableSourceAt(body, pos + 1, sources.length);
+      if (!next) return [];
+      sources.push(next.source);
+      pos = next.end;
+      continue;
+    }
+    const joinIndex = findTopLevelKeyword(body, "JOIN", pos);
+    if (joinIndex < 0) break;
+    const next = parseTableSourceAt(body, joinIndex + "JOIN".length, sources.length);
+    if (!next) return [];
+    sources.push(next.source);
+    pos = next.end;
   }
-  const tableName = ident.parts[ident.parts.length - 1];
+
+  return sources;
+}
+
+function parseTableSourceAt(text: string, start: number, index: number): { source: EditableQuerySource; end: number } | null {
+  const pos = skipWhitespace(text, start);
+  if (text[pos] === "'" || text[pos] === "(") return null;
+  const ident = parseQualifiedIdentifier(text.slice(pos));
+  if (!ident || ident.parts.length < 1 || ident.parts.length > 3) return null;
+  if (ident.rest.trimStart().startsWith("(")) return null;
+
+  let end = pos + ident.end;
+  let alias: string | undefined;
+  let tailPos = skipWhitespace(text, end);
+  if (startsWithKeyword(text, tailPos, "AS")) {
+    const aliasIdent = readIdentifier(text, tailPos + 2);
+    if (!aliasIdent) return null;
+    alias = aliasIdent.value;
+    end = aliasIdent.end;
+    tailPos = skipWhitespace(text, end);
+  } else if (!tableSourceTerminatorAt(text, tailPos)) {
+    const aliasIdent = readIdentifier(text, tailPos);
+    if (!aliasIdent) return null;
+    alias = aliasIdent.value;
+    end = aliasIdent.end;
+  }
+
+  const tableName = ident.parts[ident.parts.length - 1]!;
   const tableNameQuoted = ident.quoted[ident.quoted.length - 1];
-  const schema = ident.parts.length === 2 ? ident.parts[0] : undefined;
-  const schemaQuoted = ident.parts.length === 2 ? ident.quoted[0] : false;
-  return { schema, schemaQuoted, tableName, tableNameQuoted, alias };
+  const schema = ident.parts.length >= 2 ? ident.parts[ident.parts.length - 2] : undefined;
+  const schemaQuoted = ident.parts.length >= 2 ? ident.quoted[ident.quoted.length - 2] : false;
+  const catalog = ident.parts.length === 3 ? ident.parts[0] : undefined;
+  const catalogQuoted = ident.parts.length === 3 ? ident.quoted[0] : false;
+  return {
+    source: {
+      key: `${alias ?? tableName}:${index}`,
+      ...(catalog ? { catalog, catalogQuoted } : {}),
+      schema,
+      schemaQuoted,
+      tableName,
+      tableNameQuoted,
+      alias,
+    },
+    end,
+  };
 }
 
 function isExternalFromSource(body: string): boolean {
   const trimmed = body.trim();
   return /^'(?:''|[^'])*'(?:\s+(?:AS\s+)?[A-Za-z_][\w$]*)?$/i.test(trimmed) || /^[A-Za-z_][\w$]*\s*\(/.test(trimmed);
+}
+
+function tableSourceTerminatorAt(text: string, pos: number): boolean {
+  if (pos >= text.length) return true;
+  if (text[pos] === ",") return true;
+  return ["ON", "USING", "JOIN", "LEFT", "RIGHT", "INNER", "FULL", "CROSS", "OUTER", "NATURAL"].some((keyword) => startsWithKeyword(text, pos, keyword));
+}
+
+function startsWithKeyword(text: string, pos: number, keyword: string): boolean {
+  const start = skipWhitespace(text, pos);
+  if (text.slice(start, start + keyword.length).toUpperCase() !== keyword) return false;
+  const before = start === 0 ? "" : text[start - 1];
+  const after = text[start + keyword.length] ?? "";
+  return !isIdentifierChar(before) && !isIdentifierChar(after);
+}
+
+function sourceKeyForQualifier(sources: EditableQuerySource[] | undefined, qualifier: string): string | undefined {
+  if (!sources?.length) return undefined;
+  const normalizedQualifier = qualifier.toLowerCase();
+  const matches = sources.filter((source) => (source.alias ?? source.tableName).toLowerCase() === normalizedQualifier || source.tableName.toLowerCase() === normalizedQualifier);
+  return matches.length === 1 ? matches[0]!.key : undefined;
 }
 
 function parseQualifiedIdentifier(text: string): { parts: string[]; quoted: boolean[]; end: number; rest: string; done: boolean } | null {
@@ -311,27 +443,52 @@ function escapeRegExp(value: string): string {
  * Check if all primary key columns are present in the result set columns.
  * Comparison is case-insensitive.
  */
-export function allPrimaryKeysPresent(primaryKeys: string[], resultColumns: string[], analysis?: EditableQueryInfo): boolean {
+export function allPrimaryKeysPresent(primaryKeys: string[], resultColumns: string[], analysis?: EditableQueryInfo, sourceKey?: string): boolean {
   if (analysis && !analysis.selectStar) {
-    const sourceColumns = new Set(analysis.columns.flatMap((column) => (column.sourceName ? [column.sourceName.toLowerCase()] : [])));
+    const sourceColumns = new Set(
+      analysis.columns.flatMap((column) => {
+        if (!column.sourceName) return [];
+        if (sourceKey && column.sourceKey !== sourceKey) return [];
+        return [column.sourceName.toLowerCase()];
+      }),
+    );
     return primaryKeys.every((pk) => sourceColumns.has(pk.toLowerCase()));
   }
   const colSet = new Set(resultColumns.map((c) => c.toLowerCase()));
   return primaryKeys.every((pk) => colSet.has(pk.toLowerCase()));
 }
 
-export function allEditableColumnsWriteable(analysis: EditableQueryInfo, resultColumns: string[]): boolean {
-  if (analysis.selectStar) return true;
-  const sourceByResult = new Map(analysis.columns.map((column) => [column.resultName.toLowerCase(), column]));
-  return resultColumns.every((resultColumn) => {
-    const source = sourceByResult.get(resultColumn.toLowerCase());
-    return !!source;
-  });
+function matchColumnsForResult(analysis: EditableQueryInfo, resultColumns: string[]): EditableQueryColumn[] | undefined {
+  const matches: EditableQueryColumn[] = [];
+  let searchFrom = 0;
+  for (const resultColumn of resultColumns) {
+    const normalized = resultColumn.toLowerCase();
+    let matchIndex = -1;
+    for (let index = searchFrom; index < analysis.columns.length; index++) {
+      if (analysis.columns[index]!.resultName.toLowerCase() === normalized) {
+        matchIndex = index;
+        break;
+      }
+    }
+    if (matchIndex < 0) return undefined;
+    matches.push(analysis.columns[matchIndex]!);
+    searchFrom = matchIndex + 1;
+  }
+  return matches;
 }
 
-export function sourceColumnsForResult(analysis: EditableQueryInfo, resultColumns: string[]): Array<string | undefined> | undefined {
+export function allEditableColumnsWriteable(analysis: EditableQueryInfo, resultColumns: string[], sourceKey?: string): boolean {
+  if (analysis.selectStar) return true;
+  const matchedColumns = matchColumnsForResult(analysis, resultColumns);
+  return !!matchedColumns && matchedColumns.every((source) => !sourceKey || !source.sourceName || source.sourceKey === sourceKey);
+}
+
+export function sourceColumnsForResult(analysis: EditableQueryInfo, resultColumns: string[], sourceKey?: string): Array<string | undefined> | undefined {
   if (analysis.selectStar) return undefined;
-  const sourceByResult = new Map(analysis.columns.map((column) => [column.resultName.toLowerCase(), column]));
-  const sourceColumns = resultColumns.map((resultColumn) => sourceByResult.get(resultColumn.toLowerCase())?.sourceName);
-  return resultColumns.every((resultColumn) => sourceByResult.has(resultColumn.toLowerCase())) ? sourceColumns : undefined;
+  const matchedColumns = matchColumnsForResult(analysis, resultColumns);
+  if (!matchedColumns) return undefined;
+  return matchedColumns.map((column) => {
+    if (sourceKey && column.sourceKey !== sourceKey) return undefined;
+    return column.sourceName;
+  });
 }

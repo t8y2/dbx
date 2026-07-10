@@ -79,26 +79,7 @@ public final class BatchExecutor {
     }
 
     private static void applySchema(Connection conn, String schema, Function<String, String> setSchemaSql) throws Exception {
-        if (schema == null || schema.trim().isEmpty()) {
-            return;
-        }
-        try {
-            conn.setSchema(schema);
-            return;
-        } catch (Exception | AbstractMethodError ignored) {
-        }
-        try {
-            conn.setCatalog(schema);
-            return;
-        } catch (Exception | AbstractMethodError ignored) {
-        }
-        String schemaSql = setSchemaSql.apply(schema);
-        if (schemaSql == null || schemaSql.trim().isEmpty()) {
-            return;
-        }
-        try (Statement stmt = conn.createStatement()) {
-            stmt.execute(schemaSql);
-        }
+        JdbcSchemaSwitcher.apply(conn, schema, setSchemaSql);
     }
 
     private static <T> T unchecked(ThrowingSupplier<T> supplier) {

@@ -1,6 +1,29 @@
-import { describe, expect, it } from "vitest";
-import { requiresDatabaseSelection } from "../useSqlExecution";
+import { computed, ref } from "vue";
+import { createPinia, setActivePinia } from "pinia";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { requiresDatabaseSelection, useSqlExecution } from "../useSqlExecution";
+import { useHistoryStore } from "@/stores/historyStore";
+import { useQueryStore } from "@/stores/queryStore";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
+
+vi.mock("vue-i18n", () => ({
+  createI18n: () => ({ global: { locale: { value: "en" }, setLocaleMessage: vi.fn() } }),
+  useI18n: () => ({ t: (key: string) => key }),
+}));
+
+vi.mock("@/lib/backend/api", () => ({
+  saveEditorSettings: vi.fn(),
+  saveHistory: vi.fn(),
+}));
+
+function installLocalStorage() {
+  const data = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: vi.fn((key: string) => data.get(key) ?? null),
+    setItem: vi.fn((key: string, value: string) => data.set(key, value)),
+    removeItem: vi.fn((key: string) => data.delete(key)),
+  });
+}
 
 function connection(dbType: ConnectionConfig["db_type"]): ConnectionConfig {
   return {
@@ -31,6 +54,11 @@ function queryTab(database = ""): QueryTab {
 }
 
 describe("requiresDatabaseSelection", () => {
+  beforeEach(() => {
+    installLocalStorage();
+    setActivePinia(createPinia());
+  });
+
   it("allows MySQL CREATE DATABASE to run without a selected database", () => {
     expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "CREATE DATABASE app_db")).toBe(false);
   });
@@ -57,5 +85,56 @@ describe("requiresDatabaseSelection", () => {
 
   it("still requires a database for ordinary MySQL queries", () => {
     expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "SELECT * FROM users")).toBe(true);
+  });
+
+  it("allows HANA with default database (empty string) to execute queries", () => {
+    expect(requiresDatabaseSelection(queryTab(""), connection("saphana"), "SELECT * FROM MOMX_MES.Z_SHIPMENT_INFORMATION")).toBe(false);
+  });
+
+  it("allows JDBC with default database (empty string) to execute queries", () => {
+    expect(requiresDatabaseSelection(queryTab(""), connection("jdbc"), "SELECT * FROM users")).toBe(false);
+  });
+
+  it("allows PostgreSQL with default database (empty string) to execute queries", () => {
+    expect(requiresDatabaseSelection(queryTab(""), connection("postgres"), "SELECT * FROM public.users")).toBe(false);
+  });
+});
+
+describe("useSqlExecution", () => {
+  beforeEach(() => {
+    installLocalStorage();
+    setActivePinia(createPinia());
+  });
+
+  it("sends native SET variables without client-side expansion", async () => {
+    const activeTab = ref<QueryTab | undefined>(queryTab("app"));
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const historyStore = useHistoryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["ok"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(historyStore, "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(
+        () => `
+          set @date_start = '2026-07-04 00:00:00';
+
+          select * from sa_access_decision_log AS fp
+          where fp.create_at < @date_start;
+        `,
+      ),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    const executedSql = executeCurrentSql.mock.calls[0]?.[0] ?? "";
+    expect(executedSql).toContain("set @date_start = '2026-07-04 00:00:00'");
+    expect(executedSql).toContain("where fp.create_at < @date_start");
   });
 });

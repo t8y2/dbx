@@ -44,7 +44,7 @@ describe("createDatabaseCharsetOptions", () => {
     expect(metadata.collationsByCharset.gbk).toEqual(["gbk_chinese_ci"]);
   });
 
-  it("keeps server-provided utf8mb4 collations while hiding 0900 entries from the dropdown", () => {
+  it("keeps server-provided MySQL 8 utf8mb4 collations", () => {
     const metadata = parseCreateDatabaseCharsetMetadata(
       {
         columns: ["Charset", "Description", "Default collation", "Maxlen"],
@@ -62,7 +62,7 @@ describe("createDatabaseCharsetOptions", () => {
       },
     );
 
-    expect(metadata.collationsByCharset.utf8mb4).toEqual(["utf8mb4_general_ci", "utf8mb4_unicode_ci", "utf8mb4_unicode_520_ci", "utf8mb4_bin"]);
+    expect(metadata.collationsByCharset.utf8mb4).toEqual(["utf8mb4_0900_ai_ci", "utf8mb4_general_ci", "utf8mb4_unicode_ci", "utf8mb4_unicode_520_ci", "utf8mb4_bin"]);
   });
 
   it("keeps custom collations unless the previous value was the old charset default", () => {

@@ -11,9 +11,10 @@ use sha2::{Digest, Sha256};
 
 use crate::ai::AiConfig;
 use crate::connection_secrets::{
-    MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY,
+    MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY,
+    MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
 };
-use crate::models::connection::{ConnectionConfig, TransportLayerConfig};
+use crate::models::connection::{ConnectionConfig, DatabaseType, TransportLayerConfig};
 use crate::saved_sql::SavedSqlLibrary;
 use crate::storage::{DesktopSettings, Storage};
 
@@ -31,6 +32,7 @@ const SECRET_KEYS: &[&str] = &[
     MQ_AUTH_API_KEY_VALUE_KEY,
     MQ_AUTH_CLIENT_SECRET_KEY,
     MQ_TOKEN_SIGNING_KEY,
+    NACOS_AUTH_PASSWORD_KEY,
 ];
 const SSH_TUNNEL_SECRET_PREFIX: &str = "ssh_tunnels.";
 const TRANSPORT_LAYER_SECRET_PREFIX: &str = "transport_layers.";
@@ -48,6 +50,13 @@ pub struct WebDavConfig {
 #[serde(rename_all = "camelCase")]
 pub struct WebDavPasswordStatus {
     pub has_saved_password: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebDavSyncSecretsStatus {
+    pub enabled: bool,
+    pub has_saved_passphrase: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +152,21 @@ pub async fn build_sync_snapshot(
     })
 }
 
+pub async fn build_sync_snapshot_with_saved_secrets(
+    storage: &Storage,
+    app_version: impl Into<String>,
+    editor_settings: Option<serde_json::Value>,
+    secrets_passphrase: Option<&str>,
+) -> Result<SyncSnapshot, String> {
+    match normalized_passphrase(secrets_passphrase) {
+        Some(passphrase) => build_sync_snapshot(storage, app_version, editor_settings, Some(passphrase)).await,
+        None => {
+            let saved_passphrase = resolve_webdav_sync_secrets_passphrase(storage).await?;
+            build_sync_snapshot(storage, app_version, editor_settings, saved_passphrase.as_deref()).await
+        }
+    }
+}
+
 pub async fn apply_sync_snapshot(
     storage: &Storage,
     snapshot: &SyncSnapshot,
@@ -212,6 +236,46 @@ pub async fn resolve_webdav_password(storage: &Storage, config: &mut WebDavConfi
     let secret = storage.load_or_create_local_device_secret().await?;
     config.password = Some(decrypt_text_with_secret(&blob, &secret)?);
     Ok(())
+}
+
+pub async fn webdav_sync_secrets_status(storage: &Storage) -> Result<WebDavSyncSecretsStatus, String> {
+    Ok(WebDavSyncSecretsStatus {
+        enabled: storage.load_webdav_sync_secrets_enabled().await?,
+        has_saved_passphrase: storage.load_webdav_sync_secrets_passphrase_blob().await?.is_some(),
+    })
+}
+
+pub async fn save_webdav_sync_secrets_preference(
+    storage: &Storage,
+    enabled: bool,
+    passphrase: Option<&str>,
+) -> Result<(), String> {
+    let normalized = normalized_passphrase(passphrase);
+    let blob = match normalized {
+        Some(passphrase) => {
+            let secret = storage.load_or_create_local_device_secret().await?;
+            let blob = encrypt_text_with_secret(passphrase, &secret)?;
+            Some(serde_json::to_value(blob).map_err(|e| e.to_string())?)
+        }
+        None => None,
+    };
+    storage.save_webdav_sync_secrets_preference(enabled, blob.as_ref()).await
+}
+
+pub async fn forget_webdav_sync_secrets_passphrase(storage: &Storage) -> Result<(), String> {
+    storage.delete_webdav_sync_secrets_passphrase_blob().await
+}
+
+pub async fn resolve_webdav_sync_secrets_passphrase(storage: &Storage) -> Result<Option<String>, String> {
+    if !storage.load_webdav_sync_secrets_enabled().await? {
+        return Ok(None);
+    }
+    let Some(value) = storage.load_webdav_sync_secrets_passphrase_blob().await? else {
+        return Ok(None);
+    };
+    let blob: EncryptedSecretsBlob = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    let secret = storage.load_or_create_local_device_secret().await?;
+    decrypt_text_with_secret(&blob, &secret).map(Some)
 }
 
 impl WebDavClient {
@@ -326,6 +390,8 @@ fn scrub_connection_secrets(config: &mut ConnectionConfig) {
     }
     config.redis_sentinel_password.clear();
     config.connection_string = None;
+    scrub_mq_external_config_secrets(config);
+    scrub_nacos_auth_secrets(config);
 }
 
 fn webdav_password_account(config: &WebDavConfig) -> String {
@@ -382,6 +448,7 @@ async fn build_sensitive_payload(
             push_secret(&mut connection_secrets, &config.id, "connection_string", connection_string);
         }
         push_mq_external_config_secrets(&mut connection_secrets, config);
+        push_nacos_external_config_secrets(&mut connection_secrets, config);
     }
 
     Ok(SensitiveSyncPayload { connection_secrets, ai_config: storage.load_ai_config().await? })
@@ -407,6 +474,44 @@ fn push_mq_external_config_secrets(secrets: &mut Vec<ConnectionSecretSnapshot>, 
     }
 }
 
+fn scrub_mq_external_config_secrets(config: &mut ConnectionConfig) {
+    if config.db_type != DatabaseType::MessageQueue {
+        return;
+    }
+    let Some(external_config) = config.external_config.as_mut() else {
+        return;
+    };
+    if let Some(auth) = external_config.get_mut("auth").and_then(serde_json::Value::as_object_mut) {
+        match auth.get("kind").and_then(serde_json::Value::as_str) {
+            Some("token") => scrub_json_secret(auth, "token"),
+            Some("basic") => scrub_json_secret(auth, "password"),
+            Some("apiKey") | Some("api_key") | Some("apikey") => scrub_json_secret(auth, "value"),
+            Some("oauth2") => scrub_json_secret(auth, "clientSecret"),
+            _ => {}
+        }
+    }
+    if let Some(signing) = external_config.get_mut("tokenSigning").and_then(serde_json::Value::as_object_mut) {
+        scrub_json_secret(signing, "key");
+    }
+}
+
+fn push_nacos_external_config_secrets(secrets: &mut Vec<ConnectionSecretSnapshot>, config: &ConnectionConfig) {
+    if config.db_type != DatabaseType::Nacos {
+        return;
+    }
+    let Some(auth) = config
+        .external_config
+        .as_ref()
+        .and_then(|external_config| external_config.get("auth"))
+        .and_then(serde_json::Value::as_object)
+    else {
+        return;
+    };
+    if auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword") {
+        push_json_secret(secrets, &config.id, NACOS_AUTH_PASSWORD_KEY, auth, "password");
+    }
+}
+
 fn push_json_secret(
     secrets: &mut Vec<ConnectionSecretSnapshot>,
     connection_id: &str,
@@ -428,6 +533,30 @@ fn push_secret(secrets: &mut Vec<ConnectionSecretSnapshot>, connection_id: &str,
         key: key.to_string(),
         secret: secret.to_string(),
     });
+}
+
+fn scrub_nacos_auth_secrets(config: &mut ConnectionConfig) {
+    if config.db_type != DatabaseType::Nacos {
+        return;
+    }
+    let Some(auth) = config
+        .external_config
+        .as_mut()
+        .and_then(|external_config| external_config.get_mut("auth"))
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    if auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword") && auth.contains_key("password")
+    {
+        scrub_json_secret(auth, "password");
+    }
+}
+
+fn scrub_json_secret(object: &mut serde_json::Map<String, serde_json::Value>, field: &str) {
+    if object.contains_key(field) {
+        object.insert(field.to_string(), serde_json::Value::String(String::new()));
+    }
 }
 
 async fn apply_sensitive_payload(storage: &Storage, payload: &SensitiveSyncPayload) -> Result<(), String> {
@@ -562,11 +691,25 @@ fn normalized_passphrase(passphrase: Option<&str>) -> Option<&str> {
 }
 
 fn normalized_remote_path(value: Option<&str>) -> String {
-    let value = value.unwrap_or(DEFAULT_REMOTE_PATH).trim().trim_start_matches('/');
-    if value.is_empty() {
+    let value = value.unwrap_or(DEFAULT_REMOTE_PATH).trim().replace('\\', "/");
+    let mut parts: Vec<&str> = Vec::new();
+    for part in value.split('/') {
+        let part = part.trim();
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            // Keep the WebDAV target inside the configured endpoint when users paste OS paths.
+            parts.pop();
+            continue;
+        }
+        parts.push(part);
+    }
+
+    if parts.is_empty() {
         DEFAULT_REMOTE_PATH.to_string()
     } else {
-        value.to_string()
+        parts.join("/")
     }
 }
 
@@ -586,23 +729,155 @@ fn parent_collection_paths(remote_path: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        decrypt_sensitive_payload, encrypt_sensitive_payload, normalized_remote_path, parent_collection_paths,
-        scrub_connection_secrets, ConnectionSecretSnapshot, SensitiveSyncPayload,
+        build_sync_snapshot_with_saved_secrets, decrypt_sensitive_payload, encrypt_sensitive_payload,
+        forget_webdav_sync_secrets_passphrase, normalized_remote_path, parent_collection_paths,
+        resolve_webdav_sync_secrets_passphrase, save_webdav_sync_secrets_preference, scrub_connection_secrets,
+        webdav_sync_secrets_status, ConnectionSecretSnapshot, SensitiveSyncPayload,
     };
+    use crate::connection_secrets::NACOS_AUTH_PASSWORD_KEY;
     use crate::models::connection::{
         default_redis_key_separator, ConnectionConfig, DatabaseType, TransportLayerConfig,
     };
+    use crate::storage::Storage;
+
+    fn temp_db_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("dbx-cloud-sync-{name}-{}.db", uuid::Uuid::new_v4()))
+    }
+
+    fn postgres_connection(id: &str, password: &str) -> ConnectionConfig {
+        ConnectionConfig {
+            id: id.to_string(),
+            name: "Postgres".to_string(),
+            db_type: DatabaseType::Postgres,
+            driver_profile: None,
+            driver_label: None,
+            url_params: None,
+            agent_java_options: Vec::new(),
+            host: "127.0.0.1".to_string(),
+            port: 5432,
+            username: "app".to_string(),
+            password: password.to_string(),
+            database: Some("app_db".to_string()),
+            visible_databases: None,
+            visible_schemas: None,
+            attached_databases: Vec::new(),
+            color: None,
+            transport_layers: Vec::new(),
+            connect_timeout_secs: 5,
+            query_timeout_secs: 30,
+            idle_timeout_secs: 60,
+            keepalive_interval_secs: 0,
+            ssl: false,
+            ca_cert_path: String::new(),
+            client_cert_path: String::new(),
+            client_key_path: String::new(),
+            sysdba: false,
+            oracle_connection_type: None,
+            connection_string: None,
+            redis_connection_mode: None,
+            redis_sentinel_master: String::new(),
+            redis_sentinel_nodes: String::new(),
+            redis_sentinel_username: String::new(),
+            redis_sentinel_password: String::new(),
+            redis_sentinel_tls: false,
+            redis_cluster_nodes: String::new(),
+            redis_key_separator: default_redis_key_separator(),
+            redis_scan_page_size: None,
+            etcd_endpoints: String::new(),
+            gbase_server: String::new(),
+            informix_server: String::new(),
+            external_config: None,
+            jdbc_driver_class: None,
+            jdbc_driver_paths: Vec::new(),
+            one_time: false,
+            read_only: false,
+        }
+    }
+
+    fn nacos_connection(id: &str, password: &str) -> ConnectionConfig {
+        ConnectionConfig {
+            id: id.to_string(),
+            name: "Nacos".to_string(),
+            db_type: DatabaseType::Nacos,
+            driver_profile: None,
+            driver_label: None,
+            url_params: None,
+            agent_java_options: Vec::new(),
+            host: "127.0.0.1".to_string(),
+            port: 8848,
+            username: "nacos".to_string(),
+            password: String::new(),
+            database: None,
+            visible_databases: None,
+            visible_schemas: None,
+            attached_databases: Vec::new(),
+            color: None,
+            transport_layers: Vec::new(),
+            connect_timeout_secs: 5,
+            query_timeout_secs: 30,
+            idle_timeout_secs: 60,
+            keepalive_interval_secs: 0,
+            ssl: false,
+            ca_cert_path: String::new(),
+            client_cert_path: String::new(),
+            client_key_path: String::new(),
+            sysdba: false,
+            oracle_connection_type: None,
+            connection_string: None,
+            redis_connection_mode: None,
+            redis_sentinel_master: String::new(),
+            redis_sentinel_nodes: String::new(),
+            redis_sentinel_username: String::new(),
+            redis_sentinel_password: String::new(),
+            redis_sentinel_tls: false,
+            redis_cluster_nodes: String::new(),
+            redis_key_separator: default_redis_key_separator(),
+            redis_scan_page_size: None,
+            etcd_endpoints: String::new(),
+            gbase_server: String::new(),
+            informix_server: String::new(),
+            external_config: Some(serde_json::json!({
+                "namespace": "public",
+                "group": "DEFAULT_GROUP",
+                "auth": {
+                    "kind": "usernamePassword",
+                    "username": "nacos",
+                    "password": password
+                }
+            })),
+            jdbc_driver_class: None,
+            jdbc_driver_paths: Vec::new(),
+            one_time: false,
+            read_only: false,
+        }
+    }
+
+    fn nacos_auth_password(config: &ConnectionConfig) -> Option<&str> {
+        config.external_config.as_ref()?.get("auth")?.get("password")?.as_str()
+    }
 
     #[test]
     fn normalizes_empty_remote_path_to_default() {
         assert_eq!(normalized_remote_path(None), "DBX/sync/snapshot.json");
         assert_eq!(normalized_remote_path(Some("")), "DBX/sync/snapshot.json");
+        assert_eq!(normalized_remote_path(Some("///\\\\//")), "DBX/sync/snapshot.json");
+    }
+
+    #[test]
+    fn normalizes_remote_path_separators() {
         assert_eq!(normalized_remote_path(Some("/custom/snapshot.json")), "custom/snapshot.json");
+        assert_eq!(normalized_remote_path(Some(r"\DBX\sync\snapshot.json")), "DBX/sync/snapshot.json");
+        assert_eq!(normalized_remote_path(Some("///DBX//sync/./snapshot.json")), "DBX/sync/snapshot.json");
+        assert_eq!(normalized_remote_path(Some("DBX/sync/../snapshot.json")), "DBX/snapshot.json");
     }
 
     #[test]
     fn returns_parent_collection_paths_from_leaf() {
         assert_eq!(parent_collection_paths("dbx/sync/snapshot.json"), vec!["dbx".to_string(), "dbx/sync".to_string()]);
+        assert_eq!(
+            parent_collection_paths(&normalized_remote_path(Some(r"\DBX\sync\snapshot.json"))),
+            vec!["DBX".to_string(), "DBX/sync".to_string()]
+        );
     }
 
     #[test]
@@ -614,6 +889,7 @@ mod tests {
             driver_profile: None,
             driver_label: None,
             url_params: None,
+            agent_java_options: Vec::new(),
             host: "localhost".to_string(),
             port: 5432,
             username: "user".to_string(),
@@ -638,6 +914,7 @@ mod tests {
                     expose_lan: false,
                     use_ssh_agent: false,
                     ssh_agent_sock_path: String::new(),
+                    auth_method: "password".to_string(),
                 }),
                 TransportLayerConfig::HttpTunnel(crate::models::connection::HttpTunnelConfig {
                     id: "http".to_string(),
@@ -730,5 +1007,69 @@ mod tests {
         };
         let encrypted = encrypt_sensitive_payload(&payload, "sync-pass").unwrap();
         assert!(decrypt_sensitive_payload(&encrypted, "wrong-pass").is_err());
+    }
+
+    #[tokio::test]
+    async fn webdav_sync_secrets_preference_round_trips_and_clears_passphrase() {
+        let storage = Storage::open(&temp_db_path("sync-secrets-preference")).await.unwrap();
+
+        let status = webdav_sync_secrets_status(&storage).await.unwrap();
+        assert!(!status.enabled);
+        assert!(!status.has_saved_passphrase);
+        assert_eq!(resolve_webdav_sync_secrets_passphrase(&storage).await.unwrap(), None);
+
+        save_webdav_sync_secrets_preference(&storage, true, Some("sync-pass")).await.unwrap();
+
+        let status = webdav_sync_secrets_status(&storage).await.unwrap();
+        assert!(status.enabled);
+        assert!(status.has_saved_passphrase);
+        assert_eq!(resolve_webdav_sync_secrets_passphrase(&storage).await.unwrap().as_deref(), Some("sync-pass"));
+
+        forget_webdav_sync_secrets_passphrase(&storage).await.unwrap();
+        let status = webdav_sync_secrets_status(&storage).await.unwrap();
+        assert!(status.enabled);
+        assert!(!status.has_saved_passphrase);
+        assert_eq!(resolve_webdav_sync_secrets_passphrase(&storage).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn saved_sync_passphrase_encrypts_snapshot_secrets_without_exposing_connection_passwords() {
+        let storage = Storage::open(&temp_db_path("saved-sync-snapshot")).await.unwrap();
+        storage.save_connections(&[postgres_connection("pg", "db-secret")]).await.unwrap();
+
+        let plain_snapshot =
+            build_sync_snapshot_with_saved_secrets(&storage, "test-version", None, None).await.unwrap();
+        assert!(plain_snapshot.encrypted_secrets.is_none());
+        assert_eq!(plain_snapshot.connections[0].password, "");
+
+        save_webdav_sync_secrets_preference(&storage, true, Some("sync-pass")).await.unwrap();
+        let encrypted_snapshot =
+            build_sync_snapshot_with_saved_secrets(&storage, "test-version", None, None).await.unwrap();
+
+        assert_eq!(encrypted_snapshot.connections[0].password, "");
+        let encrypted = encrypted_snapshot.encrypted_secrets.as_ref().expect("encrypted secrets");
+        let decrypted = decrypt_sensitive_payload(encrypted, "sync-pass").unwrap();
+        assert!(decrypted.connection_secrets.iter().any(|secret| {
+            secret.connection_id == "pg" && secret.key == "password" && secret.secret == "db-secret"
+        }));
+    }
+
+    #[tokio::test]
+    async fn saved_sync_passphrase_encrypts_nacos_auth_password_without_exposing_it() {
+        let storage = Storage::open(&temp_db_path("saved-sync-nacos-snapshot")).await.unwrap();
+        storage.save_connections(&[nacos_connection("nacos", "nacos-secret")]).await.unwrap();
+
+        save_webdav_sync_secrets_preference(&storage, true, Some("sync-pass")).await.unwrap();
+        let encrypted_snapshot =
+            build_sync_snapshot_with_saved_secrets(&storage, "test-version", None, None).await.unwrap();
+
+        assert_eq!(nacos_auth_password(&encrypted_snapshot.connections[0]), Some(""));
+        let public_json = serde_json::to_string(&encrypted_snapshot.connections).unwrap();
+        assert!(!public_json.contains("nacos-secret"));
+        let encrypted = encrypted_snapshot.encrypted_secrets.as_ref().expect("encrypted secrets");
+        let decrypted = decrypt_sensitive_payload(encrypted, "sync-pass").unwrap();
+        assert!(decrypted.connection_secrets.iter().any(|secret| {
+            secret.connection_id == "nacos" && secret.key == NACOS_AUTH_PASSWORD_KEY && secret.secret == "nacos-secret"
+        }));
     }
 }

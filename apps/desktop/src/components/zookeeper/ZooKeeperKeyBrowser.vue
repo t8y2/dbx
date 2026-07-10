@@ -39,6 +39,7 @@ const labels = computed(() => ({
   deleteTitle: t("zookeeper.deleteTitle"),
   keyPlaceholder: t("zookeeper.keyPlaceholder"),
   keyRequired: t("zookeeper.keyRequired"),
+  rootReadonly: t("zookeeper.rootReadonly"),
   saved: t("zookeeper.saved"),
   deleted: t("zookeeper.deleted"),
   base64Readonly: t("zookeeper.base64Readonly"),

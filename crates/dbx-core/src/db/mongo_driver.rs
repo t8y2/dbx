@@ -207,18 +207,41 @@ pub async fn list_gridfs_files(
     client: &Client,
     database: &str,
     bucket: &str,
+    filter: Option<&str>,
+    sort: Option<&str>,
 ) -> Result<Vec<MongoGridFsFileInfo>, String> {
     let bucket = normalized_gridfs_bucket_name(bucket)?;
     let collection_name = format!("{bucket}.files");
     let collection = client.database(database).collection::<Document>(&collection_name);
-    let mut cursor =
-        collection.find(doc! {}).sort(doc! { "uploadDate": -1_i32, "_id": -1_i32 }).await.map_err(|e| e.to_string())?;
+    let filter_doc = gridfs_file_filter_document(filter)?;
+    let sort_doc = gridfs_file_sort_document(sort)?;
+    let mut cursor = collection.find(filter_doc).sort(sort_doc).await.map_err(|e| e.to_string())?;
     let mut files = Vec::new();
     while cursor.advance().await.map_err(|e| e.to_string())? {
         let doc = cursor.deserialize_current().map_err(|e| e.to_string())?;
         files.push(gridfs_file_info_from_document(&doc));
     }
     Ok(files)
+}
+
+fn gridfs_file_filter_document(filter: Option<&str>) -> Result<Document, String> {
+    match filter {
+        Some(raw) if !raw.trim().is_empty() => {
+            let json: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!("Invalid filter JSON: {e}"))?;
+            json_filter_to_document(&json)
+        }
+        _ => Ok(doc! {}),
+    }
+}
+
+fn gridfs_file_sort_document(sort: Option<&str>) -> Result<Document, String> {
+    match sort {
+        Some(raw) if !raw.trim().is_empty() => {
+            let json: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!("Invalid sort JSON: {e}"))?;
+            json_object_to_document(&json).map_err(|e| format!("Invalid sort: {e}"))
+        }
+        _ => Ok(doc! { "uploadDate": -1_i32, "_id": -1_i32 }),
+    }
 }
 
 pub async fn gridfs_bucket_summary(
@@ -1144,6 +1167,13 @@ fn json_filter_value_to_bson(value: &serde_json::Value, field_name: Option<&str>
                         return Bson::ObjectId(oid);
                     }
                 }
+                // Extended JSON dates must be decoded in filters too, otherwise
+                // {"$date": ...} reaches the server as a raw document: a bare
+                // { field: {"$date": ...} } fails with "unknown operator: $date"
+                // and { field: {"$gte": {"$date": ...}} } silently matches nothing.
+                if let Some(date) = parse_extended_json_date(obj) {
+                    return Bson::DateTime(date);
+                }
             }
 
             if field_name == Some("_id") && obj.keys().all(|key| key.starts_with('$')) {
@@ -1325,6 +1355,27 @@ mod tests {
         let doc = json_filter_to_document(&filter).unwrap();
 
         assert!(matches!(doc.get("owner_id"), Some(Bson::String(value)) if value == id));
+    }
+
+    #[test]
+    fn json_filter_to_document_decodes_extended_json_dates() {
+        let iso = "2025-02-25T04:57:39.965Z";
+        let expected = DateTime::parse_rfc3339_str(iso).unwrap();
+
+        // Direct equality must yield a BSON DateTime, not a raw { "$date": ... }
+        // document that the server rejects with "unknown operator: $date".
+        let filter = serde_json::json!({ "createdAt": { "$date": iso } });
+        let doc = json_filter_to_document(&filter).unwrap();
+        assert_eq!(doc.get("createdAt"), Some(&Bson::DateTime(expected)));
+
+        // Range operands must be decoded too, otherwise $gte compares against a
+        // sub-document and silently matches nothing.
+        let range = serde_json::json!({ "createdAt": { "$gte": { "$date": iso } } });
+        let range_doc = json_filter_to_document(&range).unwrap();
+        let Some(Bson::Document(op)) = range_doc.get("createdAt") else {
+            panic!("expected operator document");
+        };
+        assert_eq!(op.get("$gte"), Some(&Bson::DateTime(expected)));
     }
 
     #[test]
@@ -1581,6 +1632,16 @@ mod tests {
         assert_eq!(info.md5.as_deref(), Some("abc123"));
         assert_eq!(info.content_type.as_deref(), Some("application/zip"));
         assert_eq!(info.aliases, Some(vec!["archive".to_string(), "nightly".to_string()]));
+    }
+
+    #[test]
+    fn gridfs_file_sort_uses_upload_date_desc_by_default() {
+        assert_eq!(gridfs_file_sort_document(None).unwrap(), doc! { "uploadDate": -1_i32, "_id": -1_i32 });
+    }
+
+    #[test]
+    fn gridfs_file_sort_parses_explicit_sort_json() {
+        assert_eq!(gridfs_file_sort_document(Some(r#"{"filename":1}"#)).unwrap(), doc! { "filename": 1_i64 });
     }
 
     #[test]

@@ -39,7 +39,7 @@ export interface MongoCollectionStatsCommand {
   scale?: number;
 }
 
-type MongoWriteKind = "insert" | "update" | "delete" | "createIndex" | "dropIndex" | "dropIndexes";
+type MongoWriteKind = "insert" | "update" | "delete" | "createIndex" | "dropIndex" | "dropIndexes" | "dropCollection";
 
 export type MongoCommand =
   | ({ kind: "find" } & MongoFindCommand)
@@ -54,7 +54,8 @@ export type MongoCommand =
   | { kind: "delete"; collection: string; filter: string; many: boolean }
   | { kind: "createIndex"; collection: string; keys: string; options?: string }
   | { kind: "dropIndex"; collection: string; index: string }
-  | { kind: "dropIndexes"; collection: string; indexes?: string };
+  | { kind: "dropIndexes"; collection: string; indexes?: string }
+  | { kind: "dropCollection"; collection: string };
 
 export type MongoWriteCommand = Extract<MongoCommand, { kind: MongoWriteKind }>;
 
@@ -340,6 +341,13 @@ export function parseMongoWriteCommand(input: string): MongoWriteCommand | null 
     return indexes !== null ? { kind: "dropIndexes", collection: dropIndexes.collection, ...(indexes ? { indexes } : {}) } : null;
   }
 
+  const dropCollection = parseCollectionMethodTarget(source, "drop");
+  if (dropCollection) {
+    const args = parseMethodArgs(source, dropCollection.methodCallIndex);
+    if (!args || args.some((arg) => arg.trim())) return null;
+    return { kind: "dropCollection", collection: dropCollection.collection };
+  }
+
   return null;
 }
 
@@ -425,6 +433,12 @@ export function evaluateMongoWriteSafety(command: MongoWriteCommand, options: Mo
     return {
       allowed: false,
       reason: "MongoDB dropIndexes() without a specific single index requires DBX_MCP_ALLOW_DANGEROUS_SQL=1.",
+    };
+  }
+  if (!options.allowDangerous && command.kind === "dropCollection") {
+    return {
+      allowed: false,
+      reason: "MongoDB drop() requires DBX_MCP_ALLOW_DANGEROUS_SQL=1.",
     };
   }
   return { allowed: true };
@@ -618,7 +632,14 @@ function parseCollectionMethodTarget(source: string, method: string): { collecti
 function normalizeJsonArgument(value: string): string | null {
   const trimmed = value.trim();
   if (!trimmed) return "{}";
-  const preprocessed = quoteUnquotedObjectKeys(convertSingleQuotedStrings(trimmed.replace(/ObjectId\s*\(\s*["']([^"']+)["']\s*\)/g, '{"$oid":"$1"}')));
+  // Rewrite mongo shell constructors that are not valid JSON into the extended
+  // JSON the backend understands (mongo_driver::json_value_to_bson): ObjectId(x)
+  // -> {"$oid":x} and ISODate(x)/new Date(x) -> {"$date":x}. Without this a
+  // filter such as { createdAt: { $gte: ISODate("...") } } fails JSON.parse,
+  // the command is left unrecognized and falls through to the SQL executor,
+  // which rejects it with "Use MongoDB-specific commands".
+  const withExtendedJson = trimmed.replace(/ObjectId\s*\(\s*["']([^"']+)["']\s*\)/g, '{"$oid":"$1"}').replace(/(?:ISODate|new\s+Date)\s*\(\s*["']([^"']+)["']\s*\)/g, '{"$date":"$1"}');
+  const preprocessed = quoteUnquotedObjectKeys(convertSingleQuotedStrings(withExtendedJson));
   try {
     JSON.parse(preprocessed);
     return preprocessed;

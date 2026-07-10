@@ -4,6 +4,7 @@ import com.dbx.agent.ConfiguredJdbcAgent;
 import com.dbx.agent.ExecuteQueryOptions;
 import com.dbx.agent.JdbcAgentProfile;
 import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.QueryPageOptions;
 import com.dbx.agent.QueryPageResult;
@@ -55,18 +56,34 @@ public final class Gbase8aAgent extends ConfiguredJdbcAgent {
 
     @Override
     public List<TableInfo> listTables(String schema) {
+        return queryTables(schema, MetadataListConstraints.NONE);
+    }
+
+    @Override
+    public List<TableInfo> listTables(String schema, MetadataListConstraints constraints) {
+        return queryTables(schema, MetadataListConstraints.orNone(constraints));
+    }
+
+    private List<TableInfo> queryTables(String schema, MetadataListConstraints constraints) {
         return unchecked(() -> {
-            List<TableInfo> result = new ArrayList<>();
-            String sql;
-            if (schema != null && !schema.trim().isEmpty()) {
-                sql = "SELECT TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME";
-            } else {
-                sql = "SELECT TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES WHERE TABLE_SCHEMA NOT IN ('information_schema', 'performance_schema', 'gclusterdb', 'gctmpdb') ORDER BY TABLE_SCHEMA, TABLE_NAME";
+            if (!constraints.includesTableLikeTypes()) {
+                return List.of();
             }
-            try (PreparedStatement stmt = requireConnection().prepareStatement(sql)) {
-                if (schema != null && !schema.trim().isEmpty()) {
-                    stmt.setString(1, schema);
-                }
+            List<TableInfo> result = new ArrayList<>();
+            List<Object> args = new ArrayList<>();
+            StringBuilder sql = new StringBuilder("SELECT TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES WHERE ");
+            if (hasSchema(schema)) {
+                sql.append("TABLE_SCHEMA = ?");
+                args.add(schema);
+            } else {
+                sql.append("TABLE_SCHEMA NOT IN ('information_schema', 'performance_schema', 'gclusterdb', 'gctmpdb')");
+            }
+            appendGbase8aTableTypePredicate(sql, args, constraints);
+            appendNameFilter(sql, args, "TABLE_NAME", constraints);
+            sql.append(hasSchema(schema) ? " ORDER BY TABLE_NAME" : " ORDER BY TABLE_SCHEMA, TABLE_NAME");
+            appendLimitOffset(sql, args, constraints);
+            try (PreparedStatement stmt = requireConnection().prepareStatement(sql.toString())) {
+                bind(stmt, args);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
                         String tableType = rs.getString("TABLE_TYPE");
@@ -78,32 +95,63 @@ public final class Gbase8aAgent extends ConfiguredJdbcAgent {
                 }
             }
             result.sort(Comparator.comparing(TableInfo::getName));
-            return result;
+            MetadataListConstraints guard = constraints.hasLimit() ? constraints.withoutPaging() : constraints;
+            return guard.filterTables(result);
         });
     }
 
     @Override
     public List<ObjectInfo> listObjects(String schema) {
+        return queryObjects(schema, MetadataListConstraints.NONE);
+    }
+
+    @Override
+    public List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints) {
+        return queryObjects(schema, MetadataListConstraints.orNone(constraints));
+    }
+
+    private List<ObjectInfo> queryObjects(String schema, MetadataListConstraints constraints) {
         return unchecked(() -> {
-            List<ObjectInfo> result = StandardJdbcMetadata.INSTANCE.listObjects(listTables(schema), schema);
-            // GBase 8a's table metadata does not surface routines, so sidebar objects must load them explicitly.
-            appendRoutines(result, schema);
-            return result;
+            boolean includeTables = constraints.includesTableLikeTypes();
+            boolean includeRoutines = includesRoutineTypes(constraints);
+            if (!includeTables && !includeRoutines) {
+                return List.of();
+            }
+            List<ObjectInfo> result = new ArrayList<>();
+            if (includeTables) {
+                MetadataListConstraints tableConstraints = includeRoutines
+                    ? new MetadataListConstraints(constraints.getFilter(), null, null, tableLikeObjectTypes(constraints))
+                    : constraints;
+                result.addAll(StandardJdbcMetadata.INSTANCE.listObjects(queryTables(schema, tableConstraints), schema));
+            }
+            if (includeRoutines) {
+                MetadataListConstraints routineConstraints = includeTables
+                    ? new MetadataListConstraints(constraints.getFilter(), null, null, routineObjectTypes(constraints))
+                    : constraints;
+                appendRoutines(result, schema, routineConstraints);
+            }
+            boolean singlePagedSource = includeTables != includeRoutines && constraints.hasLimit();
+            MetadataListConstraints guard = singlePagedSource ? constraints.withoutPaging() : constraints;
+            return guard.filterObjects(result);
         });
     }
 
-    private void appendRoutines(List<ObjectInfo> result, String schema) throws Exception {
-        String sql;
-        boolean hasSchema = schema != null && !schema.trim().isEmpty();
+    private void appendRoutines(List<ObjectInfo> result, String schema, MetadataListConstraints constraints) throws Exception {
+        StringBuilder sql = new StringBuilder();
+        List<Object> args = new ArrayList<>();
+        boolean hasSchema = hasSchema(schema);
         if (hasSchema) {
-            sql = "SELECT ROUTINE_NAME, ROUTINE_TYPE, ROUTINE_COMMENT FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? ORDER BY ROUTINE_NAME";
+            sql.append("SELECT ROUTINE_NAME, ROUTINE_TYPE, ROUTINE_COMMENT FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ?");
+            args.add(schema);
         } else {
-            sql = "SELECT ROUTINE_SCHEMA, ROUTINE_NAME, ROUTINE_TYPE, ROUTINE_COMMENT FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA NOT IN ('information_schema', 'performance_schema', 'gclusterdb', 'gctmpdb') ORDER BY ROUTINE_SCHEMA, ROUTINE_NAME";
+            sql.append("SELECT ROUTINE_SCHEMA, ROUTINE_NAME, ROUTINE_TYPE, ROUTINE_COMMENT FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA NOT IN ('information_schema', 'performance_schema', 'gclusterdb', 'gctmpdb')");
         }
-        try (PreparedStatement stmt = requireConnection().prepareStatement(sql)) {
-            if (hasSchema) {
-                stmt.setString(1, schema);
-            }
+        appendGbase8aRoutineTypePredicate(sql, args, constraints);
+        appendNameFilter(sql, args, "ROUTINE_NAME", constraints);
+        sql.append(hasSchema ? " ORDER BY ROUTINE_NAME" : " ORDER BY ROUTINE_SCHEMA, ROUTINE_NAME");
+        appendLimitOffset(sql, args, constraints);
+        try (PreparedStatement stmt = requireConnection().prepareStatement(sql.toString())) {
+            bind(stmt, args);
             try (ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {
                     String routineSchema = hasSchema ? schema : rs.getString("ROUTINE_SCHEMA");
@@ -114,6 +162,126 @@ public final class Gbase8aAgent extends ConfiguredJdbcAgent {
                         rs.getString("ROUTINE_COMMENT")
                     ));
                 }
+            }
+        }
+    }
+
+    private static void appendGbase8aTableTypePredicate(
+        StringBuilder sql,
+        List<Object> args,
+        MetadataListConstraints constraints
+    ) {
+        if (!constraints.hasObjectTypes()) {
+            return;
+        }
+        List<String> tableTypes = new ArrayList<>();
+        if (constraints.tableTypeAllowed("TABLE")) {
+            tableTypes.add("BASE TABLE");
+        }
+        if (constraints.tableTypeAllowed("VIEW")) {
+            tableTypes.add("VIEW");
+        }
+        if (tableTypes.isEmpty()) {
+            sql.append(" AND 1 = 0");
+            return;
+        }
+        sql.append(" AND TABLE_TYPE IN (").append(placeholders(tableTypes.size())).append(")");
+        args.addAll(tableTypes);
+    }
+
+    private static void appendGbase8aRoutineTypePredicate(
+        StringBuilder sql,
+        List<Object> args,
+        MetadataListConstraints constraints
+    ) {
+        if (!constraints.hasObjectTypes()) {
+            return;
+        }
+        List<String> routineTypes = new ArrayList<>();
+        if (constraints.objectTypeAllowed("PROCEDURE")) {
+            routineTypes.add("PROCEDURE");
+        }
+        if (constraints.objectTypeAllowed("FUNCTION")) {
+            routineTypes.add("FUNCTION");
+        }
+        if (routineTypes.isEmpty()) {
+            sql.append(" AND 1 = 0");
+            return;
+        }
+        sql.append(" AND ROUTINE_TYPE IN (").append(placeholders(routineTypes.size())).append(")");
+        args.addAll(routineTypes);
+    }
+
+    private static void appendNameFilter(StringBuilder sql, List<Object> args, String column, MetadataListConstraints constraints) {
+        if (!constraints.hasFilter()) {
+            return;
+        }
+        sql.append(" AND UPPER(").append(column).append(") LIKE ? ESCAPE '\\\\'");
+        args.add(constraints.fuzzyLikePattern().toUpperCase(Locale.ROOT));
+    }
+
+    private static void appendLimitOffset(StringBuilder sql, List<Object> args, MetadataListConstraints constraints) {
+        if (!constraints.hasLimit()) {
+            return;
+        }
+        sql.append(" LIMIT ?");
+        args.add(constraints.getLimit());
+        if (constraints.hasOffset()) {
+            sql.append(" OFFSET ?");
+            args.add(constraints.getOffset());
+        }
+    }
+
+    private static boolean hasSchema(String schema) {
+        return schema != null && !schema.trim().isEmpty();
+    }
+
+    private static boolean includesRoutineTypes(MetadataListConstraints constraints) {
+        if (!constraints.hasObjectTypes()) {
+            return true;
+        }
+        return constraints.objectTypeAllowed("PROCEDURE") || constraints.objectTypeAllowed("FUNCTION");
+    }
+
+    private static List<String> tableLikeObjectTypes(MetadataListConstraints constraints) {
+        if (!constraints.hasObjectTypes()) {
+            return null;
+        }
+        List<String> result = new ArrayList<>();
+        if (constraints.tableTypeAllowed("TABLE")) {
+            result.add("TABLE");
+        }
+        if (constraints.tableTypeAllowed("VIEW")) {
+            result.add("VIEW");
+        }
+        return result;
+    }
+
+    private static List<String> routineObjectTypes(MetadataListConstraints constraints) {
+        if (!constraints.hasObjectTypes()) {
+            return null;
+        }
+        List<String> result = new ArrayList<>();
+        if (constraints.objectTypeAllowed("PROCEDURE")) {
+            result.add("PROCEDURE");
+        }
+        if (constraints.objectTypeAllowed("FUNCTION")) {
+            result.add("FUNCTION");
+        }
+        return result;
+    }
+
+    private static String placeholders(int count) {
+        return String.join(", ", java.util.Collections.nCopies(count, "?"));
+    }
+
+    private static void bind(PreparedStatement stmt, List<Object> args) throws Exception {
+        for (int index = 0; index < args.size(); index += 1) {
+            Object arg = args.get(index);
+            if (arg instanceof Integer) {
+                stmt.setInt(index + 1, (Integer) arg);
+            } else {
+                stmt.setString(index + 1, String.valueOf(arg));
             }
         }
     }

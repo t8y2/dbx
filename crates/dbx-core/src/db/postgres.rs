@@ -26,8 +26,8 @@ use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
     ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
     CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, DatabaseInfo,
-    ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectInfo, ObjectStatistics, OwnerInfo, QueryResult, RuleInfo,
-    SchemaInfo, SequenceInfo, TableInfo, TriggerInfo,
+    ExtensionInfo, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectInfo, ObjectStatistics, OwnerInfo, QueryResult,
+    RuleInfo, SchemaInfo, SequenceInfo, TableInfo, TriggerInfo,
 };
 
 fn pg_temporal_to_json_value(row: &Row, idx: usize) -> Option<serde_json::Value> {
@@ -569,6 +569,50 @@ fn should_retry_postgres_text_query_message(message: &str) -> bool {
 fn should_retry_postgres_stale_cache(err: &tokio_postgres::Error) -> bool {
     let message = err.as_db_error().map(ToString::to_string).unwrap_or_else(|| err.to_string()).to_ascii_lowercase();
     message.contains("cached plan must not change result type")
+}
+
+async fn postgres_query_cached(
+    client: &deadpool_postgres::Client,
+    sql: &str,
+    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+) -> Result<Vec<Row>, tokio_postgres::Error> {
+    let stmt = client.prepare_cached(sql).await?;
+    match client.query(&stmt, params).await {
+        Ok(rows) => Ok(rows),
+        Err(err) if should_retry_postgres_stale_cache(&err) => {
+            // Metadata queries can be cached while a table/view definition is
+            // changed from another session. Evict and retry once with fresh
+            // statement/type metadata instead of surfacing PostgreSQL's stale
+            // cached-plan error to the UI.
+            log::warn!("[postgres][metadata:stale_cache] evicting cached statement: {}", pg_error_to_string(err));
+            client.statement_cache.remove(sql, &[]);
+            client.clear_type_cache();
+            let stmt = client.prepare_cached(sql).await?;
+            client.query(&stmt, params).await
+        }
+        Err(err) => Err(err),
+    }
+}
+
+async fn postgres_query_one_cached(
+    client: &deadpool_postgres::Client,
+    sql: &str,
+    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+) -> Result<Row, tokio_postgres::Error> {
+    let stmt = client.prepare_cached(sql).await?;
+    match client.query_one(&stmt, params).await {
+        Ok(row) => Ok(row),
+        Err(err) if should_retry_postgres_stale_cache(&err) => {
+            // Same stale-cache protection as postgres_query_cached, for scalar
+            // catalog probes such as pg_proc feature detection.
+            log::warn!("[postgres][metadata:stale_cache] evicting cached statement: {}", pg_error_to_string(err));
+            client.statement_cache.remove(sql, &[]);
+            client.clear_type_cache();
+            let stmt = client.prepare_cached(sql).await?;
+            client.query_one(&stmt, params).await
+        }
+        Err(err) => Err(err),
+    }
 }
 
 async fn execute_select_prepared(
@@ -1245,24 +1289,37 @@ impl ServerCertVerifier for NoPostgresCertVerification {
 
     fn verify_tls12_signature(
         &self,
-        message: &[u8],
+        _message: &[u8],
         cert: &CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
+        _dss: &rustls::DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        self.accept_tls_signature_for_unverified_cert(cert)
     }
 
     fn verify_tls13_signature(
         &self,
-        message: &[u8],
+        _message: &[u8],
         cert: &CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
+        _dss: &rustls::DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        self.accept_tls_signature_for_unverified_cert(cert)
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         self.provider.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+impl NoPostgresCertVerification {
+    fn accept_tls_signature_for_unverified_cert(
+        &self,
+        _cert: &CertificateDer<'_>,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        // PostgreSQL sslmode=prefer/require does not authenticate the server certificate.
+        // Avoid rustls' default signature helpers here because they parse the certificate
+        // before chain verification and reject legacy server certificates that libpq/JDBC
+        // still accept in these non-verifying modes.
+        Ok(HandshakeSignatureValid::assertion())
     }
 }
 
@@ -1338,17 +1395,17 @@ fn validate_postgres_ssl_paths(url: &str) -> Result<(), String> {
 
 pub async fn list_databases(pool: &Pool) -> Result<Vec<DatabaseInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let stmt = client
-        .prepare_cached(
-            "SELECT datname FROM pg_database \
-             WHERE datallowconn = true \
-             ORDER BY datname",
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    let rows = client.query(&stmt, &[]).await.map_err(|e| e.to_string())?;
+    let rows = postgres_query_cached(
+        &client,
+        "SELECT datname FROM pg_database \
+         WHERE datallowconn = true \
+         ORDER BY datname",
+        &[],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
-    Ok(rows.iter().map(|row| DatabaseInfo { name: row.get::<_, String>(0) }).collect())
+    Ok(rows.iter().map(|row| DatabaseInfo { name: pg_row_try_string(row, 0) }).collect())
 }
 
 pub async fn list_tables(pool: &Pool, schema: &str) -> Result<Vec<TableInfo>, String> {
@@ -1370,17 +1427,19 @@ pub async fn list_tables_filtered(
     let limit_param = limit.and_then(|value| i64::try_from(value).ok());
     let offset_param = offset.and_then(|value| i64::try_from(value).ok()).unwrap_or(0);
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let stmt = client.prepare_cached(postgres_tables_sql()).await.map_err(|e| e.to_string())?;
-    let rows = client
-        .query(&stmt, &[&schema, &filter_pattern, &fuzzy_filter_pattern, &limit_param, &offset_param])
-        .await
-        .map_err(|e| e.to_string())?;
+    let rows = postgres_query_cached(
+        &client,
+        postgres_tables_sql(),
+        &[&schema, &filter_pattern, &fuzzy_filter_pattern, &limit_param, &offset_param],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     Ok(rows
         .iter()
         .map(|row| TableInfo {
-            name: row.get::<_, String>(0),
-            table_type: row.get::<_, String>(1),
+            name: pg_row_try_string(row, 0),
+            table_type: pg_row_try_string(row, 1),
             comment: row.try_get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
             parent_schema: row.try_get::<_, Option<String>>(3).ok().flatten().filter(|s| !s.is_empty()),
             parent_name: row.try_get::<_, Option<String>>(4).ok().flatten().filter(|s| !s.is_empty()),
@@ -1392,7 +1451,8 @@ pub async fn completion_assistant_search(
     pool: &Pool,
     request: &CompletionAssistantRequest,
 ) -> Result<CompletionAssistantResponse, String> {
-    let schema = request.schema.as_deref().or(request.parent_schema.as_deref()).unwrap_or("public");
+    let schema = request.schema.as_deref().or(request.parent_schema.as_deref());
+    let routine_schema = schema.unwrap_or("public");
     let limit = request.max_results.unwrap_or(100).clamp(1, 1000);
     let kinds = if request.object_kinds.is_empty() {
         vec![CompletionAssistantObjectKind::Table, CompletionAssistantObjectKind::View]
@@ -1404,17 +1464,18 @@ pub async fn completion_assistant_search(
     let mut candidates = Vec::new();
 
     if kinds.iter().any(|kind| matches!(kind, CompletionAssistantObjectKind::Schema)) {
-        let stmt = client
-            .prepare_cached(
-                "SELECT nspname FROM pg_catalog.pg_namespace \
-                 WHERE nspname NOT LIKE 'pg_%' AND nspname <> 'information_schema' \
-                   AND ($1 = '%%' OR nspname ILIKE $1 ESCAPE '~') \
-                 ORDER BY nspname LIMIT $2",
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-        for row in client.query(&stmt, &[&pattern, &(limit as i64)]).await.map_err(|e| e.to_string())? {
-            let schema_name: String = row.get(0);
+        for row in postgres_query_cached(
+            &client,
+            "SELECT nspname FROM pg_catalog.pg_namespace \
+             WHERE nspname NOT LIKE 'pg_%' AND nspname <> 'information_schema' \
+               AND ($1 = '%%' OR nspname ILIKE $1 ESCAPE '~') \
+             ORDER BY nspname LIMIT $2",
+            &[&pattern, &(limit as i64)],
+        )
+        .await
+        .map_err(|e| e.to_string())?
+        {
+            let schema_name: String = pg_row_try_string(&row, 0);
             candidates.push(CompletionAssistantCandidate {
                 name: schema_name.clone(),
                 kind: CompletionAssistantCandidateKind::Schema,
@@ -1430,22 +1491,24 @@ pub async fn completion_assistant_search(
 
     if candidates.len() < limit && kinds.iter().any(CompletionAssistantObjectKind::is_table_like) {
         let relkinds = postgres_completion_relkinds(&kinds);
-        let stmt = client.prepare_cached(postgres_completion_tables_sql()).await.map_err(|e| e.to_string())?;
-        let rows = client
-            .query(&stmt, &[&schema, &pattern, &relkinds, &((limit - candidates.len()) as i64)])
-            .await
-            .map_err(|e| e.to_string())?;
+        let rows = postgres_query_cached(
+            &client,
+            postgres_completion_tables_sql(),
+            &[&schema, &pattern, &relkinds, &((limit - candidates.len()) as i64)],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
         for row in rows {
-            let table_type: String = row.get(2);
+            let table_type: String = pg_row_try_string(&row, 2);
             candidates.push(CompletionAssistantCandidate {
-                name: row.get(0),
+                name: pg_row_try_string(&row, 0),
                 kind: if table_type.contains("VIEW") {
                     CompletionAssistantCandidateKind::View
                 } else {
                     CompletionAssistantCandidateKind::Table
                 },
                 database: Some(request.database.clone()),
-                schema: Some(row.get(1)),
+                schema: Some(pg_row_try_string(&row, 1)),
                 parent_schema: row.try_get::<_, Option<String>>(4).ok().flatten(),
                 parent_name: row.try_get::<_, Option<String>>(5).ok().flatten(),
                 comment: row.try_get::<_, Option<String>>(3).ok().flatten(),
@@ -1456,22 +1519,24 @@ pub async fn completion_assistant_search(
 
     if candidates.len() < limit && kinds.iter().any(CompletionAssistantObjectKind::is_routine_like) {
         let prokinds = postgres_completion_prokinds(&kinds);
-        let stmt = client.prepare_cached(postgres_completion_routines_sql()).await.map_err(|e| e.to_string())?;
-        let rows = client
-            .query(&stmt, &[&schema, &pattern, &prokinds, &((limit - candidates.len()) as i64)])
-            .await
-            .map_err(|e| e.to_string())?;
+        let rows = postgres_query_cached(
+            &client,
+            postgres_completion_routines_sql(),
+            &[&routine_schema, &pattern, &prokinds, &((limit - candidates.len()) as i64)],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
         for row in rows {
-            let routine_type: String = row.get(2);
+            let routine_type: String = pg_row_try_string(&row, 2);
             candidates.push(CompletionAssistantCandidate {
-                name: row.get(0),
+                name: pg_row_try_string(&row, 0),
                 kind: if routine_type == "PROCEDURE" {
                     CompletionAssistantCandidateKind::Procedure
                 } else {
                     CompletionAssistantCandidateKind::Function
                 },
                 database: Some(request.database.clone()),
-                schema: Some(row.get(1)),
+                schema: Some(pg_row_try_string(&row, 1)),
                 parent_schema: None,
                 parent_name: None,
                 comment: row.try_get::<_, Option<String>>(3).ok().flatten(),
@@ -1483,21 +1548,36 @@ pub async fn completion_assistant_search(
     if candidates.len() < limit && kinds.iter().any(|kind| matches!(kind, CompletionAssistantObjectKind::Column)) {
         let table = request.parent_name.as_deref().unwrap_or("");
         if !table.is_empty() {
-            let stmt = client.prepare_cached(postgres_completion_columns_sql()).await.map_err(|e| e.to_string())?;
-            let rows = client
-                .query(&stmt, &[&schema, &table, &pattern, &((limit - candidates.len()) as i64)])
-                .await
-                .map_err(|e| e.to_string())?;
+            // Unqualified PostgreSQL objects resolve through search_path, so column
+            // metadata must use the same visible relation instead of assuming public.
+            let resolved_schema = match schema {
+                Some(schema) => Some(schema.to_string()),
+                None => postgres_query_cached(&client, postgres_visible_table_schema_sql(), &[&table])
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .first()
+                    .map(|row| pg_row_try_string(row, 0)),
+            };
+            let Some(resolved_schema) = resolved_schema else {
+                return Ok(CompletionAssistantResponse { incomplete: false, candidates, fallback_used: false });
+            };
+            let rows = postgres_query_cached(
+                &client,
+                postgres_completion_columns_sql(),
+                &[&resolved_schema, &table, &pattern, &((limit - candidates.len()) as i64)],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
             for row in rows {
                 candidates.push(CompletionAssistantCandidate {
-                    name: row.get(0),
+                    name: pg_row_try_string(&row, 0),
                     kind: CompletionAssistantCandidateKind::Column,
                     database: Some(request.database.clone()),
-                    schema: Some(schema.to_string()),
-                    parent_schema: Some(schema.to_string()),
+                    schema: Some(resolved_schema.clone()),
+                    parent_schema: Some(resolved_schema.clone()),
                     parent_name: Some(table.to_string()),
                     comment: row.try_get::<_, Option<String>>(2).ok().flatten(),
-                    data_type: Some(row.get(1)),
+                    data_type: Some(pg_row_try_string(&row, 1)),
                 });
             }
         }
@@ -1517,7 +1597,9 @@ fn postgres_completion_tables_sql() -> &'static str {
      LEFT JOIN pg_catalog.pg_inherits i ON i.inhrelid = c.oid \
      LEFT JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent \
      LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace \
-     WHERE n.nspname = $1 AND c.relkind = ANY($3) \
+     WHERE ($1::text IS NOT NULL AND n.nspname = $1 \
+            OR $1::text IS NULL AND pg_catalog.pg_table_is_visible(c.oid)) \
+       AND c.relkind = ANY($3) \
        AND ($2 = '%%' OR c.relname ILIKE $2 ESCAPE '~') \
      ORDER BY c.relname LIMIT $4"
 }
@@ -1540,6 +1622,13 @@ fn postgres_completion_columns_sql() -> &'static str {
      WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped \
        AND ($3 = '%%' OR a.attname ILIKE $3 ESCAPE '~') \
      ORDER BY a.attnum LIMIT $4"
+}
+
+fn postgres_visible_table_schema_sql() -> &'static str {
+    "SELECT n.nspname FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     WHERE c.relname = $1 AND pg_catalog.pg_table_is_visible(c.oid) \
+     LIMIT 1"
 }
 
 fn postgres_completion_relkinds(kinds: &[CompletionAssistantObjectKind]) -> Vec<String> {
@@ -1584,8 +1673,9 @@ fn postgres_completion_like_pattern(value: &str, mode: Option<&CompletionAssista
 pub async fn get_table_comment(pool: &Pool, schema: &str, table: &str) -> Result<Option<String>, String> {
     let schema = if schema.is_empty() { "public" } else { schema };
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let stmt = client.prepare_cached(postgres_table_comment_sql()).await.map_err(|e| e.to_string())?;
-    let rows = client.query(&stmt, &[&schema, &table]).await.map_err(|e| e.to_string())?;
+    let rows = postgres_query_cached(&client, postgres_table_comment_sql(), &[&schema, &table])
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(rows.first().and_then(|row| row.try_get::<_, Option<String>>(0).ok().flatten()).filter(|s| !s.is_empty()))
 }
 
@@ -1699,7 +1789,38 @@ fn list_object_relations_sql(include_timestamps: bool) -> &'static str {
      WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p','S')"
 }
 
-fn list_object_routines_sql(include_timestamps: bool, has_proc_prokind: bool) -> &'static str {
+fn list_object_routines_sql(include_timestamps: bool, has_proc_prokind: bool, has_proc_prosp: bool) -> &'static str {
+    if has_proc_prokind && has_proc_prosp {
+        if include_timestamps {
+            return "SELECT p.proname AS object_name, \
+       CASE WHEN p.prokind = 'p' OR p.prosp THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type, \
+       obj_description(p.oid) AS object_comment, \
+       NULL::text AS created_at, \
+       CASE WHEN current_setting('track_commit_timestamp', true) = 'on' \
+         THEN pg_xact_commit_timestamp(p.xmin)::text END AS updated_at, \
+       NULL::text AS parent_schema, \
+       NULL::text AS parent_name, \
+       pg_get_function_arguments(p.oid) AS signature, \
+       CASE WHEN p.prokind = 'p' OR p.prosp THEN 2 ELSE 3 END AS sort_order \
+     FROM pg_catalog.pg_proc p \
+     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+     WHERE n.nspname = $1 AND (p.prokind IN ('p','f') OR p.prosp)";
+        }
+
+        return "SELECT p.proname AS object_name, \
+       CASE WHEN p.prokind = 'p' OR p.prosp THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type, \
+       obj_description(p.oid) AS object_comment, \
+       NULL::text AS created_at, \
+       NULL::text AS updated_at, \
+       NULL::text AS parent_schema, \
+       NULL::text AS parent_name, \
+       pg_get_function_arguments(p.oid) AS signature, \
+       CASE WHEN p.prokind = 'p' OR p.prosp THEN 2 ELSE 3 END AS sort_order \
+     FROM pg_catalog.pg_proc p \
+     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+     WHERE n.nspname = $1 AND (p.prokind IN ('p','f') OR p.prosp)";
+    }
+
     if has_proc_prokind {
         if include_timestamps {
             return "SELECT p.proname AS object_name, \
@@ -1729,6 +1850,37 @@ fn list_object_routines_sql(include_timestamps: bool, has_proc_prokind: bool) ->
      FROM pg_catalog.pg_proc p \
      JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
      WHERE n.nspname = $1 AND p.prokind IN ('p','f')";
+    }
+
+    if has_proc_prosp {
+        if include_timestamps {
+            return "SELECT p.proname AS object_name, \
+       CASE WHEN p.prosp THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type, \
+       obj_description(p.oid) AS object_comment, \
+       NULL::text AS created_at, \
+       CASE WHEN current_setting('track_commit_timestamp', true) = 'on' \
+         THEN pg_xact_commit_timestamp(p.xmin)::text END AS updated_at, \
+       NULL::text AS parent_schema, \
+       NULL::text AS parent_name, \
+       pg_get_function_arguments(p.oid) AS signature, \
+       CASE WHEN p.prosp THEN 2 ELSE 3 END AS sort_order \
+     FROM pg_catalog.pg_proc p \
+     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+     WHERE n.nspname = $1 AND NOT p.proisagg AND NOT p.proiswindow";
+        }
+
+        return "SELECT p.proname AS object_name, \
+       CASE WHEN p.prosp THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type, \
+       obj_description(p.oid) AS object_comment, \
+       NULL::text AS created_at, \
+       NULL::text AS updated_at, \
+       NULL::text AS parent_schema, \
+       NULL::text AS parent_name, \
+       pg_get_function_arguments(p.oid) AS signature, \
+       CASE WHEN p.prosp THEN 2 ELSE 3 END AS sort_order \
+     FROM pg_catalog.pg_proc p \
+     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+     WHERE n.nspname = $1 AND NOT p.proisagg AND NOT p.proiswindow";
     }
 
     if include_timestamps {
@@ -1761,11 +1913,11 @@ fn list_object_routines_sql(include_timestamps: bool, has_proc_prokind: bool) ->
      WHERE n.nspname = $1 AND NOT p.proisagg AND NOT p.proiswindow"
 }
 
-fn list_objects_sql(include_timestamps: bool, has_proc_prokind: bool) -> String {
+fn list_objects_sql(include_timestamps: bool, has_proc_prokind: bool, has_proc_prosp: bool) -> String {
     format!(
         "{} UNION ALL {} ORDER BY sort_order, object_name",
         list_object_relations_sql(include_timestamps),
-        list_object_routines_sql(include_timestamps, has_proc_prokind)
+        list_object_routines_sql(include_timestamps, has_proc_prokind, has_proc_prosp)
     )
 }
 
@@ -1780,9 +1932,24 @@ fn postgres_proc_has_prokind_sql() -> &'static str {
 }
 
 async fn postgres_proc_has_prokind(client: &deadpool_postgres::Client) -> Result<bool, String> {
-    let stmt = client.prepare_cached(postgres_proc_has_prokind_sql()).await.map_err(|e| e.to_string())?;
-    let row = client.query_one(&stmt, &[]).await.map_err(|e| e.to_string())?;
-    Ok(row.get(0))
+    let row =
+        postgres_query_one_cached(client, postgres_proc_has_prokind_sql(), &[]).await.map_err(|e| e.to_string())?;
+    Ok(pg_row_try_bool(&row, 0).unwrap_or(false))
+}
+
+fn postgres_proc_has_prosp_sql() -> &'static str {
+    "SELECT EXISTS ( \
+       SELECT 1 \
+       FROM pg_catalog.pg_attribute \
+       WHERE attrelid = 'pg_catalog.pg_proc'::regclass \
+         AND attname = 'prosp' \
+         AND NOT attisdropped \
+     )"
+}
+
+async fn postgres_proc_has_prosp(client: &deadpool_postgres::Client) -> Result<bool, String> {
+    let row = postgres_query_one_cached(client, postgres_proc_has_prosp_sql(), &[]).await.map_err(|e| e.to_string())?;
+    Ok(pg_row_try_bool(&row, 0).unwrap_or(false))
 }
 
 async fn list_objects_rows(
@@ -1790,20 +1957,23 @@ async fn list_objects_rows(
     schema: &str,
     include_timestamps: bool,
     has_proc_prokind: bool,
+    has_proc_prosp: bool,
 ) -> Result<Vec<Row>, String> {
-    let sql = list_objects_sql(include_timestamps, has_proc_prokind);
-    let stmt = client.prepare_cached(&sql).await.map_err(|e| e.to_string())?;
-    client.query(&stmt, &[&schema]).await.map_err(|e| e.to_string())
+    let sql = list_objects_sql(include_timestamps, has_proc_prokind, has_proc_prosp);
+    postgres_query_cached(client, &sql, &[&schema]).await.map_err(|e| e.to_string())
 }
 
 pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
     let has_proc_prokind = postgres_proc_has_prokind(&client).await?;
-    let rows = match list_objects_rows(&client, schema, true, has_proc_prokind).await {
+    // Some GaussDB-compatible catalogs expose prosp alongside, or instead of,
+    // PostgreSQL 11's prokind. Treat prosp as an extra procedure signal.
+    let has_proc_prosp = postgres_proc_has_prosp(&client).await?;
+    let rows = match list_objects_rows(&client, schema, true, has_proc_prokind, has_proc_prosp).await {
         Ok(rows) => rows,
         Err(primary_error) => {
             log::debug!("[postgres][list_objects:timestamp-fallback] primary_error={}", primary_error);
-            match list_objects_rows(&client, schema, false, has_proc_prokind).await {
+            match list_objects_rows(&client, schema, false, has_proc_prokind, has_proc_prosp).await {
                 Ok(rows) => rows,
                 Err(fallback_error) => {
                     return Err(format!("{primary_error}; timestamp fallback failed: {fallback_error}"));
@@ -1815,8 +1985,8 @@ pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, 
     Ok(rows
         .iter()
         .map(|row| ObjectInfo {
-            name: row.get::<_, String>(0),
-            object_type: row.get::<_, String>(1),
+            name: pg_row_try_string(row, 0),
+            object_type: pg_row_try_string(row, 1),
             schema: Some(schema.to_string()),
             comment: row.try_get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
             created_at: row.try_get::<_, Option<String>>(3).ok().flatten().filter(|s| !s.is_empty()),
@@ -1831,23 +2001,23 @@ pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, 
 pub async fn list_object_statistics(pool: &Pool, schema: &str) -> Result<Vec<ObjectStatistics>, String> {
     let schema = if schema.is_empty() { "public" } else { schema };
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let stmt = client
-        .prepare_cached(
-            "SELECT c.relname, \
-                    GREATEST(c.reltuples, 0)::bigint AS estimated_rows, \
-                    pg_catalog.pg_total_relation_size(c.oid)::bigint AS total_bytes \
-             FROM pg_catalog.pg_class c \
-             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-             WHERE n.nspname = $1 AND c.relkind IN ('r','m','f','p') \
-             ORDER BY c.relname",
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    let rows = client.query(&stmt, &[&schema]).await.map_err(|e| e.to_string())?;
+    let rows = postgres_query_cached(
+        &client,
+        "SELECT c.relname, \
+                GREATEST(c.reltuples, 0)::bigint AS estimated_rows, \
+                pg_catalog.pg_total_relation_size(c.oid)::bigint AS total_bytes \
+         FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relkind IN ('r','m','f','p') \
+         ORDER BY c.relname",
+        &[&schema],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(rows
         .iter()
         .map(|row| ObjectStatistics {
-            name: row.get::<_, String>(0),
+            name: pg_row_try_string(row, 0),
             schema: Some(schema.to_string()),
             estimated_rows: row.try_get::<_, i64>(1).ok(),
             total_bytes: row.try_get::<_, i64>(2).ok(),
@@ -1861,27 +2031,27 @@ pub async fn list_schemas(pool: &Pool) -> Result<Vec<String>, String> {
 
 pub async fn list_schema_infos(pool: &Pool) -> Result<Vec<SchemaInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let stmt = client
-        .prepare_cached(
-            "SELECT n.nspname AS schema_name, d.description AS schema_comment \
-             FROM pg_catalog.pg_namespace n \
-             LEFT JOIN pg_catalog.pg_description d \
-               ON d.objoid = n.oid \
-              AND d.objsubid = 0 \
-              AND d.classoid = 'pg_namespace'::regclass \
-             WHERE n.nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast') \
-             AND n.nspname NOT LIKE 'pg_toast_temp_%' \
-             AND n.nspname NOT LIKE 'pg_temp_%' \
-             ORDER BY n.nspname",
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    let rows = client.query(&stmt, &[]).await.map_err(|e| e.to_string())?;
+    let rows = postgres_query_cached(
+        &client,
+        "SELECT n.nspname AS schema_name, d.description AS schema_comment \
+         FROM pg_catalog.pg_namespace n \
+         LEFT JOIN pg_catalog.pg_description d \
+           ON d.objoid = n.oid \
+          AND d.objsubid = 0 \
+          AND d.classoid = 'pg_namespace'::regclass \
+         WHERE n.nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast') \
+         AND n.nspname NOT LIKE 'pg_toast_temp_%' \
+         AND n.nspname NOT LIKE 'pg_temp_%' \
+         ORDER BY n.nspname",
+        &[],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     Ok(rows
         .iter()
         .map(|row| SchemaInfo {
-            name: row.get::<_, String>(0),
+            name: pg_row_try_string(row, 0),
             comment: row.try_get::<_, Option<String>>(1).ok().flatten(),
         })
         .collect())
@@ -1912,9 +2082,13 @@ const POSTGRES_COLUMNS_SQL: &str = "SELECT a.attname AS column_name, \
              CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 \
                THEN (a.atttypmod - 4) & 65535 ELSE NULL END AS numeric_scale, \
              CASE WHEN t.typname IN ('varchar', 'bpchar') AND a.atttypmod > 0 \
-               THEN a.atttypmod - 4 ELSE NULL END AS character_maximum_length \
+               THEN a.atttypmod - 4 ELSE NULL END AS character_maximum_length, \
+             CASE WHEN enum_t.oid IS NULL THEN NULL \
+               ELSE COALESCE((SELECT array_to_json(array_agg(e.enumlabel ORDER BY e.enumsortorder))::text \
+                              FROM pg_enum e WHERE e.enumtypid = enum_t.oid), '[]') END AS enum_values \
              FROM pg_attribute a \
              JOIN pg_type t ON t.oid = a.atttypid \
+             LEFT JOIN pg_type enum_t ON enum_t.oid = CASE WHEN t.typtype = 'd' THEN t.typbasetype WHEN t.typtype = 'e' THEN t.oid ELSE NULL END AND enum_t.typtype = 'e' \
              LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
              LEFT JOIN pg_depend dep ON dep.refobjid = a.attrelid AND dep.refobjsubid = a.attnum AND dep.deptype = 'i' \
              LEFT JOIN pg_sequence pseq ON pseq.seqrelid = dep.objid \
@@ -1941,7 +2115,8 @@ const POSTGRES_COLUMNS_COMPAT_SQL: &str = "SELECT a.attname AS column_name, \
              CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 \
                THEN (a.atttypmod - 4) & 65535 ELSE NULL END AS numeric_scale, \
              CASE WHEN t.typname IN ('varchar', 'bpchar') AND a.atttypmod > 0 \
-               THEN a.atttypmod - 4 ELSE NULL END AS character_maximum_length \
+               THEN a.atttypmod - 4 ELSE NULL END AS character_maximum_length, \
+             NULL::text AS enum_values \
              FROM pg_attribute a \
              JOIN pg_type t ON t.oid = a.atttypid \
              LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
@@ -1972,24 +2147,75 @@ const POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL: &str = "SELECT c.column_name, \
              NULL::text AS column_extra, \
              CAST(c.numeric_precision AS int) AS numeric_precision, \
              CAST(c.numeric_scale AS int) AS numeric_scale, \
-             CAST(c.character_maximum_length AS int) AS character_maximum_length \
+             CAST(c.character_maximum_length AS int) AS character_maximum_length, \
+             NULL::text AS enum_values \
              FROM information_schema.columns c \
              WHERE c.table_schema = $1 AND c.table_name = $2 \
              ORDER BY c.ordinal_position";
 
+fn parse_enum_values_from_row(row: &Row, index: usize) -> Option<Vec<String>> {
+    let raw = row.try_get::<_, Option<String>>(index).ok().flatten()?;
+    serde_json::from_str::<Vec<String>>(&raw).ok()
+}
+
+/// Read a boolean column from a PostgreSQL row, tolerating databases that
+/// encode booleans as integers (0/1) or text ('t'/'f') instead of the standard
+/// `bool` OID.  Returns `None` when the column is NULL or truly unreadable.
+fn pg_row_try_bool(row: &Row, idx: usize) -> Option<bool> {
+    if let Ok(v) = row.try_get::<_, bool>(idx) {
+        return Some(v);
+    }
+    if let Ok(v) = row.try_get::<_, i32>(idx) {
+        return Some(v != 0);
+    }
+    if let Ok(v) = row.try_get::<_, i16>(idx) {
+        return Some(v != 0);
+    }
+    if let Ok(Some(v)) = row.try_get::<_, Option<String>>(idx) {
+        match v.as_str() {
+            "t" | "true" | "1" | "yes" | "YES" => return Some(true),
+            "f" | "false" | "0" | "no" | "NO" => return Some(false),
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Read a String column from a PostgreSQL row, tolerating databases that
+/// return text as other types.  Falls back to i64/i32/i16/bool formatting.
+fn pg_row_try_string(row: &Row, idx: usize) -> String {
+    if let Ok(v) = row.try_get::<_, String>(idx) {
+        return v;
+    }
+    if let Ok(v) = row.try_get::<_, i64>(idx) {
+        return v.to_string();
+    }
+    if let Ok(v) = row.try_get::<_, i32>(idx) {
+        return v.to_string();
+    }
+    if let Ok(v) = row.try_get::<_, i16>(idx) {
+        return v.to_string();
+    }
+    if let Some(v) = pg_row_try_bool(row, idx) {
+        return v.to_string();
+    }
+    String::new()
+}
+
 fn column_info_from_row(row: &Row) -> ColumnInfo {
     let full_type = row.try_get::<_, Option<String>>(1).ok().flatten().unwrap_or_default();
     ColumnInfo {
-        name: row.get::<_, String>(0),
+        name: pg_row_try_string(row, 0),
         data_type: full_type,
-        is_nullable: row.get::<_, bool>(2),
+        is_nullable: pg_row_try_bool(row, 2).unwrap_or(true),
         column_default: row.try_get::<_, Option<String>>(3).ok().flatten(),
-        is_primary_key: row.get::<_, bool>(4),
+        is_primary_key: pg_row_try_bool(row, 4).unwrap_or(false),
         extra: row.try_get::<_, Option<String>>(6).ok().flatten(),
         comment: row.try_get::<_, Option<String>>(5).ok().flatten(),
         numeric_precision: row.try_get::<_, Option<i32>>(7).ok().flatten(),
         numeric_scale: row.try_get::<_, Option<i32>>(8).ok().flatten(),
         character_maximum_length: row.try_get::<_, Option<i32>>(9).ok().flatten(),
+        enum_values: parse_enum_values_from_row(row, 10),
     }
 }
 
@@ -1999,8 +2225,7 @@ async fn get_columns_with_sql(
     schema: &str,
     table: &str,
 ) -> Result<Vec<ColumnInfo>, tokio_postgres::Error> {
-    let stmt = client.prepare_cached(sql).await?;
-    let rows = client.query(&stmt, &[&schema, &table]).await?;
+    let rows = postgres_query_cached(client, sql, &[&schema, &table]).await?;
 
     Ok(rows.iter().map(column_info_from_row).collect())
 }
@@ -2596,22 +2821,21 @@ async fn list_indexes_with_sql(
     schema: &str,
     table: &str,
 ) -> Result<Vec<IndexInfo>, tokio_postgres::Error> {
-    let stmt = client.prepare_cached(sql).await?;
-    let rows = client.query(&stmt, &[&schema, &table]).await?;
+    let rows = postgres_query_cached(client, sql, &[&schema, &table]).await?;
 
     Ok(rows
         .iter()
         .map(|row| {
-            let all_cols: Vec<String> = row.get::<_, Vec<String>>(1);
+            let all_cols: Vec<String> = row.try_get::<_, Vec<String>>(1).unwrap_or_default();
             let nkeyatts = row.try_get::<_, Option<i16>>(6).ok().flatten().unwrap_or(all_cols.len() as i16) as usize;
             let split_at = nkeyatts.min(all_cols.len());
             let key_cols = all_cols[..split_at].to_vec();
             let included = if split_at < all_cols.len() { all_cols[split_at..].to_vec() } else { vec![] };
             IndexInfo {
-                name: row.get::<_, String>(0),
+                name: pg_row_try_string(row, 0),
                 columns: key_cols,
-                is_unique: row.get::<_, bool>(2),
-                is_primary: row.get::<_, bool>(3),
+                is_unique: pg_row_try_bool(row, 2).unwrap_or(false),
+                is_primary: pg_row_try_bool(row, 3).unwrap_or(false),
                 filter: row.try_get::<_, Option<String>>(4).ok().flatten(),
                 index_type: row.try_get::<_, Option<String>>(5).ok().flatten(),
                 included_columns: if included.is_empty() { None } else { Some(included) },
@@ -2641,66 +2865,76 @@ pub async fn list_indexes(pool: &Pool, schema: &str, table: &str) -> Result<Vec<
     }
 }
 
+fn postgres_foreign_keys_sql() -> &'static str {
+    "SELECT fk.constraint_name, fk.column_name, \
+     pk.table_schema AS ref_schema, pk.table_name AS ref_table, pk.column_name AS ref_column, \
+     rc.update_rule AS on_update, rc.delete_rule AS on_delete \
+     FROM information_schema.table_constraints tc \
+     JOIN information_schema.key_column_usage fk \
+       ON fk.constraint_name = tc.constraint_name \
+       AND fk.constraint_schema = tc.constraint_schema \
+       AND fk.table_schema = tc.table_schema \
+       AND fk.table_name = tc.table_name \
+     JOIN information_schema.referential_constraints rc \
+       ON rc.constraint_name = tc.constraint_name \
+       AND rc.constraint_schema = tc.constraint_schema \
+     JOIN information_schema.key_column_usage pk \
+       ON pk.constraint_name = rc.unique_constraint_name \
+       AND pk.constraint_schema = rc.unique_constraint_schema \
+       AND pk.ordinal_position = fk.position_in_unique_constraint \
+     WHERE tc.constraint_type = 'FOREIGN KEY' \
+       AND fk.table_schema = $1 AND fk.table_name = $2 \
+     ORDER BY fk.constraint_name, fk.ordinal_position"
+}
+
+fn postgres_foreign_key_action(value: String) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
 pub async fn list_foreign_keys(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ForeignKeyInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let stmt = client
-        .prepare_cached(
-            "SELECT fk.constraint_name, fk.column_name, \
-             pk.table_schema AS ref_schema, pk.table_name AS ref_table, pk.column_name AS ref_column \
-             FROM information_schema.table_constraints tc \
-             JOIN information_schema.key_column_usage fk \
-               ON fk.constraint_name = tc.constraint_name \
-               AND fk.constraint_schema = tc.constraint_schema \
-               AND fk.table_schema = tc.table_schema \
-               AND fk.table_name = tc.table_name \
-             JOIN information_schema.referential_constraints rc \
-               ON rc.constraint_name = tc.constraint_name \
-               AND rc.constraint_schema = tc.constraint_schema \
-             JOIN information_schema.key_column_usage pk \
-               ON pk.constraint_name = rc.unique_constraint_name \
-               AND pk.constraint_schema = rc.unique_constraint_schema \
-               AND pk.ordinal_position = fk.position_in_unique_constraint \
-             WHERE tc.constraint_type = 'FOREIGN KEY' \
-               AND fk.table_schema = $1 AND fk.table_name = $2 \
-             ORDER BY fk.constraint_name, fk.ordinal_position",
-        )
+    let rows = postgres_query_cached(&client, postgres_foreign_keys_sql(), &[&schema, &table])
         .await
         .map_err(|e| e.to_string())?;
-    let rows = client.query(&stmt, &[&schema, &table]).await.map_err(|e| e.to_string())?;
 
     Ok(rows
         .iter()
         .map(|row| ForeignKeyInfo {
-            name: row.get::<_, String>(0),
-            column: row.get::<_, String>(1),
-            ref_schema: Some(row.get::<_, String>(2)),
-            ref_table: row.get::<_, String>(3),
-            ref_column: row.get::<_, String>(4),
-            on_update: None,
-            on_delete: None,
+            name: pg_row_try_string(row, 0),
+            column: pg_row_try_string(row, 1),
+            ref_schema: Some(pg_row_try_string(row, 2)),
+            ref_table: pg_row_try_string(row, 3),
+            ref_column: pg_row_try_string(row, 4),
+            on_update: postgres_foreign_key_action(pg_row_try_string(row, 5)),
+            on_delete: postgres_foreign_key_action(pg_row_try_string(row, 6)),
         })
         .collect())
 }
 
 pub async fn list_triggers(pool: &Pool, schema: &str, table: &str) -> Result<Vec<TriggerInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let stmt = client
-        .prepare_cached(
-            "SELECT trigger_name, event_manipulation, action_timing \
-             FROM information_schema.triggers \
-             WHERE trigger_schema = $1 AND event_object_table = $2 \
-             ORDER BY trigger_name",
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    let rows = client.query(&stmt, &[&schema, &table]).await.map_err(|e| e.to_string())?;
+    let rows = postgres_query_cached(
+        &client,
+        "SELECT trigger_name, event_manipulation, action_timing \
+         FROM information_schema.triggers \
+         WHERE trigger_schema = $1 AND event_object_table = $2 \
+         ORDER BY trigger_name",
+        &[&schema, &table],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     Ok(rows
         .iter()
         .map(|row| TriggerInfo {
-            name: row.get::<_, String>(0),
-            event: row.get::<_, String>(1),
-            timing: row.get::<_, String>(2),
+            name: pg_row_try_string(row, 0),
+            event: pg_row_try_string(row, 1),
+            timing: pg_row_try_string(row, 2),
             statement: None,
         })
         .collect())
@@ -2738,13 +2972,14 @@ pub async fn list_functions(pool: &Pool, schema: &str) -> Result<Vec<FunctionInf
     // for reliable function definition retrieval (information_schema.routines.routine_definition
     // is NULL for non-SQL functions like plpgsql)
     let has_proc_prokind = postgres_proc_has_prokind(&client).await?;
-    let stmt = client.prepare_cached(postgres_functions_sql(has_proc_prokind)).await.map_err(|e| e.to_string())?;
-    let rows = client.query(&stmt, &[&schema]).await.map_err(|e| e.to_string())?;
+    let rows = postgres_query_cached(&client, postgres_functions_sql(has_proc_prokind), &[&schema])
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(rows
         .iter()
         .map(|row| {
-            let def: String = row.get::<_, String>(3);
+            let def: String = pg_row_try_string(row, 3);
             // Remove schema qualification from CREATE FUNCTION statement
             // to avoid false differences when comparing across schemas.
             // Handle both "schema.name" and schema.name formats.
@@ -2752,11 +2987,11 @@ pub async fn list_functions(pool: &Pool, schema: &str) -> Result<Vec<FunctionInf
                 .replace(&format!("CREATE OR REPLACE FUNCTION \"{}\".", schema), "CREATE OR REPLACE FUNCTION ")
                 .replace(&format!("CREATE OR REPLACE FUNCTION {}.", schema), "CREATE OR REPLACE FUNCTION ");
             FunctionInfo {
-                name: row.get::<_, String>(0),
-                function_type: row.get::<_, String>(1),
-                data_type: row.get::<_, String>(2),
+                name: pg_row_try_string(row, 0),
+                function_type: pg_row_try_string(row, 1),
+                data_type: pg_row_try_string(row, 2),
                 definition: normalized_def,
-                arguments: row.get::<_, String>(4),
+                arguments: pg_row_try_string(row, 4),
             }
         })
         .collect())
@@ -2766,35 +3001,35 @@ pub async fn list_sequences(pool: &Pool, schema: &str, with_last_values: bool) -
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
     // Use pg_class + pg_sequence + pg_namespace instead of pg_sequences view
     // for better compatibility and permission handling
-    let stmt = client
-        .prepare_cached(
-            "SELECT c.relname, \
-              COALESCE(format_type(s.seqtypid, NULL), 'bigint'), \
-              COALESCE(s.seqstart::text, '1'), \
-              COALESCE(s.seqmin::text, '1'), \
-              COALESCE(s.seqmax::text, '9223372036854775807'), \
-              COALESCE(s.seqincrement::text, '1'), \
-              CASE WHEN s.seqcycle THEN 'YES' ELSE 'NO' END \
-             FROM pg_class c \
-             JOIN pg_namespace n ON n.oid = c.relnamespace \
-             LEFT JOIN pg_sequence s ON s.seqrelid = c.oid \
-             WHERE c.relkind = 'S' AND n.nspname = $1 \
-             ORDER BY c.relname",
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    let rows = client.query(&stmt, &[&schema]).await.map_err(|e| e.to_string())?;
+    let rows = postgres_query_cached(
+        &client,
+        "SELECT c.relname, \
+          COALESCE(format_type(s.seqtypid, NULL), 'bigint'), \
+          COALESCE(s.seqstart::text, '1'), \
+          COALESCE(s.seqmin::text, '1'), \
+          COALESCE(s.seqmax::text, '9223372036854775807'), \
+          COALESCE(s.seqincrement::text, '1'), \
+          CASE WHEN s.seqcycle THEN 'YES' ELSE 'NO' END \
+         FROM pg_class c \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         LEFT JOIN pg_sequence s ON s.seqrelid = c.oid \
+         WHERE c.relkind = 'S' AND n.nspname = $1 \
+         ORDER BY c.relname",
+        &[&schema],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     let mut sequences: Vec<SequenceInfo> = rows
         .iter()
         .map(|row| SequenceInfo {
-            name: row.get::<_, String>(0),
-            data_type: row.get::<_, String>(1),
-            start_value: row.get::<_, String>(2),
-            min_value: row.get::<_, String>(3),
-            max_value: row.get::<_, String>(4),
-            increment: row.get::<_, String>(5),
-            cycle: row.get::<_, String>(6) == "YES",
+            name: pg_row_try_string(row, 0),
+            data_type: pg_row_try_string(row, 1),
+            start_value: pg_row_try_string(row, 2),
+            min_value: pg_row_try_string(row, 3),
+            max_value: pg_row_try_string(row, 4),
+            increment: pg_row_try_string(row, 5),
+            cycle: pg_row_try_string(row, 6) == "YES",
             last_value: None,
         })
         .collect();
@@ -2805,14 +3040,12 @@ pub async fn list_sequences(pool: &Pool, schema: &str, with_last_values: bool) -
                    FROM pg_class c \
                    JOIN pg_namespace n ON n.oid = c.relnamespace \
                    WHERE c.relkind = 'S' AND n.nspname = $1";
-        if let Ok(stmt) = client.prepare_cached(sql).await {
-            if let Ok(rows) = client.query(&stmt, &[&schema]).await {
-                for row in rows {
-                    let name: String = row.get(0);
-                    if let Ok(val) = row.try_get::<_, i64>(1) {
-                        if let Some(seq) = sequences.iter_mut().find(|s| s.name == name) {
-                            seq.last_value = Some(val.to_string());
-                        }
+        if let Ok(rows) = postgres_query_cached(&client, sql, &[&schema]).await {
+            for row in rows {
+                let name: String = pg_row_try_string(&row, 0);
+                if let Ok(val) = row.try_get::<_, i64>(1) {
+                    if let Some(seq) = sequences.iter_mut().find(|s| s.name == name) {
+                        seq.last_value = Some(val.to_string());
                     }
                 }
             }
@@ -2824,40 +3057,89 @@ pub async fn list_sequences(pool: &Pool, schema: &str, with_last_values: bool) -
 
 pub async fn list_rules(pool: &Pool, schema: &str) -> Result<Vec<RuleInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let stmt = client
-        .prepare_cached(
-            "SELECT schemaname, tablename, rulename, definition \
-             FROM pg_rules \
-             WHERE schemaname = $1 \
-             ORDER BY rulename",
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    let rows = client.query(&stmt, &[&schema]).await.map_err(|e| e.to_string())?;
+    let rows = postgres_query_cached(
+        &client,
+        "SELECT schemaname, tablename, rulename, definition \
+         FROM pg_rules \
+         WHERE schemaname = $1 \
+         ORDER BY rulename",
+        &[&schema],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     Ok(rows
         .iter()
         .map(|row| RuleInfo {
-            name: row.get::<_, String>(2),
-            table_name: row.get::<_, String>(1),
-            definition: row.get::<_, String>(3),
+            name: pg_row_try_string(row, 2),
+            table_name: pg_row_try_string(row, 1),
+            definition: pg_row_try_string(row, 3),
+        })
+        .collect())
+}
+
+pub async fn list_extensions(pool: &Pool, schema: &str) -> Result<Vec<ExtensionInfo>, String> {
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let rows = postgres_query_cached(
+        &client,
+        "SELECT e.extname, COALESCE(e.extversion, '') AS extversion, d.description, n.nspname \
+         FROM pg_catalog.pg_extension e \
+         JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace \
+         LEFT JOIN pg_catalog.pg_description d ON d.objoid = e.oid AND d.classoid = 'pg_extension'::regclass \
+         WHERE n.nspname = $1 \
+         ORDER BY e.extname",
+        &[&schema],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .iter()
+        .map(|row| ExtensionInfo {
+            name: pg_row_try_string(row, 0),
+            version: pg_row_try_string(row, 1),
+            comment: row.try_get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
+            schema: Some(schema.to_string()),
+        })
+        .collect())
+}
+
+pub async fn list_available_extensions(pool: &Pool) -> Result<Vec<ExtensionInfo>, String> {
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let rows = postgres_query_cached(
+        &client,
+        "SELECT name, default_version, comment \
+         FROM pg_catalog.pg_available_extensions \
+         WHERE installed_version IS NULL \
+         ORDER BY name",
+        &[],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .iter()
+        .map(|row| ExtensionInfo {
+            name: pg_row_try_string(row, 0),
+            version: pg_row_try_string(row, 1),
+            comment: row.try_get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
+            schema: None,
         })
         .collect())
 }
 
 pub async fn list_owners(pool: &Pool, schema: &str) -> Result<Vec<OwnerInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let stmt = client.prepare_cached(POSTGRES_OWNERS_SQL).await.map_err(|e| e.to_string())?;
-    let rows = client.query(&stmt, &[&schema]).await.map_err(|e| e.to_string())?;
+    let rows = postgres_query_cached(&client, POSTGRES_OWNERS_SQL, &[&schema]).await.map_err(|e| e.to_string())?;
 
     Ok(rows
         .iter()
         .map(|row| {
-            let relkind: String = row.get(2);
+            let relkind: String = pg_row_try_string(row, 2);
             OwnerInfo {
-                object_name: row.get::<_, String>(1),
+                object_name: pg_row_try_string(row, 1),
                 object_type: postgres_owner_object_type(&relkind).to_string(),
-                owner: row.get::<_, String>(3),
+                owner: pg_row_try_string(row, 3),
             }
         })
         .collect())
@@ -2937,7 +3219,81 @@ pub async fn copy_in(pool: &Pool, sql: &str, data: &[u8]) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+    use std::time::Instant;
     use tokio_postgres::types::FromSql;
+
+    struct DockerPostgres {
+        name: String,
+        port: u16,
+    }
+
+    impl DockerPostgres {
+        fn url(&self) -> String {
+            format!("postgres://postgres:postgres@127.0.0.1:{}/postgres?sslmode=disable", self.port)
+        }
+    }
+
+    impl Drop for DockerPostgres {
+        fn drop(&mut self) {
+            let _ = Command::new("docker").args(["rm", "-f", &self.name]).status();
+        }
+    }
+
+    fn docker_ready() -> bool {
+        Command::new("docker")
+            .args(["version", "--format", "{{.Server.Version}}"])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    async fn start_docker_postgres() -> Option<DockerPostgres> {
+        if !docker_ready() {
+            eprintln!("skipping docker-backed postgres test because Docker is unavailable");
+            return None;
+        }
+
+        let port = portpicker::pick_unused_port().expect("pick unused postgres port");
+        let container = DockerPostgres { name: format!("dbx-postgres-enum-{}", uuid::Uuid::new_v4()), port };
+
+        let status = Command::new("docker")
+            .args([
+                "run",
+                "-d",
+                "--rm",
+                "--name",
+                &container.name,
+                "-e",
+                "POSTGRES_PASSWORD=postgres",
+                "-e",
+                "POSTGRES_USER=postgres",
+                "-e",
+                "POSTGRES_DB=postgres",
+                "-p",
+                &format!("{port}:5432"),
+                "postgres:16-alpine",
+            ])
+            .status()
+            .expect("start docker postgres");
+        assert!(status.success(), "docker run postgres container should succeed");
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            match connect(&container.url(), Duration::from_secs(2)).await {
+                Ok(pool) => {
+                    drop(pool);
+                    return Some(container);
+                }
+                Err(_) if Instant::now() < deadline => tokio::time::sleep(Duration::from_millis(500)).await,
+                Err(error) => panic!("docker postgres did not become ready: {error}"),
+            }
+        }
+    }
+
+    fn state_enum_values(columns: &[ColumnInfo]) -> Option<Vec<String>> {
+        columns.iter().find(|column| column.name == "state").and_then(|column| column.enum_values.clone())
+    }
 
     // --- pg_quote_ident ---
 
@@ -2982,6 +3338,23 @@ mod tests {
 
         let raw = PgRawBytes::from_sql(&Type::UNKNOWN, &[0x01, 0xAB, 0xFF]).unwrap();
         assert_eq!(raw.0, vec![0x01, 0xAB, 0xFF]);
+    }
+
+    #[test]
+    fn postgres_foreign_keys_sql_selects_referential_actions() {
+        let sql = postgres_foreign_keys_sql();
+
+        assert!(sql.contains("rc.update_rule AS on_update"));
+        assert!(sql.contains("rc.delete_rule AS on_delete"));
+        assert!(sql.contains("information_schema.referential_constraints rc"));
+    }
+
+    #[test]
+    fn postgres_foreign_key_action_keeps_non_empty_action() {
+        assert_eq!(postgres_foreign_key_action("CASCADE".to_string()), Some("CASCADE".to_string()));
+        assert_eq!(postgres_foreign_key_action(" SET NULL ".to_string()), Some("SET NULL".to_string()));
+        assert_eq!(postgres_foreign_key_action("".to_string()), None);
+        assert_eq!(postgres_foreign_key_action("  ".to_string()), None);
     }
 
     #[test]
@@ -3291,6 +3664,14 @@ mod tests {
     }
 
     #[test]
+    fn postgres_accept_all_tls_signature_does_not_parse_unverified_cert() {
+        let verifier = NoPostgresCertVerification { provider: Arc::new(rustls::crypto::aws_lc_rs::default_provider()) };
+        let malformed_cert = CertificateDer::from(vec![0x30, 0x03, 0x02, 0x01, 0x00]);
+
+        assert!(verifier.accept_tls_signature_for_unverified_cert(&malformed_cert).is_ok());
+    }
+
+    #[test]
     fn inject_postgres_keepalive_params_preserves_url_fragment() {
         let url = "postgres://localhost/app?sslmode=require#read-only";
 
@@ -3381,6 +3762,8 @@ mod tests {
         assert!(POSTGRES_COLUMNS_SQL.contains("generated always as identity"));
         assert!(POSTGRES_COLUMNS_SQL.contains("COALESCE(c.is_nullable = 'YES', NOT a.attnotnull)"));
         assert!(POSTGRES_COLUMNS_SQL.contains("LEFT JOIN information_schema.columns"));
+        assert!(POSTGRES_COLUMNS_SQL.contains("pg_enum"));
+        assert!(POSTGRES_COLUMNS_SQL.contains("AS enum_values"));
     }
 
     #[test]
@@ -3391,6 +3774,8 @@ mod tests {
         assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("col_description"));
         assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("COALESCE(c.is_nullable = 'YES', NOT a.attnotnull)"));
         assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("LEFT JOIN information_schema.columns"));
+        assert!(POSTGRES_COLUMNS_COMPAT_SQL.contains("NULL::text AS enum_values"));
+        assert!(!POSTGRES_COLUMNS_COMPAT_SQL.contains("pg_enum"));
     }
 
     #[test]
@@ -3398,8 +3783,74 @@ mod tests {
         assert!(POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL.contains("information_schema.columns"));
         assert!(POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL.contains("information_schema.table_constraints"));
         assert!(POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL.contains("information_schema.key_column_usage"));
+        assert!(POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL.contains("NULL::text AS enum_values"));
         assert!(!POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL.contains("pg_attribute"));
         assert!(!POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL.contains("regclass"));
+    }
+
+    #[tokio::test]
+    async fn postgres_column_metadata_query_returns_enum_values_against_real_postgres() {
+        let Some(container) = start_docker_postgres().await else {
+            return;
+        };
+
+        let pool = connect(&container.url(), Duration::from_secs(5)).await.expect("connect postgres");
+        let schema = format!("dbx_enum_meta_{}", std::process::id());
+        let schema_ident = format!("\"{}\"", schema.replace('\"', "\"\""));
+        let table = format!("{schema_ident}.orders");
+        let type_ident = format!("{schema_ident}.\"status\"");
+
+        execute_query(&pool, &format!("CREATE SCHEMA {schema_ident}")).await.expect("create schema");
+        execute_query(&pool, &format!("CREATE TYPE {type_ident} AS ENUM ('pending', 'active', 'archived')"))
+            .await
+            .expect("create enum type");
+        execute_query(&pool, &format!("CREATE TABLE {table} (id integer PRIMARY KEY, state {type_ident} NOT NULL)"))
+            .await
+            .expect("create table");
+
+        let client =
+            checkout_postgres_client(&pool, None, crate::db::connection_timeout()).await.expect("checkout client");
+
+        let columns =
+            get_columns_with_sql(&client, POSTGRES_COLUMNS_SQL, &schema, "orders").await.expect("primary columns");
+        assert_eq!(
+            state_enum_values(&columns),
+            Some(vec!["pending".to_string(), "active".to_string(), "archived".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL database"]
+    async fn postgres_column_metadata_decode_type_mismatch_uses_fallbacks() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect(&url, std::time::Duration::from_secs(5)).await.expect("connect postgres");
+        let client =
+            checkout_postgres_client(&pool, None, std::time::Duration::from_secs(5)).await.expect("checkout postgres");
+        let row = client
+            .query_one(
+                "SELECT \
+                   1::int4 AS column_name, \
+                   'text'::text AS full_type, \
+                   'YES'::text AS is_nullable, \
+                   NULL::text AS column_default, \
+                   1::int4 AS is_pk, \
+                   NULL::text AS column_comment, \
+                   NULL::text AS column_extra, \
+                   NULL::int4 AS numeric_precision, \
+                   NULL::int4 AS numeric_scale, \
+                   NULL::int4 AS character_maximum_length",
+                &[],
+            )
+            .await
+            .expect("query mismatched metadata row");
+
+        let info = column_info_from_row(&row);
+        // int4 column_name should be converted to string "1" instead of panicking
+        assert_eq!(info.name, "1");
+        // text 'YES' is not a standard bool, pg_row_try_bool falls back to string match
+        assert!(info.is_nullable);
+        // int4 1 should be interpreted as true for is_primary_key
+        assert!(info.is_primary_key);
     }
 
     #[test]
@@ -3432,7 +3883,7 @@ mod tests {
 
     #[test]
     fn list_objects_sql_includes_routines() {
-        let sql = list_objects_sql(true, true);
+        let sql = list_objects_sql(true, true, false);
         assert!(sql.contains("pg_catalog.pg_class"));
         assert!(sql.contains("pg_catalog.pg_proc"));
         assert!(sql.contains("pg_catalog.pg_inherits"));
@@ -3449,7 +3900,7 @@ mod tests {
 
     #[test]
     fn list_objects_sql_without_timestamps_omits_stat_file() {
-        let sql = list_objects_sql(false, true);
+        let sql = list_objects_sql(false, true, false);
         assert!(!sql.contains("pg_stat_file"));
         assert!(sql.contains("NULL::text AS created_at"));
         assert!(sql.contains("NULL::text AS updated_at"));
@@ -3457,29 +3908,60 @@ mod tests {
 
     #[test]
     fn both_list_objects_sql_variants_use_parameter() {
-        assert!(list_objects_sql(true, true).contains("$1"));
-        assert!(list_objects_sql(false, true).contains("$1"));
-        assert!(list_objects_sql(true, false).contains("$1"));
-        assert!(list_objects_sql(false, false).contains("$1"));
+        assert!(list_objects_sql(true, true, true).contains("$1"));
+        assert!(list_objects_sql(false, true, true).contains("$1"));
+        assert!(list_objects_sql(true, true, false).contains("$1"));
+        assert!(list_objects_sql(false, true, false).contains("$1"));
+        assert!(list_objects_sql(true, false, true).contains("$1"));
+        assert!(list_objects_sql(false, false, true).contains("$1"));
+        assert!(list_objects_sql(true, false, false).contains("$1"));
+        assert!(list_objects_sql(false, false, false).contains("$1"));
     }
 
     #[test]
     fn both_list_objects_sql_variants_include_pg_proc() {
-        assert!(list_objects_sql(true, true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(false, true).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(true, false).contains("pg_catalog.pg_proc"));
-        assert!(list_objects_sql(false, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(true, true, true).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(false, true, true).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(true, true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(false, true, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(true, false, true).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(false, false, true).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(true, false, false).contains("pg_catalog.pg_proc"));
+        assert!(list_objects_sql(false, false, false).contains("pg_catalog.pg_proc"));
     }
 
     #[test]
     fn legacy_list_objects_sql_avoids_pg11_proc_kind_column() {
-        let sql = list_objects_sql(true, false);
+        let sql = list_objects_sql(true, false, false);
         assert!(!sql.contains("p.prokind"));
+        assert!(!sql.contains("p.prosp"));
         assert!(sql.contains("NOT p.proisagg"));
         assert!(sql.contains("NOT p.proiswindow"));
         assert!(sql.contains("pg_get_function_arguments(p.oid) AS signature"));
         assert!(sql.contains("'FUNCTION' AS object_type"));
         assert!(!sql.contains("'PROCEDURE'"));
+    }
+
+    #[test]
+    fn gaussdb_compatible_list_objects_sql_uses_prosp_when_prokind_is_missing() {
+        let sql = list_objects_sql(true, false, true);
+        assert!(!sql.contains("p.prokind"));
+        assert!(sql.contains("CASE WHEN p.prosp THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type"));
+        assert!(sql.contains("CASE WHEN p.prosp THEN 2 ELSE 3 END AS sort_order"));
+        assert!(sql.contains("NOT p.proisagg"));
+        assert!(sql.contains("NOT p.proiswindow"));
+        assert!(sql.contains("pg_get_function_arguments(p.oid) AS signature"));
+    }
+
+    #[test]
+    fn gaussdb_compatible_list_objects_sql_uses_prosp_with_prokind_when_available() {
+        let sql = list_objects_sql(true, true, true);
+        assert!(
+            sql.contains("CASE WHEN p.prokind = 'p' OR p.prosp THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type")
+        );
+        assert!(sql.contains("CASE WHEN p.prokind = 'p' OR p.prosp THEN 2 ELSE 3 END AS sort_order"));
+        assert!(sql.contains("p.prokind IN ('p','f') OR p.prosp"));
+        assert!(sql.contains("pg_get_function_arguments(p.oid) AS signature"));
     }
 
     #[test]
@@ -3507,6 +3989,14 @@ mod tests {
         assert!(sql.contains("pg_catalog.pg_attribute"));
         assert!(sql.contains("'pg_catalog.pg_proc'::regclass"));
         assert!(sql.contains("attname = 'prokind'"));
+    }
+
+    #[test]
+    fn postgres_proc_has_prosp_sql_checks_catalog_attribute() {
+        let sql = postgres_proc_has_prosp_sql();
+        assert!(sql.contains("pg_catalog.pg_attribute"));
+        assert!(sql.contains("'pg_catalog.pg_proc'::regclass"));
+        assert!(sql.contains("attname = 'prosp'"));
     }
 
     #[test]
@@ -3649,8 +4139,11 @@ mod tests {
     #[test]
     fn postgres_completion_sql_filters_before_limit() {
         assert!(postgres_completion_tables_sql().contains("c.relname ILIKE $2 ESCAPE '~'"));
+        assert!(postgres_completion_tables_sql().contains("pg_catalog.pg_table_is_visible(c.oid)"));
         assert!(postgres_completion_tables_sql().contains("ORDER BY c.relname LIMIT $4"));
         assert!(postgres_completion_routines_sql().contains("p.proname ILIKE $2 ESCAPE '~'"));
+        assert!(postgres_completion_routines_sql().contains("ORDER BY p.proname LIMIT $4"));
         assert!(postgres_completion_columns_sql().contains("a.attname ILIKE $3 ESCAPE '~'"));
+        assert!(postgres_visible_table_schema_sql().contains("pg_catalog.pg_table_is_visible(c.oid)"));
     }
 }

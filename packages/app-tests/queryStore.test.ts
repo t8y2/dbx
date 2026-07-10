@@ -3,6 +3,7 @@ import { test } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { isReactive } from "vue";
 import { decodeQueryResultArchive } from "../../apps/desktop/src/lib/query/queryResultArchive.ts";
+import { resultSqlForGrid } from "../../apps/desktop/src/lib/tabs/tabPresentation.ts";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
 import { useQueryStore } from "../../apps/desktop/src/stores/queryStore.ts";
 import { useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
@@ -144,10 +145,11 @@ test("external SQL file paths persist with open query tabs", async () => {
     const tabId = store.createTab("conn-1", "db", "draft.sql");
     store.updateSql(tabId, "select 1;");
     store.linkExternalSqlPath(tabId, "/tmp/draft.sql", "draft.sql");
-    store.flushPendingPersist();
+    await store.flushPendingPersist();
 
     setActivePinia(createPinia());
     store = useQueryStore();
+    await store.initOpenTabs();
     const tab = store.tabs.find((item) => item.id === tabId);
 
     assert.equal(tab?.externalSqlPath, "/tmp/draft.sql");
@@ -177,13 +179,14 @@ test("clean saved SQL tabs persist without duplicating SQL text", async () => {
       createdAt: "2026-06-27T00:00:00.000Z",
       updatedAt: "2026-06-27T00:00:00.000Z",
     });
-    store.flushPendingPersist();
+    await store.flushPendingPersist();
 
-    const rawTabs = localStorage.getItem("dbx-open-tabs") ?? "";
+    const rawTabs = localStorage.getItem("dbx-app-state:open_tabs") ?? "";
     assert.equal(rawTabs.includes("large_table"), false);
 
     setActivePinia(createPinia());
     store = useQueryStore();
+    await store.initOpenTabs();
     const tab = store.tabs.find((item) => item.savedSqlId === "saved-1");
 
     assert.equal(tab?.sql, "");
@@ -209,13 +212,14 @@ test("dirty saved SQL tabs keep unsaved edits in open tab persistence", async ()
       updatedAt: "2026-06-27T00:00:00.000Z",
     });
     store.updateSql(tabId, "SELECT 2;");
-    store.flushPendingPersist();
+    await store.flushPendingPersist();
 
-    const rawTabs = localStorage.getItem("dbx-open-tabs") ?? "";
+    const rawTabs = localStorage.getItem("dbx-app-state:open_tabs") ?? "";
     assert.equal(rawTabs.includes("SELECT 2;"), true);
 
     setActivePinia(createPinia());
     store = useQueryStore();
+    await store.initOpenTabs();
     const tab = store.tabs.find((item) => item.savedSqlId === "saved-1");
 
     assert.equal(tab?.sql, "SELECT 2;");
@@ -452,7 +456,7 @@ test("close other fixed tabs does not close regular tabs", () => {
   );
 });
 
-test("close other tabs pauses on restored unsaved query tabs", () => {
+test("close other tabs pauses on restored unsaved query tabs", async () => {
   const restoreStorage = installMemoryStorage();
   try {
     localStorage.setItem(
@@ -479,6 +483,7 @@ test("close other tabs pauses on restored unsaved query tabs", () => {
     localStorage.setItem("dbx-active-tab", "b");
     setActivePinia(createPinia());
     const store = useQueryStore();
+    await store.initOpenTabs();
 
     store.closeOtherTabs("b");
 
@@ -1224,6 +1229,291 @@ test("normalizes unquoted Oracle query identifiers before loading editable metad
   }
 });
 
+test("binds DISTINCT qualified-star edits to the single safe joined source", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const columnRequests: Array<{ schema: string | null; table: string | null }> = [];
+
+  connectionStore.addEphemeralConnection(conn("pg-join-1"));
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/execute-multi") {
+      return new Response(
+        JSON.stringify([
+          {
+            columns: ["id", "name"],
+            rows: [[1, "Ada"]],
+            affected_rows: 0,
+            execution_time_ms: 1,
+          },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/analyze-editability") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      assert.equal(body.sql, "select distinct u.* from users u join orders o on o.user_id = u.id");
+      return new Response(
+        JSON.stringify({
+          editable: true,
+          analysis: {
+            schema: undefined,
+            schemaQuoted: false,
+            tableName: "users",
+            tableNameQuoted: false,
+            tableAlias: "u",
+            selectStar: false,
+            distinct: true,
+            multiSource: true,
+            allowInsertDelete: false,
+            sources: [
+              { key: "u:0", tableName: "users", tableNameQuoted: false, schemaQuoted: false, alias: "u" },
+              { key: "o:1", tableName: "orders", tableNameQuoted: false, schemaQuoted: false, alias: "o" },
+            ],
+            columns: [{ star: true, sourceQualifier: "u", sourceKey: "u:0", resultName: "*", expression: "u.*" }],
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url.startsWith("/api/schema/columns?")) {
+      const params = new URL(url, "http://localhost").searchParams;
+      const table = params.get("table");
+      columnRequests.push({ schema: params.get("schema"), table });
+      const columns =
+        table === "users"
+          ? [
+              { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: null },
+              { name: "name", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: null },
+            ]
+          : [
+              { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: null },
+              { name: "user_id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: false, extra: null, comment: null },
+              { name: "total", data_type: "numeric", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: null },
+            ];
+      return new Response(JSON.stringify(columns), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url === "/api/query/prepare-pagination-plan") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify({ sqlToExecute: body.options.sql, useAgentResultSession: false }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const sql = "select distinct u.* from users u join orders o on o.user_id = u.id";
+    const tabId = store.createTab("pg-join-1", "appdb", "Query 1", "query");
+    await store.executeTabSql(tabId, sql);
+
+    const tab = store.tabs.find((item) => item.id === tabId);
+    await waitFor(() => columnRequests.length === 2 && tab?.tableMeta?.tableName === "users");
+    assert.deepEqual(columnRequests, [
+      { schema: "public", table: "users" },
+      { schema: "public", table: "orders" },
+    ]);
+    assert.equal(tab?.queryEditabilityReason, undefined);
+    assert.equal(tab?.queryAnalysis?.multiSource, true);
+    assert.equal(tab?.queryAnalysis?.distinct, true);
+    assert.equal(tab?.queryAnalysis?.allowInsertDelete, false);
+    assert.equal(tab?.tableMeta?.tableName, "users");
+    assert.deepEqual(tab?.querySourceColumns, ["id", "name"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("expands single-table alias star projections for editable query metadata", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const columnRequests: Array<{ schema: string | null; table: string | null }> = [];
+
+  connectionStore.addEphemeralConnection(conn("pg-star-1"));
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/execute-multi") {
+      return new Response(
+        JSON.stringify([
+          {
+            columns: ["create_date", "id", "container_main_id"],
+            rows: [["2026-07-09 13:59:35", "20750975119640248", null]],
+            affected_rows: 0,
+            execution_time_ms: 1,
+          },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/analyze-editability") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      assert.equal(body.sql, "select t.create_date, t.* from tt_kd_material_container_sap t where t.order_no = 'KD2607071336' order by t.create_date desc");
+      return new Response(
+        JSON.stringify({
+          editable: true,
+          analysis: {
+            schema: undefined,
+            schemaQuoted: false,
+            tableName: "tt_kd_material_container_sap",
+            tableNameQuoted: false,
+            tableAlias: "t",
+            selectStar: false,
+            columns: [
+              { sourceName: "create_date", sourceNameQuoted: false, sourceQualifier: "t", sourceKey: "t:0", resultName: "create_date", expression: "t.create_date" },
+              { star: true, sourceQualifier: "t", sourceKey: "t:0", resultName: "*", expression: "t.*" },
+            ],
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url.startsWith("/api/schema/columns?")) {
+      const params = new URL(url, "http://localhost").searchParams;
+      columnRequests.push({ schema: params.get("schema"), table: params.get("table") });
+      return new Response(
+        JSON.stringify([
+          { name: "create_date", data_type: "timestamp", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: null },
+          { name: "id", data_type: "varchar", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: null },
+          { name: "container_main_id", data_type: "varchar", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: null },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/prepare-pagination-plan") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify({ sqlToExecute: body.options.sql, useAgentResultSession: false }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const sql = "select t.create_date, t.* from tt_kd_material_container_sap t where t.order_no = 'KD2607071336' order by t.create_date desc";
+    const tabId = store.createTab("pg-star-1", "appdb", "Query 1", "query");
+    await store.executeTabSql(tabId, sql);
+
+    const tab = store.tabs.find((item) => item.id === tabId);
+    await waitFor(() => columnRequests.length === 1 && tab?.tableMeta?.tableName === "tt_kd_material_container_sap");
+    assert.deepEqual(columnRequests, [{ schema: "public", table: "tt_kd_material_container_sap" }]);
+    assert.equal(tab?.queryEditabilityReason, undefined);
+    assert.equal(tab?.queryAnalysis?.selectStar, false);
+    assert.equal(tab?.tableMeta?.tableName, "tt_kd_material_container_sap");
+    assert.deepEqual(tab?.querySourceColumns, ["create_date", "id", "container_main_id"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("keeps joined query read-only when multiple source tables are writable candidates", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const columnRequests: Array<{ schema: string | null; table: string | null }> = [];
+
+  connectionStore.addEphemeralConnection(conn("pg-join-ambiguous"));
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/execute-multi") {
+      return new Response(
+        JSON.stringify([
+          {
+            columns: ["user_id", "name", "order_id", "total"],
+            rows: [[1, "Ada", 10, 42]],
+            affected_rows: 0,
+            execution_time_ms: 1,
+          },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/analyze-editability") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      assert.equal(body.sql, "select u.id as user_id, u.name, o.id as order_id, o.total from users u join orders o on o.user_id = u.id");
+      return new Response(
+        JSON.stringify({
+          editable: true,
+          analysis: {
+            schema: undefined,
+            schemaQuoted: false,
+            tableName: "users",
+            tableNameQuoted: false,
+            tableAlias: "u",
+            selectStar: false,
+            multiSource: true,
+            allowInsertDelete: false,
+            sources: [
+              { key: "u:0", tableName: "users", tableNameQuoted: false, schemaQuoted: false, alias: "u" },
+              { key: "o:1", tableName: "orders", tableNameQuoted: false, schemaQuoted: false, alias: "o" },
+            ],
+            columns: [
+              { sourceName: "id", sourceNameQuoted: false, sourceQualifier: "u", sourceKey: "u:0", resultName: "user_id", expression: "u.id" },
+              { sourceName: "name", sourceNameQuoted: false, sourceQualifier: "u", sourceKey: "u:0", resultName: "name", expression: "u.name" },
+              { sourceName: "id", sourceNameQuoted: false, sourceQualifier: "o", sourceKey: "o:1", resultName: "order_id", expression: "o.id" },
+              { sourceName: "total", sourceNameQuoted: false, sourceQualifier: "o", sourceKey: "o:1", resultName: "total", expression: "o.total" },
+            ],
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url.startsWith("/api/schema/columns?")) {
+      const params = new URL(url, "http://localhost").searchParams;
+      const table = params.get("table");
+      columnRequests.push({ schema: params.get("schema"), table });
+      const columns =
+        table === "users"
+          ? [
+              { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: null },
+              { name: "name", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: null },
+            ]
+          : [
+              { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: null },
+              { name: "total", data_type: "numeric", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: null },
+            ];
+      return new Response(JSON.stringify(columns), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url === "/api/query/prepare-pagination-plan") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify({ sqlToExecute: body.options.sql, useAgentResultSession: false }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const sql = "select u.id as user_id, u.name, o.id as order_id, o.total from users u join orders o on o.user_id = u.id";
+    const tabId = store.createTab("pg-join-ambiguous", "appdb", "Query 1", "query");
+    await store.executeTabSql(tabId, sql);
+
+    const tab = store.tabs.find((item) => item.id === tabId);
+    await waitFor(() => columnRequests.length === 2 && tab?.queryEditabilityReason === "complex-source");
+    assert.equal(tab?.queryAnalysis, undefined);
+    assert.equal(tab?.tableMeta, undefined);
+    assert.equal(tab?.querySourceColumns, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("uses dbo as SQL Server metadata schema when query omits schema", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());
@@ -1394,6 +1684,7 @@ test("evicting cached tab results releases multi-result payloads and sessions", 
       await store.executeTabSql(tabId, `select ${i + 1}; select ${i + 1} as detail`);
     }
 
+    await waitFor(() => store.tabs.find((tab) => tab.id === tabIds[0])?.resultEvicted === true);
     const evicted = store.tabs.find((tab) => tab.id === tabIds[0]);
     assert.equal(executeCount, 7);
     assert.equal(evicted?.result, undefined);
@@ -1469,6 +1760,7 @@ test("result cache eviction keeps recently accessed inactive tabs", async () => 
     tabIds.push(tabId);
     await store.executeTabSql(tabId, "select 7");
 
+    await waitFor(() => store.tabs.find((tab) => tab.id === tabIds[1])?.resultEvicted === true);
     const recentlyViewed = store.tabs.find((tab) => tab.id === tabIds[0]);
     const leastRecentlyUsed = store.tabs.find((tab) => tab.id === tabIds[1]);
     assert.ok(recentlyViewed?.result);
@@ -2483,6 +2775,101 @@ test("mongo multi-command execution runs writes sequentially and keeps grouped r
     assert.equal(tab?.results?.length, 2);
     assert.equal(tab?.activeResultIndex, 0);
     assert.equal(tab?.result?.affected_rows, 1);
+    assert.deepEqual(
+      tab?.results?.map((result) => result.sourceStatement),
+      ['db.users.insertOne({ name: "Ada" })', 'db.users.insertOne({ name: "Grace" })'],
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("redis multi-command execution records source statements for each result", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const commandBodies: any[] = [];
+
+  connectionStore.addEphemeralConnection({
+    ...conn("redis-1"),
+    db_type: "redis",
+    port: 6379,
+  });
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/redis/execute-command") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      commandBodies.push(body);
+      if (body.command === "BAD") return new Response("bad command", { status: 500 });
+      return new Response(JSON.stringify({ command: body.command, safety: "allowed", value: body.command === "GET user:1" ? "Ada" : "OK" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const tabId = store.createTab("redis-1", "0", "Redis", "query", "");
+    await store.executeTabSql(tabId, "GET user:1\nBAD\nPING");
+    const tab = store.tabs.find((item) => item.id === tabId);
+
+    assert.deepEqual(
+      commandBodies.map((body) => body.command),
+      ["GET user:1", "BAD", "PING"],
+    );
+    assert.deepEqual(
+      tab?.results?.map((result) => result.sourceStatement),
+      ["GET user:1", "BAD", "PING"],
+    );
+    assert.deepEqual(tab?.results?.[1]?.columns, ["Error"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("mongo multi-command execution records source statements for error results", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  let insertCount = 0;
+
+  connectionStore.addEphemeralConnection({
+    ...conn("mongo-1"),
+    db_type: "mongodb",
+    port: 27017,
+  });
+
+  globalThis.fetch = withConnectionHealthMock(async (input) => {
+    const url = String(input);
+    if (url === "/api/mongo/insert-documents") {
+      insertCount += 1;
+      if (insertCount === 2) return new Response("duplicate key", { status: 500 });
+      return new Response(JSON.stringify({ affected_rows: 1 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const tabId = store.createTab("mongo-1", "accounting", "Query", "query", "");
+    await store.executeTabSql(tabId, 'db.users.insertOne({ name: "Ada" });\ndb.users.insertOne({ name: "Ada" });');
+    const tab = store.tabs.find((item) => item.id === tabId);
+
+    assert.deepEqual(
+      tab?.results?.map((result) => result.sourceStatement),
+      ['db.users.insertOne({ name: "Ada" })', 'db.users.insertOne({ name: "Ada" })'],
+    );
+    assert.deepEqual(tab?.results?.[1]?.columns, ["Error"]);
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();
@@ -3126,7 +3513,7 @@ test("query execution is scoped to the tab client session", async () => {
   }
 });
 
-test("data tab execution reuses the shared connection pool", async () => {
+test("data tab execution uses a tab-scoped client session", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());
   const connectionStore = useConnectionStore();
@@ -3152,8 +3539,57 @@ test("data tab execution reuses the shared connection pool", async () => {
   try {
     await store.executeTabSql(tabId, "select * from users");
 
-    assert.equal(executeBody.clientSessionId, undefined);
+    assert.equal(executeBody.clientSessionId, tabId);
     assert.equal(executeBody.timeoutSecs, 30);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("closing a data tab releases its tab-scoped client session", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+
+  connectionStore.addEphemeralConnection(conn("conn-1"));
+  const tabId = store.createTab("conn-1", "db", "users", "data", "public");
+  let executeBody: any;
+  const closedSessions: any[] = [];
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/execute-multi") {
+      executeBody = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify([{ columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/query/close-client-session") {
+      closedSessions.push(JSON.parse(String(init?.body ?? "{}")));
+      return new Response(JSON.stringify(true), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    await store.executeTabSql(tabId, "select * from users");
+    assert.equal(executeBody.clientSessionId, tabId);
+
+    store.closeTab(tabId, { force: true });
+
+    // closeClientConnectionSession is fire-and-forget; wait for the request to land.
+    await waitFor(() => closedSessions.some((body) => body.clientSessionId === tabId));
+    assert.ok(
+      closedSessions.some((body) => body.clientSessionId === tabId && body.connectionId === "conn-1"),
+      `expected close-client-session for tab session, got ${JSON.stringify(closedSessions)}`,
+    );
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();
@@ -3449,6 +3885,10 @@ test("query results keep readable table source labels with active database conte
       tab?.results?.map((result) => result.sourceStatement),
       ["select * from users", "select * from orders"],
     );
+    assert.equal(resultSqlForGrid(tab!), "select * from users");
+    store.setActiveResultIndex(tabId, 1);
+    tab = store.tabs.find((item) => item.id === tabId);
+    assert.equal(resultSqlForGrid(tab!), "select * from orders");
 
     await store.executeTabSql(defaultDatabaseTabId, "SELECT *\nFROM apis AS ap\nLIMIT 10;\n\nSELECT *\nFROM menus AS mn\nLIMIT 10;");
     tab = store.tabs.find((item) => item.id === defaultDatabaseTabId);
@@ -3469,6 +3909,7 @@ test("query results keep readable table source labels with active database conte
     await store.executeTabSql(tabId, "update users set active = true; select * from users");
     tab = store.tabs.find((item) => item.id === tabId);
     assert.equal(tab?.results?.[0]?.sourceLabel, undefined);
+    assert.equal(tab?.results?.[0]?.sourceStatement, "update users set active = true");
     assert.equal(tab?.results?.[1]?.sourceLabel, "db.users");
     assert.equal(tab?.results?.[1]?.sourceStatement, "select * from users");
   } finally {
@@ -3522,19 +3963,26 @@ test("reopening table structure tabs records the requested initial tab", () => {
     setActivePinia(createPinia());
     const store = useQueryStore();
 
-    const structureId = store.openTableStructure("conn-1", "db", "public", "users", "indexes");
+    const structureId = store.openTableStructure("conn-1", "db", "public", "users", "indexes", { kind: "index", name: "idx_users_email" });
     const firstTab = store.tabs.find((item) => item.id === structureId);
 
     assert.equal(firstTab?.structureInitialTab, "indexes");
     assert.equal(firstTab?.structureInitialTabRequestId, 1);
+    assert.deepEqual(firstTab?.structureInitialTarget, { kind: "index", name: "idx_users_email" });
 
-    const reusedStructureId = store.openTableStructure("conn-1", "db", "public", "users", "foreignKeys");
+    const reusedStructureId = store.openTableStructure("conn-1", "db", "public", "users", "columns", { kind: "column", name: "email" });
     const reusedTab = store.tabs.find((item) => item.id === reusedStructureId);
 
     assert.equal(reusedStructureId, structureId);
-    assert.equal(reusedTab?.structureInitialTab, "foreignKeys");
+    assert.equal(reusedTab?.structureInitialTab, "columns");
     assert.equal(reusedTab?.structureInitialTabRequestId, 2);
+    assert.deepEqual(reusedTab?.structureInitialTarget, { kind: "column", name: "email" });
     assert.equal(store.activeTabId, structureId);
+
+    store.openTableStructure("conn-1", "db", "public", "users", "foreignKeys");
+    assert.equal(reusedTab?.structureInitialTab, "foreignKeys");
+    assert.equal(reusedTab?.structureInitialTabRequestId, 3);
+    assert.equal(reusedTab?.structureInitialTarget, undefined);
   } finally {
     restoreStorage();
   }

@@ -10,6 +10,7 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || "";
 const OUT_CN = "releases-cn.json";
 const OUT_EN = "releases-en.json";
+const LATEST_EN_OUT = "latest-en.json";
 const EN_CACHE_URL = process.env.CHANGELOG_EN_CACHE_URL || "https://dl.dbxio.com/changelog/releases-en.json";
 
 const SECTION_MAP = {
@@ -49,6 +50,31 @@ export function stripDownloadSection(body) {
   return body.slice(0, idx).trim();
 }
 
+// 剥离 release notes 里的 issue 引用 (closes #xxx)，保留贡献者署名 (contributed by @xxx)。
+// 同时处理纯 closes 括号和混在 contributed by 括号里的 closes 片段。
+function stripIssueRefs(text) {
+  return text
+    // 纯 closes 括号整体去掉，如 (closes #123) 或 (closes #123, closes #456)
+    .replace(/\s*\(closes #\d+(?:,\s*closes #\d+)*\)/g, "")
+    // closes 在前、contributed by 在后，如 (closes #88, contributed by @xxx) → (contributed by @xxx)
+    .replace(/\(closes #\d+,\s*/g, "(")
+    // contributed by 在前、closes 在后，如 (contributed by @xxx, closes #123) → (contributed by @xxx)
+    .replace(/,\s*closes #\d+/g, "");
+}
+
+// 对整份 releases JSON 统一剥离 closes # 引用。cache 复用的英文翻译来自 R2，
+// 可能是旧版脚本生成的（desc 仍含 closes #），在写文件前统一清理一次。
+function stripIssueRefsInReleases(json) {
+  for (const release of json.releases || []) {
+    for (const section of release.sections || []) {
+      for (const item of section.items || []) {
+        if (item.desc) item.desc = stripIssueRefs(item.desc);
+      }
+    }
+  }
+  return json;
+}
+
 export function parseBody(body) {
   const cleaned = stripDownloadSection(body);
   const sections = [];
@@ -68,7 +94,7 @@ export function parseBody(body) {
 
     const itemMatch = line.match(/^-\s+\*\*(.+?)\*\*\s*[—–-]\s*(.+)/);
     if (itemMatch) {
-      current.items.push({ title: itemMatch[1].trim(), desc: itemMatch[2].trim() });
+      current.items.push({ title: itemMatch[1].trim(), desc: stripIssueRefs(itemMatch[2].trim()) });
       continue;
     }
 
@@ -119,6 +145,17 @@ function releaseToMarkdown(release) {
     .join("\n\n");
 }
 
+// 给应用内更新提示用的英文 notes：只取最新一条版本（releases 已按 published_at 降序），
+// 转成 md。version 用 tag（如 v0.5.47），应用端 normalize_version 后与 latest.json 的 version 校验。
+function buildLatestEnNotes(enReleasesJson) {
+  const latest = enReleasesJson.releases?.[0];
+  if (!latest) return null;
+  return {
+    version: latest.tag,
+    notes: releaseToMarkdown(latest),
+  };
+}
+
 export async function fetchCachedEnglish({ cacheUrl = EN_CACHE_URL, fetchImpl = fetch } = {}) {
   try {
     const res = await fetchImpl(cacheUrl, { headers: { Accept: "application/json" } });
@@ -134,15 +171,29 @@ export async function fetchCachedEnglish({ cacheUrl = EN_CACHE_URL, fetchImpl = 
 }
 
 export async function translateToEnglish(cnJson, { cachedEnJson = null, deepseekApiKey = DEEPSEEK_API_KEY, fetchImpl = fetch, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
-  if (!deepseekApiKey) {
-    console.warn("DEEPSEEK_API_KEY not set, skipping translation");
-    return null;
-  }
-
   const cachedByTag = new Map((cachedEnJson?.releases || []).map((release) => [release.tag, release]));
   const enReleases = [];
   let reusedCount = 0;
   let translatedCount = 0;
+  let skippedCount = 0;
+
+  // 无 API key：仅复用 R2 上的英文缓存，未命中的条目回退中文以保证文件完整。
+  // 这样本地（无 key）只要 R2 缓存新鲜也能产出英文 CHANGELOG；CI 有 key 时走正常翻译流程。
+  if (!deepseekApiKey) {
+    console.warn("DEEPSEEK_API_KEY not set, falling back to cached English translations only");
+    for (const release of cnJson.releases) {
+      const cachedRelease = cachedByTag.get(release.tag);
+      if (cachedRelease?._sourceHash === release._sourceHash) {
+        enReleases.push({ ...cachedRelease, name: release.name, date: release.date, _sourceHash: release._sourceHash });
+        reusedCount++;
+      } else {
+        enReleases.push(release);
+        skippedCount++;
+      }
+    }
+    console.log(`English changelog cache reused ${reusedCount}, skipped ${skippedCount} (no API key)`);
+    return { updatedAt: cnJson.updatedAt, releases: enReleases };
+  }
 
   for (const release of cnJson.releases) {
     const cachedRelease = cachedByTag.get(release.tag);
@@ -217,8 +268,17 @@ async function main() {
   console.log("Translating to English...");
   const enJson = await translateToEnglish(cnJson, { cachedEnJson });
   if (enJson) {
+    // cache 复用的英文翻译可能来自旧版 R2 数据（desc 含 closes # 引用），统一剥离一次
+    stripIssueRefsInReleases(enJson);
     writeFileSync(OUT_EN, JSON.stringify(enJson, null, 2));
     console.log(`Wrote ${OUT_EN}`);
+
+    // 应用内更新提示用的英文 notes（单条最新版本）
+    const latestEn = buildLatestEnNotes(enJson);
+    if (latestEn) {
+      writeFileSync(LATEST_EN_OUT, JSON.stringify(latestEn, null, 2));
+      console.log(`Wrote ${LATEST_EN_OUT}`);
+    }
   }
 
   console.log("Done!");

@@ -18,7 +18,10 @@ pub(super) fn qualified_table(dialect: StructureDialect, schema: Option<&str>, t
 
 pub(super) fn quote_ident(dialect: StructureDialect, name: &str) -> String {
     match dialect {
-        StructureDialect::Mysql | StructureDialect::ManticoreSearch | StructureDialect::Questdb => {
+        StructureDialect::Mysql
+        | StructureDialect::Doris
+        | StructureDialect::ManticoreSearch
+        | StructureDialect::Questdb => {
             format!("`{}`", name.replace('`', "``"))
         }
         StructureDialect::SqlServer => format!("[{}]", name.replace(']', "]]")),
@@ -117,7 +120,9 @@ pub(super) fn is_protected_manticore_id_column(dialect: StructureDialect, column
 pub(super) fn is_temporal_type_for_default(dialect: StructureDialect, base_type: &str) -> bool {
     let normalized = base_type.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
     match dialect {
-        StructureDialect::Mysql => matches!(normalized.as_str(), "date" | "datetime" | "timestamp" | "time" | "year"),
+        StructureDialect::Mysql | StructureDialect::Doris => {
+            matches!(normalized.as_str(), "date" | "datetime" | "timestamp" | "time" | "year")
+        }
         StructureDialect::Postgres => {
             matches!(
                 normalized.as_str(),
@@ -183,7 +188,7 @@ pub(super) fn is_temporal_expression(value: &str) -> bool {
 pub(super) fn is_string_type_for_default(dialect: StructureDialect, base_type: &str) -> bool {
     let normalized = base_type.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
     match dialect {
-        StructureDialect::Mysql => matches!(
+        StructureDialect::Mysql | StructureDialect::Doris => matches!(
             normalized.as_str(),
             "char"
                 | "varchar"

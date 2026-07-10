@@ -2,6 +2,8 @@ package com.dbx.agent.test;
 
 import com.dbx.agent.DatabaseAgent;
 import com.dbx.agent.ExecuteQueryOptions;
+import com.dbx.agent.QueryPageOptions;
+import com.dbx.agent.QueryPageResult;
 import com.dbx.agent.QueryResult;
 import org.junit.jupiter.api.Test;
 
@@ -15,7 +17,7 @@ public abstract class JdbcFakeExecutionBehaviorTest {
     protected abstract String resultSetSql();
 
     @Test
-    void executesNonSelectStatementsThatReturnResultSets() {
+    protected void executesNonSelectStatementsThatReturnResultSets() {
         DatabaseAgent agent = createAgent();
         TestSupport.setPrivateConnection(agent, JdbcAgentFake.connection());
 
@@ -27,7 +29,7 @@ public abstract class JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
-    void appliesExecutionRowAndFetchLimitsToJdbcStatements() {
+    protected void appliesExecutionRowAndFetchLimitsToJdbcStatements() {
         DatabaseAgent agent = createAgent();
         TestSupport.setPrivateConnection(agent, JdbcAgentFake.connection());
 
@@ -37,11 +39,31 @@ public abstract class JdbcFakeExecutionBehaviorTest {
         assertEquals(asList("setMaxRows:2", "setFetchSize:25", "execute"), JdbcAgentFake.calls);
     }
 
-    private static java.util.List<String> asList(String first, String second) {
+    @Test
+    protected void pagedQueryExecutionPassesCallerFetchSizeToStatement() {
+        DatabaseAgent agent = createAgent();
+        TestSupport.setPrivateConnection(agent, JdbcAgentFake.connection());
+
+        agent.executeQueryPage(resultSetSql(), null, new QueryPageOptions(100, 500, 1000));
+
+        assertEquals(asList("setFetchSize:500", "execute"), JdbcAgentFake.calls);
+    }
+
+    @Test
+    protected void tableReadPassesCallerFetchSizeToStatement() {
+        DatabaseAgent agent = createAgent();
+        TestSupport.setPrivateConnection(agent, JdbcAgentFake.connection());
+
+        agent.startTableRead(resultSetSql(), null, new QueryPageOptions(100, 500, 1000));
+
+        assertEquals(asList("setFetchSize:500", "execute"), JdbcAgentFake.calls);
+    }
+
+    protected static java.util.List<String> asList(String first, String second) {
         return java.util.Arrays.asList(first, second);
     }
 
-    private static java.util.List<String> asList(String first, String second, String third) {
+    protected static java.util.List<String> asList(String first, String second, String third) {
         return java.util.Arrays.asList(first, second, third);
     }
 }

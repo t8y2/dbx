@@ -13,17 +13,42 @@ beforeEach(() => {
   apiMock.findStatementAtCursor.mockReset();
 });
 
-test("mongodb backend resolution keeps the full text when nothing is selected", async () => {
+test("mongodb backend resolution uses the current command when configured", async () => {
   apiMock.findStatementAtCursor.mockResolvedValue("db.users.insertOne({ name: 'ignored' })");
 
-  const fullSql = "db.users.insertOne({ name: 'Ada' });\ndb.users.insertOne({ name: 'Grace' });";
+  const fullSql = 'db.users.find({ name: "Ada" });\ndb.users.find({ name: "Grace" });\ndb.users.find({ name: "Linus" });';
   const resolved = await resolveExecutableSqlWithBackend(fullSql, "", {
     mode: "current",
     cursorPos: fullSql.indexOf("Grace"),
     databaseType: "mongodb",
   });
 
+  assert.equal(resolved, 'db.users.find({ name: "Grace" })');
+  assert.equal(apiMock.findStatementAtCursor.mock.calls.length, 0);
+});
+
+test("mongodb backend resolution keeps the full text in all mode", async () => {
+  const fullSql = 'db.users.find({ name: "Ada" });\ndb.users.find({ name: "Grace" });';
+  const resolved = await resolveExecutableSqlWithBackend(fullSql, "", {
+    mode: "all",
+    cursorPos: fullSql.indexOf("Grace"),
+    databaseType: "mongodb",
+  });
+
   assert.equal(resolved, fullSql);
+  assert.equal(apiMock.findStatementAtCursor.mock.calls.length, 0);
+});
+
+test("mongodb backend resolution prefers the manual selection", async () => {
+  const fullSql = 'db.users.find({ name: "Ada" });\ndb.users.find({ name: "Grace" });';
+  const selectedSql = 'db.users.find({ name: "Ada" })';
+  const resolved = await resolveExecutableSqlWithBackend(fullSql, selectedSql, {
+    mode: "current",
+    cursorPos: fullSql.indexOf("Grace"),
+    databaseType: "mongodb",
+  });
+
+  assert.equal(resolved, selectedSql);
   assert.equal(apiMock.findStatementAtCursor.mock.calls.length, 0);
 });
 

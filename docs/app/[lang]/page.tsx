@@ -45,14 +45,14 @@ async function getGitHubStarLabel() {
 function metrics(starLabel: string) {
   return {
     en: [
-      { value: "~15 MB", label: "desktop installer" },
-      { value: "50+", label: "database engines" },
+      { value: "~20 MB", label: "desktop installer" },
+      { value: "60+", label: "database engines" },
       { value: "2 modes", label: "desktop and Docker" },
       { value: starLabel, label: "GitHub stars, fully open-source" },
     ],
     cn: [
-      { value: "~15 MB", label: "桌面安装包" },
-      { value: "50+", label: "数据库引擎" },
+      { value: "~20 MB", label: "桌面安装包" },
+      { value: "60+", label: "数据库引擎" },
       { value: "2 种模式", label: "桌面与 Docker" },
       { value: starLabel, label: "GitHub Star，完全开源" },
     ],
@@ -370,7 +370,7 @@ const testimonials = {
 
 const i18nText = {
   en: {
-    heroTitle: "15 MB to manage 50+ databases!",
+    heroTitle: "20 MB to manage 60+ databases!",
     heroSubtitle: "DBX brings connections, SQL editing, data grids, schema tools, AI assistance, and self-hosted access into one lightweight product.",
     download: "Download DBX",
     downloadName: "Download DBX",
@@ -392,7 +392,7 @@ const i18nText = {
     docker: "Docker setup",
   },
   cn: {
-    heroTitle: "15MB，管理50+种数据库！",
+    heroTitle: "20MB，管理60+种数据库！",
     heroSubtitle: "DBX 将连接管理、SQL 编辑、数据表格、结构工具、AI 助手和自托管访问放进一个轻量产品里。",
     download: "下载 DBX",
     downloadName: "下载 DBX",
@@ -419,11 +419,11 @@ import { buildMetadata } from "@/lib/metadata";
 
 const landingMeta = {
   en: {
-    title: "DBX - 15 MB to manage 50+ databases!",
+    title: "DBX - 20 MB to manage 60+ databases!",
     description: "DBX brings connections, SQL editing, data grids, schema tools, AI assistance, and self-hosted access into one lightweight product.",
   },
   cn: {
-    title: "DBX - 15MB，管理50+种数据库！",
+    title: "DBX - 20MB，管理60+种数据库！",
     description: "DBX 将连接管理、SQL 编辑、数据表格、结构工具、AI 助手和自托管访问放进一个轻量产品里。",
   },
 };

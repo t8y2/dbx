@@ -19,6 +19,34 @@ pub struct LinkedServerInfo {
     pub data_source: Option<String>,
 }
 
+/// A catalog exposed by a multi-catalog engine (e.g. Doris / StarRocks).
+/// `internal` is the engine's native catalog; other entries are external
+/// catalogs (iceberg, hive, jdbc, ...) federated through the same connection.
+///
+/// Note: the built-in catalog is named `internal` in Doris (Type=`internal`)
+/// but `default_catalog` in StarRocks (Type=`Internal`). The `catalog_type`
+/// column is the cross-engine signal, so `is_internal()` matches it
+/// case-insensitively and falls back to the canonical Doris name when the
+/// column is absent (very old / proxied deployments).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogInfo {
+    pub name: String,
+    pub catalog_type: String,
+    pub is_current: bool,
+    pub comment: Option<String>,
+}
+
+impl CatalogInfo {
+    /// Whether this is the engine's built-in (non-federated) catalog.
+    pub fn is_internal(&self) -> bool {
+        if !self.catalog_type.trim().is_empty() {
+            self.catalog_type.eq_ignore_ascii_case("internal")
+        } else {
+            self.name == "internal"
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableInfo {
     pub name: String,
@@ -40,6 +68,14 @@ pub struct ObjectInfo {
     pub updated_at: Option<String>,
     pub parent_schema: Option<String>,
     pub parent_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtensionInfo {
+    pub name: String,
+    pub version: String,
+    pub comment: Option<String>,
+    pub schema: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +104,8 @@ pub struct ObjectSource {
     pub object_type: ObjectSourceKind,
     pub schema: Option<String>,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editable: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +120,8 @@ pub struct ColumnInfo {
     pub numeric_precision: Option<i32>,
     pub numeric_scale: Option<i32>,
     pub character_maximum_length: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enum_values: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

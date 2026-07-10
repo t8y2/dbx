@@ -25,7 +25,7 @@ pub(super) fn column_definition(dialect: StructureDialect, column: &EditableStru
             parts.push("ON UPDATE CURRENT_TIMESTAMP".to_string());
         }
     }
-    if dialect == StructureDialect::Mysql && !clean(&column.comment).is_empty() {
+    if matches!(dialect, StructureDialect::Mysql | StructureDialect::Doris) && !clean(&column.comment).is_empty() {
         parts.push(format!("COMMENT {}", quote_string(&clean(&column.comment))));
     }
     parts.join(" ")
@@ -138,6 +138,22 @@ pub(super) fn normalize_column_data_type(dialect: StructureDialect, data_type: &
         }
     }
 
+    if is_oracle_like(dialect) && is_oracle_lengthless_type(base_type) {
+        // Dameng/Oracle integer aliases do not accept MySQL-style display widths like INTEGER(11).
+        return base_type.to_string();
+    }
+
+    if dialect == StructureDialect::SqlServer && is_sqlserver_lengthless_type(base_type) {
+        // SQL Server exact integer and legacy LOB types do not accept MySQL-style display widths.
+        return base_type.to_string();
+    }
+
+    if dialect == StructureDialect::SqlServer && is_sqlserver_float_with_scale(base_type, params) {
+        // SQL Server float only accepts a single integer mantissa bit count (1–53),
+        // not comma-separated precision/scale like float(10,2).
+        return base_type.to_string();
+    }
+
     if is_temporal_precision_type(dialect, base_type) {
         return if is_valid_temporal_precision(params, dialect) {
             format!("{base_type}({params})")
@@ -147,6 +163,65 @@ pub(super) fn normalize_column_data_type(dialect: StructureDialect, data_type: &
     }
 
     trimmed.to_string()
+}
+
+fn is_oracle_lengthless_type(base_type: &str) -> bool {
+    let normalized = base_type.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "binary_double"
+            | "binary_float"
+            | "bigint"
+            | "boolean"
+            | "bool"
+            | "byte"
+            | "date"
+            | "double"
+            | "double precision"
+            | "float"
+            | "integer"
+            | "int"
+            | "long"
+            | "long raw"
+            | "nclob"
+            | "real"
+            | "smallint"
+            | "text"
+            | "tinyint"
+    )
+}
+
+fn is_sqlserver_lengthless_type(base_type: &str) -> bool {
+    let normalized = base_type.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "bigint"
+            | "bit"
+            | "date"
+            | "datetime"
+            | "image"
+            | "int"
+            | "integer"
+            | "money"
+            | "ntext"
+            | "real"
+            | "smalldatetime"
+            | "smallint"
+            | "smallmoney"
+            | "sql_variant"
+            | "text"
+            | "timestamp"
+            | "tinyint"
+            | "uniqueidentifier"
+            | "xml"
+    )
+}
+
+/// SQL Server `float` accepts a single integer mantissa bit count (1–53)
+/// but rejects comma-separated precision/scale like `float(10,2)`.
+fn is_sqlserver_float_with_scale(base_type: &str, params: &str) -> bool {
+    let normalized = base_type.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    normalized == "float" && params.contains(',')
 }
 
 fn normalize_mysql_numeric_attribute_type(base_type: &str, params: &str) -> Option<String> {

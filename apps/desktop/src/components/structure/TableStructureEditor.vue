@@ -28,7 +28,7 @@ import { PRESET_FIELDS_TEMPLATE_ID, createTableColumnTemplateDrafts } from "@/li
 import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { canAddTableStructureColumn, getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
 import { connectionObjectTreeQuerySchema, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
-import type { TableInfoTab, TableStructureEditorDraft } from "@/types/database";
+import type { TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
 import {
   buildStructureTargetLabel,
   combineDataTypeForDatabase,
@@ -62,6 +62,12 @@ const historyStore = useHistoryStore();
 const settingsStore = useSettingsStore();
 const { toast } = useToast();
 const rootRef = ref<HTMLElement>();
+type StructureScrollerRef = HTMLElement | { $el?: HTMLElement };
+const columnsScrollerRef = ref<StructureScrollerRef>();
+const indexesScrollerRef = ref<StructureScrollerRef>();
+const foreignKeysScrollerRef = ref<StructureScrollerRef>();
+const triggersScrollerRef = ref<StructureScrollerRef>();
+const ddlScrollerRef = ref<StructureScrollerRef>();
 const dynamicDataTypeOptionsCache = new Map<string, string[]>();
 
 const sqlHighlighter = ref<SqlHighlighter>();
@@ -85,6 +91,7 @@ const props = defineProps<{
   tableName: string;
   initialTab?: TableInfoTab;
   initialTabRequestId?: number;
+  initialTarget?: TableStructureEditorTarget;
   draft?: TableStructureEditorDraft;
 }>();
 
@@ -494,8 +501,12 @@ const resizing = ref<{ col: number; startX: number; startW: number } | null>(nul
 const columnSearchInputRef = ref<InstanceType<typeof Input>>();
 const columnSearchText = ref("");
 const highlightedColumnId = ref<string | null>(null);
+const indexSearchInputRef = ref<InstanceType<typeof Input>>();
+const indexSearchText = ref("");
+const highlightedIndexId = ref<string | null>(null);
 const sqlPreviewCollapsed = ref(loadSqlPreviewCollapsed());
 let columnHighlightTimer: ReturnType<typeof window.setTimeout> | undefined;
+let indexHighlightTimer: ReturnType<typeof window.setTimeout> | undefined;
 
 watch(
   structureDensity,
@@ -689,6 +700,12 @@ const filteredColumnRowIds = computed(() => {
   );
 });
 const columnSearchMatchCount = computed(() => (columnSearchText.value.trim() ? filteredColumnRowIds.value.size : 0));
+const filteredIndexRowIds = computed(() => {
+  const query = indexSearchText.value.trim().toLowerCase();
+  if (!query) return new Set<string>();
+  return new Set(indexes.value.filter((index) => indexMatchesSearch(index, query)).map((index) => index.id));
+});
+const indexSearchMatchCount = computed(() => (indexSearchText.value.trim() ? filteredIndexRowIds.value.size : 0));
 const foreignKeyActionOptions = ["", "CASCADE", "SET NULL", "RESTRICT", "NO ACTION"];
 const triggerTimingOptions = ["BEFORE", "AFTER"];
 const triggerEventOptions = ["INSERT", "UPDATE", "DELETE"];
@@ -723,9 +740,62 @@ let restoringDraft = false;
 let syncingDraft = false;
 let draftHydrated = false;
 let hydratingRestoredDraft = false;
+let structureScrollFrame = 0;
+// A context-menu target may arrive before metadata rows render, so search text
+// and row scrolling are tracked separately for each request.
+let appliedInitialTargetSearchKey = "";
+let appliedInitialTargetScrollKey = "";
 
 function cloneDraftValue<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+const structureScrollPositions = ref<Partial<Record<TableInfoTab, TableStructureEditorViewport>>>({});
+
+function structureScrollerElement(scroller: StructureScrollerRef | undefined): HTMLElement | undefined {
+  if (!scroller) return undefined;
+  if (scroller instanceof HTMLElement) return scroller;
+  return scroller.$el instanceof HTMLElement ? scroller.$el : undefined;
+}
+
+function structureScrollerForTab(tab: TableInfoTab): HTMLElement | undefined {
+  if (tab === "columns") return structureScrollerElement(columnsScrollerRef.value);
+  if (tab === "indexes") return structureScrollerElement(indexesScrollerRef.value);
+  if (tab === "foreignKeys") return structureScrollerElement(foreignKeysScrollerRef.value);
+  if (tab === "triggers") return structureScrollerElement(triggersScrollerRef.value);
+  if (tab === "ddl") return structureScrollerElement(ddlScrollerRef.value);
+  return undefined;
+}
+
+function restoreStructureScrollPosition(tab = activeTab.value) {
+  const position = structureScrollPositions.value[tab];
+  if (!position) return;
+  nextTick(() => {
+    const scroller = structureScrollerForTab(tab);
+    if (!scroller) return;
+    scroller.scrollTop = Math.max(0, position.scrollTop);
+    scroller.scrollLeft = Math.max(0, position.scrollLeft);
+  });
+}
+
+function onStructureContentScroll(tab: TableInfoTab, event: Event) {
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLElement)) return;
+  const position: TableStructureEditorViewport = {
+    scrollTop: Math.max(0, Math.round(target.scrollTop)),
+    scrollLeft: Math.max(0, Math.round(target.scrollLeft)),
+  };
+  const previous = structureScrollPositions.value[tab];
+  if (previous?.scrollTop === position.scrollTop && previous.scrollLeft === position.scrollLeft) return;
+  structureScrollPositions.value = {
+    ...structureScrollPositions.value,
+    [tab]: position,
+  };
+  if (structureScrollFrame) return;
+  structureScrollFrame = window.requestAnimationFrame(() => {
+    structureScrollFrame = 0;
+    syncDraftToParent();
+  });
 }
 
 function createCurrentDraft(initialized = true): TableStructureEditorDraft {
@@ -738,6 +808,7 @@ function createCurrentDraft(initialized = true): TableStructureEditorDraft {
     indexes: cloneDraftValue(indexes.value),
     foreignKeys: cloneDraftValue(foreignKeys.value),
     triggers: cloneDraftValue(triggers.value),
+    scrollPositions: cloneDraftValue(structureScrollPositions.value),
     initialized,
   };
 }
@@ -761,8 +832,10 @@ function restoreDraft(draft: TableStructureEditorDraft) {
   indexes.value = cloneDraftValue(draft.indexes || []);
   foreignKeys.value = cloneDraftValue(draft.foreignKeys || []);
   triggers.value = cloneDraftValue(draft.triggers || []);
+  structureScrollPositions.value = cloneDraftValue(draft.scrollPositions || {});
   restoringDraft = false;
   draftHydrated = !needsColumnDraftMetadataHydration();
+  restoreStructureScrollPosition();
 }
 
 function needsColumnDraftMetadataHydration() {
@@ -977,6 +1050,12 @@ function resetState() {
   newTableName.value = "";
   tableComment.value = "";
   originalTableComment.value = "";
+  columnSearchText.value = "";
+  highlightedColumnId.value = null;
+  indexSearchText.value = "";
+  highlightedIndexId.value = null;
+  appliedInitialTargetSearchKey = "";
+  appliedInitialTargetScrollKey = "";
 }
 
 async function reloadStructureFromDatabase() {
@@ -1441,6 +1520,76 @@ function onColumnSearchKeydown(event: KeyboardEvent) {
   scrollToColumnSearchMatch(event.shiftKey ? -1 : 1);
 }
 
+function indexMatchesSearch(index: EditableStructureIndex, searchQuery = indexSearchText.value.trim().toLowerCase()): boolean {
+  if (!searchQuery) return false;
+  return [index.name, toColumnNames(index.columns), index.includedColumns.join(", "), index.indexType, index.filter, index.comment].some((value) =>
+    String(value ?? "")
+      .toLowerCase()
+      .includes(searchQuery),
+  );
+}
+
+function indexFieldMatchesSearch(value: string | null | undefined): boolean {
+  const query = indexSearchText.value.trim().toLowerCase();
+  return (
+    !!query &&
+    String(value ?? "")
+      .toLowerCase()
+      .includes(query)
+  );
+}
+
+function indexRowClass(index: EditableStructureIndex) {
+  const isSearchMatch = filteredIndexRowIds.value.has(index.id);
+  return {
+    "bg-destructive/5 opacity-60": index.markedForDrop,
+    "structure-column-search-match": isSearchMatch,
+    "structure-column-search-current": highlightedIndexId.value === index.id,
+  };
+}
+
+function indexSearchFieldClass(index: EditableStructureIndex, value: string | null | undefined) {
+  const matches = indexFieldMatchesSearch(value);
+  return {
+    "!border-primary/60 !bg-primary/10": matches,
+    "!border-primary !ring-2 !ring-primary/30": matches && highlightedIndexId.value === index.id,
+  };
+}
+
+function focusIndexSearch() {
+  activeTab.value = "indexes";
+  void nextTick(() => {
+    const input = indexSearchInputRef.value?.$el as HTMLInputElement | undefined;
+    input?.focus();
+    input?.select();
+  });
+}
+
+function scrollToIndexSearchMatch(direction: 1 | -1 = 1) {
+  const query = indexSearchText.value.trim();
+  if (!query) {
+    focusIndexSearch();
+    return;
+  }
+  const rows = Array.from(rootRef.value?.querySelectorAll<HTMLElement>("[data-index-row-index]") ?? []);
+  const matches = indexes.value.map((index, rowIndex) => ({ index, rowIndex })).filter(({ index }) => indexMatchesSearch(index));
+  if (!matches.length) return;
+  const currentIndex = highlightedIndexId.value ? matches.findIndex(({ index }) => index.id === highlightedIndexId.value) : -1;
+  const nextMatch = matches[(currentIndex + direction + matches.length) % matches.length] ?? matches[0];
+  highlightedIndexId.value = nextMatch.index.id;
+  rows[nextMatch.rowIndex]?.scrollIntoView({ block: "center", inline: "nearest" });
+  if (indexHighlightTimer) window.clearTimeout(indexHighlightTimer);
+  indexHighlightTimer = window.setTimeout(() => {
+    highlightedIndexId.value = null;
+  }, 1800);
+}
+
+function onIndexSearchKeydown(event: KeyboardEvent) {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  scrollToIndexSearchMatch(event.shiftKey ? -1 : 1);
+}
+
 function columnDragInsertionIndex(index: number, event: DragEvent): number {
   const target = event.currentTarget;
   if (!(target instanceof HTMLElement)) return index;
@@ -1816,16 +1965,18 @@ function unregisterStructureEditorShortcuts() {
 onMounted(() => {
   resetState();
   applyInitialStructureTab();
+  applyInitialStructureTarget();
   registerStructureEditorShortcuts();
   void loadDynamicDataTypeOptions();
   if (props.draft?.initialized) {
     restoreDraft(props.draft);
     applyInitialStructureTab();
-    void hydrateRestoredDraftFromDatabase();
+    applyInitialStructureTarget();
+    void hydrateRestoredDraftFromDatabase().then(() => applyInitialStructureTarget());
   } else if (isCreateMode.value) {
     markDraftHydratedAndSync();
   } else {
-    void loadStructure(false, FULL_STRUCTURE_REFRESH_SCOPE, true, { blockSecondaryMetadata: true });
+    void loadStructure(false, FULL_STRUCTURE_REFRESH_SCOPE, true, { blockSecondaryMetadata: true }).then(() => applyInitialStructureTarget());
   }
 });
 
@@ -1834,8 +1985,10 @@ onActivated(() => {
   void loadDynamicDataTypeOptions();
   if (props.draft?.initialized && !draftHydrated) {
     restoreDraft(props.draft);
-    void hydrateRestoredDraftFromDatabase();
+    applyInitialStructureTarget();
+    void hydrateRestoredDraftFromDatabase().then(() => applyInitialStructureTarget());
   }
+  restoreStructureScrollPosition();
 });
 onDeactivated(unregisterStructureEditorShortcuts);
 onBeforeUnmount(() => {
@@ -1843,6 +1996,8 @@ onBeforeUnmount(() => {
   unregisterStructureEditorShortcuts();
   clearSqlPreviewState();
   if (columnHighlightTimer) window.clearTimeout(columnHighlightTimer);
+  if (indexHighlightTimer) window.clearTimeout(indexHighlightTimer);
+  if (structureScrollFrame) window.cancelAnimationFrame(structureScrollFrame);
   persistStructureDensity();
 });
 
@@ -1869,13 +2024,53 @@ function applyInitialStructureTab() {
   activeTab.value = resolveStructureMetadataTab(props.initialTab);
 }
 
+function initialTargetKey(target: TableStructureEditorTarget): string {
+  return `${props.initialTabRequestId ?? 0}:${target.kind}:${target.name}`;
+}
+
+function applyInitialStructureTarget() {
+  const target = props.initialTarget;
+  const targetName = target?.name.trim();
+  if (!target || !targetName) return;
+
+  const key = initialTargetKey(target);
+  if (appliedInitialTargetSearchKey !== key) {
+    if (target.kind === "column") {
+      activeTab.value = resolveStructureMetadataTab("columns");
+      columnSearchText.value = targetName;
+      highlightedColumnId.value = null;
+    } else {
+      activeTab.value = resolveStructureMetadataTab("indexes");
+      indexSearchText.value = targetName;
+      highlightedIndexId.value = null;
+    }
+    appliedInitialTargetSearchKey = key;
+  }
+
+  if (appliedInitialTargetScrollKey === key) return;
+  const hasMatch = target.kind === "column" ? columns.value.some((column) => columnMatchesSearch(column)) : indexes.value.some((index) => indexMatchesSearch(index));
+  if (!hasMatch) return;
+  appliedInitialTargetScrollKey = key;
+  void nextTick(() => {
+    if (target.kind === "column") {
+      scrollToColumnSearchMatch(1);
+    } else {
+      scrollToIndexSearchMatch(1);
+    }
+  });
+}
+
 watch(tableMetadataCapabilities, (capabilities) => {
   if (!isStructureMetadataTabSupported(activeTab.value, capabilities)) activeTab.value = firstStructureMetadataTab(capabilities);
 });
 
-watch([() => props.initialTab, () => props.initialTabRequestId], () => {
-  if (!props.initialTab) return;
-  applyInitialStructureTab();
+watch([() => props.initialTab, () => props.initialTabRequestId, () => props.initialTarget], () => {
+  if (props.initialTab) applyInitialStructureTab();
+  applyInitialStructureTarget();
+});
+
+watch([columns, indexes], () => {
+  applyInitialStructureTarget();
 });
 
 watch([() => props.connectionId, () => props.database, databaseType], () => {
@@ -1893,6 +2088,8 @@ watch(
 
 watch(activeTab, () => {
   highlightedColumnId.value = null;
+  highlightedIndexId.value = null;
+  restoreStructureScrollPosition();
   syncDraftToParent();
 });
 
@@ -2036,6 +2233,19 @@ watch(activeTab, (tab) => {
                 </TooltipTrigger>
                 <TooltipContent>{{ t("structureEditor.configureColumnTemplates") }}</TooltipContent>
               </Tooltip>
+              <div v-if="activeTab === 'indexes'" class="relative flex w-40 shrink-0 items-center">
+                <Search :class="[structureIconClass, 'pointer-events-none absolute left-2 text-muted-foreground']" />
+                <Input ref="indexSearchInputRef" v-model="indexSearchText" :placeholder="t('structureEditor.searchIndexes')" :class="[structureControlClass, 'pl-7 pr-14 text-[length:var(--structure-font-size)] placeholder:text-[length:var(--structure-font-size)]']" @keydown="onIndexSearchKeydown" />
+                <button
+                  v-if="indexSearchText"
+                  type="button"
+                  class="absolute right-1.5 top-1/2 -translate-y-1/2 rounded px-1 text-[length:var(--structure-font-size)] text-muted-foreground hover:bg-muted hover:text-foreground"
+                  :title="t('structureEditor.nextIndexMatch')"
+                  @click="scrollToIndexSearchMatch(1)"
+                >
+                  {{ indexSearchMatchCount }}
+                </button>
+              </div>
               <Button v-if="activeTab === 'indexes'" size="sm" :class="structureToolbarButtonClass" :disabled="!structureCapabilities.createIndex || indexesLoading" @click="addIndex">
                 <Plus :class="structureIconClass" />
                 {{ t("structureEditor.addIndex") }}
@@ -2051,7 +2261,7 @@ watch(activeTab, (tab) => {
             </div>
           </div>
 
-          <TabsContent v-if="tableMetadataCapabilities.columns" value="columns" class="m-0 min-h-0 flex-1 overflow-auto p-0">
+          <TabsContent ref="columnsScrollerRef" v-if="tableMetadataCapabilities.columns" value="columns" class="m-0 min-h-0 flex-1 overflow-auto p-0" @scroll.passive="onStructureContentScroll('columns', $event)">
             <table class="border-separate border-spacing-0 text-[length:var(--structure-font-size)] leading-[var(--structure-line-height)]" :style="{ minWidth: visibleColWidths.reduce((a, w) => a + w, 0) + 'px' }">
               <thead class="sticky top-0 z-10 bg-background">
                 <tr>
@@ -2322,7 +2532,7 @@ watch(activeTab, (tab) => {
             </table>
           </TabsContent>
 
-          <TabsContent v-if="tableMetadataCapabilities.indexes" value="indexes" class="m-0 min-h-0 flex-1 overflow-auto p-0">
+          <TabsContent ref="indexesScrollerRef" v-if="tableMetadataCapabilities.indexes" value="indexes" class="m-0 min-h-0 flex-1 overflow-auto p-0" @scroll.passive="onStructureContentScroll('indexes', $event)">
             <div v-if="indexesLoading" class="flex items-center justify-center gap-2 py-10 text-muted-foreground">
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
@@ -2345,9 +2555,9 @@ watch(activeTab, (tab) => {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="index in indexes" :key="index.id" :class="index.markedForDrop ? 'bg-destructive/5 opacity-60' : ''" :data-new-index-row="!index.original ? 'true' : undefined">
+                <tr v-for="(index, rowIndex) in indexes" :key="index.id" :class="indexRowClass(index)" :data-new-index-row="!index.original ? 'true' : undefined" :data-index-row-index="rowIndex">
                   <td :class="structureCellClass">
-                    <Input :model-value="index.name" :class="structureControlClass" :disabled="!canEditIndexDraft(index)" data-index-name-input @update:model-value="(value: string | number) => onIndexNameInput(index, value)" />
+                    <Input :model-value="index.name" :class="[structureControlClass, indexSearchFieldClass(index, index.name)]" :disabled="!canEditIndexDraft(index)" data-index-name-input @update:model-value="(value: string | number) => onIndexNameInput(index, value)" />
                   </td>
                   <td :class="[structureCellClass, 'overflow-hidden']">
                     <DropdownMenu v-if="canEditIndexDraft(index)">
@@ -2405,10 +2615,10 @@ watch(activeTab, (tab) => {
                     <span v-else class="text-[length:var(--structure-font-size)] text-muted-foreground">{{ index.includedColumns.join(", ") }}</span>
                   </td>
                   <td :class="structureCellClass">
-                    <Input v-model="index.filter" :class="structureMonoControlClass" :placeholder="index.original?.filter || ''" :disabled="!canEditIndexFilter(index)" />
+                    <Input v-model="index.filter" :class="[structureMonoControlClass, indexSearchFieldClass(index, index.filter)]" :placeholder="index.original?.filter || ''" :disabled="!canEditIndexFilter(index)" />
                   </td>
                   <td :class="structureCellClass">
-                    <Input v-model="index.comment" :class="structureControlClass" :disabled="!canEditIndexComment(index)" />
+                    <Input v-model="index.comment" :class="[structureControlClass, indexSearchFieldClass(index, index.comment)]" :disabled="!canEditIndexComment(index)" />
                   </td>
                   <td :class="structureLastCellClass">
                     <Badge v-if="index.isPrimary" variant="outline">{{ t("structureEditor.primary") }}</Badge>
@@ -2426,7 +2636,7 @@ watch(activeTab, (tab) => {
             </table>
           </TabsContent>
 
-          <TabsContent v-if="tableMetadataCapabilities.foreignKeys" value="foreignKeys" class="m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]">
+          <TabsContent ref="foreignKeysScrollerRef" v-if="tableMetadataCapabilities.foreignKeys" value="foreignKeys" class="m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]" @scroll.passive="onStructureContentScroll('foreignKeys', $event)">
             <div v-if="foreignKeysLoading" class="flex items-center justify-center gap-2 py-10 text-muted-foreground">
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
@@ -2476,7 +2686,7 @@ watch(activeTab, (tab) => {
             </div>
           </TabsContent>
 
-          <TabsContent v-if="tableMetadataCapabilities.triggers" value="triggers" class="m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]">
+          <TabsContent ref="triggersScrollerRef" v-if="tableMetadataCapabilities.triggers" value="triggers" class="m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]" @scroll.passive="onStructureContentScroll('triggers', $event)">
             <div v-if="triggersLoading" class="flex items-center justify-center gap-2 py-10 text-muted-foreground">
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
@@ -2525,7 +2735,7 @@ watch(activeTab, (tab) => {
             </div>
           </TabsContent>
 
-          <TabsContent v-if="tableMetadataCapabilities.ddl" value="ddl" class="m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]">
+          <TabsContent ref="ddlScrollerRef" v-if="tableMetadataCapabilities.ddl" value="ddl" class="m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]" @scroll.passive="onStructureContentScroll('ddl', $event)">
             <div v-if="ddlLoading" class="flex items-center justify-center gap-2 py-10 text-muted-foreground">
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}

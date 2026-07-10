@@ -1,3 +1,4 @@
+import { parseShortcutParts } from "@/lib/editor/shortcutDisplay";
 import { normalizeShortcutSettings, type ShortcutActionId, type ShortcutSettings } from "@/lib/editor/shortcutRegistry";
 
 export interface ShortcutLikeEvent {
@@ -11,11 +12,13 @@ export interface ShortcutLikeEvent {
 
 function normalizeKey(key: string): string {
   if (key === " ") return "Space";
+  if (key === "+" || key === "Plus") return "Plus";
   return key.length === 1 ? key.toLowerCase() : key;
 }
 
 function shortcutKeyName(key: string): string | null {
   if (key === " ") return "Space";
+  if (key === "+") return "Plus";
   if (["Control", "Meta", "Shift", "Alt"].includes(key)) return null;
   if (key.length === 1) return key.toUpperCase();
   return key;
@@ -28,7 +31,7 @@ export function eventToShortcut(event: ShortcutLikeEvent): string | null {
   if (!key) return null;
 
   const hasModifier = !!event.metaKey || !!event.ctrlKey || !!event.altKey || !!event.shiftKey;
-  if (!hasModifier && key.length === 1) return null;
+  if (!hasModifier && event.key.length === 1 && event.key !== " ") return null;
 
   const parts: string[] = [];
   if (event.shiftKey) parts.push("Shift");
@@ -40,7 +43,7 @@ export function eventToShortcut(event: ShortcutLikeEvent): string | null {
 
 export function matchesShortcut(event: ShortcutLikeEvent, shortcut: string): boolean {
   if (event.isComposing || !shortcut) return false;
-  const parts = shortcut.split("+");
+  const parts = parseShortcutParts(shortcut);
   const key = parts[parts.length - 1] ?? "";
   const modifiers = new Set(parts.slice(0, -1));
   const usesMod = modifiers.has("Mod");
@@ -71,6 +74,10 @@ export function isExecuteSqlShortcut(event: ShortcutLikeEvent, shortcuts?: Parti
 
 export function isCloseTabShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("closeTab", shortcuts));
+}
+
+export function isSendSelectionToAiShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("sendSelectionToAi", shortcuts));
 }
 
 export function isNewQueryShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {

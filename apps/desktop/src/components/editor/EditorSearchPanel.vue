@@ -3,8 +3,9 @@ import { ref, nextTick, onBeforeUnmount, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { EditorView } from "@codemirror/view";
 import { EditorSelection } from "@codemirror/state";
-import { SearchQuery, setSearchQuery, openSearchPanel as cmOpenSearchPanel, findNext as cmFindNext, findPrevious as cmFindPrevious, replaceNext as cmReplaceNext, replaceAll as cmReplaceAll } from "@codemirror/search";
+import { setSearchQuery, openSearchPanel as cmOpenSearchPanel, findNext as cmFindNext, findPrevious as cmFindPrevious, replaceNext as cmReplaceNext, replaceAll as cmReplaceAll } from "@codemirror/search";
 import { ChevronUp, ChevronDown, ChevronRight, X } from "@lucide/vue";
+import { createEditorSearchQuery } from "@/lib/editor/editorSearchQuery";
 
 const props = defineProps<{
   view: EditorView | null;
@@ -26,17 +27,25 @@ const replaceInputRef = ref<HTMLInputElement>();
 const matchCountLimited = ref(false);
 
 const SEARCH_UPDATE_DELAY_MS = 120;
+const DOCUMENT_SEARCH_UPDATE_DELAY_MS = 500;
 const MATCH_COUNT_LIMIT = 1000;
 
 let searchUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+let documentSearchUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearDocumentSearchUpdate() {
+  if (!documentSearchUpdateTimer) return;
+  clearTimeout(documentSearchUpdateTimer);
+  documentSearchUpdateTimer = null;
+}
 
 function dispatchSearchQuery() {
   const v = props.view;
   if (!v) return;
-  const q = new SearchQuery({
+  const q = createEditorSearchQuery({
     search: searchText.value,
     caseSensitive: caseSensitive.value,
-    regexp: useRegex.value,
+    useRegex: useRegex.value,
     replace: replaceText.value,
   });
   v.dispatch({ effects: setSearchQuery.of(q) });
@@ -48,7 +57,7 @@ function clearSearchQuery() {
   const selection = v.state.selection.main;
   v.dispatch({
     selection: EditorSelection.single(selection.head),
-    effects: setSearchQuery.of(new SearchQuery({ search: "" })),
+    effects: setSearchQuery.of(createEditorSearchQuery({ search: "", caseSensitive: false, useRegex: false })),
   });
   matchCount.value = 0;
   currentMatchIndex.value = 0;
@@ -64,10 +73,10 @@ function updateMatchInfo(autoSelect = false) {
     return;
   }
   try {
-    const q = new SearchQuery({
+    const q = createEditorSearchQuery({
       search: searchText.value,
       caseSensitive: caseSensitive.value,
-      regexp: useRegex.value,
+      useRegex: useRegex.value,
     });
     if (!q.valid) {
       matchCount.value = 0;
@@ -101,6 +110,7 @@ function updateMatchInfo(autoSelect = false) {
 }
 
 function scheduleSearchUpdate(autoSelect = false) {
+  clearDocumentSearchUpdate();
   if (searchUpdateTimer) {
     clearTimeout(searchUpdateTimer);
     searchUpdateTimer = null;
@@ -114,6 +124,15 @@ function scheduleSearchUpdate(autoSelect = false) {
     searchUpdateTimer = null;
     updateMatchInfo(autoSelect);
   }, SEARCH_UPDATE_DELAY_MS);
+}
+
+function scheduleDocumentSearchUpdate() {
+  if (!searchVisible.value || !searchText.value) return;
+  clearDocumentSearchUpdate();
+  documentSearchUpdateTimer = setTimeout(() => {
+    documentSearchUpdateTimer = null;
+    updateMatchInfo();
+  }, DOCUMENT_SEARCH_UPDATE_DELAY_MS);
 }
 
 function openSearch(): boolean {
@@ -146,6 +165,7 @@ function closeSearch() {
   const wasVisible = searchVisible.value;
   searchVisible.value = false;
   showReplace.value = false;
+  clearDocumentSearchUpdate();
   const v = props.view;
   if (v) {
     clearSearchQuery();
@@ -204,13 +224,14 @@ watch(replaceText, () => {
 });
 
 onBeforeUnmount(() => {
+  clearDocumentSearchUpdate();
   if (searchUpdateTimer) {
     clearTimeout(searchUpdateTimer);
     searchUpdateTimer = null;
   }
 });
 
-defineExpose({ openSearch, openReplace, closeSearch });
+defineExpose({ openSearch, openReplace, closeSearch, scheduleDocumentSearchUpdate });
 </script>
 
 <template>

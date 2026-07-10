@@ -171,6 +171,44 @@ pub(crate) async fn list_collections_with_db(
     }
 }
 
+/// List databases for a vector connection.
+/// Milvus supports multiple databases; other vector stores expose a single "default" namespace.
+pub async fn list_databases(client: &VectorClient) -> Result<Vec<String>, String> {
+    match client.kind {
+        VectorDbKind::Milvus => list_milvus_databases(client).await,
+        _ => Ok(vec!["default".to_string()]),
+    }
+}
+
+async fn list_milvus_databases(client: &VectorClient) -> Result<Vec<String>, String> {
+    // Older Milvus versions (pre-2.2) do not expose the databases endpoint; fall back to "default"
+    // so the connection stays browsable instead of failing the whole tree load.
+    //
+    // The endpoint rejects a bodyless POST with `{"code":1801,...}` (HTTP 200, no `data` field),
+    // so send an empty JSON object like every other Milvus v2 endpoint.
+    let body = match send_json(client.post("/v2/vectordb/databases/list").json(&serde_json::json!({})), "Milvus").await
+    {
+        Ok(body) => body,
+        Err(_) => return Ok(vec!["default".to_string()]),
+    };
+    let mut names: Vec<String> = match body.get("data") {
+        Some(Value::Array(items)) => items.iter().filter_map(milvus_database_name_from_item).collect(),
+        _ => Vec::new(),
+    };
+    if !names.iter().any(|name| name == "default") {
+        names.push("default".to_string());
+    }
+    names.sort_by(|a, b| a.cmp(b));
+    Ok(names)
+}
+
+fn milvus_database_name_from_item(item: &Value) -> Option<String> {
+    item.as_str()
+        .map(str::to_string)
+        .or_else(|| item.get("dbName").and_then(Value::as_str).map(str::to_string))
+        .or_else(|| item.get("name").and_then(Value::as_str).map(str::to_string))
+}
+
 async fn list_qdrant_collections(client: &VectorClient) -> Result<Vec<CollectionInfo>, String> {
     let body = send_json(client.get("/collections"), "Qdrant").await?;
     let mut infos: Vec<CollectionInfo> = body
@@ -441,6 +479,7 @@ fn weaviate_collection_names_from_schema(body: &Value) -> Vec<String> {
 
 pub async fn find_documents(
     client: &VectorClient,
+    database: &str,
     collection: &str,
     skip: u64,
     limit: i64,
@@ -498,7 +537,7 @@ pub async fn find_documents(
         VectorDbKind::Milvus => format!(
             "POST /v2/vectordb/entities/query\n{}",
             serde_json::json!({
-                "dbName": "default",
+                "dbName": if database.is_empty() { "default" } else { database },
                 "collectionName": collection,
                 "filter": "",
                 "limit": limit.max(1) as u64,

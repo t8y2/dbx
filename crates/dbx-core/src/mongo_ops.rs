@@ -48,7 +48,16 @@ pub async fn mongo_drop_collection_core(
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => mongo_driver::drop_collection(client, database, collection).await,
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support drop collection".to_string()),
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            let _: serde_json::Value = client
+                .mongo_drop_collection(serde_json::json!({
+                    "database": database,
+                    "collection": collection,
+                }))
+                .await?;
+            Ok(())
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -197,7 +206,18 @@ pub async fn mongo_create_index_core(
         PoolKind::MongoDb(client) => {
             mongo_driver::create_index(client, database, collection, keys_json, options_json).await
         }
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support createIndex".to_string()),
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            let result: serde_json::Value = client
+                .mongo_create_index(serde_json::json!({
+                    "database": database,
+                    "collection": collection,
+                    "keys_json": keys_json,
+                    "options_json": options_json,
+                }))
+                .await?;
+            Ok(result.get("name").and_then(|value| value.as_str()).unwrap_or("").to_string())
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -216,7 +236,17 @@ pub async fn mongo_drop_indexes_core(
         PoolKind::MongoDb(client) => {
             mongo_driver::drop_indexes(client, database, collection, indexes_json, single).await
         }
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support dropIndex/dropIndexes".to_string()),
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            client
+                .mongo_drop_indexes(serde_json::json!({
+                    "database": database,
+                    "collection": collection,
+                    "indexes_json": indexes_json,
+                    "single": single,
+                }))
+                .await
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }

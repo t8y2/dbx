@@ -732,6 +732,43 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void listTablesAppliesMetadataConstraints() throws Exception {
+        request("executeQuery", """
+            {
+              "connection": %s,
+              "sql": "CREATE SCHEMA IF NOT EXISTS app"
+            }
+            """.formatted(CONNECTION));
+        request("executeQuery", """
+            {
+              "connection": %s,
+              "sql": "CREATE TABLE IF NOT EXISTS app.people (id INT PRIMARY KEY)"
+            }
+            """.formatted(CONNECTION));
+        request("executeQuery", """
+            {
+              "connection": %s,
+              "sql": "CREATE TABLE IF NOT EXISTS app.people_archive (id INT PRIMARY KEY)"
+            }
+            """.formatted(CONNECTION));
+
+        JsonNode response = request("listTables", """
+            {
+              "connection": %s,
+              "schema": "APP",
+              "filter": "people",
+              "limit": 1,
+              "offset": 1,
+              "object_types": ["TABLE"]
+            }
+            """.formatted(CONNECTION));
+
+        assertFalse(response.has("error"), response.toString());
+        assertEquals(1, response.path("result").size());
+        assertEquals("PEOPLE_ARCHIVE", response.path("result").path(0).path("name").asText());
+    }
+
+    @Test
     void listDatabasesIncludesConfiguredDatabaseWhenDriverDoesNotReturnIt() throws Exception {
         String connection = """
             {
@@ -792,6 +829,43 @@ final class DbxJdbcPluginTest {
 
         assertFalse(response.has("error"), response.toString());
         assertEquals("PEOPLE", response.path("result").path(0).path("name").asText());
+    }
+
+    @Test
+    void listObjectsAppliesMetadataConstraints() throws Exception {
+        request("executeQuery", """
+            {
+              "connection": %s,
+              "sql": "CREATE SCHEMA IF NOT EXISTS app"
+            }
+            """.formatted(CONNECTION));
+        request("executeQuery", """
+            {
+              "connection": %s,
+              "sql": "CREATE TABLE IF NOT EXISTS app.people (id INT PRIMARY KEY)"
+            }
+            """.formatted(CONNECTION));
+        request("executeQuery", """
+            {
+              "connection": %s,
+              "sql": "CREATE TABLE IF NOT EXISTS app.people_archive (id INT PRIMARY KEY)"
+            }
+            """.formatted(CONNECTION));
+
+        JsonNode response = request("listObjects", """
+            {
+              "connection": %s,
+              "schema": "APP",
+              "filter": "people",
+              "limit": 1,
+              "offset": 1,
+              "object_types": ["TABLE"]
+            }
+            """.formatted(CONNECTION));
+
+        assertFalse(response.has("error"), response.toString());
+        assertEquals(1, response.path("result").size());
+        assertEquals("PEOPLE_ARCHIVE", response.path("result").path(0).path("name").asText());
     }
 
     @Test

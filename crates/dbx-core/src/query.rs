@@ -627,7 +627,7 @@ async fn wait_for_duckdb_task_with_interrupt(
 }
 
 #[cfg(feature = "duckdb-bundled")]
-fn duckdb_execute_for_database(
+pub(crate) fn duckdb_execute_for_database(
     con: &duckdb::Connection,
     attached_names: &[String],
     database: Option<&str>,
@@ -745,8 +745,15 @@ pub fn is_connection_error(err: &str) -> bool {
         || lower.contains("closed")
         || lower.contains("关闭的连接")
         || lower.contains("连接已关闭")
+        || lower.contains("网络通信异常")
+        || lower.contains("通信异常")
+        || lower.contains("communications link failure")
+        || lower.contains("sqlrecoverableexception")
+        || lower.contains("sqlnontransientconnectionexception")
+        || lower.contains("sqltransientconnectionexception")
         || lower.contains("eof")
         || lower.contains("i/o error")
+        || lower.contains("input/output error")
         || lower.contains("not connected")
         || lower.contains("end-of-file")
         || lower.contains("idle")
@@ -845,7 +852,12 @@ fn is_os_connection_error(lower: &str) -> bool {
 }
 
 pub fn timeout_error() -> String {
-    format!("Query timed out after {} seconds", QUERY_TIMEOUT.as_secs())
+    timeout_error_for(QUERY_TIMEOUT)
+}
+
+fn timeout_error_for(timeout_duration: Duration) -> String {
+    let seconds = timeout_duration.as_secs().max(1);
+    format!("Query timed out after {seconds} seconds")
 }
 
 pub fn canceled_error() -> String {
@@ -876,14 +888,25 @@ pub async fn wait_for_query_with_timeout<F>(
 where
     F: Future<Output = Result<db::QueryResult, String>>,
 {
+    wait_for_result_with_timeout(cancel_token, timeout_duration, future).await
+}
+
+async fn wait_for_result_with_timeout<T, F>(
+    cancel_token: Option<CancellationToken>,
+    timeout_duration: Duration,
+    future: F,
+) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>>,
+{
     if let Some(token) = cancel_token {
         tokio::select! {
             biased;
             _ = token.cancelled() => Err(canceled_error()),
-            result = timeout(timeout_duration, future) => result.map_err(|_| timeout_error())?,
+            result = timeout(timeout_duration, future) => result.map_err(|_| timeout_error_for(timeout_duration))?,
         }
     } else {
-        timeout(timeout_duration, future).await.map_err(|_| timeout_error())?
+        timeout(timeout_duration, future).await.map_err(|_| timeout_error_for(timeout_duration))?
     }
 }
 
@@ -897,8 +920,19 @@ pub async fn wait_for_query_opt<F>(
 where
     F: Future<Output = Result<db::QueryResult, String>>,
 {
+    wait_for_result_opt(cancel_token, timeout_duration, future).await
+}
+
+async fn wait_for_result_opt<T, F>(
+    cancel_token: Option<CancellationToken>,
+    timeout_duration: Option<Duration>,
+    future: F,
+) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>>,
+{
     match timeout_duration {
-        Some(d) => wait_for_query_with_timeout(cancel_token, d, future).await,
+        Some(d) => wait_for_result_with_timeout(cancel_token, d, future).await,
         None => match cancel_token {
             Some(token) => {
                 tokio::select! {
@@ -910,6 +944,48 @@ where
             None => future.await,
         },
     }
+}
+
+async fn wait_for_value_opt<T, F>(
+    cancel_token: Option<CancellationToken>,
+    timeout_duration: Option<Duration>,
+    future: F,
+) -> Result<T, String>
+where
+    F: Future<Output = T>,
+{
+    match timeout_duration {
+        Some(timeout_duration) => {
+            if let Some(token) = cancel_token {
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => Err(canceled_error()),
+                    result = timeout(timeout_duration, future) => result.map_err(|_| timeout_error_for(timeout_duration)),
+                }
+            } else {
+                timeout(timeout_duration, future).await.map_err(|_| timeout_error_for(timeout_duration))
+            }
+        }
+        None => match cancel_token {
+            Some(token) => {
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => Err(canceled_error()),
+                    result = future => Ok(result),
+                }
+            }
+            None => Ok(future.await),
+        },
+    }
+}
+
+async fn sqlserver_pool_is_current(
+    state: &AppState,
+    pool_key: &str,
+    client: &Arc<tokio::sync::Mutex<db::sqlserver::SqlServerClient>>,
+) -> bool {
+    let connections = state.connections.read().await;
+    matches!(connections.get(pool_key), Some(PoolKind::SqlServer(current)) if Arc::ptr_eq(current, client))
 }
 
 fn resolve_query_timeout(timeout_secs: Option<u64>) -> Option<Duration> {
@@ -935,6 +1011,30 @@ async fn configured_operation_budget_for_pool_key(state: &AppState, pool_key: &s
     crate::connection::config_for_pool_key(pool_key, &configs)
         .map(DbOperationBudget::from_connection_config)
         .unwrap_or_else(DbOperationBudget::with_defaults)
+}
+
+fn oceanbase_mysql_session_timeout_sql(config: Option<&ConnectionConfig>, timeout_secs: Option<u64>) -> Option<String> {
+    let config = config?;
+    let timeout_secs = timeout_secs.unwrap_or(config.query_timeout_secs);
+    crate::connection::oceanbase_mysql_query_timeout_sql(config, timeout_secs)
+}
+
+async fn apply_oceanbase_mysql_session_timeout(
+    state: &AppState,
+    pool_key: &str,
+    conn: &mut mysql_async::Conn,
+    timeout_secs: Option<u64>,
+) -> Result<(), String> {
+    let sql = {
+        let configs = state.configs.read().await;
+        oceanbase_mysql_session_timeout_sql(crate::connection::config_for_pool_key(pool_key, &configs), timeout_secs)
+    };
+    if let Some(sql) = sql {
+        // OceanBase enforces query timeouts through a session variable; set it
+        // on the checked-out connection in case the pooled session was reset.
+        conn.query_drop(&sql).await.map_err(|err| format!("Failed to apply OceanBase query timeout: {err}"))?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1015,9 +1115,33 @@ pub async fn do_execute(
                 }
             }
         }
+        #[cfg(feature = "duckdb-bundled")]
+        PoolKind::DuckDbWorker(client) => {
+            let client = client.clone();
+            if let Some(ref execution_id) = options.execution_id {
+                let cancel_client = client.clone();
+                state.running_queries.register_interrupt(execution_id, move || {
+                    let cancel_client = cancel_client.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = cancel_client.cancel().await {
+                            log::warn!("Failed to cancel DuckDB worker query: {error}");
+                        }
+                    });
+                });
+            }
+            let sql = sql.to_string();
+            let database = database.map(str::to_string);
+            let max_rows = options.max_rows;
+            drop(connections);
+            client.execute(database, sql, max_rows, cancel_token, query_timeout).await
+        }
         #[cfg(not(feature = "duckdb-bundled"))]
         PoolKind::DuckDb(_) => {
             return Err("DuckDB support is not compiled in this build".to_string());
+        }
+        #[cfg(not(feature = "duckdb-bundled"))]
+        PoolKind::DuckDbWorker(_) => {
+            return Err("DuckDB worker support is not compiled in this build".to_string());
         }
         PoolKind::Mysql(p, mode) => {
             let p = p.clone();
@@ -1051,6 +1175,7 @@ pub async fn do_execute(
                     });
                 });
             }
+            apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, options.timeout_secs).await?;
             wait_for_query_opt(
                 cancel_token,
                 query_timeout,
@@ -1740,6 +1865,8 @@ async fn execute_multi_mysql(
     };
     let mut results = Vec::with_capacity(statements.len());
 
+    apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, options.timeout_secs).await?;
+
     for stmt in statements {
         if is_canceled(&cancel_token) {
             results.push(error_query_result(canceled_error()));
@@ -1809,6 +1936,7 @@ async fn execute_multi_sqlserver(
     check_read_only_for_connection_multi(state, pool_key, &batches).await?;
     let mut all_results = Vec::new();
     let max_rows = options.max_rows;
+    let query_timeout = resolve_query_timeout(options.timeout_secs);
 
     for batch in &batches {
         if is_canceled(&cancel_token) {
@@ -1834,17 +1962,28 @@ async fn execute_multi_sqlserver(
         };
         drop(connections);
 
-        let mut client = match cancel_token.as_ref() {
-            Some(token) => tokio::select! {
-                biased;
-                _ = token.cancelled() => return Err(canceled_error()),
-                guard = client.lock() => guard,
-            },
-            None => client.lock().await,
+        let mut client_guard = match wait_for_value_opt(cancel_token.clone(), query_timeout, client.lock()).await {
+            Ok(guard) => guard,
+            Err(err) => {
+                all_results.push(error_query_result(err));
+                break;
+            }
         };
 
-        let result = db::sqlserver::execute_batch_with_max_rows(&mut client, batch, max_rows).await;
-        drop(client);
+        if !sqlserver_pool_is_current(state, pool_key, &client).await {
+            all_results.push(error_query_result(
+                "SQL Server connection was reset while waiting for the query lock; please retry.".to_string(),
+            ));
+            break;
+        }
+
+        let result = wait_for_result_opt(
+            cancel_token.clone(),
+            query_timeout,
+            db::sqlserver::execute_batch_with_max_rows(&mut client_guard, batch, max_rows),
+        )
+        .await;
+        drop(client_guard);
 
         match result {
             Ok(results) => all_results.extend(results),
@@ -2045,6 +2184,7 @@ pub async fn execute_statements_in_transaction(
             PoolKind::MessageQueue | PoolKind::Nacos => TxPath::None,
             #[cfg(feature = "duckdb-bundled")]
             PoolKind::DuckDb(_)
+            | PoolKind::DuckDbWorker(_)
             | PoolKind::Redis(_)
             | PoolKind::MongoDb(_)
             | PoolKind::Elasticsearch(_)
@@ -2054,6 +2194,7 @@ pub async fn execute_statements_in_transaction(
             | PoolKind::ExternalDriver { .. } => TxPath::None,
             #[cfg(not(feature = "duckdb-bundled"))]
             PoolKind::DuckDb(_)
+            | PoolKind::DuckDbWorker(_)
             | PoolKind::Redis(_)
             | PoolKind::MongoDb(_)
             | PoolKind::Elasticsearch(_)
@@ -2070,7 +2211,7 @@ pub async fn execute_statements_in_transaction(
             exec_tx_pg_inner(pool, statements, schema, start, operation_budget.clone(), cancel_context).await
         }
         Some(TxPath::Mysql(pool, _bare)) => {
-            exec_tx_mysql_inner(pool, statements, start, operation_budget.clone()).await
+            exec_tx_mysql_inner(state, &pool_key, pool, statements, start, operation_budget.clone()).await
         }
         Some(TxPath::Sqlite(pool)) => exec_tx_sqlite_inner(pool, statements, start).await,
         Some(TxPath::Explicit) => {
@@ -2195,12 +2336,15 @@ async fn exec_tx_pg_statements(
 }
 
 async fn exec_tx_mysql_inner(
+    state: &AppState,
+    pool_key: &str,
     pool: mysql_async::Pool,
     statements: &[String],
     start: std::time::Instant,
     budget: DbOperationBudget,
 ) -> Result<db::QueryResult, String> {
     let mut conn = db::mysql::get_conn_with_health_check_with_timeout(&pool, budget.checkout_timeout).await?;
+    apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, None).await?;
     mysql_query_drop_with_timeout(
         &mut conn,
         "START TRANSACTION",
@@ -2824,6 +2968,7 @@ pub async fn rollback_manual_transaction(state: &AppState, txn_session_id: &str)
 mod tests {
     use super::*;
     use crate::models::connection::{default_redis_key_separator, ConnectionConfig, DatabaseType};
+    #[cfg(feature = "duckdb-bundled")]
     use crate::storage::Storage;
 
     fn test_connection_config(db_type: DatabaseType) -> ConnectionConfig {
@@ -2834,6 +2979,7 @@ mod tests {
             driver_profile: None,
             driver_label: None,
             url_params: None,
+            agent_java_options: Vec::new(),
             host: "localhost".to_string(),
             port: 0,
             username: String::new(),
@@ -2888,6 +3034,37 @@ mod tests {
         assert!(!is_agent_execute_batch_unsupported("Agent RPC error (-1): unknown method: execute_query"));
     }
 
+    #[test]
+    fn oceanbase_mysql_session_timeout_sql_uses_connection_timeout_by_default() {
+        let mut config = test_connection_config(DatabaseType::Mysql);
+        config.driver_profile = Some("oceanbase".to_string());
+        config.query_timeout_secs = 300_000;
+
+        assert_eq!(
+            oceanbase_mysql_session_timeout_sql(Some(&config), None),
+            Some("SET ob_query_timeout = 300000000000".to_string())
+        );
+    }
+
+    #[test]
+    fn oceanbase_mysql_session_timeout_sql_prefers_execution_timeout_override() {
+        let mut config = test_connection_config(DatabaseType::Mysql);
+        config.driver_profile = Some("oceanbase".to_string());
+        config.query_timeout_secs = 30;
+
+        assert_eq!(
+            oceanbase_mysql_session_timeout_sql(Some(&config), Some(600)),
+            Some("SET ob_query_timeout = 600000000".to_string())
+        );
+    }
+
+    #[test]
+    fn oceanbase_mysql_session_timeout_sql_skips_plain_mysql() {
+        let config = test_connection_config(DatabaseType::Mysql);
+
+        assert_eq!(oceanbase_mysql_session_timeout_sql(Some(&config), Some(600)), None);
+    }
+
     #[tokio::test]
     async fn wait_for_query_returns_cancelled_when_token_is_cancelled() {
         let token = CancellationToken::new();
@@ -2930,7 +3107,29 @@ mod tests {
         })
         .await;
 
-        assert_eq!(result.unwrap_err(), timeout_error());
+        assert_eq!(result.unwrap_err(), timeout_error_for(Duration::from_millis(10)));
+    }
+
+    #[tokio::test]
+    async fn wait_for_value_opt_times_out_while_waiting_for_lock() {
+        let lock = tokio::sync::Mutex::new(());
+        let _guard = lock.lock().await;
+
+        let result = wait_for_value_opt(None, Some(Duration::from_millis(10)), lock.lock()).await;
+
+        assert_eq!(result.unwrap_err(), timeout_error_for(Duration::from_millis(10)));
+    }
+
+    #[tokio::test]
+    async fn wait_for_value_opt_can_cancel_while_waiting_for_lock() {
+        let lock = tokio::sync::Mutex::new(());
+        let _guard = lock.lock().await;
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let result = wait_for_value_opt(Some(token), Some(Duration::from_secs(30)), lock.lock()).await;
+
+        assert_eq!(result.unwrap_err(), QUERY_CANCELED);
     }
 
     #[cfg(feature = "duckdb-bundled")]
@@ -3208,6 +3407,13 @@ mod tests {
         assert!(is_connection_error(
             "I/O error: 由于连接方在一段时间后没有正确答复或连接的主机没有反应，连接尝试失败。 (os error 10060)"
         ));
+        assert!(is_connection_error("Agent RPC error (-1): dm.jdbc.driver.DMException: 网络通信异常"));
+        assert!(is_connection_error(
+            "Agent RPC error (-1): java.sql.SQLRecoverableException: IO 错误: Got minus one from a read call"
+        ));
+        assert!(is_connection_error(
+            "Agent RPC error (-1): com.mysql.cj.jdbc.exceptions.CommunicationsException: Communications link failure"
+        ));
     }
 
     #[test]
@@ -3277,6 +3483,9 @@ mod tests {
 
         assert_eq!(pool_error_action(Some(DatabaseType::SqlServer), err), PoolErrorAction::ReconnectAndRetry);
         assert_eq!(pool_error_action(Some(DatabaseType::Postgres), err), PoolErrorAction::ReconnectAndRetry);
+
+        let dameng_err = "Agent RPC error (-1): dm.jdbc.driver.DMException: 网络通信异常";
+        assert_eq!(pool_error_action(Some(DatabaseType::Dameng), dameng_err), PoolErrorAction::ReconnectAndRetry);
     }
 
     #[cfg(feature = "duckdb-bundled")]
@@ -3432,6 +3641,7 @@ mod tests {
             driver_profile: None,
             driver_label: None,
             url_params: None,
+            agent_java_options: Vec::new(),
             host: "localhost".to_string(),
             port: 0,
             username: String::new(),

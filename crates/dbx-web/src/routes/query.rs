@@ -22,6 +22,7 @@ pub struct ExecuteQueryRequest {
     pub result_session_id: Option<String>,
     pub client_session_id: Option<String>,
     pub timeout_secs: Option<u64>,
+    pub use_transaction: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -170,6 +171,12 @@ pub struct BuildSchemaNameSqlRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BuildDatabasePropertyEditSqlRequest {
+    pub options: dbx_core::db_admin_sql::DatabasePropertyEditSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BuildDuplicateTableStructureSqlRequest {
     pub options: dbx_core::db_admin_sql::DuplicateTableStructureSqlOptions,
 }
@@ -309,6 +316,7 @@ pub async fn execute_query(
             client_session_id: req.client_session_id,
             timeout_secs: req.timeout_secs,
             execution_id: Some(execution_id),
+            use_transaction: req.use_transaction,
             ..Default::default()
         },
     )
@@ -346,6 +354,7 @@ pub async fn execute_multi(
             client_session_id: req.client_session_id,
             timeout_secs: req.timeout_secs,
             execution_id: Some(execution_id),
+            use_transaction: req.use_transaction,
             ..Default::default()
         },
     )
@@ -582,8 +591,10 @@ pub async fn build_rename_object_sql(Json(req): Json<BuildRenameObjectSqlRequest
     dbx_core::db_admin_sql::build_rename_object_sql(req.options).map(Json).map_err(AppError)
 }
 
-pub async fn build_create_database_sql(Json(req): Json<BuildCreateDatabaseSqlRequest>) -> Json<String> {
-    Json(dbx_core::db_admin_sql::build_create_database_sql(req.options))
+pub async fn build_create_database_sql(
+    Json(req): Json<BuildCreateDatabaseSqlRequest>,
+) -> Result<Json<String>, AppError> {
+    dbx_core::db_admin_sql::build_create_database_sql(req.options).map(Json).map_err(AppError)
 }
 
 pub async fn build_duckdb_attach_database_sql(Json(req): Json<BuildDuckDbAttachDatabaseSqlRequest>) -> Json<String> {
@@ -616,8 +627,14 @@ pub async fn build_drop_database_sql(Json(req): Json<BuildDatabaseNameSqlRequest
     Json(dbx_core::db_admin_sql::build_drop_database_sql(req.options))
 }
 
-pub async fn build_create_schema_sql(Json(req): Json<BuildSchemaNameSqlRequest>) -> Json<String> {
-    Json(dbx_core::db_admin_sql::build_create_schema_sql(req.options))
+pub async fn build_create_schema_sql(Json(req): Json<BuildSchemaNameSqlRequest>) -> Result<Json<String>, AppError> {
+    dbx_core::db_admin_sql::build_create_schema_sql(req.options).map(Json).map_err(AppError)
+}
+
+pub async fn build_update_database_properties_sql(
+    Json(req): Json<BuildDatabasePropertyEditSqlRequest>,
+) -> Result<Json<String>, AppError> {
+    dbx_core::db_admin_sql::build_update_database_properties_sql(req.options).map(Json).map_err(AppError)
 }
 
 pub async fn build_drop_schema_sql(Json(req): Json<BuildSchemaNameSqlRequest>) -> Json<String> {

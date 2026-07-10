@@ -19,6 +19,7 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "elasticsearch-index",
   "user-admin",
   "saved-sql-file",
+  "table-search-control",
   "load-more",
 ]);
 
@@ -32,6 +33,7 @@ const pinnableTypes: Set<TreeNodeType> = new Set([
   "linked-server",
   "linked-server-catalog",
   "linked-server-schema",
+  "doris-catalog",
   "schema",
   "table",
   "view",

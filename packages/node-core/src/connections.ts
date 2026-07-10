@@ -279,6 +279,11 @@ export async function findConnection(name: string): Promise<ConnectionConfig | u
   return connections.find((c) => c.name.toLowerCase() === name.toLowerCase());
 }
 
+export async function findConnectionById(id: string): Promise<ConnectionConfig | undefined> {
+  const connections = await loadConnections();
+  return connections.find((c) => c.id === id);
+}
+
 export async function addConnection(config: Omit<ConnectionConfig, "id">): Promise<ConnectionConfig> {
   const id = randomUUID();
   const db = openDb();
@@ -354,4 +359,16 @@ export async function removeConnection(name: string): Promise<boolean> {
   db.close();
 
   return true;
+}
+
+export async function removeConnectionById(id: string): Promise<boolean> {
+  const db = openDb();
+  const remove = db.transaction(() => {
+    const result = db.prepare("DELETE FROM connections WHERE id = ?").run(id);
+    db.prepare("DELETE FROM connection_secrets WHERE connection_id = ?").run(id);
+    return result.changes > 0;
+  });
+  const deleted = remove();
+  db.close();
+  return deleted;
 }

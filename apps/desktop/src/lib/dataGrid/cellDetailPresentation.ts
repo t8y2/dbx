@@ -1,3 +1,5 @@
+import { safeJsonFormat } from "@/lib/common/safeJsonFormat";
+
 export type CellDetailTab = "details" | "hexViewer" | "valueEditor";
 export type ValueEditorAction = "formatJson" | "setNull" | "restoreOriginal";
 
@@ -90,7 +92,7 @@ export function formatJsonText(text: string): string | undefined {
   if (!trimmed) return undefined;
   if (trimmed.length > CELL_DETAIL_JSON_FORMAT_MAX_LENGTH) return undefined;
   try {
-    return JSON.stringify(JSON.parse(trimmed), null, 2);
+    return safeJsonFormat(trimmed, 2);
   } catch {
     return undefined;
   }
@@ -101,7 +103,7 @@ export function compactJsonText(text: string): string | undefined {
   if (!trimmed) return undefined;
   if (trimmed.length > CELL_DETAIL_JSON_FORMAT_MAX_LENGTH) return undefined;
   try {
-    return JSON.stringify(JSON.parse(trimmed));
+    return safeJsonFormat(trimmed);
   } catch {
     return undefined;
   }

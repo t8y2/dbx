@@ -16,6 +16,25 @@ impl LayerEndpoint {
     }
 }
 
+/// Resolves any `~/.ssh/config` aliases on SSH layers before endpoints are
+/// computed. Both `.endpoint()` read sites below (the current layer's own
+/// connect target, and an earlier layer's forward target when this layer is
+/// the *next* one in the chain) must see the resolved host/port rather than
+/// a literal alias string, so resolution happens once up front instead of
+/// only at the `start_tunnel` call site.
+fn resolve_ssh_layers(
+    layers: &[TransportLayerConfig],
+    resolve: impl Fn(&crate::models::connection::SshTunnelConfig) -> crate::models::connection::SshTunnelConfig,
+) -> Vec<TransportLayerConfig> {
+    layers
+        .iter()
+        .map(|layer| match layer {
+            TransportLayerConfig::Ssh(ssh) => TransportLayerConfig::Ssh(resolve(ssh)),
+            other => other.clone(),
+        })
+        .collect()
+}
+
 /// Starts an ordered transport layer chain and returns the final local port.
 ///
 /// Each layer listens on a local port. The next layer connects to that local
@@ -33,6 +52,9 @@ pub async fn start_transport_layers(
         return Err("No transport layers configured".to_string());
     }
     validate_transport_layers(layers)?;
+
+    let layers = resolve_ssh_layers(layers, crate::ssh_config::resolve_ssh_tunnel_config);
+    let layers = layers.as_slice();
 
     let mut next_connect_endpoint: Option<LayerEndpoint> = None;
     let mut final_local_port = 0;
@@ -52,21 +74,22 @@ pub async fn start_transport_layers(
         };
 
         let local_port = match layer {
-            TransportLayerConfig::Ssh(ssh) => ssh_tunnels
+            TransportLayerConfig::Ssh(resolved) => ssh_tunnels
                 .start_tunnel(
                     &layer_id,
                     &connect_endpoint.host,
                     connect_endpoint.port,
-                    &ssh.user,
-                    &ssh.password,
-                    &ssh.key_path,
-                    &ssh.key_passphrase,
-                    ssh.use_ssh_agent,
-                    &ssh.ssh_agent_sock_path,
-                    effective_ssh_connect_timeout_secs(ssh.connect_timeout_secs),
+                    &resolved.user,
+                    &resolved.password,
+                    &resolved.key_path,
+                    &resolved.key_passphrase,
+                    resolved.use_ssh_agent,
+                    &resolved.ssh_agent_sock_path,
+                    &resolved.auth_method,
+                    effective_ssh_connect_timeout_secs(resolved.connect_timeout_secs),
                     &target_endpoint.host,
                     target_endpoint.port,
-                    is_last && ssh.expose_lan,
+                    is_last && resolved.expose_lan,
                 )
                 .await
                 .map_err(|err| format!("SSH layer {} failed: {err}", index + 1))?,
@@ -164,6 +187,22 @@ fn plan_transport_layers(
     remote_port: u16,
     local_ports: &[u16],
 ) -> Vec<PlannedTransportLayer> {
+    plan_transport_layers_with_resolver(layers, remote_host, remote_port, local_ports, |ssh| ssh.clone())
+}
+
+/// Same as `plan_transport_layers`, but takes an explicit SSH-alias resolver
+/// so tests can exercise `~/.ssh/config` resolution without touching the real
+/// filesystem (mirrors `start_transport_layers`'s use of `resolve_ssh_layers`).
+#[cfg(test)]
+fn plan_transport_layers_with_resolver(
+    layers: &[TransportLayerConfig],
+    remote_host: &str,
+    remote_port: u16,
+    local_ports: &[u16],
+    resolve: impl Fn(&crate::models::connection::SshTunnelConfig) -> crate::models::connection::SshTunnelConfig,
+) -> Vec<PlannedTransportLayer> {
+    let layers = resolve_ssh_layers(layers, resolve);
+    let layers = layers.as_slice();
     let mut planned = Vec::new();
     let mut next_connect_endpoint: Option<(String, u16)> = None;
     for (index, layer) in layers.iter().enumerate() {
@@ -198,7 +237,10 @@ fn plan_transport_layers(
 
 #[cfg(test)]
 mod tests {
-    use super::{plan_transport_layers, validate_transport_layers, PlannedLayerType, PlannedTransportLayer};
+    use super::{
+        plan_transport_layers, plan_transport_layers_with_resolver, validate_transport_layers, PlannedLayerType,
+        PlannedTransportLayer,
+    };
     use crate::models::connection::{
         HttpTunnelConfig, ProxyTunnelConfig, ProxyType, SshTunnelConfig, TransportLayerConfig,
     };
@@ -218,6 +260,7 @@ mod tests {
             expose_lan: false,
             use_ssh_agent: false,
             ssh_agent_sock_path: String::new(),
+            auth_method: "password".to_string(),
         })
     }
 
@@ -293,6 +336,71 @@ mod tests {
         let err = validate_transport_layers(&layers).unwrap_err();
 
         assert!(err.contains("HTTP tunnel must be the first transport layer"));
+    }
+
+    #[test]
+    fn single_ssh_hop_with_config_alias_connects_to_resolved_host_and_port() {
+        // RF-001 regression: a single SSH layer whose `host` is a
+        // `~/.ssh/config` alias must dial the resolved HostName/Port, not
+        // the literal alias string.
+        let layers = vec![ssh_layer("ssh-a", "myserver", 22)];
+
+        let planned = plan_transport_layers_with_resolver(&layers, "db.internal", 5432, &[], |ssh| {
+            assert_eq!(ssh.host, "myserver");
+            let mut resolved = ssh.clone();
+            resolved.host = "10.0.0.5".to_string();
+            resolved.port = 2222;
+            resolved
+        });
+
+        assert_eq!(
+            planned,
+            vec![PlannedTransportLayer {
+                layer_type: PlannedLayerType::Ssh,
+                connect_host: "10.0.0.5".to_string(),
+                connect_port: 2222,
+                remote_host: "db.internal".to_string(),
+                remote_port: 5432,
+            }]
+        );
+    }
+
+    #[test]
+    fn earlier_hop_forwards_to_resolved_alias_of_next_ssh_hop() {
+        // RF-002 regression: when hop N+1 is an SSH layer addressed by a
+        // config alias, hop N's forward target must be the resolved
+        // HostName/Port, not the literal alias (which the remote host at
+        // hop N cannot resolve).
+        let layers = vec![ssh_layer("ssh-a", "bastion-a", 22), ssh_layer("ssh-b", "myserver", 22)];
+
+        let planned = plan_transport_layers_with_resolver(&layers, "db.internal", 5432, &[41001], |ssh| {
+            let mut resolved = ssh.clone();
+            if ssh.host == "myserver" {
+                resolved.host = "10.0.0.5".to_string();
+                resolved.port = 2222;
+            }
+            resolved
+        });
+
+        assert_eq!(
+            planned,
+            vec![
+                PlannedTransportLayer {
+                    layer_type: PlannedLayerType::Ssh,
+                    connect_host: "bastion-a".to_string(),
+                    connect_port: 22,
+                    remote_host: "10.0.0.5".to_string(),
+                    remote_port: 2222,
+                },
+                PlannedTransportLayer {
+                    layer_type: PlannedLayerType::Ssh,
+                    connect_host: "127.0.0.1".to_string(),
+                    connect_port: 41001,
+                    remote_host: "db.internal".to_string(),
+                    remote_port: 5432,
+                },
+            ]
+        );
     }
 
     #[test]

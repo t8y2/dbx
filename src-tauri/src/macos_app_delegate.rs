@@ -60,7 +60,7 @@ extern "C-unwind" fn application_should_terminate(
         return NSApplicationTerminateReply::TerminateNow;
     };
 
-    if app.try_state::<CloseBehaviorState>().map(|state| state.is_exit_confirmed()).unwrap_or(false) {
+    if app.try_state::<CloseBehaviorState>().map(|state| state.take_confirmed_exit()).unwrap_or(false) {
         return NSApplicationTerminateReply::TerminateNow;
     }
 

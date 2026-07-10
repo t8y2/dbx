@@ -10,6 +10,8 @@ import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcExecutor;
 import com.dbx.agent.JdbcIdentifiers;
 import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MetadataListConstraints;
+import com.dbx.agent.MetadataSqlSupport;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.QueryResult;
@@ -115,6 +117,44 @@ public final class Db2Agent extends BaseDatabaseAgent {
     }
 
     @Override
+    public List<TableInfo> listTables(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        if (isUnconstrained(normalized)) {
+            return listTables(schema);
+        }
+        if (!normalized.includesTableLikeTypes()) {
+            return List.of();
+        }
+        try {
+            return queryConstrainedTables(schema, normalized);
+        } catch (RuntimeException e) {
+            return normalized.filterTables(listTables(schema));
+        }
+    }
+
+    private List<TableInfo> queryConstrainedTables(String schema, MetadataListConstraints constraints) {
+        return unchecked(() -> {
+            List<TableInfo> result = new ArrayList<>();
+            List<Object> args = new ArrayList<>();
+            StringBuilder sql = new StringBuilder("SELECT TABNAME, TYPE FROM SYSCAT.TABLES WHERE TABSCHEMA = ?");
+            args.add(schema);
+            appendDb2TableTypePredicate(sql, args, constraints);
+            MetadataSqlSupport.appendNameFilter(sql, args, "TABNAME", constraints);
+            sql.append(" ORDER BY TABNAME");
+            MetadataSqlSupport.appendLiteralOffsetFetch(sql, constraints);
+            try (PreparedStatement stmt = requireConnected().prepareStatement(sql.toString())) {
+                MetadataSqlSupport.bind(stmt, args);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        result.add(new TableInfo(rs.getString(1).trim(), db2TableType(rs.getString(2)), null));
+                    }
+                }
+            }
+            return constraints.withoutPaging().filterTables(result);
+        });
+    }
+
+    @Override
     public List<ObjectInfo> listObjects(String schema) {
         return unchecked(() -> {
             List<ObjectInfo> result = new ArrayList<>();
@@ -132,6 +172,63 @@ public final class Db2Agent extends BaseDatabaseAgent {
                 }
             }
             return result;
+        });
+    }
+
+    @Override
+    public List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        if (isUnconstrained(normalized)) {
+            return listObjects(schema);
+        }
+        if (!includesSupportedObjects(normalized)) {
+            return List.of();
+        }
+        try {
+            return queryConstrainedObjects(schema, normalized);
+        } catch (RuntimeException e) {
+            return normalized.filterObjects(listObjects(schema));
+        }
+    }
+
+    private List<ObjectInfo> queryConstrainedObjects(String schema, MetadataListConstraints constraints) {
+        return unchecked(() -> {
+            List<ObjectInfo> result = new ArrayList<>();
+            List<String> branches = new ArrayList<>();
+            List<Object> args = new ArrayList<>();
+            if (constraints.includesTableLikeTypes()) {
+                StringBuilder tableSql = new StringBuilder(
+                    "SELECT TABNAME AS OBJECT_NAME, CASE TYPE WHEN 'T' THEN 'TABLE' WHEN 'V' THEN 'VIEW' ELSE TYPE END AS OBJECT_TYPE FROM SYSCAT.TABLES WHERE TABSCHEMA = ?"
+                );
+                args.add(schema);
+                appendDb2TableTypePredicate(tableSql, args, constraints);
+                MetadataSqlSupport.appendNameFilter(tableSql, args, "TABNAME", constraints);
+                branches.add(tableSql.toString());
+            }
+            if (constraints.objectTypeAllowed("PROCEDURE")) {
+                StringBuilder procedureSql = new StringBuilder(
+                    "SELECT PROCNAME AS OBJECT_NAME, 'PROCEDURE' AS OBJECT_TYPE FROM SYSCAT.PROCEDURES WHERE PROCSCHEMA = ?"
+                );
+                args.add(schema);
+                MetadataSqlSupport.appendNameFilter(procedureSql, args, "PROCNAME", constraints);
+                branches.add(procedureSql.toString());
+            }
+            if (branches.isEmpty()) {
+                return List.of();
+            }
+            StringBuilder sql = new StringBuilder("SELECT OBJECT_NAME, OBJECT_TYPE FROM (")
+                .append(String.join(" UNION ALL ", branches))
+                .append(") metadata_objects ORDER BY CASE OBJECT_TYPE WHEN 'TABLE' THEN 0 WHEN 'VIEW' THEN 1 WHEN 'PROCEDURE' THEN 2 ELSE 9 END, OBJECT_NAME");
+            MetadataSqlSupport.appendLiteralOffsetFetch(sql, constraints);
+            try (PreparedStatement stmt = requireConnected().prepareStatement(sql.toString())) {
+                MetadataSqlSupport.bind(stmt, args);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        result.add(new ObjectInfo(rs.getString(1).trim(), rs.getString(2), schema, null));
+                    }
+                }
+            }
+            return constraints.withoutPaging().filterObjects(result);
         });
     }
 
@@ -329,6 +426,39 @@ public final class Db2Agent extends BaseDatabaseAgent {
             return url;
         }
         return url + ":" + extraParams + (extraParams.endsWith(";") ? "" : ";");
+    }
+
+    private static boolean isUnconstrained(MetadataListConstraints constraints) {
+        return !constraints.hasFilter() && !constraints.hasLimit() && !constraints.hasOffset() && !constraints.hasObjectTypes();
+    }
+
+    private static boolean includesSupportedObjects(MetadataListConstraints constraints) {
+        return constraints.includesTableLikeTypes() || constraints.objectTypeAllowed("PROCEDURE");
+    }
+
+    private static void appendDb2TableTypePredicate(StringBuilder sql, List<Object> args, MetadataListConstraints constraints) {
+        List<String> types = new ArrayList<>();
+        if (constraints.tableTypeAllowed("TABLE")) {
+            types.add("T");
+        }
+        if (constraints.tableTypeAllowed("VIEW")) {
+            types.add("V");
+        }
+        if (types.isEmpty()) {
+            sql.append(" AND 1 = 0");
+            return;
+        }
+        sql.append(" AND TYPE IN (").append(MetadataSqlSupport.placeholders(types.size())).append(")");
+        args.addAll(types);
+    }
+
+    private static String db2TableType(String value) {
+        String db2Type = value == null ? "" : value.trim();
+        return switch (db2Type) {
+            case "T" -> "TABLE";
+            case "V" -> "VIEW";
+            default -> db2Type;
+        };
     }
 
     private static String trimDb2UrlParams(String urlParams) {

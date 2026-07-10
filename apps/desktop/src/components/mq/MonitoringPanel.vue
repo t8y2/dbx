@@ -7,8 +7,8 @@ import { LineChart } from "echarts/charts";
 import { GridComponent, LegendComponent, TooltipComponent } from "echarts/components";
 import VChart from "vue-echarts";
 import { Activity, AlertTriangle, BarChart3, Boxes, CheckCircle2, Database, Download, Gauge, Hash, HardDrive, Layers3, Loader2, Package, RadioTower, RefreshCw, Send, ShieldCheck, Table2, Upload, Users } from "@lucide/vue";
-import type { TopicRef, TopicInfo, TopicStats, BacklogStats } from "@/types/mq";
-import { mqGetTopicStats, mqGetBacklog } from "@/lib/backend/api";
+import type { TopicRef, TopicInfo, TopicStats, BacklogStats, PeekedMessage } from "@/types/mq";
+import { mqGetTopicStats, mqGetBacklog, mqPeekMessages } from "@/lib/backend/api";
 
 use([CanvasRenderer, LineChart, GridComponent, LegendComponent, TooltipComponent]);
 
@@ -62,6 +62,10 @@ const error = ref<string>();
 const autoRefresh = ref(true);
 const refreshInterval = ref(5); // seconds
 const selectedPartitionName = ref<string>();
+const kafkaMessageSql = ref("");
+const kafkaMessageLoading = ref(false);
+const kafkaMessageError = ref<string>();
+const kafkaMessages = ref<PeekedMessage[]>([]);
 
 let refreshTimer: number | undefined;
 const history = ref<MetricPoint[]>([]);
@@ -192,6 +196,61 @@ async function loadStats(options: { skipWhenHidden?: boolean } = {}) {
 
 function refreshNow() {
   void loadStats();
+}
+
+function defaultKafkaMessageSql(): string {
+  const topic = props.topic?.shortName;
+  return topic ? `SELECT * FROM "${topic}" PARTITION 0 OFFSET 0 LIMIT 20` : "";
+}
+
+function parseKafkaMessageSql(sql: string): { topic: string; partition: number; offset: number; limit: number } {
+  const match = sql.trim().match(/^\s*select\s+\*\s+from\s+(?:"([^"]+)"|`([^`]+)`|'([^']+)'|([^\s;]+))(?:\s+partition\s+(\d+))?(?:\s+offset\s+(\d+))?(?:\s+limit\s+(\d+))?\s*;?\s*$/i);
+  if (!match) {
+    throw new Error('仅支持 SELECT * FROM "topic" [PARTITION n] [OFFSET n] [LIMIT n]');
+  }
+  const topic = match[1] || match[2] || match[3] || match[4] || "";
+  const partition = Math.max(0, Number(match[5] ?? 0));
+  const offset = Math.max(0, Number(match[6] ?? 0));
+  const limit = Math.max(1, Math.min(100, Number(match[7] ?? 20)));
+  return { topic, partition, offset, limit };
+}
+
+async function runKafkaMessageSql() {
+  if (!props.tenant || !props.namespace) return;
+  kafkaMessageLoading.value = true;
+  kafkaMessageError.value = undefined;
+  try {
+    const parsed = parseKafkaMessageSql(kafkaMessageSql.value);
+    const selected = props.topic && parsed.topic === props.topic.shortName ? props.topic : undefined;
+    kafkaMessages.value = await mqPeekMessages(
+      props.connectionId,
+      {
+        tenant: props.tenant,
+        namespace: props.namespace,
+        topic: parsed.topic,
+        persistent: selected?.persistent ?? true,
+        partitioned: selected?.partitioned,
+      },
+      "__dbx_kafka_monitor__",
+      parsed.limit,
+      { partition: parsed.partition, offset: parsed.offset },
+    );
+  } catch (e: unknown) {
+    kafkaMessageError.value = formatError(e);
+  } finally {
+    kafkaMessageLoading.value = false;
+  }
+}
+
+function kafkaMessagePayload(message: PeekedMessage): string {
+  return message.payloadText ?? message.payloadBase64;
+}
+
+function formatKafkaMessageTimestamp(value?: string): string {
+  if (!value) return "-";
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return value;
+  return new Date(numeric).toLocaleString();
 }
 
 function appendHistoryPoint(statsData: TopicStats, backlogData?: BacklogStats) {
@@ -349,6 +408,9 @@ watch(
   () => {
     history.value = [];
     selectedPartitionName.value = undefined;
+    kafkaMessageSql.value = defaultKafkaMessageSql();
+    kafkaMessageError.value = undefined;
+    kafkaMessages.value = [];
     void loadStats();
     startAutoRefresh();
   },
@@ -533,6 +595,38 @@ onUnmounted(() => {
           </div>
         </div>
         <div v-else class="empty-state compact">当前 Kafka 响应未返回分区指标</div>
+      </div>
+
+      <div class="stats-section">
+        <div class="section-title-row">
+          <h4>Kafka 消息查询</h4>
+          <button type="button" class="btn-sm" :disabled="kafkaMessageLoading || !kafkaMessageSql.trim()" @click="runKafkaMessageSql">
+            <Loader2 v-if="kafkaMessageLoading" class="btn-icon spinning" :size="14" />
+            <span>{{ kafkaMessageLoading ? "查询中..." : "查询消息" }}</span>
+          </button>
+        </div>
+        <textarea v-model="kafkaMessageSql" class="kafka-sql-input" rows="2" spellcheck="false" />
+        <div class="query-hint">支持：SELECT * FROM "topic" PARTITION 0 OFFSET 0 LIMIT 20，单次最多返回 100 条。</div>
+        <div v-if="kafkaMessageError" class="panel-error inline-error">
+          <AlertTriangle :size="16" />
+          <span>{{ kafkaMessageError }}</span>
+        </div>
+        <div v-else-if="kafkaMessageLoading" class="empty-state compact">消息加载中...</div>
+        <div v-else-if="!kafkaMessages.length" class="empty-state compact">暂无消息</div>
+        <div v-else class="kafka-message-list">
+          <article v-for="message in kafkaMessages" :key="message.messageId || message.position" class="kafka-message-row">
+            <div class="kafka-message-meta">
+              <span>#{{ message.position }}</span>
+              <span>offset {{ message.messageId || "-" }}</span>
+              <span v-if="message.key">key {{ message.key }}</span>
+              <span>{{ formatKafkaMessageTimestamp(message.publishTime) }}</span>
+            </div>
+            <pre class="kafka-message-payload">{{ kafkaMessagePayload(message) }}</pre>
+            <div v-if="Object.keys(message.headers || {}).length" class="kafka-message-headers">
+              <span v-for="(value, key) in message.headers" :key="key">{{ key }}: {{ value }}</span>
+            </div>
+          </article>
+        </div>
       </div>
     </div>
 
@@ -1057,6 +1151,99 @@ onUnmounted(() => {
   border-radius: 2px;
   background: var(--monitor-accent);
   box-shadow: 0 0 0 4px var(--monitor-accent-soft);
+}
+
+.section-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.section-title-row h4 {
+  margin-bottom: 0;
+}
+
+.kafka-sql-input {
+  width: 100%;
+  min-height: 54px;
+  padding: 10px 12px;
+  border: 1px solid var(--monitor-border);
+  border-radius: 8px;
+  background: var(--monitor-surface);
+  color: var(--monitor-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.kafka-sql-input:focus {
+  outline: none;
+  border-color: var(--monitor-accent);
+  box-shadow: 0 0 0 3px var(--monitor-accent-soft);
+}
+
+.query-hint {
+  margin-top: 6px;
+  color: var(--monitor-faint);
+  font-size: 12px;
+}
+
+.inline-error {
+  justify-content: flex-start;
+  margin-top: 10px;
+  border: 1px solid color-mix(in srgb, var(--monitor-danger) 22%, transparent);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.kafka-message-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.kafka-message-row {
+  border: 1px solid var(--monitor-border);
+  border-radius: 8px;
+  background: var(--monitor-surface);
+  overflow: hidden;
+}
+
+.kafka-message-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--monitor-border);
+  color: var(--monitor-muted);
+  font-size: 12px;
+}
+
+.kafka-message-payload {
+  max-height: 220px;
+  margin: 0;
+  overflow: auto;
+  padding: 10px;
+  color: var(--monitor-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.kafka-message-headers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--monitor-border);
+  color: var(--monitor-muted);
+  font-size: 11px;
 }
 
 .charts-grid {

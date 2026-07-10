@@ -1,0 +1,12 @@
+dependencies {
+    implementation 'com.microsoft.sqlserver:mssql-jdbc:13.2.0.jre11'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes(
+            'Agent-Label': 'SQL Server legacy compatibility component',
+            'Main-Class': 'com.dbx.agent.sqlserverlegacy.SqlServerLegacyAgent'
+        )
+    }
+}

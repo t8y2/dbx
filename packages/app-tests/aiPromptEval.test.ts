@@ -34,6 +34,7 @@ const { buildSystemPrompt } = await import("../../apps/desktop/src/lib/ai/ai.ts"
 
 function baseContext(overrides: Partial<AiContext> = {}): AiContext {
   return {
+    connectionId: "conn-1",
     connectionName: "prod-analytics",
     databaseType: "postgres",
     database: "warehouse",
@@ -67,6 +68,7 @@ function baseContext(overrides: Partial<AiContext> = {}): AiContext {
         ],
       },
     ],
+    sqlFiles: [],
     truncated: false,
     ...overrides,
   };

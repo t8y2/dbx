@@ -790,6 +790,34 @@ mod tests {
     }
 
     #[test]
+    fn connection_params_preserve_kafka_gssapi_properties() {
+        let cfg = kafka_config(
+            serde_json::json!({
+                "bootstrapServers": "broker:9093",
+                "securityProtocol": "SASL_SSL",
+                "saslMechanism": "GSSAPI",
+                "properties": {
+                    "sasl.jaas.config": "com.sun.security.auth.module.Krb5LoginModule required useKeyTab=true keyTab=\"/tmp/user.keytab\" principal=\"user@EXAMPLE.COM\";",
+                    "sasl.kerberos.service.name": "kafka",
+                    "java.security.krb5.conf": "/tmp/krb5.conf"
+                }
+            }),
+            MqAuth::None,
+            false,
+        );
+
+        let params = build_connection_params(&cfg);
+
+        assert_eq!(params.get("security_protocol").and_then(|v| v.as_str()), Some("SASL_SSL"));
+        assert_eq!(params.get("sasl_mechanism").and_then(|v| v.as_str()), Some("GSSAPI"));
+        assert_eq!(params.pointer("/properties/sasl.kerberos.service.name").and_then(|v| v.as_str()), Some("kafka"));
+        assert_eq!(
+            params.pointer("/properties/java.security.krb5.conf").and_then(|v| v.as_str()),
+            Some("/tmp/krb5.conf")
+        );
+    }
+
+    #[test]
     fn reset_cursor_params_preserve_timestamp_position() {
         let topic = TopicRef {
             tenant: "_kafka".to_string(),

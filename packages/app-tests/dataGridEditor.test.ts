@@ -662,6 +662,92 @@ test("undo and redo cover row add and delete operations", () => {
   assert.deepEqual([...editor.deletedRows.value], [0]);
 });
 
+test("batch row delete records a single undo snapshot", () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const result = computed(() => ({
+    columns: ["id", "name"],
+    rows: [
+      [1, "Ada"] as CellValue[],
+      [2, "Linus"] as CellValue[],
+      [3, "Grace"] as CellValue[],
+    ],
+  }));
+  const rowStatusFilter = ref<"all" | "changed" | "edited" | "new" | "deleted">("all");
+  let editor: ReturnType<typeof useDataGridEditor>;
+
+  editor = useDataGridEditor({
+    result,
+    editable: computed(() => true),
+    databaseType: computed(() => "postgres"),
+    connectionId: computed(() => undefined),
+    database: computed(() => undefined),
+    tableMeta: computed(() => ({
+      tableName: "people",
+      columns: [column("id", true), column("name")],
+      primaryKeys: ["id"],
+    })),
+    onExecuteSql: computed(() => undefined),
+    customSaveHandler: computed(() => undefined),
+    sql: computed(() => "SELECT id, name FROM people"),
+    searchText: ref(""),
+    whereFilterInput: ref(""),
+    orderByInput: ref(""),
+    currentWhereInput: computed(() => undefined),
+    rowStatusFilter,
+    pageSize: ref(50),
+    currentPage: ref(1),
+    getRowItem: (rowId) => {
+      if (rowId >= 0 && result.value.rows[rowId]) {
+        return {
+          id: rowId,
+          sourceIndex: rowId,
+          data: result.value.rows[rowId],
+          isNew: false,
+          isDeleted: editor.deletedRows.value.has(rowId),
+          isDirtyCol: [false, editor.dirtyRows.value.get(rowId)?.has(1) ?? false],
+          status: editor.deletedRows.value.has(rowId) ? "deleted" : editor.dirtyRows.value.has(rowId) ? "edited" : "clean",
+        };
+      }
+      if (rowId < 0) {
+        const newIndex = -rowId - 1;
+        const row = editor.newRows.value[newIndex];
+        if (!row) return undefined;
+        return {
+          id: rowId,
+          newIndex,
+          data: row,
+          isNew: true,
+          isDeleted: false,
+          isDirtyCol: [false, false],
+          status: "new",
+        };
+      }
+      return undefined;
+    },
+    emit: () => {},
+  });
+
+  editor.applyDeleteRows([0, 1]);
+  assert.deepEqual([...editor.deletedRows.value], [0, 1]);
+
+  editor.undoPendingChange();
+  assert.deepEqual([...editor.deletedRows.value], []);
+  assert.equal(editor.canUndoPendingChange.value, false);
+
+  editor.redoPendingChange();
+  assert.deepEqual([...editor.deletedRows.value], [0, 1]);
+
+  editor.newRows.value = [
+    [4, "Katherine"],
+    [5, "Margaret"],
+    [6, "Donald"],
+  ];
+  editor.applyDeleteRows([-1, -2]);
+  assert.deepEqual(editor.newRows.value, [[6, "Donald"]]);
+});
+
 test("undo and redo restore pending cell edits before save", () => {
   setActivePinia(createPinia());
   installBrowserTestGlobals();

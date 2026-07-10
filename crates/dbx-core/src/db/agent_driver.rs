@@ -3,7 +3,7 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -14,11 +14,11 @@ pub const AGENT_PROTOCOL_VERSION: u32 = 1;
 const RPC_TIMEOUT_SECS: u64 = 30;
 const STARTUP_TIMEOUT_SECS: u64 = 15;
 const STDERR_TAIL_LINES: usize = 20;
-const AGENT_EXIT_DIAGNOSTIC_WAIT_MS: u64 = 200;
+const AGENT_EXIT_DIAGNOSTIC_WAIT_MS: u64 = 1_000;
+const AGENT_EXIT_DIAGNOSTIC_POLL_MS: u64 = 10;
+const AGENT_JAVA_OPTS_ENV: &str = "DBX_AGENT_JAVA_OPTS";
 const AGENT_JAVA_TOO_OLD_MESSAGE: &str =
     "Agent requires Java 21, but DBX started it with an older Java runtime. Use DBX managed JRE 21 or select a Java 21 executable in Driver Manager.";
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 pub struct AgentDriverClient {
     child: Child,
@@ -42,10 +42,18 @@ impl AgentLaunchSpec {
     }
 
     pub fn java_jar(java_path: impl Into<PathBuf>, jar_path: impl AsRef<Path>) -> Self {
+        Self::java_jar_with_extra_args(java_path, jar_path, &[])
+    }
+
+    pub fn java_jar_with_extra_args(
+        java_path: impl Into<PathBuf>,
+        jar_path: impl AsRef<Path>,
+        extra_java_args: &[String],
+    ) -> Self {
         let jar_path = jar_path.as_ref();
         Self {
             program: java_path.into(),
-            args: agent_java_args(&jar_path.to_string_lossy()),
+            args: agent_java_args_with_extra_args(&jar_path.to_string_lossy(), extra_java_args),
             working_dir: jar_path.parent().map(Path::to_path_buf),
         }
     }
@@ -245,6 +253,9 @@ pub enum MongoAgentMethod {
     FindDocuments,
     FindDocumentsExtendedJson,
     ServerVersion,
+    CreateIndex,
+    DropIndexes,
+    DropCollection,
     InsertDocument,
     UpdateDocument,
     UpdateDocuments,
@@ -253,12 +264,15 @@ pub enum MongoAgentMethod {
 }
 
 impl MongoAgentMethod {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 13] = [
         Self::ListDatabases,
         Self::ListCollections,
         Self::FindDocuments,
         Self::FindDocumentsExtendedJson,
         Self::ServerVersion,
+        Self::CreateIndex,
+        Self::DropIndexes,
+        Self::DropCollection,
         Self::InsertDocument,
         Self::UpdateDocument,
         Self::UpdateDocuments,
@@ -273,6 +287,9 @@ impl MongoAgentMethod {
             Self::FindDocuments => "find_documents",
             Self::FindDocumentsExtendedJson => "find_documents_extended_json",
             Self::ServerVersion => "server_version",
+            Self::CreateIndex => "create_index",
+            Self::DropIndexes => "drop_indexes",
+            Self::DropCollection => "drop_collection",
             Self::InsertDocument => "insert_document",
             Self::UpdateDocument => "update_document",
             Self::UpdateDocuments => "update_documents",
@@ -341,18 +358,12 @@ impl AgentDriverClient {
     /// they speak the DBX stdin/stdout JSON-RPC protocol.
     /// Blocks (async) until the agent writes `{"ready":true}` to stdout.
     pub async fn spawn(launch: AgentLaunchSpec) -> Result<Self, String> {
-        let mut command = Command::new(&launch.program);
+        let mut command = crate::process::new_std_command(&launch.program);
         command.args(&launch.args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         if let Some(working_dir) = &launch.working_dir {
             command.current_dir(working_dir);
         }
         remove_agent_proxy_env(&mut command);
-
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(CREATE_NO_WINDOW);
-        }
 
         let mut child =
             command.spawn().map_err(|e| format!("Failed to spawn agent process {}: {e}", launch_display(&launch)))?;
@@ -629,7 +640,29 @@ impl AgentDriverClient {
         object_types: Option<&[String]>,
         timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
+        self.list_tables_constrained(database, schema, None, None, None, object_types, timeout_duration).await
+    }
+
+    pub async fn list_tables_constrained<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        filter: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+        object_types: Option<&[String]>,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
         let mut params = agent_schema_params(database, schema);
+        if let Some(filter) = filter.map(str::trim).filter(|filter| !filter.is_empty()) {
+            params["filter"] = serde_json::json!(filter);
+        }
+        if let Some(limit) = limit {
+            params["limit"] = serde_json::json!(limit);
+        }
+        if let Some(offset) = offset {
+            params["offset"] = serde_json::json!(offset);
+        }
         if let Some(object_types) = object_types {
             params["object_types"] = serde_json::json!(object_types);
         }
@@ -642,8 +675,33 @@ impl AgentDriverClient {
         schema: &str,
         timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
-        self.call_method_with_timeout(AgentMethod::ListObjects, agent_schema_params(database, schema), timeout_duration)
-            .await
+        self.list_objects_constrained(database, schema, None, None, None, None, timeout_duration).await
+    }
+
+    pub async fn list_objects_constrained<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        filter: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+        object_types: Option<&[String]>,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        let mut params = agent_schema_params(database, schema);
+        if let Some(filter) = filter.map(str::trim).filter(|filter| !filter.is_empty()) {
+            params["filter"] = serde_json::json!(filter);
+        }
+        if let Some(limit) = limit {
+            params["limit"] = serde_json::json!(limit);
+        }
+        if let Some(offset) = offset {
+            params["offset"] = serde_json::json!(offset);
+        }
+        if let Some(object_types) = object_types {
+            params["object_types"] = serde_json::json!(object_types);
+        }
+        self.call_method_with_timeout(AgentMethod::ListObjects, params, timeout_duration).await
     }
 
     pub async fn list_data_types<T: DeserializeOwned + Send + 'static>(
@@ -948,6 +1006,27 @@ impl AgentDriverClient {
         self.call_mongo_method(MongoAgentMethod::ServerVersion, mongo_database_params(database)).await
     }
 
+    pub async fn mongo_create_index<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::CreateIndex, params).await
+    }
+
+    pub async fn mongo_drop_indexes<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::DropIndexes, params).await
+    }
+
+    pub async fn mongo_drop_collection<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::DropCollection, params).await
+    }
+
     pub async fn mongo_insert_document<T: DeserializeOwned + Send + 'static>(
         &mut self,
         params: Value,
@@ -1125,7 +1204,25 @@ pub fn mongo_document_id_params(database: &str, collection: &str, id: &str) -> V
     serde_json::json!({ "database": database, "collection": collection, "id": id })
 }
 
+#[cfg(test)]
 fn agent_java_args(jar_path: &str) -> Vec<String> {
+    agent_java_args_with_extra(jar_path, std::env::var(AGENT_JAVA_OPTS_ENV).ok().as_deref())
+}
+
+#[cfg(test)]
+fn agent_java_args_with_extra(jar_path: &str, extra_opts: Option<&str>) -> Vec<String> {
+    agent_java_args_with_extra_opts(jar_path, extra_opts, &[])
+}
+
+fn agent_java_args_with_extra_args(jar_path: &str, extra_java_args: &[String]) -> Vec<String> {
+    agent_java_args_with_extra_opts(jar_path, std::env::var(AGENT_JAVA_OPTS_ENV).ok().as_deref(), extra_java_args)
+}
+
+fn agent_java_args_with_extra_opts(
+    jar_path: &str,
+    extra_opts: Option<&str>,
+    extra_java_args: &[String],
+) -> Vec<String> {
     let mut args = vec![
         "-Dfile.encoding=UTF-8",
         "-Dsun.stdout.encoding=UTF-8",
@@ -1145,9 +1242,53 @@ fn agent_java_args(jar_path: &str) -> Vec<String> {
         args.push("-Djava.net.preferIPv4Stack=true".to_string());
     }
 
+    // Hive/Kerberos JDBC drivers read JAAS and krb5 settings during JVM startup,
+    // so users need a process-level escape hatch before the agent jar is loaded.
+    if let Some(extra) = extra_opts {
+        args.extend(parse_agent_java_opts(extra));
+    }
+    args.extend(extra_java_args.iter().map(|arg| arg.trim()).filter(|arg| !arg.is_empty()).map(str::to_string));
+
     args.push("--add-opens=java.sql/java.sql=ALL-UNNAMED".to_string());
 
     args.extend(["-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-jar", jar_path].into_iter().map(str::to_string));
+
+    args
+}
+
+fn parse_agent_java_opts(opts: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut chars = opts.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match (quote, ch) {
+            (None, ch) if ch.is_whitespace() => {
+                if !current.is_empty() {
+                    args.push(std::mem::take(&mut current));
+                }
+            }
+            (None, '\'' | '"') => quote = Some(ch),
+            (Some(q), ch) if ch == q => quote = None,
+            (Some('"'), '\\') => {
+                if let Some(&next) = chars.peek() {
+                    if next == '"' || next == '\\' {
+                        current.push(chars.next().unwrap());
+                    } else {
+                        current.push(ch);
+                    }
+                } else {
+                    current.push(ch);
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if !current.is_empty() {
+        args.push(current);
+    }
 
     args
 }
@@ -1230,12 +1371,16 @@ fn child_exit_status(child: &mut Child) -> Option<String> {
 }
 
 fn child_exit_status_after_short_wait(child: &mut Child) -> Option<String> {
-    let status = child_exit_status(child);
-    if status.is_some() {
-        return status;
+    let deadline = Instant::now() + Duration::from_millis(AGENT_EXIT_DIAGNOSTIC_WAIT_MS);
+    loop {
+        if let Some(status) = child_exit_status(child) {
+            return Some(status);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(AGENT_EXIT_DIAGNOSTIC_POLL_MS));
     }
-    std::thread::sleep(Duration::from_millis(AGENT_EXIT_DIAGNOSTIC_WAIT_MS));
-    child_exit_status(child)
 }
 
 fn stderr_tail_snapshot(stderr_tail: &Arc<Mutex<StderrTail>>) -> StderrTail {
@@ -1281,11 +1426,9 @@ fn format_agent_startup_error(base: &str, child: &mut Child, stderr_tail: &Arc<M
 
 impl AgentDriverClient {
     fn format_agent_process_error(&mut self, base: &str) -> String {
-        format_agent_process_error(
-            base,
-            child_exit_status_after_short_wait(&mut self.child),
-            &stderr_tail_snapshot(&self.stderr_tail),
-        )
+        // Runtime RPC errors are common SQL/driver paths. Do not wait for the
+        // child to exit unless startup diagnostics already expect the process to die.
+        format_agent_process_error(base, child_exit_status(&mut self.child), &stderr_tail_snapshot(&self.stderr_tail))
     }
 }
 
@@ -1298,13 +1441,13 @@ impl Drop for AgentDriverClient {
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_close_query_session_params, agent_handshake_params, agent_java_args, agent_object_source_params,
-        agent_proxy_env_vars, agent_schema_params, agent_schema_table_params, agent_supports_capability,
-        agent_transaction_params, format_agent_process_error, format_agent_startup_error,
-        is_unsupported_handshake_error, mongo_collection_params, mongo_database_params, mongo_document_id_params,
-        read_agent_line, start_stderr_collector, AgentCapability, AgentDriverClient, AgentHandshake, AgentKvMethod,
-        AgentMethod, AgentTableReadCloseParams, AgentTableReadPageParams, AgentTableReadStartParams, MongoAgentMethod,
-        StderrTail, AGENT_PROTOCOL_VERSION,
+        agent_close_query_session_params, agent_handshake_params, agent_java_args, agent_java_args_with_extra,
+        agent_java_args_with_extra_opts, agent_object_source_params, agent_proxy_env_vars, agent_schema_params,
+        agent_schema_table_params, agent_supports_capability, agent_transaction_params, format_agent_process_error,
+        format_agent_startup_error, is_unsupported_handshake_error, mongo_collection_params, mongo_database_params,
+        mongo_document_id_params, parse_agent_java_opts, read_agent_line, start_stderr_collector, AgentCapability,
+        AgentDriverClient, AgentHandshake, AgentKvMethod, AgentMethod, AgentTableReadCloseParams,
+        AgentTableReadPageParams, AgentTableReadStartParams, MongoAgentMethod, StderrTail, AGENT_PROTOCOL_VERSION,
     };
     use std::io::Cursor;
     use std::process::{Command, Stdio};
@@ -1354,6 +1497,60 @@ mod tests {
         let args = agent_java_args("/tmp/dbx/drivers/highgo/agent.jar");
 
         assert!(!args.iter().any(|arg| arg == "-Djava.net.preferIPv4Stack=true"));
+    }
+
+    #[test]
+    fn agent_java_args_include_custom_jvm_options_before_jar() {
+        let args = agent_java_args_with_extra(
+            "/tmp/dbx/drivers/hive/agent.jar",
+            Some("-Djava.security.auth.login.config=C:\\jaas.conf -Djavax.security.auth.useSubjectCredsOnly=false"),
+        );
+
+        let login_config = args
+            .iter()
+            .position(|arg| arg == "-Djava.security.auth.login.config=C:\\jaas.conf")
+            .expect("custom JAAS option should be present");
+        let jar = args.iter().position(|arg| arg == "-jar").expect("agent jar marker should be present");
+
+        assert!(login_config < jar);
+        assert!(args.iter().any(|arg| arg == "-Djavax.security.auth.useSubjectCredsOnly=false"));
+    }
+
+    #[test]
+    fn agent_java_args_include_connection_jvm_options_after_env_options() {
+        let args = agent_java_args_with_extra_opts(
+            "/tmp/dbx/drivers/hive/agent.jar",
+            Some("-Djava.security.krb5.conf=/etc/global-krb5.conf"),
+            &["-Djava.security.krb5.conf=/etc/connection-krb5.conf".to_string()],
+        );
+
+        let global = args
+            .iter()
+            .position(|arg| arg == "-Djava.security.krb5.conf=/etc/global-krb5.conf")
+            .expect("global krb5 option should be present");
+        let connection = args
+            .iter()
+            .position(|arg| arg == "-Djava.security.krb5.conf=/etc/connection-krb5.conf")
+            .expect("connection krb5 option should be present");
+        let jar = args.iter().position(|arg| arg == "-jar").expect("agent jar marker should be present");
+
+        assert!(global < connection);
+        assert!(connection < jar);
+    }
+
+    #[test]
+    fn agent_java_opts_parser_preserves_quoted_windows_paths() {
+        let args = parse_agent_java_opts(
+            r#"-Djava.security.krb5.conf="C:\Program Files\MIT\Kerberos5\krb5.ini" -Dsun.security.krb5.debug=true"#,
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "-Djava.security.krb5.conf=C:\\Program Files\\MIT\\Kerberos5\\krb5.ini",
+                "-Dsun.security.krb5.debug=true"
+            ]
+        );
     }
 
     #[test]
@@ -1418,6 +1615,33 @@ mod tests {
         assert!(message.contains("Agent requires Java 21"));
         assert!(message.contains("details: Failed to read startup line from agent: end of stream"));
         assert!(message.contains("UnsupportedClassVersionError"));
+    }
+
+    #[test]
+    fn runtime_agent_process_error_does_not_wait_for_live_child() {
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 2")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("child should start");
+        let mut client = AgentDriverClient {
+            child,
+            stdin: None,
+            stdout: None,
+            stderr_tail: Arc::new(Mutex::new(StderrTail::default())),
+            handshake: None,
+            next_id: 0,
+        };
+
+        let started_at = std::time::Instant::now();
+        let message = client.format_agent_process_error("Agent RPC error (-1): syntax error");
+
+        assert!(started_at.elapsed() < std::time::Duration::from_millis(500));
+        assert!(message.contains("Agent RPC error (-1): syntax error"));
+        assert!(!message.contains("agent process exited"));
     }
 
     #[test]
@@ -1504,6 +1728,9 @@ mod tests {
         assert_eq!(MongoAgentMethod::FindDocuments.as_str(), "find_documents");
         assert_eq!(MongoAgentMethod::FindDocumentsExtendedJson.as_str(), "find_documents_extended_json");
         assert_eq!(MongoAgentMethod::ServerVersion.as_str(), "server_version");
+        assert_eq!(MongoAgentMethod::CreateIndex.as_str(), "create_index");
+        assert_eq!(MongoAgentMethod::DropIndexes.as_str(), "drop_indexes");
+        assert_eq!(MongoAgentMethod::DropCollection.as_str(), "drop_collection");
         assert_eq!(MongoAgentMethod::InsertDocument.as_str(), "insert_document");
         assert_eq!(MongoAgentMethod::UpdateDocument.as_str(), "update_document");
         assert_eq!(MongoAgentMethod::UpdateDocuments.as_str(), "update_documents");
@@ -1548,6 +1775,9 @@ mod tests {
         let _mongo_find_documents_extended_json =
             AgentDriverClient::mongo_find_documents_extended_json::<serde_json::Value>;
         let _mongo_server_version = AgentDriverClient::mongo_server_version::<serde_json::Value>;
+        let _mongo_create_index = AgentDriverClient::mongo_create_index::<serde_json::Value>;
+        let _mongo_drop_indexes = AgentDriverClient::mongo_drop_indexes::<serde_json::Value>;
+        let _mongo_drop_collection = AgentDriverClient::mongo_drop_collection::<serde_json::Value>;
         let _mongo_insert_document = AgentDriverClient::mongo_insert_document::<serde_json::Value>;
         let _mongo_update_document = AgentDriverClient::mongo_update_document::<serde_json::Value>;
         let _mongo_update_documents = AgentDriverClient::mongo_update_documents::<serde_json::Value>;

@@ -333,7 +333,7 @@ pub fn build_rename_object_sql(options: dbx_core::db_admin_sql::RenameObjectSqlO
 
 #[tauri::command]
 pub fn build_create_database_sql(options: dbx_core::db_admin_sql::CreateDatabaseSqlOptions) -> Result<String, String> {
-    Ok(dbx_core::db_admin_sql::build_create_database_sql(options))
+    dbx_core::db_admin_sql::build_create_database_sql(options)
 }
 
 #[cfg(feature = "duckdb-bundled")]
@@ -378,7 +378,14 @@ pub fn build_drop_database_sql(options: dbx_core::db_admin_sql::DatabaseNameSqlO
 
 #[tauri::command]
 pub fn build_create_schema_sql(options: dbx_core::db_admin_sql::SchemaNameSqlOptions) -> Result<String, String> {
-    Ok(dbx_core::db_admin_sql::build_create_schema_sql(options))
+    dbx_core::db_admin_sql::build_create_schema_sql(options)
+}
+
+#[tauri::command]
+pub fn build_update_database_properties_sql(
+    options: dbx_core::db_admin_sql::DatabasePropertyEditSqlOptions,
+) -> Result<String, String> {
+    dbx_core::db_admin_sql::build_update_database_properties_sql(options)
 }
 
 #[tauri::command]

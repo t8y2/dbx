@@ -1,112 +1,143 @@
 # Contributing to DBX
 
-Thanks for helping improve DBX. This repository contains the desktop app, Rust backend, Docker service, documentation site, CLI, MCP server, and optional plugins.
+Thanks for taking a look at DBX. Whether you fix a typo, improve docs, or tackle a database-specific bug, every PR helps.
 
-## Project Layout
+## Where to Start
 
-- `apps/desktop/` - Vue desktop frontend.
-- `crates/dbx-core/` - shared Rust database core.
-- `crates/dbx-web/` - Docker/web backend service.
-- `src-tauri/` - Tauri desktop shell and native commands.
-- `packages/` - Node packages, including CLI, MCP server, shared Node core, and app tests.
-- `plugins/` - optional DBX plugins.
-- `docs/` - documentation site and docs assets.
-- `deploy/` - Docker and deployment assets.
+1. Browse [open issues](https://github.com/t8y2/dbx/issues). Good first targets are labeled `documentation`, `good first issue`, or issues in a database you already use.
+2. Comment on the issue you want to work on. Say what you plan to do so others do not duplicate the effort. For community issues, you can also comment `/claim` when that workflow is enabled.
+3. Fork the repo, create a branch, and open a PR against `main`.
+
+If you are not sure what to pick, documentation and small UX fixes are a solid first contribution. See [examples/](examples/) and the [official docs](https://dbxio.com/en/docs/what-is-dbx) for the current structure.
 
 ## Development Setup
 
-Required tools:
+### Prerequisites
 
-- Node.js `>=22.13.0`
-- pnpm `10.27.0`
+- Node.js >= 22.13.0
+- pnpm 10.27.0
+- Rust >= 1.77
 - Make
-- Rust stable
-- Java 17, when working on JDBC plugin packaging
 
-Install dependencies:
+Linux desktop builds also need WebKit/GTK packages. See [README.md](README.md#getting-started) for the exact commands.
 
-```bash
-make install
-```
-
-Run the desktop app during development:
+### Run Locally
 
 ```bash
+git clone https://github.com/t8y2/dbx.git
+cd dbx
 make
 ```
 
-Run the web app during development:
+`make` installs dependencies when needed and starts the Tauri desktop dev environment.
+
+Useful shortcuts:
 
 ```bash
-make dev-web       # frontend
-make dev-backend   # backend
+make dev-fast          # skip DuckDB during local dev
+make dev-web           # frontend only
+make dev-backend       # web backend only
+make docs              # preview the documentation site
+make cargo-check-fast  # fast Rust checks
 ```
 
-Preview the documentation site:
+### JDBC Agent Drivers
+
+Agent driver projects live under `agents/`. Java/JDBC driver builds and tests require JDK 21; Gradle can auto-download the toolchain when available.
+
+```bash
+cd agents
+./gradlew test
+```
+
+## Project Layout
+
+| Path | Purpose |
+| --- | --- |
+| `src/` | Vue frontend |
+| `src-tauri/` | Tauri desktop shell and command layer |
+| `crates/dbx-core/` | Shared Rust database logic |
+| `crates/dbx-web/` | Docker / Web HTTP backend |
+| `packages/cli/` | `@dbx-app/cli` |
+| `packages/mcp-server/` | `@dbx-app/mcp-server` |
+| `packages/node-core/` | Shared Node.js bridge and direct-query logic |
+| `docs/` | Official documentation site |
+| `examples/` | Sample configs and automation scripts |
+| `agents/` | JDBC agent driver projects |
+
+## Making Changes
+
+### Branch Naming
+
+Use a short descriptive branch name, for example:
+
+- `docs/web-api-reference`
+- `fix/mysql-connection-timeout`
+- `feat/redis-key-search`
+
+### Scope
+
+Keep PRs focused. A docs-only PR should not include unrelated code changes. A bug fix should not also refactor nearby modules unless that refactor is required for the fix.
+
+### Commits
+
+Write commit messages in plain language:
+
+- `docs: add web API reference for Docker deployments`
+- `fix(redis): handle empty scan cursor`
+- `feat(schema): show catalog info for Doris`
+
+### Tests
+
+Run the checks that match your change:
+
+```bash
+make cargo-check-fast
+make cargo-test-fast
+pnpm test
+```
+
+For frontend or package changes, run the relevant package tests under `packages/` or `packages/app-tests/`.
+
+### Documentation
+
+User-facing docs live in two places:
+
+- Repository docs: `README.md`, `CONTRIBUTING.md`, package READMEs, and `examples/`
+- Website docs: `docs/content/docs/`
+
+If you add a new docs page under `docs/content/docs/`, register it in:
+
+- `docs/content/docs/meta.json`
+- `docs/content/docs/meta.cn.json`
+
+Preview locally with:
 
 ```bash
 make docs
 ```
 
-## Checks
-
-Before opening a pull request, run:
-
-```bash
-make check
-cargo fmt --check
-cargo check --workspace --locked
-```
-
-> [!TIP]
-> DuckDB compiles from source and takes a while. Skip it during routine
-> development when you're not touching DuckDB features:
->
-> ```bash
-> make cargo-check-fast
-> make cargo-test-fast
-> make dev-fast
-> ```
->
-> Release builds and CI should always include DuckDB (omit the flag).
-
-For package changes, also run:
-
-```bash
-pnpm test:packages
-pnpm publish:dry-run
-```
-
-For Docker or deployment changes, run the relevant Docker Compose or Docker build checks from `deploy/`.
-
-## Database Driver Metadata
-
-When adding or changing a database type, update `crates/dbx-core/assets/database-drivers.manifest.json` first. The manifest is the shared source for driver mode, MCP/CLI routing, agent keys, support level, and top-level product capabilities.
-
-Choose the support level conservatively:
-
-- `connect` — connection and SQL/command execution only.
-- `browse` — connection plus metadata browsing.
-- `understand` — browsing plus higher-level understanding features such as search, object sources, or diagrams.
-- `operate` — advanced operation surfaces such as table data editing, structure editing, import, transfer, database creation, explain plans, or user administration.
-
-Set `capabilities` explicitly for the product surfaces DBX should expose. Keep detailed feature behavior in the owning feature module, such as table structure sub-capabilities or user administration dialects. Custom JDBC support should remain conservative unless dialect inference or a dedicated profile proves the advanced capability works.
-
-Then run:
-
-```bash
-cargo test -p dbx-core --test database_capabilities
-pnpm --filter @dbx-app/node-core exec tsx --test tests/driver-manifest.test.ts
-pnpm --filter @dbx-app/mcp-server exec tsx --test tests/driver-manifest.test.ts
-```
-
 ## Pull Requests
 
-- Keep changes focused and reviewable.
-- Include tests for behavior changes when practical.
-- Update documentation when user-facing behavior changes.
-- Use clear commit messages following Conventional Commits, such as `fix(app): clamp window size`.
+1. Push your branch to your fork.
+2. Open a PR against `https://github.com/t8y2/dbx` `main`.
+3. Link the related issue in the PR description.
+4. Explain what changed, how you tested it, and any screenshots if the UI changed.
 
-## Reporting Issues
+Small PRs are easier to review and merge.
 
-Use GitHub Issues for reproducible bugs, feature requests, database compatibility reports, and questions. Include the DBX version, operating system, database type, and relevant logs or screenshots when possible.
+## What We Are Looking For
+
+- Documentation improvements and translations
+- Reproducible bug fixes with clear before/after behavior
+- Database-specific fixes where you can verify against a real instance
+- Tests for non-trivial logic changes
+- Examples that show CLI, MCP, Docker, or Web API usage
+
+## Community
+
+- [Discord](https://discord.gg/W7NyVDRt6a)
+- [GitHub Issues](https://github.com/t8y2/dbx/issues)
+- [Official docs](https://dbxio.com/en/docs/what-is-dbx)
+
+Merged contributors appear on the [DBX contributors wall](https://dbxio.com/en/community).

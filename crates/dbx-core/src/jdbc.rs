@@ -5,7 +5,6 @@ use crate::update::{fetch_latest_release, is_newer_version, JdbcPluginLatest};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use tokio::process::Command;
 
 const JDBC_PLUGIN_DOWNLOAD_URL: &str =
     "https://github.com/t8y2/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip";
@@ -153,7 +152,7 @@ pub async fn install_jdbc_driver_from_maven(
     let local_repo = plugin_dir.join("maven-cache");
     std::fs::create_dir_all(&local_repo).map_err(|err| err.to_string())?;
 
-    let mut command = Command::new(&resolver);
+    let mut command = crate::process::new_tokio_command(&resolver);
     env.apply_to(&mut command);
     command.arg("resolve").arg("--coordinate").arg(&coordinate).arg("--local-repo").arg(&local_repo);
     for repo in &repositories {
@@ -363,7 +362,8 @@ fn build_plugin_status(
 }
 
 async fn latest_jdbc_plugin() -> Option<JdbcPluginLatest> {
-    fetch_latest_release().await.ok().and_then(|release| release.jdbc_plugin)
+    // 只需 jdbc_plugin，不关心 release notes；传中文 locale 跳过英文 notes 拉取
+    fetch_latest_release("zh-CN").await.ok().and_then(|release| release.jdbc_plugin)
 }
 
 async fn download_jdbc_plugin_zip_with_progress(progress: &impl Fn(AgentProgressEvent)) -> Result<Vec<u8>, String> {

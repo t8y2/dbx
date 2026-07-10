@@ -32,6 +32,18 @@ const props = defineProps<{
   focusTableName?: string;
 }>();
 
+const emit = defineEmits<{
+  "open-target": [
+    value: {
+      connectionId: string;
+      database: string;
+      schema?: string;
+      tableName: string;
+      tableType?: string;
+    },
+  ];
+}>();
+
 const CARD_WIDTH = 270;
 const COLUMN_ROW_HEIGHT = 24;
 const CARD_HEADER_HEIGHT = 44;
@@ -181,6 +193,17 @@ function isRelationshipColumn(table: DiagramTable, columnName: string): boolean 
 
 function relationshipTitle(relationship: DiagramRelationship): string {
   return `${relationship.sourceTable}.${relationship.sourceColumn} (${relationship.sourceCardinality}:${relationship.targetCardinality}) -> ${relationship.targetTable}.${relationship.targetColumn}`;
+}
+
+function openTableData(tableName: string) {
+  if (!connectionId.value || !database.value || !tableName) return;
+  emit("open-target", {
+    connectionId: connectionId.value,
+    database: database.value,
+    schema: isSchemaAware.value ? schema.value || undefined : undefined,
+    tableName,
+    tableType: "TABLE",
+  });
 }
 
 function relationshipStorageKey(): string {
@@ -1015,6 +1038,7 @@ onUnmounted(stopDrag);
                       width: `${CARD_WIDTH}px`,
                       transform: `translate(${positions[table.name]?.x ?? 0}px, ${positions[table.name]?.y ?? 0}px)`,
                     }"
+                    @dblclick.stop="openTableData(table.name)"
                   >
                     <div class="flex h-11 cursor-grab items-center gap-2 border-b bg-muted/40 px-3 active:cursor-grabbing" @mousedown="startDrag(table.name, $event)">
                       <Table2 class="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -1103,13 +1127,14 @@ onUnmounted(stopDrag);
                   <div
                     v-for="entity in engineeringDiagram.entities"
                     :key="entity.id"
-                    class="absolute flex items-center justify-center border border-blue-500/70 bg-blue-100/80 px-3 text-center text-sm font-semibold text-blue-950 shadow-sm dark:bg-blue-950/35 dark:text-blue-100"
+                    class="absolute flex cursor-pointer items-center justify-center border border-blue-500/70 bg-blue-100/80 px-3 text-center text-sm font-semibold text-blue-950 shadow-sm dark:bg-blue-950/35 dark:text-blue-100"
                     :class="entity.name === focusTableName ? 'ring-2 ring-primary/40' : ''"
                     :style="{
                       width: `${entity.width}px`,
                       height: `${entity.height}px`,
                       transform: `translate(${entity.x}px, ${entity.y}px)`,
                     }"
+                    @dblclick.stop="openTableData(entity.name)"
                   >
                     <span class="truncate">{{ entity.name }}</span>
                   </div>

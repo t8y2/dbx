@@ -109,8 +109,6 @@ function skippedTitleKey(reason: string): string {
       return "ai.agentStepTitles.requiresConfirmation";
     case "ask_mode":
       return "ai.agentStepTitles.askMode";
-    case "unsupported_action":
-      return "ai.agentStepTitles.unsupportedAction";
     case "no_sql":
       return "ai.agentStepTitles.noSql";
     default:

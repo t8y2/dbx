@@ -67,7 +67,7 @@ class AbstractJdbcAgentTest {
         assertEquals(Collections.singletonList("VALUE"), result.getColumns());
         assertEquals(Collections.singletonList(Collections.<Object>singletonList("row-value")), result.getRows());
         assertFalse(result.getTruncated());
-        assertEquals(Arrays.asList("setSchema:APP", "setMaxRows:26", "setFetchSize:7", "execute:SELECT VALUE"), tracking.calls);
+        assertEquals(Arrays.asList("execute:USE APP", "setMaxRows:26", "setFetchSize:7", "execute:SELECT VALUE"), tracking.calls);
     }
 
     @Test
@@ -153,7 +153,7 @@ class AbstractJdbcAgentTest {
         assertEquals(
             Arrays.asList(
                 "setAutoCommit:false",
-                "setSchema:APP",
+                "execute:USE APP",
                 "executeUpdate:UPDATE A",
                 "executeUpdate:UPDATE B",
                 "commit",

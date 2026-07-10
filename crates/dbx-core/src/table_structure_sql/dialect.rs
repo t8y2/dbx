@@ -3,6 +3,7 @@ use crate::models::connection::DatabaseType;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StructureDialect {
     Mysql,
+    Doris,
     Postgres,
     Sqlite,
     #[cfg(feature = "duckdb-bundled")]
@@ -65,7 +66,6 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
     match database_type {
         Some(
             DatabaseType::Mysql
-            | DatabaseType::Doris
             | DatabaseType::StarRocks
             | DatabaseType::Goldendb
             | DatabaseType::Sundb
@@ -85,6 +85,15 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             index_comment: true,
             alter_primary_key: true,
             foreign_key: true,
+            ..base
+        },
+        Some(DatabaseType::Doris) => TableStructureCapabilities {
+            dialect: StructureDialect::Doris,
+            add_column: true,
+            drop_column: true,
+            rename_column: true,
+            alter_existing_column: true,
+            comment: true,
             ..base
         },
         Some(DatabaseType::Gbase) => TableStructureCapabilities {
@@ -268,6 +277,7 @@ pub(super) fn database_label(database_type: Option<DatabaseType>) -> String {
 pub(super) fn dialect_label(dialect: StructureDialect) -> String {
     match dialect {
         StructureDialect::Mysql => "mysql",
+        StructureDialect::Doris => "doris",
         StructureDialect::Postgres => "postgres",
         StructureDialect::Sqlite => "sqlite",
         #[cfg(feature = "duckdb-bundled")]
@@ -287,6 +297,7 @@ pub(super) fn dialect_label(dialect: StructureDialect) -> String {
 pub(super) fn database_type_for_dialect(dialect: StructureDialect) -> Option<DatabaseType> {
     match dialect {
         StructureDialect::Mysql => Some(DatabaseType::Mysql),
+        StructureDialect::Doris => Some(DatabaseType::Doris),
         StructureDialect::Postgres => Some(DatabaseType::Postgres),
         StructureDialect::Sqlite => Some(DatabaseType::Sqlite),
         #[cfg(feature = "duckdb-bundled")]

@@ -3,7 +3,7 @@ import { ref, watch, shallowRef, computed, onMounted, onUnmounted, nextTick } fr
 import type { Ref } from "vue";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { useI18n } from "vue-i18n";
-import { AlertTriangle, CheckCircle2, CircleHelp, Cloud, Copy, Download, ExternalLink, GripVertical, Loader2, Moon, PackageSearch, Pencil, Plus, RefreshCw, RotateCcw, Settings, Sun, SunMoon, Terminal, Trash2, Upload, X } from "@lucide/vue";
+import { AlertTriangle, CheckCircle2, CircleHelp, Cloud, Copy, Download, ExternalLink, GripVertical, Loader2, Moon, PackageSearch, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings, Sun, SunMoon, Terminal, Trash2, Upload, X } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -25,6 +25,9 @@ import {
   DEFAULT_EDITOR_SETTINGS,
   DEFAULT_DESKTOP_SETTINGS,
   DEFAULT_SIDEBAR_TABLE_PAGE_SIZE,
+  DUCKDB_WORKER_MAX_PROCESSES_MAX,
+  DUCKDB_WORKER_MAX_PROCESSES_MIN,
+  normalizeDuckDbWorkerMaxProcesses,
   normalizeAiEnv,
   type AiProvider,
   type AiApiStyle,
@@ -40,7 +43,7 @@ import {
   type CustomThemeColors,
   type CustomTheme,
 } from "@/stores/settingsStore";
-import { loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
+import { createRunStatementButtonDom, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { formatAiModelOption } from "@/lib/ai/aiModelPresentation";
 import ThemeCustomizerDialog from "./ThemeCustomizerDialog.vue";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -52,32 +55,43 @@ import {
   aiTestConnection,
   checkMcpServerStatus,
   installMcpServer,
+  forgetWebdavSyncSecretsPassphrase,
   forgetWebdavSavedPassword,
+  getAppSupportInfo,
   listSystemFonts,
+  saveWebdavSyncSecretsPreference,
   saveWebdavSavedPassword,
   webdavPasswordStatus,
   webdavSyncDownload,
+  webdavSyncSecretsStatus,
   webdavSyncTest,
   webdavSyncUpload,
+  type AppSupportInfo,
   type AiModelInfo,
   type McpServerStatus,
   type WebDavConfig,
 } from "@/lib/backend/api";
 import { eventToShortcut } from "@/lib/editor/keyboardShortcuts";
 import { SHORTCUT_DEFINITIONS, findShortcutConflict, normalizeShortcutSettings, type ShortcutActionId } from "@/lib/editor/shortcutRegistry";
+import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
+import { currentStatementFrameRangeTo, visualSqlColumns } from "@/lib/sql/currentStatementFrame";
 import { normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
+import { currentExecutableStatementRange, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
+import { executableStatementRangeCacheForDoc, executableStatementRangeStartingAt, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
 import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES } from "@/lib/table/tableColumnTemplates";
 import { buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpVsCodeConfig, type McpEnvEntry, type McpLaunchConfig } from "@/lib/mcp/mcpConfigTemplates";
 import { isWindows } from "@/lib/backend/platform";
 import { combineDataTypeForDatabase, dataTypeLengthInputValue, getDataTypeOptions, getDefaultLengthForType, isDataTypeLengthDisabled, splitDataType } from "@/lib/table/tableStructureEditorState";
+import { useToast } from "@/composables/useToast";
 import type { DatabaseType, SqlSnippet } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
 import { DEFAULT_SQL_SNIPPETS } from "@/lib/sql/sqlCompletion";
 import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
 import AppLogo from "@/components/icons/AppLogo.vue";
 import SqlFormatterSettingsPanel from "./SqlFormatterSettingsPanel.vue";
-import type { AppThemeAppearance } from "@/lib/app/appTheme";
+import { APP_THEME_PALETTES, type AppThemeAppearance, type AppThemeMode, type AppThemePalette } from "@/lib/app/appTheme";
+import { editorSettingsDraftChanged, editorSettingsDraftFromSettings, editorSettingsPatchFromDraft, type EditorSettingsDraft } from "@/lib/settings/editorSettingsDraft";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { currentLocale, setLocale, type Locale } from "@/i18n";
@@ -85,12 +99,30 @@ import { LOCALE_OPTIONS } from "@/lib/app/localeOptions";
 import { DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES, DEFAULT_WEB_DAV_REMOTE_PATH, normalizedWebDavAutoUploadInterval, writeWebDavAutoUploadFields } from "@/lib/webdav/webdavAutoUploadConfig";
 import { apiUrl } from "@/lib/common/webPath";
 import { DEFAULT_UI_FONT_FAMILY, SYSTEM_UI_FONT_FAMILY } from "@/lib/app/appFonts";
+import { buildAppSupportInfoRows, formatAppSupportInfoForClipboard, type AppSupportInfoLabels } from "@/lib/app/supportInfo";
 
 const { t } = useI18n();
+const { toast } = useToast();
 const settingsStore = useSettingsStore();
 const connectionStore = useConnectionStore();
 const savedSqlStore = useSavedSqlStore();
-const { isDark, themeMode, setThemeMode } = useTheme();
+const { isDark, themeMode, themePalette, setThemeMode, setThemePalette } = useTheme();
+
+const appThemePaletteOptions = computed(
+  (): Array<{ value: AppThemePalette; label: string; previewColor: string }> =>
+    APP_THEME_PALETTES.map((palette) => ({
+      value: palette.value,
+      label: t(palette.labelKey),
+      previewColor: palette.previewColor,
+    })),
+);
+const selectedThemePaletteOption = computed(() => appThemePaletteOptions.value.find((option) => option.value === themePalette.value) ?? appThemePaletteOptions.value[0]);
+const selectedLocaleOption = computed(() => LOCALE_OPTIONS.find((locale) => locale.value === currentLocale()) ?? LOCALE_OPTIONS[0]);
+const appThemeModeOptions = computed(() => [
+  { value: "light" as AppThemeMode, label: t("toolbar.themeLight"), icon: Sun },
+  { value: "dark" as AppThemeMode, label: t("toolbar.themeDark"), icon: Moon },
+  { value: "system" as AppThemeMode, label: t("toolbar.themeSystem"), icon: SunMoon },
+]);
 
 let cachedSystemFonts: string[] | null = null;
 let pendingSystemFonts: Promise<string[]> | null = null;
@@ -211,9 +243,12 @@ const editActiveCustomThemeId = ref(settingsStore.editorSettings.activeCustomThe
 const showThemeCustomizer = ref(false);
 const editExecuteMode = ref(settingsStore.editorSettings.executeMode);
 const editShowExecutionTargetPicker = ref(settingsStore.editorSettings.showExecutionTargetPicker);
+const editShowStatementRunButtons = ref(settingsStore.editorSettings.showStatementRunButtons);
+const editShowCurrentStatementFrame = ref(settingsStore.editorSettings.showCurrentStatementFrame);
 const editAutoAliasTables = ref(settingsStore.editorSettings.autoAliasTables);
 const editWordWrap = ref(settingsStore.editorSettings.wordWrap);
 const editVimModeEnabled = ref(settingsStore.editorSettings.vimModeEnabled);
+const editAutoCloseBrackets = ref(settingsStore.editorSettings.autoCloseBrackets);
 const editSqlSemanticDiagnosticsMode = ref<SqlSemanticDiagnosticsMode>(settingsStore.editorSettings.sqlSemanticDiagnosticsMode);
 const editSqlSemanticDiagnosticsEnabled = ref(settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled);
 const editConfirmDangerousSqlExecution = ref(settingsStore.editorSettings.confirmDangerousSqlExecution);
@@ -224,6 +259,12 @@ const editQuitOnClose = ref(settingsStore.desktopSettings.quit_on_close);
 const desktopCloseBehaviorResetPending = ref(false);
 const editIconTheme = ref<DesktopIconTheme>(settingsStore.desktopSettings.icon_theme);
 const editDebugLoggingEnabled = ref(settingsStore.desktopSettings.debug_logging_enabled);
+const editDuckDbWorkerProcessIsolation = ref(settingsStore.desktopSettings.duckdb_worker_process_isolation);
+const editDuckDbWorkerMaxProcesses = ref(settingsStore.desktopSettings.duckdb_worker_max_processes);
+const startupDuckDbWorkerProcessIsolation = ref(settingsStore.desktopSettings.duckdb_worker_process_isolation);
+const startupDuckDbWorkerMaxProcesses = ref(settingsStore.desktopSettings.duckdb_worker_max_processes);
+const duckDbWorkerStartupCaptured = ref(false);
+const duckDbRestarting = ref(false);
 const editSidebarTablePageSize = ref(settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE);
 const debugLogCopied = ref(false);
 const debugLogDownloaded = ref(false);
@@ -245,6 +286,7 @@ const editingShortcutId = ref<ShortcutActionId | null>(null);
 const editSidebarActivation = ref(settingsStore.editorSettings.sidebarActivation);
 const editSidebarObjectDisplay = ref(settingsStore.editorSettings.sidebarObjectDisplay);
 const sidebarObjectDisplayHelp = ref<"grouped" | "simple" | null>(null);
+const editSidebarTableSearchEnabled = ref(settingsStore.editorSettings.sidebarTableSearchEnabled);
 const editAutoSelectActiveSidebarNode = ref(settingsStore.editorSettings.autoSelectActiveSidebarNode);
 const editOpenTabsRestoreMode = ref<OpenTabsRestoreMode>(settingsStore.editorSettings.openTabsRestoreMode);
 const editDisconnectTabHandlingMode = ref<DisconnectTabHandlingMode>(settingsStore.editorSettings.disconnectTabHandlingMode);
@@ -265,7 +307,9 @@ const systemFontsLoaded = ref(false);
 const uiScaleOptions = [0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
 const fontSearchTriggerClass =
   "h-8 w-full max-w-none justify-between gap-1.5 rounded-[6px] border border-input bg-transparent py-2 pl-2.5 pr-2 text-sm font-normal shadow-none hover:bg-transparent focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 aria-expanded:bg-transparent dark:bg-input/30 dark:hover:bg-input/50";
+const appearanceFontSearchTriggerClass = `${fontSearchTriggerClass} gap-0 pl-2 pr-1.5`;
 const fontSearchTriggerIconClass = "size-4 text-muted-foreground";
+const appearanceFontSearchTriggerIconClass = "size-2.5 text-muted-foreground";
 const disconnectTabHandlingModeDescriptionKey = computed(() => {
   switch (editDisconnectTabHandlingMode.value) {
     case "close-tabs":
@@ -287,7 +331,65 @@ const visibleTableColumnTemplateRows = computed(() =>
 );
 
 // --- Snippet state ---
-const editSnippets = ref<SqlSnippet[]>(settingsStore.editorSettings.snippets.map((s) => ({ ...s })));
+function editableSnippet(snippet: SqlSnippet): SqlSnippet {
+  return { ...snippet, enabled: snippet.enabled !== false };
+}
+
+const editSnippets = ref<SqlSnippet[]>(settingsStore.editorSettings.snippets.map(editableSnippet));
+
+function currentEditorSettingsDraft(): EditorSettingsDraft {
+  return {
+    fontFamily: editFontFamily.value,
+    fontSize: editFontSize.value,
+    uiFontFamily: editUiFontFamily.value,
+    uiScale: editUiScale.value,
+    theme: editTheme.value,
+    customThemes: editCustomThemes.value,
+    activeCustomThemeId: editActiveCustomThemeId.value,
+    executeMode: editExecuteMode.value,
+    showExecutionTargetPicker: editShowExecutionTargetPicker.value,
+    showStatementRunButtons: editShowStatementRunButtons.value,
+    showCurrentStatementFrame: editShowCurrentStatementFrame.value,
+    autoAliasTables: editAutoAliasTables.value,
+    wordWrap: editWordWrap.value,
+    vimModeEnabled: editVimModeEnabled.value,
+    autoCloseBrackets: editAutoCloseBrackets.value,
+    sqlSemanticDiagnosticsMode: editSqlSemanticDiagnosticsMode.value,
+    confirmDangerousSqlExecution: editConfirmDangerousSqlExecution.value,
+    confirmUnsavedSqlClose: editConfirmUnsavedSqlClose.value,
+    appLayout: editAppLayout.value,
+    showColumnCommentsInHeader: editShowColumnCommentsInHeader.value,
+    showColumnTypesInHeader: editShowColumnTypesInHeader.value,
+    compactColumnHeaderActions: editCompactColumnHeaderActions.value,
+    dataGridQuickEntry: editDataGridQuickEntry.value,
+    infiniteScroll: editInfiniteScroll.value,
+    infiniteScrollMaxRows: editInfiniteScrollMaxRows.value,
+    tableColumnTemplateFields: normalizedEditTableColumnTemplateFields.value,
+    shortcuts: editShortcuts.value,
+    sqlFormatter: normalizeSqlFormatterSettings(editSqlFormatter.value),
+    sidebarActivation: editSidebarActivation.value,
+    sidebarObjectDisplay: editSidebarObjectDisplay.value,
+    sidebarTableSearchEnabled: editSidebarTableSearchEnabled.value,
+    autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode.value,
+    openTabsRestoreMode: editOpenTabsRestoreMode.value,
+    disconnectTabHandlingMode: editDisconnectTabHandlingMode.value,
+    reuseDataTab: editReuseDataTab.value,
+    updateNotificationsEnabled: editUpdateNotificationsEnabled.value,
+    sidebarHideTableComments: editSidebarHideTableComments.value,
+    sidebarAllowHorizontalScroll: editSidebarAllowHorizontalScroll.value,
+    sidebarHiddenTablePrefixes: normalizeSidebarHiddenTablePrefixes(editSidebarHiddenTablePrefixes.value),
+    exportBatchSize: editExportBatchSize.value,
+    exportRowLimitEnabled: editExportRowLimitEnabled.value,
+    exportRowLimit: editExportRowLimit.value,
+    queryExportKeysetOptimizationEnabled: editQueryExportKeysetOptimizationEnabled.value,
+    updateDownloadSource: editUpdateDownloadSource.value,
+    toolbarItems: { ...editToolbarItems.value },
+    snippets: editSnippets.value,
+  };
+}
+
+const editEditorSettingsBase = ref<EditorSettingsDraft>(editorSettingsDraftFromSettings(settingsStore.editorSettings));
+const hasEditorDraftChanges = computed(() => editorSettingsDraftChanged(currentEditorSettingsDraft(), editEditorSettingsBase.value));
 
 const snippetDialogOpen = ref(false);
 const snippetEditingId = ref<string | null>(null);
@@ -406,6 +508,7 @@ function saveSnippet() {
         label: snippetForm.value.label.trim() || prefix,
         prefix,
         body: snippetForm.value.body,
+        enabled: editSnippets.value[idx].enabled !== false,
       };
     }
   } else {
@@ -414,9 +517,16 @@ function saveSnippet() {
       label: snippetForm.value.label.trim() || prefix,
       prefix,
       body: snippetForm.value.body,
+      enabled: true,
     });
   }
   snippetDialogOpen.value = false;
+}
+
+function setSnippetEnabled(id: string, enabled: boolean) {
+  const idx = editSnippets.value.findIndex((s) => s.id === id);
+  if (idx === -1) return;
+  editSnippets.value[idx] = { ...editSnippets.value[idx], enabled };
 }
 
 function deleteSnippet(id: string) {
@@ -497,63 +607,83 @@ async function loadSystemFontOptions() {
   }
 }
 
+function syncEditorSettingsDraftFromStore() {
+  editFontFamily.value = settingsStore.editorSettings.fontFamily;
+  editFontSize.value = settingsStore.editorSettings.fontSize;
+  editUiFontFamily.value = settingsStore.editorSettings.uiFontFamily;
+  editUiScale.value = settingsStore.editorSettings.uiScale;
+  editTheme.value = settingsStore.editorSettings.theme;
+  editCustomThemes.value = [...settingsStore.editorSettings.customThemes];
+  editActiveCustomThemeId.value = settingsStore.editorSettings.activeCustomThemeId;
+  editExecuteMode.value = settingsStore.editorSettings.executeMode;
+  editShowExecutionTargetPicker.value = settingsStore.editorSettings.showExecutionTargetPicker;
+  editShowStatementRunButtons.value = settingsStore.editorSettings.showStatementRunButtons;
+  editShowCurrentStatementFrame.value = settingsStore.editorSettings.showCurrentStatementFrame;
+  editAutoAliasTables.value = settingsStore.editorSettings.autoAliasTables;
+  editWordWrap.value = settingsStore.editorSettings.wordWrap;
+  editVimModeEnabled.value = settingsStore.editorSettings.vimModeEnabled;
+  editAutoCloseBrackets.value = settingsStore.editorSettings.autoCloseBrackets;
+  editSqlSemanticDiagnosticsMode.value = settingsStore.editorSettings.sqlSemanticDiagnosticsMode;
+  editSqlSemanticDiagnosticsEnabled.value = settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled;
+  editConfirmDangerousSqlExecution.value = settingsStore.editorSettings.confirmDangerousSqlExecution;
+  editConfirmUnsavedSqlClose.value = settingsStore.editorSettings.confirmUnsavedSqlClose;
+  editAppLayout.value = settingsStore.editorSettings.appLayout;
+  editShowColumnCommentsInHeader.value = settingsStore.editorSettings.showColumnCommentsInHeader;
+  editShowColumnTypesInHeader.value = settingsStore.editorSettings.showColumnTypesInHeader;
+  editCompactColumnHeaderActions.value = settingsStore.editorSettings.compactColumnHeaderActions;
+  editDataGridQuickEntry.value = settingsStore.editorSettings.dataGridQuickEntry;
+  editInfiniteScroll.value = settingsStore.editorSettings.infiniteScroll;
+  editInfiniteScrollMaxRows.value = settingsStore.editorSettings.infiniteScrollMaxRows;
+  editTableColumnTemplateRows.value = tableColumnTemplateRowsFromSettings(settingsStore.editorSettings.tableColumnTemplateFields);
+  editShortcuts.value = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
+  editSqlFormatter.value = normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter);
+  sqlFormatterConfigValid.value = true;
+  editSidebarActivation.value = settingsStore.editorSettings.sidebarActivation;
+  editSidebarObjectDisplay.value = settingsStore.editorSettings.sidebarObjectDisplay;
+  editSidebarTableSearchEnabled.value = settingsStore.editorSettings.sidebarTableSearchEnabled;
+  editAutoSelectActiveSidebarNode.value = settingsStore.editorSettings.autoSelectActiveSidebarNode;
+  editOpenTabsRestoreMode.value = settingsStore.editorSettings.openTabsRestoreMode;
+  editDisconnectTabHandlingMode.value = settingsStore.editorSettings.disconnectTabHandlingMode;
+  editReuseDataTab.value = settingsStore.editorSettings.reuseDataTab;
+  editUpdateNotificationsEnabled.value = settingsStore.editorSettings.updateNotificationsEnabled;
+  editSidebarHiddenTablePrefixes.value = settingsStore.editorSettings.sidebarHiddenTablePrefixes.join("\n");
+  editSidebarHideTableComments.value = settingsStore.editorSettings.sidebarHideTableComments;
+  editSidebarAllowHorizontalScroll.value = settingsStore.editorSettings.sidebarAllowHorizontalScroll;
+  editExportBatchSize.value = settingsStore.editorSettings.exportBatchSize;
+  editExportRowLimitEnabled.value = settingsStore.editorSettings.exportRowLimitEnabled;
+  editExportRowLimit.value = settingsStore.editorSettings.exportRowLimit;
+  editQueryExportKeysetOptimizationEnabled.value = settingsStore.editorSettings.queryExportKeysetOptimizationEnabled;
+  editUpdateDownloadSource.value = settingsStore.editorSettings.updateDownloadSource;
+  editToolbarItems.value = { ...settingsStore.editorSettings.toolbarItems };
+  editSnippets.value = settingsStore.editorSettings.snippets.map(editableSnippet);
+  editEditorSettingsBase.value = editorSettingsDraftFromSettings(settingsStore.editorSettings);
+}
+
 // Sync from store when dialog opens
 watch(
   () => settingsVisible.value,
   (open) => {
     if (open) {
-      editFontFamily.value = settingsStore.editorSettings.fontFamily;
-      editFontSize.value = settingsStore.editorSettings.fontSize;
-      editUiFontFamily.value = settingsStore.editorSettings.uiFontFamily;
-      editUiScale.value = settingsStore.editorSettings.uiScale;
-      editTheme.value = settingsStore.editorSettings.theme;
-      editCustomThemes.value = [...settingsStore.editorSettings.customThemes];
-      editActiveCustomThemeId.value = settingsStore.editorSettings.activeCustomThemeId;
-      editExecuteMode.value = settingsStore.editorSettings.executeMode;
-      editShowExecutionTargetPicker.value = settingsStore.editorSettings.showExecutionTargetPicker;
-      editAutoAliasTables.value = settingsStore.editorSettings.autoAliasTables;
-      editWordWrap.value = settingsStore.editorSettings.wordWrap;
-      editVimModeEnabled.value = settingsStore.editorSettings.vimModeEnabled;
-      editSqlSemanticDiagnosticsMode.value = settingsStore.editorSettings.sqlSemanticDiagnosticsMode;
-      editSqlSemanticDiagnosticsEnabled.value = settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled;
-      editConfirmDangerousSqlExecution.value = settingsStore.editorSettings.confirmDangerousSqlExecution;
-      editConfirmUnsavedSqlClose.value = settingsStore.editorSettings.confirmUnsavedSqlClose;
-      editAppLayout.value = settingsStore.editorSettings.appLayout;
+      syncEditorSettingsDraftFromStore();
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
       editQuitOnClose.value = settingsStore.desktopSettings.quit_on_close;
       editIconTheme.value = settingsStore.desktopSettings.icon_theme;
       editDebugLoggingEnabled.value = settingsStore.desktopSettings.debug_logging_enabled;
+      editDuckDbWorkerProcessIsolation.value = settingsStore.desktopSettings.duckdb_worker_process_isolation;
       editSidebarTablePageSize.value = settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
-      editShowColumnCommentsInHeader.value = settingsStore.editorSettings.showColumnCommentsInHeader;
-      editShowColumnTypesInHeader.value = settingsStore.editorSettings.showColumnTypesInHeader;
-      editCompactColumnHeaderActions.value = settingsStore.editorSettings.compactColumnHeaderActions;
-      editDataGridQuickEntry.value = settingsStore.editorSettings.dataGridQuickEntry;
-      editInfiniteScroll.value = settingsStore.editorSettings.infiniteScroll;
-      editInfiniteScrollMaxRows.value = settingsStore.editorSettings.infiniteScrollMaxRows;
-      editTableColumnTemplateRows.value = tableColumnTemplateRowsFromSettings(settingsStore.editorSettings.tableColumnTemplateFields);
-      editShortcuts.value = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
-      editSqlFormatter.value = normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter);
-      sqlFormatterConfigValid.value = true;
-      editSidebarActivation.value = settingsStore.editorSettings.sidebarActivation;
-      editSidebarObjectDisplay.value = settingsStore.editorSettings.sidebarObjectDisplay;
-      editAutoSelectActiveSidebarNode.value = settingsStore.editorSettings.autoSelectActiveSidebarNode;
-      editOpenTabsRestoreMode.value = settingsStore.editorSettings.openTabsRestoreMode;
-      editDisconnectTabHandlingMode.value = settingsStore.editorSettings.disconnectTabHandlingMode;
-      editReuseDataTab.value = settingsStore.editorSettings.reuseDataTab;
-      editUpdateNotificationsEnabled.value = settingsStore.editorSettings.updateNotificationsEnabled;
-      editSidebarHiddenTablePrefixes.value = settingsStore.editorSettings.sidebarHiddenTablePrefixes.join("\n");
-      editSidebarHideTableComments.value = settingsStore.editorSettings.sidebarHideTableComments;
-      editSidebarAllowHorizontalScroll.value = settingsStore.editorSettings.sidebarAllowHorizontalScroll;
-      editExportBatchSize.value = settingsStore.editorSettings.exportBatchSize;
-      editExportRowLimitEnabled.value = settingsStore.editorSettings.exportRowLimitEnabled;
-      editExportRowLimit.value = settingsStore.editorSettings.exportRowLimit;
-      editQueryExportKeysetOptimizationEnabled.value = settingsStore.editorSettings.queryExportKeysetOptimizationEnabled;
-      editUpdateDownloadSource.value = settingsStore.editorSettings.updateDownloadSource;
-      editToolbarItems.value = { ...settingsStore.editorSettings.toolbarItems };
-      editSnippets.value = settingsStore.editorSettings.snippets.map((s) => ({ ...s }));
     }
   },
   { immediate: true },
+);
+
+watch(
+  () => settingsStore.editorSettings,
+  () => {
+    if (settingsVisible.value && !hasEditorDraftChanges.value) {
+      syncEditorSettingsDraftFromStore();
+    }
+  },
+  { deep: true },
 );
 
 const shortcutConflicts = computed(() =>
@@ -562,121 +692,75 @@ const shortcutConflicts = computed(() =>
     return conflict ? [definition.id] : [];
   }),
 );
-const formatterEditorShortcutIds: ShortcutActionId[] = ["formatSql", "find", "replace", "saveSql", "acceptCompletion", "indentMore", "indentLess", "duplicateLine", "deleteLine", "moveLineUp", "moveLineDown", "copyLineUp", "copyLineDown", "undo", "redo", "selectAll"];
+const shortcutSearchQuery = ref("");
+const formatterEditorShortcutIds: ShortcutActionId[] = [
+  "formatSql",
+  "toggleLineComment",
+  "find",
+  "replace",
+  "saveSql",
+  "acceptCompletion",
+  "indentMore",
+  "indentLess",
+  "duplicateLine",
+  "deleteLine",
+  "moveLineUp",
+  "moveLineDown",
+  "copyLineUp",
+  "copyLineDown",
+  "undo",
+  "redo",
+  "selectAll",
+  "uppercaseSelection",
+  "lowercaseSelection",
+];
 const formatterEditorShortcutDefinitions = computed(() => formatterEditorShortcutIds.map((id) => SHORTCUT_DEFINITIONS.find((definition) => definition.id === id)).filter((definition): definition is (typeof SHORTCUT_DEFINITIONS)[number] => !!definition));
+const filteredShortcutDefinitions = computed(() => {
+  const query = shortcutSearchQuery.value.trim().toLowerCase();
+  if (!query) return SHORTCUT_DEFINITIONS;
+  return SHORTCUT_DEFINITIONS.filter((definition) => {
+    const scope = t(`settings.shortcutScope${definition.scope[0].toUpperCase()}${definition.scope.slice(1)}`);
+    const shortcut = formatShortcutPill(editShortcuts.value[definition.id]);
+    return [definition.id, t(definition.labelKey), scope, shortcut].some((value) => value.toLowerCase().includes(query));
+  });
+});
 const hasShortcutConflicts = computed(() => shortcutConflicts.value.length > 0);
-const shortcutsChanged = computed(() => JSON.stringify(editShortcuts.value) !== JSON.stringify(settingsStore.editorSettings.shortcuts));
+const shortcutsChanged = computed(() => JSON.stringify(editShortcuts.value) !== JSON.stringify(editEditorSettingsBase.value.shortcuts));
+const duckDbWorkerSettingsRequireRestart = computed(() => editDuckDbWorkerProcessIsolation.value !== startupDuckDbWorkerProcessIsolation.value || normalizeDuckDbWorkerMaxProcesses(editDuckDbWorkerMaxProcesses.value) !== startupDuckDbWorkerMaxProcesses.value);
 const hasBlockingShortcutConflicts = computed(() => shortcutsChanged.value && hasShortcutConflicts.value);
 const hasBlockingFormatterConfig = computed(() => activeSettingsTab.value === "formatter" && !sqlFormatterConfigValid.value);
 const hasApplyBlocker = computed(() => hasBlockingShortcutConflicts.value || hasBlockingFormatterConfig.value);
 
 function hasChanges(): boolean {
   return (
-    editFontFamily.value !== settingsStore.editorSettings.fontFamily ||
-    editFontSize.value !== settingsStore.editorSettings.fontSize ||
-    editUiFontFamily.value !== settingsStore.editorSettings.uiFontFamily ||
-    editUiScale.value !== settingsStore.editorSettings.uiScale ||
-    editTheme.value !== settingsStore.editorSettings.theme ||
-    JSON.stringify(editCustomThemes.value) !== JSON.stringify(settingsStore.editorSettings.customThemes) ||
-    editActiveCustomThemeId.value !== settingsStore.editorSettings.activeCustomThemeId ||
-    editExecuteMode.value !== settingsStore.editorSettings.executeMode ||
-    editShowExecutionTargetPicker.value !== settingsStore.editorSettings.showExecutionTargetPicker ||
-    editAutoAliasTables.value !== settingsStore.editorSettings.autoAliasTables ||
-    editWordWrap.value !== settingsStore.editorSettings.wordWrap ||
-    editVimModeEnabled.value !== settingsStore.editorSettings.vimModeEnabled ||
-    editSqlSemanticDiagnosticsMode.value !== settingsStore.editorSettings.sqlSemanticDiagnosticsMode ||
-    editSqlSemanticDiagnosticsEnabled.value !== settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled ||
-    editConfirmDangerousSqlExecution.value !== settingsStore.editorSettings.confirmDangerousSqlExecution ||
-    editConfirmUnsavedSqlClose.value !== settingsStore.editorSettings.confirmUnsavedSqlClose ||
-    editAppLayout.value !== settingsStore.editorSettings.appLayout ||
+    hasEditorDraftChanges.value ||
     editShowTrayIcon.value !== settingsStore.desktopSettings.show_tray_icon ||
     editQuitOnClose.value !== settingsStore.desktopSettings.quit_on_close ||
     editIconTheme.value !== settingsStore.desktopSettings.icon_theme ||
     editDebugLoggingEnabled.value !== settingsStore.desktopSettings.debug_logging_enabled ||
-    editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE) ||
-    editShowColumnCommentsInHeader.value !== settingsStore.editorSettings.showColumnCommentsInHeader ||
-    editShowColumnTypesInHeader.value !== settingsStore.editorSettings.showColumnTypesInHeader ||
-    editCompactColumnHeaderActions.value !== settingsStore.editorSettings.compactColumnHeaderActions ||
-    editDataGridQuickEntry.value !== settingsStore.editorSettings.dataGridQuickEntry ||
-    editInfiniteScroll.value !== settingsStore.editorSettings.infiniteScroll ||
-    editInfiniteScrollMaxRows.value !== settingsStore.editorSettings.infiniteScrollMaxRows ||
-    JSON.stringify(normalizedEditTableColumnTemplateFields.value) !== JSON.stringify(settingsStore.editorSettings.tableColumnTemplateFields) ||
-    JSON.stringify(editShortcuts.value) !== JSON.stringify(settingsStore.editorSettings.shortcuts) ||
-    JSON.stringify(editSqlFormatter.value) !== JSON.stringify(normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter)) ||
-    editSidebarActivation.value !== settingsStore.editorSettings.sidebarActivation ||
-    editSidebarObjectDisplay.value !== settingsStore.editorSettings.sidebarObjectDisplay ||
-    editAutoSelectActiveSidebarNode.value !== settingsStore.editorSettings.autoSelectActiveSidebarNode ||
-    editOpenTabsRestoreMode.value !== settingsStore.editorSettings.openTabsRestoreMode ||
-    editDisconnectTabHandlingMode.value !== settingsStore.editorSettings.disconnectTabHandlingMode ||
-    editReuseDataTab.value !== settingsStore.editorSettings.reuseDataTab ||
-    editUpdateNotificationsEnabled.value !== settingsStore.editorSettings.updateNotificationsEnabled ||
-    editSidebarHideTableComments.value !== settingsStore.editorSettings.sidebarHideTableComments ||
-    editSidebarAllowHorizontalScroll.value !== settingsStore.editorSettings.sidebarAllowHorizontalScroll ||
-    editExportBatchSize.value !== settingsStore.editorSettings.exportBatchSize ||
-    editExportRowLimitEnabled.value !== settingsStore.editorSettings.exportRowLimitEnabled ||
-    editExportRowLimit.value !== settingsStore.editorSettings.exportRowLimit ||
-    editQueryExportKeysetOptimizationEnabled.value !== settingsStore.editorSettings.queryExportKeysetOptimizationEnabled ||
-    editUpdateDownloadSource.value !== settingsStore.editorSettings.updateDownloadSource ||
-    JSON.stringify(editToolbarItems.value) !== JSON.stringify(settingsStore.editorSettings.toolbarItems) ||
-    JSON.stringify(normalizeSidebarHiddenTablePrefixes(editSidebarHiddenTablePrefixes.value)) !== JSON.stringify(settingsStore.editorSettings.sidebarHiddenTablePrefixes) ||
-    JSON.stringify(editSnippets.value) !== JSON.stringify(settingsStore.editorSettings.snippets)
+    editDuckDbWorkerProcessIsolation.value !== settingsStore.desktopSettings.duckdb_worker_process_isolation ||
+    normalizeDuckDbWorkerMaxProcesses(editDuckDbWorkerMaxProcesses.value) !== settingsStore.desktopSettings.duckdb_worker_max_processes ||
+    editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE)
   );
 }
 
 async function persistSettings() {
   if (hasApplyBlocker.value) return;
-  const sidebarObjectDisplayChanged = editSidebarObjectDisplay.value !== settingsStore.editorSettings.sidebarObjectDisplay;
+  const editorSettingsPatch = editorSettingsPatchFromDraft(currentEditorSettingsDraft(), editEditorSettingsBase.value);
+  const sidebarObjectDisplayChanged = editorSettingsPatch.sidebarObjectDisplay !== undefined && editorSettingsPatch.sidebarObjectDisplay !== settingsStore.editorSettings.sidebarObjectDisplay;
   const sidebarTablePageSizeChanged = editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE);
-  settingsStore.updateEditorSettings({
-    fontFamily: editFontFamily.value,
-    fontSize: editFontSize.value,
-    uiFontFamily: editUiFontFamily.value,
-    uiScale: editUiScale.value,
-    theme: editTheme.value,
-    customThemes: editCustomThemes.value,
-    activeCustomThemeId: editActiveCustomThemeId.value,
-    executeMode: editExecuteMode.value,
-    showExecutionTargetPicker: editShowExecutionTargetPicker.value,
-    autoAliasTables: editAutoAliasTables.value,
-    wordWrap: editWordWrap.value,
-    vimModeEnabled: editVimModeEnabled.value,
-    sqlSemanticDiagnosticsMode: editSqlSemanticDiagnosticsMode.value,
-    confirmDangerousSqlExecution: editConfirmDangerousSqlExecution.value,
-    confirmUnsavedSqlClose: editConfirmUnsavedSqlClose.value,
-    appLayout: editAppLayout.value,
-    showColumnCommentsInHeader: editShowColumnCommentsInHeader.value,
-    showColumnTypesInHeader: editShowColumnTypesInHeader.value,
-    compactColumnHeaderActions: editCompactColumnHeaderActions.value,
-    dataGridQuickEntry: editDataGridQuickEntry.value,
-    infiniteScroll: editInfiniteScroll.value,
-    infiniteScrollMaxRows: editInfiniteScrollMaxRows.value,
-    tableColumnTemplateFields: normalizedEditTableColumnTemplateFields.value,
-    shortcuts: editShortcuts.value,
-    sqlFormatter: normalizeSqlFormatterSettings(editSqlFormatter.value),
-    sidebarActivation: editSidebarActivation.value,
-    sidebarObjectDisplay: editSidebarObjectDisplay.value,
-    autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode.value,
-    openTabsRestoreMode: editOpenTabsRestoreMode.value,
-    disconnectTabHandlingMode: editDisconnectTabHandlingMode.value,
-    reuseDataTab: editReuseDataTab.value,
-    updateNotificationsEnabled: editUpdateNotificationsEnabled.value,
-    sidebarHideTableComments: editSidebarHideTableComments.value,
-    sidebarAllowHorizontalScroll: editSidebarAllowHorizontalScroll.value,
-    sidebarHiddenTablePrefixes: normalizeSidebarHiddenTablePrefixes(editSidebarHiddenTablePrefixes.value),
-    exportBatchSize: editExportBatchSize.value,
-    exportRowLimitEnabled: editExportRowLimitEnabled.value,
-    exportRowLimit: editExportRowLimit.value,
-    queryExportKeysetOptimizationEnabled: editQueryExportKeysetOptimizationEnabled.value,
-    updateDownloadSource: editUpdateDownloadSource.value,
-    toolbarItems: { ...editToolbarItems.value },
-    snippets: editSnippets.value,
-  });
+  if (Object.keys(editorSettingsPatch).length > 0) {
+    settingsStore.updateEditorSettings(editorSettingsPatch);
+    editEditorSettingsBase.value = editorSettingsDraftFromSettings(settingsStore.editorSettings);
+  }
   await settingsStore.updateDesktopSettings({
     show_tray_icon: editShowTrayIcon.value,
     quit_on_close: editQuitOnClose.value,
     close_action_prompted: desktopCloseBehaviorResetPending.value ? false : true,
     icon_theme: editIconTheme.value,
     debug_logging_enabled: editDebugLoggingEnabled.value,
+    duckdb_worker_process_isolation: editDuckDbWorkerProcessIsolation.value,
+    duckdb_worker_max_processes: normalizeDuckDbWorkerMaxProcesses(editDuckDbWorkerMaxProcesses.value),
     sidebar_table_page_size: editSidebarTablePageSize.value,
   });
   desktopCloseBehaviorResetPending.value = false;
@@ -696,15 +780,32 @@ async function applySettingsAndClose() {
   closeSettings();
 }
 
+async function restartDbxForDuckDbIsolation() {
+  if (duckDbRestarting.value || hasApplyBlocker.value || isWeb) return;
+  duckDbRestarting.value = true;
+  try {
+    await persistSettings();
+    const { relaunch } = await import("@tauri-apps/plugin-process");
+    await relaunch();
+  } catch (e: any) {
+    toast(t("settings.restartDbxFailed", { error: e?.message || String(e) }), 5000);
+  } finally {
+    duckDbRestarting.value = false;
+  }
+}
+
 function resetDefaultsForTab(tab: SettingsCategory) {
   if (tab === "editor") {
     editFontFamily.value = DEFAULT_EDITOR_SETTINGS.fontFamily;
     editFontSize.value = DEFAULT_EDITOR_SETTINGS.fontSize;
     editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
     editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
+    editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
+    editShowCurrentStatementFrame.value = DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame;
     editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
     editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
     editVimModeEnabled.value = DEFAULT_EDITOR_SETTINGS.vimModeEnabled;
+    editAutoCloseBrackets.value = DEFAULT_EDITOR_SETTINGS.autoCloseBrackets;
     editSqlSemanticDiagnosticsMode.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsMode;
     editSqlSemanticDiagnosticsEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsEnabled;
     editConfirmDangerousSqlExecution.value = DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution;
@@ -728,6 +829,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSidebarTablePageSize.value = DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
     editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
     editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
+    editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
     editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
     editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
     editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
@@ -744,6 +846,8 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
     editInfiniteScroll.value = DEFAULT_EDITOR_SETTINGS.infiniteScroll;
     editInfiniteScrollMaxRows.value = DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows;
+    editDuckDbWorkerProcessIsolation.value = DEFAULT_DESKTOP_SETTINGS.duckdb_worker_process_isolation;
+    editDuckDbWorkerMaxProcesses.value = DEFAULT_DESKTOP_SETTINGS.duckdb_worker_max_processes;
     editTableColumnTemplateRows.value = tableColumnTemplateRowsFromSettings(DEFAULT_EDITOR_SETTINGS.tableColumnTemplateFields);
     editExportBatchSize.value = DEFAULT_EDITOR_SETTINGS.exportBatchSize;
     editExportRowLimitEnabled.value = DEFAULT_EDITOR_SETTINGS.exportRowLimitEnabled;
@@ -768,9 +872,12 @@ function resetAllDefaults() {
   editActiveCustomThemeId.value = DEFAULT_EDITOR_SETTINGS.activeCustomThemeId;
   editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
   editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
+  editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
+  editShowCurrentStatementFrame.value = DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame;
   editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
   editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
   editVimModeEnabled.value = DEFAULT_EDITOR_SETTINGS.vimModeEnabled;
+  editAutoCloseBrackets.value = DEFAULT_EDITOR_SETTINGS.autoCloseBrackets;
   editSqlSemanticDiagnosticsMode.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsMode;
   editSqlSemanticDiagnosticsEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsEnabled;
   editConfirmDangerousSqlExecution.value = DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution;
@@ -781,6 +888,8 @@ function resetAllDefaults() {
   desktopCloseBehaviorResetPending.value = true;
   editIconTheme.value = DEFAULT_DESKTOP_SETTINGS.icon_theme;
   editDebugLoggingEnabled.value = DEFAULT_DESKTOP_SETTINGS.debug_logging_enabled;
+  editDuckDbWorkerProcessIsolation.value = DEFAULT_DESKTOP_SETTINGS.duckdb_worker_process_isolation;
+  editDuckDbWorkerMaxProcesses.value = DEFAULT_DESKTOP_SETTINGS.duckdb_worker_max_processes;
   editSidebarTablePageSize.value = DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
   editShowColumnCommentsInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader;
   editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
@@ -794,6 +903,7 @@ function resetAllDefaults() {
   sqlFormatterConfigValid.value = true;
   editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
   editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
+  editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
   editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
   editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
   editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
@@ -1035,29 +1145,7 @@ function onShortcutKeydown(actionId: ShortcutActionId, event: KeyboardEvent) {
 }
 
 function formatShortcutPill(shortcut: string): string {
-  if (!shortcut) return "—";
-  const isMac = globalThis.navigator?.platform?.toLowerCase().includes("mac") ?? false;
-  return shortcut
-    .split("+")
-    .filter(Boolean)
-    .map((part) => {
-      if (part === "Mod") return isMac ? "⌘" : "Ctrl";
-      if (part === "Meta") return isMac ? "⌘" : "Meta";
-      if (part === "Shift") return isMac ? "⇧" : "Shift";
-      if (part === "Alt") return isMac ? "⌥" : "Alt";
-      if (part === "Control" || part === "Ctrl") return isMac ? "⌃" : "Ctrl";
-      if (part === "Enter") return "↵";
-      if (part === "Backspace") return "⌫";
-      if (part === "Delete") return isMac ? "⌦" : "Del";
-      if (part === "Escape") return "Esc";
-      if (part === "ArrowUp") return "↑";
-      if (part === "ArrowDown") return "↓";
-      if (part === "ArrowLeft") return "←";
-      if (part === "ArrowRight") return "→";
-      if (part === " ") return "Space";
-      return part.length === 1 ? part.toUpperCase() : part;
-    })
-    .join(isMac ? " " : " + ");
+  return formatShortcutDisplay(shortcut);
 }
 
 const shortcutPressShortcutLabel = computed(() => t("settings.shortcutPressShortcut"));
@@ -1094,14 +1182,27 @@ function setSidebarActivation(value: "single" | "double") {
   editSidebarActivation.value = value;
 }
 
-const activeSettingsTab = ref("editor");
+const activeSettingsTab = ref("appearance");
 const isWeb = !isTauriRuntime();
-const displayedAppVersion = computed(() => (props.appVersion ? `v${props.appVersion}` : ""));
+const appSupportInfo = ref<AppSupportInfo | null>(null);
+const appSupportInfoLoading = ref(false);
+const appSupportInfoError = ref("");
+const appSupportInfoCopied = ref(false);
+const appSupportInfoLabels = computed<AppSupportInfoLabels>(() => ({
+  appVersion: t("settings.supportInfoAppVersion"),
+  runtime: t("settings.supportInfoRuntime"),
+  runtimeDesktop: t("settings.supportInfoRuntimeDesktop"),
+  runtimeWeb: t("settings.supportInfoRuntimeWeb"),
+  operatingSystem: t("settings.supportInfoOperatingSystem"),
+  architecture: t("settings.supportInfoArchitecture"),
+  unknown: t("settings.supportInfoUnknown"),
+}));
+const appSupportInfoRows = computed(() => (appSupportInfo.value ? buildAppSupportInfoRows(appSupportInfo.value, appSupportInfoLabels.value) : []));
 type SettingsCategory = "editor" | "formatter" | "appearance" | "navigation" | "data" | "shortcuts" | "snippets" | "sync" | "ai" | "mcp" | "security" | "about";
 const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[]>(() => [
+  { value: "appearance", label: t("settings.appearanceTab") },
   { value: "editor", label: t("settings.editorTab") },
   { value: "formatter", label: t("settings.sqlFormatterTab") },
-  { value: "appearance", label: t("settings.appearanceTab") },
   { value: "navigation", label: t("settings.navigationTab") },
   { value: "data", label: t("settings.dataTab") },
   { value: "shortcuts", label: t("settings.shortcutsTab") },
@@ -1119,7 +1220,7 @@ function hasSettingsApplyFooter(value: SettingsCategory): boolean {
 }
 
 function settingsCategoryButton(value: SettingsCategory): string {
-  return ["w-full rounded-md px-3 py-2 text-left text-sm transition-colors", value === activeSettingsTab.value ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:bg-muted hover:text-foreground"].join(" ");
+  return ["w-auto shrink-0 whitespace-nowrap rounded-md px-3 py-2 text-left text-sm transition-colors lg:w-full", value === activeSettingsTab.value ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:bg-muted hover:text-foreground"].join(" ");
 }
 
 function openExternalUrl(url: string) {
@@ -1136,6 +1237,44 @@ async function copyDebugLogs() {
   window.setTimeout(() => {
     debugLogCopied.value = false;
   }, 1500);
+}
+
+function fallbackAppSupportInfo(): AppSupportInfo {
+  return {
+    appVersion: props.appVersion || "",
+    runtime: isWeb ? "web" : "desktop",
+    osName: "",
+    osVersion: null,
+    arch: "",
+  };
+}
+
+async function refreshAppSupportInfo() {
+  if (appSupportInfoLoading.value) return;
+  appSupportInfoLoading.value = true;
+  appSupportInfoError.value = "";
+  try {
+    appSupportInfo.value = await getAppSupportInfo();
+  } catch (e: any) {
+    appSupportInfo.value = appSupportInfo.value || fallbackAppSupportInfo();
+    appSupportInfoError.value = e?.message || String(e);
+  } finally {
+    appSupportInfoLoading.value = false;
+  }
+}
+
+async function copyAppSupportInfo() {
+  if (!appSupportInfo.value) await refreshAppSupportInfo();
+  if (!appSupportInfo.value) return;
+  try {
+    await copyToClipboard(formatAppSupportInfoForClipboard(appSupportInfo.value, appSupportInfoLabels.value));
+    appSupportInfoCopied.value = true;
+    window.setTimeout(() => {
+      appSupportInfoCopied.value = false;
+    }, 1500);
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
 }
 
 function clearDebugLogs() {
@@ -1162,8 +1301,10 @@ const mcpStatusLoading = ref(false);
 const mcpStatusError = ref("");
 const mcpCopied = ref<"" | McpCopyKind>("");
 const mcpConfigTab = ref<McpConfigTab>("claude");
-const mcpReadonlyMode = ref(false);
-const mcpAllowDangerous = ref(false);
+const MCP_READONLY_STORAGE_KEY = "dbx-mcp-config-readonly";
+const MCP_ALLOW_DANGEROUS_STORAGE_KEY = "dbx-mcp-config-allow-dangerous";
+const mcpReadonlyMode = ref(localStorage.getItem(MCP_READONLY_STORAGE_KEY) === "true");
+const mcpAllowDangerous = ref(localStorage.getItem(MCP_ALLOW_DANGEROUS_STORAGE_KEY) === "true");
 const mcpInstalling = ref(false);
 const mcpInstallMessage = ref("");
 const mcpInstallError = ref(false);
@@ -1216,7 +1357,12 @@ const mcpCommand = computed(() => {
 });
 
 watch(mcpReadonlyMode, (value) => {
+  localStorage.setItem(MCP_READONLY_STORAGE_KEY, String(value));
   if (value) mcpAllowDangerous.value = false;
+});
+
+watch(mcpAllowDangerous, (value) => {
+  localStorage.setItem(MCP_ALLOW_DANGEROUS_STORAGE_KEY, String(value));
 });
 
 async function refreshMcpStatus() {
@@ -1278,13 +1424,14 @@ const webdavHasSavedPassword = ref(false);
 const webdavRemotePath = ref(localStorage.getItem("dbx-webdav-remote-path") || DEFAULT_WEB_DAV_REMOTE_PATH);
 const webdavSyncSecrets = ref(false);
 const webdavSecretsPassphrase = ref("");
+const webdavHasSavedSecretsPassphrase = ref(false);
 const webdavAutoUploadEnabled = ref(localStorage.getItem("dbx-webdav-auto-upload-enabled") === "true");
 const webdavAutoUploadIntervalMinutes = ref(Number(localStorage.getItem("dbx-webdav-auto-upload-interval-minutes") || String(DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES)));
 const webdavBusy = ref<"" | "test" | "upload" | "download">("");
 const webdavMessage = ref("");
 const webdavError = ref(false);
 
-const webdavReady = computed(() => !!webdavEndpoint.value.trim() && !webdavBusy.value && (!webdavSyncSecrets.value || !!webdavSecretsPassphrase.value.trim()));
+const webdavReady = computed(() => !!webdavEndpoint.value.trim() && !webdavBusy.value && (!webdavSyncSecrets.value || !!webdavSecretsPassphrase.value.trim() || webdavHasSavedSecretsPassphrase.value));
 
 function currentWebDavConfig(): WebDavConfig {
   return {
@@ -1320,6 +1467,7 @@ async function runWebDavAction(kind: "test" | "upload" | "download", action: () 
   try {
     rememberWebDavFields();
     await applyWebDavPasswordPreference();
+    await applyWebDavSyncSecretsPreference();
     setWebDavResult(await action());
   } catch (e: any) {
     setWebDavResult(e?.message || String(e), true);
@@ -1353,6 +1501,40 @@ async function applyWebDavPasswordPreference() {
   if (!webdavRememberPassword.value && webdavHasSavedPassword.value) {
     await forgetWebdavSavedPassword(currentWebDavAccountConfig());
     webdavHasSavedPassword.value = false;
+  }
+}
+
+async function refreshWebDavSyncSecretsStatus() {
+  try {
+    const status = await webdavSyncSecretsStatus();
+    webdavSyncSecrets.value = status.enabled;
+    webdavHasSavedSecretsPassphrase.value = status.hasSavedPassphrase;
+  } catch {
+    webdavSyncSecrets.value = false;
+    webdavHasSavedSecretsPassphrase.value = false;
+  }
+}
+
+async function applyWebDavSyncSecretsPreference() {
+  const passphrase = webdavSecretsPassphrase.value.trim();
+  if (!webdavSyncSecrets.value) {
+    await saveWebdavSyncSecretsPreference(false);
+    return;
+  }
+  await saveWebdavSyncSecretsPreference(true, passphrase || undefined);
+  if (passphrase) {
+    webdavHasSavedSecretsPassphrase.value = true;
+    webdavSecretsPassphrase.value = "";
+  }
+}
+
+async function clearWebDavSyncSecretsPassphrase() {
+  try {
+    await forgetWebdavSyncSecretsPassphrase();
+    webdavHasSavedSecretsPassphrase.value = false;
+    webdavSecretsPassphrase.value = "";
+  } catch (e: any) {
+    setWebDavResult(e?.message || String(e), true);
   }
 }
 
@@ -1412,7 +1594,7 @@ watch(
   () => settingsVisible.value,
   async (open) => {
     if (open) {
-      activeSettingsTab.value = props.initialTab || "editor";
+      activeSettingsTab.value = props.initialTab || "appearance";
       passwordMessage.value = "";
       oldPassword.value = "";
       newPassword.value = "";
@@ -1423,12 +1605,22 @@ watch(
       editQuitOnClose.value = settingsStore.desktopSettings.quit_on_close;
       editIconTheme.value = settingsStore.desktopSettings.icon_theme;
       editDebugLoggingEnabled.value = settingsStore.desktopSettings.debug_logging_enabled;
+      editDuckDbWorkerProcessIsolation.value = settingsStore.desktopSettings.duckdb_worker_process_isolation;
+      editDuckDbWorkerMaxProcesses.value = settingsStore.desktopSettings.duckdb_worker_max_processes;
+      if (!duckDbWorkerStartupCaptured.value) {
+        startupDuckDbWorkerProcessIsolation.value = settingsStore.desktopSettings.duckdb_worker_process_isolation;
+        startupDuckDbWorkerMaxProcesses.value = settingsStore.desktopSettings.duckdb_worker_max_processes;
+        duckDbWorkerStartupCaptured.value = true;
+      }
       editSidebarTablePageSize.value = settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
       webdavPassword.value = "";
+      webdavSecretsPassphrase.value = "";
       await refreshWebDavPasswordStatus();
+      await refreshWebDavSyncSecretsStatus();
       syncAiEditState();
       if (!isWeb && activeSettingsTab.value === "mcp") void refreshMcpStatus();
       if (!isWeb && activeSettingsTab.value === "ai" && aiIsCodexCli.value) void ensureCodexMcpStatus();
+      if (activeSettingsTab.value === "about") void refreshAppSupportInfo();
       await scrollToInitialSettingsSection();
     }
   },
@@ -1465,6 +1657,7 @@ watch([webdavAutoUploadEnabled, webdavAutoUploadIntervalMinutes], () => {
 watch(activeSettingsTab, (tab) => {
   if (tab === "mcp" && !mcpStatus.value && !mcpStatusLoading.value) void refreshMcpStatus();
   if (tab === "ai" && aiIsCodexCli.value) void ensureCodexMcpStatus();
+  if (tab === "about" && !appSupportInfo.value) void refreshAppSupportInfo();
   if (tab === "appearance") {
     checkLayoutDescTruncation();
     checkIconThemeDescTruncation();
@@ -1890,28 +2083,49 @@ const previewSettings = computed<{
   fontSize: number;
   theme: EditorTheme;
   appAppearance: AppThemeAppearance;
+  appPalette: AppThemePalette;
   customColors?: CustomThemeColors;
+  showStatementRunButtons: boolean;
+  showCurrentStatementFrame: boolean;
 }>(() => ({
   fontFamily: editFontFamily.value,
   fontSize: editFontSize.value,
   theme: editTheme.value,
   appAppearance: isDark.value ? "dark" : "light",
+  appPalette: themePalette.value,
   customColors: getPreviewCustomThemeColors(),
+  showStatementRunButtons: editShowStatementRunButtons.value,
+  showCurrentStatementFrame: editShowCurrentStatementFrame.value,
 }));
 
 const previewSqlNormal = `SELECT u.id, u.name
 FROM users u
-ORDER BY u.id LIMIT 5;`;
+ORDER BY u.id LIMIT 5;
+
+SELECT o.id, o.total
+FROM orders o
+WHERE o.total > 100;`;
 const previewSqlWithSyntaxError = `SELECT u.id, u.name
 FOM users u
-ORDER BY u.id LIMIT 5;`;
+ORDER BY u.id LIMIT 5;
+
+SELECT o.id, o.total
+FROM orders o
+WHERE o.total > 100;`;
 
 let fontThemeComp: import("@codemirror/state").Compartment | null = null;
 let themeComp: import("@codemirror/state").Compartment | null = null;
 let diagnosticComp: import("@codemirror/state").Compartment | null = null;
+let previewRunGutterComp: import("@codemirror/state").Compartment | null = null;
+let currentStatementFrameComp: import("@codemirror/state").Compartment | null = null;
 let setPreviewDiagnosticsEffect: import("@codemirror/state").StateEffectType<PreviewSqlDiagnostic[]> | null = null;
+let setPreviewRunHighlightEffect: import("@codemirror/state").StateEffectType<{ from: number; to: number } | null> | null = null;
 let editorViewModule: typeof import("@codemirror/view") | null = null;
 let previewSqlDiagnostics: PreviewSqlDiagnostic[] = [];
+let previewExecutableCache: ExecutableStatementRangeCache | null = null;
+let previewRunHighlightRange: { from: number; to: number } | null = null;
+let previewRunHighlightTimer: ReturnType<typeof setTimeout> | null = null;
+let buildPreviewRunGutterExtension: () => import("@codemirror/state").Extension = () => [];
 
 function currentPreviewSql(): string {
   return editSqlSemanticDiagnosticsEnabled.value ? previewSqlWithSyntaxError : previewSqlNormal;
@@ -1934,10 +2148,124 @@ function updatePreviewSqlDiagnostics() {
     view.dispatch({ effects });
     return;
   }
+  previewExecutableCache = null;
   view.dispatch({
     changes: { from: 0, to: currentSql.length, insert: nextSql },
     effects,
   });
+}
+
+function previewExecutableStatementRangeStartingAt(currentView: EditorViewType, lineFrom: number) {
+  previewExecutableCache = executableStatementRangeCacheForDoc(previewExecutableCache, currentView.state.doc, "mysql");
+  return executableStatementRangeStartingAt(previewExecutableCache, lineFrom);
+}
+
+function clearPreviewRunHighlight() {
+  previewRunHighlightRange = null;
+  if (previewView.value && setPreviewRunHighlightEffect) {
+    previewView.value.dispatch({ effects: setPreviewRunHighlightEffect.of(null) });
+  }
+}
+
+function flashPreviewRunHighlight(range: { from: number; to: number }, event: Event) {
+  previewRunHighlightRange = range;
+  if (previewView.value && setPreviewRunHighlightEffect) {
+    previewView.value.dispatch({ effects: setPreviewRunHighlightEffect.of(range) });
+  }
+  if (event.target instanceof Element) {
+    const marker = event.target.closest(".cm-run-statement-marker");
+    marker?.classList.add("cm-run-statement-marker--executed");
+    window.setTimeout(() => marker?.classList.remove("cm-run-statement-marker--executed"), 650);
+  }
+  if (previewRunHighlightTimer) clearTimeout(previewRunHighlightTimer);
+  previewRunHighlightTimer = window.setTimeout(() => {
+    previewRunHighlightTimer = null;
+    clearPreviewRunHighlight();
+  }, 650);
+}
+
+function handlePreviewRunGutterMouseDown(currentView: EditorViewType, line: { from: number; to: number }, event: Event): boolean {
+  if (!(event instanceof MouseEvent) || event.button !== 0) return false;
+  const statementRange = previewExecutableStatementRangeStartingAt(currentView, line.from);
+  if (!statementRange) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  flashPreviewRunHighlight({ from: statementRange.from, to: statementRange.to }, event);
+  currentView.focus();
+  return true;
+}
+
+function buildPreviewCurrentStatementFrameExtension(viewModule: Pick<typeof import("@codemirror/view"), "Decoration" | "EditorView" | "ViewPlugin">, enabled: boolean) {
+  if (!enabled) return [];
+  const { Decoration, EditorView, ViewPlugin } = viewModule;
+  const frameTheme = EditorView.baseTheme({
+    ".cm-db-current-statement-line": {
+      position: "relative",
+    },
+    ".cm-db-current-statement-line::after": {
+      content: '""',
+      position: "absolute",
+      top: "0",
+      bottom: "0",
+      left: "0",
+      boxSizing: "border-box",
+      width: "var(--dbx-current-statement-frame-width, 100%)",
+      borderRight: "1px solid rgb(34 197 94 / 0.75)",
+      borderLeft: "1px solid rgb(34 197 94 / 0.75)",
+      pointerEvents: "none",
+    },
+    ".cm-db-current-statement-line--first::after": {
+      borderTop: "1px solid rgb(34 197 94 / 0.75)",
+    },
+    ".cm-db-current-statement-line--last::after": {
+      borderBottom: "1px solid rgb(34 197 94 / 0.75)",
+    },
+  });
+  const framePlugin = ViewPlugin.fromClass(
+    class {
+      decorations: import("@codemirror/view").DecorationSet;
+      constructor(view: import("@codemirror/view").EditorView) {
+        this.decorations = this.getDeco(view);
+      }
+      update(update: import("@codemirror/view").ViewUpdate) {
+        this.decorations = this.getDeco(update.view);
+      }
+      getDeco(view: import("@codemirror/view").EditorView) {
+        if (view.state.selection.ranges.some((range) => !range.empty)) return Decoration.none;
+        const range = currentExecutableStatementRange(view.state.doc.toString(), view.state.selection.main.head, "mysql");
+        if (!range) return Decoration.none;
+
+        const startLine = view.state.doc.lineAt(range.from);
+        const frameTo = previewCurrentStatementFrameTo(view, range);
+        const endLine = view.state.doc.lineAt(Math.max(range.from, frameTo - 1));
+        let maxWidth = 1;
+        for (let lineNumber = startLine.number; lineNumber <= endLine.number; lineNumber += 1) {
+          const line = view.state.doc.line(lineNumber);
+          const lineRangeTo = Math.min(line.to, frameTo);
+          maxWidth = Math.max(maxWidth, visualSqlColumns(view.state.doc.sliceString(line.from, lineRangeTo)));
+        }
+
+        const deco: any[] = [];
+        const frameWidth = `calc(${maxWidth}ch + 2ch)`;
+        for (let lineNumber = startLine.number; lineNumber <= endLine.number; lineNumber += 1) {
+          const line = view.state.doc.line(lineNumber);
+          const classes = ["cm-db-current-statement-line"];
+          if (lineNumber === startLine.number) classes.push("cm-db-current-statement-line--first");
+          if (lineNumber === endLine.number) classes.push("cm-db-current-statement-line--last");
+          deco.push(Decoration.line({ class: classes.join(" "), attributes: { style: `--dbx-current-statement-frame-width: ${frameWidth};` } }).range(line.from));
+        }
+        return Decoration.set(deco);
+      }
+    },
+    { decorations: (v) => v.decorations },
+  );
+
+  return [framePlugin, frameTheme];
+}
+
+function previewCurrentStatementFrameTo(view: import("@codemirror/view").EditorView, range: SqlTextRange): number {
+  const nextChar = range.to < view.state.doc.length ? view.state.doc.sliceString(range.to, range.to + 1) : "";
+  return currentStatementFrameRangeTo(nextChar, range);
 }
 
 watch(
@@ -1945,9 +2273,14 @@ watch(
   async ([ss]) => {
     if (!previewView.value || !fontThemeComp || !themeComp || !editorViewModule) return;
 
-    const themeExt = await loadEditorTheme(ss.theme, ss.appAppearance, ss.customColors);
+    const themeExt = await loadEditorTheme(ss.theme, ss.appAppearance, ss.customColors, ss.appPalette);
     previewView.value.dispatch({
-      effects: [themeComp.reconfigure(themeExt), fontThemeComp.reconfigure(editorFontTheme(editorViewModule.EditorView, ss.fontSize, ss.fontFamily))],
+      effects: [
+        themeComp.reconfigure(themeExt),
+        fontThemeComp.reconfigure(editorFontTheme(editorViewModule.EditorView, ss.fontSize, ss.fontFamily)),
+        ...(previewRunGutterComp ? [previewRunGutterComp.reconfigure(buildPreviewRunGutterExtension())] : []),
+        ...(currentStatementFrameComp ? [currentStatementFrameComp.reconfigure(buildPreviewCurrentStatementFrameExtension(editorViewModule, ss.showCurrentStatementFrame))] : []),
+      ],
     });
   },
   { deep: true },
@@ -1967,9 +2300,19 @@ function cleanupPreviewEditor() {
   fontThemeComp = null;
   themeComp = null;
   diagnosticComp = null;
+  previewRunGutterComp = null;
+  currentStatementFrameComp = null;
   setPreviewDiagnosticsEffect = null;
+  setPreviewRunHighlightEffect = null;
   editorViewModule = null;
   previewSqlDiagnostics = [];
+  previewExecutableCache = null;
+  previewRunHighlightRange = null;
+  buildPreviewRunGutterExtension = () => [];
+  if (previewRunHighlightTimer) {
+    clearTimeout(previewRunHighlightTimer);
+    previewRunHighlightTimer = null;
+  }
 }
 
 watch(activeSettingsTab, (tab) => {
@@ -1983,17 +2326,20 @@ watch(previewRef, async (el) => {
   previewInitialized = true;
   if (previewView.value) return;
 
-  const [{ EditorView, Decoration }, { EditorState, Compartment, StateEffect, StateField }, { sql, MySQL }, { basicSetup }] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("codemirror")]);
+  const [{ EditorView, Decoration, ViewPlugin, gutter, GutterMarker }, { EditorState, Compartment, StateEffect, StateField }, { sql, MySQL }, { basicSetup }] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("codemirror")]);
 
-  editorViewModule = { EditorView } as typeof import("@codemirror/view");
+  editorViewModule = { Decoration, EditorView, ViewPlugin } as typeof import("@codemirror/view");
   fontThemeComp = new Compartment();
   themeComp = new Compartment();
   diagnosticComp = new Compartment();
+  previewRunGutterComp = new Compartment();
+  currentStatementFrameComp = new Compartment();
   setPreviewDiagnosticsEffect = StateEffect.define<PreviewSqlDiagnostic[]>();
+  setPreviewRunHighlightEffect = StateEffect.define<{ from: number; to: number } | null>();
   previewSqlDiagnostics = previewDiagnosticsForSql(currentPreviewSql());
 
   const ss = previewSettings.value;
-  const themeExt = await loadEditorTheme(ss.theme, ss.appAppearance, ss.customColors);
+  const themeExt = await loadEditorTheme(ss.theme, ss.appAppearance, ss.customColors, ss.appPalette);
   const diagnosticTheme = EditorView.baseTheme({
     ".cm-settings-preview-sql-error": {
       textDecoration: "underline wavy var(--destructive)",
@@ -2025,9 +2371,52 @@ watch(previewRef, async (el) => {
     return [field, diagnosticTheme];
   };
 
+  class PreviewRunStatementGutterMarker extends GutterMarker {
+    toDOM() {
+      return createRunStatementButtonDom(t("settings.previewStatementRunButton"));
+    }
+  }
+
+  const previewRunMarker = new PreviewRunStatementGutterMarker();
+  buildPreviewRunGutterExtension = () =>
+    editShowStatementRunButtons.value
+      ? gutter({
+          class: "cm-run-statement-gutter",
+          lineMarker(currentView, line) {
+            return previewExecutableStatementRangeStartingAt(currentView, line.from) ? previewRunMarker : null;
+          },
+          domEventHandlers: {
+            mousedown: handlePreviewRunGutterMouseDown,
+          },
+        })
+      : [];
+
+  const buildPreviewRunHighlightExtension = () => {
+    const highlightEffect = setPreviewRunHighlightEffect;
+    const buildDecorations = () => (previewRunHighlightRange ? Decoration.set([Decoration.mark({ class: "cm-settings-preview-run-highlight" }).range(previewRunHighlightRange.from, previewRunHighlightRange.to)], true) : Decoration.none);
+    const field = StateField.define({
+      create: buildDecorations,
+      update(value, transaction) {
+        const highlightChanged = !!highlightEffect && transaction.effects.some((effect) => effect.is(highlightEffect));
+        return transaction.docChanged || highlightChanged ? buildDecorations() : value;
+      },
+      provide: (field) => EditorView.decorations.from(field),
+    });
+    return field;
+  };
+
   const state = EditorState.create({
     doc: currentPreviewSql(),
-    extensions: [basicSetup, sql({ dialect: MySQL }), themeComp.of(themeExt), fontThemeComp.of(editorFontTheme(EditorView, ss.fontSize, ss.fontFamily)), diagnosticComp.of(buildPreviewDiagnosticExtension())],
+    extensions: [
+      basicSetup,
+      sql({ dialect: MySQL }),
+      themeComp.of(themeExt),
+      fontThemeComp.of(editorFontTheme(EditorView, ss.fontSize, ss.fontFamily)),
+      previewRunGutterComp.of(buildPreviewRunGutterExtension()),
+      currentStatementFrameComp.of(buildPreviewCurrentStatementFrameExtension(editorViewModule, ss.showCurrentStatementFrame)),
+      diagnosticComp.of(buildPreviewDiagnosticExtension()),
+      buildPreviewRunHighlightExtension(),
+    ],
   });
 
   previewView.value = new EditorView({ state, parent: previewRef.value });
@@ -2053,8 +2442,8 @@ onUnmounted(cleanupPreviewEditor);
         </component>
       </DialogHeader>
 
-      <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden sm:flex-row">
-        <nav class="settingsCategoryNav flex min-h-0 shrink-0 gap-1 overflow-x-auto border-b pb-3 sm:w-40 sm:flex-col sm:overflow-x-hidden sm:overflow-y-auto sm:border-b-0 sm:border-r sm:pb-0 sm:pr-3">
+      <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden lg:flex-row">
+        <nav class="settingsCategoryNav flex min-h-0 shrink-0 gap-1 overflow-x-auto border-b pb-3 lg:w-40 lg:flex-col lg:overflow-x-hidden lg:overflow-y-auto lg:border-b-0 lg:border-r lg:pb-0 lg:pr-3">
           <button v-for="category in settingsCategoryNav" :key="category.value" type="button" :class="settingsCategoryButton(category.value)" @click="activeSettingsTab = category.value">
             {{ category.label }}
           </button>
@@ -2164,6 +2553,22 @@ onUnmounted(cleanupPreviewEditor);
 
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
+                    <Label for="editor-show-statement-run-buttons">{{ t("settings.showStatementRunButtons") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.showStatementRunButtonsDescription") }}</p>
+                  </div>
+                  <Switch id="editor-show-statement-run-buttons" v-model="editShowStatementRunButtons" class="mt-0.5" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-show-current-statement-frame">{{ t("settings.showCurrentStatementFrame") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.showCurrentStatementFrameDescription") }}</p>
+                  </div>
+                  <Switch id="editor-show-current-statement-frame" v-model="editShowCurrentStatementFrame" class="mt-0.5" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
                     <Label for="editor-word-wrap">{{ t("settings.wordWrap") }}</Label>
                     <p class="text-xs text-muted-foreground">{{ t("settings.wordWrapDescription") }}</p>
                   </div>
@@ -2176,6 +2581,14 @@ onUnmounted(cleanupPreviewEditor);
                     <p class="text-xs text-muted-foreground">{{ t("settings.vimModeDescription") }}</p>
                   </div>
                   <Switch id="editor-vim-mode" v-model="editVimModeEnabled" class="mt-0.5" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-auto-close-brackets">{{ t("settings.autoCloseBrackets") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.autoCloseBracketsDescription") }}</p>
+                  </div>
+                  <Switch id="editor-auto-close-brackets" v-model="editAutoCloseBrackets" class="mt-0.5" />
                 </div>
 
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
@@ -2249,8 +2662,8 @@ onUnmounted(cleanupPreviewEditor);
                           readonly
                           :aria-invalid="shortcutConflicts.includes(definition.id)"
                           :placeholder="t('settings.shortcutPressShortcut')"
-                          class="h-7 w-auto min-w-12 max-w-32 shrink-0 cursor-default rounded-[6px] border border-transparent bg-background px-2.5 text-center font-mono text-[13px] font-semibold text-foreground/75 shadow-inner outline-none selection:bg-transparent placeholder:text-muted-foreground aria-invalid:border-destructive/70 aria-invalid:text-destructive aria-invalid:ring-destructive/20"
-                          :class="editingShortcutId === definition.id ? 'max-w-44 cursor-text border-border/80 bg-background text-left text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35' : ''"
+                          class="h-7 w-auto min-w-12 max-w-64 shrink-0 cursor-default rounded-[6px] border border-transparent bg-background px-2.5 text-center font-mono text-[13px] font-semibold text-foreground/75 shadow-inner outline-none selection:bg-transparent placeholder:text-muted-foreground aria-invalid:border-destructive/70 aria-invalid:text-destructive aria-invalid:ring-destructive/20"
+                          :class="editingShortcutId === definition.id ? 'max-w-64 cursor-text border-border/80 bg-background text-left text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35' : ''"
                           @keydown="(event: KeyboardEvent) => onShortcutKeydown(definition.id, event)"
                         />
                         <Button
@@ -2302,16 +2715,25 @@ onUnmounted(cleanupPreviewEditor);
             </section>
 
             <section v-else-if="activeSettingsTab === 'appearance'" class="flex flex-col gap-5 py-2">
-              <div class="grid gap-4 md:grid-cols-[minmax(220px,280px)_minmax(260px,1fr)]">
+              <div class="grid gap-x-1.5 gap-y-4 sm:grid-cols-[minmax(0,127fr)_minmax(0,127fr)_minmax(0,191fr)_minmax(0,130fr)]">
                 <div class="space-y-2 min-w-0">
-                  <Label>{{ t("settings.languageTitle") }}</Label>
+                  <div class="flex h-9 items-end">
+                    <Label class="whitespace-normal leading-tight">{{ t("settings.languageTitle") }}</Label>
+                  </div>
                   <Select :model-value="currentLocale()" @update:model-value="onLocaleChange">
-                    <SelectTrigger class="h-8 w-full">
-                      <SelectValue />
+                    <SelectTrigger class="h-8 w-full gap-0.5 px-0.5">
+                      <SelectValue>
+                        <span v-if="selectedLocaleOption" class="flex min-w-0 items-center gap-0.5">
+                          <span class="inline-flex h-5 shrink-0 items-center justify-center text-sm font-medium leading-none">
+                            {{ selectedLocaleOption.flag }}
+                          </span>
+                          <span class="truncate">{{ selectedLocaleOption.label }}</span>
+                        </span>
+                      </SelectValue>
                     </SelectTrigger>
-                    <SelectContent>
+                    <SelectContent class="w-[150px]">
                       <SelectItem v-for="locale in LOCALE_OPTIONS" :key="locale.value" :value="locale.value">
-                        <div class="flex items-center gap-2">
+                        <div class="flex items-center gap-1">
                           <span class="inline-flex h-5 w-6 shrink-0 items-center justify-center text-sm font-medium leading-none">
                             {{ locale.flag }}
                           </span>
@@ -2323,7 +2745,36 @@ onUnmounted(cleanupPreviewEditor);
                 </div>
 
                 <div class="space-y-2 min-w-0">
-                  <Label>{{ t("settings.uiFontFamily") }}</Label>
+                  <div class="flex h-9 items-end">
+                    <Label class="whitespace-normal leading-tight">{{ t("settings.colorTheme") }}</Label>
+                  </div>
+                  <Select :model-value="themePalette" @update:model-value="(value) => setThemePalette(value as AppThemePalette)">
+                    <SelectTrigger class="h-8 w-full gap-1">
+                      <SelectValue :placeholder="t('settings.selectColorTheme')">
+                        <span v-if="selectedThemePaletteOption" class="flex min-w-0 items-center gap-1">
+                          <span class="h-3 w-3 shrink-0 rounded-full border border-border shadow-xs" :style="{ background: selectedThemePaletteOption.previewColor }" />
+                          <span class="truncate">{{ selectedThemePaletteOption.label }}</span>
+                        </span>
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem v-for="option in appThemePaletteOptions" :key="option.value" :value="option.value">
+                        <div class="flex items-center gap-2">
+                          <span class="h-3 w-3 rounded-full border border-border shadow-xs" :style="{ background: option.previewColor }" />
+                          {{ option.label }}
+                        </div>
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div class="space-y-2 min-w-0">
+                  <div class="flex h-9 items-end gap-1">
+                    <Label class="min-w-0 whitespace-normal leading-tight">{{ t("settings.uiFontFamily") }}</Label>
+                    <HelpTooltip :label="t('settings.uiFontFamily')" trigger-class="[&_svg]:h-3 [&_svg]:w-3" content-class="max-w-64">
+                      <p>{{ t("settings.uiFontFamilyDescription") }}</p>
+                    </HelpTooltip>
+                  </div>
                   <SearchableSelect
                     :model-value="editUiFontFamily"
                     :options="uiFontOptions"
@@ -2334,8 +2785,8 @@ onUnmounted(cleanupPreviewEditor);
                     allow-custom
                     :display-name="displayUiFontFamily"
                     :normalize-custom="normalizeCustomFontFamilyInput"
-                    :trigger-class="fontSearchTriggerClass"
-                    :trigger-icon-class="fontSearchTriggerIconClass"
+                    :trigger-class="appearanceFontSearchTriggerClass"
+                    :trigger-icon-class="appearanceFontSearchTriggerIconClass"
                     content-class="w-[var(--reka-popover-trigger-width)] min-w-[260px]"
                     @update:model-value="onUiFontFamilyChange"
                     @update:open="(open: boolean) => open && loadSystemFontOptions()"
@@ -2354,54 +2805,51 @@ onUnmounted(cleanupPreviewEditor);
                       </span>
                     </template>
                   </SearchableSelect>
-                  <p class="text-xs text-muted-foreground">{{ t("settings.uiFontFamilyDescription") }}</p>
+                </div>
+
+                <div class="space-y-2 min-w-0">
+                  <div class="flex h-9 items-end gap-1">
+                    <Label class="min-w-0 whitespace-normal leading-tight">{{ t("settings.uiScale") }}</Label>
+                    <HelpTooltip :label="t('settings.uiScale')" trigger-class="[&_svg]:h-3 [&_svg]:w-3" content-class="max-w-64">
+                      <p>{{ t("settings.uiScaleDescription") }}</p>
+                    </HelpTooltip>
+                  </div>
+                  <Select
+                    :model-value="String(editUiScale)"
+                    @update:model-value="
+                      (value: any) => {
+                        const next = Number(value);
+                        if (Number.isFinite(next)) editUiScale = next;
+                      }
+                    "
+                  >
+                    <SelectTrigger class="h-8 w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem v-for="scale in uiScaleOptions" :key="scale" :value="String(scale)" class="pl-2.5"> {{ Math.round(scale * 100) }}% </SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
               </div>
 
               <div class="space-y-2">
                 <Label>{{ t("settings.theme") }}</Label>
-                <div class="flex gap-2">
+                <div class="flex flex-wrap gap-2">
                   <Button
-                    v-for="option in [
-                      { value: 'light', label: t('toolbar.themeLight'), icon: Sun },
-                      { value: 'dark', label: t('toolbar.themeDark'), icon: Moon },
-                      { value: 'system', label: t('toolbar.themeSystem'), icon: SunMoon },
-                    ]"
+                    v-for="option in appThemeModeOptions"
                     :key="option.value"
                     type="button"
                     variant="outline"
                     size="sm"
-                    class="h-auto gap-1.5 px-3 py-1.5"
-                    :class="themeMode === option.value ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
-                    @click="setThemeMode(option.value as 'light' | 'dark' | 'system')"
+                    class="h-8 gap-1.5 rounded-[6px] px-3"
+                    :class="themeMode === option.value ? 'border-primary/40 bg-primary/10 text-primary ring-1 ring-primary/30' : 'text-foreground'"
+                    @click="setThemeMode(option.value)"
                   >
                     <component :is="option.icon" class="h-3.5 w-3.5" />
                     {{ option.label }}
                   </Button>
                 </div>
-              </div>
-
-              <Separator />
-
-              <div class="space-y-2">
-                <Label>{{ t("settings.uiScale") }}</Label>
-                <Select
-                  :model-value="String(editUiScale)"
-                  @update:model-value="
-                    (value: any) => {
-                      const next = Number(value);
-                      if (Number.isFinite(next)) editUiScale = next;
-                    }
-                  "
-                >
-                  <SelectTrigger class="min-w-36">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem v-for="scale in uiScaleOptions" :key="scale" :value="String(scale)" class="pl-2.5"> {{ Math.round(scale * 100) }}% </SelectItem>
-                  </SelectContent>
-                </Select>
-                <p class="text-xs text-muted-foreground">{{ t("settings.uiScaleDescription") }}</p>
               </div>
 
               <Separator />
@@ -2633,6 +3081,7 @@ onUnmounted(cleanupPreviewEditor);
                       { key: 'dataCompare', label: t('dataCompare.title') },
                       { key: 'checkUpdates', label: t('updates.check') },
                       { key: 'sqlLibrary', label: t('sqlLibrary.title') },
+                      { key: 'sqlFileTree', label: t('sqlFileTree.title') },
                       { key: 'history', label: t('history.title') },
                       { key: 'ai', label: 'AI' },
                       { key: 'theme', label: t('toolbar.theme') },
@@ -2717,6 +3166,15 @@ onUnmounted(cleanupPreviewEditor);
                     </div>
                   </Button>
                 </div>
+              </div>
+              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <Label for="sidebar-table-search-enabled">{{ t("settings.sidebarTableSearchEnabled") }}</Label>
+                  <HelpTooltip :label="t('settings.sidebarTableSearchEnabled')">
+                    {{ t("settings.sidebarTableSearchEnabledDescription") }}
+                  </HelpTooltip>
+                </div>
+                <Switch id="sidebar-table-search-enabled" v-model="editSidebarTableSearchEnabled" />
               </div>
               <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
@@ -2832,6 +3290,57 @@ onUnmounted(cleanupPreviewEditor);
 
             <!-- Data Tab -->
             <section v-else-if="activeSettingsTab === 'data'" class="flex flex-col gap-5 py-2">
+              <template v-if="!isWeb">
+                <div class="space-y-3">
+                  <div class="text-sm font-medium text-muted-foreground">DuckDB</div>
+                  <div class="space-y-3 rounded-md border bg-muted/20 px-3 py-2">
+                    <div class="flex items-start justify-between gap-4">
+                      <div class="space-y-1">
+                        <Label for="duckdb-worker-process-isolation">
+                          {{ t("settings.duckDbWorkerProcessIsolation") }}
+                        </Label>
+                        <p class="text-xs text-muted-foreground">
+                          {{ t("settings.duckDbWorkerProcessIsolationDescription") }}
+                        </p>
+                      </div>
+                      <Switch id="duckdb-worker-process-isolation" v-model="editDuckDbWorkerProcessIsolation" class="mt-0.5" />
+                    </div>
+                    <div class="flex items-start justify-between gap-4">
+                      <div class="space-y-1">
+                        <Label for="duckdb-worker-max-processes">
+                          {{ t("settings.duckDbWorkerMaxProcesses") }}
+                        </Label>
+                        <p class="text-xs text-muted-foreground">
+                          {{ t("settings.duckDbWorkerMaxProcessesDescription") }}
+                        </p>
+                      </div>
+                      <Input
+                        id="duckdb-worker-max-processes"
+                        v-model.number="editDuckDbWorkerMaxProcesses"
+                        type="number"
+                        class="h-8 w-20 text-right [&::-webkit-inner-spin-button]:appearance-none"
+                        :min="DUCKDB_WORKER_MAX_PROCESSES_MIN"
+                        :max="DUCKDB_WORKER_MAX_PROCESSES_MAX"
+                        :step="1"
+                        @blur="editDuckDbWorkerMaxProcesses = normalizeDuckDbWorkerMaxProcesses(editDuckDbWorkerMaxProcesses)"
+                      />
+                    </div>
+                    <div v-if="duckDbWorkerSettingsRequireRestart" class="flex flex-wrap items-center gap-2 border-t pt-2">
+                      <p class="text-xs font-medium text-amber-600 dark:text-amber-400">
+                        {{ t("settings.duckDbWorkerProcessIsolationRestartRequired") }}
+                      </p>
+                      <Button type="button" variant="outline" size="sm" class="h-7 gap-1.5 px-2 text-xs" :disabled="duckDbRestarting || hasApplyBlocker" @click="restartDbxForDuckDbIsolation">
+                        <Loader2 v-if="duckDbRestarting" class="size-3.5 animate-spin" />
+                        <RefreshCw v-else class="size-3.5" />
+                        {{ t("settings.restartDbx") }}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+
+                <Separator />
+              </template>
+
               <div class="space-y-3">
                 <div class="text-sm font-medium text-muted-foreground">{{ t("settings.exportSection") }}</div>
                 <div class="space-y-2">
@@ -2967,8 +3476,15 @@ onUnmounted(cleanupPreviewEditor);
             </section>
 
             <section v-else-if="activeSettingsTab === 'shortcuts'" class="flex flex-col gap-2 py-2">
+              <div class="relative">
+                <Search class="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input v-model="shortcutSearchQuery" autocomplete="off" :placeholder="t('settings.shortcutSearchPlaceholder')" class="h-9 pl-9 text-sm" />
+              </div>
               <div class="overflow-hidden rounded-md border border-border/70 bg-background">
-                <div v-for="definition in SHORTCUT_DEFINITIONS" :key="definition.id" class="group -mt-px grid gap-2 border-t border-border/70 px-3 py-2 transition-colors first:mt-0 first:border-t-0 hover:bg-muted/40 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+                <div v-if="filteredShortcutDefinitions.length === 0" class="px-3 py-8 text-center text-sm text-muted-foreground">
+                  {{ t("settings.shortcutSearchNoResults") }}
+                </div>
+                <div v-for="definition in filteredShortcutDefinitions" :key="definition.id" class="group -mt-px grid gap-2 border-t border-border/70 px-3 py-2 transition-colors first:mt-0 first:border-t-0 hover:bg-muted/40 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
                   <div class="min-w-0">
                     <div class="flex min-w-0 items-center gap-2">
                       <Label class="min-w-0 truncate leading-none">{{ t(definition.labelKey) }}</Label>
@@ -2988,8 +3504,8 @@ onUnmounted(cleanupPreviewEditor);
                         readonly
                         :aria-invalid="shortcutConflicts.includes(definition.id)"
                         :placeholder="t('settings.shortcutPressShortcut')"
-                        class="h-7 w-auto min-w-12 max-w-32 shrink-0 cursor-default rounded-[6px] border border-transparent bg-muted px-2.5 text-center font-mono text-[13px] font-semibold text-foreground/75 shadow-inner outline-none selection:bg-transparent placeholder:text-muted-foreground aria-invalid:border-destructive/70 aria-invalid:text-destructive aria-invalid:ring-destructive/20"
-                        :class="editingShortcutId === definition.id ? 'max-w-44 cursor-text border-border/80 bg-background text-left text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35' : ''"
+                        class="h-7 w-auto min-w-12 max-w-64 shrink-0 cursor-default rounded-[6px] border border-transparent bg-muted px-2.5 text-center font-mono text-[13px] font-semibold text-foreground/75 shadow-inner outline-none selection:bg-transparent placeholder:text-muted-foreground aria-invalid:border-destructive/70 aria-invalid:text-destructive aria-invalid:ring-destructive/20"
+                        :class="editingShortcutId === definition.id ? 'max-w-64 cursor-text border-border/80 bg-background text-left text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35' : ''"
                         @keydown="(event: KeyboardEvent) => onShortcutKeydown(definition.id, event)"
                       />
                       <Button
@@ -3043,12 +3559,13 @@ onUnmounted(cleanupPreviewEditor);
               <div class="flex items-center justify-between">
                 <p class="text-sm text-muted-foreground">{{ t("settings.snippetsDescription") }}</p>
                 <Button variant="outline" size="sm" @click="openAddSnippetDialog">
+                  <Plus class="mr-2 h-4 w-4" />
                   {{ t("settings.snippetsAdd") }}
                 </Button>
               </div>
 
-              <div class="rounded-md border">
-                <table class="w-full text-sm">
+              <div class="overflow-x-auto rounded-md border">
+                <table class="w-full min-w-[720px] text-sm">
                   <thead>
                     <tr class="border-b bg-muted/50">
                       <th class="px-3 py-2 text-left font-medium whitespace-nowrap">
@@ -3058,18 +3575,29 @@ onUnmounted(cleanupPreviewEditor);
                         {{ t("settings.snippetsPrefix") }}
                       </th>
                       <th class="px-3 py-2 text-left font-medium whitespace-nowrap">
+                        {{ t("settings.snippetsStatus") }}
+                      </th>
+                      <th class="px-3 py-2 text-left font-medium whitespace-nowrap">
                         {{ t("settings.snippetsBody") }}
                       </th>
                       <th class="px-3 py-2 w-20"></th>
                     </tr>
                   </thead>
                   <tbody>
-                    <tr v-for="snippet in editSnippets" :key="snippet.id" class="border-b last:border-b-0 hover:bg-muted/30">
+                    <tr v-for="snippet in editSnippets" :key="snippet.id" class="border-b last:border-b-0 hover:bg-muted/30" :class="snippet.enabled === false ? 'text-muted-foreground' : ''">
                       <td class="px-3 py-2">{{ snippet.label }}</td>
                       <td class="px-3 py-2">
                         <Badge variant="outline" class="h-5 rounded-md px-1.5 text-[11px] font-mono text-muted-foreground">
                           {{ snippet.prefix }}
                         </Badge>
+                      </td>
+                      <td class="px-3 py-2">
+                        <div class="flex items-center gap-2">
+                          <Switch :id="`snippet-enabled-${snippet.id}`" :model-value="snippet.enabled !== false" size="sm" :aria-label="t('settings.snippetsToggle')" @update:model-value="(value: boolean) => setSnippetEnabled(snippet.id, value)" />
+                          <Label :for="`snippet-enabled-${snippet.id}`" class="text-xs font-normal text-muted-foreground">
+                            {{ snippet.enabled === false ? t("settings.snippetsDisabled") : t("settings.snippetsEnabled") }}
+                          </Label>
+                        </div>
                       </td>
                       <td class="px-3 py-2 font-mono text-xs text-muted-foreground max-w-[300px] truncate">
                         {{ snippet.body }}
@@ -3173,7 +3701,21 @@ onUnmounted(cleanupPreviewEditor);
                 </div>
                 <div v-if="webdavSyncSecrets" class="space-y-2">
                   <Label for="webdav-secrets-passphrase">{{ t("settings.syncSecretsPassphrase") }}</Label>
-                  <PasswordInput id="webdav-secrets-passphrase" v-model="webdavSecretsPassphrase" autocomplete="new-password" />
+                  <div class="flex items-center gap-2">
+                    <PasswordInput id="webdav-secrets-passphrase" v-model="webdavSecretsPassphrase" class="min-w-0 flex-1" :placeholder="webdavHasSavedSecretsPassphrase ? '••••••••' : ''" :show-toggle="!webdavHasSavedSecretsPassphrase || !!webdavSecretsPassphrase" autocomplete="new-password" />
+                    <Button
+                      v-if="webdavHasSavedSecretsPassphrase"
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      class="h-9 w-9 shrink-0 text-muted-foreground hover:text-foreground"
+                      :title="t('settings.syncClearSavedPassword')"
+                      :aria-label="t('settings.syncClearSavedPassword')"
+                      @click="clearWebDavSyncSecretsPassphrase"
+                    >
+                      <X class="size-3.5" />
+                    </Button>
+                  </div>
                   <p class="text-xs text-muted-foreground">{{ t("settings.syncSecretsPassphraseDescription") }}</p>
                 </div>
               </div>
@@ -3490,6 +4032,7 @@ onUnmounted(cleanupPreviewEditor);
               </div>
 
               <div class="space-y-2">
+                <p class="text-xs text-muted-foreground">{{ t("settings.mcpConfigOptionsHint") }}</p>
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="mcp-readonly-mode">{{ t("settings.mcpReadonlyMode") }}</Label>
@@ -3648,16 +4191,27 @@ onUnmounted(cleanupPreviewEditor);
             </section>
 
             <section v-else-if="activeSettingsTab === 'about'" class="flex flex-col gap-5 py-2">
-              <div class="rounded-lg border bg-muted/20 p-4">
-                <div class="flex items-start justify-between gap-4">
+              <div class="rounded-lg border p-4">
+                <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                   <div class="min-w-0 space-y-1">
-                    <div class="text-lg font-semibold">DBX</div>
-                    <p class="text-sm text-muted-foreground">{{ t("settings.aboutDescription") }}</p>
+                    <Label>{{ t("settings.supportInfoTitle") }}</Label>
+                    <p class="text-sm text-muted-foreground">{{ t("settings.supportInfoDescription") }}</p>
                   </div>
-                  <div v-if="displayedAppVersion" class="rounded-md border bg-background px-2 py-1 text-xs text-muted-foreground">
-                    {{ displayedAppVersion }}
+                  <Button type="button" variant="outline" size="sm" class="shrink-0" :disabled="appSupportInfoLoading && !appSupportInfo" @click="copyAppSupportInfo">
+                    <Loader2 v-if="appSupportInfoLoading && !appSupportInfo" class="mr-1 h-3.5 w-3.5 animate-spin" />
+                    <CheckCircle2 v-else-if="appSupportInfoCopied" class="mr-1 h-3.5 w-3.5" />
+                    <Copy v-else class="mr-1 h-3.5 w-3.5" />
+                    {{ appSupportInfoCopied ? t("settings.supportInfoCopied") : t("settings.supportInfoCopy") }}
+                  </Button>
+                </div>
+                <div v-if="appSupportInfoRows.length" class="mt-4 grid gap-3 sm:grid-cols-2">
+                  <div v-for="row in appSupportInfoRows" :key="row.key" class="min-w-0 rounded-md bg-muted/30 px-3 py-2">
+                    <div class="text-xs font-medium text-muted-foreground">{{ row.label }}</div>
+                    <div class="mt-1 min-w-0 select-text break-words font-mono text-xs text-foreground">{{ row.value }}</div>
                   </div>
                 </div>
+                <p v-else class="mt-4 text-sm text-muted-foreground">{{ t("settings.supportInfoLoading") }}</p>
+                <p v-if="appSupportInfoError" class="mt-3 text-xs text-destructive">{{ t("settings.supportInfoLoadFailed", { message: appSupportInfoError }) }}</p>
               </div>
 
               <div class="rounded-lg border p-4">

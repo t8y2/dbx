@@ -6,6 +6,7 @@ import * as api from "@/lib/backend/api";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { UpdateDownloadSource as SettingsUpdateDownloadSource } from "@/stores/settingsStore";
 import type { UpdateDownloadProgress } from "@/lib/backend/tauri";
+import { currentLocale } from "@/i18n";
 
 export function shouldOpenUpdateDialog(options: { silent?: boolean }) {
   return options.silent !== true;
@@ -74,7 +75,7 @@ export function useAppUpdater() {
     checkingUpdates.value = true;
     updateCheckMessage.value = "";
     try {
-      const info = await api.checkForUpdates();
+      const info = await api.checkForUpdates(currentLocale());
       updateInfo.value = info;
       if (info.update_available) {
         if (shouldOpenUpdateDialog({ silent: options.silent })) {

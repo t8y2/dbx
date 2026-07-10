@@ -206,21 +206,21 @@ fn unique_file_path(dir: &Path, file_name: &str) -> PathBuf {
 fn open_path(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let mut command = {
-        let mut command = std::process::Command::new("open");
+        let mut command = dbx_core::process::new_std_command("open");
         command.arg(path);
         command
     };
 
     #[cfg(target_os = "windows")]
     let mut command = {
-        let mut command = std::process::Command::new("explorer");
+        let mut command = dbx_core::process::new_std_command("explorer");
         command.arg(path);
         command
     };
 
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     let mut command = {
-        let mut command = std::process::Command::new("xdg-open");
+        let mut command = dbx_core::process::new_std_command("xdg-open");
         command.arg(path);
         command
     };

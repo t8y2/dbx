@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onBeforeUnmount, ref, watch } from "vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import {
@@ -19,6 +19,8 @@ import {
   Eye,
   FileCode,
   GripVertical,
+  LayoutGrid,
+  List,
   ListTree,
   Upload,
   Loader2,
@@ -46,17 +48,16 @@ import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomC
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
 import * as api from "@/lib/backend/api";
-import type { ConnectionConfig, ForeignKeyInfo, ObjectInfo, ObjectSourceKind, ObjectStatistics } from "@/types/database";
+import type { ConnectionConfig, ForeignKeyInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics } from "@/types/database";
 import { sortTablesByFkDependency, type TableWithFk } from "@/lib/table/tableDependencySort";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
-import { buildDropObjectSql, buildDuplicateTableStructureSql, buildCopyTableDataSql, buildEmptyTableSql, buildTruncateTableSql, type TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
+import { buildDropObjectSql, buildDropTableSql, buildDuplicateTableStructureSql, buildCopyTableDataSql, buildEmptyTableSql, buildTruncateTableSql, supportsDropTableCascade, supportsTruncateTableCascade, type TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
 import { useToast } from "@/composables/useToast";
-import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceStatements, objectSourceSaveExecutionMode, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
+import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceStatements, executeObjectSourceSave, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
 import { buildRenameObjectSql, supportsObjectRename } from "@/lib/table/objectRenameSql";
-import { buildViewDdl } from "@/lib/table/viewDdl";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
 import { copyToClipboard, eventTargetAllowsAppClipboardShortcut } from "@/lib/common/clipboard";
@@ -93,11 +94,13 @@ const props = defineProps<{
   connection: ConnectionConfig;
   database: string;
   schema?: string;
+  viewport?: ObjectBrowserViewport;
 }>();
 
 const emit = defineEmits<{
   openTable: [target: { tableName: string; schema?: string; tableType?: string }];
   schemaChange: [schema: string | undefined];
+  viewportChange: [viewport: ObjectBrowserViewport];
 }>();
 
 const { t } = useI18n();
@@ -123,6 +126,7 @@ const sourceContent = ref("");
 const sourceError = ref("");
 const sourceRow = ref<ObjectBrowserRow | null>(null);
 const sourceEditing = ref(false);
+const sourceCanEdit = ref(true);
 const effectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(props.connection) ?? props.connection.db_type);
 const tableStructureDatabaseType = computed(() => tableStructureDatabaseTypeForConnection(props.connection) ?? props.connection.db_type);
 const sourceEditableText = ref("");
@@ -132,6 +136,9 @@ const sourceSaveError = ref("");
 const error = ref("");
 const showDropConfirm = ref(false);
 const dropTarget = ref<ObjectBrowserRow | null>(null);
+const dropPreviewSql = ref("");
+const dropTableCascade = ref(false);
+const batchDropCascade = ref(false);
 const showRenameDialog = ref(false);
 const renameTarget = ref<ObjectBrowserRow | null>(null);
 const renameInput = ref("");
@@ -140,6 +147,7 @@ const renamePreviewSqlText = ref("");
 const showTruncateConfirm = ref(false);
 const truncateTarget = ref<ObjectBrowserRow | null>(null);
 const truncatePreviewSql = ref("");
+const truncateTableCascade = ref(false);
 const showEmptyConfirm = ref(false);
 const emptyTarget = ref<ObjectBrowserRow | null>(null);
 const emptyPreviewSql = ref("");
@@ -154,6 +162,9 @@ const selectedTableIds = ref<Set<string>>(new Set());
 const expandedPartitionParentIds = ref<Set<string>>(new Set());
 const showBatchDropConfirm = ref(false);
 const batchDropPreviewSql = ref("");
+const showBatchTruncateConfirm = ref(false);
+const batchTruncatePreviewSql = ref("");
+const batchTruncateCascade = ref(false);
 // Paste table dialog state
 const showPasteDialog = ref(false);
 const pasteTableMode = ref<PasteTableMode>("structure-and-data");
@@ -171,11 +182,14 @@ const objectColumnWidths = ref<Record<ObjectBrowserColumnKey, number>>({
 });
 let loadId = 0;
 let stopColumnResize: (() => void) | null = null;
+let preserveObjectFilterScrollOnce = false;
 
 // Export via background tracker
 const { addTask: addExportTask } = useExportTracker();
 
 const needsSchema = computed(() => isSchemaAware(props.connection.db_type) && !connectionUsesDatabaseObjectTreeMode(props.connection));
+const canDropTargetCascade = computed(() => dropTarget.value?.type === "TABLE" && supportsDropTableCascade(effectiveDatabaseType.value));
+const canTruncateTargetCascade = computed(() => !!truncateTarget.value && supportsTruncateTableCascade(effectiveDatabaseType.value));
 const tableCount = computed(() => rows.value.filter((row) => row.type === "TABLE").length);
 const viewCount = computed(() => rows.value.filter((row) => row.type === "VIEW").length);
 const materializedViewCount = computed(() => rows.value.filter((row) => row.type === "MATERIALIZED_VIEW").length);
@@ -208,8 +222,145 @@ const objectFilters = computed<ObjectFilter[]>(() =>
 const showObjectFilter = computed(() => objectFilters.value.length > 2);
 const hasCreatedAt = computed(() => rows.value.some((row) => row.created_at?.trim()));
 const hasUpdatedAt = computed(() => rows.value.some((row) => row.updated_at?.trim()));
+const hasAnyComment = computed(() => rows.value.some((row) => row.comment?.trim()));
+const isListView = computed(() => settingsStore.editorSettings.objectBrowserViewMode !== "grid");
+
+type ObjectBrowserScroller =
+  | HTMLElement
+  | {
+      scrollToItem?: (index: number) => void;
+      scrollToPosition?: (position: number) => void;
+      $el?: HTMLElement;
+      el?: HTMLElement | { value?: HTMLElement | null };
+    };
+
+// RecycleScroller exposes scroll helpers on its component instance. Keep the
+// type loose because vue-virtual-scroller does not ship complete ref typings.
+const listScrollerRef = ref<ObjectBrowserScroller | null>(null);
+const gridScrollerRef = ref<ObjectBrowserScroller | null>(null);
+let viewportFrame = 0;
+let restoreViewportFrame = 0;
+
+function objectBrowserViewMode(): ObjectBrowserViewMode {
+  return isListView.value ? "list" : "grid";
+}
+
+function activeScroller() {
+  return isListView.value ? listScrollerRef.value : gridScrollerRef.value;
+}
+
+function scrollerElement(scroller: ObjectBrowserScroller | null = activeScroller()): HTMLElement | null {
+  if (!scroller) return null;
+  if (scroller instanceof HTMLElement) return scroller;
+  if (scroller.$el instanceof HTMLElement) return scroller.$el;
+  if (scroller.el instanceof HTMLElement) return scroller.el;
+  if (scroller.el?.value instanceof HTMLElement) return scroller.el.value;
+  return null;
+}
+
+function emitViewportChange(scrollTop: number) {
+  const viewport: ObjectBrowserViewport = {
+    scrollTop: Math.max(0, Math.round(scrollTop)),
+    viewMode: objectBrowserViewMode(),
+  };
+  if (props.viewport?.scrollTop === viewport.scrollTop && props.viewport.viewMode === viewport.viewMode) return;
+  emit("viewportChange", viewport);
+}
+
+function onObjectsScroll() {
+  if (viewportFrame) return;
+  viewportFrame = window.requestAnimationFrame(() => {
+    viewportFrame = 0;
+    const el = scrollerElement();
+    if (!el) return;
+    emitViewportChange(el.scrollTop);
+  });
+}
+
+function applyObjectBrowserScrollTop(scrollTop: number) {
+  const scroller = activeScroller();
+  if (scroller && !(scroller instanceof HTMLElement)) {
+    scroller.scrollToPosition?.(scrollTop);
+    if (scrollTop === 0) scroller.scrollToItem?.(0);
+  }
+  const el = scrollerElement(scroller);
+  if (el) el.scrollTop = scrollTop;
+}
+
+function restoreObjectBrowserViewport() {
+  const viewport = props.viewport;
+  if (!viewport || viewport.viewMode !== objectBrowserViewMode()) return;
+  if (restoreViewportFrame) window.cancelAnimationFrame(restoreViewportFrame);
+  const scrollTop = Math.max(0, viewport.scrollTop);
+  nextTick(() => {
+    applyObjectBrowserScrollTop(scrollTop);
+    restoreViewportFrame = window.requestAnimationFrame(() => {
+      applyObjectBrowserScrollTop(scrollTop);
+      restoreViewportFrame = 0;
+    });
+  });
+}
+
+function scrollObjectsToTop() {
+  // Read the active scroller inside nextTick so that after a list <-> grid
+  // switch the (re)mounted scroller is the one we reset.
+  emitViewportChange(0);
+  nextTick(() => {
+    applyObjectBrowserScrollTop(0);
+  });
+}
+
+watch(
+  [listScrollerRef, gridScrollerRef, isListView],
+  (_value, _oldValue, onCleanup) => {
+    const el = scrollerElement();
+    if (!el) return;
+    el.addEventListener("scroll", onObjectsScroll, { passive: true });
+    restoreObjectBrowserViewport();
+    onCleanup(() => el.removeEventListener("scroll", onObjectsScroll));
+  },
+  { flush: "post" },
+);
+
+onActivated(() => {
+  restoreObjectBrowserViewport();
+});
+
+function setViewMode(mode: "list" | "grid") {
+  settingsStore.updateEditorSettings({ objectBrowserViewMode: mode });
+  scrollObjectsToTop();
+}
+
+// Re-sorting reorders the rows; jump to the top so the new head is visible
+// instead of leaving the view parked at a stale mid-scroll position.
+// Note: watch(sortKeyOptions) may reset sortKey during setup when the persisted key
+// is no longer valid, triggering this watcher before any scroller is mounted —
+// scrollObjectsToTop() handles that safely via optional chaining.
+watch([sortKey, sortDirection], () => scrollObjectsToTop());
+
+// Also jump to the top when the search query or object-type filter changes —
+// filtered results bear no relation to the previous scroll position.
+watch(search, () => scrollObjectsToTop());
+watch(objectFilter, () => {
+  if (preserveObjectFilterScrollOnce) {
+    preserveObjectFilterScrollOnce = false;
+    return;
+  }
+  scrollObjectsToTop();
+});
+
+const showCheckboxColumn = computed(() => settingsStore.editorSettings.objectBrowserShowCheckbox || selectedTableCount.value > 0);
+
+function toggleCheckboxColumn() {
+  const next = !settingsStore.editorSettings.objectBrowserShowCheckbox;
+  settingsStore.updateEditorSettings({ objectBrowserShowCheckbox: next });
+  if (!next) clearTableSelection();
+}
+
 const objectBrowserColumns = computed<ObjectBrowserColumnKey[]>(() => {
-  const columns: ObjectBrowserColumnKey[] = ["select", "name", "type", "estimatedRows", "totalBytes"];
+  const columns: ObjectBrowserColumnKey[] = [];
+  if (showCheckboxColumn.value) columns.push("select");
+  columns.push("name", "type", "estimatedRows", "totalBytes");
   if (hasCreatedAt.value) columns.push("created_at");
   if (hasUpdatedAt.value) columns.push("updated_at");
   columns.push("comment");
@@ -240,12 +391,88 @@ const partitionRowsByParentId = computed(() => {
 });
 const filteredRows = computed(() => groupedFilteredRows());
 const selectableRows = computed(() => rows.value.filter((row) => row.type === "TABLE"));
+
+// ---- Grid (tile) view virtualization ----
+// The grid view chunks filteredRows into fixed-height rows and hands them to
+// RecycleScroller, mirroring the list view so only visible rows are mounted.
+// The previous flat `v-for` rendered every card (plus its CustomContextMenu)
+// at once, which stalls the UI on schemas with thousands of objects.
+const OBJECT_GRID_MIN_CARD_WIDTH = 160; // former `minmax(160px, 1fr)` floor
+const OBJECT_GRID_GAP = 12; // 0.75rem, former grid gap (both axes)
+// Card height is variable: only timestamp/comment rows that actually appear in
+// the current dataset contribute. objectGridRowHeight (below) adapts accordingly
+// so the row slot is as tight as possible instead of always using the worst case.
+//   Base: p-3 top+bottom(24) + icon h-11(44) + name(18) + type/bytes(18) + gap-1×2(8) = 112
+//   + optional timestamp row: text-[10px](15) + gap-1(4) = 19
+//   + optional comment row:   text-[10px](15) + gap-1(4) = 19
+// If the card gains a new metadata row, add a matching constant and include it below.
+const OBJECT_GRID_CARD_BASE_H = 112;
+const OBJECT_GRID_CARD_TIMESTAMP_H = 19;
+const OBJECT_GRID_CARD_COMMENT_H = 19;
+const OBJECT_GRID_CARD_SAFETY = 6; // buffer for sub-pixel font differences
+
+const objectGridRowHeight = computed(() => {
+  let cardH = OBJECT_GRID_CARD_BASE_H;
+  if (hasCreatedAt.value || hasUpdatedAt.value) cardH += OBJECT_GRID_CARD_TIMESTAMP_H;
+  if (hasAnyComment.value) cardH += OBJECT_GRID_CARD_COMMENT_H;
+  return cardH + OBJECT_GRID_GAP + OBJECT_GRID_CARD_SAFETY;
+});
+const gridContainerRef = ref<HTMLElement | null>(null);
+const gridColumns = ref(1);
+let gridResizeObserver: ResizeObserver | null = null;
+
+function recomputeGridColumns(width: number) {
+  gridColumns.value = Math.max(1, Math.floor((width + OBJECT_GRID_GAP) / (OBJECT_GRID_MIN_CARD_WIDTH + OBJECT_GRID_GAP)));
+}
+
+// The grid container lives inside a v-else, so it mounts/unmounts when the user
+// toggles list <-> grid. Watch the template ref to (re)attach the observer each
+// time the node appears, instead of once in onMounted (which would miss the
+// case where the browser starts in list mode).
+watch(
+  gridContainerRef,
+  (el, prevEl) => {
+    if (prevEl) {
+      gridResizeObserver?.disconnect();
+      gridResizeObserver = null;
+    }
+    if (!el) return;
+    // Use the content-box width (excluding padding) to match what ResizeObserver
+    // delivers via entry.contentRect.width, avoiding a 1-frame column jump on mount.
+    const style = getComputedStyle(el);
+    recomputeGridColumns(el.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight));
+    gridResizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) recomputeGridColumns(entry.contentRect.width);
+    });
+    gridResizeObserver.observe(el);
+  },
+  { flush: "post" },
+);
+
+onBeforeUnmount(() => {
+  gridResizeObserver?.disconnect();
+  gridResizeObserver = null;
+  if (viewportFrame) window.cancelAnimationFrame(viewportFrame);
+  if (restoreViewportFrame) window.cancelAnimationFrame(restoreViewportFrame);
+});
+
+const gridRows = computed(() => {
+  const cols = gridColumns.value;
+  const cards = filteredRows.value;
+  const rows: Array<{ key: string; cards: ObjectBrowserRow[] }> = [];
+  for (let i = 0; i < cards.length; i += cols) {
+    rows.push({ key: `row-${i}`, cards: cards.slice(i, i + cols) });
+  }
+  return rows;
+});
 const visibleSelectableRows = computed(() => filteredRows.value.filter((row) => row.type === "TABLE"));
 const selectedTableRows = computed(() => {
   const ids = selectedTableIds.value;
   return selectableRows.value.filter((row) => ids.has(row.id));
 });
 const selectedTableCount = computed(() => selectedTableRows.value.length);
+const canBatchDropCascade = computed(() => selectedTableCount.value > 0 && supportsDropTableCascade(effectiveDatabaseType.value));
+const canBatchTruncateCascade = computed(() => selectedTableCount.value > 0 && supportsTruncateTableCascade(effectiveDatabaseType.value));
 const allVisibleTablesSelected = computed(() => visibleSelectableRows.value.length > 0 && visibleSelectableRows.value.every((row) => selectedTableIds.value.has(row.id)));
 
 function iconFor(row: ObjectBrowserRow) {
@@ -280,6 +507,36 @@ function toggleSort(key: ObjectBrowserSortKey) {
   }
   sortKey.value = key;
   sortDirection.value = initialObjectBrowserSortDirection(key);
+}
+
+const sortKeyOptions = computed<ObjectBrowserSortKey[]>(() => {
+  const options: ObjectBrowserSortKey[] = ["name", "type", "estimatedRows", "totalBytes"];
+  if (hasCreatedAt.value) options.push("created_at");
+  if (hasUpdatedAt.value) options.push("updated_at");
+  options.push("comment");
+  return options;
+});
+
+watch(sortKeyOptions, (options) => {
+  if (!options.includes(sortKey.value)) {
+    sortKey.value = "name";
+    sortDirection.value = "asc";
+  }
+});
+
+function sortKeyLabel(key: ObjectBrowserSortKey): string {
+  if (key === "name") return t("objects.name");
+  if (key === "type") return t("objects.type");
+  if (key === "estimatedRows") return t("objects.rows");
+  if (key === "totalBytes") return t("objects.size");
+  if (key === "created_at") return t("objects.createdAt");
+  if (key === "updated_at") return t("objects.updatedAt");
+  if (key === "comment") return t("objects.comment");
+  return key;
+}
+
+function onSortKeyChange(key: ObjectBrowserSortKey) {
+  toggleSort(key);
 }
 
 function minimumColumnWidth(key: ObjectBrowserColumnKey) {
@@ -374,6 +631,15 @@ function iconClass(type: ObjectBrowserRow["type"]) {
   return "text-green-500";
 }
 
+function iconBgClass(type: ObjectBrowserRow["type"]) {
+  if (type === "VIEW" || type === "MATERIALIZED_VIEW") return "bg-purple-500/10";
+  if (type === "PROCEDURE") return "bg-blue-500/10";
+  if (type === "FUNCTION") return "bg-amber-500/10";
+  if (type === "SEQUENCE") return "bg-emerald-500/10";
+  if (type === "PACKAGE" || type === "PACKAGE_BODY") return "bg-cyan-500/10";
+  return "bg-green-500/10";
+}
+
 function isPartitionParentExpanded(row: ObjectBrowserRow) {
   return expandedPartitionParentIds.value.has(row.id);
 }
@@ -423,12 +689,14 @@ async function openSource(row: ObjectBrowserRow) {
   sourceContent.value = "";
   sourceError.value = "";
   sourceEditing.value = false;
+  sourceCanEdit.value = true;
   sourceEditableText.value = "";
   sourceDraft.value = "";
   sourceSaveError.value = "";
   sourceLoading.value = true;
   try {
     const result = await api.getObjectSource(props.connection.id, props.database, row.schema || selectedSchema.value || props.database, row.name, row.type as ObjectSourceKind);
+    sourceCanEdit.value = result.editable !== false && row.type !== "SEQUENCE";
     const editable = await api.buildEditableObjectSource({
       databaseType: effectiveDatabaseType.value,
       objectType: row.type as ObjectSourceKind,
@@ -439,32 +707,14 @@ async function openSource(row: ObjectBrowserRow) {
     sourceEditableText.value = editable;
     sourceContent.value = await formatSqlForDisplay(editable, sourceFormatDialect.value, settingsStore.editorSettings.sqlFormatter);
     sourceDraft.value = editable;
-    sourceEditing.value = row.type !== "SEQUENCE";
+    sourceEditing.value = sourceCanEdit.value;
+    if (!sourceCanEdit.value && row.type !== "SEQUENCE") {
+      toast(t("objects.sourceReadOnly"), 3000);
+    }
   } catch (e: any) {
     sourceError.value = e?.message || String(e);
   } finally {
     sourceLoading.value = false;
-  }
-}
-
-async function openViewDdl(row: ObjectBrowserRow) {
-  if (row.type !== "VIEW" && row.type !== "MATERIALIZED_VIEW") return;
-  try {
-    const schema = row.schema || selectedSchema.value || props.database;
-    const ddl =
-      row.type === "MATERIALIZED_VIEW"
-        ? await api.getTableDdl(props.connection.id, props.database, schema, row.name, "MATERIALIZED_VIEW")
-        : await buildViewDdl({
-            databaseType: effectiveDatabaseType.value,
-            schema,
-            name: row.name,
-            source: (await api.getObjectSource(props.connection.id, props.database, schema, row.name, "VIEW")).source,
-          });
-    const formatted = await formatSqlForDisplay(ddl, sourceFormatDialect.value, settingsStore.editorSettings.sqlFormatter);
-    const tabId = queryStore.createTab(props.connection.id, props.database, `DDL - ${row.name}`);
-    queryStore.updateSql(tabId, formatted);
-  } catch (e: any) {
-    toast(e?.message || String(e), 5000);
   }
 }
 
@@ -506,7 +756,10 @@ async function executeProcedureSql(sql: string) {
 
 function requestDrop(row: ObjectBrowserRow) {
   dropTarget.value = row;
+  dropPreviewSql.value = "";
+  dropTableCascade.value = false;
   showDropConfirm.value = true;
+  void refreshDropPreviewSql();
 }
 
 function requestRename(row: ObjectBrowserRow) {
@@ -593,12 +846,7 @@ async function confirmDrop() {
   if (!dropTarget.value) return;
   const row = dropTarget.value;
   try {
-    const sql = await buildDropObjectSql({
-      databaseType: effectiveDatabaseType.value,
-      objectType: row.type,
-      schema: row.schema || selectedSchema.value,
-      name: row.name,
-    });
+    const sql = dropPreviewSql.value || (await buildDropSqlForRow(row, { cascade: canDropTargetCascade.value && dropTableCascade.value }));
     await api.executeQuery(props.connection.id, props.database, sql);
     const successKey = row.type === "VIEW" ? "contextMenu.dropViewSuccess" : row.type === "PROCEDURE" ? "contextMenu.dropProcedureSuccess" : row.type === "FUNCTION" ? "contextMenu.dropFunctionSuccess" : "contextMenu.dropTableSuccess";
     toast(t(successKey, { name: row.name }));
@@ -609,6 +857,34 @@ async function confirmDrop() {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
   dropTarget.value = null;
+  dropPreviewSql.value = "";
+  dropTableCascade.value = false;
+}
+
+async function buildDropSqlForRow(row: ObjectBrowserRow, options?: { cascade?: boolean }): Promise<string> {
+  if (row.type === "TABLE") {
+    return buildDropTableSql(tableAdminSqlOptions(row, { cascade: options?.cascade && supportsDropTableCascade(effectiveDatabaseType.value) }));
+  }
+  return buildDropObjectSql({
+    databaseType: effectiveDatabaseType.value,
+    objectType: row.type,
+    schema: row.schema || selectedSchema.value,
+    name: row.name,
+  });
+}
+
+let dropPreviewRequestId = 0;
+
+async function refreshDropPreviewSql() {
+  const requestId = ++dropPreviewRequestId;
+  const row = dropTarget.value;
+  if (!row) {
+    dropPreviewSql.value = "";
+    return;
+  }
+  dropPreviewSql.value = "";
+  const sql = await buildDropSqlForRow(row, { cascade: canDropTargetCascade.value && dropTableCascade.value }).catch(() => "");
+  if (requestId === dropPreviewRequestId) dropPreviewSql.value = sql;
 }
 
 function dropConfirmTitle(): string {
@@ -785,13 +1061,9 @@ async function fetchSortedTableRowsForDrop(): Promise<ObjectBrowserRow[]> {
 async function refreshBatchDropPreviewSql() {
   const statements: string[] = [];
   const sortedRows = await fetchSortedTableRowsForDrop();
+  const useCascade = canBatchDropCascade.value && batchDropCascade.value;
   for (const row of sortedRows) {
-    const sql = await buildDropObjectSql({
-      databaseType: effectiveDatabaseType.value,
-      objectType: "TABLE",
-      schema: row.schema || selectedSchema.value,
-      name: row.name,
-    }).catch(() => "");
+    const sql = await buildDropTableSql(tableAdminSqlOptions(row, { cascade: useCascade })).catch(() => "");
     if (sql) statements.push(sql);
   }
   batchDropPreviewSql.value = statements.join("\n");
@@ -799,6 +1071,7 @@ async function refreshBatchDropPreviewSql() {
 
 function requestBatchDropTables() {
   if (selectedTableCount.value === 0) return;
+  batchDropCascade.value = false;
   batchDropPreviewSql.value = "";
   void refreshBatchDropPreviewSql();
   showBatchDropConfirm.value = true;
@@ -808,18 +1081,51 @@ async function confirmBatchDropTables() {
   const targets = await fetchSortedTableRowsForDrop();
   if (targets.length === 0) return;
   try {
+    const useCascade = canBatchDropCascade.value && batchDropCascade.value;
     for (const row of targets) {
-      const sql = await buildDropObjectSql({
-        databaseType: effectiveDatabaseType.value,
-        objectType: "TABLE",
-        schema: row.schema || selectedSchema.value,
-        name: row.name,
-      });
+      const sql = await buildDropTableSql(tableAdminSqlOptions(row, { cascade: useCascade }));
       await api.executeQuery(props.connection.id, props.database, sql);
       closeDroppedTableObjectTabsForRow(row);
     }
     toast(t("objects.batchDropSuccess", { count: targets.length }));
     clearTableSelection();
+    await reload();
+    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);
+  } catch (e: any) {
+    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+async function refreshBatchTruncatePreviewSql() {
+  const statements: string[] = [];
+  const useCascade = canBatchTruncateCascade.value && batchTruncateCascade.value;
+  for (const row of selectedTableRows.value) {
+    const sql = await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: useCascade })).catch(() => "");
+    if (sql) statements.push(sql);
+  }
+  batchTruncatePreviewSql.value = statements.join("\n");
+}
+
+function requestBatchTruncateTables() {
+  if (selectedTableCount.value === 0 || !supportsTruncateTable.value) return;
+  batchTruncateCascade.value = false;
+  batchTruncatePreviewSql.value = "";
+  void refreshBatchTruncatePreviewSql();
+  showBatchTruncateConfirm.value = true;
+}
+
+async function confirmBatchTruncateTables() {
+  const targets = [...selectedTableRows.value];
+  if (targets.length === 0) return;
+  try {
+    const useCascade = canBatchTruncateCascade.value && batchTruncateCascade.value;
+    for (const row of targets) {
+      const sql = await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: useCascade }));
+      await api.executeQuery(props.connection.id, props.database, sql);
+    }
+    toast(t("objects.batchTruncateSuccess", { count: targets.length }));
+    clearTableSelection();
+    showBatchTruncateConfirm.value = false;
     await reload();
     await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);
   } catch (e: any) {
@@ -1121,21 +1427,24 @@ async function confirmPasteTable() {
   await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);
 }
 
-function tableAdminSqlOptions(row: ObjectBrowserRow): TableAdminSqlOptions {
-  return {
+function tableAdminSqlOptions(row: ObjectBrowserRow, options?: { cascade?: boolean }): TableAdminSqlOptions {
+  const result: TableAdminSqlOptions = {
     databaseType: effectiveDatabaseType.value,
     schema: row.schema || selectedSchema.value,
     tableName: row.name,
   };
+  if (options?.cascade) result.cascade = true;
+  return result;
 }
 
 async function refreshTruncatePreviewSql(row: ObjectBrowserRow) {
   truncatePreviewSql.value = "";
-  truncatePreviewSql.value = await buildTruncateTableSql(tableAdminSqlOptions(row)).catch(() => "");
+  truncatePreviewSql.value = await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: canTruncateTargetCascade.value && truncateTableCascade.value })).catch(() => "");
 }
 
 function requestTruncateTable(row: ObjectBrowserRow) {
   truncateTarget.value = row;
+  truncateTableCascade.value = false;
   void refreshTruncatePreviewSql(row);
   showTruncateConfirm.value = true;
 }
@@ -1144,7 +1453,7 @@ async function confirmTruncateTable() {
   const row = truncateTarget.value;
   if (!row) return;
   try {
-    const sql = truncatePreviewSql.value || (await buildTruncateTableSql(tableAdminSqlOptions(row)));
+    const sql = truncatePreviewSql.value || (await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: canTruncateTargetCascade.value && truncateTableCascade.value })));
     await api.executeQuery(props.connection.id, props.database, sql);
     toast(t("contextMenu.truncateTableSuccess", { name: row.name }));
   } catch (e: any) {
@@ -1198,6 +1507,10 @@ async function copySource() {
 
 function editSource() {
   if (!sourceRow.value || !sourceEditableText.value) return;
+  if (!sourceCanEdit.value) {
+    toast(t("objects.sourceReadOnly"), 3000);
+    return;
+  }
   sourceDraft.value = sourceEditableText.value;
   sourceSaveError.value = "";
   sourceEditing.value = true;
@@ -1210,6 +1523,10 @@ function cancelEditSource() {
 }
 
 async function saveSource() {
+  if (!sourceCanEdit.value) {
+    toast(t("objects.sourceReadOnly"), 3000);
+    return;
+  }
   if (!sourceRow.value || !sourceDraft.value.trim()) return;
   const row = sourceRow.value;
   const schema = row.schema || selectedSchema.value || props.database;
@@ -1223,13 +1540,7 @@ async function saveSource() {
       name: row.name,
       source: sourceDraft.value,
     });
-    for (const sql of statements) {
-      if (objectSourceSaveExecutionMode(effectiveDatabaseType.value) === "single") {
-        await api.executeQuery(props.connection.id, props.database, sql, schema);
-      } else {
-        await api.executeScript(props.connection.id, props.database, sql, schema);
-      }
-    }
+    await executeObjectSourceSave(props.connection.id, props.database, effectiveDatabaseType.value, statements, schema);
     toast(t("objects.sourceSaved"));
     sourceEditing.value = false;
     sourceDraft.value = "";
@@ -1285,8 +1596,12 @@ async function loadObjects() {
     if (id === loadId) {
       loadingObjects.value = false;
       if (!userHasSelectedFilter.value && tableCount.value > 0) {
+        // The default table filter is a presentation choice, not a user query
+        // change, so preserve the tab's saved scroll offset across remounts.
+        preserveObjectFilterScrollOnce = objectFilter.value !== "tables";
         objectFilter.value = "tables";
       }
+      restoreObjectBrowserViewport();
     }
   }
 }
@@ -1414,7 +1729,7 @@ watch(
 function exportDataSubmenu(item: ObjectBrowserRow): ContextMenuItem {
   return {
     label: t("contextMenu.exportData"),
-    icon: Download,
+    icon: Upload,
     children: [
       { label: "CSV", action: () => exportData(item, "csv") },
       { label: "JSON", action: () => exportData(item, "json") },
@@ -1439,11 +1754,11 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
     { label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
     ...(canOpenDiagram.value ? [{ label: t("diagram.open"), action: () => openDiagram(item), icon: Network }] : []),
-    ...(canOpenTableImport.value ? [{ label: t("contextMenu.importData"), action: () => openTableImport(item), icon: Upload }] : []),
+    ...(canOpenTableImport.value ? [{ label: t("contextMenu.importData"), action: () => openTableImport(item), icon: Download }] : []),
     { label: t("dataCompare.title"), action: () => openDataCompare(item), icon: ArrowRightLeft },
     { label: "", separator: true },
     exportDataSubmenu(item),
-    { label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Download },
+    { label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Upload },
     { label: t("contextMenu.exportStructure"), action: () => exportStructure(item), icon: FileCode },
     { label: "", separator: true },
     { label: t("contextMenu.duplicateStructure"), action: () => requestDuplicateStructure(item), icon: CopyPlus },
@@ -1481,13 +1796,20 @@ function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     { label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
     { label: t("contextMenu.editView"), action: () => openSource(item), icon: PencilLine },
     { label: t("contextMenu.viewSource"), action: () => openSource(item), icon: Code2 },
-    { label: t("contextMenu.viewDdl"), action: () => openViewDdl(item), icon: ScrollText },
+    {
+      label: t("contextMenu.viewDdl"),
+      action: () => {
+        ddlDialogTarget.value = item;
+        showDdlDialog.value = true;
+      },
+      icon: ScrollText,
+    },
     ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
     { label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
     ...(canOpenDiagram.value ? [{ label: t("diagram.open"), action: () => openDiagram(item), icon: Network }] : []),
     { label: "", separator: true },
     exportDataSubmenu(item),
-    { label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Download },
+    { label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Upload },
     { label: t("contextMenu.exportStructure"), action: () => exportStructure(item), icon: FileCode },
     { label: "", separator: true },
     {
@@ -1582,6 +1904,35 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         content-class="w-56"
         @update:model-value="onSchemaChange"
       />
+      <!-- Sort selector -->
+      <div class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
+        <select
+          class="h-6 cursor-pointer appearance-none rounded-sm bg-transparent px-1.5 text-xs text-muted-foreground outline-none hover:text-foreground focus:text-foreground"
+          :value="sortKey"
+          :aria-label="t('objects.sortBy')"
+          @change="onSortKeyChange(($event.target as HTMLSelectElement).value as ObjectBrowserSortKey)"
+        >
+          <option v-for="key in sortKeyOptions" :key="key" :value="key" class="bg-background text-foreground">
+            {{ sortKeyLabel(key) }}
+          </option>
+        </select>
+        <button type="button" class="flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground" :title="sortDirection === 'asc' ? t('objects.sortAsc') : t('objects.sortDesc')" @click="sortDirection = sortDirection === 'asc' ? 'desc' : 'asc'">
+          <ArrowUp v-if="sortDirection === 'asc'" class="h-3 w-3" />
+          <ArrowDown v-else class="h-3 w-3" />
+        </button>
+      </div>
+      <div class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
+        <button type="button" class="flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground" :class="{ 'bg-background text-foreground shadow-sm': isListView }" :title="t('objects.viewList')" @click="setViewMode('list')">
+          <List class="h-3.5 w-3.5" />
+        </button>
+        <button type="button" class="flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground" :class="{ 'bg-background text-foreground shadow-sm': !isListView }" :title="t('objects.viewGrid')" @click="setViewMode('grid')">
+          <LayoutGrid class="h-3.5 w-3.5" />
+        </button>
+      </div>
+      <Button variant="ghost" size="icon" class="h-7 w-7" :class="{ 'text-primary': settingsStore.editorSettings.objectBrowserShowCheckbox }" :title="t('objects.toggleCheckbox')" @click="toggleCheckboxColumn">
+        <CheckSquare v-if="settingsStore.editorSettings.objectBrowserShowCheckbox" class="h-3.5 w-3.5" />
+        <Square v-else class="h-3.5 w-3.5" />
+      </Button>
       <Button variant="ghost" size="icon" class="h-7 w-7" :disabled="loadingObjects" @click="reload">
         <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loadingObjects }" />
       </Button>
@@ -1590,17 +1941,21 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         {{ t("objects.pasteTableSelected") }}
       </Button>
     </div>
-    <div v-if="selectedTableCount > 0" class="flex h-9 shrink-0 items-center gap-2 border-b bg-muted/30 px-3 text-xs">
+    <div v-if="selectedTableCount > 0" class="flex h-9 shrink-0 items-center gap-2 overflow-x-auto border-b bg-muted/30 px-3 text-xs">
       <div class="min-w-0 flex-1 truncate text-muted-foreground">
         {{ t("objects.selectedTables", { count: selectedTableCount }) }}
       </div>
       <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="openBatchDatabaseExport">
-        <Download class="mr-1.5 h-3.5 w-3.5" />
+        <Upload class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.exportSelected") }}
       </Button>
       <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="copySelectedTablesToClipboard">
         <Clipboard class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.copyTableSelected") }}
+      </Button>
+      <Button v-if="supportsTruncateTable" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchTruncateTables">
+        <Scissors class="mr-1.5 h-3.5 w-3.5" />
+        {{ t("objects.truncateSelected") }}
       </Button>
       <Button variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchDropTables">
         <Trash2 class="mr-1.5 h-3.5 w-3.5" />
@@ -1623,9 +1978,9 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       {{ t("objects.empty") }}
     </div>
     <div v-else class="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div class="object-browser-table flex min-h-0 min-w-0 flex-1 flex-col overflow-x-auto overflow-y-hidden">
+      <div v-if="isListView" class="object-browser-table flex min-h-0 min-w-0 flex-1 flex-col overflow-x-auto overflow-y-hidden">
         <div class="grid h-7 shrink-0 items-center gap-3 border-b bg-muted/40 px-3 text-xs font-medium text-muted-foreground" :style="{ gridTemplateColumns, minWidth: `${objectGridMinWidth}px` }">
-          <div class="relative flex min-w-0 items-center">
+          <div v-if="showCheckboxColumn" class="relative flex min-w-0 items-center">
             <button class="flex h-6 w-6 items-center justify-center rounded-sm hover:bg-accent" type="button" :disabled="visibleSelectableRows.length === 0" @click="toggleVisibleTableSelection">
               <CheckSquare v-if="allVisibleTablesSelected" class="h-3.5 w-3.5 text-primary" />
               <Square v-else class="h-3.5 w-3.5" />
@@ -1714,7 +2069,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
             </div>
           </div>
         </div>
-        <RecycleScroller class="object-browser-scroller min-h-0 flex-1" :style="{ minWidth: `${objectGridMinWidth}px` }" :items="filteredRows" :item-size="34" :buffer="600" :skip-hover="true" key-field="id">
+        <RecycleScroller ref="listScrollerRef" class="object-browser-scroller min-h-0 flex-1" :style="{ minWidth: `${objectGridMinWidth}px` }" :items="filteredRows" :item-size="34" :buffer="600" :skip-hover="true" key-field="id">
           <template #default="{ item }">
             <CustomContextMenu :items="getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu }">
               <div
@@ -1727,7 +2082,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 @click="onRowClick(item, $event)"
                 @contextmenu="onContextMenu"
               >
-                <button class="flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground" type="button" :class="{ invisible: item.type !== 'TABLE' }" @click.stop="toggleTableSelection(item)">
+                <button v-if="showCheckboxColumn" class="flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground" type="button" :class="{ invisible: item.type !== 'TABLE' }" @click.stop="toggleTableSelection(item)">
                   <CheckSquare v-if="selectedTableIds.has(item.id)" class="h-3.5 w-3.5 text-primary" />
                   <Square v-else class="h-3.5 w-3.5" />
                 </button>
@@ -1753,7 +2108,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 <div class="truncate text-xs tabular-nums text-muted-foreground" :title="item.estimatedRows == null ? '' : formatObjectBrowserCount(item.estimatedRows)">
                   {{ formatObjectBrowserCount(item.estimatedRows) }}
                 </div>
-                <div class="truncate text-xs tabular-nums text-muted-foreground" :title="item.totalBytes == null ? '' : formatObjectBrowserCount(item.totalBytes)">
+                <div class="truncate text-xs tabular-nums text-muted-foreground" :title="item.totalBytes == null ? '' : formatObjectBrowserBytes(item.totalBytes)">
                   {{ formatObjectBrowserBytes(item.totalBytes) }}
                 </div>
                 <div v-if="hasCreatedAt" class="truncate text-xs tabular-nums text-muted-foreground" :title="formatObjectBrowserTimestamp(item.created_at)">
@@ -1767,6 +2122,48 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 </div>
               </div>
             </CustomContextMenu>
+          </template>
+        </RecycleScroller>
+      </div>
+      <div v-else ref="gridContainerRef" class="object-browser-grid-wrapper min-h-0 flex-1 p-2">
+        <RecycleScroller ref="gridScrollerRef" v-if="gridRows.length > 0" class="object-browser-grid-scroller h-full" :items="gridRows" :item-size="objectGridRowHeight" :buffer="600" :skip-hover="true" key-field="key">
+          <template #default="{ item: row }">
+            <div class="object-browser-grid-row" :style="{ gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`, height: `${objectGridRowHeight - OBJECT_GRID_GAP}px` }">
+              <CustomContextMenu v-for="item in row.cards" :key="item.id" :items="getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu }">
+                <div
+                  class="relative flex cursor-pointer flex-col items-center gap-1 rounded-lg border bg-card p-3 text-center transition-all hover:border-primary/40 hover:shadow-sm"
+                  :class="{
+                    'border-primary bg-primary/5': selectedTableIds.has(item.id),
+                    'border-primary/60': sourceRow?.id === item.id && !selectedTableIds.has(item.id),
+                  }"
+                  :title="item.displayName"
+                  @click="onRowClick(item, $event)"
+                  @contextmenu="onContextMenu"
+                >
+                  <button v-if="showCheckboxColumn" class="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground" type="button" :class="{ invisible: item.type !== 'TABLE' }" @click.stop="toggleTableSelection(item)">
+                    <CheckSquare v-if="selectedTableIds.has(item.id)" class="h-3.5 w-3.5 text-primary" />
+                    <Square v-else class="h-3.5 w-3.5" />
+                  </button>
+                  <div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-full shadow-sm" :class="iconBgClass(item.type)">
+                    <component :is="iconFor(item)" class="h-6 w-6" :class="iconClass(item.type)" />
+                  </div>
+                  <span class="w-full truncate text-sm font-medium leading-tight text-foreground">{{ item.displayName }}</span>
+                  <div class="flex items-center gap-1.5">
+                    <span class="text-xs text-muted-foreground">{{ typeLabel(item.type) }}</span>
+                    <span v-if="item.estimatedRows != null && item.estimatedRows > 0" class="rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-primary">{{ formatObjectBrowserCount(item.estimatedRows) }}</span>
+                    <span v-if="item.totalBytes != null && item.totalBytes > 0" class="rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">{{ formatObjectBrowserBytes(item.totalBytes) }}</span>
+                  </div>
+                  <div v-if="item.created_at?.trim() || item.updated_at?.trim()" class="flex items-center gap-1 text-[10px] text-muted-foreground/70">
+                    <span v-if="item.created_at?.trim()">{{ formatObjectBrowserTimestamp(item.created_at) }}</span>
+                    <span v-if="item.created_at?.trim() && item.updated_at?.trim()">·</span>
+                    <span v-if="item.updated_at?.trim()">{{ formatObjectBrowserTimestamp(item.updated_at) }}</span>
+                  </div>
+                  <div v-if="item.comment?.trim()" class="w-full truncate text-[10px] text-muted-foreground/60" :title="item.comment">
+                    {{ item.comment }}
+                  </div>
+                </div>
+              </CustomContextMenu>
+            </div>
           </template>
         </RecycleScroller>
       </div>
@@ -1784,7 +2181,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <Button v-if="!sourceEditing" variant="ghost" size="icon" class="h-5 w-5" :disabled="!sourceContent" @click="copySource">
             <Copy class="h-3 w-3" />
           </Button>
-          <Button v-if="!sourceEditing" variant="ghost" size="icon" class="h-5 w-5" :disabled="!sourceContent" @click="editSource">
+          <Button v-if="!sourceEditing && sourceCanEdit" variant="ghost" size="icon" class="h-5 w-5" :disabled="!sourceContent" @click="editSource">
             <PencilLine class="h-3 w-3" />
           </Button>
           <Button variant="ghost" size="icon" class="h-5 w-5" @click="closeSource">
@@ -1822,9 +2219,48 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     </div>
   </div>
 
-  <DangerConfirmDialog v-model:open="showDropConfirm" :title="dropConfirmTitle()" :details="dropConfirmMessage()" :confirm-label="t('dangerDialog.deleteConfirm')" @confirm="confirmDrop" />
+  <DangerConfirmDialog v-model:open="showDropConfirm" :title="dropConfirmTitle()" :message="dropConfirmMessage()" :sql="dropPreviewSql" :confirm-label="t('dangerDialog.deleteConfirm')" @confirm="confirmDrop">
+    <template v-if="canDropTargetCascade" #options>
+      <label class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+        <input v-model="dropTableCascade" type="checkbox" class="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary" @change="refreshDropPreviewSql()" />
+        <span class="grid gap-0.5">
+          <span class="font-medium text-foreground">{{ t("contextMenu.dropTableCascade") }}</span>
+          <span class="text-xs leading-5 text-muted-foreground">{{ t("contextMenu.dropTableCascadeHint") }}</span>
+        </span>
+      </label>
+    </template>
+  </DangerConfirmDialog>
 
-  <DangerConfirmDialog v-model:open="showBatchDropConfirm" :title="t('objects.confirmBatchDropTitle')" :message="t('objects.confirmBatchDropMessage', { count: selectedTableCount })" :sql="batchDropPreviewSql" :confirm-label="t('objects.dropSelected')" @confirm="confirmBatchDropTables" />
+  <DangerConfirmDialog v-model:open="showBatchDropConfirm" :title="t('objects.confirmBatchDropTitle')" :message="t('objects.confirmBatchDropMessage', { count: selectedTableCount })" :sql="batchDropPreviewSql" :confirm-label="t('objects.dropSelected')" @confirm="confirmBatchDropTables">
+    <template v-if="canBatchDropCascade" #options>
+      <label class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+        <input v-model="batchDropCascade" type="checkbox" class="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary" @change="refreshBatchDropPreviewSql()" />
+        <span class="grid gap-0.5">
+          <span class="font-medium text-foreground">{{ t("contextMenu.dropTableCascade") }}</span>
+          <span class="text-xs leading-5 text-muted-foreground">{{ t("contextMenu.dropTableCascadeHint") }}</span>
+        </span>
+      </label>
+    </template>
+  </DangerConfirmDialog>
+
+  <DangerConfirmDialog
+    v-model:open="showBatchTruncateConfirm"
+    :title="t('objects.confirmBatchTruncateTitle')"
+    :message="t('objects.confirmBatchTruncateMessage', { count: selectedTableCount })"
+    :sql="batchTruncatePreviewSql"
+    :confirm-label="t('objects.truncateSelected')"
+    @confirm="confirmBatchTruncateTables"
+  >
+    <template v-if="canBatchTruncateCascade" #options>
+      <label class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+        <input v-model="batchTruncateCascade" type="checkbox" class="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary" @change="refreshBatchTruncatePreviewSql()" />
+        <span class="grid gap-0.5">
+          <span class="font-medium text-foreground">{{ t("contextMenu.truncateTableCascade") }}</span>
+          <span class="text-xs leading-5 text-muted-foreground">{{ t("contextMenu.truncateTableCascadeHint") }}</span>
+        </span>
+      </label>
+    </template>
+  </DangerConfirmDialog>
 
   <Dialog v-model:open="showRenameDialog">
     <DialogContent class="sm:max-w-[420px]">
@@ -1852,7 +2288,17 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     :sql="truncatePreviewSql"
     :confirm-label="t('contextMenu.truncateTable')"
     @confirm="confirmTruncateTable"
-  />
+  >
+    <template v-if="canTruncateTargetCascade" #options>
+      <label class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+        <input v-model="truncateTableCascade" type="checkbox" class="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary" @change="truncateTarget && refreshTruncatePreviewSql(truncateTarget)" />
+        <span class="grid gap-0.5">
+          <span class="font-medium text-foreground">{{ t("contextMenu.truncateTableCascade") }}</span>
+          <span class="text-xs leading-5 text-muted-foreground">{{ t("contextMenu.truncateTableCascadeHint") }}</span>
+        </span>
+      </label>
+    </template>
+  </DangerConfirmDialog>
 
   <DangerConfirmDialog v-model:open="showEmptyConfirm" :title="t('contextMenu.confirmEmptyTableTitle')" :message="t('contextMenu.confirmEmptyTableMessage', { name: emptyTarget?.name ?? '' })" :sql="emptyPreviewSql" :confirm-label="t('contextMenu.emptyTable')" @confirm="confirmEmptyTable" />
 
@@ -1918,7 +2364,17 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     </DialogContent>
   </Dialog>
 
-  <DdlViewDialog v-if="ddlDialogTarget" :connection-id="props.connection.id" :database="props.database" :schema="ddlDialogTarget.schema || selectedSchema" :table-name="ddlDialogTarget.name" :dialect="sourceDialect" :format-dialect="sourceFormatDialect" v-model:open="showDdlDialog" />
+  <DdlViewDialog
+    v-if="ddlDialogTarget"
+    :connection-id="props.connection.id"
+    :database="props.database"
+    :schema="ddlDialogTarget.schema || selectedSchema"
+    :table-name="ddlDialogTarget.name"
+    :object-type="tableDdlObjectType(ddlDialogTarget.type)"
+    :dialect="sourceDialect"
+    :format-dialect="sourceFormatDialect"
+    v-model:open="showDdlDialog"
+  />
 </template>
 
 <style scoped>
@@ -1933,5 +2389,25 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 
 .object-browser-scroller :deep(.vue-recycle-scroller__item-view) {
   contain: layout style paint;
+}
+
+.object-browser-grid-wrapper {
+  scrollbar-width: thin;
+}
+
+.object-browser-grid-scroller {
+  will-change: scroll-position;
+  contain: content;
+  scrollbar-width: thin;
+}
+
+.object-browser-grid-scroller :deep(.vue-recycle-scroller__item-view) {
+  contain: layout style paint;
+}
+
+.object-browser-grid-row {
+  display: grid;
+  column-gap: 12px;
+  align-items: start;
 }
 </style>

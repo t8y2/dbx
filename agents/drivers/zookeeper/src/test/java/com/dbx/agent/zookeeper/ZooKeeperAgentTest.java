@@ -104,6 +104,16 @@ final class ZooKeeperAgentTest {
     }
 
     @Test
+    void statLookupConcurrencyUsesConservativeDefaultsAndOverrides() {
+        Assertions.assertEquals(16, ZooKeeperAgent.configuredStatLookupConcurrency(null, null));
+        Assertions.assertEquals(20, ZooKeeperAgent.configuredStatLookupConcurrency("20", "12"));
+        Assertions.assertEquals(12, ZooKeeperAgent.configuredStatLookupConcurrency(null, "12"));
+        Assertions.assertEquals(1, ZooKeeperAgent.configuredStatLookupConcurrency("0", null));
+        Assertions.assertEquals(64, ZooKeeperAgent.configuredStatLookupConcurrency("128", null));
+        Assertions.assertEquals(16, ZooKeeperAgent.configuredStatLookupConcurrency("not-a-number", null));
+    }
+
+    @Test
     void connectAndTestConnectionWorkAgainstTestingServer() throws Exception {
         try (TestingServer server = new TestingServer()) {
             JsonObject connect = result(request(
@@ -398,8 +408,25 @@ final class ZooKeeperAgentTest {
 
             JsonObject list = result(request(5, "kv_list_prefix", "{\"prefix\":\"/\",\"recursive\":false}"));
 
-            Assertions.assertEquals(List.of("/app", "/config"), listedKeys(list));
+            Assertions.assertEquals(List.of("/app", "/config", "/zookeeper"), listedKeys(list));
             Assertions.assertTrue(list.get("continuation").isJsonNull());
+        }
+    }
+
+    @Test
+    void listPrefixKeepsDirectChildMetadataForLazyExpansion() throws Exception {
+        try (TestingServer server = new TestingServer()) {
+            connect(server);
+            result(request(2, "kv_put", "{\"key\":\"/app/name\",\"value\":{\"encoding\":\"utf8\",\"data\":\"dbx\"}}"));
+            result(request(3, "kv_put", "{\"key\":\"/config\",\"value\":{\"encoding\":\"utf8\",\"data\":\"cfg\"}}"));
+
+            JsonObject list = result(request(5, "kv_list_prefix", "{\"prefix\":\"/\",\"recursive\":false}"));
+            JsonObject app = listedRow(list, "/app");
+            JsonObject config = listedRow(list, "/config");
+
+            Assertions.assertEquals(1, app.get("numChildren").getAsInt());
+            Assertions.assertEquals(0, config.get("numChildren").getAsInt());
+            Assertions.assertEquals(3, config.get("dataLength").getAsInt());
         }
     }
 
@@ -412,7 +439,10 @@ final class ZooKeeperAgentTest {
 
             JsonObject list = result(request(5, "kv_list_prefix", "{\"prefix\":\"/\"}"));
 
-            Assertions.assertEquals(List.of("/app", "/app/name", "/config"), listedKeys(list));
+            Assertions.assertEquals(
+                List.of("/app", "/app/name", "/config", "/zookeeper", "/zookeeper/config", "/zookeeper/quota"),
+                listedKeys(list)
+            );
             Assertions.assertTrue(list.get("continuation").isJsonNull());
         }
     }
@@ -426,7 +456,10 @@ final class ZooKeeperAgentTest {
 
             JsonObject list = result(request(6, "kv_list_prefix", "{\"prefix\":\"/\",\"recursive\":true}"));
 
-            Assertions.assertEquals(List.of("/app", "/app/name", "/config"), listedKeys(list));
+            Assertions.assertEquals(
+                List.of("/app", "/app/name", "/config", "/zookeeper", "/zookeeper/config", "/zookeeper/quota"),
+                listedKeys(list)
+            );
         }
     }
 
@@ -457,11 +490,19 @@ final class ZooKeeperAgentTest {
                 "kv_list_prefix",
                 "{\"prefix\":\"/\",\"limit\":2,\"continuation\":\"" + continuation + "\"}"
             ));
+            String secondContinuation = second.get("continuation").getAsString();
+            JsonObject third = result(request(
+                7,
+                "kv_list_prefix",
+                "{\"prefix\":\"/\",\"limit\":2,\"continuation\":\"" + secondContinuation + "\"}"
+            ));
 
             Assertions.assertEquals(List.of("/a", "/b"), listedKeys(first));
             Assertions.assertFalse(continuation.isBlank());
-            Assertions.assertEquals(List.of("/c"), listedKeys(second));
-            Assertions.assertTrue(second.get("continuation").isJsonNull());
+            Assertions.assertEquals(List.of("/c", "/zookeeper"), listedKeys(second));
+            Assertions.assertFalse(secondContinuation.isBlank());
+            Assertions.assertEquals(List.of("/zookeeper/config", "/zookeeper/quota"), listedKeys(third));
+            Assertions.assertTrue(third.get("continuation").isJsonNull());
         }
     }
 
@@ -539,5 +580,17 @@ final class ZooKeeperAgentTest {
             keys.add(row.getAsJsonObject().get("key").getAsString());
         }
         return keys;
+    }
+
+    private static JsonObject listedRow(JsonObject listResult, String key) {
+        JsonArray rows = listResult.getAsJsonArray("keys");
+        for (JsonElement row : rows) {
+            JsonObject object = row.getAsJsonObject();
+            if (key.equals(object.get("key").getAsString())) {
+                return object;
+            }
+        }
+        Assertions.fail("expected listed row for " + key);
+        return new JsonObject();
     }
 }

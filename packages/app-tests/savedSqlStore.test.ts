@@ -3,6 +3,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, test, vi } from "vitest";
 import type { SavedSqlFile, SavedSqlFolder, SavedSqlLibrary } from "../../apps/desktop/src/types/database.ts";
 import { useSavedSqlStore } from "../../apps/desktop/src/stores/savedSqlStore.ts";
+import { useQueryStore } from "../../apps/desktop/src/stores/queryStore.ts";
 
 const apiMock = vi.hoisted(() => ({
   loadSavedSqlLibrary: vi.fn<() => Promise<SavedSqlLibrary>>(),
@@ -226,4 +227,111 @@ test("moving selected files already in the target folder keeps them in place", a
     store.filesInFolder("folder-1").map((file) => file.id),
     ["sql-2", "sql-1"],
   );
+});
+
+test("renaming a saved SQL file syncs linked tab titles", async () => {
+  const file: SavedSqlFile = {
+    id: "sql-1",
+    connectionId: "conn-1",
+    name: "draft.sql",
+    database: "db",
+    sql: "SELECT 1;",
+    sqlLoaded: true,
+    createdAt: "2026-06-27T00:00:00.000Z",
+    updatedAt: "2026-06-27T00:00:00.000Z",
+  };
+  apiMock.loadSavedSqlLibrary.mockResolvedValue({ folders: [], files: [file] });
+
+  const savedSqlStore = useSavedSqlStore();
+  await savedSqlStore.initFromStorage();
+
+  const queryStore = useQueryStore();
+  const tabId = queryStore.openSavedSql(file);
+  const tab = queryStore.tabs.find((item) => item.id === tabId);
+  assert.equal(tab?.title, "draft.sql");
+
+  await savedSqlStore.renameFile("sql-1", "revenue.sql");
+
+  assert.equal(savedSqlStore.getFile("sql-1")?.name, "revenue.sql");
+  assert.equal(queryStore.tabs.find((item) => item.id === tabId)?.title, "revenue.sql");
+});
+
+test("renaming a saved SQL tab syncs the library file name", async () => {
+  const file: SavedSqlFile = {
+    id: "sql-1",
+    connectionId: "conn-1",
+    name: "draft.sql",
+    database: "db",
+    sql: "SELECT 1;",
+    sqlLoaded: true,
+    createdAt: "2026-06-27T00:00:00.000Z",
+    updatedAt: "2026-06-27T00:00:00.000Z",
+  };
+  apiMock.loadSavedSqlLibrary.mockResolvedValue({ folders: [], files: [file] });
+
+  const savedSqlStore = useSavedSqlStore();
+  await savedSqlStore.initFromStorage();
+
+  const queryStore = useQueryStore();
+  const tabId = queryStore.openSavedSql(file);
+
+  assert.equal(queryStore.renameTab(tabId, " Revenue checks "), true);
+  await Promise.resolve();
+
+  assert.equal(queryStore.tabs.find((item) => item.id === tabId)?.title, "Revenue checks.sql");
+  assert.equal(savedSqlStore.getFile("sql-1")?.name, "Revenue checks.sql");
+  assert.equal(apiMock.saveSavedSqlFile.mock.calls.at(-1)?.[0].name, "Revenue checks.sql");
+});
+
+test("renaming a saved SQL tab keeps uppercase .SQL extension without double-appending", async () => {
+  const file: SavedSqlFile = {
+    id: "sql-1",
+    connectionId: "conn-1",
+    name: "report.SQL",
+    database: "db",
+    sql: "SELECT 1;",
+    sqlLoaded: true,
+    createdAt: "2026-06-27T00:00:00.000Z",
+    updatedAt: "2026-06-27T00:00:00.000Z",
+  };
+  apiMock.loadSavedSqlLibrary.mockResolvedValue({ folders: [], files: [file] });
+
+  const savedSqlStore = useSavedSqlStore();
+  await savedSqlStore.initFromStorage();
+
+  const queryStore = useQueryStore();
+  const tabId = queryStore.openSavedSql(file);
+
+  assert.equal(queryStore.renameTab(tabId, "report.SQL"), true);
+  await Promise.resolve();
+
+  assert.equal(queryStore.tabs.find((item) => item.id === tabId)?.title, "report.SQL");
+  assert.equal(savedSqlStore.getFile("sql-1")?.name, "report.SQL");
+  assert.equal(apiMock.saveSavedSqlFile.mock.calls.length, 0);
+});
+
+test("renaming a saved SQL tab reverts title when persistence fails", async () => {
+  const file: SavedSqlFile = {
+    id: "sql-1",
+    connectionId: "conn-1",
+    name: "draft.sql",
+    database: "db",
+    sql: "SELECT 1;",
+    sqlLoaded: true,
+    createdAt: "2026-06-27T00:00:00.000Z",
+    updatedAt: "2026-06-27T00:00:00.000Z",
+  };
+  apiMock.loadSavedSqlLibrary.mockResolvedValue({ folders: [], files: [file] });
+
+  const savedSqlStore = useSavedSqlStore();
+  await savedSqlStore.initFromStorage();
+
+  const queryStore = useQueryStore();
+  const tabId = queryStore.openSavedSql(file);
+
+  apiMock.saveSavedSqlFile.mockRejectedValueOnce(new Error("disk full"));
+  assert.equal(queryStore.renameTab(tabId, "broken"), true);
+  await vi.waitFor(() => queryStore.tabs.find((item) => item.id === tabId)?.title === "draft.sql");
+
+  assert.equal(savedSqlStore.getFile("sql-1")?.name, "draft.sql");
 });

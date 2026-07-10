@@ -135,8 +135,17 @@ pub async fn document_list_gridfs_buckets(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     database: String,
+    filter: Option<String>,
+    sort: Option<String>,
 ) -> Result<Vec<dbx_core::document_ops::MongoGridFsBucketInfo>, String> {
-    dbx_core::document_ops::list_gridfs_buckets_core(&state, &connection_id, &database).await
+    dbx_core::document_ops::list_gridfs_buckets_core(
+        &state,
+        &connection_id,
+        &database,
+        filter.as_deref(),
+        sort.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -167,8 +176,18 @@ pub async fn document_list_gridfs_files(
     connection_id: String,
     database: String,
     bucket: String,
+    filter: Option<String>,
+    sort: Option<String>,
 ) -> Result<Vec<dbx_core::document_ops::MongoGridFsFileInfo>, String> {
-    dbx_core::document_ops::list_gridfs_files_core(&state, &connection_id, &database, &bucket).await
+    dbx_core::document_ops::list_gridfs_files_core(
+        &state,
+        &connection_id,
+        &database,
+        &bucket,
+        filter.as_deref(),
+        sort.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]

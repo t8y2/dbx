@@ -7,9 +7,9 @@ use dbx_core::agent_manager::{
     AgentDriverInfo, AgentState, DriverStoreUsage, JavaRuntimeConfig, JavaRuntimeMode, DEFAULT_JRE_KEY,
 };
 use dbx_core::agent_service::{
-    build_agent_list, fetch_registry, import_agents_from_zip as import_agents_from_zip_core, install_agent_driver,
-    invalidate_registry_cache, reinstall_agent_jre, uninstall_agent_driver, uninstall_agent_jre,
-    upgrade_all_agent_drivers, AgentProgressEvent,
+    build_agent_list, clear_agent_download_cache, fetch_registry,
+    import_agents_from_zip as import_agents_from_zip_core, install_agent_driver, invalidate_registry_cache,
+    reinstall_agent_jre, uninstall_agent_driver, uninstall_agent_jre, upgrade_all_agent_drivers, AgentProgressEvent,
 };
 use dbx_core::driver_runtime::DriverRuntimeSummary;
 use futures::Stream;
@@ -49,8 +49,22 @@ pub async fn list_installed_agents(State(state): State<Arc<WebState>>) -> Result
     Ok(Json(build_agent_list(&state.app.agent_manager, registry.as_ref())))
 }
 
+pub async fn is_agent_installed(
+    State(state): State<Arc<WebState>>,
+    Path(db_type): Path<String>,
+) -> Result<Json<bool>, AppError> {
+    Ok(Json(state.app.agent_manager.is_driver_installed(&db_type)))
+}
+
 pub async fn get_driver_store_usage(State(state): State<Arc<WebState>>) -> Result<Json<DriverStoreUsage>, AppError> {
     Ok(Json(state.app.agent_manager.collect_driver_store_usage(state.app.plugins.root_dir())))
+}
+
+pub async fn clear_driver_download_cache(
+    State(state): State<Arc<WebState>>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    clear_agent_download_cache(&state.app.agent_manager).map_err(AppError)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 pub async fn get_driver_runtime_summary(

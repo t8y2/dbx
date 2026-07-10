@@ -27,6 +27,7 @@ const open = defineModel<boolean>("open", { default: false });
 const props = defineProps<{
   prefillConnectionId?: string;
   prefillDatabase?: string;
+  prefillFilePath?: string;
 }>();
 
 const store = useConnectionStore();
@@ -409,6 +410,11 @@ watch(
     resetState();
     if (connectionId.value) {
       loadDatabasesForConnection(connectionId.value);
+    }
+    // When opened from the SQL Files panel with a pre-selected file, load its
+    // preview automatically so the user can review statements before running.
+    if (props.prefillFilePath) {
+      void loadPreview(props.prefillFilePath);
     }
   },
   { immediate: true },

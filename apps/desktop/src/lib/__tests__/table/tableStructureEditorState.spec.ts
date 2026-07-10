@@ -28,6 +28,14 @@ describe("tableStructureEditorState", () => {
     expect(dataTypeLengthInputValue("mysql", "set('manual','auto')")).toBe("");
   });
 
+  it("does not expose Oracle-like integer display widths as editable length", () => {
+    expect(isDataTypeLengthDisabled("dameng", "integer")).toBe(true);
+    expect(dataTypeLengthInputValue("dameng", "integer(11)")).toBe("");
+    expect(combineDataTypeForDatabase("dameng", "integer", "11")).toBe("integer");
+    expect(combineDataTypeForDatabase("oracle", "number", "10,0")).toBe("number(10,0)");
+    expect(combineDataTypeForDatabase("mysql", "integer", "11")).toBe("integer(11)");
+  });
+
   it("strips SQL Server metadata parentheses from editable defaults", () => {
     const drafts = createColumnDrafts(
       [

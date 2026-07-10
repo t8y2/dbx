@@ -146,15 +146,15 @@ const activeConfig = computed(() => props.configs.find((c) => c.id === props.act
     </Button>
 
     <Button variant="outline" size="icon" class="h-8 w-8" :title="t('schemaDiff.exportConfig')" @click="onExport">
-      <Download class="h-4 w-4" />
-    </Button>
-
-    <Button variant="outline" size="icon" class="h-8 w-8" :title="t('schemaDiff.importConfig')" @click="importDialogOpen = true">
       <Upload class="h-4 w-4" />
     </Button>
 
+    <Button variant="outline" size="icon" class="h-8 w-8" :title="t('schemaDiff.importConfig')" @click="importDialogOpen = true">
+      <Download class="h-4 w-4" />
+    </Button>
+
     <Button variant="outline" size="icon" class="h-8 w-8" :title="t('schemaDiff.exportAllConfigs')" @click="onExportAll">
-      <FileDown class="h-4 w-4" />
+      <Upload class="h-4 w-4" />
     </Button>
 
     <!-- Rename Dialog -->

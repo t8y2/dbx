@@ -40,6 +40,7 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   ["doris", TABLE_VIEW_OBJECTS],
   ["starrocks", TABLE_VIEW_OBJECTS],
   ["hive", TABLE_VIEW_OBJECTS],
+  ["spark", TABLE_VIEW_OBJECTS],
   ["trino", TABLE_VIEW_OBJECTS],
   ["prestosql", TABLE_VIEW_OBJECTS],
   ["cassandra", TABLE_VIEW_OBJECTS],

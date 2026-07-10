@@ -1,18 +1,19 @@
-import { ref, type Ref, type ComputedRef } from "vue";
+import { ref, watch, type Ref, type ComputedRef } from "vue";
 import { useI18n } from "vue-i18n";
 import { useQueryStore } from "@/stores/queryStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
-import { isSingleDatabase } from "@/lib/database/databaseCapabilities";
+import { isSingleDatabase, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
 import { canExecuteWithoutSelectedDatabase } from "@/lib/connection/connectionLevelDatabaseBootstrap";
 import { classifySqlActivityKind } from "@/lib/history/historyActivityKind";
 import { sqlMetadataRefreshTarget } from "@/lib/sql/sqlMetadataRefresh";
 import { classifyRedisCommandSafety, firstRedisCommandToken } from "@/lib/redis/redisCommandSafety";
 import { isSqlExecutionSnapshot, resolveExecutableSql, type SqlExecutionOverride, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
-import { extractSqlParameters } from "@/lib/sql/sqlParameters";
-import type { ConnectionConfig, QueryTab } from "@/types/database";
+import { extractSqlParameterDescriptors, type SqlParameterDescriptor } from "@/lib/sql/sqlParameters";
+import { expandSqlVariables } from "@/lib/sql/sqlVariables";
+import type { ConnectionConfig, DatabaseType, QueryTab } from "@/types/database";
 
 const DANGER_RE = /^\s*(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
 
@@ -60,13 +61,14 @@ export function useSqlExecution(deps: {
   const explainMode = ref<"explain" | "autotrace">("explain");
   const showSqlParameterDialog = ref(false);
   const sqlParameterSourceSql = ref("");
-  const sqlParameterNames = ref<string[]>([]);
+  const sqlParameterNames = ref<SqlParameterDescriptor[]>([]);
+  const sqlParameterDatabaseType = ref<DatabaseType | undefined>();
 
   async function resolvedExecutableSql(source?: SqlExecutionOverride): Promise<string> {
-    if (typeof source === "string") return source;
-    if (deps.resolveExecutableSql) return await deps.resolveExecutableSql(source);
-    if (isSqlExecutionSnapshot(source)) return resolveExecutableSql(source.fullSql, source.selectedSql, { cursorPos: source.cursorPos });
-    return deps.executableSql.value;
+    if (typeof source === "string") return expandSqlVariables(source).sql;
+    if (deps.resolveExecutableSql) return expandSqlVariables(await deps.resolveExecutableSql(source)).sql;
+    if (isSqlExecutionSnapshot(source)) return expandSqlVariables(resolveExecutableSql(source.fullSql, source.selectedSql, { cursorPos: source.cursorPos })).sql;
+    return expandSqlVariables(deps.executableSql.value).sql;
   }
 
   async function tryExecute(sqlOverride?: SqlExecutionOverride) {
@@ -107,10 +109,12 @@ export function useSqlExecution(deps: {
   }
 
   function prepareSqlParameterDialog(sql: string): boolean {
-    const parameters = extractSqlParameters(sql);
+    const databaseType = deps.activeConnection.value?.db_type;
+    const parameters = extractSqlParameterDescriptors(sql, { databaseType });
     if (!parameters.length) return false;
     sqlParameterSourceSql.value = sql;
     sqlParameterNames.value = parameters;
+    sqlParameterDatabaseType.value = databaseType;
     showSqlParameterDialog.value = true;
     return true;
   }
@@ -201,8 +205,16 @@ export function useSqlExecution(deps: {
     showSqlParameterDialog.value = false;
     sqlParameterSourceSql.value = "";
     sqlParameterNames.value = [];
+    sqlParameterDatabaseType.value = undefined;
     await continueExecute(sql);
   }
+
+  watch(showSqlParameterDialog, (open) => {
+    if (open) return;
+    sqlParameterSourceSql.value = "";
+    sqlParameterNames.value = [];
+    sqlParameterDatabaseType.value = undefined;
+  });
 
   return {
     dangerSql,
@@ -217,6 +229,7 @@ export function useSqlExecution(deps: {
     showSqlParameterDialog,
     sqlParameterSourceSql,
     sqlParameterNames,
+    sqlParameterDatabaseType,
     onSqlParametersConfirm,
     explainMode,
   };
@@ -229,7 +242,9 @@ function supportsSqlTemplateParameters(connection: ConnectionConfig | undefined)
 
 export function requiresDatabaseSelection(tab: QueryTab, connection: ConnectionConfig | undefined, sql = ""): boolean {
   if (tab.mode !== "query") return false;
-  if (!connection || tab.database) return false;
+  if (!connection) return false;
+  if (tab.database) return false;
+  if (tab.database === "" && usesTreeSchemaMode(connection.db_type)) return false;
   if (isSingleDatabase(connection.db_type)) return false;
   if (canExecuteWithoutSelectedDatabase(connection, sql)) return false;
   return !["elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "zookeeper"].includes(connection.db_type);

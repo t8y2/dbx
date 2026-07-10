@@ -99,7 +99,10 @@ test("executeRedisCommand runs standalone redis commands without the DBX bridge"
 
       assert.deepEqual(result, { command: "GET", safety: "allowed", value: "value-1" });
       const dataCommands = seen.filter((request) => request.command !== "CLIENT");
-      assert.deepEqual(dataCommands.map((request) => request.command), ["SELECT", "GET"]);
+      assert.deepEqual(
+        dataCommands.map((request) => request.command),
+        ["SELECT", "GET"],
+      );
       assert.deepEqual(dataCommands[0].args, ["2"]);
     },
   );
@@ -113,13 +116,13 @@ test("executeRedisCommand parses quoted arguments and JSON bulk replies", async 
         assert.deepEqual(request.args, ["session:1", "hello world"]);
         return "+OK\r\n";
       }
-      return bulk("{\"ok\":true}");
+      return bulk('{"ok":true}');
     },
     async (port) => {
       const set = await executeRedisCommand(redisConnection(port), 0, 'SET session:1 "hello world"');
       const get = await executeRedisCommand(redisConnection(port), 0, "GET session:1");
 
-      assert.deepEqual(set, { command: "SET", safety: "confirm", value: "OK" });
+      assert.deepEqual(set, { command: "SET", safety: "write", value: "OK" });
       assert.deepEqual(get, { command: "GET", safety: "allowed", value: { ok: true } });
     },
   );
@@ -129,7 +132,7 @@ test("executeRedisCommand keeps blocked redis commands behind skipSafetyCheck", 
   await withRedisServer(
     (request) => {
       if (request.command === "CLIENT") return "+OK\r\n";
-      return bulk("[\"session:1\"]");
+      return bulk('["session:1"]');
     },
     async (port) => {
       await assert.rejects(() => executeRedisCommand(redisConnection(port), 0, "KEYS *"), /blocked for safety/);

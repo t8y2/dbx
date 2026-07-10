@@ -16,7 +16,7 @@ use dbx_core::path_utils::expand_tilde;
 pub fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
+        dbx_core::process::new_std_command("open")
             .arg("-R")
             .arg(path)
             .spawn()
@@ -30,7 +30,7 @@ pub fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
         // after the comma. `Command::arg` does not invoke a shell, so the path
         // is forwarded as-is — spaces and non-ASCII characters survive.
         let arg = format!("/select,{}", path.display());
-        std::process::Command::new("explorer")
+        dbx_core::process::new_std_command("explorer")
             .arg(arg)
             .spawn()
             .map(|_| ())
@@ -40,7 +40,7 @@ pub fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     {
         let target: PathBuf = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| path.to_path_buf());
-        std::process::Command::new("xdg-open")
+        dbx_core::process::new_std_command("xdg-open")
             .arg(&target)
             .spawn()
             .map(|_| ())

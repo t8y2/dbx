@@ -34,6 +34,7 @@ pub async fn save_desktop_settings(
     settings: DesktopSettings,
 ) -> Result<(), String> {
     state.storage.save_desktop_settings(&settings).await?;
+    state.apply_duckdb_worker_process_isolation(settings.duckdb_worker_process_isolation).await;
     apply_debug_log_level(settings.debug_logging_enabled);
     if let Err(err) = apply_desktop_settings(&app, &settings) {
         eprintln!("Failed to apply desktop settings: {err}");
@@ -72,6 +73,41 @@ pub async fn load_pinned_tree_node_ids(state: State<'_, Arc<AppState>>) -> Resul
 #[tauri::command]
 pub async fn save_pinned_tree_node_ids(state: State<'_, Arc<AppState>>, ids: Vec<String>) -> Result<(), String> {
     state.storage.save_pinned_tree_node_ids(&ids).await
+}
+
+#[tauri::command]
+pub async fn load_editor_settings(state: State<'_, Arc<AppState>>) -> Result<Option<serde_json::Value>, String> {
+    state.storage.load_editor_settings().await
+}
+
+#[tauri::command]
+pub async fn save_editor_settings(state: State<'_, Arc<AppState>>, settings: serde_json::Value) -> Result<(), String> {
+    state.storage.save_editor_settings(&settings).await
+}
+
+#[tauri::command]
+pub async fn load_open_tabs_state(state: State<'_, Arc<AppState>>) -> Result<Option<serde_json::Value>, String> {
+    state.storage.load_open_tabs_state().await
+}
+
+#[tauri::command]
+pub async fn save_open_tabs_state(state: State<'_, Arc<AppState>>, payload: serde_json::Value) -> Result<(), String> {
+    state.storage.save_open_tabs_state(&payload).await
+}
+
+#[tauri::command]
+pub async fn load_saved_sql_editor_positions(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<serde_json::Value>, String> {
+    state.storage.load_saved_sql_editor_positions().await
+}
+
+#[tauri::command]
+pub async fn save_saved_sql_editor_positions(
+    state: State<'_, Arc<AppState>>,
+    positions: serde_json::Value,
+) -> Result<(), String> {
+    state.storage.save_saved_sql_editor_positions(&positions).await
 }
 
 #[tauri::command]

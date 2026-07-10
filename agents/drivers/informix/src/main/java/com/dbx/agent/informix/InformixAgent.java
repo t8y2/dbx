@@ -9,6 +9,8 @@ import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcExecutor;
 import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MetadataListConstraints;
+import com.dbx.agent.MetadataSqlSupport;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.QueryResult;
@@ -16,6 +18,7 @@ import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
@@ -206,6 +209,45 @@ public final class InformixAgent extends BaseDatabaseAgent {
     }
 
     @Override
+    public List<TableInfo> listTables(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        if (isUnconstrained(normalized)) {
+            return listTables(schema);
+        }
+        if (!normalized.includesTableLikeTypes()) {
+            return List.of();
+        }
+        try {
+            return queryConstrainedTables(normalized);
+        } catch (RuntimeException e) {
+            return normalized.filterTables(listTables(schema));
+        }
+    }
+
+    private List<TableInfo> queryConstrainedTables(MetadataListConstraints constraints) {
+        return unchecked(() -> {
+            List<TableInfo> result = new ArrayList<>();
+            List<Object> args = new ArrayList<>();
+            StringBuilder sql = new StringBuilder("SELECT ");
+            MetadataSqlSupport.appendLiteralSkipFirst(sql, constraints);
+            sql.append("tabname, CASE tabtype WHEN 'T' THEN 'TABLE' WHEN 'V' THEN 'VIEW' ELSE tabtype END ")
+                .append("FROM systables WHERE tabid >= 100");
+            appendInformixTableTypePredicate(sql, constraints);
+            MetadataSqlSupport.appendNameFilter(sql, args, "tabname", constraints);
+            sql.append(" ORDER BY tabname");
+            try (PreparedStatement stmt = requireConnected().prepareStatement(sql.toString())) {
+                MetadataSqlSupport.bind(stmt, args);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        result.add(new TableInfo(rs.getString(1).trim(), rs.getString(2).trim(), null));
+                    }
+                }
+            }
+            return constraints.withoutPaging().filterTables(result);
+        });
+    }
+
+    @Override
     public List<ObjectInfo> listObjects(String schema) {
         return unchecked(() -> {
             List<ObjectInfo> result = new ArrayList<>();
@@ -231,6 +273,63 @@ public final class InformixAgent extends BaseDatabaseAgent {
                 }
             }
             return result;
+        });
+    }
+
+    @Override
+    public List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        if (isUnconstrained(normalized)) {
+            return listObjects(schema);
+        }
+        if (!includesSupportedObjects(normalized)) {
+            return List.of();
+        }
+        try {
+            return queryConstrainedObjects(schema, normalized);
+        } catch (RuntimeException e) {
+            return normalized.filterObjects(listObjects(schema));
+        }
+    }
+
+    private List<ObjectInfo> queryConstrainedObjects(String schema, MetadataListConstraints constraints) {
+        return unchecked(() -> {
+            List<ObjectInfo> result = new ArrayList<>();
+            List<String> branches = new ArrayList<>();
+            List<Object> args = new ArrayList<>();
+            if (constraints.includesTableLikeTypes()) {
+                StringBuilder tableSql = new StringBuilder("SELECT tabname AS object_name, CASE tabtype WHEN 'T' THEN 'TABLE' WHEN 'V' THEN 'VIEW' ELSE tabtype END AS object_type, 0 AS object_order FROM systables WHERE tabid >= 100");
+                appendInformixTableTypePredicate(tableSql, constraints);
+                MetadataSqlSupport.appendNameFilter(tableSql, args, "tabname", constraints);
+                branches.add(tableSql.toString());
+            }
+            if (constraints.objectTypeAllowed("FUNCTION")) {
+                StringBuilder functionSql = new StringBuilder("SELECT procname AS object_name, 'FUNCTION' AS object_type, 1 AS object_order FROM sysprocedures WHERE owner != 'informix' AND isproc = 'f'");
+                MetadataSqlSupport.appendNameFilter(functionSql, args, "procname", constraints);
+                branches.add(functionSql.toString());
+            }
+            if (constraints.objectTypeAllowed("PROCEDURE")) {
+                StringBuilder procedureSql = new StringBuilder("SELECT procname AS object_name, 'PROCEDURE' AS object_type, 2 AS object_order FROM sysprocedures WHERE owner != 'informix' AND isproc = 't'");
+                MetadataSqlSupport.appendNameFilter(procedureSql, args, "procname", constraints);
+                branches.add(procedureSql.toString());
+            }
+            if (branches.isEmpty()) {
+                return List.of();
+            }
+            StringBuilder sql = new StringBuilder("SELECT ");
+            MetadataSqlSupport.appendLiteralSkipFirst(sql, constraints);
+            sql.append("object_name, object_type FROM (")
+                .append(String.join(" UNION ALL ", branches))
+                .append(") metadata_objects ORDER BY object_order, object_name");
+            try (PreparedStatement stmt = requireConnected().prepareStatement(sql.toString())) {
+                MetadataSqlSupport.bind(stmt, args);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        result.add(new ObjectInfo(rs.getString(1).trim(), rs.getString(2).trim(), schema, null));
+                    }
+                }
+            }
+            return constraints.withoutPaging().filterObjects(result);
         });
     }
 
@@ -392,6 +491,34 @@ public final class InformixAgent extends BaseDatabaseAgent {
             Object value = rs.getObject(index);
             return rs.wasNull() ? null : value == null ? null : value.toString();
         });
+    }
+
+    private static boolean isUnconstrained(MetadataListConstraints constraints) {
+        return !constraints.hasFilter() && !constraints.hasLimit() && !constraints.hasOffset() && !constraints.hasObjectTypes();
+    }
+
+    private static boolean includesSupportedObjects(MetadataListConstraints constraints) {
+        return constraints.includesTableLikeTypes()
+            || constraints.objectTypeAllowed("PROCEDURE")
+            || constraints.objectTypeAllowed("FUNCTION");
+    }
+
+    private static void appendInformixTableTypePredicate(StringBuilder sql, MetadataListConstraints constraints) {
+        if (!constraints.hasObjectTypes()) {
+            return;
+        }
+        List<String> types = new ArrayList<>();
+        if (constraints.tableTypeAllowed("TABLE")) {
+            types.add("'T'");
+        }
+        if (constraints.tableTypeAllowed("VIEW")) {
+            types.add("'V'");
+        }
+        if (types.isEmpty()) {
+            sql.append(" AND 1 = 0");
+            return;
+        }
+        sql.append(" AND tabtype IN (").append(String.join(", ", types)).append(")");
     }
 
     private static String trimStart(String value, char... chars) {

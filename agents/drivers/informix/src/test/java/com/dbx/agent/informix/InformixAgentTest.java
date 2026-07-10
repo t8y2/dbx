@@ -1,7 +1,11 @@
 package com.dbx.agent.informix;
 
 import com.dbx.agent.ConnectParams;
+import com.dbx.agent.MetadataListConstraints;
+import com.dbx.agent.test.JdbcMetadataSqlFake;
+import com.dbx.agent.test.TestSupport;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Set;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -124,5 +128,34 @@ class InformixAgentTest {
     @Test
     void listsDatabasesFromSysmasterCatalog() {
         Assertions.assertEquals("SELECT name FROM sysmaster:sysdatabases ORDER BY name", InformixAgent.databaseCatalogSql());
+    }
+
+    @Test
+    void constrainedTableMetadataUsesInformixSkipFirstPushdown() {
+        InformixAgent agent = new InformixAgent();
+        TestSupport.setPrivateConnection(agent, JdbcMetadataSqlFake.connection());
+
+        agent.listTables("stores", new MetadataListConstraints("ord", 25, 50, List.of("TABLE")));
+
+        String sql = JdbcMetadataSqlFake.statements.get(0);
+        Assertions.assertTrue(sql.startsWith("SELECT SKIP 50 FIRST 25 tabname"), sql);
+        Assertions.assertTrue(sql.contains("tabtype IN ('T')"), sql);
+        Assertions.assertTrue(sql.contains("UPPER(tabname) LIKE ? ESCAPE '\\\\'"), sql);
+        Assertions.assertTrue(sql.endsWith("ORDER BY tabname"), sql);
+    }
+
+    @Test
+    void constrainedObjectMetadataUsesInformixUnionPushdown() {
+        InformixAgent agent = new InformixAgent();
+        TestSupport.setPrivateConnection(agent, JdbcMetadataSqlFake.connection());
+
+        agent.listObjects("stores", new MetadataListConstraints("sync", 10, null, List.of("PROCEDURE", "FUNCTION")));
+
+        String sql = JdbcMetadataSqlFake.statements.get(0);
+        Assertions.assertTrue(sql.startsWith("SELECT FIRST 10 object_name, object_type FROM ("), sql);
+        Assertions.assertTrue(sql.contains("FROM sysprocedures"), sql);
+        Assertions.assertTrue(sql.contains("isproc = 'f'"), sql);
+        Assertions.assertTrue(sql.contains("isproc = 't'"), sql);
+        Assertions.assertTrue(sql.endsWith("ORDER BY object_order, object_name"), sql);
     }
 }

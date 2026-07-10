@@ -213,6 +213,7 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
         next.add(rowId);
       }
       selectedRowIds.value = next;
+      selectContiguousRowIds(next);
       lastClickedRowIndex.value = rowIndex;
     } else if (isShift && lastClickedRowIndex.value !== null) {
       const start = Math.min(lastClickedRowIndex.value, rowIndex);
@@ -229,6 +230,30 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
       selectRow(rowIndex);
       lastClickedRowIndex.value = rowIndex;
     }
+  }
+
+  function selectContiguousRowIds(rowIds: Set<number>) {
+    if (rowIds.size === 0) {
+      clearCellSelection();
+      return;
+    }
+
+    const indexes = displayItems.value.reduce<number[]>((selectedIndexes, item, index) => {
+      if (rowIds.has(item.id)) selectedIndexes.push(index);
+      return selectedIndexes;
+    }, []);
+    if (indexes.length !== rowIds.size) {
+      clearCellSelection();
+      return;
+    }
+
+    const start = Math.min(...indexes);
+    const end = Math.max(...indexes);
+    if (end - start + 1 !== indexes.length) {
+      clearCellSelection();
+      return;
+    }
+    selectRows(start, end);
   }
 
   function finishCellSelection() {

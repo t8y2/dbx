@@ -76,6 +76,7 @@ function onConfirm() {
       <div class="py-4 min-w-0">
         <p class="text-sm text-muted-foreground mb-3">{{ message || t("dangerDialog.message") }}</p>
         <p v-if="detailsText" class="text-xs text-muted-foreground mb-3 whitespace-pre-line">{{ detailsText }}</p>
+        <slot name="options" />
         <div v-if="code" class="relative">
           <Button variant="ghost" size="icon-xs" class="absolute top-1 right-1 z-10 h-6 w-6" :class="wrap ? 'text-foreground bg-accent' : 'text-muted-foreground'" :title="t('dangerDialog.wrapLines')" @click="wrap = !wrap">
             <TextWrap class="h-3.5 w-3.5" />

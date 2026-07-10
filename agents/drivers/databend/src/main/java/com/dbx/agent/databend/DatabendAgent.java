@@ -3,11 +3,13 @@ package com.dbx.agent.databend;
 import com.dbx.agent.ConfiguredJdbcAgent;
 import com.dbx.agent.JdbcAgentProfile;
 import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.PreparedStatement;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -55,6 +57,23 @@ public final class DatabendAgent extends ConfiguredJdbcAgent {
     }
 
     @Override
+    public List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        boolean includeTables = normalized.includesTableLikeTypes();
+        boolean includeProcedures = includesProcedures(normalized);
+        if (includeProcedures && !includeTables) {
+            return listProcedures(schema, normalized);
+        }
+        if (includeTables && !includeProcedures) {
+            return super.listObjects(schema, normalized);
+        }
+        if (!includeTables && !includeProcedures) {
+            return List.of();
+        }
+        return normalized.filterObjects(listObjects(schema));
+    }
+
+    @Override
     public ObjectSource getObjectSource(String schema, String name, String objectType) {
         if (!"PROCEDURE".equalsIgnoreCase(objectType)) {
             return super.getObjectSource(schema, name, objectType);
@@ -77,6 +96,53 @@ public final class DatabendAgent extends ConfiguredJdbcAgent {
         }
         try (java.sql.Statement stmt = requireConnected().createStatement()) {
             stmt.execute(DATABEND_PROFILE.schemaSwitchSql(schema.trim()));
+        }
+    }
+
+    private List<ObjectInfo> listProcedures(String schema, MetadataListConstraints constraints) {
+        return unchecked(() -> {
+            useSchema(schema);
+            List<ObjectInfo> result = new ArrayList<>();
+            StringBuilder sql = new StringBuilder("SELECT name, comment FROM system.procedures");
+            List<Object> args = new ArrayList<>();
+            if (constraints.hasFilter()) {
+                sql.append(" WHERE UPPER(name) LIKE ? ESCAPE '\\\\'");
+                args.add(constraints.fuzzyLikePattern().toUpperCase(Locale.ROOT));
+            }
+            sql.append(" ORDER BY name");
+            if (constraints.hasLimit()) {
+                sql.append(" LIMIT ?");
+                args.add(constraints.getLimit());
+                if (constraints.hasOffset()) {
+                    sql.append(" OFFSET ?");
+                    args.add(constraints.getOffset());
+                }
+            }
+            try (PreparedStatement stmt = requireConnected().prepareStatement(sql.toString())) {
+                bind(stmt, args);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        result.add(new ObjectInfo(rs.getString("name"), "PROCEDURE", schema, rs.getString("comment")));
+                    }
+                }
+            }
+            MetadataListConstraints guard = constraints.hasLimit() ? constraints.withoutPaging() : constraints;
+            return guard.filterObjects(result);
+        });
+    }
+
+    private static boolean includesProcedures(MetadataListConstraints constraints) {
+        return !constraints.hasObjectTypes() || constraints.objectTypeAllowed("PROCEDURE");
+    }
+
+    private static void bind(PreparedStatement stmt, List<Object> args) throws SQLException {
+        for (int index = 0; index < args.size(); index += 1) {
+            Object arg = args.get(index);
+            if (arg instanceof Integer) {
+                stmt.setInt(index + 1, (Integer) arg);
+            } else {
+                stmt.setString(index + 1, String.valueOf(arg));
+            }
         }
     }
 

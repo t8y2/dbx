@@ -75,7 +75,9 @@ export const installJdbcPluginLocal = forward("installJdbcPluginLocal");
 export const uninstallJdbcPlugin = forward("uninstallJdbcPlugin");
 export const listInstalledAgentsLocal = forward("listInstalledAgentsLocal");
 export const listInstalledAgents = forward("listInstalledAgents");
+export const isAgentInstalled = forward("isAgentInstalled");
 export const getDriverStoreUsage = forward("getDriverStoreUsage");
+export const clearDriverDownloadCache = forward("clearDriverDownloadCache");
 export const getDriverRuntimeSummary = forward("getDriverRuntimeSummary");
 export const stopDriverRuntime = forward("stopDriverRuntime");
 export const restartDriverRuntime = forward("restartDriverRuntime");
@@ -106,6 +108,8 @@ export const syncSavedSqlDirectory = forward("syncSavedSqlDirectory");
 
 // Schema
 export const listDatabases = forward("listDatabases");
+export const listDorisCatalogs = forward("listDorisCatalogs");
+export const listDorisCatalogDatabases = forward("listDorisCatalogDatabases");
 export const listSqlServerLinkedServers = forward("listSqlServerLinkedServers");
 export const listSqlServerLinkedServerCatalogs = forward("listSqlServerLinkedServerCatalogs");
 export const listSqlServerLinkedServerSchemas = forward("listSqlServerLinkedServerSchemas");
@@ -132,6 +136,8 @@ export const listFunctions = forward("listFunctions");
 export const listSequences = forward("listSequences");
 export const listRules = forward("listRules");
 export const listOwners = forward("listOwners");
+export const listExtensions = forward("listExtensions");
+export const listAvailableExtensions = forward("listAvailableExtensions");
 export const prepareSchemaDiff = forward("prepareSchemaDiff");
 export const generateSchemaSyncSql = forward("generateSchemaSyncSql");
 
@@ -169,6 +175,7 @@ export const buildEmptyTableSql = forward("buildEmptyTableSql");
 export const buildTruncateTableSql = forward("buildTruncateTableSql");
 export const buildDropDatabaseSql = forward("buildDropDatabaseSql");
 export const buildCreateSchemaSql = forward("buildCreateSchemaSql");
+export const buildUpdateDatabasePropertiesSql = forward("buildUpdateDatabasePropertiesSql");
 export const buildDropSchemaSql = forward("buildDropSchemaSql");
 export const buildDuplicateTableStructureSql = forward("buildDuplicateTableStructureSql");
 export const buildCopyTableDataSql = forward("buildCopyTableDataSql");
@@ -219,10 +226,19 @@ export const setAgentStoreDir = forward("setAgentStoreDir");
 export const getDriverStorePath = forward("getDriverStorePath");
 export const loadPinnedTreeNodeIds = forward("loadPinnedTreeNodeIds");
 export const savePinnedTreeNodeIds = forward("savePinnedTreeNodeIds");
+export const loadEditorSettings = forward("loadEditorSettings");
+export const saveEditorSettings = forward("saveEditorSettings");
+export const loadOpenTabsState = forward("loadOpenTabsState");
+export const saveOpenTabsState = forward("saveOpenTabsState");
+export const loadSavedSqlEditorPositions = forward("loadSavedSqlEditorPositions");
+export const saveSavedSqlEditorPositions = forward("saveSavedSqlEditorPositions");
 export const webdavSyncTest = forward("webdavSyncTest");
 export const webdavPasswordStatus = forward("webdavPasswordStatus");
 export const saveWebdavSavedPassword = forward("saveWebdavSavedPassword");
 export const forgetWebdavSavedPassword = forward("forgetWebdavSavedPassword");
+export const webdavSyncSecretsStatus = forward("webdavSyncSecretsStatus");
+export const saveWebdavSyncSecretsPreference = forward("saveWebdavSyncSecretsPreference");
+export const forgetWebdavSyncSecretsPassphrase = forward("forgetWebdavSyncSecretsPassphrase");
 export const webdavSyncUpload = forward("webdavSyncUpload");
 export const webdavSyncDownload = forward("webdavSyncDownload");
 export const saveAiConversation = forward("saveAiConversation");
@@ -231,6 +247,7 @@ export const deleteAiConversation = forward("deleteAiConversation");
 
 // System
 export const listSystemFonts = forward("listSystemFonts");
+export const listSshConfigHosts = forward("listSshConfigHosts");
 
 // SQL File Execution
 export const previewSqlFile = forward("previewSqlFile");
@@ -242,6 +259,7 @@ export const pendingOpenDbFiles = forward("pendingOpenDbFiles");
 export const pendingOpenConnectionLinks = forward("pendingOpenConnectionLinks");
 export const readExternalSqlFile = forward("readExternalSqlFile");
 export const writeExternalSqlFile = forward("writeExternalSqlFile");
+export const listSqlFilesInFolder = forward("listSqlFilesInFolder");
 
 // Nacos
 export const nacosTestConnection = forward("nacosTestConnection");
@@ -263,6 +281,7 @@ export const nacosRawRequest = forward("nacosRawRequest");
 // Data Transfer
 export const startTransfer = forward("startTransfer");
 export const cancelTransfer = forward("cancelTransfer");
+export const previewTransferOwnership = forward("previewTransferOwnership");
 export const sortTablesByFkDependency = forward("sortTablesByFkDependency");
 
 // Table File Import
@@ -422,6 +441,7 @@ export const checkForUpdates = forward("checkForUpdates");
 export const getSystemProxyUrl = forward("getSystemProxyUrl");
 export const downloadAndInstallUpdate = forward("downloadAndInstallUpdate");
 export const getAppVersion = forward("getAppVersion");
+export const getAppSupportInfo = forward("getAppSupportInfo");
 
 // Layout
 export const saveSidebarLayout = forward("saveSidebarLayout");
@@ -432,6 +452,7 @@ export const loadSidebarLayout = forward("loadSidebarLayout");
 // ---------------------------------------------------------------------------
 
 export type {
+  AppSupportInfo,
   AiMessage,
   AiCompletionRequest,
   AiTaskContract,
@@ -457,9 +478,18 @@ export type {
   WebDavDownloadResult,
   McpServerStatus,
   UpdateInfo,
+  RedisBlob,
+  RedisCollectionPage,
   RedisDatabaseInfo,
+  RedisHashItem,
   RedisKeyInfo,
+  RedisListItem,
+  RedisSetItem,
+  RedisStreamEntry,
+  RedisStreamField,
   RedisValue,
+  RedisValueData,
+  RedisZsetItem,
   RedisScanResult,
   RedisCommandSafety,
   RedisCommandResult,
@@ -487,9 +517,15 @@ export type {
   TransferProgress,
   TransferMode,
   TransferTableNameCase,
+  TransferOwnershipPolicy,
+  TransferOwnershipPreview,
   TableImportMode,
   TableImportStatus,
+  TableImportSourceFormat,
+  TableImportJsonShape,
   TableImportColumnMapping,
+  TableImportParseOptions,
+  TableImportPreviewRequest,
   TableImportPreview,
   TableImportRequest,
   TableImportSummary,
@@ -501,4 +537,5 @@ export type {
   TableExportRequest,
   QueryResultExportRequest,
   AgentEvent,
+  SqlFileEntry,
 } from "@/lib/backend/tauri";

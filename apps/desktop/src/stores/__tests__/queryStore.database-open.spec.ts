@@ -40,6 +40,22 @@ describe("queryStore database open state", () => {
     expect(store.isDatabaseOpen("pg-1", "analytics")).toBe(false);
   });
 
+  it("keeps object browser viewport per tab and clears it on schema change", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    const tabId = store.openObjectBrowser("pg-1", "app", "public");
+    store.updateObjectBrowserViewport(tabId, { scrollTop: 340, viewMode: "list" });
+
+    const tab = store.tabs.find((item) => item.id === tabId);
+    expect(tab?.objectBrowser?.viewport).toEqual({ scrollTop: 340, viewMode: "list" });
+
+    store.updateSchema(tabId, "archive");
+
+    expect(tab?.objectBrowser?.schema).toBe("archive");
+    expect(tab?.objectBrowser?.viewport).toBeUndefined();
+  });
+
   it("closes data and structure tabs for a dropped table object", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
@@ -156,17 +172,22 @@ describe("queryStore database open state", () => {
     vi.unstubAllGlobals();
     const storage = installLocalStorage();
     storage.set("dbx-editor-settings", JSON.stringify({ openTabsRestoreMode: "none" }));
+    storage.set("dbx-app-state:open_tabs", JSON.stringify({ tabs: JSON.parse(persistedTabs), activeTabId: "tab-1" }));
     storage.set(OPEN_TABS_STORAGE_KEY, persistedTabs);
     storage.set(ACTIVE_TAB_STORAGE_KEY, "tab-1");
     setActivePinia(createPinia());
 
+    const { useSettingsStore } = await import("@/stores/settingsStore");
     const { useQueryStore } = await import("@/stores/queryStore");
+    await useSettingsStore().initEditorSettings();
     const store = useQueryStore();
+    await store.initOpenTabs();
 
     expect(store.tabs).toEqual([]);
     expect(store.activeTabId).toBeNull();
-    expect(storage.get(OPEN_TABS_STORAGE_KEY)).toBe(persistedTabs);
-    expect(storage.get(ACTIVE_TAB_STORAGE_KEY)).toBe("tab-1");
+    expect(storage.get(OPEN_TABS_STORAGE_KEY)).toBeUndefined();
+    expect(storage.get(ACTIVE_TAB_STORAGE_KEY)).toBeUndefined();
+    expect(JSON.parse(storage.get("dbx-app-state:open_tabs") ?? "{}")).toEqual({ tabs: [], activeTabId: null });
   });
 
   it("restores only pinned tabs when launch restore mode is pinned", async () => {
@@ -196,8 +217,11 @@ describe("queryStore database open state", () => {
     storage.set(ACTIVE_TAB_STORAGE_KEY, "tab-2");
     setActivePinia(createPinia());
 
+    const { useSettingsStore } = await import("@/stores/settingsStore");
     const { useQueryStore } = await import("@/stores/queryStore");
+    await useSettingsStore().initEditorSettings();
     const store = useQueryStore();
+    await store.initOpenTabs();
 
     expect(store.tabs.map((tab) => tab.id)).toEqual(["tab-1"]);
     expect(store.activeTabId).toBe("tab-1");

@@ -54,13 +54,13 @@ async function copy() {
   </div>
 
   <!-- centered: 居中占满 -->
-  <div v-else class="flex-1 flex flex-col items-center justify-center gap-2 px-6 text-center">
+  <div v-else class="flex-1 min-h-0 flex flex-col items-center justify-center gap-2 px-6 py-4 text-center">
     <TriangleAlert class="h-8 w-8 text-destructive/50" aria-hidden="true" />
-    <div class="space-y-1 select-text text-destructive" @mousedown.stop @click.stop>
+    <div class="min-h-0 max-h-48 max-w-lg overflow-auto space-y-1 select-text text-destructive" @mousedown.stop @click.stop>
       <div class="text-sm font-medium">{{ displayTitle }}</div>
-      <div class="text-xs max-w-lg break-all cursor-text text-destructive/80 select-text">{{ message }}</div>
+      <div class="text-xs break-all cursor-text text-destructive/80 select-text">{{ message }}</div>
     </div>
-    <div class="flex flex-wrap items-center justify-center gap-2 text-foreground">
+    <div class="shrink-0 flex flex-wrap items-center justify-center gap-2 text-foreground">
       <Button variant="outline" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click.stop="copy">
         <Copy class="h-3.5 w-3.5" />
         {{ t("grid.copy") }}

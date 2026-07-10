@@ -4,7 +4,7 @@ import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 import * as api from "@/lib/backend/api";
 import type { TableGenerateConfig } from "@/lib/dataGrid/dataGenerate";
-import { findGeneratorKey, generateTableData, defaultGeneratorParams } from "@/lib/dataGrid/dataGenerate";
+import { displayGeneratedValue, findGeneratorKey, formatGeneratedValue, generateTableData, defaultGeneratorParams } from "@/lib/dataGrid/dataGenerate";
 import { quoteTableIdentifier } from "@/lib/table/tableSelectSql";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -113,7 +113,7 @@ async function loadSchemas() {
               database: db,
               rowCount: 1000,
               columns: cols.map((c: ColumnInfo) => {
-                const isAI = c.extra === "auto_increment" || (c.column_default?.includes("nextval") ?? false);
+                const isAI = c.extra === "auto_increment" || (c.column_default?.toLowerCase().includes("nextval") ?? false);
                 const gKey = findGeneratorKey(c.name, c.data_type, isAI);
                 return {
                   columnName: c.name,
@@ -133,6 +133,7 @@ async function loadSchemas() {
                     gKey,
                   ),
                   isAutoIncrement: isAI,
+                  columnDefault: c.column_default,
                 };
               }),
             };
@@ -205,7 +206,7 @@ async function loadColumns(schema: string, table: string) {
     database: props.prefillDatabase,
     rowCount: 1000,
     columns: cols.map((c: ColumnInfo) => {
-      const isAI = c.extra === "auto_increment" || (c.column_default?.includes("nextval") ?? false);
+      const isAI = c.extra === "auto_increment" || (c.column_default?.toLowerCase().includes("nextval") ?? false);
       const gKey = findGeneratorKey(c.name, c.data_type, isAI);
       return {
         columnName: c.name,
@@ -225,6 +226,7 @@ async function loadColumns(schema: string, table: string) {
           gKey,
         ),
         isAutoIncrement: isAI,
+        columnDefault: c.column_default,
       };
     }),
   };
@@ -323,6 +325,10 @@ function onPreviewColResizeStart(ci: number, event: MouseEvent) {
   document.body.classList.add("select-none", "cursor-col-resize");
 }
 const currentPreview = computed(() => generatedResults.value[previewTableIndex.value] ?? { tableName: "", columns: [], rows: [], sql: "" });
+
+function displayPreviewCell(cell: unknown): string {
+  return displayGeneratedValue(cell);
+}
 
 async function fetchMaxValues(cfg: TableGenerateConfig): Promise<Record<string, number>> {
   const starts: Record<string, number> = {};
@@ -428,13 +434,7 @@ function sqlStatementsForTable(r: { tableName: string; columns: string[]; rows: 
   } else {
     const colList = r.columns.map((c) => quoteTableIdentifier(dbType.value, c)).join(", ");
     for (const row of r.rows) {
-      const vals = row
-        .map((v) => {
-          if (v === null || v === undefined) return "NULL";
-          if (typeof v === "number") return String(v);
-          return `'${String(v).replace(/'/g, "''")}'`;
-        })
-        .join(", ");
+      const vals = row.map(formatGeneratedValue).join(", ");
       stmts.push(`INSERT INTO ${quoteTableIdentifier(dbType.value, r.tableName)} (${colList}) VALUES (${vals});`);
     }
   }
@@ -480,6 +480,9 @@ async function startInsert() {
       }
     }
     perTable.push({ table: r.tableName, total: rowCount, ok, err: rowCount - ok, error: lastError || undefined });
+    if (ok > 0) {
+      store.invalidateMetadataCache(cid, db, props.prefillSchema || undefined, r.tableName);
+    }
   }
   executeResults.value = perTable;
   currentStep.value = "result";
@@ -868,7 +871,7 @@ async function onFileSelected(event: Event) {
                         :style="{ maxWidth: (previewColWidths[ci] ?? 120) + 'px' }"
                         :class="{ 'text-muted-foreground italic': cell === null || cell === undefined }"
                       >
-                        {{ cell === null || cell === undefined ? "NULL" : String(cell) }}
+                        {{ displayPreviewCell(cell) }}
                       </td>
                     </tr>
                   </tbody>

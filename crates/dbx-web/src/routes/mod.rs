@@ -24,6 +24,7 @@ pub mod schema;
 pub mod schema_cache;
 pub mod schema_diff;
 pub mod sql_file;
+pub mod ssh_config;
 pub mod tab_runtime_cache;
 pub mod table_export;
 pub mod table_import;

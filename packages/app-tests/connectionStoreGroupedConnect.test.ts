@@ -153,6 +153,64 @@ test("duplicating a grouped connection keeps the copy in the same group", async 
   }
 });
 
+test("reloading connections preserves the current grouped layout when the saved layout is temporarily unavailable", async () => {
+  const originalFetch = globalThis.fetch;
+  const storage = installMemoryStorage();
+  const savedConnections: ConnectionConfig[] = [
+    conn("pg", "pg"),
+    conn("pg2", "pg2"),
+    conn("pg3", "pg3"),
+    conn("pg4", "pg4"),
+  ];
+  let savedLayout: SidebarLayout | null = {
+    groups: [
+      { id: "group-a", name: "dir[a]", collapsed: false },
+      { id: "group-b", name: "dir[b]", collapsed: false },
+    ],
+    order: [
+      { type: "group", id: "group-a", connectionIds: ["pg", "pg2"] },
+      { type: "group", id: "group-b", connectionIds: ["pg3", "pg4"] },
+    ],
+  };
+
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url === "/api/connection/list") {
+      return new Response(JSON.stringify(savedConnections), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url === "/api/layout/sidebar") {
+      if (init?.method === "POST") {
+        savedLayout = JSON.parse(String(init.body ?? "null"));
+        return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify(savedLayout), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    await store.initFromDisk();
+
+    assert.deepEqual(
+      store.treeNodes.map((node) => node.label),
+      ["dir[a]", "dir[b]"],
+    );
+
+    savedLayout = null;
+    await store.initFromDisk();
+
+    assert.deepEqual(
+      store.treeNodes.map((node) => node.label),
+      ["dir[a]", "dir[b]"],
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    storage.restore();
+  }
+});
+
 test("importing grouped dbx connections remaps exported layout to new connection ids", async () => {
   const originalFetch = globalThis.fetch;
   const storage = installMemoryStorage();

@@ -90,8 +90,9 @@ fn tag_version(version: &str) -> String {
 }
 
 #[tauri::command]
-pub async fn check_for_updates() -> Result<UpdateInfo, String> {
-    let release = dbx_core::update::fetch_latest_release().await?;
+pub async fn check_for_updates(locale: Option<String>) -> Result<UpdateInfo, String> {
+    let locale = locale.unwrap_or_else(|| "zh-CN".to_string());
+    let release = dbx_core::update::fetch_latest_release(&locale).await?;
     let current_version = env!("CARGO_PKG_VERSION");
     let mut info = dbx_core::update::build_update_info(release, current_version);
     info.portable_mode = crate::data_dir::is_portable_mode();

@@ -7,6 +7,8 @@ const MYSQL_COMPATIBLE_TYPES = new Set<DatabaseType>(["mysql", "doris", "starroc
 export interface CreateDatabaseSqlOptions {
   databaseType?: DatabaseType;
   driverProfile?: string | null;
+  target?: "database" | "schema" | "catalog" | "namespace";
+  parent?: string | null;
   name: string;
   charset?: string;
   collation?: string;

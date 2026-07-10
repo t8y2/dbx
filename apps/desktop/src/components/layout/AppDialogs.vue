@@ -20,7 +20,9 @@ const DataGenerateDialog = defineAsyncComponent(() => import("@/components/gener
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useDialogSources } from "@/composables/useDialogSources";
 import type { ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
+import type { SqlParameterDescriptor } from "@/lib/sql/sqlParameters";
 import type { ConfigTab } from "@/components/connection/ConnectionDialog.vue";
+import type { DatabaseType } from "@/types/database";
 
 const props = defineProps<{
   showConnectionDialog: boolean;
@@ -31,7 +33,8 @@ const props = defineProps<{
   suppressDangerConfirm: boolean;
   showSqlParameterDialog: boolean;
   sqlParameterSourceSql: string;
-  sqlParameterNames: string[];
+  sqlParameterNames: SqlParameterDescriptor[];
+  sqlParameterDatabaseType?: DatabaseType;
 }>();
 
 const emit = defineEmits<{
@@ -63,6 +66,15 @@ const emit = defineEmits<{
       tableName: string;
       tableType?: string;
       whereInput?: string;
+    },
+  ];
+  openDiagramTarget: [
+    target: {
+      connectionId: string;
+      database: string;
+      schema?: string;
+      tableName: string;
+      tableType?: string;
     },
   ];
 }>();
@@ -123,7 +135,7 @@ watch(
     @update:suppress-future-prompts="emit('update:suppressDangerConfirm', $event)"
     @confirm="emit('dangerConfirm')"
   />
-  <SqlParameterDialog v-if="showSqlParameterDialog" :open="showSqlParameterDialog" :sql="sqlParameterSourceSql" :parameters="sqlParameterNames" @update:open="emit('update:showSqlParameterDialog', $event)" @execute="emit('sqlParametersConfirm', $event)" />
+  <SqlParameterDialog v-if="showSqlParameterDialog" :open="showSqlParameterDialog" :sql="sqlParameterSourceSql" :parameters="sqlParameterNames" :database-type="sqlParameterDatabaseType" @update:open="emit('update:showSqlParameterDialog', $event)" @execute="emit('sqlParametersConfirm', $event)" />
   <DataTransferDialog v-model:open="dialogs.showTransferDialog.value" :prefill-connection-id="dialogs.transferPrefillConnectionId.value" :prefill-database="dialogs.transferPrefillDatabase.value" />
   <SchemaDiffDialog v-if="dialogs.showSchemaDiffDialog.value" v-model:open="dialogs.showSchemaDiffDialog.value" :prefill-connection-id="dialogs.schemaDiffPrefillConnectionId.value" :prefill-database="dialogs.schemaDiffPrefillDatabase.value" :prefill-schema="dialogs.schemaDiffPrefillSchema.value" />
   <DataCompareDialog
@@ -134,7 +146,7 @@ watch(
     :prefill-schema="dialogs.dataComparePrefillSchema.value"
     :prefill-table="dialogs.dataComparePrefillTable.value"
   />
-  <SqlFileExecutionDialog v-model:open="dialogs.showSqlFileDialog.value" :prefill-connection-id="dialogs.sqlFilePrefillConnectionId.value" :prefill-database="dialogs.sqlFilePrefillDatabase.value" />
+  <SqlFileExecutionDialog v-model:open="dialogs.showSqlFileDialog.value" :prefill-connection-id="dialogs.sqlFilePrefillConnectionId.value" :prefill-database="dialogs.sqlFilePrefillDatabase.value" :prefill-file-path="dialogs.sqlFilePrefillFilePath.value" />
   <SchemaDiagramDialog
     v-if="dialogs.showDiagramDialog.value"
     v-model:open="dialogs.showDiagramDialog.value"
@@ -142,6 +154,7 @@ watch(
     :prefill-database="dialogs.diagramPrefillDatabase.value"
     :prefill-schema="dialogs.diagramPrefillSchema.value"
     :focus-table-name="dialogs.diagramFocusTableName.value"
+    @open-target="emit('openDiagramTarget', $event)"
   />
   <TableImportDialog
     v-if="dialogs.showTableImportDialog.value"

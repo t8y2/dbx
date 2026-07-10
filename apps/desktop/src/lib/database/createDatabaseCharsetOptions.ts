@@ -66,7 +66,7 @@ export function parseCreateDatabaseCharsetMetadata(charsetResult: QueryLikeResul
   for (const row of collationResult.rows) {
     const collation = cellString(row[collationNameIndex]);
     const charset = normalizeCreateDatabaseCharsetKey(cellString(row[collationCharsetIndex]));
-    if (!collation || !charset || isHiddenCreateDatabaseCollation(collation)) continue;
+    if (!collation || !charset) continue;
     collationsByCharset[charset] ??= [];
     if (isDefaultFlag(row[collationDefaultIndex])) {
       collationsByCharset[charset].unshift(collation);
@@ -78,7 +78,7 @@ export function parseCreateDatabaseCharsetMetadata(charsetResult: QueryLikeResul
   for (const row of charsetResult.rows) {
     const charset = normalizeCreateDatabaseCharsetKey(cellString(row[charsetNameIndex]));
     const defaultCollation = cellString(row[charsetDefaultCollationIndex]);
-    if (!charset || !defaultCollation || isHiddenCreateDatabaseCollation(defaultCollation)) continue;
+    if (!charset || !defaultCollation) continue;
     collationsByCharset[charset] ??= [];
     const existingIndex = collationsByCharset[charset].indexOf(defaultCollation);
     if (existingIndex > 0) collationsByCharset[charset].splice(existingIndex, 1);
@@ -103,10 +103,6 @@ function cellString(value: unknown): string {
 
 function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))];
-}
-
-function isHiddenCreateDatabaseCollation(value: string): boolean {
-  return value.toLowerCase().includes("_0900_");
 }
 
 function isDefaultFlag(value: unknown): boolean {

@@ -22,11 +22,13 @@ interface MessageSegment {
 
 export interface AiMessageRendererOptions {
   maxEntries?: number;
+  maxCacheableChars?: number;
   markdown: (text: string) => string;
   highlightCode?: (content: string, lang: string) => string;
 }
 
 const DEFAULT_MAX_ENTRIES = 100;
+const DEFAULT_MAX_CACHEABLE_CHARS = 20_000;
 const SQL_LANGUAGES = new Map([
   ["sql", "SQL"],
   ["mysql", "MYSQL"],
@@ -48,10 +50,12 @@ const SQL_LANGUAGE_LABELS = new Set(SQL_LANGUAGES.values());
 
 export function createAiMessageRenderer(options: AiMessageRendererOptions) {
   const maxEntries = Math.max(1, Math.floor(options.maxEntries ?? DEFAULT_MAX_ENTRIES));
+  const maxCacheableChars = Math.max(0, Math.floor(options.maxCacheableChars ?? DEFAULT_MAX_CACHEABLE_CHARS));
   const cache = new Map<string, AiMessageRenderSegment[]>();
 
   function render(content: string): AiMessageRenderSegment[] {
-    const cached = cache.get(content);
+    const cacheable = content.length <= maxCacheableChars;
+    const cached = cacheable ? cache.get(content) : undefined;
     if (cached) {
       cache.delete(content);
       cache.set(content, cached);
@@ -72,11 +76,13 @@ export function createAiMessageRenderer(options: AiMessageRendererOptions) {
       };
     });
 
-    cache.set(content, rendered);
-    while (cache.size > maxEntries) {
-      const oldestKey = cache.keys().next().value;
-      if (oldestKey === undefined) break;
-      cache.delete(oldestKey);
+    if (cacheable) {
+      cache.set(content, rendered);
+      while (cache.size > maxEntries) {
+        const oldestKey = cache.keys().next().value;
+        if (oldestKey === undefined) break;
+        cache.delete(oldestKey);
+      }
     }
     return rendered;
   }

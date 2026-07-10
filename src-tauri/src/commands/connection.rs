@@ -142,6 +142,8 @@ async fn connect_agent_pool(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "sqlite-sqlcipher")]
+    use super::connect_sqlite_from_config;
     use super::{
         mark_mongo_legacy_driver, mongo_legacy_connect_params, MONGO_LEGACY_DRIVER_LABEL, MONGO_LEGACY_DRIVER_PROFILE,
     };
@@ -161,6 +163,7 @@ mod tests {
             driver_profile: Some("mongodb".to_string()),
             driver_label: Some("MongoDB".to_string()),
             url_params: Some("authSource=admin&authMechanism=SCRAM-SHA-1".to_string()),
+            agent_java_options: Vec::new(),
             host: "172.22.4.42".to_string(),
             port: 27017,
             username: "mongouser".to_string(),
@@ -202,6 +205,24 @@ mod tests {
             one_time: false,
             read_only: false,
         }
+    }
+
+    #[cfg(feature = "sqlite-sqlcipher")]
+    fn sqlite_config(path: &std::path::Path, password: &str) -> ConnectionConfig {
+        let mut config = mongodb_config();
+        config.id = "sqlite".to_string();
+        config.name = "SQLite".to_string();
+        config.db_type = DatabaseType::Sqlite;
+        config.driver_profile = None;
+        config.driver_label = None;
+        config.url_params = None;
+        config.host = path.to_string_lossy().to_string();
+        config.port = 0;
+        config.username = String::new();
+        config.password = password.to_string();
+        config.database = None;
+        config.connection_string = None;
+        config
     }
 
     #[cfg(feature = "mq-admin")]
@@ -250,6 +271,51 @@ mod tests {
         assert_eq!(config.driver_profile.as_deref(), Some(MONGO_LEGACY_DRIVER_PROFILE));
         assert_eq!(config.driver_label.as_deref(), Some(MONGO_LEGACY_DRIVER_LABEL));
         assert!(!mark_mongo_legacy_driver(&mut config));
+    }
+
+    #[cfg(feature = "sqlite-sqlcipher")]
+    #[tokio::test]
+    async fn sqlite_connect_from_config_uses_sqlcipher_key() {
+        let path = std::env::temp_dir().join(format!("dbx-tauri-sqlcipher-{}.db", uuid::Uuid::new_v4()));
+        let key = "dbx-pass";
+
+        {
+            let pool =
+                dbx_core::db::sqlite::connect_path_create_if_missing_with_cipher_key(path.to_str().unwrap(), key)
+                    .await
+                    .expect("create encrypted sqlite");
+            pool.with_connection(|conn| {
+                conn.execute_batch(
+                    "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT); INSERT INTO users(name) VALUES ('Ada'), ('Grace');",
+                )
+                .map_err(|err| err.to_string())
+            })
+            .expect("write encrypted sqlite");
+        }
+
+        let config = sqlite_config(&path, key);
+        let pool = connect_sqlite_from_config(&config).await.expect("open encrypted sqlite");
+        let count = pool
+            .with_connection(|conn| {
+                conn.query_row("SELECT count(*) FROM users", [], |row| row.get::<_, i64>(0))
+                    .map_err(|err| err.to_string())
+            })
+            .expect("read encrypted sqlite");
+        assert_eq!(count, 2);
+
+        let wrong_key = match connect_sqlite_from_config(&sqlite_config(&path, "wrong-key")).await {
+            Ok(_) => panic!("wrong SQLCipher key must fail"),
+            Err(err) => err,
+        };
+        assert!(wrong_key.contains("SQLCipher database unlock failed"));
+
+        let missing_key = match connect_sqlite_from_config(&sqlite_config(&path, "")).await {
+            Ok(_) => panic!("missing SQLCipher key must fail"),
+            Err(err) => err,
+        };
+        assert!(missing_key.contains("not a valid SQLite database"));
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[cfg(feature = "mq-admin")]
@@ -487,6 +553,25 @@ pub async fn load_sidebar_layout(state: State<'_, Arc<AppState>>) -> Result<Opti
     state.storage.load_sidebar_layout().await
 }
 
+fn sqlite_extension_specs_from_config(config: &ConnectionConfig) -> Vec<db::sqlite::SqliteExtensionSpec> {
+    db::sqlite::sqlite_extension_specs_from_url_params(config.url_params.as_deref())
+        .into_iter()
+        .map(|mut extension| {
+            extension.path = expand_tilde(&extension.path);
+            extension
+        })
+        .collect()
+}
+
+async fn connect_sqlite_from_config(config: &ConnectionConfig) -> Result<db::sqlite::SqliteHandle, String> {
+    db::sqlite::connect_path_with_cipher_key_and_extensions(
+        &expand_tilde(&config.host),
+        &config.password,
+        sqlite_extension_specs_from_config(config),
+    )
+    .await
+}
+
 #[tauri::command]
 pub async fn test_connection(state: State<'_, Arc<AppState>>, config: ConnectionConfig) -> Result<String, String> {
     let tunnel_id = format!("{}:test", config.id);
@@ -512,7 +597,16 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                 }
             }
             DatabaseType::Mysql if config.needs_bare_mysql() && config.bare_mysql_uses_tls() => {
-                match db::mysql::connect_with_ca_cert(&url, Some(&config.ca_cert_path), connect_timeout).await {
+                match db::mysql::connect_compatible_with_ca_cert_pool_limit_idle_and_setup(
+                    &url,
+                    Some(&config.ca_cert_path),
+                    connect_timeout,
+                    10,
+                    None,
+                    &[],
+                )
+                .await
+                {
                     Ok(pool) => {
                         let _ = pool.disconnect().await;
                         Ok("Connection successful".to_string())
@@ -540,7 +634,15 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
             }
             DatabaseType::StarRocks => {
                 let connect = if config.bare_mysql_uses_tls() {
-                    db::mysql::connect_with_ca_cert(&url, Some(&config.ca_cert_path), connect_timeout).await
+                    db::mysql::connect_compatible_with_ca_cert_pool_limit_idle_and_setup(
+                        &url,
+                        Some(&config.ca_cert_path),
+                        connect_timeout,
+                        10,
+                        None,
+                        &[],
+                    )
+                    .await
                 } else {
                     db::mysql::connect_bare(&url, connect_timeout).await
                 };
@@ -564,19 +666,10 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                 }
                 Err(e) => Err(e),
             },
-            DatabaseType::Sqlite => {
-                let extensions = db::sqlite::sqlite_extension_specs_from_url_params(config.url_params.as_deref())
-                    .into_iter()
-                    .map(|mut extension| {
-                        extension.path = expand_tilde(&extension.path);
-                        extension
-                    })
-                    .collect();
-                match db::sqlite::connect_path_with_extensions(&expand_tilde(&config.host), extensions).await {
-                    Ok(_) => Ok("Connection successful".to_string()),
-                    Err(e) => Err(e),
-                }
-            }
+            DatabaseType::Sqlite => match connect_sqlite_from_config(&config).await {
+                Ok(_) => Ok("Connection successful".to_string()),
+                Err(e) => Err(e),
+            },
             DatabaseType::Redis => {
                 let con = if config.uses_redis_cluster() {
                     state.connect_redis_cluster(&tunnel_id, &config).await?;
@@ -654,17 +747,9 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                     .await
                     .map(|_| "Connection successful".to_string())
             }
-            DatabaseType::SqlServer => db::sqlserver::connect(
-                &host,
-                port,
-                &config.username,
-                &config.password,
-                config.database.as_deref(),
-                config.url_params.as_deref(),
-                connect_timeout,
-            )
-            .await
-            .map(|_| "Connection successful".to_string()),
+            DatabaseType::SqlServer => {
+                state.test_sqlserver_connection_with_legacy_fallback(&config, &host, port, connect_timeout).await
+            }
             DatabaseType::Elasticsearch => {
                 let mut client = db::elasticsearch_driver::EsClient::from_config(
                     &url,
@@ -737,16 +822,7 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                     .map(|_| "Connection successful".to_string())
             }
             DatabaseType::InfluxDb => {
-                let username = if config.username.is_empty() { None } else { Some(config.username.clone()) };
-                let password = if config.password.is_empty() { None } else { Some(config.password.clone()) };
-                let client = db::influxdb_driver::InfluxdbClient::new_with_ca_cert(
-                    &url,
-                    username,
-                    password,
-                    config.url_params.clone(),
-                    Some(&config.ca_cert_path),
-                    connect_timeout,
-                )?;
+                let client = db::influxdb_driver::InfluxdbClient::new_for_config(&url, &config, connect_timeout)?;
                 db::influxdb_driver::test_connection(&client, connect_timeout)
                     .await
                     .map(|_| "Connection successful".to_string())
@@ -807,11 +883,15 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
 }
 
 #[tauri::command]
-pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfig) -> Result<String, String> {
+pub async fn connect_db(
+    state: State<'_, Arc<AppState>>,
+    config: ConnectionConfig,
+    client_attempt: Option<u64>,
+) -> Result<String, String> {
     let config = config.canonicalized();
     let id = config.id.clone();
     let db_config = metadata_connection_config(&config);
-    let attempt = state.begin_connection_attempt(&id).await;
+    let attempt = state.begin_connection_attempt_with_client_attempt(&id, client_attempt).await;
     let mut connected_config = config.clone();
     let mut connected_db_config = db_config.clone();
 
@@ -819,7 +899,15 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
     state.reset_connection_transport_for_config(&id, &db_config).await;
 
     let (host, port) = state.connection_host_port(&id, &db_config).await?;
+    if let Err(err) = state.ensure_current_connection_attempt(&id, Some(attempt)).await {
+        state.reset_connection_transport_for_config(&id, &db_config).await;
+        return Err(err);
+    }
     probe_connection_endpoint(&db_config, &host, port).await?;
+    if let Err(err) = state.ensure_current_connection_attempt(&id, Some(attempt)).await {
+        state.reset_connection_transport_for_config(&id, &db_config).await;
+        return Err(err);
+    }
     let url = connection_url_for_endpoint(&db_config, &host, port);
     let connect_timeout = std::time::Duration::from_secs(db_config.effective_connect_timeout_secs());
     let idle_timeout = std::time::Duration::from_secs(db_config.idle_timeout_secs);
@@ -840,18 +928,7 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
         | DatabaseType::Kwdb
         | DatabaseType::Questdb
         | DatabaseType::OpenGauss => PoolKind::Postgres(db::postgres::connect(&url, connect_timeout).await?),
-        DatabaseType::Sqlite => {
-            let extensions = db::sqlite::sqlite_extension_specs_from_url_params(db_config.url_params.as_deref())
-                .into_iter()
-                .map(|mut extension| {
-                    extension.path = expand_tilde(&extension.path);
-                    extension
-                })
-                .collect();
-            PoolKind::Sqlite(
-                db::sqlite::connect_path_with_extensions(&expand_tilde(&db_config.host), extensions).await?,
-            )
-        }
+        DatabaseType::Sqlite => PoolKind::Sqlite(connect_sqlite_from_config(&db_config).await?),
         DatabaseType::Redis => {
             let con = if db_config.uses_redis_cluster() {
                 PoolKind::Redis(db::redis_driver::RedisConnection::Cluster(
@@ -885,14 +962,17 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
             if mongo_uses_legacy_driver(&db_config) {
                 let mut client =
                     state.agent_manager.spawn(&db_config.db_type, Some(MONGO_LEGACY_DRIVER_PROFILE)).await?;
+                state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
                 client
                     .connect(mongo_legacy_connect_params(&db_config, &host, port))
                     .await
                     .map_err(|err| mongo_legacy_error_with_auth_hint(&err))?;
+                state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
                 PoolKind::Agent(std::sync::Arc::new(tokio::sync::Mutex::new(client)))
             } else {
                 let native_err = match db::mongo_driver::connect(&url, connect_timeout, idle_timeout).await {
                     Ok(client) => {
+                        state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
                         match db::mongo_driver::test_connection(
                             &client,
                             connect_timeout,
@@ -901,7 +981,8 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
                         .await
                         {
                             Ok(()) => {
-                                state
+                                state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
+                                if let Err(err) = state
                                     .insert_connection_pool_for_attempt(
                                         &id,
                                         attempt,
@@ -909,7 +990,11 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
                                         PoolKind::MongoDb(client),
                                         &db_config,
                                     )
-                                    .await?;
+                                    .await
+                                {
+                                    state.reset_connection_transport_for_config(&id, &db_config).await;
+                                    return Err(err);
+                                }
                                 state.configs.write().await.insert(id.clone(), config);
                                 return Ok(id);
                             }
@@ -922,12 +1007,14 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
                     log::info!("Native MongoDB driver failed ({native_err}), falling back to agent driver");
                     let mut client =
                         state.agent_manager.spawn(&db_config.db_type, Some(MONGO_LEGACY_DRIVER_PROFILE)).await?;
+                    state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
                     client.connect(mongo_legacy_connect_params(&db_config, &host, port)).await.map_err(|err| {
                         format!(
                             "{native_err}\n\nFallback with MongoDB (Legacy) driver failed: {}",
                             mongo_legacy_error_with_auth_hint(&err)
                         )
                     })?;
+                    state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
                     mark_mongo_legacy_driver(&mut connected_config);
                     connected_db_config = metadata_connection_config(&connected_config);
                     persist_mongo_legacy_driver_profile(state.inner(), &connected_config).await?;
@@ -952,17 +1039,7 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
             PoolKind::ClickHouse(client)
         }
         DatabaseType::SqlServer => {
-            let client = db::sqlserver::connect(
-                &host,
-                port,
-                &db_config.username,
-                &db_config.password,
-                db_config.database.as_deref(),
-                db_config.url_params.as_deref(),
-                connect_timeout,
-            )
-            .await?;
-            PoolKind::SqlServer(std::sync::Arc::new(tokio::sync::Mutex::new(client)))
+            state.connect_sqlserver_pool_with_legacy_fallback(&db_config, &host, port, connect_timeout).await?
         }
         DatabaseType::Elasticsearch => {
             let mut client = db::elasticsearch_driver::EsClient::from_config(
@@ -1032,16 +1109,7 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
             PoolKind::Turso(client)
         }
         DatabaseType::InfluxDb => {
-            let username = if db_config.username.is_empty() { None } else { Some(db_config.username.clone()) };
-            let password = if db_config.password.is_empty() { None } else { Some(db_config.password.clone()) };
-            let client = db::influxdb_driver::InfluxdbClient::new_with_ca_cert(
-                &url,
-                username,
-                password,
-                db_config.url_params,
-                Some(&db_config.ca_cert_path),
-                connect_timeout,
-            )?;
+            let client = db::influxdb_driver::InfluxdbClient::new_for_config(&url, &db_config, connect_timeout)?;
             db::influxdb_driver::test_connection(&client, connect_timeout).await?;
             PoolKind::InfluxDb(client)
         }
@@ -1062,7 +1130,15 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
                     return Err(err);
                 }
             };
+            if let Err(err) = state.ensure_current_connection_attempt(&id, Some(attempt)).await {
+                state.mq_registry.drop_connection(&id).await;
+                return Err(err);
+            }
             if let Err(err) = adapter.test_connection().await {
+                state.mq_registry.drop_connection(&id).await;
+                return Err(err);
+            }
+            if let Err(err) = state.ensure_current_connection_attempt(&id, Some(attempt)).await {
                 state.mq_registry.drop_connection(&id).await;
                 return Err(err);
             }
@@ -1086,7 +1162,12 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
         db_type => return Err(format!("Unsupported database type: {db_type:?}")),
     };
 
-    state.insert_connection_pool_for_attempt(&id, attempt, id.clone(), pool, &connected_db_config).await?;
+    if let Err(err) =
+        state.insert_connection_pool_for_attempt(&id, attempt, id.clone(), pool, &connected_db_config).await
+    {
+        state.reset_connection_transport_for_config(&id, &connected_db_config).await;
+        return Err(err);
+    }
     state.configs.write().await.insert(id.clone(), connected_config);
 
     Ok(id)
@@ -1111,8 +1192,20 @@ pub async fn connection_final_proxy_port(
 }
 
 #[tauri::command]
-pub async fn disconnect_db(state: State<'_, Arc<AppState>>, connection_id: String) -> Result<(), String> {
-    state.supersede_connection_attempt(&connection_id).await;
+pub async fn disconnect_db(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    client_attempt: Option<u64>,
+) -> Result<(), String> {
+    let should_disconnect = if let Some(client_attempt) = client_attempt {
+        state.supersede_connection_attempt_if_client_attempt(&connection_id, client_attempt).await
+    } else {
+        state.supersede_connection_attempt(&connection_id).await;
+        true
+    };
+    if !should_disconnect {
+        return Ok(());
+    }
     state.remove_connection_pools_detached(&connection_id).await;
     drop_nacos_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;
     drop_mq_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;

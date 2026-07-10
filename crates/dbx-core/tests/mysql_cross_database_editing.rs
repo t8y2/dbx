@@ -32,6 +32,7 @@ fn mysql_cross_database_query_flow_preserves_target_database() {
         offset: Some(0),
         where_input: Some("active = 1".to_string()),
         include_row_id: false,
+        ..Default::default()
     });
     assert!(preview_sql.contains("FROM `db_9`.`users`"), "preview SQL should stay on the referenced database");
 
@@ -54,6 +55,7 @@ fn mysql_cross_database_query_flow_preserves_target_database() {
     let save = prepare_data_grid_save(DataGridSaveStatementOptions {
         database_type: Some(DatabaseType::Mysql),
         table_meta: DataGridTableMeta {
+            catalog: None,
             schema: Some("db_9".to_string()),
             table_name: "users".to_string(),
             primary_keys: vec!["id".to_string()],

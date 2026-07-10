@@ -71,6 +71,7 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
 
     match dialect {
         StructureDialect::Mysql => statements.extend(build_mysql_existing_column_sql(&table, &options.column, "")),
+        StructureDialect::Doris => statements.extend(build_doris_existing_column_sql(&table, &options.column, "")),
         StructureDialect::Postgres => statements.extend(build_postgres_existing_column_sql(&table, &options.column)),
         StructureDialect::Oracle => {
             statements.extend(build_oracle_like_existing_column_sql(dialect, &table, &options.column))
@@ -245,6 +246,41 @@ pub(super) fn build_mysql_existing_column_sql(
         )
     };
     vec![format!("ALTER TABLE {table} {operation}{position_clause};")]
+}
+
+pub(super) fn build_doris_existing_column_sql(
+    table: &str,
+    column: &EditableStructureColumn,
+    position_clause: &str,
+) -> Vec<String> {
+    let Some(original) = &column.original else {
+        return Vec::new();
+    };
+    let mut statements = Vec::new();
+    let mut current_column = column.clone();
+
+    if column.name != original.name {
+        // Doris follows its own lightweight schema-change grammar: no MySQL CHANGE and no TO keyword.
+        statements.push(format!(
+            "ALTER TABLE {table} RENAME COLUMN {} {};",
+            quote_ident(StructureDialect::Doris, &original.name),
+            quote_ident(StructureDialect::Doris, &column.name)
+        ));
+        current_column.name = column.name.clone();
+    }
+
+    let type_changed = column.data_type.trim() != original.data_type.trim();
+    let nullable_changed = column.is_nullable != original.is_nullable;
+    let default_changed = normalize_default(Some(&column.default_value)) != original_default(column);
+    let comment_changed = clean(&column.comment) != original_comment(column);
+    if type_changed || nullable_changed || default_changed || comment_changed || !position_clause.is_empty() {
+        statements.push(format!(
+            "ALTER TABLE {table} MODIFY COLUMN {}{position_clause};",
+            column_definition(StructureDialect::Doris, &current_column)
+        ));
+    }
+
+    statements
 }
 
 pub(super) fn build_postgres_existing_column_sql(table: &str, column: &EditableStructureColumn) -> Vec<String> {

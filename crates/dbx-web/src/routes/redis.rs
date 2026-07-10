@@ -77,6 +77,18 @@ pub struct RedisKeyRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RedisLoadMoreRequest {
+    pub connection_id: String,
+    pub db: u32,
+    pub key_raw: String,
+    pub key_type: String,
+    pub cursor: u64,
+    pub count: usize,
+    pub filter: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RedisSetStringRequest {
     pub connection_id: String,
     pub db: u32,
@@ -268,6 +280,25 @@ pub async fn get_value(
     let result = dbx_core::redis_ops::redis_get_value_in_db_core(&state.app, &req.connection_id, req.db, &req.key_raw)
         .await
         .map_err(AppError)?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
+}
+
+pub async fn load_more(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<RedisLoadMoreRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result = dbx_core::redis_ops::redis_load_more_in_db_core(
+        &state.app,
+        &req.connection_id,
+        req.db,
+        &req.key_raw,
+        &req.key_type,
+        req.cursor,
+        req.count,
+        req.filter.as_deref(),
+    )
+    .await
+    .map_err(AppError)?;
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
 }
 

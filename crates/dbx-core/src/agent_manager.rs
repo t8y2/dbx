@@ -579,6 +579,16 @@ impl AgentManager {
         driver_key: &str,
         jre_key: &str,
     ) -> Result<AgentLaunchSpec, String> {
+        self.resolve_agent_launch_spec_with_extra_args(state, driver_key, jre_key, &[])
+    }
+
+    pub fn resolve_agent_launch_spec_with_extra_args(
+        &self,
+        state: &AgentState,
+        driver_key: &str,
+        jre_key: &str,
+        extra_java_args: &[String],
+    ) -> Result<AgentLaunchSpec, String> {
         let driver_dir = self.driver_dir(driver_key);
         let config_path = self.driver_launch_config_path(driver_key);
         if config_path.exists() {
@@ -598,7 +608,7 @@ impl AgentManager {
                     "{driver_key} driver jar is invalid or corrupt. Please reinstall it from the Driver Manager."
                 ));
             }
-            return Ok(AgentLaunchSpec::java_jar(java, jar_path));
+            return Ok(AgentLaunchSpec::java_jar_with_extra_args(java, jar_path, extra_java_args));
         }
 
         Err(format!("{driver_key} driver is not installed. Please install it from the Driver Manager."))
@@ -766,7 +776,16 @@ impl AgentManager {
         db_type: &DatabaseType,
         driver_profile: Option<&str>,
     ) -> Result<AgentDriverClient, String> {
-        crate::agent_runtime::spawn_connection_client(self, db_type, driver_profile).await
+        self.spawn_with_extra_java_args(db_type, driver_profile, &[]).await
+    }
+
+    pub async fn spawn_with_extra_java_args(
+        &self,
+        db_type: &DatabaseType,
+        driver_profile: Option<&str>,
+        extra_java_args: &[String],
+    ) -> Result<AgentDriverClient, String> {
+        crate::agent_runtime::spawn_connection_client(self, db_type, driver_profile, extra_java_args).await
     }
 
     pub async fn call_daemon<T: serde::de::DeserializeOwned + Send + 'static>(

@@ -4,6 +4,7 @@ import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.DatabaseAgent;
 import com.dbx.agent.DatabaseInfo;
 import com.dbx.agent.IndexInfo;
+import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.TableInfo;
@@ -18,6 +19,7 @@ import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.sql.Types;
@@ -42,6 +44,14 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
 
         Assertions.assertEquals("com.kingbase8.Driver", agent.getProfile().getDriverClass());
         Assertions.assertEquals("jdbc:kingbase8://{host}:{port}/{database}", agent.getProfile().getUrlTemplate());
+    }
+
+    @Test
+    void schemaSwitchPlacesSysCatalogAfterSelectedSchema() {
+        KingbaseAgent agent = new KingbaseAgent();
+
+        Assertions.assertEquals("SET search_path TO \"app\", sys_catalog", agent.setSchemaSQL("app"));
+        Assertions.assertEquals("SET search_path TO \"app\"\"prod\", sys_catalog", agent.setSchemaSQL("app\"prod"));
     }
 
     @Test
@@ -71,7 +81,24 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         Assertions.assertEquals(2, databases.size());
         Assertions.assertEquals("app", databases.get(0).getName());
         Assertions.assertEquals("analytics", databases.get(1).getName());
-        Assertions.assertTrue(sql.get(0).contains("FROM sys_database"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_database"), sql.get(0));
+    }
+
+    @Test
+    void regularListDatabasesFallsBackToPostgresCatalog() {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnectionWithFailure(sql, "sys_catalog.sys_database", resultSet(
+            new String[]{"database_name"},
+            new Object[][]{{"test"}}
+        )));
+
+        List<DatabaseInfo> databases = agent.listDatabases();
+
+        Assertions.assertEquals(1, databases.size());
+        Assertions.assertEquals("test", databases.get(0).getName());
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_database"), sql.get(0));
+        Assertions.assertTrue(sql.get(1).contains("FROM pg_database"), sql.get(1));
     }
 
     @Test
@@ -120,7 +147,11 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         Assertions.assertEquals("app_view", tables.get(1).getName());
         Assertions.assertEquals("VIEW", tables.get(1).getTable_type());
         Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_class"), sql.get(0));
-        Assertions.assertTrue(sql.get(0).contains("c.relkind IN ('r','p','v','m','f')"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_rewrite"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_index"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_views"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_matviews"), sql.get(0));
+        Assertions.assertFalse(sql.get(0).contains("relkind"), sql.get(0));
     }
 
     @Test
@@ -150,7 +181,83 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         Assertions.assertEquals("format_name", objects.get(3).getName());
         Assertions.assertEquals("FUNCTION", objects.get(3).getObject_type());
         Assertions.assertTrue(sql.get(1).contains("FROM sys_catalog.sys_proc"), sql.get(1));
-        Assertions.assertTrue(sql.get(1).contains("p.prokind IN ('p','f')"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("p.prorettype = 2278"), sql.get(1));
+        Assertions.assertFalse(sql.get(1).contains("prokind"), sql.get(1));
+    }
+
+    @Test
+    void constrainedRegularTableMetadataPushesFilterTypesAndPaging() {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"table_name", "table_type", "table_comment"},
+            new Object[][]{}
+        )));
+
+        agent.listTables("public", new MetadataListConstraints("ord", 30, 60, List.of("TABLE", "VIEW")));
+
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_class"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_views"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("UNION ALL"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("UPPER(CAST(c.relname AS varchar(256))) LIKE ? ESCAPE '\\\\'"), sql.get(0));
+        Assertions.assertFalse(sql.get(0).contains("relkind"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).endsWith("LIMIT 30 OFFSET 60"), sql.get(0));
+    }
+
+    @Test
+    void constrainedRegularMaterializedViewMetadataUsesMatviewCatalog() {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"table_name", "table_type", "table_comment"},
+            new Object[][]{{"mv_sales", "MATERIALIZED_VIEW", "cached sales"}}
+        )));
+
+        List<TableInfo> tables = agent.listTables("public", new MetadataListConstraints("sales", 10, null, List.of("MATERIALIZED_VIEW")));
+
+        Assertions.assertEquals(1, tables.size());
+        Assertions.assertEquals("mv_sales", tables.get(0).getName());
+        Assertions.assertEquals("MATERIALIZED_VIEW", tables.get(0).getTable_type());
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_matviews"), sql.get(0));
+        Assertions.assertFalse(sql.get(0).contains("FROM sys_catalog.sys_views"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("UPPER(CAST(mv.matviewname AS varchar(256))) LIKE ? ESCAPE '\\\\'"), sql.get(0));
+        Assertions.assertFalse(sql.get(0).contains("relkind"), sql.get(0));
+    }
+
+    @Test
+    void constrainedRegularObjectMetadataPushesRoutineTypesAndPaging() {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"object_name", "object_type", "object_comment"},
+            new Object[][]{}
+        )));
+
+        agent.listObjects("public", new MetadataListConstraints("sync", 10, null, List.of("PROCEDURE", "FUNCTION")));
+
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_proc"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("p.prorettype = 2278"), sql.get(0));
+        Assertions.assertFalse(sql.get(0).contains("prokind"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("ORDER BY CASE object_type"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).endsWith("LIMIT 10"), sql.get(0));
+    }
+
+    @Test
+    void constrainedMysqlCompatTableMetadataPushesInformationSchemaPaging() {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        agent.setMysqlCompatMode(true);
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"table_name", "table_type"},
+            new Object[][]{}
+        )));
+
+        agent.listTables("PUBLIC", new MetadataListConstraints("ord", 20, 40, List.of("VIEW")));
+
+        Assertions.assertTrue(sql.get(0).contains("FROM information_schema.tables"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("table_type IN (?)"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("UPPER(table_name) LIKE ? ESCAPE '\\\\'"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).endsWith("LIMIT 20 OFFSET 40"), sql.get(0));
     }
 
     @Test
@@ -167,6 +274,7 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         Assertions.assertTrue(source.getSource().startsWith("CREATE FUNCTION public.format_name()"), source.getSource());
         Assertions.assertTrue(sql.get(0).contains("SELECT sys_get_functiondef(p.oid) AS source"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_proc"), sql.get(0));
+        Assertions.assertFalse(sql.get(0).contains("prokind"), sql.get(0));
     }
 
     @Test
@@ -321,6 +429,31 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
             }
             if ("createStatement".equals(method.getName())) {
                 return plainStatement;
+            }
+            if ("isClosed".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Connection preparedConnectionWithFailure(List<String> sql, String failingSqlFragment, ResultSet fallback) {
+        return proxy(Connection.class, (method, args) -> {
+            if ("prepareStatement".equals(method.getName())) {
+                String preparedSql = String.valueOf(args[0]);
+                sql.add(preparedSql);
+                return proxy(PreparedStatement.class, (statementMethod, statementArgs) -> {
+                    if ("executeQuery".equals(statementMethod.getName())) {
+                        if (preparedSql.contains(failingSqlFragment)) {
+                            throw new SQLException("relation does not exist: " + failingSqlFragment);
+                        }
+                        return fallback;
+                    }
+                    if ("close".equals(statementMethod.getName())) {
+                        return null;
+                    }
+                    return defaultValue(statementMethod.getReturnType());
+                });
             }
             if ("isClosed".equals(method.getName())) {
                 return false;

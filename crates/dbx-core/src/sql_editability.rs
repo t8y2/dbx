@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditableQueryInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub catalog_quoted: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
     pub schema_quoted: bool,
@@ -12,6 +16,16 @@ pub struct EditableQueryInfo {
     pub table_alias: Option<String>,
     pub select_star: bool,
     pub columns: Vec<EditableQueryColumn>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sources: Option<Vec<EditableQuerySource>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editable_source_key: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub multi_source: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_insert_delete: Option<bool>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub distinct: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,8 +34,31 @@ pub struct EditableQueryColumn {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_name: Option<String>,
     pub source_name_quoted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_qualifier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_key: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub star: bool,
     pub result_name: String,
     pub expression: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditableQuerySource {
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub catalog_quoted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub schema_quoted: bool,
+    pub table_name: String,
+    pub table_name_quoted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,11 +90,18 @@ pub struct QueryEditability {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FromSource {
+    key: String,
+    catalog: Option<String>,
+    catalog_quoted: bool,
     schema: Option<String>,
     schema_quoted: bool,
     table_name: String,
     table_name_quoted: bool,
     alias: Option<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,10 +148,18 @@ pub fn analyze_editable_query_editability(sql: &str) -> QueryEditability {
         return not_editable(QueryEditabilityReason::NoTable);
     };
 
-    let select_body = normalized["SELECT".len()..from_index].trim();
-    if starts_with_keyword(select_body, "DISTINCT") {
-        return not_editable(QueryEditabilityReason::Aggregation);
-    }
+    let raw_select_body = normalized["SELECT".len()..from_index].trim();
+    let (select_body, distinct) = if starts_with_keyword(raw_select_body, "DISTINCT") {
+        let body = raw_select_body["DISTINCT".len()..].trim_start();
+        // DISTINCT ON has database-specific row-selection semantics and cannot be
+        // treated as a plain projection whose rows map directly to base records.
+        if starts_with_keyword(body, "ON") {
+            return not_editable(QueryEditabilityReason::Aggregation);
+        }
+        (body, true)
+    } else {
+        (raw_select_body, false)
+    };
 
     let group_index = find_top_level_keyword(&normalized, "GROUP", from_index + "FROM".len());
     let having_index = find_top_level_keyword(&normalized, "HAVING", from_index + "FROM".len());
@@ -123,36 +175,53 @@ pub fn analyze_editable_query_editability(sql: &str) -> QueryEditability {
     if is_external_from_source(from_body) {
         return not_editable(QueryEditabilityReason::ExternalSource);
     }
-    let Some(source) = parse_from_source(from_body) else {
+    let sources = parse_from_sources(from_body);
+    if sources.is_empty() {
         return not_editable(QueryEditabilityReason::ComplexSource);
-    };
+    }
+    let source = sources[0].clone();
 
-    let select_star = is_select_star(select_body, source.alias.as_deref());
-    let columns = if select_star { Vec::new() } else { parse_select_columns(select_body) };
+    let select_star = sources.len() == 1 && is_select_star(select_body, source.alias.as_deref());
+    let columns = if select_star { Vec::new() } else { parse_select_columns(select_body, &sources) };
     if !select_star && columns.is_empty() {
         return not_editable(QueryEditabilityReason::ComputedColumns);
     }
-
-    QueryEditability {
-        editable: true,
-        analysis: Some(EditableQueryInfo {
-            schema: source.schema,
-            schema_quoted: source.schema_quoted,
-            table_name: source.table_name,
-            table_name_quoted: source.table_name_quoted,
-            table_alias: source.alias,
-            select_star,
-            columns,
-        }),
-        reason: None,
+    if sources.len() > 1 && columns.iter().any(|column| column.star && column.source_key.is_none()) {
+        return not_editable(QueryEditabilityReason::ComplexSource);
     }
+
+    let mut analysis = EditableQueryInfo {
+        catalog: source.catalog,
+        catalog_quoted: source.catalog_quoted,
+        schema: source.schema,
+        schema_quoted: source.schema_quoted,
+        table_name: source.table_name,
+        table_name_quoted: source.table_name_quoted,
+        table_alias: source.alias,
+        select_star,
+        columns,
+        sources: None,
+        editable_source_key: None,
+        multi_source: false,
+        // Updating an identified base row is safe, but insert/delete semantics are
+        // ambiguous when the displayed set is de-duplicated by the query.
+        allow_insert_delete: distinct.then_some(false),
+        distinct,
+    };
+    if sources.len() > 1 {
+        analysis.sources = Some(sources.into_iter().map(EditableQuerySource::from).collect());
+        analysis.multi_source = true;
+        analysis.allow_insert_delete = Some(false);
+    }
+
+    QueryEditability { editable: true, analysis: Some(analysis), reason: None }
 }
 
 fn not_editable(reason: QueryEditabilityReason) -> QueryEditability {
     QueryEditability { editable: false, analysis: None, reason: Some(reason) }
 }
 
-fn parse_select_columns(body: &str) -> Vec<EditableQueryColumn> {
+fn parse_select_columns(body: &str, sources: &[FromSource]) -> Vec<EditableQueryColumn> {
     let mut columns = Vec::new();
     let mut depth = 0i32;
     let mut current = String::new();
@@ -173,7 +242,7 @@ fn parse_select_columns(body: &str) -> Vec<EditableQueryColumn> {
             '(' => depth += 1,
             ')' => depth -= 1,
             ',' if depth == 0 => {
-                let Some(column) = parse_select_column(current.trim()) else {
+                let Some(column) = parse_select_column(current.trim(), sources) else {
                     return Vec::new();
                 };
                 columns.push(column);
@@ -186,7 +255,7 @@ fn parse_select_columns(body: &str) -> Vec<EditableQueryColumn> {
     }
 
     if !current.trim().is_empty() {
-        let Some(column) = parse_select_column(current.trim()) else {
+        let Some(column) = parse_select_column(current.trim(), sources) else {
             return Vec::new();
         };
         columns.push(column);
@@ -195,7 +264,10 @@ fn parse_select_columns(body: &str) -> Vec<EditableQueryColumn> {
     columns
 }
 
-fn parse_select_column(column: &str) -> Option<EditableQueryColumn> {
+fn parse_select_column(column: &str, sources: &[FromSource]) -> Option<EditableQueryColumn> {
+    if let Some(star) = parse_star_select_column(column, sources) {
+        return Some(star);
+    }
     let Some(source) = parse_qualified_identifier(column) else {
         return parse_computed_select_column(column);
     };
@@ -203,13 +275,56 @@ fn parse_select_column(column: &str) -> Option<EditableQueryColumn> {
     let Some(alias) = parse_column_alias(rest) else {
         return parse_computed_select_column(column);
     };
-    let source = source.parts.last()?;
-    let source_name = source.value.clone();
+    let source_name_part = source.parts.last()?;
+    let source_name = source_name_part.value.clone();
+    let qualifier = if source.parts.len() >= 2 {
+        source.parts.get(source.parts.len() - 2).map(|part| part.value.clone())
+    } else {
+        None
+    };
+    let source_key = qualifier.as_deref().and_then(|qualifier| source_key_for_qualifier(sources, qualifier));
     Some(EditableQueryColumn {
         source_name: Some(source_name.clone()),
-        source_name_quoted: source.quoted,
+        source_name_quoted: source_name_part.quoted,
+        source_qualifier: qualifier,
+        source_key,
+        star: false,
         result_name: alias.unwrap_or(source_name),
         expression: column[..source.end].trim().to_string(),
+    })
+}
+
+fn parse_star_select_column(column: &str, sources: &[FromSource]) -> Option<EditableQueryColumn> {
+    let trimmed = column.trim();
+    if trimmed == "*" {
+        return Some(EditableQueryColumn {
+            source_name: None,
+            source_name_quoted: false,
+            source_qualifier: None,
+            source_key: None,
+            star: true,
+            result_name: "*".to_string(),
+            expression: trimmed.to_string(),
+        });
+    }
+    let qualifier = read_identifier(trimmed, 0)?;
+    let mut pos = skip_whitespace(trimmed, qualifier.end);
+    if !trimmed[pos..].starts_with('.') {
+        return None;
+    }
+    pos = skip_whitespace(trimmed, pos + 1);
+    if trimmed[pos..].trim() != "*" {
+        return None;
+    }
+    let source_key = source_key_for_qualifier(sources, &qualifier.value);
+    Some(EditableQueryColumn {
+        source_name: None,
+        source_name_quoted: false,
+        source_qualifier: Some(qualifier.value),
+        source_key,
+        star: true,
+        result_name: "*".to_string(),
+        expression: trimmed.to_string(),
     })
 }
 
@@ -218,6 +333,9 @@ fn parse_computed_select_column(column: &str) -> Option<EditableQueryColumn> {
     Some(EditableQueryColumn {
         source_name: None,
         source_name_quoted: false,
+        source_qualifier: None,
+        source_key: None,
+        star: false,
         result_name: alias.result_name,
         expression: alias.expression,
     })
@@ -298,45 +416,145 @@ fn is_select_star(body: &str, alias: Option<&str>) -> bool {
     prefix.trim().eq_ignore_ascii_case(alias) && suffix.trim() == "*"
 }
 
-fn parse_from_source(body: &str) -> Option<FromSource> {
-    if body.is_empty()
-        || body.contains(',')
-        || body.contains('(')
-        || body.contains(')')
-        || contains_keyword(body, "JOIN")
-    {
+fn parse_from_sources(body: &str) -> Vec<FromSource> {
+    if body.is_empty() || body.contains('(') || body.contains(')') {
+        return Vec::new();
+    }
+
+    let mut sources = Vec::new();
+    let Some(first) = parse_table_source_at(body, 0, sources.len()) else {
+        return Vec::new();
+    };
+    sources.push(first.0);
+    let mut pos = first.1;
+
+    while pos < body.len() {
+        pos = skip_whitespace(body, pos);
+        if pos >= body.len() {
+            break;
+        }
+        if body[pos..].starts_with(',') {
+            let Some(next) = parse_table_source_at(body, pos + 1, sources.len()) else {
+                return Vec::new();
+            };
+            sources.push(next.0);
+            pos = next.1;
+            continue;
+        }
+        let Some(join_index) = find_top_level_keyword(body, "JOIN", pos) else {
+            break;
+        };
+        let Some(next) = parse_table_source_at(body, join_index + "JOIN".len(), sources.len()) else {
+            return Vec::new();
+        };
+        sources.push(next.0);
+        pos = next.1;
+    }
+
+    sources
+}
+
+fn parse_table_source_at(text: &str, start: usize, index: usize) -> Option<(FromSource, usize)> {
+    let pos = skip_whitespace(text, start);
+    if text[pos..].starts_with('\'') || text[pos..].starts_with('(') {
         return None;
     }
-    let ident = parse_qualified_identifier(body)?;
-    if ident.parts.is_empty() || ident.parts.len() > 2 {
+    let ident = parse_qualified_identifier(&text[pos..])?;
+    if ident.parts.is_empty() || ident.parts.len() > 3 {
         return None;
     }
-    let tail = body[ident.end..].trim();
-    let alias = if tail.is_empty() {
+    let mut end = pos + ident.end;
+    let tail_pos = skip_whitespace(text, end);
+    let alias = if starts_with_keyword_at(text, tail_pos, "AS") {
+        let alias_ident = read_identifier(text, tail_pos + 2)?;
+        end = alias_ident.end;
+        Some(alias_ident.value)
+    } else if table_source_terminator_at(text, tail_pos) {
         None
     } else {
-        let alias_text = strip_leading_as(tail).unwrap_or(tail).trim();
-        let alias_ident = read_identifier(alias_text, 0)?;
-        if alias_ident.end != alias_text.len() {
-            return None;
-        }
+        let alias_ident = read_identifier(text, tail_pos)?;
+        end = alias_ident.end;
         Some(alias_ident.value)
     };
+
     let table = ident.parts.last()?;
     let table_name = table.value.clone();
     let table_name_quoted = table.quoted;
-    let (schema, schema_quoted) = if ident.parts.len() == 2 {
-        let schema = &ident.parts[0];
+    let (schema, schema_quoted) = if ident.parts.len() >= 2 {
+        let schema = &ident.parts[ident.parts.len() - 2];
         (Some(schema.value.clone()), schema.quoted)
     } else {
         (None, false)
     };
-    Some(FromSource { schema, schema_quoted, table_name, table_name_quoted, alias })
+    let (catalog, catalog_quoted) = if ident.parts.len() == 3 {
+        let catalog = &ident.parts[0];
+        (Some(catalog.value.clone()), catalog.quoted)
+    } else {
+        (None, false)
+    };
+    let key = format!("{}:{}", alias.as_deref().unwrap_or(&table_name), index);
+    Some((
+        FromSource { key, catalog, catalog_quoted, schema, schema_quoted, table_name, table_name_quoted, alias },
+        end,
+    ))
 }
 
 fn is_external_from_source(body: &str) -> bool {
     let trimmed = body.trim();
     is_single_quoted_source_with_optional_alias(trimmed) || starts_with_table_function(trimmed)
+}
+
+fn table_source_terminator_at(text: &str, pos: usize) -> bool {
+    let pos = skip_whitespace(text, pos);
+    if pos >= text.len() || text[pos..].starts_with(',') {
+        return true;
+    }
+    ["ON", "USING", "JOIN", "LEFT", "RIGHT", "INNER", "FULL", "CROSS", "OUTER", "NATURAL"]
+        .iter()
+        .any(|keyword| starts_with_keyword_at(text, pos, keyword))
+}
+
+fn starts_with_keyword_at(text: &str, pos: usize, keyword: &str) -> bool {
+    let start = skip_whitespace(text, pos);
+    let Some(candidate) = text.get(start..start + keyword.len()) else {
+        return false;
+    };
+    if !candidate.eq_ignore_ascii_case(keyword) {
+        return false;
+    }
+    let before = previous_char(text, start);
+    let after = text[start + keyword.len()..].chars().next();
+    !before.is_some_and(is_identifier_char) && !after.is_some_and(is_identifier_char)
+}
+
+fn source_key_for_qualifier(sources: &[FromSource], qualifier: &str) -> Option<String> {
+    let matches = sources
+        .iter()
+        .filter(|source| {
+            source.alias.as_deref().is_some_and(|alias| alias.eq_ignore_ascii_case(qualifier))
+                || source.table_name.eq_ignore_ascii_case(qualifier)
+        })
+        .collect::<Vec<_>>();
+    if matches.len() == 1 {
+        Some(matches[0].key.clone())
+    } else {
+        None
+    }
+}
+
+impl From<FromSource> for EditableQuerySource {
+    fn from(source: FromSource) -> Self {
+        Self {
+            key: source.key,
+            catalog: source.catalog,
+            catalog_quoted: source.catalog_quoted,
+            schema: source.schema,
+            schema_quoted: source.schema_quoted,
+            table_name: source.table_name,
+            table_name_quoted: source.table_name_quoted,
+            alias: source.alias,
+        }
+    }
 }
 
 fn is_single_quoted_source_with_optional_alias(text: &str) -> bool {
@@ -528,10 +746,6 @@ fn starts_with_keyword(sql: &str, keyword: &str) -> bool {
     !trimmed[keyword.len()..].chars().next().is_some_and(is_identifier_char)
 }
 
-fn contains_keyword(sql: &str, keyword: &str) -> bool {
-    find_top_level_keyword(sql, keyword, 0).is_some()
-}
-
 fn previous_char(text: &str, index: usize) -> Option<char> {
     text[..index].chars().next_back()
 }
@@ -549,34 +763,17 @@ mod tests {
         let result =
             analyze_editable_query_editability("select id, name from public.users where active = true order by id");
 
+        assert!(result.editable);
+        assert_eq!(result.reason, None);
+        let analysis = result.analysis.unwrap();
+        assert_eq!(analysis.schema.as_deref(), Some("public"));
+        assert_eq!(analysis.table_name, "users");
         assert_eq!(
-            result,
-            QueryEditability {
-                editable: true,
-                analysis: Some(EditableQueryInfo {
-                    schema: Some("public".to_string()),
-                    schema_quoted: false,
-                    table_name: "users".to_string(),
-                    table_name_quoted: false,
-                    table_alias: None,
-                    select_star: false,
-                    columns: vec![
-                        EditableQueryColumn {
-                            source_name: Some("id".to_string()),
-                            source_name_quoted: false,
-                            result_name: "id".to_string(),
-                            expression: "id".to_string(),
-                        },
-                        EditableQueryColumn {
-                            source_name: Some("name".to_string()),
-                            source_name_quoted: false,
-                            result_name: "name".to_string(),
-                            expression: "name".to_string(),
-                        },
-                    ],
-                }),
-                reason: None,
-            }
+            analysis.columns,
+            vec![
+                column(Some("id"), false, None, None, "id", "id"),
+                column(Some("name"), false, None, None, "name", "name"),
+            ]
         );
     }
 
@@ -585,56 +782,120 @@ mod tests {
         let result =
             analyze_editable_query_editability(r#"SELECT u."id", u."full name" FROM "app schema"."user table" AS u"#);
 
+        let analysis = result.analysis.unwrap();
+        assert_eq!(analysis.schema.as_deref(), Some("app schema"));
+        assert_eq!(analysis.table_name, "user table");
+        assert_eq!(analysis.table_alias.as_deref(), Some("u"));
         assert_eq!(
-            result.analysis.unwrap(),
-            EditableQueryInfo {
-                schema: Some("app schema".to_string()),
-                schema_quoted: true,
-                table_name: "user table".to_string(),
-                table_name_quoted: true,
-                table_alias: Some("u".to_string()),
-                select_star: false,
-                columns: vec![
-                    EditableQueryColumn {
-                        source_name: Some("id".to_string()),
-                        source_name_quoted: true,
-                        result_name: "id".to_string(),
-                        expression: r#"u."id""#.to_string(),
-                    },
-                    EditableQueryColumn {
-                        source_name: Some("full name".to_string()),
-                        source_name_quoted: true,
-                        result_name: "full name".to_string(),
-                        expression: r#"u."full name""#.to_string(),
-                    },
-                ],
-            }
+            analysis.columns,
+            vec![
+                column(Some("id"), true, Some("u"), Some("u:0"), "id", r#"u."id""#),
+                column(Some("full name"), true, Some("u"), Some("u:0"), "full name", r#"u."full name""#),
+            ]
         );
     }
 
     #[test]
     fn keeps_select_star_empty_columns() {
+        let analysis = analyze_editable_query("select * from users").unwrap();
+        assert_eq!(analysis.table_name, "users");
+        assert!(analysis.select_star);
+        assert!(analysis.columns.is_empty());
+    }
+
+    #[test]
+    fn maps_single_table_explicit_column_with_alias_star() {
+        let result = analyze_editable_query_editability(
+            "select t.create_date, t.* from tt_kd_material_container_sap t where t.order_no = 'KD2607071336' order by t.create_date desc",
+        );
+
+        assert!(result.editable);
+        let analysis = result.analysis.unwrap();
+        assert_eq!(analysis.table_name, "tt_kd_material_container_sap");
+        assert_eq!(analysis.table_alias.as_deref(), Some("t"));
         assert_eq!(
-            analyze_editable_query("select * from users").unwrap(),
-            EditableQueryInfo {
-                schema: None,
-                schema_quoted: false,
-                table_name: "users".to_string(),
-                table_name_quoted: false,
-                table_alias: None,
-                select_star: true,
-                columns: Vec::new(),
-            }
+            analysis.columns,
+            vec![
+                column(Some("create_date"), false, Some("t"), Some("t:0"), "create_date", "t.create_date"),
+                star_column(Some("t"), Some("t:0"), "t.*"),
+            ]
         );
     }
 
     #[test]
-    fn reports_joined_query_as_complex_source() {
+    fn recognizes_distinct_single_table_projection_as_update_only() {
+        let result = analyze_editable_query_editability("select distinct id, name from users");
+
+        assert!(result.editable);
+        let analysis = result.analysis.unwrap();
+        assert!(analysis.distinct);
+        assert_eq!(analysis.allow_insert_delete, Some(false));
+        assert_eq!(analysis.columns.len(), 2);
+    }
+
+    #[test]
+    fn recognizes_distinct_qualified_star_from_join() {
+        let result = analyze_editable_query_editability(
+            "select distinct u.* from users u left join orders o on o.user_id = u.id",
+        );
+
+        assert!(result.editable);
+        let analysis = result.analysis.unwrap();
+        assert!(analysis.distinct);
+        assert!(analysis.multi_source);
+        assert_eq!(analysis.allow_insert_delete, Some(false));
+        assert_eq!(analysis.columns, vec![star_column(Some("u"), Some("u:0"), "u.*")]);
+    }
+
+    #[test]
+    fn rejects_unqualified_star_from_join() {
         let result =
-            analyze_editable_query_editability("select u.id, o.total from users u join orders o on o.user_id = u.id");
+            analyze_editable_query_editability("select distinct * from users u join orders o on o.user_id = u.id");
 
         assert!(!result.editable);
         assert_eq!(result.reason, Some(QueryEditabilityReason::ComplexSource));
+    }
+
+    #[test]
+    fn rejects_distinct_on_projection() {
+        let result = analyze_editable_query_editability(
+            "select distinct on (user_id) id, user_id from orders order by user_id, id desc",
+        );
+
+        assert!(!result.editable);
+        assert_eq!(result.reason, Some(QueryEditabilityReason::Aggregation));
+    }
+
+    #[test]
+    fn maps_joined_query_source_columns() {
+        let result = analyze_editable_query_editability(
+            "select u.id as user_id, u.name, o.total from users u join orders o on o.user_id = u.id",
+        );
+
+        assert!(result.editable);
+        let analysis = result.analysis.unwrap();
+        assert!(analysis.multi_source);
+        assert_eq!(analysis.allow_insert_delete, Some(false));
+        assert_eq!(
+            analysis
+                .sources
+                .unwrap()
+                .iter()
+                .map(|source| (&source.key, &source.table_name, source.alias.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                (&"u:0".to_string(), &"users".to_string(), Some("u")),
+                (&"o:1".to_string(), &"orders".to_string(), Some("o")),
+            ]
+        );
+        assert_eq!(
+            analysis.columns,
+            vec![
+                column(Some("id"), false, Some("u"), Some("u:0"), "user_id", "u.id"),
+                column(Some("name"), false, Some("u"), Some("u:0"), "name", "u.name"),
+                column(Some("total"), false, Some("o"), Some("o:1"), "total", "o.total"),
+            ]
+        );
     }
 
     #[test]
@@ -662,30 +923,10 @@ mod tests {
         assert_eq!(
             result.analysis.unwrap().columns,
             vec![
-                EditableQueryColumn {
-                    source_name: Some("iso3".to_string()),
-                    source_name_quoted: false,
-                    result_name: "iso3".to_string(),
-                    expression: "iso3".to_string(),
-                },
-                EditableQueryColumn {
-                    source_name: Some("year".to_string()),
-                    source_name_quoted: false,
-                    result_name: "year".to_string(),
-                    expression: "year".to_string(),
-                },
-                EditableQueryColumn {
-                    source_name: Some("country_name".to_string()),
-                    source_name_quoted: false,
-                    result_name: "country_name".to_string(),
-                    expression: "country_name".to_string(),
-                },
-                EditableQueryColumn {
-                    source_name: None,
-                    source_name_quoted: false,
-                    result_name: "score".to_string(),
-                    expression: "ihli / gdp_pc".to_string(),
-                },
+                column(Some("iso3"), false, None, None, "iso3", "iso3"),
+                column(Some("year"), false, None, None, "year", "year"),
+                column(Some("country_name"), false, None, None, "country_name", "country_name"),
+                column(None, false, None, None, "score", "ihli / gdp_pc"),
             ]
         );
     }
@@ -695,5 +936,36 @@ mod tests {
         let json = serde_json::to_value(not_editable(QueryEditabilityReason::SetOperation)).unwrap();
 
         assert_eq!(json, serde_json::json!({ "editable": false, "reason": "set-operation" }));
+    }
+
+    fn column(
+        source_name: Option<&str>,
+        source_name_quoted: bool,
+        source_qualifier: Option<&str>,
+        source_key: Option<&str>,
+        result_name: &str,
+        expression: &str,
+    ) -> EditableQueryColumn {
+        EditableQueryColumn {
+            source_name: source_name.map(str::to_string),
+            source_name_quoted,
+            source_qualifier: source_qualifier.map(str::to_string),
+            source_key: source_key.map(str::to_string),
+            star: false,
+            result_name: result_name.to_string(),
+            expression: expression.to_string(),
+        }
+    }
+
+    fn star_column(source_qualifier: Option<&str>, source_key: Option<&str>, expression: &str) -> EditableQueryColumn {
+        EditableQueryColumn {
+            source_name: None,
+            source_name_quoted: false,
+            source_qualifier: source_qualifier.map(str::to_string),
+            source_key: source_key.map(str::to_string),
+            star: true,
+            result_name: "*".to_string(),
+            expression: expression.to_string(),
+        }
     }
 }

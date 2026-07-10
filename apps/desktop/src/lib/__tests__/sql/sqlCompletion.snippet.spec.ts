@@ -81,6 +81,11 @@ describe("buildSnippetItems", () => {
     expect(items[0].label).toBe("select all");
   });
 
+  it("does not return disabled snippets", () => {
+    const items = buildSnippetItemsForTest("sel", [{ ...TEST_SNIPPETS[0], enabled: false }, TEST_SNIPPETS[1]]);
+    expect(items).toEqual([]);
+  });
+
   it("does not keep matching a renamed snippet by its old short label prefix", () => {
     const items = buildSnippetItemsForTest("sel", [{ id: "1", label: "select all", prefix: "fff", body: "SELECT *\nFROM my_table;" }]);
     expect(items).toEqual([]);

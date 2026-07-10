@@ -58,6 +58,7 @@ function normalizeViteBase(value: string | undefined): string {
 const viteBase = normalizeViteBase(configuredBasePath);
 const publicBasePath = viteBase.startsWith("/") ? viteBase.replace(/\/+$/, "") : "";
 const apiProxyPath = publicBasePath ? `${publicBasePath}/api` : "/api";
+const backendUrl = process.env.DBX_BACKEND_URL || "http://localhost:4224";
 
 export default defineConfig(async () => ({
   root: __dirname,
@@ -91,7 +92,7 @@ export default defineConfig(async () => ({
       : undefined,
     proxy: {
       [apiProxyPath]: {
-        target: "http://localhost:4224",
+        target: backendUrl,
         changeOrigin: true,
         ws: true,
         rewrite: publicBasePath ? (requestPath) => requestPath.slice(publicBasePath.length) || "/" : undefined,

@@ -34,6 +34,11 @@ jobs:
               --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
               --content-type application/json
           fi
+          if [ -f latest-en.json ]; then
+            aws s3 cp latest-en.json "s3://${R2_BUCKET_NAME}/changelog/latest-en.json" \
+              --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+              --content-type application/json
+          fi
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}

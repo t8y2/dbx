@@ -9,9 +9,9 @@ export interface QueryEditorTableReferencePayload {
   connectionId: string;
   database: string;
   schema?: string;
-  tableName: string;
+  tableName?: string;
   columnName?: string;
-  referenceType?: "table" | "column";
+  referenceType?: "database" | "table" | "column";
   databaseType?: DatabaseType;
 }
 
@@ -23,15 +23,21 @@ export interface QueryEditorTableReferenceDropDetail {
 
 let activeTableReferencePayload: QueryEditorTableReferencePayload | null = null;
 
-export function createTableReferencePayload(options: { connectionId?: string; database?: string; schema?: string; tableName?: string; columnName?: string; databaseType?: DatabaseType }): QueryEditorTableReferencePayload | null {
-  if (!options.connectionId || options.database == null || !options.tableName) return null;
+export function createTableReferencePayload(options: { connectionId?: string; database?: string; schema?: string; tableName?: string; columnName?: string; referenceType?: "database" | "table" | "column"; databaseType?: DatabaseType }): QueryEditorTableReferencePayload | null {
+  if (!options.connectionId || options.database == null) return null;
+  const referenceType = options.referenceType ?? (options.columnName ? "column" : "table");
+  if (referenceType !== "database" && !options.tableName) return null;
   const payload: QueryEditorTableReferencePayload = {
     kind: "dbx-table-reference",
     connectionId: options.connectionId,
     database: options.database,
-    tableName: options.tableName,
   };
-  if (options.columnName) {
+  if (referenceType === "database") {
+    payload.referenceType = "database";
+  } else {
+    payload.tableName = options.tableName;
+  }
+  if (referenceType === "column" && options.columnName) {
     payload.columnName = options.columnName;
     payload.referenceType = "column";
   }
@@ -48,9 +54,20 @@ export function parseTableReferencePayload(value: string | undefined | null): Qu
   if (!value) return null;
   try {
     const parsed = JSON.parse(value) as Partial<QueryEditorTableReferencePayload>;
-    if (parsed.kind !== "dbx-table-reference" || typeof parsed.connectionId !== "string" || typeof parsed.database !== "string" || typeof parsed.tableName !== "string" || !parsed.connectionId || !parsed.tableName) {
+    if (parsed.kind !== "dbx-table-reference" || typeof parsed.connectionId !== "string" || typeof parsed.database !== "string" || !parsed.connectionId) {
       return null;
     }
+    if (parsed.referenceType === "database") {
+      const payload: QueryEditorTableReferencePayload = {
+        kind: "dbx-table-reference",
+        connectionId: parsed.connectionId,
+        database: parsed.database,
+        referenceType: "database",
+      };
+      if (parsed.databaseType) payload.databaseType = parsed.databaseType;
+      return payload;
+    }
+    if (typeof parsed.tableName !== "string" || !parsed.tableName) return null;
     const columnName = typeof parsed.columnName === "string" && parsed.columnName ? parsed.columnName : undefined;
     const referenceType = parsed.referenceType === "column" || columnName ? "column" : "table";
     if (referenceType === "column" && !columnName) return null;
@@ -100,12 +117,16 @@ export function createTableReferenceDropEvent(detail: QueryEditorTableReferenceD
 
 export function tableReferenceInsertText(payload: QueryEditorTableReferencePayload, fallbackDatabaseType?: DatabaseType): string {
   const databaseType = payload.databaseType ?? fallbackDatabaseType;
+  if (payload.referenceType === "database") {
+    return quoteTableIdentifier(databaseType, payload.database);
+  }
   if (payload.referenceType === "column" && payload.columnName) {
     return quoteTableIdentifier(databaseType, payload.columnName);
   }
+  const tableName = payload.tableName || payload.database;
   return qualifiedTableName({
     databaseType,
     schema: payload.schema,
-    tableName: payload.tableName,
+    tableName,
   });
 }

@@ -3,9 +3,12 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::Json;
 use dbx_core::cloud_sync::{
-    apply_sync_snapshot, build_sync_snapshot, forget_webdav_password, resolve_webdav_password, save_webdav_password,
-    webdav_saved_password_status, ApplySnapshotOptions, ApplySnapshotSummary, WebDavClient, WebDavConfig,
-    WebDavPasswordStatus, WebDavSyncSummary,
+    apply_sync_snapshot, build_sync_snapshot_with_saved_secrets, forget_webdav_password,
+    forget_webdav_sync_secrets_passphrase as core_forget_webdav_sync_secrets_passphrase, resolve_webdav_password,
+    resolve_webdav_sync_secrets_passphrase, save_webdav_password,
+    save_webdav_sync_secrets_preference as core_save_webdav_sync_secrets_preference, webdav_saved_password_status,
+    webdav_sync_secrets_status as core_webdav_sync_secrets_status, ApplySnapshotOptions, ApplySnapshotSummary,
+    WebDavClient, WebDavConfig, WebDavPasswordStatus, WebDavSyncSecretsStatus, WebDavSyncSummary,
 };
 use dbx_core::storage::DesktopSettings;
 use serde::{Deserialize, Serialize};
@@ -50,6 +53,13 @@ pub struct WebDavDownloadRequest {
     pub secrets_passphrase: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebDavSyncSecretsPreferenceRequest {
+    pub enabled: bool,
+    pub passphrase: Option<String>,
+}
+
 pub async fn webdav_sync_test(
     State(state): State<Arc<WebState>>,
     Json(mut req): Json<WebDavConfigRequest>,
@@ -82,12 +92,33 @@ pub async fn forget_webdav_saved_password(
     Ok(Json(()))
 }
 
+pub async fn webdav_sync_secrets_status(
+    State(state): State<Arc<WebState>>,
+) -> Result<Json<WebDavSyncSecretsStatus>, AppError> {
+    core_webdav_sync_secrets_status(&state.app.storage).await.map(Json).map_err(AppError)
+}
+
+pub async fn save_webdav_sync_secrets_preference(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<WebDavSyncSecretsPreferenceRequest>,
+) -> Result<Json<()>, AppError> {
+    core_save_webdav_sync_secrets_preference(&state.app.storage, req.enabled, req.passphrase.as_deref())
+        .await
+        .map_err(AppError)?;
+    Ok(Json(()))
+}
+
+pub async fn forget_webdav_sync_secrets_passphrase(State(state): State<Arc<WebState>>) -> Result<Json<()>, AppError> {
+    core_forget_webdav_sync_secrets_passphrase(&state.app.storage).await.map_err(AppError)?;
+    Ok(Json(()))
+}
+
 pub async fn webdav_sync_upload(
     State(state): State<Arc<WebState>>,
     Json(mut req): Json<WebDavUploadRequest>,
 ) -> Result<Json<WebDavSyncSummary>, AppError> {
     resolve_webdav_password(&state.app.storage, &mut req.config).await.map_err(AppError)?;
-    let snapshot = build_sync_snapshot(
+    let snapshot = build_sync_snapshot_with_saved_secrets(
         &state.app.storage,
         env!("CARGO_PKG_VERSION"),
         req.editor_settings,
@@ -104,10 +135,16 @@ pub async fn webdav_sync_download(
 ) -> Result<Json<WebDavDownloadResult>, AppError> {
     resolve_webdav_password(&state.app.storage, &mut req.config).await.map_err(AppError)?;
     let (snapshot, summary) = WebDavClient::new(req.config).get_snapshot().await.map_err(AppError)?;
+    let explicit_passphrase = req.secrets_passphrase.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let saved_passphrase = if explicit_passphrase.is_some() {
+        None
+    } else {
+        resolve_webdav_sync_secrets_passphrase(&state.app.storage).await.map_err(AppError)?
+    };
     let apply_summary = apply_sync_snapshot(
         &state.app.storage,
         &snapshot,
-        ApplySnapshotOptions { secrets_passphrase: req.secrets_passphrase.as_deref() },
+        ApplySnapshotOptions { secrets_passphrase: explicit_passphrase.or(saved_passphrase.as_deref()) },
     )
     .await
     .map_err(AppError)?;

@@ -441,10 +441,10 @@ fn add_sql_server_existing_top_pagination(statement: &str, limit: usize, offset:
 }
 
 fn sql_server_default_pagination_order(statement: &str) -> String {
-    first_simple_sqlserver_projection(statement).unwrap_or_else(|| "(SELECT NULL)".to_string())
+    first_simple_sqlserver_projection_order_column(statement).unwrap_or_else(|| "(SELECT NULL)".to_string())
 }
 
-fn first_simple_sqlserver_projection(statement: &str) -> Option<String> {
+fn first_simple_sqlserver_projection_order_column(statement: &str) -> Option<String> {
     let sql = statement.trim();
     let sql = &sql[skip_leading_sql_comments(sql, 0)..];
     if sql.len() < 6 || !sql[..6].eq_ignore_ascii_case("SELECT") {
@@ -463,11 +463,7 @@ fn first_simple_sqlserver_projection(statement: &str) -> Option<String> {
     let projection_start = skip_sql_whitespace(sql, index);
     let projection_end = find_first_projection_end(sql, projection_start)?;
     let projection = sql[projection_start..projection_end].trim();
-    if is_simple_sqlserver_order_projection(projection) {
-        Some(projection.to_string())
-    } else {
-        None
-    }
+    sql_server_derived_order_column_from_projection(projection)
 }
 
 fn skip_leading_sql_comments(sql: &str, mut index: usize) -> usize {
@@ -605,6 +601,37 @@ fn is_simple_sqlserver_order_projection(projection: &str) -> bool {
         return false;
     }
     saw_part && !expect_part
+}
+
+fn sql_server_derived_order_column_from_projection(projection: &str) -> Option<String> {
+    if !is_simple_sqlserver_order_projection(projection) {
+        return None;
+    }
+
+    let last_part = last_sqlserver_identifier_part(projection);
+    if last_part.starts_with('[') {
+        return Some(last_part.to_string());
+    }
+    Some(quote_table_identifier(Some(DatabaseType::SqlServer), last_part))
+}
+
+fn last_sqlserver_identifier_part(projection: &str) -> &str {
+    let mut last_start = 0;
+    let mut index = 0;
+    while index < projection.len() {
+        let ch = next_char(projection, index);
+        if ch == '[' {
+            index = skip_sql_bracket_identifier(projection, index);
+            continue;
+        }
+        if ch == '.' {
+            last_start = index + 1;
+            index += 1;
+            continue;
+        }
+        index += ch.len_utf8();
+    }
+    projection[last_start..].trim()
 }
 
 fn skip_sql_whitespace(sql: &str, mut index: usize) -> usize {
@@ -776,6 +803,33 @@ fn has_top_level_limit(sql: &str) -> bool {
     top_level_sql_tokens(sql).iter().any(|token| token.text == "LIMIT")
 }
 
+fn top_level_limit_row_count(sql: &str) -> Option<usize> {
+    let token = top_level_sql_tokens(sql).into_iter().find(|token| token.text == "LIMIT")?;
+    parse_standard_limit_row_count(sql, token.start + token.text.len())
+}
+
+fn parse_standard_limit_row_count(sql: &str, start: usize) -> Option<usize> {
+    let mut cursor = skip_sql_whitespace(sql, start);
+    let first = parse_usize_literal(sql, &mut cursor)?;
+    cursor = skip_sql_whitespace(sql, cursor);
+    if sql.get(cursor..)?.starts_with(',') {
+        cursor = skip_sql_whitespace(sql, cursor + 1);
+        return parse_usize_literal(sql, &mut cursor);
+    }
+    Some(first)
+}
+
+fn parse_usize_literal(sql: &str, cursor: &mut usize) -> Option<usize> {
+    let start = *cursor;
+    while *cursor < sql.len() && sql.as_bytes()[*cursor].is_ascii_digit() {
+        *cursor += 1;
+    }
+    if *cursor == start {
+        return None;
+    }
+    sql[start..*cursor].parse().ok()
+}
+
 fn has_top_level_informix_row_limit(sql: &str) -> bool {
     if has_top_level_limit(sql) {
         return true;
@@ -887,7 +941,9 @@ fn add_standard_limit(
             // ordering across pages in distributed databases like Doris.
             return add_outer_standard_limit(statement, database_type, limit, offset, &order_sql);
         }
-        if offset > 0 {
+        // A user/top-level LIMIT can still be wider than the selected grid page size.
+        // Wrap it so the first page respects the UI page limit while preserving the user's cap.
+        if offset > 0 || top_level_limit_row_count(statement).is_some_and(|row_count| row_count > limit) {
             return add_outer_standard_limit(statement, database_type, limit, offset, "");
         }
         return format!("{statement};");
@@ -1431,6 +1487,50 @@ mod tests {
     }
 
     #[test]
+    fn paginates_sqlserver_top_query_with_qualified_first_projection_by_exposed_column() {
+        let sql = "select top 1  t1.FSUPPLIERID,  kh.FNAME gysnm   from  GDWORKOUT t1 join  SUPPLIER kh on t1.FSUPPLIERID=kh.FITEMID join GDWORKOUTS t2 on t1.fid=t2.fid";
+        let first_page = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: sql.to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 100,
+            offset: 0,
+        });
+        let second_page = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: sql.to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 100,
+            offset: 100,
+        });
+
+        assert!(first_page.ok);
+        assert!(second_page.ok);
+        assert_eq!(
+            first_page.sql.unwrap(),
+            "SELECT TOP (100) * FROM (select top 1  t1.FSUPPLIERID,  kh.FNAME gysnm   from  GDWORKOUT t1 join  SUPPLIER kh on t1.FSUPPLIERID=kh.FITEMID join GDWORKOUTS t2 on t1.fid=t2.fid) [dbx_page] ORDER BY [FSUPPLIERID];"
+        );
+        assert_eq!(
+            second_page.sql.unwrap(),
+            "SELECT * FROM (SELECT dbx_page_source.*, ROW_NUMBER() OVER (ORDER BY [FSUPPLIERID]) AS [__dbx_row_num] FROM (select top 1  t1.FSUPPLIERID,  kh.FNAME gysnm   from  GDWORKOUT t1 join  SUPPLIER kh on t1.FSUPPLIERID=kh.FITEMID join GDWORKOUTS t2 on t1.fid=t2.fid) dbx_page_source) dbx_page WHERE [__dbx_row_num] > 100 AND [__dbx_row_num] <= 200 ORDER BY [__dbx_row_num];"
+        );
+    }
+
+    #[test]
+    fn paginates_sqlserver_top_query_with_dotted_bracket_identifier() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT TOP 1000 [order.id] FROM TicketInfo".to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 100,
+            offset: 0,
+        });
+
+        assert!(result.ok);
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT TOP (100) * FROM (SELECT TOP 1000 [order.id] FROM TicketInfo) [dbx_page] ORDER BY [order.id];"
+        );
+    }
+
+    #[test]
     fn paginates_sqlserver_top_query_after_leading_comment_by_first_column() {
         let sql = "-- 测试\nSELECT TOP (500) [id], [order_no], [store_id], [product_id], [customer_name], [quantity], [amount], [order_status], [created_at] FROM [sales].[orders_10k]";
         let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
@@ -1838,6 +1938,36 @@ WHERE u.id = picked.id;
         });
 
         assert_eq!(result.sql.unwrap(), "SELECT id FROM users LIMIT 20;");
+    }
+
+    #[test]
+    fn mysql_pagination_wraps_wide_existing_limit_on_first_page() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT * FROM dy_promotion_item WHERE create_time < '2026-06-01' LIMIT 10000;".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+            limit: 500,
+            offset: 0,
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT * FROM dy_promotion_item WHERE create_time < '2026-06-01' LIMIT 10000) `dbx_page` LIMIT 500 OFFSET 0;"
+        );
+    }
+
+    #[test]
+    fn mysql_pagination_wraps_comma_limit_row_count_on_first_page() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT * FROM users LIMIT 20, 10000;".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+            limit: 500,
+            offset: 0,
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT * FROM users LIMIT 20, 10000) `dbx_page` LIMIT 500 OFFSET 0;"
+        );
     }
 
     #[test]

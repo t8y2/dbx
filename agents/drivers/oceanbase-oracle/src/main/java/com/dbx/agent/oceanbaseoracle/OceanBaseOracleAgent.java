@@ -4,11 +4,13 @@ import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.ConfiguredJdbcAgent;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.DatabaseInfo;
+import com.dbx.agent.DdlBuilder;
 import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcAgentProfile;
 import com.dbx.agent.JdbcIdentifiers;
 import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
@@ -16,6 +18,7 @@ import com.dbx.agent.TriggerInfo;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -39,7 +42,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     public static final JdbcAgentProfile OCEANBASE_ORACLE_PROFILE = new JdbcAgentProfile(
         "com.oceanbase.jdbc.Driver",
         "jdbc:oceanbase://{host}:{port}/{database}",
-        2881,
+        2883,
         false,
         SYSTEM_SCHEMAS,
         List.of("TABLE", "VIEW", "BASE TABLE")
@@ -81,39 +84,79 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
 
     @Override
     public List<TableInfo> listTables(String schema) {
+        return queryTables(schema, MetadataListConstraints.NONE);
+    }
+
+    @Override
+    public List<TableInfo> listTables(String schema, MetadataListConstraints constraints) {
+        return queryTables(schema, MetadataListConstraints.orNone(constraints));
+    }
+
+    private List<TableInfo> queryTables(String schema, MetadataListConstraints constraints) {
         return unchecked(() -> {
             String owner = normalizeSchema(schema);
-            String sql = """
+            List<String> objectTypes = oceanBaseTableTypes(constraints);
+            if (objectTypes.isEmpty()) {
+                return List.of();
+            }
+            String baseSql = """
                 SELECT o.OBJECT_NAME,
                     CASE o.OBJECT_TYPE WHEN 'VIEW' THEN 'VIEW' ELSE 'TABLE' END AS TABLE_TYPE,
                     c.COMMENTS
                 FROM ALL_OBJECTS o
                 LEFT JOIN ALL_TAB_COMMENTS c ON c.OWNER = o.OWNER AND c.TABLE_NAME = o.OBJECT_NAME
-                WHERE o.OWNER = ? AND o.OBJECT_TYPE IN ('TABLE', 'VIEW')
-                ORDER BY o.OBJECT_NAME
+                WHERE o.OWNER = ? AND o.OBJECT_TYPE IN (%s)
                 """.stripIndent().trim();
+            MetadataSql query = oceanBaseMetadataSql(
+                String.format(baseSql, placeholders(objectTypes.size())),
+                "OBJECT_NAME, TABLE_TYPE, COMMENTS",
+                "o.OBJECT_NAME",
+                "ORDER BY OBJECT_NAME",
+                owner,
+                objectTypes,
+                constraints
+            );
 
             List<TableInfo> result = new ArrayList<>();
-            try (var stmt = requireConnection().prepareStatement(sql)) {
-                stmt.setString(1, owner);
+            try (var stmt = requireConnection().prepareStatement(query.sql)) {
+                bind(stmt, query.args);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
                         result.add(new TableInfo(rs.getString(1), rs.getString(2), rs.getString(3)));
                     }
                 }
             }
-            return result;
+            return constraints.withoutPaging().filterTables(result);
         });
     }
 
     @Override
     public List<ObjectInfo> listObjects(String schema) {
+        return queryObjects(schema, MetadataListConstraints.NONE);
+    }
+
+    @Override
+    public List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints) {
+        return queryObjects(schema, MetadataListConstraints.orNone(constraints));
+    }
+
+    private List<ObjectInfo> queryObjects(String schema, MetadataListConstraints constraints) {
         return unchecked(() -> {
             String owner = normalizeSchema(schema);
-            String sql = """
+            List<String> objectTypes = oceanBaseObjectTypes(constraints);
+            if (objectTypes.isEmpty()) {
+                return List.of();
+            }
+            String baseSql = """
                 SELECT OBJECT_NAME, OBJECT_TYPE
                 FROM ALL_OBJECTS
-                WHERE OWNER = ? AND OBJECT_TYPE IN ('TABLE', 'VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE', 'SEQUENCE', 'SYNONYM')
+                WHERE OWNER = ? AND OBJECT_TYPE IN (%s)
+                """.stripIndent().trim();
+            MetadataSql query = oceanBaseMetadataSql(
+                String.format(baseSql, placeholders(objectTypes.size())),
+                "OBJECT_NAME, OBJECT_TYPE",
+                "OBJECT_NAME",
+                """
                 ORDER BY CASE OBJECT_TYPE
                     WHEN 'TABLE' THEN 0
                     WHEN 'VIEW' THEN 1
@@ -123,19 +166,111 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                     WHEN 'SEQUENCE' THEN 5
                     ELSE 6
                 END, OBJECT_NAME
-                """.stripIndent().trim();
+                """.stripIndent().trim(),
+                owner,
+                objectTypes,
+                constraints
+            );
 
             List<ObjectInfo> result = new ArrayList<>();
-            try (var stmt = requireConnection().prepareStatement(sql)) {
-                stmt.setString(1, owner);
+            try (var stmt = requireConnection().prepareStatement(query.sql)) {
+                bind(stmt, query.args);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
                         result.add(new ObjectInfo(rs.getString(1), rs.getString(2), owner, null));
                     }
                 }
             }
-            return result;
+            return constraints.withoutPaging().filterObjects(result);
         });
+    }
+
+    private static MetadataSql oceanBaseMetadataSql(
+        String baseSql,
+        String selectList,
+        String nameColumn,
+        String orderSql,
+        String owner,
+        List<String> objectTypes,
+        MetadataListConstraints constraints
+    ) {
+        List<Object> args = new ArrayList<>();
+        args.add(owner);
+        args.addAll(objectTypes);
+        String sql = baseSql;
+        if (constraints.hasFilter()) {
+            sql += " AND UPPER(" + nameColumn + ") LIKE ? ESCAPE '\\'";
+            args.add(constraints.fuzzyLikePattern().toUpperCase(Locale.ROOT));
+        }
+        sql += "\n" + orderSql;
+        if (constraints.hasLimit()) {
+            // OceanBase Oracle mode is safest with the classic ordered ROWNUM wrapper for paged metadata.
+            int offset = constraints.getOffset() == null ? 0 : constraints.getOffset();
+            sql = "SELECT " + selectList + "\nFROM (\n  SELECT DBX_Q.*, ROWNUM AS DBX_RN\n  FROM (\n"
+                + sql
+                + "\n  ) DBX_Q\n  WHERE ROWNUM <= ?\n)\nWHERE DBX_RN > ?";
+            args.add(offset + constraints.getLimit());
+            args.add(offset);
+        } else if (constraints.hasOffset()) {
+            sql = "SELECT " + selectList + "\nFROM (\n  SELECT DBX_Q.*, ROWNUM AS DBX_RN\n  FROM (\n"
+                + sql
+                + "\n  ) DBX_Q\n)\nWHERE DBX_RN > ?";
+            args.add(constraints.getOffset());
+        }
+        return new MetadataSql(sql, args);
+    }
+
+    private static List<String> oceanBaseTableTypes(MetadataListConstraints constraints) {
+        if (!constraints.hasObjectTypes()) {
+            return List.of("TABLE", "VIEW");
+        }
+        List<String> result = new ArrayList<>();
+        if (constraints.tableTypeAllowed("TABLE")) {
+            result.add("TABLE");
+        }
+        if (constraints.tableTypeAllowed("VIEW")) {
+            result.add("VIEW");
+        }
+        return result;
+    }
+
+    private static List<String> oceanBaseObjectTypes(MetadataListConstraints constraints) {
+        List<String> supported = List.of("TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "SEQUENCE", "SYNONYM");
+        if (!constraints.hasObjectTypes()) {
+            return supported;
+        }
+        List<String> result = new ArrayList<>();
+        for (String objectType : supported) {
+            if (constraints.objectTypeAllowed(objectType)) {
+                result.add(objectType);
+            }
+        }
+        return result;
+    }
+
+    private static String placeholders(int count) {
+        return String.join(", ", java.util.Collections.nCopies(count, "?"));
+    }
+
+    private static void bind(java.sql.PreparedStatement stmt, List<Object> args) throws SQLException {
+        for (int index = 0; index < args.size(); index += 1) {
+            Object arg = args.get(index);
+            if (arg instanceof Integer) {
+                stmt.setInt(index + 1, (Integer) arg);
+            } else {
+                stmt.setString(index + 1, String.valueOf(arg));
+            }
+        }
+    }
+
+    private static final class MetadataSql {
+        private final String sql;
+        private final List<Object> args;
+
+        private MetadataSql(String sql, List<Object> args) {
+            this.sql = sql;
+            this.args = args;
+        }
     }
 
     @Override
@@ -144,7 +279,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             String owner = normalizeSchema(schema);
             String sql = """
                 SELECT c.COLUMN_NAME, c.DATA_TYPE, c.NULLABLE, c.DATA_PRECISION, c.DATA_SCALE,
-                    c.DATA_LENGTH, c.CHAR_LENGTH, cc.COMMENTS,
+                    c.DATA_LENGTH, c.CHAR_LENGTH, c.DATA_DEFAULT, cc.COMMENTS,
                     CASE WHEN pk.COLUMN_NAME IS NULL THEN 0 ELSE 1 END AS IS_PK
                 FROM ALL_TAB_COLUMNS c
                 LEFT JOIN ALL_COL_COMMENTS cc
@@ -168,6 +303,8 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                 stmt.setString(4, table);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
+                        // Oracle-compatible DATA_DEFAULT is LONG-like; read it before other metadata fields.
+                        String defaultValue = rs.getString("DATA_DEFAULT");
                         String name = rs.getString("COLUMN_NAME");
                         String baseType = rs.getString("DATA_TYPE");
                         Integer numPrec = intOrNull(rs, "DATA_PRECISION");
@@ -178,7 +315,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                             name,
                             formatDataType(baseType, numPrec, numScale, dataLen, charLen),
                             "Y".equalsIgnoreCase(rs.getString("NULLABLE")),
-                            null,
+                            defaultValue,
                             rs.getInt("IS_PK") == 1,
                             null,
                             rs.getString("COMMENTS"),
@@ -191,6 +328,25 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             }
             return result;
         });
+    }
+
+    @Override
+    public String getTableDdl(String schema, String table) {
+        List<IndexInfo> indexes;
+        try {
+            indexes = listIndexes(schema, table);
+        } catch (RuntimeException e) {
+            indexes = Collections.emptyList();
+        }
+
+        List<ForeignKeyInfo> foreignKeys;
+        try {
+            foreignKeys = listForeignKeys(schema, table);
+        } catch (RuntimeException e) {
+            foreignKeys = Collections.emptyList();
+        }
+
+        return DdlBuilder.buildTableDdl(schema, table, getColumns(schema, table), indexes, foreignKeys, false, true);
     }
 
     @Override

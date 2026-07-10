@@ -7,6 +7,7 @@ import {
   combineDataTypeForDatabase,
   createColumnDrafts,
   createIndexDrafts,
+  dataTypeLengthInputValue,
   generateIndexName,
   generateUniqueIndexName,
   getColumnEditorControls,
@@ -279,6 +280,16 @@ test("recognizes SQL Server identity-compatible data types", () => {
   assert.equal(isSqlServerIdentityCompatibleDataType("numeric(10)"), true);
   assert.equal(isSqlServerIdentityCompatibleDataType("varchar(255)"), false);
   assert.equal(isSqlServerIdentityCompatibleDataType("numeric(18,2)"), false);
+});
+
+test("does not add MySQL-style display widths to SQL Server integer types", () => {
+  assert.equal(combineDataTypeForDatabase("sqlserver", "int", "11"), "int");
+  assert.equal(combineDataTypeForDatabase("sqlserver", "integer", "11"), "integer");
+  assert.equal(combineDataTypeForDatabase("sqlserver", "bigint", "20"), "bigint");
+  assert.equal(dataTypeLengthInputValue("sqlserver", "int(11)"), "");
+  assert.equal(combineDataTypeForDatabase("sqlserver", "decimal", "10,0"), "decimal(10,0)");
+  assert.equal(combineDataTypeForDatabase("sqlserver", "varchar", "255"), "varchar(255)");
+  assert.equal(combineDataTypeForDatabase("sqlserver", "float", "53"), "float(53)");
 });
 
 test("parses Manticore Search text properties to ColumnExtra", () => {

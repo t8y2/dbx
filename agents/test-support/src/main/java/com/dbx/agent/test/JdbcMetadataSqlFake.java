@@ -88,7 +88,7 @@ public final class JdbcMetadataSqlFake {
                 if ("getUpdateCount".equals(name)) {
                     return 0;
                 }
-                if ("setString".equals(name)) {
+                if ("setString".equals(name) || "setInt".equals(name) || "setObject".equals(name)) {
                     statements.add("param:" + args[0] + "=" + args[1]);
                     return null;
                 }

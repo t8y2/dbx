@@ -18,6 +18,8 @@ pub const MQ_AUTH_API_KEY_VALUE_KEY: &str = "mq.auth.api_key_value";
 pub const MQ_AUTH_CLIENT_SECRET_KEY: &str = "mq.auth.client_secret";
 pub const MQ_TOKEN_SIGNING_SECRET_PREFIX: &str = "mq.token_signing.";
 pub const MQ_TOKEN_SIGNING_KEY: &str = "mq.token_signing.key";
+pub const NACOS_AUTH_SECRET_PREFIX: &str = "nacos.auth.";
+pub const NACOS_AUTH_PASSWORD_KEY: &str = "nacos.auth.password";
 
 pub trait ConnectionSecretStore {
     fn set_secret(&self, connection_id: &str, key: &str, secret: &str) -> Result<(), String>;
@@ -722,6 +724,7 @@ mod tests {
             driver_profile: None,
             driver_label: None,
             url_params: None,
+            agent_java_options: Vec::new(),
             host: "localhost".to_string(),
             port: 5432,
             username: "postgres".to_string(),
@@ -778,6 +781,7 @@ mod tests {
             expose_lan: false,
             use_ssh_agent: false,
             ssh_agent_sock_path: String::new(),
+            auth_method: "key".to_string(),
         }
     }
 

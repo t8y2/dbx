@@ -6159,7 +6159,7 @@ const {
   copyRowAsInsert,
   copyRowAsInsertWithoutPrimaryKeys,
   prefetchRowAsInsertStatement,
-  canCopyPreparedInsert,
+  canCopyRowAsInsert,
   prefetchRowAsUpdateStatement,
   canCopyPreparedUpdate,
   copyRowAsUpdate,
@@ -8329,28 +8329,28 @@ function copySubmenu(): ContextMenuItem {
     items.push({ label: singleRowSelected ? t("grid.copySelectedRowTsvWithHeaders") : t("grid.copySelectedRowsTsvWithHeaders", { count: selectedRowCount.value }), action: copySelectedRowsTsvWithHeaders });
   }
   if (isMultiRow.value) {
-    items.push({ label: labels.insertMerged, action: () => copyRowAsInsert("merged"), disabled: !canCopyPreparedInsert(false, "merged") });
-    items.push({ label: labels.insertRowByRow, action: () => copyRowAsInsert("row-by-row"), disabled: !canCopyPreparedInsert(false, "row-by-row") });
+    items.push({ label: labels.insertMerged, action: () => copyRowAsInsert("merged"), disabled: !canCopyRowAsInsert.value });
+    items.push({ label: labels.insertRowByRow, action: () => copyRowAsInsert("row-by-row"), disabled: !canCopyRowAsInsert.value });
   } else {
-    items.push({ label: labels.insert, action: () => copyRowAsInsert(), disabled: !canCopyPreparedInsert(false) });
+    items.push({ label: labels.insert, action: () => copyRowAsInsert(), disabled: !canCopyRowAsInsert.value });
   }
   if (canCopyRowAsInsertWithoutPrimaryKeys.value) {
     if (isMultiRow.value) {
       items.push({
         label: labels.insertNoPkMerged,
         action: () => copyRowAsInsertWithoutPrimaryKeys("merged"),
-        disabled: !canCopyPreparedInsert(true, "merged"),
+        disabled: !canCopyRowAsInsertWithoutPrimaryKeys.value,
       });
       items.push({
         label: labels.insertNoPkRowByRow,
         action: () => copyRowAsInsertWithoutPrimaryKeys("row-by-row"),
-        disabled: !canCopyPreparedInsert(true, "row-by-row"),
+        disabled: !canCopyRowAsInsertWithoutPrimaryKeys.value,
       });
     } else {
       items.push({
         label: labels.insertNoPk,
         action: () => copyRowAsInsertWithoutPrimaryKeys(),
-        disabled: !canCopyPreparedInsert(true),
+        disabled: !canCopyRowAsInsertWithoutPrimaryKeys.value,
       });
     }
   }

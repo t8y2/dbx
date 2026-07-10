@@ -343,9 +343,64 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return cache.ready && cache.key === insertCopyKey(excludePrimaryKeys, insertMode);
   }
 
-  function copyPreparedRowAsInsert(excludePrimaryKeys: boolean, insertMode: DataGridCopyInsertMode = "merged"): boolean {
-    if (!canCopyPreparedInsert(excludePrimaryKeys, insertMode)) return false;
-    void copyText(insertCopyCache(excludePrimaryKeys, insertMode).text);
+  async function prepareRowAsInsertStatement(excludePrimaryKeys: boolean, insertMode: DataGridCopyInsertMode = "merged"): Promise<string | undefined> {
+    if (canCopyPreparedInsert(excludePrimaryKeys, insertMode)) {
+      return insertCopyCache(excludePrimaryKeys, insertMode).text;
+    }
+
+    const rows = insertEligibleRows();
+    if (!rows.length) return undefined;
+    const key = insertCopyKey(excludePrimaryKeys, insertMode);
+    setInsertCopyCache(excludePrimaryKeys, insertMode, {
+      key,
+      text: "",
+      loading: true,
+      ready: false,
+    });
+
+    try {
+      const statement =
+        databaseType.value === "mongodb"
+          ? buildMongoCopyInsertStatement({
+              collection: copyInsertTargetLabel?.value || tableMeta.value?.tableName || "collection",
+              columns: columns.value,
+              sourceColumns: sourceColumns.value,
+              rows: rows.map((item) => item.data),
+              excludePrimaryKeys,
+              insertMode,
+            })
+          : await buildDataGridCopyInsertStatement({
+              databaseType: databaseType.value,
+              tableMeta: tableMeta.value,
+              columns: columns.value,
+              columnTypes: columnTypes.value,
+              sourceColumns: sourceColumns.value,
+              rows: rows.map((item) => item.data),
+              excludePrimaryKeys,
+              insertMode,
+            });
+      setInsertCopyCache(excludePrimaryKeys, insertMode, {
+        key,
+        text: statement ?? "",
+        loading: false,
+        ready: !!statement,
+      });
+      return statement;
+    } catch {
+      setInsertCopyCache(excludePrimaryKeys, insertMode, {
+        key,
+        text: "",
+        loading: false,
+        ready: false,
+      });
+      return undefined;
+    }
+  }
+
+  async function copyPreparedRowAsInsert(excludePrimaryKeys: boolean, insertMode: DataGridCopyInsertMode = "merged"): Promise<boolean> {
+    const statement = await prepareRowAsInsertStatement(excludePrimaryKeys, insertMode);
+    if (!statement) return false;
+    await copyText(statement);
     return true;
   }
 
@@ -512,11 +567,11 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   async function copyRowAsInsert(insertMode: DataGridCopyInsertMode = "merged") {
-    copyPreparedRowAsInsert(false, insertMode);
+    await copyPreparedRowAsInsert(false, insertMode);
   }
 
   async function copyRowAsInsertWithoutPrimaryKeys(insertMode: DataGridCopyInsertMode = "merged") {
-    copyPreparedRowAsInsert(true, insertMode);
+    await copyPreparedRowAsInsert(true, insertMode);
   }
 
   async function copyRowAsUpdate() {
@@ -534,6 +589,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const primaryKeySet = new Set(primaryKeys.map(normalizeColumnName));
     return saveColumns.some((column) => column && !primaryKeySet.has(normalizeColumnName(column)));
   });
+
+  const canCopyRowAsInsert = computed(() => insertEligibleRows().length > 0);
 
   const canCopyRowAsInsertWithoutPrimaryKeys = computed(() => {
     if (!tableMeta.value?.primaryKeys.length) return false;
@@ -1108,6 +1165,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     prefetchRowAsInsertStatement,
     canCopyPreparedInsert,
     copyPreparedRowAsInsert,
+    canCopyRowAsInsert,
     prefetchRowAsUpdateStatement,
     canCopyPreparedUpdate,
     copyPreparedRowAsUpdate,

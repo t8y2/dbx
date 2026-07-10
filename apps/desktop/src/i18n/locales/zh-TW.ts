@@ -1719,6 +1719,9 @@ export default withEnglishFallback({
     identitySeed: "起始值",
     identityIncrement: "增量",
     sqlServerIdentityTypeHint: "SQL Server 自動遞增僅支援 tinyint、smallint、int、bigint、decimal/numeric（小數位為 0）",
+    characterSet: "字元集",
+    charsetPlaceholder: "字元集",
+    collationPlaceholder: "排序規則",
   },
   diagram: {
     title: "關係圖",

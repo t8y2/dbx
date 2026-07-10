@@ -45,11 +45,13 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
 
     public SqlServerLegacyAgent() {
         super(PROFILE);
+        // AbstractJdbcAgent loads the JDBC driver before building the URL, so relax
+        // the legacy TLS policy here before the driver can initialize JSSE.
+        enableLegacyTlsAlgorithms();
     }
 
     @Override
     protected String buildJdbcUrl(ConnectParams params) {
-        enableLegacyTlsAlgorithms();
         return legacyTlsUrl(params);
     }
 

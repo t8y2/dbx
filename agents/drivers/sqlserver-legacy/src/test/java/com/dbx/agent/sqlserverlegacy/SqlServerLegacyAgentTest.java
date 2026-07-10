@@ -4,7 +4,24 @@ import com.dbx.agent.ConnectParams;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.security.Security;
+
 class SqlServerLegacyAgentTest {
+    @Test
+    void constructorRelaxesLegacyTlsPolicyBeforeDriverLoading() {
+        String key = "jdk.tls.disabledAlgorithms";
+        String original = Security.getProperty(key);
+        try {
+            Security.setProperty(key, "TLSv1, TLSv1.1, 3DES_EDE_CBC, EC keySize < 224");
+
+            new SqlServerLegacyAgent();
+
+            Assertions.assertEquals("EC keySize < 224", Security.getProperty(key));
+        } finally {
+            Security.setProperty(key, original == null ? "" : original);
+        }
+    }
+
     @Test
     void legacyTlsUrlUsesSqlServerTlsV1Properties() {
         ConnectParams params = new ConnectParams(

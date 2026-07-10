@@ -2672,7 +2672,7 @@ export const useQueryStore = defineStore("query", () => {
         countSql = plan.countSql;
         useAgentResultSession = plan.useAgentResultSession;
       } else if (tab.mode === "data") {
-        pageLimit = options?.pagination?.limit ?? tableOpenPageLimit(settingsStore.editorSettings.pageSize);
+        pageLimit = options?.pagination?.limit ?? tableOpenPageLimit();
         pageOffset = options?.pagination?.offset ?? 0;
       }
 
@@ -3243,7 +3243,7 @@ export const useQueryStore = defineStore("query", () => {
       pagination:
         tab.mode === "data"
           ? {
-              limit: tab.resultPageLimit ?? tableOpenPageLimit(useSettingsStore().editorSettings.pageSize),
+              limit: tab.resultPageLimit ?? tableOpenPageLimit(),
               offset: tab.resultPageOffset ?? 0,
             }
           : undefined,

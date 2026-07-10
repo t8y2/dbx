@@ -1305,7 +1305,7 @@ async function openData() {
     logPhase("ensure-connected", { tabId });
     if (!config) throw new Error("Connection config not found");
 
-    const limit = tableOpenPageLimit(settingsStore.editorSettings.pageSize);
+    const limit = tableOpenPageLimit();
     const refreshTableMetaInBackground = async () => {
       const metadataStartedAt = performance.now();
       console.info("[DBX][openData:metadata:start]", {

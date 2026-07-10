@@ -48,10 +48,8 @@ test("normalizes saved query result page size", () => {
   assert.equal(normalizeEditorSettings({ pageSize: 0 }).pageSize, 100);
 });
 
-test("uses saved rows-per-page for table opens", () => {
+test("uses dedicated default row limit for table opens", () => {
   assert.equal(tableOpenPageLimit(), 100);
-  assert.equal(tableOpenPageLimit(500), 500);
-  assert.equal(tableOpenPageLimit(0), 100);
 });
 
 test("defaults export batch size to 2000 rows", () => {

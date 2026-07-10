@@ -2205,6 +2205,7 @@ function extractReferencedTables(sql: string): SqlCompletionReferencedTable[] {
     "select",
     "from",
     "join",
+    "straight_join",
     "left",
     "right",
     "inner",
@@ -2287,7 +2288,8 @@ function extractReferencedTables(sql: string): SqlCompletionReferencedTable[] {
     "respect",
   ]);
 
-  const pattern = /\b(?:from|join|update|apply)\s+((?:"[^"]+"|`[^`]+`|[^\s,;()]+)(?:\.(?:"[^"]+"|`[^`]+`|[^\s,;()]+))?)(?:\s+(?:as\s+)?([A-Za-z_][\w$]*))?/gi;
+  // STRAIGHT_JOIN is a standalone MySQL table introducer, not a modifier followed by JOIN.
+  const pattern = /\b(?:from|join|straight_join|update|apply)\s+((?:"[^"]+"|`[^`]+`|[^\s,;()]+)(?:\.(?:"[^"]+"|`[^`]+`|[^\s,;()]+))?)(?:\s+(?:as\s+)?([A-Za-z_][\w$]*))?/gi;
   const referenced: SqlCompletionReferencedTable[] = [];
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(sql)) !== null) {

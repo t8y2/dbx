@@ -1012,6 +1012,19 @@ test("extracts every table across consecutive JOINs", () => {
   );
 });
 
+test("extracts tables across a MySQL STRAIGHT_JOIN", () => {
+  const sql = "select * from db.a straight_join db.b on db.a.id = db.b.id";
+  const context = getSqlCompletionContext(sql, sql.length);
+
+  assert.deepEqual(
+    context.referencedTables.map(({ schema, name, alias }) => ({ schema, name, alias })),
+    [
+      { schema: "db", name: "a", alias: undefined },
+      { schema: "db", name: "b", alias: undefined },
+    ],
+  );
+});
+
 test("keeps explicit table aliases across a JOIN", () => {
   const sql = "select * from db.a x join db.b y";
   const context = getSqlCompletionContext(sql, sql.length);

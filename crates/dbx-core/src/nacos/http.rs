@@ -28,7 +28,7 @@ pub struct NacosOpenApiAdmin {
 
 impl NacosOpenApiAdmin {
     pub fn new(cfg: NacosAdminConfig) -> Result<Self, String> {
-        let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS));
+        let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS)).no_proxy();
         if cfg.tls_skip_verify {
             builder = builder.danger_accept_invalid_certs(true);
         }

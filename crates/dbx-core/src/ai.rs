@@ -772,7 +772,7 @@ fn ai_endpoint_is_loopback(config: &AiConfig) -> bool {
 }
 
 pub fn build_ai_http_client(config: &AiConfig, timeout_secs: u64) -> Result<reqwest::Client, String> {
-    let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(timeout_secs));
+    let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(timeout_secs)).no_proxy();
     if config.proxy_enabled && !config.proxy_url.trim().is_empty() && !ai_endpoint_is_loopback(config) {
         let proxy_url = normalize_ai_proxy_url(&config.proxy_url);
         let proxy = reqwest::Proxy::all(&proxy_url).map_err(|e| format!("Invalid AI proxy URL: {e}"))?;
@@ -2620,6 +2620,172 @@ mod tests {
         };
 
         build_ai_http_client(&config, 1).unwrap();
+    }
+
+    /// Regression test for the AI HTTP client's proxy behavior. Spins up local
+    /// TCP sockets to act as the AI endpoint and a candidate HTTP proxy, then
+    /// verifies three properties required by the reviewer:
+    ///
+    /// 1. When `proxy_enabled` is off, ambient `HTTP_PROXY` environment
+    ///    variables are ignored (`.no_proxy()` on the base builder), so the
+    ///    request reaches the endpoint directly and the proxy is never
+    ///    contacted.
+    /// 2. When `proxy_enabled` is on with a non-loopback endpoint, the
+    ///    explicitly configured AI proxy takes effect (the proxy receives a
+    ///    `CONNECT` tunnel request).
+    /// 3. When `proxy_enabled` is on but the endpoint is loopback, the proxy
+    ///    is bypassed so the request connects directly.
+    #[tokio::test]
+    async fn ai_http_client_proxy_behavior() {
+        use std::net::UdpSocket;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        // The target server binds to 0.0.0.0 so it is reachable both via the
+        // loopback address (for the loopback-bypass case) and via the host's
+        // non-loopback interface IP (for the proxy-applied cases, where
+        // `ai_endpoint_is_loopback` must return false).
+        let target = TcpListener::bind("0.0.0.0:0").await.unwrap();
+        let target_port = target.local_addr().unwrap().port();
+        let loopback_url = format!("http://127.0.0.1:{target_port}/v1/models");
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = target.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0_u8; 1024];
+                    let _ = stream.read(&mut buf).await;
+                    let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
+                    let _ = stream.write_all(resp).await;
+                });
+            }
+        });
+
+        // Find a non-loopback local IP so the endpoint is not treated as
+        // loopback by `ai_endpoint_is_loopback`. This uses a "connected" UDP
+        // socket to discover the routing interface without sending packets.
+        let non_loopback_ip = (|| {
+            let s = UdpSocket::bind("0.0.0.0:0").ok()?;
+            s.connect("8.8.8.8:80").ok()?;
+            let addr = s.local_addr().ok()?;
+            match addr.ip() {
+                std::net::IpAddr::V4(v4) if !v4.is_loopback() => Some(v4),
+                _ => None,
+            }
+        })();
+        // If the sandbox has no non-loopback interface, skip the cases that
+        // depend on it rather than failing the build. The loopback-bypass
+        // case still runs.
+        let external_url = non_loopback_ip.map(|ip| format!("http://{ip}:{target_port}/v1/models"));
+
+        // Candidate proxy: counts how many connections it receives. It replies
+        // to HTTP CONNECT so that an explicit AI proxy tunnel can be observed.
+        let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let connect_count = Arc::new(AtomicU32::new(0));
+        let count_for_server = connect_count.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = proxy.accept().await else {
+                    break;
+                };
+                count_for_server.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut buf = vec![0_u8; 4096];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    if req.starts_with("CONNECT ") {
+                        // Acknowledge the tunnel. We do not forward the
+                        // tunneled traffic; observing the CONNECT is enough
+                        // for this test.
+                        let _ = stream.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n").await;
+                        // Drain until the client closes the tunnel.
+                        loop {
+                            if stream.read(&mut buf).await.unwrap_or(0) == 0 {
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        let proxy_connections = || connect_count.load(Ordering::SeqCst);
+
+        let base_config = AiConfig {
+            provider: AiProvider::OpenaiCompatible,
+            api_key: "key".to_string(),
+            auth_method: AiAuthMethod::Bearer,
+            endpoint: external_url.clone().unwrap_or_else(|| loopback_url.clone()),
+            model: "gpt-4o".to_string(),
+            api_style: AiApiStyle::Completions,
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            enable_thinking: true,
+            reasoning_level: AiReasoningLevel::Default,
+            context_window: None,
+            codex_cli_path: None,
+            codex_cli_env: Default::default(),
+        };
+
+        // --- Case 1: ambient HTTP_PROXY ignored when proxy_enabled is off ---
+        // Point the environment at our candidate proxy; with `.no_proxy()` on
+        // the base builder the request must bypass it and reach the target.
+        if let Some(url) = &external_url {
+            safety_env_set("HTTP_PROXY", &format!("http://{proxy_addr}"));
+            safety_env_set("http_proxy", &format!("http://{proxy_addr}"));
+            let config = AiConfig { endpoint: url.clone(), ..base_config.clone() };
+            let client = build_ai_http_client(&config, 5).unwrap();
+            let before = proxy_connections();
+            let resp = client.get(url).send().await.unwrap();
+            assert!(resp.status().is_success());
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert_eq!(proxy_connections(), before, "ambient HTTP_PROXY must be ignored when proxy_enabled is off");
+            safety_env_unset("HTTP_PROXY");
+            safety_env_unset("http_proxy");
+        }
+
+        // --- Case 2: explicit AI proxy is applied for non-loopback endpoints ---
+        if let Some(url) = &external_url {
+            let config = AiConfig {
+                proxy_enabled: true,
+                proxy_url: proxy_addr.to_string(),
+                endpoint: url.clone(),
+                ..base_config.clone()
+            };
+            let client = build_ai_http_client(&config, 5).unwrap();
+            let before = proxy_connections();
+            // The mock proxy acknowledges CONNECT but does not forward
+            // tunneled traffic, so the request itself will not complete.
+            // We only need to confirm the proxy was contacted.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), client.get(url).send()).await;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert!(proxy_connections() > before, "explicit AI proxy must be applied for non-loopback endpoints");
+        }
+
+        // --- Case 3: loopback endpoint bypasses the explicit AI proxy ---
+        let config = AiConfig {
+            endpoint: loopback_url.clone(),
+            proxy_enabled: true,
+            proxy_url: proxy_addr.to_string(),
+            ..base_config
+        };
+        let client = build_ai_http_client(&config, 5).unwrap();
+        let before = proxy_connections();
+        let resp = client.get(&loopback_url).send().await.unwrap();
+        assert!(resp.status().is_success());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(proxy_connections(), before, "loopback endpoint must bypass the AI proxy");
+    }
+
+    fn safety_env_set(key: &str, value: &str) {
+        std::env::set_var(key, value);
+    }
+
+    fn safety_env_unset(key: &str) {
+        std::env::remove_var(key);
     }
 
     #[test]

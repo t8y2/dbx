@@ -333,6 +333,7 @@ pub async fn fetch_registry() -> Result<AgentRegistry, String> {
     }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
+        .no_proxy()
         .build()
         .map_err(|err| format!("Failed to create HTTP client: {err}"))?;
     let resp = crate::race_download(&client, REGISTRY_PATH, REGISTRY_R2_PATH, "dbx-agent-manager")
@@ -736,6 +737,7 @@ async fn download_with_progress(
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
+        .no_proxy()
         .build()
         .map_err(|err| format!("Failed to create HTTP client: {err}"))?;
     let mut last_err = None;

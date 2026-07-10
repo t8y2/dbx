@@ -101,7 +101,7 @@ impl HttpTunnelEndpoint {
             connect_timeout: effective_connect_timeout(connect_timeout_secs),
             target_host: remote_host.to_string(),
             target_port: remote_port,
-            client: Client::new(),
+            client: Client::builder().no_proxy().build().unwrap_or_else(|_| Client::new()),
         })
     }
 }

@@ -33,7 +33,8 @@ impl InfluxdbClient {
         url_params: Option<String>,
         timeout: Duration,
     ) -> Self {
-        let http = HttpClient::builder().connect_timeout(timeout).build().unwrap_or_else(|_| HttpClient::new());
+        let http =
+            HttpClient::builder().connect_timeout(timeout).no_proxy().build().unwrap_or_else(|_| HttpClient::new());
         Self {
             http,
             base_url: url.trim_end_matches('/').to_string(),
@@ -90,7 +91,7 @@ impl InfluxdbClient {
 }
 
 fn build_http_client(ca_cert_path: Option<&str>, timeout: Duration) -> Result<HttpClient, String> {
-    let mut builder = HttpClient::builder().connect_timeout(timeout);
+    let mut builder = HttpClient::builder().connect_timeout(timeout).no_proxy();
     if let Some(path) = ca_cert_path.map(str::trim).filter(|path| !path.is_empty()) {
         let path = expand_cert_path(path);
         let cert_bytes =

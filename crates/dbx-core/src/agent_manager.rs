@@ -843,7 +843,9 @@ impl AgentManager {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        let resp = reqwest::get(url).await.map_err(|e| format!("Download failed: {e}"))?;
+        let client =
+            reqwest::Client::builder().no_proxy().build().map_err(|e| format!("Failed to create HTTP client: {e}"))?;
+        let resp = client.get(url).send().await.map_err(|e| format!("Download failed: {e}"))?;
         if !resp.status().is_success() {
             return Err(format!("Download failed with status: {}", resp.status()));
         }

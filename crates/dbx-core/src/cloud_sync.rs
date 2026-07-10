@@ -40,6 +40,12 @@ const SECRET_KEYS: &[&str] = &[
 const SSH_TUNNEL_SECRET_PREFIX: &str = "ssh_tunnels.";
 const TRANSPORT_LAYER_SECRET_PREFIX: &str = "transport_layers.";
 
+/// Builds a reqwest client that ignores system/environment proxies so cloud
+/// sync always connects directly. Consistent with `db::http_client_builder`.
+fn no_proxy_client() -> Client {
+    Client::builder().no_proxy().build().unwrap_or_else(|_| Client::new())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebDavConfig {
@@ -352,7 +358,7 @@ pub async fn resolve_webdav_sync_secrets_passphrase(storage: &Storage) -> Result
 
 impl WebDavClient {
     pub fn new(config: WebDavConfig) -> Self {
-        Self { http: Client::new(), config }
+        Self { http: no_proxy_client(), config }
     }
 
     pub fn remote_path(&self) -> String {
@@ -446,7 +452,7 @@ impl WebDavClient {
 
 impl SnippetSyncClient {
     pub fn new(config: SnippetSyncConfig) -> Self {
-        Self { http: Client::new(), config }
+        Self { http: no_proxy_client(), config }
     }
 
     pub async fn test(&self) -> Result<(), String> {

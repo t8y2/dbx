@@ -1001,6 +1001,21 @@ test("ranks exact keyword matches above prefix-matching routines (#3002)", () =>
   assert.equal(items[0]?.type, "keyword");
 });
 
+test("preserves an exact routine match before truncating candidates", () => {
+  const sql = "select aaa";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [],
+    objects: [
+      ...Array.from({ length: 200 }, (_, index) => ({ name: `a_a_a_${index}`, type: "procedure" as const })),
+      { name: "aaa", type: "function" },
+    ],
+    columnsByTable: new Map(),
+  });
+
+  assert.equal(items[0]?.label, "aaa");
+  assert.equal(items[0]?.type, "function");
+});
+
 test("ranks an exact table label match first", () => {
   const sql = "select * from orders";
   const items = buildSqlCompletionItems(sql, sql.length, {

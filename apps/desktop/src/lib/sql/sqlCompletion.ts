@@ -2721,6 +2721,8 @@ function buildObjectItems(context: SqlCompletionContext, objects: SqlCompletionO
         detail,
         apply: object.type === "trigger" || object.type === "package" ? applyName : `${applyName}()`,
         boost: computeBoost(object.name, context.prefix) + (object.type === "procedure" ? 1800 : object.type === "package" ? 1600 : 900),
+        // Preserve exact routine matches before the capped candidate list is truncated.
+        exactMatch: !!context.prefix && object.name.toLowerCase() === context.prefix.toLowerCase(),
       };
     })
     .sort(compareCompletionItems)

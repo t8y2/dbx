@@ -204,7 +204,6 @@ export async function describeTable(config: ConnectionConfig, table: string, sch
 }
 
 export async function executeQuery(config: ConnectionConfig, sql: string, options?: QueryOptions): Promise<QueryResult> {
-  await ensureConnected(config);
   if (config.db_type === "mongodb") {
     if (parseMongoVersionCommand(sql)) {
       const res = await apiFetch("/api/mongo/server-version", {

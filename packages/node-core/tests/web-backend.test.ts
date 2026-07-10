@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "vitest";
 
-import { loadConnections, resetWebAuthForTests } from "../src/web-backend.js";
+import { executeQuery, loadConnections, resetWebAuthForTests } from "../src/web-backend.js";
 
 const originalFetch = globalThis.fetch;
 const originalWebUrl = process.env.DBX_WEB_URL;
@@ -122,4 +122,50 @@ test("web backend still allows DBX Web instances with password auth disabled", a
   }) as typeof fetch;
 
   assert.deepEqual(await loadConnections(), []);
+});
+
+test("web backend executes concurrent SQL queries without pre-connecting", async () => {
+  process.env.DBX_WEB_URL = "http://127.0.0.1:4224";
+  delete process.env.DBX_WEB_PASSWORD;
+  const calls: string[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    calls.push(url);
+    if (url.endsWith("/api/auth/check")) {
+      return jsonResponse({ authenticated: true, required: false, setup_required: false });
+    }
+    if (url.endsWith("/api/connection/connect")) {
+      throw new Error("query execution should not call /api/connection/connect");
+    }
+    if (url.endsWith("/api/query/execute")) {
+      const body = JSON.parse(String(init?.body)) as { sql: string };
+      const n = Number(body.sql.match(/select\s+(\d+)/i)?.[1] ?? 0);
+      return jsonResponse({
+        columns: ["n"],
+        rows: [[n]],
+      });
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+
+  const config = {
+    id: "oracle-1",
+    name: "Oracle",
+    db_type: "oracle",
+    host: "127.0.0.1",
+    port: 1521,
+    username: "app",
+    password: "",
+    database: "orcl",
+    ssh_enabled: false,
+    ssl: false,
+  } as const;
+  const results = await Promise.all([1, 2, 3, 4].map((n) => executeQuery(config, `select ${n} as n from dual`)));
+
+  assert.deepEqual(
+    results.map((result) => result.rows[0]?.n),
+    [1, 2, 3, 4],
+  );
+  assert.equal(calls.filter((url) => url.endsWith("/api/connection/connect")).length, 0);
+  assert.equal(calls.filter((url) => url.endsWith("/api/query/execute")).length, 4);
 });

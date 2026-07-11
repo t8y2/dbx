@@ -5,7 +5,7 @@ import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { canReloadUnavailableDataTab } from "@/lib/table/tableDataRefresh";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { Check, Columns3, Columns3Cog, EyeOff, Loader2, Search, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Timer, Wrench, Toolbox, ListChecks, Database, Download, Upload, X, Pin, Rows3, SquareDashed, Minus, Plus } from "@lucide/vue";
+import { Check, Columns3, Columns3Cog, EyeOff, Loader2, Search, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Timer, Wrench, Toolbox, ListChecks, Database, Download, Upload, X, Pin, Rows3, SquareDashed, Minus, Plus, ShieldAlert } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -206,6 +206,11 @@ const activeEffectiveDatabaseType = computed(() => effectiveDatabaseTypeForConne
 const activeDataTabExecutionDatabase = computed(() => dataTabExecutionDatabase(props.activeConnection, props.activeTab.database, activeDataTabTableMeta.value?.catalog));
 const activeProductionContext = computed(() => productionContextForDatabase(props.activeConnection, props.activeTab.database));
 const productionWatermarkText = computed(() => (locale.value.startsWith("zh") ? "生产环境" : "PROD"));
+const productionSessionDetail = computed(() => {
+  if (!activeProductionContext.value.active) return "";
+  if (activeProductionContext.value.reason === "connection") return t("production.connection");
+  return activeProductionContext.value.databases.join(", ") || t("production.databases");
+});
 
 function findNodeInTree(nodes: TreeNode[], id: string): TreeNode | undefined {
   for (const node of nodes) {
@@ -848,7 +853,12 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
 </script>
 
 <template>
-  <div class="flex flex-col flex-1 min-h-0">
+  <div class="production-session-shell flex flex-col flex-1 min-h-0" :class="{ 'production-session-shell--active': activeProductionContext.active }">
+    <div v-if="activeProductionContext.active" class="production-session-strip flex h-7 shrink-0 items-center gap-2 border-b border-red-500/35 bg-red-500/10 px-3 text-xs font-semibold text-red-800 shadow-[inset_0_1px_0_rgb(239_68_68_/_0.28)] dark:text-red-200">
+      <ShieldAlert class="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+      <span class="font-mono uppercase tracking-normal">{{ t("production.title") }}</span>
+      <span v-if="productionSessionDetail" class="min-w-0 truncate rounded-[4px] border border-red-500/25 bg-background/65 px-1.5 py-0.5 font-medium text-red-700 dark:text-red-200">{{ productionSessionDetail }}</span>
+    </div>
     <!-- Query mode: editor + results -->
     <template v-if="activeTab.mode === 'query'">
       <Splitpanes horizontal class="query-output-splitpanes flex-1 min-h-0 overflow-hidden" @resized="onResultsResized">
@@ -1769,6 +1779,14 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
 <style scoped>
 .query-output-splitpanes {
   isolation: isolate;
+}
+
+.production-session-shell--active {
+  box-shadow: inset 3px 0 0 color-mix(in oklch, var(--destructive) 78%, transparent);
+}
+
+.production-session-strip {
+  background-image: linear-gradient(90deg, color-mix(in oklch, var(--destructive) 14%, transparent), color-mix(in oklch, var(--destructive) 7%, transparent));
 }
 
 .query-output-splitpanes :deep(> .splitpanes__splitter) {

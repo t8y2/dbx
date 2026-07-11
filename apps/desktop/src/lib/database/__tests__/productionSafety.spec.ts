@@ -46,6 +46,27 @@ describe("production SQL safety", () => {
     }
   });
 
+  it("detects qualified procedure calls and privilege targets", () => {
+    for (const sql of ["CALL prod_app.purge_users()", "CALL `prod_app`.`purge_users`()", "GRANT ALL ON prod_app.* TO 'u'@'%'", "GRANT EXECUTE ON PROCEDURE prod_app.purge_users TO 'u'@'%'"]) {
+      expect(assessProductionSql(sql, connection(), "staging")).toMatchObject({ active: true, isMutation: true, databases: ["prod_app"] });
+    }
+  });
+
+  it("allows resolved non-production procedure and privilege targets", () => {
+    expect(assessProductionSql("CALL staging.purge_users()", connection(), "staging")).toMatchObject({ active: false, isMutation: true });
+    expect(assessProductionSql("GRANT ALL ON staging.* TO 'u'@'%'", connection(), "staging")).toMatchObject({ active: false, isMutation: true });
+  });
+
+  it("conservatively confirms ambiguous production targets", () => {
+    for (const sql of ["CALL purge_users()", "GRANT PROCESS ON *.* TO 'u'@'%'", "GRANT ALL ON users TO 'u'@'%'", "CREATE USER 'u'@'%'"]) {
+      expect(assessProductionSql(sql, connection(), "staging")).toMatchObject({ active: true, isMutation: true, databases: ["prod_app"] });
+    }
+  });
+
+  it("does not treat read-only qualified references as write targets", () => {
+    expect(assessProductionSql("SELECT * FROM prod_app.orders; DELETE FROM staging.users WHERE id = 1", connection(), "staging")).toMatchObject({ active: false, isMutation: true });
+  });
+
   it("treats unrecognized SQL as a production mutation until proven read-only", () => {
     expect(isProductionMutation("MAINTAIN UNKNOWN THING")).toBe(true);
     expect(assessProductionSql("MAINTAIN UNKNOWN THING", connection(), "prod_app")).toMatchObject({ active: true, isMutation: true });

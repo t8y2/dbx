@@ -7,10 +7,59 @@ export interface ProductionSqlAssessment {
   databases: string[];
 }
 
-const USE_RE = /^\s*USE\s+([`"[]?[^\s;`"\]]+[`"\]]?)/i;
-const QUALIFIED_IDENTIFIER_RE = /\b(?:FROM|JOIN|UPDATE|INTO|TABLE|REFERENCES)\s+((?:`[^`]+`|"[^"]+"|\[[^\]]+\]|[\w$-]+)\s*\.\s*(?:`[^`]+`|"[^"]+"|\[[^\]]+\]|[\w$-]+))/gi;
-const DATABASE_TARGET_RE = /\b(?:CREATE|ALTER|DROP)\s+(?:DATABASE|SCHEMA)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?([`"[]?[^\s;`"\]]+[`"\]]?)/gi;
-const COPY_TARGET_RE = /^\s*COPY\s+((?:`[^`]+`|"[^"]+"|\[[^\]]+\]|[\w$-]+)\s*\.\s*(?:`[^`]+`|"[^"]+"|\[[^\]]+\]|[\w$-]+))\s+FROM\b/i;
+const IDENTIFIER_PATTERN = String.raw`(?=[A-Za-z0-9_@$#-]*[A-Za-z_@$#])[A-Za-z0-9_@$#-]+`;
+const QUALIFIED_NAME_PATTERN = String.raw`${IDENTIFIER_PATTERN}\s*\.\s*(?:\*|${IDENTIFIER_PATTERN})(?:\s*\.\s*(?:\*|${IDENTIFIER_PATTERN}))?`;
+const USE_RE = new RegExp(String.raw`^\s*USE\s+(${IDENTIFIER_PATTERN})`, "i");
+const DML_TARGET_RE = new RegExp(String.raw`\b(?:FROM|JOIN|UPDATE|INTO|REFERENCES)\s+(${QUALIFIED_NAME_PATTERN})`, "gi");
+const DDL_OBJECT_TARGET_RE = new RegExp(String.raw`\b(?:CREATE|ALTER|DROP)\s+(?:OR\s+REPLACE\s+)?(?:TABLE|VIEW|MATERIALIZED\s+VIEW|INDEX|SEQUENCE|FUNCTION|PROCEDURE|ROUTINE|TRIGGER|EVENT|TYPE|SYNONYM)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(?:ONLY\s+)?(${QUALIFIED_NAME_PATTERN})`, "gi");
+const INDEX_ON_TARGET_RE = new RegExp(String.raw`\b(?:CREATE|ALTER|DROP)\s+(?:UNIQUE\s+)?INDEX\b[\s\S]*?\bON\s+(${QUALIFIED_NAME_PATTERN})`, "gi");
+const DATABASE_TARGET_RE = new RegExp(String.raw`\b(?:CREATE|ALTER|DROP)\s+(DATABASE|SCHEMA|CATALOG)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(${IDENTIFIER_PATTERN})`, "gi");
+const COPY_TARGET_RE = new RegExp(String.raw`^\s*COPY\s+(${QUALIFIED_NAME_PATTERN})\s+FROM\b`, "i");
+const ROUTINE_CALL_TARGET_RE = new RegExp(String.raw`\b(?:CALL|EXEC|EXECUTE)\s+(${QUALIFIED_NAME_PATTERN})`, "gi");
+const PRIVILEGE_TARGET_RE = new RegExp(String.raw`\b(?:GRANT|REVOKE|DENY)\b[\s\S]*?\bON\s+(?:(?:TABLE|SEQUENCE|FUNCTION|PROCEDURE|ROUTINE|OBJECT)\s+|OBJECT\s*::\s*)?(${QUALIFIED_NAME_PATTERN})`, "gi");
+const PRIVILEGE_DATABASE_TARGET_RE = new RegExp(String.raw`\b(?:GRANT|REVOKE|DENY)\b[\s\S]*?\bON\s+(?:DATABASE|CATALOG)(?:::|\s+)\s*(${IDENTIFIER_PATTERN})`, "gi");
+const GLOBAL_PRIVILEGE_TARGET_RE = /\b(?:GRANT|REVOKE|DENY)\b[\s\S]*?\bON\s+\*\s*\.\s*\*/i;
+const GLOBAL_DDL_TARGET_RE = /^\s*(?:CREATE|ALTER|DROP)\s+(?:USER|ROLE|LOGIN|SERVER|TABLESPACE|RESOURCE|PROFILE|ACCOUNT)\b/i;
+const TARGET_AMBIGUOUS_KEYWORDS = new Set(["call", "exec", "execute", "grant", "revoke", "deny"]);
+const UNQUALIFIED_TARGET_KEYWORDS = new Set(["insert", "update", "delete", "merge", "replace", "load", "copy", "truncate", "create", "alter", "drop"]);
+const THREE_PART_DATABASE_QUALIFIER_TYPES = new Set(["sqlserver", "snowflake", "trino", "prestosql", "databricks", "bigquery"]);
+const SCHEMA_FIRST_QUALIFIER_TYPES = new Set([
+  "postgres",
+  "redshift",
+  "gaussdb",
+  "kwdb",
+  "opengauss",
+  "kingbase",
+  "highgo",
+  "vastbase",
+  "yashandb",
+  "oracle",
+  "oceanbase-oracle",
+  "dameng",
+  "firebird",
+  "exasol",
+  "teradata",
+  "vertica",
+  "db2",
+  "informix",
+  "h2",
+  "iris",
+  "xugu",
+  "oscar",
+  "gbase",
+  "saphana",
+  "sqlserver",
+  "snowflake",
+  "trino",
+  "prestosql",
+  "databricks",
+  "bigquery",
+]);
+
+interface ReferencedDatabaseAssessment {
+  databases: string[];
+  uncertain: boolean;
+}
 
 /** Normalizes quoted database names before production scope comparison. */
 export function normalizeProductionDatabase(value: string | undefined | null): string {
@@ -41,34 +90,89 @@ export function assessProductionSql(sql: string, config: ConnectionConfig | unde
   const marked = new Set((config.production_databases ?? []).map(normalizeProductionDatabase).filter(Boolean));
   if (!marked.size) return { active: false, isMutation, databases: [] };
 
-  const targets = new Set<string>();
+  const targets = referencedDatabases(statements, config.db_type, activeDatabase);
+  const databases = targets.databases.filter((database) => marked.has(normalizeProductionDatabase(database)));
+  return { active: databases.length > 0 || targets.uncertain, isMutation, databases: databases.length > 0 ? databases : targets.uncertain ? [...marked] : [] };
+}
+
+function referencedDatabases(statements: string[], dbType: string, activeDatabase?: string): ReferencedDatabaseAssessment {
+  const databases = new Set<string>();
+  let uncertain = false;
   let useDatabase = "";
+  const normalizedActiveDatabase = normalizeProductionDatabase(activeDatabase);
+
   for (const statement of statements) {
+    const beforeSize = databases.size;
+    const statementAssessment = classifySqlRisk(statement);
+    const statementIsMutation = isSqlRiskMutation(statementAssessment.risk);
     const useMatch = statement.match(USE_RE);
     if (useMatch?.[1]) {
       useDatabase = normalizeProductionDatabase(useMatch[1]);
       continue;
     }
-    if (isSqlRiskMutation(classifySqlRisk(statement).risk) && useDatabase) targets.add(useDatabase);
+    if (!statementIsMutation) continue;
+    if (useDatabase) databases.add(useDatabase);
 
-    QUALIFIED_IDENTIFIER_RE.lastIndex = 0;
-    for (const match of statement.matchAll(QUALIFIED_IDENTIFIER_RE)) {
-      const database = normalizeProductionDatabase(match[1]?.split(".")[0]);
-      if (database) targets.add(database);
-    }
+    collectQualifiedTargetDatabases(statement, dbType, databases, DML_TARGET_RE, DDL_OBJECT_TARGET_RE, INDEX_ON_TARGET_RE, ROUTINE_CALL_TARGET_RE, PRIVILEGE_TARGET_RE);
     for (const match of statement.matchAll(DATABASE_TARGET_RE)) {
+      const database = databaseTargetKindMeansDatabase(match[1], dbType) ? normalizeProductionDatabase(match[2]) : "";
+      if (database) databases.add(database);
+    }
+    for (const match of statement.matchAll(PRIVILEGE_DATABASE_TARGET_RE)) {
       const database = normalizeProductionDatabase(match[1]);
-      if (database) targets.add(database);
+      if (database) databases.add(database);
     }
     const copyTarget = statement.match(COPY_TARGET_RE);
     if (copyTarget?.[1]) {
-      const database = normalizeProductionDatabase(copyTarget[1].split(".")[0]);
-      if (database) targets.add(database);
+      const database = databaseFromQualifiedName(copyTarget[1], dbType);
+      if (database) databases.add(database);
+    }
+    uncertain = uncertain || GLOBAL_PRIVILEGE_TARGET_RE.test(statement) || isAmbiguousProductionTargetStatement(statement, statementAssessment, databases.size > beforeSize, !!(useDatabase || normalizedActiveDatabase));
+  }
+  return { databases: [...databases], uncertain };
+}
+
+function collectQualifiedTargetDatabases(statement: string, dbType: string, databases: Set<string>, ...patterns: RegExp[]): void {
+  for (const pattern of patterns) {
+    pattern.lastIndex = 0;
+    for (const match of statement.matchAll(pattern)) {
+      const database = databaseFromQualifiedName(match[1], dbType);
+      if (database) databases.add(database);
     }
   }
+}
 
-  const databases = [...targets].filter((database) => marked.has(database));
-  return { active: databases.length > 0, isMutation, databases };
+function databaseFromQualifiedName(qualifiedName: string | undefined, dbType: string): string {
+  const parts = String(qualifiedName ?? "")
+    .split(".")
+    .map(normalizeProductionDatabase)
+    .filter(Boolean);
+  if (parts.length < 2) return "";
+  if (qualifiedFirstPartIsDatabase(dbType, parts.length)) return parts[0] ?? "";
+  return "";
+}
+
+function qualifiedFirstPartIsDatabase(dbType: string, partCount: number): boolean {
+  const normalizedType = dbType.toLowerCase();
+  if (partCount >= 3 && THREE_PART_DATABASE_QUALIFIER_TYPES.has(normalizedType)) return true;
+  if (SCHEMA_FIRST_QUALIFIER_TYPES.has(normalizedType)) return false;
+  return partCount >= 2;
+}
+
+function databaseTargetKindMeansDatabase(kind: string | undefined, dbType: string): boolean {
+  const normalizedKind = String(kind ?? "").toLowerCase();
+  if (normalizedKind === "database" || normalizedKind === "catalog") return true;
+  if (normalizedKind !== "schema") return false;
+  return !SCHEMA_FIRST_QUALIFIER_TYPES.has(dbType.toLowerCase());
+}
+
+function isAmbiguousProductionTargetStatement(statement: string, assessment: ReturnType<typeof classifySqlRisk>, hasResolvedTarget: boolean, hasCurrentDatabase: boolean): boolean {
+  if (!isSqlRiskMutation(assessment.risk)) return false;
+  if (assessment.risk === "unknown") return true;
+  const firstKeyword = assessment.firstKeyword;
+  if (firstKeyword && TARGET_AMBIGUOUS_KEYWORDS.has(firstKeyword) && !hasResolvedTarget) return true;
+  if (firstKeyword && UNQUALIFIED_TARGET_KEYWORDS.has(firstKeyword) && !hasResolvedTarget && !hasCurrentDatabase) return true;
+  return GLOBAL_DDL_TARGET_RE.test(statement);
 }
 
 /** MCP receives Mongo shell text rather than SQL, so use a conservative write detector. */

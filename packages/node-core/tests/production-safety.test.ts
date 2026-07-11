@@ -28,15 +28,30 @@ describe("production safety", () => {
   });
 
   it("detects production writes hidden behind parser-sensitive SQL forms", () => {
-    for (const sql of [
-      "EXPLAIN ANALYZE DELETE FROM prod_app.users WHERE id = 1",
-      "/*! DELETE FROM prod_app.users WHERE id = 1 */",
-      "COPY prod_app.users FROM '/tmp/users.csv'",
-      "SELECT * INTO prod_app.backup_users FROM users",
-      "SELECT * FROM prod_app.users INTO OUTFILE '/tmp/users.csv'",
-    ]) {
+    for (const sql of ["EXPLAIN ANALYZE DELETE FROM prod_app.users WHERE id = 1", "/*! DELETE FROM prod_app.users WHERE id = 1 */", "COPY prod_app.users FROM '/tmp/users.csv'", "SELECT * INTO prod_app.backup_users FROM users", "SELECT * FROM prod_app.users INTO OUTFILE '/tmp/users.csv'"]) {
       expect(assessProductionSql(sql, connection(), "staging")).toMatchObject({ active: true, isMutation: true, databases: ["prod_app"] });
     }
+  });
+
+  it("detects qualified procedure calls and privilege targets", () => {
+    for (const sql of ["CALL prod_app.purge_users()", "CALL `prod_app`.`purge_users`()", "GRANT ALL ON prod_app.* TO 'u'@'%'", "GRANT EXECUTE ON PROCEDURE prod_app.purge_users TO 'u'@'%'"]) {
+      expect(assessProductionSql(sql, connection(), "staging")).toMatchObject({ active: true, isMutation: true, databases: ["prod_app"] });
+    }
+  });
+
+  it("allows resolved non-production procedure and privilege targets", () => {
+    expect(assessProductionSql("CALL staging.purge_users()", connection(), "staging")).toMatchObject({ active: false, isMutation: true });
+    expect(assessProductionSql("GRANT ALL ON staging.* TO 'u'@'%'", connection(), "staging")).toMatchObject({ active: false, isMutation: true });
+  });
+
+  it("conservatively confirms ambiguous production targets", () => {
+    for (const sql of ["CALL purge_users()", "GRANT PROCESS ON *.* TO 'u'@'%'", "GRANT ALL ON users TO 'u'@'%'", "CREATE USER 'u'@'%'"]) {
+      expect(assessProductionSql(sql, connection(), "staging")).toMatchObject({ active: true, isMutation: true, databases: ["prod_app"] });
+    }
+  });
+
+  it("does not treat read-only qualified references as write targets", () => {
+    expect(assessProductionSql("SELECT * FROM prod_app.orders; DELETE FROM staging.users WHERE id = 1", connection(), "staging")).toMatchObject({ active: false, isMutation: true });
   });
 
   it("treats unrecognized SQL as a mutation when production is selected", () => {

@@ -16,7 +16,7 @@ interface SqlRiskToken {
 
 const READ_KEYWORDS = new Set(["select", "show", "describe", "desc", "values", "table"]);
 const WRITE_KEYWORDS = new Set(["insert", "update", "delete", "merge", "replace", "upsert", "load", "call", "exec", "execute", "flush"]);
-const DDL_KEYWORDS = new Set(["create", "alter", "drop", "truncate", "rename", "grant", "revoke", "comment", "reindex", "vacuum", "optimize"]);
+const DDL_KEYWORDS = new Set(["create", "alter", "drop", "truncate", "rename", "grant", "revoke", "deny", "comment", "reindex", "vacuum", "optimize"]);
 const TRANSACTION_KEYWORDS = new Set(["begin", "start", "commit", "rollback", "abort", "savepoint", "release"]);
 const EXPLAIN_OPTION_KEYWORDS = new Set(["explain", "analyze", "analyse", "verbose", "query", "plan", "format", "type", "costs", "buffers", "timing", "summary", "settings", "wal", "generic_plan"]);
 const PRIMARY_STATEMENT_KEYWORDS = new Set([...READ_KEYWORDS, ...WRITE_KEYWORDS, ...DDL_KEYWORDS, ...TRANSACTION_KEYWORDS, "with", "copy", "pragma", "use", "set"]);
@@ -33,10 +33,7 @@ export function splitSqlStatementsForSafety(sql: string): string[] {
 export function classifySqlRisk(sql: string): SqlRiskAssessment {
   const statements = splitSqlStatementsForSafety(sql).map(classifySqlStatementRisk);
   if (!statements.length) return { risk: "unknown", statements: [] };
-  const highest = statements.reduce<SqlRiskStatementAssessment>(
-    (current, statement) => (RISK_ORDER[statement.risk] > RISK_ORDER[current.risk] ? statement : current),
-    { risk: "read" },
-  );
+  const highest = statements.reduce<SqlRiskStatementAssessment>((current, statement) => (RISK_ORDER[statement.risk] > RISK_ORDER[current.risk] ? statement : current), { risk: "read" });
   return { ...highest, statements };
 }
 

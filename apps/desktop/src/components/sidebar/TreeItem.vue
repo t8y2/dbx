@@ -147,6 +147,7 @@ import { supportsDatabaseUserAdmin } from "@/lib/database/databaseUserAdmin";
 import { canCloseSidebarDatabaseConnection, isSidebarDatabaseOpened } from "@/lib/sidebar/sidebarDatabaseOpenState";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { batchTableEmptyFeedback, runBatchTableEmpty } from "@/lib/sidebar/batchTableEmpty";
+import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
 import InstallExtensionDialog from "@/components/objects/InstallExtensionDialog.vue";
@@ -2085,7 +2086,7 @@ async function refreshMutatedTableDataTabsForNode(node: TreeNode) {
   }
 }
 
-async function refreshMutatedTableDataTabsForNodes(nodes: TreeNode[]) {
+async function refreshMutatedTableDataTabsForNodes(nodes: readonly TreeNode[]) {
   for (const target of nodes) {
     await refreshMutatedTableDataTabsForNode(target);
   }
@@ -2497,19 +2498,20 @@ async function confirmBatchDrop() {
 async function confirmBatchTruncate() {
   const targets = selectedBatchTruncateTargets();
   if (!targets.length) return;
-  const succeeded: TreeNode[] = [];
   try {
     const useCascade = canBatchTruncateCascade.value && batchTruncateCascade.value;
-    for (const target of targets) {
-      if (!target.connectionId || !target.database) continue;
-      await connectionStore.ensureConnected(target.connectionId);
-      const sql = await truncateSqlForTreeNode(target, { cascade: useCascade });
-      if (!sql) continue;
-      await api.executeQuery(target.connectionId, target.database, sql, target.schema);
-      succeeded.push(target);
-    }
+    await runBatchTableTruncate(
+      targets,
+      async (target) => {
+        if (!target.connectionId || !target.database) return false;
+        await connectionStore.ensureConnected(target.connectionId);
+        const sql = await truncateSqlForTreeNode(target, { cascade: useCascade });
+        if (!sql) return false;
+        await api.executeQuery(target.connectionId, target.database, sql, target.schema);
+      },
+      refreshMutatedTableDataTabsForNodes,
+    );
     toast(t("contextMenu.batchTruncateSuccess", { count: targets.length }), 3000);
-    await refreshMutatedTableDataTabsForNodes(succeeded);
     showBatchTruncateConfirm.value = false;
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);

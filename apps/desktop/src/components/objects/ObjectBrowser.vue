@@ -95,6 +95,7 @@ import {
 } from "@/lib/table/objectBrowserRows";
 import { resolveRowClickAction, shouldDeferSingleClick, type ObjectBrowserRowAction } from "@/lib/table/objectBrowserRowAction";
 import { createSidePanelRequestGuard } from "@/lib/table/sidePanelRequestGuard";
+import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
 
 type ObjectFilter = "all" | "tables" | "views" | "materializedViews" | "procedures" | "functions" | "sequences" | "packages";
 type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
@@ -1447,7 +1448,7 @@ function tableDataRefreshTargetForRow(row: ObjectBrowserRow) {
   };
 }
 
-async function refreshMutatedTableDataTabsForRows(rows: ObjectBrowserRow[]) {
+async function refreshMutatedTableDataTabsForRows(rows: readonly ObjectBrowserRow[]) {
   for (const row of rows) {
     const target = tableDataRefreshTargetForRow(row);
     try {
@@ -1461,16 +1462,17 @@ async function refreshMutatedTableDataTabsForRows(rows: ObjectBrowserRow[]) {
 async function confirmBatchTruncateTables() {
   const targets = [...selectedTableRows.value];
   if (targets.length === 0) return;
-  const succeeded: ObjectBrowserRow[] = [];
   try {
     const useCascade = canBatchTruncateCascade.value && batchTruncateCascade.value;
-    for (const row of targets) {
-      const sql = await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: useCascade }));
-      await api.executeQuery(props.connection.id, props.database, sql);
-      succeeded.push(row);
-    }
+    await runBatchTableTruncate(
+      targets,
+      async (row) => {
+        const sql = await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: useCascade }));
+        await api.executeQuery(props.connection.id, props.database, sql);
+      },
+      refreshMutatedTableDataTabsForRows,
+    );
     toast(t("objects.batchTruncateSuccess", { count: targets.length }));
-    await refreshMutatedTableDataTabsForRows(succeeded);
     clearTableSelection();
     showBatchTruncateConfirm.value = false;
     await reload();

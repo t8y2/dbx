@@ -1896,7 +1896,7 @@ onUnmounted(() => {
                     @editor-selection-state-change="(tabId: string, selection: { anchor: number; head: number }) => queryStore.updateEditorSelection(tabId, selection)"
                     @format-error="toast(t('toolbar.formatSqlFailed'))"
                     @save-sql="void openSaveSqlDialog()"
-                    @reload="(sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number) => onReloadData(sql, searchText, whereInput, orderBy, limit, offset)"
+                    @reload="(sql, searchText, whereInput, orderBy, limit, offset, intent) => onReloadData(sql, searchText, whereInput, orderBy, limit, offset, intent)"
                     @paginate="onPaginate"
                     @sort="onSort"
                     @execute-sql="onExecuteSql"

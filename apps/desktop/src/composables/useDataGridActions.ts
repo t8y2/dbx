@@ -13,6 +13,7 @@ import { effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from 
 import { applyMongoFindSort } from "@/lib/mongo/mongoShellCommand";
 import { uuid } from "@/lib/common/utils";
 import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
+import type { DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
 import { queryResultBaseSql, queryResultExecutionSql } from "@/lib/tabs/tabPresentation";
 
 const DATA_TAB_METADATA_TTL_MS = 30_000;
@@ -109,7 +110,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     await queryStore.executeTabSql(tab.id, sql, { preserveResultDuringExecution: true });
   }
 
-  async function onReloadData(sql?: string, _searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number) {
+  async function onReloadData(sql?: string, _searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent) {
     const tab = activeTab.value;
     if (!tab) return;
     const traceId = uuid().slice(0, 8);
@@ -160,6 +161,22 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
         queryStore.setExecuting(tab.id, false);
         throw e;
       }
+      return;
+    }
+    if (intent === "refresh" && tab.mode === "query" && (tab.results?.length ?? 0) > 1) {
+      const resultGroupSql = tab.resultBaseSql || tab.lastExecutedSql || tab.sql;
+      if (!resultGroupSql.trim()) return;
+      tab.resultSortColumn = undefined;
+      tab.resultSortColumnIndex = undefined;
+      tab.resultSortDirection = undefined;
+      tab.resultSortMode = undefined;
+      tab.resultSortedSql = undefined;
+      await queryStore.executeTabSql(tab.id, resultGroupSql, {
+        resultBaseSql: resultGroupSql,
+        resultSortedSql: undefined,
+        preserveResultDuringExecution: true,
+        preserveActiveResultIndex: true,
+      });
       return;
     }
     if (tab.resultSortedSql) {

@@ -71,6 +71,12 @@ export function hasCompleteTdengineRowIdentity(databaseType: DatabaseType | unde
   return primaryKeys.every((primaryKey) => availableColumns.has(primaryKey.toLowerCase()));
 }
 
+export function canDeleteExistingTdengineRows(databaseType: DatabaseType | undefined, primaryKeys: readonly string[]): boolean {
+  if (databaseType !== "tdengine") return true;
+  const rowPrimaryKeys = primaryKeys.filter((primaryKey) => primaryKey.toLowerCase() !== DBX_TDENGINE_TBNAME_COLUMN);
+  return rowPrimaryKeys.length <= 1;
+}
+
 export function hiveTablePropertiesIndicateTransactional(result: { rows: readonly (readonly unknown[])[] }): boolean {
   return result.rows.some((row) => {
     const name = String(row[0] ?? "")

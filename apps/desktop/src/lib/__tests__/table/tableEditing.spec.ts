@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DBX_ROWID_COLUMN,
   DBX_TDENGINE_TBNAME_COLUMN,
+  canDeleteExistingTdengineRows,
   canEditExistingTableRows,
   canUseKeylessRowPredicate,
   editablePrimaryKeys,
@@ -87,6 +88,14 @@ describe("tableEditing", () => {
     expect(hasCompleteTdengineRowIdentity("tdengine", stableKeys, ["tbname", "ts", "voltage"])).toBe(false);
     expect(hasCompleteTdengineRowIdentity("tdengine", ["ts", "seq"], ["ts", "seq", "voltage"])).toBe(true);
     expect(hasCompleteTdengineRowIdentity("postgres", ["id"], [])).toBe(true);
+  });
+
+  it("disables existing-row deletion for TDengine composite keys", () => {
+    expect(canDeleteExistingTdengineRows("tdengine", ["ts"])).toBe(true);
+    expect(canDeleteExistingTdengineRows("tdengine", [DBX_TDENGINE_TBNAME_COLUMN, "ts"])).toBe(true);
+    expect(canDeleteExistingTdengineRows("tdengine", ["ts", "seq"])).toBe(false);
+    expect(canDeleteExistingTdengineRows("tdengine", [DBX_TDENGINE_TBNAME_COLUMN, "ts", "seq"])).toBe(false);
+    expect(canDeleteExistingTdengineRows("postgres", ["id", "tenant_id"])).toBe(true);
   });
 
   it("treats ClickHouse row identifier cells as readonly on existing rows", () => {

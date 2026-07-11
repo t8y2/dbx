@@ -92,6 +92,7 @@ import { buildTableSelectSql, quoteTableIdentifier } from "@/lib/table/tableSele
 import { uuid } from "@/lib/common/utils";
 import { compactHeaderColumnType, resolveHeaderColumnType } from "@/lib/dataGrid/dataGridColumnType";
 import {
+  canDeleteExistingTdengineRows,
   canEditExistingTableRows,
   canInsertTableRows,
   canUseKeylessRowPredicate,
@@ -3648,6 +3649,7 @@ const hasDataGridInsertTarget = computed(() => {
 });
 const canInsertRows = computed(() => !!props.editable && hasDataGridInsertTarget.value);
 const canDeleteRows = computed(() => props.allowDeleteRows !== false && (!props.customSaveHandler || props.customSaveHandler.canDelete !== false));
+const canDeleteExistingRows = computed(() => !!props.customSaveHandler || canDeleteExistingTdengineRows(props.databaseType, props.tableMeta?.primaryKeys ?? []));
 watch(
   () => [props.databaseType, props.connectionId, props.database, props.tableMeta?.schema, props.tableMeta?.tableName],
   async () => {
@@ -4197,7 +4199,7 @@ function canDeleteRowItem(item: RowItem | undefined): boolean {
     isDraft: !!item.isDraft,
     isDeleted: item.isDeleted,
     isNew: item.isNew,
-    canEditExistingRows: canEditExistingRows.value,
+    canEditExistingRows: canEditExistingRows.value && canDeleteExistingRows.value,
     isSavingNewRow: isSavingNewRow(item),
   });
 }

@@ -51,6 +51,10 @@ pub(super) fn build_tdengine_data_grid_save_statements(options: &DataGridSaveSta
 }
 
 pub(super) fn build_tdengine_data_grid_rollback_statements(options: &DataGridSaveStatementOptions) -> Vec<String> {
+    if has_tdengine_composite_primary_key(options) && !options.new_rows.is_empty() {
+        return Vec::new();
+    }
+
     let save_columns = effective_columns(options);
     let mut statements = Vec::new();
 
@@ -114,6 +118,10 @@ pub(super) fn validate_tdengine_existing_rows(options: &DataGridSaveStatementOpt
         return None;
     }
 
+    if has_tdengine_composite_primary_key(options) && !options.deleted_rows.is_empty() {
+        return Some(tdengine_composite_key_delete_error());
+    }
+
     let save_columns = effective_columns(options);
     let primary_keys = tdengine_row_primary_keys(options);
     let requires_tbname = options
@@ -166,6 +174,10 @@ fn build_tdengine_delete_statement(
     save_columns: &[Option<String>],
     row: &[Value],
 ) -> Option<String> {
+    if has_tdengine_composite_primary_key(options) {
+        return None;
+    }
+
     let table_name = tdengine_tbname_value(save_columns, row).unwrap_or_else(|| options.table_meta.table_name.clone());
     let primary_keys = tdengine_row_primary_keys(options);
     let where_clause = build_primary_key_where(
@@ -195,12 +207,20 @@ fn tdengine_row_primary_keys(options: &DataGridSaveStatementOptions) -> Vec<Stri
         .collect()
 }
 
+fn has_tdengine_composite_primary_key(options: &DataGridSaveStatementOptions) -> bool {
+    tdengine_row_primary_keys(options).len() > 1
+}
+
 fn tdengine_row_identity_error() -> String {
     "TDengine row editing requires all row identifier columns in the result.".to_string()
 }
 
 fn tdengine_row_identity_readonly_error() -> String {
     "TDengine row identifier columns cannot be edited.".to_string()
+}
+
+fn tdengine_composite_key_delete_error() -> String {
+    "TDengine tables with composite keys do not support row deletion.".to_string()
 }
 
 fn tdengine_insert_identity_error() -> String {

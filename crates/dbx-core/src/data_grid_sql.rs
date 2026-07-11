@@ -2985,7 +2985,7 @@ mod tests {
     }
 
     #[test]
-    fn prepares_tdengine_composite_key_delete_from_same_timestamp_stable_rows() {
+    fn rejects_tdengine_composite_key_delete_from_same_timestamp_stable_rows() {
         let result = prepare_data_grid_save(DataGridSaveStatementOptions {
             database_type: Some(DatabaseType::Tdengine),
             table_meta: DataGridTableMeta {
@@ -3015,15 +3015,12 @@ mod tests {
             new_rows: vec![],
         });
 
-        assert_eq!(result.validation_error, None);
         assert_eq!(
-            result.statements,
-            vec!["DELETE FROM `dbx_tdengine_demo`.`device_a` WHERE `ts` = '2026-07-10T13:59:00.456+08:00' AND `seq` = 2;"]
+            result.validation_error,
+            Some("TDengine tables with composite keys do not support row deletion.".to_string())
         );
-        assert_eq!(
-            result.rollback_statements,
-            vec!["INSERT INTO `dbx_tdengine_demo`.`meters` (`tbname`, `ts`, `seq`, `voltage`) VALUES ('device_a', '2026-07-10T13:59:00.456+08:00', 2, 222.5);"]
-        );
+        assert!(result.statements.is_empty());
+        assert!(result.rollback_statements.is_empty());
     }
 
     #[test]
@@ -3172,7 +3169,7 @@ mod tests {
     }
 
     #[test]
-    fn prepares_tdengine_composite_key_insert_rollback_for_same_timestamp_rows() {
+    fn skips_tdengine_composite_key_insert_rollback_for_same_timestamp_rows() {
         let result = prepare_data_grid_save(DataGridSaveStatementOptions {
             database_type: Some(DatabaseType::Tdengine),
             table_meta: DataGridTableMeta {
@@ -3210,13 +3207,7 @@ mod tests {
                 "INSERT INTO `dbx_tdengine_demo`.`meters` (`tbname`, `ts`, `seq`, `voltage`) VALUES ('device_a', '2026-07-10T17:48:51.000+08:00', 2, 222.0);",
             ]
         );
-        assert_eq!(
-            result.rollback_statements,
-            vec![
-                "DELETE FROM `dbx_tdengine_demo`.`device_a` WHERE `ts` = '2026-07-10T17:48:51.000+08:00' AND `seq` = 1;",
-                "DELETE FROM `dbx_tdengine_demo`.`device_a` WHERE `ts` = '2026-07-10T17:48:51.000+08:00' AND `seq` = 2;",
-            ]
-        );
+        assert!(result.rollback_statements.is_empty());
     }
 
     #[test]

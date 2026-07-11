@@ -1817,6 +1817,7 @@ export default withEnglishFallback({
     moveColumnUp: "Mover coluna para cima",
     moveColumnDown: "Mover coluna para baixo",
     dragColumn: "Arraste para reordenar colunas",
+    localColumnOrderNotice: "A ordem das colunas é salva apenas localmente e não altera a estrutura do banco de dados.",
     yes: "Sim",
     no: "Não",
     emptyReadonly: "Nenhum registro",

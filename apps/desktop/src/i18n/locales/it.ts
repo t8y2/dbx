@@ -1815,6 +1815,7 @@ export default withEnglishFallback({
     moveColumnUp: "Sposta colonna su",
     moveColumnDown: "Sposta colonna giù",
     dragColumn: "Trascina per riordinare la colonna",
+    localColumnOrderNotice: "L'ordine delle colonne viene salvato solo localmente e non modifica la struttura del database.",
     yes: "Sì",
     no: "No",
     emptyReadonly: "Nessun record",

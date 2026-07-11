@@ -1892,6 +1892,7 @@ export default {
     moveColumnUp: "Move column up",
     moveColumnDown: "Move column down",
     dragColumn: "Drag to reorder column",
+    localColumnOrderNotice: "Column order is saved locally and does not change the database table structure.",
     yes: "Yes",
     no: "No",
     emptyReadonly: "No records",

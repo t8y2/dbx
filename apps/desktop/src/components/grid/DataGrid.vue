@@ -159,7 +159,18 @@ import { MAX_RESULT_PAGE_SIZE, MIN_RESULT_PAGE_SIZE, normalizeResultPageSize, re
 import { allNullColumnIndexes, filterColumnVisibilityOptions, hiddenColumnIndexesWithAllNullColumns, invertedHiddenColumnIndexes, nextHiddenColumnIndexes, removeAutoHiddenColumnIndexes, visibleColumnIndexesForFilter } from "@/lib/dataGrid/dataGridColumnVisibility";
 import { buildDataGridColumnLookupItems, filterDataGridColumnLookupItems } from "@/lib/dataGrid/dataGridColumnLookup";
 import { columnOrderKeysForIndexes, isDefaultColumnOrder, moveVisibleColumnIndex, orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
-import { dataGridColumnLayoutScopeKey, loadDataGridColumnOrder, removeDataGridColumnOrder, saveDataGridColumnOrder } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
+import {
+  dataGridColumnLayoutScopeKey,
+  loadDataGridColumnOrder,
+  loadTableDataGridColumnOrder,
+  removeDataGridColumnOrder,
+  removeTableDataGridColumnOrder,
+  saveDataGridColumnOrder,
+  saveTableDataGridColumnOrder,
+  TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT,
+  tableDataGridColumnOrderScopeKey,
+  type TableDataGridColumnOrderChangedDetail,
+} from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { parseClipboardTable, summarizeSelection } from "@/lib/dataGrid/gridSelection";
 import { columnHeaderCanvasPointerDisabled, columnHeaderClickShouldBeSuppressed, columnHeaderPreviewOffsetForColumn, columnHeaderTooltipDisabled } from "@/lib/dataGrid/dataGridColumnHeaderInteraction";
 
@@ -2554,6 +2565,15 @@ const columnLayoutScopeKey = computed(() =>
     sourceColumns: props.sourceColumns,
   }),
 );
+const tableColumnOrderScopeKey = computed(() => {
+  if (props.context !== "table-data" || !props.connectionId || !props.database || !props.tableMeta?.tableName) return "";
+  return tableDataGridColumnOrderScopeKey({
+    connectionId: props.connectionId,
+    database: props.database,
+    schema: props.tableMeta.schema,
+    tableName: props.tableMeta.tableName,
+  });
+});
 const persistedColumnOrderKeys = ref<string[]>([]);
 const displayableColumnIndexes = computed(() =>
   props.result.columns
@@ -2633,20 +2653,31 @@ function invertColumnVisibility() {
   hiddenColumnIndexes.value = invertedHiddenColumnIndexes(displayableColumnIndexes.value, hiddenColumnIndexes.value);
 }
 function loadColumnOrder() {
-  persistedColumnOrderKeys.value = loadDataGridColumnOrder(columnLayoutScopeKey.value, columnOrderKeys.value);
+  const tableOrder = tableColumnOrderScopeKey.value ? loadTableDataGridColumnOrder(tableColumnOrderScopeKey.value) : [];
+  persistedColumnOrderKeys.value = tableOrder.length ? tableOrder : loadDataGridColumnOrder(columnLayoutScopeKey.value, columnOrderKeys.value);
+}
+function onTableDataGridColumnOrderChanged(event: Event) {
+  if (!(event instanceof CustomEvent)) return;
+  const detail = event.detail as TableDataGridColumnOrderChangedDetail | undefined;
+  if (!detail || detail.scopeKey !== tableColumnOrderScopeKey.value) return;
+  loadColumnOrder();
+  nextTick(refreshGridScrollerMetrics);
 }
 function persistColumnOrder(indexes: number[]) {
   if (isDefaultColumnOrder(displayableColumnIndexes.value, indexes)) {
     removeDataGridColumnOrder(columnLayoutScopeKey.value);
+    if (tableColumnOrderScopeKey.value) removeTableDataGridColumnOrder(tableColumnOrderScopeKey.value);
     persistedColumnOrderKeys.value = [];
     return;
   }
   const keys = columnOrderKeysForIndexes(indexes, columnOrderKeys.value);
   persistedColumnOrderKeys.value = keys;
   saveDataGridColumnOrder(columnLayoutScopeKey.value, columnOrderKeys.value, keys);
+  if (tableColumnOrderScopeKey.value) saveTableDataGridColumnOrder(tableColumnOrderScopeKey.value, keys);
 }
 function resetColumnOrder() {
   removeDataGridColumnOrder(columnLayoutScopeKey.value);
+  if (tableColumnOrderScopeKey.value) removeTableDataGridColumnOrder(tableColumnOrderScopeKey.value);
   persistedColumnOrderKeys.value = [];
   nextTick(refreshGridScrollerMetrics);
 }
@@ -2678,7 +2709,7 @@ watch(allNullColumnIndexesForResult, () => {
   autoHiddenNullColumnIndexes.value = new Set();
   hideAllNullColumns();
 });
-watch(() => columnLayoutScopeKey.value, loadColumnOrder, { immediate: true });
+watch([columnLayoutScopeKey, tableColumnOrderScopeKey], loadColumnOrder, { immediate: true });
 const firstVisibleColumnIndex = computed(() => visibleColumnIndexes.value[0] ?? 0);
 function actualColumnIndex(visibleColumnIndex: number): number {
   return visibleColumnIndexes.value[visibleColumnIndex] ?? visibleColumnIndex;
@@ -6262,6 +6293,7 @@ onMounted(() => {
   window.visualViewport?.addEventListener("resize", resizeFocusedConditionInputs);
   window.addEventListener("dbx:ui-scale-applied", scheduleCanvasPixelRatioRefresh);
   window.addEventListener("dbx:ui-scale-applied", resizeFocusedConditionInputs);
+  window.addEventListener(TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, onTableDataGridColumnOrderChanged);
   document.addEventListener("pointerdown", onConditionSuggestionDocumentPointerDown, true);
 });
 onDeactivated(pauseCanvasGridWork);
@@ -6288,6 +6320,7 @@ onUnmounted(() => {
   window.visualViewport?.removeEventListener("resize", resizeFocusedConditionInputs);
   window.removeEventListener("dbx:ui-scale-applied", scheduleCanvasPixelRatioRefresh);
   window.removeEventListener("dbx:ui-scale-applied", resizeFocusedConditionInputs);
+  window.removeEventListener(TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, onTableDataGridColumnOrderChanged);
   document.removeEventListener("pointerdown", onConditionSuggestionDocumentPointerDown, true);
 });
 

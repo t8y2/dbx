@@ -1891,6 +1891,7 @@ export default withEnglishFallback({
     moveColumnUp: "上移字段",
     moveColumnDown: "下移字段",
     dragColumn: "拖拽调整字段顺序",
+    localColumnOrderNotice: "字段顺序仅保存在本地，不会修改数据库表结构。",
     yes: "是",
     no: "否",
     emptyReadonly: "暂无记录",

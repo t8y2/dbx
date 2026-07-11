@@ -1850,6 +1850,7 @@ export default withEnglishFallback({
     moveColumnUp: "列を上に移動",
     moveColumnDown: "列を下に移動",
     dragColumn: "ドラッグして列の順序を変更",
+    localColumnOrderNotice: "列の順序はローカルにのみ保存され、データベースのテーブル構造は変更されません。",
     yes: "はい",
     no: "いいえ",
     emptyReadonly: "レコードなし",

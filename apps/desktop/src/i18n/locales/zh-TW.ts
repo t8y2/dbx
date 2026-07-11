@@ -1721,6 +1721,7 @@ export default withEnglishFallback({
     moveColumnUp: "上移欄位",
     moveColumnDown: "下移欄位",
     dragColumn: "拖曳調整欄位順序",
+    localColumnOrderNotice: "欄位順序僅儲存在本機，不會修改資料庫資料表結構。",
     yes: "是",
     no: "否",
     emptyReadonly: "暫無記錄",

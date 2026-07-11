@@ -6,7 +6,7 @@ import * as api from "@/lib/backend/api";
 const MIN_UI_SCALE = 0.75;
 const MAX_UI_SCALE = 2;
 export const MAC_TRAFFIC_LIGHT_X = 16;
-export const MAC_TRAFFIC_LIGHT_BASE_Y = 22;
+export const MAC_TRAFFIC_LIGHT_BASE_Y = 18;
 const MAC_TRAFFIC_LIGHT_SCALE_DELTA_Y = 20;
 const MAC_TRAFFIC_LIGHT_RESERVED_INSET = 70;
 

@@ -34,9 +34,9 @@ describe("window controls", () => {
   });
 
   it("adjusts macOS traffic lights vertically with the UI scale", () => {
-    expect(macTrafficLightPositionForScale(1)).toEqual({ x: 16, y: 22 });
-    expect(macTrafficLightPositionForScale(0.9)).toEqual({ x: 16, y: 20 });
-    expect(macTrafficLightPositionForScale(1.1)).toEqual({ x: 16, y: 24 });
-    expect(macTrafficLightPositionForScale(1.25)).toEqual({ x: 16, y: 27 });
+    expect(macTrafficLightPositionForScale(1)).toEqual({ x: 16, y: 18 });
+    expect(macTrafficLightPositionForScale(0.9)).toEqual({ x: 16, y: 16 });
+    expect(macTrafficLightPositionForScale(1.1)).toEqual({ x: 16, y: 20 });
+    expect(macTrafficLightPositionForScale(1.25)).toEqual({ x: 16, y: 23 });
   });
 });

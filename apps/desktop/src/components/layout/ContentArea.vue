@@ -300,7 +300,7 @@ const activeQueryError = computed(() => {
   if (!result?.columns.includes("Error")) return "";
   return String(result.rows[0]?.[0] ?? "");
 });
-const hasQueryOutput = computed(() => !!props.activeTab.result || !!props.activeTab.explainPlan || !!props.activeTab.explainError || props.activeTab.isExecuting === true || props.activeTab.isExplaining === true);
+const hasQueryOutput = computed(() => !!props.activeTab.result || !!props.activeTab.explainPlan || !!props.activeTab.explainError || !!props.activeTab.explainTableResult || !!props.activeTab.explainTableError || props.activeTab.isExecuting === true || props.activeTab.isExplaining === true);
 const visibleResultItems = computed(() => tabularResultItems(props.activeTab.results ?? (props.activeTab.result ? [props.activeTab.result] : undefined)));
 const tabularResults = computed(() => tabularResultItems(props.activeTab.results));
 const allResultExportSheets = computed(() =>
@@ -330,7 +330,7 @@ const hasTabularResult = computed(() => {
   return visibleResultItems.value.length > 0;
 });
 const canShowResultOutput = computed(() => hasTabularResult.value || props.activeTab.isExecuting);
-const canShowExplainOutput = computed(() => !!props.activeTab.explainPlan || !!props.activeTab.explainError || props.activeTab.isExplaining === true);
+const canShowExplainOutput = computed(() => !!props.activeTab.explainPlan || !!props.activeTab.explainError || !!props.activeTab.explainTableResult || !!props.activeTab.explainTableError || props.activeTab.isExplaining === true);
 const showStandaloneResultToolbar = computed(() => props.activeOutputView !== "result" || !props.activeTab.result || !hasTabularResult.value);
 const standaloneResultToolbarCompact = computed(() => standaloneResultToolbarWidth.value > 0 && standaloneResultToolbarWidth.value < DATA_GRID_COMPACT_TOPBAR_WIDTH);
 let standaloneResultToolbarResizeObserver: ResizeObserver | undefined;
@@ -1009,7 +1009,17 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
               />
             </div>
 
-            <ExplainPlanViewer v-if="activeOutputView === 'explain'" class="flex-1 min-h-0" :plan="activeTab.explainPlan" :error="activeTab.explainError" :loading="activeTab.isExplaining" :source-sql="activeTab.lastExplainedSql" :explain-sql="activeTab.explainSql" />
+            <ExplainPlanViewer
+              v-if="activeOutputView === 'explain'"
+              class="flex-1 min-h-0"
+              :plan="activeTab.explainPlan"
+              :error="activeTab.explainError"
+              :loading="activeTab.isExplaining"
+              :source-sql="activeTab.lastExplainedSql"
+              :explain-sql="activeTab.explainSql"
+              :table-result="activeTab.explainTableResult"
+              :table-error="activeTab.explainTableError"
+            />
 
             <QueryChart v-else-if="activeOutputView === 'chart' && activeTab.result" class="flex-1 min-h-0" :result="activeTab.result" />
 

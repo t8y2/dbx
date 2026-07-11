@@ -326,3 +326,16 @@ fn driver_manifest_declares_expected_product_capabilities() {
     assert!(zookeeper.capabilities.driver_management);
     assert!(!zookeeper.capabilities.metadata_browse);
 }
+
+#[test]
+fn kingbase_declares_data_transfer_support() {
+    let manifest = driver_manifest();
+    let kingbase = manifest
+        .drivers
+        .iter()
+        .find(|driver| driver.db_type == DatabaseType::Kingbase)
+        .expect("Kingbase manifest entry");
+
+    assert!(kingbase.capabilities.table_import);
+    assert!(kingbase.capabilities.data_transfer);
+}

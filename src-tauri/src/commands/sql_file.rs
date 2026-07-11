@@ -8,9 +8,12 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::commands::connection::{ensure_connection_writable, AppState};
-use dbx_core::sql_file_import::{execute_sql_file_content, sql_file_error_progress, sql_file_progress};
+use dbx_core::sql_file_import::{
+    execute_sql_file_path, mysql_like_sql_file_can_execute_without_selected_database, read_sql_file_preview,
+    sql_file_progress,
+};
 
-pub use dbx_core::sql::{decode_sql_file_bytes, SqlFilePreview, SqlFileRequest, SqlFileStatus};
+pub use dbx_core::sql::{SqlFilePreview, SqlFileRequest, SqlFileStatus};
 
 static SQL_FILE_EXECUTIONS: OnceLock<RwLock<HashMap<String, CancellationToken>>> = OnceLock::new();
 
@@ -31,17 +34,16 @@ struct SqlFileSummary {
 pub async fn preview_sql_file(file_path: String) -> Result<SqlFilePreview, String> {
     let path = PathBuf::from(&file_path);
     let metadata = tokio::fs::metadata(&path).await.map_err(|e| e.to_string())?;
-    let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
-    let content = decode_sql_file_bytes(&bytes)?;
-    let preview = content.chars().take(20_000).collect();
+    let prefix = read_sql_file_preview(&path, 1_000_000).await?;
+    let can_execute_without_selected_database = mysql_like_sql_file_can_execute_without_selected_database(&prefix);
+    let preview = prefix.chars().take(20_000).collect();
 
     Ok(SqlFilePreview {
         file_name: path.file_name().and_then(|name| name.to_str()).unwrap_or("script.sql").to_string(),
         file_path,
         size_bytes: metadata.len(),
         preview,
-        can_execute_without_selected_database:
-            dbx_core::sql_file_import::mysql_like_sql_file_can_execute_without_selected_database(&content),
+        can_execute_without_selected_database,
     })
 }
 
@@ -88,25 +90,16 @@ async fn execute_sql_file_inner(
     token: CancellationToken,
     started_at: Instant,
 ) -> Result<(), String> {
-    let file_bytes = match tokio::fs::read(&request.file_path).await {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            let error = error.to_string();
-            emit_file_io_error_progress(app, &request.execution_id, started_at, error.clone());
-            return Err(error);
-        }
-    };
-    let file_content = match decode_sql_file_bytes(&file_bytes) {
-        Ok(content) => content,
-        Err(error) => {
-            emit_file_io_error_progress(app, &request.execution_id, started_at, error.clone());
-            return Err(error);
-        }
-    };
-
-    execute_sql_file_content(state.inner().as_ref(), request, &file_content, token, started_at, |progress| {
-        let _ = app.emit("sql-file-progress", progress);
-    })
+    execute_sql_file_path(
+        state.inner().as_ref(),
+        request,
+        PathBuf::from(&request.file_path).as_path(),
+        token,
+        started_at,
+        |progress| {
+            let _ = app.emit("sql-file-progress", progress);
+        },
+    )
     .await
 }
 
@@ -154,10 +147,6 @@ fn emit_progress(
             error,
         ),
     );
-}
-
-fn emit_file_io_error_progress(app: &AppHandle, execution_id: &str, started_at: Instant, error: String) {
-    let _ = app.emit("sql-file-progress", sql_file_error_progress(execution_id, started_at, error));
 }
 
 #[cfg(test)]
@@ -250,19 +239,6 @@ mod execution_tests {
     }
 
     #[test]
-    fn file_io_errors_build_terminal_error_progress() {
-        let progress = sql_file_error_progress("exec-1", Instant::now(), "read failed".to_string());
-
-        assert_eq!(progress.execution_id, "exec-1");
-        assert_eq!(progress.status, SqlFileStatus::Error);
-        assert_eq!(progress.statement_index, 0);
-        assert_eq!(progress.success_count, 0);
-        assert_eq!(progress.failure_count, 0);
-        assert_eq!(progress.affected_rows, 0);
-        assert_eq!(progress.statement_summary, "");
-        assert_eq!(progress.error, Some("read failed".to_string()));
-    }
-
     #[test]
     fn duplicate_execution_id_is_rejected_without_replacing_token() {
         let mut executions = HashMap::new();

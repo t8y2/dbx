@@ -89,6 +89,8 @@ function getTypeLabel(type: string): string {
       return t("common.connection");
     case "database":
       return t("common.database");
+    case "schema":
+      return t("common.schema");
     case "table":
       return t("common.table");
     case "view":

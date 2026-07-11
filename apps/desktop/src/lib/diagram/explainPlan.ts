@@ -28,8 +28,8 @@ export function supportsExplainPlan(databaseType?: DatabaseType): databaseType i
   return !!databaseType && supportsDatabaseFeature(databaseType, "sqlExplain") && SUPPORTED_EXPLAIN_TYPES.has(databaseType);
 }
 
-export function buildExplainSql(databaseType: DatabaseType | undefined, sql: string): Promise<BuildExplainSqlResult> {
-  return api.buildExplainSql({ databaseType, sql }) as Promise<BuildExplainSqlResult>;
+export function buildExplainSql(databaseType: DatabaseType | undefined, sql: string, format: "json" | "standard" = "json"): Promise<BuildExplainSqlResult> {
+  return api.buildExplainSql({ databaseType, sql, format }) as Promise<BuildExplainSqlResult>;
 }
 
 export function parseExplainResult(databaseType: "mysql" | "postgres" | "dameng" | "questdb", result: QueryResult): ParsedExplainPlan {

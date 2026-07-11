@@ -25,6 +25,7 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits);
     <DialogOverlay />
     <div class="fixed inset-0 z-50 grid place-items-center p-4 pointer-events-none">
       <DialogContent
+        data-slot="dialog-content"
         :class="cn('relative z-50 grid w-full max-w-lg my-8 gap-4 border border-border bg-background p-4 shadow-lg duration-200 sm:rounded-lg md:w-full pointer-events-auto', props.class)"
         v-bind="{ ...$attrs, ...forwarded }"
         @pointer-down-outside="

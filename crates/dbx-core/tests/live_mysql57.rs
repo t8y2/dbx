@@ -6,7 +6,7 @@ use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::query::execute_sql_statement;
 use dbx_core::query_result_export::{export_query_result_core, ExportStatus, QueryResultExportRequest};
 use dbx_core::sql::{split_sql_statements_for_database, SqlFileRequest};
-use dbx_core::sql_file_import::execute_sql_file_content;
+use dbx_core::sql_file_import::execute_sql_file_path;
 use dbx_core::storage::Storage;
 use dbx_core::table_import::parse_xlsx_file;
 use tokio_util::sync::CancellationToken;
@@ -402,7 +402,10 @@ INSERT INTO install_check (id) VALUES (1), (2);
         execution_id: format!("exec-{suffix}"),
         connection_id: config.id.clone(),
         database: String::new(),
-        file_path: "issue-2356-mysql-install.sql".to_string(),
+        file_path: std::env::temp_dir()
+            .join(format!("issue-2356-mysql-install-{suffix}.sql"))
+            .to_string_lossy()
+            .into_owned(),
         continue_on_error: false,
     };
 
@@ -416,10 +419,11 @@ INSERT INTO install_check (id) VALUES (1), (2);
     )
     .await;
 
-    let result = execute_sql_file_content(
+    tokio::fs::write(&request.file_path, &script).await.unwrap();
+    let result = execute_sql_file_path(
         &state,
         &request,
-        &script,
+        std::path::Path::new(&request.file_path),
         CancellationToken::new(),
         std::time::Instant::now(),
         |_| {},
@@ -444,6 +448,7 @@ INSERT INTO install_check (id) VALUES (1), (2);
     )
     .await;
     let _ = std::fs::remove_file(db_path);
+    let _ = std::fs::remove_file(&request.file_path);
 
     result.expect("SQL file import should succeed");
     let verify = verify.expect("verify imported rows");

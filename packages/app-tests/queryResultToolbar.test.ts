@@ -53,6 +53,14 @@ test("ContentArea keeps result history conditional and removes duplicate refresh
   assert.equal((contentArea.match(/<QueryResultToolbarActions\b/g) ?? []).length, 2);
 });
 
+test("ContentArea keeps MySQL standard explain results available in the shared toolbar", () => {
+  const contentArea = source(contentAreaPath);
+
+  assert.match(contentArea, /canShowExplainOutput = computed\([\s\S]*explainTableResult[\s\S]*explainTableError/);
+  assert.match(contentArea, /:table-result="activeTab\.explainTableResult"/);
+  assert.match(contentArea, /:table-error="activeTab\.explainTableError"/);
+});
+
 test("DataGrid exposes persistent result toolbar slots", () => {
   const dataGrid = source(dataGridPath);
 

@@ -23,6 +23,8 @@ interface ParameterOccurrence extends SqlParameterDescriptor {
 
 export interface SqlParameterOptions {
   databaseType?: DatabaseType;
+  // Which placeholder syntaxes are recognized. Undefined enables all of them.
+  enabledSyntaxes?: readonly SqlParameterSyntax[];
 }
 
 const PARAMETER_NAME_RE = /^[\p{L}_][\p{L}\p{N}_]*$/u;
@@ -78,6 +80,8 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
   const occurrences: ParameterOccurrence[] = [];
   const nativeSqlServerParameters = collectNativeSqlServerParameters(sql);
   const supportsNamedParameters = options?.databaseType !== "saphana";
+  const enabledSyntaxes = options?.enabledSyntaxes ? new Set(options.enabledSyntaxes) : null;
+  const isSyntaxEnabled = (syntax: SqlParameterSyntax) => !enabledSyntaxes || enabledSyntaxes.has(syntax);
   let i = 0;
   let dollarQuoteEnd = "";
   let positionalIndex = 0;
@@ -110,14 +114,14 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
       i = skipBlockComment(sql, i + 2);
       continue;
     }
-    if (ch === "?") {
+    if (ch === "?" && isSyntaxEnabled("positional")) {
       positionalIndex += 1;
       const key = `?${positionalIndex}`;
       occurrences.push({ key, name: key, syntax: "positional", token: "?", start: i, end: i + 1 });
       i += 1;
       continue;
     }
-    if (ch === ":" && supportsNamedParameters) {
+    if (ch === ":" && supportsNamedParameters && isSyntaxEnabled("named")) {
       const name = readParameterName(sql, i + 1);
       if (name && sql[i - 1] !== ":" && sql[i + 1] !== "=") {
         occurrences.push({
@@ -132,7 +136,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
         continue;
       }
     }
-    if (ch === "$" && next === "{") {
+    if (ch === "$" && next === "{" && isSyntaxEnabled("shell")) {
       const end = sql.indexOf("}", i + 2);
       if (end !== -1) {
         const name = sql.slice(i + 2, end).trim();
@@ -143,7 +147,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
         }
       }
     }
-    if (ch === "#" && next === "{") {
+    if (ch === "#" && next === "{" && isSyntaxEnabled("mybatis")) {
       const end = sql.indexOf("}", i + 2);
       if (end !== -1) {
         const name = sql.slice(i + 2, end).trim();
@@ -158,7 +162,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
       i = skipLine(sql, i + 1);
       continue;
     }
-    if (ch === "@") {
+    if (ch === "@" && isSyntaxEnabled("sqlserver")) {
       const name = readParameterName(sql, i + 1);
       if (name && next !== "@" && sql[i - 1] !== "@" && !nativeSqlServerParameters.declared.has(name.toLowerCase()) && !nativeSqlServerParameters.ignoredStarts.has(i)) {
         occurrences.push({

@@ -5,7 +5,7 @@ import { useI18n } from "vue-i18n";
 import type { ConnectionConfig, DatabaseType, ObjectBrowserViewport, QueryResult, QueryTab, TableInfoTab, TableStructureEditorTarget } from "@/types/database";
 import { orderPinnedFirst } from "@/lib/app/pinnedItems";
 import { canCancelQueryExecution } from "@/lib/sql/queryExecutionState";
-import { buildExplainSql, parseExplainResult, parseDamengExplainText, parseOracleExplainText } from "@/lib/diagram/explainPlan";
+import { buildExplainSql, parseExplainResult, parseDamengExplainText, parseOracleExplainText, type BuildExplainSqlResult } from "@/lib/diagram/explainPlan";
 import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQueryEditability, sourceColumnsForResult, type EditableQueryInfo, type EditableQuerySource } from "@/lib/sql/sqlAnalysis";
 import { buildQueryWithHiddenPrimaryKeys, hiddenResultColumnIndexes, type HiddenPrimaryKeyProjection } from "@/lib/sql/editableQueryHiddenKeys";
 import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY, restoreOpenTabsPayload, restoreOpenTabsState, serializeOpenTabs } from "@/lib/app/openTabsPersistence";
@@ -387,7 +387,7 @@ export const useQueryStore = defineStore("query", () => {
     const catalog = tab.mode === "data" ? tab.tableMeta?.catalog : undefined;
     const connection = catalog ? useConnectionStore().getConfig(tab.connectionId) : undefined;
     const executionDatabase = dataTabExecutionDatabase(connection, tab.database, catalog);
-    const clientSessionIds = [tabClientSessionId(tab), ...BACKGROUND_CLIENT_SESSION_SUFFIXES.map((suffix) => tabClientSessionId(tab, suffix))];
+    const clientSessionIds = [...new Set([tabClientSessionId(tab), ...BACKGROUND_CLIENT_SESSION_SUFFIXES.map((suffix) => tabClientSessionId(tab, suffix)), tab.explainClientSessionId].filter((sessionId): sessionId is string => !!sessionId))];
     for (const clientSessionId of clientSessionIds) {
       await closeClientSessionId(tab.connectionId, executionDatabase, clientSessionId, { tabId: tab.id });
     }
@@ -1967,11 +1967,15 @@ export const useQueryStore = defineStore("query", () => {
 
   function clearExplain(tab: QueryTab) {
     tab.explainPlan = undefined;
+    tab.explainTableResult = undefined;
     tab.explainError = undefined;
+    tab.explainTableError = undefined;
     tab.explainSql = undefined;
+    tab.explainTableSql = undefined;
     tab.lastExplainedSql = undefined;
     tab.isExplaining = false;
     tab.explainExecutionId = undefined;
+    tab.explainClientSessionId = undefined;
   }
 
   function toErrorResult(e: any): NonNullable<QueryTab["result"]> {
@@ -3023,7 +3027,12 @@ export const useQueryStore = defineStore("query", () => {
 
     tab.isExplaining = true;
     tab.explainExecutionId = executionId;
+    tab.explainPlan = undefined;
+    tab.explainTableResult = undefined;
     tab.explainError = undefined;
+    tab.explainTableError = undefined;
+    tab.explainSql = undefined;
+    tab.explainTableSql = undefined;
     tab.lastExplainedSql = sql;
 
     // DM and Oracle agents expose native text plans. DM also supports autotrace.
@@ -3084,10 +3093,99 @@ export const useQueryStore = defineStore("query", () => {
       return { ok: true as const, sql: explainSql };
     }
 
+    if (databaseType === "mysql") {
+      let tableBuilt: BuildExplainSqlResult;
+      let jsonBuilt: BuildExplainSqlResult;
+      try {
+        [tableBuilt, jsonBuilt] = await Promise.all([buildExplainSql(databaseType, sql, "standard"), buildExplainSql(databaseType, sql, "json")]);
+      } catch (e: any) {
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.explainExecutionId === executionId) {
+          current.isExplaining = false;
+          current.explainExecutionId = undefined;
+          current.explainError = String(e?.message || e);
+        }
+        return { ok: true as const, sql: "" };
+      }
+      if (tabs.value.find((t) => t.id === id)?.explainExecutionId !== executionId) {
+        return { ok: true as const, sql: jsonBuilt.ok ? jsonBuilt.sql : "" };
+      }
+      if (!tableBuilt.ok || !jsonBuilt.ok) {
+        const failed = !tableBuilt.ok ? tableBuilt : jsonBuilt;
+        const reason = !tableBuilt.ok ? tableBuilt.reason : !jsonBuilt.ok ? jsonBuilt.reason : "unsupported";
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.explainExecutionId === executionId) {
+          current.isExplaining = false;
+          current.explainExecutionId = undefined;
+          current.explainError = reason;
+        }
+        return failed;
+      }
+
+      tab.explainTableSql = tableBuilt.sql;
+      tab.explainSql = jsonBuilt.sql;
+      // Keep the two EXPLAIN statements on the same one-connection MySQL session.
+      const clientSessionId = `${tabClientSessionId(tab, "explain")}:${executionId}`;
+      tab.explainClientSessionId = clientSessionId;
+      try {
+        try {
+          const tableResult = await api.executeQuery(tab.connectionId, tab.database, tableBuilt.sql, tab.schema, executionId, {
+            clientSessionId,
+            timeoutSecs: queryTimeoutSecs,
+          });
+          const current = tabs.value.find((t) => t.id === id);
+          if (current?.explainExecutionId === executionId) {
+            current.explainTableResult = markQueryResultRowsRaw(tableResult);
+            current.explainTableError = undefined;
+          }
+        } catch (e: any) {
+          const current = tabs.value.find((t) => t.id === id);
+          if (current?.explainExecutionId === executionId) {
+            current.explainTableResult = undefined;
+            current.explainTableError = String(e?.message || e);
+          }
+        }
+
+        // A canceled or superseded standard request must not start the JSON request.
+        if (tabs.value.find((t) => t.id === id)?.explainExecutionId !== executionId) {
+          return { ok: true as const, sql: jsonBuilt.sql };
+        }
+
+        try {
+          const jsonResult = await api.executeQuery(tab.connectionId, tab.database, jsonBuilt.sql, tab.schema, executionId, {
+            clientSessionId,
+            timeoutSecs: queryTimeoutSecs,
+          });
+          const current = tabs.value.find((t) => t.id === id);
+          if (current?.explainExecutionId === executionId) {
+            current.explainPlan = parseExplainResult("mysql", jsonResult);
+            current.explainError = undefined;
+          }
+        } catch (e: any) {
+          const current = tabs.value.find((t) => t.id === id);
+          if (current?.explainExecutionId === executionId) {
+            current.explainPlan = undefined;
+            current.explainError = String(e?.message || e);
+          }
+        }
+      } finally {
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.explainExecutionId === executionId) {
+          current.isExplaining = false;
+          current.explainExecutionId = undefined;
+        }
+        if (current?.explainClientSessionId === clientSessionId) current.explainClientSessionId = undefined;
+        void closeClientSessionId(tab.connectionId, tab.database, clientSessionId, { tabId: tab.id, explainExecutionId: executionId });
+      }
+      return { ok: true as const, sql: jsonBuilt.sql };
+    }
+
     const built = await buildExplainSql(databaseType, sql);
     if (!built.ok) {
       tab.explainPlan = undefined;
       tab.explainError = built.reason;
+      tab.isExplaining = false;
+      tab.explainExecutionId = undefined;
       return built;
     }
 
@@ -3162,19 +3260,12 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab?.isExplaining || !tab.explainExecutionId) return false;
 
     const executionId = tab.explainExecutionId;
+    // Invalidate locally before the remote cancellation call so no later stage can start.
+    tab.isExplaining = false;
+    tab.explainExecutionId = undefined;
     try {
-      const canceled = await api.cancelQuery(executionId);
-      if (!canceled) {
-        const current = tabs.value.find((t) => t.id === id);
-        if (current && current.explainExecutionId === executionId) current.isExplaining = false;
-      }
-      return canceled;
-    } catch (e: any) {
-      const current = tabs.value.find((t) => t.id === id);
-      if (current && current.explainExecutionId === executionId) {
-        current.isExplaining = false;
-        current.explainError = String(e?.message || e);
-      }
+      return await api.cancelQuery(executionId);
+    } catch {
       return false;
     }
   }

@@ -615,7 +615,8 @@ async fn execute_explain_query(
     }
 
     // Build the database-specific EXPLAIN SQL
-    let explain_result = build_explain_sql(ExplainSqlOptions { database_type: Some(*db_type), sql: sql.to_string() });
+    let explain_result =
+        build_explain_sql(ExplainSqlOptions { database_type: Some(*db_type), format: None, sql: sql.to_string() });
 
     let explain_sql = match (explain_result.ok, explain_result.sql) {
         (true, Some(sql)) => sql,

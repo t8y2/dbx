@@ -20,7 +20,7 @@ const DataGenerateDialog = defineAsyncComponent(() => import("@/components/gener
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useDialogSources } from "@/composables/useDialogSources";
 import type { ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
-import type { SqlParameterDescriptor } from "@/lib/sql/sqlParameters";
+import type { SqlParameterDescriptor, SqlParameterSyntax } from "@/lib/sql/sqlParameters";
 import type { ConfigTab } from "@/components/connection/ConnectionDialog.vue";
 import type { DatabaseType } from "@/types/database";
 
@@ -35,6 +35,7 @@ const props = defineProps<{
   sqlParameterSourceSql: string;
   sqlParameterNames: SqlParameterDescriptor[];
   sqlParameterDatabaseType?: DatabaseType;
+  sqlParameterEnabledSyntaxes?: SqlParameterSyntax[];
 }>();
 
 const emit = defineEmits<{
@@ -135,7 +136,16 @@ watch(
     @update:suppress-future-prompts="emit('update:suppressDangerConfirm', $event)"
     @confirm="emit('dangerConfirm')"
   />
-  <SqlParameterDialog v-if="showSqlParameterDialog" :open="showSqlParameterDialog" :sql="sqlParameterSourceSql" :parameters="sqlParameterNames" :database-type="sqlParameterDatabaseType" @update:open="emit('update:showSqlParameterDialog', $event)" @execute="emit('sqlParametersConfirm', $event)" />
+  <SqlParameterDialog
+    v-if="showSqlParameterDialog"
+    :open="showSqlParameterDialog"
+    :sql="sqlParameterSourceSql"
+    :parameters="sqlParameterNames"
+    :database-type="sqlParameterDatabaseType"
+    :enabled-syntaxes="sqlParameterEnabledSyntaxes"
+    @update:open="emit('update:showSqlParameterDialog', $event)"
+    @execute="emit('sqlParametersConfirm', $event)"
+  />
   <DataTransferDialog v-model:open="dialogs.showTransferDialog.value" :prefill-connection-id="dialogs.transferPrefillConnectionId.value" :prefill-database="dialogs.transferPrefillDatabase.value" />
   <SchemaDiffDialog v-if="dialogs.showSchemaDiffDialog.value" v-model:open="dialogs.showSchemaDiffDialog.value" :prefill-connection-id="dialogs.schemaDiffPrefillConnectionId.value" :prefill-database="dialogs.schemaDiffPrefillDatabase.value" :prefill-schema="dialogs.schemaDiffPrefillSchema.value" />
   <DataCompareDialog

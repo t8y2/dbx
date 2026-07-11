@@ -43,8 +43,8 @@ function welcomeConnectionSubtitle(connection: ConnectionConfig): string {
 
 <template>
   <div class="min-w-0 flex-1 overflow-x-hidden overflow-y-auto bg-background">
-    <div class="mx-auto flex min-h-full w-full min-w-0 max-w-5xl flex-col justify-center gap-6 px-8 py-10">
-      <div class="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-3">
+    <div class="welcome-content mx-auto flex min-h-full w-full min-w-0 max-w-5xl flex-col justify-center gap-6 px-8 py-10">
+      <div class="welcome-stats-grid grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-3">
         <div class="min-w-0 overflow-hidden rounded-lg border bg-muted/20 px-4 py-3">
           <div class="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
             <Database class="h-3.5 w-3.5 shrink-0" /> <span class="min-w-0 truncate">{{ t("welcome.connections") }}</span>
@@ -65,7 +65,7 @@ function welcomeConnectionSubtitle(connection: ConnectionConfig): string {
         </div>
       </div>
 
-      <div class="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
+      <div class="welcome-main-grid grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
         <div class="min-w-0 overflow-hidden rounded-lg border">
           <div class="flex items-center justify-between border-b px-4 py-3">
             <div class="text-sm font-medium">{{ t("welcome.quickConnections") }}</div>
@@ -163,3 +163,21 @@ function welcomeConnectionSubtitle(connection: ConnectionConfig): string {
     </div>
   </div>
 </template>
+
+<style>
+.welcome-content {
+  max-width: 64rem;
+}
+
+@media (min-width: 640px) {
+  .welcome-stats-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  }
+}
+
+@media (min-width: 1024px) {
+  .welcome-main-grid {
+    grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr) !important;
+  }
+}
+</style>

@@ -4,7 +4,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 
 export interface QuickOpenItem {
   id: string;
-  type: "connection" | "database" | "table" | "view" | "materialized_view" | "procedure" | "function" | "sequence" | "package" | "package-body";
+  type: "connection" | "database" | "schema" | "table" | "view" | "materialized_view" | "procedure" | "function" | "sequence" | "package" | "package-body";
   label: string;
   description?: string;
   connectionId: string;
@@ -87,7 +87,9 @@ export function useQuickOpen() {
     // Add databases and tables from tree nodes
     // Filter tree nodes by connection
     for (const conn of connections) {
-      const connectionTreeNodes = treeNodes.filter((node) => node.connectionId === conn.id);
+      // Connections may live under sidebar groups, so locate their tree recursively.
+      const connectionTreeNode = findConnectionTreeNode(treeNodes, conn.id);
+      const connectionTreeNodes = connectionTreeNode?.children || treeNodes.filter((node) => node.connectionId === conn.id);
       if (connectionTreeNodes.length === 0) continue;
 
       // Process tree nodes to extract databases and tables
@@ -121,9 +123,20 @@ export function useQuickOpen() {
         });
       }
 
-      // Schema nodes - skip them but process their children
-      if (node.type === "schema" && node.children) {
-        processDatabaseTreeNodes(node.children, conn, items);
+      // Schema nodes are navigable results and also contain database objects.
+      if (node.type === "schema" && node.database && node.schema) {
+        items.push({
+          id: `schema-${conn.id}-${node.database}-${node.schema}`,
+          type: "schema",
+          label: node.label || node.schema,
+          description: `${conn.name} / ${node.database}`,
+          connectionId: conn.id,
+          database: node.database,
+          schema: node.schema,
+          connectionName: conn.name,
+          searchText: `${conn.name} ${node.database} ${node.schema}`,
+        });
+        if (node.children) processDatabaseTreeNodes(node.children, conn, items);
         continue;
       }
 
@@ -262,6 +275,17 @@ export function useQuickOpen() {
     }
   }
 
+  function findConnectionTreeNode(nodes: any[], connectionId: string): any | undefined {
+    for (const node of nodes) {
+      if (node.type === "connection" && node.connectionId === connectionId) return node;
+      if (node.children) {
+        const match = findConnectionTreeNode(node.children, connectionId);
+        if (match) return match;
+      }
+    }
+    return undefined;
+  }
+
   const filteredItems = computed((): MatchedItem[] => {
     if (!searchQuery.value.trim()) {
       return allItems.value.map((item) => ({
@@ -293,16 +317,17 @@ export function useQuickOpen() {
       const typeOrder = {
         connection: 0,
         database: 1,
-        table: 2,
-        view: 3,
-        materialized_view: 4,
-        procedure: 5,
-        function: 6,
-        sequence: 7,
-        package: 8,
-        "package-body": 9,
+        schema: 2,
+        table: 3,
+        view: 4,
+        materialized_view: 5,
+        procedure: 6,
+        function: 7,
+        sequence: 8,
+        package: 9,
+        "package-body": 10,
       };
-      return (typeOrder[a.type] ?? 10) - (typeOrder[b.type] ?? 10);
+      return typeOrder[a.type] - typeOrder[b.type];
     });
 
     return matched;

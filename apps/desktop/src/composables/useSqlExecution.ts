@@ -11,8 +11,9 @@ import { classifySqlActivityKind } from "@/lib/history/historyActivityKind";
 import { sqlMetadataRefreshTarget } from "@/lib/sql/sqlMetadataRefresh";
 import { classifyRedisCommandSafety, firstRedisCommandToken } from "@/lib/redis/redisCommandSafety";
 import { isSqlExecutionSnapshot, resolveExecutableSql, type SqlExecutionOverride, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
-import { extractSqlParameterDescriptors, type SqlParameterDescriptor } from "@/lib/sql/sqlParameters";
+import { extractSqlParameterDescriptors, type SqlParameterDescriptor, type SqlParameterSyntax } from "@/lib/sql/sqlParameters";
 import { expandSqlVariables } from "@/lib/sql/sqlVariables";
+import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import type { ConnectionConfig, DatabaseType, QueryTab } from "@/types/database";
 
 const DANGER_RE = /^\s*(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
@@ -63,12 +64,15 @@ export function useSqlExecution(deps: {
   const sqlParameterSourceSql = ref("");
   const sqlParameterNames = ref<SqlParameterDescriptor[]>([]);
   const sqlParameterDatabaseType = ref<DatabaseType | undefined>();
+  const sqlParameterEnabledSyntaxes = ref<SqlParameterSyntax[]>([]);
 
   async function resolvedExecutableSql(source?: SqlExecutionOverride): Promise<string> {
-    if (typeof source === "string") return expandSqlVariables(source).sql;
-    if (deps.resolveExecutableSql) return expandSqlVariables(await deps.resolveExecutableSql(source)).sql;
-    if (isSqlExecutionSnapshot(source)) return expandSqlVariables(resolveExecutableSql(source.fullSql, source.selectedSql, { cursorPos: source.cursorPos })).sql;
-    return expandSqlVariables(deps.executableSql.value).sql;
+    const atSetEnabled = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, deps.activeConnection.value?.db_type).atSet;
+    const expand = (sql: string) => (atSetEnabled ? expandSqlVariables(sql).sql : sql);
+    if (typeof source === "string") return expand(source);
+    if (deps.resolveExecutableSql) return expand(await deps.resolveExecutableSql(source));
+    if (isSqlExecutionSnapshot(source)) return expand(resolveExecutableSql(source.fullSql, source.selectedSql, { cursorPos: source.cursorPos }));
+    return expand(deps.executableSql.value);
   }
 
   async function tryExecute(sqlOverride?: SqlExecutionOverride) {
@@ -110,11 +114,14 @@ export function useSqlExecution(deps: {
 
   function prepareSqlParameterDialog(sql: string): boolean {
     const databaseType = deps.activeConnection.value?.db_type;
-    const parameters = extractSqlParameterDescriptors(sql, { databaseType });
+    const toggles = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, databaseType);
+    const enabledSyntaxes = enabledSqlParameterSyntaxes(toggles);
+    const parameters = extractSqlParameterDescriptors(sql, { databaseType, enabledSyntaxes });
     if (!parameters.length) return false;
     sqlParameterSourceSql.value = sql;
     sqlParameterNames.value = parameters;
     sqlParameterDatabaseType.value = databaseType;
+    sqlParameterEnabledSyntaxes.value = enabledSyntaxes;
     showSqlParameterDialog.value = true;
     return true;
   }
@@ -206,6 +213,7 @@ export function useSqlExecution(deps: {
     sqlParameterSourceSql.value = "";
     sqlParameterNames.value = [];
     sqlParameterDatabaseType.value = undefined;
+    sqlParameterEnabledSyntaxes.value = [];
     await continueExecute(sql);
   }
 
@@ -214,6 +222,7 @@ export function useSqlExecution(deps: {
     sqlParameterSourceSql.value = "";
     sqlParameterNames.value = [];
     sqlParameterDatabaseType.value = undefined;
+    sqlParameterEnabledSyntaxes.value = [];
   });
 
   return {
@@ -230,6 +239,7 @@ export function useSqlExecution(deps: {
     sqlParameterSourceSql,
     sqlParameterNames,
     sqlParameterDatabaseType,
+    sqlParameterEnabledSyntaxes,
     onSqlParametersConfirm,
     explainMode,
   };

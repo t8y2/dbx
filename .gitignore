@@ -64,3 +64,4 @@ DBX_*_x64-portable.zip
 .pnpm-store/*
 .dbx-web
 _dev
+setup.sh

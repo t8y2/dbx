@@ -770,6 +770,7 @@ mod tests {
 
     fn ssh_hop(id: &str, password: &str, passphrase: &str) -> SshTunnelConfig {
         SshTunnelConfig {
+            profile_id: String::new(),
             id: id.to_string(),
             name: String::new(),
             enabled: true,
@@ -789,6 +790,7 @@ mod tests {
 
     fn http_tunnel(id: &str, token: &str) -> TransportLayerConfig {
         TransportLayerConfig::HttpTunnel(HttpTunnelConfig {
+            profile_id: String::new(),
             id: id.to_string(),
             name: String::new(),
             enabled: true,

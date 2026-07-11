@@ -116,6 +116,56 @@ impl TransportLayerConfig {
         }
     }
 
+    pub fn profile_id(&self) -> &str {
+        match self {
+            TransportLayerConfig::Ssh(layer) => &layer.profile_id,
+            TransportLayerConfig::Proxy(layer) => &layer.profile_id,
+            TransportLayerConfig::HttpTunnel(layer) => &layer.profile_id,
+        }
+    }
+
+    /// Builds the concrete layer used at connect time for a layer that
+    /// references a shared tunnel profile: the profile supplies the whole
+    /// configuration while the referencing layer keeps its own identity,
+    /// enabled flag, and profile reference.
+    pub fn resolved_from_profile(&self, profile: &TransportLayerConfig) -> TransportLayerConfig {
+        let mut resolved = profile.clone();
+        let (id, enabled, profile_id) = (self.id().to_string(), self.enabled(), self.profile_id().to_string());
+        match &mut resolved {
+            TransportLayerConfig::Ssh(layer) => {
+                layer.id = id;
+                layer.enabled = enabled;
+                layer.profile_id = profile_id;
+            }
+            TransportLayerConfig::Proxy(layer) => {
+                layer.id = id;
+                layer.enabled = enabled;
+                layer.profile_id = profile_id;
+            }
+            TransportLayerConfig::HttpTunnel(layer) => {
+                layer.id = id;
+                layer.enabled = enabled;
+                layer.profile_id = profile_id;
+            }
+        }
+        resolved
+    }
+
+    pub fn scrub_secrets(&mut self) {
+        match self {
+            TransportLayerConfig::Ssh(layer) => {
+                layer.password = String::new();
+                layer.key_passphrase = String::new();
+            }
+            TransportLayerConfig::Proxy(layer) => {
+                layer.password = String::new();
+            }
+            TransportLayerConfig::HttpTunnel(layer) => {
+                layer.token = String::new();
+            }
+        }
+    }
+
     pub fn name(&self) -> &str {
         match self {
             TransportLayerConfig::Ssh(layer) => &layer.name,
@@ -181,6 +231,12 @@ pub struct SshTunnelConfig {
     /// only tries that method (after the standard `none` probe).
     #[serde(default)]
     pub auth_method: String,
+    /// When non-empty, this layer references a shared tunnel profile
+    /// (Settings > Tunnels). The profile's configuration replaces this
+    /// layer's own fields at connect time; only `id` and `enabled` are
+    /// kept from the referencing layer.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub profile_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -201,6 +257,9 @@ pub struct ProxyTunnelConfig {
     pub username: String,
     #[serde(default)]
     pub password: String,
+    /// See [`SshTunnelConfig::profile_id`].
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub profile_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -217,6 +276,9 @@ pub struct HttpTunnelConfig {
     pub token: String,
     #[serde(default = "default_http_tunnel_connect_timeout_secs")]
     pub connect_timeout_secs: u64,
+    /// See [`SshTunnelConfig::profile_id`].
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub profile_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2028,6 +2090,7 @@ mod tests {
     fn serialized_connection_config_omits_legacy_transport_fields() {
         let mut config = mysql_config("root", "", None);
         config.transport_layers = vec![TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            profile_id: String::new(),
             id: "proxy".to_string(),
             name: String::new(),
             enabled: true,

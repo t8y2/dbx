@@ -2074,6 +2074,10 @@ onUnmounted(() => {
             setConnectionDialogOpen(false);
             openDriverStorePage();
           "
+          @open-tunnel-profile-settings="
+            setConnectionDialogOpen(false);
+            openSettings('tunnels');
+          "
           @open-lineage-target="openLineageTarget"
           @open-database-search-target="openDatabaseSearchTarget"
           @open-diagram-target="openDiagramTarget"

@@ -34,6 +34,7 @@ import type {
   SavedSqlFolder,
   SavedSqlLibrary,
   SshConfigHostEntry,
+  TunnelProfile,
 } from "@/types/database";
 import type { CollectionInfo } from "@/types/database";
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
@@ -1107,6 +1108,14 @@ export async function saveConnections(configs: ConnectionConfig[]): Promise<void
 
 export async function loadConnections(): Promise<ConnectionConfig[]> {
   return invoke("load_connections");
+}
+
+export async function loadTunnelProfiles(): Promise<TunnelProfile[]> {
+  return invoke("load_tunnel_profiles");
+}
+
+export async function saveTunnelProfiles(profiles: TunnelProfile[]): Promise<void> {
+  return invoke("save_tunnel_profiles", { profiles });
 }
 
 export async function readKeychainPassword(service: string): Promise<string> {

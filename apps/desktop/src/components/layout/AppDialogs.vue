@@ -50,6 +50,7 @@ const emit = defineEmits<{
   connectSucceeded: [name: string];
   connectFailed: [message: string];
   openDriverStore: [];
+  openTunnelProfileSettings: [];
   openLineageTarget: [
     target: {
       connectionId: string;
@@ -136,6 +137,7 @@ watch(
     @connect-succeeded="emit('connectSucceeded', $event)"
     @connect-failed="emit('connectFailed', $event)"
     @open-driver-store="emit('openDriverStore')"
+    @open-tunnel-profile-settings="emit('openTunnelProfileSettings')"
   />
   <DangerConfirmDialog
     v-if="showDangerDialog"

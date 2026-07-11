@@ -680,12 +680,12 @@ function iconClass(type: ObjectBrowserRow["type"]) {
 }
 
 function iconBgClass(type: ObjectBrowserRow["type"]) {
-  if (type === "VIEW" || type === "MATERIALIZED_VIEW") return "bg-purple-500/10";
-  if (type === "PROCEDURE") return "bg-blue-500/10";
-  if (type === "FUNCTION") return "bg-amber-500/10";
-  if (type === "SEQUENCE") return "bg-emerald-500/10";
-  if (type === "PACKAGE" || type === "PACKAGE_BODY") return "bg-cyan-500/10";
-  return "bg-green-500/10";
+  if (type === "VIEW" || type === "MATERIALIZED_VIEW") return "object-browser-icon-bg object-browser-icon-bg-view";
+  if (type === "PROCEDURE") return "object-browser-icon-bg object-browser-icon-bg-procedure";
+  if (type === "FUNCTION") return "object-browser-icon-bg object-browser-icon-bg-function";
+  if (type === "SEQUENCE") return "object-browser-icon-bg object-browser-icon-bg-sequence";
+  if (type === "PACKAGE" || type === "PACKAGE_BODY") return "object-browser-icon-bg object-browser-icon-bg-package";
+  return "object-browser-icon-bg object-browser-icon-bg-table";
 }
 
 function isPartitionParentExpanded(row: ObjectBrowserRow) {
@@ -2588,8 +2588,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                     <span class="w-full truncate text-sm font-medium leading-tight text-foreground">{{ item.displayName }}</span>
                     <div class="flex items-center gap-1.5">
                       <span class="text-xs text-muted-foreground">{{ typeLabel(item.type) }}</span>
-                      <span v-if="item.estimatedRows != null && item.estimatedRows > 0" class="rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-primary">{{ formatObjectBrowserCount(item.estimatedRows) }}</span>
-                      <span v-if="item.totalBytes != null && item.totalBytes > 0" class="rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">{{ formatObjectBrowserBytes(item.totalBytes) }}</span>
+                      <span v-if="item.estimatedRows != null && item.estimatedRows > 0" class="object-browser-stat-badge object-browser-stat-badge-rows rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-primary">{{
+                        formatObjectBrowserCount(item.estimatedRows)
+                      }}</span>
+                      <span v-if="item.totalBytes != null && item.totalBytes > 0" class="object-browser-stat-badge object-browser-stat-badge-bytes rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">{{ formatObjectBrowserBytes(item.totalBytes) }}</span>
                     </div>
                     <div v-if="item.created_at?.trim() || item.updated_at?.trim()" class="flex items-center gap-1 text-[10px] text-muted-foreground/70">
                       <span v-if="item.created_at?.trim()">{{ formatObjectBrowserTimestamp(item.created_at) }}</span>
@@ -3027,6 +3029,52 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   display: grid;
   column-gap: 12px;
   align-items: start;
+}
+
+.object-browser-icon-bg-table {
+  background-color: rgba(34, 197, 94, 0.1);
+}
+
+.object-browser-icon-bg-view {
+  background-color: rgba(168, 85, 247, 0.1);
+}
+
+.object-browser-icon-bg-procedure {
+  background-color: rgba(59, 130, 246, 0.1);
+}
+
+.object-browser-icon-bg-function {
+  background-color: rgba(245, 158, 11, 0.1);
+}
+
+.object-browser-icon-bg-sequence {
+  background-color: rgba(16, 185, 129, 0.1);
+}
+
+.object-browser-icon-bg-package {
+  background-color: rgba(6, 182, 212, 0.1);
+}
+
+.object-browser-stat-badge {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  line-height: 1rem;
+  white-space: nowrap;
+}
+
+.object-browser-stat-badge-rows {
+  color: var(--primary);
+  background-color: rgba(23, 23, 23, 0.1);
+}
+
+.object-browser-stat-badge-bytes {
+  color: var(--muted-foreground);
+  background-color: var(--muted);
+}
+
+:global(.dark) .object-browser-stat-badge-rows {
+  background-color: rgba(208, 208, 214, 0.12);
 }
 
 .side-panel-resizing {

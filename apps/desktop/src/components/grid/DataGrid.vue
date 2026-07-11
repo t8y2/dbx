@@ -9419,8 +9419,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 @scroll="onTransposeScroll"
               >
                 <template #before>
-                  <div class="data-grid-transpose-header sticky top-0 z-20 flex h-7 border-b border-border bg-[rgb(239_239_239)] font-semibold text-muted-foreground dark:bg-muted" :style="{ width: `${transposeTotalWidth}px` }">
-                    <div class="sticky left-0 z-30 shrink-0 border-r border-border px-3 py-1.5 bg-[rgb(239_239_239)] truncate dark:bg-muted relative" :style="{ width: `${transposePinnedWidth}px` }">
+                  <div class="data-grid-transpose-header data-grid-header-shell sticky top-0 z-20 flex h-7 border-b border-border font-semibold text-muted-foreground" :style="{ width: `${transposeTotalWidth}px` }">
+                    <div class="data-grid-header-cell sticky left-0 z-30 shrink-0 border-r border-border px-3 py-1.5 truncate relative" :style="{ width: `${transposePinnedWidth}px` }">
                       {{ t("grid.columnName") }}
                       <div class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="onTransposePinnedResizeStart" />
                     </div>
@@ -9432,7 +9432,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       :class="{
                         'transpose-record-header-selected text-primary font-semibold': transposeRecordUsesFramedHeader(recordIndex),
                         'transpose-record-header-active text-primary': transposeRecordUsesActiveHighlight(recordIndex) && !transposeRecordUsesFramedHeader(recordIndex),
-                        'bg-[rgb(239_239_239)] dark:bg-muted': !transposeRecordUsesActiveHighlight(recordIndex) && !transposeRecordUsesFramedHeader(recordIndex),
+                        'data-grid-header-cell': !transposeRecordUsesActiveHighlight(recordIndex) && !transposeRecordUsesFramedHeader(recordIndex),
                       }"
                       :style="{ width: `${getTransposeRecordWidth(recordIndex)}px` }"
                       @click="selectTransposeRecord(recordIndex, $event)"
@@ -9577,10 +9577,10 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             </div>
             <template v-else>
               <!-- Sticky header -->
-              <div ref="headerRef" class="shrink-0 bg-[rgb(239_239_239)] dark:bg-muted/60 z-10 w-full border-y border-border overflow-hidden">
+              <div ref="headerRef" class="data-grid-header-shell shrink-0 z-10 w-full border-y border-border overflow-hidden">
                 <div class="data-grid-header-row flex w-(--header-total-w) font-semibold text-foreground">
                   <div
-                    class="shrink-0 px-2 py-1.5 border-r w-(--row-num-w) border-border text-center text-muted-foreground select-none cursor-default hover:bg-gray-200 dark:hover:bg-gray-800 sticky left-0 z-20 bg-[rgb(239_239_239)] dark:bg-muted"
+                    class="data-grid-header-cell shrink-0 px-2 py-1.5 border-r w-(--row-num-w) border-border text-center text-muted-foreground select-none cursor-default hover:bg-gray-200 dark:hover:bg-gray-800 sticky left-0 z-20"
                     :class="{ '!bg-gray-300 dark:!bg-gray-900 outline outline-primary -outline-offset-1': isSelectingAll }"
                     @click="selectAllCells"
                   >
@@ -9589,7 +9589,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <div class="shrink-0" :style="{ width: `${horizontalColumnWindow.beforeWidth}px` }" />
                   <LightTooltip v-for="col in renderedGridColumns" :key="`${col.name}-${col.actualColIdx}`" :text="col.name" side="bottom" :side-offset="4" :disabled="columnHeaderTooltipsDisabled">
                     <div
-                      class="shrink-0 px-2 py-1.5 border-r border-border whitespace-nowrap hover:bg-gray-200 dark:hover:bg-gray-800 select-none relative overflow-hidden"
+                      class="data-grid-header-cell shrink-0 px-2 py-1.5 border-r border-border whitespace-nowrap hover:bg-gray-200 dark:hover:bg-gray-800 select-none relative overflow-hidden"
                       :class="{
                         '!bg-gray-300 dark:!bg-gray-900 outline outline-primary -outline-offset-1': highlightedColumnIndex === col.actualColIdx || columnIsSelected(col.visibleColIdx),
                         'bg-amber-500/20 ring-1 ring-inset ring-amber-500/40': currentSearchMatch?.kind === 'column' && currentSearchMatch.col === col.actualColIdx,
@@ -10088,10 +10088,10 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <div
                     class="data-grid-row flex border-b border-border h-6.5 w-(--total-w)"
                     :class="{
-                      'bg-destructive/5 opacity-70': item.isDeleted,
-                      'bg-primary/5': item.isNew && !isRowActive(item.displayIndex),
-                      'bg-muted/20': item.isDraft && !isRowActive(item.displayIndex),
-                      'bg-muted/30': !item.isNew && !item.isDraft && !item.isDeleted && !isRowActive(item.displayIndex) && item.displayIndex % 2 === 1,
+                      'data-grid-row--deleted opacity-70': item.isDeleted,
+                      'data-grid-row--new': item.isNew && !isRowActive(item.displayIndex),
+                      'data-grid-row--draft': item.isDraft && !isRowActive(item.displayIndex),
+                      'data-grid-row--striped': !item.isNew && !item.isDraft && !item.isDeleted && !isRowActive(item.displayIndex) && item.displayIndex % 2 === 1,
                       'active-row': isRowActive(item.displayIndex) && !item.isDeleted,
                       'relative z-20 overflow-visible': editingCell?.rowId === item.id,
                     }"
@@ -11186,48 +11186,48 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 @reference "../../styles/globals.css";
 
 [data-grid-root] {
-  --data-grid-row-muted-bg: rgb(248 248 248);
-  --data-grid-row-new-bg: rgb(243 243 243);
-  --data-grid-row-deleted-bg: rgb(255 244 244);
-  --data-grid-cell-active-bg: rgb(232 232 232);
-  --data-grid-cell-dirty-bg: rgb(255 248 230);
-  --data-grid-cell-selected-bg: rgb(226 226 226);
-  --data-grid-cell-selected-dirty-bg: rgb(244 229 186);
-  --data-grid-cell-selected-border: rgb(90 90 90);
-  --data-grid-cell-hover-bg: rgb(245 245 245);
-  --data-grid-cell-search-bg: rgb(253 245 184);
-  --data-grid-cell-current-search-bg: rgb(253 224 71 / 52%);
-  --data-grid-cell-current-search-border: rgb(234 179 8 / 82%);
-  --data-grid-row-number-default-bg: rgb(255 255 255);
-  --data-grid-row-number-new-bg: rgb(219 244 233);
-  --data-grid-row-number-edited-bg: rgb(253 241 219);
-  --data-grid-row-number-deleted-bg: rgb(255 244 244);
-  --data-grid-row-number-active-bg: rgb(232 232 232);
-  --data-grid-row-number-selected-bg: rgb(226 226 226);
+  --data-grid-row-muted-bg: rgb(248, 248, 248);
+  --data-grid-row-new-bg: rgb(243, 243, 243);
+  --data-grid-row-deleted-bg: rgb(255, 244, 244);
+  --data-grid-cell-active-bg: rgb(232, 232, 232);
+  --data-grid-cell-dirty-bg: rgb(255, 248, 230);
+  --data-grid-cell-selected-bg: rgb(226, 226, 226);
+  --data-grid-cell-selected-dirty-bg: rgb(244, 229, 186);
+  --data-grid-cell-selected-border: rgb(90, 90, 90);
+  --data-grid-cell-hover-bg: rgb(245, 245, 245);
+  --data-grid-cell-search-bg: rgb(253, 245, 184);
+  --data-grid-cell-current-search-bg: rgba(253, 224, 71, 0.52);
+  --data-grid-cell-current-search-border: rgba(234, 179, 8, 0.82);
+  --data-grid-row-number-default-bg: rgb(255, 255, 255);
+  --data-grid-row-number-new-bg: rgb(219, 244, 233);
+  --data-grid-row-number-edited-bg: rgb(253, 241, 219);
+  --data-grid-row-number-deleted-bg: rgb(255, 244, 244);
+  --data-grid-row-number-active-bg: rgb(232, 232, 232);
+  --data-grid-row-number-selected-bg: rgb(226, 226, 226);
   --data-grid-scrollbar-thumb: color-mix(in oklch, var(--foreground) 30%, transparent);
   --data-grid-scrollbar-thumb-hover: color-mix(in oklch, var(--foreground) 48%, transparent);
   --data-grid-scrollbar-track: transparent;
 }
 
 :global(.dark) [data-grid-root] {
-  --data-grid-row-muted-bg: rgb(32 32 34);
-  --data-grid-row-new-bg: rgb(51 51 55);
-  --data-grid-row-deleted-bg: rgb(55 31 32);
-  --data-grid-cell-active-bg: rgb(64 64 64);
-  --data-grid-cell-dirty-bg: rgb(94 75 26);
-  --data-grid-cell-selected-bg: rgb(66 67 70);
-  --data-grid-cell-selected-dirty-bg: rgb(94 75 26);
-  --data-grid-cell-selected-border: rgb(170 170 175);
-  --data-grid-cell-hover-bg: rgb(46 47 51);
-  --data-grid-cell-search-bg: rgb(72 57 8);
-  --data-grid-cell-current-search-bg: rgb(116 87 0);
-  --data-grid-cell-current-search-border: rgb(239 177 0);
-  --data-grid-row-number-default-bg: rgb(35 37 42);
-  --data-grid-row-number-new-bg: rgb(33 45 40);
-  --data-grid-row-number-edited-bg: rgb(48 41 28);
-  --data-grid-row-number-deleted-bg: rgb(55 31 32);
-  --data-grid-row-number-active-bg: rgb(64 64 64);
-  --data-grid-row-number-selected-bg: rgb(66 67 70);
+  --data-grid-row-muted-bg: rgb(32, 32, 34);
+  --data-grid-row-new-bg: rgb(51, 51, 55);
+  --data-grid-row-deleted-bg: rgb(55, 31, 32);
+  --data-grid-cell-active-bg: rgb(64, 64, 64);
+  --data-grid-cell-dirty-bg: rgb(94, 75, 26);
+  --data-grid-cell-selected-bg: rgb(66, 67, 70);
+  --data-grid-cell-selected-dirty-bg: rgb(94, 75, 26);
+  --data-grid-cell-selected-border: rgb(170, 170, 175);
+  --data-grid-cell-hover-bg: rgb(46, 47, 51);
+  --data-grid-cell-search-bg: rgb(72, 57, 8);
+  --data-grid-cell-current-search-bg: rgb(116, 87, 0);
+  --data-grid-cell-current-search-border: rgb(239, 177, 0);
+  --data-grid-row-number-default-bg: rgb(35, 37, 42);
+  --data-grid-row-number-new-bg: rgb(33, 45, 40);
+  --data-grid-row-number-edited-bg: rgb(48, 41, 28);
+  --data-grid-row-number-deleted-bg: rgb(55, 31, 32);
+  --data-grid-row-number-active-bg: rgb(64, 64, 64);
+  --data-grid-row-number-selected-bg: rgb(66, 67, 70);
 }
 
 @supports (background: color-mix(in oklab, white 50%, transparent)) {
@@ -11247,6 +11247,50 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
     --data-grid-row-number-active-bg: color-mix(in oklab, var(--primary) 15%, var(--background));
     --data-grid-row-number-selected-bg: color-mix(in oklab, var(--primary) 25%, var(--background));
   }
+}
+
+.data-grid-header-shell,
+.data-grid-header-cell {
+  background-color: rgb(239, 239, 239);
+}
+
+:global(.dark) [data-grid-root] .data-grid-header-shell,
+:global(.dark) [data-grid-root] .data-grid-header-cell {
+  background-color: rgb(32, 32, 34) !important;
+}
+
+:global(.dark) [data-grid-root] .data-grid-header-row {
+  color: rgb(215, 215, 219);
+}
+
+:global(.dark) [data-grid-root] .data-grid-header-cell:hover {
+  background-color: rgb(46, 47, 51) !important;
+}
+
+.data-grid-row--striped {
+  background-color: rgb(248, 248, 248);
+}
+
+.data-grid-row--draft,
+.data-grid-row--new {
+  background-color: rgb(243, 243, 243);
+}
+
+.data-grid-row--deleted {
+  background-color: rgb(255, 244, 244);
+}
+
+:global(.dark) .data-grid-row--striped {
+  background-color: rgb(32, 32, 34);
+}
+
+:global(.dark) .data-grid-row--draft,
+:global(.dark) .data-grid-row--new {
+  background-color: rgb(51, 51, 55);
+}
+
+:global(.dark) .data-grid-row--deleted {
+  background-color: rgb(55, 31, 32);
 }
 
 .data-grid-topbar {

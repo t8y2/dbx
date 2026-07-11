@@ -64,6 +64,12 @@ const selectedLabel = computed(() => {
   return props.displayName(props.modelValue);
 });
 
+const triggerBaseClass = computed(() =>
+  props.triggerVariant === "outline"
+    ? "dbx-searchable-select-trigger h-6 w-auto max-w-56 min-w-0 justify-between gap-1 px-2 text-xs font-normal shadow-none"
+    : "h-6 w-auto max-w-56 min-w-0 justify-between gap-1 border-0 bg-transparent px-1 text-xs font-normal shadow-none hover:bg-muted/50 focus-visible:ring-0",
+);
+
 const filteredOptions = computed(() => filterDatabaseOptions(props.options, searchText.value, props.displayName));
 const customOptionValue = computed(() => props.normalizeCustom(searchText.value.trim()));
 const canSelectCustom = computed(() => props.allowCustom && !!customOptionValue.value && !props.options.includes(customOptionValue.value));
@@ -162,7 +168,7 @@ function handleKeydown(event: KeyboardEvent) {
 <template>
   <Popover v-model:open="open">
     <PopoverTrigger as-child>
-      <Button type="button" :variant="triggerVariant" :disabled="disabled" :title="selectedLabel" :class="cn('h-6 w-auto max-w-56 min-w-0 justify-between gap-1 border-0 bg-transparent px-1 text-xs font-normal shadow-none hover:bg-muted/50 focus-visible:ring-0', triggerClass)">
+      <Button type="button" :variant="triggerVariant" :disabled="disabled" :title="selectedLabel" :class="cn(triggerBaseClass, triggerClass)">
         <slot name="trigger-label" :value="modelValue" :label="selectedLabel" :loading="loading">
           <span class="truncate">{{ loading ? loadingText : selectedLabel }}</span>
         </slot>
@@ -244,3 +250,36 @@ function handleKeydown(event: KeyboardEvent) {
     </PopoverContent>
   </Popover>
 </template>
+
+<style>
+.dbx-searchable-select-trigger {
+  border: 1px solid rgb(229, 229, 229) !important;
+  background-color: rgb(255, 255, 255) !important;
+  box-shadow: none !important;
+}
+
+.dbx-searchable-select-trigger:hover {
+  background-color: rgb(250, 250, 250) !important;
+}
+
+.dbx-searchable-select-trigger[aria-expanded="true"],
+.dbx-searchable-select-trigger:focus-visible {
+  border-color: rgb(96, 165, 250) !important;
+  box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.22) !important;
+}
+
+.dark .dbx-searchable-select-trigger {
+  border-color: rgba(255, 255, 255, 0.14) !important;
+  background-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+.dark .dbx-searchable-select-trigger:hover {
+  background-color: rgba(255, 255, 255, 0.12) !important;
+}
+
+.dark .dbx-searchable-select-trigger[aria-expanded="true"],
+.dark .dbx-searchable-select-trigger:focus-visible {
+  border-color: rgb(147, 197, 253) !important;
+  box-shadow: 0 0 0 2px rgba(147, 197, 253, 0.24) !important;
+}
+</style>

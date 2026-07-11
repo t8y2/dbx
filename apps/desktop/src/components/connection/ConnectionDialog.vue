@@ -3616,13 +3616,13 @@ function openExternalUrl(url: string) {
                 <h3 v-if="category.title" class="text-sm font-medium">{{ category.title }}</h3>
               </div>
 
-              <div v-if="dbPickerView === 'icon'" class="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-5">
+              <div v-if="dbPickerView === 'icon'" class="connection-db-picker-grid grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-5">
                 <button
                   v-for="opt in category.options"
                   :key="opt.value"
                   type="button"
-                  class="group flex min-h-24 flex-col items-center justify-center gap-2 rounded-xl border bg-background/70 p-3 text-center transition hover:-translate-y-0.5 hover:border-primary/40 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  :class="selectedType === opt.value ? 'border-primary bg-primary/10 shadow-sm ring-1 ring-primary/30' : 'border-border'"
+                  class="connection-db-picker-option group flex min-h-24 flex-col items-center justify-center gap-2 rounded-xl border bg-background/70 p-3 text-center transition hover:-translate-y-0.5 hover:border-primary/40 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  :class="selectedType === opt.value ? 'connection-db-picker-option--selected shadow-sm' : 'border-border'"
                   :aria-pressed="selectedType === opt.value"
                   @click="onDbTypeChange(opt.value)"
                   @dblclick="goToConnectionStep(opt.value)"
@@ -3639,8 +3639,8 @@ function openExternalUrl(url: string) {
                   v-for="opt in category.options"
                   :key="opt.value"
                   type="button"
-                  class="flex items-center gap-3 rounded-lg border bg-background px-3 py-2 text-left transition hover:border-primary/40 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  :class="selectedType === opt.value ? 'border-primary bg-primary/10 ring-1 ring-primary/30' : 'border-border'"
+                  class="connection-db-picker-option flex items-center gap-3 rounded-lg border bg-background px-3 py-2 text-left transition hover:border-primary/40 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  :class="selectedType === opt.value ? 'connection-db-picker-option--selected' : 'border-border'"
                   :aria-pressed="selectedType === opt.value"
                   @click="onDbTypeChange(opt.value)"
                   @dblclick="goToConnectionStep(opt.value)"
@@ -5521,6 +5521,44 @@ function openExternalUrl(url: string) {
 </template>
 
 <style>
+@media (min-width: 640px) {
+  .connection-db-picker-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  }
+}
+
+@media (min-width: 1024px) {
+  .connection-db-picker-grid {
+    grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+  }
+}
+
+.connection-db-picker-option {
+  color: var(--foreground);
+}
+
+.connection-db-picker-option--selected {
+  border-color: rgb(23, 23, 23);
+  background-color: rgba(23, 23, 23, 0.08);
+  box-shadow: 0 0 0 1px rgba(23, 23, 23, 0.24);
+  color: rgb(10, 10, 10);
+}
+
+.connection-db-picker-option--selected:hover {
+  background-color: rgba(23, 23, 23, 0.12);
+}
+
+.dark .connection-db-picker-option--selected {
+  border-color: rgb(208, 208, 214);
+  background-color: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.22);
+  color: rgb(221, 221, 226);
+}
+
+.dark .connection-db-picker-option--selected:hover {
+  background-color: rgba(255, 255, 255, 0.12);
+}
+
 .connection-dialog-content[data-wide="true"] .grid.grid-cols-4 {
   grid-template-columns: minmax(5.5rem, 0.7fr) repeat(3, minmax(0, 1fr));
 }

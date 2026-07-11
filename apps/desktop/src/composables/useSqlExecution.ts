@@ -14,6 +14,8 @@ import { isSqlExecutionSnapshot, resolveExecutableSql, type SqlExecutionOverride
 import { extractSqlParameterDescriptors, type SqlParameterDescriptor, type SqlParameterSyntax } from "@/lib/sql/sqlParameters";
 import { expandSqlVariables } from "@/lib/sql/sqlVariables";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
+import { assessProductionSql } from "@/lib/database/productionSafety";
+import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import type { ConnectionConfig, DatabaseType, QueryTab } from "@/types/database";
 
 const DANGER_RE = /^\s*(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
@@ -53,6 +55,7 @@ export function useSqlExecution(deps: {
   const historyStore = useHistoryStore();
   const connectionStore = useConnectionStore();
   const settingsStore = useSettingsStore();
+  const productionSafetyStore = useProductionSafetyStore();
   const { toast } = useToast();
 
   const dangerSql = ref("");
@@ -101,6 +104,19 @@ export function useSqlExecution(deps: {
           return;
         }
       }
+    }
+    const productionAssessment = assessProductionSql(sql, deps.activeConnection.value, deps.activeTab.value?.database);
+    if (productionAssessment.active && productionAssessment.isMutation) {
+      // Production writes always need a new explicit decision; editor preferences cannot suppress this gate.
+      const confirmed = await productionSafetyStore.requestConfirmation({
+        sql,
+        connectionName: deps.activeConnection.value?.name,
+        database: deps.activeTab.value?.database,
+        productionDatabases: productionAssessment.databases,
+        source: t("production.sourceSqlEditor"),
+      });
+      if (confirmed) await doExecute(sql);
+      return;
     }
     if (isDangerousSql(sql) && settingsStore.editorSettings.confirmDangerousSqlExecution) {
       dangerSql.value = sql;

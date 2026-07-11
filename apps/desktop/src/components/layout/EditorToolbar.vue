@@ -7,6 +7,7 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import TruncatedTextTooltip from "@/components/ui/TruncatedTextTooltip.vue";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
+import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { useSchemaOptions } from "@/composables/useSchemaOptions";
@@ -15,6 +16,7 @@ import { formatDatabaseLabel, isDefaultDatabase } from "@/lib/database/defaultDa
 import { connectionDisplayName } from "@/lib/tabs/tabPresentation";
 import { isSingleDatabase, supportsSqlInListPaste, supportsTransaction as supportsTransactionFeature } from "@/lib/database/databaseCapabilities";
 import { hexToRgba } from "@/lib/common/color";
+import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import type { QueryTab, ConnectionConfig } from "@/types/database";
 
 const props = defineProps<{
@@ -65,6 +67,7 @@ const activeDatabaseOptions = computed(() => {
 
 const connectionOptionIds = computed(() => connectionStore.connections.map((connection) => connection.id));
 const activeDatabaseValue = computed(() => props.activeTab.database || "");
+const activeProductionContext = computed(() => productionContextForDatabase(props.activeConnection, props.activeTab.database));
 const activeConnectionValue = computed(() => props.activeConnection?.id || "");
 const activeSchemaValue = computed(() => props.activeTab.schema || "");
 const supportsExplain = computed(() => {
@@ -318,6 +321,7 @@ function connectionById(connectionId: string): ConnectionConfig | undefined {
             <div v-if="activeConnection" class="flex min-w-0 items-center gap-1.5">
               <DatabaseIcon :db-type="connectionIconType(activeConnection)" class="h-3.5 w-3.5 shrink-0" />
               <span class="truncate">{{ label }}</span>
+              <ProductionContextBadge v-if="activeProductionContext.active" compact />
             </div>
             <span v-else class="truncate text-muted-foreground">{{ t("editor.selectConnection") }}</span>
           </template>

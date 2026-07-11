@@ -43,6 +43,18 @@ test("scoped single update auto-executes only on non-production targets", () => 
   assert.equal(classifyAiSqlExecution(sql, conn({ name: "prod-db" })).action, "confirm");
 });
 
+test("production target databases require confirmation even from staging", () => {
+  const decision = classifyAiSqlExecution(
+    "DELETE FROM prod_app.users WHERE id = 1",
+    conn({ db_type: "mysql", name: "staging-db", host: "10.0.0.8", database: "staging", production_databases: ["prod_app"] }),
+    "staging",
+  );
+
+  assert.equal(decision.action, "confirm");
+  assert.equal(decision.environment, "production");
+  assert.deepEqual(decision.reasons, ["production_write"]);
+});
+
 test("broad or destructive writes do not auto-execute", () => {
   assert.equal(classifyAiSqlExecution("UPDATE users SET name = 'a'", conn()).action, "block");
   assert.equal(classifyAiSqlExecution("UPDATE users SET name = 'a' WHERE 1=1", conn()).action, "block");

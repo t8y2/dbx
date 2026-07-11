@@ -22,6 +22,7 @@ export interface AiAgentPlanInput {
   instruction: string;
   assistantContent: string;
   connection?: ConnectionConfig;
+  database?: string;
 }
 
 export interface AiAgentPlan {
@@ -61,7 +62,7 @@ export function buildAiAgentPlan(input: AiAgentPlanInput): AiAgentPlan {
     return { steps };
   }
 
-  const decision = classifyAiSqlExecution(sql, input.connection);
+  const decision = classifyAiSqlExecution(sql, input.connection, input.database);
   steps.push({ kind: "risk_check", status: "done", ...decision });
 
   if (decision.action === "auto_execute") {

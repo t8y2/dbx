@@ -73,6 +73,8 @@ import { isPreviewTab } from "@/lib/tabs/tabPresentation";
 import { supportsSqlFileExecution } from "@/lib/database/databaseCapabilities";
 import { classifyAiSqlExecution } from "@/lib/ai/aiSqlExecutionPolicy";
 import { buildAppendedEditorSql } from "@/lib/ai/aiSqlAppend";
+import { assessProductionSql } from "@/lib/database/productionSafety";
+import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { buildHistoryAiAnalysisPrompt } from "@/lib/history/historyAiAnalysis";
 import { countAvailableAgentDriverUpdates, type AgentDriverUpdateBadgeState } from "@/lib/connection/agentDriverUpdateBadge";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
@@ -814,7 +816,22 @@ async function saveActiveObjectSource(tab: QueryTab): Promise<boolean> {
       name: source.name,
       source: tab.sql,
     });
-    await executeObjectSourceSave(tab.connectionId, tab.database, databaseType, statements, source.schema || tab.schema);
+    const executableSql = statements.filter((sql) => sql.trim()).join(";\n");
+    if (executableSql.trim()) {
+      const saved = await executeWithProductionSqlGuard({
+        connection,
+        database: tab.database,
+        sql: executableSql,
+        source: t("production.sourceObjectSource"),
+        execute: async () => {
+          await executeObjectSourceSave(tab.connectionId, tab.database, databaseType, statements, source.schema || tab.schema);
+          return true;
+        },
+      });
+      if (!saved) return false;
+    } else {
+      await executeObjectSourceSave(tab.connectionId, tab.database, databaseType, statements, source.schema || tab.schema);
+    }
     queryStore.markTabClean(tab);
     toast(t("objects.sourceSaved"), 2000);
     return true;
@@ -1285,6 +1302,12 @@ function onAiRequestAutoExecuteSql(sql: string) {
   const tabId = ensureQueryTab();
   queryStore.updateSql(tabId, buildAppendedEditorSql(activeTab.value?.sql || "", sql));
   selectedSql.value = "";
+
+  const productionAssessment = assessProductionSql(sql, activeConnection.value, activeTab.value?.database);
+  if (productionAssessment.active && productionAssessment.isMutation) {
+    toast(t("production.aiReviewRequired"), 5000);
+    return;
+  }
 
   const decision = classifyAiSqlExecution(sql, activeConnection.value);
   if (decision.action === "block") {

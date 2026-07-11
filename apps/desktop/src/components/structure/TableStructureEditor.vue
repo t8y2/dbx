@@ -13,6 +13,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
+import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { useQueryStore } from "@/stores/queryStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useSettingsStore, type StructureEditorDensity } from "@/stores/settingsStore";
@@ -64,6 +66,7 @@ import * as api from "@/lib/backend/api";
 const { t } = useI18n();
 const { isDark } = useTheme();
 const store = useConnectionStore();
+const productionSafetyStore = useProductionSafetyStore();
 const queryStore = useQueryStore();
 const historyStore = useHistoryStore();
 const settingsStore = useSettingsStore();
@@ -2061,13 +2064,24 @@ function toggleSqlPreviewCollapsed() {
 
 async function applyChanges() {
   if (!canApply.value || !props.connectionId || !props.database) return;
+  const sql = previewSqlText.value;
+  const connection = store.getConfig(props.connectionId);
+  const productionContext = productionContextForDatabase(connection, props.database);
+  if (productionContext.active) {
+    const confirmed = await productionSafetyStore.requestConfirmation({
+      sql,
+      connectionName: connection?.name,
+      database: props.database,
+      productionDatabases: productionContext.databases,
+      source: t("production.sourceStructure"),
+    });
+    if (!confirmed) return;
+  }
   saving.value = true;
   errorMessage.value = "";
-  const sql = previewSqlText.value;
   const refreshScope = captureStructureRefreshScope();
   const startedAt = Date.now();
   try {
-    const connection = store.getConfig(props.connectionId);
     const result = hasSqliteTypeChange.value
       ? await api.applySqliteTableStructureChange(props.connectionId, props.database, structureChangeOptions(), sqliteSchemaRevision.value!)
       : await api.executeBatch(props.connectionId, props.database, pendingStatements.value, props.schema, queryTimeoutSecsForConnection(connection));

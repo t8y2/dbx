@@ -157,6 +157,10 @@ export interface ConnectionConfig {
   external_config?: unknown;
   one_time?: boolean;
   read_only?: boolean;
+  /** Explicit production marker for every database reachable through this connection. */
+  is_production?: boolean;
+  /** Database-level production markers for multi-database connections. */
+  production_databases?: string[];
 }
 
 export type TransportLayerConfig = ({ type: "ssh" } & SshTunnelConfig) | ({ type: "proxy" } & ProxyTunnelConfig) | ({ type: "http_tunnel" } & HttpTunnelConfig);

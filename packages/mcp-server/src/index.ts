@@ -15,6 +15,9 @@ import {
   mdTable,
   notifyReload,
   parseMongoAggregateCommand,
+  assessProductionSql,
+  isLikelyMongoMutation,
+  isProductionDatabase,
   postBridge,
   sqlSafetyFromEnv,
   splitSqlStatements,
@@ -245,6 +248,12 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
       if (scopedConfig.db_type !== "mongodb") {
         const safety = evaluateSqlSafety(sql, { ...sqlSafetyFromEnv(), allowMultipleStatements: true });
         if (!safety.allowed) return toolError("SQL_BLOCKED", safety.reason ?? "SQL blocked.");
+        const production = assessProductionSql(sql, scopedConfig, database ?? scope.database ?? scopedConfig.database);
+        if (production.active && production.isMutation) {
+          return toolError("PRODUCTION_WRITE_BLOCKED", "MCP cannot execute writes against a production database. Return the SQL for a user to review and run in DBX.");
+        }
+      } else if (isProductionDatabase(scopedConfig, database ?? scope.database ?? scopedConfig.database) && isLikelyMongoMutation(sql)) {
+        return toolError("PRODUCTION_WRITE_BLOCKED", "MCP cannot execute writes against a production database. Return the command for a user to review and run in DBX.");
       }
       // MongoDB shell commands don't fit the SQL safety evaluator; the backend
       // (node-core executeQuery) applies command-aware read/write gating.
@@ -284,6 +293,9 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
       }
       const safety = evaluateRedisCommandSafety(command, sqlSafetyFromEnv());
       if (!safety.allowed) return toolError("REDIS_COMMAND_BLOCKED", safety.reason ?? "Redis command blocked.");
+      if (isProductionDatabase(scopedConfig, String(defaultRedisDb(scopedConfig, scope, db))) && safety.safety !== "allowed") {
+        return toolError("PRODUCTION_WRITE_BLOCKED", "MCP cannot execute write or dangerous Redis commands against a production database.");
+      }
       try {
         const result = await backend.executeRedisCommand(scopedConfig, defaultRedisDb(scopedConfig, scope, db), command, {
           skipSafetyCheck: safety.skipSafetyCheck,
@@ -476,6 +488,16 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
         } else {
           const safety = evaluateSqlSafety(sql, { ...safetyOptions, allowMultipleStatements: true });
           if (!safety.allowed) return toolError("SQL_BLOCKED", safety.reason ?? "SQL blocked.");
+        }
+        if (config?.db_type === "mongodb") {
+          if (isProductionDatabase(config, database ?? scope.database ?? config.database) && isLikelyMongoMutation(sql)) {
+            return toolError("PRODUCTION_WRITE_BLOCKED", "MCP cannot send writes against a production database to DBX.");
+          }
+        } else {
+          const production = assessProductionSql(sql, config, database ?? scope.database ?? config.database);
+          if (production.active && production.isMutation) {
+            return toolError("PRODUCTION_WRITE_BLOCKED", "MCP cannot send writes against a production database to DBX.");
+          }
         }
         // MongoDB shell commands bypass the SQL safety evaluator; pass MCP
         // safety flags to the desktop executor for command-aware gating.

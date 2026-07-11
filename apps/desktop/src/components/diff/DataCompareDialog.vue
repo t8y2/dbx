@@ -15,6 +15,7 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import type { DataCompareCellValue, DataCompareModifiedRow, DataCompareResult, DataCompareRow, DataCompareSyncPlan, DataCompareSyncPlanTableOptions } from "@/lib/dataGrid/dataCompare";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
 import * as api from "@/lib/backend/api";
+import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import { ArrowLeftRight, CheckSquare, ChevronDown, ChevronRight, Copy, GitCompareArrows, Loader2, Play, Square } from "@lucide/vue";
 
@@ -713,30 +714,40 @@ async function copySql() {
 
 async function executeSql() {
   if (!syncPlan.value.syncSql.trim() || syncPlan.value.syncStatements.length === 0 || executing.value) return;
-  executing.value = true;
-  syncErrors.value = [];
-  executeTotal.value = syncPlan.value.syncStatements.length;
-  executedCount.value = 0;
+  const targetConnection = store.getConfig(targetConnectionId.value);
   try {
-    await store.ensureConnected(targetConnectionId.value);
-    const statements = syncPlan.value.syncStatements;
-    for (let index = 0; index < statements.length; index += SYNC_EXECUTE_BATCH_SIZE) {
-      const batch = statements.slice(index, index + SYNC_EXECUTE_BATCH_SIZE);
-      try {
-        await api.executeBatch(targetConnectionId.value, targetDatabase.value, batch, targetSchema.value);
-        executedCount.value += batch.length;
-      } catch (e: any) {
-        for (const stmt of batch) {
+    const failed = await executeWithProductionSqlGuard({
+      connection: targetConnection,
+      database: targetDatabase.value,
+      sql: syncPlan.value.syncSql,
+      source: t("production.sourceDataCompare"),
+      execute: async () => {
+        executing.value = true;
+        syncErrors.value = [];
+        executeTotal.value = syncPlan.value.syncStatements.length;
+        executedCount.value = 0;
+        await store.ensureConnected(targetConnectionId.value);
+        const statements = syncPlan.value.syncStatements;
+        for (let index = 0; index < statements.length; index += SYNC_EXECUTE_BATCH_SIZE) {
+          const batch = statements.slice(index, index + SYNC_EXECUTE_BATCH_SIZE);
           try {
-            await api.executeBatch(targetConnectionId.value, targetDatabase.value, [stmt], targetSchema.value);
-          } catch (singleError: any) {
-            syncErrors.value.push({ sql: stmt, error: singleError?.message || String(singleError) });
+            await api.executeBatch(targetConnectionId.value, targetDatabase.value, batch, targetSchema.value);
+            executedCount.value += batch.length;
+          } catch (e: any) {
+            for (const stmt of batch) {
+              try {
+                await api.executeBatch(targetConnectionId.value, targetDatabase.value, [stmt], targetSchema.value);
+              } catch (singleError: any) {
+                syncErrors.value.push({ sql: stmt, error: singleError?.message || String(singleError) });
+              }
+              executedCount.value++;
+            }
           }
-          executedCount.value++;
         }
-      }
-    }
-    const failed = syncErrors.value.length;
+        return syncErrors.value.length;
+      },
+    });
+    if (failed === undefined) return;
     if (failed === 0) {
       toast(t("dataCompare.syncSuccess"), 2000);
     } else {

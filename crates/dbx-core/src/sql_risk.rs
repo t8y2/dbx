@@ -1,5 +1,5 @@
-﻿use serde::{Deserialize, Serialize};
-use sqlparser::ast::Statement;
+use serde::{Deserialize, Serialize};
+use sqlparser::ast::{Query, SetExpr, Statement};
 use sqlparser::dialect::{
     ClickHouseDialect, DuckDbDialect, GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
 };
@@ -60,8 +60,20 @@ fn resolve_dialect(dialect: &str) -> Box<dyn sqlparser::dialect::Dialect> {
 fn classify_statement(stmt: &Statement) -> SqlRisk {
     match stmt {
         // Pure reads
-        Statement::Query(_) => SqlRisk::ReadOnly,
-        Statement::Explain { .. } => SqlRisk::ReadOnly,
+        Statement::Query(query) => {
+            if query_contains_select_into(query) {
+                SqlRisk::Write
+            } else {
+                SqlRisk::ReadOnly
+            }
+        }
+        Statement::Explain { analyze, statement, .. } => {
+            if *analyze {
+                classify_statement(statement)
+            } else {
+                SqlRisk::ReadOnly
+            }
+        }
         Statement::ExplainTable { .. } => SqlRisk::ReadOnly,
 
         // Show/Describe variants
@@ -101,14 +113,30 @@ fn classify_statement(stmt: &Statement) -> SqlRisk {
             SqlRisk::Transaction
         }
 
-        // Copy (PostgreSQL) 鈥?treat as write
+        // COPY FROM mutates data; keep COPY conservative because sqlparser does
+        // not expose enough dialect-specific direction detail here.
         Statement::Copy { .. } => SqlRisk::Write,
 
-        // Pragma (SQLite/DuckDB) 鈥?conservative: treat as write unless known-safe
+        // SQLite/DuckDB PRAGMA statements can mutate database/session state.
         Statement::Pragma { .. } => SqlRisk::Write,
 
         // Catch-all: conservative write classification
         _ => SqlRisk::Write,
+    }
+}
+
+fn query_contains_select_into(query: &Query) -> bool {
+    set_expr_contains_select_into(&query.body)
+}
+
+fn set_expr_contains_select_into(expr: &SetExpr) -> bool {
+    match expr {
+        SetExpr::Select(select) => select.into.is_some(),
+        SetExpr::Query(query) => query_contains_select_into(query),
+        SetExpr::SetOperation { left, right, .. } => {
+            set_expr_contains_select_into(left) || set_expr_contains_select_into(right)
+        }
+        _ => false,
     }
 }
 
@@ -173,6 +201,13 @@ mod tests {
         assert_eq!(classify_sql_risk("INSERT INTO users VALUES (1)", "postgres").unwrap(), SqlRisk::Write);
         assert_eq!(classify_sql_risk("UPDATE users SET name = 'x'", "postgres").unwrap(), SqlRisk::Write);
         assert_eq!(classify_sql_risk("DELETE FROM users", "postgres").unwrap(), SqlRisk::Write);
+        assert_eq!(classify_sql_risk("EXPLAIN ANALYZE DELETE FROM users", "postgres").unwrap(), SqlRisk::Write);
+        assert_eq!(classify_sql_risk("SELECT * INTO backup_users FROM users", "postgres").unwrap(), SqlRisk::Write);
+        assert_eq!(
+            classify_sql_risk("SELECT * FROM users INTO OUTFILE '/tmp/users.csv'", "mysql").unwrap(),
+            SqlRisk::Write
+        );
+        assert_eq!(classify_sql_risk("/*! DELETE FROM users */", "mysql").unwrap(), SqlRisk::Write);
     }
 
     #[test]

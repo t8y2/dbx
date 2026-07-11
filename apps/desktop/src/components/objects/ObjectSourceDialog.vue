@@ -3,10 +3,12 @@ import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Clipboard, Loader2, PencilLine, RefreshCw } from "@lucide/vue";
 import { useToast } from "@/composables/useToast";
+import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlForDisplay, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { buildEditableObjectSource, buildExecutableObjectSourceStatements, executeObjectSourceSave } from "@/lib/table/objectSourceEditor";
+import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import * as api from "@/lib/backend/api";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
 import { Button } from "@/components/ui/button";
@@ -38,6 +40,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const { toast } = useToast();
+const connectionStore = useConnectionStore();
 const settingsStore = useSettingsStore();
 
 const content = ref("");
@@ -133,18 +136,34 @@ async function saveSource() {
     return;
   }
   if (!draft.value.trim() || !props.databaseType) return;
+  const databaseType = props.databaseType;
   const schema = props.schema || props.database;
   saving.value = true;
   saveError.value = "";
   try {
     const statements = await buildExecutableObjectSourceStatements({
-      databaseType: props.databaseType,
+      databaseType,
       objectType: props.objectType,
       schema,
       name: props.name,
       source: draft.value,
     });
-    await executeObjectSourceSave(props.connectionId, props.database, props.databaseType, statements, schema);
+    const executableSql = statements.filter((sql) => sql.trim()).join(";\n");
+    if (executableSql.trim()) {
+      const saved = await executeWithProductionSqlGuard({
+        connection: connectionStore.getConfig(props.connectionId),
+        database: props.database,
+        sql: executableSql,
+        source: t("production.sourceObjectSource"),
+        execute: async () => {
+          await executeObjectSourceSave(props.connectionId, props.database, databaseType, statements, schema);
+          return true;
+        },
+      });
+      if (!saved) return;
+    } else {
+      await executeObjectSourceSave(props.connectionId, props.database, databaseType, statements, schema);
+    }
     toast(t("objects.sourceSaved"));
     emit("saved");
     await loadSource(false);

@@ -160,6 +160,7 @@ import { rankSavedSqlHistory, type SavedSqlHistoryScope } from "@/lib/savedSql/s
 import { isSqlServerLinkedNode } from "@/lib/database/sqlServerLinkedServers";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionErrorIndicator from "@/components/connection/ConnectionErrorIndicator.vue";
+import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { isSchemaAware } from "@/lib/database/databaseFeatureSupport";
 import VisibleDatabasesDialog from "@/components/sidebar/VisibleDatabasesDialog.vue";
 import SchemaFilterDialog from "@/components/sidebar/VisibleSchemasDialog.vue";
@@ -171,6 +172,8 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { flattenTree } from "@/composables/useFlatTree";
 import { createDatabaseCollationOptionsForCharset, fallbackCreateDatabaseCharsetMetadata, nextCreateDatabaseCollation, normalizeCreateDatabaseCharset, parseCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
+import { productionContextForDatabase } from "@/lib/database/productionSafety";
+import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 
 const { t } = useI18n();
 const labelRef = ref<HTMLElement>();
@@ -272,6 +275,11 @@ const usesFullWidthLabel = computed(() => usesFullWidthTreeLabel(props.node.type
 const sidebarTreeContext = inject(sidebarTreeContextKey, null);
 const rowWidthClass = computed(() => (usesFullWidthLabel.value ? "w-max min-w-full" : "w-full min-w-0"));
 const labelWidthClass = computed(() => (usesFullWidthLabel.value ? "shrink-0 whitespace-nowrap" : "min-w-0 truncate"));
+const nodeProductionContext = computed(() => {
+  const connectionId = props.node.connectionId;
+  return productionContextForDatabase(connectionId ? connectionStore.getConfig(connectionId) : undefined, props.node.database);
+});
+const showProductionBadge = computed(() => nodeProductionContext.value.active && ["connection", "database", "redis-db", "mongo-db"].includes(props.node.type));
 
 function currentDatabaseType(): DatabaseType | undefined {
   return props.node.connectionId ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(props.node.connectionId)) : undefined;
@@ -2337,6 +2345,18 @@ function openRenameObjectDialog() {
   showRenameObjectDialog.value = true;
 }
 
+async function executeTreeNodeSqlWithProductionGuard(node: Pick<TreeNode, "connectionId" | "database" | "schema">, sql: string, options: { database?: string; schema?: string } = {}) {
+  if (!node.connectionId) return undefined;
+  const database = options.database ?? node.database ?? "";
+  return executeWithProductionSqlGuard({
+    connection: connectionStore.getConfig(node.connectionId),
+    database,
+    sql,
+    source: t("production.sourceSidebar"),
+    execute: () => api.executeQuery(node.connectionId!, database, sql, options.schema ?? node.schema),
+  });
+}
+
 let renameObjectPreviewRequestId = 0;
 
 async function refreshRenameObjectPreviewSql() {
@@ -2390,7 +2410,7 @@ async function confirmRenameObject() {
         source: source.source,
       });
       for (const sql of statements) {
-        await api.executeQuery(node.connectionId, node.database, sql, schema);
+        await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema });
       }
     } else {
       const sql = await buildRenameObjectSql({
@@ -2400,7 +2420,7 @@ async function confirmRenameObject() {
         oldName: node.label,
         newName,
       });
-      await api.executeQuery(node.connectionId, node.database, sql, node.schema);
+      await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
     }
     toast(t("contextMenu.renameObjectSuccess", { oldName: node.label, newName }), 3000);
     showRenameObjectDialog.value = false;
@@ -2418,7 +2438,7 @@ async function confirmDropObject() {
   try {
     await connectionStore.ensureConnected(node.connectionId);
     const sql = dropObjectPreviewSql.value || (await buildDropObjectSql(options));
-    await api.executeQuery(node.connectionId, node.database, sql, node.schema);
+    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
     const msgKey = node.type === "view" ? "contextMenu.dropViewSuccess" : node.type === "materialized_view" ? "contextMenu.dropViewSuccess" : node.type === "procedure" ? "contextMenu.dropProcedureSuccess" : "contextMenu.dropFunctionSuccess";
     toast(t(msgKey, { name: node.label }), 3000);
     closeDroppedTableObjectTabsForNode(node);
@@ -2440,7 +2460,7 @@ async function confirmDropTableChildObject() {
   try {
     await connectionStore.ensureConnected(node.connectionId);
     const sql = dropTableChildObjectPreviewSql.value || (await buildDropTableChildObjectSql(options));
-    await api.executeQuery(node.connectionId, node.database, sql, node.schema);
+    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
     toast(t("contextMenu.dropTableChildObjectSuccess", { name: options.name }), 3000);
     connectionStore.removeTreeNode(node.id);
   } catch (e: any) {
@@ -2484,7 +2504,7 @@ async function confirmBatchDrop() {
       await connectionStore.ensureConnected(target.connectionId);
       const sql = await dropSqlForTreeNode(target, { cascade: useCascade });
       if (!sql) continue;
-      await api.executeQuery(target.connectionId, target.database, sql, target.schema);
+      await executeTreeNodeSqlWithProductionGuard(target, sql, { database: target.database, schema: target.schema });
       closeDroppedTableObjectTabsForNode(target);
       connectionStore.removeTreeNode(target.id);
     }
@@ -2507,7 +2527,8 @@ async function confirmBatchTruncate() {
         await connectionStore.ensureConnected(target.connectionId);
         const sql = await truncateSqlForTreeNode(target, { cascade: useCascade });
         if (!sql) return false;
-        await api.executeQuery(target.connectionId, target.database, sql, target.schema);
+        const result = await executeTreeNodeSqlWithProductionGuard(target, sql, { database: target.database, schema: target.schema });
+        return result === undefined ? false : undefined;
       },
       refreshMutatedTableDataTabsForNodes,
     );
@@ -2527,7 +2548,7 @@ async function confirmBatchEmpty() {
     await connectionStore.ensureConnected(target.connectionId);
     const sql = await emptySqlForTreeNode(target);
     if (!sql) throw new Error("Empty table SQL is unavailable");
-    await api.executeQuery(target.connectionId, target.database, sql, target.schema);
+    await executeTreeNodeSqlWithProductionGuard(target, sql, { database: target.database, schema: target.schema });
   });
   for (const failure of result.failed) {
     console.error(`Failed to empty table "${failure.target.label}":`, failure.error);
@@ -2719,7 +2740,7 @@ async function confirmDropTable() {
   try {
     await connectionStore.ensureConnected(node.connectionId);
     const sql = dropTablePreviewSql.value || (await buildDropTableSql(dropTableSqlOptions()));
-    await api.executeQuery(node.connectionId, node.database, sql, node.schema);
+    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
     toast(t("contextMenu.dropTableSuccess", { name: node.label }), 3000);
     closeDroppedTableObjectTabsForNode(node);
     connectionStore.removeTreeNode(node.id);
@@ -2739,7 +2760,7 @@ async function confirmEmptyTable() {
   try {
     await connectionStore.ensureConnected(node.connectionId);
     const sql = emptyTablePreviewSql.value || (await buildEmptyTableSql(tableAdminSqlOptions()));
-    await api.executeQuery(node.connectionId, node.database, sql, node.schema);
+    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
     const messageKey = currentDatabaseType() === "clickhouse" ? "contextMenu.emptyTableSubmitted" : "contextMenu.emptyTableSuccess";
     toast(t(messageKey, { name: node.label }), 3000);
     await refreshMutatedTableDataTabsForNode(node);
@@ -2760,7 +2781,7 @@ async function confirmTruncateTable() {
   try {
     await connectionStore.ensureConnected(node.connectionId);
     const sql = truncateTablePreviewSql.value || (await buildTruncateTableSql(truncateTableSqlOptions()));
-    await api.executeQuery(node.connectionId, node.database, sql, node.schema);
+    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
     toast(t("contextMenu.truncateTableSuccess", { name: node.label }), 3000);
     await refreshMutatedTableDataTabsForNode(node);
   } catch (e: any) {
@@ -2895,7 +2916,7 @@ async function confirmEditDatabaseProperties() {
     const options = databasePropertyEditOptions();
     if (!options) return;
     const sql = await buildUpdateDatabasePropertiesSql(options);
-    await api.executeQuery(node.connectionId, databasePropertyName(), sql);
+    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: databasePropertyName() });
     toast(t("contextMenu.editDatabasePropertiesSuccess", { name: node.label }), 3000);
     showEditDatabasePropertiesDialog.value = false;
     await connectionStore.loadDatabases(node.connectionId, { force: true });
@@ -2968,7 +2989,7 @@ async function confirmEditSchemaComment() {
       name: node.schema || node.label,
       comment: schemaCommentText.value,
     });
-    await api.executeQuery(node.connectionId, node.database, sql, node.schema);
+    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
     toast(t("contextMenu.editSchemaCommentSuccess", { name: node.label }), 3000);
     showEditSchemaCommentDialog.value = false;
     await connectionStore.loadSchemas(node.connectionId, node.database, { force: true });
@@ -3143,7 +3164,8 @@ async function createDuckDbAttachedDatabaseFile() {
       duckDbAttachedDatabaseNameFromPath(path),
       existingDatabases.map((database) => database.name),
     );
-    await api.executeQuery(node.connectionId, "", await buildDuckDbAttachDatabaseSql(path, name));
+    const sql = await buildDuckDbAttachDatabaseSql(path, name);
+    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: "" });
 
     const config = connectionStore.getConfig(node.connectionId);
     if (config) {
@@ -3184,7 +3206,7 @@ async function confirmCreateDatabase() {
       charset: createDatabaseCharset.value,
       collation: createDatabaseCollation.value,
     });
-    await api.executeQuery(node.connectionId, "", sql);
+    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: "" });
     toast(t("contextMenu.createDatabaseSuccess", { name }), 3000);
     await connectionStore.ensureVisibleDatabase(node.connectionId, name);
     await connectionStore.loadDatabases(node.connectionId, { force: true });
@@ -3255,7 +3277,7 @@ async function confirmDropDatabase() {
         databaseType: currentDatabaseType(),
         name: node.label,
       }));
-    await api.executeQuery(node.connectionId, "", sql);
+    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: "" });
     toast(t("contextMenu.dropDatabaseSuccess", { name: node.label }), 3000);
     await connectionStore.loadDatabases(node.connectionId, { force: true });
     showDropDatabaseConfirm.value = false;
@@ -3349,7 +3371,7 @@ async function confirmCreateSchema() {
       databaseType: effectiveDatabaseTypeForConnection(config),
       name,
     });
-    await api.executeQuery(node.connectionId, targetDatabase || "", sql);
+    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: targetDatabase || "" });
     toast(t("contextMenu.createSchemaSuccess", { name }), 3000);
     if (isConnectionLevelSchemaCreation) {
       await connectionStore.loadDatabases(node.connectionId, { force: true });
@@ -3379,7 +3401,7 @@ async function confirmDropSchema() {
         databaseType: currentDatabaseType(),
         name: node.label,
       }));
-    await api.executeQuery(node.connectionId, node.database, sql);
+    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database });
     toast(t("contextMenu.dropSchemaSuccess", { name: node.label }), 3000);
     const config = connectionStore.getConfig(node.connectionId);
     if (config?.db_type === "sqlserver") {
@@ -3417,7 +3439,7 @@ async function confirmDuplicateStructure() {
       sourceName: node.label,
       targetName: newName,
     });
-    await api.executeQuery(node.connectionId, node.database, sql, node.schema);
+    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
     toast(t("contextMenu.duplicateStructureSuccess", { name: newName }), 3000);
     await refreshTableList(node);
   } catch (e: any) {
@@ -3446,7 +3468,7 @@ async function confirmPasteTable() {
           sourceName: entry.sourceName,
           targetName,
         });
-        await api.executeQuery(entry.connectionId, entry.database, structureSql, entry.schema);
+        await executeTreeNodeSqlWithProductionGuard(entry, structureSql, { database: entry.database, schema: entry.schema });
       }
       if (copyData) {
         const sourceColumns = await api.getColumns(entry.connectionId, entry.database, entry.schema || "", entry.sourceName);
@@ -3461,7 +3483,7 @@ async function confirmPasteTable() {
           targetName,
           ...dataCopyColumnOptions,
         });
-        await api.executeQuery(entry.connectionId, entry.database, dataSql, entry.schema);
+        await executeTreeNodeSqlWithProductionGuard(entry, dataSql, { database: entry.database, schema: entry.schema });
       }
       successCount++;
       const refreshKey = `${entry.connectionId}:${entry.database}:${entry.schema || ""}`;
@@ -5323,6 +5345,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
             @click.stop
           />
           <span v-else ref="labelRef" :class="labelWidthClass">{{ visibleLabel(node) }}</span>
+          <ProductionContextBadge v-if="showProductionBadge" compact />
           <span
             v-if="
               (node.type === 'group-tables' || node.type === 'group-views' || node.type === 'group-materialized-views' || node.type === 'group-procedures' || node.type === 'group-functions' || node.type === 'group-sequences' || node.type === 'group-packages' || node.type === 'group-partitions') &&

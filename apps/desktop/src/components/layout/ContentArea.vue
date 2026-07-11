@@ -78,6 +78,7 @@ import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
 import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
 import type { QueryTab, ConnectionConfig, TableInfoTab, TreeNode, VectorCollectionMeta, ObjectBrowserViewport } from "@/types/database";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import { productionContextForDatabase } from "@/lib/database/productionSafety";
 
 type DataGridHandle = {
   onToolbarRefresh: () => Promise<void> | void;
@@ -203,6 +204,8 @@ const activeTableMeta = computed(() => props.activeTab.tableMeta);
 const activeDataTabTableMeta = computed(() => tableMetaForDataTab(props.activeTab));
 const activeEffectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(props.activeConnection));
 const activeDataTabExecutionDatabase = computed(() => dataTabExecutionDatabase(props.activeConnection, props.activeTab.database, activeDataTabTableMeta.value?.catalog));
+const activeProductionContext = computed(() => productionContextForDatabase(props.activeConnection, props.activeTab.database));
+const productionWatermarkText = computed(() => (locale.value.startsWith("zh") ? "生产环境" : "PROD"));
 
 function findNodeInTree(nodes: TreeNode[], id: string): TreeNode | undefined {
   for (const node of nodes) {
@@ -851,9 +854,12 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
       <Splitpanes horizontal class="query-output-splitpanes flex-1 min-h-0 overflow-hidden" @resized="onResultsResized">
         <Pane class="min-h-0" :size="editorPaneSize" :min-size="resultsPaneOpen ? 15 : 100">
           <div class="h-full flex flex-col relative">
+            <div v-if="activeProductionContext.active" class="production-watermark pointer-events-none absolute inset-0 z-10 grid select-none" aria-hidden="true">
+              <span v-for="index in 4" :key="index" class="production-watermark__label whitespace-nowrap font-mono text-6xl font-extrabold text-red-700/[0.24] dark:text-red-200/[0.2]">{{ productionWatermarkText }}</span>
+            </div>
             <QueryEditor
               ref="queryEditorRef"
-              class="flex-1"
+              class="relative z-0 flex-1"
               :model-value="activeTab.sql"
               :connection-id="activeTab.connectionId"
               :database="activeTab.database"
@@ -1768,6 +1774,28 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
 .query-output-splitpanes :deep(> .splitpanes__splitter) {
   z-index: 1;
   flex: 0 0 3px;
+}
+
+.production-watermark {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 3rem;
+  overflow: hidden;
+  padding: 3rem 2.5rem;
+}
+
+.production-watermark__label {
+  align-self: center;
+  justify-self: center;
+  transform: rotate(-22deg);
+}
+
+@media (max-width: 700px) {
+  .production-watermark {
+    grid-template-columns: 1fr;
+    gap: 1.5rem;
+    padding-inline: 1rem;
+  }
 }
 
 .result-tab-scroll::-webkit-scrollbar {

@@ -99,16 +99,22 @@ pub async fn ai_agent_stream(
     } else {
         None
     };
+    let production_database = state
+        .configs
+        .read()
+        .await
+        .get(&connection_id)
+        .is_some_and(|config| dbx_core::production_safety::is_production_database(config, &database));
     let agent_ctx = AgentLoopContext {
         state: state.inner().clone(),
         connection_id,
         database,
         db_type: parsed_db_type,
         cli_mcp_server_command,
-        // Explicit confirmation grants write access only to this agent run.
+        // Explicit confirmation grants write access only to this agent run, never to production.
         sql_permissions: dbx_core::agent_tools::AgentSqlPermissions {
-            allow_writes: allow_write_sql.unwrap_or(false),
-            allow_dangerous: allow_write_sql.unwrap_or(false),
+            allow_writes: !production_database && allow_write_sql.unwrap_or(false),
+            allow_dangerous: !production_database && allow_write_sql.unwrap_or(false),
         },
     };
     let is_agent_mode = mode.as_deref() == Some("agent");

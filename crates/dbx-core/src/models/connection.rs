@@ -90,6 +90,12 @@ pub struct ConnectionConfig {
     pub one_time: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub read_only: bool,
+    /// Explicitly marks every database reachable through this connection as production.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_production: bool,
+    /// Database-level production markers for multi-database connections.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub production_databases: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -457,6 +463,10 @@ struct ConnectionConfigData {
     pub one_time: bool,
     #[serde(default)]
     pub read_only: bool,
+    #[serde(default)]
+    pub is_production: bool,
+    #[serde(default)]
+    pub production_databases: Vec<String>,
 }
 
 impl From<ConnectionConfigData> for ConnectionConfig {
@@ -507,6 +517,8 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             jdbc_driver_paths: data.jdbc_driver_paths,
             one_time: data.one_time,
             read_only: data.read_only,
+            is_production: data.is_production,
+            production_databases: data.production_databases,
         }
     }
 }
@@ -1834,6 +1846,8 @@ mod tests {
             jdbc_driver_paths: Vec::new(),
             one_time: false,
             read_only: false,
+            is_production: false,
+            production_databases: vec![],
         }
     }
 

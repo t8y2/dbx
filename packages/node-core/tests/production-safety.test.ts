@@ -1,0 +1,54 @@
+import { describe, expect, it } from "vitest";
+import { assessProductionSql, isLikelyMongoMutation, isProductionDatabase } from "../src/production-safety.js";
+import type { ConnectionConfig } from "../src/connections.js";
+
+function connection(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
+  return {
+    id: "conn-1",
+    name: "Operations",
+    db_type: "mysql",
+    host: "db.internal",
+    port: 3306,
+    username: "readonly",
+    password: "",
+    production_databases: ["prod_app"],
+    ...overrides,
+  };
+}
+
+describe("production safety", () => {
+  it("keeps an explicit production connection in scope", () => {
+    expect(isProductionDatabase(connection({ is_production: true }), "scratch")).toBe(true);
+  });
+
+  it("detects a production write through USE and a qualified table name", () => {
+    expect(assessProductionSql("-- migrate\nUSE prod_app; /* delete old rows */ DELETE FROM users", connection(), "staging")).toMatchObject({ active: true, isMutation: true });
+    expect(assessProductionSql("DELETE FROM prod_app.orders", connection(), "staging")).toMatchObject({ active: true, isMutation: true, databases: ["prod_app"] });
+    expect(assessProductionSql("DROP DATABASE IF EXISTS prod_app", connection(), "staging")).toMatchObject({ active: true, isMutation: true, databases: ["prod_app"] });
+  });
+
+  it("detects production writes hidden behind parser-sensitive SQL forms", () => {
+    for (const sql of [
+      "EXPLAIN ANALYZE DELETE FROM prod_app.users WHERE id = 1",
+      "/*! DELETE FROM prod_app.users WHERE id = 1 */",
+      "COPY prod_app.users FROM '/tmp/users.csv'",
+      "SELECT * INTO prod_app.backup_users FROM users",
+      "SELECT * FROM prod_app.users INTO OUTFILE '/tmp/users.csv'",
+    ]) {
+      expect(assessProductionSql(sql, connection(), "staging")).toMatchObject({ active: true, isMutation: true, databases: ["prod_app"] });
+    }
+  });
+
+  it("treats unrecognized SQL as a mutation when production is selected", () => {
+    expect(assessProductionSql("MAINTAIN UNKNOWN THING", connection(), "prod_app")).toMatchObject({ active: true, isMutation: true });
+  });
+
+  it("does not treat a read as a production write", () => {
+    expect(assessProductionSql("SELECT * FROM prod_app.orders", connection(), "staging")).toMatchObject({ active: false, isMutation: false });
+  });
+
+  it("recognizes Mongo write commands before MCP forwards them", () => {
+    expect(isLikelyMongoMutation("db.orders.updateOne({_id: 1}, {$set: {status: 'paid'}})")).toBe(true);
+    expect(isLikelyMongoMutation("db.orders.find({status: 'paid'})")).toBe(false);
+  });
+});

@@ -57,6 +57,9 @@ import { buildAiContext, runAgentStream, isVectorDbType, isValidActionForMode, d
 import { formatAiModelOption } from "@/lib/ai/aiModelPresentation";
 import type { AgentEvent } from "@/lib/backend/tauri";
 import { buildAiAgentPlan } from "@/lib/ai/aiAgentPlan";
+import { extractFirstSqlCodeBlock } from "@/lib/ai/aiSqlExecutionPolicy";
+import { productionContextForDatabase } from "@/lib/database/productionSafety";
+import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { buildAiAgentStepItems, toolCallStepKey, upsertAgentStep, type AiAgentStepItem, type AiAgentStepTone } from "@/lib/ai/aiAgentStepPresentation";
 import { createAiShikiCodeHighlighter, type AiCodeHighlighter } from "@/lib/ai/aiCodeHighlighter";
 import { createAiMessageRenderer } from "@/lib/ai/aiMessageRender";
@@ -496,6 +499,8 @@ const proposalConfirmMessage = computed<ChatMessage | null>(() => {
 
 let allowWriteSqlForNextRun = false;
 
+const productionContext = computed(() => productionContextForDatabase(props.connection, props.tab?.database));
+
 function proposalContainsWriteSql(content: string) {
   return /\b(insert|update|delete|replace|merge|create|alter|drop|truncate|rename|grant|revoke)\b/i.test(content);
 }
@@ -505,6 +510,12 @@ function sendProposalReply(positive: boolean) {
   if (isGenerating.value) return;
   const target = proposalConfirmMessage.value;
   if (!target) return;
+  if (positive && productionContext.value.active && proposalContainsWriteSql(target.content)) {
+    const sql = extractFirstSqlCodeBlock(target.content);
+    if (sql) emit("replaceSql", sql);
+    toast(t("production.aiReviewRequired"), 5000);
+    return;
+  }
   const isZh = containsChinese(target.content || "");
   const replyZh = positive ? "请执行上面你刚提议的操作，不要再反问确认。" : "不用执行上面提到的操作，继续当前对话。";
   const replyEn = positive ? "Execute the action you just proposed above; do not ask for confirmation again." : "Do not execute the action mentioned above; continue the current conversation.";
@@ -1396,7 +1407,8 @@ async function send() {
 
   const requestedAction = activeAction.value;
   const requestedMode = assistantMode.value;
-  const allowWriteSql = requestedMode === "agent" && allowWriteSqlForNextRun;
+  // Agent confirmation cannot grant autonomous writes while the active database is production.
+  const allowWriteSql = requestedMode === "agent" && allowWriteSqlForNextRun && !productionContext.value.active;
   allowWriteSqlForNextRun = false;
   isGenerating.value = true;
   messages.value.push({ role: "assistant", content: "" });
@@ -1483,6 +1495,7 @@ async function send() {
         instruction: modelInstruction,
         assistantContent: msg?.content || "",
         connection: props.connection,
+        database: props.tab?.database,
       });
       if (msg && requestedMode === "agent") msg.agentSteps = buildAiAgentStepItems(agentPlan);
       if (agentPlan.handoffSql) emit("requestAutoExecuteSql", agentPlan.handoffSql);
@@ -1739,6 +1752,7 @@ async function openExternalUrl(url: string) {
       <span class="flex flex-1 self-stretch items-center truncate text-xs font-medium" data-tauri-drag-region>
         {{ chatTitle }}
       </span>
+      <ProductionContextBadge v-if="productionContext.active" compact />
       <Button variant="ghost" size="icon" class="h-6 w-6" @click="startNewChat" :title="t('ai.newChat')">
         <MessageSquarePlus class="h-3.5 w-3.5" />
       </Button>

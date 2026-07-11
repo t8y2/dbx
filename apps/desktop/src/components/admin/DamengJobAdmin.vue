@@ -10,6 +10,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import type { ConnectionConfig } from "@/types/database";
 import * as api from "@/lib/backend/api";
+import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import {
   DAMENG_JOB_ENVIRONMENT_SQL,
   damengClearJobHistoriesSql,
@@ -169,10 +170,18 @@ async function applyPendingSql() {
   applying.value = true;
   try {
     await ensureConnection();
-    await api.executeMulti(props.connection.id, executionDatabase.value, pendingSql.value, undefined, undefined, {
-      maxRows: 1000,
-      useTransaction: pendingUseTransaction.value,
+    const result = await executeWithProductionSqlGuard({
+      connection: props.connection,
+      database: executionDatabase.value,
+      sql: pendingSql.value,
+      source: t("production.sourceAdmin"),
+      execute: () =>
+        api.executeMulti(props.connection.id, executionDatabase.value, pendingSql.value, undefined, undefined, {
+          maxRows: 1000,
+          useTransaction: pendingUseTransaction.value,
+        }),
     });
+    if (!result) return;
     toast(t("damengJobAdmin.applySuccess"), 2500);
     previewDialogOpen.value = false;
     await (pendingAfterApply.value?.() ?? Promise.resolve());

@@ -80,6 +80,7 @@ import QueryEditor from "@/components/editor/QueryEditor.vue";
 import DdlViewDialog from "./DdlViewDialog.vue";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
+import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, type BatchTableEmptyPlanItem } from "@/lib/sidebar/batchTableEmpty";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
@@ -1145,9 +1146,13 @@ async function confirmRename() {
         newName,
         source: source.source,
       });
-      for (const sql of statements) {
-        await api.executeQuery(props.connection.id, props.database, sql, schema);
-      }
+      const executed = await executeObjectBrowserSqlWithProductionGuard(statements.join(";\n"), async () => {
+        for (const sql of statements) {
+          await api.executeQuery(props.connection.id, props.database, sql, schema);
+        }
+        return true;
+      });
+      if (!executed) return;
     } else {
       const sql = await buildRenameObjectSql({
         databaseType: effectiveDatabaseType.value,
@@ -1156,7 +1161,8 @@ async function confirmRename() {
         oldName: row.name,
         newName,
       });
-      await api.executeQuery(props.connection.id, props.database, sql, schema);
+      const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql, schema));
+      if (!executed) return;
     }
     toast(t("contextMenu.renameObjectSuccess", { oldName: row.name, newName }));
     showRenameDialog.value = false;
@@ -1173,7 +1179,8 @@ async function confirmDrop() {
   const row = dropTarget.value;
   try {
     const sql = dropPreviewSql.value || (await buildDropSqlForRow(row, { cascade: canDropTargetCascade.value && dropTableCascade.value }));
-    await api.executeQuery(props.connection.id, props.database, sql);
+    const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql));
+    if (!executed) return;
     const successKey = row.type === "VIEW" ? "contextMenu.dropViewSuccess" : row.type === "PROCEDURE" ? "contextMenu.dropProcedureSuccess" : row.type === "FUNCTION" ? "contextMenu.dropFunctionSuccess" : "contextMenu.dropTableSuccess";
     toast(t(successKey, { name: row.name }));
     closeDroppedTableObjectTabsForRow(row);
@@ -1409,11 +1416,20 @@ async function confirmBatchDropTables() {
   if (targets.length === 0) return;
   try {
     const useCascade = canBatchDropCascade.value && batchDropCascade.value;
-    for (const row of targets) {
-      const sql = await buildDropTableSql(tableAdminSqlOptions(row, { cascade: useCascade }));
-      await api.executeQuery(props.connection.id, props.database, sql);
-      closeDroppedTableObjectTabsForRow(row);
-    }
+    const statements = await Promise.all(
+      targets.map(async (row) => ({
+        row,
+        sql: await buildDropTableSql(tableAdminSqlOptions(row, { cascade: useCascade })),
+      })),
+    );
+    const executed = await executeObjectBrowserSqlWithProductionGuard(statements.map(({ sql }) => sql).join(";\n"), async () => {
+      for (const { row, sql } of statements) {
+        await api.executeQuery(props.connection.id, props.database, sql);
+        closeDroppedTableObjectTabsForRow(row);
+      }
+      return true;
+    });
+    if (!executed) return;
     toast(t("objects.batchDropSuccess", { count: targets.length }));
     clearTableSelection();
     await reload();
@@ -1468,14 +1484,23 @@ async function confirmBatchTruncateTables() {
   if (targets.length === 0) return;
   try {
     const useCascade = canBatchTruncateCascade.value && batchTruncateCascade.value;
-    await runBatchTableTruncate(
-      targets,
-      async (row) => {
-        const sql = await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: useCascade }));
-        await api.executeQuery(props.connection.id, props.database, sql);
-      },
-      refreshMutatedTableDataTabsForRows,
+    const statements = await Promise.all(
+      targets.map(async (row) => ({
+        row,
+        sql: await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: useCascade })),
+      })),
     );
+    const executed = await executeObjectBrowserSqlWithProductionGuard(statements.map(({ sql }) => sql).join(";\n"), async () => {
+      await runBatchTableTruncate(
+        statements,
+        async ({ sql }) => {
+          await api.executeQuery(props.connection.id, props.database, sql);
+        },
+        async (succeeded) => refreshMutatedTableDataTabsForRows(succeeded.map(({ row }) => row)),
+      );
+      return true;
+    });
+    if (!executed) return;
     toast(t("objects.batchTruncateSuccess", { count: targets.length }));
     clearTableSelection();
     showBatchTruncateConfirm.value = false;
@@ -1696,7 +1721,8 @@ async function confirmDuplicateStructure() {
       sourceName: row.name,
       targetName: newName,
     });
-    await api.executeQuery(props.connection.id, props.database, sql, schema);
+    const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql, schema));
+    if (!executed) return;
     toast(t("contextMenu.duplicateStructureSuccess", { name: newName }));
     await reload();
     await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, schema);
@@ -1799,7 +1825,8 @@ async function confirmPasteTable() {
           sourceName: entry.sourceName,
           targetName,
         });
-        await api.executeQuery(props.connection.id, props.database, structureSql, schema);
+        const executed = await executeObjectBrowserSqlWithProductionGuard(structureSql, () => api.executeQuery(props.connection.id, props.database, structureSql, schema));
+        if (!executed) return;
       }
       if (copyData) {
         const sourceColumns = await api.getColumns(props.connection.id, props.database, schema || "", entry.sourceName);
@@ -1814,7 +1841,8 @@ async function confirmPasteTable() {
           targetName,
           ...dataCopyColumnOptions,
         });
-        await api.executeQuery(props.connection.id, props.database, dataSql, schema);
+        const executed = await executeObjectBrowserSqlWithProductionGuard(dataSql, () => api.executeQuery(props.connection.id, props.database, dataSql, schema));
+        if (!executed) return;
       }
       successCount++;
     } catch (e: any) {
@@ -1841,6 +1869,21 @@ function tableAdminSqlOptions(row: ObjectBrowserRow, options?: { cascade?: boole
   return result;
 }
 
+/**
+ * Routes Object Browser writes through the shared production gate. The SQL is
+ * assessed before the callback runs so generated DDL cannot bypass protection
+ * via executable comments, EXPLAIN ANALYZE, or qualified production targets.
+ */
+async function executeObjectBrowserSqlWithProductionGuard<T>(sql: string, execute: () => Promise<T>): Promise<T | undefined> {
+  return executeWithProductionSqlGuard({
+    connection: props.connection,
+    database: props.database,
+    sql,
+    source: t("production.sourceObjectBrowser"),
+    execute,
+  });
+}
+
 async function refreshTruncatePreviewSql(row: ObjectBrowserRow) {
   truncatePreviewSql.value = "";
   truncatePreviewSql.value = await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: canTruncateTargetCascade.value && truncateTableCascade.value })).catch(() => "");
@@ -1858,7 +1901,8 @@ async function confirmTruncateTable() {
   if (!row) return;
   try {
     const sql = truncatePreviewSql.value || (await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: canTruncateTargetCascade.value && truncateTableCascade.value })));
-    await api.executeQuery(props.connection.id, props.database, sql);
+    const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql));
+    if (!executed) return;
     toast(t("contextMenu.truncateTableSuccess", { name: row.name }));
     await refreshMutatedTableDataTabsForRows([row]);
   } catch (e: any) {
@@ -1883,7 +1927,8 @@ async function confirmEmptyTable() {
   if (!row) return;
   try {
     const sql = emptyPreviewSql.value || (await buildEmptyTableSql(tableAdminSqlOptions(row)));
-    await api.executeQuery(props.connection.id, props.database, sql);
+    const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql));
+    if (!executed) return;
     toast(t("contextMenu.emptyTableSuccess", { name: row.name }));
     await refreshMutatedTableDataTabsForRows([row]);
   } catch (e: any) {
@@ -1949,8 +1994,23 @@ async function saveSource() {
       name: row.name,
       source: sourceDraft.value,
     });
-    await executeObjectSourceSave(connectionId, database, effectiveDatabaseType.value, statements, schema);
-    if (sidePanelGuard.isStale(epoch)) return;
+    const executableSql = statements.filter((sql) => sql.trim()).join(";\n");
+    if (executableSql.trim()) {
+      const saved = await executeWithProductionSqlGuard({
+        connection: props.connection,
+        database,
+        sql: executableSql,
+        source: t("production.sourceObjectSource"),
+        execute: async () => {
+          await executeObjectSourceSave(connectionId, database, effectiveDatabaseType.value, statements, schema);
+          return true;
+        },
+      });
+      if (!saved || sidePanelGuard.isStale(epoch)) return;
+    } else {
+      await executeObjectSourceSave(connectionId, database, effectiveDatabaseType.value, statements, schema);
+      if (sidePanelGuard.isStale(epoch)) return;
+    }
     toast(t("objects.sourceSaved"));
     sourceEditing.value = false;
     sourceDraft.value = "";

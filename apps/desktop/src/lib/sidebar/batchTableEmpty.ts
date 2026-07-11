@@ -3,7 +3,22 @@ export interface BatchTableEmptyResult<T> {
   failed: Array<{ target: T; error: unknown }>;
 }
 
+export interface BatchTableEmptyPlanItem<T> {
+  target: T;
+  sql: string;
+}
+
 export type BatchTableEmptyFeedback = "success" | "partial" | "submitted" | "submitted-partial";
+
+export async function buildBatchTableEmptyPlan<T>(targets: readonly T[], buildSql: (target: T) => Promise<string>): Promise<BatchTableEmptyPlanItem<T>[]> {
+  const plan: BatchTableEmptyPlanItem<T>[] = [];
+  for (const target of targets) {
+    const sql = await buildSql(target);
+    if (!sql.trim()) throw new Error("Empty table SQL preview is unavailable");
+    plan.push({ target, sql });
+  }
+  return plan;
+}
 
 export async function runBatchTableEmpty<T>(targets: readonly T[], execute: (target: T) => Promise<void>): Promise<BatchTableEmptyResult<T>> {
   const result: BatchTableEmptyResult<T> = { succeeded: [], failed: [] };

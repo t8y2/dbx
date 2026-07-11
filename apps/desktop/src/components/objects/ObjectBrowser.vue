@@ -80,7 +80,7 @@ import QueryEditor from "@/components/editor/QueryEditor.vue";
 import DdlViewDialog from "./DdlViewDialog.vue";
 import { formatSqlForDisplay, sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
-import { batchTableEmptyFeedback, runBatchTableEmpty } from "@/lib/sidebar/batchTableEmpty";
+import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, type BatchTableEmptyPlanItem } from "@/lib/sidebar/batchTableEmpty";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   buildObjectBrowserRows,
@@ -205,7 +205,7 @@ const batchTruncatePreviewSql = ref("");
 const batchTruncateCascade = ref(false);
 const showBatchEmptyConfirm = ref(false);
 const batchEmptyPreviewSql = ref("");
-const batchEmptyTargets = ref<ObjectBrowserRow[]>([]);
+const batchEmptyPlan = ref<BatchTableEmptyPlanItem<ObjectBrowserRow>[]>([]);
 // Paste table dialog state
 const showPasteDialog = ref(false);
 const pasteTableMode = ref<PasteTableMode>("structure-and-data");
@@ -1460,40 +1460,36 @@ async function confirmBatchTruncateTables() {
 }
 
 async function refreshBatchEmptyPreviewSql(targets: ObjectBrowserRow[]) {
-  const statements: string[] = [];
-  for (const row of targets) {
-    const sql = await buildEmptyTableSql(tableAdminSqlOptions(row)).catch(() => "");
-    if (sql) statements.push(sql);
-  }
-  batchEmptyPreviewSql.value = statements.join("\n");
+  const plan = await buildBatchTableEmptyPlan(targets, (row) => buildEmptyTableSql(tableAdminSqlOptions(row)));
+  // Freeze the reviewed SQL with its target so confirmation cannot execute a different destructive statement.
+  batchEmptyPlan.value = plan;
+  batchEmptyPreviewSql.value = plan.map(({ sql }) => sql).join("\n");
 }
 
 function requestBatchEmptyTables() {
   const targets = [...selectedTableRows.value];
   if (targets.length === 0) return;
-  batchEmptyTargets.value = targets;
+  batchEmptyPlan.value = [];
   batchEmptyPreviewSql.value = "";
   void refreshBatchEmptyPreviewSql(targets)
     .then(() => {
-      if (!batchEmptyPreviewSql.value.trim()) throw new Error("Empty table SQL preview is unavailable");
       showBatchEmptyConfirm.value = true;
     })
     .catch((e: any) => {
-      batchEmptyTargets.value = [];
+      batchEmptyPlan.value = [];
       toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
     });
 }
 
 async function confirmBatchEmptyTables() {
-  const targets = batchEmptyTargets.value.slice();
-  if (targets.length === 0) return;
+  const plan = batchEmptyPlan.value.slice();
+  if (plan.length === 0) return;
   const asynchronousMutation = effectiveDatabaseType.value === "clickhouse";
-  const result = await runBatchTableEmpty(targets, async (row) => {
-    const sql = await buildEmptyTableSql(tableAdminSqlOptions(row));
+  const result = await runBatchTableEmpty(plan, async ({ sql }) => {
     await api.executeQuery(props.connection.id, props.database, sql);
   });
   for (const failure of result.failed) {
-    console.error(`Failed to empty table "${failure.target.name}":`, failure.error);
+    console.error(`Failed to empty table "${failure.target.target.name}":`, failure.error);
   }
   const feedback = batchTableEmptyFeedback(result, asynchronousMutation);
   if (feedback === "success") {
@@ -1505,7 +1501,7 @@ async function confirmBatchEmptyTables() {
   } else {
     toast(t("contextMenu.batchEmptyPartialFail", { success: result.succeeded.length, failed: result.failed.length }), 5000);
   }
-  batchEmptyTargets.value = [];
+  batchEmptyPlan.value = [];
   showBatchEmptyConfirm.value = false;
   if (result.succeeded.length > 0) {
     clearTableSelection();
@@ -2848,10 +2844,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 
   <DangerConfirmDialog
     v-model:open="showBatchEmptyConfirm"
-    :title="t('contextMenu.confirmBatchEmptyTitle', { count: batchEmptyTargets.length })"
-    :message="t('contextMenu.confirmBatchEmptyMessage', { count: batchEmptyTargets.length })"
+    :title="t('contextMenu.confirmBatchEmptyTitle', { count: batchEmptyPlan.length })"
+    :message="t('contextMenu.confirmBatchEmptyMessage', { count: batchEmptyPlan.length })"
     :sql="batchEmptyPreviewSql"
-    :confirm-label="t('contextMenu.batchEmpty', { count: batchEmptyTargets.length })"
+    :confirm-label="t('contextMenu.batchEmpty', { count: batchEmptyPlan.length })"
     @confirm="confirmBatchEmptyTables"
   />
 

@@ -1,10 +1,10 @@
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use regex::Regex;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
-const IDENTIFIER_PATTERN: &str = r"[A-Za-z_@$#][A-Za-z0-9_@$#-]*";
-const QUALIFIED_NAME_PATTERN: &str = r"[A-Za-z_@$#][A-Za-z0-9_@$#-]*\s*\.\s*(?:\*|[A-Za-z_@$#][A-Za-z0-9_@$#-]*)(?:\s*\.\s*(?:\*|[A-Za-z_@$#][A-Za-z0-9_@$#-]*))?";
+const IDENTIFIER_PATTERN: &str = r"[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*";
+const QUALIFIED_NAME_PATTERN: &str = r"[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*\s*\.\s*(?:\*|[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*)(?:\s*\.\s*(?:\*|[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*))?";
 
 static DML_TARGET_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(r"(?is)\b(?:FROM|JOIN|UPDATE|INTO|REFERENCES)\s+({QUALIFIED_NAME_PATTERN})"))
@@ -63,6 +63,12 @@ struct ReferencedDatabaseAssessment {
     uncertain: bool,
 }
 
+#[derive(Default)]
+struct SqlTargetSafetyText {
+    text: String,
+    quoted_identifiers: HashMap<String, String>,
+}
+
 /// Returns whether the selected database inherits an explicit production marker.
 pub fn is_production_database(config: &ConnectionConfig, database: &str) -> bool {
     config.is_production
@@ -103,13 +109,13 @@ fn referenced_databases(sql: &str, db_type: &DatabaseType, active_database: &str
     let mut use_database = String::new();
     let has_active_database = !normalize_database_name(active_database).is_empty();
 
-    for statement in cleaned.split(';').map(str::trim).filter(|statement| !statement.is_empty()) {
+    for statement in cleaned.text.split(';').map(str::trim).filter(|statement| !statement.is_empty()) {
         let before_size = assessment.databases.len();
         let statement_is_mutation = crate::query_execution_sql::is_write_sql(statement);
         if let Some(database) = USE_RE
             .captures(statement)
             .and_then(|capture| capture.get(1))
-            .map(|value| normalize_database_name(value.as_str()))
+            .map(|value| normalize_target_database_name(value.as_str(), &cleaned.quoted_identifiers))
             .filter(|value| !value.is_empty())
         {
             use_database = database;
@@ -127,6 +133,7 @@ fn referenced_databases(sql: &str, db_type: &DatabaseType, active_database: &str
         collect_qualified_target_databases(
             statement,
             db_type,
+            &cleaned.quoted_identifiers,
             &mut assessment.databases,
             &[
                 &DML_TARGET_RE,
@@ -141,15 +148,17 @@ fn referenced_databases(sql: &str, db_type: &DatabaseType, active_database: &str
                 .get(1)
                 .filter(|kind| database_target_kind_means_database(kind.as_str(), db_type))
                 .and_then(|_| capture.get(2))
-                .map(|value| normalize_database_name(value.as_str()))
+                .map(|value| normalize_target_database_name(value.as_str(), &cleaned.quoted_identifiers))
                 .filter(|value| !value.is_empty())
             {
                 assessment.databases.insert(database);
             }
         }
         for capture in PRIVILEGE_DATABASE_TARGET_RE.captures_iter(statement) {
-            if let Some(database) =
-                capture.get(1).map(|value| normalize_database_name(value.as_str())).filter(|value| !value.is_empty())
+            if let Some(database) = capture
+                .get(1)
+                .map(|value| normalize_target_database_name(value.as_str(), &cleaned.quoted_identifiers))
+                .filter(|value| !value.is_empty())
             {
                 assessment.databases.insert(database);
             }
@@ -157,7 +166,7 @@ fn referenced_databases(sql: &str, db_type: &DatabaseType, active_database: &str
         if let Some(database) = COPY_TARGET_RE
             .captures(statement)
             .and_then(|capture| capture.get(1))
-            .and_then(|target| database_from_qualified_name(target.as_str(), db_type))
+            .and_then(|target| database_from_qualified_name(target.as_str(), db_type, &cleaned.quoted_identifiers))
             .filter(|value| !value.is_empty())
         {
             assessment.databases.insert(database);
@@ -176,6 +185,7 @@ fn referenced_databases(sql: &str, db_type: &DatabaseType, active_database: &str
 fn collect_qualified_target_databases(
     statement: &str,
     db_type: &DatabaseType,
+    quoted_identifiers: &HashMap<String, String>,
     databases: &mut HashSet<String>,
     patterns: &[&LazyLock<Regex>],
 ) {
@@ -183,7 +193,7 @@ fn collect_qualified_target_databases(
         for capture in pattern.captures_iter(statement) {
             if let Some(database) = capture
                 .get(1)
-                .and_then(|target| database_from_qualified_name(target.as_str(), db_type))
+                .and_then(|target| database_from_qualified_name(target.as_str(), db_type, quoted_identifiers))
                 .filter(|value| !value.is_empty())
             {
                 databases.insert(database);
@@ -192,9 +202,16 @@ fn collect_qualified_target_databases(
     }
 }
 
-fn database_from_qualified_name(qualified_name: &str, db_type: &DatabaseType) -> Option<String> {
-    let parts: Vec<String> =
-        qualified_name.split('.').map(normalize_database_name).filter(|part| !part.is_empty()).collect();
+fn database_from_qualified_name(
+    qualified_name: &str,
+    db_type: &DatabaseType,
+    quoted_identifiers: &HashMap<String, String>,
+) -> Option<String> {
+    let parts: Vec<String> = qualified_name
+        .split('.')
+        .map(|part| normalize_target_database_name(part, quoted_identifiers))
+        .filter(|part| !part.is_empty())
+        .collect();
     if parts.len() < 2 {
         return None;
     }
@@ -202,6 +219,11 @@ fn database_from_qualified_name(qualified_name: &str, db_type: &DatabaseType) ->
         return parts.first().cloned();
     }
     None
+}
+
+fn normalize_target_database_name(value: &str, quoted_identifiers: &HashMap<String, String>) -> String {
+    let normalized = normalize_database_name(value);
+    quoted_identifiers.get(&normalized).map(|quoted| normalize_database_name(quoted)).unwrap_or(normalized)
 }
 
 fn qualified_first_part_is_database(db_type: &DatabaseType, part_count: usize) -> bool {
@@ -339,9 +361,14 @@ fn is_unknown_target_keyword(keyword: &str) -> bool {
         && !is_unqualified_target_keyword(keyword)
 }
 
-fn sql_target_safety_text(sql: &str) -> String {
+fn sql_target_safety_text(sql: &str) -> SqlTargetSafetyText {
     let chars: Vec<char> = sql.chars().collect();
-    let mut output = String::with_capacity(sql.len());
+    let mut result = SqlTargetSafetyText { text: String::with_capacity(sql.len()), quoted_identifiers: HashMap::new() };
+    append_sql_target_safety_text(&chars, &mut result);
+    result
+}
+
+fn append_sql_target_safety_text(chars: &[char], result: &mut SqlTargetSafetyText) {
     let mut index = 0usize;
 
     while index < chars.len() {
@@ -353,7 +380,7 @@ fn sql_target_safety_text(sql: &str) -> String {
             while index < chars.len() && chars[index] != '\n' && chars[index] != '\r' {
                 index += 1;
             }
-            output.push(' ');
+            result.text.push(' ');
             continue;
         }
         if ch == '#' {
@@ -361,14 +388,15 @@ fn sql_target_safety_text(sql: &str) -> String {
             while index < chars.len() && chars[index] != '\n' && chars[index] != '\r' {
                 index += 1;
             }
-            output.push(' ');
+            result.text.push(' ');
             continue;
         }
         if ch == '/' && next == Some('*') {
             if let Some((body, close_index)) = mysql_executable_comment_body(&chars, index) {
-                output.push(' ');
-                output.push_str(&sql_target_safety_text(&body));
-                output.push(' ');
+                result.text.push(' ');
+                let body_chars: Vec<char> = body.chars().collect();
+                append_sql_target_safety_text(&body_chars, result);
+                result.text.push(' ');
                 index = close_index;
             } else {
                 index += 2;
@@ -376,7 +404,7 @@ fn sql_target_safety_text(sql: &str) -> String {
                     index += 1;
                 }
                 index = (index + 2).min(chars.len());
-                output.push(' ');
+                result.text.push(' ');
             }
             continue;
         }
@@ -386,25 +414,23 @@ fn sql_target_safety_text(sql: &str) -> String {
                 index += 1;
             }
             index = (index + tag_len).min(chars.len());
-            output.push(' ');
+            result.text.push(' ');
             continue;
         }
         if ch == '\'' {
             index = skip_string_literal(&chars, index, '\'', '\'');
-            output.push(' ');
+            result.text.push(' ');
             continue;
         }
         if ch == '"' || ch == '`' || ch == '[' {
             let close = if ch == '[' { ']' } else { ch };
-            index = append_unquoted_identifier(&chars, index, close, &mut output);
+            index = append_quoted_identifier_token(chars, index, close, result);
             continue;
         }
 
-        output.push(ch);
+        result.text.push(ch);
         index += 1;
     }
-
-    output
 }
 
 fn mysql_executable_comment_body(chars: &[char], start: usize) -> Option<(String, usize)> {
@@ -471,23 +497,36 @@ fn skip_string_literal(chars: &[char], start: usize, open: char, close: char) ->
     chars.len()
 }
 
-fn append_unquoted_identifier(chars: &[char], start: usize, close: char, output: &mut String) -> usize {
+fn append_quoted_identifier_token(
+    chars: &[char],
+    start: usize,
+    close: char,
+    result: &mut SqlTargetSafetyText,
+) -> usize {
     let mut index = start + 1;
-    output.push(' ');
+    let mut identifier = String::new();
     while index < chars.len() {
         if chars[index] == close {
             if chars.get(index + 1) == Some(&close) {
-                output.push(close);
+                identifier.push(close);
                 index += 2;
                 continue;
             }
-            output.push(' ');
+            let token = format!("__dbxq{}__", result.quoted_identifiers.len());
+            result.quoted_identifiers.insert(token.to_ascii_lowercase(), identifier);
+            result.text.push(' ');
+            result.text.push_str(&token);
+            result.text.push(' ');
             return index + 1;
         }
-        output.push(if chars[index] == ';' { ' ' } else { chars[index] });
+        identifier.push(if chars[index] == ';' { ' ' } else { chars[index] });
         index += 1;
     }
-    output.push(' ');
+    let token = format!("__dbxq{}__", result.quoted_identifiers.len());
+    result.quoted_identifiers.insert(token.to_ascii_lowercase(), identifier);
+    result.text.push(' ');
+    result.text.push_str(&token);
+    result.text.push(' ');
     chars.len()
 }
 
@@ -495,6 +534,18 @@ fn append_unquoted_identifier(chars: &[char], start: usize, close: char, output:
 mod tests {
     use super::{is_production_database, targets_production_database};
     use crate::models::connection::{ConnectionConfig, DatabaseType};
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ProductionSafetyCorpusCase {
+        name: String,
+        dialect: DatabaseType,
+        production_databases: Vec<String>,
+        active_database: String,
+        sql: String,
+        active: bool,
+    }
 
     fn config() -> ConnectionConfig {
         ConnectionConfig {
@@ -581,6 +632,25 @@ mod tests {
             "staging",
             "SELECT * FROM prod_app.users; DELETE FROM staging.users WHERE id = 1"
         ));
+    }
+
+    #[test]
+    fn matches_shared_sql_target_safety_corpus() {
+        let corpus: Vec<ProductionSafetyCorpusCase> =
+            serde_json::from_str(include_str!("../../../tests/fixtures/production-safety-corpus.json"))
+                .expect("production safety corpus is valid JSON");
+
+        for corpus_case in corpus {
+            let mut config = config();
+            config.db_type = corpus_case.dialect;
+            config.production_databases = corpus_case.production_databases;
+            assert_eq!(
+                targets_production_database(&config, &corpus_case.active_database, &corpus_case.sql),
+                corpus_case.active,
+                "{}",
+                corpus_case.name
+            );
+        }
     }
 
     #[test]

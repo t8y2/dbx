@@ -1,6 +1,20 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { assessProductionSql, isLikelyMongoMutation, isProductionDatabase } from "../src/production-safety.js";
 import type { ConnectionConfig } from "../src/connections.js";
+
+interface ProductionSafetyCorpusCase {
+  name: string;
+  dialect: ConnectionConfig["db_type"];
+  productionDatabases: string[];
+  activeDatabase: string;
+  sql: string;
+  active: boolean;
+  isMutation: boolean;
+  databases: string[];
+}
+
+const productionSafetyCorpus = JSON.parse(readFileSync(new URL("../../../tests/fixtures/production-safety-corpus.json", import.meta.url), "utf8")) as ProductionSafetyCorpusCase[];
 
 function connection(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
   return {
@@ -30,6 +44,31 @@ describe("production safety", () => {
   it("detects production writes hidden behind parser-sensitive SQL forms", () => {
     for (const sql of ["EXPLAIN ANALYZE DELETE FROM prod_app.users WHERE id = 1", "/*! DELETE FROM prod_app.users WHERE id = 1 */", "COPY prod_app.users FROM '/tmp/users.csv'", "SELECT * INTO prod_app.backup_users FROM users", "SELECT * FROM prod_app.users INTO OUTFILE '/tmp/users.csv'"]) {
       expect(assessProductionSql(sql, connection(), "staging")).toMatchObject({ active: true, isMutation: true, databases: ["prod_app"] });
+    }
+  });
+
+  it("matches the shared SQL target safety corpus", () => {
+    for (const corpusCase of productionSafetyCorpus) {
+      const assessment = assessProductionSql(
+        corpusCase.sql,
+        connection({
+          db_type: corpusCase.dialect,
+          production_databases: corpusCase.productionDatabases,
+        }),
+        corpusCase.activeDatabase,
+      );
+      expect(
+        {
+          active: assessment.active,
+          isMutation: assessment.isMutation,
+          databases: assessment.databases,
+        },
+        corpusCase.name,
+      ).toEqual({
+        active: corpusCase.active,
+        isMutation: corpusCase.isMutation,
+        databases: corpusCase.databases,
+      });
     }
   });
 

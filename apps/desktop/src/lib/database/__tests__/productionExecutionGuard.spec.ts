@@ -65,6 +65,42 @@ describe("production SQL execution guard", () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  it("queues concurrent production confirmations", async () => {
+    const firstExecute = vi.fn().mockResolvedValue("first");
+    const secondExecute = vi.fn().mockResolvedValue("second");
+    const firstSql = "DELETE FROM prod_app.users WHERE id = 1";
+    const secondSql = "DELETE FROM prod_app.audit_log WHERE id = 2";
+    const firstExecution = executeWithProductionSqlGuard({
+      connection: connection(),
+      database: "staging",
+      sql: firstSql,
+      source: "Schema diff",
+      execute: firstExecute,
+    });
+    const secondExecution = executeWithProductionSqlGuard({
+      connection: connection(),
+      database: "staging",
+      sql: secondSql,
+      source: "Data compare",
+      execute: secondExecute,
+    });
+
+    await Promise.resolve();
+    const store = useProductionSafetyStore();
+    expect(store.pending?.sql).toBe(firstSql);
+    expect(firstExecute).not.toHaveBeenCalled();
+    expect(secondExecute).not.toHaveBeenCalled();
+
+    store.confirm();
+    await expect(firstExecution).resolves.toBe("first");
+    expect(firstExecute).toHaveBeenCalledTimes(1);
+    expect(store.pending?.sql).toBe(secondSql);
+
+    store.cancel();
+    await expect(secondExecution).resolves.toBeUndefined();
+    expect(secondExecute).not.toHaveBeenCalled();
+  });
+
   it("executes non-production SQL immediately", async () => {
     const execute = vi.fn().mockResolvedValue("done");
     await expect(

@@ -28,13 +28,13 @@ import { redisCommandResultToQueryResult } from "@/lib/redis/redisQueryResult";
 import { nextRedisCommandDb } from "@/lib/redis/redisCommandSession";
 import { isRedisMutatingCommand } from "@/lib/redis/redisCommandTable";
 import { usesAgentCursorForQuery } from "@/lib/database/databaseDriverManifest";
-import { canUseKeylessRowPredicate } from "@/lib/table/tableEditing";
+import { canUseKeylessRowPredicate, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/table/tableDataExport";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { dataTabExecutionDatabase } from "@/lib/table/dataTabExecutionDatabase";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { loadTableMetadata } from "@/lib/metadata/tableMetadataCache";
-import { quoteTableIdentifier } from "@/lib/table/tableSelectSql";
+import { buildTableSelectSql, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
 import { connectionQueryExecutionSchema, effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
 import { frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { queryResultSourceLabel } from "@/lib/sql/queryResultSource";
@@ -81,6 +81,15 @@ interface DroppedTableObjectTarget {
   schemaCandidates?: Array<string | undefined>;
   name: string;
   objectType?: DroppedTableObjectType;
+}
+
+interface TableDataRefreshTarget {
+  connectionId: string;
+  database: string;
+  schema?: string;
+  schemaCandidates?: Array<string | undefined>;
+  catalog?: string;
+  name: string;
 }
 
 function tabClientSessionId(tab: Pick<QueryTab, "id">, suffix?: (typeof BACKGROUND_CLIENT_SESSION_SUFFIXES)[number]): string {
@@ -1528,10 +1537,61 @@ export const useQueryStore = defineStore("query", () => {
     return false;
   }
 
+  function tabMatchesTableDataRefreshTarget(tab: QueryTab, target: TableDataRefreshTarget): boolean {
+    if (tab.mode !== "data" || tab.connectionId !== target.connectionId || tab.database !== target.database) return false;
+    const tableMeta = tableMetaForDataTab(tab);
+    if (!tableMeta || tableMeta.tableName !== target.name) return false;
+    if ((tableMeta.catalog || "") !== (target.catalog || "")) return false;
+    const targetSchemas = droppedTableObjectSchemaCandidates(target);
+    return targetSchemas.has(normalizeOptionalSchema(tableMeta.schema ?? tab.schema));
+  }
+
   function closeDroppedTableObjectTabs(target: DroppedTableObjectTarget) {
     // A dropped table-like object makes existing data/structure tabs stale; close
     // them immediately instead of letting the next refresh fail against a missing object.
     closeTabsWhere((tab) => tabMatchesDroppedTableObject(tab, target));
+  }
+
+  async function refreshDataTabsForTable(target: TableDataRefreshTarget): Promise<number> {
+    const matchingTabs = tabs.value.filter((tab) => tabMatchesTableDataRefreshTarget(tab, target));
+    if (matchingTabs.length === 0) return 0;
+
+    const settingsStore = useSettingsStore();
+    let refreshed = 0;
+
+    for (const tab of matchingTabs) {
+      const tableMeta = tableMetaForDataTab(tab);
+      if (!tableMeta?.tableName) continue;
+      const conn = useConnectionStore().getConfig(tab.connectionId);
+      const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
+      const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : tableMeta.primaryKeys;
+      const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableIdentifier(effectiveDbType, tab.resultSortColumn)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
+      const orderBy = tab.orderByInput?.trim() || sortOrder;
+      const limit = tab.resultPageLimit ?? settingsStore.editorSettings.pageSize ?? tableOpenPageLimit();
+      const offset = tab.resultPageOffset ?? 0;
+      const sql = await buildTableSelectSql({
+        databaseType: effectiveDbType,
+        schema: tableMeta.schema,
+        tableName: tableMeta.tableName,
+        tableType: tableMeta.tableType,
+        catalog: tableMeta.catalog,
+        columns: tableMeta.columns.map((column) => column.name),
+        primaryKeys,
+        includeRowId: usesSyntheticRowIdKey(effectiveDbType, primaryKeys, tableMeta.tableType),
+        whereInput: tab.whereInput,
+        orderBy,
+        limit,
+        offset,
+      });
+      updateSql(tab.id, sql);
+      await executeTabSql(tab.id, sql, {
+        pagination: { limit, offset },
+        preserveResultDuringExecution: true,
+      });
+      refreshed += 1;
+    }
+
+    return refreshed;
   }
 
   function releaseTabsWhere(predicate: (tab: QueryTab) => boolean) {
@@ -3501,6 +3561,7 @@ export const useQueryStore = defineStore("query", () => {
     closeConnectionTabs,
     closeDatabaseTabs,
     closeDroppedTableObjectTabs,
+    refreshDataTabsForTable,
     releaseConnectionTabs,
     releaseDatabaseTabs,
     isDatabaseOpen,

@@ -1436,16 +1436,41 @@ function requestBatchTruncateTables() {
   showBatchTruncateConfirm.value = true;
 }
 
+function tableDataRefreshTargetForRow(row: ObjectBrowserRow) {
+  return {
+    connectionId: props.connection.id,
+    database: props.database,
+    schema: row.schema || selectedSchema.value,
+    schemaCandidates: [row.schema, selectedSchema.value],
+    catalog: props.catalog,
+    name: row.name,
+  };
+}
+
+async function refreshMutatedTableDataTabsForRows(rows: ObjectBrowserRow[]) {
+  for (const row of rows) {
+    const target = tableDataRefreshTargetForRow(row);
+    try {
+      await queryStore.refreshDataTabsForTable(target);
+    } catch (error) {
+      console.warn("[DBX][table-data-refresh-after-mutation:error]", { target, error });
+    }
+  }
+}
+
 async function confirmBatchTruncateTables() {
   const targets = [...selectedTableRows.value];
   if (targets.length === 0) return;
+  const succeeded: ObjectBrowserRow[] = [];
   try {
     const useCascade = canBatchTruncateCascade.value && batchTruncateCascade.value;
     for (const row of targets) {
       const sql = await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: useCascade }));
       await api.executeQuery(props.connection.id, props.database, sql);
+      succeeded.push(row);
     }
     toast(t("objects.batchTruncateSuccess", { count: targets.length }));
+    await refreshMutatedTableDataTabsForRows(succeeded);
     clearTableSelection();
     showBatchTruncateConfirm.value = false;
     await reload();
@@ -1778,6 +1803,7 @@ async function confirmTruncateTable() {
     const sql = truncatePreviewSql.value || (await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: canTruncateTargetCascade.value && truncateTableCascade.value })));
     await api.executeQuery(props.connection.id, props.database, sql);
     toast(t("contextMenu.truncateTableSuccess", { name: row.name }));
+    await refreshMutatedTableDataTabsForRows([row]);
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
@@ -1802,6 +1828,7 @@ async function confirmEmptyTable() {
     const sql = emptyPreviewSql.value || (await buildEmptyTableSql(tableAdminSqlOptions(row)));
     await api.executeQuery(props.connection.id, props.database, sql);
     toast(t("contextMenu.emptyTableSuccess", { name: row.name }));
+    await refreshMutatedTableDataTabsForRows([row]);
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }

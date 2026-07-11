@@ -429,6 +429,8 @@ export default withEnglishFallback({
     kafkaKerberosKrb5Conf: "krb5.conf",
     kafkaKerberosPrincipalRequired: "Kafka Kerberos プリンシパルは必須です",
     kafkaKerberosKeytabRequired: "Kafka Kerberos keytab のパスは必須です",
+    kafkaKerberosKeytabBrowse: "Keytab を選択",
+    kafkaKerberosKrb5ConfBrowse: "krb5.conf を選択",
     kafkaKerberosKeytabPlaceholder: "DBX Agent が動作するマシンのパス。例: /etc/security/keytabs/user.keytab",
     kafkaKerberosKrb5ConfPlaceholder: "オプション。DBX Agent が動作するマシンのパス。例: /etc/krb5.conf",
     kafkaKerberosPathHint: "keytab と krb5.conf のパスは DBX Agent が読み取るため、DBX Agent が動作するマシン上に存在する必要があります。ブラウザからファイルをアップロードすることはありません。",

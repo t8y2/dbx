@@ -307,6 +307,8 @@ export default {
     kafkaKerberosKrb5Conf: "krb5.conf",
     kafkaKerberosPrincipalRequired: "Kafka Kerberos principal is required",
     kafkaKerberosKeytabRequired: "Kafka Kerberos keytab path is required",
+    kafkaKerberosKeytabBrowse: "Choose Keytab",
+    kafkaKerberosKrb5ConfBrowse: "Choose krb5.conf",
     kafkaKerberosKeytabPlaceholder: "Path on DBX Agent machine, e.g. /etc/security/keytabs/user.keytab",
     kafkaKerberosKrb5ConfPlaceholder: "Optional path on DBX Agent machine, e.g. /etc/krb5.conf",
     kafkaKerberosPathHint: "The keytab and krb5.conf paths are read by DBX Agent and must exist on the machine running DBX Agent; files are not uploaded from this browser.",

@@ -430,6 +430,8 @@ export default withEnglishFallback({
     kafkaKerberosKrb5Conf: "krb5.conf",
     kafkaKerberosPrincipalRequired: "O principal do Kafka Kerberos não pode estar vazio",
     kafkaKerberosKeytabRequired: "O caminho do keytab do Kafka Kerberos não pode estar vazio",
+    kafkaKerberosKeytabBrowse: "Escolher Keytab",
+    kafkaKerberosKrb5ConfBrowse: "Escolher krb5.conf",
     kafkaKerberosKeytabPlaceholder: "Caminho na máquina do DBX Agent, por exemplo /etc/security/keytabs/user.keytab",
     kafkaKerberosKrb5ConfPlaceholder: "Opcional, caminho na máquina do DBX Agent, por exemplo /etc/krb5.conf",
     kafkaKerberosPathHint: "Os caminhos do keytab e do krb5.conf são lidos pelo DBX Agent e devem existir na máquina onde o DBX Agent é executado; os arquivos não são enviados do navegador atual.",

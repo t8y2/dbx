@@ -236,6 +236,14 @@ def validate_release_runtime_keys(root: Path) -> list[str]:
             f"registry must publish Java {DEFAULT_AGENT_JRE_KEY} under JRE key {DEFAULT_AGENT_JRE_KEY}",
         ),
         (
+            r"jdk\.security\.auth",
+            "release workflow JRE must include jdk.security.auth for Kafka Kerberos LoginModule support",
+        ),
+        (
+            r"jdk\.security\.jgss",
+            "release workflow JRE must include jdk.security.jgss for Kafka GSSAPI SASL support",
+        ),
+        (
             r"legacy-placeholder\.jar",
             "native-only registry entries must publish a legacy jar placeholder for older DBX clients",
         ),

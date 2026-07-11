@@ -309,6 +309,8 @@ export default withEnglishFallback({
     kafkaKerberosKrb5Conf: "krb5.conf",
     kafkaKerberosPrincipalRequired: "Kafka Kerberos principal 不能为空",
     kafkaKerberosKeytabRequired: "Kafka Kerberos keytab 路径不能为空",
+    kafkaKerberosKeytabBrowse: "选择 Keytab",
+    kafkaKerberosKrb5ConfBrowse: "选择 krb5.conf",
     kafkaKerberosKeytabPlaceholder: "DBX Agent 所在机器路径，例如 /etc/security/keytabs/user.keytab",
     kafkaKerberosKrb5ConfPlaceholder: "可选，DBX Agent 所在机器路径，例如 /etc/krb5.conf",
     kafkaKerberosPathHint: "keytab 和 krb5.conf 路径由 DBX Agent 读取，必须存在于运行 DBX Agent 的机器上；不会从当前浏览器上传文件。",

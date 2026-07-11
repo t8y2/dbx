@@ -318,6 +318,7 @@ class ValidateAgentsTest(unittest.TestCase):
                         include:
                           - jre-key: "21"
                             java-version: "21"
+                            modules: "java.base,jdk.security.auth,jdk.security.jgss"
                     detect_jre_key() {
                       case "$name" in
                         *) echo "21" ;;
@@ -372,6 +373,8 @@ class ValidateAgentsTest(unittest.TestCase):
                     "release workflow must build the default JRE with key 21",
                     "agents must use JRE key 21",
                     "registry must publish Java 21 under JRE key 21",
+                    "release workflow JRE must include jdk.security.auth for Kafka Kerberos LoginModule support",
+                    "release workflow JRE must include jdk.security.jgss for Kafka GSSAPI SASL support",
                     "native-only registry entries must publish a legacy jar placeholder for older DBX clients",
                     "release workflow must not build Java 21 under JRE key 17",
                     "agents must not use JRE key 17",

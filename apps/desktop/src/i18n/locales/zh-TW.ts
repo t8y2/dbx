@@ -429,6 +429,8 @@ export default withEnglishFallback({
     kafkaKerberosKrb5Conf: "krb5.conf",
     kafkaKerberosPrincipalRequired: "Kafka Kerberos principal 不能為空",
     kafkaKerberosKeytabRequired: "Kafka Kerberos keytab 路徑不能為空",
+    kafkaKerberosKeytabBrowse: "選擇 Keytab",
+    kafkaKerberosKrb5ConfBrowse: "選擇 krb5.conf",
     kafkaKerberosKeytabPlaceholder: "DBX Agent 所在機器路徑，例如 /etc/security/keytabs/user.keytab",
     kafkaKerberosKrb5ConfPlaceholder: "可選，DBX Agent 所在機器路徑，例如 /etc/krb5.conf",
     kafkaKerberosPathHint: "keytab 和 krb5.conf 路徑由 DBX Agent 讀取，必須存在於執行 DBX Agent 的機器上；不會從當前瀏覽器上傳檔案。",

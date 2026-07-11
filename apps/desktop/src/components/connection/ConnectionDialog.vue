@@ -3375,6 +3375,24 @@ async function browseHiveKerberosFile(target: "krb5" | "jaas") {
   }
 }
 
+async function browseKafkaKerberosFile(target: "keytab" | "krb5") {
+  if (isTauriRuntime()) {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      title: target === "keytab" ? t("connection.kafkaKerberosKeytabBrowse") : t("connection.kafkaKerberosKrb5ConfBrowse"),
+      multiple: false,
+      filters: [{ name: "Kerberos", extensions: target === "keytab" ? ["keytab", "kt", "*"] : ["conf", "ini", "*"] }],
+    });
+    if (selected && typeof selected === "string") {
+      if (target === "keytab") {
+        mqKafkaKerberosKeytabPath.value = selected;
+      } else {
+        mqKafkaKrb5ConfPath.value = selected;
+      }
+    }
+  }
+}
+
 async function browseDbFilePath() {
   if (isTauriRuntime()) {
     const { open } = await import("@tauri-apps/plugin-dialog");
@@ -4027,7 +4045,17 @@ function openExternalUrl(url: string) {
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.kafkaKerberosKeytab") }}</Label>
-                      <Input v-model="mqKafkaKerberosKeytabPath" class="col-span-3" :placeholder="t('connection.kafkaKerberosKeytabPlaceholder')" />
+                      <div class="col-span-3 flex items-center gap-1">
+                        <Input v-model="mqKafkaKerberosKeytabPath" class="flex-1" :placeholder="t('connection.kafkaKerberosKeytabPlaceholder')" />
+                        <Tooltip v-if="isDesktop">
+                          <TooltipTrigger as-child>
+                            <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" @click="browseKafkaKerberosFile('keytab')">
+                              <FolderOpen class="h-4 w-4" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>{{ t("connection.kafkaKerberosKeytabBrowse") }}</TooltipContent>
+                        </Tooltip>
+                      </div>
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.kafkaKerberosServiceName") }}</Label>
@@ -4035,7 +4063,17 @@ function openExternalUrl(url: string) {
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.kafkaKerberosKrb5Conf") }}</Label>
-                      <Input v-model="mqKafkaKrb5ConfPath" class="col-span-3" :placeholder="t('connection.kafkaKerberosKrb5ConfPlaceholder')" />
+                      <div class="col-span-3 flex items-center gap-1">
+                        <Input v-model="mqKafkaKrb5ConfPath" class="flex-1" :placeholder="t('connection.kafkaKerberosKrb5ConfPlaceholder')" />
+                        <Tooltip v-if="isDesktop">
+                          <TooltipTrigger as-child>
+                            <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" @click="browseKafkaKerberosFile('krb5')">
+                              <FolderOpen class="h-4 w-4" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>{{ t("connection.kafkaKerberosKrb5ConfBrowse") }}</TooltipContent>
+                        </Tooltip>
+                      </div>
                     </div>
                     <div class="grid grid-cols-4 items-start gap-4">
                       <div></div>

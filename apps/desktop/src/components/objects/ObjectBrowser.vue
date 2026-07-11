@@ -80,6 +80,7 @@ import QueryEditor from "@/components/editor/QueryEditor.vue";
 import DdlViewDialog from "./DdlViewDialog.vue";
 import { formatSqlForDisplay, sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
+import { batchTableEmptyFeedback, runBatchTableEmpty } from "@/lib/sidebar/batchTableEmpty";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   buildObjectBrowserRows,
@@ -202,6 +203,9 @@ const batchDropPreviewSql = ref("");
 const showBatchTruncateConfirm = ref(false);
 const batchTruncatePreviewSql = ref("");
 const batchTruncateCascade = ref(false);
+const showBatchEmptyConfirm = ref(false);
+const batchEmptyPreviewSql = ref("");
+const batchEmptyTargets = ref<ObjectBrowserRow[]>([]);
 // Paste table dialog state
 const showPasteDialog = ref(false);
 const pasteTableMode = ref<PasteTableMode>("structure-and-data");
@@ -1455,6 +1459,61 @@ async function confirmBatchTruncateTables() {
   }
 }
 
+async function refreshBatchEmptyPreviewSql(targets: ObjectBrowserRow[]) {
+  const statements: string[] = [];
+  for (const row of targets) {
+    const sql = await buildEmptyTableSql(tableAdminSqlOptions(row)).catch(() => "");
+    if (sql) statements.push(sql);
+  }
+  batchEmptyPreviewSql.value = statements.join("\n");
+}
+
+function requestBatchEmptyTables() {
+  const targets = [...selectedTableRows.value];
+  if (targets.length === 0) return;
+  batchEmptyTargets.value = targets;
+  batchEmptyPreviewSql.value = "";
+  void refreshBatchEmptyPreviewSql(targets)
+    .then(() => {
+      if (!batchEmptyPreviewSql.value.trim()) throw new Error("Empty table SQL preview is unavailable");
+      showBatchEmptyConfirm.value = true;
+    })
+    .catch((e: any) => {
+      batchEmptyTargets.value = [];
+      toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+    });
+}
+
+async function confirmBatchEmptyTables() {
+  const targets = batchEmptyTargets.value.slice();
+  if (targets.length === 0) return;
+  const asynchronousMutation = effectiveDatabaseType.value === "clickhouse";
+  const result = await runBatchTableEmpty(targets, async (row) => {
+    const sql = await buildEmptyTableSql(tableAdminSqlOptions(row));
+    await api.executeQuery(props.connection.id, props.database, sql);
+  });
+  for (const failure of result.failed) {
+    console.error(`Failed to empty table "${failure.target.name}":`, failure.error);
+  }
+  const feedback = batchTableEmptyFeedback(result, asynchronousMutation);
+  if (feedback === "success") {
+    toast(t("contextMenu.batchEmptySuccess", { count: result.succeeded.length }), 3000);
+  } else if (feedback === "submitted") {
+    toast(t("contextMenu.batchEmptySubmitted", { count: result.succeeded.length }), 3000);
+  } else if (feedback === "submitted-partial") {
+    toast(t("contextMenu.batchEmptySubmittedPartial", { success: result.succeeded.length, failed: result.failed.length }), 5000);
+  } else {
+    toast(t("contextMenu.batchEmptyPartialFail", { success: result.succeeded.length, failed: result.failed.length }), 5000);
+  }
+  batchEmptyTargets.value = [];
+  showBatchEmptyConfirm.value = false;
+  if (result.succeeded.length > 0) {
+    clearTableSelection();
+    await reload();
+    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);
+  }
+}
+
 async function exportStructure(row: ObjectBrowserRow) {
   try {
     const schema = row.schema || selectedSchema.value || props.database;
@@ -2075,7 +2134,16 @@ function exportDataSubmenu(item: ObjectBrowserRow): ContextMenuItem {
   };
 }
 
+function isSelectedBatchTableContext(item: ObjectBrowserRow): boolean {
+  return item.type === "TABLE" && selectedTableCount.value > 1 && selectedTableIds.value.has(item.id);
+}
+
+function selectedBatchTableCountLabel(key: "batchDrop" | "batchTruncate" | "batchEmpty"): string {
+  return t(`contextMenu.${key}`, { count: selectedTableCount.value });
+}
+
 function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
+  const useBatchActions = isSelectedBatchTableContext(item);
   return [
     { label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
     {
@@ -2103,22 +2171,22 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     ...(supportsTruncateTable.value
       ? [
           {
-            label: t("contextMenu.truncateTable"),
-            action: () => requestTruncateTable(item),
+            label: useBatchActions ? selectedBatchTableCountLabel("batchTruncate") : t("contextMenu.truncateTable"),
+            action: useBatchActions ? requestBatchTruncateTables : () => requestTruncateTable(item),
             icon: Scissors,
             variant: "destructive" as const,
           },
         ]
       : []),
     {
-      label: t("contextMenu.emptyTable"),
-      action: () => requestEmptyTable(item),
+      label: useBatchActions ? selectedBatchTableCountLabel("batchEmpty") : t("contextMenu.emptyTable"),
+      action: useBatchActions ? requestBatchEmptyTables : () => requestEmptyTable(item),
       icon: Eraser,
       variant: "destructive" as const,
     },
     {
-      label: t("contextMenu.dropTable"),
-      action: () => requestDrop(item),
+      label: useBatchActions ? selectedBatchTableCountLabel("batchDrop") : t("contextMenu.dropTable"),
+      action: useBatchActions ? requestBatchDropTables : () => requestDrop(item),
       icon: Trash2,
       variant: "destructive" as const,
     },
@@ -2292,6 +2360,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       <Button v-if="supportsTruncateTable" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchTruncateTables">
         <Scissors class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.truncateSelected") }}
+      </Button>
+      <Button variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchEmptyTables">
+        <Eraser class="mr-1.5 h-3.5 w-3.5" />
+        {{ t("contextMenu.batchEmpty", { count: selectedTableCount }) }}
       </Button>
       <Button variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchDropTables">
         <Trash2 class="mr-1.5 h-3.5 w-3.5" />
@@ -2773,6 +2845,15 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       </label>
     </template>
   </DangerConfirmDialog>
+
+  <DangerConfirmDialog
+    v-model:open="showBatchEmptyConfirm"
+    :title="t('contextMenu.confirmBatchEmptyTitle', { count: batchEmptyTargets.length })"
+    :message="t('contextMenu.confirmBatchEmptyMessage', { count: batchEmptyTargets.length })"
+    :sql="batchEmptyPreviewSql"
+    :confirm-label="t('contextMenu.batchEmpty', { count: batchEmptyTargets.length })"
+    @confirm="confirmBatchEmptyTables"
+  />
 
   <Dialog v-model:open="showRenameDialog">
     <DialogContent class="sm:max-w-[420px]">

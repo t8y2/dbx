@@ -1412,7 +1412,9 @@ function isDamengIdentityChecked(column: EditableStructureColumn): boolean {
 }
 
 function canEditDamengIdentity(column: EditableStructureColumn): boolean {
-  return !column.original && !column.markedForDrop && isDamengIdentityCompatibleDataType(column.dataType);
+  if (column.original || column.markedForDrop || !isDamengIdentityCompatibleDataType(column.dataType)) return false;
+  // DM8 permits only one identity column per table, so prevent creating an invalid draft in the editor.
+  return isDamengIdentityChecked(column) || !columns.value.some((candidate) => candidate !== column && !candidate.markedForDrop && isDamengIdentityChecked(candidate));
 }
 
 function clearDamengIdentity(column: EditableStructureColumn) {

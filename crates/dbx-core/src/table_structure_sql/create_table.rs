@@ -8,7 +8,7 @@ use super::indexes::build_create_index_statements;
 use super::triggers::build_trigger_sql;
 use super::types::{TableStructureSqlOptions, TableStructureSqlResult};
 use super::util::{clean, format_default_for_sql, normalize_default, qualified_table, quote_ident, quote_string};
-use super::validation::validate_columns;
+use super::validation::{validate_columns, validate_dameng_identity};
 
 pub fn build_create_table_sql(options: TableStructureSqlOptions) -> TableStructureSqlResult {
     let mut warnings = Vec::new();
@@ -20,6 +20,7 @@ pub fn build_create_table_sql(options: TableStructureSqlOptions) -> TableStructu
         warnings.push("At least one column is required.".to_string());
     }
     validate_columns(&active_columns, &mut warnings);
+    validate_dameng_identity(&options, &active_columns, &mut warnings);
     if !warnings.is_empty() {
         return TableStructureSqlResult { statements: Vec::new(), warnings };
     }

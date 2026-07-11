@@ -1760,6 +1760,50 @@ fn dameng_unchanged_identity_extra_does_not_mark_existing_column_changed() {
 }
 
 #[test]
+fn dameng_rejects_adding_second_identity_column() {
+    let mut existing = column("ID");
+    existing.data_type = "INT".to_string();
+    existing.is_nullable = false;
+    existing.is_primary_key = true;
+    existing.extra = Some(ColumnExtra {
+        auto_increment: Some(true),
+        identity: Some(ColumnIdentity { generation: None, seed: Some(1), increment: Some(1) }),
+        ..Default::default()
+    });
+    existing.original = Some(ColumnInfo {
+        name: "ID".to_string(),
+        data_type: "INT".to_string(),
+        is_nullable: false,
+        column_default: None,
+        is_primary_key: true,
+        extra: Some("identity".to_string()),
+        comment: None,
+        ..Default::default()
+    });
+    let mut added = column("SEQ");
+    added.data_type = "BIGINT".to_string();
+    added.extra = Some(ColumnExtra {
+        auto_increment: Some(true),
+        identity: Some(ColumnIdentity { generation: None, seed: Some(1), increment: Some(1) }),
+        ..Default::default()
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Dameng),
+        schema: Some("SYSDBA".to_string()),
+        table_name: "TEST".to_string(),
+        columns: vec![existing, added],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, vec!["Dameng tables can have only one identity column."]);
+}
+
+#[test]
 fn sqlserver_existing_column_identity_change_warns_without_unchanged_foreign_key_warning() {
     let mut id = column("id");
     id.data_type = "int".to_string();
@@ -2223,6 +2267,65 @@ fn dameng_create_table_with_identity() {
     assert_eq!(result.warnings, Vec::<String>::new());
     assert!(result.statements[0].contains("\"ID\" INT IDENTITY(100, 5)"), "ddl: {}", result.statements[0]);
     assert!(result.statements[0].contains("PRIMARY KEY (\"ID\")"), "ddl: {}", result.statements[0]);
+}
+
+#[test]
+fn dameng_rejects_multiple_identity_columns() {
+    let mut first = column("ID");
+    first.data_type = "INT".to_string();
+    first.extra = Some(ColumnExtra {
+        auto_increment: Some(true),
+        identity: Some(ColumnIdentity { generation: None, seed: Some(1), increment: Some(1) }),
+        ..Default::default()
+    });
+    let mut second = column("SEQ");
+    second.data_type = "BIGINT".to_string();
+    second.extra = Some(ColumnExtra {
+        auto_increment: Some(true),
+        identity: Some(ColumnIdentity { generation: None, seed: Some(1), increment: Some(1) }),
+        ..Default::default()
+    });
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Dameng),
+        schema: Some("SYSDBA".to_string()),
+        table_name: "USERS".to_string(),
+        columns: vec![first, second],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert!(result.statements.is_empty());
+    assert_eq!(result.warnings, vec!["Dameng tables can have only one identity column."]);
+}
+
+#[test]
+fn dameng_rejects_zero_identity_increment() {
+    let mut col = column("ID");
+    col.data_type = "INT".to_string();
+    col.extra = Some(ColumnExtra {
+        auto_increment: Some(true),
+        identity: Some(ColumnIdentity { generation: None, seed: Some(1), increment: Some(0) }),
+        ..Default::default()
+    });
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Dameng),
+        schema: Some("SYSDBA".to_string()),
+        table_name: "USERS".to_string(),
+        columns: vec![col],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert!(result.statements.is_empty());
+    assert_eq!(result.warnings, vec!["Dameng identity column \"ID\" increment cannot be 0."]);
 }
 
 #[test]

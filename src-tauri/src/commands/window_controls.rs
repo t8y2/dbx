@@ -1,12 +1,12 @@
 #[cfg(target_os = "macos")]
-fn set_macos_traffic_light_position_inner(
+async fn set_macos_traffic_light_position_inner(
     window: tauri::Window,
     target_x: f64,
     target_center_y: f64,
     ui_scale: f64,
 ) -> Result<MacosTrafficLightLayout, String> {
     let ns_window = window.ns_window().map_err(|err| err.to_string())? as usize;
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = tokio::sync::oneshot::channel();
     window
         .run_on_main_thread(move || unsafe {
             use objc2_app_kit::{NSWindow, NSWindowButton};
@@ -77,11 +77,11 @@ fn set_macos_traffic_light_position_inner(
             }));
         })
         .map_err(|err| err.to_string())?;
-    rx.recv().map_err(|err| err.to_string())?.ok_or_else(|| "Unable to locate macOS traffic light buttons".to_string())
+    rx.await.map_err(|err| err.to_string())?.ok_or_else(|| "Unable to locate macOS traffic light buttons".to_string())
 }
 
 #[cfg(not(target_os = "macos"))]
-fn set_macos_traffic_light_position_inner(
+async fn set_macos_traffic_light_position_inner(
     _window: tauri::Window,
     x: f64,
     target_center_y: f64,
@@ -89,6 +89,13 @@ fn set_macos_traffic_light_position_inner(
 ) -> Result<MacosTrafficLightLayout, String> {
     let center_y = target_center_y * ui_scale;
     Ok(MacosTrafficLightLayout { x, y: center_y, center_y, previous_center_y: center_y, reserved_inset: 0.0 })
+}
+
+fn validate_macos_traffic_light_position(x: f64, y: f64, scale: f64) -> Result<(), String> {
+    if !x.is_finite() || !y.is_finite() || !scale.is_finite() || scale <= 0.0 {
+        return Err("Invalid traffic light position".to_string());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -101,14 +108,26 @@ pub struct MacosTrafficLightLayout {
 }
 
 #[tauri::command]
-pub fn set_macos_traffic_light_position(
+pub async fn set_macos_traffic_light_position(
     window: tauri::Window,
     x: f64,
     y: f64,
     scale: f64,
 ) -> Result<MacosTrafficLightLayout, String> {
-    if !x.is_finite() || !y.is_finite() || !scale.is_finite() || scale <= 0.0 {
-        return Err("Invalid traffic light position".to_string());
+    validate_macos_traffic_light_position(x, y, scale)?;
+    // Await AppKit work asynchronously so the main thread can execute the scheduled closure.
+    set_macos_traffic_light_position_inner(window, x, y, scale).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_macos_traffic_light_position;
+
+    #[test]
+    fn validates_macos_traffic_light_position_inputs() {
+        assert!(validate_macos_traffic_light_position(16.0, 18.0, 1.0).is_ok());
+        assert!(validate_macos_traffic_light_position(f64::NAN, 18.0, 1.0).is_err());
+        assert!(validate_macos_traffic_light_position(16.0, f64::INFINITY, 1.0).is_err());
+        assert!(validate_macos_traffic_light_position(16.0, 18.0, 0.0).is_err());
     }
-    set_macos_traffic_light_position_inner(window, x, y, scale)
 }

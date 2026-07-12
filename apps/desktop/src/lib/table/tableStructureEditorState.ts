@@ -965,8 +965,17 @@ function isValidTemporalPrecision(dbType: DatabaseType | undefined, params: stri
   return Number.isInteger(value) && value >= 0 && value <= max && String(value) === params;
 }
 
-export function getDefaultLengthForType(_dbType: DatabaseType | undefined, baseType: string): string {
+export interface DataTypeDefaultOptions {
+  /**
+   * Native MySQL profiles use MySQL 8-safe defaults. Compatibility profiles
+   * retain their existing DDL defaults because their server/version is unknown.
+   */
+  omitMysqlDeprecatedDefaults?: boolean;
+}
+
+export function getDefaultLengthForType(_dbType: DatabaseType | undefined, baseType: string, options: DataTypeDefaultOptions = {}): string {
   const key = baseType.trim().toLowerCase();
+  if (_dbType === "mysql" && options.omitMysqlDeprecatedDefaults && isMysqlDeprecatedDefaultParameterType(key)) return "";
   if (_dbType === "sqlite" || _dbType === "rqlite" || _dbType === "turso") {
     return "";
   } else if (_dbType === "questdb") {
@@ -976,6 +985,20 @@ export function getDefaultLengthForType(_dbType: DatabaseType | undefined, baseT
   } else {
     return DEFAULT_TYPE_LENGTHS[key] ?? "";
   }
+}
+
+/** Default data type for a newly added structure-editor column. */
+export function defaultNewColumnDataType(dbType: DatabaseType | undefined, dataTypeOptions: readonly string[] = []): string {
+  if (dbType === "manticoresearch") {
+    const baseType = dataTypeOptions[0] ?? "text";
+    return combineDataTypeForDatabase(dbType, baseType, getDefaultLengthForType(dbType, baseType));
+  }
+  return dbType === "sqlite" ? "text" : "varchar(255)";
+}
+
+function isMysqlDeprecatedDefaultParameterType(baseType: string): boolean {
+  const typeName = baseType.split(/\s+/)[0];
+  return ["tinyint", "smallint", "mediumint", "int", "integer", "bigint", "float", "double", "real"].includes(typeName ?? "");
 }
 
 export function isDataTypeLengthDisabled(_dbType: DatabaseType | undefined, baseType: string): boolean {

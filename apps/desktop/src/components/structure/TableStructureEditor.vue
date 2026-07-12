@@ -25,6 +25,9 @@ import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { type BuildTableStructureChangeSqlOptions, type EditableStructureColumn, type EditableStructureForeignKey, type EditableStructureIndex, type EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql";
 import { PRESET_FIELDS_TEMPLATE_ID, createTableColumnTemplateDrafts } from "@/lib/table/tableColumnTemplates";
+import { getMysqlDataTypeHelp } from "@/lib/table/mysqlDataTypeHelp";
+import { getPostgresDataTypeHelp } from "@/lib/table/postgresDataTypeHelp";
+import { getSqliteDataTypeHelp } from "@/lib/table/sqliteDataTypeHelp";
 import { getTableMetadataCapabilities, firstStructureMetadataTab, isStructureMetadataTabSupported } from "@/lib/table/tableMetadataCapabilities";
 import { canAddTableStructureColumn, getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
 import { connectionObjectTreeQuerySchema, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -39,6 +42,7 @@ import {
   createIndexDrafts,
   createTriggerDrafts,
   dataTypeLengthInputValue,
+  defaultNewColumnDataType,
   generateIndexName,
   generateUniqueIndexName,
   getColumnEditorControls,
@@ -594,6 +598,7 @@ function onIndexColResize(e: MouseEvent, col: number) {
 
 const connection = computed(() => (props.connectionId ? store.getConfig(props.connectionId) : undefined));
 const databaseType = computed(() => tableStructureDatabaseTypeForConnection(connection.value));
+const usesMysql8SafeDefaults = computed(() => databaseType.value === "mysql" && connection.value?.db_type === "mysql" && connection.value.driver_profile === "mysql");
 const structureCapabilities = computed(() => getTableStructureCapabilities(databaseType.value, connection.value?.db_type));
 const tableMetadataCapabilities = computed(() => getTableMetadataCapabilities(databaseType.value));
 const structureDialect = computed(() => structureCapabilities.value.dialect);
@@ -1003,6 +1008,32 @@ function mergeDataTypeOptions(primary: readonly string[], fallback: readonly str
   return result;
 }
 
+function mysqlDataTypeTooltip(option: string): string | undefined {
+  if (databaseType.value !== "mysql") return undefined;
+  const product = connection.value?.driver_profile === "mariadb" ? "mariadb" : connection.value?.driver_profile === "mysql" ? "mysql" : undefined;
+  const help = getMysqlDataTypeHelp(option, { product });
+  return help ? [help.key, ...(help.warningKeys ?? [])].map((key) => t(`structureEditor.mysqlDataTypeHelp.${key}`)).join("\n\n") : undefined;
+}
+
+function postgresDataTypeTooltip(option: string): string | undefined {
+  if (databaseType.value !== "postgres") return undefined;
+  const help = getPostgresDataTypeHelp(option);
+  return help ? t(`structureEditor.postgresDataTypeHelp.${help.key}`) : undefined;
+}
+
+function sqliteDataTypeTooltip(option: string): string | undefined {
+  if (databaseType.value !== "sqlite") return undefined;
+  const help = getSqliteDataTypeHelp(option);
+  return help ? t(`structureEditor.sqliteDataTypeHelp.${help.key}`) : undefined;
+}
+
+function dataTypeTooltip(option: string): string | undefined {
+  if (databaseType.value === "mysql") return mysqlDataTypeTooltip(option);
+  if (databaseType.value === "postgres") return postgresDataTypeTooltip(option);
+  if (databaseType.value === "sqlite") return sqliteDataTypeTooltip(option);
+  return undefined;
+}
+
 async function loadDynamicDataTypeOptions() {
   const requestId = ++dataTypeOptionsRequestId;
   const connectionId = props.connectionId;
@@ -1272,7 +1303,7 @@ async function refreshStructureAfterSave(scope: StructureRefreshScope) {
 async function addColumn() {
   if (!canAddColumn.value) return;
   activeTab.value = "columns";
-  const dataType = databaseType.value === "manticoresearch" ? combineDataTypeForDatabase(databaseType.value, dataTypeOptions.value[0] ?? "text", getDefaultLengthForType(databaseType.value, dataTypeOptions.value[0] ?? "text")) : "varchar(255)";
+  const dataType = defaultNewColumnDataType(databaseType.value, dataTypeOptions.value);
   const column: EditableStructureColumn = {
     id: `new:${uuid()}`,
     name: "",
@@ -1464,7 +1495,7 @@ function updateColumnDataType(column: EditableStructureColumn, baseType: string)
     if (!column.enumValues?.length) column.enumValues = [""];
     column.dataType = mysqlEnumDataType(column.enumValues);
   } else {
-    column.dataType = combineDataTypeForDatabase(databaseType.value, baseType, getDefaultLengthForType(databaseType.value, baseType));
+    column.dataType = combineDataTypeForDatabase(databaseType.value, baseType, getDefaultLengthForType(databaseType.value, baseType, { omitMysqlDeprecatedDefaults: usesMysql8SafeDefaults.value }));
   }
   syncSqlServerIdentityForDataType(column);
   syncDamengIdentityForDataType(column);
@@ -2500,6 +2531,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                       :empty-text="t('structureEditor.noMatchingType')"
                       :loading-text="t('common.loading')"
                       :allow-custom="true"
+                      :option-tooltip="dataTypeTooltip"
                       :trigger-class="[structureMonoControlClass, 'w-full']"
                       @update:model-value="(v: string) => updateColumnDataType(column, v)"
                     />

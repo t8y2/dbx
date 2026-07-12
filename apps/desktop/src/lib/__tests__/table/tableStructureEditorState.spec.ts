@@ -3,6 +3,8 @@ import {
   combineDataTypeForDatabase,
   createColumnDrafts,
   dataTypeLengthInputValue,
+  DATA_TYPE_OPTIONS,
+  defaultNewColumnDataType,
   getDefaultLengthForType,
   hasExistingColumnTypeChange,
   isDataTypeLengthDisabled,
@@ -107,6 +109,30 @@ describe("tableStructureEditorState", () => {
     }
 
     expect(getDefaultLengthForType("mysql", "integer")).toBe("11");
+  });
+
+  it("uses MySQL 8-safe defaults only when the native MySQL profile is known", () => {
+    const mysql8Defaults = { omitMysqlDeprecatedDefaults: true };
+
+    expect(getDefaultLengthForType("mysql", "int", mysql8Defaults)).toBe("");
+    expect(getDefaultLengthForType("mysql", "bigint unsigned", mysql8Defaults)).toBe("");
+    expect(getDefaultLengthForType("mysql", "float", mysql8Defaults)).toBe("");
+    expect(getDefaultLengthForType("mysql", "double", mysql8Defaults)).toBe("");
+    expect(combineDataTypeForDatabase("mysql", "int", getDefaultLengthForType("mysql", "int", mysql8Defaults))).toBe("int");
+    expect(combineDataTypeForDatabase("mysql", "float", getDefaultLengthForType("mysql", "float", mysql8Defaults))).toBe("float");
+    expect(getDefaultLengthForType("mysql", "decimal", mysql8Defaults)).toBe("10,0");
+
+    // A compatibility profile cannot be version-identified, so its existing behavior is retained.
+    expect(getDefaultLengthForType("mysql", "int")).toBe("11");
+    expect(getDefaultLengthForType("mysql", "float")).toBe("10,2");
+  });
+
+  it("uses TEXT for a new native SQLite column without changing compatible defaults", () => {
+    expect(DATA_TYPE_OPTIONS.sqlite).toContain("text");
+    expect(defaultNewColumnDataType("sqlite")).toBe("text");
+    expect(defaultNewColumnDataType("rqlite")).toBe("varchar(255)");
+    expect(defaultNewColumnDataType("turso")).toBe("varchar(255)");
+    expect(defaultNewColumnDataType("mysql")).toBe("varchar(255)");
   });
 
   it("requires a SQLite rebuild only for a retained existing column type change", () => {

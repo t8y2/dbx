@@ -1,6 +1,7 @@
 import { withEnglishFallback } from "./fallback";
+import { typeHelpOverrides } from "./typeHelpOverrides";
 
-export default withEnglishFallback({
+export const localeOverrides = {
   app: {
     name: "DBX",
   },
@@ -1782,6 +1783,7 @@ export default withEnglishFallback({
     sortBy: "並べ替え",
   },
   structureEditor: {
+    ...typeHelpOverrides.ja.structureEditor,
     title: "テーブル構造を編集",
     createTitle: "テーブルを作成",
     editTabTitle: "編集: {tableName}",
@@ -1939,6 +1941,7 @@ export default withEnglishFallback({
     base64Readonly: "Base64値はこのバージョンでは読み取り専用です。",
   },
   redis: {
+    ...typeHelpOverrides.ja.redis,
     selectKey: "キーを選択して値を表示",
     noKeys: "キーが見つかりません",
     pattern: "パターン（例: user:*）",
@@ -3635,4 +3638,6 @@ export default withEnglishFallback({
     partitionMustIncrease: "新しいパーティション数は現在のパーティション数より大きくなければなりません。",
     confirmDelete: "トピック「{name}」を削除してもよろしいですか？この操作は元に戻せません。",
   },
-});
+};
+
+export default withEnglishFallback(localeOverrides);

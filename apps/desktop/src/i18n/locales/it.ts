@@ -1,5 +1,6 @@
 import { withEnglishFallback } from "./fallback";
-export default withEnglishFallback({
+import { typeHelpOverrides } from "./typeHelpOverrides";
+export const localeOverrides = {
   app: {
     name: "DBX",
   },
@@ -1747,6 +1748,7 @@ export default withEnglishFallback({
     sortBy: "Ordina per",
   },
   structureEditor: {
+    ...typeHelpOverrides.it.structureEditor,
     title: "Modifica Struttura Tabella",
     createTitle: "Crea Tabella",
     editTabTitle: "Modifica: {tableName}",
@@ -1938,6 +1940,7 @@ export default withEnglishFallback({
     summarySize: "dimensione",
   },
   redis: {
+    ...typeHelpOverrides.it.redis,
     selectKey: "Seleziona una chiave per visualizzarne il valore",
     noKeys: "Nessuna chiave trovata",
     noKeysInScanHint: "Nessuna chiave trovata nell'intervallo di scansione corrente",
@@ -3634,4 +3637,6 @@ export default withEnglishFallback({
     partitionMustIncrease: "Il nuovo numero di partizioni deve essere maggiore di quello attuale.",
     confirmDelete: 'Confermi di eliminare il topic "{name}"? Questa operazione è irreversibile.',
   },
-});
+};
+
+export default withEnglishFallback(localeOverrides);

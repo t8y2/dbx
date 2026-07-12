@@ -1,6 +1,7 @@
 import { withEnglishFallback } from "./fallback";
+import { typeHelpOverrides } from "./typeHelpOverrides";
 
-export default withEnglishFallback({
+export const localeOverrides = {
   app: {
     name: "DBX",
   },
@@ -1657,6 +1658,7 @@ export default withEnglishFallback({
     sortBy: "排序方式",
   },
   structureEditor: {
+    ...typeHelpOverrides["zh-TW"].structureEditor,
     title: "編輯資料表結構",
     createTitle: "建立資料表",
     editTabTitle: "編輯： {tableName}",
@@ -1795,6 +1797,7 @@ export default withEnglishFallback({
     noJoinSql: "沒有可複製的關係 SQL",
   },
   redis: {
+    ...typeHelpOverrides["zh-TW"].redis,
     selectKey: "選擇一個 key 檢視值",
     noKeys: "未找到 key",
     noKeysInScanHint: "目前掃描範圍內未找到匹配的 key",
@@ -3635,4 +3638,6 @@ export default withEnglishFallback({
     partitionMustIncrease: "新分區數必須大於目前分區數。",
     confirmDelete: "確定要刪除主題「{name}」嗎？此操作無法復原。",
   },
-});
+};
+
+export default withEnglishFallback(localeOverrides);

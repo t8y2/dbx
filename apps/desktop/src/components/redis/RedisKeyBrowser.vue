@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { OptionHelpPanel } from "@/components/ui/option-help-panel";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
@@ -33,6 +34,8 @@ import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle
 import { useToast } from "@/composables/useToast";
 import { redisKeySearchPattern } from "@/lib/redis/redisKeyPattern";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
+import { getRedisCreateKeyTypeHelp, redisCreateKeyTypeHelpOptionOnOpen, shouldActivateRedisCreateKeyTypeHelpOnFocus } from "@/lib/redis/redisCreateKeyTypeHelp";
+import { optionHelpPanelOffsetTop } from "@/lib/common/optionHelpPanelOffset";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -100,6 +103,12 @@ const createKeyRawMode = ref(false);
 const createKeyEntryId = ref("*");
 const jsonModuleAvailable = ref<boolean | null>(null);
 const checkingJsonModule = ref(false);
+const activeCreateKeyTypeHelp = ref<RedisCreateKeyType>();
+const createKeyTypeKeyboardNavigation = ref(false);
+const createKeyTypeOpenedByArrow = ref(false);
+const createKeyTypeListCard = ref<HTMLElement>();
+const createKeyTypeHelpPanel = ref<{ element?: HTMLElement }>();
+const createKeyTypeHelpOffsetTop = ref(0);
 let nextEntryId = 0;
 let searchRequestId = 0;
 let redisBrowserIsActive = true;
@@ -166,6 +175,67 @@ const createKeyTypeOptions = computed<{ value: RedisCreateKeyType; label: string
   { value: "stream", label: "Stream" },
   { value: "json", label: "JSON" },
 ]);
+function createKeyTypeTooltip(type: RedisCreateKeyType): string | undefined {
+  const help = getRedisCreateKeyTypeHelp(type);
+  return help ? t(`redis.createKeyTypeHelp.${help.key}`) : undefined;
+}
+const activeCreateKeyTypeHelpContent = computed(() => (activeCreateKeyTypeHelp.value ? createKeyTypeTooltip(activeCreateKeyTypeHelp.value) : undefined));
+
+function activateCreateKeyTypeHelp(type: RedisCreateKeyType) {
+  activeCreateKeyTypeHelp.value = createKeyTypeTooltip(type) ? type : undefined;
+}
+
+function onCreateKeyTypeSelectOpen(open: boolean) {
+  if (open) {
+    activeCreateKeyTypeHelp.value = redisCreateKeyTypeHelpOptionOnOpen(createKeyType.value);
+    return;
+  }
+  activeCreateKeyTypeHelp.value = undefined;
+  createKeyTypeKeyboardNavigation.value = false;
+  createKeyTypeOpenedByArrow.value = false;
+}
+
+function onCreateKeyTypeTriggerKeydown(event: KeyboardEvent) {
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+  createKeyTypeOpenedByArrow.value = true;
+  createKeyTypeKeyboardNavigation.value = true;
+}
+
+function onCreateKeyTypeSelectKeydown(event: KeyboardEvent) {
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+  createKeyTypeKeyboardNavigation.value = true;
+}
+
+function onCreateKeyTypeOptionFocus(type: RedisCreateKeyType) {
+  if (!shouldActivateRedisCreateKeyTypeHelpOnFocus({ openedByArrow: createKeyTypeOpenedByArrow.value, keyboardNavigating: createKeyTypeKeyboardNavigation.value })) return;
+  activateCreateKeyTypeHelp(type);
+  createKeyTypeOpenedByArrow.value = false;
+  createKeyTypeKeyboardNavigation.value = false;
+}
+
+async function updateCreateKeyTypeHelpOffset() {
+  if (!activeCreateKeyTypeHelp.value) {
+    createKeyTypeHelpOffsetTop.value = 0;
+    return;
+  }
+  await nextTick();
+  const card = createKeyTypeListCard.value;
+  const panel = createKeyTypeHelpPanel.value?.element;
+  const option = card?.querySelector<HTMLElement>(`[data-option-help-value="${activeCreateKeyTypeHelp.value}"]`);
+  if (!card || !panel || !option) {
+    createKeyTypeHelpOffsetTop.value = 0;
+    return;
+  }
+  createKeyTypeHelpOffsetTop.value = optionHelpPanelOffsetTop({
+    activeItemTop: option.getBoundingClientRect().top - card.getBoundingClientRect().top,
+    listCardHeight: card.clientHeight,
+    panelHeight: panel.clientHeight,
+  });
+}
+
+watch(activeCreateKeyTypeHelp, () => {
+  void updateCreateKeyTypeHelpOffset();
+});
 const visibleRows = computed(() => {
   const rows = useFlatKeySearchRows.value ? flatKeys.value.map((key) => redisKeyToFlatTreeRow(key, props.db)) : flattenVisibleRedisKeyTree(treeKeys.value, expandedGroupIds.value);
   return rows.map((row) => ({
@@ -632,6 +702,9 @@ function resetCreateKeyForm() {
   createKeyEntryId.value = "*";
   jsonModuleAvailable.value = null;
   checkingJsonModule.value = false;
+  activeCreateKeyTypeHelp.value = undefined;
+  createKeyTypeKeyboardNavigation.value = false;
+  createKeyTypeOpenedByArrow.value = false;
   resetEntries();
 }
 
@@ -640,6 +713,9 @@ function onCreateKeyTypeChange(type: any) {
   createKeyRawMode.value = false;
   jsonModuleAvailable.value = null;
   checkingJsonModule.value = false;
+  activeCreateKeyTypeHelp.value = undefined;
+  createKeyTypeKeyboardNavigation.value = false;
+  createKeyTypeOpenedByArrow.value = false;
   resetEntries();
   if (createKeyType.value === "json") {
     createKeyError.value = "";
@@ -1267,14 +1343,19 @@ defineExpose({ focusSearch });
 
           <label class="grid gap-1.5 text-xs font-medium">
             <span>{{ t("redis.createKeyType") }}</span>
-            <Select :model-value="createKeyType" @update:model-value="onCreateKeyTypeChange">
-              <SelectTrigger class="h-8 text-xs">
+            <Select :model-value="createKeyType" @update:open="onCreateKeyTypeSelectOpen" @update:model-value="onCreateKeyTypeChange">
+              <SelectTrigger class="h-8 text-xs" @keydown.capture="onCreateKeyTypeTriggerKeydown">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent>
-                <SelectItem v-for="option in createKeyTypeOptions" :key="option.value" :value="option.value">
-                  {{ option.label }}
-                </SelectItem>
+              <SelectContent data-naked-surface class="w-auto max-w-[calc(100vw-1rem)] border-0 bg-transparent p-0 shadow-none ring-0">
+                <div class="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start" @keydown.capture="onCreateKeyTypeSelectKeydown">
+                  <div ref="createKeyTypeListCard" class="min-w-40 rounded-md border bg-popover p-1 shadow-md" @scroll="updateCreateKeyTypeHelpOffset">
+                    <SelectItem v-for="option in createKeyTypeOptions" :key="option.value" :value="option.value" :data-option-help-value="option.value" @pointerenter="activateCreateKeyTypeHelp(option.value)" @focus="onCreateKeyTypeOptionFocus(option.value)">
+                      {{ option.label }}
+                    </SelectItem>
+                  </div>
+                  <OptionHelpPanel v-if="activeCreateKeyTypeHelpContent" ref="createKeyTypeHelpPanel" :content="activeCreateKeyTypeHelpContent" :offset-top="createKeyTypeHelpOffsetTop" />
+                </div>
               </SelectContent>
             </Select>
           </label>

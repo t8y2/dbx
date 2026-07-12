@@ -905,6 +905,7 @@ pub async fn update_documents(
     filter_json: &str,
     update_json: &str,
     many: bool,
+    options_json: Option<&str>,
 ) -> Result<u64, String> {
     let filter_value: serde_json::Value =
         serde_json::from_str(filter_json).map_err(|e| format!("Invalid filter JSON: {e}"))?;
@@ -912,13 +913,45 @@ pub async fn update_documents(
         serde_json::from_str(update_json).map_err(|e| format!("Invalid update JSON: {e}"))?;
     let filter = json_filter_to_document(&filter_value).map_err(|e| format!("Invalid filter: {e}"))?;
     let update = json_object_to_document(&update_value).map_err(|e| format!("Invalid update: {e}"))?;
+    let array_filters = parse_update_array_filters(options_json)?;
     let col = client.database(database).collection::<Document>(collection);
     let result = if many {
-        col.update_many(filter, update).await.map_err(|e| e.to_string())?
+        let mut action = col.update_many(filter, update);
+        if let Some(filters) = array_filters {
+            action = action.array_filters(filters);
+        }
+        action.await.map_err(|e| e.to_string())?
     } else {
-        col.update_one(filter, update).await.map_err(|e| e.to_string())?
+        let mut action = col.update_one(filter, update);
+        if let Some(filters) = array_filters {
+            action = action.array_filters(filters);
+        }
+        action.await.map_err(|e| e.to_string())?
     };
     Ok(result.modified_count)
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MongoUpdateOptions {
+    array_filters: Option<Vec<serde_json::Value>>,
+}
+
+fn parse_update_array_filters(options_json: Option<&str>) -> Result<Option<Vec<Document>>, String> {
+    let Some(raw) = options_json.filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let options: MongoUpdateOptions = serde_json::from_str(raw).map_err(|e| format!("Invalid update options: {e}"))?;
+    options
+        .array_filters
+        .map(|filters| {
+            filters
+                .iter()
+                .map(json_filter_to_document)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("Invalid arrayFilters: {e}"))
+        })
+        .transpose()
 }
 
 pub async fn delete_document(client: &Client, database: &str, collection: &str, id: &str) -> Result<u64, String> {
@@ -1247,6 +1280,23 @@ fn expand_object_id_string_array(items: &[serde_json::Value]) -> Bson {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_options_parse_array_filters() {
+        let filters = parse_update_array_filters(Some(r#"{"arrayFilters":[{"item.id":322678},{"item.active":true}]}"#))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(filters, vec![doc! { "item.id": 322678_i64 }, doc! { "item.active": true }]);
+    }
+
+    #[test]
+    fn update_options_reject_unsupported_fields() {
+        let error = parse_update_array_filters(Some(r#"{"upsert":true}"#)).unwrap_err();
+
+        assert!(error.starts_with("Invalid update options:"));
+        assert!(error.contains("unknown field `upsert`"));
+    }
 
     #[test]
     fn multi_seed_uri_removes_direct_connection_true_before_driver_parse() {

@@ -1869,7 +1869,7 @@ export async function documentUpdateDocument(connectionId: string, database: str
   return invoke("document_update_document", { connectionId, database, collection, id, docJson, routing });
 }
 
-export async function mongoUpdateDocuments(connectionId: string, database: string, collection: string, filterJson: string, updateJson: string, many: boolean): Promise<{ affected_rows: number }> {
+export async function mongoUpdateDocuments(connectionId: string, database: string, collection: string, filterJson: string, updateJson: string, many: boolean, optionsJson?: string): Promise<{ affected_rows: number }> {
   const affectedRows = await invoke<number>("mongo_update_documents", {
     connectionId,
     database,
@@ -1877,6 +1877,7 @@ export async function mongoUpdateDocuments(connectionId: string, database: strin
     filterJson,
     updateJson,
     many,
+    optionsJson,
   });
   return { affected_rows: affectedRows };
 }

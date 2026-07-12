@@ -13,6 +13,7 @@ import com.mongodb.MongoClientSettings;
 import com.mongodb.ServerAddress;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
+import com.mongodb.client.model.UpdateOptions;
 import java.io.BufferedReader;
 import java.io.FileInputStream;
 import java.io.InputStream;
@@ -625,13 +626,45 @@ public final class MongoAgent {
         String filterJson = params.get("filter_json").getAsString();
         String updateJson = params.get("update_json").getAsString();
         boolean many = params.get("many").getAsBoolean();
+        String optionsJson = params.has("options_json") && !params.get("options_json").isJsonNull()
+            ? params.get("options_json").getAsString()
+            : null;
 
         var col = c.getDatabase(database).getCollection(collection);
         Document filter = documentForWrite(filterJson);
         Document update = documentForWrite(updateJson);
         requireBulkUpdateOperatorDocument(update);
-        var result = many ? col.updateMany(filter, update) : col.updateOne(filter, update);
+        UpdateOptions options = updateOptionsForWrite(optionsJson);
+        var result = many ? col.updateMany(filter, update, options) : col.updateOne(filter, update, options);
         return Collections.singletonMap("modified_count", result.getModifiedCount());
+    }
+
+    static UpdateOptions updateOptionsForWrite(String optionsJson) {
+        UpdateOptions result = new UpdateOptions();
+        if (optionsJson == null || optionsJson.trim().isEmpty()) {
+            return result;
+        }
+        Document options = Document.parse(optionsJson);
+        for (String key : options.keySet()) {
+            if (!"arrayFilters".equals(key)) {
+                throw new IllegalArgumentException("Unsupported update option: " + key);
+            }
+        }
+        Object rawFilters = options.get("arrayFilters");
+        if (rawFilters == null) {
+            return result;
+        }
+        if (!(rawFilters instanceof List<?>)) {
+            throw new IllegalArgumentException("arrayFilters must be an array");
+        }
+        List<Document> filters = new ArrayList<>();
+        for (Object filter : (List<?>) rawFilters) {
+            if (!(filter instanceof Document)) {
+                throw new IllegalArgumentException("Each arrayFilters entry must be an object");
+            }
+            filters.add((Document) filter);
+        }
+        return result.arrayFilters(filters);
     }
 
     static Document documentForWrite(String docJson) {

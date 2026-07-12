@@ -263,6 +263,7 @@ pub async fn mongo_update_documents(
     filter_json: String,
     update_json: String,
     many: bool,
+    options_json: Option<String>,
 ) -> Result<u64, String> {
     ensure_connection_writable(&state, &connection_id, "Update").await?;
     dbx_core::mongo_ops::mongo_update_documents_core(
@@ -273,6 +274,7 @@ pub async fn mongo_update_documents(
         &filter_json,
         &update_json,
         many,
+        options_json.as_deref(),
     )
     .await
 }

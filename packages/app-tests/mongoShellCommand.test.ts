@@ -143,6 +143,27 @@ test("parseMongoWriteCommand accepts unquoted insert and update commands", () =>
   });
 });
 
+test("parseMongoWriteCommand accepts updateMany arrayFilters options", () => {
+  assert.deepEqual(
+    parseMongoWriteCommand(`db.issue_3231.updateMany(
+      { msgType: 3, "order.orderId": { $in: [12345] } },
+      { $set: { "order.$[orderElem].bcorderproducts.$[prodElem].pankouType": "双双2" } },
+      { arrayFilters: [
+        { "orderElem.orderId": { $in: [12345] } },
+        { "prodElem.id": 322678 }
+      ] }
+    )`),
+    {
+      kind: "update",
+      collection: "issue_3231",
+      filter: '{ "msgType": 3, "order.orderId": { "$in": [12345] } }',
+      update: '{ "$set": { "order.$[orderElem].bcorderproducts.$[prodElem].pankouType": "双双2" } }',
+      options: '{ "arrayFilters": [\n        { "orderElem.orderId": { "$in": [12345] } },\n        { "prodElem.id": 322678 }\n      ] }',
+      many: true,
+    },
+  );
+});
+
 test("parseMongoWriteCommand parses createIndex with optional options", () => {
   assert.deepEqual(parseMongoWriteCommand("db.users.createIndex({email: 1}, {unique: true, name: 'users_email_unique'})"), {
     kind: "createIndex",

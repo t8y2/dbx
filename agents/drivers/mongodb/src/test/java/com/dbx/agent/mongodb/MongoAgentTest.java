@@ -12,6 +12,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mongodb.MongoClientSettings;
+import com.mongodb.client.model.UpdateOptions;
 import java.io.FileInputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -200,6 +201,25 @@ class MongoAgentTest {
         assertEquals(10, json.get("id").getAsInt());
         assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
         assertFalse(json.getAsJsonObject("error").get("message").getAsString().contains("Unknown method"));
+    }
+
+    @Test
+    void parsesArrayFiltersUpdateOption() {
+        UpdateOptions options = MongoAgent.updateOptionsForWrite(
+            "{\"arrayFilters\":[{\"item.id\":322678}]}"
+        );
+
+        assertEquals(1, options.getArrayFilters().size());
+        assertEquals(322678, ((Document) options.getArrayFilters().get(0)).getInteger("item.id"));
+    }
+
+    @Test
+    void rejectsUnsupportedUpdateOptions() {
+        IllegalArgumentException error = assertThrows(
+            IllegalArgumentException.class,
+            () -> MongoAgent.updateOptionsForWrite("{\"upsert\":true}")
+        );
+        assertEquals("Unsupported update option: upsert", error.getMessage());
     }
 
     @Test

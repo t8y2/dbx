@@ -4,20 +4,21 @@ use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 const IDENTIFIER_PATTERN: &str = r"[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*";
+const TARGET_NAME_PATTERN: &str = r"[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*(?:\s*\.\s*(?:\*|[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*)){0,2}";
 const QUALIFIED_NAME_PATTERN: &str = r"[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*\s*\.\s*(?:\*|[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*)(?:\s*\.\s*(?:\*|[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*))?";
 
 static DML_TARGET_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(&format!(r"(?is)\b(?:FROM|JOIN|UPDATE|INTO|REFERENCES)\s+({QUALIFIED_NAME_PATTERN})"))
+    Regex::new(&format!(r"(?is)\b(?:FROM|JOIN|UPDATE|INTO|REFERENCES)\s+({TARGET_NAME_PATTERN})"))
         .expect("valid DML target regex")
 });
 static DDL_OBJECT_TARGET_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
-        r"(?is)\b(?:CREATE|ALTER|DROP)\s+(?:OR\s+REPLACE\s+)?(?:TABLE|VIEW|MATERIALIZED\s+VIEW|INDEX|SEQUENCE|FUNCTION|PROCEDURE|ROUTINE|TRIGGER|EVENT|TYPE|SYNONYM)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(?:ONLY\s+)?({QUALIFIED_NAME_PATTERN})"
+        r"(?is)\b(?:CREATE|ALTER|DROP)\s+(?:OR\s+REPLACE\s+)?(?:TABLE|VIEW|MATERIALIZED\s+VIEW|INDEX|SEQUENCE|FUNCTION|PROCEDURE|ROUTINE|TRIGGER|EVENT|TYPE|SYNONYM)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(?:ONLY\s+)?({TARGET_NAME_PATTERN})"
     ))
     .expect("valid DDL object target regex")
 });
 static INDEX_ON_TARGET_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(&format!(r"(?is)\b(?:CREATE|ALTER|DROP)\s+(?:UNIQUE\s+)?INDEX\b.*?\bON\s+({QUALIFIED_NAME_PATTERN})"))
+    Regex::new(&format!(r"(?is)\b(?:CREATE|ALTER|DROP)\s+(?:UNIQUE\s+)?INDEX\b.*?\bON\s+({TARGET_NAME_PATTERN})"))
         .expect("valid index target regex")
 });
 static DATABASE_TARGET_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -29,7 +30,27 @@ static DATABASE_TARGET_RE: LazyLock<Regex> = LazyLock::new(|| {
 static USE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(&format!(r"(?is)^\s*USE\s+({IDENTIFIER_PATTERN})")).expect("valid USE regex"));
 static COPY_TARGET_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(&format!(r"(?is)^\s*COPY\s+({QUALIFIED_NAME_PATTERN})\s+FROM\b")).expect("valid COPY target regex")
+    Regex::new(&format!(r"(?is)^\s*COPY\s+({TARGET_NAME_PATTERN})\s+FROM\b")).expect("valid COPY target regex")
+});
+static TRUNCATE_TARGET_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(r"(?is)\bTRUNCATE\s+(?:TABLE\s+)?({TARGET_NAME_PATTERN})"))
+        .expect("valid truncate target regex")
+});
+static RENAME_TABLE_TARGET_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(r"(?is)\bRENAME\s+TABLE\s+({TARGET_NAME_PATTERN})\s+TO\s+({TARGET_NAME_PATTERN})"))
+        .expect("valid rename table target regex")
+});
+static MAINTENANCE_TABLE_TARGET_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r"(?is)\b(?:ANALYZE|OPTIMIZE|REPAIR|CHECK)\s+(?:NO_WRITE_TO_BINLOG\s+|LOCAL\s+)?TABLE\s+({TARGET_NAME_PATTERN})"
+    ))
+    .expect("valid maintenance table target regex")
+});
+static COMMENT_TARGET_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r"(?is)\bCOMMENT\s+ON\s+(?:TABLE|VIEW|COLUMN|INDEX|SEQUENCE|FUNCTION|PROCEDURE|TYPE)\s+({TARGET_NAME_PATTERN})"
+    ))
+    .expect("valid comment target regex")
 });
 static ROUTINE_CALL_TARGET_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(r"(?is)\b(?:CALL|EXEC|EXECUTE)\s+({QUALIFIED_NAME_PATTERN})"))
@@ -107,10 +128,10 @@ fn referenced_databases(sql: &str, db_type: &DatabaseType, active_database: &str
     let mut assessment = ReferencedDatabaseAssessment::default();
     let cleaned = sql_target_safety_text(sql);
     let mut use_database = String::new();
-    let has_active_database = !normalize_database_name(active_database).is_empty();
+    let normalized_active_database = normalize_database_name(active_database);
 
     for statement in cleaned.text.split(';').map(str::trim).filter(|statement| !statement.is_empty()) {
-        let before_size = assessment.databases.len();
+        let mut statement_databases = HashSet::new();
         let statement_is_mutation = crate::query_execution_sql::is_write_sql(statement);
         if let Some(database) = USE_RE
             .captures(statement)
@@ -126,22 +147,34 @@ fn referenced_databases(sql: &str, db_type: &DatabaseType, active_database: &str
             continue;
         }
 
-        if !use_database.is_empty() {
-            assessment.databases.insert(use_database.clone());
-        }
+        let current_database =
+            if use_database.is_empty() { normalized_active_database.as_str() } else { use_database.as_str() };
 
         collect_qualified_target_databases(
             statement,
             db_type,
             &cleaned.quoted_identifiers,
-            &mut assessment.databases,
+            current_database,
+            &mut statement_databases,
             &[
                 &DML_TARGET_RE,
                 &DDL_OBJECT_TARGET_RE,
                 &INDEX_ON_TARGET_RE,
+                &TRUNCATE_TARGET_RE,
+                &MAINTENANCE_TABLE_TARGET_RE,
+                &COMMENT_TARGET_RE,
                 &ROUTINE_CALL_TARGET_RE,
                 &PRIVILEGE_TARGET_RE,
             ],
+        );
+        collect_qualified_target_database_groups(
+            statement,
+            db_type,
+            &cleaned.quoted_identifiers,
+            current_database,
+            &mut statement_databases,
+            &RENAME_TABLE_TARGET_RE,
+            &[1, 2],
         );
         for capture in DATABASE_TARGET_RE.captures_iter(statement) {
             if let Some(database) = capture
@@ -151,7 +184,7 @@ fn referenced_databases(sql: &str, db_type: &DatabaseType, active_database: &str
                 .map(|value| normalize_target_database_name(value.as_str(), &cleaned.quoted_identifiers))
                 .filter(|value| !value.is_empty())
             {
-                assessment.databases.insert(database);
+                statement_databases.insert(database);
             }
         }
         for capture in PRIVILEGE_DATABASE_TARGET_RE.captures_iter(statement) {
@@ -160,24 +193,24 @@ fn referenced_databases(sql: &str, db_type: &DatabaseType, active_database: &str
                 .map(|value| normalize_target_database_name(value.as_str(), &cleaned.quoted_identifiers))
                 .filter(|value| !value.is_empty())
             {
-                assessment.databases.insert(database);
+                statement_databases.insert(database);
             }
         }
         if let Some(database) = COPY_TARGET_RE
             .captures(statement)
             .and_then(|capture| capture.get(1))
-            .and_then(|target| database_from_qualified_name(target.as_str(), db_type, &cleaned.quoted_identifiers))
+            .and_then(|target| {
+                database_from_qualified_name(target.as_str(), db_type, &cleaned.quoted_identifiers, current_database)
+            })
             .filter(|value| !value.is_empty())
         {
-            assessment.databases.insert(database);
+            statement_databases.insert(database);
         }
+        let has_resolved_target = !statement_databases.is_empty();
+        assessment.databases.extend(statement_databases);
         assessment.uncertain = assessment.uncertain
             || GLOBAL_PRIVILEGE_TARGET_RE.is_match(statement)
-            || is_ambiguous_production_target_statement(
-                statement,
-                assessment.databases.len() > before_size,
-                !use_database.is_empty() || has_active_database,
-            );
+            || is_ambiguous_production_target_statement(statement, has_resolved_target);
     }
     assessment
 }
@@ -186,14 +219,39 @@ fn collect_qualified_target_databases(
     statement: &str,
     db_type: &DatabaseType,
     quoted_identifiers: &HashMap<String, String>,
+    current_database: &str,
     databases: &mut HashSet<String>,
     patterns: &[&LazyLock<Regex>],
 ) {
     for pattern in patterns {
-        for capture in pattern.captures_iter(statement) {
+        collect_qualified_target_database_groups(
+            statement,
+            db_type,
+            quoted_identifiers,
+            current_database,
+            databases,
+            pattern,
+            &[1],
+        );
+    }
+}
+
+fn collect_qualified_target_database_groups(
+    statement: &str,
+    db_type: &DatabaseType,
+    quoted_identifiers: &HashMap<String, String>,
+    current_database: &str,
+    databases: &mut HashSet<String>,
+    pattern: &LazyLock<Regex>,
+    capture_indexes: &[usize],
+) {
+    for capture in pattern.captures_iter(statement) {
+        for capture_index in capture_indexes {
             if let Some(database) = capture
-                .get(1)
-                .and_then(|target| database_from_qualified_name(target.as_str(), db_type, quoted_identifiers))
+                .get(*capture_index)
+                .and_then(|target| {
+                    database_from_qualified_name(target.as_str(), db_type, quoted_identifiers, current_database)
+                })
                 .filter(|value| !value.is_empty())
             {
                 databases.insert(database);
@@ -206,6 +264,7 @@ fn database_from_qualified_name(
     qualified_name: &str,
     db_type: &DatabaseType,
     quoted_identifiers: &HashMap<String, String>,
+    current_database: &str,
 ) -> Option<String> {
     let parts: Vec<String> = qualified_name
         .split('.')
@@ -213,12 +272,12 @@ fn database_from_qualified_name(
         .filter(|part| !part.is_empty())
         .collect();
     if parts.len() < 2 {
-        return None;
+        return (!current_database.is_empty()).then(|| current_database.to_string());
     }
     if qualified_first_part_is_database(db_type, parts.len()) {
         return parts.first().cloned();
     }
-    None
+    (!current_database.is_empty()).then(|| current_database.to_string())
 }
 
 fn normalize_target_database_name(value: &str, quoted_identifiers: &HashMap<String, String>) -> String {
@@ -289,76 +348,25 @@ fn schema_first_qualifier_type(db_type: &DatabaseType) -> bool {
     )
 }
 
-fn is_ambiguous_production_target_statement(
-    statement: &str,
-    has_resolved_target: bool,
-    has_current_database: bool,
-) -> bool {
+fn is_ambiguous_production_target_statement(statement: &str, has_resolved_target: bool) -> bool {
     if !crate::query_execution_sql::is_write_sql(statement) {
         return false;
-    }
-    if GLOBAL_DDL_TARGET_RE.is_match(statement) {
-        return true;
     }
     let Some(first_keyword) = first_keyword(statement) else {
         return true;
     };
-    if is_target_ambiguous_keyword(&first_keyword) && !has_resolved_target {
-        return true;
+    if is_transaction_keyword(&first_keyword) {
+        return false;
     }
-    if is_unqualified_target_keyword(&first_keyword) && !has_resolved_target && !has_current_database {
-        return true;
-    }
-    is_unknown_target_keyword(&first_keyword) && !has_resolved_target
+    GLOBAL_DDL_TARGET_RE.is_match(statement) || !has_resolved_target
 }
 
 fn first_keyword(statement: &str) -> Option<String> {
     FIRST_KEYWORD_RE.find(statement).map(|value| value.as_str().to_ascii_lowercase())
 }
 
-fn is_target_ambiguous_keyword(keyword: &str) -> bool {
-    matches!(keyword, "call" | "exec" | "execute" | "grant" | "revoke" | "deny")
-}
-
-fn is_unqualified_target_keyword(keyword: &str) -> bool {
-    matches!(
-        keyword,
-        "insert"
-            | "update"
-            | "delete"
-            | "merge"
-            | "replace"
-            | "load"
-            | "copy"
-            | "truncate"
-            | "create"
-            | "alter"
-            | "drop"
-    )
-}
-
-fn is_unknown_target_keyword(keyword: &str) -> bool {
-    !matches!(
-        keyword,
-        "select"
-            | "with"
-            | "show"
-            | "describe"
-            | "desc"
-            | "explain"
-            | "from"
-            | "values"
-            | "table"
-            | "use"
-            | "begin"
-            | "start"
-            | "commit"
-            | "rollback"
-            | "abort"
-            | "savepoint"
-            | "release"
-    ) && !is_target_ambiguous_keyword(keyword)
-        && !is_unqualified_target_keyword(keyword)
+fn is_transaction_keyword(keyword: &str) -> bool {
+    matches!(keyword, "begin" | "start" | "commit" | "rollback" | "abort" | "savepoint" | "release")
 }
 
 fn sql_target_safety_text(sql: &str) -> SqlTargetSafetyText {

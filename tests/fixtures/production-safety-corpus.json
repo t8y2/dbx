@@ -90,6 +90,136 @@
     "databases": []
   },
   {
+    "name": "mysql unqualified table DML resolves to the selected non-production database",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "UPDATE users SET active = 1 WHERE id = 1",
+    "active": false,
+    "isMutation": true,
+    "databases": []
+  },
+  {
+    "name": "mysql repeated unqualified table DML resolves per statement",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "UPDATE users SET active = 1 WHERE id = 1; DELETE FROM users WHERE id = 2",
+    "active": false,
+    "isMutation": true,
+    "databases": []
+  },
+  {
+    "name": "mysql unknown mutation without a resolved target is conservatively confirmed",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "MAINTAIN UNKNOWN THING",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "mysql transaction statement does not target a production database",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "BEGIN",
+    "active": false,
+    "isMutation": true,
+    "databases": []
+  },
+  {
+    "name": "mysql qualified rename table source and destination target production database",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "RENAME TABLE prod_app.old_name TO prod_app.new_name",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "mysql rename table into production database is detected",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "RENAME TABLE staging.old_name TO prod_app.new_name",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "mysql resolved non-production rename table target stays non-production",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "RENAME TABLE staging.old_name TO staging.new_name",
+    "active": false,
+    "isMutation": true,
+    "databases": []
+  },
+  {
+    "name": "mysql qualified truncate table targets production database",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "TRUNCATE TABLE prod_app.users",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "mysql resolved non-production truncate table target stays non-production",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "TRUNCATE TABLE staging.users",
+    "active": false,
+    "isMutation": true,
+    "databases": []
+  },
+  {
+    "name": "mysql optimize table targets production database",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "OPTIMIZE TABLE prod_app.users",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "mysql analyze table targets production database",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "ANALYZE TABLE prod_app.users",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "mysql repair table targets production database",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "REPAIR TABLE prod_app.users",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "mysql check table resolves to selected non-production database",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "CHECK TABLE users",
+    "active": false,
+    "isMutation": true,
+    "databases": []
+  },
+  {
     "name": "mysql read-only production reference before staging write stays non-production",
     "dialect": "mysql",
     "productionDatabases": ["prod_app"],

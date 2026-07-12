@@ -6055,9 +6055,10 @@ function onDomGridWheel(event: WheelEvent) {
   const maxLeft = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
   const nextTop = Math.max(0, Math.min(maxTop, scroller.scrollTop + effectiveVerticalDelta));
   const nextLeft = Math.max(0, Math.min(maxLeft, scroller.scrollLeft + effectiveHorizontalDelta));
+  // Let an outer scroll container handle wheel input once the grid reaches its boundary.
+  if (nextTop === scroller.scrollTop && nextLeft === scroller.scrollLeft) return;
   event.preventDefault();
   event.stopPropagation();
-  if (nextTop === scroller.scrollTop && nextLeft === scroller.scrollLeft) return;
 
   scroller.scrollTop = nextTop;
   scroller.scrollLeft = nextLeft;

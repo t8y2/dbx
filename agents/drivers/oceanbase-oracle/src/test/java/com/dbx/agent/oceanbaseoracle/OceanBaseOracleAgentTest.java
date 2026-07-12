@@ -2,8 +2,10 @@ package com.dbx.agent.oceanbaseoracle;
 
 import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.ConnectParams;
+import com.dbx.agent.ExecuteQueryOptions;
 import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
+import com.dbx.agent.QueryPageOptions;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.test.TestSupport;
 import org.junit.jupiter.api.Assertions;
@@ -15,6 +17,7 @@ import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -69,6 +72,47 @@ class OceanBaseOracleAgentTest {
             "jdbc:oceanbase://custom-host:2881/sys?useSSL=false&compatibleOjdbcVersion=8",
             OceanBaseOracleAgent.buildUrl(params)
         );
+    }
+
+    @Test
+    void convertsQueryTimeoutToOceanBaseSessionMicroseconds() {
+        Assertions.assertEquals(
+            "ALTER SESSION SET ob_query_timeout = 300000000",
+            OceanBaseOracleAgent.queryTimeoutSql(300)
+        );
+        Assertions.assertEquals(
+            "ALTER SESSION SET ob_query_timeout = 0",
+            OceanBaseOracleAgent.queryTimeoutSql(0)
+        );
+        Assertions.assertEquals(
+            "ALTER SESSION SET ob_query_timeout = 2147483647000000",
+            OceanBaseOracleAgent.queryTimeoutSql(Integer.MAX_VALUE)
+        );
+    }
+
+    @Test
+    void rejectsNegativeQueryTimeout() {
+        Assertions.assertThrows(IllegalArgumentException.class, () -> OceanBaseOracleAgent.queryTimeoutSql(-1));
+    }
+
+    @Test
+    void synchronizesSessionTimeoutForEveryQueryEntryPoint() {
+        List<String> sql = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, executionConnection(sql));
+
+        agent.executeQuery("SELECT 1 FROM DUAL", null, new ExecuteQueryOptions(10, null, 12));
+        agent.executeQueryPage("SELECT 2 FROM DUAL", null, new QueryPageOptions(10, null, 10, 13));
+        agent.startTableRead("SELECT 3 FROM DUAL", null, new QueryPageOptions(10, null, 10, 14));
+
+        Assertions.assertEquals(List.of(
+            "ALTER SESSION SET ob_query_timeout = 12000000",
+            "SELECT 1 FROM DUAL",
+            "ALTER SESSION SET ob_query_timeout = 13000000",
+            "SELECT 2 FROM DUAL",
+            "ALTER SESSION SET ob_query_timeout = 14000000",
+            "SELECT 3 FROM DUAL"
+        ), sql);
     }
 
     @Test
@@ -204,6 +248,32 @@ class OceanBaseOracleAgentTest {
         return proxy(Connection.class, (method, args) -> {
             if ("prepareStatement".equals(method.getName())) {
                 sql.add(String.valueOf(args[0]));
+                return statement;
+            }
+            if ("isClosed".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Connection executionConnection(List<String> sql) {
+        Statement statement = proxy(Statement.class, (method, args) -> {
+            if ("execute".equals(method.getName())) {
+                sql.add(String.valueOf(args[0]));
+                return false;
+            }
+            if ("getUpdateCount".equals(method.getName())) {
+                return 0;
+            }
+            if ("close".equals(method.getName()) || "setMaxRows".equals(method.getName())
+                || "setFetchSize".equals(method.getName()) || "setQueryTimeout".equals(method.getName())) {
+                return null;
+            }
+            return defaultValue(method.getReturnType());
+        });
+        return proxy(Connection.class, (method, args) -> {
+            if ("createStatement".equals(method.getName())) {
                 return statement;
             }
             if ("isClosed".equals(method.getName())) {

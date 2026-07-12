@@ -9,10 +9,15 @@ function isViewTableType(tableType?: string): boolean {
   return tableType?.toUpperCase().includes("VIEW") === true;
 }
 
+function isTdengineStableTableType(tableType?: string): boolean {
+  const normalized = tableType?.trim().toUpperCase();
+  return normalized === "STABLE" || normalized === "SUPER TABLE" || normalized === "SUPERTABLE";
+}
+
 export function editablePrimaryKeys(databaseType: DatabaseType | undefined, columns: ColumnInfo[], tableType?: string): string[] {
   const primaryKeys = columns.filter((column) => column.is_primary_key).map((column) => column.name);
   if (isViewTableType(tableType)) return primaryKeys;
-  if (databaseType === "tdengine" && primaryKeys.length > 0) return [DBX_TDENGINE_TBNAME_COLUMN, ...primaryKeys];
+  if (databaseType === "tdengine" && primaryKeys.length > 0 && isTdengineStableTableType(tableType)) return [DBX_TDENGINE_TBNAME_COLUMN, ...primaryKeys];
   const syntheticKey = getDatabaseCapability(databaseType).syntheticKey;
   if (syntheticKey === "oracle-rowid" && primaryKeys.length === 0) return [DBX_ROWID_COLUMN];
   if (syntheticKey === "neo4j-element-id" && primaryKeys.length === 0) return [DBX_NEO4J_ELEMENT_ID_COLUMN];
@@ -55,9 +60,21 @@ export function canEditExistingTableRows(databaseType: DatabaseType | undefined,
   if (tableData.readonly) return false;
   if (tableData.existingRowsReadonly) return false;
   if (tableData.requiresTransactionalTableForExistingRows && hiveTableTransactional !== true) return false;
-  if (databaseType === "tdengine" && !primaryKeys?.some((key) => key.toLowerCase() === DBX_TDENGINE_TBNAME_COLUMN)) return false;
   if (tableData.updateRequiresPrimaryKey && primaryKeys && primaryKeys.length === 0) return false;
   return true;
+}
+
+export function hasCompleteTdengineRowIdentity(databaseType: DatabaseType | undefined, primaryKeys: readonly string[], resultColumns: readonly (string | undefined)[]): boolean {
+  if (databaseType !== "tdengine") return true;
+  if (primaryKeys.length === 0) return false;
+  const availableColumns = new Set(resultColumns.filter((column): column is string => !!column).map((column) => column.toLowerCase()));
+  return primaryKeys.every((primaryKey) => availableColumns.has(primaryKey.toLowerCase()));
+}
+
+export function canDeleteExistingTdengineRows(databaseType: DatabaseType | undefined, primaryKeys: readonly string[]): boolean {
+  if (databaseType !== "tdengine") return true;
+  const rowPrimaryKeys = primaryKeys.filter((primaryKey) => primaryKey.toLowerCase() !== DBX_TDENGINE_TBNAME_COLUMN);
+  return rowPrimaryKeys.length <= 1;
 }
 
 export function hiveTablePropertiesIndicateTransactional(result: { rows: readonly (readonly unknown[])[] }): boolean {

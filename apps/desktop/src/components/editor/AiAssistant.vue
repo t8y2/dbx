@@ -15,6 +15,7 @@ import {
   Copy,
   Database,
   FileCode,
+  FlaskConical,
   GitBranch,
   HelpCircle,
   History,
@@ -56,6 +57,9 @@ import { buildAiContext, runAgentStream, isVectorDbType, isValidActionForMode, d
 import { formatAiModelOption } from "@/lib/ai/aiModelPresentation";
 import type { AgentEvent } from "@/lib/backend/tauri";
 import { buildAiAgentPlan } from "@/lib/ai/aiAgentPlan";
+import { extractFirstSqlCodeBlock } from "@/lib/ai/aiSqlExecutionPolicy";
+import { productionContextForDatabase } from "@/lib/database/productionSafety";
+import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { buildAiAgentStepItems, toolCallStepKey, upsertAgentStep, type AiAgentStepItem, type AiAgentStepTone } from "@/lib/ai/aiAgentStepPresentation";
 import { createAiShikiCodeHighlighter, type AiCodeHighlighter } from "@/lib/ai/aiCodeHighlighter";
 import { createAiMessageRenderer } from "@/lib/ai/aiMessageRender";
@@ -67,7 +71,7 @@ import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { decodeSelectableDatabaseValue, encodeSelectableDatabaseValue, formatDatabaseLabel, resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import ExplainPlanViewer from "@/components/explain/ExplainPlanViewer.vue";
-import { parseExplainResult, type ParsedExplainPlan } from "@/lib/diagram/explainPlan";
+import { parseExplainResult, parseOracleExplainText, type ParsedExplainPlan } from "@/lib/diagram/explainPlan";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { AI_TABLE_MENTION_CANDIDATE_LIMIT, AI_TABLE_MENTION_SCHEMA_LIMIT, filterAiTableMentionCandidates, formatAiTableMention, parseAiTableMentions, type AiTableMention } from "@/lib/ai/aiTableMentions";
 import { isAiPromptImeCompositionEvent, shouldSubmitAiPromptOnKeydown } from "@/lib/ai/aiPromptKeyboard";
@@ -123,6 +127,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   replaceSql: [sql: string];
   executeSql: [sql: string];
+  tempRunSql: [sql: string];
   requestAutoExecuteSql: [sql: string];
   openExplainPlan: [sql: string];
   close: [];
@@ -159,6 +164,10 @@ const MESSAGE_SCROLL_BUTTON_HIDE_THRESHOLD_PX = 48;
 let messageScrollViewport: HTMLElement | null = null;
 let messageTouchStartY: number | null = null;
 let lastMessageScrollTop = 0;
+let assistantDeltaFrame: number | null = null;
+let pendingAssistantDelta = "";
+let pendingAssistantReasoning = "";
+let pendingAssistantIndex = -1;
 
 function startEditMessage(visibleIndex: number) {
   if (isGenerating.value) return;
@@ -488,15 +497,30 @@ const proposalConfirmMessage = computed<ChatMessage | null>(() => {
   return null;
 });
 
+let allowWriteSqlForNextRun = false;
+
+const productionContext = computed(() => productionContextForDatabase(props.connection, props.tab?.database));
+
+function proposalContainsWriteSql(content: string) {
+  return /\b(insert|update|delete|replace|merge|create|alter|drop|truncate|rename|grant|revoke)\b/i.test(content);
+}
+
 function sendProposalReply(positive: boolean) {
   // Disable while a stream is in flight or no proposal is currently active.
   if (isGenerating.value) return;
   const target = proposalConfirmMessage.value;
   if (!target) return;
+  if (positive && productionContext.value.active && proposalContainsWriteSql(target.content)) {
+    const sql = extractFirstSqlCodeBlock(target.content);
+    if (sql) emit("replaceSql", sql);
+    toast(t("production.aiReviewRequired"), 5000);
+    return;
+  }
   const isZh = containsChinese(target.content || "");
   const replyZh = positive ? "请执行上面你刚提议的操作，不要再反问确认。" : "不用执行上面提到的操作，继续当前对话。";
   const replyEn = positive ? "Execute the action you just proposed above; do not ask for confirmation again." : "Do not execute the action mentioned above; continue the current conversation.";
   prompt.value = isZh ? replyZh : replyEn;
+  allowWriteSqlForNextRun = positive && assistantMode.value === "agent" && proposalContainsWriteSql(target.content);
   // Use the existing send pipeline so the message is added to history, persisted, etc.
   send();
 }
@@ -596,19 +620,41 @@ function changeDatabase(value: string) {
   queryStore.updateDatabase(tab.id, decodeSelectableDatabaseValue(connection.db_type, value));
 }
 
-function appendAssistantDelta(assistantIdx: number, delta: string) {
-  const msg = messages.value[assistantIdx];
-  if (msg.isThinking) msg.isThinking = false;
-  msg.content += delta;
+function flushAssistantDeltas() {
+  assistantDeltaFrame = null;
+  const msg = messages.value[pendingAssistantIndex];
+  if (!msg) return;
+  if (pendingAssistantReasoning) {
+    msg.reasoning = (msg.reasoning || "") + pendingAssistantReasoning;
+    msg.isThinking = true;
+  }
+  if (pendingAssistantDelta) {
+    msg.isThinking = false;
+    msg.content += pendingAssistantDelta;
+  }
+  pendingAssistantDelta = "";
+  pendingAssistantReasoning = "";
   scrollToBottom();
 }
 
-function appendAssistantReasoning(assistantIdx: number, delta: string) {
+function scheduleAssistantDeltaFlush(assistantIdx: number) {
+  pendingAssistantIndex = assistantIdx;
+  if (assistantDeltaFrame !== null) return;
+  // Providers can emit many tiny chunks. Render once per animation frame so
+  // Markdown parsing, highlighting, and layout do not run for every token.
+  assistantDeltaFrame = requestAnimationFrame(flushAssistantDeltas);
+}
+
+function appendAssistantDelta(assistantIdx: number, delta: string) {
   const msg = messages.value[assistantIdx];
-  if (!msg.reasoning) msg.reasoning = "";
-  msg.reasoning += delta;
-  msg.isThinking = true;
-  scrollToBottom();
+  if (msg.isThinking) msg.isThinking = false;
+  pendingAssistantDelta += delta;
+  scheduleAssistantDeltaFlush(assistantIdx);
+}
+
+function appendAssistantReasoning(assistantIdx: number, delta: string) {
+  pendingAssistantReasoning += delta;
+  scheduleAssistantDeltaFlush(assistantIdx);
 }
 
 const reasoningExpanded = ref(false);
@@ -674,6 +720,9 @@ function extractExplainData(result: unknown): unknown | undefined {
 
 /** Parse explain_data (a serialized QueryResult) into ParsedExplainPlan */
 function parseExplainFromData(explainData: unknown, dbType: string): ParsedExplainPlan | undefined {
+  if (dbType === "oracle" && typeof explainData === "string") {
+    return parseOracleExplainText(explainData);
+  }
   if (!explainData || typeof explainData !== "object") return undefined;
   const supportedTypes = ["mysql", "postgres", "dameng", "questdb"] as const;
   if (!supportedTypes.includes(dbType as (typeof supportedTypes)[number])) return undefined;
@@ -1358,6 +1407,9 @@ async function send() {
 
   const requestedAction = activeAction.value;
   const requestedMode = assistantMode.value;
+  // Agent confirmation cannot grant autonomous writes while the active database is production.
+  const allowWriteSql = requestedMode === "agent" && allowWriteSqlForNextRun && !productionContext.value.active;
+  allowWriteSqlForNextRun = false;
   isGenerating.value = true;
   messages.value.push({ role: "assistant", content: "" });
   const assistantIdx = messages.value.length - 1;
@@ -1379,6 +1431,7 @@ async function send() {
         mode: requestedMode,
         instruction: modelInstruction,
         context,
+        allowWriteSql,
       },
       history,
       (event: AgentEvent) => {
@@ -1420,6 +1473,8 @@ async function send() {
     const message = e instanceof Error ? e.message : String(e);
     messages.value[assistantIdx].content = `Error: ${message}`;
   } finally {
+    if (assistantDeltaFrame !== null) cancelAnimationFrame(assistantDeltaFrame);
+    flushAssistantDeltas();
     const msg = messages.value[assistantIdx];
     if (msg) msg.isThinking = false;
     isGenerating.value = false;
@@ -1440,6 +1495,7 @@ async function send() {
         instruction: modelInstruction,
         assistantContent: msg?.content || "",
         connection: props.connection,
+        database: props.tab?.database,
       });
       if (msg && requestedMode === "agent") msg.agentSteps = buildAiAgentStepItems(agentPlan);
       if (agentPlan.handoffSql) emit("requestAutoExecuteSql", agentPlan.handoffSql);
@@ -1475,8 +1531,11 @@ function applySql(code: string) {
 }
 
 function executeSql(code: string) {
-  emit("replaceSql", code);
   emit("executeSql", code);
+}
+
+function tempRunSql(code: string) {
+  emit("tempRunSql", code);
 }
 
 const copiedIndex = ref("");
@@ -1628,6 +1687,7 @@ function stopResize() {
 }
 
 onUnmounted(() => {
+  if (assistantDeltaFrame !== null) cancelAnimationFrame(assistantDeltaFrame);
   clearTimeout(mentionTimer);
   cancelStream();
   detachMessageScrollListener();
@@ -1692,6 +1752,7 @@ async function openExternalUrl(url: string) {
       <span class="flex flex-1 self-stretch items-center truncate text-xs font-medium" data-tauri-drag-region>
         {{ chatTitle }}
       </span>
+      <ProductionContextBadge v-if="productionContext.active" compact />
       <Button variant="ghost" size="icon" class="h-6 w-6" @click="startNewChat" :title="t('ai.newChat')">
         <MessageSquarePlus class="h-3.5 w-3.5" />
       </Button>
@@ -1838,7 +1899,8 @@ async function openExternalUrl(url: string) {
                     </div>
                   </div>
                 </div>
-                <template v-for="(seg, j) in messageRenderer.render(msg.content)" :key="j">
+                <div v-if="isGenerating && msg === messages[messages.length - 1]" class="whitespace-pre-wrap break-words text-sm leading-relaxed">{{ msg.content }}</div>
+                <template v-else v-for="(seg, j) in messageRenderer.render(msg.content)" :key="j">
                   <div v-if="seg.type === 'text'" class="ai-markdown whitespace-normal" @click.capture="onMarkdownClick">
                     <div v-html="seg.html" />
                   </div>
@@ -1848,6 +1910,9 @@ async function openExternalUrl(url: string) {
                       <span>{{ seg.lang }}</span>
                       <span class="flex-1" />
                       <div class="flex items-center gap-1.5">
+                        <button v-if="seg.isSql" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.tempRunSql')" @click="tempRunSql(seg.content)">
+                          <FlaskConical class="h-3.5 w-3.5" />
+                        </button>
                         <button v-if="seg.isSql" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.executeSql')" @click="executeSql(seg.content)">
                           <Play class="h-3.5 w-3.5" />
                         </button>

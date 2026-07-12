@@ -9,6 +9,8 @@ import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcExecutor;
 import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MetadataListConstraints;
+import com.dbx.agent.MetadataSqlSupport;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.QueryPageOptions;
@@ -25,7 +27,6 @@ import java.sql.Types;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -50,6 +51,8 @@ public final class TDengineAgent extends BaseDatabaseAgent {
         Pattern.compile("(?i)^(decimal|numeric)\\(\\d+,\\s*(\\d+)\\)");
     private static final Pattern CHARACTER_LENGTH_PATTERN =
         Pattern.compile("(?i)^(binary|nchar|varchar|varbinary)\\((\\d+)\\)");
+    private static final Pattern COMPOSITE_KEY_PATTERN =
+        Pattern.compile("(?i)\\bCOMPOSITE\\s+KEY\\b");
 
     private Connection connection;
 
@@ -98,6 +101,24 @@ public final class TDengineAgent extends BaseDatabaseAgent {
 
     @Override
     public List<TableInfo> listTables(String schema) {
+        return listTables(schema, MetadataListConstraints.NONE);
+    }
+
+    @Override
+    public List<TableInfo> listTables(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        if (!normalized.tableTypeAllowed("TABLE")) {
+            return Collections.emptyList();
+        }
+        try {
+            return queryConstrainedTables(schema, normalized);
+        } catch (RuntimeException ignored) {
+            // TDengine 2.x does not expose information_schema.ins_stables/ins_tables.
+            return normalized.filterTables(listTablesLegacy(schema));
+        }
+    }
+
+    private List<TableInfo> listTablesLegacy(String schema) {
         return unchecked(() -> {
             List<TableInfo> result = new ArrayList<>();
             result.addAll(queryTables("SHOW " + quoteQualifiedPrefix(schema) + "STABLES", "STABLE"));
@@ -108,7 +129,7 @@ public final class TDengineAgent extends BaseDatabaseAgent {
                 distinct.putIfAbsent(table.getTable_type() + ":" + table.getName(), table);
             }
             List<TableInfo> sorted = new ArrayList<>(distinct.values());
-            sorted.sort(Comparator.comparing(table -> table.getName().toLowerCase(Locale.ROOT)));
+            sortTablesForHierarchy(sorted);
             return sorted;
         });
     }
@@ -232,7 +253,111 @@ public final class TDengineAgent extends BaseDatabaseAgent {
         return result;
     }
 
-    private static List<ColumnInfo> readDescribeColumns(ResultSet rs) throws Exception {
+    private List<TableInfo> queryConstrainedTables(String database, MetadataListConstraints constraints) {
+        return unchecked(() -> {
+            TableMetadataQuery query = buildTableMetadataQuery(database, constraints);
+            List<TableInfo> result = new ArrayList<>();
+            try (java.sql.PreparedStatement stmt = requireConnected().prepareStatement(query.sql())) {
+                MetadataSqlSupport.bind(stmt, query.args());
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        result.add(new TableInfo(
+                            rs.getString(1),
+                            rs.getString(2),
+                            optionalString(rs, 3),
+                            null,
+                            optionalString(rs, 4)
+                        ));
+                    }
+                }
+            }
+            MetadataListConstraints postFilter = constraints.hasLimit() ? constraints.withoutPaging() : constraints;
+            return postFilter.filterTables(result);
+        });
+    }
+
+    static TableMetadataQuery buildTableMetadataQuery(String database, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        List<Object> args = new ArrayList<>();
+        StringBuilder sql = new StringBuilder("""
+            SELECT table_name, table_type, table_comment, parent_name
+            FROM (
+                SELECT stable_name AS table_name,
+                       'STABLE' AS table_type,
+                       table_comment,
+                       CAST(NULL AS VARCHAR(192)) AS parent_name,
+                       stable_name AS hierarchy_name,
+                       0 AS hierarchy_rank
+                FROM information_schema.ins_stables
+                WHERE db_name = ?
+                UNION ALL
+                SELECT table_name,
+                       'TABLE' AS table_type,
+                       table_comment,
+                       stable_name AS parent_name,
+                       CASE WHEN stable_name IS NULL THEN table_name ELSE stable_name END AS hierarchy_name,
+                       1 AS hierarchy_rank
+                FROM information_schema.ins_tables
+                WHERE db_name = ?
+            ) metadata
+            WHERE 1 = 1
+            """.stripIndent().trim());
+        args.add(database);
+        args.add(database);
+        if (normalized.hasFilter()) {
+            String pattern = normalized.fuzzyLikePattern();
+            sql.append(" AND (table_name LIKE ? OR table_comment LIKE ?)");
+            args.add(pattern);
+            args.add(pattern);
+        }
+        sql.append(" ORDER BY hierarchy_name, hierarchy_rank, table_name");
+        MetadataSqlSupport.appendLiteralLimitOffset(sql, normalized);
+        return new TableMetadataQuery(sql.toString(), args);
+    }
+
+    static final class TableMetadataQuery {
+        private final String sql;
+        private final List<Object> args;
+
+        TableMetadataQuery(String sql, List<Object> args) {
+            this.sql = sql;
+            this.args = args;
+        }
+
+        String sql() {
+            return sql;
+        }
+
+        List<Object> args() {
+            return args;
+        }
+    }
+
+    static void sortTablesForHierarchy(List<TableInfo> tables) {
+        tables.sort((left, right) -> {
+            String leftGroup = hierarchyGroupName(left);
+            String rightGroup = hierarchyGroupName(right);
+            int groupCompared = leftGroup.compareTo(rightGroup);
+            if (groupCompared != 0) {
+                return groupCompared;
+            }
+
+            boolean leftIsParent = left.getParent_name() == null;
+            boolean rightIsParent = right.getParent_name() == null;
+            if (leftIsParent != rightIsParent) {
+                return leftIsParent ? -1 : 1;
+            }
+            return left.getName().toLowerCase(Locale.ROOT).compareTo(right.getName().toLowerCase(Locale.ROOT));
+        });
+    }
+
+    private static String hierarchyGroupName(TableInfo table) {
+        String parentName = table.getParent_name();
+        String groupName = parentName == null || parentName.trim().isEmpty() ? table.getName() : parentName;
+        return groupName.toLowerCase(Locale.ROOT);
+    }
+
+    static List<ColumnInfo> readDescribeColumns(ResultSet rs) throws Exception {
         List<ColumnInfo> result = new ArrayList<>();
         int ordinal = 0;
         while (rs.next()) {
@@ -241,12 +366,13 @@ public final class TDengineAgent extends BaseDatabaseAgent {
             String dataType = coalesce(rs.getString(2));
             String note = optionalString(rs, 4);
             boolean isTag = note != null && note.toUpperCase(Locale.ROOT).contains("TAG");
+            boolean isPrimaryKey = !isTag && (ordinal == 1 || (note != null && COMPOSITE_KEY_PATTERN.matcher(note).find()));
             result.add(new ColumnInfo(
                 name,
                 dataType,
-                ordinal != 1,
+                !isPrimaryKey,
                 null,
-                ordinal == 1 && !isTag,
+                isPrimaryKey,
                 note,
                 isTag ? "TAG" : null,
                 parseNumericPrecision(dataType),

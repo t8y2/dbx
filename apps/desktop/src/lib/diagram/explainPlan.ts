@@ -16,20 +16,20 @@ export interface ExplainPlanNode {
 }
 
 export interface ParsedExplainPlan {
-  databaseType: "mysql" | "postgres" | "dameng" | "questdb";
+  databaseType: "mysql" | "postgres" | "dameng" | "questdb" | "oracle";
   raw: unknown;
   nodes: ExplainPlanNode[];
 }
 
 export type BuildExplainSqlResult = { ok: true; sql: string } | { ok: false; reason: "unsupported" | "empty" | "unsafe" };
 
-const SUPPORTED_EXPLAIN_TYPES = new Set<DatabaseType>(["mysql", "postgres", "dameng", "questdb"]);
-export function supportsExplainPlan(databaseType?: DatabaseType): databaseType is "mysql" | "postgres" | "dameng" | "questdb" {
+const SUPPORTED_EXPLAIN_TYPES = new Set<DatabaseType>(["mysql", "postgres", "dameng", "questdb", "oracle"]);
+export function supportsExplainPlan(databaseType?: DatabaseType): databaseType is "mysql" | "postgres" | "dameng" | "questdb" | "oracle" {
   return !!databaseType && supportsDatabaseFeature(databaseType, "sqlExplain") && SUPPORTED_EXPLAIN_TYPES.has(databaseType);
 }
 
-export function buildExplainSql(databaseType: DatabaseType | undefined, sql: string): Promise<BuildExplainSqlResult> {
-  return api.buildExplainSql({ databaseType, sql }) as Promise<BuildExplainSqlResult>;
+export function buildExplainSql(databaseType: DatabaseType | undefined, sql: string, format: "json" | "standard" = "json"): Promise<BuildExplainSqlResult> {
+  return api.buildExplainSql({ databaseType, sql, format }) as Promise<BuildExplainSqlResult>;
 }
 
 export function parseExplainResult(databaseType: "mysql" | "postgres" | "dameng" | "questdb", result: QueryResult): ParsedExplainPlan {
@@ -140,6 +140,124 @@ export function parseDamengExplainText(planText: string): ParsedExplainPlan {
   }
 
   return { databaseType: "dameng", raw: planText, nodes: rootNodes };
+}
+
+export function parseOracleExplainText(planText: string): ParsedExplainPlan {
+  const lines = planText.split("\n");
+  const headerIndex = lines.findIndex((line) => /^\|\s*Id\s*\|/i.test(line) && line.includes("Operation"));
+  if (headerIndex < 0) return { databaseType: "oracle", raw: planText, nodes: [] };
+
+  const headers = splitOraclePlanColumns(lines[headerIndex]).map((header) => header.trim().toLowerCase().replace(/\s+/g, " "));
+  const columnIndex = (name: string) => headers.findIndex((header) => header === name || header.startsWith(`${name} `));
+  const idIndex = columnIndex("id");
+  const operationIndex = columnIndex("operation");
+  const nameIndex = columnIndex("name");
+  const rowsIndex = columnIndex("rows");
+  const bytesIndex = columnIndex("bytes");
+  const costIndex = columnIndex("cost");
+  const timeIndex = columnIndex("time");
+  const predicates = oraclePredicateDetails(lines);
+
+  const parsedRows: Array<{
+    id: string;
+    depth: number;
+    operation: string;
+    name?: string;
+    rows?: string;
+    cost?: string;
+    bytes?: string;
+    time?: string;
+  }> = [];
+  let baseIndent: number | undefined;
+
+  for (const line of lines.slice(headerIndex + 1)) {
+    if (!line.startsWith("|")) continue;
+    const cells = splitOraclePlanColumns(line);
+    const idMatch = cells[idIndex]?.match(/\d+/);
+    const operationCell = cells[operationIndex];
+    if (!idMatch || operationCell == null) continue;
+
+    const indent = operationCell.search(/\S/);
+    if (indent < 0) continue;
+    baseIndent ??= indent;
+    parsedRows.push({
+      id: idMatch[0],
+      depth: Math.max(0, indent - baseIndent),
+      operation: operationCell.trim(),
+      name: cellValue(cells, nameIndex),
+      rows: cellValue(cells, rowsIndex),
+      cost: cellValue(cells, costIndex),
+      bytes: cellValue(cells, bytesIndex),
+      time: cellValue(cells, timeIndex),
+    });
+  }
+
+  const roots: ExplainPlanNode[] = [];
+  const parents: ExplainPlanNode[] = [];
+  for (const row of parsedRows) {
+    const isIndex = /\bINDEX\b/i.test(row.operation) && !/\bTABLE ACCESS\b/i.test(row.operation);
+    const relation = row.name && !isIndex ? row.name : undefined;
+    const index = row.name && isIndex ? row.name : undefined;
+    const details = [row.bytes ? `Bytes: ${row.bytes}` : "", row.time ? `Time: ${row.time}` : "", ...(predicates.get(row.id) ?? []).map((predicate) => `Predicate: ${predicate}`)].filter(Boolean);
+    const node: ExplainPlanNode = {
+      id: row.id,
+      title: row.name ? `${row.operation} on ${row.name}` : row.operation,
+      nodeType: row.operation,
+      relation,
+      index,
+      cost: row.cost,
+      rows: row.rows,
+      details,
+      children: [],
+    };
+
+    while (parents.length > row.depth) parents.pop();
+    const parent = row.depth > 0 ? parents[row.depth - 1] : undefined;
+    if (parent) parent.children.push(node);
+    else roots.push(node);
+    parents[row.depth] = node;
+    parents.length = row.depth + 1;
+  }
+
+  return { databaseType: "oracle", raw: planText, nodes: roots };
+}
+
+function splitOraclePlanColumns(line: string): string[] {
+  const columns = line.split("|");
+  return columns.length >= 3 ? columns.slice(1, -1) : [];
+}
+
+function cellValue(cells: string[], index: number): string | undefined {
+  if (index < 0) return undefined;
+  const value = cells[index]?.trim();
+  return value || undefined;
+}
+
+function oraclePredicateDetails(lines: string[]): Map<string, string[]> {
+  const predicates = new Map<string, string[]>();
+  const start = lines.findIndex((line) => line.trim().toLowerCase().startsWith("predicate information"));
+  if (start < 0) return predicates;
+
+  let currentId = "";
+  for (const rawLine of lines.slice(start + 1)) {
+    const line = rawLine.trim();
+    if (!line || /^-+$/.test(line)) continue;
+    if (/^note\b/i.test(line)) break;
+    const entry = line.match(/^(\d+)\s*-\s*(.+)$/);
+    if (entry) {
+      currentId = entry[1];
+      predicates.set(currentId, [entry[2]]);
+    } else if (currentId) {
+      const details = predicates.get(currentId);
+      if (!details?.length) continue;
+      if (/^(?:access|filter|storage)\s*\(/i.test(line)) {
+        details.push(line);
+      } else {
+        details[details.length - 1] = `${details[details.length - 1]} ${line}`;
+      }
+    }
+  }
+  return predicates;
 }
 
 interface DamengOpInfo {

@@ -91,6 +91,22 @@ BEGIN
 END;
 SELECT 2;`;
 
+const mysqlDelimitedRoutineFixture = `DELIMITER //
+CREATE PROCEDURE sp_insert_random_users(IN p_count INT)
+BEGIN
+  DECLARE i INT DEFAULT 0;
+  DECLARE v_name VARCHAR(32);
+
+  WHILE i < p_count DO
+    SET v_name = CONCAT('user_', i);
+    INSERT INTO t_user (username) VALUES (v_name);
+    SET i = i + 1;
+  END WHILE;
+END //
+DELIMITER ;
+
+CALL sp_insert_random_users(100);`;
+
 const sapHanaDoBlockFixture = `DO
 BEGIN
   SELECT 1 AS "Result" FROM DUMMY;
@@ -545,6 +561,10 @@ describe("executableStatementRanges", () => {
 
   it("does not split executable MySQL routine ranges at WHILE and REPEAT endings", () => {
     expect(rangeSqlTexts(executableStatementRanges(mysqlRoutineWithLoopsFixture, "mysql"))).toEqual([mysqlRoutineWithLoopsFixture.slice(0, mysqlRoutineWithLoopsFixture.indexOf("\nSELECT 2;")).replace(/;$/, "").trim(), "SELECT 2"]);
+  });
+
+  it("does not expose run targets for statements inside a delimited MySQL routine", () => {
+    expect(rangeSqlTexts(executableStatementRanges(mysqlDelimitedRoutineFixture, "mysql"))).toEqual([mysqlDelimitedRoutineFixture.slice(mysqlDelimitedRoutineFixture.indexOf("CREATE PROCEDURE"), mysqlDelimitedRoutineFixture.indexOf(" //\nDELIMITER")), "CALL sp_insert_random_users(100)"]);
   });
 
   it("does not split executable SAP HANA DO ranges at inner statements", () => {

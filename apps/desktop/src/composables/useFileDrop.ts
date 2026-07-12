@@ -26,9 +26,12 @@ export function useFileDrop() {
     const connectionId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
     const connection = connectionId ? connectionStore.getConfig(connectionId) : undefined;
     const database = connection?.database || "";
-    const tabId = queryStore.createTab(connectionId, database, name, "query");
-    queryStore.updateSql(tabId, content);
-    if (path) queryStore.linkExternalSqlPath(tabId, path, name);
+    if (path) {
+      queryStore.openExternalSqlFile(connectionId, database, path, content);
+    } else {
+      const tabId = queryStore.createTab(connectionId, database, name, "query");
+      queryStore.updateSql(tabId, content);
+    }
     toast(t("welcome.fileOpened", { name }));
   }
 

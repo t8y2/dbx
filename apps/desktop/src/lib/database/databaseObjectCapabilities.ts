@@ -35,6 +35,7 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   ["sqlite", TABLE_VIEW_OBJECTS],
   ["rqlite", TABLE_VIEW_OBJECTS],
   ["turso", TABLE_VIEW_OBJECTS],
+  ["cloudflare-d1", TABLE_VIEW_OBJECTS],
   ["duckdb", TABLE_VIEW_OBJECTS],
   ["clickhouse", TABLE_VIEW_OBJECTS],
   ["doris", TABLE_VIEW_OBJECTS],

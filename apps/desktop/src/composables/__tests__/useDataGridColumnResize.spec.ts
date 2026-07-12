@@ -1,14 +1,23 @@
-import { computed } from "vue";
-import { describe, expect, it } from "vitest";
+import { computed, nextTick, ref } from "vue";
+import { describe, expect, it, vi } from "vitest";
 import { DATA_GRID_COL_AUTO_FIT_MAX_WIDTH, DATA_GRID_COL_MAX_WIDTH, DATA_GRID_COL_MIN_WIDTH } from "@/lib/dataGrid/dataGridColumnWidth";
 import { DATA_GRID_ROW_NUM_WIDTH, resizeDataGridColumnWidth, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
 
-function createResizeState(options: { columns: string[]; rows: Array<Array<string | number | boolean | null>>; columnIndexes?: number[] }) {
-  return useDataGridColumnResize({
+function createResizeState(options: { columns: string[]; rows: Array<Array<string | number | boolean | null>>; columnIndexes?: number[]; density?: "compact" | "standard" | "comfortable"; compactColumnHeaderActions?: boolean }) {
+  const compact = ref(options.compactColumnHeaderActions ?? true);
+  const state = useDataGridColumnResize({
     columns: computed(() => options.columns),
     sourceRows: computed(() => options.rows),
     columnIndexes: computed(() => options.columnIndexes ?? options.columns.map((_, index) => index)),
+    density: ref(options.density ?? "standard"),
+    compactColumnHeaderActions: computed(() => compact.value),
   });
+  return {
+    ...state,
+    setCompact(v: boolean) {
+      compact.value = v;
+    },
+  };
 }
 
 describe("useDataGridColumnResize", () => {
@@ -61,5 +70,25 @@ describe("useDataGridColumnResize", () => {
 
     expect(state.renderedColumnWidths.value).not.toBe(before);
     expect(state.renderedColumnWidths.value[1]).toBe(before[1] + 40);
+  });
+
+  it("recalculates column widths when compactColumnHeaderActions changes", async () => {
+    const state = createResizeState({
+      columns: ["some_column_name_here"],
+      rows: [["a"]],
+      density: "compact",
+      compactColumnHeaderActions: true,
+    });
+
+    state.initColumnWidths();
+    const widthCompact = state.renderedColumnWidths.value[0];
+
+    state.setCompact(false);
+    await nextTick();
+
+    const widthNonCompact = state.renderedColumnWidths.value[0];
+    // compact: charWidth*nameLen + headerControlWidthCompact(20) = 7*21+20=167
+    // non-compact: 7*21+headerControlWidth(36)=183
+    expect(widthNonCompact).toBeGreaterThan(widthCompact);
   });
 });

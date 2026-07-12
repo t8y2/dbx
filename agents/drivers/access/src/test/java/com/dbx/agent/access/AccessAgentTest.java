@@ -6,6 +6,7 @@ import com.dbx.agent.ExecuteQueryOptions;
 import com.dbx.agent.QueryPageOptions;
 import com.dbx.agent.test.JdbcConnectedAgentTest;
 import java.nio.file.Path;
+import java.nio.file.Files;
 import java.util.List;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -66,7 +67,7 @@ class AccessAgentTest extends JdbcConnectedAgentTest {
         ConnectParams params = new ConnectParams("", 0, file.toString(), "", "", "memory=false;ignoreCase=true", "", false);
 
         Assertions.assertEquals(
-            "jdbc:ucanaccess://" + file + ";memory=false;ignoreCase=true;newDatabaseVersion=V2010",
+            "jdbc:ucanaccess://" + file + ";memory=false;ignoreCase=true;jackcessOpener=com.dbx.agent.access.EncryptedAccessOpener;newDatabaseVersion=V2010",
             AccessAgent.jdbcUrl(params, true)
         );
     }
@@ -77,9 +78,50 @@ class AccessAgentTest extends JdbcConnectedAgentTest {
         ConnectParams params = new ConnectParams("", 0, "jdbc:ucanaccess://" + file + ";", "", "", ";memory=false", "", false);
 
         Assertions.assertEquals(
-            "jdbc:ucanaccess://" + file + ";memory=false;newDatabaseVersion=V2010",
+            "jdbc:ucanaccess://" + file + ";memory=false;jackcessOpener=com.dbx.agent.access.EncryptedAccessOpener;newDatabaseVersion=V2010",
             AccessAgent.jdbcUrl(params, true)
         );
+    }
+
+    @Test
+    void preservesCustomJackcessOpener() {
+        Path file = tempDir.resolve("custom-opener.accdb");
+        ConnectParams params = new ConnectParams(
+            "", 0, file.toString(), "", "", "jackcessOpener=example.CustomOpener", "", false
+        );
+
+        Assertions.assertEquals(
+            "jdbc:ucanaccess://" + file + ";jackcessOpener=example.CustomOpener;newDatabaseVersion=V2010",
+            AccessAgent.jdbcUrl(params, true)
+        );
+    }
+
+    @Test
+    void connectsToEncryptedAccessFile() throws Exception {
+        Path source = Path.of(getClass().getResource("/db2007-enc.accdb").toURI());
+        Path file = tempDir.resolve("encrypted.accdb");
+        Files.copy(source, file);
+        AccessAgent agent = new AccessAgent();
+
+        try {
+            agent.connect(new ConnectParams("", 0, file.toString(), "", "Test123", "", "", false));
+            Assertions.assertFalse(agent.listTables("").isEmpty());
+        } finally {
+            agent.disconnect();
+        }
+    }
+
+    @Test
+    void rejectsIncorrectEncryptedAccessPassword() throws Exception {
+        Path source = Path.of(getClass().getResource("/db2007-enc.accdb").toURI());
+        Path file = tempDir.resolve("encrypted-wrong-password.accdb");
+        Files.copy(source, file);
+        AccessAgent agent = new AccessAgent();
+
+        RuntimeException error = Assertions.assertThrows(RuntimeException.class, () ->
+            agent.connect(new ConnectParams("", 0, file.toString(), "", "wrong", "", "", false))
+        );
+        Assertions.assertTrue(error.getMessage().contains("Incorrect password provided"));
     }
 
     @Test

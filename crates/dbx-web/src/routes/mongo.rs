@@ -154,6 +154,7 @@ pub struct MongoUpdateDocumentsRequest {
     pub filter_json: String,
     pub update_json: String,
     pub many: bool,
+    pub options_json: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -439,6 +440,7 @@ pub async fn update_documents(
         &req.filter_json,
         &req.update_json,
         req.many,
+        req.options_json.as_deref(),
     )
     .await
     .map_err(AppError)?;

@@ -155,6 +155,7 @@ export function sqlSemanticDialectFor(options: { databaseType?: DatabaseType; di
     case "sqlite":
     case "rqlite":
     case "turso":
+    case "cloudflare-d1":
       return SQL_SEMANTIC_DIALECTS.sqlite;
     case "duckdb":
       return SQL_SEMANTIC_DIALECTS.duckdb;

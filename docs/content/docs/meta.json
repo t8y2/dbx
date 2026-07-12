@@ -34,6 +34,7 @@
     "keyboard-shortcuts",
     "connection-import",
     "config-export",
+    "cloud-sync",
     "ssh-tunnel"
   ]
 }

@@ -16,7 +16,7 @@ The connection dialog exposes ready-to-use profiles with default ports and drive
 | MySQL-compatible profiles      | MariaDB, TiDB, OceanBase, Doris, SelectDB, StarRocks, Manticore Search, GoldenDB, TDSQL, PolarDB, GreatSQL, custom MySQL                                          | Reuse MySQL-style connection handling where the engine speaks a compatible protocol            |
 | PostgreSQL-compatible profiles | openGauss, KingBase, HighGo, Vastbase, CockroachDB, custom PostgreSQL                                                                                            | Reuse PostgreSQL-style connection handling where the engine speaks a compatible protocol       |
 | File-based engines             | SQLite, DuckDB, Microsoft Access, RQLite, Turso                                                                                                                  | Choose a local database file or HTTP endpoint instead of host and port                         |
-| Time-series and edge           | InfluxDB, IoTDB, TDengine, Databend, QuestDB                                                                                                                     | Optimized for time-series, IoT, or edge workloads                                              |
+| Time-series and edge           | Cloudflare D1, InfluxDB, IoTDB, TDengine, Databend, QuestDB                                                                                                      | Managed SQLite, time-series, IoT, or edge workloads                                            |
 | Agent/JDBC-oriented engines    | H2, Snowflake, Trino, PrestoSQL, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Kylin, SunDB, XuguDB, Databricks, IRIS, JDBC                                   | Feature coverage depends on the driver path used by that engine                                |
 
 ## Default Ports
@@ -49,6 +49,7 @@ The connection dialog exposes ready-to-use profiles with default ports and drive
 | Exasol                                      |         8563 |
 | SAP HANA                                    |        39015 |
 | Databricks                                  |          443 |
+| Cloudflare D1 REST API                      |          443 |
 | InfluxDB                                    |         8086 |
 | IoTDB                                       |         6667 |
 | etcd                                        |         2379 |
@@ -81,14 +82,14 @@ DBX intentionally enables advanced workflows only where the app has enough metad
 | Feature                        | Supported Types                                                                                                                                                                                                                                                                       |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Schema-aware tree              | PostgreSQL, SQL Server, Oracle, Redshift, DM, GaussDB, KWDB, KingBase, HighGo, Vastbase, JDBC, H2, Snowflake, Trino, DB2, TDengine, XuguDB, Teradata, Vertica, Exasol, Firebird, SAP HANA, YashanDB, GBase                                                                             |
-| ER diagram                     | MySQL, PostgreSQL, SQLite, SQL Server, Oracle, Redshift, DM, GaussDB, KWDB, KingBase, HighGo, Vastbase, GoldenDB, Access, H2, DB2, Teradata, Vertica, Firebird, Exasol, GBase, YashanDB                                                                                                |
+| ER diagram                     | MySQL, PostgreSQL, SQLite, Cloudflare D1, SQL Server, Oracle, Redshift, DM, GaussDB, KWDB, KingBase, HighGo, Vastbase, GoldenDB, Access, H2, DB2, Teradata, Vertica, Firebird, Exasol, GBase, YashanDB                                                                                 |
 | Database search                | MySQL, PostgreSQL, SQLite, SQL Server, Oracle, Redshift, DuckDB, ClickHouse, DM, GaussDB, KWDB, KingBase, HighGo, Vastbase, GoldenDB, Access, H2, Snowflake, Trino, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Kylin, SunDB, TDengine, XuguDB, Databricks, Teradata, Vertica      |
-| Table import                   | MySQL, PostgreSQL, SQLite, DuckDB, ClickHouse, SQL Server, Oracle, Doris, StarRocks, Redshift, DM, GaussDB, KWDB, KingBase, HighGo, Vastbase, GoldenDB, Access, Databend                                                                                                               |
+| Table import                   | MySQL, PostgreSQL, SQLite, Cloudflare D1, DuckDB, ClickHouse, SQL Server, Oracle, Doris, StarRocks, Redshift, DM, GaussDB, KWDB, KingBase, HighGo, Vastbase, GoldenDB, Access, Databend                                                                                                |
 | Geometry map preview           | PostgreSQL, HighGo, KingBase, Vastbase, openGauss, GaussDB (PostGIS `geometry` / `geography` columns are returned as WKT in the result grid and unlock the grid-toolbar map preview button)                                                                                                |
 | Table structure editor         | MySQL, PostgreSQL, SQLite, SQL Server, KWDB                                                                                                                                                                                                                                           |
 | Create database                | MySQL, PostgreSQL, SQL Server, ClickHouse, Oracle, DM, GaussDB, KWDB, Doris, StarRocks, Redshift, Teradata, Vertica                                                                                                                                                                   |
-| Field lineage                  | MySQL, PostgreSQL, SQLite, SQL Server, Oracle, Redshift, DM, GaussDB, KWDB                                                                                                                                                                                                            |
-| Data transfer                  | MySQL, PostgreSQL, SQLite, SQL Server, Oracle, ClickHouse, DuckDB, DM, GaussDB, KWDB                                                                                                                                                                                                  |
+| Field lineage                  | MySQL, PostgreSQL, SQLite, Cloudflare D1, SQL Server, Oracle, Redshift, DM, GaussDB, KWDB                                                                                                                                                                                             |
+| Data transfer                  | MySQL, PostgreSQL, SQLite, Cloudflare D1, SQL Server, Oracle, ClickHouse, DuckDB, DM, GaussDB, KWDB                                                                                                                                                                                   |
 | SQL file execution unavailable | Redis, MongoDB, Elasticsearch, etcd, Nacos                                                                                                                                                                                                                                            |
 
 <Callout type="warn">If a database can connect but does not appear in a feature row, that feature may be hidden or limited for that engine. This prevents DBX from generating SQL it cannot review reliably.</Callout>
@@ -98,6 +99,10 @@ DBX intentionally enables advanced workflows only where the app has enough metad
 Most network databases support host, port, username, password, default database, optional URL parameters, SSL, connection color, and tunnel / proxy settings. File-based engines replace host and port with a file picker.
 
 DBX can also parse common connection URLs for engines such as MySQL, PostgreSQL, Redis, MongoDB, ClickHouse, SQL Server, Oracle, Elasticsearch, DM, GaussDB, KWDB, openGauss, TDengine, XuguDB, Access, Teradata, Vertica, Firebird, Exasol, GBase, YashanDB, SAP HANA, InfluxDB, QuestDB, IoTDB, etcd, Nacos, RQLite, and Databricks.
+
+### Cloudflare D1
+
+Create a **Cloudflare D1** connection with the Account ID, D1 Database ID (UUID), and an API Token. The token needs `D1 Read` permission for browsing and queries; add `D1 Write` for inserts, updates, DDL, imports, or transfers. DBX uses Cloudflare's HTTPS API directly, so SSH and proxy transport layers are not available for this profile.
 
 ### Nacos Console
 

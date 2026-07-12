@@ -1,10 +1,12 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/url"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -247,6 +249,67 @@ func TestTrimStatementSQLRemovesRegularStatementSemicolon(t *testing.T) {
 	}
 }
 
+func TestOracleExplainPlanBindParamsIncludesNamedParameters(t *testing.T) {
+	sqlText := `
+SELECT *
+FROM orders
+WHERE id = :id
+  AND status = :status
+  AND parent_id = :id`
+
+	want := []oracleBindParam{
+		{Name: "id"},
+		{Name: "status"},
+	}
+	if got := oracleExplainPlanBindParams(sqlText); !reflect.DeepEqual(got, want) {
+		t.Fatalf("oracleExplainPlanBindParams() = %#v, want %#v", got, want)
+	}
+}
+
+func TestOracleExplainPlanBindParamsSkipsQuotedTextAndComments(t *testing.T) {
+	sqlText := `
+SELECT ':literal' AS literal_value,
+       q'[not :q_param]' AS q_literal,
+       "COL:NAME" AS quoted_identifier
+FROM orders
+WHERE id = :id
+  -- ignored :comment_param
+  AND note <> 'escaped '' :text_param'
+  /* ignored :block_param */`
+
+	want := []oracleBindParam{{Name: "id"}}
+	if got := oracleExplainPlanBindParams(sqlText); !reflect.DeepEqual(got, want) {
+		t.Fatalf("oracleExplainPlanBindParams() = %#v, want %#v", got, want)
+	}
+}
+
+func TestOracleExplainPlanBindParamsIncludesPositionalParameters(t *testing.T) {
+	sqlText := "SELECT * FROM orders WHERE id = :1 AND status = :status"
+
+	want := []oracleBindParam{
+		{Name: "1", Positional: true},
+		{Name: "status"},
+	}
+	if got := oracleExplainPlanBindParams(sqlText); !reflect.DeepEqual(got, want) {
+		t.Fatalf("oracleExplainPlanBindParams() = %#v, want %#v", got, want)
+	}
+}
+
+func TestOracleExplainPlanBindArgsUsesNamedArguments(t *testing.T) {
+	args := oracleExplainPlanBindArgs("SELECT * FROM orders WHERE id = :id")
+
+	if len(args) != 1 {
+		t.Fatalf("expected one bind argument, got %#v", args)
+	}
+	named, ok := args[0].(sql.NamedArg)
+	if !ok {
+		t.Fatalf("expected sql.NamedArg, got %#v", args[0])
+	}
+	if named.Name != "id" || named.Value != nil {
+		t.Fatalf("unexpected named bind argument: %#v", named)
+	}
+}
+
 func protocolContract(t *testing.T) struct {
 	ProtocolVersion int      `json:"protocolVersion"`
 	AllCapabilities []string `json:"allCapabilities"`
@@ -299,7 +362,7 @@ func TestBuildDSNUsesConnectionStringWhenProvided(t *testing.T) {
 	}
 }
 
-func TestBuildDSNEncodesColonInCredentials(t *testing.T) {
+func TestBuildDSNPreservesBastionUsernameAndEncodesCredentials(t *testing.T) {
 	dsn := buildDSN(connectParams{
 		Host:     "db.example.com",
 		Port:     1521,
@@ -313,11 +376,11 @@ func TestBuildDSNEncodesColonInCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	password, _ := parsed.User.Password()
-	if parsed.User.Username() != `"9008888:reader"` || password != "dbx:pass" {
+	if parsed.User.Username() != "9008888:reader" || password != "dbx:pass" {
 		t.Fatalf("credentials should survive URL parsing, dsn=%s username=%q password=%q", dsn, parsed.User.Username(), password)
 	}
-	if !strings.HasPrefix(parsed.User.String(), "%229008888%3Areader%22:") {
-		t.Fatalf("Oracle auth username should be quoted and escaped for non-regular identifiers, dsn=%s", dsn)
+	if !strings.HasPrefix(parsed.User.String(), "9008888%3Areader:") {
+		t.Fatalf("bastion username should be escaped without being quoted, dsn=%s", dsn)
 	}
 }
 
@@ -333,7 +396,7 @@ func TestBuildDSNEncodesColonInCredentialsFromJDBCServiceURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	password, _ := parsed.User.Password()
-	if parsed.User.Username() != `"9008888:reader"` || password != "dbx:pass" {
+	if parsed.User.Username() != "9008888:reader" || password != "dbx:pass" {
 		t.Fatalf("credentials should survive JDBC URL conversion, dsn=%s username=%q password=%q", dsn, parsed.User.Username(), password)
 	}
 	if parsed.Host != "db.example.com:1521" || strings.TrimPrefix(parsed.Path, "/") != "XE" {
@@ -341,21 +404,21 @@ func TestBuildDSNEncodesColonInCredentialsFromJDBCServiceURL(t *testing.T) {
 	}
 }
 
-func TestOracleAuthUsernameQuotesOnlyNonRegularIdentifiers(t *testing.T) {
-	tests := map[string]string{
-		"scott":          "scott",
-		"test":           "test",
-		"SCOTT_1":        "SCOTT_1",
-		"9008888:reader": `"9008888:reader"`,
-		"abc:def":        `"abc:def"`,
-		`"abc:def"`:      `"abc:def"`,
-		`abc"def`:        `"abc""def"`,
-	}
+func TestBuildDSNPreservesExplicitlyQuotedUsername(t *testing.T) {
+	dsn := buildDSN(connectParams{
+		Host:     "db.example.com",
+		Port:     1521,
+		Database: "XE",
+		Username: `"abc:def"`,
+		Password: "dbx:pass",
+	})
 
-	for input, want := range tests {
-		if got := oracleAuthUsername(input); got != want {
-			t.Fatalf("oracleAuthUsername(%q) = %q, want %q", input, got, want)
-		}
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.User.Username() != `"abc:def"` {
+		t.Fatalf("explicitly quoted username should remain unchanged, dsn=%s username=%q", dsn, parsed.User.Username())
 	}
 }
 

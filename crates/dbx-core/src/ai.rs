@@ -525,6 +525,22 @@ fn is_kimi_model(model: &str) -> bool {
     }
 }
 
+fn apply_chat_completion_thinking_toggle(body: &mut serde_json::Value, config: &AiConfig) {
+    if config.enable_thinking {
+        return;
+    }
+
+    if matches!(config.provider, AiProvider::Ollama) {
+        // Ollama's OpenAI-compatible API uses reasoning_effort instead of
+        // forwarding provider-specific chat template arguments.
+        body["reasoning_effort"] = json!("none");
+    } else if !is_kimi_model(&config.model) {
+        body["extra_body"] = json!({
+            "chat_template_kwargs": { "enable_thinking": false }
+        });
+    }
+}
+
 fn responses_text(data: &serde_json::Value) -> String {
     if let Some(text) = data["output_text"].as_str().filter(|text| !text.is_empty()) {
         return text.to_string();
@@ -904,11 +920,7 @@ pub async fn call_openai_compatible(client: &reqwest::Client, request: AiComplet
         "messages": messages,
     });
     set_chat_completion_token_limit(&mut body_obj, &request.config, request.max_tokens.unwrap_or(2048));
-    if !request.config.enable_thinking && !is_kimi_model(&request.config.model) {
-        body_obj["extra_body"] = json!({
-            "chat_template_kwargs": { "enable_thinking": false }
-        });
-    }
+    apply_chat_completion_thinking_toggle(&mut body_obj, &request.config);
 
     let res = client
         .post(resolve_endpoint(&request.config))
@@ -1104,7 +1116,9 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
             res.bytes_stream()
         }
         AiProvider::Gemini => {
-            let ep = resolve_endpoint(config);
+            // Gemini only returns SSE from streamGenerateContent; generateContent
+            // returns one JSON document even when alt=sse is supplied.
+            let ep = resolve_gemini_stream_endpoint(config);
             let res = client
                 .post(&ep)
                 .header(CONTENT_TYPE, "application/json")
@@ -1162,10 +1176,8 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
                 set_chat_completion_token_limit(&mut body, config, 16);
                 body
             };
-            if config.api_style != AiApiStyle::Responses && !config.enable_thinking && !is_kimi_model(&config.model) {
-                body_obj["extra_body"] = json!({
-                    "chat_template_kwargs": { "enable_thinking": false }
-                });
+            if config.api_style != AiApiStyle::Responses {
+                apply_chat_completion_thinking_toggle(&mut body_obj, config);
             }
             let ep = resolve_endpoint(config);
             let res = client
@@ -1417,11 +1429,7 @@ async fn stream_openai(
         "stream": true,
     });
     set_chat_completion_token_limit(&mut body_obj, &request.config, request.max_tokens.unwrap_or(2048));
-    if !request.config.enable_thinking && !is_kimi_model(&request.config.model) {
-        body_obj["extra_body"] = json!({
-            "chat_template_kwargs": { "enable_thinking": false }
-        });
-    }
+    apply_chat_completion_thinking_toggle(&mut body_obj, &request.config);
 
     let res = client
         .post(resolve_endpoint(&request.config))
@@ -1976,9 +1984,13 @@ async fn stream_openai_with_tools(
     });
     set_chat_completion_token_limit(&mut body, &request.config, request.max_tokens.unwrap_or(4096));
 
-    // DeepSeek API requires {"thinking": {"type": "disabled"}} to disable thinking
-    if !request.config.enable_thinking && matches!(request.config.provider, AiProvider::Deepseek) {
-        body["thinking"] = json!({ "type": "disabled" });
+    if !request.config.enable_thinking {
+        if matches!(request.config.provider, AiProvider::Ollama) {
+            apply_chat_completion_thinking_toggle(&mut body, &request.config);
+        } else if matches!(request.config.provider, AiProvider::Deepseek) {
+            // DeepSeek uses its own thinking field for tool-enabled requests.
+            body["thinking"] = json!({ "type": "disabled" });
+        }
     }
 
     let res = client
@@ -2466,14 +2478,14 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use super::{
-        build_ai_http_client, build_responses_input_with_tools, claude_headers, claude_system_prompt,
-        drain_next_stream_line, emit_responses_function_call_item, gemini_text, is_kimi_model, openai_response_text,
-        openai_stream_reasoning, openai_stream_text, parse_model_list_response, resolve_endpoint,
-        resolve_model_list_endpoint, responses_function_tool, responses_max_output_tokens, responses_stream_text,
-        responses_text, responses_token_usage, set_chat_completion_token_limit, stream_data_payload,
-        uses_anthropic_messages_api, validate_config, AiApiStyle, AiAuthMethod, AiConfig, AiMessage, AiModelInfo,
-        AiProvider, AiReasoningLevel, StreamToolEvent, StreamingToolCallAccumulator, ToolCallRef, AUTHORIZATION,
-        CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
+        apply_chat_completion_thinking_toggle, build_ai_http_client, build_responses_input_with_tools, claude_headers,
+        claude_system_prompt, drain_next_stream_line, emit_responses_function_call_item, gemini_text, is_kimi_model,
+        openai_response_text, openai_stream_reasoning, openai_stream_text, parse_model_list_response, resolve_endpoint,
+        resolve_gemini_stream_endpoint, resolve_model_list_endpoint, responses_function_tool,
+        responses_max_output_tokens, responses_stream_text, responses_text, responses_token_usage,
+        set_chat_completion_token_limit, stream_data_payload, uses_anthropic_messages_api, validate_config, AiApiStyle,
+        AiAuthMethod, AiConfig, AiMessage, AiModelInfo, AiProvider, AiReasoningLevel, StreamToolEvent,
+        StreamingToolCallAccumulator, ToolCallRef, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
     };
 
     /// Reproduce the "Unknown tool:" bug: some OpenAI-compatible providers
@@ -2633,6 +2645,10 @@ mod tests {
         assert_eq!(
             resolve_endpoint(&gemini),
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent"
+        );
+        assert_eq!(
+            resolve_gemini_stream_endpoint(&gemini),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:streamGenerateContent"
         );
 
         let ollama = AiConfig {
@@ -3169,12 +3185,67 @@ mod tests {
             "stream": true,
         });
 
-        if !config.enable_thinking && !is_kimi_model(&config.model) {
-            body["extra_body"] = serde_json::json!({
-                "chat_template_kwargs": { "enable_thinking": false }
-            });
-        }
+        apply_chat_completion_thinking_toggle(&mut body, &config);
 
+        assert!(body.get("extra_body").is_none());
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn keeps_extra_body_thinking_toggle_for_other_compatible_providers() {
+        let config = AiConfig {
+            provider: AiProvider::OpenaiCompatible,
+            api_key: "key".to_string(),
+            auth_method: AiAuthMethod::Bearer,
+            endpoint: "https://example.com/v1".to_string(),
+            model: "qwen3".to_string(),
+            api_style: AiApiStyle::Completions,
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            enable_thinking: false,
+            reasoning_level: AiReasoningLevel::Default,
+            context_window: None,
+            codex_cli_path: None,
+            codex_cli_env: Default::default(),
+        };
+        let mut body = serde_json::json!({ "model": &config.model });
+
+        apply_chat_completion_thinking_toggle(&mut body, &config);
+
+        assert_eq!(
+            body.get("extra_body"),
+            Some(&serde_json::json!({
+                "chat_template_kwargs": { "enable_thinking": false }
+            }))
+        );
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn uses_reasoning_effort_to_disable_ollama_thinking() {
+        let config = AiConfig {
+            provider: AiProvider::Ollama,
+            api_key: String::new(),
+            auth_method: AiAuthMethod::Bearer,
+            endpoint: "http://localhost:11434/v1".to_string(),
+            model: "deepseek-r1:14b".to_string(),
+            api_style: AiApiStyle::Completions,
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            enable_thinking: false,
+            reasoning_level: AiReasoningLevel::Default,
+            context_window: None,
+            codex_cli_path: None,
+            codex_cli_env: Default::default(),
+        };
+        let mut body = serde_json::json!({
+            "model": &config.model,
+            "messages": [{ "role": "user", "content": TEST_PROMPT }],
+        });
+
+        apply_chat_completion_thinking_toggle(&mut body, &config);
+
+        assert_eq!(body.get("reasoning_effort"), Some(&serde_json::json!("none")));
         assert!(body.get("extra_body").is_none());
     }
 

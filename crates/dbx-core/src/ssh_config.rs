@@ -179,6 +179,7 @@ mod tests {
 
     fn config(host: &str) -> SshTunnelConfig {
         SshTunnelConfig {
+            profile_id: String::new(),
             id: "1".to_string(),
             name: String::new(),
             enabled: true,

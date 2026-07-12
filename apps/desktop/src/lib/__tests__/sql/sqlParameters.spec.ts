@@ -276,6 +276,45 @@ DEALLOCATE PREPARE stmt;`;
   });
 });
 
+describe("enabledSyntaxes option", () => {
+  const mixedSql = "select ? as a, :named as b, ${shell_name} as c, #{mybatis_name} as d, @sql_server_name as e";
+
+  it("extracts every syntax when the option is omitted (backward compatible)", () => {
+    expect(extractSqlParameters(mixedSql)).toEqual(["?1", "named", "shell_name", "mybatis_name", "sql_server_name"]);
+  });
+
+  it("only extracts the enabled syntaxes", () => {
+    expect(extractSqlParameters(mixedSql, { enabledSyntaxes: ["named"] })).toEqual(["named"]);
+    expect(extractSqlParameters(mixedSql, { enabledSyntaxes: ["shell", "mybatis"] })).toEqual(["shell_name", "mybatis_name"]);
+  });
+
+  it("extracts nothing when no syntax is enabled", () => {
+    expect(extractSqlParameters(mixedSql, { enabledSyntaxes: [] })).toEqual([]);
+  });
+
+  it("leaves disabled-syntax tokens untouched when substituting", () => {
+    // Only :named is enabled, so every other token survives verbatim.
+    expect(substituteSqlParameters(mixedSql, { named: { kind: "number", value: "2" } }, { enabledSyntaxes: ["named"] })).toBe("select ? as a, 2 as b, ${shell_name} as c, #{mybatis_name} as d, @sql_server_name as e");
+  });
+
+  it("does not consume the positional counter for disabled positional placeholders", () => {
+    expect(substituteSqlParameters("select ?, ?", {}, { enabledSyntaxes: ["named"] })).toBe("select ?, ?");
+  });
+
+  it("keeps #{name} out of hash-comment handling when mybatis is disabled", () => {
+    expect(extractSqlParameters("select #{mybatis_name} from t", { enabledSyntaxes: ["shell"] })).toEqual([]);
+    expect(substituteSqlParameters("select #{mybatis_name} from t", {}, { enabledSyntaxes: ["shell"] })).toBe("select #{mybatis_name} from t");
+  });
+
+  it("intersects the enabled set with the saphana named-parameter rule", () => {
+    const sql = "select :named as a, ${shell_name} as b";
+    // saphana already disables :name; enabling named cannot re-enable it.
+    expect(extractSqlParameters(sql, { databaseType: "saphana", enabledSyntaxes: ["named", "shell"] })).toEqual(["shell_name"]);
+    // A non-saphana database with named disabled also drops :name.
+    expect(extractSqlParameters(sql, { enabledSyntaxes: ["shell"] })).toEqual(["shell_name"]);
+  });
+});
+
 describe("sqlParameterLiteral", () => {
   it("falls back to quoted strings for invalid boolean input", () => {
     expect(sqlParameterLiteral({ kind: "boolean", value: "maybe" })).toBe("'maybe'");

@@ -73,6 +73,22 @@ test("parseMongoWriteCommand accepts unquoted update operator keys", () => {
   });
 });
 
+test("parseMongoWriteCommand accepts updateMany arrayFilters options", () => {
+  assert.deepEqual(
+    parseMongoWriteCommand(
+      'db.orders.updateMany({status: "open"}, {$set: {"items.$[item].status": "done"}}, {arrayFilters: [{"item.id": 7}]})',
+    ),
+    {
+      kind: "update",
+      collection: "orders",
+      filter: '{"status": "open"}',
+      update: '{"$set": {"items.$[item].status": "done"}}',
+      options: '{"arrayFilters": [{"item.id": 7}]}',
+      many: true,
+    },
+  );
+});
+
 test("parseMongoCountDocumentsCommand accepts shell-style count commands", () => {
   assert.deepEqual(parseMongoCountDocumentsCommand('db.projects.countDocuments({"active":true})'), {
     collection: "projects",

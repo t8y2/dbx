@@ -13,6 +13,7 @@ import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import NacosConfigDiffDialog from "@/components/nacos/NacosConfigDiffDialog.vue";
 import NacosConfigHistoryDialog from "@/components/nacos/NacosConfigHistoryDialog.vue";
 import { useToast } from "@/composables/useToast";
+import { useNacosConfigListColumnResize } from "@/composables/useNacosConfigListColumnResize";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useI18n } from "vue-i18n";
 import * as api from "@/lib/backend/api";
@@ -113,6 +114,7 @@ const NACOS_SPLIT_SIZE_KEY = "dbx-nacos-admin-split-size";
 const savedNacosSplitSize = Number(safeLocalStorageGet(NACOS_SPLIT_SIZE_KEY));
 const nacosSplitSize = ref(savedNacosSplitSize >= 20 && savedNacosSplitSize <= 80 ? savedNacosSplitSize : 42);
 const CONNECTION_NOT_FOUND_RETRY_DELAYS_MS = [150, 350, 700];
+const { gridTemplateColumns: configListGridTemplate, minWidth: configListMinWidth, resizingColumnIndex: configListResizingColumnIndex, onResizeStart: onConfigListColumnResizeStart } = useNacosConfigListColumnResize();
 
 const namespace = computed(() => props.namespace ?? connectionInfo.value?.namespace ?? "");
 const namespaceLabel = computed(() => props.namespaceName || namespace.value || "public");
@@ -909,28 +911,43 @@ onBeforeUnmount(() => {
           </div>
           <div v-if="configError" class="border-b px-3 py-2 text-xs text-destructive">{{ configError }}</div>
           <div class="min-h-0 flex-1 overflow-auto">
-            <div class="sticky top-0 z-20 grid grid-cols-4 border-b bg-muted px-3 py-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground shadow-sm">
-              <span class="truncate pr-3">dataID</span>
-              <span class="truncate pr-3">{{ t("nacos.group") }}</span>
-              <span class="truncate pr-3">{{ t("nacos.application") }}</span>
-              <span class="truncate">{{ t("nacos.format") }}</span>
+            <div class="min-w-max" :style="{ minWidth: configListMinWidth }">
+              <div class="sticky top-0 z-20 grid border-b bg-muted px-3 py-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground shadow-sm" :style="{ gridTemplateColumns: configListGridTemplate }">
+                <div class="relative min-w-0 border-r border-border/70 pr-3 last:border-r-0">
+                  <span class="block truncate">dataID</span>
+                  <div data-column-resize-handle class="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize" :class="configListResizingColumnIndex === 0 ? 'bg-primary/10' : ''" @mousedown="onConfigListColumnResizeStart(0, $event)" />
+                </div>
+                <div class="relative min-w-0 border-r border-border/70 pr-3 last:border-r-0">
+                  <span class="block truncate">{{ t("nacos.group") }}</span>
+                  <div data-column-resize-handle class="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize" :class="configListResizingColumnIndex === 1 ? 'bg-primary/10' : ''" @mousedown="onConfigListColumnResizeStart(1, $event)" />
+                </div>
+                <div class="relative min-w-0 border-r border-border/70 pr-3 last:border-r-0">
+                  <span class="block truncate">{{ t("nacos.application") }}</span>
+                  <div data-column-resize-handle class="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize" :class="configListResizingColumnIndex === 2 ? 'bg-primary/10' : ''" @mousedown="onConfigListColumnResizeStart(2, $event)" />
+                </div>
+                <div class="relative min-w-0 border-r border-border/70 pr-3 last:border-r-0">
+                  <span class="block truncate">{{ t("nacos.format") }}</span>
+                  <div data-column-resize-handle class="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize" :class="configListResizingColumnIndex === 3 ? 'bg-primary/10' : ''" @mousedown="onConfigListColumnResizeStart(3, $event)" />
+                </div>
+              </div>
+              <button
+                v-for="item in configs"
+                :key="`${item.namespace}:${item.group}:${item.dataId}`"
+                type="button"
+                class="grid w-full items-center border-b px-3 py-2.5 text-left text-sm transition-colors hover:bg-accent/50"
+                :class="{ 'bg-accent': selectedConfig?.dataId === item.dataId && selectedConfig?.group === item.group }"
+                :style="{ gridTemplateColumns: configListGridTemplate }"
+                @click="selectConfig(item)"
+              >
+                <span class="flex min-w-0 items-center gap-2 border-r border-border/50 pr-3 last:border-r-0" :title="item.dataId">
+                  <FileText class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span class="truncate font-medium text-foreground">{{ item.dataId }}</span>
+                </span>
+                <span class="truncate border-r border-border/50 pr-3 text-xs text-muted-foreground last:border-r-0" :title="item.group || 'DEFAULT_GROUP'">{{ item.group || "DEFAULT_GROUP" }}</span>
+                <span class="truncate border-r border-border/50 pr-3 text-xs text-muted-foreground last:border-r-0" :title="item.appName || '-'">{{ item.appName || "-" }}</span>
+                <span class="truncate text-xs text-muted-foreground" :title="configFormatLabel(item)">{{ configFormatLabel(item) }}</span>
+              </button>
             </div>
-            <button
-              v-for="item in configs"
-              :key="`${item.namespace}:${item.group}:${item.dataId}`"
-              type="button"
-              class="grid w-full grid-cols-4 items-center border-b px-3 py-2.5 text-left text-sm transition-colors hover:bg-accent/50"
-              :class="{ 'bg-accent': selectedConfig?.dataId === item.dataId && selectedConfig?.group === item.group }"
-              @click="selectConfig(item)"
-            >
-              <span class="flex min-w-0 items-center gap-2 pr-3" :title="item.dataId">
-                <FileText class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                <span class="truncate font-medium text-foreground">{{ item.dataId }}</span>
-              </span>
-              <span class="truncate pr-3 text-xs text-muted-foreground" :title="item.group || 'DEFAULT_GROUP'">{{ item.group || "DEFAULT_GROUP" }}</span>
-              <span class="truncate pr-3 text-xs text-muted-foreground" :title="item.appName || '-'">{{ item.appName || "-" }}</span>
-              <span class="truncate text-xs text-muted-foreground" :title="configFormatLabel(item)">{{ configFormatLabel(item) }}</span>
-            </button>
             <div v-if="!configLoading && configs.length === 0" class="flex h-full items-center justify-center text-sm text-muted-foreground">{{ t("nacos.noConfigs") }}</div>
           </div>
           <div class="flex shrink-0 items-center justify-between border-t px-3 py-2 text-xs text-muted-foreground">
@@ -1032,7 +1049,7 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <div v-if="selectedConfig" class="relative min-h-0 flex-1 overflow-hidden bg-background">
-            <div ref="configEditorHost" class="h-full min-h-0 overflow-hidden" />
+            <div ref="configEditorHost" class="nacos-config-editor h-full min-h-0 overflow-hidden" />
             <EditorSearchPanel ref="configSearchPanelRef" :view="configEditorView" tone="editor" />
           </div>
           <div v-else class="flex h-full items-center justify-center text-sm text-muted-foreground">{{ t("nacos.selectConfig") }}</div>
@@ -1236,6 +1253,24 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.nacos-config-editor :deep(.cm-content),
+.nacos-config-editor :deep(.cm-line) {
+  cursor: text;
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
+.nacos-config-editor :deep(.cm-selectionBackground),
+.nacos-config-editor :deep(.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground),
+.nacos-config-editor :deep(.cm-trimmedSelection) {
+  display: block !important;
+  background: var(--dbx-editor-selection-background, rgba(59, 130, 246, 0.35)) !important;
+}
+
+.nacos-config-editor :deep(.cm-content ::selection) {
+  background: var(--dbx-editor-selection-background, rgba(59, 130, 246, 0.35)) !important;
+}
+
 .nacos-admin-splitpanes :deep(.splitpanes--vertical > .splitpanes__splitter) {
   width: 4px !important;
   border-left: 1px solid var(--border);

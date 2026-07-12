@@ -16,6 +16,7 @@ describe("supportsTransaction", () => {
     expect(supportsTransaction("duckdb")).toBe(false);
     expect(supportsTransaction("qdrant")).toBe(false);
     expect(supportsTransaction("turso")).toBe(false);
+    expect(supportsTransaction("cloudflare-d1")).toBe(false);
     expect(supportsTransaction("sqlite")).toBe(false);
     expect(supportsTransaction("clickhouse")).toBe(false);
     expect(supportsTransaction("sqlserver")).toBe(false);

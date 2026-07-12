@@ -19,8 +19,6 @@ const AGENT_EXIT_DIAGNOSTIC_POLL_MS: u64 = 10;
 const AGENT_JAVA_OPTS_ENV: &str = "DBX_AGENT_JAVA_OPTS";
 const AGENT_JAVA_TOO_OLD_MESSAGE: &str =
     "Agent requires Java 21, but DBX started it with an older Java runtime. Use DBX managed JRE 21 or select a Java 21 executable in Driver Manager.";
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 pub struct AgentDriverClient {
     child: Child,
@@ -360,18 +358,12 @@ impl AgentDriverClient {
     /// they speak the DBX stdin/stdout JSON-RPC protocol.
     /// Blocks (async) until the agent writes `{"ready":true}` to stdout.
     pub async fn spawn(launch: AgentLaunchSpec) -> Result<Self, String> {
-        let mut command = Command::new(&launch.program);
+        let mut command = crate::process::new_std_command(&launch.program);
         command.args(&launch.args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         if let Some(working_dir) = &launch.working_dir {
             command.current_dir(working_dir);
         }
         remove_agent_proxy_env(&mut command);
-
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(CREATE_NO_WINDOW);
-        }
 
         let mut child =
             command.spawn().map_err(|e| format!("Failed to spawn agent process {}: {e}", launch_display(&launch)))?;

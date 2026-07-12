@@ -21,6 +21,7 @@ export const DATABASE_PROPERTY_EDITING_MATRIX = {
   sqlite: { deferred: "file-backed database properties are not edited in-place" },
   rqlite: { deferred: "single SQLite-compatible database per node" },
   turso: { deferred: "remote libSQL database lifecycle is provider-managed" },
+  "cloudflare-d1": { deferred: "Cloudflare D1 database lifecycle is provider-managed" },
   redis: { deferred: "numbered logical databases are server-configured" },
   duckdb: { deferred: "attached database file properties need a dedicated DuckDB workflow" },
   clickhouse: { deferred: "database property editing not verified for first pass" },

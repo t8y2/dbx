@@ -185,6 +185,7 @@ pub fn duckdb_query_columns_in_database_with_attached(
                 numeric_precision: None,
                 numeric_scale: None,
                 character_maximum_length: None,
+            ..Default::default()
             })
         })
         .map_err(|e| e.to_string())?;

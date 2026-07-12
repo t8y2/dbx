@@ -3,7 +3,7 @@ import { filterDatabaseNamesForVisiblePicker, normalizeVisibleDatabaseSelection 
 
 const DRAFT_VISIBLE_DATABASES_PREFIX = "__visible_draft_";
 
-const UNSUPPORTED_VISIBLE_DATABASE_TYPES = new Set<DatabaseType>(["elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper"]);
+const UNSUPPORTED_VISIBLE_DATABASE_TYPES = new Set<DatabaseType>(["cloudflare-d1", "elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper"]);
 
 type VisibleDatabaseConnectionFields = Pick<
   ConnectionConfig,

@@ -68,6 +68,20 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void reportsDriverLinkageErrorsWithoutTerminatingThePlugin() throws Exception {
+        JsonNode response = request("testConnection", """
+            {
+              "connection": {
+                "connection_string": "jdbc:broken:test",
+                "jdbc_driver_class": "app.dbx.jdbc.DbxJdbcPluginTest$ErrorOnLoad"
+              }
+            }
+            """);
+
+        assertEquals("linkage boom", response.path("error").path("message").asText());
+    }
+
+    @Test
     void executeQueryTrimsSingleTrailingSemicolon() throws Exception {
         JsonNode response = request("executeQuery", """
             {
@@ -1764,6 +1778,14 @@ final class DbxJdbcPluginTest {
         if (returnType == double.class) return 0d;
         if (returnType == char.class) return '\0';
         return null;
+    }
+
+    public static final class ErrorOnLoad {
+        private static final Object FAILURE = fail();
+
+        private static Object fail() {
+            throw new AssertionError("linkage boom");
+        }
     }
 
     private static JsonNode request(String method, String params) throws Exception {

@@ -143,6 +143,27 @@ test("parseMongoWriteCommand accepts unquoted insert and update commands", () =>
   });
 });
 
+test("parseMongoWriteCommand accepts updateMany arrayFilters options", () => {
+  assert.deepEqual(
+    parseMongoWriteCommand(`db.issue_3231.updateMany(
+      { msgType: 3, "order.orderId": { $in: [12345] } },
+      { $set: { "order.$[orderElem].bcorderproducts.$[prodElem].pankouType": "双双2" } },
+      { arrayFilters: [
+        { "orderElem.orderId": { $in: [12345] } },
+        { "prodElem.id": 322678 }
+      ] }
+    )`),
+    {
+      kind: "update",
+      collection: "issue_3231",
+      filter: '{ "msgType": 3, "order.orderId": { "$in": [12345] } }',
+      update: '{ "$set": { "order.$[orderElem].bcorderproducts.$[prodElem].pankouType": "双双2" } }',
+      options: '{ "arrayFilters": [\n        { "orderElem.orderId": { "$in": [12345] } },\n        { "prodElem.id": 322678 }\n      ] }',
+      many: true,
+    },
+  );
+});
+
 test("parseMongoWriteCommand parses createIndex with optional options", () => {
   assert.deepEqual(parseMongoWriteCommand("db.users.createIndex({email: 1}, {unique: true, name: 'users_email_unique'})"), {
     kind: "createIndex",
@@ -479,6 +500,10 @@ test("mongoDocumentsToQueryResult turns mongo documents into grid rows", () => {
   assert.deepEqual(result.rows, [
     ["1", "Ada", '{"role":"admin"}', null],
     ["2", "Lin", null, true],
+  ]);
+  assert.deepEqual(result.mongo_documents, [
+    { _id: "1", name: "Ada", profile: { role: "admin" } },
+    { _id: "2", active: true, name: "Lin" },
   ]);
   assert.equal(result.affected_rows, 12);
   assert.equal(result.execution_time_ms, 5);

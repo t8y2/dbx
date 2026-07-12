@@ -4,7 +4,43 @@ import com.dbx.agent.ConnectParams;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.security.Security;
+import java.sql.SQLException;
+
 class SqlServerLegacyAgentTest {
+    @Test
+    void constructorRelaxesLegacyTlsPolicyBeforeDriverLoading() {
+        String key = "jdk.tls.disabledAlgorithms";
+        String original = Security.getProperty(key);
+        try {
+            Security.setProperty(key, "TLSv1, TLSv1.1, 3DES_EDE_CBC, EC keySize < 224");
+
+            new SqlServerLegacyAgent();
+
+            Assertions.assertEquals("EC keySize < 224", Security.getProperty(key));
+            String diagnostics = SqlServerLegacyAgent.legacyTlsDiagnostics();
+            Assertions.assertTrue(diagnostics.contains("sslProtocol=TLSv1"));
+            Assertions.assertTrue(diagnostics.contains("tlsV1Disabled=false"));
+            Assertions.assertTrue(diagnostics.contains("3desDisabled=false"));
+            Assertions.assertTrue(diagnostics.contains("rc4Disabled=false"));
+        } finally {
+            Security.setProperty(key, original == null ? "" : original);
+        }
+    }
+
+    @Test
+    void connectionErrorsPreserveDetailsAndIncludeRuntimeDiagnostics() {
+        SQLException original = new SQLException("TLS handshake failed", "08001", 1234);
+
+        SQLException error = SqlServerLegacyAgent.withLegacyTlsDiagnostics(original);
+
+        Assertions.assertEquals("08001", error.getSQLState());
+        Assertions.assertEquals(1234, error.getErrorCode());
+        Assertions.assertSame(original, error.getCause());
+        Assertions.assertTrue(error.getMessage().contains("TLS handshake failed"));
+        Assertions.assertTrue(error.getMessage().contains("DBX SQL Server legacy TLS diagnostics:"));
+    }
+
     @Test
     void legacyTlsUrlUsesSqlServerTlsV1Properties() {
         ConnectParams params = new ConnectParams(

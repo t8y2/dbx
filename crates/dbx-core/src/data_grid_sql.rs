@@ -8,7 +8,10 @@ use data_grid_neo4j_sql::{build_neo4j_data_grid_rollback_statements, build_neo4j
 
 #[path = "data_grid_tdengine_sql.rs"]
 mod data_grid_tdengine_sql;
-use data_grid_tdengine_sql::build_tdengine_data_grid_save_statements;
+use data_grid_tdengine_sql::{
+    build_tdengine_data_grid_rollback_statements, build_tdengine_data_grid_save_statements,
+    validate_tdengine_existing_rows, validate_tdengine_inserted_rows,
+};
 
 use crate::models::connection::DatabaseType;
 use crate::sql_dialect::{
@@ -643,7 +646,13 @@ fn build_neo4j_data_grid_column_distinct_values_sql(options: &DataGridColumnDist
 }
 
 fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<String> {
+    if let Some(error) = validate_tdengine_inserted_rows(options) {
+        return Some(error);
+    }
     if let Some(error) = validate_inserted_primary_keys(options) {
+        return Some(error);
+    }
+    if let Some(error) = validate_tdengine_existing_rows(options) {
         return Some(error);
     }
 
@@ -854,6 +863,11 @@ fn build_data_grid_save_statements(options: &DataGridSaveStatementOptions) -> Ve
             .iter()
             .enumerate()
             .filter_map(|(index, column)| Some((column.as_deref()?, row.get(index).unwrap_or(&Value::Null))))
+            .filter(|(column, value)| {
+                let column_info = column_info_for(column_info, column);
+                // Empty generated values must be omitted so the database can apply AUTO_INCREMENT/IDENTITY semantics.
+                !column_info.is_some_and(is_auto_generated_column) || !grid_value_is_empty(value)
+            })
             .filter(|(column, _)| {
                 !is_grid_insert_omitted_column(
                     options.database_type,
@@ -890,6 +904,9 @@ fn build_data_grid_save_statements(options: &DataGridSaveStatementOptions) -> Ve
 fn build_data_grid_rollback_statements(options: &DataGridSaveStatementOptions) -> Vec<String> {
     if options.database_type == Some(DatabaseType::Neo4j) {
         return build_neo4j_data_grid_rollback_statements(options);
+    }
+    if options.database_type == Some(DatabaseType::Tdengine) {
+        return build_tdengine_data_grid_rollback_statements(options);
     }
     if options.database_type == Some(DatabaseType::ClickHouse) {
         return Vec::new();
@@ -1782,6 +1799,10 @@ fn is_auto_generated_column(column: &DataGridColumnInfo) -> bool {
         .any(|part| matches!(part, "auto_increment" | "autoincrement" | "identity"))
 }
 
+fn grid_value_is_empty(value: &Value) -> bool {
+    value.is_null() || value.as_str().is_some_and(str::is_empty)
+}
+
 fn is_grid_insert_omitted_column(
     database_type: Option<DatabaseType>,
     column_info: Option<&DataGridColumnInfo>,
@@ -2067,6 +2088,7 @@ fn uses_keyless_row_predicate(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Sqlite
                 | DatabaseType::Rqlite
                 | DatabaseType::Turso
+                | DatabaseType::CloudflareD1
                 | DatabaseType::DuckDb
                 | DatabaseType::SqlServer
                 | DatabaseType::Oracle
@@ -2943,6 +2965,374 @@ mod tests {
     }
 
     #[test]
+    fn prepares_tdengine_child_table_delete_from_stable_row() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "meters".to_string(),
+                primary_keys: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string()],
+                columns: Some(vec![column("ts", "TIMESTAMP", false, None), column("voltage", "FLOAT", true, None)]),
+            },
+            columns: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string(), "voltage".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("codex_delete_verify"), json!("2026-07-10T13:59:00.456+08:00"), json!(221.5)]],
+            dirty_rows: vec![],
+            deleted_rows: vec![0],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec!["DELETE FROM `dbx_tdengine_demo`.`codex_delete_verify` WHERE `ts` = '2026-07-10T13:59:00.456+08:00';"]
+        );
+        assert_eq!(
+            result.rollback_statements,
+            vec!["INSERT INTO `dbx_tdengine_demo`.`meters` (`tbname`, `ts`, `voltage`) VALUES ('codex_delete_verify', '2026-07-10T13:59:00.456+08:00', 221.5);"]
+        );
+    }
+
+    #[test]
+    fn rejects_tdengine_composite_key_delete_from_same_timestamp_stable_rows() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "meters".to_string(),
+                primary_keys: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string(), "seq".to_string()],
+                columns: Some(vec![
+                    column("ts", "TIMESTAMP", false, None),
+                    column("seq", "INT", false, Some("COMPOSITE KEY")),
+                    column("voltage", "FLOAT", true, None),
+                ]),
+            },
+            columns: vec![
+                DBX_TDENGINE_TBNAME_COLUMN.to_string(),
+                "ts".to_string(),
+                "seq".to_string(),
+                "voltage".to_string(),
+            ],
+            source_columns: None,
+            rows: vec![
+                vec![json!("device_a"), json!("2026-07-10T13:59:00.456+08:00"), json!(1), json!(221.5)],
+                vec![json!("device_a"), json!("2026-07-10T13:59:00.456+08:00"), json!(2), json!(222.5)],
+            ],
+            dirty_rows: vec![],
+            deleted_rows: vec![1],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.validation_error,
+            Some("TDengine tables with composite keys do not support row deletion.".to_string())
+        );
+        assert!(result.statements.is_empty());
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn prepares_tdengine_delete_from_direct_child_table_row() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "codex_grid_accept_20260710".to_string(),
+                primary_keys: vec!["ts".to_string()],
+                columns: Some(vec![column("ts", "TIMESTAMP", false, None), column("voltage", "FLOAT", true, None)]),
+            },
+            columns: vec!["ts".to_string(), "voltage".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("2026-07-10T16:00:00.111+08:00"), json!(220.1)]],
+            dirty_rows: vec![],
+            deleted_rows: vec![0],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec!["DELETE FROM `dbx_tdengine_demo`.`codex_grid_accept_20260710` WHERE `ts` = '2026-07-10T16:00:00.111+08:00';"]
+        );
+        assert_eq!(
+            result.rollback_statements,
+            vec!["INSERT INTO `dbx_tdengine_demo`.`codex_grid_accept_20260710` (`ts`, `voltage`) VALUES ('2026-07-10T16:00:00.111+08:00', 220.1);"]
+        );
+    }
+
+    #[test]
+    fn prepares_tdengine_overwrite_for_direct_child_table_row() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "codex_grid_update_verify_20260710".to_string(),
+                primary_keys: vec!["ts".to_string()],
+                columns: Some(vec![
+                    column("ts", "TIMESTAMP", false, None),
+                    column("voltage", "FLOAT", true, None),
+                    column("current", "FLOAT", true, None),
+                ]),
+            },
+            columns: vec!["ts".to_string(), "voltage".to_string(), "current".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("2026-07-10T16:30:00.444+08:00"), json!(220.0), json!(1.0)]],
+            dirty_rows: vec![(0, vec![(1, json!(229.9))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec!["INSERT INTO `dbx_tdengine_demo`.`codex_grid_update_verify_20260710` (`ts`, `voltage`, `current`) VALUES ('2026-07-10T16:30:00.444+08:00', 229.9, 1.0);"]
+        );
+        assert_eq!(
+            result.rollback_statements,
+            vec!["INSERT INTO `dbx_tdengine_demo`.`codex_grid_update_verify_20260710` (`ts`, `voltage`, `current`) VALUES ('2026-07-10T16:30:00.444+08:00', 220.0, 1.0);"]
+        );
+    }
+
+    #[test]
+    fn prepares_tdengine_composite_key_overwrite_and_rollback_for_same_timestamp_child_rows() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "device_a".to_string(),
+                primary_keys: vec!["ts".to_string(), "seq".to_string()],
+                columns: Some(vec![
+                    column("ts", "TIMESTAMP", false, None),
+                    column("seq", "INT", false, Some("COMPOSITE KEY")),
+                    column("voltage", "FLOAT", true, None),
+                ]),
+            },
+            columns: vec!["ts".to_string(), "seq".to_string(), "voltage".to_string()],
+            source_columns: None,
+            rows: vec![
+                vec![json!("2026-07-10T16:30:00.444+08:00"), json!(1), json!(220.0)],
+                vec![json!("2026-07-10T16:30:00.444+08:00"), json!(2), json!(221.0)],
+            ],
+            dirty_rows: vec![(1, vec![(2, json!(229.9))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec!["INSERT INTO `dbx_tdengine_demo`.`device_a` (`ts`, `seq`, `voltage`) VALUES ('2026-07-10T16:30:00.444+08:00', 2, 229.9);"]
+        );
+        assert_eq!(
+            result.rollback_statements,
+            vec!["INSERT INTO `dbx_tdengine_demo`.`device_a` (`ts`, `seq`, `voltage`) VALUES ('2026-07-10T16:30:00.444+08:00', 2, 221.0);"]
+        );
+    }
+
+    #[test]
+    fn prepares_tdengine_stable_insert_with_child_table_identity() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "issue_3121_devices".to_string(),
+                primary_keys: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string()],
+                columns: Some(vec![
+                    column("ts", "TIMESTAMP", false, None),
+                    column("reading", "FLOAT", true, None),
+                    column("site", "VARCHAR", true, Some("TAG")),
+                ]),
+            },
+            columns: vec![
+                DBX_TDENGINE_TBNAME_COLUMN.to_string(),
+                "ts".to_string(),
+                "reading".to_string(),
+                "site".to_string(),
+            ],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![
+                json!("codex_issue3121_insert_verify"),
+                json!("2026-07-10T17:48:51.000+08:00"),
+                json!(1.0),
+                json!("codex-lab"),
+            ]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec!["INSERT INTO `dbx_tdengine_demo`.`issue_3121_devices` (`tbname`, `ts`, `reading`, `site`) VALUES ('codex_issue3121_insert_verify', '2026-07-10T17:48:51.000+08:00', 1.0, 'codex-lab');"]
+        );
+        assert_eq!(
+            result.rollback_statements,
+            vec!["DELETE FROM `dbx_tdengine_demo`.`codex_issue3121_insert_verify` WHERE `ts` = '2026-07-10T17:48:51.000+08:00';"]
+        );
+    }
+
+    #[test]
+    fn skips_tdengine_composite_key_insert_rollback_for_same_timestamp_rows() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "meters".to_string(),
+                primary_keys: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string(), "seq".to_string()],
+                columns: Some(vec![
+                    column("ts", "TIMESTAMP", false, None),
+                    column("seq", "INT", false, Some("COMPOSITE KEY")),
+                    column("voltage", "FLOAT", true, None),
+                ]),
+            },
+            columns: vec![
+                DBX_TDENGINE_TBNAME_COLUMN.to_string(),
+                "ts".to_string(),
+                "seq".to_string(),
+                "voltage".to_string(),
+            ],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![
+                vec![json!("device_a"), json!("2026-07-10T17:48:51.000+08:00"), json!(1), json!(221.0)],
+                vec![json!("device_a"), json!("2026-07-10T17:48:51.000+08:00"), json!(2), json!(222.0)],
+            ],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "INSERT INTO `dbx_tdengine_demo`.`meters` (`tbname`, `ts`, `seq`, `voltage`) VALUES ('device_a', '2026-07-10T17:48:51.000+08:00', 1, 221.0);",
+                "INSERT INTO `dbx_tdengine_demo`.`meters` (`tbname`, `ts`, `seq`, `voltage`) VALUES ('device_a', '2026-07-10T17:48:51.000+08:00', 2, 222.0);",
+            ]
+        );
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn rejects_tdengine_stable_insert_without_child_table_identity() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "issue_3121_devices".to_string(),
+                primary_keys: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string()],
+                columns: Some(vec![column("ts", "TIMESTAMP", false, None), column("reading", "FLOAT", true, None)]),
+            },
+            columns: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string(), "reading".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![Value::Null, json!("2026-07-10T17:48:51.000+08:00"), json!(1.0)]],
+        });
+
+        assert_eq!(
+            result.validation_error,
+            Some("TDengine STABLE inserts require a child table name (tbname).".to_string())
+        );
+        assert!(result.statements.is_empty());
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn rejects_tdengine_delete_without_child_table_identity() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "meters".to_string(),
+                primary_keys: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string()],
+                columns: Some(vec![column("ts", "TIMESTAMP", false, None)]),
+            },
+            columns: vec!["ts".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("2026-07-10T13:59:00.456+08:00")]],
+            dirty_rows: vec![],
+            deleted_rows: vec![0],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.validation_error,
+            Some("TDengine row editing requires all row identifier columns in the result.".to_string())
+        );
+        assert!(result.statements.is_empty());
+    }
+
+    #[test]
+    fn rejects_tdengine_existing_row_edit_when_composite_key_is_missing() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "device_a".to_string(),
+                primary_keys: vec!["ts".to_string(), "seq".to_string()],
+                columns: Some(vec![
+                    column("ts", "TIMESTAMP", false, None),
+                    column("seq", "INT", false, Some("COMPOSITE KEY")),
+                    column("voltage", "FLOAT", true, None),
+                ]),
+            },
+            columns: vec!["ts".to_string(), "voltage".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("2026-07-10T16:30:00.444+08:00"), json!(220.0)]],
+            dirty_rows: vec![(0, vec![(1, json!(229.9))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.validation_error,
+            Some("TDengine row editing requires all row identifier columns in the result.".to_string())
+        );
+        assert!(result.statements.is_empty());
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn rejects_tdengine_existing_row_identity_changes() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "device_a".to_string(),
+                primary_keys: vec!["ts".to_string(), "seq".to_string()],
+                columns: Some(vec![
+                    column("ts", "TIMESTAMP", false, None),
+                    column("seq", "INT", false, Some("COMPOSITE KEY")),
+                    column("voltage", "FLOAT", true, None),
+                ]),
+            },
+            columns: vec!["ts".to_string(), "seq".to_string(), "voltage".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("2026-07-10T16:30:00.444+08:00"), json!(2), json!(220.0)]],
+            dirty_rows: vec![(0, vec![(1, json!(3))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, Some("TDengine row identifier columns cannot be edited.".to_string()));
+        assert!(result.statements.is_empty());
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
     fn prepares_databend_save_statements() {
         let result = prepare_data_grid_save(DataGridSaveStatementOptions {
             database_type: Some(DatabaseType::Databend),
@@ -3490,6 +3880,32 @@ mod tests {
             result.statements,
             vec![r#"INSERT INTO "OnlineLogs" ("OnlineLogId", "LogTime") VALUES (42, '2026-06-12T00:00:00Z');"#]
         );
+    }
+
+    #[test]
+    fn prepare_data_grid_save_omits_empty_mysql_auto_increment_value() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                schema: Some("app".to_string()),
+                table_name: "users".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    pk_column("id", "BIGINT", false, Some("auto_increment")),
+                    column("name", "VARCHAR", false, None),
+                ]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![json!(""), json!("Ada")]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["INSERT INTO `app`.`users` (`name`) VALUES ('Ada');"]);
     }
 
     #[test]

@@ -16,10 +16,10 @@ import type {
   SqlSemanticToken,
 } from "@/lib/sql/semantic/types";
 
-const TABLE_INTRODUCERS = new Set(["from", "join", "update", "into", "using", "apply"]);
+const TABLE_INTRODUCERS = new Set(["from", "join", "straight_join", "update", "into", "using", "apply"]);
 const JOIN_MODIFIERS = new Set(["left", "right", "inner", "outer", "cross", "full", "natural"]);
 const CLAUSE_BOUNDARIES = new Set(["where", "group", "having", "order", "limit", "offset", "union", "intersect", "except", "on", "set", "values", "returning"]);
-const ALIAS_BLACKLIST = new Set([...CLAUSE_BOUNDARIES, "join", "left", "right", "inner", "outer", "cross", "full", "natural", "as", "select", "from"]);
+const ALIAS_BLACKLIST = new Set([...CLAUSE_BOUNDARIES, "join", "straight_join", "left", "right", "inner", "outer", "cross", "full", "natural", "as", "select", "from"]);
 
 interface ParseState {
   dialect: SqlSemanticDialectAdapter;

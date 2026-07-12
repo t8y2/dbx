@@ -6,7 +6,7 @@ use calamine::{open_workbook_auto, Data, Reader};
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 
-use crate::connection::AppState;
+use crate::connection::{task_client_session_id, AppState};
 use crate::models::connection::DatabaseType;
 use crate::transfer::{
     execute_on_pool, generate_insert_typed, get_columns_for_transfer, qualified_table, quote_identifier,
@@ -16,6 +16,10 @@ pub const DEFAULT_PREVIEW_LIMIT: usize = 50;
 pub const DEFAULT_BATCH_SIZE: usize = 500;
 pub const CREATE_TABLE_INFERENCE_ROWS: usize = 100;
 pub const MAX_NON_STREAMING_IMPORT_BYTES: u64 = 100 * 1024 * 1024;
+
+pub fn table_import_client_session_id(import_id: &str) -> String {
+    task_client_session_id("table-import", import_id)
+}
 
 #[derive(Debug, Clone)]
 pub struct ParsedImportFile {
@@ -97,6 +101,9 @@ pub enum TableImportJsonShape {
 pub struct TableImportParseOptions {
     pub delimiter: Option<String>,
     pub has_header: Option<bool>,
+    pub title_row: Option<usize>,
+    pub data_start_row: Option<usize>,
+    pub last_data_row: Option<usize>,
     pub trim_values: Option<bool>,
     pub empty_string_as_null: Option<bool>,
     pub sheet_name: Option<String>,
@@ -109,6 +116,9 @@ impl Default for TableImportParseOptions {
         Self {
             delimiter: None,
             has_header: None,
+            title_row: None,
+            data_start_row: None,
+            last_data_row: None,
             trim_values: Some(false),
             empty_string_as_null: Some(true),
             sheet_name: None,
@@ -266,9 +276,37 @@ pub fn normalize_header(value: &str, index: usize) -> String {
 #[derive(Debug, Clone, Copy)]
 pub struct DelimitedParseConfig {
     pub delimiter: u8,
-    pub has_header: bool,
     pub trim_values: bool,
     pub empty_string_as_null: bool,
+    pub row_range: ImportRowRange,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportRowRange {
+    pub title_row: Option<usize>,
+    pub data_start_row: usize,
+    pub last_data_row: Option<usize>,
+}
+
+pub fn effective_import_row_range(options: &TableImportParseOptions) -> Result<ImportRowRange, String> {
+    let title_row = match options.title_row {
+        Some(0) => None,
+        Some(row) => Some(row),
+        None if options.has_header.unwrap_or(true) => Some(1),
+        None => None,
+    };
+    let data_start_row = options.data_start_row.unwrap_or_else(|| title_row.map_or(1, |row| row + 1));
+    let last_data_row = options.last_data_row.filter(|row| *row > 0);
+    if data_start_row == 0 {
+        return Err("Data start row must be at least 1".to_string());
+    }
+    if title_row.is_some_and(|row| row >= data_start_row) {
+        return Err("Title row must be before the data start row".to_string());
+    }
+    if last_data_row.is_some_and(|last| last < data_start_row) {
+        return Err("Last data row must be 0 or not less than the data start row".to_string());
+    }
+    Ok(ImportRowRange { title_row, data_start_row, last_data_row })
 }
 
 pub fn effective_delimited_config(
@@ -293,9 +331,9 @@ pub fn effective_delimited_config(
 
     Ok(DelimitedParseConfig {
         delimiter,
-        has_header: options.has_header.unwrap_or(true),
         trim_values: options.trim_values.unwrap_or(false),
         empty_string_as_null: options.empty_string_as_null.unwrap_or(true),
+        row_range: effective_import_row_range(options)?,
     })
 }
 
@@ -311,7 +349,12 @@ pub fn csv_value_with_config(value: &str, config: DelimitedParseConfig) -> serde
 pub fn csv_value(value: &str) -> serde_json::Value {
     csv_value_with_config(
         value,
-        DelimitedParseConfig { delimiter: b',', has_header: true, trim_values: false, empty_string_as_null: true },
+        DelimitedParseConfig {
+            delimiter: b',',
+            trim_values: false,
+            empty_string_as_null: true,
+            row_range: ImportRowRange { title_row: Some(1), data_start_row: 2, last_data_row: None },
+        },
     )
 }
 
@@ -320,72 +363,32 @@ pub fn parse_delimited_reader<R: std::io::Read>(
     config: DelimitedParseConfig,
     preview_limit: usize,
 ) -> Result<ParsedImportFile, String> {
-    let mut reader = csv::ReaderBuilder::new()
-        .delimiter(config.delimiter)
-        .has_headers(config.has_header)
-        .flexible(true)
-        .from_reader(reader);
+    let mut reader =
+        csv::ReaderBuilder::new().delimiter(config.delimiter).has_headers(false).flexible(true).from_reader(reader);
 
     let mut rows = Vec::new();
     let mut total_rows = 0;
-    let columns = if config.has_header {
-        reader
-            .headers()
-            .map_err(|e| e.to_string())?
-            .iter()
-            .enumerate()
-            .map(|(index, header)| normalize_header(header.trim_start_matches('\u{feff}'), index))
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-
-    let mut columns = columns;
-    if columns.is_empty() {
-        let mut records = reader.records();
-        let first_record = match records.next() {
-            Some(record) => record.map_err(|e| e.to_string())?,
-            None => return Err("Import file has no rows".to_string()),
-        };
-        columns = (0..first_record.len()).map(|index| format!("column_{}", index + 1)).collect();
-        if columns.is_empty() {
-            return Err("Import file has no columns".to_string());
-        }
-        total_rows += 1;
-        if preview_limit > 0 {
-            rows.push(
-                (0..columns.len())
-                    .map(|index| {
-                        first_record
-                            .get(index)
-                            .map(|value| csv_value_with_config(value, config))
-                            .unwrap_or(serde_json::Value::Null)
-                    })
-                    .collect(),
-            );
-        }
-        for record in records {
-            let record = record.map_err(|e| e.to_string())?;
-            total_rows += 1;
-            if rows.len() >= preview_limit {
-                continue;
-            }
-            let mut row = Vec::with_capacity(columns.len());
-            for index in 0..columns.len() {
-                row.push(
-                    record
-                        .get(index)
-                        .map(|value| csv_value_with_config(value, config))
-                        .unwrap_or(serde_json::Value::Null),
-                );
-            }
-            rows.push(row);
-        }
-        return Ok(ParsedImportFile { columns, rows, total_rows });
-    }
-
-    for record in reader.records() {
+    let mut columns = Vec::new();
+    for (index, record) in reader.records().enumerate() {
         let record = record.map_err(|e| e.to_string())?;
+        let row_number = index + 1;
+        if config.row_range.title_row == Some(row_number) {
+            columns = record
+                .iter()
+                .enumerate()
+                .map(|(index, header)| normalize_header(header.trim_start_matches('\u{feff}'), index))
+                .collect();
+            continue;
+        }
+        if row_number < config.row_range.data_start_row {
+            continue;
+        }
+        if config.row_range.last_data_row.is_some_and(|last| row_number > last) {
+            break;
+        }
+        if columns.is_empty() {
+            columns = (0..record.len()).map(|index| format!("column_{}", index + 1)).collect();
+        }
         total_rows += 1;
         if rows.len() >= preview_limit {
             continue;
@@ -398,7 +401,12 @@ pub fn parse_delimited_reader<R: std::io::Read>(
         }
         rows.push(row);
     }
-
+    if columns.is_empty() {
+        return Err("Import file has no columns in the selected row range".to_string());
+    }
+    if total_rows == 0 {
+        return Err("Import file has no data rows in the selected row range".to_string());
+    }
     Ok(ParsedImportFile { columns, rows, total_rows })
 }
 
@@ -576,47 +584,29 @@ pub fn parse_xlsx_file_with_options(
         sheet_names.first().cloned().ok_or_else(|| "Workbook has no sheets".to_string())?
     };
     let range = workbook.worksheet_range(&sheet_name).map_err(|e| e.to_string())?;
-    let mut rows_iter = range.rows();
-    let has_header = options.has_header.unwrap_or(true);
-    let columns = if has_header {
-        let header = rows_iter.next().ok_or_else(|| "Import file has no rows".to_string())?;
-        header
-            .iter()
-            .enumerate()
-            .map(|(index, cell)| normalize_header(&xlsx_cell_label(cell), index))
-            .collect::<Vec<_>>()
-    } else {
-        let first_row = rows_iter.next().ok_or_else(|| "Import file has no rows".to_string())?;
-        let columns = (0..first_row.len()).map(|index| format!("column_{}", index + 1)).collect::<Vec<_>>();
-        let mut rows = Vec::new();
-        if preview_limit > 0 {
-            rows.push(
-                (0..columns.len())
-                    .map(|index| first_row.get(index).map(xlsx_cell_value).unwrap_or(serde_json::Value::Null))
-                    .collect::<Vec<_>>(),
-            );
-        }
-        let mut total_rows = 1;
-        for source_row in rows_iter {
-            total_rows += 1;
-            if rows.len() >= preview_limit {
-                continue;
-            }
-            let mut row = Vec::with_capacity(columns.len());
-            for index in 0..columns.len() {
-                row.push(source_row.get(index).map(xlsx_cell_value).unwrap_or(serde_json::Value::Null));
-            }
-            rows.push(row);
-        }
-        return Ok(ParsedImportFile { columns, rows, total_rows });
-    };
-    if columns.is_empty() {
-        return Err("Import file has no columns".to_string());
-    }
-
+    let row_range = effective_import_row_range(options)?;
+    let mut columns = Vec::new();
     let mut rows = Vec::new();
     let mut total_rows = 0;
-    for source_row in rows_iter {
+    for (index, source_row) in range.rows().enumerate() {
+        let row_number = index + 1;
+        if row_range.title_row == Some(row_number) {
+            columns = source_row
+                .iter()
+                .enumerate()
+                .map(|(index, cell)| normalize_header(&xlsx_cell_label(cell), index))
+                .collect();
+            continue;
+        }
+        if row_number < row_range.data_start_row {
+            continue;
+        }
+        if row_range.last_data_row.is_some_and(|last| row_number > last) {
+            break;
+        }
+        if columns.is_empty() {
+            columns = (0..source_row.len()).map(|index| format!("column_{}", index + 1)).collect();
+        }
         total_rows += 1;
         if rows.len() >= preview_limit {
             continue;
@@ -627,7 +617,12 @@ pub fn parse_xlsx_file_with_options(
         }
         rows.push(row);
     }
-
+    if columns.is_empty() {
+        return Err("Import file has no columns in the selected row range".to_string());
+    }
+    if total_rows == 0 {
+        return Err("Import file has no data rows in the selected row range".to_string());
+    }
     Ok(ParsedImportFile { columns, rows, total_rows })
 }
 
@@ -740,6 +735,17 @@ pub fn build_import_insert_batch_from_rows(
     if rows.is_empty() {
         return Ok(None);
     }
+    if *db_type == DatabaseType::CloudflareD1 {
+        return crate::db::cloudflare_d1::build_streaming_import_insert_batch(
+            rows,
+            columns,
+            mappings,
+            target_column_types,
+            table,
+            schema,
+            rows.len(),
+        );
+    }
     let mapped = mapping_indexes_for_columns(columns, mappings)?;
     let target_columns = mapped.iter().map(|(_, target)| target.clone()).collect::<Vec<_>>();
     let column_types = target_columns
@@ -764,6 +770,10 @@ pub fn build_import_insert_batch_from_rows(
     Ok((!sql.trim().is_empty()).then_some(ImportSqlBatch { sql, row_count: rows.len() }))
 }
 
+fn supports_multi_row_insert_values(db_type: &DatabaseType) -> bool {
+    !matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Iris)
+}
+
 pub fn build_import_insert_batches(
     data: &ParsedImportFile,
     mappings: &[TableImportColumnMapping],
@@ -773,6 +783,17 @@ pub fn build_import_insert_batches(
     db_type: &DatabaseType,
     batch_size: usize,
 ) -> Result<Vec<ImportSqlBatch>, String> {
+    if *db_type == DatabaseType::CloudflareD1 {
+        return crate::db::cloudflare_d1::build_import_insert_batches(
+            &data.rows,
+            &data.columns,
+            mappings,
+            target_column_types,
+            table,
+            schema,
+            batch_size.clamp(1, 100),
+        );
+    }
     let mapped = mapping_indexes(data, mappings)?;
     let columns = mapped.iter().map(|(_, target)| target.clone()).collect::<Vec<_>>();
     let column_types = columns
@@ -784,12 +805,9 @@ pub fn build_import_insert_batches(
                 .map(|(_, data_type)| data_type.clone())
         })
         .collect::<Vec<_>>();
-    let batch_size = match db_type {
-        // Oracle-compatible drivers reject INSERT ... VALUES (...), (...), so
-        // keep import batches executable as single-row statements.
-        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => 1,
-        _ => batch_size.max(1),
-    };
+    // Drivers without multi-row VALUES support still benefit from the agent
+    // batching the generated single-row statements during execution.
+    let batch_size = if supports_multi_row_insert_values(db_type) { batch_size.max(1) } else { 1 };
     let mut batches = Vec::new();
 
     for chunk in data.rows.chunks(batch_size) {
@@ -814,7 +832,7 @@ pub fn build_import_insert_batches(
 pub fn truncate_sql(table: &str, schema: &str, db_type: &DatabaseType) -> String {
     let full_table = qualified_table(table, schema, db_type);
     match db_type {
-        DatabaseType::Sqlite => format!("DELETE FROM {full_table}"),
+        DatabaseType::Sqlite | DatabaseType::CloudflareD1 => format!("DELETE FROM {full_table}"),
         _ => format!("TRUNCATE TABLE {full_table}"),
     }
 }
@@ -932,7 +950,7 @@ fn text_data_type(db_type: &DatabaseType) -> &'static str {
 
 fn integer_data_type(db_type: &DatabaseType) -> &'static str {
     match db_type {
-        DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso => "INTEGER",
+        DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1 => "INTEGER",
         DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng => "NUMBER(19)",
         DatabaseType::ClickHouse => "Int64",
         _ => "BIGINT",
@@ -949,7 +967,7 @@ fn decimal_data_type(db_type: &DatabaseType) -> &'static str {
         | DatabaseType::Highgo
         | DatabaseType::Kwdb
         | DatabaseType::Vastbase => "DOUBLE PRECISION",
-        DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso => "REAL",
+        DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1 => "REAL",
         DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng => "BINARY_DOUBLE",
         DatabaseType::ClickHouse => "Float64",
         _ => "DOUBLE",
@@ -965,7 +983,7 @@ fn boolean_data_type(db_type: &DatabaseType) -> &'static str {
         | DatabaseType::Sundb
         | DatabaseType::Databend => "TINYINT(1)",
         DatabaseType::SqlServer => "BIT",
-        DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso => "INTEGER",
+        DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1 => "INTEGER",
         DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng => "NUMBER(1)",
         DatabaseType::ClickHouse => "UInt8",
         _ => "BOOLEAN",
@@ -974,7 +992,7 @@ fn boolean_data_type(db_type: &DatabaseType) -> &'static str {
 
 fn date_data_type(db_type: &DatabaseType) -> &'static str {
     match db_type {
-        DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso => "TEXT",
+        DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1 => "TEXT",
         DatabaseType::ClickHouse => "Date",
         _ => "DATE",
     }
@@ -989,7 +1007,7 @@ fn timestamp_data_type(db_type: &DatabaseType) -> &'static str {
         | DatabaseType::Sundb
         | DatabaseType::Databend => "DATETIME",
         DatabaseType::SqlServer => "DATETIME2",
-        DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso => "TEXT",
+        DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1 => "TEXT",
         DatabaseType::ClickHouse => "DateTime64",
         _ => "TIMESTAMP",
     }
@@ -1146,28 +1164,33 @@ fn delimited_columns_and_first_record<R: std::io::Read>(
     reader: &mut csv::Reader<R>,
     config: DelimitedParseConfig,
 ) -> Result<(Vec<String>, Option<csv::StringRecord>), String> {
-    if config.has_header {
-        let columns = reader
-            .headers()
-            .map_err(|e| e.to_string())?
-            .iter()
-            .enumerate()
-            .map(|(index, header)| normalize_header(header.trim_start_matches('\u{feff}'), index))
-            .collect::<Vec<_>>();
+    let mut columns = Vec::new();
+    for (index, record) in reader.records().enumerate() {
+        let record = record.map_err(|e| e.to_string())?;
+        let row_number = index + 1;
+        if config.row_range.title_row == Some(row_number) {
+            columns = record
+                .iter()
+                .enumerate()
+                .map(|(index, header)| normalize_header(header.trim_start_matches('\u{feff}'), index))
+                .collect();
+            continue;
+        }
+        if row_number < config.row_range.data_start_row {
+            continue;
+        }
+        if config.row_range.last_data_row.is_some_and(|last| row_number > last) {
+            break;
+        }
+        if columns.is_empty() {
+            columns = (0..record.len()).map(|index| format!("column_{}", index + 1)).collect();
+        }
         if columns.is_empty() {
             return Err("Import file has no columns".to_string());
         }
-        return Ok((columns, None));
+        return Ok((columns, Some(record)));
     }
-
-    let mut records = reader.records();
-    let first_record =
-        records.next().transpose().map_err(|e| e.to_string())?.ok_or_else(|| "Import file has no rows".to_string())?;
-    let columns = (0..first_record.len()).map(|index| format!("column_{}", index + 1)).collect::<Vec<_>>();
-    if columns.is_empty() {
-        return Err("Import file has no columns".to_string());
-    }
-    Ok((columns, Some(first_record)))
+    Err("Import file has no data rows in the selected row range".to_string())
 }
 
 pub async fn preview_table_import_file_with_request(
@@ -1366,17 +1389,15 @@ where
                 ));
             }
         };
-        let mut reader = csv::ReaderBuilder::new()
-            .delimiter(config.delimiter)
-            .has_headers(config.has_header)
-            .flexible(true)
-            .from_reader(file);
+        let mut reader =
+            csv::ReaderBuilder::new().delimiter(config.delimiter).has_headers(false).flexible(true).from_reader(file);
         let (columns, first_record) = match delimited_columns_and_first_record(&mut reader, config) {
             Ok(result) => result,
             Err(error) => return Err(emit_import_error(&mut progress_callback, request, 0, total_rows, error)),
         };
         let effective_batch_size = match db_type {
             DatabaseType::Oracle | DatabaseType::OceanbaseOracle => 1,
+            DatabaseType::CloudflareD1 => batch_size.clamp(1, 100),
             _ => batch_size.max(1),
         };
         let mut rows_imported = 0;
@@ -1386,7 +1407,12 @@ where
             pending_rows.push(delimited_record_to_row(&record, columns.len(), config));
         }
 
+        let mut source_row_number = config.row_range.data_start_row;
         for record in reader.records() {
+            source_row_number += 1;
+            if config.row_range.last_data_row.is_some_and(|last| source_row_number > last) {
+                break;
+            }
             if is_cancelled(&request.import_id).await {
                 progress_callback(TableImportProgress {
                     import_id: request.import_id.clone(),
@@ -1665,6 +1691,40 @@ mod tests {
     }
 
     #[test]
+    fn parses_delimited_text_with_custom_title_and_data_rows() {
+        let options = TableImportParseOptions {
+            title_row: Some(2),
+            data_start_row: Some(4),
+            last_data_row: Some(5),
+            ..TableImportParseOptions::default()
+        };
+        let parsed = parse_delimited_bytes_with_options(
+            b"report,ignored\nid,name\nnotes,ignored\n1,Ada\n2,Grace\nsummary,2\n",
+            TableImportSourceFormat::Csv,
+            &options,
+            10,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.columns, vec!["id", "name"]);
+        assert_eq!(parsed.total_rows, 2);
+        assert_eq!(parsed.rows[0], vec![serde_json::json!("1"), serde_json::json!("Ada")]);
+        assert_eq!(parsed.rows[1], vec![serde_json::json!("2"), serde_json::json!("Grace")]);
+    }
+
+    #[test]
+    fn rejects_title_row_inside_data_range() {
+        let options = TableImportParseOptions {
+            title_row: Some(2),
+            data_start_row: Some(1),
+            last_data_row: Some(3),
+            ..TableImportParseOptions::default()
+        };
+
+        assert!(effective_import_row_range(&options).unwrap_err().contains("before the data start row"));
+    }
+
+    #[test]
     fn parses_json_array_objects_with_union_columns() {
         let parsed = parse_json_bytes(br#"[{"id":1,"name":"Ada"},{"id":2,"active":true}]"#, 10).unwrap();
 
@@ -1701,11 +1761,13 @@ mod tests {
             XlsxWorksheetData {
                 sheet_name: Some("First".to_string()),
                 columns: vec!["id".to_string()],
+                column_types: vec![],
                 rows: vec![vec![serde_json::json!(1)]],
             },
             XlsxWorksheetData {
                 sheet_name: Some("Second".to_string()),
                 columns: vec!["name".to_string()],
+                column_types: vec![],
                 rows: vec![vec![serde_json::json!("Ada")]],
             },
         ])
@@ -1719,6 +1781,37 @@ mod tests {
         assert_eq!(xlsx_sheet_names(&path.to_string_lossy()).unwrap(), vec!["First", "Second"]);
         assert_eq!(parsed.columns, vec!["name"]);
         assert_eq!(parsed.rows, vec![vec![serde_json::json!("Ada")]]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn parses_excel_with_custom_title_and_data_rows() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-rows-{}.xlsx", uuid::Uuid::new_v4()));
+        let workbook = build_xlsx_workbook_multi(&[XlsxWorksheetData {
+            sheet_name: Some("Rows".to_string()),
+            columns: vec!["report".to_string(), "ignored".to_string()],
+            column_types: vec![],
+            rows: vec![
+                vec![serde_json::json!("id"), serde_json::json!("name")],
+                vec![serde_json::json!(1), serde_json::json!("Ada")],
+                vec![serde_json::json!(2), serde_json::json!("Grace")],
+                vec![serde_json::json!("summary"), serde_json::json!(2)],
+            ],
+        }])
+        .unwrap();
+        std::fs::write(&path, workbook).unwrap();
+        let options = TableImportParseOptions {
+            title_row: Some(2),
+            data_start_row: Some(3),
+            last_data_row: Some(4),
+            ..TableImportParseOptions::default()
+        };
+        let parsed = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
+
+        assert_eq!(parsed.columns, vec!["id", "name"]);
+        assert_eq!(parsed.total_rows, 2);
+        assert_eq!(parsed.rows[0], vec![serde_json::json!(1.0), serde_json::json!("Ada")]);
+        assert_eq!(parsed.rows[1], vec![serde_json::json!(2.0), serde_json::json!("Grace")]);
         let _ = std::fs::remove_file(path);
     }
 
@@ -1903,6 +1996,38 @@ mod tests {
                 row_count: 1,
             },
         ]);
+    }
+
+    #[test]
+    fn iris_import_uses_single_row_values_statements() {
+        let mappings = vec![TableImportColumnMapping {
+            source_column: "id".to_string(),
+            target_column: "id".to_string(),
+            target_data_type: None,
+        }];
+        let data = ParsedImportFile {
+            columns: vec!["id".to_string()],
+            rows: vec![vec![serde_json::json!(1)], vec![serde_json::json!(2)]],
+            total_rows: 2,
+        };
+
+        let batches =
+            build_import_insert_batches(&data, &mappings, &[], "items", "SQLUSER", &DatabaseType::Iris, 100).unwrap();
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].sql, "INSERT INTO \"SQLUSER\".\"items\" (\"id\") VALUES\n(1)");
+        assert_eq!(batches[0].row_count, 1);
+        assert_eq!(batches[1].sql, "INSERT INTO \"SQLUSER\".\"items\" (\"id\") VALUES\n(2)");
+        assert_eq!(batches[1].row_count, 1);
+    }
+
+    #[test]
+    fn multi_row_insert_values_support_matches_database_dialects() {
+        assert!(!supports_multi_row_insert_values(&DatabaseType::Oracle));
+        assert!(!supports_multi_row_insert_values(&DatabaseType::OceanbaseOracle));
+        assert!(!supports_multi_row_insert_values(&DatabaseType::Iris));
+        assert!(supports_multi_row_insert_values(&DatabaseType::Postgres));
+        assert!(supports_multi_row_insert_values(&DatabaseType::Mysql));
     }
 
     #[test]

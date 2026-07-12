@@ -2,10 +2,11 @@
 
 import { basename, join } from "node:path";
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 
 const DEFAULT_API_BASE = "https://api.atomgit.com/api/v5";
 const DEFAULT_REPOSITORY = "t8y2/dbx";
+const DEFAULT_CONCURRENCY = 3;
 
 function parseArgs(argv) {
   const args = {
@@ -15,6 +16,7 @@ function parseArgs(argv) {
     githubReleasePath: "",
     assetsDir: "",
     skipExistingAssets: true,
+    concurrency: Number.parseInt(process.env.ATOMGIT_UPLOAD_CONCURRENCY || `${DEFAULT_CONCURRENCY}`, 10),
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -43,6 +45,9 @@ function parseArgs(argv) {
   if (!args.repository.includes("/")) {
     throw new Error(`Invalid AtomGit repository: ${args.repository}`);
   }
+  if (!Number.isInteger(args.concurrency) || args.concurrency < 1) {
+    throw new Error("ATOMGIT_UPLOAD_CONCURRENCY must be a positive integer.");
+  }
   return args;
 }
 
@@ -64,15 +69,17 @@ async function main() {
     return;
   }
 
-  console.log(`Syncing ${assets.length} asset(s) to AtomGit release ${tag}.`);
-  for (const assetPath of assets) {
+  const pendingAssets = assets.filter((assetPath) => {
     const name = basename(assetPath);
     if (args.skipExistingAssets && existingAssets.has(name)) {
       console.log(`Skipping existing AtomGit asset: ${name}`);
-      continue;
+      return false;
     }
-    await uploadAsset(client, tag, assetPath);
-  }
+    return true;
+  });
+
+  console.log(`Uploading ${pendingAssets.length} asset(s) with concurrency ${args.concurrency}.`);
+  await mapWithConcurrency(pendingAssets, args.concurrency, (assetPath) => uploadAsset(client, tag, assetPath));
 }
 
 async function ensureRelease(client, githubRelease) {
@@ -114,7 +121,7 @@ async function uploadAsset(client, tag, filePath) {
 
   // AtomGit returns a per-file upload URL plus required upload headers.
   // Try raw PUT first and fall back to multipart POST for API-compatible deployments.
-  const put = runCurl([
+  const putStatus = await runCurl([
     "--fail-with-body",
     "--location",
     "--show-error",
@@ -131,12 +138,12 @@ async function uploadAsset(client, tag, filePath) {
     filePath,
     uploadTarget.url,
   ]);
-  if (put.status === 0) {
+  if (putStatus === 0) {
     return;
   }
 
   console.warn(`PUT upload failed for ${name}; retrying as multipart POST.`);
-  const post = runCurl([
+  const postStatus = await runCurl([
     "--fail-with-body",
     "--location",
     "--show-error",
@@ -151,13 +158,28 @@ async function uploadAsset(client, tag, filePath) {
     `file=@${filePath};filename=${name};type=${contentTypeHeader}`,
     uploadTarget.url,
   ]);
-  if (post.status !== 0) {
+  if (postStatus !== 0) {
     throw new Error(`Failed to upload ${name} to AtomGit.`);
   }
 }
 
 function runCurl(args) {
-  return spawnSync("curl", args, { stdio: "inherit" });
+  return new Promise((resolve, reject) => {
+    const child = spawn("curl", args, { stdio: "inherit" });
+    child.once("error", reject);
+    child.once("close", (code) => resolve(code ?? 1));
+  });
+}
+
+async function mapWithConcurrency(items, concurrency, worker) {
+  let nextIndex = 0;
+  async function runWorker() {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      await worker(items[index]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, runWorker));
 }
 
 function localAssets(dir) {

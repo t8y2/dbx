@@ -7,6 +7,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import { GitCompareArrows, ArrowLeft, Play, Loader2, Maximize2, Minimize2, AlertTriangle, CircleCheck } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
+import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { useSchemaDiffConfig } from "@/composables/useSchemaDiffConfig";
 import SchemaDiffConfigStep from "@/components/diff/SchemaDiffConfigStep.vue";
 import SchemaDiffObjectTree from "@/components/diff/SchemaDiffObjectTree.vue";
@@ -496,7 +497,14 @@ async function handleExecuteScript() {
 
   executing.value = true;
   try {
-    await api.executeScript(targetConnectionId.value, targetDatabase.value, deploySql.value, targetSchema.value);
+    const result = await executeWithProductionSqlGuard({
+      connection: store.getConfig(targetConnectionId.value),
+      database: targetDatabase.value,
+      sql: deploySql.value,
+      source: t("production.sourceSchemaDiff"),
+      execute: () => api.executeScript(targetConnectionId.value, targetDatabase.value, deploySql.value, targetSchema.value),
+    });
+    if (!result) return;
     toast(t("diff.executeSuccess"), 3000);
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
@@ -621,7 +629,14 @@ async function onConfirmDeploy() {
   showConfirmDialog.value = false;
   executing.value = true;
   try {
-    const result = await api.executeScript(targetConnectionId.value, targetDatabase.value, deploySql.value, targetSchema.value);
+    const result = await executeWithProductionSqlGuard({
+      connection: store.getConfig(targetConnectionId.value),
+      database: targetDatabase.value,
+      sql: deploySql.value,
+      source: t("production.sourceSchemaDiff"),
+      execute: () => api.executeScript(targetConnectionId.value, targetDatabase.value, deploySql.value, targetSchema.value),
+    });
+    if (!result) return;
     deployResult.value = {
       success: true,
       message: t("diff.deploySuccess"),

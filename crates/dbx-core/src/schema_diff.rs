@@ -366,8 +366,11 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
         let column_diffs = diff_columns_with_options(
             &source.columns,
             &target.columns,
-            options.ignore_comments,
-            options.compare_column_order,
+            ColumnDiffOptions {
+                ignore_comments: options.ignore_comments,
+                compare_column_order: options.compare_column_order,
+                case_insensitive_names: column_names_are_case_insensitive(options.database_type),
+            },
         );
         let index_diffs = diff_indexes(&source.indexes, &target.indexes);
         let foreign_key_diffs = diff_foreign_keys(&source.foreign_keys, &target.foreign_keys);
@@ -415,27 +418,50 @@ fn diff_names(source: &[String], target: &[String]) -> (Vec<String>, Vec<String>
 }
 
 pub fn diff_columns(source: &[ColumnInfo], target: &[ColumnInfo]) -> Vec<ColumnDiff> {
-    diff_columns_with_options(source, target, false, false)
+    diff_columns_with_options(source, target, ColumnDiffOptions::default())
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ColumnDiffOptions {
+    ignore_comments: bool,
+    compare_column_order: bool,
+    case_insensitive_names: bool,
 }
 
 fn diff_columns_with_options(
     source: &[ColumnInfo],
     target: &[ColumnInfo],
-    ignore_comments: bool,
-    compare_column_order: bool,
+    options: ColumnDiffOptions,
 ) -> Vec<ColumnDiff> {
     let mut diffs = Vec::new();
-    let target_map: HashMap<&str, &ColumnInfo> = target.iter().map(|column| (column.name.as_str(), column)).collect();
-    let source_map: HashMap<&str, &ColumnInfo> = source.iter().map(|column| (column.name.as_str(), column)).collect();
+    let target_map: HashMap<String, &ColumnInfo> = target
+        .iter()
+        .map(|column| (column_name_match_key(&column.name, options.case_insensitive_names), column))
+        .collect();
+    let source_map: HashMap<String, &ColumnInfo> = source
+        .iter()
+        .map(|column| (column_name_match_key(&column.name, options.case_insensitive_names), column))
+        .collect();
     let target_position_map: HashMap<&str, usize> =
         target.iter().enumerate().map(|(index, column)| (column.name.as_str(), index)).collect();
-    let can_compare_order = compare_column_order
+    let target_normalized_position_map: HashMap<String, usize> = target
+        .iter()
+        .enumerate()
+        .map(|(index, column)| (column_name_match_key(&column.name, options.case_insensitive_names), index))
+        .collect();
+    let can_compare_order = options.compare_column_order
         && source.len() == target.len()
-        && source.iter().all(|column| target_map.contains_key(column.name.as_str()));
+        && source.iter().all(|column| {
+            target_map.contains_key(&column_name_match_key(&column.name, options.case_insensitive_names))
+        });
 
     for (source_index, source_column) in source.iter().enumerate() {
-        if let Some(target_column) = target_map.get(source_column.name.as_str()) {
+        let source_name_key = column_name_match_key(&source_column.name, options.case_insensitive_names);
+        if let Some(target_column) = target_map.get(&source_name_key) {
             let mut changes = Vec::new();
+            if options.case_insensitive_names && source_column.name != target_column.name {
+                changes.push(format!("name: {} → {}", target_column.name, source_column.name));
+            }
             if source_column.data_type.to_lowercase() != target_column.data_type.to_lowercase() {
                 changes.push(format!("type: {} → {}", target_column.data_type, source_column.data_type));
             }
@@ -455,7 +481,7 @@ fn diff_columns_with_options(
                     source_column.column_default.as_deref().unwrap_or("NULL")
                 ));
             }
-            if !ignore_comments
+            if !options.ignore_comments
                 && source_column.comment.as_deref().unwrap_or_default()
                     != target_column.comment.as_deref().unwrap_or_default()
             {
@@ -466,7 +492,12 @@ fn diff_columns_with_options(
                 ));
             }
             if can_compare_order {
-                if let Some(target_index) = target_position_map.get(source_column.name.as_str()) {
+                let target_index = if options.case_insensitive_names {
+                    target_normalized_position_map.get(&source_name_key)
+                } else {
+                    target_position_map.get(source_column.name.as_str())
+                };
+                if let Some(target_index) = target_index {
                     if source_index != *target_index {
                         changes.push(format!("order: {} → {}", *target_index + 1, source_index + 1));
                     }
@@ -493,7 +524,7 @@ fn diff_columns_with_options(
     }
 
     for target_column in target {
-        if !source_map.contains_key(target_column.name.as_str()) {
+        if !source_map.contains_key(&column_name_match_key(&target_column.name, options.case_insensitive_names)) {
             diffs.push(ColumnDiff {
                 diff_type: "removed".to_string(),
                 name: target_column.name.clone(),
@@ -505,6 +536,20 @@ fn diff_columns_with_options(
     }
 
     diffs
+}
+
+fn column_name_match_key(name: &str, case_insensitive: bool) -> String {
+    if case_insensitive {
+        name.to_ascii_lowercase()
+    } else {
+        name.to_string()
+    }
+}
+
+fn column_names_are_case_insensitive(db_type: DatabaseType) -> bool {
+    // MySQL documents column identifiers as case-insensitive on every platform; exact matching would turn
+    // a case-only rename into a destructive add/drop plan.
+    matches!(db_type, DatabaseType::Mysql)
 }
 
 pub fn diff_indexes(source: &[IndexInfo], target: &[IndexInfo]) -> Vec<IndexDiff> {
@@ -939,12 +984,110 @@ fn quote_id(name: &str, db_type: DatabaseType) -> String {
     }
 }
 
+fn mysql_default_value(default: &str, data_type: &str) -> String {
+    let trimmed = default.trim();
+    if is_mysql_default_expression(trimmed) || !is_mysql_string_literal_type(data_type) {
+        return default.to_string();
+    }
+
+    // MySQL metadata returns string defaults as values rather than reusable DDL tokens.
+    let literal = format!("'{}'", default.replace('\'', "''"));
+    if mysql_default_requires_expression(data_type) {
+        format!("({literal})")
+    } else {
+        literal
+    }
+}
+
+fn is_mysql_default_expression(default: &str) -> bool {
+    let upper = default.to_ascii_uppercase();
+    (default.starts_with('(') && default.ends_with(')'))
+        || (default.starts_with('\'') && default.ends_with('\''))
+        || (default.starts_with('"') && default.ends_with('"'))
+        || upper == "NULL"
+        || upper == "CURRENT_TIMESTAMP"
+        || upper.strip_prefix("CURRENT_TIMESTAMP(").is_some_and(|precision| {
+            precision.ends_with(')') && precision[..precision.len() - 1].chars().all(|c| c.is_ascii_digit())
+        })
+        || matches!(upper.as_bytes(), [b'B' | b'X', b'\'', .., b'\''])
+}
+
+fn is_mysql_string_literal_type(data_type: &str) -> bool {
+    let base_type = mysql_base_type(data_type);
+    matches!(
+        base_type.as_str(),
+        "char"
+            | "varchar"
+            | "tinytext"
+            | "text"
+            | "mediumtext"
+            | "longtext"
+            | "tinyblob"
+            | "blob"
+            | "mediumblob"
+            | "longblob"
+            | "binary"
+            | "varbinary"
+            | "enum"
+            | "set"
+            | "date"
+            | "datetime"
+            | "timestamp"
+            | "time"
+            | "year"
+            | "json"
+            | "geometry"
+            | "point"
+            | "linestring"
+            | "polygon"
+            | "multipoint"
+            | "multilinestring"
+            | "multipolygon"
+            | "geometrycollection"
+    )
+}
+
+fn mysql_default_requires_expression(data_type: &str) -> bool {
+    let base_type = mysql_base_type(data_type);
+    matches!(
+        base_type.as_str(),
+        "tinytext"
+            | "text"
+            | "mediumtext"
+            | "longtext"
+            | "tinyblob"
+            | "blob"
+            | "mediumblob"
+            | "longblob"
+            | "json"
+            | "geometry"
+            | "point"
+            | "linestring"
+            | "polygon"
+            | "multipoint"
+            | "multilinestring"
+            | "multipolygon"
+            | "geometrycollection"
+    )
+}
+
+fn mysql_base_type(data_type: &str) -> String {
+    data_type
+        .trim_start()
+        .split(|c: char| c == '(' || c.is_ascii_whitespace())
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
 fn column_def(col: &ColumnInfo, db_type: DatabaseType) -> String {
     let mut definition = format!("{} {}", quote_id(&col.name, db_type), col.data_type);
     if !col.is_nullable {
         definition.push_str(" NOT NULL");
     }
     if let Some(default) = &col.column_default {
+        let default =
+            if db_type == DatabaseType::Mysql { mysql_default_value(default, &col.data_type) } else { default.clone() };
         definition.push_str(&format!(" DEFAULT {default}"));
     }
     if is_mysql_like(db_type) {
@@ -1143,7 +1286,16 @@ pub fn generate_schema_sync_sql(
                     "modified" => {
                         if let Some(source) = &column.source {
                             if is_mysql {
-                                if column.changes.iter().any(|change| !change.starts_with("order:")) {
+                                let renames_column = column.changes.iter().any(|change| change.starts_with("name:"));
+                                if renames_column {
+                                    if let Some(target) = &column.target {
+                                        parts.push(format!(
+                                            "  CHANGE COLUMN {} {}",
+                                            quote_id(&target.name, db_type),
+                                            column_def(source, db_type)
+                                        ));
+                                    }
+                                } else if column.changes.iter().any(|change| !change.starts_with("order:")) {
                                     parts.push(format!("  MODIFY COLUMN {}", column_def(source, db_type)));
                                 }
                             } else {
@@ -1455,7 +1607,42 @@ mod tests {
             numeric_scale: None,
             character_maximum_length: None,
             enum_values: None,
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn formats_mysql_metadata_defaults_as_valid_column_definitions() {
+        let cases = [
+            ("varchar(50)", "外籍一般件", "DEFAULT '外籍一般件'"),
+            ("VARCHAR(50)", "uppercase type", "DEFAULT 'uppercase type'"),
+            ("varchar(50)", "", "DEFAULT ''"),
+            ("varchar(50)", "O'Reilly\\docs", "DEFAULT 'O''Reilly\\docs'"),
+            ("int", "7", "DEFAULT 7"),
+            ("decimal(10,2)", "1.00", "DEFAULT 1.00"),
+            ("timestamp", "CURRENT_TIMESTAMP", "DEFAULT CURRENT_TIMESTAMP"),
+            ("timestamp(3)", "CURRENT_TIMESTAMP(3)", "DEFAULT CURRENT_TIMESTAMP(3)"),
+            ("varchar(36)", "(UUID())", "DEFAULT (UUID())"),
+            ("json", "(JSON_ARRAY())", "DEFAULT (JSON_ARRAY())"),
+            ("text", "plain text", "DEFAULT ('plain text')"),
+            ("json", "{}", "DEFAULT ('{}')"),
+            ("varchar(50)", "'already quoted'", "DEFAULT 'already quoted'"),
+        ];
+
+        for (data_type, default, expected) in cases {
+            let mut source = column("value", data_type, None);
+            source.column_default = Some(default.to_string());
+            assert!(column_def(&source, DatabaseType::Mysql).contains(expected), "{data_type}: {default}");
+        }
+    }
+
+    #[test]
+    fn leaves_non_mysql_defaults_unchanged() {
+        let mut source = column("value", "varchar(50)", None);
+        source.column_default = Some("unquoted_metadata_value".to_string());
+
+        assert!(column_def(&source, DatabaseType::Postgres).contains("DEFAULT unquoted_metadata_value"));
+        assert!(column_def(&source, DatabaseType::Doris).contains("DEFAULT unquoted_metadata_value"));
     }
 
     #[test]
@@ -1463,8 +1650,7 @@ mod tests {
         let diffs = diff_columns_with_options(
             &[column("id", "int", None), column("name", "varchar(64)", None), column("status", "varchar(16)", None)],
             &[column("status", "varchar(16)", None), column("id", "int", None), column("name", "varchar(64)", None)],
-            false,
-            false,
+            ColumnDiffOptions::default(),
         );
 
         assert!(diffs.is_empty());
@@ -1475,12 +1661,67 @@ mod tests {
         let diffs = diff_columns_with_options(
             &[column("id", "int", None), column("name", "varchar(64)", None), column("status", "varchar(16)", None)],
             &[column("status", "varchar(16)", None), column("id", "int", None), column("name", "varchar(64)", None)],
-            false,
-            true,
+            ColumnDiffOptions { compare_column_order: true, ..ColumnDiffOptions::default() },
         );
 
         assert_eq!(diffs.len(), 3);
         assert_eq!(diffs[0].changes, vec!["order: 2 → 1"]);
+    }
+
+    #[test]
+    fn keeps_case_sensitive_column_names_distinct_by_default() {
+        let diffs = diff_columns_with_options(
+            &[column("FREEDATE", "datetime", None)],
+            &[column("freedate", "datetime", None)],
+            ColumnDiffOptions::default(),
+        );
+
+        assert_eq!(diffs.len(), 2);
+        assert_eq!(diffs[0].diff_type, "added");
+        assert_eq!(diffs[1].diff_type, "removed");
+    }
+
+    #[test]
+    fn matches_mysql_column_names_case_insensitively() {
+        let diffs = diff_columns_with_options(
+            &[column("FREEDATE", "datetime", None), column("DATETYPE", "char(6)", Some("holiday type"))],
+            &[column("freedate", "datetime", None), column("datetype", "char(6)", Some("holiday type"))],
+            ColumnDiffOptions { case_insensitive_names: true, ..ColumnDiffOptions::default() },
+        );
+
+        assert_eq!(diffs.len(), 2);
+        assert!(diffs.iter().all(|diff| diff.diff_type == "modified"));
+        assert_eq!(diffs[0].changes, vec!["name: freedate → FREEDATE"]);
+        assert_eq!(diffs[1].changes, vec!["name: datetype → DATETYPE"]);
+
+        let sql = generate_schema_sync_sql(
+            &[TableDiff {
+                diff_type: "modified".to_string(),
+                object_type: Some("table".to_string()),
+                name: "c_freedate".to_string(),
+                columns: Some(diffs),
+                indexes: None,
+                foreign_keys: None,
+                triggers: None,
+                ddl: None,
+                target_ddl: None,
+                source_table_comment: None,
+                target_table_comment: None,
+                sync_sql: None,
+            }],
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Mysql,
+            None,
+            false,
+        );
+
+        assert!(sql.contains("CHANGE COLUMN `freedate` `FREEDATE` datetime NOT NULL"));
+        assert!(sql.contains("CHANGE COLUMN `datetype` `DATETYPE` char(6) NOT NULL COMMENT 'holiday type'"));
+        assert!(!sql.contains("ADD COLUMN"));
+        assert!(!sql.contains("DROP COLUMN"));
     }
 
     #[test]
@@ -1855,6 +2096,7 @@ mod tests {
                     numeric_scale: None,
                     character_maximum_length: None,
                     enum_values: None,
+                    ..Default::default()
                 }),
                 target: None,
                 changes: Vec::new(),

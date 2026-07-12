@@ -539,6 +539,7 @@ pub async fn get_columns(client: &ChClient, database: &str, table: &str) -> Resu
                 numeric_scale: None,
                 character_maximum_length: None,
                 enum_values: None,
+                ..Default::default()
             }
         })
         .collect())

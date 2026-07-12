@@ -1,3 +1,13 @@
 # Keep formatter-sensitive source files consistent across platforms.
 apps/desktop/src/**/*.ts text eol=lf
 apps/desktop/src/**/*.vue text eol=lf
+
+# Keep tests available for review and CI without counting them as shipped code
+# in GitHub's repository language breakdown.
+packages/app-tests/** linguist-vendored
+apps/desktop/src/**/__tests__/** linguist-vendored
+apps/desktop/src/**/*.spec.ts linguist-vendored
+apps/desktop/src/**/*.test.ts linguist-vendored
+packages/**/tests/** linguist-vendored
+packages/**/*.spec.ts linguist-vendored
+packages/**/*.test.ts linguist-vendored

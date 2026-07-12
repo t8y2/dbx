@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { QueryResult } from "@/types/database";
 
-import { isNoSnapshotErrorResult } from "@/lib/query/queryResultError";
+import { isMysqlExecutionErrorResult, isNoSnapshotErrorResult } from "@/lib/query/queryResultError";
 
 function errorResult(message: string): QueryResult {
   return { columns: ["Error"], rows: [[message]], affected_rows: 0, execution_time_ms: 0 };
@@ -37,5 +37,25 @@ describe("isNoSnapshotErrorResult", () => {
     expect(isNoSnapshotErrorResult(undefined)).toBe(false);
     expect(isNoSnapshotErrorResult(null)).toBe(false);
     expect(isNoSnapshotErrorResult({ ...errorResult("There is currently no snapshot."), rows: [] })).toBe(false);
+  });
+});
+
+describe("isMysqlExecutionErrorResult", () => {
+  it("recognizes an explicitly marked MySQL batch execution error", () => {
+    expect(isMysqlExecutionErrorResult({ ...errorResult("Duplicate entry '1'"), execution_error: true }, "mysql")).toBe(true);
+  });
+
+  it("does not mistake an unmarked Error alias without type metadata for an execution error", () => {
+    const result: QueryResult = {
+      columns: ["Error"],
+      rows: [["2"]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+    };
+    expect(isMysqlExecutionErrorResult(result, "mysql")).toBe(false);
+  });
+
+  it("does not apply the native MySQL heuristic to JDBC connections", () => {
+    expect(isMysqlExecutionErrorResult({ ...errorResult("Duplicate entry '1'"), execution_error: true }, "jdbc")).toBe(false);
   });
 });

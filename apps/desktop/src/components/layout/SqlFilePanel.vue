@@ -216,10 +216,7 @@ async function openFile(path: string) {
     const connectionId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
     const connection = connectionId ? connectionStore.getConfig(connectionId) : undefined;
     const database = connection ? resolveDefaultDatabase(connection, []) : "";
-    const name = path.split("\\").pop()?.split("/").pop() || "script.sql";
-    const tabId = queryStore.createTab(connectionId, database, name, "query");
-    queryStore.updateSql(tabId, content);
-    queryStore.linkExternalSqlPath(tabId, path, name);
+    queryStore.openExternalSqlFile(connectionId, database, path, content);
   } catch (e: any) {
     toast(t("toolbar.sqlOpenFailed", { message: e?.message || String(e) }), 5000);
   }

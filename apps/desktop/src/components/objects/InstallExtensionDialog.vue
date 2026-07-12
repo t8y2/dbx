@@ -7,12 +7,15 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { buildCreateExtensionSql, buildDropExtensionSql } from "@/lib/database/dbAdminSql";
 import * as api from "@/lib/backend/api";
+import { useConnectionStore } from "@/stores/connectionStore";
+import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { useToast } from "@/composables/useToast";
 import { translateBackendError } from "@/i18n/backend-errors";
 import type { ExtensionInfo, TreeNode } from "@/types/database";
 
 const { t } = useI18n();
 const { toast } = useToast();
+const connectionStore = useConnectionStore();
 
 const props = defineProps<{
   node: TreeNode;
@@ -53,7 +56,14 @@ async function installExtension(name: string) {
   installing.value = name;
   try {
     const sql = buildCreateExtensionSql(name, props.node.schema ?? null);
-    await api.executeQuery(props.node.connectionId, props.node.database, sql, props.node.schema ?? undefined);
+    const result = await executeWithProductionSqlGuard({
+      connection: connectionStore.getConfig(props.node.connectionId),
+      database: props.node.database,
+      sql,
+      source: t("production.sourceExtension"),
+      execute: () => api.executeQuery(props.node.connectionId!, props.node.database!, sql, props.node.schema ?? undefined),
+    });
+    if (!result) return;
     await loadData();
     emit("close");
   } catch (e: any) {
@@ -68,7 +78,14 @@ async function dropExtension(name: string) {
   dropping.value = name;
   try {
     const sql = buildDropExtensionSql(name, false);
-    await api.executeQuery(props.node.connectionId, props.node.database, sql, props.node.schema ?? undefined);
+    const result = await executeWithProductionSqlGuard({
+      connection: connectionStore.getConfig(props.node.connectionId),
+      database: props.node.database,
+      sql,
+      source: t("production.sourceExtension"),
+      execute: () => api.executeQuery(props.node.connectionId!, props.node.database!, sql, props.node.schema ?? undefined),
+    });
+    if (!result) return;
     await loadData();
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
@@ -82,7 +99,7 @@ defineExpose({ show });
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="max-h-[85vh] flex flex-col overflow-hidden sm:max-w-3xl">
+    <DialogContent class="h-[min(760px,calc(100dvh-2rem))] flex flex-col overflow-hidden sm:max-w-3xl">
       <DialogHeader>
         <DialogTitle>{{ t("extension.manageTitle") }}</DialogTitle>
       </DialogHeader>

@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { DBX_ROWID_COLUMN, canEditExistingTableRows, canUseKeylessRowPredicate, editablePrimaryKeys, editableRowIdentifierColumns, isClickHouseExistingRowReadonlyColumn, isTableDataEditable, supportsDataGridTransaction, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
+import {
+  DBX_ROWID_COLUMN,
+  DBX_TDENGINE_TBNAME_COLUMN,
+  canDeleteExistingTdengineRows,
+  canEditExistingTableRows,
+  canUseKeylessRowPredicate,
+  editablePrimaryKeys,
+  editableRowIdentifierColumns,
+  hasCompleteTdengineRowIdentity,
+  isClickHouseExistingRowReadonlyColumn,
+  isTdengineExistingRowReadonlyColumn,
+  isTableDataEditable,
+  supportsDataGridTransaction,
+  usesSyntheticRowIdKey,
+} from "@/lib/table/tableEditing";
 import type { ColumnInfo, IndexInfo } from "@/types/database";
 
 function column(name: string, isPrimaryKey = false): ColumnInfo {
@@ -57,6 +71,31 @@ describe("tableEditing", () => {
     expect(supportsDataGridTransaction("clickhouse")).toBe(false);
     expect(isTableDataEditable("clickhouse", [], "BASE TABLE")).toBe(true);
     expect(canEditExistingTableRows("clickhouse", undefined, [])).toBe(false);
+  });
+
+  it("uses tbname only when editing TDengine stable rows", () => {
+    const columns = [column("ts", true), column("seq", true), column("voltage")];
+    expect(editablePrimaryKeys("tdengine", columns, "STABLE")).toEqual([DBX_TDENGINE_TBNAME_COLUMN, "ts", "seq"]);
+    expect(editablePrimaryKeys("tdengine", columns, "TABLE")).toEqual(["ts", "seq"]);
+    expect(canEditExistingTableRows("tdengine", undefined, ["ts", "seq"])).toBe(true);
+    expect(canEditExistingTableRows("tdengine", undefined, [])).toBe(false);
+    expect(isTdengineExistingRowReadonlyColumn("tdengine", "seq", columns)).toBe(true);
+  });
+
+  it("requires every TDengine row identifier in editable results", () => {
+    const stableKeys = [DBX_TDENGINE_TBNAME_COLUMN, "ts", "seq"];
+    expect(hasCompleteTdengineRowIdentity("tdengine", stableKeys, ["tbname", "ts", "seq", "voltage"])).toBe(true);
+    expect(hasCompleteTdengineRowIdentity("tdengine", stableKeys, ["tbname", "ts", "voltage"])).toBe(false);
+    expect(hasCompleteTdengineRowIdentity("tdengine", ["ts", "seq"], ["ts", "seq", "voltage"])).toBe(true);
+    expect(hasCompleteTdengineRowIdentity("postgres", ["id"], [])).toBe(true);
+  });
+
+  it("disables existing-row deletion for TDengine composite keys", () => {
+    expect(canDeleteExistingTdengineRows("tdengine", ["ts"])).toBe(true);
+    expect(canDeleteExistingTdengineRows("tdengine", [DBX_TDENGINE_TBNAME_COLUMN, "ts"])).toBe(true);
+    expect(canDeleteExistingTdengineRows("tdengine", ["ts", "seq"])).toBe(false);
+    expect(canDeleteExistingTdengineRows("tdengine", [DBX_TDENGINE_TBNAME_COLUMN, "ts", "seq"])).toBe(false);
+    expect(canDeleteExistingTdengineRows("postgres", ["id", "tenant_id"])).toBe(true);
   });
 
   it("treats ClickHouse row identifier cells as readonly on existing rows", () => {

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{Child, ChildStdin};
 use tokio::sync::{oneshot, Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
@@ -389,7 +389,7 @@ impl DuckDbWorkerClient {
                 .map_err(|_| "DuckDB worker process limiter is closed".to_string())?;
 
         log::info!("[duckdb-worker:start] executable={}", self.inner.executable.display());
-        let mut child = Command::new(&self.inner.executable)
+        let mut child = crate::process::new_tokio_command(&self.inner.executable)
             .arg("--duckdb-worker")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

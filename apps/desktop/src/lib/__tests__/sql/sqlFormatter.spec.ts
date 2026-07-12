@@ -9,7 +9,7 @@ describe("sqlFormatter", () => {
   });
 
   it("maps SQLite-compatible database types to the sqlite formatter dialect", () => {
-    for (const dbType of ["sqlite", "rqlite", "turso"]) {
+    for (const dbType of ["sqlite", "rqlite", "turso", "cloudflare-d1"]) {
       expect(sqlFormatDialectForDbType(dbType)).toBe("sqlite");
     }
   });

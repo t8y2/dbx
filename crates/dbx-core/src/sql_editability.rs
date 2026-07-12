@@ -24,6 +24,8 @@ pub struct EditableQueryInfo {
     pub multi_source: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_insert_delete: Option<bool>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub distinct: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,10 +148,19 @@ pub fn analyze_editable_query_editability(sql: &str) -> QueryEditability {
         return not_editable(QueryEditabilityReason::NoTable);
     };
 
-    let select_body = normalized["SELECT".len()..from_index].trim();
-    if starts_with_keyword(select_body, "DISTINCT") {
-        return not_editable(QueryEditabilityReason::Aggregation);
-    }
+    let raw_select_body = normalized["SELECT".len()..from_index].trim();
+    let (select_body, distinct) = if starts_with_keyword(raw_select_body, "DISTINCT") {
+        let body = raw_select_body["DISTINCT".len()..].trim_start();
+        // DISTINCT ON has database-specific row-selection semantics and cannot be
+        // treated as a plain projection whose rows map directly to base records.
+        if starts_with_keyword(body, "ON") {
+            return not_editable(QueryEditabilityReason::Aggregation);
+        }
+        (body, true)
+    } else {
+        (raw_select_body, false)
+    };
+    let select_body = strip_sql_server_top_clause(select_body);
 
     let group_index = find_top_level_keyword(&normalized, "GROUP", from_index + "FROM".len());
     let having_index = find_top_level_keyword(&normalized, "HAVING", from_index + "FROM".len());
@@ -172,12 +183,12 @@ pub fn analyze_editable_query_editability(sql: &str) -> QueryEditability {
     let source = sources[0].clone();
 
     let select_star = sources.len() == 1 && is_select_star(select_body, source.alias.as_deref());
-    if sources.len() > 1 && select_body_contains_star_projection(select_body) {
-        return not_editable(QueryEditabilityReason::ComplexSource);
-    }
     let columns = if select_star { Vec::new() } else { parse_select_columns(select_body, &sources) };
     if !select_star && columns.is_empty() {
         return not_editable(QueryEditabilityReason::ComputedColumns);
+    }
+    if sources.len() > 1 && columns.iter().any(|column| column.star && column.source_key.is_none()) {
+        return not_editable(QueryEditabilityReason::ComplexSource);
     }
 
     let mut analysis = EditableQueryInfo {
@@ -193,7 +204,10 @@ pub fn analyze_editable_query_editability(sql: &str) -> QueryEditability {
         sources: None,
         editable_source_key: None,
         multi_source: false,
-        allow_insert_delete: None,
+        // Updating an identified base row is safe, but insert/delete semantics are
+        // ambiguous when the displayed set is de-duplicated by the query.
+        allow_insert_delete: distinct.then_some(false),
+        distinct,
     };
     if sources.len() > 1 {
         analysis.sources = Some(sources.into_iter().map(EditableQuerySource::from).collect());
@@ -389,6 +403,72 @@ fn strip_leading_as(text: &str) -> Option<&str> {
     }
 }
 
+fn strip_sql_server_top_clause(body: &str) -> &str {
+    let trimmed = body.trim_start();
+    if !starts_with_keyword(trimmed, "TOP") {
+        return trimmed;
+    }
+
+    let mut pos = skip_whitespace(trimmed, "TOP".len());
+    if trimmed[pos..].starts_with('(') {
+        let mut depth = 0i32;
+        let mut quote: Option<char> = None;
+        let mut end = None;
+        for (offset, ch) in trimmed[pos..].char_indices() {
+            if let Some(close) = quote {
+                if ch == close {
+                    quote = None;
+                }
+                continue;
+            }
+            match ch {
+                '\'' | '"' | '`' => quote = Some(ch),
+                '[' => quote = Some(']'),
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(pos + offset + ch.len_utf8());
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else {
+            return trimmed;
+        };
+        pos = end;
+    } else {
+        let number_end = trimmed[pos..]
+            .char_indices()
+            .take_while(|(_, ch)| ch.is_ascii_digit())
+            .last()
+            .map(|(offset, ch)| pos + offset + ch.len_utf8());
+        let Some(end) = number_end else {
+            return trimmed;
+        };
+        pos = end;
+    }
+
+    pos = skip_whitespace(trimmed, pos);
+    if starts_with_keyword_at(trimmed, pos, "PERCENT") {
+        pos = skip_whitespace(trimmed, pos + "PERCENT".len());
+    }
+    if starts_with_keyword_at(trimmed, pos, "WITH") {
+        let ties_pos = skip_whitespace(trimmed, pos + "WITH".len());
+        if starts_with_keyword_at(trimmed, ties_pos, "TIES") {
+            pos = skip_whitespace(trimmed, ties_pos + "TIES".len());
+        }
+    }
+    let remaining = trimmed[pos..].trim_start();
+    if remaining.is_empty() {
+        trimmed
+    } else {
+        remaining
+    }
+}
+
 fn is_select_star(body: &str, alias: Option<&str>) -> bool {
     let trimmed = body.trim();
     if trimmed == "*" {
@@ -489,52 +569,6 @@ fn parse_table_source_at(text: &str, start: usize, index: usize) -> Option<(From
 fn is_external_from_source(body: &str) -> bool {
     let trimmed = body.trim();
     is_single_quoted_source_with_optional_alias(trimmed) || starts_with_table_function(trimmed)
-}
-
-fn select_body_contains_star_projection(body: &str) -> bool {
-    split_top_level_commas(body).iter().any(|item| {
-        let trimmed = item.trim();
-        if trimmed == "*" {
-            return true;
-        }
-        let Some((_, suffix)) = trimmed.split_once('.') else {
-            return false;
-        };
-        suffix.trim() == "*"
-    })
-}
-
-fn split_top_level_commas(body: &str) -> Vec<String> {
-    let mut items = Vec::new();
-    let mut depth = 0i32;
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-    for ch in body.chars() {
-        if let Some(close) = quote {
-            current.push(ch);
-            if ch == close {
-                quote = None;
-            }
-            continue;
-        }
-        match ch {
-            '\'' | '"' | '`' => quote = Some(ch),
-            '[' => quote = Some(']'),
-            '(' => depth += 1,
-            ')' => depth = 0.max(depth - 1),
-            ',' if depth == 0 => {
-                items.push(current);
-                current = String::new();
-                continue;
-            }
-            _ => {}
-        }
-        current.push(ch);
-    }
-    if !current.is_empty() {
-        items.push(current);
-    }
-    items
 }
 
 fn table_source_terminator_at(text: &str, pos: usize) -> bool {
@@ -811,6 +845,24 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_sql_server_top_selects_as_editable() {
+        for sql in [
+            "SELECT TOP 2 name, note FROM dbo.users ORDER BY name",
+            "SELECT TOP(2) name, note FROM dbo.users ORDER BY name",
+            "SELECT TOP (2) name, note FROM dbo.users ORDER BY name",
+            "SELECT TOP 10 PERCENT name, note FROM dbo.users ORDER BY name",
+            "SELECT TOP (2) WITH TIES name, note FROM dbo.users ORDER BY name",
+        ] {
+            let result = analyze_editable_query_editability(sql);
+            assert!(result.editable, "{sql}: {:?}", result.reason);
+            let analysis = result.analysis.unwrap();
+            assert_eq!(analysis.table_name, "users");
+            assert_eq!(analysis.columns[0].source_name.as_deref(), Some("name"));
+            assert_eq!(analysis.columns[1].source_name.as_deref(), Some("note"));
+        }
+    }
+
+    #[test]
     fn recognizes_quoted_table_names_and_aliases() {
         let result =
             analyze_editable_query_editability(r#"SELECT u."id", u."full name" FROM "app schema"."user table" AS u"#);
@@ -853,6 +905,50 @@ mod tests {
                 star_column(Some("t"), Some("t:0"), "t.*"),
             ]
         );
+    }
+
+    #[test]
+    fn recognizes_distinct_single_table_projection_as_update_only() {
+        let result = analyze_editable_query_editability("select distinct id, name from users");
+
+        assert!(result.editable);
+        let analysis = result.analysis.unwrap();
+        assert!(analysis.distinct);
+        assert_eq!(analysis.allow_insert_delete, Some(false));
+        assert_eq!(analysis.columns.len(), 2);
+    }
+
+    #[test]
+    fn recognizes_distinct_qualified_star_from_join() {
+        let result = analyze_editable_query_editability(
+            "select distinct u.* from users u left join orders o on o.user_id = u.id",
+        );
+
+        assert!(result.editable);
+        let analysis = result.analysis.unwrap();
+        assert!(analysis.distinct);
+        assert!(analysis.multi_source);
+        assert_eq!(analysis.allow_insert_delete, Some(false));
+        assert_eq!(analysis.columns, vec![star_column(Some("u"), Some("u:0"), "u.*")]);
+    }
+
+    #[test]
+    fn rejects_unqualified_star_from_join() {
+        let result =
+            analyze_editable_query_editability("select distinct * from users u join orders o on o.user_id = u.id");
+
+        assert!(!result.editable);
+        assert_eq!(result.reason, Some(QueryEditabilityReason::ComplexSource));
+    }
+
+    #[test]
+    fn rejects_distinct_on_projection() {
+        let result = analyze_editable_query_editability(
+            "select distinct on (user_id) id, user_id from orders order by user_id, id desc",
+        );
+
+        assert!(!result.editable);
+        assert_eq!(result.reason, Some(QueryEditabilityReason::Aggregation));
     }
 
     #[test]

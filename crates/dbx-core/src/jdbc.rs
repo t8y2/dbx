@@ -5,7 +5,6 @@ use crate::update::{fetch_latest_release, is_newer_version, JdbcPluginLatest};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use tokio::process::Command;
 
 const JDBC_PLUGIN_DOWNLOAD_URL: &str =
     "https://github.com/t8y2/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip";
@@ -55,6 +54,23 @@ pub struct JdbcMavenArtifactInfo {
     pub sha256: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JdbcLocalBundleInfo {
+    pub id: String,
+    pub name: String,
+    pub installed_at: String,
+    pub path: String,
+    pub artifacts: Vec<JdbcLocalArtifactInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JdbcLocalArtifactInfo {
+    pub file_name: String,
+    pub path: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct JdbcPluginStatus {
     pub installed: bool,
@@ -77,7 +93,15 @@ pub fn list_jdbc_maven_bundles(plugins_root: &Path) -> Result<Vec<JdbcMavenBundl
     list_jdbc_maven_bundles_from_dir(&jdbc_maven_drivers_dir(plugins_root))
 }
 
+pub fn list_jdbc_local_bundles(plugins_root: &Path) -> Result<Vec<JdbcLocalBundleInfo>, String> {
+    list_jdbc_local_bundles_from_dir(&jdbc_local_drivers_dir(plugins_root))
+}
+
 pub fn import_jdbc_drivers(plugins_root: &Path, paths: &[String]) -> Result<Vec<JdbcDriverInfo>, String> {
+    if paths.len() > 1 {
+        install_jdbc_local_bundle(plugins_root, paths)?;
+        return list_jdbc_drivers(plugins_root);
+    }
     let drivers_dir = jdbc_drivers_dir(plugins_root);
     std::fs::create_dir_all(&drivers_dir).map_err(|err| err.to_string())?;
 
@@ -127,6 +151,17 @@ pub fn delete_jdbc_maven_bundle(plugins_root: &Path, bundle_id: &str) -> Result<
     list_jdbc_drivers(plugins_root)
 }
 
+pub fn delete_jdbc_local_bundle(plugins_root: &Path, bundle_id: &str) -> Result<Vec<JdbcDriverInfo>, String> {
+    if !is_safe_bundle_id(bundle_id) {
+        return Err("Invalid JDBC local bundle id".to_string());
+    }
+    let target = jdbc_local_drivers_dir(plugins_root).join(bundle_id);
+    if target.exists() {
+        std::fs::remove_dir_all(&target).map_err(|err| err.to_string())?;
+    }
+    list_jdbc_drivers(plugins_root)
+}
+
 pub async fn install_jdbc_driver_from_maven(
     plugins_root: &Path,
     request: JdbcMavenInstallRequest,
@@ -153,7 +188,7 @@ pub async fn install_jdbc_driver_from_maven(
     let local_repo = plugin_dir.join("maven-cache");
     std::fs::create_dir_all(&local_repo).map_err(|err| err.to_string())?;
 
-    let mut command = Command::new(&resolver);
+    let mut command = crate::process::new_tokio_command(&resolver);
     env.apply_to(&mut command);
     command.arg("resolve").arg("--coordinate").arg(&coordinate).arg("--local-repo").arg(&local_repo);
     for repo in &repositories {
@@ -308,6 +343,10 @@ fn jdbc_drivers_dir(plugins_root: &Path) -> PathBuf {
 
 fn jdbc_maven_drivers_dir(plugins_root: &Path) -> PathBuf {
     jdbc_drivers_dir(plugins_root).join("maven")
+}
+
+fn jdbc_local_drivers_dir(plugins_root: &Path) -> PathBuf {
+    jdbc_drivers_dir(plugins_root).join("local")
 }
 
 fn jdbc_maven_resolver_executable(plugin_dir: &Path) -> PathBuf {
@@ -505,9 +544,14 @@ fn list_jdbc_drivers_from_dir(drivers_dir: &Path) -> Result<Vec<JdbcDriverInfo>,
     for entry in entries {
         let entry = entry.map_err(|err| err.to_string())?;
         let path = entry.path();
-        if path.file_name().and_then(|name| name.to_str()) == Some("maven") && path.is_dir() {
-            append_jdbc_maven_driver_jars(&mut drivers, &path)?;
-            continue;
+        if path.is_dir() {
+            match path.file_name().and_then(|name| name.to_str()) {
+                Some("maven") | Some("local") => {
+                    append_jdbc_bundle_jars(&mut drivers, &path)?;
+                    continue;
+                }
+                _ => {}
+            }
         }
         if path.extension().and_then(|ext| ext.to_str()).map(|ext| ext.eq_ignore_ascii_case("jar")) != Some(true) {
             continue;
@@ -524,8 +568,8 @@ fn list_jdbc_drivers_from_dir(drivers_dir: &Path) -> Result<Vec<JdbcDriverInfo>,
     Ok(drivers)
 }
 
-fn append_jdbc_maven_driver_jars(drivers: &mut Vec<JdbcDriverInfo>, maven_dir: &Path) -> Result<(), String> {
-    let entries = match std::fs::read_dir(maven_dir) {
+fn append_jdbc_bundle_jars(drivers: &mut Vec<JdbcDriverInfo>, bundles_dir: &Path) -> Result<(), String> {
+    let entries = match std::fs::read_dir(bundles_dir) {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(err) => return Err(err.to_string()),
@@ -559,6 +603,86 @@ fn append_jdbc_maven_driver_jars(drivers: &mut Vec<JdbcDriverInfo>, maven_dir: &
         }
     }
     Ok(())
+}
+
+fn list_jdbc_local_bundles_from_dir(local_dir: &Path) -> Result<Vec<JdbcLocalBundleInfo>, String> {
+    let entries = match std::fs::read_dir(local_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(err) => return Err(err.to_string()),
+    };
+    let mut bundles = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let manifest_path = entry.path().join("manifest.json");
+        if !manifest_path.exists() {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&manifest_path).map_err(|err| err.to_string())?;
+        bundles.push(serde_json::from_str::<JdbcLocalBundleInfo>(&raw).map_err(|err| err.to_string())?);
+    }
+    bundles.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(bundles)
+}
+
+fn install_jdbc_local_bundle(plugins_root: &Path, paths: &[String]) -> Result<(), String> {
+    let sources = paths
+        .iter()
+        .map(PathBuf::from)
+        .map(|source| {
+            if !source.exists() {
+                return Err(format!("Driver JAR does not exist: {}", source.display()));
+            }
+            if source.extension().and_then(|ext| ext.to_str()).map(|ext| ext.eq_ignore_ascii_case("jar")) != Some(true)
+            {
+                return Err(format!("Only .jar files can be imported: {}", source.display()));
+            }
+            Ok(source)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let name = sources
+        .first()
+        .and_then(|path| path.file_stem())
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("JDBC driver")
+        .to_string();
+    let bundle_id = format!("local-{}", uuid::Uuid::new_v4().simple());
+    let bundle_dir = jdbc_local_drivers_dir(plugins_root).join(&bundle_id);
+    let temp_dir = bundle_dir.with_extension("tmp");
+    std::fs::create_dir_all(temp_dir.join("jars")).map_err(|err| err.to_string())?;
+
+    let mut artifacts = Vec::with_capacity(sources.len());
+    for source in sources {
+        let file_name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("Invalid driver file path: {}", source.display()))?;
+        let target = unique_target_path(&temp_dir.join("jars"), file_name);
+        std::fs::copy(&source, &target)
+            .map_err(|err| format!("Failed to import {} to {}: {err}", source.display(), target.display()))?;
+        let metadata = std::fs::metadata(&target).map_err(|err| err.to_string())?;
+        let final_path = bundle_dir.join("jars").join(target.file_name().unwrap_or_default());
+        artifacts.push(JdbcLocalArtifactInfo {
+            file_name: target.file_name().and_then(|value| value.to_str()).unwrap_or(file_name).to_string(),
+            path: final_path.to_string_lossy().to_string(),
+            size: metadata.len(),
+            sha256: file_sha256(&target)?,
+        });
+    }
+    let manifest = JdbcLocalBundleInfo {
+        id: bundle_id,
+        name,
+        installed_at: chrono::Utc::now().to_rfc3339(),
+        path: bundle_dir.to_string_lossy().to_string(),
+        artifacts,
+    };
+    std::fs::write(
+        temp_dir.join("manifest.json"),
+        serde_json::to_string_pretty(&manifest).map_err(|err| err.to_string())?,
+    )
+    .map_err(|err| err.to_string())?;
+    std::fs::rename(&temp_dir, &bundle_dir).map_err(|err| err.to_string())
 }
 
 fn list_jdbc_maven_bundles_from_dir(maven_dir: &Path) -> Result<Vec<JdbcMavenBundleInfo>, String> {
@@ -817,6 +941,48 @@ mod tests {
         );
         assert!(is_safe_bundle_id("org.apache.hive_hive-jdbc_4.0.1_standalone"));
         assert!(!is_safe_bundle_id("../hive"));
+    }
+
+    #[test]
+    fn multiple_local_jars_are_imported_as_one_bundle() {
+        let root = std::env::temp_dir().join(format!("dbx-jdbc-local-bundle-test-{}", uuid::Uuid::new_v4()));
+        let source_dir = root.join("source");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let driver = source_dir.join("vendor-driver.jar");
+        let dependency = source_dir.join("vendor-codec.jar");
+        std::fs::write(&driver, b"driver").unwrap();
+        std::fs::write(&dependency, b"dependency").unwrap();
+
+        let paths = vec![driver.to_string_lossy().to_string(), dependency.to_string_lossy().to_string()];
+        let drivers = import_jdbc_drivers(&root, &paths).unwrap();
+        let bundles = list_jdbc_local_bundles(&root).unwrap();
+
+        assert_eq!(bundles.len(), 1);
+        assert_eq!(bundles[0].name, "vendor-driver");
+        assert_eq!(bundles[0].artifacts.len(), 2);
+        assert_eq!(drivers.len(), 2);
+        assert!(drivers.iter().all(|item| item.bundle_id.as_deref() == Some(bundles[0].id.as_str())));
+
+        let remaining = delete_jdbc_local_bundle(&root, &bundles[0].id).unwrap();
+        assert!(remaining.is_empty());
+        assert!(list_jdbc_local_bundles(&root).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn single_local_jar_keeps_legacy_standalone_behavior() {
+        let root = std::env::temp_dir().join(format!("dbx-jdbc-single-jar-test-{}", uuid::Uuid::new_v4()));
+        let source = root.join("source").join("standalone.jar");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"driver").unwrap();
+
+        let drivers = import_jdbc_drivers(&root, &[source.to_string_lossy().to_string()]).unwrap();
+
+        assert_eq!(drivers.len(), 1);
+        assert_eq!(drivers[0].name, "standalone.jar");
+        assert_eq!(drivers[0].bundle_id, None);
+        assert!(list_jdbc_local_bundles(&root).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { buildMongoCopyInsertDocument, buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, parseMongoDocumentInputValue } from "../../apps/desktop/src/lib/mongo/mongoDocumentValues.ts";
+import { applyMongoGridChangesToDocument, buildMongoCopyInsertDocument, buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, parseMongoDocumentInputValue } from "../../apps/desktop/src/lib/mongo/mongoDocumentValues.ts";
 
 test("parses Mongo shell ISODate literals as extended JSON dates", () => {
   assert.deepEqual(parseMongoDocumentInputValue('ISODate("2026-06-10T13:59:31.287Z")'), {
@@ -33,6 +33,32 @@ test("builds Mongo grid updates with set and unset operators", () => {
     $unset: {
       archivedAt: "",
     },
+  });
+});
+
+test("applies saved Mongo grid changes to the raw preview document", () => {
+  const original = {
+    _id: "1",
+    name: "Ada",
+    profile: { role: "admin" },
+    archivedAt: "2026-01-01",
+  };
+  const changes = new Map<number, string | number | boolean | null>([
+    [1, "Lin"],
+    [2, '{"role":"maintainer"}'],
+    [3, null],
+  ]);
+
+  assert.deepEqual(applyMongoGridChangesToDocument(original, changes, ["_id", "name", "profile", "archivedAt"]), {
+    _id: "1",
+    name: "Lin",
+    profile: { role: "maintainer" },
+  });
+  assert.deepEqual(original, {
+    _id: "1",
+    name: "Ada",
+    profile: { role: "admin" },
+    archivedAt: "2026-01-01",
   });
 });
 

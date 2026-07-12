@@ -14,6 +14,7 @@ const assetIcons: Record<string, string> = {
   sqlite: "sqlite",
   rqlite: "rqlite.png",
   turso: "turso.png",
+  cloudflare_d1: "cloudflare-d1",
   redis: "redis",
   mongodb: "mongodb",
   mongodb_legacy: "mongodb",

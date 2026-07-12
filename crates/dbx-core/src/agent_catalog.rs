@@ -36,6 +36,9 @@ const MONGODB_PROFILES: &[AgentDriverProfile] = &[AgentDriverProfile {
     store_visible: false,
 }];
 
+const H2_PROFILES: &[AgentDriverProfile] =
+    &[AgentDriverProfile { profile: "h2-legacy", key: "h2-legacy", label: "H2 2.1 Legacy", store_visible: true }];
+
 const EXTRA_AGENT_LABELS: &[(&str, &str)] =
     &[("kafka", "Apache Kafka"), ("sqlserver-legacy", "SQL Server legacy compatibility component")];
 const EXTRA_DRIVER_STORE_ENTRIES: &[(&str, &str)] =
@@ -154,7 +157,7 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
         store_visible: true,
         profiles: ORACLE_PROFILES,
     },
-    AgentCatalogEntry { db_type: DatabaseType::H2, key: "h2", label: "H2", store_visible: true, profiles: &[] },
+    AgentCatalogEntry { db_type: DatabaseType::H2, key: "h2", label: "H2", store_visible: true, profiles: H2_PROFILES },
     AgentCatalogEntry {
         db_type: DatabaseType::Snowflake,
         key: "snowflake",
@@ -352,4 +355,17 @@ pub fn label_for_key(agent_key: &str) -> Option<&'static str> {
 
 fn entry_for_db_type(db_type: &DatabaseType) -> Option<&'static AgentCatalogEntry> {
     entries().iter().find(|entry| entry.db_type == *db_type)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn h2_legacy_profile_uses_separate_agent() {
+        assert_eq!(agent_key(&DatabaseType::H2, None), Some("h2"));
+        assert_eq!(agent_key(&DatabaseType::H2, Some("h2")), Some("h2"));
+        assert_eq!(agent_key(&DatabaseType::H2, Some("h2-legacy")), Some("h2-legacy"));
+        assert!(driver_store_entries().any(|(key, label)| key == "h2-legacy" && label == "H2 2.1 Legacy"));
+    }
 }

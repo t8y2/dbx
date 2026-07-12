@@ -97,8 +97,8 @@ test("data reload executes before slow metadata refresh completes", async () => 
     const actions = useDataGridActions(computed(() => tab));
     const reload = actions.onReloadData(undefined, undefined, undefined, undefined, 50, 0);
 
-    await waitFor(() => !!executeBody);
-    assert.equal(executeBody.clientSessionId, undefined);
+    await waitFor(() => !!executeBody, 5_000);
+    assert.equal(executeBody.clientSessionId, tabId);
     assert.deepEqual(tab.result?.rows, [[1]]);
 
     await waitFor(() => typeof resolveColumns === "function");
@@ -167,6 +167,67 @@ test("data reload preserves current page offset instead of resetting to page 1",
     assert.equal(tab.resultPageOffset, 400, "resultPageOffset must be 400 after reload to keep DataGrid on page 5");
   } finally {
     globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("query toolbar refresh reruns the complete multi-result SQL and keeps the active result", async () => {
+  const restoreStorage = installMemoryStorage();
+  const { useDataGridActions } = await import("../../apps/desktop/src/composables/useDataGridActions.ts");
+
+  try {
+    setActivePinia(createPinia());
+    const queryStore = useQueryStore();
+    const tabId = queryStore.createTab("mysql-1", "app", "query", "query");
+    const tab = queryStore.tabs.find((item) => item.id === tabId);
+    assert.ok(tab);
+
+    const batchSql = "select * from users; select * from orders";
+    const refreshedResults = [
+      { columns: ["id"], rows: [[11]], affected_rows: 0, execution_time_ms: 1, sourceStatement: "select * from users" },
+      { columns: ["id"], rows: [[22]], affected_rows: 0, execution_time_ms: 1, sourceStatement: "select * from orders" },
+    ];
+    tab.sql = batchSql;
+    tab.lastExecutedSql = batchSql;
+    tab.resultBaseSql = batchSql;
+    tab.results = refreshedResults.map((result) => ({ ...result, rows: result.rows.map((row) => [...row]) }));
+    tab.activeResultIndex = 1;
+    tab.result = tab.results[1];
+    tab.resultSortColumn = "id";
+    tab.resultSortColumnIndex = 0;
+    tab.resultSortDirection = "desc";
+    tab.resultSortMode = "database";
+    tab.resultSortedSql = "select * from orders order by id desc";
+
+    const executeTabSql = vi.spyOn(queryStore, "executeTabSql").mockImplementation(async (_tabId, _sql, options) => {
+      assert.equal(tab.resultSortColumn, undefined);
+      assert.equal(tab.resultSortColumnIndex, undefined);
+      assert.equal(tab.resultSortDirection, undefined);
+      assert.equal(tab.resultSortMode, undefined);
+      assert.equal(tab.resultSortedSql, undefined);
+      tab.results = refreshedResults;
+      if (!options?.preserveActiveResultIndex) tab.activeResultIndex = 0;
+      tab.result = refreshedResults[tab.activeResultIndex ?? 0];
+    });
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onReloadData("select * from orders", undefined, undefined, undefined, 100, 0, "refresh");
+    await actions.onReloadData("select * from orders", undefined, undefined, undefined, 100, 0, "refresh");
+
+    assert.equal(executeTabSql.mock.calls.length, 2);
+    for (const call of executeTabSql.mock.calls) {
+      assert.equal(call[1], batchSql);
+      assert.deepEqual(call[2], {
+        resultBaseSql: batchSql,
+        resultSortedSql: undefined,
+        preserveResultDuringExecution: true,
+        preserveActiveResultIndex: true,
+      });
+    }
+    assert.equal(tab.results?.length, 2);
+    assert.equal(tab.activeResultIndex, 1);
+    assert.deepEqual(tab.result, refreshedResults[1]);
+  } finally {
     restoreStorage();
   }
 });

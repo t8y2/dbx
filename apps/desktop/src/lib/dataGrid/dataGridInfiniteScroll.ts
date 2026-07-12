@@ -25,3 +25,12 @@ export function shouldCheckInfiniteScrollAfterScroll(previous: DataGridScrollPos
 export function isDataGridNearScrollBottom(metrics: DataGridScrollMetrics, threshold = 100): boolean {
   return metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight < threshold;
 }
+
+export function isDataGridAtScrollBottom(metrics: DataGridScrollMetrics, tolerance = 1): boolean {
+  const maxScrollTop = Math.max(0, metrics.scrollHeight - metrics.clientHeight);
+  return maxScrollTop - metrics.scrollTop <= tolerance;
+}
+
+export function dataGridBottomScrollTop(metrics: Pick<DataGridScrollMetrics, "scrollHeight" | "clientHeight">): number {
+  return Math.max(0, metrics.scrollHeight - metrics.clientHeight);
+}

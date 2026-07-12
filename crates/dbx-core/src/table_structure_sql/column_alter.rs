@@ -1,4 +1,4 @@
-use super::column_format::{clickhouse_column_type, column_data_type, column_definition};
+use super::column_format::{clickhouse_column_type, column_data_type, column_definition, is_mysql_character_data_type};
 use super::columns::build_drop_column_sql;
 use super::comments::build_sqlserver_column_comment_sql;
 use super::dialect::{capabilities_for, database_label, StructureDialect};
@@ -54,7 +54,10 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
     let has_attribute_change = options.column.data_type.trim() != original.data_type.trim()
         || options.column.is_nullable != original.is_nullable
         || normalize_default(Some(&options.column.default_value)) != original_default(&options.column)
-        || clean(&options.column.comment) != original_comment(&options.column);
+        || clean(&options.column.comment) != original_comment(&options.column)
+        || (is_mysql_character_data_type(&options.column.data_type)
+            && (options.column.character_set.trim() != original.character_set.as_deref().unwrap_or("")
+                || options.column.collation.trim() != original.collation.as_deref().unwrap_or("")));
 
     if has_rename && !capabilities.rename_column {
         warnings.push(format!("Renaming columns is not supported for {database_label} from this editor."));
@@ -73,7 +76,7 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
         StructureDialect::Mysql => statements.extend(build_mysql_existing_column_sql(&table, &options.column, "")),
         StructureDialect::Doris => statements.extend(build_doris_existing_column_sql(&table, &options.column, "")),
         StructureDialect::Postgres => statements.extend(build_postgres_existing_column_sql(&table, &options.column)),
-        StructureDialect::Oracle => {
+        StructureDialect::Oracle | StructureDialect::Dameng => {
             statements.extend(build_oracle_like_existing_column_sql(dialect, &table, &options.column))
         }
         StructureDialect::H2 => statements.extend(build_h2_existing_column_sql(&table, &options.column)),
@@ -727,4 +730,7 @@ pub(super) fn has_existing_column_attribute_change(column: &EditableStructureCol
         || column.is_nullable != original.is_nullable
         || normalize_default(Some(&column.default_value)) != original_default(column)
         || clean(&column.comment) != original_comment(column)
+        || (is_mysql_character_data_type(&column.data_type)
+            && (column.character_set.trim() != original.character_set.as_deref().unwrap_or("")
+                || column.collation.trim() != original.collation.as_deref().unwrap_or("")))
 }

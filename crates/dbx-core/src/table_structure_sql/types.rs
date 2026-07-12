@@ -23,6 +23,10 @@ pub struct EditableStructureColumn {
     pub original_position: Option<usize>,
     #[serde(default)]
     pub marked_for_drop: bool,
+    #[serde(default)]
+    pub character_set: String,
+    #[serde(default)]
+    pub collation: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -55,7 +59,7 @@ pub struct ColumnIdentity {
     pub increment: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ColumnInfo {
     pub name: String,
     pub data_type: String,
@@ -67,6 +71,10 @@ pub struct ColumnInfo {
     pub extra: Option<String>,
     #[serde(default)]
     pub comment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character_set: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collation: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -203,6 +211,14 @@ pub struct TableStructureSqlOptions {
 pub struct TableStructureSqlResult {
     pub statements: Vec<String>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqliteTableStructurePreview {
+    pub statements: Vec<String>,
+    pub warnings: Vec<String>,
+    pub schema_revision: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

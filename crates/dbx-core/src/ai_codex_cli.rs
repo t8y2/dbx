@@ -11,7 +11,6 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Instant;
-use tokio::process::Command;
 use tokio::sync::Notify;
 
 const DEFAULT_CODEX_MODELS: &[&str] = &["default", "gpt-5.5", "gpt-5.4-mini"];
@@ -186,7 +185,7 @@ fn program_path_candidates(dir: &Path, program: &str) -> Vec<PathBuf> {
 #[cfg(not(windows))]
 async fn shell_program_path(program: &str) -> Option<String> {
     let script = shell_resolve_script(program);
-    let mut command = Command::new(user_shell());
+    let mut command = cli_command(user_shell());
     command.args(user_shell_args(&script));
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     let output = command.output().await.ok()?;
@@ -204,7 +203,7 @@ async fn shell_program_path(program: &str) -> Option<String> {
 #[cfg(windows)]
 async fn shell_program_path(program: &str) -> Option<String> {
     let script = format!("(Get-Command -All {} -ErrorAction SilentlyContinue).Source", windows_shell_quote(program));
-    let mut command = Command::new("powershell.exe");
+    let mut command = cli_command("powershell.exe");
     command.args(["-NoProfile", "-Command", &script]);
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     let output = command.output().await.ok()?;
@@ -434,8 +433,8 @@ pub fn build_codex_exec_command(config: &AiConfig, _prompt: &str, options: &Code
     CodexCommandSpec { program: codex_program(config), args }
 }
 
-pub fn build_codex_prompt(system_prompt: &str, messages: &[crate::ai::AiMessage]) -> String {
-    build_cli_agent_prompt("Codex", system_prompt, messages)
+pub fn build_codex_prompt(system_prompt: &str, messages: &[crate::ai::AiMessage], allow_write_sql: bool) -> String {
+    build_cli_agent_prompt("Codex", system_prompt, messages, allow_write_sql)
 }
 
 pub async fn list_codex_models(config: &AiConfig) -> Result<Vec<AiModelInfo>, String> {
@@ -623,6 +622,8 @@ mod tests {
             connection_name: "local".to_string(),
             database: "demo".to_string(),
             agent_mode: true,
+            allow_writes: false,
+            allow_dangerous: false,
             mcp_server_command: None,
         }
     }
@@ -640,6 +641,7 @@ mod tests {
         assert!(spec.args.contains(&"mcp_servers.dbx.command=\"dbx-mcp-server\"".to_string()));
         assert!(spec.args.contains(&"mcp_servers.dbx.default_tools_approval_mode=\"approve\"".to_string()));
         assert!(spec.args.contains(&"mcp_servers.dbx.env.DBX_MCP_ALLOW_WRITES=\"0\"".to_string()));
+        assert!(spec.args.contains(&"mcp_servers.dbx.env.DBX_MCP_ALLOW_DANGEROUS_SQL=\"0\"".to_string()));
         assert!(spec.args.contains(&"mcp_servers.dbx.env.DBX_MCP_SCOPE_CONNECTION_ID=\"conn-1\"".to_string()));
         assert!(spec.args.iter().any(|arg| arg.contains("dbx_execute_query")));
     }

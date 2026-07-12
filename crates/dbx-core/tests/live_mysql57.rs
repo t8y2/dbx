@@ -3,10 +3,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use dbx_core::connection::AppState;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
-use dbx_core::query::execute_sql_statement;
+use dbx_core::query::{execute_multi_core, execute_sql_statement};
 use dbx_core::query_result_export::{export_query_result_core, ExportStatus, QueryResultExportRequest};
 use dbx_core::sql::{split_sql_statements_for_database, SqlFileRequest};
-use dbx_core::sql_file_import::execute_sql_file_content;
+use dbx_core::sql_file_import::execute_sql_file_path;
 use dbx_core::storage::Storage;
 use dbx_core::table_import::parse_xlsx_file;
 use tokio_util::sync::CancellationToken;
@@ -383,6 +383,76 @@ async fn live_mysql_recovers_after_server_idle_disconnect() {
 
 #[tokio::test]
 #[ignore = "requires DBX_LIVE_SQL_FILE_MYSQL_* env vars pointing at a writable MySQL connection without a required default database"]
+async fn live_mysql_multi_statement_stops_after_first_error() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let connection_id = format!("live-mysql-multi-stop-{suffix}");
+    let config = live_mysql_sql_file_config(&connection_id);
+    let (state, db_path) = app_state_with_config(config.clone()).await;
+    let database_name = format!("dbx_issue_2783_{suffix}");
+    let table_name = "statement_order";
+    let script = format!(
+        "INSERT INTO `{table_name}` (id, label) VALUES (1, 'first');\n\
+         INSERT INTO `{table_name}` (id, label) VALUES (1, 'duplicate');\n\
+         INSERT INTO `{table_name}` (id, label) VALUES (2, 'must-not-run');"
+    );
+
+    let result = async {
+        let _ = execute_sql_statement(
+            &state,
+            &config.id,
+            "",
+            &format!("DROP DATABASE IF EXISTS `{database_name}`"),
+            None,
+            None,
+        )
+        .await;
+        execute_sql_statement(&state, &config.id, "", &format!("CREATE DATABASE `{database_name}`"), None, None)
+            .await?;
+        execute_sql_statement(
+            &state,
+            &config.id,
+            &database_name,
+            &format!("CREATE TABLE `{table_name}` (id INT PRIMARY KEY, label VARCHAR(32) NOT NULL)"),
+            None,
+            None,
+        )
+        .await?;
+
+        let results = execute_multi_core(&state, &config.id, &database_name, &script, None, None).await?;
+        let rows = execute_sql_statement(
+            &state,
+            &config.id,
+            &database_name,
+            &format!("SELECT id, label FROM `{table_name}` ORDER BY id"),
+            None,
+            None,
+        )
+        .await?;
+        Ok::<_, String>((results, rows))
+    }
+    .await;
+
+    let _ = execute_sql_statement(
+        &state,
+        &config.id,
+        "",
+        &format!("DROP DATABASE IF EXISTS `{database_name}`"),
+        None,
+        None,
+    )
+    .await;
+    let _ = std::fs::remove_file(db_path);
+
+    let (results, rows) = result.expect("multi-statement execution should return the first failure");
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].affected_rows, 1);
+    assert_eq!(results[1].columns, vec!["Error"]);
+    assert_eq!(rows.columns, vec!["id", "label"]);
+    assert_eq!(rows.rows, vec![vec![serde_json::json!("1"), serde_json::json!("first")]]);
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQL_FILE_MYSQL_* env vars pointing at a writable MySQL connection without a required default database"]
 async fn live_sql_file_import_creates_database_and_switches_context_without_default_database() {
     let config = live_mysql_sql_file_config("sql-file-import");
     let (state, db_path) = app_state_with_config(config.clone()).await;
@@ -402,7 +472,10 @@ INSERT INTO install_check (id) VALUES (1), (2);
         execution_id: format!("exec-{suffix}"),
         connection_id: config.id.clone(),
         database: String::new(),
-        file_path: "issue-2356-mysql-install.sql".to_string(),
+        file_path: std::env::temp_dir()
+            .join(format!("issue-2356-mysql-install-{suffix}.sql"))
+            .to_string_lossy()
+            .into_owned(),
         continue_on_error: false,
     };
 
@@ -416,10 +489,11 @@ INSERT INTO install_check (id) VALUES (1), (2);
     )
     .await;
 
-    let result = execute_sql_file_content(
+    tokio::fs::write(&request.file_path, &script).await.unwrap();
+    let result = execute_sql_file_path(
         &state,
         &request,
-        &script,
+        std::path::Path::new(&request.file_path),
         CancellationToken::new(),
         std::time::Instant::now(),
         |_| {},
@@ -444,6 +518,7 @@ INSERT INTO install_check (id) VALUES (1), (2);
     )
     .await;
     let _ = std::fs::remove_file(db_path);
+    let _ = std::fs::remove_file(&request.file_path);
 
     result.expect("SQL file import should succeed");
     let verify = verify.expect("verify imported rows");

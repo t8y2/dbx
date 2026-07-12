@@ -30,6 +30,7 @@ export function sqlFormatDialectForDbType(dbType: string | null | undefined): Sq
     case "sqlite":
     case "rqlite":
     case "turso":
+    case "cloudflare-d1":
       return "sqlite";
     case "sqlserver":
       return "sqlserver";

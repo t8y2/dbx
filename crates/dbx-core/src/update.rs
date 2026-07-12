@@ -113,7 +113,7 @@ pub fn system_proxy_url() -> Option<String> {
 
 #[cfg(target_os = "macos")]
 fn system_proxy_url_from_platform() -> Option<String> {
-    let output = std::process::Command::new("scutil").arg("--proxy").output().ok()?;
+    let output = crate::process::new_std_command("scutil").arg("--proxy").output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -123,20 +123,11 @@ fn system_proxy_url_from_platform() -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn system_proxy_url_from_platform() -> Option<String> {
-    use std::os::windows::process::CommandExt;
-
     let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings";
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-    let proxy_enable = std::process::Command::new("reg")
-        .args(["query", key, "/v", "ProxyEnable"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .ok()?;
-    let proxy_server = std::process::Command::new("reg")
-        .args(["query", key, "/v", "ProxyServer"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .ok()?;
+    let proxy_enable =
+        crate::process::new_std_command("reg").args(["query", key, "/v", "ProxyEnable"]).output().ok()?;
+    let proxy_server =
+        crate::process::new_std_command("reg").args(["query", key, "/v", "ProxyServer"]).output().ok()?;
     if !proxy_enable.status.success() || !proxy_server.status.success() {
         return None;
     }

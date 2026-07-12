@@ -150,6 +150,13 @@ export async function removeConnection(name: string): Promise<boolean> {
   return true;
 }
 
+export async function removeConnectionById(id: string): Promise<boolean> {
+  const connection = await loadConnections().then((cs) => cs.find((c) => c.id === id));
+  if (!connection) return false;
+  await apiFetch(`/api/connection/delete?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+  return true;
+}
+
 async function ensureConnected(config: ConnectionConfig): Promise<void> {
   await apiFetch("/api/connection/connect", {
     method: "POST",
@@ -368,6 +375,7 @@ async function executeMongoWrite(config: ConnectionConfig, command: MongoWriteCo
         filterJson: command.filter,
         updateJson: command.update,
         many: command.many,
+        optionsJson: command.options,
       }),
     });
     const result = (await res.json()) as { affected_rows: number };

@@ -1,0 +1,125 @@
+import { createPinia, setActivePinia } from "pinia";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const mocks = vi.hoisted(() => ({
+  analyzeEditableQueryEditability: vi.fn(),
+  closeClientConnectionSession: vi.fn(),
+  closeQuerySession: vi.fn(),
+  executeMulti: vi.fn(),
+  getConnectionConfig: vi.fn(),
+  prepareQueryPaginationExecutionPlan: vi.fn(),
+  saveOpenTabsState: vi.fn(),
+}));
+
+vi.mock("@/lib/backend/api", () => ({
+  analyzeEditableQueryEditability: mocks.analyzeEditableQueryEditability,
+  closeClientConnectionSession: mocks.closeClientConnectionSession,
+  closeQuerySession: mocks.closeQuerySession,
+  executeMulti: mocks.executeMulti,
+  prepareQueryPaginationExecutionPlan: mocks.prepareQueryPaginationExecutionPlan,
+  saveOpenTabsState: mocks.saveOpenTabsState,
+}));
+
+vi.mock("@/stores/connectionStore", () => ({
+  useConnectionStore: () => ({
+    ensureConnected: vi.fn().mockResolvedValue(undefined),
+    getConfig: mocks.getConnectionConfig,
+    recordConnectionLostError: vi.fn(),
+  }),
+}));
+
+vi.mock("@/stores/settingsStore", () => ({
+  useSettingsStore: () => ({
+    editorSettings: { autoCalculateTotalRows: false, pageSize: 100 },
+  }),
+}));
+
+function installLocalStorage() {
+  const data = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: vi.fn((key: string) => data.get(key) ?? null),
+    setItem: vi.fn((key: string, value: string) => data.set(key, value)),
+    removeItem: vi.fn((key: string) => data.delete(key)),
+  });
+}
+
+describe("queryStore multi-statement errors", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.unstubAllGlobals();
+    installLocalStorage();
+    setActivePinia(createPinia());
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "mysql-1",
+      name: "MySQL",
+      db_type: "mysql",
+      database: "app",
+      query_timeout_secs: 30,
+    });
+    mocks.prepareQueryPaginationExecutionPlan.mockImplementation(async (options) => ({
+      sqlToExecute: options.sql,
+      pageSql: undefined,
+      pageLimit: undefined,
+      pageOffset: undefined,
+      countSql: undefined,
+      useAgentResultSession: false,
+    }));
+    mocks.analyzeEditableQueryEditability.mockResolvedValue({ editable: false, reason: "multiple-statements" });
+  });
+
+  it("opens the first error result from a mixed result batch", async () => {
+    mocks.executeMulti.mockResolvedValue([
+      { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 },
+      { columns: ["Error"], execution_error: true, rows: [["no such table: missing"]], affected_rows: 0, execution_time_ms: 1 },
+    ]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+
+    await store.executeTabSql(tabId, "SELECT 1 AS value; SELECT * FROM missing");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.activeResultIndex).toBe(1);
+    expect(tab.result?.columns).toEqual(["Error"]);
+  });
+
+  it("does not promote an unmarked Error alias without type metadata as a batch failure", async () => {
+    mocks.executeMulti.mockResolvedValue([
+      { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 },
+      { columns: ["Error"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 },
+    ]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+
+    await store.executeTabSql(tabId, "SELECT 1 AS value; SELECT 2 AS Error");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.activeResultIndex).toBe(0);
+    expect(tab.result?.columns).toEqual(["value"]);
+  });
+
+  it("does not apply the MySQL result heuristic to a JDBC MySQL dialect", async () => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "mysql-1",
+      name: "JDBC MySQL",
+      db_type: "jdbc",
+      connection_string: "jdbc:mysql://localhost:3306/app",
+      database: "app",
+      query_timeout_secs: 30,
+    });
+    mocks.executeMulti.mockResolvedValue([
+      { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 },
+      { columns: ["Error"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 },
+    ]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+
+    await store.executeTabSql(tabId, "SELECT 1 AS value; SELECT 2 AS Error");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.activeResultIndex).toBe(0);
+    expect(tab.result?.columns).toEqual(["value"]);
+  });
+});

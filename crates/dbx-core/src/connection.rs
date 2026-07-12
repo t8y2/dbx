@@ -23,6 +23,7 @@ use crate::db::proxy_tunnel::ProxyTunnelManager;
 use crate::db::ssh_tunnel::TunnelManager;
 use crate::models::connection::{
     parse_jdbc_host_port, parse_mongo_first_host, rewrite_jdbc_url_host, ConnectionConfig, DatabaseType,
+    TransportLayerConfig,
 };
 use crate::path_utils::expand_tilde;
 use crate::plugins::{PluginDriverSession, PluginRegistry, PluginRuntimeEnv};
@@ -37,6 +38,7 @@ const SQLSERVER_LEGACY_DRIVER_INSTALL_HINT: &str =
 const DEFAULT_AGENT_CONNECT_TIMEOUT_SECS: u64 = 30;
 const ACCESS_AGENT_CONNECT_TIMEOUT_SECS: u64 = 30;
 const POOL_CLOSE_TIMEOUT_SECS: u64 = 3;
+const HEALTH_CHECK_POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[cfg(feature = "duckdb-bundled")]
 mod duckdb_types {
@@ -84,6 +86,7 @@ pub enum PoolKind {
     Sqlite(db::sqlite::SqliteHandle),
     Rqlite(db::rqlite_driver::RqliteClient),
     Turso(db::turso_driver::TursoClient),
+    CloudflareD1(db::cloudflare_d1_driver::CloudflareD1Client),
     Redis(db::redis_driver::RedisConnection),
     DuckDb(DuckDbHandle),
     DuckDbWorker(DuckDbWorkerHandle),
@@ -189,6 +192,7 @@ pub struct AppState {
 }
 
 #[derive(Clone, Copy)]
+#[cfg_attr(not(test), allow(dead_code))]
 struct PoolActivity {
     last_used_at: Instant,
 }
@@ -241,7 +245,11 @@ pub fn database_connection_config(config: &ConnectionConfig, database: Option<&s
     if let Some(db) = database {
         if !matches!(
             db_config.db_type,
-            DatabaseType::Oracle | DatabaseType::Dameng | DatabaseType::MongoDb | DatabaseType::OceanbaseOracle
+            DatabaseType::Oracle
+                | DatabaseType::Dameng
+                | DatabaseType::MongoDb
+                | DatabaseType::OceanbaseOracle
+                | DatabaseType::CloudflareD1
         ) {
             db_config.database = Some(db.to_string());
         }
@@ -831,61 +839,31 @@ impl AppState {
 
     async fn start_keepalive_task(&self, pool_key: &str, pool: &PoolKind, config: &ConnectionConfig) {
         let interval_secs = config.keepalive_interval_secs;
-        let idle_timeout_secs = config.idle_timeout_secs;
-        let idle_cleanup_enabled = is_session_scoped_pool_key(pool_key) && idle_timeout_secs > 0;
         let mut target = keepalive_target_from_pool(pool, config);
-        if interval_secs == 0 && !idle_cleanup_enabled {
+        if interval_secs == 0 {
             return;
         }
         if interval_secs > 0 && target.is_none() {
             log::debug!(
                 "Connection keepalive requested for '{pool_key}', but this database driver does not keep a pingable client handle."
             );
-            if !idle_cleanup_enabled {
-                return;
-            }
+            return;
         };
 
         let key = pool_key.to_string();
-        let interval = if interval_secs > 0 {
-            Duration::from_secs(interval_secs.max(1))
-        } else {
-            Duration::from_secs(idle_timeout_secs.min(60).max(1))
-        };
+        let interval = Duration::from_secs(interval_secs.max(1));
         let timeout = Duration::from_secs(config.effective_connect_timeout_secs().max(1));
         let connections = self.connections.clone();
         let keepalive_tasks = self.keepalive_tasks.clone();
         let pool_activity = self.pool_activity.clone();
         let cancel_contexts = self.postgres_cancel_contexts.clone();
         let running_queries = self.running_queries.clone();
-        let idle_timeout = Duration::from_secs(idle_timeout_secs.max(1));
         let handle = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(interval).await;
 
                 if running_queries.is_pool_active(&key) {
                     continue;
-                }
-
-                if idle_cleanup_enabled {
-                    let idle_for = {
-                        let activity = pool_activity.read().await;
-                        activity.get(&key).map(|activity| activity.last_used_at.elapsed())
-                    };
-                    if idle_for.is_some_and(|elapsed| elapsed >= idle_timeout) {
-                        log::info!(
-                            "Closing idle session-scoped connection pool '{key}' after {}s",
-                            idle_timeout.as_secs()
-                        );
-                        keepalive_tasks.write().await.remove(&key);
-                        pool_activity.write().await.remove(&key);
-                        cancel_contexts.write().await.remove(&key);
-                        let removed = connections.write().await.remove(&key);
-                        if let Some(pool) = removed {
-                            close_pool_kind_with_timeout(key, pool).await;
-                        }
-                        break;
-                    }
                 }
 
                 if let Some(target) = target.as_mut() {
@@ -989,13 +967,14 @@ impl AppState {
         client_session_id: Option<&str>,
         connection_attempt: Option<u64>,
     ) -> Result<String, String> {
-        let db_type = {
+        let config = {
             let configs = self.configs.read().await;
-            configs.get(connection_id).map(|c| c.db_type)
+            configs.get(connection_id).ok_or("Connection config not found")?.clone()
         };
+        let db_type = Some(config.db_type);
 
         let base_pool_key = base_pool_key_for(db_type, connection_id, database, false);
-        let pool_key = session_scoped_pool_key_for(db_type, base_pool_key, client_session_id);
+        let pool_key = session_scoped_pool_key_for(Some(&config), base_pool_key, client_session_id);
 
         let conns = self.connections.read().await;
         if conns.contains_key(&pool_key) {
@@ -1009,10 +988,6 @@ impl AppState {
         } else {
             drop(conns);
         }
-
-        let configs = self.configs.read().await;
-        let config = configs.get(connection_id).ok_or("Connection config not found")?.clone();
-        drop(configs);
 
         let db_config = database_connection_config(&config, database);
 
@@ -1112,6 +1087,9 @@ impl AppState {
                 let client = db::turso_driver::TursoClient::new(&url, &auth_token, db_config.ssl, connect_timeout)?;
                 db::turso_driver::test_connection(&client, connect_timeout).await?;
                 PoolKind::Turso(client)
+            }
+            DatabaseType::CloudflareD1 => {
+                PoolKind::CloudflareD1(db::cloudflare_d1_driver::connect(&db_config, connect_timeout).await?)
             }
             DatabaseType::Redis => {
                 let con = if db_config.uses_redis_cluster() {
@@ -1407,12 +1385,61 @@ impl AppState {
         Ok(pool_key)
     }
 
+    /// Returns the enabled transport layers for a connection with tunnel
+    /// profile references resolved: a layer carrying a `profile_id` is
+    /// replaced by the shared profile from storage (Settings > Tunnels), so
+    /// edits to a profile take effect for every connection referencing it.
+    /// Fails when a referenced profile no longer exists — connecting without
+    /// the intended tunnel would silently bypass it.
+    pub async fn resolved_transport_layers(
+        &self,
+        config: &ConnectionConfig,
+    ) -> Result<Vec<TransportLayerConfig>, String> {
+        let layers = config.effective_transport_layers();
+        if layers.iter().all(|layer| layer.profile_id().is_empty()) {
+            return Ok(layers);
+        }
+
+        let profiles: HashMap<String, TransportLayerConfig> = self
+            .storage
+            .load_tunnel_profiles()
+            .await?
+            .into_iter()
+            .map(|profile| (profile.id().to_string(), profile))
+            .collect();
+
+        layers
+            .into_iter()
+            .map(|layer| {
+                let profile_id = layer.profile_id();
+                if profile_id.is_empty() {
+                    return Ok(layer);
+                }
+                let Some(profile) = profiles.get(profile_id) else {
+                    let label = if layer.name().is_empty() { profile_id } else { layer.name() };
+                    return Err(format!(
+                        "Tunnel profile '{label}' referenced by this connection no longer exists. Re-create it in Settings > Tunnels or edit the connection's tunnel settings."
+                    ));
+                };
+                // Validate the stored reference again at connect time because synced or
+                // externally supplied configs may bypass the editor's type constraints.
+                if !layer.same_type_as(profile) {
+                    return Err(format!(
+                        "Tunnel profile '{}' has a different type than the referencing transport layer.",
+                        if layer.name().is_empty() { profile_id } else { layer.name() }
+                    ));
+                }
+                Ok(layer.resolved_from_profile(profile))
+            })
+            .collect()
+    }
+
     pub async fn connection_host_port(
         &self,
         connection_id: &str,
         config: &ConnectionConfig,
     ) -> Result<(String, u16), String> {
-        let transport_layers = config.effective_transport_layers();
+        let transport_layers = self.resolved_transport_layers(config).await?;
         if transport_layers.is_empty() {
             return Ok((config.host.clone(), config.port));
         }
@@ -1437,7 +1464,7 @@ impl AppState {
         connection_id: &str,
         config: &ConnectionConfig,
     ) -> Result<redis::aio::MultiplexedConnection, String> {
-        let transport_layers = config.effective_transport_layers();
+        let transport_layers = self.resolved_transport_layers(config).await?;
         if transport_layers.is_empty() {
             return db::redis_driver::connect_sentinel(config).await;
         }
@@ -1567,7 +1594,7 @@ impl AppState {
         connection_id: &str,
         config: &ConnectionConfig,
     ) -> Result<db::redis_driver::RedisClusterPool, String> {
-        let transport_layers = config.effective_transport_layers();
+        let transport_layers = self.resolved_transport_layers(config).await?;
         if transport_layers.is_empty() {
             return db::redis_driver::connect_cluster(config).await;
         }
@@ -1664,11 +1691,30 @@ impl AppState {
                 PoolKind::Mysql(pool, _) => {
                     let pool = pool.clone();
                     drop(connections);
-                    match db::mysql::get_conn_with_health_check(&pool).await {
-                        Ok(_) => false,
-                        Err(err) => {
+                    match tokio::time::timeout(HEALTH_CHECK_POOL_ACQUIRE_TIMEOUT, pool.get_conn()).await {
+                        // Pool saturation means active work, not a dead connection. Removing this pool would
+                        // start a competing reconnect while foreground queries and metadata are still running.
+                        Err(_) => {
+                            log::debug!("MySQL connection pool '{pool_key}' is busy; skipping health probe");
+                            false
+                        }
+                        Ok(Err(err)) => {
                             log::warn!("MySQL connection pool '{pool_key}' is stale: {err}");
                             true
+                        }
+                        Ok(Ok(mut conn)) => {
+                            let timeout = crate::db::connection_timeout();
+                            match tokio::time::timeout(timeout, conn.ping()).await {
+                                Ok(Ok(())) => false,
+                                Ok(Err(err)) => {
+                                    log::warn!("MySQL connection pool '{pool_key}' is stale: {err}");
+                                    true
+                                }
+                                Err(_) => {
+                                    log::warn!("MySQL connection pool '{pool_key}' is stale: health check timed out");
+                                    true
+                                }
+                            }
                         }
                     }
                 }
@@ -1676,7 +1722,7 @@ impl AppState {
                     let pool = pool.clone();
                     drop(connections);
                     let timeout = crate::db::connection_timeout();
-                    match tokio::time::timeout(timeout, pool.get()).await {
+                    match tokio::time::timeout(HEALTH_CHECK_POOL_ACQUIRE_TIMEOUT, pool.get()).await {
                         Ok(Ok(client)) => match tokio::time::timeout(timeout, client.simple_query("SELECT 1")).await {
                             Ok(Ok(_)) => false,
                             Ok(Err(err)) => {
@@ -1693,8 +1739,8 @@ impl AppState {
                             true
                         }
                         Err(_) => {
-                            log::warn!("PostgreSQL connection pool '{pool_key}' is stale: get connection timed out");
-                            true
+                            log::debug!("PostgreSQL connection pool '{pool_key}' is busy; skipping health probe");
+                            false
                         }
                     }
                 }
@@ -1810,6 +1856,18 @@ impl AppState {
                         }
                     }
                 }
+                PoolKind::CloudflareD1(client) => {
+                    let client = client.clone();
+                    drop(connections);
+                    let timeout = crate::db::connection_timeout();
+                    match db::cloudflare_d1_driver::test_connection(&client, timeout).await {
+                        Ok(()) => false,
+                        Err(err) => {
+                            log::warn!("Cloudflare D1 connection pool '{pool_key}' is stale: {err}");
+                            true
+                        }
+                    }
+                }
                 PoolKind::Agent(client) => {
                     let client = client.clone();
                     drop(connections);
@@ -1865,12 +1923,13 @@ impl AppState {
         database: Option<&str>,
         client_session_id: Option<&str>,
     ) -> Result<String, String> {
-        let db_type = {
+        let config = {
             let configs = self.configs.read().await;
-            configs.get(connection_id).map(|c| c.db_type)
+            configs.get(connection_id).cloned()
         };
+        let db_type = config.as_ref().map(|config| config.db_type);
         let base_pool_key = base_pool_key_for(db_type, connection_id, database, true);
-        let pool_key = session_scoped_pool_key_for(db_type, base_pool_key, client_session_id);
+        let pool_key = session_scoped_pool_key_for(config.as_ref(), base_pool_key, client_session_id);
         if self.uses_forwarded_transport(connection_id).await {
             self.remove_connection_pools(connection_id).await;
             self.reset_connection_transport(connection_id).await;
@@ -1896,12 +1955,13 @@ impl AppState {
         let Some(session) = session else {
             return Ok(false);
         };
-        let db_type = {
+        let config = {
             let configs = self.configs.read().await;
-            configs.get(connection_id).map(|c| c.db_type)
+            configs.get(connection_id).cloned()
         };
+        let db_type = config.as_ref().map(|config| config.db_type);
         let base_pool_key = base_pool_key_for(db_type, connection_id, database, false);
-        let pool_key = session_scoped_pool_key_for(db_type, base_pool_key.clone(), Some(&session));
+        let pool_key = session_scoped_pool_key_for(config.as_ref(), base_pool_key.clone(), Some(&session));
         if pool_key == base_pool_key {
             return Ok(false);
         }
@@ -2320,6 +2380,15 @@ impl AppState {
                         false
                     }
                 },
+                PoolKind::CloudflareD1(client) => {
+                    match db::cloudflare_d1_driver::test_connection(client, timeout).await {
+                        Ok(()) => true,
+                        Err(e) => {
+                            log::warn!("Cloudflare D1 connection pool '{key}' is unhealthy: {e}");
+                            false
+                        }
+                    }
+                }
                 PoolKind::Agent(client) => {
                     let mut agent = client.lock().await;
                     match agent.test_connection(serde_json::json!({})).await {
@@ -2657,6 +2726,10 @@ fn normalize_client_session_id(client_session_id: Option<&str>) -> Option<String
     client_session_id.map(str::trim).filter(|session| !session.is_empty()).map(|session| session.replace(':', "_"))
 }
 
+pub fn task_client_session_id(task_kind: &str, task_id: &str) -> String {
+    format!("{task_kind}:{task_id}")
+}
+
 fn mysql_pool_max_connections_for_session(client_session_id: Option<&str>) -> usize {
     if normalize_client_session_id(client_session_id).is_some() {
         1
@@ -2701,6 +2774,7 @@ fn session_scoped_pool_key(base_pool_key: String, client_session_id: Option<&str
         .unwrap_or(base_pool_key)
 }
 
+#[cfg(test)]
 fn is_session_scoped_pool_key(pool_key: &str) -> bool {
     pool_key.contains(":session:")
 }
@@ -2719,11 +2793,18 @@ pub(crate) fn config_for_pool_key<'a>(
 }
 
 fn session_scoped_pool_key_for(
-    db_type: Option<DatabaseType>,
+    config: Option<&ConnectionConfig>,
     base_pool_key: String,
     client_session_id: Option<&str>,
 ) -> String {
-    if matches!(db_type, Some(DatabaseType::DuckDb)) {
+    let shares_base_pool = config.is_some_and(|config| {
+        matches!(config.db_type, DatabaseType::DuckDb | DatabaseType::CloudflareD1)
+            || (config.db_type == DatabaseType::Sqlite && db::sqlite::is_memory_database_path(&config.host))
+    });
+    if shares_base_pool {
+        // DuckDB and D1 already use connection-scoped handles. In-memory SQLite databases
+        // only exist inside one connection, so a session-scoped handle would point tabs at
+        // a different empty database.
         return base_pool_key;
     }
     session_scoped_pool_key(base_pool_key, client_session_id)
@@ -2736,6 +2817,7 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         PoolKind::Sqlite(p) => PoolKind::Sqlite(p.clone()),
         PoolKind::Rqlite(client) => PoolKind::Rqlite(client.clone()),
         PoolKind::Turso(client) => PoolKind::Turso(client.clone()),
+        PoolKind::CloudflareD1(client) => PoolKind::CloudflareD1(client.clone()),
         #[cfg(feature = "duckdb-bundled")]
         PoolKind::DuckDb(con) => PoolKind::DuckDb(con.clone()),
         #[cfg(feature = "duckdb-bundled")]
@@ -2770,6 +2852,7 @@ pub async fn close_pool_kind(pool: PoolKind) {
         PoolKind::Sqlite(_) => {}
         PoolKind::Rqlite(_) => {}
         PoolKind::Turso(_) => {}
+        PoolKind::CloudflareD1(_) => {}
         PoolKind::Redis(conn) => {
             drop(conn);
         }
@@ -3086,8 +3169,8 @@ mod tests {
         metadata_connection_config, mysql_metadata_fallback_url, oceanbase_mysql_query_timeout_sql,
         oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint,
         redis_sentinel_transport_id, redis_sentinel_transport_prefix, sqlserver_legacy_agent_config,
-        sqlserver_legacy_agent_error, uses_bare_mysql_pool, uses_tcp_probe, validate_h2_database_path, AppState,
-        PoolKind, PRESTOSQL_JDBC_DRIVER_CLASS,
+        sqlserver_legacy_agent_error, task_client_session_id, uses_bare_mysql_pool, uses_tcp_probe,
+        validate_h2_database_path, AppState, MysqlMode, PoolKind, PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
@@ -3097,12 +3180,13 @@ mod tests {
     use crate::database_capabilities;
     use crate::db;
     use crate::models::connection::{
-        default_connect_timeout_secs, default_redis_key_separator, ConnectionConfig, DatabaseType, ProxyTunnelConfig,
-        ProxyType, TransportLayerConfig,
+        default_connect_timeout_secs, default_redis_key_separator, ConnectionConfig, DatabaseType, HttpTunnelConfig,
+        ProxyTunnelConfig, ProxyType, SshTunnelConfig, TransportLayerConfig,
     };
     use crate::query;
     use crate::schema;
     use crate::storage::Storage;
+    use std::time::{Duration, Instant};
 
     fn mysql_config(database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
@@ -3151,7 +3235,16 @@ mod tests {
             jdbc_driver_paths: Vec::new(),
             one_time: false,
             read_only: false,
+            is_production: false,
+            production_databases: vec![],
         }
+    }
+
+    #[test]
+    fn task_client_session_ids_are_stable_and_isolated() {
+        assert_eq!(task_client_session_id("table-export", "job-1"), "table-export:job-1");
+        assert_ne!(task_client_session_id("table-export", "job-1"), task_client_session_id("database-export", "job-1"));
+        assert_ne!(task_client_session_id("table-export", "job-1"), task_client_session_id("table-export", "job-2"));
     }
 
     #[test]
@@ -3593,6 +3686,28 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires DBX_TEST_MYSQL_URL"]
+    async fn live_mysql_health_check_keeps_saturated_pool() {
+        let url = std::env::var("DBX_TEST_MYSQL_URL").expect("DBX_TEST_MYSQL_URL is required");
+        let (state, dir) = test_app_state().await;
+        let config = mysql_config(Some("testdb"));
+        let pool = db::mysql::connect_bare_with_pool_limit(&url, Duration::from_secs(5), 1).await.unwrap();
+        state
+            .insert_connection_pool("conn".to_string(), PoolKind::Mysql(pool.clone(), MysqlMode::Normal), &config)
+            .await;
+        let held_connection = pool.get_conn().await.unwrap();
+
+        let started = Instant::now();
+        state.check_connection_health("conn").await.unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(state.connections.read().await.contains_key("conn"));
+        drop(held_connection);
+        state.remove_connection_pools_detached("conn").await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn jdbc_plugin_env_uses_managed_jre_when_installed() {
         let dir = std::env::temp_dir().join(format!("dbx-core-jdbc-managed-jre-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -3857,6 +3972,20 @@ mod tests {
     }
 
     #[test]
+    fn cloudflare_d1_query_namespace_does_not_replace_database_id() {
+        let mut config = mysql_config(Some("database-uuid"));
+        config.db_type = DatabaseType::CloudflareD1;
+
+        let scoped = database_connection_config(&config, Some("main"));
+
+        assert_eq!(scoped.database.as_deref(), Some("database-uuid"));
+        assert_eq!(
+            super::base_pool_key_for(Some(DatabaseType::CloudflareD1), "d1-conn", Some("main"), false),
+            "d1-conn"
+        );
+    }
+
+    #[test]
     fn oracle_database_connection_ignores_requested_database() {
         let mut config = mysql_config(Some("ORCL"));
         config.db_type = DatabaseType::Oracle;
@@ -3904,18 +4033,39 @@ mod tests {
 
     #[test]
     fn session_scoped_pool_keys_are_sanitized_and_detected() {
-        let key = super::session_scoped_pool_key_for(
-            Some(DatabaseType::Mysql),
-            "mysql-conn:analytics".to_string(),
-            Some("tab-1:count"),
-        );
+        let mysql = mysql_config(Some("analytics"));
+        let key =
+            super::session_scoped_pool_key_for(Some(&mysql), "mysql-conn:analytics".to_string(), Some("tab-1:count"));
 
         assert_eq!(key, "mysql-conn:analytics:session:tab-1_count");
         assert!(super::is_session_scoped_pool_key(&key));
         assert!(!super::is_session_scoped_pool_key("mysql-conn:analytics"));
+
+        let mut duckdb = mysql_config(None);
+        duckdb.db_type = DatabaseType::DuckDb;
         assert_eq!(
-            super::session_scoped_pool_key_for(Some(DatabaseType::DuckDb), "duckdb-conn".to_string(), Some("tab-1")),
+            super::session_scoped_pool_key_for(Some(&duckdb), "duckdb-conn".to_string(), Some("tab-1")),
             "duckdb-conn"
+        );
+        let mut sqlite_memory = mysql_config(None);
+        sqlite_memory.db_type = DatabaseType::Sqlite;
+        sqlite_memory.host = " :MeMoRy: ".to_string();
+        assert_eq!(
+            super::session_scoped_pool_key_for(Some(&sqlite_memory), "sqlite-memory".to_string(), Some("tab-1")),
+            "sqlite-memory"
+        );
+
+        sqlite_memory.host = "/tmp/dbx-session-test.sqlite".to_string();
+        assert_eq!(
+            super::session_scoped_pool_key_for(Some(&sqlite_memory), "sqlite-file".to_string(), Some("tab-1")),
+            "sqlite-file:session:tab-1"
+        );
+
+        let mut cloudflare_d1 = mysql_config(None);
+        cloudflare_d1.db_type = DatabaseType::CloudflareD1;
+        assert_eq!(
+            super::session_scoped_pool_key_for(Some(&cloudflare_d1), "d1-conn".to_string(), Some("tab-1")),
+            "d1-conn"
         );
     }
 
@@ -4143,6 +4293,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[tokio::test]
+    async fn session_scoped_pool_is_not_closed_by_idle_timeout() {
+        let (state, dir) = test_app_state().await;
+        let pool_key = "conn:session:tab-1";
+        let pool = crate::db::sqlite::connect_path(":memory:").await.unwrap();
+        let mut config = mysql_config(None);
+        config.idle_timeout_secs = 1;
+        config.keepalive_interval_secs = 0;
+
+        state.connections.write().await.insert(pool_key.to_string(), PoolKind::Sqlite(pool));
+        state.pool_activity.write().await.insert(
+            pool_key.to_string(),
+            super::PoolActivity { last_used_at: std::time::Instant::now() - std::time::Duration::from_secs(10) },
+        );
+        let pool = super::clone_pool_kind(state.connections.read().await.get(pool_key).unwrap());
+        state.start_keepalive_task(pool_key, &pool, &config).await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        assert!(state.connections.read().await.contains_key(pool_key));
+        assert!(!state.keepalive_tasks.read().await.contains_key(pool_key));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn close_client_session_pool_releases_session_scoped_pool() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "conn".to_string();
+        config.db_type = DatabaseType::Sqlite;
+        state.configs.write().await.insert(config.id.clone(), config);
+
+        let pool_key = "conn:session:tab-1";
+        let pool = crate::db::sqlite::connect_path(":memory:").await.unwrap();
+        state.connections.write().await.insert(pool_key.to_string(), PoolKind::Sqlite(pool));
+        state.pool_activity.write().await.insert(pool_key.to_string(), super::PoolActivity::now());
+
+        assert!(state.close_client_session_pool("conn", None, "tab-1").await.unwrap());
+        assert!(!state.connections.read().await.contains_key(pool_key));
+        assert!(!state.pool_activity.read().await.contains_key(pool_key));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn agent_validate_connection_unknown_method_is_not_stale() {
         assert!(super::is_agent_validate_connection_unsupported(
@@ -4183,6 +4378,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_memory_client_sessions_share_the_same_database() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "sqlite-memory".to_string();
+        config.name = "SQLite memory".to_string();
+        config.db_type = DatabaseType::Sqlite;
+        config.host = ":memory:".to_string();
+        config.password.clear();
+        config.port = 0;
+
+        state.configs.write().await.insert(config.id.clone(), config);
+        let base_pool_key = state.get_or_create_pool("sqlite-memory", None).await.unwrap();
+        let query_pool_key =
+            state.get_or_create_pool_for_session("sqlite-memory", Some("main"), Some("query-tab")).await.unwrap();
+        let data_pool_key =
+            state.get_or_create_pool_for_session("sqlite-memory", Some("main"), Some("data-tab")).await.unwrap();
+
+        assert_eq!(query_pool_key, base_pool_key);
+        assert_eq!(data_pool_key, base_pool_key);
+
+        let handle = {
+            let connections = state.connections.read().await;
+            match connections.get(&base_pool_key) {
+                Some(PoolKind::Sqlite(handle)) => handle.clone(),
+                _ => panic!("expected SQLite pool"),
+            }
+        };
+        handle
+            .with_connection(|connection| {
+                connection
+                    .execute_batch("CREATE TABLE test (id INTEGER); INSERT INTO test VALUES (42);")
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        let value = handle
+            .with_connection(|connection| {
+                connection
+                    .query_row("SELECT id FROM test", [], |row| row.get::<_, i64>(0))
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        assert_eq!(value, 42);
+
+        assert!(!state.close_client_session_pool("sqlite-memory", Some("main"), "query-tab").await.unwrap());
+        assert!(state.connections.read().await.contains_key(&base_pool_key));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn close_database_pool_removes_database_and_session_scoped_pools_only() {
         let (state, dir) = test_app_state().await;
         let mut config = mysql_config(None);
@@ -4209,11 +4454,141 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    fn ssh_layer(id: &str, profile_id: &str) -> SshTunnelConfig {
+        SshTunnelConfig {
+            id: id.to_string(),
+            name: String::new(),
+            enabled: true,
+            host: String::new(),
+            port: 22,
+            user: String::new(),
+            password: String::new(),
+            key_path: String::new(),
+            key_passphrase: String::new(),
+            connect_timeout_secs: 5,
+            expose_lan: false,
+            use_ssh_agent: false,
+            ssh_agent_sock_path: String::new(),
+            auth_method: String::new(),
+            profile_id: profile_id.to_string(),
+        }
+    }
+
+    fn proxy_layer(id: &str, profile_id: &str) -> ProxyTunnelConfig {
+        ProxyTunnelConfig {
+            id: id.to_string(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: String::new(),
+            port: 1080,
+            username: String::new(),
+            password: String::new(),
+            profile_id: profile_id.to_string(),
+        }
+    }
+
+    fn http_tunnel_layer(id: &str, profile_id: &str) -> HttpTunnelConfig {
+        HttpTunnelConfig {
+            id: id.to_string(),
+            name: String::new(),
+            enabled: true,
+            url: String::new(),
+            token: String::new(),
+            connect_timeout_secs: 10,
+            profile_id: profile_id.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolved_transport_layers_substitutes_shared_profiles() {
+        let (state, dir) = test_app_state().await;
+
+        let mut profile = ssh_layer("shared-bastion", "");
+        profile.name = "Bastion".to_string();
+        profile.host = "bastion.example.com".to_string();
+        profile.user = "deploy".to_string();
+        profile.password = "s3cret".to_string();
+        profile.auth_method = "password".to_string();
+        state.storage.save_tunnel_profiles(&[TransportLayerConfig::Ssh(profile)]).await.unwrap();
+
+        let mut config = mysql_config(Some("app"));
+        config.transport_layers = vec![TransportLayerConfig::Ssh(ssh_layer("layer-1", "shared-bastion"))];
+
+        let resolved = state.resolved_transport_layers(&config).await.unwrap();
+        assert_eq!(resolved.len(), 1);
+        match &resolved[0] {
+            TransportLayerConfig::Ssh(ssh) => {
+                // Profile supplies the configuration; the layer keeps its identity.
+                assert_eq!(ssh.id, "layer-1");
+                assert_eq!(ssh.profile_id, "shared-bastion");
+                assert_eq!(ssh.host, "bastion.example.com");
+                assert_eq!(ssh.user, "deploy");
+                assert_eq!(ssh.password, "s3cret");
+            }
+            other => panic!("expected ssh layer, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn resolved_transport_layers_fails_closed_on_missing_profile() {
+        let (state, dir) = test_app_state().await;
+
+        let mut config = mysql_config(Some("app"));
+        config.transport_layers = vec![TransportLayerConfig::Ssh(ssh_layer("layer-1", "deleted-profile"))];
+
+        let err = state.resolved_transport_layers(&config).await.unwrap_err();
+        assert!(err.contains("no longer exists"), "unexpected error: {err}");
+
+        // Disabled reference layers are filtered out before resolution, so a
+        // dangling reference on a disabled layer must not block connecting.
+        let mut disabled = ssh_layer("layer-1", "deleted-profile");
+        disabled.enabled = false;
+        config.transport_layers = vec![TransportLayerConfig::Ssh(disabled)];
+        assert!(state.resolved_transport_layers(&config).await.unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn resolved_transport_layers_rejects_mismatched_profile_types() {
+        let (state, dir) = test_app_state().await;
+
+        let mismatches = [
+            (
+                TransportLayerConfig::Ssh(ssh_layer("layer", "shared")),
+                TransportLayerConfig::Proxy(proxy_layer("shared", "")),
+            ),
+            (
+                TransportLayerConfig::Proxy(proxy_layer("layer", "shared")),
+                TransportLayerConfig::HttpTunnel(http_tunnel_layer("shared", "")),
+            ),
+            (
+                TransportLayerConfig::HttpTunnel(http_tunnel_layer("layer", "shared")),
+                TransportLayerConfig::Ssh(ssh_layer("shared", "")),
+            ),
+        ];
+
+        for (layer, profile) in mismatches {
+            state.storage.save_tunnel_profiles(&[profile]).await.unwrap();
+            let mut config = mysql_config(Some("app"));
+            config.transport_layers = vec![layer];
+
+            let error = state.resolved_transport_layers(&config).await.unwrap_err();
+            assert!(error.contains("different type"));
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     async fn proxy_connection_uses_local_forward_endpoint() {
         let (state, dir) = test_app_state().await;
         let mut config = mysql_config(Some("app"));
         config.transport_layers = vec![TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            profile_id: String::new(),
             id: "proxy".to_string(),
             name: String::new(),
             enabled: true,
@@ -4262,6 +4637,7 @@ mod tests {
             "auth": { "kind": "none" }
         }));
         config.transport_layers = vec![TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            profile_id: String::new(),
             id: "proxy".to_string(),
             name: String::new(),
             enabled: true,
@@ -4319,6 +4695,7 @@ mod tests {
             "auth": { "kind": "none" }
         }));
         config.transport_layers = vec![TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            profile_id: String::new(),
             id: "proxy".to_string(),
             name: String::new(),
             enabled: true,

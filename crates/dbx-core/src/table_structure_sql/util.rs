@@ -6,6 +6,7 @@ pub(super) fn qualified_table(dialect: StructureDialect, schema: Option<&str>, t
         dialect,
         StructureDialect::Postgres
             | StructureDialect::Oracle
+            | StructureDialect::Dameng
             | StructureDialect::SqlServer
             | StructureDialect::H2
             | StructureDialect::Informix
@@ -142,7 +143,7 @@ pub(super) fn is_temporal_type_for_default(dialect: StructureDialect, base_type:
             normalized.as_str(),
             "date" | "time" | "datetime" | "datetime2" | "smalldatetime" | "datetimeoffset"
         ),
-        StructureDialect::Oracle => matches!(
+        StructureDialect::Oracle | StructureDialect::Dameng => matches!(
             normalized.as_str(),
             "date"
                 | "timestamp"
@@ -228,7 +229,7 @@ pub(super) fn is_string_type_for_default(dialect: StructureDialect, base_type: &
             normalized.as_str(),
             "char" | "varchar" | "nchar" | "nvarchar" | "text" | "ntext" | "xml" | "uniqueidentifier" | "sysname"
         ),
-        StructureDialect::Oracle => matches!(
+        StructureDialect::Oracle | StructureDialect::Dameng => matches!(
             normalized.as_str(),
             "char" | "nchar" | "varchar2" | "nvarchar2" | "clob" | "nclob" | "long" | "raw" | "long raw" | "bfile"
         ),

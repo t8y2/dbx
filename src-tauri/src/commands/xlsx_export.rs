@@ -8,6 +8,8 @@ pub struct QueryResultXlsxExportRequest {
     pub file_path: String,
     pub sheet_name: Option<String>,
     pub columns: Vec<String>,
+    #[serde(default)]
+    pub column_types: Vec<String>,
     pub rows: Vec<Vec<Value>>,
 }
 
@@ -24,6 +26,7 @@ pub async fn export_query_result_xlsx(request: QueryResultXlsxExportRequest) -> 
         let workbook = build_xlsx_workbook(&XlsxWorksheetData {
             sheet_name: request.sheet_name,
             columns: request.columns,
+            column_types: request.column_types,
             rows: request.rows,
         })?;
         std::fs::write(&request.file_path, workbook).map_err(|err| err.to_string())

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { safeJsonFormat } from "../safeJsonFormat";
+import { isLosslessJsonNumber, parseJsonPreservingLargeNumbers, safeJsonFormat } from "../safeJsonFormat";
 
 describe("safeJsonFormat", () => {
   it("preserves large integers exceeding MAX_SAFE_INTEGER", () => {
@@ -60,5 +60,29 @@ describe("safeJsonFormat", () => {
     const input = '{"id":"87712409002717401"}';
     const result = safeJsonFormat(input, 2);
     expect(result).toBe('{\n  "id": "87712409002717401"\n}');
+  });
+
+  it("does not replace large digit sequences inside strings", () => {
+    const input = '{"text":"value 87712409002717401, unchanged"}';
+    expect(safeJsonFormat(input, 2)).toBe('{\n  "text": "value 87712409002717401, unchanged"\n}');
+  });
+
+  it("parses large integers as lossless numeric values", () => {
+    const parsed = parseJsonPreservingLargeNumbers('{"companyId":518400931654815740,"safe":42}') as Record<string, unknown>;
+    expect(isLosslessJsonNumber(parsed.companyId)).toBe(true);
+    expect(isLosslessJsonNumber(parsed.companyId) ? parsed.companyId.raw : null).toBe("518400931654815740");
+    expect(parsed.safe).toBe(42);
+  });
+
+  it("preserves fractional and exponent literals that Number would round or overflow", () => {
+    const input = '{"fraction":0.123456789012345678901234,"scientific":1.234567890123456789e20,"overflow":1e999}';
+    const parsed = parseJsonPreservingLargeNumbers(input) as Record<string, unknown>;
+
+    expect(isLosslessJsonNumber(parsed.fraction) ? parsed.fraction.raw : null).toBe("0.123456789012345678901234");
+    expect(isLosslessJsonNumber(parsed.scientific) ? parsed.scientific.raw : null).toBe("1.234567890123456789e20");
+    expect(isLosslessJsonNumber(parsed.overflow) ? parsed.overflow.raw : null).toBe("1e999");
+    expect(safeJsonFormat(input, 2)).toContain("0.123456789012345678901234");
+    expect(safeJsonFormat(input, 2)).toContain("1.234567890123456789e20");
+    expect(safeJsonFormat(input, 2)).toContain("1e999");
   });
 });

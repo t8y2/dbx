@@ -27,6 +27,7 @@ class PostgresLikeAgentTest {
         agent.listTables("app");
         agent.listObjects("app");
         agent.getColumns("app", "orders");
+        agent.listCheckConstraintsForTest("app", "orders");
         agent.listForeignKeys("app", "orders");
         agent.listTriggers("app", "orders");
 
@@ -39,6 +40,7 @@ class PostgresLikeAgentTest {
         assertTrue(sql.contains("pg_catalog.pg_proc"), sql);
         assertTrue(sql.contains("pg_catalog.pg_attribute"), sql);
         assertTrue(sql.contains("pg_catalog.pg_constraint"), sql);
+        assertTrue(sql.contains("pg_catalog.pg_get_constraintdef"), sql);
         assertTrue(sql.contains("pg_catalog.pg_trigger"), sql);
         assertFalse(sql.contains(" AS key "), sql);
         assertFalse(sql.contains(" key."), sql);
@@ -78,6 +80,28 @@ class PostgresLikeAgentTest {
         assertEquals("name", columns.get(1).getName());
         assertTrue(columns.get(1).getIs_nullable());
         assertEquals(Integer.valueOf(255), columns.get(1).getCharacter_maximum_length());
+    }
+
+    @Test
+    void tableDdlIncludesNamedCheckConstraints() {
+        ConstraintDdlAgent agent = new ConstraintDdlAgent();
+
+        String ddl = agent.getTableDdl("public", "orders");
+
+        assertTrue(
+            ddl.contains("CONSTRAINT \"chk_balance_status\" CHECK (status = ANY (ARRAY['PLAN'::text, 'EXECUTION'::text]))"),
+            ddl
+        );
+    }
+
+    @Test
+    void tableDdlFallsBackWhenCheckConstraintCatalogIsUnavailable() {
+        ConstraintDdlAgent agent = new ConstraintDdlAgent(true);
+
+        String ddl = agent.getTableDdl("public", "orders");
+
+        assertTrue(ddl.startsWith("CREATE TABLE \"public\".\"orders\""), ddl);
+        assertFalse(ddl.contains("CHECK"), ddl);
     }
 
     @Test
@@ -157,6 +181,55 @@ class PostgresLikeAgentTest {
                 }
                 return rs.getObject(index);
             };
+        }
+
+        List<CheckConstraintInfo> listCheckConstraintsForTest(String schema, String table) {
+            return listCheckConstraints(schema, table);
+        }
+    }
+
+    private static final class ConstraintDdlAgent extends PostgresLikeAgent {
+        private final boolean failCheckConstraintLookup;
+
+        private ConstraintDdlAgent() {
+            this(false);
+        }
+
+        private ConstraintDdlAgent(boolean failCheckConstraintLookup) {
+            super(new PostgresLikeAgentProfile(
+                PostgresLikeAgentTest.class.getName(),
+                "jdbc:test://{host}:{port}/{database}"
+            ));
+            this.failCheckConstraintLookup = failCheckConstraintLookup;
+        }
+
+        @Override
+        public List<ColumnInfo> getColumns(String schema, String table) {
+            return java.util.Arrays.asList(
+                new ColumnInfo("id", "bigint", false, null, true),
+                new ColumnInfo("status", "character varying", false, "'PLAN'::character varying", false)
+            );
+        }
+
+        @Override
+        public List<IndexInfo> listIndexes(String schema, String table) {
+            return java.util.Collections.emptyList();
+        }
+
+        @Override
+        public List<ForeignKeyInfo> listForeignKeys(String schema, String table) {
+            return java.util.Collections.emptyList();
+        }
+
+        @Override
+        protected List<CheckConstraintInfo> listCheckConstraints(String schema, String table) {
+            if (failCheckConstraintLookup) {
+                throw new RuntimeException("pg_get_constraintdef is unavailable");
+            }
+            return java.util.Collections.singletonList(new CheckConstraintInfo(
+                "chk_balance_status",
+                "CHECK (status = ANY (ARRAY['PLAN'::text, 'EXECUTION'::text]))"
+            ));
         }
     }
 

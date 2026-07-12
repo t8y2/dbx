@@ -1,12 +1,15 @@
 use dbx_core::connection::{AppState, PoolKind};
 use dbx_core::models::connection::DatabaseType;
 use dbx_core::query_result_export::{export_query_result_core, ExportStatus, QueryResultExportRequest};
+use dbx_core::sql::{SqlFileRequest, SqlFileStatus};
+use dbx_core::sql_file_import::execute_sql_file_content;
 use dbx_core::storage::Storage;
 use dbx_core::table_structure_sql::{
     build_table_structure_change_sql, ColumnInfo, EditableStructureColumn, TableStructureSqlOptions,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 
 fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connection::ConnectionConfig {
     dbx_core::models::connection::ConnectionConfig {
@@ -55,6 +58,8 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         jdbc_driver_paths: Vec::new(),
         one_time: false,
         read_only: false,
+        is_production: false,
+        production_databases: vec![],
     }
 }
 
@@ -187,9 +192,12 @@ fn structure_column(
             is_primary_key: false,
             extra: None,
             comment: None,
+            ..Default::default()
         }),
         original_position: None,
         marked_for_drop: false,
+        character_set: String::new(),
+        collation: String::new(),
     }
 }
 
@@ -336,6 +344,84 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
     assert!(csv.contains("\"1\",\"alpha\""));
     assert!(csv.contains("\"2\",\"beta\""));
     assert!(!csv.contains("\n\n"));
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQLSERVER_HOST/PORT/USER/PASSWORD pointing at a writable SQL Server database"]
+async fn live_sqlserver_sql_file_import_executes_go_batches() {
+    let database = std::env::var("DBX_LIVE_SQLSERVER_DATABASE").unwrap_or_else(|_| "tempdb".to_string());
+    let host = std::env::var("DBX_LIVE_SQLSERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("DBX_LIVE_SQLSERVER_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(1433);
+    let user = std::env::var("DBX_LIVE_SQLSERVER_USER").unwrap_or_else(|_| "sa".to_string());
+    let password = std::env::var("DBX_LIVE_SQLSERVER_PASSWORD").expect("DBX_LIVE_SQLSERVER_PASSWORD");
+    let client =
+        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some(&database), None, Duration::from_secs(10))
+            .await
+            .expect("connect SQL Server");
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let table = format!("dbx_sql_file_{suffix}");
+    let procedure = format!("dbx_sql_file_proc_{suffix}");
+    let dir = std::env::temp_dir().join(format!("dbx-live-sqlserver-file-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    let connection_id = "live-sqlserver-file";
+    let mut config = live_sqlserver_config(connection_id, &database);
+    config.host = host;
+    config.port = port;
+    config.username = user;
+    config.password = password;
+    state.configs.write().await.insert(connection_id.to_string(), config);
+    state.connections.write().await.insert(
+        format!("{connection_id}:{database}"),
+        PoolKind::SqlServer(std::sync::Arc::new(tokio::sync::Mutex::new(client))),
+    );
+
+    let script = format!(
+        "CREATE TABLE [dbo].[{table}] (id INT NOT NULL);\n\
+         GO\n\
+         INSERT INTO [dbo].[{table}] (id) VALUES (1);\n\
+         GO\n\
+         CREATE PROCEDURE [dbo].[{procedure}] AS\n\
+         BEGIN\n\
+             SELECT COUNT(*) AS item_count FROM [dbo].[{table}];\n\
+         END\n\
+         GO"
+    );
+    let request = SqlFileRequest {
+        execution_id: format!("live-sqlserver-file-{suffix}"),
+        connection_id: connection_id.to_string(),
+        database: database.clone(),
+        file_path: "fixture.sql".to_string(),
+        continue_on_error: false,
+    };
+    let done_seen = AtomicBool::new(false);
+
+    execute_sql_file_content(&state, &request, &script, CancellationToken::new(), Instant::now(), |progress| {
+        if progress.status == SqlFileStatus::Done {
+            done_seen.store(true, Ordering::Relaxed);
+        }
+    })
+    .await
+    .expect("execute SQL Server file with GO batches");
+
+    let pool_key = format!("{connection_id}:{database}");
+    let connections = state.connections.read().await;
+    let PoolKind::SqlServer(client) = connections.get(&pool_key).expect("SQL Server pool") else {
+        panic!("expected SQL Server pool");
+    };
+    let mut client = client.lock().await;
+    let rows = dbx_core::db::sqlserver::execute_query(&mut client, &format!("EXEC [dbo].[{procedure}]")).await;
+    let cleanup = format!("DROP PROCEDURE [dbo].[{procedure}]; DROP TABLE [dbo].[{table}];");
+    let _ = dbx_core::db::sqlserver::execute_batch(&mut client, &cleanup).await;
+    drop(client);
+    drop(connections);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(done_seen.load(Ordering::Relaxed));
+    let rows = rows.expect("execute imported procedure");
+    assert_eq!(rows.rows.first().and_then(|row| row.first()), Some(&serde_json::json!(1)));
 }
 
 #[tokio::test]

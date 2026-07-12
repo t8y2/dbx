@@ -151,29 +151,29 @@ export function importDataTypeForDatabase(inferredType: ImportInferredType, data
     case "boolean":
       if (["mysql", "doris", "starrocks", "goldendb", "sundb", "databend"].includes(databaseType || "")) return "TINYINT(1)";
       if (databaseType === "sqlserver") return "BIT";
-      if (databaseType === "sqlite" || databaseType === "rqlite" || databaseType === "turso") return "INTEGER";
+      if (databaseType === "sqlite" || databaseType === "rqlite" || databaseType === "turso" || databaseType === "cloudflare-d1") return "INTEGER";
       if (databaseType === "oracle" || databaseType === "oceanbase-oracle" || databaseType === "dameng") return "NUMBER(1)";
       if (databaseType === "clickhouse") return "UInt8";
       return "BOOLEAN";
     case "integer":
-      if (databaseType === "sqlite" || databaseType === "rqlite" || databaseType === "turso") return "INTEGER";
+      if (databaseType === "sqlite" || databaseType === "rqlite" || databaseType === "turso" || databaseType === "cloudflare-d1") return "INTEGER";
       if (databaseType === "oracle" || databaseType === "oceanbase-oracle" || databaseType === "dameng") return "NUMBER(19)";
       if (databaseType === "clickhouse") return "Int64";
       return "BIGINT";
     case "decimal":
       if (["postgres", "gaussdb", "opengauss", "redshift", "kingbase", "highgo", "kwdb", "vastbase"].includes(databaseType || "")) return "DOUBLE PRECISION";
-      if (databaseType === "sqlite" || databaseType === "rqlite" || databaseType === "turso") return "REAL";
+      if (databaseType === "sqlite" || databaseType === "rqlite" || databaseType === "turso" || databaseType === "cloudflare-d1") return "REAL";
       if (databaseType === "oracle" || databaseType === "oceanbase-oracle" || databaseType === "dameng") return "BINARY_DOUBLE";
       if (databaseType === "clickhouse") return "Float64";
       return "DOUBLE";
     case "date":
-      if (databaseType === "sqlite" || databaseType === "rqlite" || databaseType === "turso") return "TEXT";
+      if (databaseType === "sqlite" || databaseType === "rqlite" || databaseType === "turso" || databaseType === "cloudflare-d1") return "TEXT";
       if (databaseType === "clickhouse") return "Date";
       return "DATE";
     case "timestamp":
       if (["mysql", "doris", "starrocks", "goldendb", "sundb", "databend"].includes(databaseType || "")) return "DATETIME";
       if (databaseType === "sqlserver") return "DATETIME2";
-      if (databaseType === "sqlite" || databaseType === "rqlite" || databaseType === "turso") return "TEXT";
+      if (databaseType === "sqlite" || databaseType === "rqlite" || databaseType === "turso" || databaseType === "cloudflare-d1") return "TEXT";
       if (databaseType === "clickhouse") return "DateTime64";
       return "TIMESTAMP";
     case "json":

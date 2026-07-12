@@ -73,15 +73,24 @@ public abstract class ConfiguredJdbcAgent extends AbstractJdbcAgent {
 
     @Override
     public List<ObjectInfo> listObjects(String schema) {
-        return StandardJdbcMetadata.INSTANCE.listObjects(listTables(schema), schema);
+        return StandardJdbcMetadata.INSTANCE.listObjects(
+            requireConnection(),
+            profile,
+            configuredDatabase,
+            schema,
+            MetadataListConstraints.NONE
+        );
     }
 
     @Override
     public List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints) {
-        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
-        MetadataListConstraints tableConstraints =
-            new MetadataListConstraints(normalized.getFilter(), null, null, normalized.getObjectTypes());
-        return StandardJdbcMetadata.INSTANCE.listObjects(listTables(schema, tableConstraints), schema, normalized);
+        return StandardJdbcMetadata.INSTANCE.listObjects(
+            requireConnection(),
+            profile,
+            configuredDatabase,
+            schema,
+            constraints
+        );
     }
 
     @Override

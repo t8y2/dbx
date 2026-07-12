@@ -1,20 +1,20 @@
 import { describe, expect, it } from "vitest";
 import en from "./en";
-import esRaw from "./es";
-import itRaw from "./it";
-import jaRaw from "./ja";
-import ptBRRaw from "./pt-BR";
-import zhTWRaw from "./zh-TW";
+import esMessages from "./es";
+import itMessages from "./it";
+import jaMessages from "./ja";
+import ptBRMessages from "./pt-BR";
+import zhTWMessages from "./zh-TW";
 
 type TypeHelpLocale = { structureEditor: Record<string, Record<string, string>>; redis: Record<string, Record<string, string>> };
 
 const english = en as unknown as TypeHelpLocale;
-const es = esRaw as unknown as TypeHelpLocale;
-const itLocale = itRaw as unknown as TypeHelpLocale;
-const ja = jaRaw as unknown as TypeHelpLocale;
-const ptBR = ptBRRaw as unknown as TypeHelpLocale;
-const zhTW = zhTWRaw as unknown as TypeHelpLocale;
-const locales = { es, it: itLocale, ja, "pt-BR": ptBR, "zh-TW": zhTW } as const;
+const es = esMessages as unknown as TypeHelpLocale;
+const itLocale = itMessages as unknown as TypeHelpLocale;
+const ja = jaMessages as unknown as TypeHelpLocale;
+const ptBR = ptBRMessages as unknown as TypeHelpLocale;
+const zhTW = zhTWMessages as unknown as TypeHelpLocale;
+const locales = { es, it: itLocale, ja, "pt-BR": ptBR, "zh-TW": zhTW };
 const directories = [
   ["structureEditor", "mysqlDataTypeHelp"],
   ["structureEditor", "postgresDataTypeHelp"],
@@ -22,7 +22,7 @@ const directories = [
   ["redis", "createKeyTypeHelp"],
 ] as const;
 
-describe("localized type help overrides", () => {
+describe("localized type help", () => {
   it("provides every English help key directly in each supported locale", () => {
     for (const [localeName, locale] of Object.entries(locales)) {
       for (const [section, directory] of directories) {

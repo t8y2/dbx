@@ -20,7 +20,7 @@ describe("getSqliteDataTypeHelp", () => {
     expect(getSqliteDataTypeHelp(" decimal(10, 2) ")).toEqual({ key: "numeric" });
   });
 
-  it("documents common declared type aliases while leaving unknown types alone", () => {
+  it("applies SQLite's ordered declared-type affinity rules", () => {
     expect(getSqliteDataTypeHelp("char(12)")).toEqual({ key: "text" });
     expect(getSqliteDataTypeHelp("boolean")).toEqual({ key: "numeric" });
     expect(getSqliteDataTypeHelp("unsigned big int")).toEqual({ key: "integer" });
@@ -28,8 +28,13 @@ describe("getSqliteDataTypeHelp", () => {
     expect(getSqliteDataTypeHelp("date")).toEqual({ key: "numeric" });
     expect(getSqliteDataTypeHelp("datetime")).toEqual({ key: "numeric" });
     expect(getSqliteDataTypeHelp("time")).toEqual({ key: "numeric" });
-    expect(getSqliteDataTypeHelp("unsigned")).toBeUndefined();
-    expect(getSqliteDataTypeHelp("application_status")).toBeUndefined();
+    expect(getSqliteDataTypeHelp("VARCHAR2")).toEqual({ key: "text" });
+    expect(getSqliteDataTypeHelp("CHARACTER")).toEqual({ key: "text" });
+    expect(getSqliteDataTypeHelp("INT64")).toEqual({ key: "integer" });
+    expect(getSqliteDataTypeHelp("FLOATING POINT")).toEqual({ key: "integer" });
+    expect(getSqliteDataTypeHelp("STRING")).toEqual({ key: "numeric" });
+    expect(getSqliteDataTypeHelp("application_status")).toEqual({ key: "numeric" });
+    expect(getSqliteDataTypeHelp("")).toEqual({ key: "blob" });
   });
 
   it("has English and Simplified Chinese copy for static and common help keys", () => {

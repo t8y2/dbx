@@ -1,12 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  buildInsertValueHints,
-  expandToSqlStatementWindow,
-  parseInsertValueHints,
-  parseInsertValueHintsInRanges,
-  parseInsertValuesClauses,
-} from "../../apps/desktop/src/lib/sql/insertValueHints.ts";
+import { buildInsertValueHints, expandToSqlStatementWindow, parseInsertValueHints, parseInsertValueHintsInRanges, parseInsertValuesClauses } from "../../apps/desktop/src/lib/sql/insertValueHints.ts";
 
 test("maps explicit column list to single-row VALUES", () => {
   const sql = "INSERT INTO auth_user (id, password, last_login) VALUES (5, 'hash', NULL)";
@@ -41,6 +35,26 @@ test("does not split nested parentheses inside a value", () => {
   );
   assert.ok(sql.slice(hints[0]!.from).startsWith("COALESCE(x, y)"));
   assert.ok(sql.slice(hints[1]!.from).startsWith("NOW()"));
+});
+
+test("does not split PostgreSQL dollar-quoted values", () => {
+  const sql = "INSERT INTO t (body, count) VALUES ($tag$hello,(world),again$tag$, 2)";
+  const hints = parseInsertValueHints(sql);
+  assert.deepEqual(
+    hints.map((hint) => hint.column),
+    ["body", "count"],
+  );
+  assert.ok(sql.slice(hints[0]!.from).startsWith("$tag$hello,(world),again$tag$"));
+  assert.equal(sql.slice(hints[1]!.from, hints[1]!.from + 1), "2");
+});
+
+test("skips SQL Server table hints before the INSERT column list", () => {
+  const sql = "INSERT INTO dbo.Users WITH (TABLOCK) (id, name) VALUES (1, 'alice')";
+  const hints = parseInsertValueHints(sql);
+  assert.deepEqual(
+    hints.map((hint) => hint.column),
+    ["id", "name"],
+  );
 });
 
 test("resolves columns from table metadata when column list is omitted", () => {

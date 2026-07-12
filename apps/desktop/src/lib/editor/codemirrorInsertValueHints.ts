@@ -139,15 +139,12 @@ export function createInsertValueHintsExtension(options: InsertValueHintsExtensi
       decorations: DecorationSet;
       private lastEnabled = true;
       private reparseTimer: ReturnType<typeof setTimeout> | null = null;
-      private view: EditorView;
 
       constructor(view: EditorView) {
-        this.view = view;
         this.decorations = this.compute(view);
       }
 
       update(update: ViewUpdate) {
-        this.view = update.view;
         const refreshed = update.transactions.some((tr) => tr.effects.some((effect) => effect.is(refreshInsertValueHintsEffect)));
         const enabled = options.isEnabled?.() ?? true;
 

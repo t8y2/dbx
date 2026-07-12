@@ -72,6 +72,16 @@ export function tokenizeSqlSemantic(input: string): SqlSemanticToken[] {
       continue;
     }
 
+    if (ch === "$") {
+      const marker = /^\$[A-Za-z_0-9]*\$/.exec(input.slice(start))?.[0];
+      if (marker) {
+        const closing = input.indexOf(marker, start + marker.length);
+        index = closing < 0 ? input.length : closing + marker.length;
+        tokens.push(token("string", input.slice(start, index), start, index, depth, marker));
+        continue;
+      }
+    }
+
     if (ch === '"') {
       index = readQuoted(input, start, '"', '"');
       tokens.push(token("quoted_identifier", input.slice(start, index), start, index, depth, '"'));

@@ -173,6 +173,13 @@ function parseInsertClause(tokens: readonly SqlSemanticToken[], span: SqlSemanti
   let index = tableInfo.nextIndex;
   let columns: string[] | null = null;
 
+  // SQL Server table hints appear between the target table and INSERT column list.
+  if (tokens[index]?.normalized === "with" && tokens[index + 1]?.text === "(") {
+    const hintList = parseColumnList(tokens, index + 1);
+    if (!hintList) return null;
+    index = hintList.nextIndex;
+  }
+
   // Optional alias between table and column list / VALUES / SELECT
   if (tokenIsIdentifier(tokens[index]) && tokens[index]?.normalized !== "values" && tokens[index]?.normalized !== "select" && tokens[index]?.normalized !== "default") {
     const maybeAs = tokens[index];

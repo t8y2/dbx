@@ -339,6 +339,23 @@ export function canEditTableStructure(dbType?: DatabaseType): boolean {
   return caps.createTable || caps.addColumn || caps.alterExistingColumn || caps.createIndex || caps.dropIndex;
 }
 
+export function supportsLocalTableColumnReorder(dbType?: DatabaseType, connectionDbType?: DatabaseType): boolean {
+  const caps = getTableStructureCapabilities(dbType, connectionDbType);
+  return canEditTableStructure(dbType) && !caps.reorderColumn;
+}
+
+export function isPhysicalTableColumnOrderChange(dbType: DatabaseType | undefined, connectionDbType: DatabaseType | undefined, originalPosition: number | undefined, currentPosition: number): boolean {
+  return getTableStructureCapabilities(dbType, connectionDbType).reorderColumn && originalPosition !== currentPosition;
+}
+
+export function hasLocalTableColumnOrderChange(columns: readonly { originalPosition?: number; original?: unknown; markedForDrop?: boolean }[]): boolean {
+  const activeColumns = columns.filter((column) => !column.markedForDrop);
+  // Databases without physical reorder support keep existing columns in ordinal order
+  // and append newly added columns, so compare against that post-save layout.
+  const databaseOrder = [...activeColumns.filter((column) => column.original).sort((left, right) => (left.originalPosition ?? Number.MAX_SAFE_INTEGER) - (right.originalPosition ?? Number.MAX_SAFE_INTEGER)), ...activeColumns.filter((column) => !column.original)];
+  return activeColumns.some((column, index) => column !== databaseOrder[index]);
+}
+
 export function canAddTableStructureColumn(dbType: DatabaseType | undefined, isCreateMode: boolean): boolean {
   const caps = getTableStructureCapabilities(dbType);
   return isCreateMode ? caps.createTable : caps.addColumn;

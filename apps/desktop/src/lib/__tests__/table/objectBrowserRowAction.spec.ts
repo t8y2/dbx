@@ -94,9 +94,15 @@ describe("resolveRowClickAction", () => {
   });
 
   describe("double-click activation mode", () => {
-    it("single click (detail=1) returns none", () => {
+    it("single click (detail=1) on TABLE returns table-info (side panel)", () => {
       const result = resolveRowClickAction(tableRow, 1, "double");
-      expect(result.action).toBe("none");
+      expect(result.action).toBe("table-info");
+      expect(result.isDouble).toBe(false);
+    });
+
+    it("single click (detail=1) on VIEW returns open-source (side panel)", () => {
+      const result = resolveRowClickAction(viewRow, 1, "double");
+      expect(result.action).toBe("open-source");
       expect(result.isDouble).toBe(false);
     });
 
@@ -118,28 +124,24 @@ describe("shouldDeferSingleClick", () => {
   const tableRow = row("TABLE", "users");
   const viewRow = row("VIEW", "v_users");
 
-  it("defers TABLE table-info in single mode (distinct single/double actions)", () => {
-    expect(shouldDeferSingleClick(tableRow, "table-info", "single")).toBe(true);
+  it("defers TABLE table-info (distinct single/double actions)", () => {
+    expect(shouldDeferSingleClick(tableRow, "table-info")).toBe(true);
   });
 
-  it("does not defer VIEW open-source in single mode (same single/double action)", () => {
-    expect(shouldDeferSingleClick(viewRow, "open-source", "single")).toBe(false);
-  });
-
-  it("does not defer in double activation mode", () => {
-    expect(shouldDeferSingleClick(tableRow, "table-info", "double")).toBe(false);
+  it("does not defer VIEW open-source (same single/double action)", () => {
+    expect(shouldDeferSingleClick(viewRow, "open-source")).toBe(false);
   });
 
   it("does not defer none action", () => {
-    expect(shouldDeferSingleClick(tableRow, "none", "single")).toBe(false);
+    expect(shouldDeferSingleClick(tableRow, "none")).toBe(false);
   });
 
   it("does not defer when action is not the single-click action", () => {
-    expect(shouldDeferSingleClick(tableRow, "open-table", "single")).toBe(false);
+    expect(shouldDeferSingleClick(tableRow, "open-table")).toBe(false);
   });
 
   it("handles null/undefined row", () => {
-    expect(shouldDeferSingleClick(null, "table-info", "single")).toBe(false);
-    expect(shouldDeferSingleClick(undefined, "open-source", "single")).toBe(false);
+    expect(shouldDeferSingleClick(null, "table-info")).toBe(false);
+    expect(shouldDeferSingleClick(undefined, "open-source")).toBe(false);
   });
 });

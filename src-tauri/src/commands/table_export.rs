@@ -23,6 +23,10 @@ pub async fn start_table_export(
             dbx_core::table_export::export_table_data_core(&state, &request, |progress| emit_progress(&app, progress))
                 .await;
 
+        let client_session_id = dbx_core::table_export::table_export_client_session_id(&export_id);
+        let _ =
+            state.close_client_session_pool(&request.connection_id, Some(&request.database), &client_session_id).await;
+
         if let Err(e) = result {
             emit_progress(
                 &app,

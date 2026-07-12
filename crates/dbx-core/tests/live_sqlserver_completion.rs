@@ -58,6 +58,8 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         jdbc_driver_paths: Vec::new(),
         one_time: false,
         read_only: false,
+        is_production: false,
+        production_databases: vec![],
     }
 }
 

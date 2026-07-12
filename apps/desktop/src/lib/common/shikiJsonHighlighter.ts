@@ -1,8 +1,8 @@
 import type { AppThemeAppearance } from "@/lib/app/appTheme";
 
-export type RedisJsonHighlighter = (content: string, appearance?: AppThemeAppearance) => string;
+export type JsonHighlighter = (content: string, appearance?: AppThemeAppearance) => string;
 
-interface RedisShikiJsonHighlighterOptions {
+interface ShikiJsonHighlighterOptions {
   appearance: () => AppThemeAppearance;
 }
 
@@ -15,8 +15,8 @@ type ShikiHighlighter = Awaited<ReturnType<typeof import("shiki/core").createHig
 
 let highlighterPromise: Promise<ShikiHighlighter> | undefined;
 
-export async function createRedisShikiJsonHighlighter(options: RedisShikiJsonHighlighterOptions): Promise<RedisJsonHighlighter> {
-  const highlighter = await getRedisShikiHighlighter();
+export async function createShikiJsonHighlighter(options: ShikiJsonHighlighterOptions): Promise<JsonHighlighter> {
+  const highlighter = await getShikiJsonHighlighter();
   return (content, appearance = options.appearance()) =>
     highlighter.codeToHtml(content, {
       lang: "json",
@@ -25,12 +25,12 @@ export async function createRedisShikiJsonHighlighter(options: RedisShikiJsonHig
     });
 }
 
-function getRedisShikiHighlighter(): Promise<ShikiHighlighter> {
-  highlighterPromise ??= loadRedisShikiHighlighter();
+function getShikiJsonHighlighter(): Promise<ShikiHighlighter> {
+  highlighterPromise ??= loadShikiJsonHighlighter();
   return highlighterPromise;
 }
 
-async function loadRedisShikiHighlighter(): Promise<ShikiHighlighter> {
+async function loadShikiJsonHighlighter(): Promise<ShikiHighlighter> {
   const [{ createHighlighterCore }, { createJavaScriptRegexEngine }, githubDark, githubLight, json] = await Promise.all([import("shiki/core"), import("shiki/engine/javascript"), import("shiki/themes/github-dark.mjs"), import("shiki/themes/github-light.mjs"), import("shiki/langs/json.mjs")]);
 
   return createHighlighterCore({

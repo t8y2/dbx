@@ -18,7 +18,7 @@ export function isLosslessJsonNumber(value: unknown): value is LosslessJsonNumbe
 
 /**
  * Parses JSON while retaining numeric literals that JavaScript cannot safely
- * represent as numbers. Callers can render these values without adding quotes.
+ * represent exactly. Callers can render these values without adding quotes.
  */
 export function parseJsonPreservingLargeNumbers(text: string): unknown {
   const protectedJson = protectLargeJsonNumbers(text);
@@ -28,7 +28,8 @@ export function parseJsonPreservingLargeNumbers(text: string): unknown {
 
 /**
  * Parse and re-stringify JSON while preserving numeric literals whose integer
- * parts exceed Number.MAX_SAFE_INTEGER (2^53 - 1).
+ * parts exceed Number.MAX_SAFE_INTEGER (2^53 - 1), plus decimal and exponent
+ * forms that JavaScript may round or turn into Infinity.
  */
 export function safeJsonFormat(text: string, indent?: number): string {
   const protectedJson = protectLargeJsonNumbers(text);
@@ -62,7 +63,7 @@ function protectLargeJsonNumbers(text: string): ProtectedJsonNumbers {
     const numberMatch = text.slice(index).match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/);
     if (numberMatch) {
       const raw = numberMatch[0];
-      if (hasUnsafeIntegerPart(raw)) {
+      if (shouldPreserveJsonNumber(raw)) {
         // A quoted placeholder lets the native parser validate the rest of the JSON.
         const placeholder = `${placeholderPrefix}${numbers.size}__`;
         numbers.set(placeholder, raw);
@@ -96,7 +97,12 @@ function findJsonStringEnd(text: string, start: number): number {
   return text.length;
 }
 
-function hasUnsafeIntegerPart(raw: string): boolean {
+function shouldPreserveJsonNumber(raw: string): boolean {
+  // Keep fractional/exponent forms verbatim. Even when a particular value is
+  // representable today, parsing it through Number can change its precision or
+  // spelling before the JSON viewer renders it.
+  if (raw.includes(".") || raw.includes("e") || raw.includes("E") || raw === "-0") return true;
+
   const unsigned = raw.startsWith("-") ? raw.slice(1) : raw;
   const integerPart = unsigned.split(/[.eE]/, 1)[0];
   const normalized = integerPart.replace(/^0+(?=\d)/, "");

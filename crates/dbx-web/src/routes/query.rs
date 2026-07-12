@@ -309,7 +309,7 @@ pub struct BuildDatabaseSqlExportRequest {
 pub async fn execute_query(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ExecuteQueryRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<dbx_core::db::QueryResult>, AppError> {
     let execution_id = req.execution_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     let registered = state.app.running_queries.register_task(
@@ -341,13 +341,13 @@ pub async fn execute_query(
     .map_err(AppError)?;
 
     drop(registered);
-    Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
+    Ok(Json(result))
 }
 
 pub async fn execute_multi(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ExecuteQueryRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<Vec<dbx_core::db::QueryResult>>, AppError> {
     let execution_id = req.execution_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     let registered = state.app.running_queries.register_task(
@@ -379,13 +379,13 @@ pub async fn execute_multi(
     .map_err(AppError)?;
 
     drop(registered);
-    Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
+    Ok(Json(result))
 }
 
 pub async fn execute_batch(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ExecuteBatchRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<dbx_core::db::QueryResult>, AppError> {
     let result = dbx_core::query::execute_statements(
         &state.app,
         &req.connection_id,
@@ -397,7 +397,7 @@ pub async fn execute_batch(
     .await
     .map_err(AppError)?;
 
-    Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
+    Ok(Json(result))
 }
 
 pub async fn cancel_query(
@@ -442,7 +442,7 @@ pub async fn close_client_connection_session(
 pub async fn execute_script(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ExecuteQueryRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<dbx_core::db::QueryResult>, AppError> {
     let db_type = {
         let configs = state.app.configs.read().await;
         configs.get(&req.connection_id).map(|config| config.db_type)
@@ -461,13 +461,13 @@ pub async fn execute_script(
     .await
     .map_err(AppError)?;
 
-    Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
+    Ok(Json(result))
 }
 
 pub async fn execute_in_transaction(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ExecuteBatchRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<dbx_core::db::QueryResult>, AppError> {
     let result = dbx_core::query::execute_statements_in_transaction(
         &state.app,
         &req.connection_id,
@@ -478,7 +478,7 @@ pub async fn execute_in_transaction(
     .await
     .map_err(AppError)?;
 
-    Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
+    Ok(Json(result))
 }
 
 pub async fn analyze_sql_references(

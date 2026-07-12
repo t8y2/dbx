@@ -249,6 +249,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     await queryStore.executeTabSql(tab.id, sql, {
       pagination: { offset, limit },
       preserveResultDuringExecution: true,
+      preserveTotalRowCountDuringExecution: true,
     });
   }
 

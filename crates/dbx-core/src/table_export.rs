@@ -7,14 +7,14 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::connection::MysqlMode;
-use crate::connection::{AppState, PoolKind};
+use crate::connection::{task_client_session_id, AppState, PoolKind};
 use crate::csv_export::{escape_csv, format_csv, value_to_csv_text};
 pub use crate::database_export::ExportStatus;
 use crate::database_export::{build_export_insert_statements, is_export_cancelled, BuildExportInsertStatementsOptions};
 use crate::db::agent_driver::AgentTableReadStartParams;
 use crate::models::connection::DatabaseType;
 use crate::transfer::{
-    count_sql_with_where, execute_on_pool, execute_on_pool_with_max_rows, keyset_pagination_sql,
+    count_sql_with_where, execute_read_on_pool, execute_read_on_pool_with_max_rows, keyset_pagination_sql,
     pagination_sql_with_filter_order, qualified_table, quote_identifier,
 };
 use crate::types::QueryResult;
@@ -22,6 +22,10 @@ use crate::xlsx_export::{finish_streaming_xlsx_workbook, start_streaming_xlsx_wo
 
 const DEFAULT_BATCH_SIZE: usize = 10_000;
 const SQL_INSERT_BATCH_SIZE: usize = 100;
+
+pub fn table_export_client_session_id(export_id: &str) -> String {
+    task_client_session_id("table-export", export_id)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,6 +75,16 @@ fn format_csv_rows(rows: &[Vec<Value>]) -> String {
         .map(|row| row.iter().map(|cell| escape_csv(&value_to_csv_text(cell))).collect::<Vec<_>>().join(","))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn export_column_types(request: &TableExportRequest) -> Vec<String> {
+    request
+        .column_types
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|column_type| column_type.clone().unwrap_or_default())
+        .collect()
 }
 
 fn write_json_row_object<W: Write>(writer: &mut W, columns: &[String], row: &[Value]) -> Result<(), String> {
@@ -343,7 +357,7 @@ async fn fetch_paginated_table_export_batch(
         offset,
         active_batch_size,
     );
-    execute_on_pool_with_max_rows(state, pool_key, &sql, Some(active_batch_size)).await
+    execute_read_on_pool_with_max_rows(state, pool_key, &sql, Some(active_batch_size)).await
 }
 
 async fn close_table_read_session_if_open(
@@ -492,10 +506,15 @@ async fn try_export_native_table_stream(
             result
         }
         "xlsx" => {
+            let column_types = export_column_types(request);
             let xlsx_file =
                 std::fs::File::create(&request.file_path).map_err(|e| format!("Failed to create XLSX file: {e}"))?;
-            let mut writer =
-                start_streaming_xlsx_workbook(BufWriter::new(xlsx_file), Some(&request.table_name), col_names)?;
+            let mut writer = start_streaming_xlsx_workbook(
+                BufWriter::new(xlsx_file),
+                Some(&request.table_name),
+                col_names,
+                &column_types,
+            )?;
             let result = stream_native_table_rows(
                 state,
                 pool_key,
@@ -758,7 +777,10 @@ pub async fn export_table_data_core(
         .ok_or_else(|| format!("Connection config not found: {}", request.connection_id))?;
 
     // 2. Get pool
-    let pool_key = state.get_or_create_pool(&request.connection_id, Some(&request.database)).await?;
+    let client_session_id = table_export_client_session_id(&request.export_id);
+    let pool_key = state
+        .get_or_create_pool_for_session(&request.connection_id, Some(&request.database), Some(&client_session_id))
+        .await?;
 
     // 3. Resolve columns. Data grid exports can provide columns/primary keys
     // directly, which avoids expensive metadata round-trips on JDBC drivers.
@@ -815,7 +837,7 @@ pub async fn export_table_data_core(
             &db_type,
             request.where_input.as_deref(),
         );
-        match execute_on_pool(state, &pool_key, &count_query).await {
+        match execute_read_on_pool(state, &pool_key, &count_query).await {
             Ok(result) => result
                 .rows
                 .first()
@@ -958,13 +980,18 @@ pub async fn export_table_data_core(
             }
         }
         "xlsx" => {
+            let column_types = export_column_types(request);
             // Create a dedicated file handle for the streaming XLSX writer
             // instead of cloning the outer BufWriter's handle.  This avoids
             // sharing a file descriptor between two independent buffers.
             let xlsx_file =
                 std::fs::File::create(&request.file_path).map_err(|e| format!("Failed to create XLSX file: {e}"))?;
-            let mut writer =
-                start_streaming_xlsx_workbook(BufWriter::new(xlsx_file), Some(&request.table_name), &col_names)?;
+            let mut writer = start_streaming_xlsx_workbook(
+                BufWriter::new(xlsx_file),
+                Some(&request.table_name),
+                &col_names,
+                &column_types,
+            )?;
 
             loop {
                 // Check cancellation between batches
@@ -1490,6 +1517,7 @@ mod tests {
         let data = XlsxWorksheetData {
             sheet_name: Some("employees".to_string()),
             columns: vec!["id".to_string(), "name".to_string(), "salary".to_string()],
+            column_types: vec![],
             rows: vec![
                 vec![json!(1), json!("Alice"), json!(75000.50)],
                 vec![json!(2), json!("Bob"), json!(82000)],

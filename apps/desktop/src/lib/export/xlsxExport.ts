@@ -3,6 +3,7 @@ export type XlsxCellValue = string | number | boolean | null | undefined;
 export interface XlsxWorksheetData {
   sheetName?: string;
   columns: readonly string[];
+  columnTypes?: readonly string[];
   rows: readonly (readonly XlsxCellValue[])[];
 }
 
@@ -103,7 +104,51 @@ function estimateColumnWidths(columns: readonly string[], rows: readonly (readon
   });
 }
 
-function cellXml(value: XlsxCellValue, rowIndex: number, colIndex: number, style?: number): string {
+function isNumericColumnType(columnType?: string): boolean {
+  const base = (columnType || "")
+    .trim()
+    .toLowerCase()
+    .split(/[\s([]/, 1)[0];
+  return new Set([
+    "bit",
+    "tinyint",
+    "smallint",
+    "mediumint",
+    "int",
+    "integer",
+    "bigint",
+    "int2",
+    "int4",
+    "int8",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "uint128",
+    "uint256",
+    "float",
+    "float4",
+    "float8",
+    "float32",
+    "float64",
+    "real",
+    "double",
+    "decimal",
+    "numeric",
+    "number",
+    "money",
+    "smallmoney",
+  ]).has(base);
+}
+
+function safeExcelNumber(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed || !Number.isFinite(Number(trimmed))) return undefined;
+  const significantDigits = (trimmed.split(/[eE]/, 1)[0].match(/\d/g) || []).join("").replace(/^0+/, "").length;
+  return significantDigits <= 15 ? trimmed : undefined;
+}
+
+function cellXml(value: XlsxCellValue, rowIndex: number, colIndex: number, style?: number, columnType?: string): string {
   const ref = cellRef(rowIndex, colIndex);
   const styleAttr = style == null ? "" : ` s="${style}"`;
   if (value == null) return `<c r="${ref}"${styleAttr}/>`;
@@ -112,6 +157,12 @@ function cellXml(value: XlsxCellValue, rowIndex: number, colIndex: number, style
   }
   if (typeof value === "boolean") {
     return `<c r="${ref}" t="b"${styleAttr}><v>${value ? 1 : 0}</v></c>`;
+  }
+  if (typeof value === "string" && isNumericColumnType(columnType)) {
+    // Excel keeps only 15 significant digits, so preserve higher-precision
+    // database values as text rather than silently rounding them.
+    const number = safeExcelNumber(value);
+    if (number !== undefined) return `<c r="${ref}"${styleAttr}><v>${number}</v></c>`;
   }
   return `<c r="${ref}" t="inlineStr"${styleAttr}><is><t>${escapeXml(String(value))}</t></is></c>`;
 }
@@ -127,7 +178,7 @@ function worksheetXml(data: XlsxWorksheetData): string {
   const bodyXml = rows
     .map((row, rowIndex) => {
       const excelRowIndex = rowIndex + 2;
-      const cells = columns.map((_, colIndex) => cellXml(row[colIndex], excelRowIndex - 1, colIndex)).join("");
+      const cells = columns.map((_, colIndex) => cellXml(row[colIndex], excelRowIndex - 1, colIndex, undefined, data.columnTypes?.[colIndex])).join("");
       return `<row r="${excelRowIndex}">${cells}</row>`;
     })
     .join("");

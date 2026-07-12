@@ -31,11 +31,17 @@ export function doubleClickRowAction(row: ObjectBrowserRow | null | undefined): 
 /**
  * Resolve a row click event into a single or double action based on click detail
  * and the sidebar activation setting.
+ *
+ * In both single-click and double-click activation modes, a single click
+ * triggers the side-panel action (table-info / open-source). When a distinct
+ * double-click action exists (e.g. TABLE single→table-info, double→open-table),
+ * the caller defers the single-click via shouldDeferSingleClick so the second
+ * click can cancel it.
  */
 export function resolveRowClickAction(row: ObjectBrowserRow | null | undefined, detail: number, activation: "single" | "double"): { action: ObjectBrowserRowAction; isDouble: boolean } {
   if (activation === "double") {
     if (detail === 2) return { action: doubleClickRowAction(row), isDouble: true };
-    return { action: "none", isDouble: false };
+    return { action: singleClickRowAction(row), isDouble: false };
   }
   // single-click activation
   if (detail > 1) return { action: doubleClickRowAction(row), isDouble: true };
@@ -44,13 +50,12 @@ export function resolveRowClickAction(row: ObjectBrowserRow | null | undefined, 
 
 /**
  * Whether a single-click action should be deferred to distinguish it from a
- * possible upcoming double-click. Only applies in single-click activation mode
- * and when the row's single-click and double-click actions differ (e.g. TABLE:
- * single → table-info, double → open-table). For rows whose single and double
- * actions are identical (e.g. VIEW → open-source both), no deferral is needed.
+ * possible upcoming double-click. Applies when the row's single-click and
+ * double-click actions differ (e.g. TABLE: single → table-info, double →
+ * open-table). For rows whose single and double actions are identical
+ * (e.g. VIEW → open-source both), no deferral is needed.
  */
-export function shouldDeferSingleClick(row: ObjectBrowserRow | null | undefined, action: ObjectBrowserRowAction, activation: "single" | "double"): boolean {
-  if (activation !== "single") return false;
+export function shouldDeferSingleClick(row: ObjectBrowserRow | null | undefined, action: ObjectBrowserRowAction): boolean {
   if (action === "none") return false;
   const single = singleClickRowAction(row);
   const double = doubleClickRowAction(row);

@@ -3,12 +3,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tokio::sync::RwLock;
 
-use crate::connection::{AppState, PoolKind};
+use crate::connection::{config_for_pool_key, AppState, PoolKind};
 use crate::db;
 use crate::db::mongo_driver::MongoDocumentResult;
 use crate::models::connection::DatabaseType;
 use crate::object_source_sql::{build_executable_object_source_statements, EditableObjectSourceSqlInput};
-use crate::query::{agent_execute_query_params, should_discard_pool_after_error, QueryExecutionOptions};
+use crate::query::{agent_execute_query_params, pool_error_action, PoolErrorAction, QueryExecutionOptions};
 use crate::sql::split_sql_statements;
 #[cfg(feature = "duckdb-bundled")]
 use crate::sql::starts_with_executable_sql_keyword;
@@ -2513,7 +2513,20 @@ fn mongo_columns_from_documents(documents: &[serde_json::Value]) -> Vec<db::Colu
 }
 
 pub async fn execute_on_pool(state: &AppState, pool_key: &str, sql: &str) -> Result<db::QueryResult, String> {
-    execute_on_pool_with_max_rows(state, pool_key, sql, None).await
+    execute_on_pool_with_options(state, pool_key, sql, None, TransferExecutionSafety::WriteNoReplay).await
+}
+
+pub async fn execute_read_on_pool(state: &AppState, pool_key: &str, sql: &str) -> Result<db::QueryResult, String> {
+    execute_read_on_pool_with_max_rows(state, pool_key, sql, None).await
+}
+
+pub async fn execute_read_on_pool_with_max_rows(
+    state: &AppState,
+    pool_key: &str,
+    sql: &str,
+    max_rows: Option<usize>,
+) -> Result<db::QueryResult, String> {
+    execute_on_pool_with_options(state, pool_key, sql, max_rows, TransferExecutionSafety::ReadOnlyRetryable).await
 }
 
 async fn execute_transfer_ddl_on_pool(
@@ -2597,6 +2610,91 @@ pub async fn execute_on_pool_with_max_rows(
     sql: &str,
     max_rows: Option<usize>,
 ) -> Result<db::QueryResult, String> {
+    execute_on_pool_with_options(state, pool_key, sql, max_rows, TransferExecutionSafety::WriteNoReplay).await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransferExecutionSafety {
+    ReadOnlyRetryable,
+    WriteNoReplay,
+}
+
+fn transfer_pool_error_action(
+    safety: TransferExecutionSafety,
+    db_type: Option<DatabaseType>,
+    err: &str,
+) -> PoolErrorAction {
+    match (safety, pool_error_action(db_type, err)) {
+        (TransferExecutionSafety::WriteNoReplay, PoolErrorAction::ReconnectAndRetry) => PoolErrorAction::Discard,
+        (_, action) => action,
+    }
+}
+
+async fn transfer_pool_context(
+    state: &AppState,
+    pool_key: &str,
+) -> (Option<String>, Option<String>, Option<DatabaseType>) {
+    let configs = state.configs.read().await;
+    let config = config_for_pool_key(pool_key, &configs);
+    (
+        config.map(|config| config.id.clone()),
+        database_from_pool_key(pool_key).map(str::to_string),
+        config.map(|config| config.db_type),
+    )
+}
+
+fn client_session_id_from_pool_key(pool_key: &str) -> Option<&str> {
+    pool_key.split_once(":session:").map(|(_, session)| session).filter(|session| !session.is_empty())
+}
+
+async fn execute_on_pool_with_options(
+    state: &AppState,
+    pool_key: &str,
+    sql: &str,
+    max_rows: Option<usize>,
+    safety: TransferExecutionSafety,
+) -> Result<db::QueryResult, String> {
+    let (connection_id, database, db_type) = transfer_pool_context(state, pool_key).await;
+    let client_session_id = client_session_id_from_pool_key(pool_key).map(str::to_string);
+    let mut current_pool_key = pool_key.to_string();
+
+    for attempt in 0..2 {
+        let result = execute_on_pool_once(state, &current_pool_key, sql, max_rows).await;
+        let Some(error) = result.as_ref().err() else {
+            return result;
+        };
+
+        match transfer_pool_error_action(safety, db_type, error) {
+            PoolErrorAction::Keep => return result,
+            PoolErrorAction::Discard => {
+                state.remove_pool_by_key(&current_pool_key).await;
+                return result;
+            }
+            PoolErrorAction::ReconnectAndRetry if attempt == 0 => {
+                let Some(connection_id) = connection_id.as_deref() else {
+                    state.remove_pool_by_key(&current_pool_key).await;
+                    return result;
+                };
+                current_pool_key = state
+                    .reconnect_pool_for_session(connection_id, database.as_deref(), client_session_id.as_deref())
+                    .await?;
+            }
+            PoolErrorAction::ReconnectAndRetry => {
+                state.remove_pool_by_key(&current_pool_key).await;
+                return result;
+            }
+        }
+    }
+
+    unreachable!("transfer pool execution retry loop runs at most twice")
+}
+
+async fn execute_on_pool_once(
+    state: &AppState,
+    pool_key: &str,
+    sql: &str,
+    max_rows: Option<usize>,
+) -> Result<db::QueryResult, String> {
     // Read-only check: block transfer operations in readonly mode
     crate::query::check_read_only_for_connection(state, pool_key, sql).await?;
     let connections = state.connections.read().await;
@@ -2631,10 +2729,6 @@ pub async fn execute_on_pool_with_max_rows(
             let mut client = client.lock().await;
             let result = db::sqlserver::execute_query_with_max_rows(&mut client, sql, max_rows).await;
             drop(client);
-            if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(Some(DatabaseType::SqlServer), err))
-            {
-                state.remove_pool_by_key(pool_key).await;
-            }
             result
         }
         PoolKind::Agent(client) => {
@@ -4680,6 +4774,8 @@ mod tests {
             jdbc_driver_paths: Vec::new(),
             one_time: false,
             read_only: false,
+            is_production: false,
+            production_databases: vec![],
         }
     }
 
@@ -6244,6 +6340,30 @@ SELECT 1 FROM dual"#
         assert_eq!(database_from_pool_key("conn:analytics"), Some("analytics"));
         assert_eq!(database_from_pool_key("conn:analytics:session:editor-1"), Some("analytics"));
         assert_eq!(database_from_pool_key("conn"), None);
+    }
+
+    #[test]
+    fn transfer_read_retry_policy_retries_connection_errors() {
+        assert_eq!(
+            transfer_pool_error_action(
+                TransferExecutionSafety::ReadOnlyRetryable,
+                Some(DatabaseType::Postgres),
+                "connection reset by peer"
+            ),
+            PoolErrorAction::ReconnectAndRetry
+        );
+    }
+
+    #[test]
+    fn transfer_write_retry_policy_discards_without_replaying_batch() {
+        assert_eq!(
+            transfer_pool_error_action(
+                TransferExecutionSafety::WriteNoReplay,
+                Some(DatabaseType::Postgres),
+                "connection reset by peer"
+            ),
+            PoolErrorAction::Discard
+        );
     }
 
     #[test]

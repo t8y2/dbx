@@ -26,6 +26,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "dataGridQuickEntry",
   "infiniteScroll",
   "infiniteScrollMaxRows",
+  "autoCalculateTotalRows",
   "tableColumnTemplateFields",
   "shortcuts",
   "sqlFormatter",

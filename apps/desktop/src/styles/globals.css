@@ -1345,6 +1345,9 @@ body.dbx-table-reference-dragging * {
   font-size: 12.5px;
 }
 
+/* Tailwind CSS v4 targets Safari 16.4+. Keep these legacy WebKit fallbacks
+ * isolated so supported WebViews continue using the generated component CSS. */
+@supports not (color: oklch(0.5 0.1 180)) {
 @media (min-width: 640px) {
   .sm\:flex-row {
     flex-direction: row !important;
@@ -1808,6 +1811,7 @@ body.dbx-table-reference-dragging * {
   [data-slot="dialog-content"][class*="sm:!max-w-[min(920px,calc(100vw-48px))]"] {
     max-width: min(920px, calc(100vw - 48px)) !important;
   }
+}
 }
 
 /* Splitpanes */

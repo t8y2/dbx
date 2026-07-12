@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { useHistoryStore } from "@/stores/historyStore";
+import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import { resolveHistoryActivityKind } from "@/lib/history/historyActivityKind";
 import { canRollbackHistoryEntry } from "@/lib/history/historyAiAnalysis";
@@ -16,12 +17,14 @@ import { hasHistoryDateRange, historyDateRangeIsValid, historyEntryMatchesDateRa
 import { HISTORY_ROW_HEIGHT, HISTORY_SCROLL_BUFFER, shouldVirtualizeHistory } from "@/lib/history/historyVirtualList";
 import type { HistoryEntry } from "@/lib/backend/api";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import * as api from "@/lib/backend/api";
 
 const { t } = useI18n();
 const { toast } = useToast();
 const { highlight } = useSqlHighlighter();
 const store = useHistoryStore();
+const connectionStore = useConnectionStore();
 
 const emit = defineEmits<{
   restore: [sql: string, entry: HistoryEntry];
@@ -226,7 +229,14 @@ async function rollback(entry: HistoryEntry) {
   isRollingBack.value = true;
   const start = Date.now();
   try {
-    const result = await api.executeScript(connectionId, entry.database, rollbackSql);
+    const result = await executeWithProductionSqlGuard({
+      connection: connectionStore.getConfig(connectionId),
+      database: entry.database,
+      sql: rollbackSql,
+      source: t("production.sourceQueryHistory"),
+      execute: () => api.executeScript(connectionId, entry.database, rollbackSql),
+    });
+    if (!result) return;
     await store.add({
       connection_id: connectionId,
       connection_name: entry.connection_name,

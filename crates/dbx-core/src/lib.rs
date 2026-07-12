@@ -36,6 +36,7 @@ pub mod object_source_sql;
 pub mod path_utils;
 pub mod plugins;
 pub mod process;
+pub mod production_safety;
 pub mod query;
 pub mod query_cancel;
 pub mod query_execution_sql;

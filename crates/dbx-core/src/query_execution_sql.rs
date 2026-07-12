@@ -201,9 +201,45 @@ pub fn is_write_sql(sql: &str) -> bool {
         return !is_safe_read_pragma(&upper);
     }
 
+    if starts_with_keyword(&upper, "SELECT") && select_contains_top_level_into(&upper) {
+        return true;
+    }
+
     // A statement is a write if it doesn't start with a read keyword,
     // or if it contains embedded dangerous keywords (e.g. CTE-wrapped writes like WITH ... AS (DELETE FROM ...))
     !starts_with_read || contains_dangerous_sql_keyword(sql)
+}
+
+fn select_contains_top_level_into(upper: &str) -> bool {
+    let mut token = String::new();
+    let mut depth = 0usize;
+    let mut saw_select = false;
+
+    for ch in upper.chars().chain(std::iter::once(' ')) {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            token.push(ch);
+            continue;
+        }
+
+        if !token.is_empty() {
+            if depth == 0 {
+                if token == "SELECT" {
+                    saw_select = true;
+                } else if saw_select && token == "INTO" {
+                    return true;
+                }
+            }
+            token.clear();
+        }
+
+        if ch == '(' {
+            depth += 1;
+        } else if ch == ')' {
+            depth = depth.saturating_sub(1);
+        }
+    }
+
+    false
 }
 
 /// Check if a PRAGMA statement is a safe read-only form.
@@ -321,7 +357,13 @@ fn strip_sql_comments(sql: &str) -> String {
         }
         if ch == '/' && chars.peek() == Some(&'*') {
             chars.next();
-            in_block_comment = true;
+            if let Some(body) = read_mysql_executable_comment_body(&mut chars) {
+                output.push(' ');
+                output.push_str(&strip_sql_comments(&body));
+                output.push(' ');
+            } else {
+                in_block_comment = true;
+            }
             continue;
         }
 
@@ -392,7 +434,13 @@ pub fn strip_sql_comments_and_literals(sql: &str) -> String {
         }
         if ch == '/' && chars.peek() == Some(&'*') {
             chars.next();
-            in_block_comment = true;
+            if let Some(body) = read_mysql_executable_comment_body(&mut chars) {
+                output.push(' ');
+                output.push_str(&strip_sql_comments_and_literals(&body));
+                output.push(' ');
+            } else {
+                in_block_comment = true;
+            }
             continue;
         }
         if ch == '\'' {
@@ -410,6 +458,39 @@ pub fn strip_sql_comments_and_literals(sql: &str) -> String {
     }
 
     output
+}
+
+fn read_mysql_executable_comment_body<I>(chars: &mut std::iter::Peekable<I>) -> Option<String>
+where
+    I: Iterator<Item = char>,
+{
+    let marker = chars.peek().copied()?;
+    if marker == '!' {
+        chars.next();
+    } else if marker == 'M' {
+        chars.next();
+        if chars.peek() != Some(&'!') {
+            return None;
+        }
+        chars.next();
+    } else {
+        return None;
+    }
+
+    let mut body = String::new();
+    let mut skipping_version = true;
+    while let Some(ch) = chars.next() {
+        if ch == '*' && chars.peek() == Some(&'/') {
+            chars.next();
+            return Some(body);
+        }
+        if skipping_version && (ch.is_ascii_digit() || ch.is_whitespace()) {
+            continue;
+        }
+        skipping_version = false;
+        body.push(ch);
+    }
+    Some(body)
 }
 
 #[cfg(test)]
@@ -609,6 +690,11 @@ mod tests {
         assert!(is_write_sql("CREATE TABLE users (id INT)"));
         assert!(is_write_sql("ALTER TABLE users ADD COLUMN age INT"));
         assert!(is_write_sql("TRUNCATE TABLE users"));
+        assert!(is_write_sql("EXPLAIN ANALYZE DELETE FROM users"));
+        assert!(is_write_sql("SELECT * INTO backup_users FROM users"));
+        assert!(is_write_sql("SELECT * FROM users INTO OUTFILE '/tmp/users.csv'"));
+        assert!(is_write_sql("COPY users FROM '/tmp/users.csv'"));
+        assert!(is_write_sql("/*! DELETE FROM users */"));
         assert!(is_write_sql(
             "MERGE INTO target USING source ON t.id = s.id WHEN MATCHED THEN UPDATE SET t.name = s.name"
         ));

@@ -43,10 +43,10 @@ import { normalizeKafkaBootstrapServers } from "@/lib/connection/kafkaBootstrapS
 import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } from "@/lib/connection/mqAuth";
 import { driverInstallProgressPercent, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 import { isSqlServerLegacyCompatibilityMode, requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityMode, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
-import { ArrowLeft, ArrowDown, ArrowUp, CheckSquare, ChevronRight, CircleHelp, Copy, ExternalLink, FilePlus2, FolderOpen, GripVertical, Grid3X3, KeyRound, Link2, List, ListFilter, Loader2, Pencil, Pipette, Plus, Search, ShieldCheck, Square, Trash2 } from "@lucide/vue";
+import { ArrowLeft, ArrowDown, ArrowUp, CheckSquare, ChevronRight, CircleHelp, Copy, ExternalLink, FilePlus2, FolderOpen, GripVertical, Grid3X3, KeyRound, Link2, List, ListFilter, Loader2, Pencil, Pipette, Plus, RefreshCw, Search, ShieldAlert, ShieldCheck, Square, Trash2 } from "@lucide/vue";
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleDatabaseSelectionIsStale } from "@/lib/connection/connectionVisibleDatabases";
 import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, isSystemDatabaseName, normalizeVisibleDatabaseSelection, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
-import { isSchemaAware } from "@/lib/database/databaseFeatureSupport";
+import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
 import VisibleSchemasDialog from "@/components/sidebar/VisibleSchemasDialog.vue";
 import { oceanbaseModeConnectionPatch, oceanbaseSubModeFromConfig } from "@/lib/database/oceanbaseConnectionMode";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -57,6 +57,7 @@ type DbCategory = { key: string; title: string; options: DbOption[] };
 type DialogStep = "select" | "config";
 type DbPickerView = "icon" | "list";
 export type ConfigTab = "connection" | "advanced" | "tls" | "transport";
+type ProductionScope = "connection" | "databases";
 type MqTokenSigningMode = "none" | "hs256" | "rs256";
 type NacosAuthKind = NacosAuthConfig["kind"];
 type DremioConnectionMode = "arrow-flight-sql" | "legacy";
@@ -136,6 +137,13 @@ const visibleDatabaseSelection = ref<Set<string>>(new Set());
 const visibleDatabaseSearchText = ref("");
 const visibleDatabaseError = ref("");
 const visibleDatabaseShowSystem = ref(false);
+const showProductionDatabasesDialog = ref(false);
+const isLoadingProductionDatabases = ref(false);
+const productionDatabaseNames = ref<string[]>([]);
+const productionDatabaseSelection = ref<Set<string>>(new Set());
+const productionDatabaseSearchText = ref("");
+const productionDatabaseError = ref("");
+const productionProtectionEnabled = ref(false);
 const showVisibleSchemasDialog = ref(false);
 const isLoadingVisibleSchemas = ref(false);
 const visibleSchemaNames = ref<string[]>([]);
@@ -189,6 +197,8 @@ const defaultForm = (): ConnectionForm => ({
   informix_server: "",
   external_config: undefined,
   read_only: false,
+  is_production: false,
+  production_databases: [],
   visible_databases: undefined,
 });
 
@@ -1430,8 +1440,11 @@ watch(
         informix_server: config.informix_server || "",
         external_config: config.external_config,
         read_only: config.read_only || false,
+        is_production: config.is_production || false,
+        production_databases: config.production_databases || [],
         visible_databases: config.visible_databases,
       };
+      productionProtectionEnabled.value = !!config.is_production || (config.production_databases?.length ?? 0) > 0;
       connectionUrlInput.value = config.db_type === "h2" && config.connection_string ? config.connection_string : "";
       appliedConnectionUrlInput.value = connectionUrlInput.value.trim();
       if (config.db_type === "mq") {
@@ -1471,6 +1484,7 @@ watch(
     } else {
       editingId.value = null;
       form.value = defaultForm();
+      productionProtectionEnabled.value = false;
       selectedTransportLayerId.value = null;
       selectedType.value = "mysql";
       customDriverName.value = "";
@@ -1893,6 +1907,37 @@ const visibleDatabaseHasSystemDatabases = computed(() => {
   const connection = connectionConfigSnapshotForVisibleDatabases();
   return visibleDatabaseNames.value.some((database) => isSystemDatabaseName(connection.db_type, database));
 });
+const filteredProductionDatabaseNames = computed(() => {
+  const query = productionDatabaseSearchText.value.trim().toLowerCase();
+  if (!query) return productionDatabaseNames.value;
+  return productionDatabaseNames.value.filter((name) => name.toLowerCase().includes(query));
+});
+const productionDatabaseSelectedCount = computed(() => productionDatabaseSelection.value.size);
+const productionDatabaseCanSave = computed(() => productionDatabaseNames.value.length > 0 && productionDatabaseSelection.value.size > 0);
+const productionDatabaseSummary = computed(() => {
+  const selected = form.value.production_databases?.length || 0;
+  if (!selected) return t("production.noDatabasesSelected");
+  if (!productionDatabaseNames.value.length) return t("production.databasesConfiguredCount", { count: selected });
+  return t("production.databasesSelectedCount", { selected, total: productionDatabaseNames.value.length });
+});
+const productionScope = computed<ProductionScope>({
+  get: () => (isSingleDatabase(form.value.db_type) || form.value.is_production ? "connection" : "databases"),
+  set: (scope) => {
+    form.value.is_production = isSingleDatabase(form.value.db_type) || scope === "connection";
+  },
+});
+const canSelectProductionDatabases = computed(() => !isSingleDatabase(form.value.db_type));
+
+function setProductionProtectionEnabled(enabled: boolean) {
+  productionProtectionEnabled.value = enabled;
+  if (!enabled) {
+    form.value.is_production = false;
+    form.value.production_databases = [];
+  } else if (!form.value.is_production && !form.value.production_databases?.length) {
+    // Enabling protection starts with the broadest scope until the user chooses a narrower one.
+    form.value.is_production = true;
+  }
+}
 const canChooseVisibleSchemas = computed(() => isSchemaAware(form.value.db_type));
 const visibleSchemasDatabaseKey = computed(() => form.value.database || "");
 const hasVisibleSchemaFilter = computed(() => {
@@ -2254,6 +2299,14 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
   }
   if (!config.one_time) config.one_time = undefined;
   if (!config.read_only) config.read_only = undefined;
+  if (isSingleDatabase(config.db_type) && config.production_databases?.length) {
+    // Single-database drivers expose schemas or internal names, not independently selectable databases.
+    config.is_production = true;
+    config.production_databases = [];
+  }
+  if (!config.is_production) config.is_production = undefined;
+  config.production_databases = [...new Set((config.production_databases || []).map((database) => database.trim()).filter(Boolean))];
+  if (!config.production_databases.length) config.production_databases = undefined;
   if (config.db_type === "mq") {
     const mqConfig = buildMqAdminConfig();
     config.external_config = mqConfig;
@@ -2685,6 +2738,16 @@ function resetVisibleDatabaseDraftState() {
   visibleDatabaseShowSystem.value = false;
 }
 
+function resetProductionDatabaseDraftState() {
+  showProductionDatabasesDialog.value = false;
+  isLoadingProductionDatabases.value = false;
+  productionDatabaseNames.value = [];
+  productionDatabaseSelection.value = new Set();
+  productionDatabaseSearchText.value = "";
+  productionDatabaseError.value = "";
+  productionProtectionEnabled.value = false;
+}
+
 /** Silently load database names so the summary count shows a real total. */
 async function preloadVisibleDatabaseNames() {
   if (!ensureConnectionHostResolvedFromUrl()) return;
@@ -2753,6 +2816,88 @@ async function loadVisibleDatabaseNames(connectionId: string, config: Connection
     return api.mongoListDatabases(connectionId);
   }
   return (await api.listDatabases(connectionId)).map((database) => database.name);
+}
+
+function normalizeProductionDatabaseSelection(selectedNames: Iterable<string>, databaseNames: string[]): string[] {
+  const available = new Map(databaseNames.map((name) => [name.toLowerCase(), name]));
+  const selected = new Set<string>();
+  for (const name of selectedNames) {
+    const canonicalName = available.get(name.toLowerCase());
+    if (canonicalName) selected.add(canonicalName);
+  }
+  return [...selected];
+}
+
+function initialProductionDatabaseSelection(databaseNames: string[]): string[] {
+  const configured = form.value.production_databases || [];
+  // A new database-level safeguard starts broad; users can explicitly narrow it in the picker.
+  return configured.length ? normalizeProductionDatabaseSelection(configured, databaseNames) : databaseNames;
+}
+
+async function loadProductionDatabaseNames(connectionId: string, config: ConnectionConfig): Promise<string[]> {
+  if (config.db_type === "redis") {
+    return (await api.redisListDatabases(connectionId)).map((database) => String(database.db));
+  }
+  if (config.db_type === "mongodb") {
+    return api.mongoListDatabases(connectionId);
+  }
+  return (await api.listDatabases(connectionId)).map((database) => database.name);
+}
+
+async function openProductionDatabasesPicker() {
+  if (!ensureConnectionHostResolvedFromUrl() || !productionProtectionEnabled.value || form.value.is_production || isLoadingProductionDatabases.value) return;
+  showProductionDatabasesDialog.value = true;
+  await reloadProductionDatabases();
+}
+
+async function reloadProductionDatabases() {
+  if (isLoadingProductionDatabases.value) return;
+
+  isLoadingProductionDatabases.value = true;
+  productionDatabaseError.value = "";
+  productionDatabaseSearchText.value = "";
+  const draftId = `__production_database_draft_${uuid()}`;
+  try {
+    const draftConfig = {
+      ...connectionConfigForSubmit(draftId),
+      id: draftId,
+      one_time: true,
+    };
+    await api.connectDb(draftConfig);
+    productionDatabaseNames.value = await loadProductionDatabaseNames(draftId, draftConfig);
+    productionDatabaseSelection.value = new Set(initialProductionDatabaseSelection(productionDatabaseNames.value));
+  } catch (e: any) {
+    productionDatabaseNames.value = [];
+    productionDatabaseSelection.value = new Set();
+    productionDatabaseError.value = mongodbAuthFailureHint(errorMessage(e));
+  } finally {
+    await api.disconnectDb(draftId).catch(() => undefined);
+    isLoadingProductionDatabases.value = false;
+  }
+}
+
+function toggleProductionDatabase(database: string) {
+  const next = new Set(productionDatabaseSelection.value);
+  if (next.has(database)) next.delete(database);
+  else next.add(database);
+  productionDatabaseSelection.value = next;
+}
+
+function selectAllProductionDatabases() {
+  productionDatabaseSelection.value = new Set(productionDatabaseNames.value);
+}
+
+function clearProductionDatabaseSelection() {
+  productionDatabaseSelection.value = new Set();
+}
+
+function saveProductionDatabaseSelection() {
+  if (!productionDatabaseCanSave.value) return;
+  // A database selection is always narrower than a connection-wide marker.
+  productionProtectionEnabled.value = true;
+  form.value.is_production = false;
+  form.value.production_databases = normalizeProductionDatabaseSelection(productionDatabaseSelection.value, productionDatabaseNames.value);
+  showProductionDatabasesDialog.value = false;
 }
 
 function toggleVisibleDatabase(database: string) {
@@ -2905,6 +3050,7 @@ function resetForm() {
   dbSearchQuery.value = "";
   configTab.value = "connection";
   resetVisibleDatabaseDraftState();
+  resetProductionDatabaseDraftState();
   resetVisibleSchemasState();
   resetTestState();
 }
@@ -5084,6 +5230,39 @@ function openExternalUrl(url: string) {
                     <span class="text-xs text-muted-foreground">{{ t("connection.readOnlyHint") }}</span>
                   </label>
                 </div>
+                <div class="grid grid-cols-4 items-start gap-4 rounded-[6px] border border-red-500/25 bg-red-500/[0.035] px-3 py-2.5">
+                  <Label :class="[connectionLabelSmallClass, 'pt-0.5 text-red-700 dark:text-red-300']">
+                    <span class="inline-flex items-center justify-end gap-1"><ShieldAlert class="h-3.5 w-3.5" />PROD</span>
+                  </Label>
+                  <div class="col-span-3 grid gap-2">
+                    <div class="flex items-center justify-between gap-3">
+                      <Label class="text-sm font-medium">{{ t("production.enable") }}</Label>
+                      <Switch :model-value="productionProtectionEnabled" @update:model-value="setProductionProtectionEnabled" />
+                    </div>
+                    <p v-if="!productionProtectionEnabled" class="text-xs leading-5 text-muted-foreground">{{ t("production.disabledDescription") }}</p>
+                    <template v-else>
+                      <Label class="text-xs font-medium">{{ t("production.scope") }}</Label>
+                      <Tabs v-model="productionScope" class="w-full">
+                        <TabsList class="grid h-8 w-full grid-cols-2">
+                          <TabsTrigger value="connection" class="text-xs">{{ t("production.allDatabases") }}</TabsTrigger>
+                          <TabsTrigger value="databases" class="text-xs" :disabled="!canSelectProductionDatabases" :title="canSelectProductionDatabases ? undefined : t('production.singleDatabaseScopeHint')">{{ t("production.selectedDatabases") }}</TabsTrigger>
+                        </TabsList>
+                      </Tabs>
+                      <p class="text-xs leading-5 text-muted-foreground">{{ productionScope === "connection" ? t("production.connectionDescription") : t("production.databaseDescription") }}</p>
+                      <div v-if="productionScope === 'databases'" class="grid gap-1.5">
+                        <div class="flex items-center justify-between gap-3">
+                          <Label class="text-xs font-medium">{{ t("production.databases") }}</Label>
+                          <span class="text-xs text-muted-foreground">{{ productionDatabaseSummary }}</span>
+                        </div>
+                        <Button type="button" variant="outline" size="sm" class="justify-start" :disabled="isTesting || isSaving || isLoadingProductionDatabases || !hasRequiredConnectionTarget" @click="openProductionDatabasesPicker">
+                          <Loader2 v-if="isLoadingProductionDatabases" class="mr-1.5 h-4 w-4 animate-spin" />
+                          <ListFilter v-else class="mr-1.5 h-4 w-4" />
+                          {{ t("production.selectDatabases") }}
+                        </Button>
+                      </div>
+                    </template>
+                  </div>
+                </div>
                 <div v-show="form.db_type === 'sqlserver'" class="grid grid-cols-4 items-start gap-4">
                   <Label :class="connectionLabelSmallClass">{{ t("connection.sqlServerLegacyCompatibilityMode") }}</Label>
                   <div class="col-span-3 flex flex-col gap-1">
@@ -5500,6 +5679,74 @@ function openExternalUrl(url: string) {
         <Button variant="outline" @click="showVisibleDatabasesDialog = false">{{ t("dangerDialog.cancel") }}</Button>
         <Button :disabled="isLoadingVisibleDatabases || !!visibleDatabaseError || !visibleDatabaseCanSave" @click="saveVisibleDatabaseSelection">
           {{ t(visibleObjectSaveKey) }}
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+
+  <Dialog v-model:open="showProductionDatabasesDialog">
+    <DialogContent class="sm:max-w-[460px]">
+      <DialogHeader>
+        <DialogTitle>{{ t("production.databasePickerTitle") }}</DialogTitle>
+        <p class="text-sm text-muted-foreground">
+          {{ t("production.databasePickerDescription", { connection: form.name || selectedProfile().label }) }}
+        </p>
+      </DialogHeader>
+
+      <div class="flex items-center gap-2 rounded-md border bg-background px-2">
+        <Search class="h-4 w-4 shrink-0 text-muted-foreground" />
+        <Input v-model="productionDatabaseSearchText" :placeholder="t('production.databaseSearchPlaceholder')" class="h-8 border-0 px-0 shadow-none focus-visible:ring-0" :disabled="isLoadingProductionDatabases || !!productionDatabaseError" />
+      </div>
+
+      <div class="flex items-center justify-between text-xs text-muted-foreground">
+        <span>{{ t("production.databasesSelectedCount", { selected: productionDatabaseSelectedCount, total: productionDatabaseNames.length }) }}</span>
+        <div class="flex items-center gap-2">
+          <button class="hover:text-foreground disabled:opacity-50" :disabled="isLoadingProductionDatabases || !!productionDatabaseError" @click="selectAllProductionDatabases">
+            {{ t("visibleDatabases.selectAll") }}
+          </button>
+          <button class="hover:text-foreground disabled:opacity-50" :disabled="isLoadingProductionDatabases || !!productionDatabaseError" @click="clearProductionDatabaseSelection">
+            {{ t("visibleDatabases.clear") }}
+          </button>
+        </div>
+      </div>
+      <p v-if="!isLoadingProductionDatabases && !productionDatabaseError && !productionDatabaseCanSave" class="text-xs text-destructive">
+        {{ t("production.databaseSelectionRequired") }}
+      </p>
+
+      <div class="h-72 overflow-y-auto rounded-md border bg-background/50 p-1">
+        <div v-if="isLoadingProductionDatabases" class="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
+          <Loader2 class="h-4 w-4 animate-spin" />
+          {{ t("common.loading") }}
+        </div>
+        <div v-else-if="productionDatabaseError" class="flex h-full flex-col items-start justify-center gap-3 p-3 text-sm text-destructive">
+          <p>{{ t("production.databaseLoadFailed", { message: productionDatabaseError }) }}</p>
+          <Button type="button" variant="outline" size="sm" @click="reloadProductionDatabases">
+            <RefreshCw class="mr-1.5 h-3.5 w-3.5" />
+            {{ t("production.retry") }}
+          </Button>
+        </div>
+        <div v-else-if="!filteredProductionDatabaseNames.length" class="p-3 text-sm text-muted-foreground">
+          {{ productionDatabaseNames.length ? t("grid.noSearchResults") : t("production.noDatabasesAvailable") }}
+        </div>
+        <template v-else>
+          <button
+            v-for="database in filteredProductionDatabaseNames"
+            :key="database"
+            type="button"
+            class="flex h-8 w-full min-w-0 items-center gap-2 rounded-sm px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none"
+            @click="toggleProductionDatabase(database)"
+          >
+            <CheckSquare v-if="productionDatabaseSelection.has(database)" class="h-4 w-4 shrink-0 text-primary" />
+            <Square v-else class="h-4 w-4 shrink-0 text-muted-foreground" />
+            <span class="truncate">{{ database }}</span>
+          </button>
+        </template>
+      </div>
+
+      <DialogFooter>
+        <Button variant="outline" @click="showProductionDatabasesDialog = false">{{ t("dangerDialog.cancel") }}</Button>
+        <Button :disabled="isLoadingProductionDatabases || !!productionDatabaseError || !productionDatabaseCanSave" @click="saveProductionDatabaseSelection">
+          {{ t("visibleDatabases.save") }}
         </Button>
       </DialogFooter>
     </DialogContent>

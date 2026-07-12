@@ -213,6 +213,8 @@ mod tests {
             jdbc_driver_paths: Vec::new(),
             one_time: false,
             read_only: true,
+            is_production: false,
+            production_databases: Vec::new(),
         };
         cfg.read_only = true;
         state.configs.write().await.insert(cfg.id.clone(), cfg);
@@ -278,6 +280,8 @@ mod tests {
             jdbc_driver_paths: Vec::new(),
             one_time: false,
             read_only: true,
+            is_production: false,
+            production_databases: Vec::new(),
         };
         state.configs.write().await.insert(cfg.id.clone(), cfg);
         let err = nacos_rollback_config_core(

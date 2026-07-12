@@ -8,6 +8,7 @@ import { displayGeneratedValue, findGeneratorKey, formatGeneratedValue, generate
 import { quoteTableIdentifier } from "@/lib/table/tableSelectSql";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import GeneratorParamsPanel from "./params/GeneratorParamsPanel.vue";
 import type { ColumnInfo, TableInfo } from "@/types/database";
 
@@ -450,43 +451,57 @@ async function startInsert() {
   const cid = props.prefillConnectionId;
   const db = props.prefillDatabase;
   if (!cid || !db) return;
-  executing.value = true;
-  const perTable: TableResult[] = [];
-  for (const r of generatedResults.value) {
-    const stmts = sqlStatementsForTable(r);
-    const rowCount = r.rows.length;
-    let ok = 0;
-    let lastError = "";
-    for (let si = 0; si < stmts.length; si++) {
-      try {
-        if (generateOptions.useTransaction) {
-          await api.executeInTransaction(cid, db, [stmts[si]], props.prefillSchema);
-        } else {
-          await api.executeQuery(cid, db, stmts[si], props.prefillSchema);
+  const sql = allSqlStatements().join("\n");
+  if (!sql.trim()) return;
+  try {
+    await executeWithProductionSqlGuard({
+      connection: store.getConfig(cid),
+      database: db,
+      sql,
+      source: t("production.sourceDataGenerate"),
+      execute: async () => {
+        executing.value = true;
+        const perTable: TableResult[] = [];
+        for (const r of generatedResults.value) {
+          const stmts = sqlStatementsForTable(r);
+          const rowCount = r.rows.length;
+          let ok = 0;
+          let lastError = "";
+          for (let si = 0; si < stmts.length; si++) {
+            try {
+              if (generateOptions.useTransaction) {
+                await api.executeInTransaction(cid, db, [stmts[si]], props.prefillSchema);
+              } else {
+                await api.executeQuery(cid, db, stmts[si], props.prefillSchema);
+              }
+              if (generateOptions.extendedInsert) {
+                ok = rowCount;
+              } else if (!(generateOptions.truncate && si === 0)) {
+                ok++;
+              }
+            } catch (e: unknown) {
+              const msg = e instanceof Error ? e.message : String(e);
+              console.error("[startInsert] SQL error:", msg);
+              if (!lastError) lastError = msg;
+              if (generateOptions.extendedInsert) {
+                ok = 0;
+              }
+              if (!generateOptions.continueOnError) break;
+            }
+          }
+          perTable.push({ table: r.tableName, total: rowCount, ok, err: rowCount - ok, error: lastError || undefined });
+          if (ok > 0) {
+            store.invalidateMetadataCache(cid, db, props.prefillSchema || undefined, r.tableName);
+          }
         }
-        if (generateOptions.extendedInsert) {
-          ok = rowCount;
-        } else if (!(generateOptions.truncate && si === 0)) {
-          ok++;
-        }
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : String(e);
-        console.error("[startInsert] SQL error:", msg);
-        if (!lastError) lastError = msg;
-        if (generateOptions.extendedInsert) {
-          ok = 0;
-        }
-        if (!generateOptions.continueOnError) break;
-      }
-    }
-    perTable.push({ table: r.tableName, total: rowCount, ok, err: rowCount - ok, error: lastError || undefined });
-    if (ok > 0) {
-      store.invalidateMetadataCache(cid, db, props.prefillSchema || undefined, r.tableName);
-    }
+        executeResults.value = perTable;
+        currentStep.value = "result";
+        return true;
+      },
+    });
+  } finally {
+    executing.value = false;
   }
-  executeResults.value = perTable;
-  currentStep.value = "result";
-  executing.value = false;
 }
 
 const orderDialogOpen = ref(false);

@@ -961,13 +961,14 @@ impl AppState {
         client_session_id: Option<&str>,
         connection_attempt: Option<u64>,
     ) -> Result<String, String> {
-        let db_type = {
+        let config = {
             let configs = self.configs.read().await;
-            configs.get(connection_id).map(|c| c.db_type)
+            configs.get(connection_id).ok_or("Connection config not found")?.clone()
         };
+        let db_type = Some(config.db_type);
 
         let base_pool_key = base_pool_key_for(db_type, connection_id, database, false);
-        let pool_key = session_scoped_pool_key_for(db_type, base_pool_key, client_session_id);
+        let pool_key = session_scoped_pool_key_for(Some(&config), base_pool_key, client_session_id);
 
         let conns = self.connections.read().await;
         if conns.contains_key(&pool_key) {
@@ -981,10 +982,6 @@ impl AppState {
         } else {
             drop(conns);
         }
-
-        let configs = self.configs.read().await;
-        let config = configs.get(connection_id).ok_or("Connection config not found")?.clone();
-        drop(configs);
 
         let db_config = database_connection_config(&config, database);
 
@@ -1856,12 +1853,13 @@ impl AppState {
         database: Option<&str>,
         client_session_id: Option<&str>,
     ) -> Result<String, String> {
-        let db_type = {
+        let config = {
             let configs = self.configs.read().await;
-            configs.get(connection_id).map(|c| c.db_type)
+            configs.get(connection_id).cloned()
         };
+        let db_type = config.as_ref().map(|config| config.db_type);
         let base_pool_key = base_pool_key_for(db_type, connection_id, database, true);
-        let pool_key = session_scoped_pool_key_for(db_type, base_pool_key, client_session_id);
+        let pool_key = session_scoped_pool_key_for(config.as_ref(), base_pool_key, client_session_id);
         if self.uses_forwarded_transport(connection_id).await {
             self.remove_connection_pools(connection_id).await;
             self.reset_connection_transport(connection_id).await;
@@ -1887,12 +1885,13 @@ impl AppState {
         let Some(session) = session else {
             return Ok(false);
         };
-        let db_type = {
+        let config = {
             let configs = self.configs.read().await;
-            configs.get(connection_id).map(|c| c.db_type)
+            configs.get(connection_id).cloned()
         };
+        let db_type = config.as_ref().map(|config| config.db_type);
         let base_pool_key = base_pool_key_for(db_type, connection_id, database, false);
-        let pool_key = session_scoped_pool_key_for(db_type, base_pool_key.clone(), Some(&session));
+        let pool_key = session_scoped_pool_key_for(config.as_ref(), base_pool_key.clone(), Some(&session));
         if pool_key == base_pool_key {
             return Ok(false);
         }
@@ -2648,6 +2647,10 @@ fn normalize_client_session_id(client_session_id: Option<&str>) -> Option<String
     client_session_id.map(str::trim).filter(|session| !session.is_empty()).map(|session| session.replace(':', "_"))
 }
 
+pub fn task_client_session_id(task_kind: &str, task_id: &str) -> String {
+    format!("{task_kind}:{task_id}")
+}
+
 fn mysql_pool_max_connections_for_session(client_session_id: Option<&str>) -> usize {
     if normalize_client_session_id(client_session_id).is_some() {
         1
@@ -2711,11 +2714,17 @@ pub(crate) fn config_for_pool_key<'a>(
 }
 
 fn session_scoped_pool_key_for(
-    db_type: Option<DatabaseType>,
+    config: Option<&ConnectionConfig>,
     base_pool_key: String,
     client_session_id: Option<&str>,
 ) -> String {
-    if matches!(db_type, Some(DatabaseType::DuckDb)) {
+    let shares_base_pool = config.is_some_and(|config| {
+        config.db_type == DatabaseType::DuckDb
+            || (config.db_type == DatabaseType::Sqlite && db::sqlite::is_memory_database_path(&config.host))
+    });
+    if shares_base_pool {
+        // In-memory SQLite databases only exist inside one connection. A session-scoped
+        // handle would silently point query/data tabs at a different empty database.
         return base_pool_key;
     }
     session_scoped_pool_key(base_pool_key, client_session_id)
@@ -3078,8 +3087,8 @@ mod tests {
         metadata_connection_config, mysql_metadata_fallback_url, oceanbase_mysql_query_timeout_sql,
         oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint,
         redis_sentinel_transport_id, redis_sentinel_transport_prefix, sqlserver_legacy_agent_config,
-        sqlserver_legacy_agent_error, uses_bare_mysql_pool, uses_tcp_probe, validate_h2_database_path, AppState,
-        MysqlMode, PoolKind, PRESTOSQL_JDBC_DRIVER_CLASS,
+        sqlserver_legacy_agent_error, task_client_session_id, uses_bare_mysql_pool, uses_tcp_probe,
+        validate_h2_database_path, AppState, MysqlMode, PoolKind, PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
@@ -3144,7 +3153,16 @@ mod tests {
             jdbc_driver_paths: Vec::new(),
             one_time: false,
             read_only: false,
+            is_production: false,
+            production_databases: vec![],
         }
+    }
+
+    #[test]
+    fn task_client_session_ids_are_stable_and_isolated() {
+        assert_eq!(task_client_session_id("table-export", "job-1"), "table-export:job-1");
+        assert_ne!(task_client_session_id("table-export", "job-1"), task_client_session_id("database-export", "job-1"));
+        assert_ne!(task_client_session_id("table-export", "job-1"), task_client_session_id("table-export", "job-2"));
     }
 
     #[test]
@@ -3919,18 +3937,33 @@ mod tests {
 
     #[test]
     fn session_scoped_pool_keys_are_sanitized_and_detected() {
-        let key = super::session_scoped_pool_key_for(
-            Some(DatabaseType::Mysql),
-            "mysql-conn:analytics".to_string(),
-            Some("tab-1:count"),
-        );
+        let mysql = mysql_config(Some("analytics"));
+        let key =
+            super::session_scoped_pool_key_for(Some(&mysql), "mysql-conn:analytics".to_string(), Some("tab-1:count"));
 
         assert_eq!(key, "mysql-conn:analytics:session:tab-1_count");
         assert!(super::is_session_scoped_pool_key(&key));
         assert!(!super::is_session_scoped_pool_key("mysql-conn:analytics"));
+
+        let mut duckdb = mysql_config(None);
+        duckdb.db_type = DatabaseType::DuckDb;
         assert_eq!(
-            super::session_scoped_pool_key_for(Some(DatabaseType::DuckDb), "duckdb-conn".to_string(), Some("tab-1")),
+            super::session_scoped_pool_key_for(Some(&duckdb), "duckdb-conn".to_string(), Some("tab-1")),
             "duckdb-conn"
+        );
+
+        let mut sqlite_memory = mysql_config(None);
+        sqlite_memory.db_type = DatabaseType::Sqlite;
+        sqlite_memory.host = " :MeMoRy: ".to_string();
+        assert_eq!(
+            super::session_scoped_pool_key_for(Some(&sqlite_memory), "sqlite-memory".to_string(), Some("tab-1")),
+            "sqlite-memory"
+        );
+
+        sqlite_memory.host = "/tmp/dbx-session-test.sqlite".to_string();
+        assert_eq!(
+            super::session_scoped_pool_key_for(Some(&sqlite_memory), "sqlite-file".to_string(), Some("tab-1")),
+            "sqlite-file:session:tab-1"
         );
     }
 
@@ -4238,6 +4271,56 @@ mod tests {
         let conns = state.connections.read().await;
         assert!(conns.contains_key("duckdb-conn"));
         assert!(!conns.contains_key("duckdb-conn:session:tab-1"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn sqlite_memory_client_sessions_share_the_same_database() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "sqlite-memory".to_string();
+        config.name = "SQLite memory".to_string();
+        config.db_type = DatabaseType::Sqlite;
+        config.host = ":memory:".to_string();
+        config.password.clear();
+        config.port = 0;
+
+        state.configs.write().await.insert(config.id.clone(), config);
+        let base_pool_key = state.get_or_create_pool("sqlite-memory", None).await.unwrap();
+        let query_pool_key =
+            state.get_or_create_pool_for_session("sqlite-memory", Some("main"), Some("query-tab")).await.unwrap();
+        let data_pool_key =
+            state.get_or_create_pool_for_session("sqlite-memory", Some("main"), Some("data-tab")).await.unwrap();
+
+        assert_eq!(query_pool_key, base_pool_key);
+        assert_eq!(data_pool_key, base_pool_key);
+
+        let handle = {
+            let connections = state.connections.read().await;
+            match connections.get(&base_pool_key) {
+                Some(PoolKind::Sqlite(handle)) => handle.clone(),
+                _ => panic!("expected SQLite pool"),
+            }
+        };
+        handle
+            .with_connection(|connection| {
+                connection
+                    .execute_batch("CREATE TABLE test (id INTEGER); INSERT INTO test VALUES (42);")
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        let value = handle
+            .with_connection(|connection| {
+                connection
+                    .query_row("SELECT id FROM test", [], |row| row.get::<_, i64>(0))
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        assert_eq!(value, 42);
+
+        assert!(!state.close_client_session_pool("sqlite-memory", Some("main"), "query-tab").await.unwrap());
+        assert!(state.connections.read().await.contains_key(&base_pool_key));
 
         let _ = std::fs::remove_dir_all(dir);
     }

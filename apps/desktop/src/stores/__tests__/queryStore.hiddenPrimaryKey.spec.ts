@@ -2,28 +2,37 @@ import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const executeMulti = vi.fn();
+const executeQuery = vi.fn();
 const analyzeEditableQueryEditability = vi.fn();
 const getColumns = vi.fn();
 const listIndexes = vi.fn();
 const getConnectionConfig = vi.fn();
 const buildSortedQuerySql = vi.fn();
+const buildDataGridCountSql = vi.fn();
+const prepareQueryPaginationExecutionPlan = vi.fn(async (options) => ({
+  sqlToExecute: options.sql,
+  pageSql: undefined,
+  pageLimit: undefined,
+  pageOffset: undefined,
+  countSql: undefined,
+  useAgentResultSession: false,
+}));
+const editorSettings = {
+  pageSize: 100,
+  autoCalculateTotalRows: false,
+};
 
 vi.mock("@/lib/backend/api", () => ({
   analyzeEditableQueryEditability,
+  buildDataGridCountSql,
   buildSortedQuerySql,
   closeClientConnectionSession: vi.fn().mockResolvedValue(undefined),
   closeQuerySession: vi.fn().mockResolvedValue(undefined),
   executeMulti,
+  executeQuery,
   getColumns,
   listIndexes,
-  prepareQueryPaginationExecutionPlan: vi.fn(async (options) => ({
-    sqlToExecute: options.sql,
-    pageSql: undefined,
-    pageLimit: undefined,
-    pageOffset: undefined,
-    countSql: undefined,
-    useAgentResultSession: false,
-  })),
+  prepareQueryPaginationExecutionPlan,
   saveOpenTabsState: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -37,7 +46,7 @@ vi.mock("@/stores/connectionStore", () => ({
 
 vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({
-    editorSettings: { pageSize: 100 },
+    editorSettings,
   }),
 }));
 
@@ -68,6 +77,23 @@ describe("queryStore hidden primary key editing", () => {
     listIndexes.mockResolvedValue([]);
     analyzeEditableQueryEditability.mockImplementation(async (sql: string) => queryAnalysis(sql));
     buildSortedQuerySql.mockImplementation(async (options) => ({ ok: true, sql: `${options.originalSql} ORDER BY ${options.column} ${options.direction.toUpperCase()}` }));
+    buildDataGridCountSql.mockResolvedValue("SELECT COUNT(*) FROM `users`");
+    prepareQueryPaginationExecutionPlan.mockImplementation(async (options) => ({
+      sqlToExecute: options.sql,
+      pageSql: undefined,
+      pageLimit: undefined,
+      pageOffset: undefined,
+      countSql: undefined,
+      useAgentResultSession: false,
+    }));
+    editorSettings.pageSize = 100;
+    editorSettings.autoCalculateTotalRows = false;
+    executeQuery.mockResolvedValue({
+      columns: ["row_count"],
+      rows: [[0]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+    });
     executeMulti.mockResolvedValue([
       {
         columns: ["name", "__DBX_PK_0"],
@@ -338,5 +364,112 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.result?.hidden_column_indexes).toEqual([1]);
     await vi.waitFor(() => expect(tab.queryEditabilityReason).toBe("primary-key-not-returned"));
     expect(tab.queryAnalysis).toBeUndefined();
+  });
+
+  it("records the returned row count when a page is known to be incomplete without count sql", async () => {
+    prepareQueryPaginationExecutionPlan.mockResolvedValue({
+      sqlToExecute: "SELECT name FROM users LIMIT 100 OFFSET 0",
+      pageSql: "SELECT name FROM users LIMIT 100 OFFSET 0",
+      pageLimit: 100,
+      pageOffset: 0,
+      countSql: undefined,
+      useAgentResultSession: false,
+    });
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["name"],
+        rows: Array.from({ length: 42 }, (_, index) => [`user-${index}`]),
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+
+    await store.executeTabSql(tabId, "SELECT name FROM users");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.resultTotalRowCount).toBe(42);
+    expect(tab.resultTotalRowCountLoading).toBe(false);
+    expect(executeQuery).not.toHaveBeenCalled();
+  });
+
+  it("does not treat an empty later page as the total row count", async () => {
+    prepareQueryPaginationExecutionPlan.mockResolvedValue({
+      sqlToExecute: "SELECT name FROM users LIMIT 100 OFFSET 200",
+      pageSql: "SELECT name FROM users LIMIT 100 OFFSET 200",
+      pageLimit: 100,
+      pageOffset: 200,
+      countSql: undefined,
+      useAgentResultSession: false,
+    });
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["name"],
+        rows: [],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+
+    await store.executeTabSql(tabId, "SELECT name FROM users");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.resultTotalRowCount).toBeUndefined();
+    expect(tab.resultTotalRowCountLoading).toBe(false);
+    expect(executeQuery).not.toHaveBeenCalled();
+  });
+
+  it("automatically counts table data totals when the setting is enabled", async () => {
+    editorSettings.autoCalculateTotalRows = true;
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["id", "name"],
+        rows: Array.from({ length: 100 }, (_, index) => [index + 1, `user-${index + 1}`]),
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+    executeQuery.mockResolvedValue({
+      columns: ["row_count"],
+      rows: [[123]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+    });
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "users", "data", "public");
+    store.setTableMeta(tabId, {
+      schema: "public",
+      tableName: "users",
+      columns: [
+        { name: "id", data_type: "int", is_nullable: false, is_primary_key: true, column_default: null, extra: null },
+        { name: "name", data_type: "varchar", is_nullable: true, is_primary_key: false, column_default: null, extra: null },
+      ],
+      primaryKeys: ["id"],
+    });
+
+    await store.executeTabSql(tabId, "SELECT id, name FROM users LIMIT 100", {
+      pagination: { limit: 100, offset: 0 },
+    });
+
+    expect(buildDataGridCountSql).toHaveBeenCalledWith({
+      databaseType: "mysql",
+      catalog: undefined,
+      schema: "public",
+      tableName: "users",
+      whereInput: undefined,
+    });
+    await vi.waitFor(() => expect(executeQuery).toHaveBeenCalledWith("mysql-1", "app", "SELECT COUNT(*) FROM `users`", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 })));
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.resultTotalRowCount).toBe(123));
+    expect(tab.resultTotalRowCountLoading).toBe(false);
   });
 });

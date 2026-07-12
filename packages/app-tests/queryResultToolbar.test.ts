@@ -87,3 +87,12 @@ test("DataGrid marks toolbar refresh separately from current-result reloads", ()
   assert.match(dataGrid, /emit\("reload", props\.sql,[^;]+"refresh"\);/);
   assert.match(dataGrid, /function onToolbarRollback\(\)[\s\S]*?emit\("reload", props\.sql,[^;]+\);/);
 });
+
+test("Elasticsearch JSON refresh preserves multi-result query groups", () => {
+  const contentArea = source(contentAreaPath);
+
+  assert.match(
+    contentArea,
+    /if \(activeElasticsearchJsonResponse\.value\) \{[\s\S]*?emit\("reload", activeResultSql\.value, undefined, undefined, undefined, undefined, undefined, "refresh"\);/,
+  );
+});

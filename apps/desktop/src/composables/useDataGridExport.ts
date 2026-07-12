@@ -178,10 +178,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return displayItems.value.filter((item) => rowIdSet.has(item.id) && !item.isDraft);
   }
 
-  async function resultToExport(rowIds?: number[], onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void, useFullExport = true): Promise<{ columns: string[]; rows: CellValue[][] }> {
+  async function resultToExport(rowIds?: number[], onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void, useFullExport = true): Promise<{ columns: string[]; columnTypes: string[]; rows: CellValue[][] }> {
     if (useFullExport && rowIds === undefined && fullExportResult && !hasCompleteLocalResult?.value) {
       const result = await fullExportResult(onProgress);
-      if (result) return { columns: result.columns, rows: result.rows };
+      if (result) return { columns: result.columns, columnTypes: result.column_types ?? [], rows: result.rows };
     }
     // The full result is already in memory — export the raw QueryResult (all
     // rows, all columns, committed values) so "export all data" matches the
@@ -189,10 +189,11 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     // and reflects client-side filters/search and unsaved edits, which would
     // silently change what the export contains.
     if (useFullExport && rowIds === undefined && hasCompleteLocalResult?.value && completeLocalResult?.value) {
-      return { columns: completeLocalResult.value.columns, rows: completeLocalResult.value.rows };
+      return { columns: completeLocalResult.value.columns, columnTypes: completeLocalResult.value.column_types ?? [], rows: completeLocalResult.value.rows };
     }
     return {
       columns: columns.value,
+      columnTypes: (columnTypes.value ?? []).map((type) => type ?? ""),
       rows: rowsToExport(rowIds).map((item) => item.data),
     };
   }
@@ -861,7 +862,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             totalRows: result.rows.length,
           };
         }
-        await api.exportQueryResultXlsx(outputPath, currentXlsxSheetName(), result.columns, result.rows);
+        await api.exportQueryResultXlsx(outputPath, currentXlsxSheetName(), result.columns, result.columnTypes, result.rows);
         if (needsFullExport && exportProgressState) {
           exportProgressState.value = {
             ...exportProgressState.value,
@@ -898,7 +899,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           outputPath = path as string;
         }
         const result = await resultToExport(undefined, undefined, false);
-        await api.exportQueryResultXlsx(outputPath, currentXlsxSheetName(), result.columns, result.rows);
+        await api.exportQueryResultXlsx(outputPath, currentXlsxSheetName(), result.columns, result.columnTypes, result.rows);
         toast(t("grid.exported"));
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: e?.message || String(e) }), 5000);
@@ -928,6 +929,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           sheets.map((sheet) => ({
             sheetName: sheet.sheetName,
             columns: sheet.result.columns,
+            columnTypes: sheet.result.column_types ?? [],
             rows: sheet.result.rows,
           })),
         );

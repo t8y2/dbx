@@ -2339,32 +2339,61 @@ export const useQueryStore = defineStore("query", () => {
 
   function setQueryTotalRowCountIfCurrent(tabId: string, executionId: string, result: QueryResult, totalRowCount: number | undefined) {
     const current = tabs.value.find((t) => t.id === tabId);
-    if (current?.mode !== "query") return;
+    if (!current || (current.mode !== "query" && current.mode !== "data")) return;
     if (current.executionId !== executionId && current.result !== result) return;
     current.resultTotalRowCount = totalRowCount;
     current.resultTotalRowCountLoading = false;
     syncActiveResultRunFromDisplayed(current);
   }
 
-  function countQueryTotalRowsInBackground(options: { tabId: string; connectionId: string; database: string; schema?: string; countSql?: string; result: QueryResult; pageLimit?: number; pageOffset?: number; executionId: string; traceId: string; elapsed: () => string; timeoutSecs: number }) {
+  type TotalRowCountSqlTarget = { sql: string; schema?: string };
+
+  function countQueryTotalRowsInBackground(options: {
+    tabId: string;
+    connectionId: string;
+    database: string;
+    schema?: string;
+    countSql?: string;
+    countSqlTarget?: () => Promise<TotalRowCountSqlTarget | undefined>;
+    result: QueryResult;
+    pageLimit?: number;
+    pageOffset?: number;
+    executionId: string;
+    traceId: string;
+    elapsed: () => string;
+    timeoutSecs: number;
+  }) {
     const resultRowCount = options.result.rows.length;
-    if (!options.countSql || resultRowCount <= 0) {
+    if (resultRowCount <= 0) {
       setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, undefined);
       return;
     }
-    const countSql = options.countSql;
-    const clientSessionId = tabClientSessionId({ id: options.tabId }, "count");
-    const countExecutionId = `${options.executionId}:count`;
-
     if (typeof options.pageLimit === "number" && resultRowCount < options.pageLimit) {
       setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, (options.pageOffset ?? 0) + resultRowCount);
       return;
     }
 
+    // A full page was returned, so more rows may exist and determining the true
+    // total requires a potentially expensive COUNT(*) over the user's query.
+    // Only run it automatically when the user opted in; otherwise leave the
+    // total unknown and let them trigger it on demand from the result grid
+    // (matches DBeaver's default of not counting large result sets).
+    if (!useSettingsStore().editorSettings.autoCalculateTotalRows) {
+      setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, undefined);
+      return;
+    }
+
+    const clientSessionId = tabClientSessionId({ id: options.tabId }, "count");
+    const countExecutionId = `${options.executionId}:count`;
     void (async () => {
       try {
+        const countTarget = options.countSql ? { sql: options.countSql, schema: options.schema } : await options.countSqlTarget?.();
+        if (!countTarget?.sql) {
+          setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, undefined);
+          return;
+        }
         console.info("[DBX][executeTabSql:count:start]", { traceId: options.traceId, elapsed: options.elapsed() });
-        const countResult = await api.executeQuery(options.connectionId, options.database, countSql, options.schema, countExecutionId, {
+        const countResult = await api.executeQuery(options.connectionId, options.database, countTarget.sql, countTarget.schema, countExecutionId, {
           clientSessionId,
           timeoutSecs: options.timeoutSecs,
         });
@@ -2911,24 +2940,49 @@ export const useQueryStore = defineStore("query", () => {
         if (!options?.preserveTotalRowCountDuringExecution) {
           current.resultTotalRowCount = undefined;
         }
-        current.resultTotalRowCountLoading = current.mode === "query" && !!current.result && !!countSql;
+        const resultRowCount = current.result?.rows.length ?? 0;
+        const totalKnownFromIncompletePage = !!current.result && typeof pageLimit === "number" && resultRowCount < pageLimit;
+        const dataCountTarget =
+          current.mode === "data"
+            ? (() => {
+                const tableMeta = tableMetaForDataTab(current);
+                if (!tableMeta?.tableName) return undefined;
+                return {
+                  databaseType: effectiveDbType,
+                  catalog: tableMeta.catalog,
+                  schema: tableMeta.schema,
+                  tableName: tableMeta.tableName,
+                  whereInput: current.whereInput?.trim() || undefined,
+                };
+              })()
+            : undefined;
+        const canAutoCalculateTotalRows = !!current.result && resultRowCount > 0 && !totalKnownFromIncompletePage && settingsStore.editorSettings.autoCalculateTotalRows && ((current.mode === "query" && !!countSql) || (current.mode === "data" && !!dataCountTarget));
+        current.resultTotalRowCountLoading = canAutoCalculateTotalRows;
         // Server-side pagination without a countSql: the backend (currently
         // the Elasticsearch driver) already reports the true match total via
         // affected_rows. Use it directly so the result-grid can compute the
         // page count without issuing a separate COUNT query.
-        if (current.result && current.mode === "query" && typeof pageLimit === "number" && !countSql && typeof current.result.affected_rows === "number") {
+        let totalRowCountResolved = false;
+        if (current.result && current.mode === "query" && typeof pageLimit === "number" && !countSql && typeof current.result.affected_rows === "number" && current.result.affected_rows > current.result.rows.length) {
           current.resultTotalRowCount = current.result.affected_rows;
           current.resultTotalRowCountLoading = false;
+          totalRowCountResolved = true;
         }
         touchResult(current);
         syncDisplayedResultRun(current, queryBaseSql);
-        if (current.mode === "query" && current.result) {
+        if (!totalRowCountResolved && (current.mode === "query" || current.mode === "data") && current.result) {
           countQueryTotalRowsInBackground({
             tabId: id,
             connectionId: current.connectionId,
             database: current.database,
             schema: current.schema,
             countSql,
+            countSqlTarget: dataCountTarget
+              ? async () => ({
+                  sql: await api.buildDataGridCountSql(dataCountTarget),
+                  schema: undefined,
+                })
+              : undefined,
             result: current.result,
             pageLimit,
             pageOffset,

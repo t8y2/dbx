@@ -2009,6 +2009,59 @@ test("automatic table aliases avoid reserved words", () => {
   assert.equal(tableItem!.apply, "orders AS ord");
 });
 
+test("automatic table aliases respect text after the cursor", () => {
+  const cases: Array<[string, number, string]> = [
+    ["select * from ord AS o", "select * from ord".length, "orders"],
+    ["select * from ord o", "select * from ord".length, "orders"],
+    ["select * from ord where id = 1", "select * from ord".length, "orders AS ord"],
+    ["select * from ord", "select * from ord".length, "orders AS ord"],
+    ["select * from ord, users", "select * from ord".length, "orders AS ord"],
+    ["select * from orders AS o", "select * from or".length, "orders"],
+    ["select * from ord单 AS o", "select * from ord".length, "orders"],
+    ["select * from orde\u0301 AS o", "select * from ord".length, "orders"],
+    ["select * from ord𐐀 AS o", "select * from ord".length, "orders"],
+    ['select * from ord AS "o"', "select * from ord".length, "orders"],
+    ["select * from ord `o`", "select * from ord".length, "orders"],
+    ["select * from ord AS ", "select * from ord".length, "orders"],
+    ["select * from ord /* comment */ AS o", "select * from ord".length, "orders"],
+    ["select * from ord -- comment\n  o", "select * from ord".length, "orders"],
+    ["select * from ord\n  o", "select * from ord".length, "orders"],
+    ["select * from ord /* ; */ AS o", "select * from ord".length, "orders"],
+    ["select * from ord /* comment */ where id = 1", "select * from ord".length, "orders AS ord"],
+  ];
+
+  for (const [sql, cursor, expectedApply] of cases) {
+    const items = buildSqlCompletionItems(sql, cursor, {
+      tables,
+      columnsByTable,
+      autoAliasTables: true,
+    });
+
+    const tableItem = items.find((item) => item.type === "table" && item.label === "orders");
+    assert.ok(tableItem, `should suggest orders for ${sql}`);
+    assert.equal(tableItem!.apply, expectedApply, sql);
+  }
+});
+
+test("table alias suggestions respect text after the cursor", () => {
+  const aliasedCases: Array<[string, number]> = [
+    ["select * from orders AS o", "select * from orders ".length],
+    ['select * from orders AS "o"', "select * from orders ".length],
+    ["select * from orders AS ", "select * from orders ".length],
+    ["select * from orders /* c */ AS o", "select * from orders ".length],
+  ];
+
+  for (const [sql, cursor] of aliasedCases) {
+    const items = buildSqlCompletionItems(sql, cursor, { tables, columnsByTable });
+    const aliasItem = items.find((item) => item.type === "snippet" && item.detail === "alias for orders");
+    assert.equal(aliasItem, undefined, sql);
+  }
+
+  const items = buildSqlCompletionItems("select * from orders ", "select * from orders ".length, { tables, columnsByTable });
+  const aliasItem = items.find((item) => item.type === "snippet" && item.detail === "alias for orders");
+  assert.ok(aliasItem, "alias snippet should remain available when no alias follows");
+});
+
 test("table alias suggestions avoid SQL keywords", () => {
   const items = buildSqlCompletionItems("select * from item_file ", "select * from item_file ".length, {
     tables: [{ name: "item_file", schema: "public", type: "table" }],

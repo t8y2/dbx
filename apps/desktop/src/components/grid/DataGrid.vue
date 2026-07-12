@@ -3485,10 +3485,17 @@ let scrollingTimer = 0;
 const isScrolling = ref(false);
 let infiniteScrollPositions = new WeakMap<HTMLElement, DataGridScrollPosition>();
 
+function updateDomGridVisibleItemsDuringScroll(scroller: HTMLElement) {
+  if (useCanvasGridRows.value || scroller !== gridScrollerElement()) return;
+  (scrollerRef.value as { updateVisibleItems?: (itemsChanged: boolean, checkPositionDiff?: boolean) => void } | null)?.updateVisibleItems?.(false, true);
+}
+
 function markGridScrolling() {
   if (!isScrolling.value) isScrolling.value = true;
   clearTimeout(scrollingTimer);
   scrollingTimer = window.setTimeout(() => {
+    const scroller = gridScrollerElement();
+    if (scroller) updateDomGridVisibleItemsDuringScroll(scroller);
     isScrolling.value = false;
   }, 120);
 }
@@ -3519,6 +3526,7 @@ function onScrollerScroll(e: Event) {
   const target = e.target;
   if (target instanceof HTMLElement) {
     clampGridScrollerBounds(target);
+    updateDomGridVisibleItemsDuringScroll(target);
     syncHeaderScroll(e);
     recordScrollPosition({ top: target.scrollTop, left: target.scrollLeft });
     maybeCheckInfiniteScroll(target);
@@ -6045,14 +6053,15 @@ function onDomGridWheel(event: WheelEvent) {
 
   const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
   const maxLeft = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
-  const horizontalIntent = Math.abs(effectiveHorizontalDelta) > Math.abs(effectiveVerticalDelta);
-  const verticalIntent = !horizontalIntent;
-  const blockedHorizontal = effectiveHorizontalDelta < 0 ? scroller.scrollLeft <= 0 : effectiveHorizontalDelta > 0 && scroller.scrollLeft >= maxLeft;
-  const blockedVertical = effectiveVerticalDelta < 0 ? scroller.scrollTop <= 0 : effectiveVerticalDelta > 0 && scroller.scrollTop >= maxTop;
-  if ((horizontalIntent && blockedHorizontal) || (verticalIntent && blockedVertical)) {
-    event.preventDefault();
-    event.stopPropagation();
-  }
+  const nextTop = Math.max(0, Math.min(maxTop, scroller.scrollTop + effectiveVerticalDelta));
+  const nextLeft = Math.max(0, Math.min(maxLeft, scroller.scrollLeft + effectiveHorizontalDelta));
+  event.preventDefault();
+  event.stopPropagation();
+  if (nextTop === scroller.scrollTop && nextLeft === scroller.scrollLeft) return;
+
+  scroller.scrollTop = nextTop;
+  scroller.scrollLeft = nextLeft;
+  onScrollerScroll({ target: scroller } as unknown as Event);
 }
 
 function onCanvasMouseMove(event: MouseEvent) {

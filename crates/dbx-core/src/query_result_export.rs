@@ -35,6 +35,18 @@ const STREAMING_PAGINATION_UNSUPPORTED_ERROR: &str = "当前查询暂不支持�
 const AGENT_SESSION_MISSING_ERROR: &str = "查询结果流式导出需要驱动返回结果集会话，但当前驱动未返回 session_id。";
 const STREAM_PROGRESS_TIME_INTERVAL: Duration = Duration::from_secs(1);
 
+async fn disconnect_with_timeout<C, F, Fut>(
+    connection: C,
+    cleanup_timeout: Duration,
+    disconnect: F,
+) -> Result<Result<(), String>, tokio::time::error::Elapsed>
+where
+    F: FnOnce(C) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    tokio::time::timeout(cleanup_timeout, disconnect(connection)).await
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryResultExportRequest {
@@ -941,6 +953,25 @@ async fn try_export_mysql_query_result_stream(
     watcher_done.cancel();
 
     if let Err(error) = stream_result {
+        // A timed-out, cancelled, or failed MySQL result stream may leave an
+        // incomplete protocol packet on the connection. Explicitly disconnect
+        // it so mysql_async cannot recycle the poisoned connection into the pool.
+        match disconnect_with_timeout(conn, operation_budget.cleanup_timeout, |conn| async move {
+            conn.disconnect().await.map_err(|error| error.to_string())
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(disconnect_error)) => {
+                log::warn!(
+                    "Failed to disconnect MySQL export connection {mysql_connection_id} after stream error: {disconnect_error}"
+                );
+            }
+            Err(_) => {
+                log::warn!("Timed out disconnecting MySQL export connection {mysql_connection_id} after stream error");
+            }
+        }
+
         if error == QUERY_CANCELED
             || export_cancelled.load(Ordering::SeqCst)
             || cancel_token.as_ref().is_some_and(|token| token.is_cancelled())
@@ -1410,5 +1441,28 @@ mod tests {
     fn keyset_candidate_rejects_filters_and_projection_changes() {
         assert!(safe_keyset_candidate("SELECT * FROM users WHERE active = true").is_none());
         assert!(safe_keyset_candidate("SELECT id, name FROM users").is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_mysql_stream_disconnects_connection_without_database_or_xlsx() {
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let disconnected_for_call = disconnected.clone();
+        let result = disconnect_with_timeout((), Duration::from_secs(1), move |_| async move {
+            disconnected_for_call.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+        assert!(matches!(result, Ok(Ok(()))));
+        assert!(disconnected.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn failed_mysql_stream_disconnect_is_bounded_by_cleanup_timeout() {
+        let result = disconnect_with_timeout((), Duration::from_millis(1), |_| async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Ok(())
+        })
+        .await;
+        assert!(result.is_err());
     }
 }

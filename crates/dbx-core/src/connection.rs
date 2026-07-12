@@ -1413,6 +1413,14 @@ impl AppState {
                         "Tunnel profile '{label}' referenced by this connection no longer exists. Re-create it in Settings > Tunnels or edit the connection's tunnel settings."
                     ));
                 };
+                // Validate the stored reference again at connect time because synced or
+                // externally supplied configs may bypass the editor's type constraints.
+                if !layer.same_type_as(profile) {
+                    return Err(format!(
+                        "Tunnel profile '{}' has a different type than the referencing transport layer.",
+                        if layer.name().is_empty() { profile_id } else { layer.name() }
+                    ));
+                }
                 Ok(layer.resolved_from_profile(profile))
             })
             .collect()
@@ -3140,8 +3148,8 @@ mod tests {
     use crate::database_capabilities;
     use crate::db;
     use crate::models::connection::{
-        default_connect_timeout_secs, default_redis_key_separator, ConnectionConfig, DatabaseType, ProxyTunnelConfig,
-        ProxyType, SshTunnelConfig, TransportLayerConfig,
+        default_connect_timeout_secs, default_redis_key_separator, ConnectionConfig, DatabaseType, HttpTunnelConfig,
+        ProxyTunnelConfig, ProxyType, SshTunnelConfig, TransportLayerConfig,
     };
     use crate::query;
     use crate::schema;
@@ -4414,6 +4422,32 @@ mod tests {
         }
     }
 
+    fn proxy_layer(id: &str, profile_id: &str) -> ProxyTunnelConfig {
+        ProxyTunnelConfig {
+            id: id.to_string(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: String::new(),
+            port: 1080,
+            username: String::new(),
+            password: String::new(),
+            profile_id: profile_id.to_string(),
+        }
+    }
+
+    fn http_tunnel_layer(id: &str, profile_id: &str) -> HttpTunnelConfig {
+        HttpTunnelConfig {
+            id: id.to_string(),
+            name: String::new(),
+            enabled: true,
+            url: String::new(),
+            token: String::new(),
+            connect_timeout_secs: 10,
+            profile_id: profile_id.to_string(),
+        }
+    }
+
     #[tokio::test]
     async fn resolved_transport_layers_substitutes_shared_profiles() {
         let (state, dir) = test_app_state().await;
@@ -4462,6 +4496,37 @@ mod tests {
         disabled.enabled = false;
         config.transport_layers = vec![TransportLayerConfig::Ssh(disabled)];
         assert!(state.resolved_transport_layers(&config).await.unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn resolved_transport_layers_rejects_mismatched_profile_types() {
+        let (state, dir) = test_app_state().await;
+
+        let mismatches = [
+            (
+                TransportLayerConfig::Ssh(ssh_layer("layer", "shared")),
+                TransportLayerConfig::Proxy(proxy_layer("shared", "")),
+            ),
+            (
+                TransportLayerConfig::Proxy(proxy_layer("layer", "shared")),
+                TransportLayerConfig::HttpTunnel(http_tunnel_layer("shared", "")),
+            ),
+            (
+                TransportLayerConfig::HttpTunnel(http_tunnel_layer("layer", "shared")),
+                TransportLayerConfig::Ssh(ssh_layer("shared", "")),
+            ),
+        ];
+
+        for (layer, profile) in mismatches {
+            state.storage.save_tunnel_profiles(&[profile]).await.unwrap();
+            let mut config = mysql_config(Some("app"));
+            config.transport_layers = vec![layer];
+
+            let error = state.resolved_transport_layers(&config).await.unwrap_err();
+            assert!(error.contains("different type"));
+        }
 
         let _ = std::fs::remove_dir_all(dir);
     }

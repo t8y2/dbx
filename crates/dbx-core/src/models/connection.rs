@@ -108,6 +108,15 @@ pub enum TransportLayerConfig {
 }
 
 impl TransportLayerConfig {
+    pub fn same_type_as(&self, other: &TransportLayerConfig) -> bool {
+        matches!(
+            (self, other),
+            (TransportLayerConfig::Ssh(_), TransportLayerConfig::Ssh(_))
+                | (TransportLayerConfig::Proxy(_), TransportLayerConfig::Proxy(_))
+                | (TransportLayerConfig::HttpTunnel(_), TransportLayerConfig::HttpTunnel(_))
+        )
+    }
+
     pub fn id(&self) -> &str {
         match self {
             TransportLayerConfig::Ssh(layer) => &layer.id,

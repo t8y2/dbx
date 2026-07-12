@@ -1,0 +1,13 @@
+sourceSets {
+    main.java.srcDirs = ['src/main/java', '../h2/src/main/java']
+}
+
+dependencies {
+    implementation 'com.h2database:h2:2.1.214'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': 'H2 2.1 Legacy', 'Main-Class': 'com.dbx.agent.h2legacy.H2LegacyAgent')
+    }
+}

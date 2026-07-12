@@ -1,4 +1,4 @@
-import { addConnection as desktopAddConnection, findConnection as desktopFindConnection, loadConnections as desktopLoadConnections, removeConnection as desktopRemoveConnection } from "./connections.js";
+import { addConnection as desktopAddConnection, findConnection as desktopFindConnection, loadConnections as desktopLoadConnections, removeConnection as desktopRemoveConnection, removeConnectionById as desktopRemoveConnectionById } from "./connections.js";
 import { closeDatabaseResources as desktopCloseDatabaseResources, describeTable as desktopDescribeTable, executeQuery as desktopExecuteQuery, executeRedisCommand as desktopExecuteRedisCommand, listTables as desktopListTables } from "./database.js";
 import type { ConnectionConfig } from "./connections.js";
 import type { ColumnInfo, QueryOptions, QueryResult, TableInfo } from "./database.js";
@@ -9,6 +9,7 @@ export interface Backend {
   findConnection(name: string): Promise<ConnectionConfig | undefined>;
   addConnection(config: Omit<ConnectionConfig, "id">): Promise<ConnectionConfig>;
   removeConnection(name: string): Promise<boolean>;
+  removeConnectionById?(id: string): Promise<boolean>;
   listTables(config: ConnectionConfig, schema?: string): Promise<TableInfo[]>;
   describeTable(config: ConnectionConfig, table: string, schema?: string): Promise<ColumnInfo[]>;
   executeQuery(config: ConnectionConfig, sql: string, options?: QueryOptions): Promise<QueryResult>;
@@ -26,6 +27,7 @@ export async function createBackend(env: NodeJS.ProcessEnv = process.env): Promi
     findConnection: desktopFindConnection,
     addConnection: desktopAddConnection,
     removeConnection: desktopRemoveConnection,
+    removeConnectionById: desktopRemoveConnectionById,
     listTables: desktopListTables,
     describeTable: desktopDescribeTable,
     executeQuery: desktopExecuteQuery,

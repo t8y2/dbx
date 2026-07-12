@@ -30,6 +30,7 @@ import java.util.Map;
 import java.util.Set;
 
 public final class AccessAgent extends BaseDatabaseAgent {
+    private static final String ENCRYPTED_ACCESS_OPENER = EncryptedAccessOpener.class.getName();
     private Connection connection;
     private String databaseFile = "";
 
@@ -284,6 +285,11 @@ public final class AccessAgent extends BaseDatabaseAgent {
             rawUrl = "jdbc:ucanaccess://" + databasePath(params);
         }
         rawUrl = appendUCanAccessParams(rawUrl, params.getUrl_params());
+
+        // The codec opener is safe for regular files and enables encrypted Access files when a password is supplied.
+        if (!containsIgnoreCase(rawUrl, "jackcessOpener=")) {
+            rawUrl += (rawUrl.endsWith(";") ? "" : ";") + "jackcessOpener=" + ENCRYPTED_ACCESS_OPENER;
+        }
 
         if (!createIfMissing || Files.exists(Path.of(databasePath(params)))) {
             return rawUrl;

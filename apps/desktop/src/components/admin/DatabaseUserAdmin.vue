@@ -13,6 +13,7 @@ import { useToast } from "@/composables/useToast";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import type { ConnectionConfig } from "@/types/database";
 import * as api from "@/lib/backend/api";
+import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { grantsFromQueryResult, getDatabaseUserAdminProvider, supportsDatabaseUserAdmin, type DatabaseUserIdentity, type PrivilegeScope } from "@/lib/database/databaseUserAdmin";
 
 const props = defineProps<{
@@ -165,7 +166,14 @@ async function applyPendingSql() {
   if (!pendingSql.value.trim()) return;
   applying.value = true;
   try {
-    await api.executeMulti(props.connection.id, "", pendingSql.value, undefined, undefined, { maxRows: 1000 });
+    const result = await executeWithProductionSqlGuard({
+      connection: props.connection,
+      database: "",
+      sql: pendingSql.value,
+      source: t("production.sourceAdmin"),
+      execute: () => api.executeMulti(props.connection.id, "", pendingSql.value, undefined, undefined, { maxRows: 1000 }),
+    });
+    if (!result) return;
     toast(t("userAdmin.applySuccess"), 2500);
     sqlDialogOpen.value = false;
     await (pendingAfterApply.value?.() ?? Promise.resolve());

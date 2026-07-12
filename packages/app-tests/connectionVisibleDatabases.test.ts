@@ -82,16 +82,17 @@ test("ZooKeeper connections do not offer visible database selection", () => {
   assert.equal(connectionCanChooseVisibleDatabases(config({ db_type: "zookeeper" })), false);
 });
 
+test("Cloudflare D1 does not offer a visible database filter for its fixed main namespace", () => {
+  assert.equal(connectionCanChooseVisibleDatabases(config({ db_type: "cloudflare-d1" })), false);
+});
+
 test("OceanBase Oracle uses schema filtering for visible object selection", () => {
   assert.equal(connectionUsesVisibleSchemaFilter(config({ db_type: "oceanbase-oracle" })), true);
   assert.equal(connectionUsesVisibleSchemaFilter(config({ db_type: "mysql", driver_profile: "oceanbase" })), false);
 });
 
 test("Dameng default SYSDBA user remains selectable", () => {
-  assert.deepEqual(
-    filterDatabaseNamesForConnection(["SYS", "SYSDBA", "SYSAUDITOR"], config({ db_type: "dameng" })),
-    ["SYSDBA"],
-  );
+  assert.deepEqual(filterDatabaseNamesForConnection(["SYS", "SYSDBA", "SYSAUDITOR"], config({ db_type: "dameng" })), ["SYSDBA"]);
 });
 
 test("visible database selection is stale when connection target changes", () => {

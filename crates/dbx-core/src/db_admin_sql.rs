@@ -78,6 +78,8 @@ pub struct DropObjectSqlOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -311,10 +313,18 @@ pub fn build_create_user_sql(username: &str, password: &str, tablespace: &str) -
 }
 
 pub fn build_drop_object_sql(options: DropObjectSqlOptions) -> String {
+    let signature = if matches!(options.database_type, Some(DatabaseType::Postgres))
+        && matches!(options.object_type, DatabaseObjectType::Function | DatabaseObjectType::Procedure)
+    {
+        options.signature.as_deref().map(|value| format!("({value})")).unwrap_or_default()
+    } else {
+        String::new()
+    };
     format!(
-        "DROP {} {};",
+        "DROP {} {}{};",
         object_type_keyword(options.object_type),
-        qualified_name(options.database_type, options.schema.as_deref(), &options.name)
+        qualified_name(options.database_type, options.schema.as_deref(), &options.name),
+        signature
     )
 }
 
@@ -1206,8 +1216,19 @@ mod tests {
                 object_type: DatabaseObjectType::Procedure,
                 schema: Some("dbo".to_string()),
                 name: "refresh_cache".to_string(),
+                signature: None,
             }),
             "DROP PROCEDURE [dbo].[refresh_cache];"
+        );
+        assert_eq!(
+            build_drop_object_sql(DropObjectSqlOptions {
+                database_type: Some(DatabaseType::Postgres),
+                object_type: DatabaseObjectType::Function,
+                schema: Some("public".to_string()),
+                name: "calc".to_string(),
+                signature: Some("integer, integer".to_string()),
+            }),
+            "DROP FUNCTION \"public\".\"calc\"(integer, integer);"
         );
         assert_eq!(
             build_drop_database_sql(DatabaseNameSqlOptions {

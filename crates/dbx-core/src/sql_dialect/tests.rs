@@ -571,6 +571,24 @@ fn builds_table_data_special_column_queries() {
             schema: Some("test_db".to_string()),
             table_name: "meters".to_string(),
             table_type: Some("STABLE".to_string()),
+            primary_keys: Vec::new(),
+            columns: Vec::new(),
+            fallback_order_columns: Vec::new(),
+            order_by: None,
+            limit: Some(100),
+            offset: None,
+            where_input: None,
+            include_row_id: false,
+            ..Default::default()
+        }),
+        "SELECT tbname, * FROM `test_db`.`meters` LIMIT 100;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            schema: Some("test_db".to_string()),
+            table_name: "meters".to_string(),
+            table_type: Some("STABLE".to_string()),
             primary_keys: vec!["ts".to_string()],
             columns: vec![
                 "ts".to_string(),

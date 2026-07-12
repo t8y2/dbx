@@ -269,8 +269,18 @@ pub async fn get_object_source(
     schema: String,
     name: String,
     object_type: db::ObjectSourceKind,
+    signature: Option<String>,
 ) -> Result<db::ObjectSource, String> {
-    dbx_core::schema::get_object_source_core(&state, &connection_id, &database, &schema, &name, object_type).await
+    dbx_core::schema::get_object_source_core(
+        &state,
+        &connection_id,
+        &database,
+        &schema,
+        &name,
+        object_type,
+        signature.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]

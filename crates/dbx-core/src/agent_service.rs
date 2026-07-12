@@ -7,6 +7,7 @@ use crate::agent_catalog;
 use crate::agent_manager::{
     AgentDriverInfo, AgentManager, AgentRegistry, InstalledDriver, JavaRuntimeMode, DEFAULT_JRE_KEY,
 };
+use crate::DownloadSource;
 
 /// Number of attempts to delete a JRE directory before giving up (Windows
 /// experiences transient `ERROR_ACCESS_DENIED` when java.exe is still mapped
@@ -131,8 +132,9 @@ fn replace_old_jre_dir(am: &AgentManager, path: &Path) -> Result<Option<PathBuf>
 const REGISTRY_PATH: &str = "https://github.com/t8y2/dbx/releases/download/agents-latest/agent-registry.json";
 const REGISTRY_R2_PATH: &str = "agents/agent-registry.json";
 
-static REGISTRY_CACHE: std::sync::LazyLock<tokio::sync::Mutex<Option<(std::time::Instant, AgentRegistry)>>> =
-    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(None));
+static REGISTRY_CACHE: std::sync::LazyLock<
+    tokio::sync::Mutex<std::collections::HashMap<DownloadSource, (std::time::Instant, AgentRegistry)>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashMap::new()));
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct AgentProgressEvent {
@@ -323,9 +325,13 @@ pub fn install_local_agent(am: &AgentManager, db_type: &str, source: PathBuf) ->
 }
 
 pub async fn fetch_registry() -> Result<AgentRegistry, String> {
+    fetch_registry_from(DownloadSource::Official).await
+}
+
+pub async fn fetch_registry_from(source: DownloadSource) -> Result<AgentRegistry, String> {
     {
         let cache = REGISTRY_CACHE.lock().await;
-        if let Some((ts, registry)) = cache.as_ref() {
+        if let Some((ts, registry)) = cache.get(&source) {
             if ts.elapsed() < std::time::Duration::from_secs(300) {
                 return Ok(registry.clone());
             }
@@ -335,16 +341,40 @@ pub async fn fetch_registry() -> Result<AgentRegistry, String> {
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|err| format!("Failed to create HTTP client: {err}"))?;
-    let resp = crate::race_download(&client, REGISTRY_PATH, REGISTRY_R2_PATH, "dbx-agent-manager")
+    let resp = open_download_response(&client, source, REGISTRY_PATH, REGISTRY_R2_PATH, "dbx-agent-manager")
         .await
         .map_err(|err| format!("Failed to fetch agent registry: {err}"))?;
     let registry: AgentRegistry = resp.json().await.map_err(|err| format!("Failed to parse registry: {err}"))?;
-    *REGISTRY_CACHE.lock().await = Some((std::time::Instant::now(), registry.clone()));
+    REGISTRY_CACHE.lock().await.insert(source, (std::time::Instant::now(), registry.clone()));
     Ok(registry)
 }
 
+async fn open_download_response(
+    client: &reqwest::Client,
+    source: DownloadSource,
+    github_url: &str,
+    r2_path: &str,
+    user_agent: &str,
+) -> Result<reqwest::Response, String> {
+    let mut errors = Vec::new();
+    for url in source.download_candidate_urls(github_url, r2_path)? {
+        match client
+            .get(&url)
+            .header(reqwest::header::USER_AGENT, user_agent)
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
+            .send()
+            .await
+            .and_then(|response| response.error_for_status())
+        {
+            Ok(response) => return Ok(response),
+            Err(error) => errors.push(format!("{url}: {error}")),
+        }
+    }
+    Err(errors.join("; "))
+}
+
 pub async fn invalidate_registry_cache() {
-    *REGISTRY_CACHE.lock().await = None;
+    REGISTRY_CACHE.lock().await.clear();
 }
 
 pub async fn install_agent_driver(
@@ -352,14 +382,31 @@ pub async fn install_agent_driver(
     db_type: &str,
     progress: impl Fn(AgentProgressEvent),
 ) -> Result<(), String> {
-    install_agent_driver_with_batch(am, db_type, &progress, None, None).await
+    install_agent_driver_from(am, db_type, DownloadSource::Official, progress).await
+}
+
+pub async fn install_agent_driver_from(
+    am: &AgentManager,
+    db_type: &str,
+    source: DownloadSource,
+    progress: impl Fn(AgentProgressEvent),
+) -> Result<(), String> {
+    install_agent_driver_with_batch(am, db_type, source, &progress, None, None).await
 }
 
 pub async fn upgrade_all_agent_drivers(
     am: &AgentManager,
     progress: impl Fn(AgentProgressEvent),
 ) -> Result<UpgradeAllAgentDriversResult, String> {
-    let registry = fetch_registry().await?;
+    upgrade_all_agent_drivers_from(am, DownloadSource::Official, progress).await
+}
+
+pub async fn upgrade_all_agent_drivers_from(
+    am: &AgentManager,
+    source: DownloadSource,
+    progress: impl Fn(AgentProgressEvent),
+) -> Result<UpgradeAllAgentDriversResult, String> {
+    let registry = fetch_registry_from(source).await?;
     let agents = build_agent_list(am, Some(&registry));
     let updatable: Vec<&AgentDriverInfo> = agents.iter().filter(|agent| agent.update_available).collect();
     let total = updatable.len() as u32;
@@ -369,6 +416,7 @@ pub async fn upgrade_all_agent_drivers(
         match install_agent_driver_from_registry(
             am,
             &registry,
+            source,
             &agent.db_type,
             &progress,
             Some((index + 1) as u32),
@@ -439,7 +487,16 @@ pub async fn reinstall_agent_jre(
     jre_key: &str,
     progress: impl Fn(AgentProgressEvent),
 ) -> Result<(), String> {
-    let registry = fetch_registry().await?;
+    reinstall_agent_jre_from(am, jre_key, DownloadSource::Official, progress).await
+}
+
+pub async fn reinstall_agent_jre_from(
+    am: &AgentManager,
+    jre_key: &str,
+    source: DownloadSource,
+    progress: impl Fn(AgentProgressEvent),
+) -> Result<(), String> {
+    let registry = fetch_registry_from(source).await?;
     let jre_info = registry.resolve_jre(jre_key).ok_or_else(|| format!("No JRE definition for version: {jre_key}"))?;
     let platform = AgentManager::current_platform();
     let platform_jre = jre_info
@@ -451,6 +508,7 @@ pub async fn reinstall_agent_jre(
         am,
         &progress,
         "jre",
+        source,
         &platform_jre.url,
         &r2_path_with_cache_buster(&github_url_to_r2_path(&platform_jre.url, "jre"), &jre_info.version),
         &jre_archive,
@@ -497,19 +555,23 @@ pub fn import_agents_from_zip(
 async fn install_agent_driver_with_batch(
     am: &AgentManager,
     db_type: &str,
+    source: DownloadSource,
     progress: &impl Fn(AgentProgressEvent),
     current: Option<u32>,
     total_drivers: Option<u32>,
 ) -> Result<(), String> {
-    match fetch_registry().await {
+    match fetch_registry_from(source).await {
         Ok(registry) => {
-            match install_agent_driver_from_registry(am, &registry, db_type, progress, current, total_drivers).await {
+            match install_agent_driver_from_registry(am, &registry, source, db_type, progress, current, total_drivers)
+                .await
+            {
                 Ok(()) => Ok(()),
                 Err(registry_err) => {
                     if let Some(local_jar) = find_local_agent_jar(db_type) {
                         install_local_agent_with_registry_jre(
                             am,
                             &registry,
+                            source,
                             db_type,
                             local_jar,
                             progress,
@@ -538,6 +600,7 @@ async fn install_agent_driver_with_batch(
 async fn ensure_jre_from_registry(
     am: &AgentManager,
     registry: &AgentRegistry,
+    source: DownloadSource,
     jre_key: &str,
     db_type: &str,
     progress: &impl Fn(AgentProgressEvent),
@@ -560,6 +623,7 @@ async fn ensure_jre_from_registry(
         am,
         progress,
         "jre",
+        source,
         &platform_jre.url,
         &r2_path_with_cache_buster(&github_url_to_r2_path(&platform_jre.url, "jre"), &jre_info.version),
         &jre_archive,
@@ -584,6 +648,7 @@ async fn ensure_jre_from_registry(
 async fn install_local_agent_with_registry_jre(
     am: &AgentManager,
     registry: &AgentRegistry,
+    source: DownloadSource,
     db_type: &str,
     local_jar: PathBuf,
     progress: &impl Fn(AgentProgressEvent),
@@ -592,7 +657,7 @@ async fn install_local_agent_with_registry_jre(
 ) -> Result<(), String> {
     let jre_key = DEFAULT_JRE_KEY;
     if jre_needs_install(am, registry, jre_key) {
-        ensure_jre_from_registry(am, registry, jre_key, db_type, progress, current, total_drivers).await?;
+        ensure_jre_from_registry(am, registry, source, jre_key, db_type, progress, current, total_drivers).await?;
     }
     install_local_agent(am, db_type, local_jar)?;
     if let Some(jre_info) = registry.resolve_jre(jre_key) {
@@ -608,6 +673,7 @@ async fn install_local_agent_with_registry_jre(
 async fn install_agent_driver_from_registry(
     am: &AgentManager,
     registry: &AgentRegistry,
+    source: DownloadSource,
     db_type: &str,
     progress: &impl Fn(AgentProgressEvent),
     current: Option<u32>,
@@ -615,8 +681,17 @@ async fn install_agent_driver_from_registry(
 ) -> Result<(), String> {
     let Some(driver) = agent_registry_driver(registry, db_type) else {
         if let Some(local_jar) = find_local_agent_jar(db_type) {
-            install_local_agent_with_registry_jre(am, registry, db_type, local_jar, progress, current, total_drivers)
-                .await?;
+            install_local_agent_with_registry_jre(
+                am,
+                registry,
+                source,
+                db_type,
+                local_jar,
+                progress,
+                current,
+                total_drivers,
+            )
+            .await?;
             return Ok(());
         }
         return Err(format!("Unknown driver type: {db_type}"));
@@ -628,7 +703,7 @@ async fn install_agent_driver_from_registry(
     let needs_jre = requires_java_runtime && jre_needs_install(am, registry, jre_key);
 
     if needs_jre {
-        ensure_jre_from_registry(am, registry, jre_key, db_type, progress, current, total_drivers).await?;
+        ensure_jre_from_registry(am, registry, source, jre_key, db_type, progress, current, total_drivers).await?;
     }
 
     let (artifact, target_path, is_native_artifact) = if let Some(native) = native_artifact {
@@ -650,6 +725,7 @@ async fn install_agent_driver_from_registry(
         am,
         progress,
         "driver",
+        source,
         &artifact.url,
         &r2_path_with_cache_buster(&github_url_to_r2_path(&artifact.url, "driver"), &driver.version),
         &target_path,
@@ -706,6 +782,7 @@ async fn download_with_progress(
     am: &AgentManager,
     progress: &impl Fn(AgentProgressEvent),
     step: &str,
+    source: DownloadSource,
     url: &str,
     r2_path: &str,
     dest: &std::path::Path,
@@ -764,6 +841,7 @@ async fn download_with_progress(
 
         let (mut resp, resumed, source_url) = match open_agent_download_response(
             &client,
+            source,
             url,
             r2_path,
             "dbx-agent-manager",
@@ -847,6 +925,7 @@ async fn download_with_progress(
 
 async fn open_agent_download_response(
     client: &reqwest::Client,
+    source: DownloadSource,
     github_url: &str,
     r2_path: &str,
     user_agent: &str,
@@ -855,7 +934,7 @@ async fn open_agent_download_response(
     resume_source: Option<&str>,
 ) -> Result<(reqwest::Response, bool, String), String> {
     let mut errors = Vec::new();
-    for candidate_url in crate::download_candidate_urls(github_url, r2_path) {
+    for candidate_url in source.download_candidate_urls(github_url, r2_path)? {
         if resume_from > 0 && resume_source.is_some_and(|source| source != candidate_url) {
             continue;
         }
@@ -1448,7 +1527,17 @@ mod agent_registry_install_tests {
             write_cached_driver_download(&manager, db_type, version, native_url, &native_path, native_bytes);
         let progress = |_| {};
 
-        install_agent_driver_from_registry(&manager, &registry, db_type, &progress, None, None).await.unwrap();
+        install_agent_driver_from_registry(
+            &manager,
+            &registry,
+            DownloadSource::Official,
+            db_type,
+            &progress,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(std::fs::read(&native_path).unwrap(), native_bytes);
         assert!(!cache_path.exists());
@@ -1474,8 +1563,17 @@ mod agent_registry_install_tests {
             .unwrap();
         let progress = |_| {};
 
-        let err =
-            install_agent_driver_from_registry(&manager, &registry, db_type, &progress, None, None).await.unwrap_err();
+        let err = install_agent_driver_from_registry(
+            &manager,
+            &registry,
+            DownloadSource::Official,
+            db_type,
+            &progress,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
 
         assert!(err.contains("invalid or corrupt"));
         assert!(cache_path.exists());

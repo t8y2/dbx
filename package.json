@@ -1,6 +1,6 @@
 {
   "name": "dbx",
-  "version": "0.5.52",
+  "version": "0.5.54",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -8,7 +8,7 @@
     "dev": "vite --config apps/desktop/vite.config.ts",
     "dev:tauri": "tauri dev",
     "dev:web": "vite --config apps/desktop/vite.config.ts --port 5173 --mode web",
-    "dev:backend": "RUST_LOG=${RUST_LOG:-info} sh -c 'if cargo watch --version >/dev/null 2>&1; then cargo watch -x \"run -p dbx-web\"; else echo \"cargo-watch is not installed; running dbx-web without hot reload. Install with: cargo install cargo-watch\"; cargo run -p dbx-web; fi'",
+    "dev:backend": "node scripts/dev-backend.mjs",
     "build:packages": "pnpm --filter @dbx-app/node-core build && pnpm --filter @dbx-app/cli build && pnpm --filter @dbx-app/mcp-server build",
     "test:packages": "pnpm --filter @dbx-app/node-core test && pnpm --filter @dbx-app/cli test && pnpm --filter @dbx-app/mcp-server test",
     "pack:packages": "rm -rf /tmp/dbx-pack-check && mkdir -p /tmp/dbx-pack-check && pnpm --filter @dbx-app/node-core pack --pack-destination /tmp/dbx-pack-check && pnpm --filter @dbx-app/cli pack --pack-destination /tmp/dbx-pack-check && pnpm --filter @dbx-app/mcp-server pack --pack-destination /tmp/dbx-pack-check",

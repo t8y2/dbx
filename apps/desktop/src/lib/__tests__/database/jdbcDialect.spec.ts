@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { effectiveDatabaseTypeForConnection, inferJdbcDialect } from "@/lib/database/jdbcDialect";
+import { connectionQueryExecutionSchema, effectiveDatabaseTypeForConnection, inferJdbcDialect } from "@/lib/database/jdbcDialect";
 
 describe("jdbc dialect inference", () => {
   it("detects InterSystems IRIS and Caché JDBC connections", () => {
@@ -45,5 +45,27 @@ describe("jdbc dialect inference", () => {
         driver_profile: "sqlserver",
       }),
     ).toBe("sqlserver");
+  });
+});
+
+describe("query execution schema", () => {
+  it.each(["spark", "hive"] as const)("uses the selected database as the %s execution schema", (dbType) => {
+    expect(connectionQueryExecutionSchema({ db_type: dbType }, "ai_test", undefined, false)).toBe("ai_test");
+  });
+
+  it("prefers an explicit schema for PostgreSQL", () => {
+    expect(connectionQueryExecutionSchema({ db_type: "postgres" }, "app", "reporting", false)).toBe("reporting");
+  });
+
+  it("does not send a schema for MySQL database context", () => {
+    expect(connectionQueryExecutionSchema({ db_type: "mysql" }, "app", undefined, false)).toBeUndefined();
+  });
+
+  it("does not change data-tab execution context", () => {
+    expect(connectionQueryExecutionSchema({ db_type: "spark" }, "ai_test", undefined, true)).toBeUndefined();
+  });
+
+  it("keeps generic JDBC Databend schema fallback", () => {
+    expect(connectionQueryExecutionSchema({ db_type: "jdbc", connection_string: "jdbc:databend://localhost:8000/default" }, "analytics", undefined, false)).toBe("analytics");
   });
 });

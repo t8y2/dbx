@@ -1,4 +1,6 @@
 import type { ConnectionConfig } from "@/types/database";
+import { assessProductionSql, productionContextForDatabase } from "@/lib/database/productionSafety";
+import { classifySqlStatementRisk, splitSqlStatementsForSafety, sqlSafetyText } from "@/lib/sql/sqlRisk";
 
 export type ConnectionEnvironment = "production" | "non_production" | "unknown";
 export type AiSqlExecutionAction = "auto_execute" | "confirm" | "block";
@@ -11,40 +13,29 @@ export interface AiSqlExecutionDecision {
   reasons: string[];
 }
 
-const READ_RE = /^(SELECT|WITH|SHOW|DESCRIBE|DESC|EXPLAIN)\b/i;
-const INSERT_RE = /^INSERT\b/i;
-const UPDATE_RE = /^UPDATE\b/i;
-const DELETE_RE = /^DELETE\b/i;
-const CONFIRM_WRITE_RE = /^(MERGE|REPLACE)\b/i;
-const BLOCK_RE = /^(DROP|TRUNCATE|ALTER|RENAME)\b/i;
-const SCHEMA_RE = /^(CREATE)\b/i;
-
 const PRODUCTION_RE = /\b(prod|prd|production)\b|生产|正式/i;
 const NON_PRODUCTION_RE = /\b(local|localhost|dev|develop|development|test|testing|stage|staging|sandbox|demo)\b|本地|开发|测试|预发/i;
 const LOCAL_HOST_RE = /^(localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|::1)$/i;
 const NEGATIVE_EXECUTION_RE = /(不要|别|不用|禁止|只生成|仅生成|只写|仅写).{0,12}(执行|运行|跑)|do\s+not\s+execute|don't\s+execute|dont\s+execute|without\s+executing|only\s+(generate|write|return)/i;
 
 export function stripAiSqlComments(sql: string): string {
-  return sql
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/--.*$/gm, " ")
-    .replace(/#.*$/gm, " ");
+  return sqlSafetyText(sql);
 }
 
 function sqlStatements(sql: string): string[] {
-  return stripAiSqlComments(sql)
-    .split(";")
-    .map((stmt) => stmt.trim())
-    .filter(Boolean);
+  return splitSqlStatementsForSafety(sql);
 }
 
-function classifyStatement(statement: string): AiSqlExecutionCategory {
-  if (READ_RE.test(statement)) return "read";
-  if (BLOCK_RE.test(statement)) return "dangerous";
-  if (SCHEMA_RE.test(statement)) return "schema_change";
-  if (INSERT_RE.test(statement)) return "low_risk_write";
-  if (UPDATE_RE.test(statement)) return isScopedUpdate(statement) ? "low_risk_write" : "dangerous";
-  if (DELETE_RE.test(statement) || CONFIRM_WRITE_RE.test(statement)) return "write";
+function classifyStatement(statement: string, connection?: ConnectionConfig): AiSqlExecutionCategory {
+  const risk = classifySqlStatementRisk(statement, { dialect: connection?.db_type });
+  if (risk.risk === "read") return "read";
+  if (risk.risk === "unknown") return "unknown";
+  if (risk.risk === "transaction" || risk.risk === "ddl") {
+    return risk.firstKeyword === "create" ? "schema_change" : "dangerous";
+  }
+  if (risk.firstKeyword === "insert") return "low_risk_write";
+  if (risk.firstKeyword === "update") return isScopedUpdate(statement) ? "low_risk_write" : "dangerous";
+  if (risk.firstKeyword === "delete" || risk.firstKeyword === "merge" || risk.firstKeyword === "replace") return "write";
   return "unknown";
 }
 
@@ -56,8 +47,9 @@ function isScopedUpdate(statement: string): boolean {
   return /\b[\w"`.[\]]*(?:id|_id|uuid|key)[\w"`.[\]]*\s*=\s*(?:'[^']+'|"[^"]+"|`[^`]+`|[\w.-]+)/i.test(where);
 }
 
-export function classifyConnectionEnvironment(connection?: ConnectionConfig): ConnectionEnvironment {
+export function classifyConnectionEnvironment(connection?: ConnectionConfig, database?: string): ConnectionEnvironment {
   if (!connection) return "unknown";
+  if (productionContextForDatabase(connection, database).active) return "production";
 
   const parts = [connection.name, connection.host, connection.database, connection.connection_string].filter(Boolean);
   const signal = parts.join(" ");
@@ -66,8 +58,8 @@ export function classifyConnectionEnvironment(connection?: ConnectionConfig): Co
   return "unknown";
 }
 
-export function classifyAiSqlExecution(sql: string, connection?: ConnectionConfig): AiSqlExecutionDecision {
-  const environment = classifyConnectionEnvironment(connection);
+export function classifyAiSqlExecution(sql: string, connection?: ConnectionConfig, database?: string): AiSqlExecutionDecision {
+  const environment = classifyConnectionEnvironment(connection, database);
   const statements = sqlStatements(sql);
   const reasons: string[] = [];
 
@@ -75,9 +67,10 @@ export function classifyAiSqlExecution(sql: string, connection?: ConnectionConfi
     return { action: "block", environment, category: "unknown", reasons: ["empty_sql"] };
   }
 
-  const categories = statements.map(classifyStatement);
+  const categories = statements.map((statement) => classifyStatement(statement, connection));
   const hasMultipleStatements = statements.length > 1;
   if (hasMultipleStatements) reasons.push("multi_statement");
+  const productionAssessment = assessProductionSql(sql, connection, database);
 
   if (categories.includes("dangerous")) {
     return { action: "block", environment, category: "dangerous", reasons };
@@ -89,6 +82,11 @@ export function classifyAiSqlExecution(sql: string, connection?: ConnectionConfi
 
   if (categories.every((category) => category === "read")) {
     return { action: "auto_execute", environment, category: "read", reasons };
+  }
+
+  if (productionAssessment.active && productionAssessment.isMutation) {
+    reasons.push("production_write");
+    return { action: "confirm", environment: "production", category: categories[0] ?? "unknown", reasons };
   }
 
   if (hasMultipleStatements) {

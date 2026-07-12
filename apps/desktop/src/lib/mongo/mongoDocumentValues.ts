@@ -56,6 +56,22 @@ export function buildMongoUpdateDocument(changes: Map<number, MongoInputValue>, 
   return doc;
 }
 
+export function applyMongoGridChangesToDocument(document: unknown, changes: Map<number, MongoInputValue>, columns: string[]): unknown {
+  if (!document || typeof document !== "object" || Array.isArray(document)) return document;
+
+  const updated = { ...(document as Record<string, unknown>) };
+  for (const [colIdx, newVal] of changes) {
+    const column = columns[colIdx];
+    if (!column || column === "_id") continue;
+    if (newVal === null) {
+      delete updated[column];
+    } else {
+      updated[column] = parseMongoDocumentInputValue(newVal);
+    }
+  }
+  return updated;
+}
+
 export function buildMongoInsertDocument(row: MongoInputValue[], columns: string[]): Record<string, unknown> {
   const doc: Record<string, unknown> = {};
   for (let ci = 0; ci < columns.length; ci++) {

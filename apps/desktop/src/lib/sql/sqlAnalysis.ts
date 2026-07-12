@@ -22,6 +22,7 @@ export interface EditableQueryInfo {
   sources?: EditableQuerySource[];
   editableSourceKey?: string;
   multiSource?: boolean;
+  allowInsert?: boolean;
   allowInsertDelete?: boolean;
   distinct?: boolean;
 }
@@ -83,10 +84,11 @@ export function analyzeEditableQueryEditability(sql: string): QueryEditability {
 
   const rawSelectBody = normalized.slice("SELECT".length, fromIndex).trim();
   const distinct = /^DISTINCT\b/i.test(rawSelectBody);
-  const selectBody = distinct ? rawSelectBody.replace(/^DISTINCT\b/i, "").trimStart() : rawSelectBody;
+  const selectBodyWithoutDistinct = distinct ? rawSelectBody.replace(/^DISTINCT\b/i, "").trimStart() : rawSelectBody;
   // DISTINCT ON selects a representative row using database-specific ordering,
   // so it cannot be mapped to base rows like an ordinary DISTINCT projection.
-  if (distinct && /^ON\b/i.test(selectBody)) return { editable: false, reason: "aggregation" };
+  if (distinct && /^ON\b/i.test(selectBodyWithoutDistinct)) return { editable: false, reason: "aggregation" };
+  const selectBody = stripSqlServerTopClause(selectBodyWithoutDistinct);
 
   const groupIndex = findTopLevelKeyword(normalized, "GROUP", fromIndex + 4);
   const havingIndex = findTopLevelKeyword(normalized, "HAVING", fromIndex + 4);
@@ -131,6 +133,14 @@ export function analyzeEditableQueryEditability(sql: string): QueryEditability {
 
 export function queryEditabilityMessageKey(reason: QueryEditabilityReason): string {
   return `grid.queryEditUnsupported.${reason}`;
+}
+
+function stripSqlServerTopClause(body: string): string {
+  const topMatch = body.match(/^TOP(?:\s+|(?=\())(?:\((?:[^()'"`[\]]|"[^"]*"|'(?:''|[^'])*'|`[^`]*`|\[[^\]]*\])+\)|\d+)\s*/i);
+  if (!topMatch) return body;
+  let remaining = body.slice(topMatch[0].length).trimStart();
+  remaining = remaining.replace(/^PERCENT\b\s*/i, "").replace(/^WITH\s+TIES\b\s*/i, "");
+  return remaining || body;
 }
 
 function parseSelectColumns(body: string, sources?: EditableQuerySource[]): EditableQueryColumn[] {

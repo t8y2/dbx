@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onBeforeUnmount, ref, watch, type Component } from "vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import {
@@ -14,12 +14,15 @@ import {
   CopyPlus,
   ChevronDown,
   ChevronRight,
+  Columns3Cog,
   Download,
   Eraser,
   Eye,
   FileCode,
   GripVertical,
+  KeyRound,
   LayoutGrid,
+  Link2,
   List,
   ListTree,
   Upload,
@@ -31,13 +34,16 @@ import {
   Play,
   Package,
   RefreshCw,
+  RotateCcw,
   Scissors,
   Search,
   ScrollText,
   Square,
   Table2,
+  TableProperties,
   TerminalSquare,
   Trash2,
+  WrapText,
   X,
 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
@@ -48,11 +54,12 @@ import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomC
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
 import * as api from "@/lib/backend/api";
-import type { ConnectionConfig, ForeignKeyInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics } from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, TableInfoTab, TriggerInfo } from "@/types/database";
 import { sortTablesByFkDependency, type TableWithFk } from "@/lib/table/tableDependencySort";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { getTableMetadataCapabilities, type TableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
 import { buildDropObjectSql, buildDropTableSql, buildDuplicateTableStructureSql, buildCopyTableDataSql, buildEmptyTableSql, buildTruncateTableSql, supportsDropTableCascade, supportsTruncateTableCascade, type TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
 import { useToast } from "@/composables/useToast";
@@ -70,9 +77,10 @@ import { useExportTracker, type ExportTask } from "@/composables/useExportTracke
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useQueryStore } from "@/stores/queryStore";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
-import DdlViewDialog from "./DdlViewDialog.vue";
-import { formatSqlForDisplay, sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
+import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, type BatchTableEmptyPlanItem } from "@/lib/sidebar/batchTableEmpty";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   buildObjectBrowserRows,
@@ -86,6 +94,9 @@ import {
   type ObjectBrowserSortDirection,
   type ObjectBrowserSortKey,
 } from "@/lib/table/objectBrowserRows";
+import { resolveRowClickAction, shouldDeferSingleClick, type ObjectBrowserRowAction } from "@/lib/table/objectBrowserRowAction";
+import { createSidePanelRequestGuard } from "@/lib/table/sidePanelRequestGuard";
+import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
 
 type ObjectFilter = "all" | "tables" | "views" | "materializedViews" | "procedures" | "functions" | "sequences" | "packages";
 type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
@@ -93,12 +104,13 @@ type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "to
 const props = defineProps<{
   connection: ConnectionConfig;
   database: string;
+  catalog?: string;
   schema?: string;
   viewport?: ObjectBrowserViewport;
 }>();
 
 const emit = defineEmits<{
-  openTable: [target: { tableName: string; schema?: string; tableType?: string }];
+  openTable: [target: { tableName: string; schema?: string; tableType?: string; catalog?: string }];
   schemaChange: [schema: string | undefined];
   viewportChange: [viewport: ObjectBrowserViewport];
 }>();
@@ -127,6 +139,33 @@ const sourceError = ref("");
 const sourceRow = ref<ObjectBrowserRow | null>(null);
 const sourceEditing = ref(false);
 const sourceCanEdit = ref(true);
+// --- Right-side panel state ---
+// Unified panel: either "table-info" (for tables) or "source" (for views/procedures/etc.)
+const sidePanelRow = ref<ObjectBrowserRow | null>(null);
+const sidePanelMode = ref<"table-info" | "source">("source");
+// Table info panel state
+const tableInfoTab = ref<TableInfoTab>("ddl");
+const tableColumns = ref<ColumnInfo[]>([]);
+const tableColumnsLoading = ref(false);
+const tableDdlContent = ref("");
+const tableDdlLoading = ref(false);
+const tableIndexes = ref<IndexInfo[]>([]);
+const tableIndexesLoading = ref(false);
+const tableForeignKeys = ref<ForeignKeyInfo[]>([]);
+const tableForeignKeysLoading = ref(false);
+const tableTriggers = ref<TriggerInfo[]>([]);
+const tableTriggersLoading = ref(false);
+const tableInfoSearchQuery = ref("");
+const tableInfoWrap = ref(true);
+const tableInfoDdlPreRef = ref<HTMLPreElement | null>(null);
+const SIDE_PANEL_MIN_WIDTH = 280;
+const SIDE_PANEL_MAX_WIDTH = 900;
+const sidePanelWidth = ref(settingsStore.editorSettings.tableInfoDrawerWidth || 420);
+let sidePanelResizeStartX = 0;
+let sidePanelResizeStartWidth = 0;
+const isResizingSidePanel = ref(false);
+const sidePanelGuard = createSidePanelRequestGuard();
+const tableMetadataCapabilities = computed<TableMetadataCapabilities>(() => getTableMetadataCapabilities(effectiveDatabaseType.value));
 const effectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(props.connection) ?? props.connection.db_type);
 const tableStructureDatabaseType = computed(() => tableStructureDatabaseTypeForConnection(props.connection) ?? props.connection.db_type);
 const sourceEditableText = ref("");
@@ -156,8 +195,6 @@ const duplicateTarget = ref<ObjectBrowserRow | null>(null);
 const duplicateTableName = ref("");
 const showProcedureExecutionConfirm = ref(false);
 const procedureExecutionTarget = ref<ObjectBrowserRow | null>(null);
-const ddlDialogTarget = ref<ObjectBrowserRow | null>(null);
-const showDdlDialog = ref(false);
 const selectedTableIds = ref<Set<string>>(new Set());
 const expandedPartitionParentIds = ref<Set<string>>(new Set());
 const showBatchDropConfirm = ref(false);
@@ -165,6 +202,9 @@ const batchDropPreviewSql = ref("");
 const showBatchTruncateConfirm = ref(false);
 const batchTruncatePreviewSql = ref("");
 const batchTruncateCascade = ref(false);
+const showBatchEmptyConfirm = ref(false);
+const batchEmptyPreviewSql = ref("");
+const batchEmptyPlan = ref<BatchTableEmptyPlanItem<ObjectBrowserRow>[]>([]);
 // Paste table dialog state
 const showPasteDialog = ref(false);
 const pasteTableMode = ref<PasteTableMode>("structure-and-data");
@@ -454,6 +494,12 @@ onBeforeUnmount(() => {
   gridResizeObserver = null;
   if (viewportFrame) window.cancelAnimationFrame(viewportFrame);
   if (restoreViewportFrame) window.cancelAnimationFrame(restoreViewportFrame);
+  window.removeEventListener("mousemove", onSidePanelResizeMove);
+  window.removeEventListener("mouseup", onSidePanelResizeEnd);
+  if (singleClickTimer) {
+    clearTimeout(singleClickTimer);
+    singleClickTimer = null;
+  }
 });
 
 const gridRows = computed(() => {
@@ -632,12 +678,12 @@ function iconClass(type: ObjectBrowserRow["type"]) {
 }
 
 function iconBgClass(type: ObjectBrowserRow["type"]) {
-  if (type === "VIEW" || type === "MATERIALIZED_VIEW") return "bg-purple-500/10";
-  if (type === "PROCEDURE") return "bg-blue-500/10";
-  if (type === "FUNCTION") return "bg-amber-500/10";
-  if (type === "SEQUENCE") return "bg-emerald-500/10";
-  if (type === "PACKAGE" || type === "PACKAGE_BODY") return "bg-cyan-500/10";
-  return "bg-green-500/10";
+  if (type === "VIEW" || type === "MATERIALIZED_VIEW") return "object-browser-icon-bg object-browser-icon-bg-view";
+  if (type === "PROCEDURE") return "object-browser-icon-bg object-browser-icon-bg-procedure";
+  if (type === "FUNCTION") return "object-browser-icon-bg object-browser-icon-bg-function";
+  if (type === "SEQUENCE") return "object-browser-icon-bg object-browser-icon-bg-sequence";
+  if (type === "PACKAGE" || type === "PACKAGE_BODY") return "object-browser-icon-bg object-browser-icon-bg-package";
+  return "object-browser-icon-bg object-browser-icon-bg-table";
 }
 
 function isPartitionParentExpanded(row: ObjectBrowserRow) {
@@ -652,10 +698,6 @@ function togglePartitionParent(row: ObjectBrowserRow) {
   expandedPartitionParentIds.value = next;
 }
 
-function canOpenSource(row: ObjectBrowserRow) {
-  return row.type === "VIEW" || row.type === "MATERIALIZED_VIEW" || row.type === "PROCEDURE" || row.type === "FUNCTION" || row.type === "SEQUENCE" || row.type === "PACKAGE" || row.type === "PACKAGE_BODY";
-}
-
 function canRename(row: ObjectBrowserRow) {
   return supportsObjectRename(effectiveDatabaseType.value, row.type) || supportsSourceBackedRoutineRename(effectiveDatabaseType.value, row.type as ObjectSourceKind);
 }
@@ -665,26 +707,300 @@ function sourceTitle(row: ObjectBrowserRow | null) {
   return `${row.name} ${t("objects.source")}`;
 }
 
-function onRowClick(row: ObjectBrowserRow, event: MouseEvent) {
-  if (settingsStore.editorSettings.sidebarActivation === "double") {
-    if (event.detail === 2) openRow(row);
-    return;
+const SINGLE_CLICK_DELAY = 250;
+let singleClickTimer: ReturnType<typeof setTimeout> | null = null;
+
+function executeRowAction(row: ObjectBrowserRow, action: ObjectBrowserRowAction) {
+  switch (action) {
+    case "table-info":
+      void openTableInfo(row);
+      break;
+    case "open-table":
+      emit("openTable", { tableName: row.name, schema: row.schema, catalog: props.catalog });
+      break;
+    case "open-source":
+      void openSource(row);
+      break;
   }
-  if (event.detail > 1) return;
-  openRow(row);
 }
 
-function openRow(row: ObjectBrowserRow) {
-  if (row.type === "TABLE") {
-    emit("openTable", { tableName: row.name, schema: row.schema });
+function onRowClick(row: ObjectBrowserRow, event: MouseEvent) {
+  const activation = settingsStore.editorSettings.sidebarActivation;
+  const { action, isDouble } = resolveRowClickAction(row, event.detail, activation);
+  // Double click: cancel any pending single-click and fire immediately
+  if (isDouble) {
+    if (singleClickTimer) {
+      clearTimeout(singleClickTimer);
+      singleClickTimer = null;
+    }
+    executeRowAction(row, action);
     return;
   }
-  if (canOpenSource(row)) {
-    void openSource(row);
+  // Single click: defer when the row has a distinct double-click action so a
+  // following second click can cancel it (e.g. TABLE single→table-info, double→open-table).
+  if (shouldDeferSingleClick(row, action)) {
+    if (singleClickTimer) clearTimeout(singleClickTimer);
+    singleClickTimer = setTimeout(() => {
+      singleClickTimer = null;
+      executeRowAction(row, action);
+    }, SINGLE_CLICK_DELAY);
+    return;
   }
+  executeRowAction(row, action);
+}
+
+// --- Table info panel (replicates DataGrid table-info-drawer) ---
+
+type TableInfoTabItem = { id: TableInfoTab; label: string; icon: Component; count?: number };
+
+const tableInfoTabs = computed<TableInfoTabItem[]>(() => {
+  const tabs: TableInfoTabItem[] = [];
+  if (tableMetadataCapabilities.value.ddl) {
+    tabs.push({ id: "ddl", label: "DDL", icon: Code2 });
+  }
+  if (tableMetadataCapabilities.value.columns) {
+    tabs.push({ id: "columns", label: t("grid.tableInfoColumns"), icon: ListTree, count: tableColumns.value.length });
+  }
+  if (tableMetadataCapabilities.value.indexes) {
+    tabs.push({ id: "indexes", label: t("grid.tableInfoIndexes"), icon: KeyRound, count: tableIndexes.value.length });
+  }
+  if (tableMetadataCapabilities.value.foreignKeys) {
+    tabs.push({ id: "foreignKeys", label: t("grid.tableInfoForeignKeys"), icon: Link2, count: tableForeignKeys.value.length });
+  }
+  if (tableMetadataCapabilities.value.triggers) {
+    tabs.push({ id: "triggers", label: t("grid.tableInfoTriggers"), icon: RotateCcw, count: tableTriggers.value.length });
+  }
+  return tabs;
+});
+
+const tableInfoTabListStyle = computed(() => ({
+  gridTemplateColumns: `repeat(${tableInfoTabs.value.length}, minmax(0, 1fr))`,
+}));
+
+const filteredTableColumns = computed(() => {
+  if (!tableInfoSearchQuery.value) return tableColumns.value;
+  const q = tableInfoSearchQuery.value.toLowerCase();
+  return tableColumns.value.filter((c) => c.name.toLowerCase().includes(q) || c.data_type.toLowerCase().includes(q));
+});
+
+const filteredTableIndexes = computed(() => {
+  if (!tableInfoSearchQuery.value) return tableIndexes.value;
+  const q = tableInfoSearchQuery.value.toLowerCase();
+  return tableIndexes.value.filter((i) => i.name.toLowerCase().includes(q) || i.columns.some((c) => c.toLowerCase().includes(q)));
+});
+
+const filteredTableForeignKeys = computed(() => {
+  if (!tableInfoSearchQuery.value) return tableForeignKeys.value;
+  const q = tableInfoSearchQuery.value.toLowerCase();
+  return tableForeignKeys.value.filter((fk) => fk.name.toLowerCase().includes(q) || fk.column.toLowerCase().includes(q) || fk.ref_table.toLowerCase().includes(q) || fk.ref_column.toLowerCase().includes(q));
+});
+
+const filteredTableTriggers = computed(() => {
+  if (!tableInfoSearchQuery.value) return tableTriggers.value;
+  const q = tableInfoSearchQuery.value.toLowerCase();
+  return tableTriggers.value.filter((tr) => tr.name.toLowerCase().includes(q));
+});
+
+const filteredTableDdlContent = computed(() => {
+  if (!tableDdlContent.value) return "";
+  const html = highlight(tableDdlContent.value);
+  if (!tableInfoSearchQuery.value) return html;
+  const escaped = tableInfoSearchQuery.value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = new RegExp(`(${escaped})`, "gi");
+  return html.replace(/>([^<]*)</g, (_, text) => {
+    return `>${text.replace(regex, "<mark>$1</mark>")}<`;
+  });
+});
+
+async function openTableInfo(row: ObjectBrowserRow, initialTab?: TableInfoTab) {
+  // Toggle off if clicking the same table
+  if (sidePanelRow.value?.id === row.id && sidePanelMode.value === "table-info" && !initialTab) {
+    closeSidePanel();
+    return;
+  }
+  sidePanelRow.value = row;
+  sidePanelMode.value = "table-info";
+  sidePanelGuard.bump();
+  // Reset state
+  tableColumns.value = [];
+  tableDdlContent.value = "";
+  tableIndexes.value = [];
+  tableForeignKeys.value = [];
+  tableTriggers.value = [];
+  tableInfoSearchQuery.value = "";
+  // Determine initial tab: explicit request > first available > ddl
+  const firstTab = initialTab ?? tableInfoTabs.value[0]?.id ?? "ddl";
+  await selectTableInfoTab(firstTab);
+}
+
+async function selectTableInfoTab(tab: TableInfoTab) {
+  const nextTab = tableInfoTabs.value.some((item) => item.id === tab) ? tab : tableInfoTabs.value[0]?.id;
+  if (!nextTab) return;
+  tableInfoTab.value = nextTab;
+  tableInfoSearchQuery.value = "";
+  if (nextTab === "ddl") await fetchTableDdl();
+  else if (nextTab === "columns") await fetchTableColumns();
+  else if (nextTab === "indexes") await fetchTableIndexes();
+  else if (nextTab === "foreignKeys") await fetchTableForeignKeys();
+  else if (nextTab === "triggers") await fetchTableTriggers();
+}
+
+async function fetchTableDdl() {
+  const row = sidePanelRow.value;
+  if (!row) return;
+  const epoch = sidePanelGuard.capture();
+  tableDdlLoading.value = true;
+  try {
+    const schema = row.schema || selectedSchema.value || props.database;
+    const ddl = await api.getTableDdl(props.connection.id, props.database || "", schema, row.name, tableDdlObjectType(row.type));
+    if (sidePanelGuard.isStale(epoch)) return;
+    tableDdlContent.value = ddl;
+  } catch (e: any) {
+    if (sidePanelGuard.isStale(epoch)) return;
+    tableDdlContent.value = `-- Error: ${e?.message || e}`;
+  } finally {
+    if (sidePanelGuard.isFresh(epoch)) tableDdlLoading.value = false;
+  }
+}
+
+async function fetchTableColumns() {
+  const row = sidePanelRow.value;
+  if (!row || tableColumns.value.length > 0) return;
+  const epoch = sidePanelGuard.capture();
+  tableColumnsLoading.value = true;
+  try {
+    const schema = row.schema || selectedSchema.value || props.database;
+    const columns = await api.getColumns(props.connection.id, props.database || "", schema, row.name);
+    if (sidePanelGuard.isStale(epoch)) return;
+    tableColumns.value = columns;
+  } catch {
+    if (sidePanelGuard.isStale(epoch)) return;
+    tableColumns.value = [];
+  } finally {
+    if (sidePanelGuard.isFresh(epoch)) tableColumnsLoading.value = false;
+  }
+}
+
+async function fetchTableIndexes() {
+  const row = sidePanelRow.value;
+  if (!row || tableIndexes.value.length > 0) return;
+  const epoch = sidePanelGuard.capture();
+  tableIndexesLoading.value = true;
+  try {
+    const schema = row.schema || selectedSchema.value || props.database;
+    const indexes = await api.listIndexes(props.connection.id, props.database || "", schema, row.name);
+    if (sidePanelGuard.isStale(epoch)) return;
+    tableIndexes.value = indexes;
+  } catch {
+    if (sidePanelGuard.isStale(epoch)) return;
+    tableIndexes.value = [];
+  } finally {
+    if (sidePanelGuard.isFresh(epoch)) tableIndexesLoading.value = false;
+  }
+}
+
+async function fetchTableForeignKeys() {
+  const row = sidePanelRow.value;
+  if (!row || tableForeignKeys.value.length > 0) return;
+  const epoch = sidePanelGuard.capture();
+  tableForeignKeysLoading.value = true;
+  try {
+    const schema = row.schema || selectedSchema.value || props.database;
+    const fks = await api.listForeignKeys(props.connection.id, props.database || "", schema, row.name);
+    if (sidePanelGuard.isStale(epoch)) return;
+    tableForeignKeys.value = fks;
+  } catch {
+    if (sidePanelGuard.isStale(epoch)) return;
+    tableForeignKeys.value = [];
+  } finally {
+    if (sidePanelGuard.isFresh(epoch)) tableForeignKeysLoading.value = false;
+  }
+}
+
+async function fetchTableTriggers() {
+  const row = sidePanelRow.value;
+  if (!row || tableTriggers.value.length > 0) return;
+  const epoch = sidePanelGuard.capture();
+  tableTriggersLoading.value = true;
+  try {
+    const schema = row.schema || selectedSchema.value || props.database;
+    const triggers = await api.listTriggers(props.connection.id, props.database || "", schema, row.name);
+    if (sidePanelGuard.isStale(epoch)) return;
+    tableTriggers.value = triggers;
+  } catch {
+    if (sidePanelGuard.isStale(epoch)) return;
+    tableTriggers.value = [];
+  } finally {
+    if (sidePanelGuard.isFresh(epoch)) tableTriggersLoading.value = false;
+  }
+}
+
+function copyTableDdl() {
+  void copyToClipboard(tableDdlContent.value);
+  toast(t("grid.copyDdl"), 2000);
+}
+
+function onTableInfoDdlKeydown(e: KeyboardEvent) {
+  if ((e.ctrlKey || e.metaKey) && e.key === "a") {
+    e.preventDefault();
+    const el = tableInfoDdlPreRef.value;
+    if (!el) return;
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+  }
+}
+
+// --- Side panel resize ---
+function onSidePanelResizeStart(event: MouseEvent) {
+  isResizingSidePanel.value = true;
+  sidePanelResizeStartX = event.clientX;
+  sidePanelResizeStartWidth = sidePanelWidth.value;
+  window.addEventListener("mousemove", onSidePanelResizeMove);
+  window.addEventListener("mouseup", onSidePanelResizeEnd);
+}
+
+function onSidePanelResizeMove(event: MouseEvent) {
+  if (!isResizingSidePanel.value) return;
+  const delta = sidePanelResizeStartX - event.clientX;
+  const next = Math.min(SIDE_PANEL_MAX_WIDTH, Math.max(SIDE_PANEL_MIN_WIDTH, sidePanelResizeStartWidth + delta));
+  sidePanelWidth.value = next;
+}
+
+function onSidePanelResizeEnd() {
+  isResizingSidePanel.value = false;
+  window.removeEventListener("mousemove", onSidePanelResizeMove);
+  window.removeEventListener("mouseup", onSidePanelResizeEnd);
+  settingsStore.updateEditorSettings({ tableInfoDrawerWidth: sidePanelWidth.value });
+}
+
+function closeSidePanel() {
+  sidePanelRow.value = null;
+  sidePanelMode.value = "source";
+  sidePanelGuard.bump();
+}
+
+const canOpenTableStructureEditor = computed(() => sidePanelRow.value?.type === "TABLE" && canOpenStructureEditor.value);
+
+function openTableStructureEditor() {
+  const row = sidePanelRow.value;
+  if (!row || row.type !== "TABLE" || !canOpenTableStructureEditor.value) return;
+  queryStore.openTableStructure(props.connection.id, props.database, row.schema || selectedSchema.value, row.name, tableInfoTab.value);
 }
 
 async function openSource(row: ObjectBrowserRow) {
+  // Toggle off if clicking the same source row
+  if (sidePanelRow.value?.id === row.id && sidePanelMode.value === "source") {
+    closeSidePanel();
+    return;
+  }
+  // Starting a different object must invalidate slower source requests before
+  // any state is reset, otherwise an old response can populate the new row.
+  const epoch = sidePanelGuard.start();
+  sidePanelRow.value = row;
+  sidePanelMode.value = "source";
   sourceRow.value = row;
   sourceContent.value = "";
   sourceError.value = "";
@@ -694,27 +1010,35 @@ async function openSource(row: ObjectBrowserRow) {
   sourceDraft.value = "";
   sourceSaveError.value = "";
   sourceLoading.value = true;
+  const connectionId = props.connection.id;
+  const database = props.database;
+  const schema = row.schema || selectedSchema.value || database;
   try {
-    const result = await api.getObjectSource(props.connection.id, props.database, row.schema || selectedSchema.value || props.database, row.name, row.type as ObjectSourceKind);
+    const result = await api.getObjectSource(connectionId, database, schema, row.name, row.type as ObjectSourceKind);
+    if (sidePanelGuard.isStale(epoch)) return;
     sourceCanEdit.value = result.editable !== false && row.type !== "SEQUENCE";
     const editable = await api.buildEditableObjectSource({
       databaseType: effectiveDatabaseType.value,
       objectType: row.type as ObjectSourceKind,
-      schema: row.schema || selectedSchema.value || props.database,
+      schema,
       name: row.name,
       source: result.source,
     });
+    if (sidePanelGuard.isStale(epoch)) return;
+    // Viewing database source must preserve its original whitespace and comments;
+    // formatting remains an explicit editor action instead of altering it on open.
     sourceEditableText.value = editable;
-    sourceContent.value = await formatSqlForDisplay(editable, sourceFormatDialect.value, settingsStore.editorSettings.sqlFormatter);
+    sourceContent.value = editable;
     sourceDraft.value = editable;
     sourceEditing.value = sourceCanEdit.value;
     if (!sourceCanEdit.value && row.type !== "SEQUENCE") {
       toast(t("objects.sourceReadOnly"), 3000);
     }
   } catch (e: any) {
+    if (sidePanelGuard.isStale(epoch)) return;
     sourceError.value = e?.message || String(e);
   } finally {
-    sourceLoading.value = false;
+    if (sidePanelGuard.isFresh(epoch)) sourceLoading.value = false;
   }
 }
 
@@ -819,9 +1143,13 @@ async function confirmRename() {
         newName,
         source: source.source,
       });
-      for (const sql of statements) {
-        await api.executeQuery(props.connection.id, props.database, sql, schema);
-      }
+      const executed = await executeObjectBrowserSqlWithProductionGuard(statements.join(";\n"), async () => {
+        for (const sql of statements) {
+          await api.executeQuery(props.connection.id, props.database, sql, schema);
+        }
+        return true;
+      });
+      if (!executed) return;
     } else {
       const sql = await buildRenameObjectSql({
         databaseType: effectiveDatabaseType.value,
@@ -830,7 +1158,8 @@ async function confirmRename() {
         oldName: row.name,
         newName,
       });
-      await api.executeQuery(props.connection.id, props.database, sql, schema);
+      const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql, schema));
+      if (!executed) return;
     }
     toast(t("contextMenu.renameObjectSuccess", { oldName: row.name, newName }));
     showRenameDialog.value = false;
@@ -847,7 +1176,8 @@ async function confirmDrop() {
   const row = dropTarget.value;
   try {
     const sql = dropPreviewSql.value || (await buildDropSqlForRow(row, { cascade: canDropTargetCascade.value && dropTableCascade.value }));
-    await api.executeQuery(props.connection.id, props.database, sql);
+    const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql));
+    if (!executed) return;
     const successKey = row.type === "VIEW" ? "contextMenu.dropViewSuccess" : row.type === "PROCEDURE" ? "contextMenu.dropProcedureSuccess" : row.type === "FUNCTION" ? "contextMenu.dropFunctionSuccess" : "contextMenu.dropTableSuccess";
     toast(t(successKey, { name: row.name }));
     closeDroppedTableObjectTabsForRow(row);
@@ -908,6 +1238,7 @@ function dropConfirmMessage(): string {
 
 function closeSource() {
   sourceRow.value = null;
+  sidePanelRow.value = null;
   sourceContent.value = "";
   sourceError.value = "";
   sourceEditing.value = false;
@@ -937,7 +1268,7 @@ async function saveFileContent(content: string, defaultFileName: string, filterN
 }
 
 function openViewData(row: ObjectBrowserRow) {
-  emit("openTable", { tableName: row.name, schema: row.schema, tableType: row.type });
+  emit("openTable", { tableName: row.name, schema: row.schema, tableType: row.type, catalog: props.catalog });
 }
 
 function openStructureEditor(row: ObjectBrowserRow) {
@@ -1082,11 +1413,20 @@ async function confirmBatchDropTables() {
   if (targets.length === 0) return;
   try {
     const useCascade = canBatchDropCascade.value && batchDropCascade.value;
-    for (const row of targets) {
-      const sql = await buildDropTableSql(tableAdminSqlOptions(row, { cascade: useCascade }));
-      await api.executeQuery(props.connection.id, props.database, sql);
-      closeDroppedTableObjectTabsForRow(row);
-    }
+    const statements = await Promise.all(
+      targets.map(async (row) => ({
+        row,
+        sql: await buildDropTableSql(tableAdminSqlOptions(row, { cascade: useCascade })),
+      })),
+    );
+    const executed = await executeObjectBrowserSqlWithProductionGuard(statements.map(({ sql }) => sql).join(";\n"), async () => {
+      for (const { row, sql } of statements) {
+        await api.executeQuery(props.connection.id, props.database, sql);
+        closeDroppedTableObjectTabsForRow(row);
+      }
+      return true;
+    });
+    if (!executed) return;
     toast(t("objects.batchDropSuccess", { count: targets.length }));
     clearTableSelection();
     await reload();
@@ -1114,15 +1454,50 @@ function requestBatchTruncateTables() {
   showBatchTruncateConfirm.value = true;
 }
 
+function tableDataRefreshTargetForRow(row: ObjectBrowserRow) {
+  return {
+    connectionId: props.connection.id,
+    database: props.database,
+    schema: row.schema || selectedSchema.value,
+    schemaCandidates: [row.schema, selectedSchema.value],
+    catalog: props.catalog,
+    name: row.name,
+  };
+}
+
+async function refreshMutatedTableDataTabsForRows(rows: readonly ObjectBrowserRow[]) {
+  for (const row of rows) {
+    const target = tableDataRefreshTargetForRow(row);
+    try {
+      await queryStore.refreshDataTabsForTable(target);
+    } catch (error) {
+      console.warn("[DBX][table-data-refresh-after-mutation:error]", { target, error });
+    }
+  }
+}
+
 async function confirmBatchTruncateTables() {
   const targets = [...selectedTableRows.value];
   if (targets.length === 0) return;
   try {
     const useCascade = canBatchTruncateCascade.value && batchTruncateCascade.value;
-    for (const row of targets) {
-      const sql = await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: useCascade }));
-      await api.executeQuery(props.connection.id, props.database, sql);
-    }
+    const statements = await Promise.all(
+      targets.map(async (row) => ({
+        row,
+        sql: await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: useCascade })),
+      })),
+    );
+    const executed = await executeObjectBrowserSqlWithProductionGuard(statements.map(({ sql }) => sql).join(";\n"), async () => {
+      await runBatchTableTruncate(
+        statements,
+        async ({ sql }) => {
+          await api.executeQuery(props.connection.id, props.database, sql);
+        },
+        async (succeeded) => refreshMutatedTableDataTabsForRows(succeeded.map(({ row }) => row)),
+      );
+      return true;
+    });
+    if (!executed) return;
     toast(t("objects.batchTruncateSuccess", { count: targets.length }));
     clearTableSelection();
     showBatchTruncateConfirm.value = false;
@@ -1130,6 +1505,61 @@ async function confirmBatchTruncateTables() {
     await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+async function refreshBatchEmptyPreviewSql(targets: ObjectBrowserRow[]) {
+  const plan = await buildBatchTableEmptyPlan(targets, (row) => buildEmptyTableSql(tableAdminSqlOptions(row)));
+  // Freeze the reviewed SQL with its target so confirmation cannot execute a different destructive statement.
+  batchEmptyPlan.value = plan;
+  batchEmptyPreviewSql.value = plan.map(({ sql }) => sql).join("\n");
+}
+
+function requestBatchEmptyTables() {
+  const targets = [...selectedTableRows.value];
+  if (targets.length === 0) return;
+  batchEmptyPlan.value = [];
+  batchEmptyPreviewSql.value = "";
+  void refreshBatchEmptyPreviewSql(targets)
+    .then(() => {
+      showBatchEmptyConfirm.value = true;
+    })
+    .catch((e: any) => {
+      batchEmptyPlan.value = [];
+      toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+    });
+}
+
+async function confirmBatchEmptyTables() {
+  const plan = batchEmptyPlan.value.slice();
+  if (plan.length === 0) return;
+  const asynchronousMutation = effectiveDatabaseType.value === "clickhouse";
+  const reviewSql = plan.map(({ sql }) => sql).join(";\n");
+  const result = await executeObjectBrowserSqlWithProductionGuard(reviewSql, () => {
+    return runBatchTableEmpty(plan, async ({ sql }) => {
+      await api.executeQuery(props.connection.id, props.database, sql);
+    });
+  });
+  if (!result) return;
+  for (const failure of result.failed) {
+    console.error(`Failed to empty table "${failure.target.target.name}":`, failure.error);
+  }
+  const feedback = batchTableEmptyFeedback(result, asynchronousMutation);
+  if (feedback === "success") {
+    toast(t("contextMenu.batchEmptySuccess", { count: result.succeeded.length }), 3000);
+  } else if (feedback === "submitted") {
+    toast(t("contextMenu.batchEmptySubmitted", { count: result.succeeded.length }), 3000);
+  } else if (feedback === "submitted-partial") {
+    toast(t("contextMenu.batchEmptySubmittedPartial", { success: result.succeeded.length, failed: result.failed.length }), 5000);
+  } else {
+    toast(t("contextMenu.batchEmptyPartialFail", { success: result.succeeded.length, failed: result.failed.length }), 5000);
+  }
+  batchEmptyPlan.value = [];
+  showBatchEmptyConfirm.value = false;
+  if (result.succeeded.length > 0) {
+    clearTableSelection();
+    await reload();
+    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);
   }
 }
 
@@ -1292,7 +1722,8 @@ async function confirmDuplicateStructure() {
       sourceName: row.name,
       targetName: newName,
     });
-    await api.executeQuery(props.connection.id, props.database, sql, schema);
+    const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql, schema));
+    if (!executed) return;
     toast(t("contextMenu.duplicateStructureSuccess", { name: newName }));
     await reload();
     await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, schema);
@@ -1395,7 +1826,8 @@ async function confirmPasteTable() {
           sourceName: entry.sourceName,
           targetName,
         });
-        await api.executeQuery(props.connection.id, props.database, structureSql, schema);
+        const executed = await executeObjectBrowserSqlWithProductionGuard(structureSql, () => api.executeQuery(props.connection.id, props.database, structureSql, schema));
+        if (!executed) return;
       }
       if (copyData) {
         const sourceColumns = await api.getColumns(props.connection.id, props.database, schema || "", entry.sourceName);
@@ -1410,7 +1842,8 @@ async function confirmPasteTable() {
           targetName,
           ...dataCopyColumnOptions,
         });
-        await api.executeQuery(props.connection.id, props.database, dataSql, schema);
+        const executed = await executeObjectBrowserSqlWithProductionGuard(dataSql, () => api.executeQuery(props.connection.id, props.database, dataSql, schema));
+        if (!executed) return;
       }
       successCount++;
     } catch (e: any) {
@@ -1437,6 +1870,21 @@ function tableAdminSqlOptions(row: ObjectBrowserRow, options?: { cascade?: boole
   return result;
 }
 
+/**
+ * Routes Object Browser writes through the shared production gate. The SQL is
+ * assessed before the callback runs so generated DDL cannot bypass protection
+ * via executable comments, EXPLAIN ANALYZE, or qualified production targets.
+ */
+async function executeObjectBrowserSqlWithProductionGuard<T>(sql: string, execute: () => Promise<T>): Promise<T | undefined> {
+  return executeWithProductionSqlGuard({
+    connection: props.connection,
+    database: props.database,
+    sql,
+    source: t("production.sourceObjectBrowser"),
+    execute,
+  });
+}
+
 async function refreshTruncatePreviewSql(row: ObjectBrowserRow) {
   truncatePreviewSql.value = "";
   truncatePreviewSql.value = await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: canTruncateTargetCascade.value && truncateTableCascade.value })).catch(() => "");
@@ -1454,8 +1902,10 @@ async function confirmTruncateTable() {
   if (!row) return;
   try {
     const sql = truncatePreviewSql.value || (await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: canTruncateTargetCascade.value && truncateTableCascade.value })));
-    await api.executeQuery(props.connection.id, props.database, sql);
+    const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql));
+    if (!executed) return;
     toast(t("contextMenu.truncateTableSuccess", { name: row.name }));
+    await refreshMutatedTableDataTabsForRows([row]);
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
@@ -1478,8 +1928,10 @@ async function confirmEmptyTable() {
   if (!row) return;
   try {
     const sql = emptyPreviewSql.value || (await buildEmptyTableSql(tableAdminSqlOptions(row)));
-    await api.executeQuery(props.connection.id, props.database, sql);
+    const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql));
+    if (!executed) return;
     toast(t("contextMenu.emptyTableSuccess", { name: row.name }));
+    await refreshMutatedTableDataTabsForRows([row]);
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
@@ -1529,7 +1981,10 @@ async function saveSource() {
   }
   if (!sourceRow.value || !sourceDraft.value.trim()) return;
   const row = sourceRow.value;
-  const schema = row.schema || selectedSchema.value || props.database;
+  const epoch = sidePanelGuard.capture();
+  const connectionId = props.connection.id;
+  const database = props.database;
+  const schema = row.schema || selectedSchema.value || database;
   sourceSaving.value = true;
   sourceSaveError.value = "";
   try {
@@ -1540,15 +1995,32 @@ async function saveSource() {
       name: row.name,
       source: sourceDraft.value,
     });
-    await executeObjectSourceSave(props.connection.id, props.database, effectiveDatabaseType.value, statements, schema);
+    const executableSql = statements.filter((sql) => sql.trim()).join(";\n");
+    if (executableSql.trim()) {
+      const saved = await executeWithProductionSqlGuard({
+        connection: props.connection,
+        database,
+        sql: executableSql,
+        source: t("production.sourceObjectSource"),
+        execute: async () => {
+          await executeObjectSourceSave(connectionId, database, effectiveDatabaseType.value, statements, schema);
+          return true;
+        },
+      });
+      if (!saved || sidePanelGuard.isStale(epoch)) return;
+    } else {
+      await executeObjectSourceSave(connectionId, database, effectiveDatabaseType.value, statements, schema);
+      if (sidePanelGuard.isStale(epoch)) return;
+    }
     toast(t("objects.sourceSaved"));
     sourceEditing.value = false;
     sourceDraft.value = "";
     await openSource(row);
   } catch (e: any) {
+    if (sidePanelGuard.isStale(epoch)) return;
     sourceSaveError.value = e?.message || String(e);
   } finally {
-    sourceSaving.value = false;
+    if (sidePanelGuard.isFresh(epoch)) sourceSaving.value = false;
   }
 }
 
@@ -1577,7 +2049,7 @@ async function loadObjects() {
   rows.value = [];
   try {
     const schema = needsSchema.value ? selectedSchema.value || "" : props.database;
-    const objects: ObjectInfo[] = await api.listObjects(props.connection.id, props.database, schema);
+    const objects: ObjectInfo[] = await api.listObjects(props.connection.id, props.database, schema, undefined, undefined, undefined, undefined, props.catalog);
     if (id !== loadId) return;
     rows.value = buildObjectBrowserRows({
       objects,
@@ -1714,6 +2186,15 @@ watch(
     userHasSelectedFilter.value = false;
     objectFilter.value = "all";
     clearTableSelection();
+    // Close side panel and invalidate any pending source/table-info requests
+    // so stale results from the old context don't overwrite new state.
+    closeSidePanel();
+    sourceRow.value = null;
+    sourceContent.value = "";
+    sourceError.value = "";
+    sourceLoading.value = false;
+    sourceEditing.value = false;
+    sourceSaving.value = false;
     try {
       await connectionStore.ensureConnected(props.connection.id);
     } catch (e) {
@@ -1739,15 +2220,21 @@ function exportDataSubmenu(item: ObjectBrowserRow): ContextMenuItem {
   };
 }
 
+function isSelectedBatchTableContext(item: ObjectBrowserRow): boolean {
+  return item.type === "TABLE" && selectedTableCount.value > 1 && selectedTableIds.value.has(item.id);
+}
+
+function selectedBatchTableCountLabel(key: "batchDrop" | "batchTruncate" | "batchEmpty"): string {
+  return t(`contextMenu.${key}`, { count: selectedTableCount.value });
+}
+
 function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
+  const useBatchActions = isSelectedBatchTableContext(item);
   return [
-    { label: t("contextMenu.viewData"), action: () => openRow(item), icon: Table2 },
+    { label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
     {
       label: t("contextMenu.viewDdl"),
-      action: () => {
-        ddlDialogTarget.value = item;
-        showDdlDialog.value = true;
-      },
+      action: () => openTableInfo(item, "ddl"),
       icon: FileCode,
     },
     ...(canOpenStructureEditor.value ? [{ label: t("contextMenu.editStructure"), action: () => openStructureEditor(item), icon: PencilRuler }] : []),
@@ -1767,22 +2254,22 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     ...(supportsTruncateTable.value
       ? [
           {
-            label: t("contextMenu.truncateTable"),
-            action: () => requestTruncateTable(item),
+            label: useBatchActions ? selectedBatchTableCountLabel("batchTruncate") : t("contextMenu.truncateTable"),
+            action: useBatchActions ? requestBatchTruncateTables : () => requestTruncateTable(item),
             icon: Scissors,
             variant: "destructive" as const,
           },
         ]
       : []),
     {
-      label: t("contextMenu.emptyTable"),
-      action: () => requestEmptyTable(item),
+      label: useBatchActions ? selectedBatchTableCountLabel("batchEmpty") : t("contextMenu.emptyTable"),
+      action: useBatchActions ? requestBatchEmptyTables : () => requestEmptyTable(item),
       icon: Eraser,
       variant: "destructive" as const,
     },
     {
-      label: t("contextMenu.dropTable"),
-      action: () => requestDrop(item),
+      label: useBatchActions ? selectedBatchTableCountLabel("batchDrop") : t("contextMenu.dropTable"),
+      action: useBatchActions ? requestBatchDropTables : () => requestDrop(item),
       icon: Trash2,
       variant: "destructive" as const,
     },
@@ -1798,10 +2285,7 @@ function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     { label: t("contextMenu.viewSource"), action: () => openSource(item), icon: Code2 },
     {
       label: t("contextMenu.viewDdl"),
-      action: () => {
-        ddlDialogTarget.value = item;
-        showDdlDialog.value = true;
-      },
+      action: () => openTableInfo(item, "ddl"),
       icon: ScrollText,
     },
     ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
@@ -1957,6 +2441,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         <Scissors class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.truncateSelected") }}
       </Button>
+      <Button variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchEmptyTables">
+        <Eraser class="mr-1.5 h-3.5 w-3.5" />
+        {{ t("contextMenu.batchEmpty", { count: selectedTableCount }) }}
+      </Button>
       <Button variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchDropTables">
         <Trash2 class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.dropSelected") }}
@@ -1977,244 +2465,422 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     <div v-else-if="filteredRows.length === 0" class="flex flex-1 items-center justify-center text-sm text-muted-foreground">
       {{ t("objects.empty") }}
     </div>
-    <div v-else class="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div v-if="isListView" class="object-browser-table flex min-h-0 min-w-0 flex-1 flex-col overflow-x-auto overflow-y-hidden">
-        <div class="grid h-7 shrink-0 items-center gap-3 border-b bg-muted/40 px-3 text-xs font-medium text-muted-foreground" :style="{ gridTemplateColumns, minWidth: `${objectGridMinWidth}px` }">
-          <div v-if="showCheckboxColumn" class="relative flex min-w-0 items-center">
-            <button class="flex h-6 w-6 items-center justify-center rounded-sm hover:bg-accent" type="button" :disabled="visibleSelectableRows.length === 0" @click="toggleVisibleTableSelection">
-              <CheckSquare v-if="allVisibleTablesSelected" class="h-3.5 w-3.5 text-primary" />
-              <Square v-else class="h-3.5 w-3.5" />
-            </button>
-            <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('select', $event)" @dblclick="resetObjectColumnWidth('select', 34, $event)">
-              <GripVertical class="h-3 w-3" />
-            </div>
-          </div>
-          <div class="relative flex min-w-0 items-center">
-            <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('name')">
-              <span class="truncate">{{ t("objects.name") }}</span>
-              <component :is="sortIconFor('name')" v-if="sortIconFor('name')" class="h-3 w-3 shrink-0" />
-            </button>
-            <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('name', $event)" @dblclick="resetObjectColumnWidth('name', 260, $event)">
-              <GripVertical class="h-3 w-3" />
-            </div>
-          </div>
-          <div class="relative flex min-w-0 items-center">
-            <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('type')">
-              <span class="truncate">{{ t("objects.type") }}</span>
-              <component :is="sortIconFor('type')" v-if="sortIconFor('type')" class="h-3 w-3 shrink-0" />
-            </button>
-            <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('type', $event)" @dblclick="resetObjectColumnWidth('type', 110, $event)">
-              <GripVertical class="h-3 w-3" />
-            </div>
-          </div>
-          <div class="relative flex min-w-0 items-center">
-            <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :title="t('objects.statisticsHint')" @click="toggleSort('estimatedRows')">
-              <span class="truncate">{{ t("objects.rows") }}</span>
-              <component :is="sortIconFor('estimatedRows')" v-if="sortIconFor('estimatedRows')" class="h-3 w-3 shrink-0" />
-            </button>
-            <div
-              class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-              @mousedown="onObjectColumnResizeStart('estimatedRows', $event)"
-              @dblclick="resetObjectColumnWidth('estimatedRows', 110, $event)"
-            >
-              <GripVertical class="h-3 w-3" />
-            </div>
-          </div>
-          <div class="relative flex min-w-0 items-center">
-            <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :title="t('objects.statisticsHint')" @click="toggleSort('totalBytes')">
-              <span class="truncate">{{ t("objects.size") }}</span>
-              <component :is="sortIconFor('totalBytes')" v-if="sortIconFor('totalBytes')" class="h-3 w-3 shrink-0" />
-            </button>
-            <div
-              class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-              @mousedown="onObjectColumnResizeStart('totalBytes', $event)"
-              @dblclick="resetObjectColumnWidth('totalBytes', 100, $event)"
-            >
-              <GripVertical class="h-3 w-3" />
-            </div>
-          </div>
-          <div v-if="hasCreatedAt" class="relative flex min-w-0 items-center">
-            <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('created_at')">
-              <span class="truncate">{{ t("objects.createdAt") }}</span>
-              <component :is="sortIconFor('created_at')" v-if="sortIconFor('created_at')" class="h-3 w-3 shrink-0" />
-            </button>
-            <div
-              class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-              @mousedown="onObjectColumnResizeStart('created_at', $event)"
-              @dblclick="resetObjectColumnWidth('created_at', 150, $event)"
-            >
-              <GripVertical class="h-3 w-3" />
-            </div>
-          </div>
-          <div v-if="hasUpdatedAt" class="relative flex min-w-0 items-center">
-            <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('updated_at')">
-              <span class="truncate">{{ t("objects.updatedAt") }}</span>
-              <component :is="sortIconFor('updated_at')" v-if="sortIconFor('updated_at')" class="h-3 w-3 shrink-0" />
-            </button>
-            <div
-              class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-              @mousedown="onObjectColumnResizeStart('updated_at', $event)"
-              @dblclick="resetObjectColumnWidth('updated_at', 150, $event)"
-            >
-              <GripVertical class="h-3 w-3" />
-            </div>
-          </div>
-          <div class="relative flex min-w-0 items-center">
-            <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('comment')">
-              <span class="truncate">{{ t("objects.comment") }}</span>
-              <component :is="sortIconFor('comment')" v-if="sortIconFor('comment')" class="h-3 w-3 shrink-0" />
-            </button>
-            <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('comment', $event)" @dblclick="resetObjectColumnWidth('comment', 260, $event)">
-              <GripVertical class="h-3 w-3" />
-            </div>
-          </div>
-        </div>
-        <RecycleScroller ref="listScrollerRef" class="object-browser-scroller min-h-0 flex-1" :style="{ minWidth: `${objectGridMinWidth}px` }" :items="filteredRows" :item-size="34" :buffer="600" :skip-hover="true" key-field="id">
-          <template #default="{ item }">
-            <CustomContextMenu :items="getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu }">
-              <div
-                class="grid h-[34px] cursor-pointer items-center gap-3 border-b px-3 hover:bg-accent/50"
-                :class="{
-                  'bg-accent/40': sourceRow?.id === item.id,
-                  'bg-primary/5': selectedTableIds.has(item.id),
-                }"
-                :style="{ gridTemplateColumns }"
-                @click="onRowClick(item, $event)"
-                @contextmenu="onContextMenu"
-              >
-                <button v-if="showCheckboxColumn" class="flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground" type="button" :class="{ invisible: item.type !== 'TABLE' }" @click.stop="toggleTableSelection(item)">
-                  <CheckSquare v-if="selectedTableIds.has(item.id)" class="h-3.5 w-3.5 text-primary" />
-                  <Square v-else class="h-3.5 w-3.5" />
-                </button>
-                <div class="flex min-w-0 items-center gap-2">
-                  <button
-                    v-if="item.partitionCount"
-                    type="button"
-                    class="flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground"
-                    :aria-label="t('objects.partitions', { count: item.partitionCount })"
-                    @click.stop="togglePartitionParent(item)"
-                  >
-                    <ChevronDown v-if="isPartitionParentExpanded(item)" class="h-3.5 w-3.5" />
-                    <ChevronRight v-else class="h-3.5 w-3.5" />
-                  </button>
-                  <span v-else-if="item.partitionParentId" class="ml-4 h-5 w-5 shrink-0" />
-                  <component :is="iconFor(item)" class="h-3.5 w-3.5 shrink-0" :class="iconClass(item.type)" />
-                  <span class="truncate text-[13px] font-medium text-foreground" :title="item.displayName">{{ item.displayName }}</span>
-                  <span v-if="item.partitionCount" class="shrink-0 rounded border bg-muted/40 px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted-foreground">
-                    {{ t("objects.partitions", { count: item.partitionCount }) }}
-                  </span>
-                </div>
-                <div class="truncate text-xs text-muted-foreground">{{ typeLabel(item.type) }}</div>
-                <div class="truncate text-xs tabular-nums text-muted-foreground" :title="item.estimatedRows == null ? '' : formatObjectBrowserCount(item.estimatedRows)">
-                  {{ formatObjectBrowserCount(item.estimatedRows) }}
-                </div>
-                <div class="truncate text-xs tabular-nums text-muted-foreground" :title="item.totalBytes == null ? '' : formatObjectBrowserBytes(item.totalBytes)">
-                  {{ formatObjectBrowserBytes(item.totalBytes) }}
-                </div>
-                <div v-if="hasCreatedAt" class="truncate text-xs tabular-nums text-muted-foreground" :title="formatObjectBrowserTimestamp(item.created_at)">
-                  {{ formatObjectBrowserTimestamp(item.created_at) }}
-                </div>
-                <div v-if="hasUpdatedAt" class="truncate text-xs tabular-nums text-muted-foreground" :title="formatObjectBrowserTimestamp(item.updated_at)">
-                  {{ formatObjectBrowserTimestamp(item.updated_at) }}
-                </div>
-                <div class="truncate text-xs text-muted-foreground" :title="item.comment || ''">
-                  {{ item.comment || "" }}
-                </div>
+    <div v-else class="flex min-h-0 min-w-0 flex-1">
+      <div class="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div v-if="isListView" class="object-browser-table flex min-h-0 min-w-0 flex-1 flex-col overflow-x-auto overflow-y-hidden">
+          <div class="grid h-7 shrink-0 items-center gap-3 border-b bg-muted/40 px-3 text-xs font-medium text-muted-foreground" :style="{ gridTemplateColumns, minWidth: `${objectGridMinWidth}px` }">
+            <div v-if="showCheckboxColumn" class="relative flex min-w-0 items-center">
+              <button class="flex h-6 w-6 items-center justify-center rounded-sm hover:bg-accent" type="button" :disabled="visibleSelectableRows.length === 0" @click="toggleVisibleTableSelection">
+                <CheckSquare v-if="allVisibleTablesSelected" class="h-3.5 w-3.5 text-primary" />
+                <Square v-else class="h-3.5 w-3.5" />
+              </button>
+              <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('select', $event)" @dblclick="resetObjectColumnWidth('select', 34, $event)">
+                <GripVertical class="h-3 w-3" />
               </div>
-            </CustomContextMenu>
-          </template>
-        </RecycleScroller>
-      </div>
-      <div v-else ref="gridContainerRef" class="object-browser-grid-wrapper min-h-0 flex-1 p-2">
-        <RecycleScroller ref="gridScrollerRef" v-if="gridRows.length > 0" class="object-browser-grid-scroller h-full" :items="gridRows" :item-size="objectGridRowHeight" :buffer="600" :skip-hover="true" key-field="key">
-          <template #default="{ item: row }">
-            <div class="object-browser-grid-row" :style="{ gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`, height: `${objectGridRowHeight - OBJECT_GRID_GAP}px` }">
-              <CustomContextMenu v-for="item in row.cards" :key="item.id" :items="getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu }">
+            </div>
+            <div class="relative flex min-w-0 items-center">
+              <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('name')">
+                <span class="truncate">{{ t("objects.name") }}</span>
+                <component :is="sortIconFor('name')" v-if="sortIconFor('name')" class="h-3 w-3 shrink-0" />
+              </button>
+              <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('name', $event)" @dblclick="resetObjectColumnWidth('name', 260, $event)">
+                <GripVertical class="h-3 w-3" />
+              </div>
+            </div>
+            <div class="relative flex min-w-0 items-center">
+              <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('type')">
+                <span class="truncate">{{ t("objects.type") }}</span>
+                <component :is="sortIconFor('type')" v-if="sortIconFor('type')" class="h-3 w-3 shrink-0" />
+              </button>
+              <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('type', $event)" @dblclick="resetObjectColumnWidth('type', 110, $event)">
+                <GripVertical class="h-3 w-3" />
+              </div>
+            </div>
+            <div class="relative flex min-w-0 items-center">
+              <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :title="t('objects.statisticsHint')" @click="toggleSort('estimatedRows')">
+                <span class="truncate">{{ t("objects.rows") }}</span>
+                <component :is="sortIconFor('estimatedRows')" v-if="sortIconFor('estimatedRows')" class="h-3 w-3 shrink-0" />
+              </button>
+              <div
+                class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                @mousedown="onObjectColumnResizeStart('estimatedRows', $event)"
+                @dblclick="resetObjectColumnWidth('estimatedRows', 110, $event)"
+              >
+                <GripVertical class="h-3 w-3" />
+              </div>
+            </div>
+            <div class="relative flex min-w-0 items-center">
+              <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :title="t('objects.statisticsHint')" @click="toggleSort('totalBytes')">
+                <span class="truncate">{{ t("objects.size") }}</span>
+                <component :is="sortIconFor('totalBytes')" v-if="sortIconFor('totalBytes')" class="h-3 w-3 shrink-0" />
+              </button>
+              <div
+                class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                @mousedown="onObjectColumnResizeStart('totalBytes', $event)"
+                @dblclick="resetObjectColumnWidth('totalBytes', 100, $event)"
+              >
+                <GripVertical class="h-3 w-3" />
+              </div>
+            </div>
+            <div v-if="hasCreatedAt" class="relative flex min-w-0 items-center">
+              <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('created_at')">
+                <span class="truncate">{{ t("objects.createdAt") }}</span>
+                <component :is="sortIconFor('created_at')" v-if="sortIconFor('created_at')" class="h-3 w-3 shrink-0" />
+              </button>
+              <div
+                class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                @mousedown="onObjectColumnResizeStart('created_at', $event)"
+                @dblclick="resetObjectColumnWidth('created_at', 150, $event)"
+              >
+                <GripVertical class="h-3 w-3" />
+              </div>
+            </div>
+            <div v-if="hasUpdatedAt" class="relative flex min-w-0 items-center">
+              <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('updated_at')">
+                <span class="truncate">{{ t("objects.updatedAt") }}</span>
+                <component :is="sortIconFor('updated_at')" v-if="sortIconFor('updated_at')" class="h-3 w-3 shrink-0" />
+              </button>
+              <div
+                class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                @mousedown="onObjectColumnResizeStart('updated_at', $event)"
+                @dblclick="resetObjectColumnWidth('updated_at', 150, $event)"
+              >
+                <GripVertical class="h-3 w-3" />
+              </div>
+            </div>
+            <div class="relative flex min-w-0 items-center">
+              <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('comment')">
+                <span class="truncate">{{ t("objects.comment") }}</span>
+                <component :is="sortIconFor('comment')" v-if="sortIconFor('comment')" class="h-3 w-3 shrink-0" />
+              </button>
+              <div
+                class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                @mousedown="onObjectColumnResizeStart('comment', $event)"
+                @dblclick="resetObjectColumnWidth('comment', 260, $event)"
+              >
+                <GripVertical class="h-3 w-3" />
+              </div>
+            </div>
+          </div>
+          <RecycleScroller ref="listScrollerRef" class="object-browser-scroller min-h-0 flex-1" :style="{ minWidth: `${objectGridMinWidth}px` }" :items="filteredRows" :item-size="34" :buffer="600" :skip-hover="true" key-field="id">
+            <template #default="{ item }">
+              <CustomContextMenu :items="getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu }">
                 <div
-                  class="relative flex cursor-pointer flex-col items-center gap-1 rounded-lg border bg-card p-3 text-center transition-all hover:border-primary/40 hover:shadow-sm"
+                  class="grid h-[34px] cursor-pointer items-center gap-3 border-b px-3 hover:bg-accent/50"
                   :class="{
-                    'border-primary bg-primary/5': selectedTableIds.has(item.id),
-                    'border-primary/60': sourceRow?.id === item.id && !selectedTableIds.has(item.id),
+                    'bg-accent/40': sourceRow?.id === item.id,
+                    'bg-primary/5': selectedTableIds.has(item.id),
                   }"
-                  :title="item.displayName"
+                  :style="{ gridTemplateColumns }"
                   @click="onRowClick(item, $event)"
                   @contextmenu="onContextMenu"
                 >
-                  <button v-if="showCheckboxColumn" class="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground" type="button" :class="{ invisible: item.type !== 'TABLE' }" @click.stop="toggleTableSelection(item)">
+                  <button v-if="showCheckboxColumn" class="flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground" type="button" :class="{ invisible: item.type !== 'TABLE' }" @click.stop="toggleTableSelection(item)">
                     <CheckSquare v-if="selectedTableIds.has(item.id)" class="h-3.5 w-3.5 text-primary" />
                     <Square v-else class="h-3.5 w-3.5" />
                   </button>
-                  <div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-full shadow-sm" :class="iconBgClass(item.type)">
-                    <component :is="iconFor(item)" class="h-6 w-6" :class="iconClass(item.type)" />
+                  <div class="flex min-w-0 items-center gap-2">
+                    <button
+                      v-if="item.partitionCount"
+                      type="button"
+                      class="flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground"
+                      :aria-label="t('objects.partitions', { count: item.partitionCount })"
+                      @click.stop="togglePartitionParent(item)"
+                    >
+                      <ChevronDown v-if="isPartitionParentExpanded(item)" class="h-3.5 w-3.5" />
+                      <ChevronRight v-else class="h-3.5 w-3.5" />
+                    </button>
+                    <span v-else-if="item.partitionParentId" class="ml-4 h-5 w-5 shrink-0" />
+                    <component :is="iconFor(item)" class="h-3.5 w-3.5 shrink-0" :class="iconClass(item.type)" />
+                    <span class="truncate text-[13px] font-medium text-foreground" :title="item.displayName">{{ item.displayName }}</span>
+                    <span v-if="item.partitionCount" class="shrink-0 rounded border bg-muted/40 px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted-foreground">
+                      {{ t("objects.partitions", { count: item.partitionCount }) }}
+                    </span>
                   </div>
-                  <span class="w-full truncate text-sm font-medium leading-tight text-foreground">{{ item.displayName }}</span>
-                  <div class="flex items-center gap-1.5">
-                    <span class="text-xs text-muted-foreground">{{ typeLabel(item.type) }}</span>
-                    <span v-if="item.estimatedRows != null && item.estimatedRows > 0" class="rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-primary">{{ formatObjectBrowserCount(item.estimatedRows) }}</span>
-                    <span v-if="item.totalBytes != null && item.totalBytes > 0" class="rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">{{ formatObjectBrowserBytes(item.totalBytes) }}</span>
+                  <div class="truncate text-xs text-muted-foreground">{{ typeLabel(item.type) }}</div>
+                  <div class="truncate text-xs tabular-nums text-muted-foreground" :title="item.estimatedRows == null ? '' : formatObjectBrowserCount(item.estimatedRows)">
+                    {{ formatObjectBrowserCount(item.estimatedRows) }}
                   </div>
-                  <div v-if="item.created_at?.trim() || item.updated_at?.trim()" class="flex items-center gap-1 text-[10px] text-muted-foreground/70">
-                    <span v-if="item.created_at?.trim()">{{ formatObjectBrowserTimestamp(item.created_at) }}</span>
-                    <span v-if="item.created_at?.trim() && item.updated_at?.trim()">·</span>
-                    <span v-if="item.updated_at?.trim()">{{ formatObjectBrowserTimestamp(item.updated_at) }}</span>
+                  <div class="truncate text-xs tabular-nums text-muted-foreground" :title="item.totalBytes == null ? '' : formatObjectBrowserBytes(item.totalBytes)">
+                    {{ formatObjectBrowserBytes(item.totalBytes) }}
                   </div>
-                  <div v-if="item.comment?.trim()" class="w-full truncate text-[10px] text-muted-foreground/60" :title="item.comment">
-                    {{ item.comment }}
+                  <div v-if="hasCreatedAt" class="truncate text-xs tabular-nums text-muted-foreground" :title="formatObjectBrowserTimestamp(item.created_at)">
+                    {{ formatObjectBrowserTimestamp(item.created_at) }}
+                  </div>
+                  <div v-if="hasUpdatedAt" class="truncate text-xs tabular-nums text-muted-foreground" :title="formatObjectBrowserTimestamp(item.updated_at)">
+                    {{ formatObjectBrowserTimestamp(item.updated_at) }}
+                  </div>
+                  <div class="truncate text-xs text-muted-foreground" :title="item.comment || ''">
+                    {{ item.comment || "" }}
                   </div>
                 </div>
               </CustomContextMenu>
-            </div>
-          </template>
-        </RecycleScroller>
+            </template>
+          </RecycleScroller>
+        </div>
+        <div v-else ref="gridContainerRef" class="object-browser-grid-wrapper min-h-0 flex-1 p-2">
+          <RecycleScroller ref="gridScrollerRef" v-if="gridRows.length > 0" class="object-browser-grid-scroller h-full" :items="gridRows" :item-size="objectGridRowHeight" :buffer="600" :skip-hover="true" key-field="key">
+            <template #default="{ item: row }">
+              <div class="object-browser-grid-row" :style="{ gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`, height: `${objectGridRowHeight - OBJECT_GRID_GAP}px` }">
+                <CustomContextMenu v-for="item in row.cards" :key="item.id" :items="getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu }">
+                  <div
+                    class="relative flex cursor-pointer flex-col items-center gap-1 rounded-lg border bg-card p-3 text-center transition-all hover:border-primary/40 hover:shadow-sm"
+                    :class="{
+                      'border-primary bg-primary/5': selectedTableIds.has(item.id),
+                      'border-primary/60': sourceRow?.id === item.id && !selectedTableIds.has(item.id),
+                    }"
+                    :title="item.displayName"
+                    @click="onRowClick(item, $event)"
+                    @contextmenu="onContextMenu"
+                  >
+                    <button v-if="showCheckboxColumn" class="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground" type="button" :class="{ invisible: item.type !== 'TABLE' }" @click.stop="toggleTableSelection(item)">
+                      <CheckSquare v-if="selectedTableIds.has(item.id)" class="h-3.5 w-3.5 text-primary" />
+                      <Square v-else class="h-3.5 w-3.5" />
+                    </button>
+                    <div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-full shadow-sm" :class="iconBgClass(item.type)">
+                      <component :is="iconFor(item)" class="h-6 w-6" :class="iconClass(item.type)" />
+                    </div>
+                    <span class="w-full truncate text-sm font-medium leading-tight text-foreground">{{ item.displayName }}</span>
+                    <div class="flex items-center gap-1.5">
+                      <span class="text-xs text-muted-foreground">{{ typeLabel(item.type) }}</span>
+                      <span v-if="item.estimatedRows != null && item.estimatedRows > 0" class="object-browser-stat-badge object-browser-stat-badge-rows rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-primary">{{
+                        formatObjectBrowserCount(item.estimatedRows)
+                      }}</span>
+                      <span v-if="item.totalBytes != null && item.totalBytes > 0" class="object-browser-stat-badge object-browser-stat-badge-bytes rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">{{ formatObjectBrowserBytes(item.totalBytes) }}</span>
+                    </div>
+                    <div v-if="item.created_at?.trim() || item.updated_at?.trim()" class="flex items-center gap-1 text-[10px] text-muted-foreground/70">
+                      <span v-if="item.created_at?.trim()">{{ formatObjectBrowserTimestamp(item.created_at) }}</span>
+                      <span v-if="item.created_at?.trim() && item.updated_at?.trim()">·</span>
+                      <span v-if="item.updated_at?.trim()">{{ formatObjectBrowserTimestamp(item.updated_at) }}</span>
+                    </div>
+                    <div v-if="item.comment?.trim()" class="w-full truncate text-[10px] text-muted-foreground/60" :title="item.comment">
+                      {{ item.comment }}
+                    </div>
+                  </div>
+                </CustomContextMenu>
+              </div>
+            </template>
+          </RecycleScroller>
+        </div>
       </div>
-      <div v-if="sourceRow" class="flex h-[42%] min-h-44 shrink-0 flex-col border-t bg-background">
-        <div class="flex h-8 shrink-0 items-center gap-2 border-b bg-muted/20 px-3">
-          <Code2 class="h-3.5 w-3.5 text-muted-foreground" />
-          <span class="min-w-0 flex-1 truncate text-xs font-medium">{{ sourceTitle(sourceRow) }}</span>
-          <Button v-if="sourceEditing" variant="ghost" size="sm" class="h-6 px-2 text-xs" :disabled="sourceSaving || !sourceDraft.trim()" @click="saveSource">
-            <Loader2 v-if="sourceSaving" class="mr-1 h-3 w-3 animate-spin" />
-            {{ t("objects.saveSource") }}
-          </Button>
-          <Button v-if="sourceEditing" variant="ghost" size="sm" class="h-6 px-2 text-xs" :disabled="sourceSaving" @click="cancelEditSource">
-            {{ t("objects.cancelEdit") }}
-          </Button>
-          <Button v-if="!sourceEditing" variant="ghost" size="icon" class="h-5 w-5" :disabled="!sourceContent" @click="copySource">
-            <Copy class="h-3 w-3" />
-          </Button>
-          <Button v-if="!sourceEditing && sourceCanEdit" variant="ghost" size="icon" class="h-5 w-5" :disabled="!sourceContent" @click="editSource">
-            <PencilLine class="h-3 w-3" />
-          </Button>
-          <Button variant="ghost" size="icon" class="h-5 w-5" @click="closeSource">
-            <X class="h-3 w-3" />
-          </Button>
-        </div>
-        <div v-if="sourceLoading" class="flex flex-1 items-center justify-center">
-          <Loader2 class="h-4 w-4 animate-spin text-muted-foreground" />
-        </div>
-        <div v-else-if="sourceError" class="flex flex-1 items-center justify-center px-4 text-sm text-destructive">
-          {{ sourceError }}
-        </div>
-        <div v-else-if="sourceEditing" class="flex min-h-0 flex-1 flex-col" data-object-source-editor>
-          <QueryEditor v-model="sourceDraft" class="min-h-0 flex-1" :connection-id="props.connection.id" :database="props.database" :schema="selectedSchema" :database-type="props.connection.db_type" :dialect="sourceDialect" :format-dialect="sourceFormatDialect" force-word-wrap @save="saveSource" />
-          <div v-if="sourceSaveError" class="shrink-0 border-t px-3 py-2 text-xs text-destructive">
-            {{ sourceSaveError }}
+      <!-- Right-side panel: table info or source -->
+      <div v-if="sidePanelRow" class="object-browser-side-panel relative flex min-h-0 shrink-0 flex-col border-l bg-background" :class="{ 'side-panel-resizing': isResizingSidePanel }" :style="{ width: `${sidePanelWidth}px` }">
+        <div class="absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/30" @mousedown.prevent="onSidePanelResizeStart" />
+        <!-- Table info mode -->
+        <template v-if="sidePanelMode === 'table-info'">
+          <div class="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20 h-9">
+            <TableProperties class="w-3.5 h-3.5 text-muted-foreground" />
+            <span class="text-xs font-medium flex-1 min-w-0 truncate">{{ sidePanelRow?.name }}</span>
+            <div v-if="tableInfoTab === 'ddl'" class="table-info-actions flex min-w-0 shrink-0 items-center gap-1">
+              <Button variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs" :title="t('grid.copyDdl')" :aria-label="t('grid.copyDdl')" @click="copyTableDdl">
+                <Copy class="w-3 h-3" />
+                <span class="table-info-action-label">{{ t("grid.copyDdl") }}</span>
+              </Button>
+              <Button variant="ghost" size="icon" class="h-6 w-6" :class="{ 'bg-accent': tableInfoWrap }" @click="tableInfoWrap = !tableInfoWrap">
+                <WrapText class="w-3 h-3" />
+              </Button>
+            </div>
+            <Button v-if="canOpenTableStructureEditor" variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs" :title="t('contextMenu.editStructure')" :aria-label="t('contextMenu.editStructure')" @click="openTableStructureEditor">
+              <Columns3Cog class="w-3 h-3" />
+              <span class="table-info-action-label">{{ t("contextMenu.editStructure") }}</span>
+            </Button>
+            <Button variant="ghost" size="icon" class="h-5 w-5" @click="closeSidePanel">
+              <X class="w-3 h-3" />
+            </Button>
           </div>
-        </div>
-        <QueryEditor
-          v-else
-          :key="`source-preview-${sourceRow.id}`"
-          :model-value="sourceContent"
-          class="min-h-0 flex-1"
-          :connection-id="props.connection.id"
-          :database="props.database"
-          :schema="selectedSchema"
-          :database-type="props.connection.db_type"
-          :dialect="sourceDialect"
-          :format-dialect="sourceFormatDialect"
-          force-word-wrap
-          read-only
-          data-object-source-preview
-        />
+          <div class="grid border-b bg-background shrink-0" :style="tableInfoTabListStyle">
+            <button
+              v-for="tab in tableInfoTabs"
+              :key="tab.id"
+              class="h-9 min-w-0 px-1.5 text-[11px] border-b-2 transition-colors"
+              :class="tableInfoTab === tab.id ? 'border-primary bg-gray-300/80 text-foreground dark:bg-gray-700/80' : 'border-transparent text-muted-foreground hover:bg-gray-200 hover:text-foreground dark:hover:bg-gray-800/50'"
+              :title="tab.label"
+              @click="selectTableInfoTab(tab.id)"
+            >
+              <component :is="tab.icon" class="mx-auto h-3.5 w-3.5" />
+              <span class="block truncate">{{ tab.label }}</span>
+            </button>
+          </div>
+          <div class="px-2 py-1.5 border-b shrink-0 bg-background">
+            <div class="relative">
+              <Search class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+              <input v-model="tableInfoSearchQuery" :placeholder="t('grid.tableInfoSearch')" class="w-full h-7 pl-7 pr-6 text-xs bg-muted/50 rounded border border-border focus:outline-none focus:border-primary/50" @keydown.escape="tableInfoSearchQuery = ''" />
+              <button v-if="tableInfoSearchQuery" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" @click="tableInfoSearchQuery = ''">
+                <X class="w-3 h-3" />
+              </button>
+            </div>
+          </div>
+          <div v-if="tableInfoTab === 'columns'" class="flex-1 min-h-0 overflow-auto">
+            <div v-if="tableColumnsLoading" class="h-full flex items-center justify-center">
+              <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
+            </div>
+            <div v-else-if="tableInfoSearchQuery && filteredTableColumns.length === 0" class="p-6 text-center text-xs text-muted-foreground">
+              {{ t("grid.tableInfoNoResults") }}
+            </div>
+            <table v-else class="w-full text-xs">
+              <thead class="sticky top-0 bg-muted text-muted-foreground">
+                <tr class="border-b">
+                  <th class="text-left text-nowrap font-medium px-3 py-2 w-8">#</th>
+                  <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.columnName") }}</th>
+                  <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.columnType") }}</th>
+                  <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.tableInfoNullable") }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(column, index) in filteredTableColumns" :key="column.name" class="border-b hover:bg-gray-200 dark:hover:bg-gray-800/30" :title="column.name">
+                  <td class="px-3 py-2 text-muted-foreground w-8">{{ index + 1 }}</td>
+                  <td class="px-3 py-2 font-medium">
+                    <span class="inline-flex items-center gap-1.5">
+                      <KeyRound v-if="column.is_primary_key" class="h-3 w-3 text-amber-500" />
+                      {{ column.name }}
+                    </span>
+                    <div v-if="column.comment" class="mt-0.5 text-[11px] text-muted-foreground truncate">
+                      {{ column.comment }}
+                    </div>
+                  </td>
+                  <td class="px-3 py-2 font-mono text-[11px] text-muted-foreground">{{ column.data_type }}</td>
+                  <td class="px-3 py-2">{{ column.is_nullable ? "YES" : "NO" }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div v-else-if="tableInfoTab === 'indexes'" class="flex-1 min-h-0 overflow-auto">
+            <div v-if="tableIndexesLoading" class="h-full flex items-center justify-center">
+              <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
+            </div>
+            <div v-else-if="tableInfoSearchQuery && filteredTableIndexes.length === 0" class="p-6 text-center text-xs text-muted-foreground">
+              {{ t("grid.tableInfoNoResults") }}
+            </div>
+            <div v-else-if="tableIndexes.length === 0" class="p-6 text-center text-xs text-muted-foreground">
+              {{ t("grid.tableInfoEmpty") }}
+            </div>
+            <div v-else class="divide-y">
+              <div v-for="index in filteredTableIndexes" :key="index.name" class="p-3 text-xs">
+                <div class="flex items-start gap-2">
+                  <div class="min-w-0 flex-1">
+                    <div class="font-medium truncate">{{ index.name }}</div>
+                    <div class="mt-1 flex flex-wrap gap-1">
+                      <span v-if="index.is_primary" class="rounded bg-amber-500/10 px-1.5 py-0.5 text-amber-600">PK</span>
+                      <span v-if="index.is_unique" class="rounded bg-emerald-500/10 px-1.5 py-0.5 text-emerald-600">UNIQUE</span>
+                      <span v-if="index.index_type" class="rounded bg-muted px-1.5 py-0.5 text-muted-foreground">{{ index.index_type }}</span>
+                    </div>
+                    <div class="mt-2 font-mono text-[11px] text-muted-foreground break-all">
+                      {{ index.columns.join(", ") }}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div v-else-if="tableInfoTab === 'foreignKeys'" class="flex-1 min-h-0 overflow-auto">
+            <div v-if="tableForeignKeysLoading" class="h-full flex items-center justify-center">
+              <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
+            </div>
+            <div v-else-if="tableInfoSearchQuery && filteredTableForeignKeys.length === 0" class="p-6 text-center text-xs text-muted-foreground">
+              {{ t("grid.tableInfoNoResults") }}
+            </div>
+            <div v-else-if="tableForeignKeys.length === 0" class="p-6 text-center text-xs text-muted-foreground">
+              {{ t("grid.tableInfoEmpty") }}
+            </div>
+            <div v-else class="divide-y">
+              <div v-for="fk in filteredTableForeignKeys" :key="`${fk.name}:${fk.column}`" class="p-3 text-xs">
+                <div class="font-medium truncate">{{ fk.name }}</div>
+                <div class="mt-1 font-mono text-[11px] text-muted-foreground break-all">{{ fk.column }} -> {{ fk.ref_table }}.{{ fk.ref_column }}</div>
+              </div>
+            </div>
+          </div>
+          <div v-else-if="tableInfoTab === 'triggers'" class="flex-1 min-h-0 overflow-auto">
+            <div v-if="tableTriggersLoading" class="h-full flex items-center justify-center">
+              <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
+            </div>
+            <div v-else-if="tableInfoSearchQuery && filteredTableTriggers.length === 0" class="p-6 text-center text-xs text-muted-foreground">
+              {{ t("grid.tableInfoNoResults") }}
+            </div>
+            <div v-else-if="tableTriggers.length === 0" class="p-6 text-center text-xs text-muted-foreground">
+              {{ t("grid.tableInfoEmpty") }}
+            </div>
+            <div v-else class="divide-y">
+              <div v-for="trigger in filteredTableTriggers" :key="trigger.name" class="p-3 text-xs">
+                <div class="font-medium truncate">{{ trigger.name }}</div>
+                <div class="mt-1 text-[11px] text-muted-foreground">{{ trigger.timing }} {{ trigger.event }}</div>
+              </div>
+            </div>
+          </div>
+          <pre
+            v-else-if="tableInfoTab === 'ddl' && !tableDdlLoading"
+            ref="tableInfoDdlPreRef"
+            data-native-clipboard
+            tabindex="0"
+            class="flex-1 min-w-0 text-xs font-mono p-3 overflow-auto ddl-code leading-5 select-text outline-none"
+            :class="tableInfoWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'"
+            v-html="filteredTableDdlContent"
+            @keydown="onTableInfoDdlKeydown"
+          ></pre>
+          <div v-else class="flex-1 flex items-center justify-center">
+            <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
+          </div>
+        </template>
+        <!-- Source mode (views, procedures, functions, sequences) -->
+        <template v-else>
+          <div class="flex h-8 shrink-0 items-center gap-2 border-b bg-muted/20 px-3">
+            <Code2 class="h-3.5 w-3.5 text-muted-foreground" />
+            <span class="min-w-0 flex-1 truncate text-xs font-medium">{{ sourceTitle(sourceRow) }}</span>
+            <Button v-if="sourceEditing" variant="ghost" size="sm" class="h-6 px-2 text-xs" :disabled="sourceSaving || !sourceDraft.trim()" @click="saveSource">
+              <Loader2 v-if="sourceSaving" class="mr-1 h-3 w-3 animate-spin" />
+              {{ t("objects.saveSource") }}
+            </Button>
+            <Button v-if="sourceEditing" variant="ghost" size="sm" class="h-6 px-2 text-xs" :disabled="sourceSaving" @click="cancelEditSource">
+              {{ t("objects.cancelEdit") }}
+            </Button>
+            <Button v-if="!sourceEditing" variant="ghost" size="icon" class="h-5 w-5" :disabled="!sourceContent" @click="copySource">
+              <Copy class="h-3 w-3" />
+            </Button>
+            <Button v-if="!sourceEditing && sourceCanEdit" variant="ghost" size="icon" class="h-5 w-5" :disabled="!sourceContent" @click="editSource">
+              <PencilLine class="h-3 w-3" />
+            </Button>
+            <Button variant="ghost" size="icon" class="h-5 w-5" @click="closeSource">
+              <X class="h-3 w-3" />
+            </Button>
+          </div>
+          <div v-if="sourceLoading" class="flex flex-1 items-center justify-center">
+            <Loader2 class="h-4 w-4 animate-spin text-muted-foreground" />
+          </div>
+          <div v-else-if="sourceError" class="flex flex-1 items-center justify-center px-4 text-sm text-destructive">
+            {{ sourceError }}
+          </div>
+          <div v-else-if="sourceEditing" class="flex min-h-0 flex-1 flex-col" data-object-source-editor>
+            <QueryEditor
+              v-model="sourceDraft"
+              class="min-h-0 flex-1"
+              :connection-id="props.connection.id"
+              :database="props.database"
+              :schema="selectedSchema"
+              :database-type="props.connection.db_type"
+              :dialect="sourceDialect"
+              :format-dialect="sourceFormatDialect"
+              force-word-wrap
+              @save="saveSource"
+            />
+            <div v-if="sourceSaveError" class="shrink-0 border-t px-3 py-2 text-xs text-destructive">
+              {{ sourceSaveError }}
+            </div>
+          </div>
+          <QueryEditor
+            v-else
+            :key="`source-preview-${sourceRow?.id}`"
+            :model-value="sourceContent"
+            class="min-h-0 flex-1"
+            :connection-id="props.connection.id"
+            :database="props.database"
+            :schema="selectedSchema"
+            :database-type="props.connection.db_type"
+            :dialect="sourceDialect"
+            :format-dialect="sourceFormatDialect"
+            force-word-wrap
+            read-only
+            data-object-source-preview
+          />
+        </template>
       </div>
     </div>
   </div>
@@ -2261,6 +2927,15 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       </label>
     </template>
   </DangerConfirmDialog>
+
+  <DangerConfirmDialog
+    v-model:open="showBatchEmptyConfirm"
+    :title="t('contextMenu.confirmBatchEmptyTitle', { count: batchEmptyPlan.length })"
+    :message="t('contextMenu.confirmBatchEmptyMessage', { count: batchEmptyPlan.length })"
+    :sql="batchEmptyPreviewSql"
+    :confirm-label="t('contextMenu.batchEmpty', { count: batchEmptyPlan.length })"
+    @confirm="confirmBatchEmptyTables"
+  />
 
   <Dialog v-model:open="showRenameDialog">
     <DialogContent class="sm:max-w-[420px]">
@@ -2363,18 +3038,6 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       </DialogFooter>
     </DialogContent>
   </Dialog>
-
-  <DdlViewDialog
-    v-if="ddlDialogTarget"
-    :connection-id="props.connection.id"
-    :database="props.database"
-    :schema="ddlDialogTarget.schema || selectedSchema"
-    :table-name="ddlDialogTarget.name"
-    :object-type="tableDdlObjectType(ddlDialogTarget.type)"
-    :dialect="sourceDialect"
-    :format-dialect="sourceFormatDialect"
-    v-model:open="showDdlDialog"
-  />
 </template>
 
 <style scoped>
@@ -2409,5 +3072,97 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   display: grid;
   column-gap: 12px;
   align-items: start;
+}
+
+.object-browser-icon-bg-table {
+  background-color: rgba(34, 197, 94, 0.1);
+}
+
+.object-browser-icon-bg-view {
+  background-color: rgba(168, 85, 247, 0.1);
+}
+
+.object-browser-icon-bg-procedure {
+  background-color: rgba(59, 130, 246, 0.1);
+}
+
+.object-browser-icon-bg-function {
+  background-color: rgba(245, 158, 11, 0.1);
+}
+
+.object-browser-icon-bg-sequence {
+  background-color: rgba(16, 185, 129, 0.1);
+}
+
+.object-browser-icon-bg-package {
+  background-color: rgba(6, 182, 212, 0.1);
+}
+
+.object-browser-stat-badge {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  line-height: 1rem;
+  white-space: nowrap;
+}
+
+.object-browser-stat-badge-rows {
+  color: var(--primary);
+  background-color: rgba(23, 23, 23, 0.1);
+}
+
+.object-browser-stat-badge-bytes {
+  color: var(--muted-foreground);
+  background-color: var(--muted);
+}
+
+:global(.dark) .object-browser-stat-badge-rows {
+  background-color: rgba(208, 208, 214, 0.12);
+}
+
+.side-panel-resizing {
+  user-select: none;
+  pointer-events: none;
+}
+
+.ddl-code {
+  container-type: inline-size;
+}
+
+.object-browser-side-panel {
+  container-type: inline-size;
+}
+
+.table-info-action-button {
+  gap: 0.25rem;
+  max-width: 8rem;
+  overflow: hidden;
+  transition:
+    max-width 180ms ease,
+    padding-inline 180ms ease;
+}
+
+.table-info-action-label {
+  min-width: 0;
+  max-width: 6rem;
+  overflow: hidden;
+  white-space: nowrap;
+  opacity: 1;
+  transition:
+    max-width 180ms ease,
+    opacity 120ms ease;
+}
+
+@container (max-width: 360px) {
+  .table-info-action-button {
+    width: 1.5rem;
+    max-width: 1.5rem;
+    padding-inline: 0;
+  }
+
+  .table-info-action-label {
+    max-width: 0;
+    opacity: 0;
+  }
 }
 </style>

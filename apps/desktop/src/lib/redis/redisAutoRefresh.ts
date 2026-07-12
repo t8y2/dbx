@@ -18,9 +18,8 @@ export type AutoRefreshTickAction = { type: "idle" } | { type: "decrement" } | {
  */
 export function computeAutoRefreshTick(enabled: boolean, countdownTtl: number, isLoading: boolean): AutoRefreshTickAction {
   if (!enabled) return { type: "idle" };
-  if (countdownTtl > 0) return { type: "decrement" };
-  if (countdownTtl <= 0 && !isLoading) return { type: "refresh" };
-  return { type: "idle" };
+  if (isLoading) return countdownTtl > 0 ? { type: "decrement" } : { type: "idle" };
+  return countdownTtl <= 1 ? { type: "refresh" } : { type: "decrement" };
 }
 
 /**
@@ -36,12 +35,9 @@ export function shouldStopAutoRefresh(ttl: number): boolean {
 /**
  * Compute the TTL value that should be displayed in the badge.
  *
- * When auto-refresh is active and countdown is running, the live
- * countdown value is shown. Otherwise the last known server TTL is used.
+ * When auto-refresh is active, the live countdown value is shown. The
+ * last known server TTL must not reappear after the countdown reaches zero.
  */
 export function computeDisplayTtl(autoRefreshEnabled: boolean, countdownTtl: number, serverTtl: number): number {
-  if (autoRefreshEnabled && countdownTtl > 0) {
-    return countdownTtl;
-  }
-  return serverTtl;
+  return autoRefreshEnabled ? Math.max(countdownTtl, 0) : serverTtl;
 }

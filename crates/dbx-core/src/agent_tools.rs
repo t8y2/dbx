@@ -26,6 +26,21 @@ const BROWSE_COLLECTION_LIMIT: usize = 20;
 /// Absolute maximum rows any query tool may request.
 const MAX_ALLOWED_ROWS: usize = 100;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AgentSqlPermissions {
+    pub allow_writes: bool,
+    pub allow_dangerous: bool,
+}
+
+fn sql_risk_allowed(risk: SqlRisk, permissions: AgentSqlPermissions) -> bool {
+    match risk {
+        SqlRisk::ReadOnly => true,
+        SqlRisk::Write => permissions.allow_writes,
+        SqlRisk::Ddl => permissions.allow_dangerous,
+        SqlRisk::Transaction => false,
+    }
+}
+
 /// Returns true for vector database types (Qdrant, Milvus, Weaviate, ChromaDb).
 /// If modifying this, also update VECTOR_DB_TYPES in apps/desktop/src/lib/ai.ts.
 pub fn is_vector_db(db_type: DatabaseType) -> bool {
@@ -45,13 +60,13 @@ pub fn read_only_tools(db_type: DatabaseType) -> Vec<ToolDefinition> {
 /// Get all available tool definitions for the given database type.
 /// Includes read-only tools plus execute_query, get_sample_data, and
 /// explain_query for database types that support them.
-pub fn all_tools(db_type: DatabaseType) -> Vec<ToolDefinition> {
+pub fn all_tools(db_type: DatabaseType, sql_permissions: AgentSqlPermissions) -> Vec<ToolDefinition> {
     if is_vector_db(db_type) {
         return vec![list_collections_tool(), browse_collection_tool()];
     }
     let mut tools = vec![list_tables_tool(), get_columns_tool()];
     if supports_sql_query(db_type) {
-        tools.push(execute_query_tool());
+        tools.push(execute_query_tool(sql_permissions));
         tools.push(get_sample_data_tool());
     }
     if supports_explain_plan(Some(db_type)) {
@@ -109,12 +124,17 @@ fn get_columns_tool() -> ToolDefinition {
     }
 }
 /// execute_query tool definition.
-fn execute_query_tool() -> ToolDefinition {
+fn execute_query_tool(sql_permissions: AgentSqlPermissions) -> ToolDefinition {
+    let description = if sql_permissions.allow_dangerous {
+        "Execute SQL after the user explicitly confirmed this operation. Read queries, writes, and DDL are allowed for this run."
+    } else if sql_permissions.allow_writes {
+        "Execute SQL after the user explicitly confirmed this operation. Read queries and non-DDL writes are allowed for this run."
+    } else {
+        "Execute a read-only SQL query and return results (max 50 rows). Only SELECT, WITH, SHOW, DESCRIBE, EXPLAIN statements are allowed. Write operations (INSERT/UPDATE/DELETE/DDL) are blocked."
+    };
     ToolDefinition {
         name: "execute_query",
-        description: "Execute a read-only SQL query and return results (max 50 rows). \
-                      Only SELECT, WITH, SHOW, DESCRIBE, EXPLAIN statements are allowed. \
-                      Write operations (INSERT/UPDATE/DELETE/DDL) are blocked.",
+        description,
         parameters: json!({
             "type": "object",
             "properties": {
@@ -231,11 +251,14 @@ pub async fn execute_tool(
     connection_id: &str,
     database: &str,
     db_type: &DatabaseType,
+    sql_permissions: AgentSqlPermissions,
 ) -> ToolResult {
     let result = match tool_call.name.as_str() {
         "list_tables" => execute_list_tables(tool_call, state, connection_id, database, db_type).await,
         "get_columns" => execute_get_columns(tool_call, state, connection_id, database, db_type).await,
-        "execute_query" => execute_execute_query(tool_call, state, connection_id, database, db_type).await,
+        "execute_query" => {
+            execute_execute_query(tool_call, state, connection_id, database, db_type, sql_permissions).await
+        }
         "get_sample_data" => execute_get_sample_data(tool_call, state, connection_id, database, db_type).await,
         "list_collections" => execute_list_collections(tool_call, state, connection_id, database, db_type).await,
         "browse_collection" => execute_browse_collection(tool_call, state, connection_id, database, db_type).await,
@@ -415,6 +438,7 @@ async fn execute_execute_query(
     connection_id: &str,
     database: &str,
     db_type: &DatabaseType,
+    sql_permissions: AgentSqlPermissions,
 ) -> Result<String, String> {
     let sql = tool_call.arguments.get("sql").and_then(|v| v.as_str()).ok_or("Missing required parameter: sql")?.trim();
 
@@ -429,17 +453,22 @@ async fn execute_execute_query(
         .map(|l| (l as usize).min(MAX_ALLOWED_ROWS))
         .unwrap_or(EXECUTE_QUERY_LIMIT);
 
-    // Classify SQL risk using sqlparser AST
-    let db_type_str = format!("{:?}", db_type).to_lowercase();
-    let risk = crate::sql_risk::classify_sql_risk(sql, &db_type_str)?;
-    match risk {
-        SqlRisk::ReadOnly => { /* proceed */ }
-        _ => {
-            return Err(format!(
-                "Blocked: {} statement detected. Only read-only queries (SELECT, SHOW, DESCRIBE, EXPLAIN) are allowed.",
-                risk
-            ));
+    // Classify SQL risk using the concrete database dialect.
+    let risk = crate::sql_risk::classify_sql_risk_for_database(sql, *db_type)?;
+    let connection_config = state.configs.read().await.get(connection_id).cloned();
+    if let Some(config) = connection_config {
+        if risk != SqlRisk::ReadOnly && crate::production_safety::targets_production_database(&config, database, sql) {
+            return Err("Blocked: AI agents cannot execute writes or DDL on a production database. Return the SQL for the user to review and execute manually in DBX.".to_string());
         }
+    }
+    if !sql_risk_allowed(risk, sql_permissions) {
+        if risk == SqlRisk::Transaction {
+            return Err("Blocked: transaction control statements are not available to the AI agent.".to_string());
+        }
+        return Err(format!(
+            "Blocked: {} statement detected. Ask the user to confirm the proposed database change before executing it.",
+            risk
+        ));
     }
 
     // Execute query using existing infrastructure
@@ -533,7 +562,8 @@ async fn execute_get_sample_data(
         name: "execute_query".to_string(),
         arguments: serde_json::json!({ "sql": sql, "limit": limit }),
     };
-    execute_execute_query(&synthetic_call, state, connection_id, database, db_type).await
+    execute_execute_query(&synthetic_call, state, connection_id, database, db_type, AgentSqlPermissions::default())
+        .await
 }
 
 /// Execute an EXPLAIN query via the explain_query tool.
@@ -555,8 +585,7 @@ async fn execute_explain_query(
     }
 
     // Classify SQL risk – only ReadOnly queries can be explained
-    let db_type_str = format!("{:?}", db_type).to_lowercase();
-    let risk = match crate::sql_risk::classify_sql_risk(sql, &db_type_str) {
+    let risk = match crate::sql_risk::classify_sql_risk_for_database(sql, *db_type) {
         Ok(r) => r,
         Err(e) => return (Err(e), None),
     };
@@ -573,8 +602,25 @@ async fn execute_explain_query(
         }
     }
 
+    if *db_type == DatabaseType::Oracle {
+        return match crate::agent_explain::get_agent_explain_info_core(
+            state,
+            connection_id,
+            Some(database),
+            None,
+            sql,
+            Some("explain"),
+        )
+        .await
+        {
+            Ok(plan) => (Ok(plan.clone()), Some(serde_json::Value::String(plan))),
+            Err(error) => (Err(error), None),
+        };
+    }
+
     // Build the database-specific EXPLAIN SQL
-    let explain_result = build_explain_sql(ExplainSqlOptions { database_type: Some(*db_type), sql: sql.to_string() });
+    let explain_result =
+        build_explain_sql(ExplainSqlOptions { database_type: Some(*db_type), format: None, sql: sql.to_string() });
 
     let explain_sql = match (explain_result.ok, explain_result.sql) {
         (true, Some(sql)) => sql,
@@ -772,10 +818,38 @@ mod tests {
 
     #[test]
     fn vector_agent_tools_include_collection_browsing() {
-        let tools = all_tools(DatabaseType::Qdrant);
+        let tools = all_tools(DatabaseType::Qdrant, AgentSqlPermissions::default());
         let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
 
         assert_eq!(names, vec!["list_collections", "browse_collection"]);
+    }
+
+    #[test]
+    fn confirmed_sql_permissions_update_execute_query_contract() {
+        let tools = all_tools(DatabaseType::Mysql, AgentSqlPermissions { allow_writes: true, allow_dangerous: true });
+        let execute_query = tools.iter().find(|tool| tool.name == "execute_query").unwrap();
+
+        assert!(execute_query.description.contains("explicitly confirmed"));
+        assert!(execute_query.description.contains("DDL"));
+    }
+
+    #[test]
+    fn sql_permissions_keep_writes_blocked_until_confirmation() {
+        assert!(!sql_risk_allowed(SqlRisk::Write, AgentSqlPermissions::default()));
+        assert!(!sql_risk_allowed(SqlRisk::Ddl, AgentSqlPermissions::default()));
+        assert!(sql_risk_allowed(SqlRisk::Ddl, AgentSqlPermissions { allow_writes: true, allow_dangerous: true }));
+        assert!(!sql_risk_allowed(
+            SqlRisk::Transaction,
+            AgentSqlPermissions { allow_writes: true, allow_dangerous: true }
+        ));
+    }
+
+    #[test]
+    fn oracle_agent_tools_include_explain_query() {
+        let tools = all_tools(DatabaseType::Oracle, AgentSqlPermissions::default());
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+
+        assert!(names.contains(&"explain_query"));
     }
 
     #[test]

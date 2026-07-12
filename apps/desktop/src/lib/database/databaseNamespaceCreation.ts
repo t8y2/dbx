@@ -20,6 +20,7 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   sqlite: { deferred: "file-backed; create a new connection/file instead" },
   rqlite: { deferred: "single SQLite-compatible database per node" },
   turso: { deferred: "remote libSQL database lifecycle is provider-managed" },
+  "cloudflare-d1": { deferred: "Cloudflare D1 database lifecycle is provider-managed" },
   redis: { deferred: "numbered logical databases are server-configured" },
   duckdb: { connection: "attach" },
   clickhouse: { connection: "database" },

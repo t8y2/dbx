@@ -129,8 +129,10 @@ pub(super) fn build_drop_index_sql(
     if matches!(dialect, StructureDialect::Mysql | StructureDialect::SqlServer) {
         return format!("DROP INDEX {} ON {table};", quote_ident(dialect, index_name));
     }
-    if matches!(dialect, StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::Informix)
-        && schema.is_some_and(|schema| !schema.trim().is_empty())
+    if matches!(
+        dialect,
+        StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::Dameng | StructureDialect::Informix
+    ) && schema.is_some_and(|schema| !schema.trim().is_empty())
     {
         return format!("DROP INDEX {}.{};", quote_ident(dialect, schema.unwrap()), quote_ident(dialect, index_name));
     }
@@ -168,7 +170,9 @@ pub(super) fn build_create_index_statements(
                 type_prefix = prefix;
                 using_clause = using;
             }
-            StructureDialect::Oracle if idx_type == "BITMAP" => type_prefix = "BITMAP ".to_string(),
+            StructureDialect::Oracle | StructureDialect::Dameng if idx_type == "BITMAP" => {
+                type_prefix = "BITMAP ".to_string()
+            }
             _ => {}
         }
     }

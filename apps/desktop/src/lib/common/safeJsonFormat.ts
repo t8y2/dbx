@@ -1,40 +1,122 @@
+const LOSSLESS_JSON_NUMBER = Symbol("DBX lossless JSON number");
+
+export interface LosslessJsonNumber {
+  readonly [LOSSLESS_JSON_NUMBER]: true;
+  readonly raw: string;
+}
+
+interface ProtectedJsonNumbers {
+  text: string;
+  numbers: Map<string, string>;
+}
+
+const MAX_SAFE_INTEGER_TEXT = String(Number.MAX_SAFE_INTEGER);
+
+export function isLosslessJsonNumber(value: unknown): value is LosslessJsonNumber {
+  return typeof value === "object" && value !== null && (value as Partial<LosslessJsonNumber>)[LOSSLESS_JSON_NUMBER] === true && typeof (value as Partial<LosslessJsonNumber>).raw === "string";
+}
+
 /**
- * Parse and re-stringify JSON while preserving integer values that exceed
- * Number.MAX_SAFE_INTEGER (2^53 - 1). JavaScript's JSON.parse loses
- * precision on such values (e.g. 87712409002717401 → 87712409002717400),
- * so we replace large integer literals with string placeholders before
- * parsing and restore them after stringifying.
+ * Parses JSON while retaining numeric literals that JavaScript cannot safely
+ * represent exactly. Callers can render these values without adding quotes.
+ */
+export function parseJsonPreservingLargeNumbers(text: string): unknown {
+  const protectedJson = protectLargeJsonNumbers(text);
+  const parsed = JSON.parse(protectedJson.text);
+  return restoreLosslessNumbers(parsed, protectedJson.numbers);
+}
+
+/**
+ * Parse and re-stringify JSON while preserving numeric literals whose integer
+ * parts exceed Number.MAX_SAFE_INTEGER (2^53 - 1), plus decimal and exponent
+ * forms that JavaScript may round or turn into Infinity.
  */
 export function safeJsonFormat(text: string, indent?: number): string {
-  const MAX_SAFE_INT = String(Number.MAX_SAFE_INTEGER);
-  const MIN_SAFE_INT = String(-Number.MAX_SAFE_INTEGER);
-  const largeInts = new Map<string, string>();
-  const placeholderPrefix = '"__DBX_BIGINT_';
-
-  // Replace large numeric literals (integers or floats with large integer parts)
-  // with string placeholders to avoid precision loss.
-  // Matches: optional minus, 16+ digits, optional decimal part, followed by
-  // a JSON delimiter (comma, ], }, or end-of-string after whitespace).
-  const replaced = text.replace(/(-?\d{16,}(?:\.\d+)?)(\s*(?:,|\]|}|$))/g, (_match, digits: string, tail: string) => {
-    // Extract the integer part (before any decimal point) for comparison
-    const integerPart = digits.split(".")[0];
-    const isNegative = integerPart.startsWith("-");
-    const absInteger = isNegative ? integerPart.slice(1) : integerPart;
-    const threshold = isNegative ? MIN_SAFE_INT.slice(1) : MAX_SAFE_INT;
-    if (absInteger.length < threshold.length) return _match;
-    if (absInteger.length === threshold.length && absInteger <= threshold) return _match;
-
-    const key = String(largeInts.size);
-    largeInts.set(key, digits);
-    return `${placeholderPrefix}${key}"${tail}`;
-  });
-
-  const parsed = JSON.parse(replaced);
+  const protectedJson = protectLargeJsonNumbers(text);
+  const parsed = JSON.parse(protectedJson.text);
   let result = JSON.stringify(parsed, null, indent ?? undefined);
 
-  for (const [key, digits] of largeInts) {
-    result = result.replace(`${placeholderPrefix}${key}"`, digits);
+  for (const [placeholder, raw] of protectedJson.numbers) {
+    result = result.replaceAll(JSON.stringify(placeholder), raw);
   }
 
   return result;
+}
+
+function protectLargeJsonNumbers(text: string): ProtectedJsonNumbers {
+  let placeholderPrefix = "__DBX_LOSSLESS_NUMBER_";
+  while (text.includes(placeholderPrefix)) placeholderPrefix += "_";
+
+  const numbers = new Map<string, string>();
+  let output = "";
+  let index = 0;
+
+  while (index < text.length) {
+    const character = text[index];
+    if (character === '"') {
+      const stringEnd = findJsonStringEnd(text, index);
+      output += text.slice(index, stringEnd);
+      index = stringEnd;
+      continue;
+    }
+
+    const numberMatch = text.slice(index).match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/);
+    if (numberMatch) {
+      const raw = numberMatch[0];
+      if (shouldPreserveJsonNumber(raw)) {
+        // A quoted placeholder lets the native parser validate the rest of the JSON.
+        const placeholder = `${placeholderPrefix}${numbers.size}__`;
+        numbers.set(placeholder, raw);
+        output += JSON.stringify(placeholder);
+      } else {
+        output += raw;
+      }
+      index += raw.length;
+      continue;
+    }
+
+    output += character;
+    index += 1;
+  }
+
+  return { text: output, numbers };
+}
+
+function findJsonStringEnd(text: string, start: number): number {
+  let escaped = false;
+  for (let index = start + 1; index < text.length; index += 1) {
+    const character = text[index];
+    if (escaped) {
+      escaped = false;
+    } else if (character === "\\") {
+      escaped = true;
+    } else if (character === '"') {
+      return index + 1;
+    }
+  }
+  return text.length;
+}
+
+function shouldPreserveJsonNumber(raw: string): boolean {
+  // Keep fractional/exponent forms verbatim. Even when a particular value is
+  // representable today, parsing it through Number can change its precision or
+  // spelling before the JSON viewer renders it.
+  if (raw.includes(".") || raw.includes("e") || raw.includes("E") || raw === "-0") return true;
+
+  const unsigned = raw.startsWith("-") ? raw.slice(1) : raw;
+  const integerPart = unsigned.split(/[.eE]/, 1)[0];
+  const normalized = integerPart.replace(/^0+(?=\d)/, "");
+  return normalized.length > MAX_SAFE_INTEGER_TEXT.length || (normalized.length === MAX_SAFE_INTEGER_TEXT.length && normalized > MAX_SAFE_INTEGER_TEXT);
+}
+
+function restoreLosslessNumbers(value: unknown, numbers: Map<string, string>): unknown {
+  if (typeof value === "string") {
+    const raw = numbers.get(value);
+    return raw === undefined ? value : ({ [LOSSLESS_JSON_NUMBER]: true, raw } satisfies LosslessJsonNumber);
+  }
+  if (Array.isArray(value)) return value.map((item) => restoreLosslessNumbers(item, numbers));
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, restoreLosslessNumbers(item, numbers)]));
+  }
+  return value;
 }

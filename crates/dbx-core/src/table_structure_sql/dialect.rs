@@ -10,6 +10,7 @@ pub(super) enum StructureDialect {
     DuckDb,
     SqlServer,
     Oracle,
+    Dameng,
     H2,
     ClickHouse,
     ManticoreSearch,
@@ -196,9 +197,21 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             index_comment: true,
             ..base
         },
+        Some(DatabaseType::Dameng) => TableStructureCapabilities {
+            dialect: StructureDialect::Dameng,
+            add_column: true,
+            drop_column: true,
+            rename_column: true,
+            alter_existing_column: true,
+            comment: true,
+            create_index: true,
+            drop_index: true,
+            rebuild_index: true,
+            index_type: true,
+            ..base
+        },
         Some(
             DatabaseType::Oracle
-            | DatabaseType::Dameng
             | DatabaseType::OceanbaseOracle
             | DatabaseType::Iris
             | DatabaseType::Yashandb
@@ -260,7 +273,7 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
 }
 
 pub(super) fn is_oracle_like(dialect: StructureDialect) -> bool {
-    dialect == StructureDialect::Oracle
+    matches!(dialect, StructureDialect::Oracle | StructureDialect::Dameng)
 }
 
 pub(super) fn database_label(database_type: Option<DatabaseType>) -> String {
@@ -284,6 +297,7 @@ pub(super) fn dialect_label(dialect: StructureDialect) -> String {
         StructureDialect::DuckDb => "duckdb",
         StructureDialect::SqlServer => "sqlserver",
         StructureDialect::Oracle => "oracle",
+        StructureDialect::Dameng => "dameng",
         StructureDialect::H2 => "h2",
         StructureDialect::ClickHouse => "clickhouse",
         StructureDialect::ManticoreSearch => "manticoresearch",
@@ -304,6 +318,7 @@ pub(super) fn database_type_for_dialect(dialect: StructureDialect) -> Option<Dat
         StructureDialect::DuckDb => Some(DatabaseType::DuckDb),
         StructureDialect::SqlServer => Some(DatabaseType::SqlServer),
         StructureDialect::Oracle => Some(DatabaseType::Oracle),
+        StructureDialect::Dameng => Some(DatabaseType::Dameng),
         StructureDialect::H2 => Some(DatabaseType::H2),
         StructureDialect::ClickHouse => Some(DatabaseType::ClickHouse),
         StructureDialect::ManticoreSearch => Some(DatabaseType::ManticoreSearch),

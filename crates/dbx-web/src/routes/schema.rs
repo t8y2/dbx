@@ -19,6 +19,7 @@ pub struct SchemaQuery {
     pub limit: Option<usize>,
     pub offset: Option<usize>,
     pub object_type: Option<dbx_core::db::ObjectSourceKind>,
+    pub signature: Option<String>,
     pub object_types: Option<String>,
     pub apply_visible_filter: Option<bool>,
 }
@@ -258,10 +259,17 @@ pub async fn get_object_source(
     let schema = q.schema.as_deref().unwrap_or("");
     let name = q.table.as_deref().unwrap_or("");
     let object_type = q.object_type.ok_or_else(|| AppError("Missing object_type".to_string()))?;
-    let result =
-        dbx_core::schema::get_object_source_core(&state.app, &q.connection_id, database, schema, name, object_type)
-            .await
-            .map_err(AppError)?;
+    let result = dbx_core::schema::get_object_source_core(
+        &state.app,
+        &q.connection_id,
+        database,
+        schema,
+        name,
+        object_type,
+        q.signature.as_deref(),
+    )
+    .await
+    .map_err(AppError)?;
     Ok(Json(result))
 }
 

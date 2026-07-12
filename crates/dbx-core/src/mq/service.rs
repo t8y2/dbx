@@ -596,6 +596,8 @@ mod tests {
             jdbc_driver_paths: Vec::new(),
             one_time: false,
             read_only,
+            is_production: false,
+            production_databases: Vec::new(),
         }
     }
 

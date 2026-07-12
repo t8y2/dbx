@@ -10,13 +10,13 @@ import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
-import RedisJsonTree from "./RedisJsonTree.vue";
+import JsonTree from "@/components/common/JsonTree.vue";
 import * as api from "@/lib/backend/api";
 import type { RedisBlob, RedisHashItem, RedisKeyInfo, RedisListItem, RedisSetItem, RedisStreamEntry, RedisValue, RedisZsetItem } from "@/lib/backend/api";
 import { useToast } from "@/composables/useToast";
 import { useTheme } from "@/composables/useTheme";
 import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle";
-import { createRedisShikiJsonHighlighter, type RedisJsonHighlighter } from "@/lib/redis/redisJsonHighlighter";
+import { createShikiJsonHighlighter, type JsonHighlighter } from "@/lib/common/shikiJsonHighlighter";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatTtl } from "@/lib/common/ttlFormat";
 import { computeAutoRefreshTick, computeDisplayTtl, shouldStopAutoRefresh } from "@/lib/redis/redisAutoRefresh";
@@ -99,7 +99,7 @@ const stringValueView = ref<RedisValueFormat>(readPreferredRedisValueFormat());
 const memberValueView = ref<RedisValueFormat>(readPreferredRedisValueFormat());
 const redisJsonView = ref<"raw" | "tree">("raw");
 const redisJsonWordWrap = ref(readRedisJsonWordWrap());
-const redisJsonHighlighter = ref<RedisJsonHighlighter>();
+const redisJsonHighlighter = ref<JsonHighlighter>();
 
 // Auto-refresh
 const autoRefreshEnabled = ref(true);
@@ -1118,7 +1118,7 @@ function formatValue(val: unknown): string {
 
 onMounted(() => {
   void load();
-  void createRedisShikiJsonHighlighter({
+  void createShikiJsonHighlighter({
     appearance: () => redisJsonAppearance.value,
   })
     .then((highlight) => {
@@ -1148,7 +1148,7 @@ onBeforeUnmount(() => {
       <div class="shrink-0 border-b bg-background">
         <div class="flex h-9 items-center gap-2 px-4">
           <span class="dbx-editor-font-family min-w-0 flex-1 truncate text-sm font-semibold">{{ formatValue(data.key_display) }}</span>
-          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" @click="load"><RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': autoRefreshEnabled }" /></Button>
+          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 animate-none" @click="load"><RefreshCw class="h-3.5 w-3.5 animate-none" /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" @click="copyValue"><Copy class="h-3.5 w-3.5" /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('redis.copyInsertStatement')" @click="copyInsertStatement"><Terminal class="h-3.5 w-3.5" /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 text-destructive" @click="requestDeleteKey"><Trash2 class="h-3.5 w-3.5" /></Button>
@@ -1196,10 +1196,10 @@ onBeforeUnmount(() => {
           </label>
         </div>
         <div v-if="stringValueView === 'json' && stringValueDetail.json" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-4 text-sm leading-6">
-          <RedisJsonTree :value="stringValueDetail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
+          <JsonTree :value="stringValueDetail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
         </div>
         <div v-else-if="stringValueView === 'javaserialize' && stringValueDetail.javaSerialized" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-4 text-sm leading-6">
-          <RedisJsonTree :value="stringValueDetail.javaSerialized.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
+          <JsonTree :value="stringValueDetail.javaSerialized.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
         </div>
         <div v-else-if="stringValueView === 'hex'" class="min-h-0 flex-1 overflow-auto bg-background p-4 text-xs leading-5">
           <div class="mb-3 flex items-center justify-between text-muted-foreground">
@@ -1255,7 +1255,7 @@ onBeforeUnmount(() => {
           </label>
         </div>
         <div v-if="redisJsonView === 'tree'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-4 text-sm leading-6">
-          <RedisJsonTree :value="redisJsonValue" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
+          <JsonTree :value="redisJsonValue" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
         </div>
         <textarea v-else v-model="editValue" class="dbx-editor-font-family flex-1 resize-none bg-background p-4 text-sm outline-none" :class="redisJsonWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'" spellcheck="false" @input="handleJsonInput" />
         <div v-if="isEditing" class="px-4 py-2 border-t flex justify-end gap-2 shrink-0">
@@ -1574,10 +1574,10 @@ onBeforeUnmount(() => {
             </label>
           </div>
           <div v-if="memberValueView === 'json' && selectedMemberDetail.json" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-5 text-[13px] leading-6">
-            <RedisJsonTree :value="selectedMemberDetail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
+            <JsonTree :value="selectedMemberDetail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
           </div>
           <div v-else-if="memberValueView === 'javaserialize' && selectedMemberDetail.javaSerialized" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-5 text-[13px] leading-6">
-            <RedisJsonTree :value="selectedMemberDetail.javaSerialized.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
+            <JsonTree :value="selectedMemberDetail.javaSerialized.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
           </div>
           <div v-else-if="memberValueView === 'hex'" class="min-h-0 flex-1 overflow-auto bg-background p-5 text-xs leading-5">
             <div class="mb-3 flex items-center justify-between text-muted-foreground">

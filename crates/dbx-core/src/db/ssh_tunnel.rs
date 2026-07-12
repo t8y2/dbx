@@ -870,6 +870,7 @@ mod tests {
 
     fn hop(id: &str, host: &str, port: u16) -> SshTunnelConfig {
         SshTunnelConfig {
+            profile_id: String::new(),
             id: id.to_string(),
             name: String::new(),
             enabled: true,

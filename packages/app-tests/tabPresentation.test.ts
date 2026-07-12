@@ -185,7 +185,7 @@ test("tabular result items expose source labels when available", () => {
     tabularResultItems(results).map((item) => ({ index: item.index, n: item.n, label: item.label, title: item.title })),
     [
       { index: 1, n: 1, label: "public.users", title: "select * from public.users" },
-      { index: 2, n: 2, label: "select id, name, email, created_at from users...", title: "select id, name, email, created_at from users where active = true order by created_at desc" },
+      { index: 2, n: 2, label: undefined, title: "select id, name, email, created_at from users where active = true order by created_at desc" },
     ],
   );
   assert.deepEqual(

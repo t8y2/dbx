@@ -14,6 +14,8 @@ pub struct CliAgentRunOptions {
     pub connection_name: String,
     pub database: String,
     pub agent_mode: bool,
+    pub allow_writes: bool,
+    pub allow_dangerous: bool,
     pub mcp_server_command: Option<CliAgentCommandSpec>,
 }
 
@@ -57,7 +59,8 @@ pub fn dbx_mcp_enabled_tools(agent_mode: bool) -> Vec<&'static str> {
 
 pub fn dbx_mcp_scope_env(options: &CliAgentRunOptions) -> Vec<(&'static str, String)> {
     vec![
-        ("DBX_MCP_ALLOW_WRITES", "0".to_string()),
+        ("DBX_MCP_ALLOW_WRITES", if options.allow_writes { "1" } else { "0" }.to_string()),
+        ("DBX_MCP_ALLOW_DANGEROUS_SQL", if options.allow_dangerous { "1" } else { "0" }.to_string()),
         ("DBX_MCP_SCOPE_CONNECTION_ID", options.connection_id.clone()),
         ("DBX_MCP_SCOPE_CONNECTION_NAME", options.connection_name.clone()),
         ("DBX_MCP_SCOPE_DATABASE", options.database.clone()),
@@ -71,10 +74,20 @@ pub fn append_config_overrides(args: &mut Vec<String>, overrides: impl IntoItera
     }
 }
 
-pub fn build_cli_agent_prompt(provider_label: &str, system_prompt: &str, messages: &[AiMessage]) -> String {
+pub fn build_cli_agent_prompt(
+    provider_label: &str,
+    system_prompt: &str,
+    messages: &[AiMessage],
+    allow_write_sql: bool,
+) -> String {
+    let database_access = if allow_write_sql {
+        "The user explicitly confirmed the proposed database change. DBX MCP tools may execute write and DDL SQL for this run only."
+    } else {
+        "Use the DBX MCP tools when you need live database schema or read-only query results."
+    };
     let mut sections = vec![
         format!("You are running inside DBX Desktop as the {provider_label} CLI provider."),
-        "Use the DBX MCP tools when you need live database schema or read-only query results.".to_string(),
+        database_access.to_string(),
         "Do not modify files or run shell commands. The DBX MCP server is the only intended tool surface.".to_string(),
         String::new(),
         "## System instructions".to_string(),

@@ -15,6 +15,7 @@ import i18n from "@/i18n";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import type { EditorTheme } from "@/stores/settingsStore";
 import type { AppThemeAppearance, AppThemePalette } from "@/lib/app/appTheme";
+import { selectAllCellDetailText } from "@/lib/dataGrid/cellDetailSelection";
 
 export interface UseCellDetailEditorOptions {
   onChange?: (value: string) => void;
@@ -199,6 +200,10 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
         fontThemeComp.of(fontTheme),
         keymap.of([
           {
+            key: "Mod-a",
+            run: selectAllCellDetailText,
+          },
+          {
             key: "Escape",
             run: () => {
               if (searchInstance && (searchInstance as any).closeSearch()) return true;
@@ -227,6 +232,9 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
         }),
         EditorState.readOnly.of(!!options.readOnly),
         EditorView.editable.of(!options.readOnly),
+        // Read-only CodeMirror content is not editable or focusable by default.
+        // Keep it keyboard-focusable so selection shortcuts stay inside the detail value.
+        EditorView.contentAttributes.of(options.readOnly ? { tabindex: "0" } : {}),
       ],
     });
 

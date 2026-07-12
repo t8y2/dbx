@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onBeforeUnmount, h, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
+import { invoke } from "@tauri-apps/api/core";
 import { DatabaseZap, FilePlus2, Loader2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, CloudDownload, Package, FileDown, FolderTree } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import WindowControls from "@/components/layout/WindowControls.vue";
 import ExportProgressPopover from "@/components/export/ExportProgressPopover.vue";
-import { shouldReserveMacTrafficLightInset, useWindowControls } from "@/composables/useWindowControls";
+import { MAC_TRAFFIC_LIGHT_X, macTrafficLightInsetPaddingForScale, shouldReserveMacTrafficLightInset, useWindowControls } from "@/composables/useWindowControls";
 import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { isSystemAppThemeMode, type AppThemeMode } from "@/lib/app/appTheme";
@@ -95,7 +96,9 @@ function onToolbarDblClick(e: MouseEvent) {
 }
 
 const toolbarEl = ref<HTMLElement>();
+const newConnectionLabelEl = ref<HTMLElement>();
 const toolbarCollapsed = ref(false);
+const shouldReserveTrafficLightInset = computed(() => shouldReserveMacTrafficLightInset(isMac, isFullscreen.value, isDesktop));
 
 function checkToolbarWidth() {
   const el = toolbarEl.value;
@@ -110,8 +113,18 @@ function checkToolbarWidth() {
 const rightWrapper = ref<HTMLElement>();
 const rightOverflowCount = ref(0);
 let toolbarLayoutRaf = 0;
+let trafficLightSyncRaf = 0;
 let settlingRightOverflow = false;
 let pendingRightOverflowSettle = false;
+const measuredTrafficLightInset = ref<number | null>(null);
+
+type MacosTrafficLightLayout = {
+  x: number;
+  y: number;
+  center_y: number;
+  previous_center_y: number;
+  reserved_inset: number;
+};
 
 /** Ordered list of right-side item keys that can overflow into "More".
  *  Items earlier in the list overflow first when space shrinks. */
@@ -274,8 +287,37 @@ function scheduleToolbarLayout() {
   toolbarLayoutRaf = requestAnimationFrame(() => {
     toolbarLayoutRaf = 0;
     checkToolbarWidth();
+    scheduleTrafficLightSync();
     void settleRightOverflow();
   });
+}
+
+function scheduleTrafficLightSync() {
+  if (!shouldReserveTrafficLightInset.value) return;
+  if (trafficLightSyncRaf) cancelAnimationFrame(trafficLightSyncRaf);
+  trafficLightSyncRaf = requestAnimationFrame(() => {
+    trafficLightSyncRaf = 0;
+    void syncTrafficLightsToToolbar();
+  });
+}
+
+async function syncTrafficLightsToToolbar() {
+  if (!shouldReserveTrafficLightInset.value) return;
+  const toolbarRect = toolbarEl.value?.getBoundingClientRect();
+  const targetEl = newConnectionLabelEl.value;
+  const targetRect = targetEl?.getBoundingClientRect();
+  if (!toolbarRect || !targetRect) return;
+  const targetCenterY = targetRect.top - toolbarRect.top + targetRect.height / 2;
+  try {
+    const layout = await invoke<MacosTrafficLightLayout>("set_macos_traffic_light_position", {
+      x: MAC_TRAFFIC_LIGHT_X,
+      y: targetCenterY,
+      scale: settingsStore.editorSettings.uiScale,
+    });
+    measuredTrafficLightInset.value = Math.ceil(layout.reserved_inset / settingsStore.editorSettings.uiScale);
+  } catch (error) {
+    console.warn("[DBX] Failed to sync macOS traffic light position", { targetCenterY, error });
+  }
 }
 
 function handleWindowResize() {
@@ -283,6 +325,15 @@ function handleWindowResize() {
 }
 
 watch(collapsibleRightItemDefs, () => scheduleToolbarLayout(), { flush: "post" });
+watch(
+  () => settingsStore.editorSettings.uiScale,
+  () => {
+    measuredTrafficLightInset.value = null;
+    scheduleToolbarLayout();
+    window.setTimeout(scheduleTrafficLightSync, 120);
+  },
+);
+watch(shouldReserveTrafficLightInset, () => scheduleToolbarLayout());
 
 // ──────────── Resize observer ────────────
 
@@ -298,6 +349,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   if (toolbarLayoutRaf) cancelAnimationFrame(toolbarLayoutRaf);
+  if (trafficLightSyncRaf) cancelAnimationFrame(trafficLightSyncRaf);
   resizeObserver?.disconnect();
   window.removeEventListener("resize", handleWindowResize);
 });
@@ -417,13 +469,21 @@ function isRightItemVisible(key: string) {
 const toolbarTextButtonClass = "h-8 px-2 text-xs gap-1 leading-none";
 const toolbarTextLabelClass = "inline-flex translate-y-px items-center leading-none";
 const toolbarDropdownTriggerClass = `inline-flex h-8 items-center gap-1 rounded-[6px] px-2 text-xs font-medium leading-none hover:bg-muted hover:text-foreground dark:hover:bg-muted/50 transition-colors [&>span:first-child]:translate-y-px`;
+const toolbarStyle = computed(() => {
+  if (!shouldReserveTrafficLightInset.value) return undefined;
+  return {
+    paddingLeft: `${measuredTrafficLightInset.value ?? parseInt(macTrafficLightInsetPaddingForScale(settingsStore.editorSettings.uiScale), 10)}px`,
+  };
+});
 </script>
 
 <template>
-  <div ref="toolbarEl" class="app-toolbar h-10 flex items-center gap-1 px-2 border-b bg-muted/30 shrink-0 overflow-hidden" :class="{ 'pl-17.5': shouldReserveMacTrafficLightInset(isMac, isFullscreen, isDesktop) }" data-tauri-drag-region @dblclick="onToolbarDblClick">
+  <div ref="toolbarEl" class="app-toolbar h-10 flex items-center gap-1 px-2 border-b bg-muted/30 shrink-0 overflow-hidden" :style="toolbarStyle" data-tauri-drag-region @dblclick="onToolbarDblClick">
     <Button variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('new-connection')">
-      <DatabaseZap class="h-3.5 w-3.5" />
-      <span :class="toolbarTextLabelClass">{{ t("toolbar.newConnection") }}</span>
+      <span class="inline-flex items-center gap-1">
+        <DatabaseZap class="h-3.5 w-3.5" />
+        <span ref="newConnectionLabelEl" :class="toolbarTextLabelClass">{{ t("toolbar.newConnection") }}</span>
+      </span>
     </Button>
 
     <Button variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('new-query')" :disabled="!hasConnections">

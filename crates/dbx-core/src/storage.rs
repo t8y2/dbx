@@ -224,6 +224,10 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         provider TEXT PRIMARY KEY,
         config_json TEXT NOT NULL
     )",
+    "CREATE TABLE IF NOT EXISTS tunnel_profiles (
+        id TEXT PRIMARY KEY,
+        config_json TEXT NOT NULL
+    )",
     "CREATE TABLE IF NOT EXISTS ai_conversations (
         id TEXT PRIMARY KEY,
         title TEXT NOT NULL DEFAULT '',
@@ -758,6 +762,104 @@ impl Storage {
             Ok(map)
         })
         .await
+    }
+}
+
+// Tunnel profiles — shared transport-layer configurations managed in
+// Settings and referenced from connections via `profile_id`. Secrets stay
+// inline in `config_json`; that matches the plaintext-at-rest posture of
+// `connection_secrets` in the same database file.
+
+impl Storage {
+    pub async fn load_tunnel_profiles(&self) -> Result<Vec<TransportLayerConfig>, String> {
+        let rows: Vec<String> = self
+            .with_conn(|conn| {
+                let mut stmt = conn
+                    .prepare("SELECT config_json FROM tunnel_profiles ORDER BY rowid")
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+            })
+            .await?;
+
+        let mut profiles = Vec::new();
+        for json in rows {
+            match serde_json::from_str::<TransportLayerConfig>(&json) {
+                Ok(profile) => profiles.push(profile),
+                Err(e) => warn!("Failed to deserialize tunnel profile: {}", e),
+            }
+        }
+        Ok(profiles)
+    }
+
+    pub async fn save_tunnel_profiles(&self, profiles: &[TransportLayerConfig]) -> Result<(), String> {
+        for profile in profiles {
+            if profile.id().trim().is_empty() {
+                return Err("Tunnel profile id must not be empty".to_string());
+            }
+        }
+        let profiles = profiles.to_vec();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM tunnel_profiles", []).map_err(|e| e.to_string())?;
+            for profile in &profiles {
+                let json = serde_json::to_string(profile).map_err(|e| e.to_string())?;
+                tx.execute(
+                    "INSERT INTO tunnel_profiles (id, config_json) VALUES (?1, ?2)",
+                    params![profile.id(), json],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    /// Replaces the profile catalog while keeping the secrets already stored
+    /// for a profile when the incoming copy has them scrubbed. Used when
+    /// applying sync snapshots, whose plain (non-encrypted) part strips
+    /// tunnel secrets.
+    pub async fn save_tunnel_profiles_preserving_secrets(
+        &self,
+        profiles: &[TransportLayerConfig],
+    ) -> Result<(), String> {
+        let existing: HashMap<String, TransportLayerConfig> =
+            self.load_tunnel_profiles().await?.into_iter().map(|p| (p.id().to_string(), p)).collect();
+        let merged: Vec<TransportLayerConfig> = profiles
+            .iter()
+            .map(|profile| {
+                let mut profile = profile.clone();
+                if let Some(previous) = existing.get(profile.id()) {
+                    merge_missing_tunnel_profile_secrets(&mut profile, previous);
+                }
+                profile
+            })
+            .collect();
+        self.save_tunnel_profiles(&merged).await
+    }
+}
+
+fn merge_missing_tunnel_profile_secrets(profile: &mut TransportLayerConfig, previous: &TransportLayerConfig) {
+    match (profile, previous) {
+        (TransportLayerConfig::Ssh(current), TransportLayerConfig::Ssh(previous)) => {
+            if current.password.is_empty() {
+                current.password = previous.password.clone();
+            }
+            if current.key_passphrase.is_empty() {
+                current.key_passphrase = previous.key_passphrase.clone();
+            }
+        }
+        (TransportLayerConfig::Proxy(current), TransportLayerConfig::Proxy(previous)) => {
+            if current.password.is_empty() {
+                current.password = previous.password.clone();
+            }
+        }
+        (TransportLayerConfig::HttpTunnel(current), TransportLayerConfig::HttpTunnel(previous)) => {
+            if current.token.is_empty() {
+                current.token = previous.token.clone();
+            }
+        }
+        _ => {}
     }
 }
 
@@ -2393,7 +2495,7 @@ mod tests {
     use crate::connection_secrets::{
         MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
     };
-    use crate::models::connection::{ConnectionConfig, DatabaseType};
+    use crate::models::connection::{ConnectionConfig, DatabaseType, SshTunnelConfig, TransportLayerConfig};
     use crate::saved_sql::SavedSqlFile;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2405,6 +2507,65 @@ mod tests {
     fn temp_data_dir(name: &str) -> std::path::PathBuf {
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
         std::env::temp_dir().join(format!("dbx-storage-{name}-{}-{stamp}", std::process::id()))
+    }
+
+    fn ssh_profile(id: &str, password: &str) -> TransportLayerConfig {
+        TransportLayerConfig::Ssh(SshTunnelConfig {
+            id: id.to_string(),
+            name: "Bastion".to_string(),
+            enabled: true,
+            host: "bastion.example.com".to_string(),
+            port: 22,
+            user: "deploy".to_string(),
+            password: password.to_string(),
+            key_path: String::new(),
+            key_passphrase: String::new(),
+            connect_timeout_secs: 5,
+            expose_lan: false,
+            use_ssh_agent: false,
+            ssh_agent_sock_path: String::new(),
+            auth_method: "password".to_string(),
+            profile_id: String::new(),
+        })
+    }
+
+    #[tokio::test]
+    async fn tunnel_profiles_roundtrip_and_preserve_secrets() {
+        let path = temp_db_path("tunnel-profiles");
+        let storage = Storage::open(&path).await.unwrap();
+
+        let profile = ssh_profile("profile-1", "s3cret");
+        storage.save_tunnel_profiles(std::slice::from_ref(&profile)).await.unwrap();
+        assert_eq!(storage.load_tunnel_profiles().await.unwrap(), vec![profile.clone()]);
+
+        // Applying a scrubbed copy (e.g. from a sync snapshot) keeps stored secrets.
+        let mut scrubbed = profile.clone();
+        scrubbed.scrub_secrets();
+        storage.save_tunnel_profiles_preserving_secrets(&[scrubbed.clone()]).await.unwrap();
+        match &storage.load_tunnel_profiles().await.unwrap()[0] {
+            TransportLayerConfig::Ssh(ssh) => assert_eq!(ssh.password, "s3cret"),
+            other => panic!("expected ssh profile, got {other:?}"),
+        }
+
+        // A plain save is exact: clearing a secret really clears it.
+        storage.save_tunnel_profiles(&[scrubbed.clone()]).await.unwrap();
+        assert_eq!(storage.load_tunnel_profiles().await.unwrap(), vec![scrubbed]);
+
+        storage.save_tunnel_profiles(&[]).await.unwrap();
+        assert!(storage.load_tunnel_profiles().await.unwrap().is_empty());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn tunnel_profiles_reject_empty_ids() {
+        let path = temp_db_path("tunnel-profiles-empty-id");
+        let storage = Storage::open(&path).await.unwrap();
+
+        let profile = ssh_profile("", "secret");
+        assert!(storage.save_tunnel_profiles(&[profile]).await.is_err());
+
+        let _ = std::fs::remove_file(path);
     }
 
     fn mq_connection(id: &str, token: &str) -> ConnectionConfig {
@@ -2461,6 +2622,8 @@ mod tests {
             jdbc_driver_paths: Vec::new(),
             one_time: false,
             read_only: false,
+            is_production: false,
+            production_databases: vec![],
         }
     }
 
@@ -2519,6 +2682,8 @@ mod tests {
             jdbc_driver_paths: Vec::new(),
             one_time: false,
             read_only: false,
+            is_production: false,
+            production_databases: vec![],
         }
     }
 

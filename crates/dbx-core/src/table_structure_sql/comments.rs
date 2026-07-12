@@ -19,7 +19,7 @@ pub(super) fn build_table_comment_sql(options: &TableStructureSqlOptions, warnin
         StructureDialect::Mysql => {
             vec![format!("ALTER TABLE {table} COMMENT = {quoted};")]
         }
-        StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::H2 => {
+        StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::Dameng | StructureDialect::H2 => {
             vec![format!("COMMENT ON TABLE {table} IS {quoted};")]
         }
         StructureDialect::ClickHouse => {

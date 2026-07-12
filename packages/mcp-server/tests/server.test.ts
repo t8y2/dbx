@@ -196,7 +196,7 @@ test("redis execute query points callers to the redis command tool", async () =>
   const redisConnection: ConnectionConfig = { ...connection, db_type: "redis", database: "0" };
   const scopedBackend: Backend = {
     ...backend,
-    findConnection: async () => redisConnection,
+    loadConnections: async () => [redisConnection],
   };
   const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
 
@@ -216,7 +216,7 @@ test("redis command tool executes redis commands on the selected database", asyn
   let usedCommand = "";
   const scopedBackend: Backend = {
     ...backend,
-    findConnection: async () => redisConnection,
+    loadConnections: async () => [redisConnection],
     executeRedisCommand: async (_config, db, command) => {
       usedDb = db;
       usedCommand = command;
@@ -242,7 +242,7 @@ test("redis command tool blocks write commands in read-only MCP sessions", async
   const redisConnection: ConnectionConfig = { ...connection, db_type: "redis" };
   const scopedBackend: Backend = {
     ...backend,
-    findConnection: async () => redisConnection,
+    loadConnections: async () => [redisConnection],
     executeRedisCommand: async () => {
       executed = true;
       return { command: "SET", safety: "write", value: "OK" };
@@ -267,7 +267,7 @@ test("redis command tool allows dangerous redis commands only when explicitly en
   let skipSafetyCheck = false;
   const scopedBackend: Backend = {
     ...backend,
-    findConnection: async () => redisConnection,
+    loadConnections: async () => [redisConnection],
     executeRedisCommand: async (_config, _db, _command, options) => {
       skipSafetyCheck = options?.skipSafetyCheck ?? false;
       return { command: "KEYS", safety: "blocked", value: ["session:1"] };
@@ -301,7 +301,7 @@ test("mongodb list tables returns collections from the selected database", async
   const mongoConnection: ConnectionConfig = { ...connection, db_type: "mongodb", database: "admin" };
   const scopedBackend: Backend = {
     ...backend,
-    findConnection: async () => mongoConnection,
+    loadConnections: async () => [mongoConnection],
     listTables: async (config) => {
       usedDatabase = config.database || "";
       return [{ name: "projects", type: "COLLECTION" }];
@@ -323,7 +323,7 @@ test("mongodb describe table returns inferred document fields", async () => {
   const mongoConnection: ConnectionConfig = { ...connection, db_type: "mongodb" };
   const scopedBackend: Backend = {
     ...backend,
-    findConnection: async () => mongoConnection,
+    loadConnections: async () => [mongoConnection],
     describeTable: async () => [
       {
         name: "_id",
@@ -355,11 +355,64 @@ test("mongodb describe table returns inferred document fields", async () => {
   assert.match(result.content[0].text, /name/);
 });
 
+test("dameng metadata tools default to the login user schema", async () => {
+  const damengConnection: ConnectionConfig = {
+    ...connection,
+    db_type: "dameng",
+    username: "SYSDBA",
+    database: "DAMENG",
+  };
+  const usedScopes: Array<{ database?: string; schema?: string }> = [];
+  const scopedBackend: Backend = {
+    ...backend,
+    loadConnections: async () => [damengConnection],
+    listTables: async (config, schema) => {
+      usedScopes.push({ database: config.database, schema });
+      return [{ name: "ORDERS", type: "TABLE" }];
+    },
+    describeTable: async (config, _table, schema) => {
+      usedScopes.push({ database: config.database, schema });
+      return [{ name: "ID", data_type: "BIGINT", is_nullable: false, column_default: null, is_primary_key: true, comment: null }];
+    },
+  };
+  const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+
+  await (server as any)._registeredTools.dbx_list_tables.handler({ connection_name: "local" });
+  await (server as any)._registeredTools.dbx_describe_table.handler({ connection_name: "local", table: "ORDERS" });
+
+  assert.deepEqual(usedScopes, [
+    { database: "DAMENG", schema: "SYSDBA" },
+    { database: "DAMENG", schema: "SYSDBA" },
+  ]);
+});
+
+test("dameng metadata tools treat database as a schema alias while preferring explicit schema", async () => {
+  const damengConnection: ConnectionConfig = { ...connection, db_type: "dameng", username: "SYSDBA", database: "DAMENG" };
+  let usedSchema = "";
+  const scopedBackend: Backend = {
+    ...backend,
+    loadConnections: async () => [damengConnection],
+    listTables: async (_config, schema) => {
+      usedSchema = schema || "";
+      return [{ name: "ORDERS", type: "TABLE" }];
+    },
+  };
+  const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+
+  await (server as any)._registeredTools.dbx_list_tables.handler({ connection_name: "local", database: "XC" });
+
+  assert.equal(usedSchema, "XC");
+
+  await (server as any)._registeredTools.dbx_list_tables.handler({ connection_name: "local", database: "XC", schema: "REPORTING" });
+
+  assert.equal(usedSchema, "REPORTING");
+});
+
 test("mongodb execute query formats shell-style find results", async () => {
   const mongoConnection: ConnectionConfig = { ...connection, db_type: "mongodb" };
   const scopedBackend: Backend = {
     ...backend,
-    findConnection: async () => mongoConnection,
+    loadConnections: async () => [mongoConnection],
     executeQuery: async () => ({
       columns: ["_id", "meta", "missing"],
       rows: [{ _id: "1", meta: { name: "demo" }, missing: null }],
@@ -395,7 +448,6 @@ test("add connection accepts H2 file paths without a port", async () => {
   let added: Omit<ConnectionConfig, "id"> | undefined;
   const scopedBackend: Backend = {
     ...backend,
-    findConnection: async () => undefined,
     addConnection: async (config) => {
       added = config;
       return { id: "h2-file", ...config };
@@ -449,23 +501,23 @@ test("query exceptions include a stable MCP error code", async () => {
 });
 
 test("desktop bridge failures include a stable MCP error code", async () => {
-  const oldHome = process.env.HOME;
   const dir = await mkdtemp(join(tmpdir(), "dbx-mcp-home-"));
-  process.env.HOME = dir;
 
   try {
-    const server = createDbxMcpServer(backend, { isWebMode: false });
-    const result = await (server as any)._registeredTools.dbx_open_table.handler({
-      connection_name: "local",
-      table: "users",
-    });
+    // Use DBX_DATA_DIR (honoured cross-platform) to point bridgePortFilePath()
+    // at an empty temp directory so no real bridge is reachable.
+    await withScopedEnv({ DBX_DATA_DIR: dir }, async () => {
+      const server = createDbxMcpServer(backend, { isWebMode: false });
+      const result = await (server as any)._registeredTools.dbx_open_table.handler({
+        connection_name: "local",
+        table: "users",
+      });
 
-    assert.equal(result.isError, true);
-    assert.match(result.content[0].text, /DBX_NOT_RUNNING:/);
-    assert.match(result.content[0].text, /DBX is not running/);
+      assert.equal(result.isError, true);
+      assert.match(result.content[0].text, /DBX_NOT_RUNNING:/);
+      assert.match(result.content[0].text, /DBX is not running/);
+    });
   } finally {
-    if (oldHome === undefined) delete process.env.HOME;
-    else process.env.HOME = oldHome;
     await rm(dir, { recursive: true, force: true });
   }
 });
@@ -478,7 +530,7 @@ test("mongodb execute-and-show blocks aggregate write stages before desktop brid
   const mongoConnection: ConnectionConfig = { ...connection, db_type: "mongodb" };
   const scopedBackend: Backend = {
     ...backend,
-    findConnection: async () => mongoConnection,
+    loadConnections: async () => [mongoConnection],
   };
   const server = createDbxMcpServer(scopedBackend, { isWebMode: false });
 
@@ -497,4 +549,243 @@ test("mongodb execute-and-show blocks aggregate write stages before desktop brid
     if (oldAllowDangerous === undefined) delete process.env.DBX_MCP_ALLOW_DANGEROUS_SQL;
     else process.env.DBX_MCP_ALLOW_DANGEROUS_SQL = oldAllowDangerous;
   }
+});
+
+test("connection_id parameter resolves correctly", async () => {
+  const connA: ConnectionConfig = { ...connection, id: "a1b2c3", name: "shared-name", db_type: "postgres" };
+  const connB: ConnectionConfig = { ...connection, id: "d4e5f6", name: "shared-name", db_type: "redis", host: "redis.local", port: 6379 };
+  const scopedBackend: Backend = {
+    ...backend,
+    loadConnections: async () => [connA, connB],
+  };
+  const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+
+  // Resolve by connection_id should return the correct connection
+  const result = await (server as any)._registeredTools.dbx_list_tables.handler({
+    connection_id: "d4e5f6",
+  });
+
+  assert.match(result.content[0].text, /users/);
+});
+
+test("duplicate connection names return AMBIGUOUS_CONNECTION error", async () => {
+  const connA: ConnectionConfig = { ...connection, id: "a1b2c3", name: "shared-name", db_type: "postgres", host: "pg.local", port: 5432 };
+  const connB: ConnectionConfig = { ...connection, id: "d4e5f6", name: "shared-name", db_type: "redis", host: "redis.local", port: 6379 };
+  const scopedBackend: Backend = {
+    ...backend,
+    loadConnections: async () => [connA, connB],
+  };
+  const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+
+  // Using connection_name with duplicates should return AMBIGUOUS_CONNECTION
+  const result = await (server as any)._registeredTools.dbx_list_tables.handler({
+    connection_name: "shared-name",
+  });
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /AMBIGUOUS_CONNECTION:/);
+  assert.match(result.content[0].text, /a1b2c3:/);
+  assert.match(result.content[0].text, /d4e5f6:/);
+  assert.match(result.content[0].text, /postgres @ pg.local:5432/);
+  assert.match(result.content[0].text, /redis @ redis.local:6379/);
+});
+
+test("connection_id takes priority over connection_name", async () => {
+  const connA: ConnectionConfig = { ...connection, id: "a1b2c3", name: "shared-name", db_type: "postgres" };
+  const connB: ConnectionConfig = { ...connection, id: "d4e5f6", name: "shared-name", db_type: "mysql", host: "mysql.local", port: 3306 };
+  let usedConfig: ConnectionConfig | undefined;
+  const scopedBackend: Backend = {
+    ...backend,
+    loadConnections: async () => [connA, connB],
+    listTables: async (config) => {
+      usedConfig = config;
+      return [{ name: "users", type: "BASE TABLE" }];
+    },
+  };
+  const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+
+  // Provide both connection_id and connection_name; connection_id should win
+  await (server as any)._registeredTools.dbx_list_tables.handler({
+    connection_id: "d4e5f6",
+    connection_name: "shared-name",
+  });
+
+  assert.equal(usedConfig?.id, "d4e5f6");
+});
+
+test("dbx_list_connections includes ID column", async () => {
+  const server = createDbxMcpServer(backend, { isWebMode: true });
+  const result = await (server as any)._registeredTools.dbx_list_connections.handler({});
+
+  // The table header should include the ID column
+  assert.match(result.content[0].text, /ID.*Name.*Type.*Host.*Port.*Database/);
+  // The connection's ID value "1" should appear in the table
+  assert.match(result.content[0].text, /1\s+\|\s+local/);
+});
+
+test("same name and db_type with different host/port returns AMBIGUOUS_CONNECTION", async () => {
+  const connA: ConnectionConfig = {
+    ...connection,
+    id: "pg-prod-us",
+    name: "my-db",
+    db_type: "postgres",
+    host: "10.0.1.100",
+    port: 5432,
+    database: "app",
+  };
+  const connB: ConnectionConfig = {
+    ...connection,
+    id: "pg-prod-eu",
+    name: "my-db",
+    db_type: "postgres",
+    host: "10.0.2.200",
+    port: 5432,
+    database: "app",
+  };
+  const scopedBackend: Backend = {
+    ...backend,
+    loadConnections: async () => [connA, connB],
+  };
+  const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+
+  // Using connection_name with duplicates (same db_type) should still return AMBIGUOUS_CONNECTION
+  const result = await (server as any)._registeredTools.dbx_list_tables.handler({
+    connection_name: "my-db",
+  });
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /AMBIGUOUS_CONNECTION:/);
+  assert.match(result.content[0].text, /pg-prod-us: postgres @ 10\.0\.1\.100:5432/);
+  assert.match(result.content[0].text, /pg-prod-eu: postgres @ 10\.0\.2\.200:5432/);
+});
+
+test("connection_id routes to correct host among same-name same-type connections", async () => {
+  const connA: ConnectionConfig = {
+    ...connection,
+    id: "pg-prod-us",
+    name: "my-db",
+    db_type: "postgres",
+    host: "10.0.1.100",
+    port: 5432,
+    database: "app",
+  };
+  const connB: ConnectionConfig = {
+    ...connection,
+    id: "pg-prod-eu",
+    name: "my-db",
+    db_type: "postgres",
+    host: "10.0.2.200",
+    port: 5432,
+    database: "app",
+  };
+  const usedConfigs: ConnectionConfig[] = [];
+  const scopedBackend: Backend = {
+    ...backend,
+    loadConnections: async () => [connA, connB],
+    listTables: async (config) => {
+      usedConfigs.push(config);
+      return [{ name: "orders", type: "BASE TABLE" }];
+    },
+    executeQuery: async (config, _sql) => {
+      usedConfigs.push(config);
+      return { columns: ["cnt"], rows: [{ cnt: 42 }], row_count: 1 };
+    },
+  };
+  const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+
+  // Route to US instance via connection_id
+  const listResult = await (server as any)._registeredTools.dbx_list_tables.handler({
+    connection_id: "pg-prod-us",
+  });
+  assert.match(listResult.content[0].text, /orders/);
+  assert.equal(usedConfigs[0].id, "pg-prod-us");
+  assert.equal(usedConfigs[0].host, "10.0.1.100");
+
+  // Route to EU instance via connection_id
+  const queryResult = await (server as any)._registeredTools.dbx_execute_query.handler({
+    connection_id: "pg-prod-eu",
+    database: "app",
+    sql: "select count(*) as cnt from orders",
+  });
+  assert.match(queryResult.content[0].text, /42/);
+  assert.equal(usedConfigs[1].id, "pg-prod-eu");
+  assert.equal(usedConfigs[1].host, "10.0.2.200");
+});
+
+test("tool responses are prefixed with connection identity label", async () => {
+  const scopedBackend: Backend = {
+    ...backend,
+    loadConnections: async () => [{ ...connection, id: "conn-xyz", name: "orders-db", db_type: "postgres", host: "10.5.5.5", port: 5432 }],
+    listTables: async () => [{ name: "orders", type: "BASE TABLE" }],
+    executeQuery: async () => ({ columns: ["cnt"], rows: [{ cnt: 7 }], row_count: 1 }),
+  };
+  const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+
+  const listResult = await (server as any)._registeredTools.dbx_list_tables.handler({ connection_id: "conn-xyz" });
+  assert.match(listResult.content[0].text, /^\[orders-db \(conn-xyz\) \[postgres @ 10\.5\.5\.5:5432\]\]/);
+
+  const queryResult = await (server as any)._registeredTools.dbx_execute_query.handler({ connection_id: "conn-xyz", sql: "select count(*) as cnt from orders" });
+  assert.match(queryResult.content[0].text, /^\[orders-db \(conn-xyz\) \[postgres @ 10\.5\.5\.5:5432\]\]/);
+});
+
+test("dbx_remove_connection with duplicate names returns AMBIGUOUS_CONNECTION", async () => {
+  const connA: ConnectionConfig = { ...connection, id: "db-a", name: "staging", db_type: "postgres", host: "pg-a.local" };
+  const connB: ConnectionConfig = { ...connection, id: "db-b", name: "staging", db_type: "mysql", host: "mysql-b.local", port: 3306 };
+  let removedName: string | undefined;
+  const scopedBackend: Backend = {
+    ...backend,
+    loadConnections: async () => [connA, connB],
+    removeConnection: async (name) => {
+      removedName = name;
+      return true;
+    },
+  };
+  const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+
+  const result = await (server as any)._registeredTools.dbx_remove_connection.handler({
+    connection_name: "staging",
+  });
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /AMBIGUOUS_CONNECTION:/);
+  assert.match(result.content[0].text, /db-a: postgres @ pg-a\.local/);
+  assert.match(result.content[0].text, /db-b: mysql @ mysql-b\.local/);
+  // removeConnection must NOT have been called — no silent deletion
+  assert.equal(removedName, undefined);
+});
+
+test("dbx_execute_query with connection_id routes correctly on bridge-backed (SSH) connections", async () => {
+  const connDirect: ConnectionConfig = { ...connection, id: "pg-direct", name: "shared", db_type: "postgres", host: "direct.local", ssh_enabled: false };
+  const connSsh: ConnectionConfig = { ...connection, id: "pg-ssh", name: "shared", db_type: "postgres", host: "private.local", ssh_enabled: true };
+  const usedConfigs: ConnectionConfig[] = [];
+  const scopedBackend: Backend = {
+    ...backend,
+    loadConnections: async () => [connDirect, connSsh],
+    executeQuery: async (config, _sql) => {
+      usedConfigs.push(config);
+      return { columns: ["result"], rows: [{ result: "ok" }], row_count: 1 };
+    },
+  };
+  const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+
+  // connection_name with two same-name connections (one SSH-backed) → AMBIGUOUS_CONNECTION
+  const ambigResult = await (server as any)._registeredTools.dbx_execute_query.handler({
+    connection_name: "shared",
+    sql: "select 1",
+  });
+  assert.equal(ambigResult.isError, true);
+  assert.match(ambigResult.content[0].text, /AMBIGUOUS_CONNECTION:/);
+  assert.match(ambigResult.content[0].text, /pg-direct/);
+  assert.match(ambigResult.content[0].text, /pg-ssh/);
+
+  // connection_id routes to the SSH-backed instance and passes its config through
+  const result = await (server as any)._registeredTools.dbx_execute_query.handler({
+    connection_id: "pg-ssh",
+    sql: "select 1",
+  });
+  assert.equal(result.isError, undefined);
+  assert.equal(usedConfigs.length, 1);
+  assert.equal(usedConfigs[0].id, "pg-ssh");
+  assert.equal(usedConfigs[0].host, "private.local");
+  assert.equal(usedConfigs[0].ssh_enabled, true);
 });

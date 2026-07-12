@@ -77,6 +77,21 @@ test("redacts network endpoint labels for quick connection cards", () => {
   );
 });
 
+test("presents Cloudflare D1 account and database identifiers without treating them as a host and port", () => {
+  const d1Connection: ConnectionConfig = {
+    ...baseConnection,
+    db_type: "cloudflare-d1",
+    driver_profile: undefined,
+    driver_label: "Cloudflare D1",
+    host: "account-id",
+    port: 443,
+    database: "database-id",
+  };
+
+  assert.equal(connectionEndpointLabel(d1Connection), "account-id/database-id");
+  assert.equal(connectionRedactedEndpointLabel(d1Connection), "***/***");
+});
+
 test("redacts host-like quick connection names", () => {
   assert.equal(
     connectionRedactedNameLabel({

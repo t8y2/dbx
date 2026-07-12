@@ -245,7 +245,50 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
             foreignKeys = Collections.emptyList();
         }
 
-        return DdlBuilder.buildTableDdl(schema, table, getColumns(schema, table), indexes, foreignKeys, mysqlCompatMode, true);
+        List<CheckConstraintInfo> checkConstraints;
+        try {
+            checkConstraints = listCheckConstraints(schema, table);
+        } catch (RuntimeException e) {
+            // Some PostgreSQL-compatible databases expose incomplete catalog APIs.
+            // DDL generation should still succeed with columns, indexes, and foreign keys.
+            checkConstraints = Collections.emptyList();
+        }
+
+        return DdlBuilder.buildTableDdl(
+            schema,
+            table,
+            getColumns(schema, table),
+            indexes,
+            foreignKeys,
+            checkConstraints,
+            mysqlCompatMode,
+            true
+        );
+    }
+
+    protected List<CheckConstraintInfo> listCheckConstraints(String schema, String table) {
+        return unchecked(() -> {
+            List<CheckConstraintInfo> result = new ArrayList<>();
+            String sql = "SELECT co.conname AS constraint_name, pg_catalog.pg_get_constraintdef(co.oid, true) AS constraint_definition " +
+                "FROM pg_catalog.pg_constraint co " +
+                "JOIN pg_catalog.pg_class c ON c.oid = co.conrelid " +
+                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace " +
+                "WHERE co.contype = 'c' AND n.nspname = ? AND c.relname = ? " +
+                "ORDER BY co.conname";
+            try (java.sql.PreparedStatement stmt = requireConnection().prepareStatement(sql)) {
+                stmt.setString(1, schema);
+                stmt.setString(2, table);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        result.add(new CheckConstraintInfo(
+                            rs.getString("constraint_name"),
+                            rs.getString("constraint_definition")
+                        ));
+                    }
+                }
+            }
+            return result;
+        });
     }
 
     @Override

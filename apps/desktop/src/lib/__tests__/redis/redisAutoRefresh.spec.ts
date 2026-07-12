@@ -10,19 +10,20 @@ describe("computeAutoRefreshTick", () => {
     expect(computeAutoRefreshTick(false, 5, true)).toEqual({ type: "idle" });
   });
 
-  it("returns decrement when countdown is above zero", () => {
+  it("returns decrement while more than one second remains", () => {
     expect(computeAutoRefreshTick(true, 10, false)).toEqual({ type: "decrement" });
-    expect(computeAutoRefreshTick(true, 1, false)).toEqual({ type: "decrement" });
     // decrement even when loading — countdown should keep ticking
     expect(computeAutoRefreshTick(true, 3, true)).toEqual({ type: "decrement" });
   });
 
-  it("returns refresh when countdown reaches zero and not loading", () => {
+  it("refreshes on the expiry tick instead of exposing a zero countdown", () => {
+    expect(computeAutoRefreshTick(true, 1, false)).toEqual({ type: "refresh" });
     expect(computeAutoRefreshTick(true, 0, false)).toEqual({ type: "refresh" });
     expect(computeAutoRefreshTick(true, -1, false)).toEqual({ type: "refresh" });
   });
 
-  it("returns idle when countdown is zero but a load is already in flight", () => {
+  it("does not start another refresh when a load is already in flight", () => {
+    expect(computeAutoRefreshTick(true, 1, true)).toEqual({ type: "decrement" });
     // This prevents concurrent load() calls
     expect(computeAutoRefreshTick(true, 0, true)).toEqual({ type: "idle" });
     expect(computeAutoRefreshTick(true, -1, true)).toEqual({ type: "idle" });
@@ -50,9 +51,8 @@ describe("computeDisplayTtl", () => {
     expect(computeDisplayTtl(false, 3, 10)).toBe(10);
   });
 
-  it("returns server TTL when countdown has not started (zero)", () => {
-    // countdownTtl starts at 0 before first tick; show server TTL
-    expect(computeDisplayTtl(true, 0, 10)).toBe(10);
+  it("does not flash back to the stale server TTL at zero", () => {
+    expect(computeDisplayTtl(true, 0, 5)).toBe(0);
   });
 
   it("returns live countdown when auto-refresh is active and counting", () => {
@@ -60,9 +60,7 @@ describe("computeDisplayTtl", () => {
     expect(computeDisplayTtl(true, 1, 10)).toBe(1);
   });
 
-  it("returns server TTL when countdown would go below zero", () => {
-    // Edge case: countdownTtl shouldn't be negative in practice,
-    // but if it is, fall back to server TTL
-    expect(computeDisplayTtl(true, -1, 10)).toBe(10);
+  it("clamps an active countdown below zero instead of showing stale data", () => {
+    expect(computeDisplayTtl(true, -1, 10)).toBe(0);
   });
 });

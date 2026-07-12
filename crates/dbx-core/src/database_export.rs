@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::io::Write;
 use tokio::sync::RwLock;
 
+use crate::connection::task_client_session_id;
 use crate::models::connection::DatabaseType;
 use crate::object_source_sql::build_export_object_source_sql;
 use crate::sql_dialect::{qualified_table_name, quote_table_identifier, uses_single_row_insert_statements};
@@ -15,6 +16,10 @@ use crate::transfer::{
 
 static EXPORT_CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashSet::new()));
+
+pub fn database_export_client_session_id(export_id: &str) -> String {
+    task_client_session_id("database-export", export_id)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -979,7 +984,10 @@ pub async fn export_database_sql_core(
         .ok_or_else(|| format!("Connection config not found: {}", request.connection_id))?;
 
     // 2. Get pool
-    let pool_key = state.get_or_create_pool(&request.connection_id, Some(&request.database)).await?;
+    let client_session_id = database_export_client_session_id(&request.export_id);
+    let pool_key = state
+        .get_or_create_pool_for_session(&request.connection_id, Some(&request.database), Some(&client_session_id))
+        .await?;
 
     // 3. List tables
     let all_tables = crate::schema::list_tables_core(
@@ -1213,7 +1221,7 @@ pub async fn export_database_sql_core(
             if !col_names.is_empty() {
                 // Get row count
                 let count_query = crate::transfer::count_sql(table_name, &request.schema, &db_type);
-                let total_rows = match crate::transfer::execute_on_pool(state, &pool_key, &count_query).await {
+                let total_rows = match crate::transfer::execute_read_on_pool(state, &pool_key, &count_query).await {
                     Ok(result) => result.rows.first().and_then(|r| r.first()).and_then(|v| match v {
                         serde_json::Value::Number(n) => n.as_u64(),
                         serde_json::Value::String(s) => s.parse::<u64>().ok(),
@@ -1251,7 +1259,7 @@ pub async fn export_database_sql_core(
                         batch_size,
                     );
 
-                    let result = match crate::transfer::execute_on_pool(state, &pool_key, &sql).await {
+                    let result = match crate::transfer::execute_read_on_pool(state, &pool_key, &sql).await {
                         Ok(r) => r,
                         Err(e) => {
                             writeln!(file, "-- ERROR exporting data for table {table_name}: {e}")
@@ -1351,6 +1359,7 @@ pub async fn export_database_sql_core(
                 &request.schema,
                 view_name,
                 crate::db::ObjectSourceKind::View,
+                None,
             )
             .await
             {
@@ -1394,6 +1403,7 @@ pub async fn export_database_sql_core(
                 &request.schema,
                 proc_name,
                 crate::db::ObjectSourceKind::Procedure,
+                None,
             )
             .await
             {
@@ -1440,6 +1450,7 @@ pub async fn export_database_sql_core(
                 &request.schema,
                 func_name,
                 crate::db::ObjectSourceKind::Function,
+                None,
             )
             .await
             {

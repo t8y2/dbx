@@ -129,7 +129,7 @@ function columnPlaceholderValue(column: ColumnInfo, databaseType?: DatabaseType)
   const colName = column.name;
 
   if (typeLooksNumeric(dataType)) return "0";
-  if (typeLooksBoolean(dataType)) return databaseType === "mysql" || databaseType === "sqlite" || databaseType === "rqlite" ? "1" : "TRUE";
+  if (typeLooksBoolean(dataType)) return databaseType === "mysql" || databaseType === "sqlite" || databaseType === "rqlite" || databaseType === "cloudflare-d1" ? "1" : "TRUE";
   if (typeLooksDateOnly(dataType)) return "'2024-01-01'";
   if (typeLooksTimeOnly(dataType)) return "'12:00:00'";
   if (typeLooksTimestamp(dataType)) return databaseType === "tdengine" ? "NOW" : "CURRENT_TIMESTAMP";

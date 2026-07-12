@@ -1,5 +1,6 @@
 import type { BinaryHexViewRow } from "@/lib/dataGrid/binaryHexViewer";
 import { buildBinaryHexViewRows } from "@/lib/dataGrid/binaryHexViewer";
+import { parseJsonPreservingLargeNumbers, safeJsonFormat } from "@/lib/common/safeJsonFormat";
 import type { RedisBlob, RedisCollectionPage, RedisHashItem, RedisListItem, RedisSetItem, RedisValue, RedisZsetItem } from "@/lib/backend/api";
 import { parseJavaSerializedDetail, type RedisJavaSerializedDetail } from "@/lib/redis/javaSerialized";
 
@@ -188,10 +189,10 @@ export function parseRedisJsonDetail(value: unknown): RedisJsonDetail | null {
   if (!trimmed) return null;
 
   try {
-    const parsed = JSON.parse(trimmed);
+    const parsed = parseJsonPreservingLargeNumbers(trimmed);
     return {
       rawText: value,
-      formattedText: JSON.stringify(parsed, null, 2),
+      formattedText: safeJsonFormat(trimmed, 2),
       value: parsed,
     };
   } catch {

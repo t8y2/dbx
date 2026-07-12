@@ -12,8 +12,9 @@
   "gbase8s": "0.1.19",
   "goldendb": "0.1.30",
   "h2": "0.1.30",
+  "h2-legacy": "0.1.0",
   "hive": "0.1.30",
-  "spark": "0.1.1",
+  "spark": "0.1.2",
   "informix": "0.1.31",
   "kingbase": "0.1.30",
   "kylin": "0.1.30",
@@ -24,11 +25,11 @@
   "saphana": "0.1.25",
   "sundb": "0.1.30",
   "teradata": "0.1.25",
-  "tdengine": "0.1.28",
+  "tdengine": "0.1.29",
   "trino": "0.1.30",
   "vastbase": "0.1.30",
   "vertica": "0.1.25",
-  "mongodb": "0.1.29",
+  "mongodb": "0.1.30",
   "highgo": "0.1.28",
   "yashandb": "0.1.26",
   "oscar": "0.1.5",
@@ -38,5 +39,5 @@
   "etcd": "0.1.18",
   "zookeeper": "0.1.8",
   "kafka": "0.1.3",
-  "sqlserver-legacy": "0.1.0"
+  "sqlserver-legacy": "0.1.1"
 }

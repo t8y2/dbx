@@ -1,4 +1,4 @@
-name: Issue Database Label
+name: Issue Triage Labels
 
 on:
   issues:
@@ -24,7 +24,7 @@ jobs:
         with:
           node-version: 22.13.0
 
-      - name: Label issue by database
+      - name: Triage issue labels and title
         run: node .github/scripts/label-issue-database.mjs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

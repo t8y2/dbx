@@ -3,10 +3,12 @@ import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Clipboard, Loader2, PencilLine, RefreshCw } from "@lucide/vue";
 import { useToast } from "@/composables/useToast";
+import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlForDisplay, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { buildEditableObjectSource, buildExecutableObjectSourceStatements, executeObjectSourceSave } from "@/lib/table/objectSourceEditor";
+import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import * as api from "@/lib/backend/api";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
 import { Button } from "@/components/ui/button";
@@ -20,6 +22,7 @@ const props = withDefaults(
     database: string;
     schema?: string;
     name: string;
+    signature?: string;
     objectType: ObjectSourceKind;
     databaseType?: DatabaseType;
     dialect: "mysql" | "postgres" | "sqlserver";
@@ -38,6 +41,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const { toast } = useToast();
+const connectionStore = useConnectionStore();
 const settingsStore = useSettingsStore();
 
 const content = ref("");
@@ -55,7 +59,7 @@ const canEdit = computed(() => sourceEditable.value && props.objectType !== "SEQ
 const title = computed(() => `${editing.value ? t("contextMenu.editView") : t("contextMenu.viewSource")} - ${props.name}`);
 
 watch(
-  () => [props.open, props.connectionId, props.database, props.schema, props.name, props.objectType, props.initialEditing] as const,
+  () => [props.open, props.connectionId, props.database, props.schema, props.name, props.signature, props.objectType, props.initialEditing] as const,
   () => {
     if (props.open) void loadSource();
   },
@@ -75,7 +79,7 @@ async function loadSource(nextEditing = props.initialEditing && canEdit.value) {
   try {
     if (!props.databaseType) throw new Error("Connection type is unavailable.");
     const schema = props.schema || props.database;
-    const result = await api.getObjectSource(props.connectionId, props.database, schema, props.name, props.objectType);
+    const result = await api.getObjectSource(props.connectionId, props.database, schema, props.name, props.objectType, props.signature);
     const editableAllowed = result.editable !== false;
     const editable = await buildEditableObjectSource({
       databaseType: props.databaseType,
@@ -133,18 +137,34 @@ async function saveSource() {
     return;
   }
   if (!draft.value.trim() || !props.databaseType) return;
+  const databaseType = props.databaseType;
   const schema = props.schema || props.database;
   saving.value = true;
   saveError.value = "";
   try {
     const statements = await buildExecutableObjectSourceStatements({
-      databaseType: props.databaseType,
+      databaseType,
       objectType: props.objectType,
       schema,
       name: props.name,
       source: draft.value,
     });
-    await executeObjectSourceSave(props.connectionId, props.database, props.databaseType, statements, schema);
+    const executableSql = statements.filter((sql) => sql.trim()).join(";\n");
+    if (executableSql.trim()) {
+      const saved = await executeWithProductionSqlGuard({
+        connection: connectionStore.getConfig(props.connectionId),
+        database: props.database,
+        sql: executableSql,
+        source: t("production.sourceObjectSource"),
+        execute: async () => {
+          await executeObjectSourceSave(props.connectionId, props.database, databaseType, statements, schema);
+          return true;
+        },
+      });
+      if (!saved) return;
+    } else {
+      await executeObjectSourceSave(props.connectionId, props.database, databaseType, statements, schema);
+    }
     toast(t("objects.sourceSaved"));
     emit("saved");
     await loadSource(false);

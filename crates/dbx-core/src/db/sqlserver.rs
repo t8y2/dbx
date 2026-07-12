@@ -874,6 +874,7 @@ pub async fn get_linked_server_columns(
                 numeric_scale,
                 character_maximum_length: linked_i32(row, 15),
                 enum_values: None,
+                ..Default::default()
             })
         })
         .collect())
@@ -1435,6 +1436,7 @@ pub async fn get_columns(client: &mut SqlServerClient, schema: &str, table: &str
                 numeric_scale: num_scale,
                 character_maximum_length: max_len,
                 enum_values: None,
+                ..Default::default()
             }
         })
         .collect())

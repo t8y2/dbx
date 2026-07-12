@@ -8,6 +8,12 @@ test("allows read-only SQL by default", () => {
   assert.equal(decision.allowed, true);
 });
 
+test("allows read-only EXPLAIN without ANALYZE", () => {
+  const decision = evaluateSqlSafety("EXPLAIN SELECT * FROM users");
+
+  assert.equal(decision.allowed, true);
+});
+
 test("allows non-dangerous write SQL by default when scoped", () => {
   const decision = evaluateSqlSafety("update users set role = 'admin' where id = 1", sqlSafetyFromEnv({}));
 
@@ -26,6 +32,27 @@ test("blocks update without where when writes are enabled", () => {
 
   assert.equal(decision.allowed, false);
   assert.match(decision.reason ?? "", /WHERE/i);
+});
+
+test("blocks writes that do not start with a write keyword in read-only mode", () => {
+  for (const sql of [
+    "EXPLAIN ANALYZE DELETE FROM users WHERE id = 1",
+    "/*! DELETE FROM users WHERE id = 1 */",
+    "COPY users FROM '/tmp/users.csv'",
+    "SELECT * INTO backup_users FROM users",
+    "SELECT * FROM users INTO OUTFILE '/tmp/users.csv'",
+  ]) {
+    const decision = evaluateSqlSafety(sql);
+    assert.equal(decision.allowed, false, sql);
+    assert.match(decision.reason ?? "", /read-only|blocked/i);
+  }
+});
+
+test("blocks unrecognized SQL unless dangerous SQL is explicitly enabled", () => {
+  const decision = evaluateSqlSafety("MAINTAIN UNKNOWN THING", { allowWrites: true });
+
+  assert.equal(decision.allowed, false);
+  assert.match(decision.reason ?? "", /unrecognized/i);
 });
 
 test("blocks multiple SQL statements unless explicitly allowed", () => {

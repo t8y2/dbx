@@ -65,6 +65,7 @@ pub struct AgentLoopContext {
     pub database: String,
     pub db_type: DatabaseType,
     pub cli_mcp_server_command: Option<CliAgentCommandSpec>,
+    pub sql_permissions: agent_tools::AgentSqlPermissions,
 }
 
 /// Check if the provider supports function calling / tool use.
@@ -108,7 +109,8 @@ pub async fn run_agent_loop(
                 .map(|config| config.name.clone())
                 .unwrap_or_else(|| agent_ctx.connection_id.clone())
         };
-        let prompt = crate::ai_codex_cli::build_codex_prompt(system_prompt, messages);
+        let prompt =
+            crate::ai_codex_cli::build_codex_prompt(system_prompt, messages, agent_ctx.sql_permissions.allow_writes);
         return crate::ai_codex_cli::run_codex_agent(
             config,
             &prompt,
@@ -117,6 +119,8 @@ pub async fn run_agent_loop(
                 connection_name,
                 database: agent_ctx.database.clone(),
                 agent_mode: is_agent_mode,
+                allow_writes: agent_ctx.sql_permissions.allow_writes,
+                allow_dangerous: agent_ctx.sql_permissions.allow_dangerous,
                 mcp_server_command: agent_ctx.cli_mcp_server_command.clone(),
             },
             cancelled,
@@ -140,7 +144,7 @@ pub async fn run_agent_loop(
         .await;
     }
     let tools = if is_agent_mode {
-        agent_tools::all_tools(agent_ctx.db_type)
+        agent_tools::all_tools(agent_ctx.db_type, agent_ctx.sql_permissions)
     } else {
         agent_tools::read_only_tools(agent_ctx.db_type)
     };
@@ -343,6 +347,7 @@ pub async fn run_agent_loop(
         let conn2 = agent_ctx.connection_id.clone();
         let db2 = agent_ctx.database.clone();
         let db_type = agent_ctx.db_type;
+        let sql_permissions = agent_ctx.sql_permissions;
 
         // Split by index into parallel and sequential groups using tool metadata
         let tool_parallel_map: std::collections::HashMap<&str, bool> =
@@ -361,7 +366,7 @@ pub async fn run_agent_loop(
                 let state = Arc::clone(&state2);
                 let conn = conn2.clone();
                 let db = db2.clone();
-                async move { agent_tools::execute_tool(&tc, &state, &conn, &db, &db_type).await }
+                async move { agent_tools::execute_tool(&tc, &state, &conn, &db, &db_type, sql_permissions).await }
             })
             .collect();
         let parallel_results = join_all(parallel_futures).await;
@@ -370,7 +375,8 @@ pub async fn run_agent_loop(
         let mut sequential_results = Vec::with_capacity(sequential_indices.len());
         for &i in &sequential_indices {
             let tc = make_tc(&collected_tool_calls[i]);
-            sequential_results.push(agent_tools::execute_tool(&tc, &state2, &conn2, &db2, &db_type).await);
+            sequential_results
+                .push(agent_tools::execute_tool(&tc, &state2, &conn2, &db2, &db_type, sql_permissions).await);
         }
 
         // Merge results back into original order

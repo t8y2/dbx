@@ -1,6 +1,7 @@
 package com.dbx.agent.kingbase;
 
 import com.dbx.agent.ColumnInfo;
+import com.dbx.agent.ConnectParams;
 import com.dbx.agent.DatabaseAgent;
 import com.dbx.agent.DatabaseInfo;
 import com.dbx.agent.IndexInfo;
@@ -113,6 +114,27 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         Assertions.assertEquals(Arrays.asList("public", "sys_catalog"), agent.listSchemas());
         Assertions.assertTrue(sql.get(0).contains("FROM sys_namespace"), sql.get(0));
         Assertions.assertFalse(sql.get(0).contains("SYS%"), sql.get(0));
+    }
+
+    @Test
+    void postgresCompatModeUsesPostgresCatalogForMetadata() throws Exception {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        Connection connection = postgresCatalogConnection(sql, resultSet(
+            new String[]{"schema_name"},
+            new Object[][]{{"public"}}
+        ));
+
+        Method afterConnect = KingbaseAgent.class.getDeclaredMethod("afterConnect", ConnectParams.class, Connection.class);
+        afterConnect.setAccessible(true);
+        afterConnect.invoke(agent, new ConnectParams(), connection);
+        TestSupport.setPrivateConnection(agent, connection);
+
+        Assertions.assertEquals(List.of("public"), agent.listSchemas());
+        Assertions.assertEquals("SELECT 1 FROM sys_catalog.sys_namespace WHERE 1 = 0", sql.get(0));
+        Assertions.assertEquals("SELECT 1 FROM pg_catalog.pg_namespace WHERE 1 = 0", sql.get(1));
+        Assertions.assertTrue(sql.get(2).contains("FROM pg_catalog.pg_namespace"), sql.get(2));
+        Assertions.assertEquals("SET search_path TO \"app\"", agent.setSchemaSQL("app"));
     }
 
     @Test
@@ -458,6 +480,34 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
             if ("isClosed".equals(method.getName())) {
                 return false;
             }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Connection postgresCatalogConnection(List<String> sql, ResultSet metadataResult) {
+        return proxy(Connection.class, (method, args) -> {
+            if ("createStatement".equals(method.getName())) {
+                return proxy(Statement.class, (statementMethod, statementArgs) -> {
+                    if ("executeQuery".equals(statementMethod.getName())) {
+                        String query = String.valueOf(statementArgs[0]);
+                        sql.add(query);
+                        if (query.contains("sys_catalog.sys_namespace")) {
+                            throw new SQLException("relation does not exist: sys_catalog.sys_namespace");
+                        }
+                        return resultSet(new String[]{"probe"}, new Object[][]{});
+                    }
+                    return defaultValue(statementMethod.getReturnType());
+                });
+            }
+            if ("prepareStatement".equals(method.getName())) {
+                String query = String.valueOf(args[0]);
+                sql.add(query);
+                return proxy(PreparedStatement.class, (statementMethod, statementArgs) -> {
+                    if ("executeQuery".equals(statementMethod.getName())) return metadataResult;
+                    return defaultValue(statementMethod.getReturnType());
+                });
+            }
+            if ("isClosed".equals(method.getName())) return false;
             return defaultValue(method.getReturnType());
         });
     }

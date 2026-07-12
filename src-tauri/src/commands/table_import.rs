@@ -45,11 +45,10 @@ pub async fn import_table_file(
     // Reject import early if the connection is read-only — importing is inherently a write operation
     ensure_connection_writable(&state, &request.connection_id, "Import").await?;
     let db_type = get_db_type(&state, &request.connection_id).await?;
-    let pool_key = if request.database.is_empty() {
-        request.connection_id.clone()
-    } else {
-        state.get_or_create_pool(&request.connection_id, Some(&request.database)).await?
-    };
+    let database = (!request.database.trim().is_empty()).then_some(request.database.as_str());
+    let client_session_id = dbx_core::table_import::table_import_client_session_id(&request.import_id);
+    let pool_key =
+        state.get_or_create_pool_for_session(&request.connection_id, database, Some(&client_session_id)).await?;
 
     let result = dbx_core::table_import::import_table_file_core(
         &state,
@@ -61,6 +60,7 @@ pub async fn import_table_file(
     )
     .await;
 
+    let _ = state.close_client_session_pool(&request.connection_id, database, &client_session_id).await;
     clear_cancelled(&request.import_id).await;
     result
 }

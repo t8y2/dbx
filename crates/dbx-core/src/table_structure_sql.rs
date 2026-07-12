@@ -6,6 +6,7 @@ mod create_table;
 mod dialect;
 mod foreign_keys;
 mod indexes;
+mod sqlite_rebuild;
 mod triggers;
 mod types;
 mod util;
@@ -16,6 +17,7 @@ mod tests;
 
 pub use column_alter::build_single_column_alter_sql;
 pub use create_table::build_create_table_sql;
+pub use sqlite_rebuild::{apply_sqlite_table_structure_change, preview_sqlite_table_structure_change};
 pub use types::*;
 
 use columns::build_column_sql;

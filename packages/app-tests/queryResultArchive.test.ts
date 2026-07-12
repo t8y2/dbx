@@ -34,6 +34,10 @@ test("query result archives round-trip query tab metadata and result runs", asyn
             [1, "Ada"],
             [2, "Linus"],
           ],
+          mongo_documents: [
+            { _id: "1", profile: { role: "admin" } },
+            { _id: "2", profile: { role: "maintainer" } },
+          ],
           affected_rows: 0,
           execution_time_ms: 3,
           session_id: "live-session",
@@ -60,6 +64,8 @@ test("query result archives round-trip query tab metadata and result runs", asyn
       affected_rows: 0,
       execution_time_ms: 5,
     },
+    resultLocalSortOriginalRows: [[1, "pending"]],
+    resultLocalSortOriginalMongoDocuments: [{ _id: "1", status: "pending" }],
   });
   const snapshot = buildTabResultSnapshot(tab);
   assert.ok(snapshot);
@@ -79,7 +85,13 @@ test("query result archives round-trip query tab metadata and result runs", asyn
     [1, "Ada"],
     [2, "Linus"],
   ]);
+  assert.deepEqual(decoded?.snapshot.resultRuns?.[0]?.result?.mongo_documents, [
+    { _id: "1", profile: { role: "admin" } },
+    { _id: "2", profile: { role: "maintainer" } },
+  ]);
   assert.equal(decoded?.snapshot.resultRuns?.[0]?.result?.session_id, undefined);
+  assert.deepEqual(decoded?.snapshot.resultLocalSortOriginalRows, [[1, "pending"]]);
+  assert.deepEqual(decoded?.snapshot.resultLocalSortOriginalMongoDocuments, [{ _id: "1", status: "pending" }]);
 });
 
 test("query result archives reject invalid files", async () => {

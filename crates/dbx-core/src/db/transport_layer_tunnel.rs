@@ -247,6 +247,7 @@ mod tests {
 
     fn ssh_layer(id: &str, host: &str, port: u16) -> TransportLayerConfig {
         TransportLayerConfig::Ssh(SshTunnelConfig {
+            profile_id: String::new(),
             id: id.to_string(),
             name: String::new(),
             enabled: true,
@@ -266,6 +267,7 @@ mod tests {
 
     fn proxy_layer(id: &str, host: &str, port: u16) -> TransportLayerConfig {
         TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            profile_id: String::new(),
             id: id.to_string(),
             name: String::new(),
             enabled: true,
@@ -279,6 +281,7 @@ mod tests {
 
     fn http_tunnel_layer(id: &str, url: &str) -> TransportLayerConfig {
         TransportLayerConfig::HttpTunnel(HttpTunnelConfig {
+            profile_id: String::new(),
             id: id.to_string(),
             name: String::new(),
             enabled: true,

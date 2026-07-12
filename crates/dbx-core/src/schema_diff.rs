@@ -984,12 +984,110 @@ fn quote_id(name: &str, db_type: DatabaseType) -> String {
     }
 }
 
+fn mysql_default_value(default: &str, data_type: &str) -> String {
+    let trimmed = default.trim();
+    if is_mysql_default_expression(trimmed) || !is_mysql_string_literal_type(data_type) {
+        return default.to_string();
+    }
+
+    // MySQL metadata returns string defaults as values rather than reusable DDL tokens.
+    let literal = format!("'{}'", default.replace('\'', "''"));
+    if mysql_default_requires_expression(data_type) {
+        format!("({literal})")
+    } else {
+        literal
+    }
+}
+
+fn is_mysql_default_expression(default: &str) -> bool {
+    let upper = default.to_ascii_uppercase();
+    (default.starts_with('(') && default.ends_with(')'))
+        || (default.starts_with('\'') && default.ends_with('\''))
+        || (default.starts_with('"') && default.ends_with('"'))
+        || upper == "NULL"
+        || upper == "CURRENT_TIMESTAMP"
+        || upper.strip_prefix("CURRENT_TIMESTAMP(").is_some_and(|precision| {
+            precision.ends_with(')') && precision[..precision.len() - 1].chars().all(|c| c.is_ascii_digit())
+        })
+        || matches!(upper.as_bytes(), [b'B' | b'X', b'\'', .., b'\''])
+}
+
+fn is_mysql_string_literal_type(data_type: &str) -> bool {
+    let base_type = mysql_base_type(data_type);
+    matches!(
+        base_type.as_str(),
+        "char"
+            | "varchar"
+            | "tinytext"
+            | "text"
+            | "mediumtext"
+            | "longtext"
+            | "tinyblob"
+            | "blob"
+            | "mediumblob"
+            | "longblob"
+            | "binary"
+            | "varbinary"
+            | "enum"
+            | "set"
+            | "date"
+            | "datetime"
+            | "timestamp"
+            | "time"
+            | "year"
+            | "json"
+            | "geometry"
+            | "point"
+            | "linestring"
+            | "polygon"
+            | "multipoint"
+            | "multilinestring"
+            | "multipolygon"
+            | "geometrycollection"
+    )
+}
+
+fn mysql_default_requires_expression(data_type: &str) -> bool {
+    let base_type = mysql_base_type(data_type);
+    matches!(
+        base_type.as_str(),
+        "tinytext"
+            | "text"
+            | "mediumtext"
+            | "longtext"
+            | "tinyblob"
+            | "blob"
+            | "mediumblob"
+            | "longblob"
+            | "json"
+            | "geometry"
+            | "point"
+            | "linestring"
+            | "polygon"
+            | "multipoint"
+            | "multilinestring"
+            | "multipolygon"
+            | "geometrycollection"
+    )
+}
+
+fn mysql_base_type(data_type: &str) -> String {
+    data_type
+        .trim_start()
+        .split(|c: char| c == '(' || c.is_ascii_whitespace())
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
 fn column_def(col: &ColumnInfo, db_type: DatabaseType) -> String {
     let mut definition = format!("{} {}", quote_id(&col.name, db_type), col.data_type);
     if !col.is_nullable {
         definition.push_str(" NOT NULL");
     }
     if let Some(default) = &col.column_default {
+        let default =
+            if db_type == DatabaseType::Mysql { mysql_default_value(default, &col.data_type) } else { default.clone() };
         definition.push_str(&format!(" DEFAULT {default}"));
     }
     if is_mysql_like(db_type) {
@@ -1509,7 +1607,42 @@ mod tests {
             numeric_scale: None,
             character_maximum_length: None,
             enum_values: None,
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn formats_mysql_metadata_defaults_as_valid_column_definitions() {
+        let cases = [
+            ("varchar(50)", "外籍一般件", "DEFAULT '外籍一般件'"),
+            ("VARCHAR(50)", "uppercase type", "DEFAULT 'uppercase type'"),
+            ("varchar(50)", "", "DEFAULT ''"),
+            ("varchar(50)", "O'Reilly\\docs", "DEFAULT 'O''Reilly\\docs'"),
+            ("int", "7", "DEFAULT 7"),
+            ("decimal(10,2)", "1.00", "DEFAULT 1.00"),
+            ("timestamp", "CURRENT_TIMESTAMP", "DEFAULT CURRENT_TIMESTAMP"),
+            ("timestamp(3)", "CURRENT_TIMESTAMP(3)", "DEFAULT CURRENT_TIMESTAMP(3)"),
+            ("varchar(36)", "(UUID())", "DEFAULT (UUID())"),
+            ("json", "(JSON_ARRAY())", "DEFAULT (JSON_ARRAY())"),
+            ("text", "plain text", "DEFAULT ('plain text')"),
+            ("json", "{}", "DEFAULT ('{}')"),
+            ("varchar(50)", "'already quoted'", "DEFAULT 'already quoted'"),
+        ];
+
+        for (data_type, default, expected) in cases {
+            let mut source = column("value", data_type, None);
+            source.column_default = Some(default.to_string());
+            assert!(column_def(&source, DatabaseType::Mysql).contains(expected), "{data_type}: {default}");
+        }
+    }
+
+    #[test]
+    fn leaves_non_mysql_defaults_unchanged() {
+        let mut source = column("value", "varchar(50)", None);
+        source.column_default = Some("unquoted_metadata_value".to_string());
+
+        assert!(column_def(&source, DatabaseType::Postgres).contains("DEFAULT unquoted_metadata_value"));
+        assert!(column_def(&source, DatabaseType::Doris).contains("DEFAULT unquoted_metadata_value"));
     }
 
     #[test]
@@ -1963,6 +2096,7 @@ mod tests {
                     numeric_scale: None,
                     character_maximum_length: None,
                     enum_values: None,
+                    ..Default::default()
                 }),
                 target: None,
                 changes: Vec::new(),

@@ -1,5 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
+import { isLosslessJsonNumber } from "../../apps/desktop/src/lib/common/safeJsonFormat.ts";
 import {
   canRenderRedisValueFormat,
   canEditRedisMemberDetail,
@@ -54,6 +55,15 @@ test("parses Redis JSON details for any valid JSON payload", () => {
   assert.equal(parseRedisJsonDetail('"plain json string"')?.formattedText, '"plain json string"');
   assert.equal(parseRedisJsonDetail("123")?.formattedText, "123");
   assert.equal(parseRedisJsonDetail("plain redis value"), null);
+});
+
+test("preserves large Redis JSON integers in formatted and tree values", () => {
+  const detail = parseRedisJsonDetail('{"companyId":518400931654815740,"nested":[-9007199254740992]}');
+
+  assert.equal(detail?.formattedText, '{\n  "companyId": 518400931654815740,\n  "nested": [\n    -9007199254740992\n  ]\n}');
+  const value = detail?.value as { companyId?: unknown; nested?: unknown[] };
+  assert.equal(isLosslessJsonNumber(value.companyId) ? value.companyId.raw : null, "518400931654815740");
+  assert.equal(isLosslessJsonNumber(value.nested?.[0]) ? value.nested[0].raw : null, "-9007199254740992");
 });
 
 test("string/blob formats stay text-oriented and binary-first where needed", () => {

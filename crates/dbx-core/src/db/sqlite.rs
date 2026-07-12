@@ -1142,6 +1142,7 @@ pub async fn get_columns(pool: &SqliteHandle, _schema: &str, table: &str) -> Res
                         numeric_scale: None,
                         character_maximum_length: None,
                         enum_values: None,
+                        ..Default::default()
                     })
                 })
                 .map_err(|e| e.to_string())?;

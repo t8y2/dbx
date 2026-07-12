@@ -18,9 +18,10 @@ const DatabaseSearchDialog = defineAsyncComponent(() => import("@/components/sea
 const DatabaseExportDialog = defineAsyncComponent(() => import("@/components/export/DatabaseExportDialog.vue"));
 const DataGenerateDialog = defineAsyncComponent(() => import("@/components/generate/DataGenerateDialog.vue"));
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { useDialogSources } from "@/composables/useDialogSources";
 import type { ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
-import type { SqlParameterDescriptor } from "@/lib/sql/sqlParameters";
+import type { SqlParameterDescriptor, SqlParameterSyntax } from "@/lib/sql/sqlParameters";
 import type { ConfigTab } from "@/components/connection/ConnectionDialog.vue";
 import type { DatabaseType } from "@/types/database";
 
@@ -35,6 +36,7 @@ const props = defineProps<{
   sqlParameterSourceSql: string;
   sqlParameterNames: SqlParameterDescriptor[];
   sqlParameterDatabaseType?: DatabaseType;
+  sqlParameterEnabledSyntaxes?: SqlParameterSyntax[];
 }>();
 
 const emit = defineEmits<{
@@ -48,6 +50,7 @@ const emit = defineEmits<{
   connectSucceeded: [name: string];
   connectFailed: [message: string];
   openDriverStore: [];
+  openTunnelProfileSettings: [];
   openLineageTarget: [
     target: {
       connectionId: string;
@@ -81,7 +84,17 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
+const productionSafetyStore = useProductionSafetyStore();
 const dialogs = useDialogSources();
+const productionConfirmationDetails = computed(() => {
+  const request = productionSafetyStore.pending;
+  if (!request) return "";
+  return t("production.confirmDetails", {
+    connection: request.connectionName || "-",
+    database: request.productionDatabases?.join(", ") || request.database || "-",
+    source: request.source || "-",
+  });
+});
 
 const editConfig = computed(() => {
   const id = connectionStore.editingConnectionId;
@@ -124,6 +137,7 @@ watch(
     @connect-succeeded="emit('connectSucceeded', $event)"
     @connect-failed="emit('connectFailed', $event)"
     @open-driver-store="emit('openDriverStore')"
+    @open-tunnel-profile-settings="emit('openTunnelProfileSettings')"
   />
   <DangerConfirmDialog
     v-if="showDangerDialog"
@@ -135,7 +149,28 @@ watch(
     @update:suppress-future-prompts="emit('update:suppressDangerConfirm', $event)"
     @confirm="emit('dangerConfirm')"
   />
-  <SqlParameterDialog v-if="showSqlParameterDialog" :open="showSqlParameterDialog" :sql="sqlParameterSourceSql" :parameters="sqlParameterNames" :database-type="sqlParameterDatabaseType" @update:open="emit('update:showSqlParameterDialog', $event)" @execute="emit('sqlParametersConfirm', $event)" />
+  <DangerConfirmDialog
+    v-if="productionSafetyStore.pending"
+    :open="true"
+    :title="t('production.confirmTitle')"
+    :message="t('production.confirmMessage')"
+    :details-text="productionConfirmationDetails"
+    :sql="productionSafetyStore.pending.sql"
+    :confirm-label="t('production.confirmAction')"
+    :close-on-confirm="false"
+    @update:open="(open) => !open && productionSafetyStore.cancel()"
+    @confirm="productionSafetyStore.confirm()"
+  />
+  <SqlParameterDialog
+    v-if="showSqlParameterDialog"
+    :open="showSqlParameterDialog"
+    :sql="sqlParameterSourceSql"
+    :parameters="sqlParameterNames"
+    :database-type="sqlParameterDatabaseType"
+    :enabled-syntaxes="sqlParameterEnabledSyntaxes"
+    @update:open="emit('update:showSqlParameterDialog', $event)"
+    @execute="emit('sqlParametersConfirm', $event)"
+  />
   <DataTransferDialog v-model:open="dialogs.showTransferDialog.value" :prefill-connection-id="dialogs.transferPrefillConnectionId.value" :prefill-database="dialogs.transferPrefillDatabase.value" />
   <SchemaDiffDialog v-if="dialogs.showSchemaDiffDialog.value" v-model:open="dialogs.showSchemaDiffDialog.value" :prefill-connection-id="dialogs.schemaDiffPrefillConnectionId.value" :prefill-database="dialogs.schemaDiffPrefillDatabase.value" :prefill-schema="dialogs.schemaDiffPrefillSchema.value" />
   <DataCompareDialog

@@ -1,3 +1,6 @@
+import { COLUMN_WIDTH_DENSITY_PRESETS } from "@/lib/dataGrid/dataGridColumnWidth";
+import type { ColumnWidthDensity } from "@/stores/settingsStore";
+
 export interface DataGridTransposeState {
   showTranspose: boolean;
   transposeRowIndex: number | null;
@@ -82,6 +85,63 @@ export interface TransposeFieldWidthOptions {
   maxWidth?: number;
   charWidth?: number;
   padding?: number;
+  density?: ColumnWidthDensity;
+}
+
+export interface TransposeRecordWidthsOptions {
+  records: readonly (readonly unknown[])[];
+  density: ColumnWidthDensity;
+  previousWidths?: readonly number[];
+  manualWidthIndexes?: ReadonlySet<number>;
+}
+
+const TRANSPOSE_RECORD_MIN_WIDTH = 96;
+const TRANSPOSE_RECORD_DEFAULT_WIDTH = 168;
+const TRANSPOSE_FIELD_MIN_WIDTH = 104;
+const TRANSPOSE_FIELD_MAX_WIDTH = 220;
+const STANDARD_CHAR_WIDTH = COLUMN_WIDTH_DENSITY_PRESETS.standard.charWidth;
+
+function densityScaledWidth(width: number, density: ColumnWidthDensity): number {
+  return Math.round((width * COLUMN_WIDTH_DENSITY_PRESETS[density].charWidth) / STANDARD_CHAR_WIDTH);
+}
+
+function transposeDisplayText(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  return typeof value === "object" ? (JSON.stringify(value) ?? String(value)) : String(value);
+}
+
+export function defaultTransposeRecordWidth(density: ColumnWidthDensity): number {
+  return densityScaledWidth(TRANSPOSE_RECORD_DEFAULT_WIDTH, density);
+}
+
+export function minTransposeRecordWidth(density: ColumnWidthDensity): number {
+  return densityScaledWidth(TRANSPOSE_RECORD_MIN_WIDTH, density);
+}
+
+export function minTransposeFieldWidth(density: ColumnWidthDensity): number {
+  return densityScaledWidth(TRANSPOSE_FIELD_MIN_WIDTH, density);
+}
+
+export function calculateTransposeRecordWidth(values: readonly unknown[], density: ColumnWidthDensity): number {
+  const preset = COLUMN_WIDTH_DENSITY_PRESETS[density];
+  const minWidth = minTransposeRecordWidth(density);
+  let maxWidth = minWidth;
+  for (const value of values) {
+    const displayLen = Math.min(transposeDisplayText(value).length, preset.valueTextLimit);
+    maxWidth = Math.max(maxWidth, displayLen * preset.charWidth + preset.cellPadding);
+  }
+  return Math.max(minWidth, Math.min(preset.maxWidth, Math.round(maxWidth)));
+}
+
+export function transposeRecordWidthsForDensity(options: TransposeRecordWidthsOptions): number[] {
+  const previousWidths = options.previousWidths ?? [];
+  const manualWidthIndexes = options.manualWidthIndexes ?? new Set<number>();
+  return options.records.map((record, index) => (manualWidthIndexes.has(index) && previousWidths[index] !== undefined ? previousWidths[index] : calculateTransposeRecordWidth(record, options.density)));
+}
+
+export function averageTransposeRecordWidth(widths: readonly number[], density: ColumnWidthDensity): number {
+  if (widths.length === 0) return defaultTransposeRecordWidth(density);
+  return widths.reduce((sum, width) => sum + width, 0) / widths.length;
 }
 
 export interface TransposeScrollLeftOptions {
@@ -218,10 +278,12 @@ export function transposeAnchorRowIndex(options: TransposeAnchorOptions): number
 }
 
 export function transposeFieldWidth(columns: string[], options: TransposeFieldWidthOptions = {}): number {
-  const minWidth = options.minWidth ?? 104;
-  const maxWidth = options.maxWidth ?? 220;
-  const charWidth = options.charWidth ?? 8;
-  const padding = options.padding ?? 32;
+  const density = options.density ?? "standard";
+  const preset = COLUMN_WIDTH_DENSITY_PRESETS[density];
+  const minWidth = options.minWidth ?? minTransposeFieldWidth(density);
+  const maxWidth = options.maxWidth ?? densityScaledWidth(TRANSPOSE_FIELD_MAX_WIDTH, density);
+  const charWidth = options.charWidth ?? preset.charWidth;
+  const padding = options.padding ?? preset.cellPadding + 4;
   const longest = columns.reduce((max, column) => Math.max(max, column.length), 0);
   return Math.min(maxWidth, Math.max(minWidth, Math.ceil(longest * charWidth + padding)));
 }

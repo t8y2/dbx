@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { sortDataGridRows } from "../../apps/desktop/src/lib/dataGrid/dataGridSort.ts";
+import { sortDataGridRowIndexes, sortDataGridRows } from "../../apps/desktop/src/lib/dataGrid/dataGridSort.ts";
 
 test("sortDataGridRows sorts numbers numerically and keeps null values last", () => {
   const rows = [
@@ -42,4 +42,11 @@ test("sortDataGridRows sorts ISO date strings by time", () => {
   const rows = [["2026-02-01"], ["2025-12-31"], ["2026-01-01"]];
 
   assert.deepEqual(sortDataGridRows(rows, 0, "asc"), [["2025-12-31"], ["2026-01-01"], ["2026-02-01"]]);
+});
+
+test("sortDataGridRowIndexes preserves stable source ordering", () => {
+  const rows = [["item-10"], ["item-2"], ["item-2"]];
+
+  assert.deepEqual(sortDataGridRowIndexes(rows, 0, "asc"), [1, 2, 0]);
+  assert.deepEqual(sortDataGridRowIndexes(rows, 0, "desc"), [0, 1, 2]);
 });

@@ -7,6 +7,7 @@ import {
   canEditExistingTableRows,
   canInsertTableRows,
   editablePrimaryKeys,
+  hasCompleteTdengineRowIdentity,
   hiveTablePropertiesIndicateTransactional,
   isHiddenGridColumn,
   isTdengineExistingRowReadonlyColumn,
@@ -39,8 +40,12 @@ test("does not synthesize ROWID for non-Oracle keyless tables", () => {
   assert.deepEqual(editablePrimaryKeys("mysql", [column("ID"), column("CITY")]), []);
 });
 
-test("uses tbname and timestamp as TDengine editable keys", () => {
-  assert.deepEqual(editablePrimaryKeys("tdengine", [column("ts", true), column("current")]), [DBX_TDENGINE_TBNAME_COLUMN, "ts"]);
+test("uses table-specific TDengine editable keys", () => {
+  const columns = [column("ts", true), column("seq", true), column("current")];
+  assert.deepEqual(editablePrimaryKeys("tdengine", columns, "STABLE"), [DBX_TDENGINE_TBNAME_COLUMN, "ts", "seq"]);
+  assert.deepEqual(editablePrimaryKeys("tdengine", columns, "TABLE"), ["ts", "seq"]);
+  assert.equal(hasCompleteTdengineRowIdentity("tdengine", [DBX_TDENGINE_TBNAME_COLUMN, "ts", "seq"], ["tbname", "ts", "seq", "current"]), true);
+  assert.equal(hasCompleteTdengineRowIdentity("tdengine", [DBX_TDENGINE_TBNAME_COLUMN, "ts", "seq"], ["tbname", "ts", "current"]), false);
 });
 
 test("allows updateable SQL table data editing even without declared primary keys", () => {
@@ -97,7 +102,8 @@ test("allows existing row edits according to database-specific key requirements"
   assert.equal(canEditExistingTableRows("duckdb", undefined, ["id"]), true);
   assert.equal(canEditExistingTableRows("informix", undefined, []), true);
   assert.equal(canEditExistingTableRows("informix", undefined, ["id"]), true);
-  assert.equal(canEditExistingTableRows("tdengine", undefined, ["ts"]), false);
+  assert.equal(canEditExistingTableRows("tdengine", undefined, []), false);
+  assert.equal(canEditExistingTableRows("tdengine", undefined, ["ts"]), true);
   assert.equal(canEditExistingTableRows("tdengine", undefined, [DBX_TDENGINE_TBNAME_COLUMN, "ts"]), true);
   assert.equal(canEditExistingTableRows("postgres", undefined), true);
 });
@@ -126,6 +132,7 @@ test("uses elementId as Neo4j editable key when labels have no primary key", () 
 test("keeps TDengine existing row identity and tag columns read-only", () => {
   assert.equal(isTdengineExistingRowReadonlyColumn("tdengine", DBX_TDENGINE_TBNAME_COLUMN, [column("ts", true)]), true);
   assert.equal(isTdengineExistingRowReadonlyColumn("tdengine", "ts", [column("ts", true)]), true);
+  assert.equal(isTdengineExistingRowReadonlyColumn("tdengine", "seq", [column("ts", true), column("seq", true)]), true);
   assert.equal(isTdengineExistingRowReadonlyColumn("tdengine", "location", [column("location")]), false);
   assert.equal(isTdengineExistingRowReadonlyColumn("mysql", "ts", [column("ts", true)]), false);
   assert.equal(isTdengineExistingRowReadonlyColumn("tdengine", "location", [{ ...column("location"), extra: "TAG", comment: "TAG" }]), true);

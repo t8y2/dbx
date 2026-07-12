@@ -4,6 +4,7 @@ export type DatabaseType =
   | "sqlite"
   | "rqlite"
   | "turso"
+  | "cloudflare-d1"
   | "redis"
   | "duckdb"
   | "clickhouse"
@@ -157,9 +158,21 @@ export interface ConnectionConfig {
   external_config?: unknown;
   one_time?: boolean;
   read_only?: boolean;
+  /** Explicit production marker for every database reachable through this connection. */
+  is_production?: boolean;
+  /** Database-level production markers for multi-database connections. */
+  production_databases?: string[];
 }
 
 export type TransportLayerConfig = ({ type: "ssh" } & SshTunnelConfig) | ({ type: "proxy" } & ProxyTunnelConfig) | ({ type: "http_tunnel" } & HttpTunnelConfig);
+
+/**
+ * A shared tunnel configuration managed in Settings > Tunnels. Structurally a
+ * `TransportLayerConfig`; its `id` is what connection layers reference via
+ * `profile_id`. Edits to a profile apply to every referencing connection the
+ * next time it connects.
+ */
+export type TunnelProfile = TransportLayerConfig;
 
 export interface SshTunnelConfig {
   id: string;
@@ -186,6 +199,12 @@ export interface SshTunnelConfig {
    * for connections that already have `use_ssh_agent` configured.
    */
   auth_method?: "password" | "key" | "agent" | "none";
+  /**
+   * When set, this layer references a shared tunnel profile; the profile's
+   * configuration replaces this layer's fields at connect time (only `id`
+   * and `enabled` are kept).
+   */
+  profile_id?: string;
 }
 
 export interface SshConfigHostEntry {
@@ -205,6 +224,8 @@ export interface ProxyTunnelConfig {
   port: number;
   username?: string;
   password?: string;
+  /** See {@link SshTunnelConfig.profile_id}. */
+  profile_id?: string;
 }
 
 export interface HttpTunnelConfig {
@@ -214,6 +235,8 @@ export interface HttpTunnelConfig {
   url: string;
   token?: string;
   connect_timeout_secs?: number;
+  /** See {@link SshTunnelConfig.profile_id}. */
+  profile_id?: string;
 }
 
 export interface AttachedDatabaseConfig {
@@ -270,6 +293,21 @@ export interface JdbcMavenBundleInfo {
   installed_at: string;
   path: string;
   artifacts: JdbcMavenArtifactInfo[];
+}
+
+export interface JdbcLocalArtifactInfo {
+  file_name: string;
+  path: string;
+  size: number;
+  sha256: string;
+}
+
+export interface JdbcLocalBundleInfo {
+  id: string;
+  name: string;
+  installed_at: string;
+  path: string;
+  artifacts: JdbcLocalArtifactInfo[];
 }
 
 export interface JdbcPluginStatus {
@@ -358,6 +396,8 @@ export interface ColumnInfo {
   numeric_scale?: number | null;
   character_maximum_length?: number | null;
   enum_values?: string[] | null;
+  character_set?: string | null;
+  collation?: string | null;
 }
 
 export interface IndexInfo {
@@ -428,6 +468,10 @@ export interface OwnerInfo {
 
 export interface QueryResult {
   columns: string[];
+  /** Set for synthesized query execution failures. */
+  execution_error?: true;
+  /** Internal row identifiers appended to editable query results. */
+  hidden_column_indexes?: number[];
   /**
    * Database type name for each column, parallel to `columns`. Optional and may
    * be shorter/empty when a driver cannot supply types (schemaless stores,
@@ -440,6 +484,11 @@ export interface QueryResult {
    */
   column_sortables?: boolean[];
   rows: (string | number | boolean | null)[][];
+  /**
+   * Original MongoDB documents, kept in lockstep with `rows` for document
+   * preview. This is populated only for MongoDB document query results.
+   */
+  mongo_documents?: unknown[];
   affected_rows: number;
   execution_time_ms: number;
   truncated?: boolean;
@@ -465,6 +514,7 @@ export interface QueryResultRun {
   resultSortDirection?: "asc" | "desc";
   resultSortMode?: "database" | "local";
   resultLocalSortOriginalRows?: QueryResult["rows"];
+  resultLocalSortOriginalMongoDocuments?: QueryResult["mongo_documents"];
   orderByInput?: string;
   resultPageSql?: string;
   resultPageLimit?: number;
@@ -609,6 +659,8 @@ export interface TreeNode {
   nacosNamespaceName?: string;
   schema?: string;
   tableName?: string;
+  objectName?: string;
+  signature?: string;
   tableType?: string;
   comment?: string | null;
   objectCount?: number;
@@ -679,6 +731,7 @@ export interface QueryTab {
   resultSortDirection?: "asc" | "desc";
   resultSortMode?: "database" | "local";
   resultLocalSortOriginalRows?: QueryResult["rows"];
+  resultLocalSortOriginalMongoDocuments?: QueryResult["mongo_documents"];
   orderByInput?: string;
   resultPageSql?: string;
   resultPageLimit?: number;
@@ -698,8 +751,12 @@ export interface QueryTab {
   activeResultRunId?: string;
   resultAutoSave?: boolean;
   explainPlan?: import("@/lib/diagram/explainPlan").ParsedExplainPlan;
+  /** MySQL's regular EXPLAIN result, kept alongside its JSON visual plan. */
+  explainTableResult?: QueryResult;
   explainError?: string;
+  explainTableError?: string;
   explainSql?: string;
+  explainTableSql?: string;
   lastExplainedSql?: string;
   isExecuting: boolean;
   isCancelling?: boolean;
@@ -715,6 +772,8 @@ export interface QueryTab {
   executionId?: string;
   isExplaining?: boolean;
   explainExecutionId?: string;
+  /** Per-run connection session for sequential MySQL explain formats. */
+  explainClientSessionId?: string;
   mode: "data" | "query" | "redis" | "redis-dashboard" | "mongo" | "mongo-gridfs" | "mongo-bucket" | "vector" | "etcd" | "zookeeper" | "mq" | "nacos" | "objects" | "structure" | "users" | "dameng-jobs";
   mqTenant?: string;
   mqInitialTab?: "topics";
@@ -726,6 +785,7 @@ export interface QueryTab {
   structureInitialTarget?: TableStructureEditorTarget;
   structureDraft?: TableStructureEditorDraft;
   objectBrowser?: {
+    catalog?: string;
     schema?: string;
     objectType?: "tables";
     viewport?: ObjectBrowserViewport;
@@ -756,6 +816,7 @@ export interface QueryTab {
     selectStar: boolean;
     editableSourceKey?: string;
     multiSource?: boolean;
+    allowInsert?: boolean;
     allowInsertDelete?: boolean;
     sources?: {
       key: string;

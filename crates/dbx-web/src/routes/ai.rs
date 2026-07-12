@@ -83,6 +83,8 @@ pub struct AiAgentStreamRequest {
     /// Defaults to "ask" if not provided.
     #[serde(default = "default_agent_mode")]
     pub mode: String,
+    #[serde(default)]
+    pub allow_write_sql: bool,
 }
 
 fn default_agent_mode() -> String {
@@ -258,6 +260,13 @@ pub async fn ai_agent_stream(
 
     let parsed_db_type: DatabaseType = serde_json::from_str(&format!("\"{}\"", body.db_type))
         .map_err(|_| AppError(format!("Unknown database type: {}", body.db_type)))?;
+    let production_database = state
+        .app
+        .configs
+        .read()
+        .await
+        .get(&body.connection_id)
+        .is_some_and(|config| dbx_core::production_safety::is_production_database(config, &body.database));
 
     let agent_ctx = AgentLoopContext {
         state: state.app.clone(),
@@ -265,6 +274,10 @@ pub async fn ai_agent_stream(
         database: body.database,
         db_type: parsed_db_type,
         cli_mcp_server_command: None,
+        sql_permissions: dbx_core::agent_tools::AgentSqlPermissions {
+            allow_writes: !production_database && body.allow_write_sql,
+            allow_dangerous: !production_database && body.allow_write_sql,
+        },
     };
 
     let sid = session_id.clone();

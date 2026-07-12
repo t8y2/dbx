@@ -174,7 +174,7 @@ jobs:
         include:
           - jre-key: "21"
             java-version: "21"
-            modules: "java.base,java.sql,java.sql.rowset,java.naming,java.management,java.desktop,java.security.jgss,java.security.sasl,jdk.charsets,java.scripting"
+            modules: "java.base,java.sql,java.sql.rowset,java.naming,java.management,java.desktop,java.security.jgss,java.security.sasl,jdk.security.auth,jdk.security.jgss,jdk.charsets,jdk.unsupported,java.scripting,java.compiler"
     steps:
       - uses: actions/setup-java@v4
         with:
@@ -385,7 +385,7 @@ jobs:
           {
             "jres": {
               "21": {
-                "version": "21.0.12",
+                "version": "21.0.12+kerberos.1",
                 "platforms": {
           ${JRE21_PLATFORMS}
                 }
@@ -551,3 +551,70 @@ jobs:
             aws s3 cp "$f" "$R2_BUCKET/$key" --endpoint-url "$R2_ENDPOINT"
             echo "Uploaded $(basename $f)"
           done
+
+  sync-release-to-cnb:
+    name: Sync agents releases to CNB
+    needs: release
+    if: ${{ always() && needs.release.result == 'success' }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ["${{ github.ref_name }}", "agents-latest"]
+    steps:
+      - name: Sync release assets to CNB
+        env:
+          TAG_NAME: ${{ matrix.tag }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_USERNAME: ${{ github.repository_owner }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CNB_REPOSITORY: dbxio.com/dbx
+          CNB_USERNAME: cnb
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          wget -q https://cnb.cool/znb/mpgrm/-/releases/download/v0.1.0/mpgrm_linux_amd64.tar.gz
+          tar -xf mpgrm_linux_amd64.tar.gz
+          chmod +x mpgrm
+          ./mpgrm releases sync \
+            --repo "https://github.com/${GITHUB_REPOSITORY}.git" \
+            --target-repo "https://cnb.cool/${CNB_REPOSITORY}.git" \
+            --tags "${TAG_NAME}"
+
+  sync-release-to-atomgit:
+    name: Sync agents releases to AtomGit
+    needs: release
+    if: ${{ always() && needs.release.result == 'success' }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ["${{ github.ref_name }}", "agents-latest"]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Sync release assets to AtomGit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ matrix.tag }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          ATOMGIT_TOKEN: ${{ secrets.ATOMGIT_TOKEN }}
+          ATOMGIT_REPOSITORY: t8y2/dbx
+        run: |
+          set -euo pipefail
+          git fetch origin "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}" --force
+          git remote add atomgit "https://t8y2:${ATOMGIT_TOKEN}@atomgit.com/t8y2/dbx.git"
+          git push atomgit "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}" --force
+          mkdir -p "$RUNNER_TEMP/github-release" "$RUNNER_TEMP/release-assets"
+          gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" \
+            --json tagName,name,body,targetCommitish,isPrerelease,isDraft,assets \
+            > "$RUNNER_TEMP/github-release/release.json"
+          gh release download "$TAG_NAME" --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/release-assets" --clobber
+          node .github/scripts/sync-atomgit-release.mjs \
+            --github-release "$RUNNER_TEMP/github-release/release.json" \
+            --assets-dir "$RUNNER_TEMP/release-assets" \
+            ${{ matrix.tag == 'agents-latest' && '--replace-assets' || '' }}

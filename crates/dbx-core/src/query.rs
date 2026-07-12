@@ -4,6 +4,7 @@ use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, NaiveDateTime, Nai
 use duckdb::types::{TimeUnit, Value, ValueRef};
 use futures::StreamExt;
 use mysql_async::prelude::Queryable;
+use serde::Serialize;
 use sqlparser::ast::{visit_relations_mut, Ident, ObjectName, ObjectNamePart, ObjectType, Statement};
 use sqlparser::dialect::{GenericDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
@@ -23,6 +24,7 @@ use crate::connection::{AppState, PoolKind, TransactionSession, TxnConnection};
 use crate::database_capabilities;
 use crate::db;
 use crate::models::connection::{ConnectionConfig, DatabaseType};
+use crate::query_execution_sql::is_write_sql;
 #[cfg(feature = "duckdb-bundled")]
 use crate::sql::starts_with_duckdb_result_sql_keyword;
 use crate::sql::{split_sql_batches, split_sql_statements, starts_with_executable_sql_keyword};
@@ -40,6 +42,38 @@ pub enum PoolErrorAction {
     Keep,
     Discard,
     ReconnectAndRetry,
+}
+
+/// A multi-statement result with metadata intended for query clients.
+///
+/// `execution_error` is emitted only for synthesized MySQL-protocol errors so
+/// clients can distinguish them from a successful result column named `Error`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecuteMultiResult {
+    #[serde(flatten)]
+    pub result: db::QueryResult,
+    #[serde(skip_serializing_if = "is_false")]
+    pub execution_error: bool,
+}
+
+impl ExecuteMultiResult {
+    fn execution_error(result: db::QueryResult) -> Self {
+        Self { result, execution_error: true }
+    }
+
+    fn into_query_result(self) -> db::QueryResult {
+        self.result
+    }
+}
+
+impl From<db::QueryResult> for ExecuteMultiResult {
+    fn from(result: db::QueryResult) -> Self {
+        Self { result, execution_error: false }
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Unified database operation execution budget.
@@ -96,12 +130,14 @@ impl DbOperationBudget {
 /// Uses config_for_pool_key to correctly resolve configs when pool_key includes
 /// a database suffix (e.g., "prod:app" → config stored under "prod").
 pub async fn check_read_only_for_connection(state: &AppState, pool_key: &str, sql: &str) -> Result<(), String> {
-    let conn_name = {
+    let connection = {
         let configs = state.configs.read().await;
-        crate::connection::config_for_pool_key(pool_key, &configs).filter(|c| c.read_only).map(|c| c.name.clone())
+        crate::connection::config_for_pool_key(pool_key, &configs)
+            .filter(|config| config.read_only)
+            .map(|config| (config.name.clone(), config.db_type))
     };
-    if let Some(name) = conn_name {
-        crate::query_execution_sql::check_read_only(sql, &name)?;
+    if let Some((name, database_type)) = connection {
+        crate::query_execution_sql::check_read_only(sql, &name, database_type)?;
     }
     Ok(())
 }
@@ -112,13 +148,15 @@ pub async fn check_read_only_for_connection_multi(
     pool_key: &str,
     statements: &[impl AsRef<str>],
 ) -> Result<(), String> {
-    let conn_name = {
+    let connection = {
         let configs = state.configs.read().await;
-        crate::connection::config_for_pool_key(pool_key, &configs).filter(|c| c.read_only).map(|c| c.name.clone())
+        crate::connection::config_for_pool_key(pool_key, &configs)
+            .filter(|config| config.read_only)
+            .map(|config| (config.name.clone(), config.db_type))
     };
-    if let Some(name) = conn_name {
+    if let Some((name, database_type)) = connection {
         for sql in statements {
-            crate::query_execution_sql::check_read_only(sql.as_ref(), &name)?;
+            crate::query_execution_sql::check_read_only(sql.as_ref(), &name, database_type)?;
         }
     }
     Ok(())
@@ -828,6 +866,7 @@ fn should_discard_pool_after_query_timeout(db_type: Option<DatabaseType>) -> boo
                 | DatabaseType::SqlServer
                 | DatabaseType::Rqlite
                 | DatabaseType::Turso
+                | DatabaseType::CloudflareD1
                 | DatabaseType::Elasticsearch
                 | DatabaseType::Qdrant
                 | DatabaseType::Milvus
@@ -839,6 +878,16 @@ fn should_discard_pool_after_query_timeout(db_type: Option<DatabaseType>) -> boo
 
 pub fn should_discard_pool_after_error(db_type: Option<DatabaseType>, err: &str) -> bool {
     matches!(pool_error_action(db_type, err), PoolErrorAction::Discard | PoolErrorAction::ReconnectAndRetry)
+}
+
+fn query_pool_error_action(db_type: Option<DatabaseType>, sql: &str, err: &str) -> PoolErrorAction {
+    match pool_error_action(db_type, err) {
+        // A connection error does not prove that the database did not receive
+        // a write. Only replay statements already accepted by the read-only
+        // protection classifier; writes discard the stale pool without retry.
+        PoolErrorAction::ReconnectAndRetry if is_write_sql(sql) => PoolErrorAction::Discard,
+        action => action,
+    }
 }
 
 fn is_os_connection_error(lower: &str) -> bool {
@@ -1055,18 +1104,18 @@ pub async fn do_execute(
     let _activity_touch = state.pool_activity_touch(pool_key);
 
     let query_timeout = resolve_query_timeout(options.timeout_secs);
-    let (_duckdb_attached_names, conn_name_if_readonly) = {
+    let (_duckdb_attached_names, read_only_connection) = {
         let configs = state.configs.read().await;
         let config = crate::connection::config_for_pool_key(pool_key, &configs);
         let attached = config
             .map(|c| c.attached_databases.iter().map(|db| db.name.clone()).collect::<Vec<_>>())
             .unwrap_or_default();
-        let conn_name = config.filter(|c| c.read_only).map(|c| c.name.clone());
-        (attached, conn_name)
+        let connection = config.filter(|config| config.read_only).map(|config| (config.name.clone(), config.db_type));
+        (attached, connection)
     };
     let operation_budget = operation_budget_for_pool_key(state, pool_key, query_timeout).await;
-    if let Some(name) = conn_name_if_readonly {
-        crate::query_execution_sql::check_read_only(sql, &name)?;
+    if let Some((name, database_type)) = read_only_connection {
+        crate::query_execution_sql::check_read_only(sql, &name, database_type)?;
     }
     let pool_db_type = connection_database_type_for_pool_key(state, pool_key).await;
     let connections = state.connections.read().await;
@@ -1238,6 +1287,17 @@ pub async fn do_execute(
                 cancel_token,
                 query_timeout,
                 db::turso_driver::execute_query_with_max_rows(&client, sql, max_rows),
+            )
+            .await
+        }
+        PoolKind::CloudflareD1(client) => {
+            let client = client.clone();
+            let max_rows = options.max_rows;
+            drop(connections);
+            wait_for_query_opt(
+                cancel_token,
+                query_timeout,
+                db::cloudflare_d1_driver::execute_query_with_max_rows(&client, sql, max_rows),
             )
             .await
         }
@@ -1427,7 +1487,7 @@ pub async fn do_execute(
                 } else if options.page_size.is_some() {
                     let params =
                         external_driver_query_params(config.as_ref(), &sql, &database, schema.as_deref(), &options);
-                    session.invoke_with_timeout::<db::QueryResult>("executeQueryPage", params, plugin_timeout).await
+                    invoke_external_driver_query_page(session.as_ref(), params, plugin_timeout).await
                 } else {
                     let params =
                         external_driver_query_params(config.as_ref(), &sql, &database, schema.as_deref(), &options);
@@ -1439,6 +1499,33 @@ pub async fn do_execute(
         }
     };
     result.map(normalize_query_result_for_js)
+}
+
+async fn invoke_external_driver_query_page(
+    session: &crate::plugins::PluginDriverSession,
+    params: serde_json::Value,
+    plugin_timeout: Option<Duration>,
+) -> Result<db::QueryResult, String> {
+    match session.invoke_with_timeout::<db::QueryResult>("executeQueryPage", params.clone(), plugin_timeout).await {
+        Ok(result) => Ok(result),
+        Err(error) if is_external_driver_method_unsupported(&error, "executeQueryPage") => {
+            // Plugins installed by older DBX releases predate cursor pagination. Keep
+            // basic queries usable until the user updates the plugin, without retrying
+            // actual JDBC/SQL failures that may have side effects.
+            log::warn!("[query][external-driver] executeQueryPage unsupported; falling back to executeQuery");
+            session.invoke_with_timeout::<db::QueryResult>("executeQuery", params, plugin_timeout).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn is_external_driver_method_unsupported(error: &str, method: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    let method = method.to_ascii_lowercase();
+    normalized.contains(&method)
+        && (normalized.contains("unsupported jdbc plugin method")
+            || normalized.contains("unknown method")
+            || normalized.contains("method not found"))
 }
 
 fn external_driver_query_params(
@@ -1550,7 +1637,7 @@ pub async fn execute_sql_statement_with_options(
         do_execute(state, &pool_key, mysql_dialect, Some(database), sql, schema, cancel_token.clone(), options.clone())
             .await;
 
-    let action = result.as_ref().err().map(|e| pool_error_action(db_type, e));
+    let action = result.as_ref().err().map(|e| query_pool_error_action(db_type, sql, e));
     match action {
         Some(PoolErrorAction::ReconnectAndRetry) if !is_canceled(&cancel_token) => {
             let db_opt = if database.is_empty() { None } else { Some(database) };
@@ -1706,6 +1793,21 @@ pub async fn execute_multi_core_with_options(
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
 ) -> Result<Vec<db::QueryResult>, String> {
+    execute_multi_core_with_options_for_client(state, connection_id, database, sql, schema, cancel_token, options)
+        .await
+        .map(|results| results.into_iter().map(ExecuteMultiResult::into_query_result).collect())
+}
+
+/// Execute a SQL batch and retain client-facing metadata for synthesized errors.
+pub async fn execute_multi_core_with_options_for_client(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    sql: &str,
+    schema: Option<&str>,
+    cancel_token: Option<CancellationToken>,
+    options: QueryExecutionOptions,
+) -> Result<Vec<ExecuteMultiResult>, String> {
     // Reject MongoDB queries that fall through to the generic executor.
     if connection_is_mongodb(state, connection_id).await {
         return Err("Use MongoDB-specific commands".to_string());
@@ -1730,20 +1832,25 @@ pub async fn execute_multi_core_with_options(
     };
 
     if is_sqlserver {
-        return execute_multi_sqlserver(state, &pool_key, sql, cancel_token, options).await;
+        return execute_multi_sqlserver(state, &pool_key, sql, cancel_token, options)
+            .await
+            .map(|results| results.into_iter().map(Into::into).collect());
     }
 
-    let is_turso = {
+    let is_http_sqlite = {
         let configs = state.configs.read().await;
-        configs.get(connection_id).is_some_and(|c| c.db_type == DatabaseType::Turso)
+        configs
+            .get(connection_id)
+            .is_some_and(|c| matches!(c.db_type, DatabaseType::Turso | DatabaseType::CloudflareD1))
     };
 
-    // Turso sends all statements in one HTTP pipeline for transactional integrity.
-    if is_turso {
+    // HTTP SQLite providers send all statements in one request so the provider
+    // can preserve batch ordering and atomicity.
+    if is_http_sqlite {
         let result =
             execute_sql_statement_with_options(state, connection_id, database, sql, schema, cancel_token, options)
                 .await?;
-        return Ok(vec![result]);
+        return Ok(vec![result.into()]);
     }
 
     let db_type = connection_database_type(state, connection_id).await;
@@ -1752,14 +1859,14 @@ pub async fn execute_multi_core_with_options(
         |db_type| crate::sql::split_sql_statements_for_database(sql, db_type),
     );
     if statements.is_empty() {
-        return Ok(vec![empty_query_result(0)]);
+        return Ok(vec![empty_query_result(0).into()]);
     }
 
     // When use_transaction is explicitly true and we have multiple statements,
     // route through the transaction wrapper instead of the sequential auto-commit loop.
     if options.use_transaction == Some(true) && statements.len() > 1 {
         let result = execute_statements_in_transaction(state, connection_id, database, &statements, schema).await?;
-        return Ok(vec![result]);
+        return Ok(vec![result.into()]);
     }
 
     let mysql_pool = {
@@ -1782,7 +1889,7 @@ pub async fn execute_multi_core_with_options(
             options,
         )
         .await?;
-        return Ok(vec![result]);
+        return Ok(vec![result.into()]);
     }
 
     if let Some((pool, mode)) = mysql_pool {
@@ -1827,7 +1934,67 @@ pub async fn execute_multi_core_with_options(
         }
     }
 
-    Ok(results)
+    Ok(results.into_iter().map(Into::into).collect())
+}
+
+trait MysqlBatchStatementExecutor {
+    async fn execute_statement(&mut self, statement: &str) -> Result<db::QueryResult, String>;
+}
+
+struct MysqlBatchConnection<'a> {
+    conn: &'a mut mysql_async::Conn,
+    cancel_token: Option<CancellationToken>,
+    query_timeout: Option<Duration>,
+    bare: bool,
+    max_rows: Option<usize>,
+    dialect: db::mysql::MySqlQueryDialect,
+}
+
+impl MysqlBatchStatementExecutor for MysqlBatchConnection<'_> {
+    async fn execute_statement(&mut self, statement: &str) -> Result<db::QueryResult, String> {
+        wait_for_query_opt(
+            self.cancel_token.clone(),
+            self.query_timeout,
+            db::mysql::execute_query_on_conn_with_max_rows(
+                &mut *self.conn,
+                statement,
+                self.bare,
+                self.max_rows,
+                self.dialect,
+            ),
+        )
+        .await
+    }
+}
+
+async fn execute_mysql_batch_statements<E>(
+    executor: &mut E,
+    statements: &[String],
+    db_type: Option<DatabaseType>,
+    cancel_token: Option<CancellationToken>,
+) -> (Vec<ExecuteMultiResult>, Option<PoolErrorAction>)
+where
+    E: MysqlBatchStatementExecutor,
+{
+    let mut results = Vec::with_capacity(statements.len());
+    for statement in statements {
+        if is_canceled(&cancel_token) {
+            results.push(ExecuteMultiResult::execution_error(error_query_result(canceled_error())));
+            return (results, None);
+        }
+
+        match executor.execute_statement(statement).await {
+            Ok(result) => results.push(result.into()),
+            Err(err) => {
+                let action = pool_error_action(db_type, &err);
+                results.push(ExecuteMultiResult::execution_error(error_query_result(err)));
+                // Do not run dependent statements after any MySQL-protocol statement fails.
+                return (results, Some(action));
+            }
+        }
+    }
+
+    (results, None)
 }
 
 async fn execute_multi_mysql(
@@ -1840,7 +2007,7 @@ async fn execute_multi_mysql(
     statements: &[String],
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
-) -> Result<Vec<db::QueryResult>, String> {
+) -> Result<Vec<ExecuteMultiResult>, String> {
     let query_timeout = resolve_query_timeout(options.timeout_secs);
     let operation_budget = operation_budget_for_pool_key(state, pool_key, query_timeout).await;
     let bare = mode == crate::connection::MysqlMode::Bare;
@@ -1860,36 +2027,25 @@ async fn execute_multi_mysql(
             {
                 state.remove_pool_by_key(pool_key).await;
             }
-            return Ok(vec![error_query_result(err)]);
+            return Ok(vec![ExecuteMultiResult::execution_error(error_query_result(err))]);
         }
     };
-    let mut results = Vec::with_capacity(statements.len());
-
     apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, options.timeout_secs).await?;
 
-    for stmt in statements {
-        if is_canceled(&cancel_token) {
-            results.push(error_query_result(canceled_error()));
-            break;
-        }
+    let mut executor = MysqlBatchConnection {
+        conn: &mut conn,
+        cancel_token: cancel_token.clone(),
+        query_timeout,
+        bare,
+        max_rows,
+        dialect,
+    };
+    let (results, error_action) =
+        execute_mysql_batch_statements(&mut executor, statements, db_type, cancel_token).await;
+    drop(executor);
 
-        match wait_for_query_opt(
-            cancel_token.clone(),
-            query_timeout,
-            db::mysql::execute_query_on_conn_with_max_rows(&mut conn, stmt, bare, max_rows, dialect),
-        )
-        .await
-        {
-            Ok(result) => results.push(result),
-            Err(err) => {
-                let action = pool_error_action(db_type, &err);
-                results.push(error_query_result(err));
-                if matches!(action, PoolErrorAction::Discard | PoolErrorAction::ReconnectAndRetry) {
-                    state.remove_pool_by_key(pool_key).await;
-                    break;
-                }
-            }
-        }
+    if matches!(error_action, Some(PoolErrorAction::Discard | PoolErrorAction::ReconnectAndRetry)) {
+        state.remove_pool_by_key(pool_key).await;
     }
 
     Ok(results)
@@ -2176,6 +2332,7 @@ pub async fn execute_statements_in_transaction(
             PoolKind::Postgres(pg) => TxPath::Pg(pg.clone()),
             PoolKind::Mysql(mp, _mode) => TxPath::Mysql(mp.clone(), false),
             PoolKind::Sqlite(sq) => TxPath::Sqlite(sq.clone()),
+            PoolKind::CloudflareD1(client) => TxPath::CloudflareD1(client.clone()),
             PoolKind::ClickHouse(_)
             | PoolKind::Rqlite(_)
             | PoolKind::Turso(_)
@@ -2214,6 +2371,15 @@ pub async fn execute_statements_in_transaction(
             exec_tx_mysql_inner(state, &pool_key, pool, statements, start, operation_budget.clone()).await
         }
         Some(TxPath::Sqlite(pool)) => exec_tx_sqlite_inner(pool, statements, start).await,
+        Some(TxPath::CloudflareD1(client)) => {
+            let sql = statements.join(";\n");
+            wait_for_query_opt(
+                None,
+                operation_budget.query_timeout,
+                db::cloudflare_d1_driver::execute_query_with_max_rows(&client, &sql, None),
+            )
+            .await
+        }
         Some(TxPath::Explicit) => {
             let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
             exec_tx_explicit_inner(state, &pool_key, mysql_dialect, Some(database), statements, schema, start).await
@@ -2239,6 +2405,7 @@ enum TxPath {
     Pg(deadpool_postgres::Pool),
     Mysql(mysql_async::Pool, bool),
     Sqlite(db::sqlite::SqliteHandle),
+    CloudflareD1(db::cloudflare_d1_driver::CloudflareD1Client),
     Explicit,
     None,
 }
@@ -2968,6 +3135,10 @@ pub async fn rollback_manual_transaction(state: &AppState, txn_session_id: &str)
 mod tests {
     use super::*;
     use crate::models::connection::{default_redis_key_separator, ConnectionConfig, DatabaseType};
+    #[cfg(unix)]
+    use crate::plugins::{
+        InstalledPlugin, PluginDriverManifest, PluginDriverSession, PluginManifest, PluginRuntimeEnv,
+    };
     #[cfg(feature = "duckdb-bundled")]
     use crate::storage::Storage;
 
@@ -3018,6 +3189,20 @@ mod tests {
             jdbc_driver_paths: Vec::new(),
             one_time: false,
             read_only: false,
+            is_production: false,
+            production_databases: vec![],
+        }
+    }
+
+    struct FakeMysqlBatchExecutor {
+        outcomes: std::collections::VecDeque<Result<db::QueryResult, String>>,
+        executed: Vec<String>,
+    }
+
+    impl MysqlBatchStatementExecutor for FakeMysqlBatchExecutor {
+        async fn execute_statement(&mut self, statement: &str) -> Result<db::QueryResult, String> {
+            self.executed.push(statement.to_string());
+            self.outcomes.pop_front().expect("test outcome for statement")
         }
     }
 
@@ -3032,6 +3217,200 @@ mod tests {
     fn agent_execute_batch_unsupported_ignores_unrelated_errors() {
         assert!(!is_agent_execute_batch_unsupported("ORA-00955: name is already used by an existing object"));
         assert!(!is_agent_execute_batch_unsupported("Agent RPC error (-1): unknown method: execute_query"));
+    }
+
+    #[test]
+    fn query_pool_error_policy_retries_reads_but_not_writes() {
+        assert_eq!(
+            query_pool_error_action(Some(DatabaseType::Postgres), "SELECT * FROM users", "connection reset by peer"),
+            PoolErrorAction::ReconnectAndRetry
+        );
+        assert_eq!(
+            query_pool_error_action(
+                Some(DatabaseType::Postgres),
+                "UPDATE users SET active = true",
+                "connection reset by peer"
+            ),
+            PoolErrorAction::Discard
+        );
+    }
+
+    #[tokio::test]
+    async fn mysql_batch_stops_after_the_first_statement_error() {
+        let statements = vec!["first".to_string(), "fails".to_string(), "must-not-run".to_string()];
+        let mut executor = FakeMysqlBatchExecutor {
+            outcomes: std::collections::VecDeque::from([
+                Ok(empty_query_result(0)),
+                Err("Duplicate entry".to_string()),
+                Ok(empty_query_result(0)),
+            ]),
+            executed: Vec::new(),
+        };
+
+        let (results, error_action) =
+            execute_mysql_batch_statements(&mut executor, &statements, Some(DatabaseType::Mysql), None).await;
+
+        assert_eq!(executor.executed, vec!["first", "fails"]);
+        assert_eq!(results.len(), 2);
+        assert!(results[1].execution_error);
+        assert_eq!(error_action, Some(PoolErrorAction::Keep));
+    }
+
+    #[test]
+    fn execute_multi_result_serializes_error_marker_only_for_synthesized_errors() {
+        let success = serde_json::to_value(ExecuteMultiResult::from(empty_query_result(0))).unwrap();
+        assert!(success.get("execution_error").is_none());
+
+        let failure =
+            serde_json::to_value(ExecuteMultiResult::execution_error(error_query_result("failed".to_string())))
+                .unwrap();
+        assert_eq!(failure.get("execution_error"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(failure.get("columns"), Some(&serde_json::json!(["Error"])));
+    }
+
+    #[test]
+    fn external_driver_method_unsupported_detects_legacy_plugin_errors() {
+        assert!(is_external_driver_method_unsupported(
+            "Unsupported JDBC plugin method: executeQueryPage",
+            "executeQueryPage"
+        ));
+        assert!(is_external_driver_method_unsupported(
+            "Plugin RPC error (-32601): Method not found: executeQueryPage",
+            "executeQueryPage"
+        ));
+        assert!(is_external_driver_method_unsupported("Unknown method executeQueryPage", "executeQueryPage"));
+    }
+
+    #[test]
+    fn external_driver_method_unsupported_ignores_query_and_other_method_errors() {
+        assert!(!is_external_driver_method_unsupported(
+            "The JDBC driver does not support this SQL operation",
+            "executeQueryPage"
+        ));
+        assert!(!is_external_driver_method_unsupported(
+            "Unsupported JDBC plugin method: listTables",
+            "executeQueryPage"
+        ));
+        assert!(!is_external_driver_method_unsupported(
+            "Unknown column executeQueryPage in field list",
+            "executeQueryPage"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn external_driver_query_page_falls_back_to_legacy_execute_query() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("dbx-legacy-jdbc-plugin-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("plugin.sh");
+        let calls = dir.join("calls.log");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nwhile IFS= read -r line; do\n  id=$(printf '%s' \"$line\" | sed -E 's/.*\"id\":([0-9]+).*/\\1/')\n  case \"$line\" in\n    *'\"method\":\"executeQueryPage\"'*)\n      echo executeQueryPage >> '{}'\n      printf '{{\"id\":%s,\"error\":{{\"message\":\"Unsupported JDBC plugin method: executeQueryPage\"}}}}\\n' \"$id\"\n      ;;\n    *'\"method\":\"executeQuery\"'*)\n      echo executeQuery >> '{}'\n      printf '{{\"id\":%s,\"result\":{{\"columns\":[\"value\"],\"rows\":[[42]],\"affected_rows\":0,\"execution_time_ms\":1,\"truncated\":false}}}}\\n' \"$id\"\n      ;;\n  esac\ndone\n",
+                calls.display(),
+                calls.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let plugin = InstalledPlugin {
+            manifest: PluginManifest {
+                id: "jdbc".to_string(),
+                name: "JDBC".to_string(),
+                version: "legacy".to_string(),
+                protocol_version: 1,
+                description: String::new(),
+                executable: Some("plugin.sh".to_string()),
+                drivers: vec![PluginDriverManifest {
+                    id: "jdbc".to_string(),
+                    label: "JDBC".to_string(),
+                    kind: "external".to_string(),
+                    database_type: Some("jdbc".to_string()),
+                }],
+            },
+            path: dir.clone(),
+        };
+        let session = PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
+            .await
+            .expect("legacy plugin should start");
+
+        let result = invoke_external_driver_query_page(
+            &session,
+            serde_json::json!({ "sql": "SELECT 42", "pageSize": 100 }),
+            Some(Duration::from_secs(5)),
+        )
+        .await
+        .expect("legacy executeQuery fallback should succeed");
+
+        assert_eq!(result.columns, vec!["value"]);
+        assert_eq!(result.rows, vec![vec![serde_json::json!(42)]]);
+        assert_eq!(std::fs::read_to_string(&calls).unwrap(), "executeQueryPage\nexecuteQuery\n");
+
+        session.shutdown().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn external_driver_query_page_does_not_retry_jdbc_errors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("dbx-jdbc-query-error-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("plugin.sh");
+        let calls = dir.join("calls.log");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nwhile IFS= read -r line; do\n  id=$(printf '%s' \"$line\" | sed -E 's/.*\"id\":([0-9]+).*/\\1/')\n  echo request >> '{}'\n  printf '{{\"id\":%s,\"error\":{{\"message\":\"Incorrect syntax near SELECT\"}}}}\\n' \"$id\"\ndone\n",
+                calls.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let plugin = InstalledPlugin {
+            manifest: PluginManifest {
+                id: "jdbc".to_string(),
+                name: "JDBC".to_string(),
+                version: "current".to_string(),
+                protocol_version: 1,
+                description: String::new(),
+                executable: Some("plugin.sh".to_string()),
+                drivers: vec![PluginDriverManifest {
+                    id: "jdbc".to_string(),
+                    label: "JDBC".to_string(),
+                    kind: "external".to_string(),
+                    database_type: Some("jdbc".to_string()),
+                }],
+            },
+            path: dir.clone(),
+        };
+        let session = PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
+            .await
+            .expect("plugin should start");
+
+        let error = invoke_external_driver_query_page(
+            &session,
+            serde_json::json!({ "sql": "SELECT broken", "pageSize": 100 }),
+            Some(Duration::from_secs(5)),
+        )
+        .await
+        .expect_err("JDBC query errors must be returned without retrying");
+
+        assert_eq!(error, "Incorrect syntax near SELECT");
+        assert_eq!(std::fs::read_to_string(&calls).unwrap(), "request\n");
+
+        session.shutdown().await;
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -3680,6 +4059,8 @@ mod tests {
             jdbc_driver_paths: Vec::new(),
             one_time: false,
             read_only: false,
+            is_production: false,
+            production_databases: vec![],
         };
 
         let params = external_driver_query_params(

@@ -54,7 +54,12 @@ impl CloseBehaviorState {
 const MACOS_TRAY_ICON: tauri::image::Image<'_> = tauri::include_image!("icons/tray-macos-template.png");
 #[cfg(target_os = "macos")]
 const ABOUT_APP_ICON: tauri::image::Image<'_> = tauri::include_image!("icons/icon.png");
+#[cfg(not(target_os = "macos"))]
 const BLACK_APP_ICON: tauri::image::Image<'_> = tauri::include_image!("icons/icon-black.png");
+#[cfg(target_os = "macos")]
+const MACOS_DEFAULT_APP_ICON: &[u8] = include_bytes!("../icons/icon.icns");
+#[cfg(target_os = "macos")]
+const MACOS_DARK_APP_ICON: &[u8] = include_bytes!("../icons/icon-macos-dark.icns");
 
 pub(crate) fn apply_debug_log_level(debug_logging_enabled: bool) {
     log::set_max_level(if debug_logging_enabled { log::LevelFilter::Debug } else { log::LevelFilter::Off });
@@ -64,8 +69,30 @@ fn should_hide_window_on_close(target_os: &str) -> bool {
     matches!(target_os, "macos" | "windows")
 }
 
-fn should_setup_desktop_tray(target_os: &str, show_tray_icon: bool) -> bool {
-    show_tray_icon && matches!(target_os, "macos" | "windows")
+fn should_setup_desktop_tray(target_os: &str, show_tray_icon: bool, linux_appindicator_available: bool) -> bool {
+    show_tray_icon
+        && (matches!(target_os, "macos" | "windows") || (target_os == "linux" && linux_appindicator_available))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_appindicator_available() -> bool {
+    const APPINDICATOR_LIBRARIES: &[&str] = &["libayatana-appindicator3.so.1", "libappindicator3.so.1"];
+
+    APPINDICATOR_LIBRARIES.iter().any(|library| {
+        // tray-icon loads AppIndicator dynamically and panics when neither ABI is
+        // installed, so probe the same libraries before entering that code path.
+        unsafe { libloading::Library::new(library).is_ok() }
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_appindicator_available() -> bool {
+    false
+}
+
+#[cfg(test)]
+fn uses_application_level_icon(target_os: &str) -> bool {
+    target_os == "macos"
 }
 
 fn should_show_main_window_after_setup() -> bool {
@@ -384,7 +411,37 @@ fn setup_desktop_tray<R: tauri::Runtime, M: Manager<R>>(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn apply_macos_app_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconTheme) -> tauri::Result<()> {
+    use objc2::{AllocAnyThread, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
+
+    let icon_bytes = match icon_theme {
+        DesktopIconTheme::Default => MACOS_DEFAULT_APP_ICON,
+        DesktopIconTheme::Black => MACOS_DARK_APP_ICON,
+    };
+    app.run_on_main_thread(move || {
+        // macOS has no per-window icon. Update NSApplication so the Dock and
+        // app switcher reflect the selected theme immediately.
+        let marker = unsafe { MainThreadMarker::new_unchecked() };
+        let application = NSApplication::sharedApplication(marker);
+        let data = NSData::with_bytes(icon_bytes);
+        if let Some(icon) = NSImage::initWithData(NSImage::alloc(), &data) {
+            unsafe { application.setApplicationIconImage(Some(&icon)) };
+        } else {
+            log::warn!("Failed to decode the selected macOS application icon");
+        }
+    })
+}
+
 fn apply_desktop_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconTheme) -> tauri::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        return apply_macos_app_icon_theme(app, icon_theme);
+    }
+
+    #[cfg(not(target_os = "macos"))]
     if let Some(window) = app.get_webview_window("main") {
         match icon_theme {
             DesktopIconTheme::Default => {
@@ -395,6 +452,7 @@ fn apply_desktop_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconTheme
             DesktopIconTheme::Black => window.set_icon(BLACK_APP_ICON)?,
         }
     }
+    #[cfg(not(target_os = "macos"))]
     Ok(())
 }
 
@@ -408,7 +466,15 @@ fn apply_desktop_tray_icon_theme(app: &tauri::AppHandle, _icon_theme: DesktopIco
             };
             _tray.set_icon(icon)?;
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(target_os = "linux")]
+        {
+            let icon = match _icon_theme {
+                DesktopIconTheme::Default => app.default_window_icon().cloned(),
+                DesktopIconTheme::Black => Some(BLACK_APP_ICON),
+            };
+            _tray.set_icon(icon)?;
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = (_tray, _icon_theme);
         }
@@ -419,7 +485,8 @@ fn apply_desktop_tray_icon_theme(app: &tauri::AppHandle, _icon_theme: DesktopIco
 pub(crate) fn apply_desktop_settings(app: &tauri::AppHandle, desktop_settings: &DesktopSettings) -> tauri::Result<()> {
     apply_debug_log_level(desktop_settings.debug_logging_enabled);
     apply_desktop_icon_theme(app, desktop_settings.icon_theme)?;
-    if matches!(std::env::consts::OS, "macos" | "windows") {
+    if should_setup_desktop_tray(std::env::consts::OS, desktop_settings.show_tray_icon, linux_appindicator_available())
+    {
         if let Some(tray) = app.tray_by_id(DESKTOP_TRAY_ID) {
             tray.set_visible(desktop_settings.show_tray_icon)?;
             apply_desktop_tray_icon_theme(app, desktop_settings.icon_theme)?;
@@ -437,6 +504,7 @@ mod tests {
         linux_appimage_system_gtk_immodules_cache, linux_appimage_wayland_backend_override,
         linux_webkit_rendering_workarounds, native_window_decorations_override, should_confirm_app_exit_request,
         should_hide_window_on_close, should_setup_desktop_tray, should_show_main_window_after_setup,
+        uses_application_level_icon,
     };
     use std::ffi::OsStr;
 
@@ -454,12 +522,45 @@ mod tests {
     }
 
     #[test]
-    fn sets_up_desktop_tray_for_windows_and_macos() {
-        assert!(should_setup_desktop_tray("windows", true));
-        assert!(should_setup_desktop_tray("macos", true));
-        assert!(!should_setup_desktop_tray("windows", false));
-        assert!(!should_setup_desktop_tray("macos", false));
-        assert!(!should_setup_desktop_tray("linux", true));
+    fn sets_up_desktop_tray_for_windows_macos_and_linux() {
+        assert!(should_setup_desktop_tray("windows", true, false));
+        assert!(should_setup_desktop_tray("macos", true, false));
+        assert!(should_setup_desktop_tray("linux", true, true));
+        assert!(!should_setup_desktop_tray("linux", true, false));
+        assert!(!should_setup_desktop_tray("windows", false, true));
+        assert!(!should_setup_desktop_tray("macos", false, true));
+        assert!(!should_setup_desktop_tray("linux", false, true));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_tray_icon_remains_a_system_template() {
+        // Menu bar template images are intentionally independent from the app
+        // icon theme so macOS can recolor them for light and dark menu bars.
+        assert_eq!(super::MACOS_TRAY_ICON.width(), 36);
+        assert_eq!(super::MACOS_TRAY_ICON.height(), 36);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_icon_themes_use_packaged_dock_assets() {
+        use objc2::AllocAnyThread;
+        use objc2_app_kit::NSImage;
+        use objc2_foundation::NSData;
+
+        assert!(super::MACOS_DEFAULT_APP_ICON.starts_with(b"icns"));
+        assert!(super::MACOS_DARK_APP_ICON.starts_with(b"icns"));
+        for bytes in [super::MACOS_DEFAULT_APP_ICON, super::MACOS_DARK_APP_ICON] {
+            let data = NSData::with_bytes(bytes);
+            assert!(NSImage::initWithData(NSImage::alloc(), &data).is_some());
+        }
+    }
+
+    #[test]
+    fn macos_icon_theme_targets_the_application_instead_of_a_window() {
+        assert!(uses_application_level_icon("macos"));
+        assert!(!uses_application_level_icon("windows"));
+        assert!(!uses_application_level_icon("linux"));
     }
 
     #[test]
@@ -727,7 +828,11 @@ pub fn run() {
                     let _ = window.set_decorations(decorations);
                 }
             }
-            if should_setup_desktop_tray(std::env::consts::OS, desktop_settings.show_tray_icon) {
+            if should_setup_desktop_tray(
+                std::env::consts::OS,
+                desktop_settings.show_tray_icon,
+                linux_appindicator_available(),
+            ) {
                 setup_desktop_tray(app, desktop_settings.icon_theme)?;
             }
             apply_desktop_icon_theme(app.handle(), desktop_settings.icon_theme)?;
@@ -773,6 +878,7 @@ pub fn run() {
             commands::app_settings::save_desktop_settings,
             commands::app_settings::complete_app_close,
             commands::app_settings::request_app_close_from_window_controls,
+            commands::window_controls::set_macos_traffic_light_position,
             commands::app_settings::set_driver_store_dir,
             commands::app_settings::set_plugin_store_dir,
             commands::app_settings::set_agent_store_dir,
@@ -796,6 +902,12 @@ pub fn run() {
             commands::cloud_sync::forget_webdav_sync_secrets_passphrase,
             commands::cloud_sync::webdav_sync_upload,
             commands::cloud_sync::webdav_sync_download,
+            commands::cloud_sync::snippet_sync_test,
+            commands::cloud_sync::snippet_token_status,
+            commands::cloud_sync::save_snippet_saved_token,
+            commands::cloud_sync::forget_snippet_saved_token,
+            commands::cloud_sync::snippet_sync_upload,
+            commands::cloud_sync::snippet_sync_download,
             commands::connection::test_connection,
             commands::connection::connect_db,
             commands::connection::connection_final_proxy_port,
@@ -810,11 +922,13 @@ pub fn run() {
             commands::plugins::list_plugins,
             commands::plugins::list_jdbc_drivers,
             commands::plugins::list_jdbc_maven_bundles,
+            commands::plugins::list_jdbc_local_bundles,
             commands::plugins::import_jdbc_drivers,
             commands::plugins::install_jdbc_driver_from_maven,
             commands::plugins::install_prestosql_jdbc_driver,
             commands::plugins::delete_jdbc_driver,
             commands::plugins::delete_jdbc_maven_bundle,
+            commands::plugins::delete_jdbc_local_bundle,
             commands::plugins::jdbc_plugin_status,
             commands::plugins::install_jdbc_plugin,
             commands::plugins::install_jdbc_plugin_local,
@@ -899,6 +1013,8 @@ pub fn run() {
             commands::query::build_routine_rename_object_source_statements,
             commands::query::build_view_ddl_sql,
             commands::query::build_table_structure_change_sql,
+            commands::query::preview_sqlite_table_structure_change,
+            commands::query::apply_sqlite_table_structure_change,
             commands::query::build_create_table_sql,
             commands::query::build_single_column_alter_sql,
             commands::query::analyze_editable_query_editability,
@@ -1156,6 +1272,8 @@ pub fn run() {
             commands::agents::import_agent_jar_cmd,
             commands::system_fonts::list_system_fonts,
             commands::ssh_config::list_ssh_config_hosts,
+            commands::tunnel_profiles::load_tunnel_profiles,
+            commands::tunnel_profiles::save_tunnel_profiles,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

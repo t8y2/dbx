@@ -2,6 +2,7 @@ package com.dbx.agent.gbase8s;
 
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.ColumnInfo;
+import com.dbx.agent.IndexInfo;
 import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.TableInfo;
@@ -18,6 +19,7 @@ import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 class Gbase8sAgentTest {
@@ -132,7 +134,25 @@ class Gbase8sAgentTest {
         Assertions.assertEquals("user_order", tables.get(0).getName());
         Assertions.assertTrue(sql.get(0).contains("FROM systables"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("SELECT SKIP 1 FIRST 1"), sql.get(0));
-        Assertions.assertTrue(sql.get(0).contains("UPPER(tabname) LIKE ?"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("UPPER(t.tabname) LIKE ?"), sql.get(0));
+    }
+
+    @Test
+    void listTablesLoadsGbase8sTableComments() {
+        List<String> sql = new ArrayList<>();
+        Gbase8sAgent agent = new Gbase8sAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"tabname", "tabtype", "comments"},
+            new Object[][]{
+                {"products", "T", "Product catalog"}
+            }
+        )));
+
+        List<TableInfo> tables = agent.listTables("root");
+
+        Assertions.assertEquals("Product catalog", tables.get(0).getComment());
+        Assertions.assertTrue(sql.get(0).contains("LEFT JOIN syscomms"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("t.owner = ?"), sql.get(0));
     }
 
     @Test
@@ -156,11 +176,11 @@ class Gbase8sAgentTest {
                 }
             ),
             resultSet(
-                new String[]{"colname", "coltype", "colno", "collength"},
+                new String[]{"colname", "coltype", "colno", "collength", "comments"},
                 new Object[][]{
-                    {"product_id", 258, 1, 4},
-                    {"sku", 13, 2, 40},
-                    {"price", 5, 3, 3074}
+                    {"product_id", 258, 1, 4, "Product identifier"},
+                    {"sku", 13, 2, 40, null},
+                    {"price", 5, 3, 3074, "Unit price"}
                 }
             )
         ));
@@ -182,6 +202,54 @@ class Gbase8sAgentTest {
         Assertions.assertEquals("DECIMAL", columns.get(2).getData_type());
         Assertions.assertEquals(12, columns.get(2).getNumeric_precision());
         Assertions.assertEquals(2, columns.get(2).getNumeric_scale());
+        Assertions.assertEquals("Product identifier", columns.get(0).getComment());
+        Assertions.assertEquals("Unit price", columns.get(2).getComment());
+        Assertions.assertTrue(sql.get(1).contains("LEFT JOIN syscolcomms"), sql.get(1));
+    }
+
+    @Test
+    void listIndexesLoadsGbase8sSystemCatalogIndexes() {
+        List<String> sql = new ArrayList<>();
+        Gbase8sAgent agent = new Gbase8sAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(
+            sql,
+            resultSet(
+                new String[]{"colno", "colname"},
+                new Object[][]{
+                    {1, "product_id"},
+                    {2, "sku"},
+                    {3, "created_at"}
+                }
+            ),
+            resultSet(
+                new String[]{"idxname", "idxtype", "constrtype", "part1", "part2", "part3", "part4", "part5", "part6", "part7", "part8", "part9", "part10", "part11", "part12", "part13", "part14", "part15", "part16"},
+                new Object[][]{
+                    {"products_pk", "U", "P", 1, 0, null, null, null, null, null, null, null, null, null, null, null, null, null, null},
+                    {"products_sku_created", "D", null, 2, -3, 0, null, null, null, null, null, null, null, null, null, null, null, null, null}
+                }
+            )
+        ));
+
+        List<IndexInfo> indexes = agent.listIndexes("root", "products");
+
+        Assertions.assertEquals(2, indexes.size());
+        Assertions.assertEquals(List.of("product_id"), indexes.get(0).getColumns());
+        Assertions.assertTrue(indexes.get(0).getIs_unique());
+        Assertions.assertTrue(indexes.get(0).getIs_primary());
+        Assertions.assertEquals(List.of("sku", "created_at"), indexes.get(1).getColumns());
+        Assertions.assertFalse(indexes.get(1).getIs_unique());
+        Assertions.assertFalse(indexes.get(1).getIs_primary());
+        Assertions.assertTrue(sql.get(0).contains("FROM syscolumns"), sql.get(0));
+        Assertions.assertTrue(sql.get(1).contains("FROM sysindexes"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("LEFT JOIN sysconstraints"), sql.get(1));
+    }
+
+    @Test
+    void resolvesGbase8sIndexPartsInDeclaredOrder() {
+        Assertions.assertEquals(
+            List.of("sku", "created_at"),
+            Gbase8sAgent.resolveIndexColumns(List.of(2, -3, 0), Map.of(2, "sku", 3, "created_at"))
+        );
     }
 
     @Test

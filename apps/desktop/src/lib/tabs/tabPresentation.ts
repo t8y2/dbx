@@ -117,6 +117,9 @@ export function tabTooltipLines(tab: QueryTab, t: Translate): { label: string; v
   if (tab.mode === "query" && queryTitle(tab)) {
     lines.unshift({ label: t("tabs.tooltipTitle"), value: tab.title });
   }
+  if (tab.mode === "query" && tab.externalSqlPath) {
+    lines.push({ label: t("tabs.tooltipFilePath"), value: tab.externalSqlPath });
+  }
   if (tab.mode === "data" && tab.tableMeta?.tableName) {
     lines.push({ label: t("tabs.tooltipTable"), value: tab.tableMeta.tableName });
   }
@@ -138,12 +141,8 @@ export function tabTooltipLines(tab: QueryTab, t: Translate): { label: string; v
   return lines;
 }
 
-export function queryResultStatementLabel(result: Pick<QueryResult, "sourceLabel" | "sourceStatement">, maxLength = 48): string | undefined {
-  if (result.sourceLabel) return result.sourceLabel;
-  const statement = result.sourceStatement?.replace(/\s+/g, " ").trim();
-  if (!statement) return undefined;
-  if (statement.length <= maxLength) return statement;
-  return `${statement.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+export function queryResultStatementLabel(result: Pick<QueryResult, "sourceLabel">): string | undefined {
+  return result.sourceLabel;
 }
 
 export function resultSqlForGrid(tab: Pick<QueryTab, "result" | "resultBaseSql" | "lastExecutedSql" | "sql">): string {

@@ -109,6 +109,30 @@ class StandardJdbcMetadataTest {
     }
 
     @Test
+    void listsProceduresAndFunctionsFromJdbcRoutineMetadata() {
+        Connection conn = routineConnection(
+            rows(
+                row("PROCEDURE_NAME", "PROCESS_ORDER", "REMARKS", "processes an order"),
+                row("PROCEDURE_NAME", "SHARED_ROUTINE", "REMARKS", null)
+            ),
+            rows(
+                row("FUNCTION_NAME", "CALCULATE_TOTAL", "REMARKS", "calculates a total"),
+                row("FUNCTION_NAME", "SHARED_ROUTINE", "REMARKS", null)
+            )
+        );
+        MetadataListConstraints constraints =
+            new MetadataListConstraints(null, null, null, Collections.singletonList("PROCEDURE"));
+
+        List<ObjectInfo> objects = StandardJdbcMetadata.INSTANCE.listObjects(conn, profile, "", "APP", constraints);
+
+        assertEquals(2, objects.size());
+        assertEquals("PROCESS_ORDER", objects.get(0).getName());
+        assertEquals("PROCEDURE", objects.get(0).getObject_type());
+        assertEquals("SHARED_ROUTINE", objects.get(1).getName());
+        assertEquals("PROCEDURE", objects.get(1).getObject_type());
+    }
+
+    @Test
     void listsDataTypesFromJdbcTypeInfo() {
         Connection conn = connection(
             rows(),
@@ -566,6 +590,34 @@ class StandardJdbcMetadataTest {
                 }
                 if ("getCatalogs".equals(name)) {
                     return rows();
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+        return proxy(Connection.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("getMetaData".equals(method.getName())) {
+                    return meta;
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+    }
+
+    private static Connection routineConnection(ResultSet procedures, ResultSet functions) {
+        DatabaseMetaData meta = proxy(DatabaseMetaData.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                String name = method.getName();
+                if ("getTables".equals(name) || "getTableTypes".equals(name)) {
+                    return rows();
+                }
+                if ("getProcedures".equals(name)) {
+                    return procedures;
+                }
+                if ("getFunctions".equals(name)) {
+                    return functions;
                 }
                 return defaultValue(method.getReturnType());
             }

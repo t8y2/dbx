@@ -23,6 +23,10 @@ type DataGridRow = DataGridCellValue[];
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
 export function sortDataGridRows<T extends DataGridRow>(rows: readonly T[], columnIndex: number, direction: DataGridSortDirection): T[] {
+  return sortDataGridRowIndexes(rows, columnIndex, direction).map((index) => rows[index]!);
+}
+
+export function sortDataGridRowIndexes(rows: readonly DataGridRow[], columnIndex: number, direction: DataGridSortDirection): number[] {
   const directionMultiplier = direction === "asc" ? 1 : -1;
   return rows
     .map((row, index) => ({ row, index }))
@@ -33,7 +37,7 @@ export function sortDataGridRows<T extends DataGridRow>(rows: readonly T[], colu
       if (compared !== 0) return compared * directionMultiplier;
       return left.index - right.index;
     })
-    .map((item) => item.row);
+    .map((item) => item.index);
 }
 
 export function compareDataGridValues(left: DataGridCellValue, right: DataGridCellValue): number {

@@ -1,6 +1,6 @@
 [package]
 name = "dbx"
-version = "0.5.52"
+version = "0.5.54"
 description = "Open-source database management tool"
 authors = ["skyler"]
 license = "Apache-2.0"
@@ -64,4 +64,8 @@ tauri-plugin-clipboard-manager = "2.3.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6.4", default-features = false, features = ["std"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSButton", "NSControl", "NSImage", "NSResponder", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSData"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libloading = "0.8"

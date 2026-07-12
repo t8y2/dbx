@@ -1,6 +1,7 @@
 pub mod agent_catalog;
 pub mod agent_connection;
 pub mod agent_events;
+pub mod agent_explain;
 pub mod agent_kv;
 pub mod agent_loop;
 pub mod agent_manager;
@@ -35,6 +36,7 @@ pub mod object_source_sql;
 pub mod path_utils;
 pub mod plugins;
 pub mod process;
+pub mod production_safety;
 pub mod query;
 pub mod query_cancel;
 pub mod query_execution_sql;
@@ -65,6 +67,43 @@ pub mod update;
 pub mod xlsx_export;
 
 pub const R2_CDN_BASE: &str = "https://dl.dbxio.com/";
+pub const GITHUB_RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/t8y2/dbx/releases/download/";
+pub const CNB_RELEASE_DOWNLOAD_PREFIX: &str = "https://cnb.cool/dbxio.com/dbx/-/releases/download/";
+pub const ATOMGIT_RELEASE_DOWNLOAD_PREFIX: &str = "https://atomgit.com/t8y2/dbx/releases/download/";
+
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum DownloadSource {
+    #[default]
+    Official,
+    Cnb,
+    Atomgit,
+}
+
+impl DownloadSource {
+    pub fn download_candidate_urls(self, github_url: &str, r2_path: &str) -> Result<Vec<String>, String> {
+        match self {
+            Self::Official => Ok(download_candidate_urls(github_url, r2_path)),
+            Self::Cnb => Ok(vec![
+                rewrite_github_release_url(github_url, CNB_RELEASE_DOWNLOAD_PREFIX)?,
+                format!("{R2_CDN_BASE}{r2_path}"),
+            ]),
+            Self::Atomgit => Ok(vec![
+                rewrite_github_release_url(github_url, ATOMGIT_RELEASE_DOWNLOAD_PREFIX)?,
+                format!("{R2_CDN_BASE}{r2_path}"),
+            ]),
+        }
+    }
+}
+
+fn rewrite_github_release_url(url: &str, target_prefix: &str) -> Result<String, String> {
+    if url.starts_with(target_prefix) {
+        return Ok(url.to_string());
+    }
+    url.strip_prefix(GITHUB_RELEASE_DOWNLOAD_PREFIX)
+        .map(|path| format!("{target_prefix}{path}"))
+        .ok_or_else(|| format!("Unsupported DBX release download URL: {url}"))
+}
 
 pub fn download_candidate_urls(github_url: &str, r2_path: &str) -> Vec<String> {
     vec![format!("{R2_CDN_BASE}{r2_path}"), github_url.to_string()]
@@ -108,7 +147,7 @@ pub async fn race_download(
 
 #[cfg(test)]
 mod tests {
-    use super::download_candidate_urls;
+    use super::{download_candidate_urls, DownloadSource};
 
     #[test]
     fn download_candidates_exclude_third_party_github_proxy() {
@@ -122,6 +161,25 @@ mod tests {
             vec![
                 "https://dl.dbxio.com/releases/latest/latest.json",
                 "https://github.com/t8y2/dbx/releases/latest/download/latest.json",
+            ]
+        );
+    }
+
+    #[test]
+    fn mirror_download_candidates_rewrite_release_urls() {
+        let github_url = "https://github.com/t8y2/dbx/releases/download/agents-latest/agent-registry.json";
+        assert_eq!(
+            DownloadSource::Cnb.download_candidate_urls(github_url, "agents/agent-registry.json").unwrap(),
+            vec![
+                "https://cnb.cool/dbxio.com/dbx/-/releases/download/agents-latest/agent-registry.json",
+                "https://dl.dbxio.com/agents/agent-registry.json",
+            ]
+        );
+        assert_eq!(
+            DownloadSource::Atomgit.download_candidate_urls(github_url, "agents/agent-registry.json").unwrap(),
+            vec![
+                "https://atomgit.com/t8y2/dbx/releases/download/agents-latest/agent-registry.json",
+                "https://dl.dbxio.com/agents/agent-registry.json",
             ]
         );
     }

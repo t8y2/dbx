@@ -21,7 +21,7 @@ export function supportsObjectRename(databaseType: DatabaseType | undefined, obj
   if (objectType === "PROCEDURE" || objectType === "FUNCTION") {
     return false;
   }
-  if (databaseType === "sqlite" || databaseType === "rqlite" || databaseType === "turso") return objectType === "TABLE";
+  if (databaseType === "sqlite" || databaseType === "rqlite" || databaseType === "turso" || databaseType === "cloudflare-d1") return objectType === "TABLE";
   if (databaseType === "mysql" || databaseType === "goldendb") return objectType === "TABLE" || objectType === "VIEW";
   if (postgresLikeRenameTypes.has(databaseType)) return objectType === "TABLE" || objectType === "VIEW" || objectType === "MATERIALIZED_VIEW";
   if (oracleLikeRenameTypes.has(databaseType)) return objectType === "TABLE" || objectType === "VIEW" || objectType === "MATERIALIZED_VIEW";

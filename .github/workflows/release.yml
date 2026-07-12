@@ -355,25 +355,34 @@ jobs:
     needs: publish
     runs-on: ubuntu-latest
     steps:
-      - name: Sync release assets to CNB
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Download GitHub release assets
         env:
           TAG_NAME: ${{ github.ref_name }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_USERNAME: ${{ github.repository_owner }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CNB_USERNAME: cnb
-          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/github-release" "$RUNNER_TEMP/release-assets"
+          gh release view "$TAG_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json tagName,name,body,targetCommitish,isPrerelease,isDraft,assets \
+            > "$RUNNER_TEMP/github-release/release.json"
+          gh release download "$TAG_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/release-assets" \
+            --clobber
 
-          wget -q https://cnb.cool/znb/mpgrm/-/releases/download/v0.1.0/mpgrm_linux_amd64.tar.gz
-          tar -xf mpgrm_linux_amd64.tar.gz
-          chmod +x mpgrm
-
-          ./mpgrm releases sync \
-            --repo "https://github.com/${GITHUB_REPOSITORY}.git" \
-            --target-repo "https://cnb.cool/${CNB_REPOSITORY}.git" \
-            --tags "${TAG_NAME}"
+      - name: Sync release assets to CNB
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CNB_UPLOAD_CONCURRENCY: "3"
+        run: |
+          node .github/scripts/sync-cnb-release.mjs \
+            --github-release "$RUNNER_TEMP/github-release/release.json" \
+            --assets-dir "$RUNNER_TEMP/release-assets"
 
   sync-release-to-atomgit:
     name: Sync release to AtomGit
@@ -416,6 +425,8 @@ jobs:
         env:
           ATOMGIT_TOKEN: ${{ secrets.ATOMGIT_TOKEN }}
           ATOMGIT_REPOSITORY: "t8y2/dbx"
+          # AtomGit throttles concurrent large-asset uploads, which can expire their temporary upload URLs.
+          ATOMGIT_UPLOAD_CONCURRENCY: "1"
         run: |
           set -euo pipefail
           node .github/scripts/sync-atomgit-release.mjs \

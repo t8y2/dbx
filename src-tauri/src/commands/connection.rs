@@ -204,6 +204,8 @@ mod tests {
             jdbc_driver_paths: Vec::new(),
             one_time: false,
             read_only: false,
+            is_production: false,
+            production_databases: vec![],
         }
     }
 
@@ -821,6 +823,9 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                     .await
                     .map(|_| "Connection successful".to_string())
             }
+            DatabaseType::CloudflareD1 => db::cloudflare_d1_driver::connect(&config, connect_timeout)
+                .await
+                .map(|_| "Connection successful".to_string()),
             DatabaseType::InfluxDb => {
                 let client = db::influxdb_driver::InfluxdbClient::new_for_config(&url, &config, connect_timeout)?;
                 db::influxdb_driver::test_connection(&client, connect_timeout)
@@ -1107,6 +1112,9 @@ pub async fn connect_db(
             let client = db::turso_driver::TursoClient::new(&url, &auth_token, db_config.ssl, connect_timeout)?;
             db::turso_driver::test_connection(&client, connect_timeout).await?;
             PoolKind::Turso(client)
+        }
+        DatabaseType::CloudflareD1 => {
+            PoolKind::CloudflareD1(db::cloudflare_d1_driver::connect(&db_config, connect_timeout).await?)
         }
         DatabaseType::InfluxDb => {
             let client = db::influxdb_driver::InfluxdbClient::new_for_config(&url, &db_config, connect_timeout)?;

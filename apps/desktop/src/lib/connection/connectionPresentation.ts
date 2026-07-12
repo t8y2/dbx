@@ -17,6 +17,7 @@ export function connectionDriverLabel(connection?: Pick<ConnectionConfig, "db_ty
 
 export function connectionEndpointLabel(connection?: ConnectionPresentationConfig): string {
   if (!connection) return "";
+  if (connection.db_type === "cloudflare-d1") return [connection.host, connection.database].filter(Boolean).join("/");
   if (LOCAL_DATABASE_TYPES.has(connection.db_type) || (connection.db_type === "h2" && connection.port === 0)) {
     return connection.host || connection.database || "local";
   }
@@ -45,6 +46,7 @@ function redactConnectionHost(host: string): string {
 
 export function connectionRedactedEndpointLabel(connection?: ConnectionPresentationConfig): string {
   if (!connection) return "";
+  if (connection.db_type === "cloudflare-d1") return `${REDACTED_HOST_SEGMENT}/${REDACTED_HOST_SEGMENT}`;
   if (LOCAL_DATABASE_TYPES.has(connection.db_type) || (connection.db_type === "h2" && connection.port === 0)) {
     return connectionEndpointLabel(connection);
   }
@@ -110,6 +112,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType): string {
 
     case "turso":
       return "https://[your-db]-[org].turso.io";
+
+    case "cloudflare-d1":
+      return "https://api.cloudflare.com/client/v4/accounts/{account_id}/d1/database/{database_id}";
 
     case "duckdb":
       return "duckdb:///absolute/path/to/database.duckdb";

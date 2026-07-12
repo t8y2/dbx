@@ -1687,7 +1687,7 @@ where
 
     let mut current_cursor = cursor;
 
-    for _ in 0..iterations {
+    for iteration in 0..iterations {
         let raw: RedisRawValue = redis::cmd("SCAN")
             .arg(current_cursor)
             .arg("MATCH")
@@ -1737,9 +1737,24 @@ where
             return Ok(RedisScanResult { cursor: 0, keys: all_keys, total_keys });
         }
         current_cursor = next_cursor;
+
+        // MATCH may yield sparse or empty batches. Keep scanning within the
+        // caller's bounded budget, but stop once this result page is full.
+        if !should_continue_key_scan(all_keys.len(), count, iteration + 1, iterations) {
+            break;
+        }
     }
 
     Ok(RedisScanResult { cursor: current_cursor, keys: all_keys, total_keys })
+}
+
+fn should_continue_key_scan(
+    matched_keys: usize,
+    target_keys: usize,
+    completed_iterations: usize,
+    max_iterations: usize,
+) -> bool {
+    matched_keys < target_keys.max(1) && completed_iterations < max_iterations.max(1)
 }
 
 pub async fn scan_values_page<C>(
@@ -2885,6 +2900,23 @@ mod tests {
     }
 
     #[test]
+    fn sparse_key_scan_continues_after_empty_iterations() {
+        assert!(super::should_continue_key_scan(0, 1000, 8, 50));
+    }
+
+    #[test]
+    fn key_scan_stops_when_result_page_is_full() {
+        assert!(!super::should_continue_key_scan(1000, 1000, 3, 50));
+        assert!(!super::should_continue_key_scan(1200, 1000, 3, 50));
+    }
+
+    #[test]
+    fn key_scan_respects_iteration_budget() {
+        assert!(!super::should_continue_key_scan(0, 1000, 50, 50));
+        assert!(!super::should_continue_key_scan(0, 0, 1, 1));
+    }
+
+    #[test]
     fn matches_hash_field_name_in_value_search() {
         let hash_value = hash_value(&[("name", "Alice"), ("email", "alice@example.com")]);
         assert!(redis_value_matches_query(&hash_value, "name"));
@@ -3076,6 +3108,8 @@ mod tests {
             jdbc_driver_paths: Vec::new(),
             one_time: false,
             read_only: false,
+            is_production: false,
+            production_databases: vec![],
         };
 
         assert_eq!(redis_database_index(&config), 4);

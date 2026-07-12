@@ -12,6 +12,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import { useToast } from "@/composables/useToast";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
+import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { requiresSqlFileTargetDatabaseSelection } from "@/lib/connection/connectionLevelDatabaseBootstrap";
 import { cancelSqlFileExecution, executeSqlFile, listenSqlFileProgress, listDatabases, previewSqlFile, type SqlFilePreview, type SqlFileProgress, type SqlFileStatus } from "@/lib/backend/api";
@@ -31,6 +33,7 @@ const props = defineProps<{
 }>();
 
 const store = useConnectionStore();
+const productionSafetyStore = useProductionSafetyStore();
 
 const fileInput = ref<HTMLInputElement | null>(null);
 const filePath = ref("");
@@ -280,6 +283,18 @@ async function refreshTargetAfterImport() {
 
 async function startExecution() {
   if (!canStart.value || !preview.value) return;
+  const productionContext = productionContextForDatabase(selectedConnection.value, database.value);
+  if (productionContext.active) {
+    // File previews are truncated, so production file execution is always reviewed instead of inferring safety from a partial preview.
+    const confirmed = await productionSafetyStore.requestConfirmation({
+      sql: preview.value.preview,
+      connectionName: selectedConnection.value?.name,
+      database: database.value,
+      productionDatabases: productionContext.databases,
+      source: t("production.sourceSqlFile"),
+    });
+    if (!confirmed) return;
+  }
 
   const id = uuid();
   executionId.value = id;

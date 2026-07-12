@@ -28,7 +28,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
-public final class H2Agent extends AbstractJdbcAgent {
+public class H2Agent extends AbstractJdbcAgent {
     private String databaseName = "";
 
     @Override

@@ -44,6 +44,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
     private static final String KINGBASE_VIEW_SCHEMA = "CAST(v.schemaname AS varchar(256))";
     private static final String KINGBASE_MATVIEW_NAME = "CAST(mv.matviewname AS varchar(256))";
     private static final String KINGBASE_MATVIEW_SCHEMA = "CAST(mv.schemaname AS varchar(256))";
+    private boolean postgresCatalogMode;
 
     public static final PostgresLikeAgentProfile KINGBASE_PROFILE = new PostgresLikeAgentProfile(
         "com.kingbase8.Driver",
@@ -56,13 +57,28 @@ public final class KingbaseAgent extends PostgresLikeAgent {
 
     @Override
     protected void afterConnect(ConnectParams params, Connection connection) {
+        postgresCatalogMode = false;
         if (params.isMysql_compat_mode()) {
             setMysqlCompatMode(true);
+            return;
+        }
+        postgresCatalogMode = !catalogExists(connection, "sys_catalog.sys_namespace")
+            && catalogExists(connection, "pg_catalog.pg_namespace");
+    }
+
+    private static boolean catalogExists(Connection connection, String catalog) {
+        try (Statement stmt = connection.createStatement();
+             ResultSet ignored = stmt.executeQuery("SELECT 1 FROM " + catalog + " WHERE 1 = 0")) {
+            return true;
+        } catch (Exception ignored) {
+            // Kingbase compatibility modes expose different catalog families.
+            return false;
         }
     }
 
     @Override
     public List<DatabaseInfo> listDatabases() {
+        if (postgresCatalogMode) return super.listDatabases();
         return unchecked(() -> {
             if (isMysqlCompatMode()) {
                 List<DatabaseInfo> result = queryDatabases("SELECT current_database() AS database_name");
@@ -96,6 +112,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
 
     @Override
     public List<String> listSchemas() {
+        if (postgresCatalogMode) return super.listSchemas();
         return unchecked(() -> {
             List<String> result = new ArrayList<>();
             String sql = isMysqlCompatMode()
@@ -122,6 +139,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
 
     @Override
     public List<TableInfo> listTables(String schema) {
+        if (postgresCatalogMode) return super.listTables(schema);
         if (isMysqlCompatMode()) {
             return listTables(schema, "table_type IN ('BASE TABLE', 'VIEW')");
         }
@@ -130,6 +148,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
 
     @Override
     public List<TableInfo> listTables(String schema, MetadataListConstraints constraints) {
+        if (postgresCatalogMode) return super.listTables(schema, constraints);
         MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
         if (isUnconstrained(normalized)) {
             return listTables(schema);
@@ -199,6 +218,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
 
     @Override
     public List<ObjectInfo> listObjects(String schema) {
+        if (postgresCatalogMode) return super.listObjects(schema);
         return unchecked(() -> {
             String effectiveSchema = effectiveSchema(schema);
             List<ObjectInfo> result = new ArrayList<>();
@@ -235,6 +255,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
 
     @Override
     public List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints) {
+        if (postgresCatalogMode) return super.listObjects(schema, constraints);
         MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
         if (isUnconstrained(normalized)) {
             return listObjects(schema);
@@ -299,6 +320,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
 
     @Override
     public ObjectSource getObjectSource(String schema, String name, String objectType) {
+        if (postgresCatalogMode) return super.getObjectSource(schema, name, objectType);
         if ("FUNCTION".equalsIgnoreCase(objectType) || "PROCEDURE".equalsIgnoreCase(objectType)) {
             return routineSource(schema, name, objectType);
         }
@@ -354,6 +376,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
 
     @Override
     public List<ColumnInfo> getColumns(String schema, String table) {
+        if (postgresCatalogMode) return super.getColumns(schema, table);
         return unchecked(() -> {
             Set<String> primaryKeys = primaryKeys(schema, table);
             if (!isMysqlCompatMode()) {
@@ -444,6 +467,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
 
     @Override
     public List<IndexInfo> listIndexes(String schema, String table) {
+        if (postgresCatalogMode) return super.listIndexes(schema, table);
         return unchecked(() -> {
             Map<String, CatalogIndexBuilder> indexes = new LinkedHashMap<>();
             String sql = "SELECT i.relname AS index_name, am.amname AS index_type, " +
@@ -487,6 +511,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
 
     @Override
     public List<ForeignKeyInfo> listForeignKeys(String schema, String table) {
+        if (postgresCatalogMode) return super.listForeignKeys(schema, table);
         return unchecked(() -> {
             List<ForeignKeyInfo> result = new ArrayList<>();
             String sql = "SELECT fk.constraint_name, fk.column_name, pk.table_name AS ref_table, pk.column_name AS ref_column " +
@@ -525,11 +550,13 @@ public final class KingbaseAgent extends PostgresLikeAgent {
 
     @Override
     public List<TriggerInfo> listTriggers(String schema, String table) {
+        if (postgresCatalogMode) return super.listTriggers(schema, table);
         return Collections.emptyList();
     }
 
     @Override
     public String setSchemaSQL(String schema) {
+        if (postgresCatalogMode) return super.setSchemaSQL(schema);
         // Kingbase searches sys_catalog implicitly before user schemas unless it
         // is listed explicitly. Put it after the selected schema so business
         // tables named like system tables (for example sys_config) win.

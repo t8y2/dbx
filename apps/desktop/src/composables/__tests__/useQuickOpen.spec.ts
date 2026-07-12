@@ -1,5 +1,5 @@
-import { describe, expect, it, beforeEach, vi } from "vitest";
-import { useQuickOpen, type QuickOpenItem } from "@/composables/useQuickOpen";
+import { describe, expect, it, vi } from "vitest";
+import { useQuickOpen } from "@/composables/useQuickOpen";
 import { useConnectionStore } from "@/stores/connectionStore";
 
 vi.mock("@/stores/connectionStore", () => ({
@@ -110,6 +110,102 @@ describe("useQuickOpen", () => {
   });
 
   describe("filtering and searching", () => {
+    it("indexes database objects under connection groups", () => {
+      const mockStore = {
+        connections: [{ id: "conn1", name: "Grouped PG", db_type: "postgres" }],
+        treeNodes: [
+          {
+            id: "group1",
+            type: "connection-group",
+            label: "Production",
+            children: [
+              {
+                id: "conn1",
+                connectionId: "conn1",
+                type: "connection",
+                label: "Grouped PG",
+                children: [
+                  {
+                    id: "conn1:postgres",
+                    connectionId: "conn1",
+                    type: "database",
+                    database: "postgres",
+                    label: "postgres",
+                    children: [
+                      {
+                        id: "conn1:postgres:public",
+                        connectionId: "conn1",
+                        type: "schema",
+                        database: "postgres",
+                        schema: "public",
+                        label: "public",
+                        children: [
+                          {
+                            id: "conn1:postgres:public:users",
+                            connectionId: "conn1",
+                            type: "table",
+                            database: "postgres",
+                            schema: "public",
+                            label: "users",
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      };
+      vi.mocked(useConnectionStore).mockReturnValue(mockStore as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+
+      setQuery("users");
+      expect(filteredItems.value.map((item) => item.label)).toContain("users");
+    });
+
+    it("includes schemas as quick open results", () => {
+      const mockStore = {
+        connections: [{ id: "conn1", name: "PG", db_type: "postgres" }],
+        treeNodes: [
+          {
+            id: "conn1",
+            connectionId: "conn1",
+            type: "connection",
+            label: "PG",
+            children: [
+              {
+                id: "conn1:postgres",
+                connectionId: "conn1",
+                type: "database",
+                database: "postgres",
+                label: "postgres",
+                children: [
+                  {
+                    id: "conn1:postgres:analytics",
+                    connectionId: "conn1",
+                    type: "schema",
+                    database: "postgres",
+                    schema: "analytics",
+                    label: "analytics",
+                    children: [],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      };
+      vi.mocked(useConnectionStore).mockReturnValue(mockStore as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+
+      setQuery("analytics");
+      expect(filteredItems.value).toEqual(expect.arrayContaining([expect.objectContaining({ type: "schema", label: "analytics" })]));
+    });
+
     it("should filter items based on search query", () => {
       const mockStore = {
         connections: [

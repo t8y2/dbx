@@ -185,4 +185,49 @@ describe("connectionStore completion assistant", () => {
     await Promise.all(requests);
     expect(maxActiveColumns).toBe(2);
   });
+
+  it("evicts old completion database entries", async () => {
+    const listDatabases = vi.fn(async (connectionId: string) => [{ name: `db_${connectionId}` }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      listDatabases,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+
+    for (let index = 0; index < 51; index++) {
+      const id = `pg-${index}`;
+      store.addEphemeralConnection({ ...postgresConnection(), id, name: `Postgres ${index}` });
+      await store.listCompletionDatabases(id);
+    }
+
+    await store.listCompletionDatabases("pg-0");
+
+    expect(listDatabases).toHaveBeenCalledTimes(52);
+  });
+
+  it("evicts old completion schema entries", async () => {
+    const listSchemas = vi.fn(async (_connectionId: string, database: string) => [`schema_${database}`]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      listSchemas,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.addEphemeralConnection(postgresConnection());
+
+    for (let index = 0; index < 51; index++) {
+      await store.listCompletionSchemas("pg-1", `db_${index}`);
+    }
+
+    await store.listCompletionSchemas("pg-1", "db_0");
+
+    expect(listSchemas).toHaveBeenCalledTimes(52);
+  });
 });

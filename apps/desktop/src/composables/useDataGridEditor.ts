@@ -7,6 +7,8 @@ import { rowStatusFilterAfterAddingRow, type RowStatusFilter } from "@/lib/dataG
 import { supportsDataGridTransaction } from "@/lib/table/tableEditing";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useHistoryStore } from "@/stores/historyStore";
+import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
+import { assessProductionSql, productionContextForDatabase } from "@/lib/database/productionSafety";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
 import { DBX_NEO4J_ELEMENT_ID_COLUMN, DBX_ROWID_COLUMN } from "@/lib/table/tableEditing";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -39,6 +41,7 @@ type CommitEditResult =
 
 interface CommitEditOptions {
   promoteDraft?: boolean;
+  explicitValue?: string | null;
 }
 
 type GridScrollerRef =
@@ -52,6 +55,7 @@ type GridScrollerRef =
 
 export interface CustomSaveHandler {
   save: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; newRows: CellValue[][]; deletedRows: Set<number>; columns: string[]; rows: CellValue[][] }) => Promise<void>;
+  applySavedChanges?: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; columns: string[] }) => void;
   preview?: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; newRows: CellValue[][]; deletedRows: Set<number>; columns: string[]; rows: CellValue[][] }) => Promise<string[]>;
   canInsert?: boolean;
   canDelete?: boolean;
@@ -166,6 +170,7 @@ export function clearDataGridPendingSnapshotsForTab(tabId: string) {
 export function useDataGridEditor(options: UseDataGridEditorOptions) {
   const connectionStore = useConnectionStore();
   const historyStore = useHistoryStore();
+  const productionSafetyStore = useProductionSafetyStore();
 
   const {
     result,
@@ -624,7 +629,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (item.isDraft) {
       ensureQuickEntryDraftRow();
       const oldVal = quickEntryDraftRow.value[col] ?? null;
-      const newVal = coerceCellValue(editValue.value, oldVal, col);
+      const newVal = options.explicitValue !== undefined ? options.explicitValue : coerceCellValue(editValue.value, oldVal, col);
       const nextDraftRow = [...quickEntryDraftRow.value];
       nextDraftRow[col] = newVal;
       if (newVal !== oldVal) pushUndoSnapshot();
@@ -650,7 +655,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
     if (item.isNew && item.newIndex !== undefined) {
       const oldVal = newRows.value[item.newIndex]?.[col];
-      const newVal = coerceCellValue(editValue.value, oldVal, col);
+      const newVal = options.explicitValue !== undefined ? options.explicitValue : coerceCellValue(editValue.value, oldVal, col);
       const changed = newVal !== oldVal;
       if (changed) pushUndoSnapshot();
       if (newRows.value[item.newIndex]) {
@@ -675,7 +680,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     }
 
     const oldVal = result.value.rows[item.sourceIndex]?.[col];
-    const newVal = coerceCellValue(editValue.value, oldVal, col);
+    const newVal = options.explicitValue !== undefined ? options.explicitValue : coerceCellValue(editValue.value, oldVal, col);
     const changed = newVal !== item.data[col];
     if (newVal !== oldVal) {
       if (changed) pushUndoSnapshot();
@@ -1159,6 +1164,22 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       return;
     }
     const customHandler = customSaveHandler?.value;
+    const connection = connectionStore.getConfig(connectionId.value ?? "");
+    const customHandlerProductionContext = productionContextForDatabase(connection, database.value);
+    if (customHandler && customHandlerProductionContext.active) {
+      // Custom data sources may not expose SQL, but their row mutations still need the same production interlock.
+      if (saveOptions.autoSave) {
+        return;
+      }
+      const confirmed = await productionSafetyStore.requestConfirmation({
+        sql: describeDataGridChanges(snapshot),
+        connectionName: connection?.name,
+        database: database.value,
+        productionDatabases: customHandlerProductionContext.databases,
+        source: "Data editor",
+      });
+      if (!confirmed) return;
+    }
     if (customHandler && snapshot.newRows.length > 0 && customHandler.supportsInsert !== true && customHandler.canInsert !== true) {
       saveError.value = "当前保存目标不支持新增行。";
       return;
@@ -1183,6 +1204,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         return;
       }
       snapshot.newRowRefs.forEach((row) => savingNewRows.delete(row));
+      customHandler.applySavedChanges?.({ dirtyRows: snapshot.dirtyRows, columns: result.value.columns });
       applyDirtyRowsToResult(snapshot);
       clearSavedPendingChanges(snapshot);
       if (!hasPendingChanges.value) exitTransaction();
@@ -1217,6 +1239,25 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       return;
     }
     const rollbackStmts = preparedSave?.rollbackStatements ?? [];
+    const productionAssessment = assessProductionSql(stmts.join(";\n"), connection, database.value);
+    if (productionAssessment.active && productionAssessment.isMutation) {
+      // Autosave must never write production data without an operator reviewing the generated statements.
+      if (saveOptions.autoSave) {
+        await finishInterruptedSaveChanges(snapshot);
+        return;
+      }
+      const confirmed = await productionSafetyStore.requestConfirmation({
+        sql: stmts.join("\n"),
+        connectionName: connection?.name,
+        database: database.value,
+        productionDatabases: productionAssessment.databases,
+        source: "Data editor",
+      });
+      if (!confirmed) {
+        await finishInterruptedSaveChanges(snapshot);
+        return;
+      }
+    }
     const start = Date.now();
     let apiResult: { affected_rows?: number } | undefined;
     console.info("[DBX][dataGrid:save-statements]", {
@@ -1469,4 +1510,9 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       }
     },
   };
+}
+
+function describeDataGridChanges(snapshot: { newRows: unknown[]; dirtyRows: Map<unknown, unknown>; deletedRows: Set<unknown> }): string {
+  const changes = [snapshot.newRows.length ? `INSERT: ${snapshot.newRows.length} row(s)` : "", snapshot.dirtyRows.size ? `UPDATE: ${snapshot.dirtyRows.size} row(s)` : "", snapshot.deletedRows.size ? `DELETE: ${snapshot.deletedRows.size} row(s)` : ""].filter(Boolean);
+  return changes.join("\n") || "DATA GRID WRITE";
 }

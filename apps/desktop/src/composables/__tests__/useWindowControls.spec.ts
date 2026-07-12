@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldDrawDesktopWindowFrame, shouldReserveMacTrafficLightInset, shouldShowWindowControls } from "@/composables/useWindowControls";
+import { macTrafficLightInsetPaddingForScale, macTrafficLightPositionForScale, shouldDrawDesktopWindowFrame, shouldReserveMacTrafficLightInset, shouldShowWindowControls } from "@/composables/useWindowControls";
 
 describe("window controls", () => {
   it("shows custom controls for non-macOS desktop windows", () => {
@@ -25,5 +25,18 @@ describe("window controls", () => {
     expect(shouldReserveMacTrafficLightInset(true, true, true)).toBe(false);
     expect(shouldReserveMacTrafficLightInset(false, false, true)).toBe(false);
     expect(shouldReserveMacTrafficLightInset(true, false, false)).toBe(false);
+  });
+
+  it("keeps the macOS traffic light reserve visually stable across UI scales", () => {
+    expect(macTrafficLightInsetPaddingForScale(1)).toBe("70px");
+    expect(macTrafficLightInsetPaddingForScale(0.9)).toBe("78px");
+    expect(macTrafficLightInsetPaddingForScale(1.25)).toBe("56px");
+  });
+
+  it("adjusts macOS traffic lights vertically with the UI scale", () => {
+    expect(macTrafficLightPositionForScale(1)).toEqual({ x: 16, y: 18 });
+    expect(macTrafficLightPositionForScale(0.9)).toEqual({ x: 16, y: 16 });
+    expect(macTrafficLightPositionForScale(1.1)).toEqual({ x: 16, y: 20 });
+    expect(macTrafficLightPositionForScale(1.25)).toEqual({ x: 16, y: 23 });
   });
 });

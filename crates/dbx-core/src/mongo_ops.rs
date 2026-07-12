@@ -315,12 +315,14 @@ pub async fn mongo_update_documents_core(
     filter_json: &str,
     update_json: &str,
     many: bool,
+    options_json: Option<&str>,
 ) -> Result<u64, String> {
     ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => {
-            mongo_driver::update_documents(client, database, collection, filter_json, update_json, many).await
+            mongo_driver::update_documents(client, database, collection, filter_json, update_json, many, options_json)
+                .await
         }
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
@@ -331,6 +333,7 @@ pub async fn mongo_update_documents_core(
                     "filter_json": filter_json,
                     "update_json": update_json,
                     "many": many,
+                    "options_json": options_json,
                 }))
                 .await?;
             Ok(result.get("modified_count").and_then(|v| v.as_u64()).unwrap_or(0))

@@ -177,6 +177,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { DataGridSortDirection, DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
+import { DATA_GRID_COMPACT_TOPBAR_WIDTH, type DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
 import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
 import { supportsTableStructureEditing } from "@/lib/database/databaseCapabilities";
@@ -280,7 +281,6 @@ const dataGridElapsed = () => `${Math.round(performance.now() - dataGridCreatedA
 const isMac = isMacOS();
 const shortcutMod = isMac ? "Cmd" : "Ctrl";
 const saveShortcutLabel = computed(() => formatShortcut(settingsStore.editorSettings.shortcuts.saveSql));
-const DATA_GRID_COMPACT_TOPBAR_WIDTH = 900;
 const AUTO_REFRESH_INTERVAL_OPTIONS = [5, 10, 30, 60, 300];
 
 function logDataGridTiming(message: string, payload?: Record<string, unknown>) {
@@ -288,7 +288,7 @@ function logDataGridTiming(message: string, payload?: Record<string, unknown>) {
 }
 
 const emit = defineEmits<{
-  reload: [sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number];
+  reload: [sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent];
   paginate: [offset: number, limit: number, whereInput?: string, orderBy?: string];
   sort: [column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode?: DataGridSortMode];
   "update:whereInput": [value: string];
@@ -4063,6 +4063,8 @@ const saveToolbarState = computed(() =>
   }),
 );
 const hasSearchBarSlot = computed(() => !!slots["search-bar"]);
+const hasResultToolbarLeadingSlot = computed(() => !!slots["result-toolbar-leading"]);
+const hasResultToolbarActionsSlot = computed(() => !!slots["result-toolbar-actions"]);
 const quickEntryEnabled = computed(() => settingsStore.editorSettings.dataGridQuickEntry);
 const showQuickEntryDraftRow = computed(() =>
   shouldShowQuickEntryDraftRow({
@@ -4079,6 +4081,8 @@ const showDataGridTopbar = computed(
     hasLocalColumnFilters.value ||
     canShowWhereSearch.value ||
     hasSearchBarSlot.value ||
+    hasResultToolbarLeadingSlot.value ||
+    hasResultToolbarActionsSlot.value ||
     showQueryEditReadOnlyBadge.value ||
     props.context !== "results" ||
     (!!props.editable && hasDataGridSaveTarget.value) ||
@@ -4236,7 +4240,7 @@ async function onToolbarRefresh() {
   }
   preserveTransposeOnNextResult.value = showTranspose.value;
   isRefreshingData.value = true;
-  emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, (currentPage.value - 1) * pageSize.value);
+  emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, (currentPage.value - 1) * pageSize.value, "refresh");
 }
 
 function stopAutoRefreshTimer() {
@@ -8731,6 +8735,9 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       <div v-if="hasData || canShowWhereSearch" class="flex-1 flex flex-col overflow-hidden" @contextmenu="onContextMenu">
         <!-- Search bar -->
         <div ref="dataGridTopbarRef" v-if="showDataGridTopbar" class="data-grid-topbar-shell shrink-0 flex min-w-0 border-b bg-muted/20">
+          <div v-if="hasResultToolbarLeadingSlot" class="flex shrink-0 items-center border-r">
+            <slot name="result-toolbar-leading" :compact="compactDataGridToolbar" />
+          </div>
           <div
             class="data-grid-topbar-scroll min-w-0 flex-1 overflow-x-hidden"
             @scroll="
@@ -9159,6 +9166,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
           </div>
 
           <div class="flex shrink-0 items-center gap-1 px-1 ml-auto" @wheel="onDataGridTopbarFixedActionWheel">
+            <slot v-if="hasResultToolbarActionsSlot" name="result-toolbar-actions" :compact="compactDataGridToolbar" />
             <Tooltip v-if="showQueryEditReadOnlyBadge">
               <TooltipTrigger as-child>
                 <div class="flex h-5 items-center gap-1 rounded border border-muted-foreground/30 bg-muted/60 px-1.5 text-xs font-medium text-muted-foreground">
@@ -11460,9 +11468,12 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 }
 
 .data-grid-topbar-action-button {
+  align-items: center;
+  justify-content: center;
   max-width: 9rem;
   min-width: 1.25rem;
   gap: 0;
+  line-height: 1;
   overflow: hidden;
   transition:
     max-width var(--data-grid-topbar-transition-duration) var(--data-grid-topbar-transition-easing),
@@ -11484,6 +11495,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 }
 
 .data-grid-topbar-action-icon {
+  display: block;
+  align-self: center;
   flex-shrink: 0;
   transition:
     margin-inline-end var(--data-grid-topbar-transition-duration) var(--data-grid-topbar-transition-easing),
@@ -11507,10 +11520,13 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 }
 
 .data-grid-topbar-action-label {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  height: 1rem;
   max-width: 8rem;
   overflow: hidden;
   white-space: nowrap;
+  line-height: 1;
   opacity: 1;
   transform: translateX(0);
   transition:

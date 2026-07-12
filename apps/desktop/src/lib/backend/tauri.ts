@@ -1188,8 +1188,8 @@ export async function listInstalledAgentsLocal(): Promise<AgentDriverInfo[]> {
   return invoke("list_installed_agents_local");
 }
 
-export async function listInstalledAgents(): Promise<AgentDriverInfo[]> {
-  return invoke("list_installed_agents");
+export async function listInstalledAgents(source?: UpdateDownloadSource): Promise<AgentDriverInfo[]> {
+  return invoke("list_installed_agents", { source });
 }
 
 export async function isAgentInstalled(dbType: string): Promise<boolean> {
@@ -1216,12 +1216,12 @@ export async function restartDriverRuntime(runtimeId: string): Promise<void> {
   return invoke("restart_driver_runtime", { runtimeId });
 }
 
-export async function installAgent(dbType: string): Promise<void> {
-  return invoke("install_agent", { dbType });
+export async function installAgent(dbType: string, source?: UpdateDownloadSource): Promise<void> {
+  return invoke("install_agent", { dbType, source });
 }
 
-export async function upgradeAllAgents(): Promise<UpgradeAllAgentDriversResult> {
-  return invoke("upgrade_all_agents");
+export async function upgradeAllAgents(source?: UpdateDownloadSource): Promise<UpgradeAllAgentDriversResult> {
+  return invoke("upgrade_all_agents", { source });
 }
 
 export async function checkAgentUpdateBlockers(dbTypes: string[]): Promise<AgentUpdateBlocker[]> {
@@ -1258,8 +1258,8 @@ export async function importAgentJar(dbType: string, path: string | File): Promi
   return invoke("import_agent_jar_cmd", { dbType, path });
 }
 
-export async function reinstallJre(jreKey?: string): Promise<void> {
-  return invoke("reinstall_jre", { jreKey });
+export async function reinstallJre(jreKey?: string, source?: UpdateDownloadSource): Promise<void> {
+  return invoke("reinstall_jre", { jreKey, source });
 }
 
 export async function uninstallJre(jreKey: string): Promise<void> {

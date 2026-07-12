@@ -12,6 +12,7 @@ const OFFICIAL_UPDATE_ENDPOINTS: [&str; 2] = [
     "https://dl.dbxio.com/releases/latest/latest.json",
     "https://github.com/t8y2/dbx/releases/latest/download/latest.json",
 ];
+const R2_LATEST_RELEASE_DOWNLOAD_PREFIX: &str = "https://dl.dbxio.com/releases/latest/";
 const CNB_RELEASE_DOWNLOAD_PREFIX: &str = "https://cnb.cool/dbxio.com/dbx/-/releases/download/";
 const GITHUB_RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/t8y2/dbx/releases/download/";
 const ATOMGIT_RELEASE_DOWNLOAD_PREFIX: &str = "https://atomgit.com/t8y2/dbx/releases/download/";
@@ -46,12 +47,18 @@ impl UpdateDownloadSource {
             Self::Cnb => {
                 let version =
                     latest_version.ok_or_else(|| "Latest version is required for CNB updates.".to_string())?;
-                Ok(vec![format!("{CNB_RELEASE_DOWNLOAD_PREFIX}{}/latest.json", tag_version(version))])
+                Ok(vec![
+                    format!("{CNB_RELEASE_DOWNLOAD_PREFIX}{}/latest.json", tag_version(version)),
+                    OFFICIAL_UPDATE_ENDPOINTS[0].to_string(),
+                ])
             }
             Self::Atomgit => {
                 let version =
                     latest_version.ok_or_else(|| "Latest version is required for AtomGit updates.".to_string())?;
-                Ok(vec![format!("{ATOMGIT_RELEASE_DOWNLOAD_PREFIX}{}/latest.json", tag_version(version))])
+                Ok(vec![
+                    format!("{ATOMGIT_RELEASE_DOWNLOAD_PREFIX}{}/latest.json", tag_version(version)),
+                    OFFICIAL_UPDATE_ENDPOINTS[0].to_string(),
+                ])
             }
         }
     }
@@ -77,6 +84,18 @@ impl UpdateDownloadSource {
             Self::Atomgit => Some(ATOMGIT_RELEASE_DOWNLOAD_PREFIX),
             Self::Official => None,
         }
+    }
+
+    fn r2_fallback_url(&self, url: &str) -> Result<Option<String>, String> {
+        if matches!(self, Self::Official) || url.starts_with(R2_LATEST_RELEASE_DOWNLOAD_PREFIX) {
+            return Ok(None);
+        }
+        let filename = url
+            .rsplit('/')
+            .next()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| format!("Unsupported update download URL for {} source: {url}", self.label()))?;
+        Ok(Some(format!("{R2_LATEST_RELEASE_DOWNLOAD_PREFIX}{filename}")))
     }
 }
 
@@ -136,6 +155,12 @@ pub async fn download_and_install_update(
     if let Some(download_url) = source.rewrite_download_url(update.download_url.as_str())? {
         update.download_url = download_url.parse().map_err(|e| format!("Invalid CNB update download URL: {e}"))?;
     }
+    if !update_url_is_available(update.download_url.as_str()).await {
+        if let Some(fallback_url) = source.r2_fallback_url(update.download_url.as_str())? {
+            println!("[DBX updater] {} asset unavailable; falling back to R2: {fallback_url}", source.label());
+            update.download_url = fallback_url.parse().map_err(|e| format!("Invalid R2 update download URL: {e}"))?;
+        }
+    }
     println!("[DBX updater] downloading from {} URL: {}", source.label(), update.download_url);
 
     let downloaded = Arc::new(AtomicU64::new(0));
@@ -159,11 +184,25 @@ pub async fn download_and_install_update(
         .map_err(|e| format!("Failed to download and install update: {e}"))
 }
 
+async fn update_url_is_available(url: &str) -> bool {
+    let client = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build() {
+        Ok(client) => client,
+        Err(_) => return false,
+    };
+    // Request only the first byte because some release hosts do not implement HEAD consistently.
+    client
+        .get(url)
+        .header(reqwest::header::RANGE, "bytes=0-0")
+        .send()
+        .await
+        .is_ok_and(|response| response.status().is_success())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         tag_version, UpdateDownloadSource, ATOMGIT_RELEASE_DOWNLOAD_PREFIX, CNB_RELEASE_DOWNLOAD_PREFIX,
-        OFFICIAL_UPDATE_ENDPOINTS,
+        OFFICIAL_UPDATE_ENDPOINTS, R2_LATEST_RELEASE_DOWNLOAD_PREFIX,
     };
 
     #[test]
@@ -181,13 +220,22 @@ mod tests {
     #[test]
     fn builds_cnb_update_endpoint_for_tag() {
         let endpoints = UpdateDownloadSource::Cnb.endpoints(Some("0.5.39")).unwrap();
-        assert_eq!(endpoints, vec![format!("{CNB_RELEASE_DOWNLOAD_PREFIX}v0.5.39/latest.json")]);
+        assert_eq!(
+            endpoints,
+            vec![format!("{CNB_RELEASE_DOWNLOAD_PREFIX}v0.5.39/latest.json"), OFFICIAL_UPDATE_ENDPOINTS[0].to_string()]
+        );
     }
 
     #[test]
     fn builds_atomgit_update_endpoint_for_tag() {
         let endpoints = UpdateDownloadSource::Atomgit.endpoints(Some("0.5.44")).unwrap();
-        assert_eq!(endpoints, vec![format!("{ATOMGIT_RELEASE_DOWNLOAD_PREFIX}v0.5.44/latest.json")]);
+        assert_eq!(
+            endpoints,
+            vec![
+                format!("{ATOMGIT_RELEASE_DOWNLOAD_PREFIX}v0.5.44/latest.json"),
+                OFFICIAL_UPDATE_ENDPOINTS[0].to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -222,5 +270,13 @@ mod tests {
             .rewrite_download_url("https://atomgit.com/t8y2/dbx/releases/download/v0.5.44/DBX_0.5.44_x64.dmg")
             .unwrap();
         assert_eq!(download_url, None);
+    }
+
+    #[test]
+    fn builds_r2_fallback_for_mirror_asset() {
+        let fallback = UpdateDownloadSource::Atomgit
+            .r2_fallback_url("https://atomgit.com/t8y2/dbx/releases/download/v0.5.44/DBX_0.5.44_x64.dmg")
+            .unwrap();
+        assert_eq!(fallback, Some(format!("{R2_LATEST_RELEASE_DOWNLOAD_PREFIX}DBX_0.5.44_x64.dmg")));
     }
 }

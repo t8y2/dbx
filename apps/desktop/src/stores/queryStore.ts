@@ -131,6 +131,11 @@ function markQueryResultRunsRowsRaw(resultRuns: NonNullable<QueryTab["resultRuns
   return resultRuns;
 }
 
+function preservedResultIndex(results: QueryResult[], currentIndex: number | undefined, preserve: boolean | undefined): number | undefined {
+  if (preserve !== true || typeof currentIndex !== "number" || currentIndex < 0 || currentIndex >= results.length) return undefined;
+  return currentIndex;
+}
+
 function annotateQueryResultSources(results: QueryResult[], sql: string, database: string | undefined, databaseType?: DatabaseType): QueryResult[] {
   const statements = splitSqlStatementRanges(sql, databaseType);
   let statementIndex = 0;
@@ -2403,6 +2408,7 @@ export const useQueryStore = defineStore("query", () => {
       mongoSafety?: MongoAggregateSafetyOptions;
       preserveResultDuringExecution?: boolean;
       preserveTotalRowCountDuringExecution?: boolean;
+      preserveActiveResultIndex?: boolean;
       replaceActiveResultInGroup?: boolean;
       skipRedisSafetyCheck?: boolean;
       sourceTraceId?: string;
@@ -2522,7 +2528,7 @@ export const useQueryStore = defineStore("query", () => {
         if (current?.executionId === executionId) {
           if (allResults.length > 1) {
             const activeResultIndex = allResults.findIndex((r) => !r.columns.includes("Error"));
-            const resultIndex = activeResultIndex >= 0 ? activeResultIndex : 0;
+            const resultIndex = preservedResultIndex(allResults, current.activeResultIndex, options?.preserveActiveResultIndex) ?? (activeResultIndex >= 0 ? activeResultIndex : 0);
             current.results = allResults;
             current.activeResultIndex = resultIndex;
             current.result = allResults[resultIndex];
@@ -2568,12 +2574,19 @@ export const useQueryStore = defineStore("query", () => {
           const mongoCommand = parsedCommand.command;
           const sourceStatement = parsedCommand.text;
           const commandStartedAt = performance.now();
+          const annotateMongoResult = (result: QueryResult): QueryResult => {
+            const annotated = annotateQueryResultSource(result, sourceStatement);
+            if ("collection" in mongoCommand) {
+              annotated.sourceLabel = currentDatabase ? `${currentDatabase}.${mongoCommand.collection}` : mongoCommand.collection;
+            }
+            return annotated;
+          };
           try {
             switch (mongoCommand.kind) {
               case "find": {
                 console.info("[DBX][executeTabSql:mongo-find:start]", { traceId, collection: mongoCommand.collection, database: currentDatabase });
                 const result = await api.mongoFindDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.skip, mongoCommand.limit, mongoCommand.filter, mongoCommand.projection, mongoCommand.sort, executionId);
-                const queryResult = markQueryResultRowsRaw(annotateQueryResultSource(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total), sourceStatement));
+                const queryResult = markQueryResultRowsRaw(annotateMongoResult(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total)));
                 allResults.push(queryResult);
                 mongoEditTarget = mongoCommands.length === 1 && queryResult.columns.includes("_id") ? { collection: mongoCommand.collection, idColumn: "_id" } : undefined;
                 console.info("[DBX][executeTabSql:mongo-find:done]", {
@@ -2589,7 +2602,7 @@ export const useQueryStore = defineStore("query", () => {
               case "version": {
                 console.info("[DBX][executeTabSql:mongo-version:start]", { traceId, database: currentDatabase });
                 const version = await api.mongoServerVersion(tab.connectionId, currentDatabase, executionId);
-                allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoVersionToQueryResult(version, performance.now() - commandStartedAt), sourceStatement)));
+                allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoVersionToQueryResult(version, performance.now() - commandStartedAt))));
                 mongoEditTarget = undefined;
                 console.info("[DBX][executeTabSql:mongo-version:done]", {
                   traceId,
@@ -2602,7 +2615,7 @@ export const useQueryStore = defineStore("query", () => {
               case "countDocuments": {
                 console.info("[DBX][executeTabSql:mongo-count:start]", { traceId, collection: mongoCommand.collection, database: currentDatabase });
                 const result = await api.mongoFindDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, 0, 1, mongoCommand.filter, undefined, undefined, executionId);
-                allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoCountToQueryResult(result.total, performance.now() - commandStartedAt), sourceStatement)));
+                allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoCountToQueryResult(result.total, performance.now() - commandStartedAt))));
                 mongoEditTarget = undefined;
                 console.info("[DBX][executeTabSql:mongo-count:done]", {
                   traceId,
@@ -2621,7 +2634,7 @@ export const useQueryStore = defineStore("query", () => {
                 console.info("[DBX][executeTabSql:mongo-aggregate:start]", { traceId, collection: mongoCommand.collection, database: currentDatabase });
                 const aggregateMaxRows = normalizeResultPageSize(pageLimit ?? options?.pagination?.limit ?? settingsStore.editorSettings.pageSize);
                 const result = await api.mongoAggregateDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.pipeline, aggregateMaxRows, executionId);
-                allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total), sourceStatement)));
+                allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total))));
                 mongoEditTarget = undefined;
                 console.info("[DBX][executeTabSql:mongo-aggregate:done]", {
                   traceId,
@@ -2636,7 +2649,7 @@ export const useQueryStore = defineStore("query", () => {
               case "getIndexes": {
                 console.info("[DBX][executeTabSql:mongo-indexes:start]", { traceId, collection: mongoCommand.collection, database: currentDatabase });
                 const indexes = await api.listIndexes(tab.connectionId, currentDatabase, "", mongoCommand.collection);
-                allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoIndexesToQueryResult(indexes, performance.now() - commandStartedAt), sourceStatement)));
+                allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoIndexesToQueryResult(indexes, performance.now() - commandStartedAt))));
                 mongoEditTarget = undefined;
                 console.info("[DBX][executeTabSql:mongo-indexes:done]", {
                   traceId,
@@ -2655,7 +2668,7 @@ export const useQueryStore = defineStore("query", () => {
                   database: currentDatabase,
                 });
                 const stats = await api.mongoCollectionStats(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.scale, executionId);
-                allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoCollectionStatsToQueryResult(mongoCommand.metric, stats as unknown as Record<string, unknown>, performance.now() - commandStartedAt), sourceStatement)));
+                allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoCollectionStatsToQueryResult(mongoCommand.metric, stats as unknown as Record<string, unknown>, performance.now() - commandStartedAt))));
                 mongoEditTarget = undefined;
                 console.info("[DBX][executeTabSql:mongo-collection-stats:done]", {
                   traceId,
@@ -2686,22 +2699,22 @@ export const useQueryStore = defineStore("query", () => {
                 mongoEditTarget = undefined;
                 if (mongoCommand.kind === "insert") {
                   const result = await api.mongoInsertDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.docsJson);
-                  allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoWriteToQueryResult(result.affected_rows, performance.now() - commandStartedAt), sourceStatement)));
+                  allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoWriteToQueryResult(result.affected_rows, performance.now() - commandStartedAt))));
                 } else if (mongoCommand.kind === "update") {
                   const result = await api.mongoUpdateDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.filter, mongoCommand.update, mongoCommand.many);
-                  allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoWriteToQueryResult(result.affected_rows, performance.now() - commandStartedAt), sourceStatement)));
+                  allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoWriteToQueryResult(result.affected_rows, performance.now() - commandStartedAt))));
                 } else if (mongoCommand.kind === "createIndex") {
                   const result = await api.mongoCreateIndex(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.keys, mongoCommand.options);
-                  allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoCreateIndexToQueryResult(result.name, performance.now() - commandStartedAt), sourceStatement)));
+                  allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoCreateIndexToQueryResult(result.name, performance.now() - commandStartedAt))));
                 } else if (mongoCommand.kind === "dropIndex" || mongoCommand.kind === "dropIndexes") {
                   const result = await api.mongoDropIndexes(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.kind === "dropIndex" ? mongoCommand.index : mongoCommand.indexes, mongoCommand.kind === "dropIndex");
-                  allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoDroppedIndexesToQueryResult(result.dropped_names, performance.now() - commandStartedAt), sourceStatement)));
+                  allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoDroppedIndexesToQueryResult(result.dropped_names, performance.now() - commandStartedAt))));
                 } else if (mongoCommand.kind === "dropCollection") {
                   await api.mongoDropCollection(tab.connectionId, currentDatabase, mongoCommand.collection);
-                  allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoWriteToQueryResult(1, performance.now() - commandStartedAt), sourceStatement)));
+                  allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoWriteToQueryResult(1, performance.now() - commandStartedAt))));
                 } else {
                   const result = await api.mongoDeleteDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.filter, mongoCommand.many);
-                  allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoWriteToQueryResult(result.affected_rows, performance.now() - commandStartedAt), sourceStatement)));
+                  allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoWriteToQueryResult(result.affected_rows, performance.now() - commandStartedAt))));
                 }
                 console.info("[DBX][executeTabSql:mongo-write:done]", {
                   traceId,
@@ -2714,7 +2727,7 @@ export const useQueryStore = defineStore("query", () => {
               }
               case "use": {
                 currentDatabase = mongoCommand.database;
-                allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(mongoUseToQueryResult(currentDatabase, performance.now() - commandStartedAt), sourceStatement)));
+                allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoUseToQueryResult(currentDatabase, performance.now() - commandStartedAt))));
                 mongoEditTarget = undefined;
                 console.info("[DBX][executeTabSql:mongo-use:done]", {
                   traceId,
@@ -2727,7 +2740,7 @@ export const useQueryStore = defineStore("query", () => {
           } catch (error: any) {
             // Surface per-command failures inline and continue collecting results
             // for the rest of the batch, matching the grouped-result UX.
-            allResults.push(annotateQueryResultSource(toErrorResult(error), sourceStatement));
+            allResults.push(annotateMongoResult(toErrorResult(error)));
             mongoEditTarget = undefined;
           }
         }
@@ -2741,11 +2754,18 @@ export const useQueryStore = defineStore("query", () => {
 
         const current = tabs.value.find((t) => t.id === id);
         if (current?.executionId === executionId) {
-          if (allResults.length > 1) {
+          const activeGroupIndex = current.activeResultIndex;
+          const activeGroupResults = current.results;
+          const shouldReplaceActiveResultInGroup = options?.replaceActiveResultInGroup === true && allResults.length === 1 && Array.isArray(activeGroupResults) && typeof activeGroupIndex === "number" && activeGroupIndex >= 0 && activeGroupIndex < activeGroupResults.length;
+          if (shouldReplaceActiveResultInGroup) {
+            current.results = activeGroupResults.slice();
+            current.results[activeGroupIndex] = allResults[0];
+            current.result = allResults[0];
+          } else if (allResults.length > 1) {
             // Open grouped output on the first non-error result when possible so
             // mixed success/error batches land on the most useful table first.
             const activeResultIndex = allResults.findIndex((result) => !result.columns.includes("Error"));
-            const resultIndex = activeResultIndex >= 0 ? activeResultIndex : 0;
+            const resultIndex = preservedResultIndex(allResults, current.activeResultIndex, options?.preserveActiveResultIndex) ?? (activeResultIndex >= 0 ? activeResultIndex : 0);
             current.results = allResults;
             current.activeResultIndex = resultIndex;
             current.result = allResults[resultIndex];
@@ -2760,9 +2780,9 @@ export const useQueryStore = defineStore("query", () => {
           current.queryEditabilityReason = undefined;
           current.mongoEditTarget = mongoCommands.length === 1 ? mongoEditTarget : undefined;
           current.tableMeta = undefined;
-          current.resultBaseSql = options?.resultBaseSql ?? sql;
+          current.resultBaseSql = shouldReplaceActiveResultInGroup ? (current.resultBaseSql ?? options?.resultBaseSql ?? sql) : (options?.resultBaseSql ?? sql);
           current.resultSortedSql = options?.resultSortedSql;
-          syncDisplayedResultRun(current, options?.resultBaseSql ?? sql);
+          syncDisplayedResultRun(current, current.resultBaseSql ?? options?.resultBaseSql ?? sql);
           if (current.database !== currentDatabase) current.database = currentDatabase;
         }
         return;
@@ -2872,7 +2892,7 @@ export const useQueryStore = defineStore("query", () => {
           current.result = results[0];
         } else if (results.length > 1) {
           const activeResultIndex = results.findIndex((result) => result.columns.length > 0);
-          const resultIndex = activeResultIndex >= 0 ? activeResultIndex : 0;
+          const resultIndex = preservedResultIndex(results, current.activeResultIndex, options?.preserveActiveResultIndex) ?? (activeResultIndex >= 0 ? activeResultIndex : 0);
           current.results = results;
           current.activeResultIndex = resultIndex;
           current.result = results[resultIndex];
@@ -2881,7 +2901,7 @@ export const useQueryStore = defineStore("query", () => {
           current.activeResultIndex = undefined;
           current.result = results[0];
         }
-        current.resultBaseSql = queryBaseSql;
+        current.resultBaseSql = shouldReplaceActiveResultInGroup ? (current.resultBaseSql ?? queryBaseSql) : queryBaseSql;
         current.resultSortedSql = resultSortedSql;
         current.resultPageSql = pageSql;
         current.resultPageLimit = pageLimit;
@@ -2967,7 +2987,7 @@ export const useQueryStore = defineStore("query", () => {
         current.queryEditabilityReason = undefined;
         current.mongoEditTarget = undefined;
         if (current.mode !== "data") current.tableMeta = undefined;
-        current.resultBaseSql = queryBaseSql;
+        current.resultBaseSql = shouldReplaceActiveResultInGroup ? (current.resultBaseSql ?? queryBaseSql) : queryBaseSql;
         current.resultSortedSql = resultSortedSql;
         current.resultPageSql = pageSql;
         current.resultPageLimit = pageLimit;

@@ -3035,7 +3035,7 @@ export default withEnglishFallback({
     updateNotificationsEnabled: "启用更新提醒",
     updateNotificationsEnabledDescription: "关闭后，DBX 不会自动检查应用和驱动更新，也不会显示更新红点；仍可手动检查更新。",
     updateDownloadSource: "更新下载源",
-    updateDownloadSourceDescription: "选择应用内更新安装包的下载来源。官方源为推荐选项，CNB 或 AtomGit 适合国内网络环境。",
+    updateDownloadSourceDescription: "选择应用更新、数据库 Agent、驱动和托管 JRE 的下载来源。官方源为推荐选项，CNB 或 AtomGit 适合国内网络环境。",
     updateDownloadSourceOfficial: "官方源（推荐）",
     updateDownloadSourceCnb: "CNB",
     updateDownloadSourceAtomgit: "AtomGit",

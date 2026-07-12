@@ -1417,6 +1417,12 @@ async function handleQuickOpenSelect(item: any) {
       }
     }
     return;
+  } else if (item.type === "schema") {
+    const dbNode = findTreeNodeById(connectionStore.treeNodes, `${item.connectionId}:${item.database}`);
+    if (dbNode && !dbNode.isExpanded) await connectionStore.loadSchemas(item.connectionId, item.database);
+    const schemaNode = findTreeNodeById(connectionStore.treeNodes, `${item.connectionId}:${item.database}:${item.schema}`);
+    if (schemaNode && !schemaNode.isExpanded) await connectionStore.loadTables(item.connectionId, item.database, item.schema);
+    return;
   } else if (item.type === "table" || item.type === "view" || item.type === "materialized_view") {
     // Open the table/view in a data tab
     await openTableTarget({
@@ -1935,7 +1941,7 @@ onUnmounted(() => {
                     @editor-selection-state-change="(tabId: string, selection: { anchor: number; head: number }) => queryStore.updateEditorSelection(tabId, selection)"
                     @format-error="toast(t('toolbar.formatSqlFailed'))"
                     @save-sql="void openSaveSqlDialog()"
-                    @reload="(sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number) => onReloadData(sql, searchText, whereInput, orderBy, limit, offset)"
+                    @reload="(sql, searchText, whereInput, orderBy, limit, offset, intent) => onReloadData(sql, searchText, whereInput, orderBy, limit, offset, intent)"
                     @paginate="onPaginate"
                     @sort="onSort"
                     @execute-sql="onExecuteSql"

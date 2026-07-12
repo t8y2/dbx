@@ -3036,7 +3036,7 @@ export default {
     updateNotificationsEnabled: "Enable update reminders",
     updateNotificationsEnabledDescription: "When disabled, DBX will not automatically check app or driver updates or show update badges. Manual checks are still available.",
     updateDownloadSource: "Update download source",
-    updateDownloadSourceDescription: "Choose where in-app update installers are downloaded from. The official source is recommended; CNB or AtomGit can be faster on mainland China networks.",
+    updateDownloadSourceDescription: "Choose where app updates, database agents, drivers, and managed JREs are downloaded from. The official source is recommended; CNB or AtomGit can be faster on mainland China networks.",
     updateDownloadSourceOfficial: "Official source (recommended)",
     updateDownloadSourceCnb: "CNB",
     updateDownloadSourceAtomgit: "AtomGit",

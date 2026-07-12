@@ -2852,6 +2852,148 @@ test("mongo aggregate execution uses editor page size when pagination plan has n
     assert.equal(aggregateBody.collection, "accounting_reconciliations");
     assert.equal(tab?.result?.rows.length, 811);
     assert.equal(tab?.result?.truncated, false);
+    assert.equal(tab?.result?.sourceLabel, "accounting.accounting_reconciliations");
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("mongo multi-find results use database and collection source labels", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const collections: string[] = [];
+
+  connectionStore.addEphemeralConnection({
+    ...conn("mongo-1"),
+    db_type: "mongodb",
+    port: 27017,
+  });
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/prepare-pagination-plan") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify({ sqlToExecute: body.options.sql, useAgentResultSession: false }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/document-store/find-documents") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      collections.push(body.collection);
+      return new Response(JSON.stringify({ documents: [{ _id: `${body.collection}-1` }], total: 1 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const tabId = store.createTab("mongo-1", "cmdb", "Query", "query", "");
+    const groupedSql = "db.model_field_group.find({})\n\ndb.model_field_info.find({})";
+    await store.executeTabSql(tabId, groupedSql);
+    const tab = store.tabs.find((item) => item.id === tabId);
+
+    assert.deepEqual(collections, ["model_field_group", "model_field_info"]);
+    assert.deepEqual(
+      tab?.results?.map((result) => result.sourceLabel),
+      ["cmdb.model_field_group", "cmdb.model_field_info"],
+    );
+
+    assert.ok(tab);
+    store.setActiveResultIndex(tabId, 1);
+    const sortedSql = "db.model_field_info.find({}).sort({ name: 1 })";
+    await store.executeTabSql(tabId, sortedSql, {
+      resultBaseSql: "db.model_field_info.find({})",
+      resultSortedSql: sortedSql,
+      preserveResultDuringExecution: true,
+      replaceActiveResultInGroup: true,
+    });
+
+    assert.deepEqual(collections, ["model_field_group", "model_field_info", "model_field_info"]);
+    assert.equal(tab.results?.length, 2);
+    assert.equal(tab.activeResultIndex, 1);
+    assert.equal(tab.resultBaseSql, groupedSql);
+    assert.deepEqual(
+      tab.results?.map((result) => result.sourceLabel),
+      ["cmdb.model_field_group", "cmdb.model_field_info"],
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("replacing one paginated SQL result preserves the grouped refresh SQL", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+
+  connectionStore.addEphemeralConnection(conn("conn-1"));
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/prepare-pagination-plan") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(
+        JSON.stringify({
+          sqlToExecute: body.options.sql,
+          pageSql: body.options.sql,
+          pageLimit: 100,
+          pageOffset: 100,
+          useAgentResultSession: false,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/execute-multi") {
+      return new Response(JSON.stringify([{ columns: ["id"], rows: [[202]], affected_rows: 0, execution_time_ms: 1 }]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/query/analyze-editability") {
+      return new Response(JSON.stringify({ editable: false, reason: "complex-source" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const tabId = store.createTab("conn-1", "app", "Query", "query");
+    const tab = store.tabs.find((item) => item.id === tabId);
+    assert.ok(tab);
+    const groupedSql = "select * from users; select * from orders";
+    const activeSql = "select * from orders";
+    tab.resultBaseSql = groupedSql;
+    tab.results = [
+      { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, sourceStatement: "select * from users" },
+      { columns: ["id"], rows: [[2]], affected_rows: 0, execution_time_ms: 1, sourceStatement: activeSql },
+    ];
+    tab.activeResultIndex = 1;
+    tab.result = tab.results[1];
+
+    await store.executeTabSql(tabId, activeSql, {
+      resultBaseSql: activeSql,
+      pagination: { limit: 100, offset: 100 },
+      preserveResultDuringExecution: true,
+      preserveTotalRowCountDuringExecution: true,
+      replaceActiveResultInGroup: true,
+    });
+
+    assert.equal(tab.results?.length, 2);
+    assert.equal(tab.activeResultIndex, 1);
+    assert.deepEqual(tab.result?.rows, [[202]]);
+    assert.equal(tab.resultBaseSql, groupedSql);
+    assert.equal(tab.result?.sourceStatement, activeSql);
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();
@@ -3068,6 +3210,10 @@ test("mongo multi-command execution runs writes sequentially and keeps grouped r
       tab?.results?.map((result) => result.sourceStatement),
       ['db.users.insertOne({ name: "Ada" })', 'db.users.insertOne({ name: "Grace" })'],
     );
+    assert.deepEqual(
+      tab?.results?.map((result) => result.sourceLabel),
+      ["accounting.users", "accounting.users"],
+    );
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();
@@ -3254,6 +3400,8 @@ test("mongo multi-command execution applies use database before later commands",
     assert.equal(tab?.database, "archive");
     assert.equal(tab?.results?.length, 2);
     assert.deepEqual(tab?.results?.[0]?.rows, [["switched to db archive"]]);
+    assert.equal(tab?.results?.[0]?.sourceLabel, undefined);
+    assert.equal(tab?.results?.[1]?.sourceLabel, "archive.users");
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();
@@ -4223,6 +4371,15 @@ test("query results keep readable table source labels with active database conte
     assert.equal(resultSqlForGrid(tab!), "select * from users");
     store.setActiveResultIndex(tabId, 1);
     tab = store.tabs.find((item) => item.id === tabId);
+    assert.equal(resultSqlForGrid(tab!), "select * from orders");
+
+    await store.executeTabSql(tabId, "select * from users; select * from orders", {
+      resultBaseSql: "select * from users; select * from orders",
+      preserveResultDuringExecution: true,
+      preserveActiveResultIndex: true,
+    });
+    tab = store.tabs.find((item) => item.id === tabId);
+    assert.equal(tab?.activeResultIndex, 1);
     assert.equal(resultSqlForGrid(tab!), "select * from orders");
 
     await store.executeTabSql(defaultDatabaseTabId, "SELECT *\nFROM apis AS ap\nLIMIT 10;\n\nSELECT *\nFROM menus AS mn\nLIMIT 10;");

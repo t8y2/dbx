@@ -342,7 +342,7 @@ export async function listInstalledAgentsLocal(): Promise<AgentDriverInfo[]> {
   return get("/api/agents/installed-local");
 }
 
-export async function listInstalledAgents(): Promise<AgentDriverInfo[]> {
+export async function listInstalledAgents(_source?: UpdateDownloadSource): Promise<AgentDriverInfo[]> {
   return get("/api/agents/installed");
 }
 
@@ -370,11 +370,11 @@ export async function restartDriverRuntime(runtimeId: string): Promise<void> {
   await post("/api/agents/runtime/restart", { runtimeId });
 }
 
-export async function installAgent(dbType: string): Promise<void> {
+export async function installAgent(dbType: string, _source?: UpdateDownloadSource): Promise<void> {
   await post("/api/agents/install", { dbType });
 }
 
-export async function upgradeAllAgents(): Promise<UpgradeAllAgentDriversResult> {
+export async function upgradeAllAgents(_source?: UpdateDownloadSource): Promise<UpgradeAllAgentDriversResult> {
   return post("/api/agents/upgrade-all", {});
 }
 
@@ -427,7 +427,7 @@ export async function importAgentJar(dbType: string, pathOrFile: string | File):
   if (!uploadRes.ok) throw new Error(await uploadRes.text());
 }
 
-export async function reinstallJre(jreKey?: string): Promise<void> {
+export async function reinstallJre(jreKey?: string, _source?: UpdateDownloadSource): Promise<void> {
   await post("/api/agents/reinstall-jre", { jreKey });
 }
 

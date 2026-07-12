@@ -1605,10 +1605,20 @@ function isCallRoutineContext(beforeToken: string): boolean {
   return /\bcall\s+(?:[A-Za-z_][\w$]*\.)?$/i.test(beforeToken) || /\bcall\s+(?:[A-Za-z_][\w$]*\.)?[A-Za-z_][\w$]*$/i.test(beforeToken);
 }
 
+const SQL_IDENTIFIER_CONTINUE_CHAR = /[$_\u200c\u200d\p{ID_Continue}]/u;
+
 function hasTableAliasAfterCursor(sql: string, cursor: number): boolean {
   if (hasAliasMarkerAt(sql, cursor, false)) return true;
   let pos = cursor;
-  while (isIdentifierPart(sql[pos]) || sql[pos] === ".") pos++;
+  while (pos < sql.length) {
+    const codePoint = sql.codePointAt(pos);
+    if (codePoint === undefined) break;
+    const char = String.fromCodePoint(codePoint);
+    if (char !== "." && !SQL_IDENTIFIER_CONTINUE_CHAR.test(char)) break;
+    // Advance by the full code point so supplementary Unicode identifiers
+    // do not leave the scan between UTF-16 surrogate halves.
+    pos += char.length;
+  }
   if (sql[pos] === '"' || sql[pos] === "`" || sql[pos] === "]") pos++;
   return hasAliasMarkerAt(sql, pos, true);
 }

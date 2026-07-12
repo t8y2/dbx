@@ -579,7 +579,8 @@ test("selected query result XLSX export uses the current source label as the she
   assert.equal(apiMock.exportQueryResultXlsx.mock.calls.length, 1);
   assert.equal(apiMock.exportQueryResultXlsx.mock.calls[0][1], "aaa.apis");
   assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0][2], ["id", "name"]);
-  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0][3], [[1, "Ada"]]);
+  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0][3], []);
+  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0][4], [[1, "Ada"]]);
 });
 
 test("cancelled query result CSV export clears the cancel handler without using the in-memory path", async () => {

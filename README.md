@@ -213,6 +213,15 @@ scoop install dbx
 winget install t8y2.dbx
 ```
 
+**Flatpak (Linux):**
+
+```bash
+flatpak remote-add --if-not-exists flatpark https://dl.flatpark.org/flatpark.flatpakrepo
+flatpak install flatpark com.dbxio.dbx
+```
+
+Updates then arrive through the regular `flatpak update`. See the [DBX page on FlatPark](https://flatpark.org/apps/com.dbxio.dbx/) for details.
+
 ## Self-Hosted (Docker)
 
 DBX provides a web version that can be deployed via Docker. The examples use

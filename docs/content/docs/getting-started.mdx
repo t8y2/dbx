@@ -46,7 +46,20 @@ This guide gets you through three things:
 
   </Tab>
   <Tab value="Linux">
-    Download a package from [GitHub Releases](https://github.com/t8y2/dbx/releases):
+    Install with Flatpak from [FlatPark](https://flatpark.org/apps/com.dbxio.dbx/) (works on any distribution):
+
+    ```bash
+    flatpak remote-add --if-not-exists flatpark https://dl.flatpark.org/flatpark.flatpakrepo
+    flatpak install flatpark com.dbxio.dbx
+    ```
+
+    Update later with:
+
+    ```bash
+    flatpak update com.dbxio.dbx
+    ```
+
+    You can also download a package from [GitHub Releases](https://github.com/t8y2/dbx/releases):
 
     | Format | Use Case |
     |---|---|

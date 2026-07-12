@@ -75,6 +75,10 @@ static GLOBAL_DDL_TARGET_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?is)^\s*(?:CREATE|ALTER|DROP)\s+(?:USER|ROLE|LOGIN|SERVER|TABLESPACE|RESOURCE|PROFILE|ACCOUNT)\b")
         .expect("valid global DDL target regex")
 });
+static MULTI_TARGET_MUTATION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?is)^\s*(?:DROP\s+(?:TEMPORARY\s+)?TABLE\b.*,|RENAME\s+TABLE\b.*,)")
+        .expect("valid multi-target mutation regex")
+});
 static FIRST_KEYWORD_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(IDENTIFIER_PATTERN).expect("valid first keyword regex"));
 
@@ -208,8 +212,11 @@ fn referenced_databases(sql: &str, db_type: &DatabaseType, active_database: &str
         }
         let has_resolved_target = !statement_databases.is_empty();
         assessment.databases.extend(statement_databases);
+        // The target regexes intentionally extract one object at a time. Until all
+        // list forms are parsed, never let a resolved first target disable fallback.
         assessment.uncertain = assessment.uncertain
             || GLOBAL_PRIVILEGE_TARGET_RE.is_match(statement)
+            || MULTI_TARGET_MUTATION_RE.is_match(statement)
             || is_ambiguous_production_target_statement(statement, has_resolved_target);
     }
     assessment

@@ -160,6 +160,26 @@
     "databases": []
   },
   {
+    "name": "mysql multi-target rename conservatively protects unresolved production target",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "RENAME TABLE staging.a TO staging.b, prod_app.c TO prod_app.d",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "mysql multi-target drop conservatively protects unresolved production target",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "DROP TABLE staging.a, prod_app.b",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
     "name": "mysql qualified truncate table targets production database",
     "dialect": "mysql",
     "productionDatabases": ["prod_app"],

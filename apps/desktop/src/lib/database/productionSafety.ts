@@ -31,6 +31,7 @@ const PRIVILEGE_TARGET_RE = new RegExp(String.raw`\b(?:GRANT|REVOKE|DENY)\b[\s\S
 const PRIVILEGE_DATABASE_TARGET_RE = new RegExp(String.raw`\b(?:GRANT|REVOKE|DENY)\b[\s\S]*?\bON\s+(?:DATABASE|CATALOG)(?:::|\s+)\s*(${IDENTIFIER_PATTERN})`, "gi");
 const GLOBAL_PRIVILEGE_TARGET_RE = /\b(?:GRANT|REVOKE|DENY)\b[\s\S]*?\bON\s+\*\s*\.\s*\*/i;
 const GLOBAL_DDL_TARGET_RE = /^\s*(?:CREATE|ALTER|DROP)\s+(?:USER|ROLE|LOGIN|SERVER|TABLESPACE|RESOURCE|PROFILE|ACCOUNT)\b/i;
+const MULTI_TARGET_MUTATION_RE = /^\s*(?:DROP\s+(?:TEMPORARY\s+)?TABLE\b[\s\S]*,|RENAME\s+TABLE\b[\s\S]*,)/i;
 const THREE_PART_DATABASE_QUALIFIER_TYPES = new Set<DatabaseType>(["sqlserver", "snowflake", "trino", "prestosql", "databricks", "bigquery"]);
 const TRANSACTION_KEYWORDS = new Set(["begin", "start", "commit", "rollback", "abort", "savepoint", "release"]);
 const SCHEMA_FIRST_QUALIFIER_TYPES = new Set<DatabaseType>([
@@ -169,7 +170,9 @@ function referencedDatabases(statements: string[], dbType: DatabaseType, activeD
       if (database) statementDatabases.add(database);
     }
     for (const database of statementDatabases) databases.add(database);
-    uncertain = uncertain || GLOBAL_PRIVILEGE_TARGET_RE.test(statement) || isAmbiguousProductionTargetStatement(statement, statementAssessment, statementDatabases.size > 0);
+    // The target regexes intentionally extract one object at a time. Until all
+    // list forms are parsed, never let a resolved first target disable fallback.
+    uncertain = uncertain || GLOBAL_PRIVILEGE_TARGET_RE.test(statement) || MULTI_TARGET_MUTATION_RE.test(statement) || isAmbiguousProductionTargetStatement(statement, statementAssessment, statementDatabases.size > 0);
   }
   return { databases: [...databases], uncertain };
 }

@@ -163,6 +163,7 @@ import {
   dataGridColumnLayoutScopeKey,
   loadDataGridColumnOrder,
   loadTableDataGridColumnOrder,
+  notifyTableDataGridColumnOrderChanged,
   removeDataGridColumnOrder,
   removeTableDataGridColumnOrder,
   saveDataGridColumnOrder,
@@ -2664,20 +2665,31 @@ function onTableDataGridColumnOrderChanged(event: Event) {
   nextTick(refreshGridScrollerMetrics);
 }
 function persistColumnOrder(indexes: number[]) {
+  const tableScopeKey = tableColumnOrderScopeKey.value;
   if (isDefaultColumnOrder(displayableColumnIndexes.value, indexes)) {
     removeDataGridColumnOrder(columnLayoutScopeKey.value);
-    if (tableColumnOrderScopeKey.value) removeTableDataGridColumnOrder(tableColumnOrderScopeKey.value);
+    if (tableScopeKey) {
+      removeTableDataGridColumnOrder(tableScopeKey);
+      notifyTableDataGridColumnOrderChanged(tableScopeKey);
+    }
     persistedColumnOrderKeys.value = [];
     return;
   }
   const keys = columnOrderKeysForIndexes(indexes, columnOrderKeys.value);
   persistedColumnOrderKeys.value = keys;
   saveDataGridColumnOrder(columnLayoutScopeKey.value, columnOrderKeys.value, keys);
-  if (tableColumnOrderScopeKey.value) saveTableDataGridColumnOrder(tableColumnOrderScopeKey.value, keys);
+  if (tableScopeKey) {
+    saveTableDataGridColumnOrder(tableScopeKey, keys);
+    notifyTableDataGridColumnOrderChanged(tableScopeKey);
+  }
 }
 function resetColumnOrder() {
   removeDataGridColumnOrder(columnLayoutScopeKey.value);
-  if (tableColumnOrderScopeKey.value) removeTableDataGridColumnOrder(tableColumnOrderScopeKey.value);
+  const tableScopeKey = tableColumnOrderScopeKey.value;
+  if (tableScopeKey) {
+    removeTableDataGridColumnOrder(tableScopeKey);
+    notifyTableDataGridColumnOrderChanged(tableScopeKey);
+  }
   persistedColumnOrderKeys.value = [];
   nextTick(refreshGridScrollerMetrics);
 }

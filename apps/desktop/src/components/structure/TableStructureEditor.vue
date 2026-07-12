@@ -26,9 +26,9 @@ import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStor
 import { type BuildTableStructureChangeSqlOptions, type EditableStructureColumn, type EditableStructureForeignKey, type EditableStructureIndex, type EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql";
 import { PRESET_FIELDS_TEMPLATE_ID, createTableColumnTemplateDrafts } from "@/lib/table/tableColumnTemplates";
 import { getTableMetadataCapabilities, firstStructureMetadataTab, isStructureMetadataTabSupported } from "@/lib/table/tableMetadataCapabilities";
-import { canAddTableStructureColumn, getTableStructureCapabilities, isPhysicalTableColumnOrderChange, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
+import { canAddTableStructureColumn, getTableStructureCapabilities, hasLocalTableColumnOrderChange, isPhysicalTableColumnOrderChange, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
 import { orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
-import { loadTableDataGridColumnOrder, removeTableDataGridColumnOrder, saveTableDataGridColumnOrder, TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
+import { loadTableDataGridColumnOrder, notifyTableDataGridColumnOrderChanged, removeTableDataGridColumnOrder, saveTableDataGridColumnOrder, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { connectionObjectTreeQuerySchema, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import type { TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
 import {
@@ -1369,9 +1369,7 @@ function localColumnOrderKeys(items: readonly EditableStructureColumn[]): string
 
 const hasLocalColumnOrderChange = computed(() => {
   if (!usesLocalTableColumnOrder.value) return false;
-  const positions = columns.value.flatMap((column) => (column.original && column.originalPosition !== undefined ? [column.originalPosition] : []));
-  const physicalPositions = [...positions].sort((left, right) => left - right);
-  return positions.some((position, index) => position !== physicalPositions[index]);
+  return hasLocalTableColumnOrderChange(columns.value);
 });
 
 function applyStoredLocalColumnOrder(items: EditableStructureColumn[]): EditableStructureColumn[] {
@@ -1387,7 +1385,7 @@ function applyStoredLocalColumnOrder(items: EditableStructureColumn[]): Editable
   return indexes.map((index) => items[index]).filter((column): column is EditableStructureColumn => !!column);
 }
 
-function persistLocalColumnOrder() {
+function persistLocalColumnOrder(showNotice = true) {
   if (!usesLocalTableColumnOrder.value) return;
   const scopeKey = localTableColumnOrderScopeKey();
   if (hasLocalColumnOrderChange.value) {
@@ -1395,10 +1393,8 @@ function persistLocalColumnOrder() {
   } else {
     removeTableDataGridColumnOrder(scopeKey);
   }
-  if (typeof window !== "undefined") {
-    window.dispatchEvent(new CustomEvent(TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, { detail: { scopeKey } }));
-  }
-  if (localColumnOrderNoticeShown.value) return;
+  notifyTableDataGridColumnOrderChanged(scopeKey);
+  if (!showNotice || localColumnOrderNoticeShown.value) return;
   localColumnOrderNoticeShown.value = true;
   toast(t("structureEditor.localColumnOrderNotice"), 4000);
 }
@@ -2138,6 +2134,8 @@ async function applyChanges() {
       emit("saved", tableComment.value !== originalTableComment.value);
       emit("close");
     } else {
+      // Refresh persisted keys after successful renames/additions before metadata reloads.
+      persistLocalColumnOrder(false);
       saving.value = false;
       postSaveRefreshing.value = true;
       skipNextRefreshVersion = true;

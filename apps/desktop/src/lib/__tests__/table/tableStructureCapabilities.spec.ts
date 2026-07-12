@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getTableStructureCapabilities, isPhysicalTableColumnOrderChange, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
+import { getTableStructureCapabilities, hasLocalTableColumnOrderChange, isPhysicalTableColumnOrderChange, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
 
 describe("tableStructureCapabilities", () => {
   it("uses table rebuilds only for native SQLite connections", () => {
@@ -43,5 +43,23 @@ describe("tableStructureCapabilities", () => {
     expect(isPhysicalTableColumnOrderChange("sqlserver", "sqlserver", 0, 2)).toBe(false);
     expect(isPhysicalTableColumnOrderChange("postgres", "postgres", 0, 2)).toBe(false);
     expect(isPhysicalTableColumnOrderChange("mysql", "mysql", 0, 2)).toBe(true);
+  });
+
+  it("detects local order changes including newly added columns", () => {
+    const first = { original: {}, originalPosition: 0 };
+    const second = { original: {}, originalPosition: 1 };
+    const added = {};
+
+    expect(hasLocalTableColumnOrderChange([first, second, added])).toBe(false);
+    expect(hasLocalTableColumnOrderChange([first, added, second])).toBe(true);
+    expect(hasLocalTableColumnOrderChange([second, first, added])).toBe(true);
+  });
+
+  it("ignores dropped columns when comparing local order", () => {
+    const first = { original: {}, originalPosition: 0 };
+    const dropped = { original: {}, originalPosition: 1, markedForDrop: true };
+    const third = { original: {}, originalPosition: 2 };
+
+    expect(hasLocalTableColumnOrderChange([first, dropped, third])).toBe(false);
   });
 });

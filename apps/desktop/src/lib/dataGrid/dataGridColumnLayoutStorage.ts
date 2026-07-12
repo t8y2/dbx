@@ -104,3 +104,8 @@ export function saveTableDataGridColumnOrder(scopeKey: string, order: readonly s
 export function removeTableDataGridColumnOrder(scopeKey: string) {
   safeLocalStorageRemove(`${TABLE_STORAGE_PREFIX}${scopeKey}`);
 }
+
+export function notifyTableDataGridColumnOrderChanged(scopeKey: string) {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent<TableDataGridColumnOrderChangedDetail>(TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, { detail: { scopeKey } }));
+}

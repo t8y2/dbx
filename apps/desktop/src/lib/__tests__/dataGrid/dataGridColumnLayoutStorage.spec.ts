@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { loadTableDataGridColumnOrder, removeTableDataGridColumnOrder, saveTableDataGridColumnOrder, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
+import { loadTableDataGridColumnOrder, notifyTableDataGridColumnOrderChanged, removeTableDataGridColumnOrder, saveTableDataGridColumnOrder, TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 
 function installLocalStorage() {
   const data = new Map<string, string>();
@@ -43,5 +43,17 @@ describe("table data grid column order storage", () => {
     const explicitMainSchema = tableDataGridColumnOrderScopeKey({ connectionId: "sqlite-1", database: "main", schema: "main", tableName: "products" });
 
     expect(withoutSchema).toBe(explicitMainSchema);
+  });
+
+  it("notifies other open views when a table order changes", () => {
+    const dispatchEvent = vi.fn();
+    vi.stubGlobal("window", { dispatchEvent });
+
+    notifyTableDataGridColumnOrderChanged("table-scope");
+
+    expect(dispatchEvent).toHaveBeenCalledOnce();
+    const event = dispatchEvent.mock.calls[0]?.[0] as CustomEvent;
+    expect(event.type).toBe(TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT);
+    expect(event.detail).toEqual({ scopeKey: "table-scope" });
   });
 });

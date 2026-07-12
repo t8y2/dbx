@@ -1,12 +1,19 @@
 import { describe, expect, it } from "vitest";
 import en from "./en";
-import { localeOverrides as es } from "./es";
-import { localeOverrides as itLocale } from "./it";
-import { localeOverrides as ja } from "./ja";
-import { localeOverrides as ptBR } from "./pt-BR";
-import { localeOverrides as zhTW } from "./zh-TW";
+import esRaw from "./es";
+import itRaw from "./it";
+import jaRaw from "./ja";
+import ptBRRaw from "./pt-BR";
+import zhTWRaw from "./zh-TW";
 
-const english = en as unknown as { structureEditor: Record<string, Record<string, string>>; redis: Record<string, Record<string, string>> };
+type TypeHelpLocale = { structureEditor: Record<string, Record<string, string>>; redis: Record<string, Record<string, string>> };
+
+const english = en as unknown as TypeHelpLocale;
+const es = esRaw as unknown as TypeHelpLocale;
+const itLocale = itRaw as unknown as TypeHelpLocale;
+const ja = jaRaw as unknown as TypeHelpLocale;
+const ptBR = ptBRRaw as unknown as TypeHelpLocale;
+const zhTW = zhTWRaw as unknown as TypeHelpLocale;
 const locales = { es, it: itLocale, ja, "pt-BR": ptBR, "zh-TW": zhTW } as const;
 const directories = [
   ["structureEditor", "mysqlDataTypeHelp"],

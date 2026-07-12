@@ -1534,9 +1534,13 @@ async function confirmBatchEmptyTables() {
   const plan = batchEmptyPlan.value.slice();
   if (plan.length === 0) return;
   const asynchronousMutation = effectiveDatabaseType.value === "clickhouse";
-  const result = await runBatchTableEmpty(plan, async ({ sql }) => {
-    await api.executeQuery(props.connection.id, props.database, sql);
+  const reviewSql = plan.map(({ sql }) => sql).join(";\n");
+  const result = await executeObjectBrowserSqlWithProductionGuard(reviewSql, () => {
+    return runBatchTableEmpty(plan, async ({ sql }) => {
+      await api.executeQuery(props.connection.id, props.database, sql);
+    });
   });
+  if (!result) return;
   for (const failure of result.failed) {
     console.error(`Failed to empty table "${failure.target.target.name}":`, failure.error);
   }

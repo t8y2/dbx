@@ -31,6 +31,20 @@ export function parseMongoDocumentInputValue(raw: MongoInputValue): unknown {
   return raw;
 }
 
+function parseMongoExistingFieldInputValue(raw: Exclude<MongoInputValue, null>, originalValue: unknown): unknown {
+  // Objects and arrays are serialized into grid text too, so the raw document
+  // is the only reliable way to distinguish them from JSON-shaped BSON strings.
+  if (typeof originalValue === "string") {
+    return typeof raw === "string" ? raw : String(raw);
+  }
+  return parseMongoDocumentInputValue(raw);
+}
+
+function mongoDocumentFieldValue(document: unknown, field: string): unknown {
+  if (!document || typeof document !== "object" || Array.isArray(document)) return undefined;
+  return (document as Record<string, unknown>)[field];
+}
+
 function legacyMongoDateDisplayToExtendedJson(value: string): { $date: string } | null {
   const match = value.match(LEGACY_MONGO_DATE_DISPLAY_PATTERN);
   if (!match) return null;
@@ -38,7 +52,7 @@ function legacyMongoDateDisplayToExtendedJson(value: string): { $date: string } 
   return { $date: `${date}T${time}.${millis.padEnd(3, "0")}Z` };
 }
 
-export function buildMongoUpdateDocument(changes: Map<number, MongoInputValue>, columns: string[]): Record<string, unknown> {
+export function buildMongoUpdateDocument(changes: Map<number, MongoInputValue>, columns: string[], originalDocument?: unknown): Record<string, unknown> {
   const setFields: Record<string, unknown> = {};
   const unsetFields: Record<string, unknown> = {};
   for (const [colIdx, newVal] of changes) {
@@ -47,7 +61,7 @@ export function buildMongoUpdateDocument(changes: Map<number, MongoInputValue>, 
     if (newVal === null) {
       unsetFields[col] = "";
     } else {
-      setFields[col] = parseMongoDocumentInputValue(newVal);
+      setFields[col] = parseMongoExistingFieldInputValue(newVal, mongoDocumentFieldValue(originalDocument, col));
     }
   }
   const doc: Record<string, unknown> = {};
@@ -66,7 +80,7 @@ export function applyMongoGridChangesToDocument(document: unknown, changes: Map<
     if (newVal === null) {
       delete updated[column];
     } else {
-      updated[column] = parseMongoDocumentInputValue(newVal);
+      updated[column] = parseMongoExistingFieldInputValue(newVal, updated[column]);
     }
   }
   return updated;

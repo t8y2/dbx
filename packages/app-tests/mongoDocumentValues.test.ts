@@ -36,6 +36,70 @@ test("builds Mongo grid updates with set and unset operators", () => {
   });
 });
 
+test("preserves JSON-shaped strings when updating existing Mongo fields", () => {
+  const original = {
+    _id: "1",
+    answer: '{"action":"New","values":[1]}',
+    tagsText: '["draft"]',
+    profile: { role: "admin" },
+  };
+  const changes = new Map<number, string | number | boolean | null>([
+    [1, '{\n  "action": "Updated",\n  "values": [\n    1,\n    2\n  ]\n}'],
+    [2, '[\n  "published"\n]'],
+    [3, '{"role":"maintainer"}'],
+  ]);
+
+  const update = buildMongoUpdateDocument(changes, ["_id", "answer", "tagsText", "profile"], original);
+
+  assert.deepEqual(update, {
+    $set: {
+      answer: '{\n  "action": "Updated",\n  "values": [\n    1,\n    2\n  ]\n}',
+      tagsText: '[\n  "published"\n]',
+      profile: { role: "maintainer" },
+    },
+  });
+  assert.equal(formatMongoShellLiteral(update), '{"$set":{"answer":"{\\n  \\"action\\": \\"Updated\\",\\n  \\"values\\": [\\n    1,\\n    2\\n  ]\\n}","tagsText":"[\\n  \\"published\\"\\n]","profile":{"role":"maintainer"}}}');
+});
+
+test("preserves existing Mongo strings that resemble typed literals", () => {
+  const original = {
+    _id: "1",
+    numericText: "42",
+    booleanText: "true",
+    dateText: 'ISODate("2026-01-01T00:00:00.000Z")',
+    quotedText: '"literal"',
+  };
+  const changes = new Map<number, string | number | boolean | null>([
+    [1, "43"],
+    [2, "false"],
+    [3, 'ISODate("2026-02-01T00:00:00.000Z")'],
+    [4, '"changed"'],
+  ]);
+
+  assert.deepEqual(buildMongoUpdateDocument(changes, ["_id", "numericText", "booleanText", "dateText", "quotedText"], original), {
+    $set: {
+      numericText: "43",
+      booleanText: "false",
+      dateText: 'ISODate("2026-02-01T00:00:00.000Z")',
+      quotedText: '"changed"',
+    },
+  });
+});
+
+test("keeps JSON inference for fields without an existing Mongo type", () => {
+  const changes = new Map<number, string | number | boolean | null>([
+    [1, '{"enabled":true}'],
+    [2, "42"],
+  ]);
+
+  assert.deepEqual(buildMongoUpdateDocument(changes, ["_id", "newObject", "newNumber"], { _id: "1" }), {
+    $set: {
+      newObject: { enabled: true },
+      newNumber: 42,
+    },
+  });
+});
+
 test("applies saved Mongo grid changes to the raw preview document", () => {
   const original = {
     _id: "1",
@@ -59,6 +123,24 @@ test("applies saved Mongo grid changes to the raw preview document", () => {
     name: "Ada",
     profile: { role: "admin" },
     archivedAt: "2026-01-01",
+  });
+});
+
+test("applies Mongo grid edits without converting existing JSON strings", () => {
+  const original = {
+    _id: "1",
+    answer: '{"action":"New"}',
+    profile: { role: "admin" },
+  };
+  const changes = new Map<number, string | number | boolean | null>([
+    [1, '{\n  "action": "Updated"\n}'],
+    [2, '{"role":"maintainer"}'],
+  ]);
+
+  assert.deepEqual(applyMongoGridChangesToDocument(original, changes, ["_id", "answer", "profile"]), {
+    _id: "1",
+    answer: '{\n  "action": "Updated"\n}',
+    profile: { role: "maintainer" },
   });
 });
 

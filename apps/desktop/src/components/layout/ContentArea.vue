@@ -391,7 +391,7 @@ const mongoQueryResultSaveHandler = computed<CustomSaveHandler | undefined>(() =
       const row = changes.rows[rowIdx];
       const id = row?.[idColIdx];
       if (id === null || id === undefined || String(id).trim() === "") continue;
-      const updateDoc = buildMongoUpdateDocument(dirtyCols, changes.columns);
+      const updateDoc = buildMongoUpdateDocument(dirtyCols, changes.columns, tab.result?.mongo_documents?.[rowIdx]);
       if (Object.keys(updateDoc).length === 0) continue;
       await api.mongoUpdateDocument(tab.connectionId, tab.database, target.collection, String(id), JSON.stringify(updateDoc));
     }
@@ -405,7 +405,7 @@ const mongoQueryResultSaveHandler = computed<CustomSaveHandler | undefined>(() =
       const row = changes.rows[rowIdx];
       const id = row?.[idColIdx];
       if (id === null || id === undefined || String(id).trim() === "") continue;
-      const updateDoc = buildMongoUpdateDocument(dirtyCols, changes.columns);
+      const updateDoc = buildMongoUpdateDocument(dirtyCols, changes.columns, tab.result?.mongo_documents?.[rowIdx]);
       if (Object.keys(updateDoc).length === 0) continue;
       stmts.push(`${mongoCollectionExpression(target.collection)}.updateOne({_id: ${mongoIdPreview(id)}}, ${formatMongoShellLiteral(updateDoc)})`);
     }

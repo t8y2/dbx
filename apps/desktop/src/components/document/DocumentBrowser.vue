@@ -305,7 +305,7 @@ async function gridSave(changes: DocumentGridChanges) {
       continue;
     }
 
-    const updateDoc = buildMongoUpdateDocument(dirtyCols, cols);
+    const updateDoc = buildMongoUpdateDocument(dirtyCols, cols, documents.value[rowIdx]);
     if (Object.keys(updateDoc).length === 0) continue;
     await api.documentUpdateDocument(props.connectionId, props.database, props.collection, String(id), JSON.stringify(updateDoc));
   }
@@ -382,7 +382,7 @@ async function previewDocumentChanges(changes: DocumentGridChanges): Promise<str
       const routing = documentRoutingFromGridRow(row, columns);
       stmts.push(`POST /${coll}/_update/${elasticsearchPathIdPreview(String(id))}${elasticsearchRoutingPreview(routing)}\n${JSON.stringify({ doc: updateDoc.$set ?? updateDoc }, null, 2)}`);
     } else {
-      const updateDoc = buildMongoUpdateDocument(dirtyCols, columns);
+      const updateDoc = buildMongoUpdateDocument(dirtyCols, columns, documents.value[rowIdx]);
       stmts.push(`db.${coll}.updateOne({_id: ${mongoIdPreview(id)}}, ${formatMongoShellLiteral(updateDoc)})`);
     }
   }

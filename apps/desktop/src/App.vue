@@ -329,9 +329,12 @@ function closeDriverStorePage() {
 const toolbarAgentDriverUpdateCount = computed(() => (updateNotificationsEnabled.value ? agentDriverUpdateCount.value : 0));
 const toolbarHasUpdateAvailable = computed(() => updateNotificationsEnabled.value && hasUpdateAvailable.value);
 const hasSqlFileConnections = computed(() => connectionStore.connections.some((c) => supportsSqlFileExecution(c.db_type)));
+const queryEditorDdlDatabaseType = computed(() => {
+  if (!queryEditorDdlTarget.value?.connectionId) return undefined;
+  return effectiveDatabaseTypeForConnection(connectionStore.getConfig(queryEditorDdlTarget.value.connectionId));
+});
 const queryEditorDdlDialect = computed(() => {
-  if (!queryEditorDdlTarget.value?.connectionId) return "mysql";
-  return codeMirrorSqlDialect(effectiveDatabaseTypeForConnection(connectionStore.getConfig(queryEditorDdlTarget.value.connectionId)));
+  return codeMirrorSqlDialect(queryEditorDdlDatabaseType.value);
 });
 const connectionStats = computed(() => ({
   total: connectionStore.connections.length,
@@ -2145,7 +2148,16 @@ onUnmounted(() => {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <DdlViewDialog v-if="queryEditorDdlTarget" v-model:open="showQueryEditorDdlDialog" :connection-id="queryEditorDdlTarget.connectionId" :database="queryEditorDdlTarget.database" :schema="queryEditorDdlTarget.schema" :table-name="queryEditorDdlTarget.tableName" :dialect="queryEditorDdlDialect" />
+      <DdlViewDialog
+        v-if="queryEditorDdlTarget"
+        v-model:open="showQueryEditorDdlDialog"
+        :connection-id="queryEditorDdlTarget.connectionId"
+        :database="queryEditorDdlTarget.database"
+        :schema="queryEditorDdlTarget.schema"
+        :table-name="queryEditorDdlTarget.tableName"
+        :database-type="queryEditorDdlDatabaseType"
+        :dialect="queryEditorDdlDialect"
+      />
     </TooltipProvider>
   </div>
 </template>

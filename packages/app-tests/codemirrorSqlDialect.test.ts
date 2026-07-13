@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import * as langSql from "@codemirror/lang-sql";
 import { createDbxCodeMirrorSqlDialect } from "../../apps/desktop/src/lib/editor/codemirrorSqlDialect.ts";
@@ -80,4 +81,14 @@ test("keeps MySQL-compatible double-dash whitespace rules", () => {
     assert.equal(countParsedNodes(dialect, "--SELECT 1", "Keyword", "SELECT"), 1, databaseType);
     assert.equal(countParsedNodes(dialect, "-- SELECT 1", "LineComment", "-- SELECT 1"), 1, databaseType);
   }
+});
+
+test("propagates database type to every DDL viewer entrypoint", () => {
+  const ddlViewDialog = readFileSync("apps/desktop/src/components/objects/DdlViewDialog.vue", "utf8");
+  const treeItem = readFileSync("apps/desktop/src/components/sidebar/TreeItem.vue", "utf8");
+  const app = readFileSync("apps/desktop/src/App.vue", "utf8");
+
+  assert.match(ddlViewDialog, /createDbxCodeMirrorSqlDialect\(langSql, props\.dialect, props\.databaseType\)/);
+  assert.match(treeItem, /<DdlViewDialog[\s\S]*?:database-type="ddlDatabaseType"[\s\S]*?v-model:open="showDdlDialog"/);
+  assert.match(app, /<DdlViewDialog[^>]*:database-type="queryEditorDdlDatabaseType"[^>]*\/>/);
 });

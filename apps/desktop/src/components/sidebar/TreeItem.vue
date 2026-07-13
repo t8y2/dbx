@@ -1804,13 +1804,15 @@ const pasteTableDataCopySupported = computed(() => supportsWholeRowTableDataCopy
 
 const ddlTarget = ref<TreeNode | null>(null);
 const showDdlDialog = ref(false);
+const ddlDatabaseType = computed(() => {
+  if (!ddlTarget.value?.connectionId) return undefined;
+  return effectiveDatabaseTypeForConnection(connectionStore.getConfig(ddlTarget.value.connectionId));
+});
 const ddlDialect = computed(() => {
-  if (!ddlTarget.value?.connectionId) return "mysql";
-  return codeMirrorSqlDialect(effectiveDatabaseTypeForConnection(connectionStore.getConfig(ddlTarget.value.connectionId)));
+  return codeMirrorSqlDialect(ddlDatabaseType.value);
 });
 const ddlFormatDialect = computed(() => {
-  if (!ddlTarget.value?.connectionId) return "generic";
-  return sqlFormatDialectForDbType(effectiveDatabaseTypeForConnection(connectionStore.getConfig(ddlTarget.value.connectionId)));
+  return sqlFormatDialectForDbType(ddlDatabaseType.value);
 });
 const objectSourceTarget = ref<{ node: TreeNode; initialEditing: boolean } | null>(null);
 const showObjectSourceDialog = ref(false);
@@ -5928,6 +5930,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
     :schema="ddlTarget.schema"
     :table-name="ddlTarget.label"
     :object-type="tableDdlObjectTypeForNode(ddlTarget.type)"
+    :database-type="ddlDatabaseType"
     :dialect="ddlDialect"
     :format-dialect="ddlFormatDialect"
     v-model:open="showDdlDialog"

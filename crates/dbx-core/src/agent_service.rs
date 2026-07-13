@@ -1239,6 +1239,7 @@ pub fn import_offline_zip(
     let registry = read_registry_from_zip(&mut archive)?;
 
     let platform = AgentManager::current_platform();
+    std::fs::create_dir_all(am.base_dir()).map_err(|e| format!("Failed to create agent directory: {e}"))?;
     let mut local_state = am.load_state();
     let mut result =
         OfflineImportResult { jre_installed: Vec::new(), drivers_installed: Vec::new(), drivers_skipped: Vec::new() };
@@ -1375,7 +1376,7 @@ fn read_registry_from_zip(archive: &mut zip::ZipArchive<std::fs::File>) -> Resul
 
 fn extract_jre_key_from_filename(name: &str) -> Option<String> {
     let filename = name.rsplit('/').next()?;
-    let rest = filename.strip_prefix("jre-")?;
+    let rest = filename.strip_prefix("dbx-jre-").or_else(|| filename.strip_prefix("jre-"))?;
     let key = rest.split('-').next()?;
     if key.is_empty() {
         return None;
@@ -1441,6 +1442,12 @@ mod agent_download_url_tests {
             r2_path_with_cache_buster("agents/drivers/dbx-agent-h2.jar?mirror=r2", "0.5.33"),
             "agents/drivers/dbx-agent-h2.jar?mirror=r2&v=0.5.33"
         );
+    }
+
+    #[test]
+    fn offline_jre_filename_parser_accepts_release_and_legacy_names() {
+        assert_eq!(extract_jre_key_from_filename("jre/dbx-jre-21-macos-aarch64.tar.gz").as_deref(), Some("21"));
+        assert_eq!(extract_jre_key_from_filename("jre/jre-21-macos-aarch64.tar.gz").as_deref(), Some("21"));
     }
 }
 

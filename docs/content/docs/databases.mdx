@@ -125,6 +125,29 @@ DuckDB connections support two modes:
 
 Create a new DuckDB database file directly from the connection form by entering a path that does not yet exist.
 
+### DuckDB Connection Init Script
+
+DuckDB connections can run a SQL script every time the connection is established. Configure it in the **Init Script** field of the connection dialog. Typical uses are loading extensions, creating secrets, tuning session options, and attaching additional catalogs:
+
+```sql
+INSTALL quack;
+LOAD quack;
+ATTACH 'quack:analytics-host' AS remote (TOKEN 'your_token');
+```
+
+Or attach a [DuckLake](https://ducklake.select/) catalog:
+
+```sql
+INSTALL ducklake;
+LOAD ducklake;
+ATTACH 'ducklake:/data/lake/meta.ducklake' AS lake (DATA_PATH '/data/lake/files');
+```
+
+- Databases attached by the script (local files, DuckLake, remote Quack servers, ...) appear in the sidebar like configured attached databases, and are re-attached automatically on every reconnect. Prefer an explicit `AS alias` so catalog names stay stable.
+- Statements run in order; when one fails, the connection fails with the statement number and the engine error so the script is easy to fix.
+- The script runs on every new connection, so prefer statements that are safe to repeat, and use guards such as `IF NOT EXISTS` where the engine or extension supports them.
+- The init script is stored like a connection password: it lives in the local secret store, is never written to plain-text config files, and only syncs inside the encrypted sensitive payload — tokens such as the Quack `TOKEN` above stay out of public sync snapshots and exports.
+
 ### In-Memory SQLite
 
 SQLite connections can use `:memory:` as the file path for ephemeral, in-memory databases. This is useful for quick experiments or temporary data transformations.

@@ -125,6 +125,29 @@ DuckDB 连接支持两种模式：
 
 可以直接从连接表单创建新的 DuckDB 数据库文件，只需输入尚不存在的文件路径即可。
 
+### DuckDB 连接初始化脚本
+
+DuckDB 连接支持在每次建立连接后执行一段 SQL 脚本，在连接对话框的**初始化脚本**中配置。典型用途包括加载扩展、创建密钥、调整会话参数以及附加额外的数据目录：
+
+```sql
+INSTALL quack;
+LOAD quack;
+ATTACH 'quack:analytics-host' AS remote (TOKEN 'your_token');
+```
+
+也可以附加 [DuckLake](https://ducklake.select/) 数据目录：
+
+```sql
+INSTALL ducklake;
+LOAD ducklake;
+ATTACH 'ducklake:/data/lake/meta.ducklake' AS lake (DATA_PATH '/data/lake/files');
+```
+
+- 脚本中 ATTACH 的数据库（本地文件、DuckLake、远程 Quack 服务等）会像配置的附加数据库一样显示在侧边栏，并在每次重连时自动重新附加。建议显式指定 `AS 别名`，保持目录名稳定。
+- 语句按顺序执行；某条语句失败时连接会失败，并提示失败语句的序号和引擎报错，方便定位修改。
+- 脚本在每次建立新连接时都会执行，请优先使用可重复执行的语句，并在引擎或扩展支持时使用 `IF NOT EXISTS` 等保护条件。
+- 初始化脚本与连接密码同等对待：保存在本地密钥存储中，不会写入明文配置文件，云同步时只进入加密的敏感载荷——上例中 Quack 的 `TOKEN` 这类敏感内容不会出现在公开同步快照或导出里。
+
 ### SQLite 内存模式
 
 SQLite 连接可以使用 `:memory:` 作为文件路径，创建临时的内存数据库。适用于快速实验或临时数据转换。

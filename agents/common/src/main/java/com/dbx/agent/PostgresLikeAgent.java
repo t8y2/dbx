@@ -29,6 +29,11 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
     }
 
     @Override
+    public String getIdentifierQuote() {
+        return mysqlCompatMode ? "`" : super.getIdentifierQuote();
+    }
+
+    @Override
     public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
         return JdbcExecutor.current().execute(
             requireConnected(),

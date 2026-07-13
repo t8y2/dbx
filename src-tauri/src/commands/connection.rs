@@ -1245,6 +1245,15 @@ pub async fn check_connection_health(state: State<'_, Arc<AppState>>, connection
     state.check_connection_health(&connection_id).await
 }
 
+#[tauri::command]
+pub async fn connection_identifier_quote(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: Option<String>,
+) -> Result<Option<String>, String> {
+    state.connection_identifier_quote(&connection_id, database.as_deref()).await
+}
+
 /// Check whether a connection has read-only protection enabled.
 /// Returns an error if the connection is read-only, preventing write operations.
 pub async fn ensure_connection_writable(

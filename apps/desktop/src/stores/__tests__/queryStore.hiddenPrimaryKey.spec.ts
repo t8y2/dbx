@@ -462,6 +462,7 @@ describe("queryStore hidden primary key editing", () => {
 
     expect(buildDataGridCountSql).toHaveBeenCalledWith({
       databaseType: "mysql",
+      identifierQuote: undefined,
       catalog: undefined,
       schema: "public",
       tableName: "users",

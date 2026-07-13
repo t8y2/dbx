@@ -373,6 +373,7 @@ pub enum AgentMethod {
     CancelSession,
     TestConnection,
     ValidateConnection,
+    ConnectionInfo,
     ListDatabases,
     ListSchemas,
     ListTables,
@@ -400,7 +401,7 @@ pub enum AgentMethod {
 }
 
 impl AgentMethod {
-    pub const ALL: [Self; 32] = [
+    pub const ALL: [Self; 33] = [
         Self::Handshake,
         Self::Connect,
         Self::OpenSession,
@@ -409,6 +410,7 @@ impl AgentMethod {
         Self::CancelSession,
         Self::TestConnection,
         Self::ValidateConnection,
+        Self::ConnectionInfo,
         Self::ListDatabases,
         Self::ListSchemas,
         Self::ListTables,
@@ -445,6 +447,7 @@ impl AgentMethod {
             Self::CancelSession => "cancel_session",
             Self::TestConnection => "test_connection",
             Self::ValidateConnection => "validate_connection",
+            Self::ConnectionInfo => "connection_info",
             Self::ListDatabases => "list_databases",
             Self::ListSchemas => "list_schemas",
             Self::ListTables => "list_tables",
@@ -471,6 +474,12 @@ impl AgentMethod {
             Self::Shutdown => "shutdown",
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentConnectionInfo {
+    pub identifier_quote: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -908,6 +917,10 @@ impl AgentDriverClient {
 
     pub async fn validate_connection(&mut self, timeout_duration: Option<Duration>) -> Result<Value, String> {
         self.call_method_with_timeout(AgentMethod::ValidateConnection, serde_json::json!({}), timeout_duration).await
+    }
+
+    pub async fn connection_info(&mut self, timeout_duration: Option<Duration>) -> Result<AgentConnectionInfo, String> {
+        self.call_method_with_timeout(AgentMethod::ConnectionInfo, serde_json::json!({}), timeout_duration).await
     }
 
     pub async fn disconnect(&mut self) -> Result<Value, String> {

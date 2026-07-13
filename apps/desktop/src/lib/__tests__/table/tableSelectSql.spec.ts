@@ -37,15 +37,16 @@ describe("quoteTableIdentifier", () => {
     expect(quoteTableIdentifier("sqlserver", "orders")).toBe("[orders]");
   });
 
-  it("leaves safe Kingbase table-data identifiers unquoted across compatibility modes", () => {
-    expect(quoteTableDataIdentifier("kingbase", "cqbq_ls")).toBe("cqbq_ls");
-    expect(quoteTableDataIdentifier("kingbase", "actionlogs")).toBe("actionlogs");
-    expect(quoteTableIdentifier("kingbase", "actionlogs")).toBe('"actionlogs"');
+  it("uses the connection-reported quote for Kingbase table-data identifiers", () => {
+    expect(quoteTableDataIdentifier("kingbase", "order", "`")).toBe("`order`");
+    expect(quoteTableDataIdentifier("kingbase", "MixedCase", '"')).toBe('"MixedCase"');
+    expect(quoteTableDataIdentifier("kingbase", "order detail", "`")).toBe("`order detail`");
   });
 
-  it("still quotes Kingbase reserved or non-simple identifiers", () => {
-    expect(quoteTableDataIdentifier("kingbase", "order")).toBe('"order"');
-    expect(quoteTableDataIdentifier("kingbase", "MixedCase")).toBe('"MixedCase"');
-    expect(quoteTableDataIdentifier("kingbase", "order detail")).toBe('"order detail"');
+  it("escapes Kingbase identifiers without maintaining a reserved-word list", () => {
+    expect(quoteTableDataIdentifier("kingbase", "ANALYZE", "`")).toBe("`ANALYZE`");
+    expect(quoteTableDataIdentifier("kingbase", "AUTHORIZATION", '"')).toBe('"AUTHORIZATION"');
+    expect(quoteTableDataIdentifier("kingbase", "COLLATE", "`")).toBe("`COLLATE`");
+    expect(quoteTableDataIdentifier("kingbase", "a`b", "`")).toBe("`a``b`");
   });
 });

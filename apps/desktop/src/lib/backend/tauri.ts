@@ -652,6 +652,11 @@ export async function checkConnectionHealth(connectionId: string): Promise<void>
   return invoke("check_connection_health", { connectionId });
 }
 
+export async function connectionIdentifierQuote(connectionId: string, database?: string): Promise<string | undefined> {
+  const quote = await invoke<string | null>("connection_identifier_quote", { connectionId, database });
+  return quote ?? undefined;
+}
+
 export async function closeDatabaseConnection(connectionId: string, database: string): Promise<boolean> {
   return invoke("close_database_connection", { connectionId, database });
 }

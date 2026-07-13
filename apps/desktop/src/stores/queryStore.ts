@@ -1625,15 +1625,18 @@ export const useQueryStore = defineStore("query", () => {
     for (const tab of matchingTabs) {
       const tableMeta = tableMetaForDataTab(tab);
       if (!tableMeta?.tableName) continue;
-      const conn = useConnectionStore().getConfig(tab.connectionId);
+      const connStore = useConnectionStore();
+      const conn = connStore.getConfig(tab.connectionId);
       const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
+      const identifierQuote = connStore.connectionIdentifierQuote?.(tab.connectionId);
       const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : tableMeta.primaryKeys;
-      const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableDataIdentifier(effectiveDbType, tab.resultSortColumn)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
+      const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableDataIdentifier(effectiveDbType, tab.resultSortColumn, identifierQuote)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
       const orderBy = tab.orderByInput?.trim() || sortOrder;
       const limit = tab.resultPageLimit ?? settingsStore.editorSettings.pageSize ?? tableOpenPageLimit();
       const offset = tab.resultPageOffset ?? 0;
       const sql = await buildTableSelectSql({
         databaseType: effectiveDbType,
+        identifierQuote,
         schema: tableMeta.schema,
         tableName: tableMeta.tableName,
         tableType: tableMeta.tableType,
@@ -2967,6 +2970,7 @@ export const useQueryStore = defineStore("query", () => {
                 if (!tableMeta?.tableName) return undefined;
                 return {
                   databaseType: effectiveDbType,
+                  identifierQuote: useConnectionStore().connectionIdentifierQuote?.(current.connectionId),
                   catalog: tableMeta.catalog,
                   schema: tableMeta.schema,
                   tableName: tableMeta.tableName,
@@ -3578,8 +3582,9 @@ export const useQueryStore = defineStore("query", () => {
       const totalRows = typeof tab.resultTotalRowCount === "number" ? tab.resultTotalRowCount : null;
       const pageLimit = TABLE_DATA_EXPORT_PAGE_SIZE;
       const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
+      const identifierQuote = connStore.connectionIdentifierQuote?.(tab.connectionId);
       const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : tableMeta.primaryKeys;
-      const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableDataIdentifier(effectiveDbType, tab.resultSortColumn)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
+      const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableDataIdentifier(effectiveDbType, tab.resultSortColumn, identifierQuote)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
       const orderBy = tab.orderByInput?.trim() || sortOrder;
       const queryTimeoutSecs = queryTimeoutSecsForConnection(conn);
       const executionDatabase = dataTabExecutionDatabase(conn, tab.database, tableMeta.catalog);
@@ -3594,6 +3599,7 @@ export const useQueryStore = defineStore("query", () => {
         while (true) {
           const sql = await api.buildTableSelectSql({
             databaseType: effectiveDbType,
+            identifierQuote,
             schema: tableMeta.schema,
             tableName: tableMeta.tableName,
             tableType: tableMeta.tableType,

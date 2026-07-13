@@ -5,6 +5,7 @@ export const TABLE_DATA_EXPORT_PAGE_SIZE = 10_000;
 
 export interface FetchTableDataForExportOptions {
   databaseType?: DatabaseType;
+  identifierQuote?: string;
   schema?: string;
   tableName: string;
   tableType?: string;
@@ -24,6 +25,7 @@ export async function fetchTableDataForExport(options: FetchTableDataForExportOp
   while (true) {
     const sql = await (options.buildPageSql ?? buildTableSelectSql)({
       databaseType: options.databaseType,
+      identifierQuote: options.identifierQuote,
       schema: options.schema,
       tableName: options.tableName,
       tableType: options.tableType,

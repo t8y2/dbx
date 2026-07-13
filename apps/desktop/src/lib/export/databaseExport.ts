@@ -46,6 +46,7 @@ export interface BuildExportInsertStatementsOptions {
 
 export interface BuildExportPageSqlOptions {
   databaseType?: DatabaseType;
+  identifierQuote?: string;
   schema?: string;
   tableName: string;
   limit?: number;
@@ -72,6 +73,7 @@ export function buildInsertStatements(options: BuildExportInsertStatementsOption
 export async function buildExportPageSql(options: BuildExportPageSqlOptions): Promise<string> {
   return buildTableSelectSql({
     databaseType: options.databaseType,
+    identifierQuote: options.identifierQuote,
     schema: options.schema,
     tableName: options.tableName,
     limit: options.limit ?? DATABASE_EXPORT_PAGE_SIZE,

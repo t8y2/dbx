@@ -46,6 +46,7 @@
     "cancel_session",
     "test_connection",
     "validate_connection",
+    "connection_info",
     "list_databases",
     "list_schemas",
     "list_tables",

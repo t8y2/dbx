@@ -192,6 +192,8 @@ pub struct DataGridCountSqlOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_type: Option<DatabaseType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
@@ -571,12 +573,21 @@ pub fn build_data_grid_column_distinct_values_sql(options: DataGridColumnDistinc
 }
 
 pub fn build_data_grid_count_sql(options: DataGridCountSqlOptions) -> String {
-    let table = crate::sql_dialect::qualified_table_name_with_catalog(
-        options.database_type,
-        options.catalog.as_deref(),
-        options.schema.as_deref(),
-        &options.table_name,
-    );
+    let table = if options.database_type == Some(DatabaseType::Kingbase) {
+        crate::sql_dialect::table_data_qualified_table_name(
+            options.database_type,
+            options.schema.as_deref(),
+            &options.table_name,
+            options.identifier_quote.as_deref(),
+        )
+    } else {
+        crate::sql_dialect::qualified_table_name_with_catalog(
+            options.database_type,
+            options.catalog.as_deref(),
+            options.schema.as_deref(),
+            &options.table_name,
+        )
+    };
     let predicate = crate::sql_dialect::normalize_where_input(options.where_input.as_deref());
     let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE ({predicate})") };
     format!("SELECT COUNT(*) AS cnt FROM {table}{where_clause}")
@@ -2595,6 +2606,7 @@ mod tests {
         assert_eq!(
             build_data_grid_count_sql(DataGridCountSqlOptions {
                 database_type: Some(DatabaseType::Postgres),
+                identifier_quote: None,
                 catalog: None,
                 schema: Some("public".to_string()),
                 table_name: "users".to_string(),
@@ -2605,6 +2617,7 @@ mod tests {
         assert_eq!(
             build_data_grid_count_sql(DataGridCountSqlOptions {
                 database_type: Some(DatabaseType::Doris),
+                identifier_quote: None,
                 catalog: Some("iceberg_catalog".to_string()),
                 schema: Some("sales".to_string()),
                 table_name: "orders".to_string(),
@@ -2615,12 +2628,24 @@ mod tests {
         assert_eq!(
             build_data_grid_count_sql(DataGridCountSqlOptions {
                 database_type: Some(DatabaseType::StarRocks),
+                identifier_quote: None,
                 catalog: Some("hive_catalog".to_string()),
                 schema: None,
                 table_name: "orders".to_string(),
                 where_input: None,
             }),
             "SELECT COUNT(*) AS cnt FROM `hive_catalog`.`orders`"
+        );
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::Kingbase),
+                identifier_quote: Some("`".to_string()),
+                catalog: None,
+                schema: Some("cqbq_ls".to_string()),
+                table_name: "ANALYZE".to_string(),
+                where_input: None,
+            }),
+            "SELECT COUNT(*) AS cnt FROM `cqbq_ls`.`ANALYZE`"
         );
     }
 

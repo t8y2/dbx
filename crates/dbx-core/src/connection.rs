@@ -2271,6 +2271,35 @@ impl AppState {
         keys
     }
 
+    pub async fn connection_identifier_quote(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        let config = self
+            .configs
+            .read()
+            .await
+            .get(connection_id)
+            .cloned()
+            .ok_or_else(|| format!("Connection config not found: {connection_id}"))?;
+        if !database_capabilities::is_agent_type(&config.db_type) {
+            return Ok(None);
+        }
+
+        let pool_key = self.get_or_create_pool(connection_id, database).await?;
+        let client = {
+            let connections = self.connections.read().await;
+            match connections.get(&pool_key) {
+                Some(PoolKind::Agent(client)) => client.clone(),
+                _ => return Ok(None),
+            }
+        };
+        let mut agent = client.lock().await;
+        let info = agent.connection_info(Some(db::connection_timeout())).await?;
+        Ok(Some(info.identifier_quote))
+    }
+
     pub async fn reset_connection_transport(&self, connection_id: &str) {
         let layer_count = {
             let configs = self.configs.read().await;

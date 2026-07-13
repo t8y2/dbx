@@ -3913,6 +3913,7 @@ async function buildCurrentCountTarget(): Promise<{ sql: string; schema?: string
   if (props.tableMeta) {
     const sql = await buildDataGridCountSql({
       databaseType: props.databaseType,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
       catalog: props.tableMeta.catalog,
       schema: props.tableMeta.schema,
       tableName: props.tableMeta.tableName,
@@ -5566,6 +5567,7 @@ async function applyOrderBySearch() {
     if (!tableMeta) return;
     const sql = await buildTableSelectSql({
       databaseType: resolvedDatabaseType.value,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
       catalog: tableMeta.catalog,
       schema: tableMeta.schema,
       tableName: tableMeta.tableName,
@@ -5598,6 +5600,7 @@ async function applyWhereFilter() {
     if (!tableMeta) return;
     const sql = await buildTableSelectSql({
       databaseType: resolvedDatabaseType.value,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
       catalog: tableMeta.catalog,
       schema: tableMeta.schema,
       tableName: tableMeta.tableName,
@@ -5707,7 +5710,7 @@ function columnTypeCacheSignature(): string {
 watch(() => [props.result.columns.join("\u0000"), columnFormatterSignatures.value.join("\u0000"), columnTypeCacheSignature()], clearCellFormatCache);
 
 function quoteIdent(name: string): string {
-  return quoteTableDataIdentifier(props.databaseType, name);
+  return quoteTableDataIdentifier(props.databaseType, name, connectionStore.connectionIdentifierQuote?.(props.connectionId));
 }
 
 function queryColumnRef(name: string): string {

@@ -1048,6 +1048,7 @@ async function openNewQuery(row: ObjectBrowserRow) {
     tabId,
     await buildTableSelectSql({
       databaseType: effectiveDatabaseType.value,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
       schema: row.schema || selectedSchema.value,
       tableName: row.name,
       limit: 100,
@@ -1585,6 +1586,7 @@ async function exportDataLegacy(row: ObjectBrowserRow, format: "json" | "sql") {
     const queryColumns = props.connection.db_type === "neo4j" ? (tableColumns ?? (await api.getColumns(props.connection.id, props.database, schema || props.database, row.name))).map((column) => column.name) : undefined;
     const result = await fetchTableDataForExport({
       databaseType: effectiveDatabaseType.value,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
       schema,
       tableName: row.name,
       columns: queryColumns,

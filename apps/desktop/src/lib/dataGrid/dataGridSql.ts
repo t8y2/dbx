@@ -91,6 +91,7 @@ export interface DataGridColumnDistinctValuesSqlOptions {
 
 export interface DataGridCountSqlOptions {
   databaseType?: DatabaseType;
+  identifierQuote?: string;
   catalog?: string;
   schema?: string;
   tableName: string;

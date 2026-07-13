@@ -1394,6 +1394,7 @@ async function openData() {
     const includeRowId = usesSyntheticRowIdKey(effectiveDbType, primaryKeys, tableType);
     const sql = await buildTableSelectSql({
       databaseType: effectiveDbType,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
       schema: tableSchema,
       tableName: node.label,
       tableType,
@@ -3768,6 +3769,7 @@ async function exportDataLegacy(format: "csv" | "json" | "sql") {
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
     const result = await fetchTableDataForExport({
       databaseType: effectiveDbType,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(connectionId),
       schema: node.schema,
       tableName: node.label,
       tableType: node.tableType,

@@ -125,6 +125,9 @@ public final class JsonRpcServer {
             return Collections.singletonMap("ok", true);
         }
         ensureLiveConnection(method);
+        if (AgentProtocol.METHOD_CONNECTION_INFO.equals(method)) {
+            return Collections.singletonMap("identifierQuote", agent.getIdentifierQuote());
+        }
         if (AgentProtocol.METHOD_LIST_DATABASES.equals(method)) {
             return agent.listDatabases();
         }

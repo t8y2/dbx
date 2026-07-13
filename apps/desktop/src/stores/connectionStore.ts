@@ -233,6 +233,7 @@ export const useConnectionStore = defineStore("connection", () => {
   const treeNodes = ref<TreeNode[]>([]);
   const pinnedTreeNodeIds = ref<Set<string>>(new Set());
   const connectedIds = ref<Set<string>>(new Set());
+  const identifierQuotes = ref<Record<string, string>>({});
   const lastConnectionHealthCheckAt = ref<Record<string, number>>({});
   const agentDrivers = ref<AgentDriverInstallState[]>([]);
   let agentDriversRefreshPromise: Promise<void> | null = null;
@@ -383,6 +384,25 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function getConfig(connectionId: string) {
     return configById.value.get(connectionId);
+  }
+
+  function connectionIdentifierQuote(connectionId?: string): string | undefined {
+    if (!connectionId) return undefined;
+    return identifierQuotes.value[connectionId];
+  }
+
+  function clearConnectionIdentifierQuote(connectionId: string) {
+    if (!(connectionId in identifierQuotes.value)) return;
+    const next = { ...identifierQuotes.value };
+    delete next[connectionId];
+    identifierQuotes.value = next;
+  }
+
+  async function refreshConnectionIdentifierQuote(connectionId: string, config: ConnectionConfig) {
+    clearConnectionIdentifierQuote(connectionId);
+    if (config.db_type !== "kingbase") return;
+    const quote = await api.connectionIdentifierQuote(connectionId).catch(() => undefined);
+    if (quote != null) identifierQuotes.value = { ...identifierQuotes.value, [connectionId]: quote };
   }
 
   function connectionErrorMessage(error: unknown): string {
@@ -711,6 +731,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function markConnectionLost(connectionId: string, error: unknown) {
     connectedIds.value.delete(connectionId);
+    clearConnectionIdentifierQuote(connectionId);
     clearConnectionNodeLoading(connectionId);
     clearConnectionHealthCheck(connectionId);
     if (activeConnectionId.value === connectionId) activeConnectionId.value = null;
@@ -1629,6 +1650,7 @@ export const useConnectionStore = defineStore("connection", () => {
     for (const id of removedIds) {
       clearConnectionError(id);
       connectedIds.value.delete(id);
+      clearConnectionIdentifierQuote(id);
       clearConnectionHealthCheck(id);
       sidebarLayout.value = removeConnectionFromSidebarLayout(sidebarLayout.value, id);
     }
@@ -1660,6 +1682,7 @@ export const useConnectionStore = defineStore("connection", () => {
     connections.value = nextConnections;
     rebuildTreeNodes();
     connectedIds.value.delete(config.id);
+    clearConnectionIdentifierQuote(config.id);
     clearConnectionHealthCheck(config.id);
     invalidateCompletionCache(config.id);
     clearLoadedChildrenCache(config.id);
@@ -1853,6 +1876,7 @@ export const useConnectionStore = defineStore("connection", () => {
       await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, localAttempt, id);
       activeConnectionId.value = id;
       connectedIds.value.add(id);
+      await refreshConnectionIdentifierQuote(id, { ...config, id });
       if (id !== config.id) markSuccessfulLocalConnectionAttempt(config.id, localAttempt);
       markSuccessfulLocalConnectionAttempt(id, localAttempt);
       markConnectionHealthChecked(id);
@@ -1900,6 +1924,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!cancelled) return false;
     clearConnectionError(connectionId);
     connectedIds.value.delete(connectionId);
+    clearConnectionIdentifierQuote(connectionId);
     clearConnectionHealthCheck(connectionId);
     if (activeConnectionId.value === connectionId) activeConnectionId.value = null;
     invalidateCompletionCache(connectionId);
@@ -1914,6 +1939,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const shouldRemoveOneTimeConnection = getConfig(connectionId)?.one_time === true;
 
     connectedIds.value.delete(connectionId);
+    clearConnectionIdentifierQuote(connectionId);
     forgetSuccessfulLocalConnectionAttempt(connectionId);
     clearConnectionHealthCheck(connectionId);
     const node = findNode(treeNodes.value, connectionId);
@@ -2014,6 +2040,7 @@ export const useConnectionStore = defineStore("connection", () => {
       await syncMongoLegacyDriverFallback(connectionId, config);
       await ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId, localAttempt, id);
       connectedIds.value.add(connectionId);
+      await refreshConnectionIdentifierQuote(connectionId, config);
       markSuccessfulLocalConnectionAttempt(connectionId, localAttempt);
       markConnectionHealthChecked(connectionId);
       activeConnectionId.value = connectionId;
@@ -5089,6 +5116,7 @@ export const useConnectionStore = defineStore("connection", () => {
     recordConnectionLostError,
     sidebarLayout,
     getConfig,
+    connectionIdentifierQuote,
     isTreeNodePinned,
     toggleTreeNodePin,
     addConnection,

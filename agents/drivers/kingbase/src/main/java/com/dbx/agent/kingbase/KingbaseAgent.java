@@ -58,12 +58,24 @@ public final class KingbaseAgent extends PostgresLikeAgent {
     @Override
     protected void afterConnect(ConnectParams params, Connection connection) {
         postgresCatalogMode = false;
+        setMysqlCompatMode(params.isMysql_compat_mode());
         if (params.isMysql_compat_mode()) {
-            setMysqlCompatMode(true);
             return;
         }
         postgresCatalogMode = !catalogExists(connection, "sys_catalog.sys_namespace")
             && catalogExists(connection, "pg_catalog.pg_namespace");
+        if (!postgresCatalogMode && mysqlSqlModeExists(connection)) {
+            setMysqlCompatMode(true);
+        }
+    }
+
+    private static boolean mysqlSqlModeExists(Connection connection) {
+        try (Statement stmt = connection.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT 1 FROM sys_settings WHERE LOWER(name) = 'sql_mode'")) {
+            return rs.next();
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private static boolean catalogExists(Connection connection, String catalog) {

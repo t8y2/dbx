@@ -5,6 +5,7 @@ import { parseSqlServerLinkedSchema, sqlServerLinkedTableName } from "@/lib/data
 
 export interface BuildTableSelectSqlOptions {
   databaseType?: DatabaseType;
+  identifierQuote?: string;
   schema?: string;
   tableName: string;
   tableType?: string;
@@ -32,19 +33,11 @@ export function quoteTableIdentifier(databaseType: DatabaseType | undefined, nam
   return `"${name.replace(/"/g, '""')}"`;
 }
 
-const KINGBASE_RESERVED_IDENTIFIERS = new Set(
-  "ALL ALTER AND AS ASC BETWEEN BY CASE CHECK COLUMN CREATE CURRENT_DATE CURRENT_TIME CURRENT_TIMESTAMP CURRENT_USER DATABASE DEFAULT DELETE DESC DISTINCT DROP ELSE EXISTS FALSE FETCH FOR FOREIGN FROM FULL GRANT GROUP HAVING IN INDEX INNER INSERT INTERSECT INTO IS JOIN KEY LEFT LIKE LIMIT NOT NULL OFFSET ON OR ORDER OUTER PRIMARY REFERENCES RIGHT SELECT SET TABLE THEN TRUE UNION UNIQUE UPDATE USER USING VALUES VIEW WHEN WHERE WITH".split(
-    " ",
-  ),
-);
-
-function isSafeUnquotedKingbaseIdentifier(name: string): boolean {
-  const hasStableCase = name === name.toLowerCase() || name === name.toUpperCase();
-  return hasStableCase && /^[A-Za-z_][A-Za-z0-9_$]*$/.test(name) && !KINGBASE_RESERVED_IDENTIFIERS.has(name.toUpperCase());
-}
-
-export function quoteTableDataIdentifier(databaseType: DatabaseType | undefined, name: string): string {
-  if (databaseType === "kingbase" && isSafeUnquotedKingbaseIdentifier(name)) return name;
+export function quoteTableDataIdentifier(databaseType: DatabaseType | undefined, name: string, identifierQuote?: string): string {
+  if (databaseType === "kingbase" && identifierQuote != null) {
+    if (!identifierQuote) return name;
+    return `${identifierQuote}${name.replaceAll(identifierQuote, identifierQuote + identifierQuote)}${identifierQuote}`;
+  }
   return quoteTableIdentifier(databaseType, name);
 }
 

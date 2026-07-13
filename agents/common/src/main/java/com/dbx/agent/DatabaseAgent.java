@@ -13,6 +13,10 @@ public interface DatabaseAgent {
 
     boolean testConnection(ConnectParams params);
 
+    default String getIdentifierQuote() {
+        return "";
+    }
+
     List<DatabaseInfo> listDatabases();
 
     List<String> listSchemas();

@@ -915,6 +915,7 @@ pub fn run() {
             commands::connection::close_database_connection,
             commands::connection::refresh_connections,
             commands::connection::check_connection_health,
+            commands::connection::connection_identifier_quote,
             commands::connection::save_connections,
             commands::connection::load_connections,
             commands::connection::save_sidebar_layout,

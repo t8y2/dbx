@@ -105,6 +105,7 @@ describe("queryStore table data refresh", () => {
     expect(refreshed).toBe(1);
     expect(mocks.buildTableSelectSql).toHaveBeenCalledWith({
       databaseType: "postgres",
+      identifierQuote: undefined,
       schema: "public",
       tableName: "users",
       tableType: "TABLE",

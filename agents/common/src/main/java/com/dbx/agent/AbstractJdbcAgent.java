@@ -21,6 +21,16 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
     }
 
     @Override
+    public String getIdentifierQuote() {
+        try {
+            String quote = requireConnected().getMetaData().getIdentifierQuoteString();
+            return quote == null || quote.trim().isEmpty() ? "" : quote.trim();
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    @Override
     public final void connect(ConnectParams params) {
         uncheckedVoid(() -> {
             loadDriver(params);

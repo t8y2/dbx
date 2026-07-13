@@ -40,7 +40,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
 
   function quoteIdent(tab: QueryTab, name: string): string {
     const config = connectionStore.getConfig(tab.connectionId);
-    return quoteTableDataIdentifier(effectiveDatabaseTypeForConnection(config), name);
+    return quoteTableDataIdentifier(effectiveDatabaseTypeForConnection(config), name, connectionStore.connectionIdentifierQuote?.(tab.connectionId));
   }
 
   function buildTableSql(tab: QueryTab, options: { orderBy?: string; limit?: number; offset?: number; whereInput?: string } = {}): Promise<string> {
@@ -51,6 +51,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const useRowId = usesSyntheticRowIdKey(effectiveDbType, primaryKeys, tableMeta?.tableType);
     return buildTableSelectSql({
       databaseType: effectiveDbType,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(tab.connectionId),
       schema: tableMeta?.schema,
       tableName: tableMeta?.tableName ?? "",
       tableType: tableMeta?.tableType,

@@ -10,7 +10,7 @@ use super::types::{
 };
 
 pub fn build_count_table_sql(database_type: Option<DatabaseType>, schema: Option<&str>, table_name: &str) -> String {
-    format!("SELECT COUNT(*) AS row_count FROM {}", table_data_qualified_table_name(database_type, schema, table_name))
+    format!("SELECT COUNT(*) AS row_count FROM {}", qualified_table_name(database_type, schema, table_name))
 }
 
 pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String {
@@ -22,7 +22,12 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
 
     // Doris / StarRocks multi-catalog: prefix the catalog for external-catalog tables.
     let table = if database_type == Some(DatabaseType::Kingbase) {
-        table_data_qualified_table_name(database_type, options.schema.as_deref(), &options.table_name)
+        table_data_qualified_table_name(
+            database_type,
+            options.schema.as_deref(),
+            &options.table_name,
+            options.identifier_quote.as_deref(),
+        )
     } else {
         qualified_table_name_with_catalog(
             database_type,
@@ -147,43 +152,38 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
     }
 }
 
-fn table_data_qualified_table_name(
+pub(crate) fn table_data_qualified_table_name(
     database_type: Option<DatabaseType>,
     schema: Option<&str>,
     table_name: &str,
+    identifier_quote: Option<&str>,
 ) -> String {
     if database_type != Some(DatabaseType::Kingbase) {
         return qualified_table_name(database_type, schema, table_name);
     }
-    let table = quote_table_data_identifier(database_type, table_name);
+    let table = quote_table_data_identifier(database_type, table_name, identifier_quote);
     schema
         .map(str::trim)
         .filter(|schema| !schema.is_empty())
-        .map(|schema| format!("{}.{}", quote_table_data_identifier(database_type, schema), table))
+        .map(|schema| format!("{}.{}", quote_table_data_identifier(database_type, schema, identifier_quote), table))
         .unwrap_or(table)
 }
 
-fn quote_table_data_identifier(database_type: Option<DatabaseType>, name: &str) -> String {
-    if database_type == Some(DatabaseType::Kingbase) && is_safe_unquoted_kingbase_identifier(name) {
-        name.to_string()
-    } else {
-        quote_table_identifier(database_type, name)
+fn quote_table_data_identifier(
+    database_type: Option<DatabaseType>,
+    name: &str,
+    identifier_quote: Option<&str>,
+) -> String {
+    if database_type != Some(DatabaseType::Kingbase) {
+        return quote_table_identifier(database_type, name);
     }
-}
-
-fn is_safe_unquoted_kingbase_identifier(name: &str) -> bool {
-    const RESERVED: &str = "ALL ALTER AND AS ASC BETWEEN BY CASE CHECK COLUMN CREATE CURRENT_DATE CURRENT_TIME CURRENT_TIMESTAMP CURRENT_USER DATABASE DEFAULT DELETE DESC DISTINCT DROP ELSE EXISTS FALSE FETCH FOR FOREIGN FROM FULL GRANT GROUP HAVING IN INDEX INNER INSERT INTERSECT INTO IS JOIN KEY LEFT LIKE LIMIT NOT NULL OFFSET ON OR ORDER OUTER PRIMARY REFERENCES RIGHT SELECT SET TABLE THEN TRUE UNION UNIQUE UPDATE USER USING VALUES VIEW WHEN WHERE WITH";
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
+    let Some(quote) = identifier_quote else {
+        return quote_table_identifier(database_type, name);
     };
-    if !(first.is_ascii_alphabetic() || first == '_')
-        || !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
-        || (name != name.to_ascii_lowercase() && name != name.to_ascii_uppercase())
-    {
-        return false;
+    if quote.is_empty() {
+        return name.to_string();
     }
-    !RESERVED.split_ascii_whitespace().any(|keyword| keyword.eq_ignore_ascii_case(name))
+    format!("{quote}{}{quote}", name.replace(quote, &format!("{quote}{quote}")))
 }
 
 fn is_view_table_type(table_type: Option<&str>) -> bool {
@@ -461,6 +461,7 @@ mod tests {
     fn opts(database_type: DatabaseType, catalog: Option<&str>, table: &str) -> TableDataSelectSqlOptions {
         TableDataSelectSqlOptions {
             database_type: Some(database_type),
+            identifier_quote: None,
             schema: None,
             table_name: table.to_string(),
             catalog: catalog.map(|c| c.to_string()),

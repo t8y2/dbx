@@ -255,7 +255,7 @@ fn builds_select_sql_with_limit_syntax_for_database_type() {
 fn builds_table_data_where_and_schema_queries() {
     assert_eq!(
         build_count_table_sql(Some(DatabaseType::Kingbase), Some("cqbq_ls"), "actionlogs"),
-        "SELECT COUNT(*) AS row_count FROM cqbq_ls.actionlogs"
+        "SELECT COUNT(*) AS row_count FROM \"cqbq_ls\".\"actionlogs\""
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {
@@ -314,6 +314,7 @@ fn builds_table_data_where_and_schema_queries() {
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {
             database_type: Some(DatabaseType::Kingbase),
+            identifier_quote: Some("`".to_string()),
             schema: Some("cqbq_ls".to_string()),
             table_name: "actionlogs".to_string(),
             table_type: None,
@@ -327,7 +328,18 @@ fn builds_table_data_where_and_schema_queries() {
             include_row_id: false,
             ..Default::default()
         }),
-        "SELECT * FROM cqbq_ls.actionlogs LIMIT 100;"
+        "SELECT * FROM `cqbq_ls`.`actionlogs` LIMIT 100;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Kingbase),
+            identifier_quote: Some("\"".to_string()),
+            schema: Some("App Schema".to_string()),
+            table_name: "ANALYZE".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT * FROM \"App Schema\".\"ANALYZE\" LIMIT 100;"
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {

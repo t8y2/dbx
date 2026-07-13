@@ -225,6 +225,11 @@ export async function checkConnectionHealth(connectionId: string): Promise<void>
   return post("/api/connection/check-health", { connectionId });
 }
 
+export async function connectionIdentifierQuote(connectionId: string, database?: string): Promise<string | undefined> {
+  const quote = await post<string | null>("/api/connection/identifier-quote", { connectionId, database });
+  return quote ?? undefined;
+}
+
 export async function closeDatabaseConnection(connectionId: string, database: string): Promise<boolean> {
   return post("/api/connection/close-database", { connectionId, database });
 }

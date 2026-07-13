@@ -138,6 +138,22 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
+    void detectsMysqlCompatModeFromServerSqlMode() throws Exception {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        Connection connection = mysqlCompatConnection(sql);
+
+        Method afterConnect = KingbaseAgent.class.getDeclaredMethod("afterConnect", ConnectParams.class, Connection.class);
+        afterConnect.setAccessible(true);
+        afterConnect.invoke(agent, new ConnectParams(), connection);
+
+        Assertions.assertTrue(agent.isMysqlCompatMode());
+        Assertions.assertEquals("`", agent.getIdentifierQuote());
+        Assertions.assertEquals("SELECT 1 FROM sys_catalog.sys_namespace WHERE 1 = 0", sql.get(0));
+        Assertions.assertEquals("SELECT 1 FROM sys_settings WHERE LOWER(name) = 'sql_mode'", sql.get(1));
+    }
+
+    @Test
     void mysqlCompatListTablesUsesInformationSchema() {
         List<String> sql = new ArrayList<>();
         KingbaseAgent agent = new KingbaseAgent();
@@ -504,6 +520,26 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
                 sql.add(query);
                 return proxy(PreparedStatement.class, (statementMethod, statementArgs) -> {
                     if ("executeQuery".equals(statementMethod.getName())) return metadataResult;
+                    return defaultValue(statementMethod.getReturnType());
+                });
+            }
+            if ("isClosed".equals(method.getName())) return false;
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Connection mysqlCompatConnection(List<String> sql) {
+        return proxy(Connection.class, (method, args) -> {
+            if ("createStatement".equals(method.getName())) {
+                return proxy(Statement.class, (statementMethod, statementArgs) -> {
+                    if ("executeQuery".equals(statementMethod.getName())) {
+                        String query = String.valueOf(statementArgs[0]);
+                        sql.add(query);
+                        if (query.contains("sys_settings")) {
+                            return resultSet(new String[]{"probe"}, new Object[][]{{1}});
+                        }
+                        return resultSet(new String[]{"probe"}, new Object[][]{});
+                    }
                     return defaultValue(statementMethod.getReturnType());
                 });
             }

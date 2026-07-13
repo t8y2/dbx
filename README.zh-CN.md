@@ -219,8 +219,15 @@ winget install t8y2.dbx
 flatpak remote-add --if-not-exists flatpark https://dl.flatpark.org/flatpark.flatpakrepo
 flatpak install flatpark com.dbxio.dbx
 ```
-
 之后通过常规的 `flatpak update` 即可获取更新。详见 [FlatPark 上的 DBX 页面](https://flatpark.org/apps/com.dbxio.dbx/)。
+
+**星火应用商店/AmberPM(Linux)：**
+
+点击[此处](https://spk-resolv.spark-app.store/?spk=spk://store/development/dbx)一键安装，或使用命令行安装
+
+后续可通过星火应用商店客户端获取更新。详见[星火应用商店](https://www.spark-app.store/)
+
+
 
 ## 自托管 (Docker)
 

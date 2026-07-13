@@ -52,6 +52,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     return buildTableSelectSql({
       databaseType: effectiveDbType,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(tab.connectionId),
+      database: tableMeta?.database,
       schema: tableMeta?.schema,
       tableName: tableMeta?.tableName ?? "",
       tableType: tableMeta?.tableType,

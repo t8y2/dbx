@@ -718,6 +718,9 @@ function softStatementKeywordAt(sql: string, pos: number, databaseType?: Databas
   if (!match) return null;
   const keyword = match[0].toUpperCase();
   if (keyword === "REPLACE" && nextNonWhitespaceChar(sql, pos + match[0].length) === "(") return null;
+  // COMMENT is also a common column name. Only COMMENT ON starts a standalone
+  // SQL command; otherwise a line-start projection column must stay in SELECT.
+  if (keyword === "COMMENT" && nextSqlWord(sql, pos + match[0].length) !== "ON") return null;
   return softStatementStartKeywords(databaseType).has(keyword) ? keyword : null;
 }
 
@@ -911,6 +914,12 @@ function nextNonWhitespaceChar(sql: string, pos: number): string | null {
   let i = pos;
   while (i < sql.length && isSqlWhitespace(sql[i])) i += 1;
   return i < sql.length ? sql[i] : null;
+}
+
+function nextSqlWord(sql: string, pos: number): string | null {
+  let i = pos;
+  while (i < sql.length && isSqlWhitespace(sql[i])) i += 1;
+  return /^[A-Za-z_][\w$]*/.exec(sql.slice(i))?.[0]?.toUpperCase() ?? null;
 }
 
 function isExplainLikeKeyword(keyword: string | null): boolean {

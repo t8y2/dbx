@@ -56,6 +56,7 @@ fn mysql_cross_database_query_flow_preserves_target_database() {
         database_type: Some(DatabaseType::Mysql),
         table_meta: DataGridTableMeta {
             catalog: None,
+            database: None,
             schema: Some("db_9".to_string()),
             table_name: "users".to_string(),
             primary_keys: vec!["id".to_string()],

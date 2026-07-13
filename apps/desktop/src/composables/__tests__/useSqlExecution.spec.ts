@@ -109,6 +109,32 @@ describe("useSqlExecution", () => {
     setActivePinia(createPinia());
   });
 
+  it("passes the selected statement's editor offset to the query store", async () => {
+    const fullSql = "SELECT * FROM users;\nSELECT * FROM users;";
+    const selectionFrom = fullSql.lastIndexOf("SELECT");
+    const selectedSql = fullSql.slice(selectionFrom, -1);
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql: fullSql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => selectedSql),
+      resolveExecutableSql: async () => selectedSql,
+      activeOutputView,
+    });
+
+    await execution.tryExecute({ fullSql, selectedSql, cursorPos: selectionFrom, selectionFrom, selectionTo: fullSql.length - 1 });
+
+    expect(executeCurrentSql).toHaveBeenCalledWith(selectedSql, { sourceOffset: selectionFrom });
+  });
+
   it("sends native SET variables without client-side expansion", async () => {
     const activeTab = ref<QueryTab | undefined>(queryTab("app"));
     const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));

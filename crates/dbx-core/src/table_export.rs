@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::connection::MysqlMode;
 use crate::connection::{task_client_session_id, AppState, PoolKind};
-use crate::csv_export::{escape_csv, format_csv, value_to_csv_text};
+use crate::csv_export::{escape_csv, format_csv, format_tsv, format_tsv_rows, value_to_csv_text};
 pub use crate::database_export::ExportStatus;
 use crate::database_export::{build_export_insert_statements, is_export_cancelled, BuildExportInsertStatementsOptions};
 use crate::db::agent_driver::AgentTableReadStartParams;
@@ -36,7 +36,7 @@ pub struct TableExportRequest {
     pub schema: Option<String>,
     pub table_name: String,
     pub file_path: String,
-    /// "csv", "xlsx", "json", "markdown", or "sql"
+    /// "csv", "xlsx", "json", "markdown", "sql", or "txt"
     pub format: String,
     #[serde(default)]
     pub columns: Option<Vec<String>>,
@@ -485,6 +485,45 @@ async fn try_export_native_table_stream(
                 |row| {
                     let row_csv = format_csv_rows(&[row.to_vec()]);
                     write!(file, "\n{row_csv}").map_err(|e| format!("Failed to write CSV rows: {e}"))?;
+                    rows_exported += 1;
+                    if rows_exported % progress_interval == 0 {
+                        on_progress(TableExportProgress {
+                            export_id: request.export_id.clone(),
+                            table_name: request.table_name.clone(),
+                            rows_exported,
+                            total_rows,
+                            status: ExportStatus::Running,
+                            error_message: None,
+                        });
+                    }
+                    Ok(())
+                },
+            )
+            .await;
+            if result.is_ok() {
+                file.flush().map_err(|e| format!("Failed to flush export file: {e}"))?;
+            }
+            result
+        }
+        "txt" => {
+            let mut file = BufWriter::new(
+                std::fs::File::create(&request.file_path).map_err(|e| format!("Failed to create file: {e}"))?,
+            );
+            let header = format_tsv(col_names, &[]);
+            let header = header.strip_suffix('\n').unwrap_or(&header);
+            file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write TXT: {e}"))?;
+
+            let result = stream_native_table_rows(
+                state,
+                pool_key,
+                db_type,
+                &sql,
+                row_limit,
+                &cancelled,
+                cancel_token.clone(),
+                |row| {
+                    let row_tsv = format_tsv_rows(&[row.to_vec()]);
+                    write!(file, "\n{row_tsv}").map_err(|e| format!("Failed to write TXT rows: {e}"))?;
                     rows_exported += 1;
                     if rows_exported % progress_interval == 0 {
                         on_progress(TableExportProgress {
@@ -979,6 +1018,85 @@ pub async fn export_table_data_core(
                 }
             }
         }
+        "txt" => {
+            let mut is_first_batch = true;
+            let header = format_tsv(&col_names, &[]);
+            let header = header.strip_suffix('\n').unwrap_or(&header);
+            file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write TXT: {e}"))?;
+
+            loop {
+                if is_export_cancelled(&request.export_id).await {
+                    on_progress(TableExportProgress {
+                        export_id: request.export_id.clone(),
+                        table_name: request.table_name.clone(),
+                        rows_exported,
+                        total_rows,
+                        status: ExportStatus::Cancelled,
+                        error_message: Some("Export cancelled".to_string()),
+                    });
+                    close_table_read_session_if_open(state, &pool_key, &mut table_read_session_id).await;
+                    return Ok(());
+                }
+
+                let Some(active_batch_size) = next_export_batch_size(row_limit, rows_exported, batch_size) else {
+                    break;
+                };
+                let result = fetch_table_export_batch(
+                    state,
+                    &pool_key,
+                    request,
+                    &db_type,
+                    &col_names,
+                    &primary_keys,
+                    use_keyset,
+                    &last_pk_values,
+                    offset,
+                    active_batch_size,
+                    &mut table_read_session_id,
+                    &mut table_read_attempted,
+                    &mut table_read_completed,
+                )
+                .await?;
+                let row_count = result.rows.len();
+                if row_count == 0 {
+                    break;
+                }
+
+                if is_first_batch {
+                    let rows_tsv = format_tsv_rows(&result.rows);
+                    write!(file, "\n{rows_tsv}").map_err(|e| format!("Failed to write TXT rows: {e}"))?;
+                    is_first_batch = false;
+                } else {
+                    let rows_tsv = format_tsv_rows(&result.rows);
+                    if !rows_tsv.is_empty() {
+                        write!(file, "\n{rows_tsv}").map_err(|e| format!("Failed to write TXT rows: {e}"))?;
+                    }
+                }
+
+                rows_exported += row_count as u64;
+
+                if use_keyset {
+                    if let Some(last_row) = result.rows.last() {
+                        last_pk_values = pk_indices.iter().map(|&i| last_row[i].clone()).collect();
+                    }
+                } else {
+                    offset += row_count as u64;
+                }
+
+                on_progress(TableExportProgress {
+                    export_id: request.export_id.clone(),
+                    table_name: request.table_name.clone(),
+                    rows_exported,
+                    total_rows,
+                    status: ExportStatus::Running,
+                    error_message: None,
+                });
+
+                if row_count < active_batch_size {
+                    break;
+                }
+            }
+        }
         "xlsx" => {
             let column_types = export_column_types(request);
             // Create a dedicated file handle for the streaming XLSX writer
@@ -1401,6 +1519,44 @@ mod tests {
         let rows = vec![vec![json!("just"), json!("one")]];
         let out = format_csv_rows(&rows);
         assert_eq!(out, "\"just\",\"one\"");
+    }
+
+    // -----------------------------------------------------------------------
+    // format_tsv (Navicat-style TXT export)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn formats_tsv_with_header_and_tab_separated_values() {
+        let columns = vec!["id".to_string(), "name".to_string()];
+        let rows = vec![vec![json!(1), json!("Alice")], vec![json!(2), json!("Bob")]];
+        assert_eq!(format_tsv(&columns, &rows), "id\tname\n1\tAlice\n2\tBob");
+    }
+
+    #[test]
+    fn formats_tsv_renders_null_as_empty() {
+        let columns = vec!["id".to_string(), "note".to_string()];
+        let rows = vec![vec![json!(1), Value::Null]];
+        assert_eq!(format_tsv(&columns, &rows), "id\tnote\n1\t");
+    }
+
+    #[test]
+    fn formats_tsv_quotes_fields_containing_tab_or_newline() {
+        let columns = vec!["a".to_string(), "b".to_string()];
+        let rows = vec![vec![json!("x\ty"), json!("line1\nline2")]];
+        assert_eq!(format_tsv(&columns, &rows), "a\tb\n\"x\ty\"\t\"line1\nline2\"");
+    }
+
+    #[test]
+    fn formats_tsv_escapes_embedded_quotes() {
+        let columns = vec!["name".to_string()];
+        let rows = vec![vec![json!(r#"Bob "Builder""#)]];
+        assert_eq!(format_tsv(&columns, &rows), "name\n\"Bob \"\"Builder\"\"\"");
+    }
+
+    #[test]
+    fn formats_tsv_rows_returns_empty_for_empty_rows() {
+        let rows: Vec<Vec<Value>> = vec![];
+        assert_eq!(format_tsv_rows(&rows), "");
     }
 
     #[test]

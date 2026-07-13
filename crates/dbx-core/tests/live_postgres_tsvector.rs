@@ -62,6 +62,7 @@ async fn postgres_tsvector_generated_columns_are_readable_and_omitted_from_inser
 
     let table_meta = DataGridTableMeta {
         catalog: None,
+        database: None,
         schema: Some(schema.clone()),
         table_name: "articles".to_string(),
         primary_keys: vec!["id".to_string()],

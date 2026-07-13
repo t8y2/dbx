@@ -41,7 +41,14 @@ public abstract class BaseDatabaseAgent implements DatabaseAgent {
             foreignKeys = Collections.emptyList();
         }
 
-        return DatabaseAgent.buildTableDdl(schema, table, getColumns(schema, table), indexes, foreignKeys);
+        String tableComment = null;
+        try {
+            tableComment = getTableComment(schema, table);
+        } catch (RuntimeException e) {
+            // Table comment is optional; DDL generation should still succeed without it.
+        }
+
+        return DdlBuilder.buildTableDdl(schema, table, getColumns(schema, table), indexes, foreignKeys, Collections.emptyList(), false, false, tableComment);
     }
 
     @Override

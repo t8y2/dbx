@@ -47,7 +47,7 @@ function installMemoryStorage() {
   };
 }
 
-function buildExportHarness(options: { currentResultLabel?: string; exportFileBaseName?: string } = {}) {
+function buildExportHarness(options: { currentResultLabel?: string; exportFileBaseName?: string; columnTypes?: Array<string | undefined> } = {}) {
   const exportProgressDialog = ref(false);
   const exportProgressState = ref({
     title: "",
@@ -95,7 +95,7 @@ function buildExportHarness(options: { currentResultLabel?: string; exportFileBa
     database: computed(() => "db"),
     context: computed(() => "results"),
     sourceColumns: computed(() => undefined),
-    columnTypes: computed(() => undefined),
+    columnTypes: computed(() => options.columnTypes),
     whereInput: computed(() => undefined),
     orderBy: computed(() => undefined),
     exportBatchSize: computed(() => 1000),
@@ -725,7 +725,7 @@ test("selected query result CSV export keeps the existing in-memory path", async
 });
 
 test("selected query result XLSX export uses the current source label as the sheet name", async () => {
-  const { composable, queryResultExportRequest } = buildExportHarness({ currentResultLabel: "aaa.apis" });
+  const { composable, queryResultExportRequest } = buildExportHarness({ currentResultLabel: "aaa.apis", columnTypes: ["bigint(20)", "varchar(64)"] });
 
   await composable.exportXlsx([1]);
 
@@ -734,7 +734,7 @@ test("selected query result XLSX export uses the current source label as the she
   assert.equal(apiMock.exportQueryResultXlsx.mock.calls.length, 1);
   assert.equal(apiMock.exportQueryResultXlsx.mock.calls[0][1], "aaa.apis");
   assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0][2], ["id", "name"]);
-  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0][3], []);
+  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0][3], ["bigint(20)", "varchar(64)"]);
   assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0][4], [[1, "Ada"]]);
 });
 

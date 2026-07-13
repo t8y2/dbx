@@ -197,6 +197,10 @@ class OceanBaseOracleAgentTest {
                 new String[]{"CONSTRAINT_NAME", "COLUMN_NAME", "TABLE_NAME", "REF_COLUMN_NAME"},
                 new Object[][]{}
             ),
+            resultSet(
+                new String[]{"COMMENTS"},
+                new Object[][]{{null}}
+            ),
             columnResultSet(new Object[][]{
                 {"CREATED_AT", "TIMESTAMP", "N", null, null, null, null, "SYSDATE", "Created timestamp", 0},
                 {"INTERNAL_NOTE", "VARCHAR2", "Y", null, null, 100, 100, null, "   ", 0}

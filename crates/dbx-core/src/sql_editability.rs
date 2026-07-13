@@ -889,6 +889,22 @@ mod tests {
     }
 
     #[test]
+    fn ignores_where_subquery_sources_for_editable_target() {
+        let result = analyze_editable_query_editability(
+            "SELECT t.* FROM app.platform_cars t WHERE t.customer_no IN (SELECT c.customer_no FROM app.customers c WHERE c.enabled = 1)",
+        );
+
+        assert!(result.editable);
+        let analysis = result.analysis.unwrap();
+        assert_eq!(analysis.schema.as_deref(), Some("app"));
+        assert_eq!(analysis.table_name, "platform_cars");
+        assert_eq!(analysis.table_alias.as_deref(), Some("t"));
+        assert!(analysis.select_star);
+        assert!(!analysis.multi_source);
+        assert_eq!(analysis.allow_insert_delete, None);
+    }
+
+    #[test]
     fn maps_single_table_explicit_column_with_alias_star() {
         let result = analyze_editable_query_editability(
             "select t.create_date, t.* from tt_kd_material_container_sap t where t.order_no = 'KD2607071336' order by t.create_date desc",

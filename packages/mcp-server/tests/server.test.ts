@@ -109,6 +109,25 @@ test("execute query runs safe multi-statement SQL one statement at a time", asyn
   assert.match(result.content[0].text, /Statement 2/);
 });
 
+test("execute query preserves string literals and PostgreSQL dollar quotes", async () => {
+  const executed: string[] = [];
+  const scopedBackend: Backend = {
+    ...backend,
+    executeQuery: async (_config, sql) => {
+      executed.push(sql);
+      return { columns: ["value"], rows: [{ value: 1 }], row_count: 1 };
+    },
+  };
+  const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+
+  await (server as any)._registeredTools.dbx_execute_query.handler({
+    connection_name: "local",
+    sql: "SELECT 'a;b' AS first; SELECT $tag$c;d$tag$ AS second;",
+  });
+
+  assert.deepEqual(executed, ["SELECT 'a;b' AS first", "SELECT $tag$c;d$tag$ AS second"]);
+});
+
 test("execute query reports the blocked statement number for unsafe multi-statement SQL", async () => {
   const server = createDbxMcpServer(backend, { isWebMode: true });
 

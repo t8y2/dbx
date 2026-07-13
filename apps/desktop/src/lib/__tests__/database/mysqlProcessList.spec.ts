@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { QueryResult } from "@/types/database";
-import { buildKillSql, clampInterval, mapProcessRows, supportsProcessList } from "@/lib/database/mysqlProcessList";
+import { buildKillSql, clampInterval, createProcessListLoadCoordinator, mapProcessRows, processListExecutionError, processListSessionCount, supportsProcessList } from "@/lib/database/mysqlProcessList";
 
 function result(columns: string[], rows: (string | number | boolean | null)[][]): QueryResult {
   return { columns, rows, affected_rows: 0, execution_time_ms: 0 };
@@ -60,6 +60,33 @@ describe("clampInterval", () => {
   it("floors fractional seconds and falls back for non-finite input", () => {
     expect(clampInterval(4.9)).toBe(4);
     expect(clampInterval(Number.NaN)).toBe(5);
+  });
+});
+
+describe("createProcessListLoadCoordinator", () => {
+  it("prevents overlapping manual and timer-driven refreshes", () => {
+    const coordinator = createProcessListLoadCoordinator();
+    expect(coordinator.tryStart()).toBe(true);
+    expect(coordinator.tryStart()).toBe(false);
+    coordinator.finish();
+    expect(coordinator.tryStart()).toBe(true);
+  });
+});
+
+describe("processListExecutionError", () => {
+  it("returns the message from a synthesized execution error", () => {
+    expect(processListExecutionError([{ ...result(["Error"], [["command denied"]]), execution_error: true }])).toBe("command denied");
+  });
+
+  it("does not treat a successful Error column as a failure", () => {
+    expect(processListExecutionError([result(["Error"], [["application value"]])])).toBeNull();
+  });
+});
+
+describe("processListSessionCount", () => {
+  it("marks truncated counts as a lower bound", () => {
+    expect(processListSessionCount(5000, true)).toBe("5000+");
+    expect(processListSessionCount(42, false)).toBe(42);
   });
 });
 

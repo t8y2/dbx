@@ -18,6 +18,7 @@ export interface BuildTableSelectSqlOptions {
   whereInput?: string;
   includeRowId?: boolean;
   catalog?: string;
+  database?: string;
 }
 
 export function quoteTableIdentifier(databaseType: DatabaseType | undefined, name: string): string {
@@ -45,16 +46,19 @@ function quoteCypherIdentifier(name: string): string {
   return `\`${name.replace(/`/g, "``")}\``;
 }
 
-export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "databaseType" | "schema" | "tableName" | "catalog">): string {
-  const { databaseType, schema, tableName, catalog } = options;
+export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "databaseType" | "schema" | "tableName" | "catalog" | "database">): string {
+  const { databaseType, schema, tableName, catalog, database } = options;
   // Doris / StarRocks multi-catalog: address external-catalog tables with the
   // 3-part `catalog.database.table` form, which the engines accept directly.
   if (catalog && catalog !== "internal" && (databaseType === "doris" || databaseType === "starrocks")) {
     const quotedCatalog = quoteTableIdentifier(databaseType, catalog);
     const quotedTable = quoteTableIdentifier(databaseType, tableName);
-    const trimmedSchema = schema?.trim();
-    if (trimmedSchema) {
-      return `${quotedCatalog}.${quoteTableIdentifier(databaseType, trimmedSchema)}.${quotedTable}`;
+    // Doris/StarRocks have no separate schema concept; the database under the
+    // external catalog is the middle segment. Prefer schema when a caller
+    // passes it that way, otherwise fall back to database.
+    const middle = schema?.trim() || database?.trim();
+    if (middle) {
+      return `${quotedCatalog}.${quoteTableIdentifier(databaseType, middle)}.${quotedTable}`;
     }
     return `${quotedCatalog}.${quotedTable}`;
   }

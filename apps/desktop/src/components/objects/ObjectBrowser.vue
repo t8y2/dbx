@@ -852,7 +852,7 @@ async function fetchTableDdl() {
   tableDdlLoading.value = true;
   try {
     const schema = row.schema || selectedSchema.value || props.database;
-    const ddl = await api.getTableDdl(props.connection.id, props.database || "", schema, row.name, tableDdlObjectType(row.type));
+    const ddl = await api.getTableDdl(props.connection.id, props.database || "", schema, row.name, tableDdlObjectType(row.type), props.catalog);
     if (sidePanelGuard.isStale(epoch)) return;
     tableDdlContent.value = ddl;
   } catch (e: any) {
@@ -870,7 +870,7 @@ async function fetchTableColumns() {
   tableColumnsLoading.value = true;
   try {
     const schema = row.schema || selectedSchema.value || props.database;
-    const columns = await api.getColumns(props.connection.id, props.database || "", schema, row.name);
+    const columns = await api.getColumns(props.connection.id, props.database || "", schema, row.name, props.catalog);
     if (sidePanelGuard.isStale(epoch)) return;
     tableColumns.value = columns;
   } catch {
@@ -888,7 +888,7 @@ async function fetchTableIndexes() {
   tableIndexesLoading.value = true;
   try {
     const schema = row.schema || selectedSchema.value || props.database;
-    const indexes = await api.listIndexes(props.connection.id, props.database || "", schema, row.name);
+    const indexes = await api.listIndexes(props.connection.id, props.database || "", schema, row.name, props.catalog);
     if (sidePanelGuard.isStale(epoch)) return;
     tableIndexes.value = indexes;
   } catch {
@@ -906,7 +906,7 @@ async function fetchTableForeignKeys() {
   tableForeignKeysLoading.value = true;
   try {
     const schema = row.schema || selectedSchema.value || props.database;
-    const fks = await api.listForeignKeys(props.connection.id, props.database || "", schema, row.name);
+    const fks = await api.listForeignKeys(props.connection.id, props.database || "", schema, row.name, props.catalog);
     if (sidePanelGuard.isStale(epoch)) return;
     tableForeignKeys.value = fks;
   } catch {
@@ -924,7 +924,7 @@ async function fetchTableTriggers() {
   tableTriggersLoading.value = true;
   try {
     const schema = row.schema || selectedSchema.value || props.database;
-    const triggers = await api.listTriggers(props.connection.id, props.database || "", schema, row.name);
+    const triggers = await api.listTriggers(props.connection.id, props.database || "", schema, row.name, props.catalog);
     if (sidePanelGuard.isStale(epoch)) return;
     tableTriggers.value = triggers;
   } catch {
@@ -987,7 +987,7 @@ const canOpenTableStructureEditor = computed(() => sidePanelRow.value?.type === 
 function openTableStructureEditor() {
   const row = sidePanelRow.value;
   if (!row || row.type !== "TABLE" || !canOpenTableStructureEditor.value) return;
-  queryStore.openTableStructure(props.connection.id, props.database, row.schema || selectedSchema.value, row.name, tableInfoTab.value);
+  queryStore.openTableStructure(props.connection.id, props.database, row.schema || selectedSchema.value, row.name, tableInfoTab.value, undefined, props.catalog);
 }
 
 async function openSource(row: ObjectBrowserRow) {
@@ -1274,7 +1274,7 @@ function openViewData(row: ObjectBrowserRow) {
 
 function openStructureEditor(row: ObjectBrowserRow) {
   if (row.type !== "TABLE") return;
-  queryStore.openTableStructure(props.connection.id, props.database, row.schema || selectedSchema.value, row.name);
+  queryStore.openTableStructure(props.connection.id, props.database, row.schema || selectedSchema.value, row.name, undefined, undefined, props.catalog);
 }
 
 function droppedTableObjectTypeForRow(row: ObjectBrowserRow): "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | null {
@@ -1377,7 +1377,7 @@ async function fetchSortedTableRowsForDrop(): Promise<ObjectBrowserRow[]> {
   const rows = [...selectedTableRows.value];
   if (rows.length <= 1) return rows;
 
-  const fkResults = await Promise.all(rows.map((row) => api.listForeignKeys(props.connection.id, props.database, row.schema || selectedSchema.value || "", row.name).catch(() => [] as ForeignKeyInfo[])));
+  const fkResults = await Promise.all(rows.map((row) => api.listForeignKeys(props.connection.id, props.database, row.schema || selectedSchema.value || "", row.name, props.catalog).catch(() => [] as ForeignKeyInfo[])));
 
   const tablesWithFk: TableWithFk[] = rows.map((row, i) => ({
     name: row.name,
@@ -1567,7 +1567,7 @@ async function confirmBatchEmptyTables() {
 async function exportStructure(row: ObjectBrowserRow) {
   try {
     const schema = row.schema || selectedSchema.value || props.database;
-    const ddl = await api.getTableDdl(props.connection.id, props.database, schema, row.name, tableDdlObjectType(row.type));
+    const ddl = await api.getTableDdl(props.connection.id, props.database, schema, row.name, tableDdlObjectType(row.type), props.catalog);
     await saveFileContent(buildSingleDdlExportFileContent(ddl), `${row.name}.sql`, "SQL", "sql");
   } catch (e: any) {
     console.error("Export structure failed:", e);
@@ -1582,8 +1582,8 @@ function tableDdlObjectType(type: ObjectBrowserRow["type"]): ObjectSourceKind | 
 async function exportDataLegacy(row: ObjectBrowserRow, format: "json" | "sql") {
   try {
     const schema = row.schema || selectedSchema.value;
-    const tableColumns = format === "sql" ? await api.getColumns(props.connection.id, props.database, schema || props.database, row.name) : undefined;
-    const queryColumns = props.connection.db_type === "neo4j" ? (tableColumns ?? (await api.getColumns(props.connection.id, props.database, schema || props.database, row.name))).map((column) => column.name) : undefined;
+    const tableColumns = format === "sql" ? await api.getColumns(props.connection.id, props.database, schema || props.database, row.name, props.catalog) : undefined;
+    const queryColumns = props.connection.db_type === "neo4j" ? (tableColumns ?? (await api.getColumns(props.connection.id, props.database, schema || props.database, row.name, props.catalog))).map((column) => column.name) : undefined;
     const result = await fetchTableDataForExport({
       databaseType: effectiveDatabaseType.value,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
@@ -1669,7 +1669,7 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx") {
 
   let task: ExportTask | null = null;
   try {
-    const queryColumns = props.connection.db_type === "neo4j" ? (await api.getColumns(props.connection.id, props.database, schema || props.database, row.name)).map((column) => column.name) : undefined;
+    const queryColumns = props.connection.db_type === "neo4j" ? (await api.getColumns(props.connection.id, props.database, schema || props.database, row.name, props.catalog)).map((column) => column.name) : undefined;
 
     task = addExportTask(row.name, format, filePath);
     const currentTask = task;
@@ -1832,7 +1832,7 @@ async function confirmPasteTable() {
         if (!executed) return;
       }
       if (copyData) {
-        const sourceColumns = await api.getColumns(props.connection.id, props.database, schema || "", entry.sourceName);
+        const sourceColumns = await api.getColumns(props.connection.id, props.database, schema || "", entry.sourceName, props.catalog);
         const dataCopyColumnOptions = tableDataCopyColumnOptions(effectiveDatabaseType.value, sourceColumns);
         if (dataCopyColumnOptions.columns.length === 0) {
           throw new Error("No writable columns available for table data copy.");

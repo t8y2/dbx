@@ -12,6 +12,7 @@ public final class ConnectParams {
     private String password;
     private String url_params;
     private String connection_string;
+    private boolean port_explicit;
     private boolean mysql_compat_mode;
     private String jdbc_driver_class;
     private List<String> jdbc_driver_paths;
@@ -91,6 +92,10 @@ public final class ConnectParams {
         return connection_string;
     }
 
+    public boolean isPort_explicit() {
+        return port_explicit;
+    }
+
     public void setHost(String host) {
         this.host = host;
     }
@@ -117,6 +122,10 @@ public final class ConnectParams {
 
     public void setConnection_string(String connection_string) {
         this.connection_string = connection_string;
+    }
+
+    public void setPort_explicit(boolean port_explicit) {
+        this.port_explicit = port_explicit;
     }
 
     public boolean isMysql_compat_mode() {
@@ -203,6 +212,7 @@ public final class ConnectParams {
             && Objects.equals(password, that.password)
             && Objects.equals(url_params, that.url_params)
             && Objects.equals(connection_string, that.connection_string)
+            && port_explicit == that.port_explicit
             && mysql_compat_mode == that.mysql_compat_mode
             && Objects.equals(jdbc_driver_class, that.jdbc_driver_class)
             && Objects.equals(jdbc_driver_paths, that.jdbc_driver_paths)
@@ -217,7 +227,7 @@ public final class ConnectParams {
     @Override
     public int hashCode() {
         return Objects.hash(host, port, database, username, password, url_params, connection_string,
-            mysql_compat_mode, jdbc_driver_class, jdbc_driver_paths, ssl, ca_cert_path, client_cert_path, client_key_path, gbase_server, informix_server);
+            port_explicit, mysql_compat_mode, jdbc_driver_class, jdbc_driver_paths, ssl, ca_cert_path, client_cert_path, client_key_path, gbase_server, informix_server);
     }
 
     @Override
@@ -229,6 +239,7 @@ public final class ConnectParams {
             + ", password=" + password
             + ", url_params=" + url_params
             + ", connection_string=" + connection_string
+            + ", port_explicit=" + port_explicit
             + ", mysql_compat_mode=" + mysql_compat_mode
             + ", jdbc_driver_class=" + jdbc_driver_class
             + ", jdbc_driver_paths=" + jdbc_driver_paths

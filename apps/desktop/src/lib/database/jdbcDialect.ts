@@ -34,6 +34,16 @@ export function effectiveDatabaseTypeForConnection(connection?: JdbcDialectConne
   if (!connection) return undefined;
   if (connection.db_type === "gbase" && isGbase8sProfile(connection.driver_profile)) return "informix";
   if (connection.db_type === "gbase") return "mysql";
+  // MySQL-protocol connections to Doris/StarRocks (db_type=mysql with a
+  // starrocks/doris driver_profile) must use the Doris/StarRocks SQL dialect so
+  // that multi-catalog 3-part names (`catalog.database.table`) are emitted.
+  // mysql and starrocks share the backtick-quoting + LIMIT dialect, so this
+  // only widens the catalog-aware SQL generation path without other side effects.
+  if (connection.db_type === "mysql") {
+    const profile = connection.driver_profile?.toLowerCase();
+    if (profile === "starrocks") return "starrocks";
+    if (profile === "doris" || profile === "selectdb") return "doris";
+  }
   if (connection.db_type !== "jdbc") return connection.db_type;
   return inferJdbcDialect(connection) ?? "jdbc";
 }

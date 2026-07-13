@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { uuid } from "@/lib/common/utils";
-import { ref, computed, watch } from "vue";
+import { ref, computed, watch, markRaw } from "vue";
 import type { ColumnInfo, CompletionAssistantCandidate, CompletionAssistantObjectKind, CompletionAssistantRequest, ConnectionConfig, CatalogInfo, ForeignKeyInfo, ObjectInfo, SchemaInfo, SidebarLayout, TableInfo, TreeNode, TunnelProfile, VectorCollectionMeta } from "@/types/database";
 import { applyPinnedTreeNodeState, updatePinnedTreeNodeInPlace } from "@/lib/app/pinnedItems";
 import {
@@ -938,6 +938,28 @@ export const useConnectionStore = defineStore("connection", () => {
     return [...existingMetadataChildren, ...nextUtilityChildren];
   }
 
+  // Leaf tree nodes (table columns / indexes / foreign keys / triggers) are
+  // immutable data payloads: they never expand, never load children, and their
+  // fields are never mutated after creation. A large schema can produce tens of
+  // thousands of them, and Vue's deep reactivity wraps every node AND its nested
+  // `meta` object in a Proxy — the dominant memory cost of the schema tree.
+  // Marking each leaf raw keeps Vue from wrapping it (and, since Vue does not
+  // recurse into raw objects, its `meta` too), mirroring the markRaw() treatment
+  // queryStore already applies to result rows. Containers stay reactive so their
+  // children / isExpanded / isLoading mutations still drive the UI.
+  const LEAF_TREE_NODE_TYPES = new Set<TreeNode["type"]>(["column", "index", "fkey", "trigger"]);
+
+  function markRawLeafTreeNodes(nodes: TreeNode[]): TreeNode[] {
+    for (const node of nodes) {
+      if (LEAF_TREE_NODE_TYPES.has(node.type)) {
+        markRaw(node);
+      } else if (node.children && node.children.length > 0) {
+        markRawLeafTreeNodes(node.children);
+      }
+    }
+    return nodes;
+  }
+
   function setChildren(parent: TreeNode, children: TreeNode[]) {
     children = preserveExistingConnectionMetadataChildren(parent, children);
     if (parent.children && parent.children.length > 0) {
@@ -950,7 +972,7 @@ export const useConnectionStore = defineStore("connection", () => {
         return child;
       });
     }
-    parent.children = applyPinnedTreeNodeState(children, pinnedTreeNodeIds.value);
+    parent.children = markRawLeafTreeNodes(applyPinnedTreeNodeState(children, pinnedTreeNodeIds.value));
     loadedTreeNodeChildrenIds.value.add(parent.id);
   }
 
@@ -1023,7 +1045,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function objectGroupCacheKey(node: TreeNode): string {
-    return schemaCacheKey(node.connectionId || "", node.database || "", node.schema || "", node.type, "objects-v3");
+    return schemaCacheKey(node.connectionId || "", node.database || "", node.schema || "", node.type, "objects-v4");
   }
 
   function metadataListDriverProfile(connectionId?: string): string | undefined {
@@ -1476,6 +1498,47 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function isTreeNodeChildrenLoaded(nodeId: string): boolean {
     return loadedTreeNodeChildrenIds.value.has(nodeId);
+  }
+
+  // Collapsing a node only hides it — its loaded children stay in memory, so a
+  // long browsing session accumulates every schema the user ever expanded and
+  // the webview creeps upward. When a *large* subtree is collapsed we drop its
+  // children so the memory is reclaimed; re-expanding reloads them (fast, from
+  // the schema cache). Small subtrees are kept so routine expand/collapse stays
+  // instant and never triggers a reload.
+  const RELEASE_COLLAPSED_SUBTREE_MIN_DESCENDANTS = 400;
+
+  function countTreeNodeDescendants(node: TreeNode, cap: number): number {
+    let count = 0;
+    const stack: TreeNode[] = [...(node.children ?? [])];
+    while (stack.length) {
+      const current = stack.pop()!;
+      count += 1;
+      if (count >= cap) return count;
+      if (current.children?.length) stack.push(...current.children);
+    }
+    return count;
+  }
+
+  function forgetLoadedChildrenIdsForSubtree(node: TreeNode) {
+    loadedTreeNodeChildrenIds.value.delete(node.id);
+    for (const child of node.children ?? []) {
+      forgetLoadedChildrenIdsForSubtree(child);
+    }
+  }
+
+  // Returns true when the collapsed node's children were released. Caller should
+  // have already set node.isExpanded = false. Re-expanding reloads on demand
+  // because the node id is removed from loadedTreeNodeChildrenIds.
+  function releaseCollapsedTreeNodeChildren(nodeId: string): boolean {
+    const node = findNode(treeNodes.value, nodeId);
+    if (!node?.children?.length) return false;
+    if (countTreeNodeDescendants(node, RELEASE_COLLAPSED_SUBTREE_MIN_DESCENDANTS) < RELEASE_COLLAPSED_SUBTREE_MIN_DESCENDANTS) {
+      return false;
+    }
+    forgetLoadedChildrenIdsForSubtree(node);
+    node.children = [];
+    return true;
   }
 
   function canApplyTreeMetadataResult(node: TreeNode): boolean {
@@ -2928,7 +2991,7 @@ export const useConnectionStore = defineStore("connection", () => {
           await ensureConnected(connectionId);
           if (useCachedChildren(node, options)) return;
           const searchFilter = activeTreeLoadSearchFilter(options);
-          const cacheKey = schemaCacheKey(connectionId, `doris-catalog:${catalog}`, database, "objects-simple-v3");
+          const cacheKey = schemaCacheKey(connectionId, `doris-catalog:${catalog}`, database, "objects-simple-v4");
           if (!options?.force && !searchFilter) {
             const cached = await loadPersistedTreeChildren(node, cacheKey);
             if (cached.hit) {
@@ -3001,7 +3064,7 @@ export const useConnectionStore = defineStore("connection", () => {
           await ensureConnected(connectionId);
           if (useCachedChildren(node, options)) return;
           const simpleObjectDisplay = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
-          const cacheKey = schemaCacheKey(connectionId, database, schema || "", simpleObjectDisplay ? "objects-simple-v3" : "objects-grouped-v3");
+          const cacheKey = schemaCacheKey(connectionId, database, schema || "", simpleObjectDisplay ? "objects-simple-v4" : "objects-grouped-v4");
           const searchFilter = activeTreeLoadSearchFilter(options);
           const isSidebarTableSearch = !!options?.sidebarTableSearchParentId;
           if (!options?.force && !searchFilter) {
@@ -3259,7 +3322,7 @@ export const useConnectionStore = defineStore("connection", () => {
             if (!canApplyTreeMetadataResult(parent)) return;
             parent.objectCount = mergedChildren.length;
             setChildren(parent, nextChildren);
-            await savePersistedTreeChildren(schemaCacheKey(parentConnectionId, parentDatabase, parent.schema || "", "objects-simple-v3"), nextChildren);
+            await savePersistedTreeChildren(schemaCacheKey(parentConnectionId, parentDatabase, parent.schema || "", "objects-simple-v4"), nextChildren);
             parent.isExpanded = true;
             return;
           }
@@ -5146,6 +5209,7 @@ export const useConnectionStore = defineStore("connection", () => {
     closeDatabaseConnection,
     ensureConnected,
     isTreeNodeChildrenLoaded,
+    releaseCollapsedTreeNodeChildren,
     setBeforeConnectHandler,
     initFromDisk,
     loadDatabases,

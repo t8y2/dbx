@@ -5793,7 +5793,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let source_ddl = crate::schema::render_postgres_table_ddl("public", "it_quick_entry", &columns, &[], &[]);
+        let source_ddl = crate::schema::render_postgres_table_ddl("public", "it_quick_entry", &columns, &[], &[], None);
         let rewritten = rewrite_transfer_source_table_ddl(
             &source_ddl,
             "public",

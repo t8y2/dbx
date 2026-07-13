@@ -1205,6 +1205,17 @@ impl ConnectionConfig {
         }
     }
 
+    pub fn sqlserver_port_explicit(&self) -> bool {
+        if self.db_type != DatabaseType::SqlServer {
+            return false;
+        }
+        self.external_config
+            .as_ref()
+            .and_then(|value| value.get("portExplicit").or_else(|| value.get("port_explicit")))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
     fn message_queue_admin_url(&self) -> String {
         self.external_config
             .as_ref()

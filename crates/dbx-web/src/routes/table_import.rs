@@ -11,10 +11,14 @@ use dbx_core::table_import::{
 };
 use dbx_core::transfer;
 use futures::stream::Stream;
+use futures::StreamExt;
 use serde::Deserialize;
+use tokio::io::AsyncWriteExt;
 
 use crate::error::AppError;
 use crate::state::WebState;
+
+const MAX_IMPORT_UPLOAD_BYTES: usize = 100 * 1024 * 1024;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,28 +40,60 @@ pub async fn preview_import(
     std::fs::create_dir_all(&tmp_dir).map_err(|e| AppError(e.to_string()))?;
     cleanup_expired_import_uploads(&tmp_dir, Duration::from_secs(24 * 60 * 60));
 
-    let mut uploaded_file: Option<(String, Bytes)> = None;
+    let mut uploaded_file: Option<(String, PathBuf)> = None;
     let mut source_format: Option<TableImportSourceFormat> = None;
     let mut parse_options = TableImportParseOptions::default();
     let mut preview_limit: Option<usize> = None;
 
-    while let Some(field) = multipart.next_field().await.map_err(|e| AppError(e.to_string()))? {
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(error) => {
+                cleanup_pending_upload(&uploaded_file).await;
+                return Err(AppError(error.to_string()));
+            }
+        };
         let name = field.name().unwrap_or_default().to_string();
         if name == "file" {
+            if uploaded_file.is_some() {
+                cleanup_pending_upload(&uploaded_file).await;
+                return Err(AppError("Only one import file may be uploaded".to_string()));
+            }
             let file_name = field.file_name().unwrap_or("upload.csv").to_string();
-            let data = field.bytes().await.map_err(|e| AppError(e.to_string()))?;
-            uploaded_file = Some((file_name, data));
+            let source_ref = uuid::Uuid::new_v4().to_string();
+            let file_path = safe_uploaded_import_path(&tmp_dir, &file_name, &source_ref)?;
+            if let Err(error) = write_import_upload(field, &file_path).await {
+                cleanup_uploaded_import_path(&file_path).await;
+                return Err(error);
+            }
+            uploaded_file = Some((source_ref, file_path));
         } else {
-            let value = field.text().await.map_err(|e| AppError(e.to_string()))?;
+            let value = match field.text().await {
+                Ok(value) => value,
+                Err(error) => {
+                    cleanup_pending_upload(&uploaded_file).await;
+                    return Err(AppError(error.to_string()));
+                }
+            };
             match name.as_str() {
                 "sourceFormat" => {
-                    source_format = Some(
-                        serde_json::from_value(serde_json::Value::String(value))
-                            .map_err(|e| AppError(e.to_string()))?,
-                    );
+                    source_format = match serde_json::from_value(serde_json::Value::String(value)) {
+                        Ok(source_format) => Some(source_format),
+                        Err(error) => {
+                            cleanup_pending_upload(&uploaded_file).await;
+                            return Err(AppError(error.to_string()));
+                        }
+                    };
                 }
                 "parseOptions" => {
-                    parse_options = serde_json::from_str(&value).map_err(|e| AppError(e.to_string()))?;
+                    parse_options = match serde_json::from_str(&value) {
+                        Ok(parse_options) => parse_options,
+                        Err(error) => {
+                            cleanup_pending_upload(&uploaded_file).await;
+                            return Err(AppError(error.to_string()));
+                        }
+                    };
                 }
                 "previewLimit" => {
                     preview_limit = value.parse::<usize>().ok();
@@ -67,15 +103,7 @@ pub async fn preview_import(
         }
     }
 
-    if let Some((file_name, data)) = uploaded_file {
-        if data.len() > 100 * 1024 * 1024 {
-            return Err(AppError(format!("File too large: {} bytes (max {} bytes)", data.len(), 100 * 1024 * 1024)));
-        }
-
-        let source_ref = uuid::Uuid::new_v4().to_string();
-        let file_path = safe_uploaded_import_path(&tmp_dir, &file_name, &source_ref)?;
-        std::fs::write(&file_path, &data).map_err(|e| AppError(e.to_string()))?;
-
+    if let Some((source_ref, file_path)) = uploaded_file {
         let file_path_str = file_path.to_string_lossy().to_string();
         let preview = table_import::preview_table_import_file_with_request(TableImportPreviewRequest {
             file_path: file_path_str,
@@ -85,11 +113,63 @@ pub async fn preview_import(
             preview_limit,
         })
         .await;
-        let preview = preview.map_err(AppError)?;
-        return Ok(Json(serde_json::to_value(preview).map_err(|e| AppError(e.to_string()))?));
+        let preview = match preview {
+            Ok(preview) => preview,
+            Err(error) => {
+                cleanup_uploaded_import_path(&file_path).await;
+                return Err(AppError(error));
+            }
+        };
+        let preview = match serde_json::to_value(preview) {
+            Ok(preview) => preview,
+            Err(error) => {
+                cleanup_uploaded_import_path(&file_path).await;
+                return Err(AppError(error.to_string()));
+            }
+        };
+        return Ok(Json(preview));
     }
 
     Err(AppError("No file uploaded".to_string()))
+}
+
+async fn write_import_upload(field: axum::extract::multipart::Field<'_>, file_path: &StdPath) -> Result<(), AppError> {
+    write_import_upload_stream(field, file_path, MAX_IMPORT_UPLOAD_BYTES).await
+}
+
+async fn write_import_upload_stream<S, E>(
+    mut chunks: S,
+    file_path: &StdPath,
+    max_upload_bytes: usize,
+) -> Result<(), AppError>
+where
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+    E: std::fmt::Display,
+{
+    let mut upload = tokio::fs::File::create(file_path).await.map_err(|error| AppError(error.to_string()))?;
+    let mut uploaded_bytes = 0usize;
+
+    // Stream uploads to disk so valid large CSV files don't require a second full-size in-memory copy.
+    let result = async {
+        while let Some(chunk) = chunks.next().await {
+            let chunk = chunk.map_err(|error| AppError(error.to_string()))?;
+            uploaded_bytes = uploaded_bytes.saturating_add(chunk.len());
+            if uploaded_bytes > max_upload_bytes {
+                return Err(AppError(format!(
+                    "File too large: {uploaded_bytes} bytes received (max {max_upload_bytes} bytes)"
+                )));
+            }
+            upload.write_all(&chunk).await.map_err(|error| AppError(error.to_string()))?;
+        }
+        upload.flush().await.map_err(|error| AppError(error.to_string()))
+    }
+    .await;
+    drop(upload);
+
+    if result.is_err() {
+        cleanup_uploaded_import_path(file_path).await;
+    }
+    result
 }
 
 pub async fn execute_import(
@@ -268,4 +348,57 @@ fn cleanup_expired_import_uploads(tmp_dir: &StdPath, max_age: Duration) {
 
 async fn cleanup_uploaded_import_source(file_path: &str) {
     let _ = tokio::fs::remove_file(file_path).await;
+}
+
+async fn cleanup_uploaded_import_path(file_path: &StdPath) {
+    let _ = tokio::fs::remove_file(file_path).await;
+}
+
+async fn cleanup_pending_upload(uploaded_file: &Option<(String, PathBuf)>) {
+    if let Some((_, file_path)) = uploaded_file {
+        cleanup_uploaded_import_path(file_path).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+
+    fn test_upload_path() -> PathBuf {
+        std::env::temp_dir().join(format!("dbx-table-import-test-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[tokio::test]
+    async fn streams_import_upload_to_disk() {
+        let file_path = test_upload_path();
+        let chunks = stream::iter([Ok::<_, String>(Bytes::from_static(b"a,b\n")), Ok(Bytes::from_static(b"1,2\n"))]);
+
+        assert!(write_import_upload_stream(chunks, &file_path, 8).await.is_ok());
+
+        assert_eq!(tokio::fs::read(&file_path).await.unwrap(), b"a,b\n1,2\n");
+        cleanup_uploaded_import_path(&file_path).await;
+    }
+
+    #[tokio::test]
+    async fn removes_partial_upload_when_size_limit_is_exceeded() {
+        let file_path = test_upload_path();
+        let chunks = stream::iter([Ok::<_, String>(Bytes::from_static(b"1234")), Ok(Bytes::from_static(b"5"))]);
+
+        let error = write_import_upload_stream(chunks, &file_path, 4).await.unwrap_err();
+
+        assert!(error.0.contains("File too large"));
+        assert!(!file_path.exists());
+    }
+
+    #[tokio::test]
+    async fn removes_partial_upload_when_stream_read_fails() {
+        let file_path = test_upload_path();
+        let chunks = stream::iter([Ok(Bytes::from_static(b"1234")), Err("multipart stream failed")]);
+
+        let error = write_import_upload_stream(chunks, &file_path, 8).await.unwrap_err();
+
+        assert_eq!(error.0, "multipart stream failed");
+        assert!(!file_path.exists());
+    }
 }

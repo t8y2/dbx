@@ -5,6 +5,7 @@ export type GridCellValue = string | number | boolean | null | unknown[] | { [ke
 
 export interface DataGridTableMeta {
   catalog?: string;
+  database?: string;
   schema?: string;
   tableName: string;
   primaryKeys: string[];
@@ -81,6 +82,7 @@ export interface DataGridColumnValuesFilterConditionOptions {
 export interface DataGridColumnDistinctValuesSqlOptions {
   databaseType?: DatabaseType;
   catalog?: string;
+  database?: string;
   schema?: string;
   tableName: string;
   columnName: string;
@@ -95,6 +97,7 @@ export interface DataGridCountSqlOptions {
   databaseType?: DatabaseType;
   identifierQuote?: string;
   catalog?: string;
+  database?: string;
   schema?: string;
   tableName: string;
   whereInput?: string;

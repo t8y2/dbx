@@ -67,6 +67,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
         identifierQuote,
         schema: target.schema,
         catalog: target.catalog,
+        database: target.database,
         tableName: target.tableName,
         tableType: targetTableType,
         columns: columns.map((column) => column.name),
@@ -77,6 +78,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       queryStore.updateSql(tabId, sql);
       queryStore.setTableMeta(tabId, {
         catalog: target.catalog,
+        database: target.database,
         schema: target.schema,
         tableName: target.tableName,
         tableType: targetTableType,
@@ -91,6 +93,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       identifierQuote,
       schema: target.schema,
       catalog: target.catalog,
+      database: target.database,
       tableName: target.tableName,
       tableType: targetTableType,
       whereInput: target.whereInput,
@@ -100,6 +103,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
     queryStore.setTableMeta(tabId, {
       schema: target.schema,
       catalog: target.catalog,
+      database: target.database,
       tableName: target.tableName,
       tableType: targetTableType,
       columns: [],
@@ -119,6 +123,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
         identifierQuote,
         schema: target.schema,
         catalog: target.catalog,
+        database: target.database,
         tableName: target.tableName,
         tableType: targetTableType,
         whereInput: target.whereInput,
@@ -135,6 +140,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       queryStore.setTableMeta(tabId, {
         schema: target.schema,
         catalog: target.catalog,
+        database: target.database,
         tableName: target.tableName,
         tableType: targetTableType,
         columns,
@@ -146,6 +152,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
           identifierQuote,
           schema: target.schema,
           catalog: target.catalog,
+          database: target.database,
           tableName: target.tableName,
           tableType: targetTableType,
           whereInput: target.whereInput,

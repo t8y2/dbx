@@ -14,7 +14,7 @@ export interface HiddenPrimaryKeyQuery {
   projections: HiddenPrimaryKeyProjection[];
 }
 
-export function buildQueryWithHiddenPrimaryKeys(options: { sql: string; databaseType: DatabaseType; primaryKeys: string[]; existingResultNames: string[] }): HiddenPrimaryKeyQuery | undefined {
+export function buildQueryWithHiddenPrimaryKeys(options: { sql: string; databaseType: DatabaseType; primaryKeys: string[]; existingResultNames: string[]; sourceExpressions?: Record<string, string> }): HiddenPrimaryKeyQuery | undefined {
   if (options.primaryKeys.length === 0) return undefined;
 
   const dialect = sqlSemanticDialectFor({ databaseType: options.databaseType });
@@ -29,7 +29,7 @@ export function buildQueryWithHiddenPrimaryKeys(options: { sql: string; database
     usedNames.add(alias.toLowerCase());
     return { sourceName, alias };
   });
-  const expressions = projections.map(({ sourceName, alias }) => `${dialect.quoteIdentifier(sourceName)} AS ${dialect.quoteIdentifier(alias)}`);
+  const expressions = projections.map(({ sourceName, alias }) => `${options.sourceExpressions?.[sourceName] ?? dialect.quoteIdentifier(sourceName)} AS ${dialect.quoteIdentifier(alias)}`);
   const sql = appendSelectProjections(options.sql, expressions);
   return sql ? { sql, projections } : undefined;
 }

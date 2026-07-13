@@ -72,25 +72,41 @@ pub fn qualified_table_name(database_type: Option<DatabaseType>, schema: Option<
 }
 
 /// Like `qualified_table_name`, but prefixes a Doris/StarRocks external
-/// catalog (`<catalog>.<schema>.<table>`) when `catalog` is present, non-empty,
-/// and not the engine's `internal` catalog. The `internal` guard is defensive —
-/// built-in-catalog tables never carry a catalog in the first place (the
-/// sidebar routes them through the standard path), so this only ever prefixes
-/// genuine external catalogs. Other engines ignore `catalog` (they have no
-/// 3-part catalog naming).
+/// catalog (`<catalog>.<database>.<table>`) when `catalog` is present,
+/// non-empty, and not the engine's `internal` catalog. The middle segment is
+/// the database — Doris/StarRocks have no separate schema concept, so
+/// `schema` is only used when a caller passes it that way; otherwise `database`
+/// fills the middle slot. When neither is set the name degrades to the 2-part
+/// `<catalog>.<table>` form. The `internal` guard is defensive — built-in
+/// catalog tables never carry a catalog in the first place (the sidebar routes
+/// them through the standard path), so this only ever prefixes genuine
+/// external catalogs. Other engines ignore `catalog` (they have no 3-part
+/// catalog naming).
 pub fn qualified_table_name_with_catalog(
     database_type: Option<DatabaseType>,
     catalog: Option<&str>,
     schema: Option<&str>,
+    database: Option<&str>,
     table_name: &str,
 ) -> String {
-    let table = qualified_table_name(database_type, schema, table_name);
     let catalog = catalog.map(str::trim).filter(|catalog| !catalog.is_empty() && *catalog != "internal");
     match (catalog, database_type) {
         (Some(catalog), Some(DatabaseType::Doris | DatabaseType::StarRocks)) => {
+            let middle = schema
+                .map(str::trim)
+                .filter(|schema| !schema.is_empty())
+                .or_else(|| database.map(str::trim).filter(|database| !database.is_empty()));
+            let table = match middle {
+                Some(middle) => format!(
+                    "{}.{}",
+                    quote_table_identifier(database_type, middle),
+                    quote_table_identifier(database_type, table_name)
+                ),
+                None => quote_table_identifier(database_type, table_name),
+            };
             format!("{}.{}", quote_table_identifier(database_type, catalog), table)
         }
-        _ => table,
+        _ => qualified_table_name(database_type, schema, table_name),
     }
 }
 

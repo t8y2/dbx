@@ -8,7 +8,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use crate::connection::{AppState, PoolKind};
-use crate::csv_export::{format_query_result_csv, format_query_result_csv_rows};
+use crate::csv_export::{format_query_result_csv, format_query_result_csv_rows, format_tsv, format_tsv_rows};
 use crate::database_export::is_export_cancelled;
 pub use crate::database_export::ExportStatus;
 use crate::models::connection::DatabaseType;
@@ -108,6 +108,19 @@ fn effective_row_limit(format: &str, request: &QueryResultExportRequest) -> Opti
 
 fn xlsx_hard_limit_active(format: &str, request: &QueryResultExportRequest) -> bool {
     format == "xlsx" && request.row_limit.map_or(true, |limit| limit > XLSX_MAX_DATA_ROWS)
+}
+
+fn format_text_export_header(format: &str, columns: &[String]) -> String {
+    let content = if format == "csv" { format_query_result_csv(columns, &[]) } else { format_tsv(columns, &[]) };
+    content.strip_suffix('\n').unwrap_or(&content).to_string()
+}
+
+fn format_text_export_rows(format: &str, rows: &[Vec<Value>]) -> String {
+    if format == "csv" {
+        format_query_result_csv_rows(rows)
+    } else {
+        format_tsv_rows(rows)
+    }
 }
 
 fn should_emit_stream_progress(
@@ -311,7 +324,7 @@ async fn export_query_result_core_inner(
     session_id: &mut Option<String>,
 ) -> Result<(), String> {
     let format = request.format.to_lowercase();
-    if format != "csv" && format != "xlsx" {
+    if format != "csv" && format != "xlsx" && format != "txt" {
         return Err(format!("Unsupported streaming query-result export format: {format}"));
     }
 
@@ -351,12 +364,12 @@ async fn export_query_result_core_inner(
         return Ok(());
     }
 
-    let mut csv_file = if format == "csv" {
+    let mut text_file = if format == "csv" || format == "txt" {
         Some(BufWriter::new(File::create(&request.file_path).map_err(|e| format!("Failed to create file: {e}"))?))
     } else {
         None
     };
-    if let Some(file) = csv_file.as_mut() {
+    if let Some(file) = text_file.as_mut() {
         file.write_all(b"\xEF\xBB\xBF").map_err(|e| format!("Failed to write BOM: {e}"))?;
     }
 
@@ -365,7 +378,7 @@ async fn export_query_result_core_inner(
     let mut column_types: Vec<String> = Vec::new();
     let mut rows_exported: u64 = 0;
     let mut offset: usize = 0;
-    let mut wrote_csv_header = false;
+    let mut wrote_text_header = false;
     let mut keyset_plan = build_keyset_plan(state, request).await;
     if keyset_plan.is_none() && !request.use_agent_cursor && !supports_streaming_offset_pagination(request, page_size) {
         return Err(STREAMING_PAGINATION_UNSUPPORTED_ERROR.to_string());
@@ -503,15 +516,19 @@ async fn export_query_result_core_inner(
         }
         let row_count = result.rows.len();
 
-        if format == "csv" {
-            if let Some(file) = csv_file.as_mut() {
-                if !wrote_csv_header {
-                    let csv = format_query_result_csv(&columns, &result.rows);
-                    file.write_all(csv.as_bytes()).map_err(|e| format!("Failed to write CSV: {e}"))?;
-                    wrote_csv_header = true;
+        if format == "csv" || format == "txt" {
+            if let Some(file) = text_file.as_mut() {
+                if !wrote_text_header {
+                    let header = format_text_export_header(&format, &columns);
+                    file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
+                    if row_count > 0 {
+                        let rows = format_text_export_rows(&format, &result.rows);
+                        write!(file, "\n{rows}").map_err(|e| format!("Failed to write export rows: {e}"))?;
+                    }
+                    wrote_text_header = true;
                 } else if row_count > 0 {
-                    let rows_csv = format_query_result_csv_rows(&result.rows);
-                    write!(file, "\n{rows_csv}").map_err(|e| format!("Failed to write CSV rows: {e}"))?;
+                    let rows = format_text_export_rows(&format, &result.rows);
+                    write!(file, "\n{rows}").map_err(|e| format!("Failed to write export rows: {e}"))?;
                 }
             }
         } else {
@@ -568,15 +585,15 @@ async fn export_query_result_core_inner(
 
     on_progress(progress(request, rows_exported, ExportStatus::Writing, None));
 
-    if format == "csv" {
-        if !wrote_csv_header {
-            let csv = format_query_result_csv(&columns, &[]);
-            if let Some(file) = csv_file.as_mut() {
-                file.write_all(csv.as_bytes()).map_err(|e| format!("Failed to write CSV: {e}"))?;
+    if format == "csv" || format == "txt" {
+        if !wrote_text_header {
+            let header = format_text_export_header(&format, &columns);
+            if let Some(file) = text_file.as_mut() {
+                file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
             }
         }
-        if let Some(file) = csv_file.as_mut() {
-            file.flush().map_err(|e| format!("Failed to flush CSV file: {e}"))?;
+        if let Some(file) = text_file.as_mut() {
+            file.flush().map_err(|e| format!("Failed to flush text export file: {e}"))?;
         }
     } else if let Some(writer) = xlsx {
         let mut buf =
@@ -646,7 +663,7 @@ async fn try_export_postgres_query_result_stream(
     let mut rows_exported = 0_u64;
     let mut last_progress_rows = 0_u64;
     let mut last_progress_at = Instant::now();
-    let mut csv_file = if format == "csv" {
+    let mut text_file = if format == "csv" || format == "txt" {
         let mut file =
             BufWriter::new(File::create(&request.file_path).map_err(|e| format!("Failed to create file: {e}"))?);
         file.write_all(b"\xEF\xBB\xBF").map_err(|e| format!("Failed to write BOM: {e}"))?;
@@ -670,10 +687,9 @@ async fn try_export_postgres_query_result_stream(
             match item {
                 crate::db::postgres::PostgresQueryStreamItem::Columns { columns: stream_columns, column_types } => {
                     columns = stream_columns;
-                    if let Some(file) = csv_file.as_mut() {
-                        let csv = format_query_result_csv(&columns, &[]);
-                        let header = csv.strip_suffix('\n').unwrap_or(&csv);
-                        file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write CSV: {e}"))?;
+                    if let Some(file) = text_file.as_mut() {
+                        let header = format_text_export_header(format, &columns);
+                        file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
                     } else {
                         let xlsx_file =
                             File::create(&request.file_path).map_err(|e| format!("Failed to create XLSX file: {e}"))?;
@@ -689,9 +705,9 @@ async fn try_export_postgres_query_result_stream(
                     if xlsx_hard_limit_active && rows_exported as usize >= XLSX_MAX_DATA_ROWS {
                         return Err(XLSX_ROW_LIMIT_ERROR.to_string());
                     }
-                    if let Some(file) = csv_file.as_mut() {
-                        let rows_csv = format_query_result_csv_rows(std::slice::from_ref(&row));
-                        write!(file, "\n{rows_csv}").map_err(|e| format!("Failed to write CSV rows: {e}"))?;
+                    if let Some(file) = text_file.as_mut() {
+                        let rows = format_text_export_rows(format, std::slice::from_ref(&row));
+                        write!(file, "\n{rows}").map_err(|e| format!("Failed to write export rows: {e}"))?;
                     } else if let Some(writer) = xlsx.as_mut() {
                         writer.write_row(&row).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                     } else {
@@ -730,8 +746,8 @@ async fn try_export_postgres_query_result_stream(
         on_progress(progress(request, rows_exported, ExportStatus::Running, None));
     }
     on_progress(progress(request, rows_exported, ExportStatus::Writing, None));
-    if let Some(file) = csv_file.as_mut() {
-        file.flush().map_err(|e| format!("Failed to flush CSV file: {e}"))?;
+    if let Some(file) = text_file.as_mut() {
+        file.flush().map_err(|e| format!("Failed to flush text export file: {e}"))?;
     }
     if let Some(writer) = xlsx {
         let mut buf =
@@ -813,7 +829,7 @@ async fn try_export_mysql_query_result_stream(
     let mut rows_exported = 0_u64;
     let mut last_progress_rows = 0_u64;
     let mut last_progress_at = Instant::now();
-    let mut csv_file = if format == "csv" {
+    let mut text_file = if format == "csv" || format == "txt" {
         let mut file =
             BufWriter::new(File::create(&request.file_path).map_err(|e| format!("Failed to create file: {e}"))?);
         file.write_all(b"\xEF\xBB\xBF").map_err(|e| format!("Failed to write BOM: {e}"))?;
@@ -886,10 +902,9 @@ async fn try_export_mysql_query_result_stream(
             match item {
                 crate::db::mysql::MySqlQueryStreamItem::Columns { columns: stream_columns, column_types } => {
                     columns = stream_columns;
-                    if let Some(file) = csv_file.as_mut() {
-                        let csv = format_query_result_csv(&columns, &[]);
-                        let header = csv.strip_suffix('\n').unwrap_or(&csv);
-                        file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write CSV: {e}"))?;
+                    if let Some(file) = text_file.as_mut() {
+                        let header = format_text_export_header(format, &columns);
+                        file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
                     } else {
                         let xlsx_file =
                             File::create(&request.file_path).map_err(|e| format!("Failed to create XLSX file: {e}"))?;
@@ -905,9 +920,9 @@ async fn try_export_mysql_query_result_stream(
                     if xlsx_hard_limit_active && rows_exported as usize >= XLSX_MAX_DATA_ROWS {
                         return Err(XLSX_ROW_LIMIT_ERROR.to_string());
                     }
-                    if let Some(file) = csv_file.as_mut() {
-                        let rows_csv = format_query_result_csv_rows(std::slice::from_ref(&row));
-                        write!(file, "\n{rows_csv}").map_err(|e| format!("Failed to write CSV rows: {e}"))?;
+                    if let Some(file) = text_file.as_mut() {
+                        let rows = format_text_export_rows(format, std::slice::from_ref(&row));
+                        write!(file, "\n{rows}").map_err(|e| format!("Failed to write export rows: {e}"))?;
                     } else if let Some(writer) = xlsx.as_mut() {
                         writer.write_row(&row).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                     } else {
@@ -992,8 +1007,8 @@ async fn try_export_mysql_query_result_stream(
         on_progress(progress(request, rows_exported, ExportStatus::Running, None));
     }
     on_progress(progress(request, rows_exported, ExportStatus::Writing, None));
-    if let Some(file) = csv_file.as_mut() {
-        file.flush().map_err(|e| format!("Failed to flush CSV file: {e}"))?;
+    if let Some(file) = text_file.as_mut() {
+        file.flush().map_err(|e| format!("Failed to flush text export file: {e}"))?;
     }
     if let Some(writer) = xlsx {
         let mut buf =
@@ -1063,7 +1078,7 @@ async fn try_export_clickhouse_query_result_stream(
     let mut rows_exported = 0_u64;
     let mut last_progress_rows = 0_u64;
     let mut last_progress_at = Instant::now();
-    let mut csv_file = if format == "csv" {
+    let mut text_file = if format == "csv" || format == "txt" {
         let mut file =
             BufWriter::new(File::create(&request.file_path).map_err(|e| format!("Failed to create file: {e}"))?);
         file.write_all(b"\xEF\xBB\xBF").map_err(|e| format!("Failed to write BOM: {e}"))?;
@@ -1087,10 +1102,9 @@ async fn try_export_clickhouse_query_result_stream(
                     column_types,
                 } => {
                     columns = stream_columns;
-                    if let Some(file) = csv_file.as_mut() {
-                        let csv = format_query_result_csv(&columns, &[]);
-                        let header = csv.strip_suffix('\n').unwrap_or(&csv);
-                        file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write CSV: {e}"))?;
+                    if let Some(file) = text_file.as_mut() {
+                        let header = format_text_export_header(format, &columns);
+                        file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
                     } else {
                         let xlsx_file =
                             File::create(&request.file_path).map_err(|e| format!("Failed to create XLSX file: {e}"))?;
@@ -1106,9 +1120,9 @@ async fn try_export_clickhouse_query_result_stream(
                     if xlsx_hard_limit_active && rows_exported as usize >= XLSX_MAX_DATA_ROWS {
                         return Err(XLSX_ROW_LIMIT_ERROR.to_string());
                     }
-                    if let Some(file) = csv_file.as_mut() {
-                        let rows_csv = format_query_result_csv_rows(std::slice::from_ref(&row));
-                        write!(file, "\n{rows_csv}").map_err(|e| format!("Failed to write CSV rows: {e}"))?;
+                    if let Some(file) = text_file.as_mut() {
+                        let rows = format_text_export_rows(format, std::slice::from_ref(&row));
+                        write!(file, "\n{rows}").map_err(|e| format!("Failed to write export rows: {e}"))?;
                     } else if let Some(writer) = xlsx.as_mut() {
                         writer.write_row(&row).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                     } else {
@@ -1169,8 +1183,8 @@ async fn try_export_clickhouse_query_result_stream(
         on_progress(progress(request, rows_exported, ExportStatus::Running, None));
     }
     on_progress(progress(request, rows_exported, ExportStatus::Writing, None));
-    if let Some(file) = csv_file.as_mut() {
-        file.flush().map_err(|e| format!("Failed to flush CSV file: {e}"))?;
+    if let Some(file) = text_file.as_mut() {
+        file.flush().map_err(|e| format!("Failed to flush text export file: {e}"))?;
     }
     if let Some(writer) = xlsx {
         let mut buf =
@@ -1221,7 +1235,7 @@ async fn try_export_sqlserver_query_result_stream(
     let mut last_progress_rows = 0_u64;
     let mut last_progress_at = Instant::now();
     let progress_row_interval = request.page_size.max(1) as u64;
-    let mut csv_file = if format == "csv" {
+    let mut text_file = if format == "csv" || format == "txt" {
         let mut file =
             BufWriter::new(File::create(&request.file_path).map_err(|e| format!("Failed to create file: {e}"))?);
         file.write_all(b"\xEF\xBB\xBF").map_err(|e| format!("Failed to write BOM: {e}"))?;
@@ -1251,10 +1265,9 @@ async fn try_export_sqlserver_query_result_stream(
             match item {
                 crate::db::sqlserver::SqlServerStreamItem::Columns(stream_columns) => {
                     columns = stream_columns.to_vec();
-                    if let Some(file) = csv_file.as_mut() {
-                        let csv = format_query_result_csv(&columns, &[]);
-                        let header = csv.strip_suffix('\n').unwrap_or(&csv);
-                        file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write CSV: {e}"))?;
+                    if let Some(file) = text_file.as_mut() {
+                        let header = format_text_export_header(format, &columns);
+                        file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
                     } else {
                         let xlsx_file =
                             File::create(&request.file_path).map_err(|e| format!("Failed to create XLSX file: {e}"))?;
@@ -1270,9 +1283,9 @@ async fn try_export_sqlserver_query_result_stream(
                     if xlsx_hard_limit_active && rows_exported as usize >= XLSX_MAX_DATA_ROWS {
                         return Err(XLSX_ROW_LIMIT_ERROR.to_string());
                     }
-                    if let Some(file) = csv_file.as_mut() {
-                        let rows_csv = format_query_result_csv_rows(&[row.to_vec()]);
-                        write!(file, "\n{rows_csv}").map_err(|e| format!("Failed to write CSV rows: {e}"))?;
+                    if let Some(file) = text_file.as_mut() {
+                        let rows = format_text_export_rows(format, &[row.to_vec()]);
+                        write!(file, "\n{rows}").map_err(|e| format!("Failed to write export rows: {e}"))?;
                     } else if let Some(writer) = xlsx.as_mut() {
                         writer.write_row(row).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                     } else {
@@ -1317,8 +1330,8 @@ async fn try_export_sqlserver_query_result_stream(
         on_progress(progress(request, rows_exported, ExportStatus::Running, None));
     }
     on_progress(progress(request, rows_exported, ExportStatus::Writing, None));
-    if let Some(file) = csv_file.as_mut() {
-        file.flush().map_err(|e| format!("Failed to flush CSV file: {e}"))?;
+    if let Some(file) = text_file.as_mut() {
+        file.flush().map_err(|e| format!("Failed to flush text export file: {e}"))?;
     }
     if let Some(writer) = xlsx {
         let mut buf =
@@ -1358,6 +1371,16 @@ mod tests {
     #[test]
     fn csv_unlimited_export_has_no_effective_row_limit() {
         assert_eq!(effective_row_limit("csv", &request("csv", None, None)), None);
+    }
+
+    #[test]
+    fn txt_unlimited_export_has_no_effective_row_limit() {
+        assert_eq!(effective_row_limit("txt", &request("txt", None, None)), None);
+    }
+
+    #[test]
+    fn txt_export_header_keeps_columns_for_empty_results() {
+        assert_eq!(format_text_export_header("txt", &["id".to_string(), "note".to_string()]), "id\tnote");
     }
 
     #[test]

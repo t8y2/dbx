@@ -2270,6 +2270,61 @@ fn dameng_create_table_with_identity() {
 }
 
 #[test]
+fn dameng_create_table_preserves_character_length_units() {
+    let mut name = column("NAME");
+    name.data_type = "VARCHAR2(255 CHAR)".to_string();
+    let mut code = column("CODE");
+    code.data_type = "VARCHAR(64 BYTE)".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Dameng),
+        schema: Some("SYSDBA".to_string()),
+        table_name: "USERS".to_string(),
+        columns: vec![name, code],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(result.statements[0].contains("\"NAME\" VARCHAR2(255 CHAR)"), "ddl: {}", result.statements[0]);
+    assert!(result.statements[0].contains("\"CODE\" VARCHAR(64 BYTE)"), "ddl: {}", result.statements[0]);
+}
+
+#[test]
+fn dameng_alter_column_preserves_character_length_unit() {
+    let mut name = column("NAME");
+    name.data_type = "VARCHAR2(64 BYTE)".to_string();
+    name.original = Some(ColumnInfo {
+        name: "NAME".to_string(),
+        data_type: "VARCHAR2(64 CHAR)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Dameng),
+        schema: Some("SYSDBA".to_string()),
+        table_name: "USERS".to_string(),
+        columns: vec![name],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE \"SYSDBA\".\"USERS\" MODIFY (\"NAME\" VARCHAR2(64 BYTE));"]);
+}
+
+#[test]
 fn dameng_rejects_multiple_identity_columns() {
     let mut first = column("ID");
     first.data_type = "INT".to_string();

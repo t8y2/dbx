@@ -29,6 +29,35 @@ describe("PostgreSQL overloaded routines", () => {
   });
 });
 
+describe("PostgreSQL table hierarchy", () => {
+  it("keeps schema pagination visible at the table-group root when a page ends inside nested partitions", () => {
+    const nodes = buildTableTreeNodes({
+      ...context,
+      schema: "public",
+      tables: [
+        { name: "orders", table_type: "BASE TABLE", comment: null },
+        { name: "orders_2026", table_type: "BASE TABLE", comment: null, parent_schema: "public", parent_name: "orders" },
+        { name: "orders_2026_01", table_type: "BASE TABLE", comment: null, parent_schema: "public", parent_name: "orders_2026" },
+      ],
+    });
+    const loadMore: TreeNode = {
+      id: "load-more:1000",
+      label: "tree.loadMore",
+      type: "load-more",
+      connectionId: context.connectionId,
+      database: context.database,
+      loadMore: { parentId: "connection:db:__tables", offset: 1000, pageSize: 1000 },
+    };
+
+    const withLoadMore = appendTableTreeLoadMoreNode(nodes, loadMore, { schema: "public", name: "orders_2026" });
+
+    expect(withLoadMore.map((node) => node.label)).toEqual(["orders", "tree.loadMore"]);
+    const yearPartition = tablePartitionGroups(withLoadMore[0])[0].children?.[0];
+    expect(yearPartition?.label).toBe("orders_2026");
+    expect(tablePartitionGroups(yearPartition!)[0].children?.map((node) => node.label)).toEqual(["orders_2026_01"]);
+  });
+});
+
 describe("TDengine table hierarchy", () => {
   it("groups child tables under their supertable and keeps ordinary tables flat", () => {
     const tables: TableInfo[] = [

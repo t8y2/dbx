@@ -1,10 +1,12 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read as IoRead, Seek, SeekFrom};
 use std::path::Path;
 
-use calamine::{open_workbook_auto, Data, Reader};
+use calamine::{open_workbook_auto, Data, ExcelDateTime, Reader as CalamineReader};
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
+use quick_xml::events::{BytesStart, Event};
+use quick_xml::Reader as XmlReader;
 use serde::{Deserialize, Serialize};
 
 use crate::connection::{task_client_session_id, AppState};
@@ -766,7 +768,73 @@ pub fn parse_json_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImpo
     parse_json_bytes_with_options(bytes, &TableImportParseOptions::default(), preview_limit)
 }
 
-pub fn xlsx_cell_value(cell: &Data) -> serde_json::Value {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum XlsxTemporalKind {
+    Date,
+    Time,
+    DateTime,
+    Duration,
+}
+
+fn format_chrono_duration_hms(duration: chrono::Duration, wrap_to_day: bool) -> String {
+    let mut millis = duration.num_milliseconds();
+    let negative = millis < 0;
+    if negative {
+        millis = -millis;
+    }
+
+    const DAY_MILLIS: i64 = 24 * 60 * 60 * 1000;
+    if wrap_to_day {
+        millis %= DAY_MILLIS;
+    }
+
+    let hours = millis / (60 * 60 * 1000);
+    let minutes = (millis / (60 * 1000)) % 60;
+    let seconds = (millis / 1000) % 60;
+    let sub_millis = millis % 1000;
+    let sign = if negative { "-" } else { "" };
+    if sub_millis == 0 {
+        format!("{sign}{hours:02}:{minutes:02}:{seconds:02}")
+    } else {
+        let fraction = format!("{sub_millis:03}").trim_end_matches('0').to_string();
+        format!("{sign}{hours:02}:{minutes:02}:{seconds:02}.{fraction}")
+    }
+}
+
+fn xlsx_datetime_label(value: &ExcelDateTime, temporal_kind: Option<XlsxTemporalKind>) -> String {
+    if matches!(temporal_kind, Some(XlsxTemporalKind::Duration)) || value.is_duration() {
+        return value
+            .as_duration()
+            .map(|duration| format_chrono_duration_hms(duration, false))
+            .unwrap_or_else(|| value.to_string());
+    }
+
+    if matches!(temporal_kind, Some(XlsxTemporalKind::Time)) {
+        return value
+            .as_duration()
+            .map(|duration| format_chrono_duration_hms(duration, true))
+            .unwrap_or_else(|| value.to_string());
+    }
+
+    let Some(datetime) = value.as_datetime() else {
+        return value.to_string();
+    };
+
+    match temporal_kind {
+        Some(XlsxTemporalKind::Date) => datetime.format("%Y-%m-%d").to_string(),
+        Some(XlsxTemporalKind::DateTime) => datetime.format("%Y-%m-%d %H:%M:%S%.f").to_string(),
+        None => {
+            if (0.0..1.0).contains(&value.as_f64()) {
+                value.to_string()
+            } else {
+                datetime.format("%Y-%m-%d %H:%M:%S%.f").to_string()
+            }
+        }
+        Some(XlsxTemporalKind::Time) | Some(XlsxTemporalKind::Duration) => unreachable!("handled above"),
+    }
+}
+
+fn xlsx_cell_value_with_temporal_kind(cell: &Data, temporal_kind: Option<XlsxTemporalKind>) -> serde_json::Value {
     match cell {
         Data::Empty => serde_json::Value::Null,
         Data::String(s) => csv_value(s),
@@ -775,30 +843,312 @@ pub fn xlsx_cell_value(cell: &Data) -> serde_json::Value {
         }
         Data::Int(n) => serde_json::Value::Number((*n).into()),
         Data::Bool(v) => serde_json::Value::Bool(*v),
-        Data::DateTime(v) => serde_json::Value::String(v.to_string()),
+        Data::DateTime(v) => serde_json::Value::String(xlsx_datetime_label(v, temporal_kind)),
         Data::DateTimeIso(v) => serde_json::Value::String(v.clone()),
         Data::DurationIso(v) => serde_json::Value::String(v.clone()),
         Data::Error(v) => serde_json::Value::String(v.to_string()),
     }
 }
 
-pub fn xlsx_cell_label(cell: &Data) -> String {
+pub fn xlsx_cell_value(cell: &Data) -> serde_json::Value {
+    xlsx_cell_value_with_temporal_kind(cell, None)
+}
+
+fn xlsx_cell_label_with_temporal_kind(cell: &Data, temporal_kind: Option<XlsxTemporalKind>) -> String {
     match cell {
         Data::Empty => String::new(),
         Data::String(s) => s.clone(),
         Data::Float(n) => n.to_string(),
         Data::Int(n) => n.to_string(),
         Data::Bool(v) => v.to_string(),
-        Data::DateTime(v) => v.to_string(),
+        Data::DateTime(v) => xlsx_datetime_label(v, temporal_kind),
         Data::DateTimeIso(v) => v.clone(),
         Data::DurationIso(v) => v.clone(),
         Data::Error(v) => v.to_string(),
     }
 }
 
+pub fn xlsx_cell_label(cell: &Data) -> String {
+    xlsx_cell_label_with_temporal_kind(cell, None)
+}
+
 pub fn xlsx_sheet_names(path: &str) -> Result<Vec<String>, String> {
     let workbook = open_workbook_auto(path).map_err(|e| e.to_string())?;
     Ok(workbook.sheet_names().to_vec())
+}
+
+fn xml_local_name_eq(name: &[u8], expected: &[u8]) -> bool {
+    name.rsplit(|byte| *byte == b':').next().is_some_and(|local| local.eq_ignore_ascii_case(expected))
+}
+
+fn xml_attr_value(reader: &XmlReader<&[u8]>, element: &BytesStart<'_>, key: &[u8]) -> Option<String> {
+    element.attributes().flatten().find_map(|attr| {
+        if xml_local_name_eq(attr.key.as_ref(), key) {
+            attr.decode_and_unescape_value(reader.decoder()).ok().map(|value| value.into_owned())
+        } else {
+            None
+        }
+    })
+}
+
+fn xlsx_builtin_temporal_kind(num_fmt_id: u16) -> Option<XlsxTemporalKind> {
+    match num_fmt_id {
+        14..=17 => Some(XlsxTemporalKind::Date),
+        18..=21 | 45 | 47 => Some(XlsxTemporalKind::Time),
+        22 => Some(XlsxTemporalKind::DateTime),
+        46 => Some(XlsxTemporalKind::Duration),
+        _ => None,
+    }
+}
+
+fn xlsx_temporal_kind_from_format_code(format_code: &str) -> Option<XlsxTemporalKind> {
+    let mut normalized = String::new();
+    let mut chars = format_code.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => {
+                for quoted in chars.by_ref() {
+                    if quoted == '"' {
+                        break;
+                    }
+                }
+            }
+            '\\' | '_' | '*' => {
+                let _ = chars.next();
+            }
+            ';' => break,
+            '[' => {
+                let mut bracket = String::new();
+                for bracket_ch in chars.by_ref() {
+                    if bracket_ch == ']' {
+                        break;
+                    }
+                    bracket.push(bracket_ch);
+                }
+                let bracket = bracket.trim().to_ascii_lowercase();
+                if matches!(bracket.as_str(), "h" | "hh" | "m" | "mm" | "s" | "ss") {
+                    return Some(XlsxTemporalKind::Duration);
+                }
+            }
+            _ => normalized.push(ch.to_ascii_lowercase()),
+        }
+    }
+
+    let has_time = normalized.contains('h')
+        || normalized.contains('s')
+        || normalized.contains("am/pm")
+        || normalized.contains("a/p");
+    let has_month = normalized.contains('m');
+    let has_date = normalized.contains('y') || normalized.contains('d') || (has_month && !has_time);
+    match (has_date, has_time) {
+        (true, true) => Some(XlsxTemporalKind::DateTime),
+        (true, false) => Some(XlsxTemporalKind::Date),
+        (false, true) => Some(XlsxTemporalKind::Time),
+        (false, false) => None,
+    }
+}
+
+fn parse_xlsx_style_temporal_kinds(styles_xml: &str) -> Vec<Option<XlsxTemporalKind>> {
+    let mut reader = XmlReader::from_str(styles_xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut custom_formats = HashMap::<u16, XlsxTemporalKind>::new();
+    let mut style_kinds = Vec::new();
+    let mut in_cell_xfs = false;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(element)) | Ok(Event::Empty(element))
+                if xml_local_name_eq(element.name().as_ref(), b"numFmt") =>
+            {
+                let id = xml_attr_value(&reader, &element, b"numFmtId").and_then(|value| value.parse::<u16>().ok());
+                let format_code = xml_attr_value(&reader, &element, b"formatCode");
+                if let (Some(id), Some(format_code)) = (id, format_code) {
+                    if let Some(kind) = xlsx_temporal_kind_from_format_code(&format_code) {
+                        custom_formats.insert(id, kind);
+                    }
+                }
+            }
+            Ok(Event::Start(element)) if xml_local_name_eq(element.name().as_ref(), b"cellXfs") => {
+                in_cell_xfs = true;
+            }
+            Ok(Event::End(element)) if xml_local_name_eq(element.name().as_ref(), b"cellXfs") => {
+                in_cell_xfs = false;
+            }
+            Ok(Event::Start(element)) | Ok(Event::Empty(element))
+                if in_cell_xfs && xml_local_name_eq(element.name().as_ref(), b"xf") =>
+            {
+                let kind = xml_attr_value(&reader, &element, b"numFmtId")
+                    .and_then(|value| value.parse::<u16>().ok())
+                    .and_then(|id| custom_formats.get(&id).copied().or_else(|| xlsx_builtin_temporal_kind(id)));
+                style_kinds.push(kind);
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    style_kinds
+}
+
+fn xlsx_workbook_sheet_refs(workbook_xml: &str) -> Vec<(String, Option<String>)> {
+    let mut reader = XmlReader::from_str(workbook_xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut sheets = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(element)) | Ok(Event::Empty(element))
+                if xml_local_name_eq(element.name().as_ref(), b"sheet") =>
+            {
+                if let Some(name) = xml_attr_value(&reader, &element, b"name") {
+                    sheets.push((name, xml_attr_value(&reader, &element, b"id")));
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    sheets
+}
+
+fn xlsx_workbook_relationship_targets(rels_xml: &str) -> HashMap<String, String> {
+    let mut reader = XmlReader::from_str(rels_xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut targets = HashMap::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(element)) | Ok(Event::Empty(element))
+                if xml_local_name_eq(element.name().as_ref(), b"Relationship") =>
+            {
+                if let (Some(id), Some(target)) =
+                    (xml_attr_value(&reader, &element, b"Id"), xml_attr_value(&reader, &element, b"Target"))
+                {
+                    targets.insert(id, target);
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    targets
+}
+
+fn xlsx_relationship_target_path(base_dir: &str, target: &str) -> String {
+    if target.starts_with('/') {
+        return target.trim_start_matches('/').to_string();
+    }
+
+    let mut parts = base_dir.split('/').filter(|part| !part.is_empty()).collect::<Vec<_>>();
+    for part in target.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            _ => parts.push(part),
+        }
+    }
+    parts.join("/")
+}
+
+fn xlsx_sheet_path_for_name(workbook_xml: &str, rels_xml: &str, sheet_name: &str) -> Option<String> {
+    let sheets = xlsx_workbook_sheet_refs(workbook_xml);
+    let (index, (_, rel_id)) = sheets.iter().enumerate().find(|(_, (name, _))| name == sheet_name)?;
+    let rel_targets = xlsx_workbook_relationship_targets(rels_xml);
+    rel_id
+        .as_ref()
+        .and_then(|id| rel_targets.get(id))
+        .map(|target| xlsx_relationship_target_path("xl", target))
+        .or_else(|| Some(format!("xl/worksheets/sheet{}.xml", index + 1)))
+}
+
+fn xlsx_cell_ref_position(reference: &str) -> Option<(usize, usize)> {
+    let mut column = 0usize;
+    let mut row = 0usize;
+    let mut saw_column = false;
+    let mut saw_row = false;
+    for ch in reference.chars() {
+        if ch == '$' {
+            continue;
+        }
+        if ch.is_ascii_alphabetic() && !saw_row {
+            saw_column = true;
+            column = column * 26 + (ch.to_ascii_uppercase() as u8 - b'A' + 1) as usize;
+        } else if ch.is_ascii_digit() {
+            saw_row = true;
+            row = row * 10 + ch.to_digit(10)? as usize;
+        } else {
+            return None;
+        }
+    }
+    (saw_column && saw_row).then_some((row, column))
+}
+
+fn parse_xlsx_sheet_temporal_kinds(
+    sheet_xml: &str,
+    style_kinds: &[Option<XlsxTemporalKind>],
+) -> HashMap<(usize, usize), XlsxTemporalKind> {
+    let mut reader = XmlReader::from_str(sheet_xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut kinds = HashMap::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(element)) | Ok(Event::Empty(element))
+                if xml_local_name_eq(element.name().as_ref(), b"c") =>
+            {
+                let Some(style_id) =
+                    xml_attr_value(&reader, &element, b"s").and_then(|value| value.parse::<usize>().ok())
+                else {
+                    buf.clear();
+                    continue;
+                };
+                let Some(kind) = style_kinds.get(style_id).copied().flatten() else {
+                    buf.clear();
+                    continue;
+                };
+                if let Some(position) =
+                    xml_attr_value(&reader, &element, b"r").and_then(|reference| xlsx_cell_ref_position(&reference))
+                {
+                    kinds.insert(position, kind);
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    kinds
+}
+
+fn read_xlsx_zip_text(zip: &mut zip::ZipArchive<File>, path: &str) -> Result<String, String> {
+    let mut file = zip.by_name(path).map_err(|err| err.to_string())?;
+    let mut content = String::new();
+    file.read_to_string(&mut content).map_err(|err| err.to_string())?;
+    Ok(content)
+}
+
+fn xlsx_temporal_cell_kinds(path: &str, sheet_name: &str) -> Result<HashMap<(usize, usize), XlsxTemporalKind>, String> {
+    let file = File::open(path).map_err(|err| err.to_string())?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|err| err.to_string())?;
+    let styles_xml = read_xlsx_zip_text(&mut zip, "xl/styles.xml").unwrap_or_default();
+    let style_kinds = parse_xlsx_style_temporal_kinds(&styles_xml);
+    if style_kinds.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let workbook_xml = read_xlsx_zip_text(&mut zip, "xl/workbook.xml")?;
+    let rels_xml = read_xlsx_zip_text(&mut zip, "xl/_rels/workbook.xml.rels").unwrap_or_default();
+    let Some(sheet_path) = xlsx_sheet_path_for_name(&workbook_xml, &rels_xml, sheet_name) else {
+        return Ok(HashMap::new());
+    };
+    let sheet_xml = read_xlsx_zip_text(&mut zip, &sheet_path)?;
+    Ok(parse_xlsx_sheet_temporal_kinds(&sheet_xml, &style_kinds))
 }
 
 pub fn parse_xlsx_file_with_options(
@@ -818,7 +1168,10 @@ pub fn parse_xlsx_file_with_options(
     } else {
         sheet_names.first().cloned().ok_or_else(|| "Workbook has no sheets".to_string())?
     };
+    let temporal_cell_kinds = xlsx_temporal_cell_kinds(path, &sheet_name).unwrap_or_default();
     let range = workbook.worksheet_range(&sheet_name).map_err(|e| e.to_string())?;
+    let (range_start_row, range_start_column) =
+        range.start().map(|(row, column)| (row as usize, column as usize)).unwrap_or_default();
     let row_range = effective_import_row_range(options)?;
     let mut columns = Vec::new();
     let mut rows = Vec::new();
@@ -829,7 +1182,14 @@ pub fn parse_xlsx_file_with_options(
             columns = source_row
                 .iter()
                 .enumerate()
-                .map(|(index, cell)| normalize_header(&xlsx_cell_label(cell), index))
+                .map(|(index, cell)| {
+                    // Calamine rows are relative to the used range, while XLSX style coordinates are worksheet-absolute.
+                    let cell_position = (range_start_row + row_number, range_start_column + index + 1);
+                    normalize_header(
+                        &xlsx_cell_label_with_temporal_kind(cell, temporal_cell_kinds.get(&cell_position).copied()),
+                        index,
+                    )
+                })
                 .collect();
             continue;
         }
@@ -848,7 +1208,15 @@ pub fn parse_xlsx_file_with_options(
         }
         let mut row = Vec::with_capacity(columns.len());
         for index in 0..columns.len() {
-            row.push(source_row.get(index).map(xlsx_cell_value).unwrap_or(serde_json::Value::Null));
+            let cell_position = (range_start_row + row_number, range_start_column + index + 1);
+            row.push(
+                source_row
+                    .get(index)
+                    .map(|cell| {
+                        xlsx_cell_value_with_temporal_kind(cell, temporal_cell_kinds.get(&cell_position).copied())
+                    })
+                    .unwrap_or(serde_json::Value::Null),
+            );
         }
         rows.push(row);
     }
@@ -1859,6 +2227,104 @@ mod tests {
     use super::*;
     use crate::models::connection::DatabaseType;
     use crate::xlsx_export::{build_xlsx_workbook_multi, XlsxWorksheetData};
+    use std::io::{Cursor, Write};
+
+    fn write_xlsx_test_entry<W: Write + std::io::Seek>(zip: &mut zip::ZipWriter<W>, path: &str, content: &str) {
+        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip.start_file(path, options).unwrap();
+        zip.write_all(content.as_bytes()).unwrap();
+    }
+
+    fn build_temporal_test_xlsx(date1904: bool, cells: &[(&str, usize, f64)]) -> Vec<u8> {
+        let cursor = Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(cursor);
+        let workbook_pr = if date1904 { r#"<workbookPr date1904="1"/>"# } else { "" };
+        let mut rows = std::collections::BTreeMap::<usize, String>::new();
+        for (reference, style_id, value) in cells {
+            let (row, _) = xlsx_cell_ref_position(reference).expect("valid XLSX cell reference");
+            rows.entry(row).or_default().push_str(&format!(r#"<c r="{reference}" s="{style_id}"><v>{value}</v></c>"#));
+        }
+        let rows_xml =
+            rows.into_iter().map(|(row, cells)| format!(r#"<row r="{row}">{cells}</row>"#)).collect::<String>();
+
+        write_xlsx_test_entry(
+            &mut zip,
+            "[Content_Types].xml",
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+</Types>"#,
+        );
+        write_xlsx_test_entry(
+            &mut zip,
+            "_rels/.rels",
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#,
+        );
+        write_xlsx_test_entry(
+            &mut zip,
+            "xl/workbook.xml",
+            &format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  {workbook_pr}
+  <sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>
+</workbook>"#
+            ),
+        );
+        write_xlsx_test_entry(
+            &mut zip,
+            "xl/_rels/workbook.xml.rels",
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>"#,
+        );
+        write_xlsx_test_entry(
+            &mut zip,
+            "xl/styles.xml",
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <numFmts count="4">
+    <numFmt numFmtId="164" formatCode="yyyy-mm-dd"/>
+    <numFmt numFmtId="165" formatCode="yyyy-mm-dd hh:mm:ss"/>
+    <numFmt numFmtId="166" formatCode="hh:mm:ss"/>
+    <numFmt numFmtId="167" formatCode="[h]:mm:ss"/>
+  </numFmts>
+  <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
+  <fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
+  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="5">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+    <xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+    <xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+    <xf numFmtId="166" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+    <xf numFmtId="167" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+  </cellXfs>
+  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+</styleSheet>"#,
+        );
+        write_xlsx_test_entry(
+            &mut zip,
+            "xl/worksheets/sheet1.xml",
+            &format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>{rows_xml}</sheetData>
+</worksheet>"#
+            ),
+        );
+
+        zip.finish().unwrap().into_inner()
+    }
 
     #[test]
     fn parses_csv_headers_and_preview_rows() {
@@ -2156,6 +2622,79 @@ mod tests {
         assert_eq!(xlsx_sheet_names(&path.to_string_lossy()).unwrap(), vec!["First", "Second"]);
         assert_eq!(parsed.columns, vec!["name"]);
         assert_eq!(parsed.rows, vec![vec![serde_json::json!("Ada")]]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn formats_unclassified_excel_datetimes_conservatively() {
+        let date_cell = Data::DateTime(ExcelDateTime::new(45996.0, calamine::ExcelDateTimeType::DateTime, false));
+        let time_cell = Data::DateTime(ExcelDateTime::new(0.5, calamine::ExcelDateTimeType::DateTime, false));
+        let duration_cell = Data::DateTime(ExcelDateTime::new(2.5, calamine::ExcelDateTimeType::TimeDelta, false));
+
+        let date_value = xlsx_cell_value(&date_cell);
+        let time_value = xlsx_cell_value(&time_cell);
+
+        assert_eq!(date_value, serde_json::json!("2025-12-05 00:00:00"));
+        assert_eq!(time_value, serde_json::json!("0.5"));
+        assert_eq!(xlsx_cell_value(&duration_cell), serde_json::json!("60:00:00"));
+        assert_eq!(infer_value_type(&date_value), Some(ImportInferredType::Timestamp));
+        assert_eq!(infer_value_type(&time_value), Some(ImportInferredType::Decimal));
+    }
+
+    #[test]
+    fn parses_excel_temporal_styles_before_type_inference() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-temporal-{}.xlsx", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            build_temporal_test_xlsx(false, &[("A1", 1, 45996.0), ("B1", 2, 45996.0), ("C1", 3, 0.5), ("D1", 4, 1.5)]),
+        )
+        .unwrap();
+        let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
+
+        let parsed = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
+
+        assert_eq!(parsed.columns, vec!["column_1", "column_2", "column_3", "column_4"]);
+        assert_eq!(
+            parsed.rows,
+            vec![vec![
+                serde_json::json!("2025-12-05"),
+                serde_json::json!("2025-12-05 00:00:00"),
+                serde_json::json!("12:00:00"),
+                serde_json::json!("36:00:00"),
+            ]]
+        );
+        assert_eq!(infer_value_type(&parsed.rows[0][0]), Some(ImportInferredType::Date));
+        assert_eq!(infer_value_type(&parsed.rows[0][1]), Some(ImportInferredType::Timestamp));
+        assert_eq!(infer_value_type(&parsed.rows[0][2]), Some(ImportInferredType::Text));
+        assert_eq!(infer_value_type(&parsed.rows[0][3]), Some(ImportInferredType::Text));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn parses_excel_temporal_styles_with_1904_date_system() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-temporal-1904-{}.xlsx", uuid::Uuid::new_v4()));
+        std::fs::write(&path, build_temporal_test_xlsx(true, &[("A1", 1, 1.0)])).unwrap();
+        let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
+
+        let parsed = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
+
+        assert_eq!(parsed.rows, vec![vec![serde_json::json!("1904-01-02")]]);
+        assert_eq!(infer_value_type(&parsed.rows[0][0]), Some(ImportInferredType::Date));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn parses_excel_temporal_styles_from_non_a1_used_range() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-temporal-offset-{}.xlsx", uuid::Uuid::new_v4()));
+        std::fs::write(&path, build_temporal_test_xlsx(false, &[("C3", 1, 45996.0), ("D3", 2, 45996.0)])).unwrap();
+        let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
+
+        let parsed = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
+
+        assert_eq!(parsed.columns, vec!["column_1", "column_2"]);
+        assert_eq!(parsed.rows, vec![vec![serde_json::json!("2025-12-05"), serde_json::json!("2025-12-05 00:00:00")]]);
+        assert_eq!(infer_value_type(&parsed.rows[0][0]), Some(ImportInferredType::Date));
+        assert_eq!(infer_value_type(&parsed.rows[0][1]), Some(ImportInferredType::Timestamp));
         let _ = std::fs::remove_file(path);
     }
 

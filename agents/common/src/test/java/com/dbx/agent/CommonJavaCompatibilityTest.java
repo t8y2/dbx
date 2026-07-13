@@ -441,6 +441,30 @@ class CommonJavaCompatibilityTest {
     }
 
     @Test
+    void tableCommentPrefersExactNameAndPreservesWhitespace() {
+        DatabaseAgent agent = new TableCommentAgent(Arrays.asList(
+            new TableInfo("users", "TABLE", "lowercase comment"),
+            new TableInfo("Users", "TABLE", "  exact comment  ")
+        ));
+
+        assertEquals("  exact comment  ", agent.getTableComment("public", "Users"));
+    }
+
+    @Test
+    void tableCommentUsesOnlyUniqueCaseInsensitiveFallback() {
+        DatabaseAgent unique = new TableCommentAgent(Collections.singletonList(
+            new TableInfo("USERS", "TABLE", "  normalized comment  ")
+        ));
+        DatabaseAgent ambiguous = new TableCommentAgent(Arrays.asList(
+            new TableInfo("Users", "TABLE", "first"),
+            new TableInfo("USERS", "TABLE", "second")
+        ));
+
+        assertEquals("  normalized comment  ", unique.getTableComment("public", "users"));
+        assertEquals(null, ambiguous.getTableComment("public", "users"));
+    }
+
+    @Test
     void executesTransactionsOneByOneWhenJdbcDriverDoesNotSupportTransactions() {
         List<String> calls = new ArrayList<>();
         DatabaseAgent agent = new TransactionAgent(nonTransactionalConnection(calls));
@@ -628,6 +652,19 @@ class CommonJavaCompatibilityTest {
         @Override
         public Connection getConnection() {
             return connection;
+        }
+    }
+
+    private static final class TableCommentAgent extends MinimalAgent {
+        private final List<TableInfo> tables;
+
+        private TableCommentAgent(List<TableInfo> tables) {
+            this.tables = tables;
+        }
+
+        @Override
+        public List<TableInfo> listTables(String schema) {
+            return tables;
         }
     }
 

@@ -166,9 +166,12 @@ export function resultSqlForGrid(tab: Pick<QueryTab, "result" | "resultBaseSql" 
  * A stale or ambiguous source is ignored instead of highlighting a different
  * statement that happens to have the same text.
  */
-export function resultSourceRange(editorSql: string, result: Pick<QueryResult, "sourceStatement"> | undefined, resultIndex: number | undefined, databaseType?: DatabaseType): SqlTextRange | undefined {
+export function resultSourceRange(editorSql: string, result: Pick<QueryResult, "sourceStatement" | "sourceFrom" | "sourceTo"> | undefined, resultIndex: number | undefined, databaseType?: DatabaseType): SqlTextRange | undefined {
   const sourceStatement = result?.sourceStatement;
   if (!sourceStatement) return undefined;
+  if (typeof result.sourceFrom === "number" && typeof result.sourceTo === "number" && editorSql.slice(result.sourceFrom, result.sourceTo) === sourceStatement) {
+    return { from: result.sourceFrom, to: result.sourceTo, sql: sourceStatement };
+  }
 
   const statements = databaseType === "redis" ? executableStatementRanges(editorSql, databaseType) : databaseType === "mongodb" ? splitMongoCommandRanges(editorSql).map(({ from, to, text }) => ({ from, to, sql: text })) : splitSqlStatementRanges(editorSql, databaseType);
   const indexed = typeof resultIndex === "number" ? statements[resultIndex] : undefined;

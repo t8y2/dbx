@@ -28,9 +28,14 @@ pub struct TableDataSelectSqlOptions {
     pub table_name: String,
     /// Doris / StarRocks multi-catalog: when set to a non-`internal` catalog,
     /// the FROM clause is prefixed with the catalog
-    /// (`<catalog>.<schema>.<table>`).
+    /// (`<catalog>.<database>.<table>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog: Option<String>,
+    /// Doris / StarRocks multi-catalog: the database under the external
+    /// catalog, used as the middle segment of the 3-part qualified name when
+    /// `schema` is absent (Doris/StarRocks have no separate schema concept).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub table_type: Option<String>,
     #[serde(default)]

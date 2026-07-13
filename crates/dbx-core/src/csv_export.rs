@@ -41,48 +41,60 @@ pub(crate) fn value_to_csv_text(value: &Value) -> String {
     }
 }
 
-pub(crate) fn value_to_query_result_csv_text(value: &Value) -> String {
+fn format_csv_value(value: &Value) -> String {
     match value {
-        Value::Null => "NULL".to_string(),
-        other => value_to_csv_text(other),
+        Value::Null => String::new(),
+        other => escape_csv(&value_to_csv_text(other)),
     }
 }
 
-/// Format query-result rows as CSV text without a header row, using the
-/// query-result NULL semantics (NULL → "NULL"). Used by the streaming
-/// query-result export for batches after the first.
-pub fn format_query_result_csv_rows(rows: &[Vec<Value>]) -> String {
+pub(crate) fn escape_tsv(value: &str) -> String {
+    if value.contains('\t') || value.contains('\n') || value.contains('\r') || value.contains('"') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+pub(crate) fn format_tsv_rows(rows: &[Vec<Value>]) -> String {
     rows.iter()
-        .map(|row| {
-            row.iter().map(|cell| escape_csv(&value_to_query_result_csv_text(cell))).collect::<Vec<_>>().join(",")
-        })
+        .map(|row| row.iter().map(|cell| escape_tsv(&value_to_csv_text(cell))).collect::<Vec<_>>().join("\t"))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn format_csv_with_value_formatter(
-    columns: &[String],
-    rows: &[Vec<Value>],
-    value_formatter: fn(&Value) -> String,
-) -> String {
+pub(crate) fn format_tsv(columns: &[String], rows: &[Vec<Value>]) -> String {
+    let header = columns.iter().map(|col| escape_tsv(col)).collect::<Vec<_>>().join("\t");
+    let body = format_tsv_rows(rows);
+    format!("{header}\n{body}")
+}
+
+/// Format query-result rows as CSV text without a header row. Database NULLs
+/// use the same empty-cell representation as table-data exports. Used by the
+/// streaming query-result export for batches after the first.
+pub fn format_query_result_csv_rows(rows: &[Vec<Value>]) -> String {
+    rows.iter().map(|row| row.iter().map(format_csv_value).collect::<Vec<_>>().join(",")).collect::<Vec<_>>().join("\n")
+}
+
+fn format_csv_with_value_formatter(columns: &[String], rows: &[Vec<Value>]) -> String {
     let header = columns.iter().map(|col| escape_csv(col)).collect::<Vec<_>>().join(",");
     let body = rows
         .iter()
-        .map(|row| row.iter().map(|cell| escape_csv(&value_formatter(cell))).collect::<Vec<_>>().join(","))
+        .map(|row| row.iter().map(format_csv_value).collect::<Vec<_>>().join(","))
         .collect::<Vec<_>>()
         .join("\n");
     format!("{header}\n{body}")
 }
 
 pub fn format_csv(columns: &[String], rows: &[Vec<Value>]) -> String {
-    format_csv_with_value_formatter(columns, rows, value_to_csv_text)
+    format_csv_with_value_formatter(columns, rows)
 }
 
 pub fn format_query_result_csv(columns: &[String], rows: &[Vec<Value>]) -> String {
-    format_csv_with_value_formatter(columns, rows, value_to_query_result_csv_text)
+    format_csv(columns, rows)
 }
 
-fn write_csv_row(writer: &mut impl Write, values: impl IntoIterator<Item = String>) -> Result<(), String> {
+fn write_csv_text_row(writer: &mut impl Write, values: impl IntoIterator<Item = String>) -> Result<(), String> {
     let mut first = true;
     for value in values {
         if !first {
@@ -90,6 +102,18 @@ fn write_csv_row(writer: &mut impl Write, values: impl IntoIterator<Item = Strin
         }
         first = false;
         writer.write_all(escape_csv(&value).as_bytes()).map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
+fn write_csv_value_row(writer: &mut impl Write, values: impl IntoIterator<Item = Value>) -> Result<(), String> {
+    let mut first = true;
+    for value in values {
+        if !first {
+            writer.write_all(b",").map_err(|err| err.to_string())?;
+        }
+        first = false;
+        writer.write_all(format_csv_value(&value).as_bytes()).map_err(|err| err.to_string())?;
     }
     Ok(())
 }
@@ -147,7 +171,7 @@ pub async fn export_table_data_csv_core(state: &AppState, options: TableCsvExpor
         .await?;
 
         if !wrote_header {
-            write_csv_row(&mut writer, result.columns)?;
+            write_csv_text_row(&mut writer, result.columns)?;
             wrote_header = true;
         }
 
@@ -157,7 +181,7 @@ pub async fn export_table_data_csv_core(state: &AppState, options: TableCsvExpor
         }
         for row in result.rows {
             writer.write_all(b"\n").map_err(|err| err.to_string())?;
-            write_csv_row(&mut writer, row.iter().map(value_to_csv_text))?;
+            write_csv_value_row(&mut writer, row)?;
         }
 
         rows_exported += fetched as u64;
@@ -176,7 +200,7 @@ pub async fn export_table_data_csv_core(state: &AppState, options: TableCsvExpor
 
 #[cfg(test)]
 mod tests {
-    use super::{format_csv, format_query_result_csv};
+    use super::{format_csv, format_query_result_csv, format_query_result_csv_rows, format_tsv};
     use serde_json::json;
 
     #[test]
@@ -188,13 +212,28 @@ mod tests {
     #[test]
     fn formats_null_as_empty_cell() {
         let out = format_csv(&["id".to_string(), "note".to_string()], &[vec![json!(1), Value::Null]]);
-        assert_eq!(out, "\"id\",\"note\"\n\"1\",\"\"");
+        assert_eq!(out, "\"id\",\"note\"\n\"1\",");
     }
 
     #[test]
-    fn formats_query_result_null_as_null_text() {
+    fn formats_query_result_null_as_empty_cell() {
         let out = format_query_result_csv(&["id".to_string(), "note".to_string()], &[vec![json!(1), Value::Null]]);
-        assert_eq!(out, "\"id\",\"note\"\n\"1\",\"NULL\"");
+        assert_eq!(out, "\"id\",\"note\"\n\"1\",");
+    }
+
+    #[test]
+    fn formats_streamed_query_result_null_as_empty_cell_and_preserves_literal_null() {
+        let out = format_query_result_csv_rows(&[vec![Value::Null, json!("NULL"), json!("")]]);
+        assert_eq!(out, ",\"NULL\",\"\"");
+    }
+
+    #[test]
+    fn formats_tsv_with_empty_null_and_escaped_special_values() {
+        let out = format_tsv(
+            &["id".to_string(), "note".to_string()],
+            &[vec![json!(1), Value::Null], vec![json!(2), json!("line1\n\"line2\"")]],
+        );
+        assert_eq!(out, "id\tnote\n1\t\n2\t\"line1\n\"\"line2\"\"\"");
     }
 
     use serde_json::Value;

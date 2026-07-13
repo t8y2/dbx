@@ -372,6 +372,13 @@ COMMENT = '测试';`;
     expect(rangeSqlTexts(executableStatementRanges(sql))).toEqual(["CREATE TABLE users (id int)", "COMMENT ON TABLE users IS 'Users'"]);
   });
 
+  it("keeps a line-start comment column inside a select projection", () => {
+    const sql = "SELECT\n  id,\n  comment,\n  created_at\nFROM project_info\nWHERE deleted = 0;";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "comment"))?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql))).toEqual([sql.slice(0, -1)]);
+  });
+
   it("keeps MySQL ALTER TABLE drop column clauses with the statement", () => {
     const sql = "ALTER TABLE t\n  DROP COLUMN a,\n  DROP COLUMN b;";
 

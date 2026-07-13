@@ -82,7 +82,51 @@ public interface DatabaseAgent {
             foreignKeys = Collections.emptyList();
         }
 
-        return buildTableDdl(schema, table, getColumns(schema, table), indexes, foreignKeys);
+        String tableComment = null;
+        try {
+            tableComment = getTableComment(schema, table);
+        } catch (RuntimeException e) {
+            // Table comment is optional; DDL generation should still succeed without it.
+        }
+
+        return DdlBuilder.buildTableDdl(schema, table, getColumns(schema, table), indexes, foreignKeys, Collections.emptyList(), false, false, tableComment);
+    }
+
+    /**
+     * Returns the comment/description for a table, or null if not available.
+     * Default implementation looks up the comment from listTables results.
+     * Subclasses can override for more efficient queries.
+     */
+    default String getTableComment(String schema, String table) {
+        try {
+            String caseInsensitiveComment = null;
+            int caseInsensitiveMatches = 0;
+            for (TableInfo info : listTables(schema)) {
+                if (!info.getName().equalsIgnoreCase(table)) {
+                    continue;
+                }
+                if (info.getName().equals(table)) {
+                    return nonBlankComment(info.getComment());
+                }
+                caseInsensitiveMatches++;
+                caseInsensitiveComment = nonBlankComment(info.getComment());
+            }
+            // Case-insensitive databases may normalize metadata names, but quoted
+            // mixed-case objects must never borrow a sibling table's comment.
+            if (caseInsensitiveMatches == 1) {
+                return caseInsensitiveComment;
+            }
+        } catch (RuntimeException e) {
+            // Ignore; table comment is optional.
+        }
+        return null;
+    }
+
+    static String nonBlankComment(String comment) {
+        if (comment != null && !comment.trim().isEmpty()) {
+            return comment;
+        }
+        return null;
     }
 
     List<IndexInfo> listIndexes(String schema, String table);

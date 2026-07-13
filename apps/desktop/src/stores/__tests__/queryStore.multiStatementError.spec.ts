@@ -83,6 +83,22 @@ describe("queryStore multi-statement errors", () => {
     expect(tab.result?.columns).toEqual(["Error"]);
   });
 
+  it("preserves the selected statement's absolute editor range", async () => {
+    mocks.executeMulti.mockResolvedValue([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+    const selectedSql = "SELECT * FROM users";
+
+    await store.executeTabSql(tabId, selectedSql, { sourceOffset: 21 });
+
+    expect(store.tabs.find((item) => item.id === tabId)?.result).toMatchObject({
+      sourceStatement: selectedSql,
+      sourceFrom: 21,
+      sourceTo: 40,
+    });
+  });
+
   it("does not promote an unmarked Error alias without type metadata as a batch failure", async () => {
     mocks.executeMulti.mockResolvedValue([
       { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 },

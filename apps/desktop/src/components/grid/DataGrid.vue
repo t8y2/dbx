@@ -159,6 +159,7 @@ import { temporalCellEditorConfig, type TemporalCellEditorConfig } from "@/lib/d
 import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowShortcut, isFocusSearchShortcut, isModRShortcut, isSaveShortcut, isToggleTransposeShortcut } from "@/lib/editor/keyboardShortcuts";
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
 import { canGoNextDataGridPage } from "@/lib/dataGrid/dataGridPagination";
+import { dataGridCountQueryOptions } from "@/lib/dataGrid/dataGridQueryOptions";
 import { dataGridBottomScrollTop, dataGridScrollPosition, isDataGridAtScrollBottom, isDataGridNearScrollBottom, shouldCheckInfiniteScrollAfterScroll, type DataGridScrollPosition } from "@/lib/dataGrid/dataGridInfiniteScroll";
 import { CANVAS_DATA_GRID_ROW_HEIGHT, drawCanvasDataGrid } from "@/lib/dataGrid/canvasDataGridRenderer";
 import { dataGridSaveActionMode, dataGridSaveToolbarState } from "@/lib/dataGrid/dataGridSaveUi";
@@ -279,6 +280,7 @@ interface DataGridProps {
   sortMode?: DataGridSortMode;
   tableMeta?: {
     catalog?: string;
+    database?: string;
     schema?: string;
     tableName: string;
     tableType?: string;
@@ -295,7 +297,7 @@ interface DataGridProps {
   cacheKey?: string;
   onExecuteSql?: (sql: string) => Promise<void>;
   fullExportResult?: (onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => Promise<QueryResult | undefined>;
-  queryResultExportRequest?: (options: { exportId: string; filePath: string; format: "csv" | "xlsx" }) => Promise<api.QueryResultExportRequest | undefined>;
+  queryResultExportRequest?: (options: { exportId: string; filePath: string; format: "csv" | "xlsx" | "txt" }) => Promise<api.QueryResultExportRequest | undefined>;
   allExportResults?: Array<{ sheetName: string; result: QueryResult }>;
   exportFileBaseName?: string;
   customSaveHandler?: import("@/composables/useDataGridEditor").CustomSaveHandler;
@@ -1419,6 +1421,7 @@ async function loadServerFilterValues(columnIndex: number, searchValue: string) 
     const sql = await buildDataGridColumnDistinctValuesSql({
       databaseType: resolvedDatabaseType.value,
       catalog: tableMeta.catalog,
+      database: tableMeta.database,
       schema: tableMeta.schema,
       tableName: tableMeta.tableName,
       columnName,
@@ -3940,7 +3943,7 @@ async function lastPage() {
   const sql = countTarget?.sql;
   if (!sql) return;
   try {
-    const result = await api.executeQuery(props.connectionId, props.executionDatabase ?? props.database ?? "", sql, countTarget.schema);
+    const result = await api.executeQuery(props.connectionId, props.executionDatabase ?? props.database ?? "", sql, countTarget.schema, undefined, dataGridCountQueryOptions(connectionStore.getConfig(props.connectionId)));
     const total = Number(result.rows?.[0]?.[0] ?? 0);
     if (total <= 0) return;
     const lastPageNum = Math.ceil(total / pageSize.value);
@@ -3960,6 +3963,7 @@ async function buildCurrentCountTarget(): Promise<{ sql: string; schema?: string
       databaseType: props.databaseType,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
       catalog: props.tableMeta.catalog,
+      database: props.tableMeta.database,
       schema: props.tableMeta.schema,
       tableName: props.tableMeta.tableName,
       whereInput: currentWhereInput(),
@@ -3975,7 +3979,7 @@ async function calculateTotalRowCount() {
   try {
     const countTarget = await buildCurrentCountTarget();
     if (!countTarget?.sql) return;
-    const result = await api.executeQuery(props.connectionId, props.executionDatabase ?? props.database ?? "", countTarget.sql, countTarget.schema);
+    const result = await api.executeQuery(props.connectionId, props.executionDatabase ?? props.database ?? "", countTarget.sql, countTarget.schema, undefined, dataGridCountQueryOptions(connectionStore.getConfig(props.connectionId)));
     const total = Number(result.rows?.[0]?.[0] ?? 0);
     if (Number.isFinite(total) && total >= 0) {
       manualTotalRowCount.value = total;
@@ -4869,6 +4873,12 @@ function exportSelectedRowsSql() {
   return exportSql(rowIds);
 }
 
+function exportSelectedRowsTxt() {
+  const rowIds = affectedRowIds();
+  if (rowIds.length === 0) return;
+  return exportTxt(rowIds);
+}
+
 function executePreviewAction(action: { execute: (ctx: any) => any }) {
   const config = action.execute({
     result: props.result,
@@ -5615,6 +5625,7 @@ async function applyOrderBySearch() {
       databaseType: resolvedDatabaseType.value,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
       catalog: tableMeta.catalog,
+      database: tableMeta.database,
       schema: tableMeta.schema,
       tableName: tableMeta.tableName,
       tableType: tableMeta.tableType,
@@ -5648,6 +5659,7 @@ async function applyWhereFilter() {
       databaseType: resolvedDatabaseType.value,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
       catalog: tableMeta.catalog,
+      database: tableMeta.database,
       schema: tableMeta.schema,
       tableName: tableMeta.tableName,
       tableType: tableMeta.tableType,
@@ -6545,6 +6557,8 @@ const {
   exportAllResultsXlsx,
   exportSql,
   exportCurrentPageSql,
+  exportTxt,
+  exportCurrentPageTxt,
   copySql,
 } = useDataGridExport({
   columns: visibleColumns,
@@ -6600,11 +6614,21 @@ const exportMenuItems = computed(() => {
         { value: "selected-json", label: t("grid.exportSelectedRowsJson") },
         { value: "selected-markdown", label: t("grid.exportSelectedRowsMarkdown") },
         { value: "selected-sql", label: t("grid.exportSelectedRowsSql") },
+        { value: "selected-txt", label: t("grid.exportSelectedRowsTxt") },
       ]
     : [];
 
   if (!hasFullResultExport) {
-    return [{ value: "csv", label: t("grid.exportCsv") }, { value: "xlsx", label: t("grid.exportXlsx") }, { value: "json", label: t("grid.exportJson") }, { value: "markdown", label: t("grid.exportMarkdown") }, { value: "sql", label: t("grid.exportSql") }, ...allResultItems, ...selectedItems];
+    return [
+      { value: "csv", label: t("grid.exportCsv") },
+      { value: "xlsx", label: t("grid.exportXlsx") },
+      { value: "json", label: t("grid.exportJson") },
+      { value: "markdown", label: t("grid.exportMarkdown") },
+      { value: "sql", label: t("grid.exportSql") },
+      { value: "txt", label: t("grid.exportTxt") },
+      ...allResultItems,
+      ...selectedItems,
+    ];
   }
 
   return [
@@ -6613,11 +6637,13 @@ const exportMenuItems = computed(() => {
     { value: "page-json", label: t("grid.exportCurrentPageJson") },
     { value: "page-markdown", label: t("grid.exportCurrentPageMarkdown") },
     { value: "page-sql", label: t("grid.exportCurrentPageSql") },
+    { value: "page-txt", label: t("grid.exportCurrentPageTxt") },
     { value: "csv", label: t("grid.exportCurrentResultCsv"), separatorBefore: true },
     { value: "xlsx", label: t("grid.exportCurrentResultXlsx") },
     { value: "json", label: t("grid.exportCurrentResultJson") },
     { value: "markdown", label: t("grid.exportCurrentResultMarkdown") },
     { value: "sql", label: t("grid.exportCurrentResultSql") },
+    { value: "txt", label: t("grid.exportCurrentResultTxt") },
     ...allResultItems,
     ...selectedItems,
   ];
@@ -6634,17 +6660,20 @@ function selectExportMenuItem(value: string) {
     "page-json": exportCurrentPageJson,
     "page-markdown": exportCurrentPageMarkdown,
     "page-sql": exportCurrentPageSql,
+    "page-txt": exportCurrentPageTxt,
     csv: exportCsv,
     xlsx: exportXlsx,
     "all-results-xlsx": exportAllResultsXlsx,
     json: exportJson,
     markdown: exportMarkdown,
     sql: exportSql,
+    txt: exportTxt,
     "selected-csv": exportSelectedRowsCsv,
     "selected-xlsx": exportSelectedRowsXlsx,
     "selected-json": exportSelectedRowsJson,
     "selected-markdown": exportSelectedRowsMarkdown,
     "selected-sql": exportSelectedRowsSql,
+    "selected-txt": exportSelectedRowsTxt,
   };
   actions[value]?.();
 }
@@ -8669,6 +8698,7 @@ defineExpose({
   exportJson,
   exportSql,
   exportXlsx,
+  exportTxt,
 });
 
 // ---- CustomContextMenu ----
@@ -8781,6 +8811,7 @@ function exportSubmenu(): ContextMenuItem {
     { label: t("grid.exportJson"), action: exportJson },
     { label: t("grid.exportMarkdown"), action: exportMarkdown },
     { label: t("grid.exportSql"), action: exportSql },
+    { label: t("grid.exportTxt"), action: exportTxt },
   ];
   if (isMultiRow.value) {
     items.push(
@@ -8790,6 +8821,7 @@ function exportSubmenu(): ContextMenuItem {
       { label: t("grid.exportSelectedRowsJson"), action: exportSelectedRowsJson },
       { label: t("grid.exportSelectedRowsMarkdown"), action: exportSelectedRowsMarkdown },
       { label: t("grid.exportSelectedRowsSql"), action: exportSelectedRowsSql },
+      { label: t("grid.exportSelectedRowsTxt"), action: exportSelectedRowsTxt },
     );
   }
   return { label: t("grid.export"), icon: Upload, children: items };

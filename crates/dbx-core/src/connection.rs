@@ -685,13 +685,13 @@ impl AppState {
         port: u16,
         connect_timeout: Duration,
     ) -> Result<String, String> {
-        match db::sqlserver::connect(
+        match db::sqlserver::connect_with_port_explicit(
             host,
             port,
+            config.sqlserver_port_explicit(),
             &config.username,
             &config.password,
             config.database.as_deref(),
-            config.url_params.as_deref(),
             connect_timeout,
         )
         .await
@@ -730,13 +730,13 @@ impl AppState {
         port: u16,
         connect_timeout: Duration,
     ) -> Result<PoolKind, String> {
-        match db::sqlserver::connect(
+        match db::sqlserver::connect_with_port_explicit(
             host,
             port,
+            config.sqlserver_port_explicit(),
             &config.username,
             &config.password,
             config.database.as_deref(),
-            config.url_params.as_deref(),
             connect_timeout,
         )
         .await
@@ -3480,6 +3480,17 @@ mod tests {
         assert_eq!(params["username"], "informix");
         assert_eq!(params["password"], "in4mix");
         assert_eq!(params["url_params"], "INFORMIXSERVER=informix;CLIENT_LOCALE=en_US.utf8");
+    }
+
+    #[test]
+    fn agent_connect_params_include_sqlserver_explicit_port_state() {
+        let mut config = mysql_config(Some("master"));
+        config.db_type = DatabaseType::SqlServer;
+        config.external_config = Some(serde_json::json!({ "portExplicit": true }));
+
+        let params = agent_connect_params(&config, r"db.example.com\SQLEXPRESS", 1433, "master");
+
+        assert_eq!(params["port_explicit"], true);
     }
 
     #[test]

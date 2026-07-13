@@ -16,7 +16,7 @@ public final class DdlBuilder {
         List<IndexInfo> indexes,
         List<ForeignKeyInfo> foreignKeys
     ) {
-        return buildTableDdl(schema, table, columns, indexes, foreignKeys, false, false);
+        return buildTableDdl(schema, table, columns, indexes, foreignKeys, Collections.emptyList(), false, false, null);
     }
 
     public static String buildTableDdl(
@@ -27,7 +27,7 @@ public final class DdlBuilder {
         List<ForeignKeyInfo> foreignKeys,
         boolean useBacktick
     ) {
-        return buildTableDdl(schema, table, columns, indexes, foreignKeys, useBacktick, false);
+        return buildTableDdl(schema, table, columns, indexes, foreignKeys, Collections.emptyList(), useBacktick, false, null);
     }
 
     public static String buildTableDdl(
@@ -47,7 +47,8 @@ public final class DdlBuilder {
             foreignKeys,
             Collections.emptyList(),
             useBacktick,
-            includeColumnComments
+            includeColumnComments,
+            null
         );
     }
 
@@ -60,6 +61,20 @@ public final class DdlBuilder {
         List<CheckConstraintInfo> checkConstraints,
         boolean useBacktick,
         boolean includeColumnComments
+    ) {
+        return buildTableDdl(schema, table, columns, indexes, foreignKeys, checkConstraints, useBacktick, includeColumnComments, null);
+    }
+
+    public static String buildTableDdl(
+        String schema,
+        String table,
+        List<ColumnInfo> columns,
+        List<IndexInfo> indexes,
+        List<ForeignKeyInfo> foreignKeys,
+        List<CheckConstraintInfo> checkConstraints,
+        boolean useBacktick,
+        boolean includeColumnComments,
+        String tableComment
     ) {
         String tableRef = qualifiedName(schema, table, useBacktick);
         List<String> columnLines = new ArrayList<>();
@@ -113,6 +128,14 @@ public final class DdlBuilder {
         ddl.append(" (\n");
         ddl.append(join(columnLines, ",\n"));
         ddl.append("\n);\n");
+
+        if (notBlank(tableComment)) {
+            ddl.append("\nCOMMENT ON TABLE ");
+            ddl.append(tableRef);
+            ddl.append(" IS '");
+            ddl.append(sqlStringBody(tableComment));
+            ddl.append("';");
+        }
 
         if (includeColumnComments) {
             for (ColumnInfo column : columns) {

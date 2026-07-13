@@ -79,29 +79,34 @@ export function useSqlExecution(deps: {
   const sqlParameterNames = ref<SqlParameterDescriptor[]>([]);
   const sqlParameterDatabaseType = ref<DatabaseType | undefined>();
   const sqlParameterEnabledSyntaxes = ref<SqlParameterSyntax[]>([]);
+  const pendingSourceOffset = ref<number | undefined>();
 
-  async function resolvedExecutableSql(source?: SqlExecutionOverride): Promise<string> {
+  async function resolvedExecutableSql(source?: SqlExecutionOverride): Promise<{ sql: string; sourceOffset?: number }> {
     const atSetEnabled = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, deps.activeConnection.value?.db_type).atSet;
     const expand = (sql: string) => (atSetEnabled ? expandSqlVariables(sql).sql : sql);
-    if (typeof source === "string") return expand(source);
-    if (deps.resolveExecutableSql) return expand(await deps.resolveExecutableSql(source));
-    if (isSqlExecutionSnapshot(source)) return expand(resolveExecutableSql(source.fullSql, source.selectedSql, { cursorPos: source.cursorPos }));
-    return expand(deps.executableSql.value);
+    if (typeof source === "string") return { sql: expand(source) };
+
+    const resolved = deps.resolveExecutableSql ? await deps.resolveExecutableSql(source) : isSqlExecutionSnapshot(source) ? resolveExecutableSql(source.fullSql, source.selectedSql, { cursorPos: source.cursorPos }) : deps.executableSql.value;
+    const sql = expand(resolved);
+    if (!isSqlExecutionSnapshot(source) || !source.selectedSql.trim() || sql !== resolved) return { sql };
+
+    const leadingWhitespace = source.selectedSql.length - source.selectedSql.trimStart().length;
+    return { sql, sourceOffset: source.selectionFrom + leadingWhitespace };
   }
 
   async function tryExecute(sqlOverride?: SqlExecutionOverride) {
     const tab = deps.activeTab.value;
-    const sql = await resolvedExecutableSql(sqlOverride);
+    const { sql, sourceOffset } = await resolvedExecutableSql(sqlOverride);
     if (!tab || !sql.trim()) return;
     if (requiresDatabaseSelection(tab, deps.activeConnection.value, sql)) {
       deps.onMissingDatabase?.();
       return;
     }
-    if (supportsSqlTemplateParameters(deps.activeConnection.value) && prepareSqlParameterDialog(sql)) return;
-    await continueExecute(sql);
+    if (supportsSqlTemplateParameters(deps.activeConnection.value) && prepareSqlParameterDialog(sql, sourceOffset)) return;
+    await continueExecute(sql, sourceOffset);
   }
 
-  async function continueExecute(sql: string) {
+  async function continueExecute(sql: string, sourceOffset?: number) {
     // Redis: block dangerous commands when toggle is on (check each line for multi-line input)
     if (deps.activeConnection.value?.db_type === "redis" && deps.blockDangerousRedisCommands?.value !== false) {
       const commands = sql
@@ -126,20 +131,21 @@ export function useSqlExecution(deps: {
         productionDatabases: productionAssessment.databases,
         source: t("production.sourceSqlEditor"),
       });
-      if (confirmed) await doExecute(sql);
+      if (confirmed) await doExecute(sql, sourceOffset);
       return;
     }
     if (isDangerousSql(sql) && settingsStore.editorSettings.confirmDangerousSqlExecution) {
       dangerSql.value = sql;
       pendingDangerSql.value = sql;
+      pendingSourceOffset.value = sourceOffset;
       suppressDangerConfirm.value = false;
       showDangerDialog.value = true;
     } else {
-      await doExecute(sql);
+      await doExecute(sql, sourceOffset);
     }
   }
 
-  function prepareSqlParameterDialog(sql: string): boolean {
+  function prepareSqlParameterDialog(sql: string, sourceOffset?: number): boolean {
     const databaseType = deps.activeConnection.value?.db_type;
     const toggles = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, databaseType);
     const enabledSyntaxes = enabledSqlParameterSyntaxes(toggles);
@@ -149,12 +155,13 @@ export function useSqlExecution(deps: {
     sqlParameterNames.value = parameters;
     sqlParameterDatabaseType.value = databaseType;
     sqlParameterEnabledSyntaxes.value = enabledSyntaxes;
+    pendingSourceOffset.value = sourceOffset;
     showSqlParameterDialog.value = true;
     return true;
   }
 
-  async function doExecute(sql?: string) {
-    sql ??= await resolvedExecutableSql();
+  async function doExecute(sql?: string, sourceOffset?: number) {
+    if (sql === undefined) ({ sql, sourceOffset } = await resolvedExecutableSql());
     const tab = deps.activeTab.value;
     if (!tab || !sql.trim()) return;
     const executionConnection = connectionStore.getConfig(tab.connectionId) ?? deps.activeConnection.value;
@@ -167,7 +174,10 @@ export function useSqlExecution(deps: {
     const connName = executionConnection?.name || "";
     const start = Date.now();
     const isRedis = executionDatabaseType === "redis";
-    await queryStore.executeCurrentSql(sql, isRedis ? { skipRedisSafetyCheck: deps.blockDangerousRedisCommands?.value === false } : undefined);
+    await queryStore.executeCurrentSql(sql, {
+      ...(isRedis ? { skipRedisSafetyCheck: deps.blockDangerousRedisCommands?.value === false } : {}),
+      ...(sourceOffset !== undefined ? { sourceOffset } : {}),
+    });
     if (tab.result && !tab.result.columns.length && !tab.results?.some((result) => result.columns.length > 0)) {
       deps.activeOutputView.value = "summary";
     }
@@ -211,7 +221,7 @@ export function useSqlExecution(deps: {
 
   async function tryExplain(sqlOverride?: SqlExecutionOverride) {
     const tab = deps.activeTab.value;
-    const sql = await resolvedExecutableSql(sqlOverride);
+    const { sql } = await resolvedExecutableSql(sqlOverride);
     if (!tab || !sql.trim()) {
       toast(t("explain.emptySql"));
       return;
@@ -229,13 +239,14 @@ export function useSqlExecution(deps: {
   }
 
   async function onDangerConfirm() {
-    const sql = pendingDangerSql.value || (await resolvedExecutableSql());
+    const resolved = pendingDangerSql.value ? { sql: pendingDangerSql.value, sourceOffset: pendingSourceOffset.value } : await resolvedExecutableSql();
     if (suppressDangerConfirm.value) {
       settingsStore.updateEditorSettings({ confirmDangerousSqlExecution: false });
     }
     suppressDangerConfirm.value = false;
     pendingDangerSql.value = "";
-    await doExecute(sql);
+    pendingSourceOffset.value = undefined;
+    await doExecute(resolved.sql, resolved.sourceOffset);
   }
 
   async function onSqlParametersConfirm(sql: string) {
@@ -244,7 +255,9 @@ export function useSqlExecution(deps: {
     sqlParameterNames.value = [];
     sqlParameterDatabaseType.value = undefined;
     sqlParameterEnabledSyntaxes.value = [];
-    await continueExecute(sql);
+    const sourceOffset = pendingSourceOffset.value;
+    pendingSourceOffset.value = undefined;
+    await continueExecute(sql, sourceOffset);
   }
 
   watch(showSqlParameterDialog, (open) => {
@@ -253,6 +266,7 @@ export function useSqlExecution(deps: {
     sqlParameterNames.value = [];
     sqlParameterDatabaseType.value = undefined;
     sqlParameterEnabledSyntaxes.value = [];
+    pendingSourceOffset.value = undefined;
   });
 
   return {

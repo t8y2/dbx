@@ -1109,10 +1109,13 @@ function executableSqlFromView(currentView: EditorViewType): string {
 }
 
 function sqlExecutionSnapshotFromView(currentView: EditorViewType): SqlExecutionSnapshot {
+  const selection = currentView.state.selection.main;
   return {
     fullSql: currentView.state.doc.toString(),
     selectedSql: selectedSqlFromView(currentView),
-    cursorPos: currentView.state.selection.main.head,
+    cursorPos: selection.head,
+    selectionFrom: selection.from,
+    selectionTo: selection.to,
   };
 }
 

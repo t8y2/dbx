@@ -33,3 +33,19 @@ test("sanitizes invalid sheet names", () => {
 
   assert.match(text, /name="bad name with chars and-a-very-"/);
 });
+
+test("writes MySQL 5.7 numeric strings as numeric cells", () => {
+  const workbook = buildXlsxWorkbook({
+    sheetName: "MySQL 5.7",
+    columns: ["nullable_int", "float_value", "double_value", "decimal_value", "bigint_high_precision"],
+    columnTypes: ["int(11)", "float", "double", "decimal(18,6)", "bigint(20)"],
+    rows: [["42", "123.5", "987654.321", "2800.000000", "9007199254740992"]],
+  });
+  const text = new TextDecoder().decode(workbook);
+
+  assert.match(text, /<c r="A2"><v>42<\/v><\/c>/);
+  assert.match(text, /<c r="B2"><v>123\.5<\/v><\/c>/);
+  assert.match(text, /<c r="C2"><v>987654\.321<\/v><\/c>/);
+  assert.match(text, /<c r="D2"><v>2800\.000000<\/v><\/c>/);
+  assert.match(text, /<c r="E2" t="inlineStr"><is><t>9007199254740992<\/t><\/is><\/c>/);
+});

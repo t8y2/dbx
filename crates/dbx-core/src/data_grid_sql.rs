@@ -32,6 +32,10 @@ const DATA_GRID_COLUMN_DISTINCT_VALUES_MAX_LIMIT: usize = 1000;
 pub struct DataGridTableMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog: Option<String>,
+    /// Doris / StarRocks multi-catalog: the database under the external
+    /// catalog, used as the middle segment of the 3-part qualified name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
     pub table_name: String,
@@ -196,6 +200,8 @@ pub struct DataGridColumnDistinctValuesSqlOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
     pub table_name: String,
     pub column_name: String,
@@ -220,6 +226,11 @@ pub struct DataGridCountSqlOptions {
     pub identifier_quote: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog: Option<String>,
+    /// Doris / StarRocks multi-catalog: the database under the external
+    /// catalog, used as the middle segment of the 3-part qualified name when
+    /// `schema` is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
     pub table_name: String,
@@ -301,6 +312,7 @@ pub fn build_data_grid_copy_update_statements(options: DataGridCopyUpdateStateme
         options.database_type,
         options.table_meta.catalog.as_deref(),
         options.table_meta.schema.as_deref(),
+        options.table_meta.database.as_deref(),
         &options.table_meta.table_name,
     );
     let mut statements = Vec::new();
@@ -383,6 +395,7 @@ pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatemen
                 options.database_type,
                 meta.catalog.as_deref(),
                 meta.schema.as_deref(),
+                meta.database.as_deref(),
                 &meta.table_name,
             )
         },
@@ -676,6 +689,7 @@ pub fn build_data_grid_column_distinct_values_sql(options: DataGridColumnDistinc
         options.database_type,
         options.catalog.as_deref(),
         options.schema.as_deref(),
+        options.database.as_deref(),
         &options.table_name,
     );
     let column = column_filter_ref(options.database_type, &options.column_name);
@@ -735,6 +749,7 @@ pub fn build_data_grid_count_sql(options: DataGridCountSqlOptions) -> String {
             options.database_type,
             options.catalog.as_deref(),
             options.schema.as_deref(),
+            options.database.as_deref(),
             &options.table_name,
         )
     };
@@ -953,6 +968,7 @@ fn build_data_grid_save_statements(options: &DataGridSaveStatementOptions) -> Ve
         options.database_type,
         options.table_meta.catalog.as_deref(),
         options.table_meta.schema.as_deref(),
+        options.table_meta.database.as_deref(),
         &options.table_meta.table_name,
     );
     let mut statements = Vec::new();
@@ -2325,6 +2341,7 @@ mod tests {
             database_type: Some(DatabaseType::Postgres),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("public".to_string()),
                 table_name: "users".to_string(),
                 primary_keys: vec!["id".to_string()],
@@ -2346,6 +2363,7 @@ mod tests {
             database_type: Some(DatabaseType::Mysql),
             table_meta: Some(DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: None,
                 table_name: "users".to_string(),
                 primary_keys: vec!["id".to_string()],
@@ -2370,6 +2388,7 @@ mod tests {
             database_type: Some(DatabaseType::Mysql),
             table_meta: Some(DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: None,
                 table_name: "users".to_string(),
                 primary_keys: vec!["id".to_string()],
@@ -2395,6 +2414,7 @@ mod tests {
             database_type: Some(DatabaseType::Mysql),
             table_meta: Some(DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: None,
                 table_name: "users".to_string(),
                 primary_keys: vec!["id".to_string()],
@@ -2421,6 +2441,7 @@ mod tests {
             database_type: Some(DatabaseType::Oracle),
             table_meta: Some(DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("APP".to_string()),
                 table_name: "USERS".to_string(),
                 primary_keys: vec!["ID".to_string()],
@@ -2444,6 +2465,7 @@ mod tests {
     fn mysql_copy_statements_preserve_blob_hex_literals() {
         let table_meta = DataGridTableMeta {
             catalog: None,
+            database: None,
             schema: None,
             table_name: "reports".to_string(),
             primary_keys: vec!["id".to_string()],
@@ -2509,6 +2531,7 @@ mod tests {
             database_type: Some(DatabaseType::Postgres),
             table_meta: Some(DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("public".to_string()),
                 table_name: "articles".to_string(),
                 primary_keys: vec!["id".to_string()],
@@ -2946,6 +2969,7 @@ mod tests {
             build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
                 database_type: Some(DatabaseType::Postgres),
                 catalog: None,
+                database: None,
                 schema: Some("public".to_string()),
                 table_name: "users".to_string(),
                 column_name: "status".to_string(),
@@ -2961,6 +2985,7 @@ mod tests {
             build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
                 database_type: Some(DatabaseType::SqlServer),
                 catalog: None,
+                database: None,
                 schema: None,
                 table_name: "users".to_string(),
                 column_name: "status".to_string(),
@@ -2976,6 +3001,7 @@ mod tests {
             build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
                 database_type: Some(DatabaseType::SqlServer),
                 catalog: None,
+                database: None,
                 schema: None,
                 table_name: "users".to_string(),
                 column_name: "id".to_string(),
@@ -2991,6 +3017,7 @@ mod tests {
             build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
                 database_type: Some(DatabaseType::Oracle),
                 catalog: None,
+                database: None,
                 schema: Some("APP".to_string()),
                 table_name: "EVENTS".to_string(),
                 column_name: "KIND".to_string(),
@@ -3006,6 +3033,7 @@ mod tests {
             build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
                 database_type: Some(DatabaseType::Firebird),
                 catalog: None,
+                database: None,
                 schema: None,
                 table_name: "USERS".to_string(),
                 column_name: "STATUS".to_string(),
@@ -3022,6 +3050,7 @@ mod tests {
             build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
                 database_type: Some(DatabaseType::Doris),
                 catalog: Some("iceberg_catalog".to_string()),
+                database: None,
                 schema: Some("sales".to_string()),
                 table_name: "orders".to_string(),
                 column_name: "status".to_string(),
@@ -3037,6 +3066,7 @@ mod tests {
             build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
                 database_type: Some(DatabaseType::StarRocks),
                 catalog: Some("hive_catalog".to_string()),
+                database: None,
                 schema: None,
                 table_name: "orders".to_string(),
                 column_name: "status".to_string(),
@@ -3053,6 +3083,7 @@ mod tests {
             build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
                 database_type: Some(DatabaseType::Doris),
                 catalog: Some("internal".to_string()),
+                database: None,
                 schema: None,
                 table_name: "orders".to_string(),
                 column_name: "status".to_string(),
@@ -3073,6 +3104,7 @@ mod tests {
                 database_type: Some(DatabaseType::Postgres),
                 identifier_quote: None,
                 catalog: None,
+                database: None,
                 schema: Some("public".to_string()),
                 table_name: "users".to_string(),
                 where_input: Some("WHERE active = true;".to_string()),
@@ -3084,7 +3116,21 @@ mod tests {
                 database_type: Some(DatabaseType::Doris),
                 identifier_quote: None,
                 catalog: Some("iceberg_catalog".to_string()),
+                database: None,
                 schema: Some("sales".to_string()),
+                table_name: "orders".to_string(),
+                where_input: Some("WHERE active = true;".to_string()),
+            }),
+            "SELECT COUNT(*) AS cnt FROM `iceberg_catalog`.`sales`.`orders` WHERE (active = true)"
+        );
+        // catalog + database (schema absent) → 3-part `catalog.database.table`
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::Doris),
+                identifier_quote: None,
+                catalog: Some("iceberg_catalog".to_string()),
+                database: Some("sales".to_string()),
+                schema: None,
                 table_name: "orders".to_string(),
                 where_input: Some("WHERE active = true;".to_string()),
             }),
@@ -3095,6 +3141,7 @@ mod tests {
                 database_type: Some(DatabaseType::StarRocks),
                 identifier_quote: None,
                 catalog: Some("hive_catalog".to_string()),
+                database: None,
                 schema: None,
                 table_name: "orders".to_string(),
                 where_input: None,
@@ -3106,6 +3153,7 @@ mod tests {
                 database_type: Some(DatabaseType::Kingbase),
                 identifier_quote: Some("`".to_string()),
                 catalog: None,
+                database: None,
                 schema: Some("cqbq_ls".to_string()),
                 table_name: "ANALYZE".to_string(),
                 where_input: None,
@@ -3272,6 +3320,7 @@ mod tests {
             database_type: Some(DatabaseType::SqlServer),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("dbo".to_string()),
                 table_name: "users".to_string(),
                 primary_keys: vec!["Id".to_string()],
@@ -3295,6 +3344,7 @@ mod tests {
             database_type: Some(DatabaseType::Oracle),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("APP".to_string()),
                 table_name: "EVENTS".to_string(),
                 primary_keys: vec!["ID".to_string()],
@@ -3341,6 +3391,7 @@ mod tests {
             database_type: Some(DatabaseType::SqlServer),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("dbo".to_string()),
                 table_name: "flags".to_string(),
                 primary_keys: vec![],
@@ -3372,6 +3423,7 @@ mod tests {
             database_type: Some(DatabaseType::Mysql),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: None,
                 table_name: "employees".to_string(),
                 primary_keys: vec!["id".to_string()],
@@ -3399,6 +3451,7 @@ mod tests {
             database_type: Some(DatabaseType::Mysql),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: None,
                 table_name: "employees".to_string(),
                 primary_keys: vec!["id".to_string()],
@@ -3426,6 +3479,7 @@ mod tests {
             database_type: Some(DatabaseType::Mysql),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: None,
                 table_name: "employees".to_string(),
                 primary_keys: vec!["id".to_string()],
@@ -3453,6 +3507,7 @@ mod tests {
             database_type: Some(DatabaseType::SqlServer),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("game".to_string()),
                 table_name: "player states".to_string(),
                 primary_keys: vec!["role id".to_string()],
@@ -3482,6 +3537,7 @@ mod tests {
             database_type: Some(DatabaseType::Tdengine),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("dbx_tdengine_demo".to_string()),
                 table_name: "meters".to_string(),
                 primary_keys: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string()],
@@ -3512,6 +3568,7 @@ mod tests {
             database_type: Some(DatabaseType::Tdengine),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("dbx_tdengine_demo".to_string()),
                 table_name: "meters".to_string(),
                 primary_keys: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string(), "seq".to_string()],
@@ -3551,6 +3608,7 @@ mod tests {
             database_type: Some(DatabaseType::Tdengine),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("dbx_tdengine_demo".to_string()),
                 table_name: "codex_grid_accept_20260710".to_string(),
                 primary_keys: vec!["ts".to_string()],
@@ -3581,6 +3639,7 @@ mod tests {
             database_type: Some(DatabaseType::Tdengine),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("dbx_tdengine_demo".to_string()),
                 table_name: "codex_grid_update_verify_20260710".to_string(),
                 primary_keys: vec!["ts".to_string()],
@@ -3615,6 +3674,7 @@ mod tests {
             database_type: Some(DatabaseType::Tdengine),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("dbx_tdengine_demo".to_string()),
                 table_name: "device_a".to_string(),
                 primary_keys: vec!["ts".to_string(), "seq".to_string()],
@@ -3652,6 +3712,7 @@ mod tests {
             database_type: Some(DatabaseType::Tdengine),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("dbx_tdengine_demo".to_string()),
                 table_name: "issue_3121_devices".to_string(),
                 primary_keys: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string()],
@@ -3696,6 +3757,7 @@ mod tests {
             database_type: Some(DatabaseType::Tdengine),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("dbx_tdengine_demo".to_string()),
                 table_name: "meters".to_string(),
                 primary_keys: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string(), "seq".to_string()],
@@ -3738,6 +3800,7 @@ mod tests {
             database_type: Some(DatabaseType::Tdengine),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("dbx_tdengine_demo".to_string()),
                 table_name: "issue_3121_devices".to_string(),
                 primary_keys: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string()],
@@ -3765,6 +3828,7 @@ mod tests {
             database_type: Some(DatabaseType::Tdengine),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("dbx_tdengine_demo".to_string()),
                 table_name: "meters".to_string(),
                 primary_keys: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string()],
@@ -3791,6 +3855,7 @@ mod tests {
             database_type: Some(DatabaseType::Tdengine),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("dbx_tdengine_demo".to_string()),
                 table_name: "device_a".to_string(),
                 primary_keys: vec!["ts".to_string(), "seq".to_string()],
@@ -3822,6 +3887,7 @@ mod tests {
             database_type: Some(DatabaseType::Tdengine),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("dbx_tdengine_demo".to_string()),
                 table_name: "device_a".to_string(),
                 primary_keys: vec!["ts".to_string(), "seq".to_string()],
@@ -3850,6 +3916,7 @@ mod tests {
             database_type: Some(DatabaseType::Databend),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("default".to_string()),
                 table_name: "people".to_string(),
                 primary_keys: vec!["id".to_string()],
@@ -3881,6 +3948,7 @@ mod tests {
             database_type: Some(DatabaseType::ClickHouse),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("default".to_string()),
                 table_name: "people".to_string(),
                 primary_keys: vec!["id".to_string()],
@@ -3914,6 +3982,7 @@ mod tests {
             database_type: Some(DatabaseType::ClickHouse),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("default".to_string()),
                 table_name: "people".to_string(),
                 primary_keys: vec!["id".to_string()],
@@ -3945,6 +4014,7 @@ mod tests {
             database_type: Some(DatabaseType::ClickHouse),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("default".to_string()),
                 table_name: "events".to_string(),
                 primary_keys: vec!["id".to_string()],
@@ -3972,6 +4042,7 @@ mod tests {
             database_type: Some(DatabaseType::ClickHouse),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("default".to_string()),
                 table_name: "events".to_string(),
                 primary_keys: vec!["id".to_string()],
@@ -4005,6 +4076,7 @@ mod tests {
             database_type: Some(DatabaseType::ClickHouse),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("default".to_string()),
                 table_name: "people".to_string(),
                 primary_keys: vec!["id".to_string()],
@@ -4022,6 +4094,7 @@ mod tests {
     fn doris_external_catalog_save_and_copy_statements_use_catalog_scope() {
         let table_meta = DataGridTableMeta {
             catalog: Some("iceberg_catalog".to_string()),
+            database: None,
             schema: Some("sales".to_string()),
             table_name: "orders".to_string(),
             primary_keys: vec!["id".to_string()],
@@ -4082,6 +4155,7 @@ mod tests {
             database_type: Some(DatabaseType::Databend),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("default".to_string()),
                 table_name: "people".to_string(),
                 primary_keys: vec![],
@@ -4110,6 +4184,7 @@ mod tests {
             database_type: Some(DatabaseType::Oscar),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("SYSDBA".to_string()),
                 table_name: "PEOPLE".to_string(),
                 primary_keys: vec![],
@@ -4138,6 +4213,7 @@ mod tests {
             database_type: Some(DatabaseType::Postgres),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("public".to_string()),
                 table_name: "ihli_data".to_string(),
                 primary_keys: vec!["iso3".to_string(), "year".to_string()],
@@ -4171,6 +4247,7 @@ mod tests {
             database_type: Some(DatabaseType::Mysql),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: None,
                 table_name: "policies".to_string(),
                 primary_keys: vec!["id".to_string()],
@@ -4222,6 +4299,7 @@ mod tests {
             database_type: Some(DatabaseType::Mysql),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: None,
                 table_name: "school".to_string(),
                 primary_keys: vec!["id".to_string()],
@@ -4247,6 +4325,7 @@ mod tests {
             database_type: Some(DatabaseType::Mysql),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: None,
                 table_name: "parts".to_string(),
                 primary_keys: vec![],
@@ -4278,6 +4357,7 @@ mod tests {
             database_type: Some(DatabaseType::ManticoreSearch),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: None,
                 table_name: "rt_products".to_string(),
                 primary_keys: vec![],
@@ -4308,6 +4388,7 @@ mod tests {
             database_type: Some(DatabaseType::Postgres),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: None,
                 table_name: "education_data".to_string(),
                 primary_keys: vec!["country_code".to_string(), "year".to_string()],
@@ -4345,6 +4426,7 @@ mod tests {
             database_type: Some(DatabaseType::Sqlite),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: None,
                 table_name: "OnlineLogs".to_string(),
                 primary_keys: vec!["OnlineLogId".to_string()],
@@ -4371,6 +4453,7 @@ mod tests {
             database_type: Some(DatabaseType::Sqlite),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: None,
                 table_name: "OnlineLogs".to_string(),
                 primary_keys: vec!["OnlineLogId".to_string()],
@@ -4400,6 +4483,7 @@ mod tests {
             database_type: Some(DatabaseType::Mysql),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: Some("app".to_string()),
                 table_name: "users".to_string(),
                 primary_keys: vec!["id".to_string()],
@@ -4426,6 +4510,7 @@ mod tests {
             database_type: Some(DatabaseType::Sqlite),
             table_meta: DataGridTableMeta {
                 catalog: None,
+                database: None,
                 schema: None,
                 table_name: "OnlineLogs".to_string(),
                 primary_keys: vec!["OnlineLogId".to_string()],

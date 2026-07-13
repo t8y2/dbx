@@ -687,8 +687,14 @@ async function saveExternalSqlPath(tab: QueryTab, options: { closeAfterSave?: bo
 
 async function saveTabForCloseAll(tabId: string): Promise<boolean> {
   const tab = queryStore.tabs.find((t) => t.id === tabId);
-  if (!tab || !canSaveSqlTab(tab)) return true;
+  if (!tab) return true;
   queryStore.activeTabId = tabId;
+
+  if (tab.mode === "structure") {
+    await nextTick();
+    return (await contentAreaRef.value?.applyTableStructureChanges?.()) === true;
+  }
+  if (!canSaveSqlTab(tab)) return true;
 
   if (tab.objectSource) return saveActiveObjectSource(tab);
 
@@ -735,7 +741,18 @@ async function handleSaveAllPendingTabClose() {
 
 async function handleSaveTab(tabId: string) {
   const tab = queryStore.tabs.find((t) => t.id === tabId);
-  if (!tab || !canSaveSqlTab(tab)) return;
+  if (!tab) return;
+  if (tab.mode === "structure") {
+    queryStore.activeTabId = tabId;
+    await nextTick();
+    if (await contentAreaRef.value?.applyTableStructureChanges?.()) {
+      completePendingTabSave(tabId);
+    } else {
+      queryStore.resumeCloseConfirm();
+    }
+    return;
+  }
+  if (!canSaveSqlTab(tab)) return;
   const closeAfterSave = pendingAppCloseAction.value === null;
   pendingSaveShouldCloseTab.value = closeAfterSave;
   if (tab.objectSource) {
@@ -1100,7 +1117,7 @@ async function newQuery() {
     targetDatabase: target.database,
     databaseType: effectiveDatabaseTypeForConnection(conn),
   });
-  const tabId = queryStore.createTab(conn.id, target.database, undefined, "query", target.schema, initialSql);
+  const tabId = queryStore.createTab(conn.id, target.database, undefined, "query", target.schema, initialSql, target.catalog);
   try {
     await connectionStore.ensureConnected(target.connectionId);
     if (target.shouldRefreshDefaultDatabase) {

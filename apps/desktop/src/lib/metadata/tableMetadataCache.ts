@@ -13,6 +13,7 @@ export interface TableMetadata {
   tableName: string;
   tableType?: string;
   catalog?: string;
+  database?: string;
   columns: ColumnInfo[];
   indexes: IndexInfo[];
   primaryKeys: string[];
@@ -72,6 +73,7 @@ export function tableMetadataToDataTabMeta(metadata: TableMetadata, schema = met
     tableName: metadata.tableName,
     tableType: metadata.tableType,
     catalog: metadata.catalog,
+    database: metadata.database,
     columns: metadata.columns,
     primaryKeys: metadata.primaryKeys,
   };
@@ -104,6 +106,7 @@ export async function loadTableMetadata(request: TableMetadataRequest): Promise<
         tableName: request.tableName,
         tableType: request.tableType,
         catalog: request.catalog,
+        database: request.database,
         columns,
         indexes,
         primaryKeys,

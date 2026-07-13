@@ -49,6 +49,33 @@ describe("editable query hidden primary keys", () => {
     ).toBe('SELECT /*+ INDEX(t IDX_USERS_NAME) */ t.NAME, "ID" AS "__DBX_PK_0"\nFROM USERS t');
   });
 
+  it("supports an Oracle ROWID expression for keyless base tables", () => {
+    expect(
+      buildQueryWithHiddenPrimaryKeys({
+        sql: "SELECT * FROM APP.USERS t WHERE t.ACTIVE = 1",
+        databaseType: "oracle",
+        primaryKeys: ["__DBX_ROWID"],
+        existingResultNames: ["ID", "NAME"],
+        sourceExpressions: { __DBX_ROWID: "ROWIDTOCHAR(ROWID)" },
+      }),
+    ).toEqual({
+      sql: 'SELECT *, ROWIDTOCHAR(ROWID) AS "__DBX_PK_0" FROM APP.USERS t WHERE t.ACTIVE = 1',
+      projections: [{ sourceName: "__DBX_ROWID", alias: "__DBX_PK_0" }],
+    });
+  });
+
+  it("preserves a WHERE subquery when adding an Oracle ROWID", () => {
+    expect(
+      buildQueryWithHiddenPrimaryKeys({
+        sql: "SELECT t.* FROM APP.PLATFORM_CARS t WHERE t.CUSTOMER_NO IN (SELECT c.CUSTOMER_NO FROM APP.CUSTOMERS c WHERE c.ENABLED = 1)",
+        databaseType: "oracle",
+        primaryKeys: ["__DBX_ROWID"],
+        existingResultNames: ["ID", "CUSTOMER_NO"],
+        sourceExpressions: { __DBX_ROWID: "ROWIDTOCHAR(ROWID)" },
+      })?.sql,
+    ).toBe('SELECT t.*, ROWIDTOCHAR(ROWID) AS "__DBX_PK_0" FROM APP.PLATFORM_CARS t WHERE t.CUSTOMER_NO IN (SELECT c.CUSTOMER_NO FROM APP.CUSTOMERS c WHERE c.ENABLED = 1)');
+  });
+
   it("inserts hidden keys before a trailing line comment", () => {
     expect(
       buildQueryWithHiddenPrimaryKeys({

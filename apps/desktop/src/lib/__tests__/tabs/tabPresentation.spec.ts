@@ -111,6 +111,17 @@ describe("query result labels", () => {
 });
 
 describe("query result source ranges", () => {
+  it("prefers the preserved editor range for a selected duplicate statement", () => {
+    const sql = "SELECT * FROM users;\nSELECT * FROM users;";
+    const from = sql.lastIndexOf("SELECT");
+
+    expect(resultSourceRange(sql, { sourceStatement: "SELECT * FROM users", sourceFrom: from, sourceTo: sql.length - 1 }, 0, "mysql")).toEqual({
+      from,
+      to: sql.length - 1,
+      sql: "SELECT * FROM users",
+    });
+  });
+
   it("uses the result index to distinguish repeated statements", () => {
     const sql = "SELECT * FROM users;\nSELECT * FROM users;";
     const range = resultSourceRange(sql, { sourceStatement: "SELECT * FROM users" }, 1, "mysql");

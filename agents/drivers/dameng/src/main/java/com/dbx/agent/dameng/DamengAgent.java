@@ -598,7 +598,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
                 default -> throw new IllegalArgumentException("Unsupported object type: " + objectType);
             };
             String source;
-            String sql = "SELECT DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL";
+            String sql = "SELECT /*+ PARALLEL(1) */ DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL";
             try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
                 stmt.setString(1, dbmsType);
                 stmt.setString(2, name);
@@ -614,17 +614,21 @@ public final class DamengAgent extends BaseDatabaseAgent {
     @Override
     public String getTableDdl(String schema, String table) {
         return unchecked(() -> {
-            String sql = "SELECT DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL";
+            String sql = "SELECT /*+ PARALLEL(1) */ DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL";
+            String ddl = null;
             try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
                 stmt.setString(1, "TABLE");
                 stmt.setString(2, table);
                 stmt.setString(3, schema);
                 try (ResultSet rs = stmt.executeQuery()) {
                     if (rs.next()) {
-                        String ddl = appendTableAndColumnComments(coalesce(readTextColumn(rs, 1)), schema, table);
-                        return appendIndependentIndexDdl(ddl, schema, table);
+                        ddl = coalesce(readTextColumn(rs, 1));
                     }
                 }
+            }
+            if (ddl != null) {
+                ddl = appendTableAndColumnComments(ddl, schema, table);
+                return appendIndependentIndexDdl(ddl, schema, table);
             }
             throw new IllegalArgumentException("Table not found: " + schema + "." + table);
         });
@@ -635,7 +639,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
         return unchecked(() -> {
             Set<String> pkColumns = new java.util.HashSet<>();
             String pkSql = """
-                SELECT cols.COLUMN_NAME FROM ALL_CONS_COLUMNS cols
+                SELECT /*+ PARALLEL(1) */ cols.COLUMN_NAME FROM ALL_CONS_COLUMNS cols
                 JOIN ALL_CONSTRAINTS cons ON cols.CONSTRAINT_NAME = cons.CONSTRAINT_NAME AND cols.OWNER = cons.OWNER
                 WHERE cons.CONSTRAINT_TYPE = 'P' AND cons.OWNER = ? AND cons.TABLE_NAME = ?
                 """.stripIndent().trim();
@@ -654,7 +658,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
             // DATA_DEFAULT is a LONG column — it must be selected first and read first
             // in JDBC, otherwise the data is truncated.
             String colSql = """
-                SELECT c.DATA_DEFAULT,
+                SELECT /*+ PARALLEL(1) */ c.DATA_DEFAULT,
                     c.COLUMN_NAME,
                     c.DATA_TYPE,
                     c.NULLABLE,
@@ -662,6 +666,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
                     c.DATA_SCALE,
                     c.DATA_LENGTH,
                     c.CHAR_LENGTH,
+                    c.CHAR_USED,
                     cc.COMMENTS
                 FROM ALL_TAB_COLUMNS c
                 LEFT JOIN ALL_COL_COMMENTS cc
@@ -684,7 +689,8 @@ public final class DamengAgent extends BaseDatabaseAgent {
                         Integer numScale = intObject(rs, "DATA_SCALE");
                         Integer dataLen = intObject(rs, "DATA_LENGTH");
                         Integer charLen = intObject(rs, "CHAR_LENGTH");
-                        String dataType = formatDataType(baseType, numPrec, numScale, dataLen, charLen);
+                        String charUsed = rs.getString("CHAR_USED");
+                        String dataType = formatDataType(baseType, numPrec, numScale, dataLen, charLen, charUsed);
 
                         result.add(new ColumnInfo(
                             name,
@@ -709,7 +715,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
     private Set<String> identityColumns(String schema, String table) {
         Set<String> result = new java.util.HashSet<>();
         String sql = """
-            SELECT c.NAME
+            SELECT /*+ PARALLEL(1) */ c.NAME
             FROM SYS.SYSCOLUMNS c
             JOIN SYS.SYSOBJECTS t ON c.ID = t.ID
             JOIN SYS.SYSOBJECTS s ON t.SCHID = s.ID
@@ -737,7 +743,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
         return unchecked(() -> {
             List<IndexInfo> result = new ArrayList<>();
             String sql = """
-                SELECT i.INDEX_NAME,
+                SELECT /*+ PARALLEL(1) */ i.INDEX_NAME,
                     LISTAGG(ic.COLUMN_NAME, ',') WITHIN GROUP (ORDER BY ic.COLUMN_POSITION) AS COLUMNS,
                     i.UNIQUENESS,
                     CASE WHEN c.CONSTRAINT_TYPE = 'P' THEN 1 ELSE 0 END AS IS_PK,
@@ -961,9 +967,20 @@ public final class DamengAgent extends BaseDatabaseAgent {
         return "jdbc:dm://" + params.getHost() + ":" + params.getPort() + suffix;
     }
 
-    private static String formatDataType(String base, Integer numPrec, Integer numScale, Integer dataLen, Integer charLen) {
+    private static String formatDataType(
+        String base,
+        Integer numPrec,
+        Integer numScale,
+        Integer dataLen,
+        Integer charLen,
+        String charUsed
+    ) {
         return switch (base.toUpperCase(Locale.ROOT)) {
-            case "VARCHAR2", "NVARCHAR2", "VARCHAR", "CHAR", "NCHAR" -> {
+            case "VARCHAR2", "VARCHAR", "CHAR" -> {
+                Integer length = characterLength(dataLen, charLen, charUsed);
+                yield length != null ? base + "(" + length + characterLengthUnit(charUsed) + ")" : base;
+            }
+            case "NVARCHAR2", "NCHAR" -> {
                 Integer length = charLen != null ? charLen : dataLen;
                 yield length != null ? base + "(" + length + ")" : base;
             }
@@ -975,6 +992,25 @@ public final class DamengAgent extends BaseDatabaseAgent {
             }
             case "RAW" -> dataLen != null ? "RAW(" + dataLen + ")" : "RAW";
             default -> base;
+        };
+    }
+
+    private static Integer characterLength(Integer dataLen, Integer charLen, String charUsed) {
+        String normalized = charUsed == null ? "" : charUsed.trim().toUpperCase(Locale.ROOT);
+        if ("B".equals(normalized) || "BYTE".equals(normalized)) {
+            return dataLen != null ? dataLen : charLen;
+        }
+        return charLen != null ? charLen : dataLen;
+    }
+
+    private static String characterLengthUnit(String charUsed) {
+        if (charUsed == null) {
+            return "";
+        }
+        return switch (charUsed.trim().toUpperCase(Locale.ROOT)) {
+            case "B", "BYTE" -> " BYTE";
+            case "C", "CHAR" -> " CHAR";
+            default -> "";
         };
     }
 
@@ -1031,18 +1067,18 @@ public final class DamengAgent extends BaseDatabaseAgent {
         Map<String, String> comments = new HashMap<>();
         queryColumnComments(
             comments,
-            "SELECT COLUMN_NAME, COMMENTS FROM USER_COL_COMMENTS WHERE TABLE_NAME = ?",
+            "SELECT /*+ PARALLEL(1) */ COLUMN_NAME, COMMENTS FROM USER_COL_COMMENTS WHERE TABLE_NAME = ?",
             table
         );
         queryColumnComments(
             comments,
-            "SELECT COLNAME, COMMENT$ FROM SYS.SYSCOLUMNCOMMENTS WHERE SCHNAME = ? AND TVNAME = ?",
+            "SELECT /*+ PARALLEL(1) */ COLNAME, COMMENT$ FROM SYS.SYSCOLUMNCOMMENTS WHERE SCHNAME = ? AND TVNAME = ?",
             schema,
             table
         );
         queryColumnComments(
             comments,
-            "SELECT COLUMN_NAME, COMMENTS FROM ALL_COL_COMMENTS WHERE UPPER(OWNER) = UPPER(?) AND UPPER(TABLE_NAME) = UPPER(?)",
+            "SELECT /*+ PARALLEL(1) */ COLUMN_NAME, COMMENTS FROM ALL_COL_COMMENTS WHERE UPPER(OWNER) = UPPER(?) AND UPPER(TABLE_NAME) = UPPER(?)",
             schema,
             table
         );
@@ -1111,7 +1147,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
         List<IndexInfo> result = new ArrayList<>();
         // Primary-key and unique-constraint backing indexes are already represented in table DDL.
         String sql = """
-            SELECT i.INDEX_NAME,
+            SELECT /*+ PARALLEL(1) */ i.INDEX_NAME,
                 LISTAGG(ic.COLUMN_NAME, ',') WITHIN GROUP (ORDER BY ic.COLUMN_POSITION) AS COLUMNS,
                 i.UNIQUENESS,
                 i.INDEX_TYPE
@@ -1180,7 +1216,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
 
     private String tableComment(String schema, String table) throws Exception {
         String sql = """
-            SELECT COMMENTS
+            SELECT /*+ PARALLEL(1) */ COMMENTS
             FROM ALL_TAB_COMMENTS
             WHERE OWNER = ? AND TABLE_NAME = ?
             """.stripIndent().trim();

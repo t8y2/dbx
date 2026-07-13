@@ -2237,7 +2237,7 @@ export interface TableExportRequest {
   schema?: string;
   tableName: string;
   filePath: string;
-  format: "csv" | "xlsx" | "json" | "markdown" | "sql";
+  format: "csv" | "xlsx" | "json" | "markdown" | "sql" | "txt";
   columns?: string[];
   columnTypes?: Array<string | null | undefined>;
   primaryKeys?: string[];
@@ -2278,7 +2278,7 @@ export interface QueryResultExportRequest {
   databaseType: DatabaseType;
   useAgentCursor: boolean;
   filePath: string;
-  format: "csv" | "xlsx";
+  format: "csv" | "xlsx" | "txt";
   pageSize: number;
   rowLimit?: number | null;
   totalRows?: number | null;

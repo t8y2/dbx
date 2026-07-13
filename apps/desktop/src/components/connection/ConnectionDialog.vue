@@ -370,6 +370,33 @@ function sshLayersForConfig(config: LegacyConnectionConfig): SshTunnelConfig[] {
 }
 
 const form = ref(defaultForm());
+
+function externalConfigRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? { ...(value as Record<string, unknown>) } : {};
+}
+
+function sqlServerPortExplicitFromConfig(config: Pick<ConnectionConfig, "db_type" | "external_config">): boolean {
+  if (config.db_type !== "sqlserver") return false;
+  const external = externalConfigRecord(config.external_config);
+  return external.portExplicit === true || external.port_explicit === true;
+}
+
+function setSqlServerPortExplicit(config: Pick<ConnectionConfig, "db_type"> & { external_config?: unknown }, explicit: boolean) {
+  if (config.db_type !== "sqlserver") return;
+  const next = externalConfigRecord(config.external_config);
+  delete next.port_explicit;
+  if (explicit) {
+    next.portExplicit = true;
+  } else {
+    delete next.portExplicit;
+  }
+  config.external_config = Object.keys(next).length > 0 ? next : undefined;
+}
+
+function markSqlServerPortExplicit() {
+  setSqlServerPortExplicit(form.value, true);
+}
+
 const keepaliveEnabled = computed({
   get: () => Number(form.value.keepalive_interval_secs) > 0,
   set: (enabled: boolean) => {
@@ -653,7 +680,7 @@ const driverProfiles: Record<
   trino: { type: "trino", port: 8080, user: "", label: "Trino", icon: "trino" },
   prestosql: { type: "prestosql", port: 8080, user: "", label: "PrestoSQL", icon: "presto" },
   hive: { type: "hive", port: 10000, user: "", label: "Apache Hive", icon: "hive" },
-  spark: { type: "spark", port: 10015, user: "", label: "Apache Spark", icon: "spark-logo.png" },
+  spark: { type: "spark", port: 10015, user: "", label: "Apache Spark", icon: "spark" },
   db2: { type: "db2", port: 50000, user: "db2inst1", label: "IBM DB2", icon: "db2" },
   informix: { type: "informix", port: 9088, user: "informix", label: "Informix", icon: "informix" },
   dremio: { type: "jdbc", port: 31010, user: "", label: "Dremio", icon: "dremio" },
@@ -1319,9 +1346,13 @@ function applyProfile(val: string, preserveConnectionFields = false) {
   form.value.db_type = profile.type;
   form.value.driver_profile = val;
   form.value.driver_label = isCustomCompatibleProfile() ? customDriverName.value.trim() || profile.label : profile.label;
+  if (profile.type !== "sqlserver") {
+    form.value.external_config = undefined;
+  }
 
   if (!preserveConnectionFields) {
     form.value.port = profile.port;
+    setSqlServerPortExplicit(form.value, false);
     form.value.username = profile.user;
     form.value.url_params = profile.urlParams || "";
     form.value.agent_java_options = [];
@@ -1699,7 +1730,7 @@ const iconTypeMap: Record<string, string> = {
   trino: "trino",
   prestosql: "prestosql",
   hive: "hive",
-  spark: "spark-logo.png",
+  spark: "spark",
   db2: "db2",
   informix: "informix",
   dremio: "dremio",
@@ -2394,6 +2425,8 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
       config.password = config.password.trim();
       config.database = config.database?.trim() || undefined;
     }
+  } else if (config.db_type === "sqlserver") {
+    config.external_config = sqlServerPortExplicitFromConfig(config) ? { portExplicit: true } : undefined;
   } else {
     config.external_config = undefined;
   }
@@ -3112,7 +3145,7 @@ function resetForm() {
 const submittedOneTimePrefillKey = ref<string | null>(null);
 
 function oneTimePrefillKey(draft: ConnectionDeepLinkDraft) {
-  return JSON.stringify([draft.name, draft.dbType, draft.driverProfile, draft.driverLabel, draft.host, draft.port, draft.username, draft.password, draft.database, draft.urlParams, draft.ssl, draft.connectionString, draft.oracleConnectionType, draft.useMongoUrl]);
+  return JSON.stringify([draft.name, draft.dbType, draft.driverProfile, draft.driverLabel, draft.host, draft.port, draft.portExplicit, draft.username, draft.password, draft.database, draft.urlParams, draft.ssl, draft.connectionString, draft.oracleConnectionType, draft.useMongoUrl]);
 }
 
 function submitOneTimePrefill(draft: ConnectionDeepLinkDraft) {
@@ -3124,7 +3157,7 @@ function submitOneTimePrefill(draft: ConnectionDeepLinkDraft) {
 }
 
 function applyConnectionDraftToConfig(config: Omit<ConnectionConfig, "id">, draft: ConnectionDeepLinkDraft): Omit<ConnectionConfig, "id"> {
-  return {
+  const next = {
     ...config,
     db_type: draft.dbType,
     driver_profile: draft.driverProfile,
@@ -3140,6 +3173,8 @@ function applyConnectionDraftToConfig(config: Omit<ConnectionConfig, "id">, draf
     oracle_connection_type: draft.oracleConnectionType ?? config.oracle_connection_type,
     one_time: draft.oneTime || undefined,
   };
+  setSqlServerPortExplicit(next, draft.portExplicit === true);
+  return next;
 }
 
 function applyConnectionDraftToForm(draft: ConnectionDeepLinkDraft) {
@@ -4807,7 +4842,7 @@ function openExternalUrl(url: string) {
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.host") }}</Label>
                     <Input v-model="form.host" class="col-span-2" />
-                    <Input v-model.number="form.port" type="number" class="col-span-1" />
+                    <Input v-model.number="form.port" type="number" class="col-span-1" @input="markSqlServerPortExplicit" />
                   </div>
 
                   <div v-if="form.driver_profile === 'gbase8s'" class="grid grid-cols-4 items-center gap-4">

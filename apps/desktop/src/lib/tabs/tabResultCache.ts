@@ -51,6 +51,8 @@ interface ColumnarQueryResult {
   has_more?: boolean;
   sourceLabel?: string;
   sourceStatement?: string;
+  sourceFrom?: number;
+  sourceTo?: number;
 }
 
 type QueryResultRunSnapshot = NonNullable<QueryTab["resultRuns"]>[number];
@@ -146,6 +148,8 @@ function stripSessionIds(result: QueryResult | undefined): QueryResult | undefin
     has_more: result.has_more,
     sourceLabel: result.sourceLabel,
     sourceStatement: result.sourceStatement,
+    sourceFrom: result.sourceFrom,
+    sourceTo: result.sourceTo,
   };
 }
 
@@ -180,6 +184,8 @@ function toColumnarResult(result: QueryResult | undefined): ColumnarQueryResult 
     has_more: result.has_more,
     sourceLabel: result.sourceLabel,
     sourceStatement: result.sourceStatement,
+    sourceFrom: result.sourceFrom,
+    sourceTo: result.sourceTo,
   });
 }
 
@@ -199,6 +205,8 @@ function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResul
     has_more: result.has_more,
     sourceLabel: result.sourceLabel,
     sourceStatement: result.sourceStatement,
+    sourceFrom: result.sourceFrom,
+    sourceTo: result.sourceTo,
   };
 }
 

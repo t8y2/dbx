@@ -55,6 +55,7 @@ const ObjectBrowser = defineAsyncComponent(() => import("@/components/objects/Ob
 const TableStructureEditor = defineAsyncComponent(() => import("@/components/structure/TableStructureEditor.vue"));
 const DatabaseUserAdmin = defineAsyncComponent(() => import("@/components/admin/DatabaseUserAdmin.vue"));
 const MySqlProcessList = defineAsyncComponent(() => import("@/components/admin/MySqlProcessList.vue"));
+const MySqlDashboard = defineAsyncComponent(() => import("@/components/admin/MySqlDashboard.vue"));
 const DamengJobAdmin = defineAsyncComponent(() => import("@/components/admin/DamengJobAdmin.vue"));
 const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explain/ExplainPlanViewer.vue"));
 const QueryChart = defineAsyncComponent(() => import("@/components/chart/QueryChart.vue"));
@@ -192,6 +193,7 @@ const columnInfoLoading = ref(false);
 const columnInfoError = ref<string | undefined>(undefined);
 const dataGridRef = ref<DataGridHandle>();
 const queryEditorRef = ref<InstanceType<typeof QueryEditor>>();
+const tableStructureEditorRef = ref<{ applyChanges: () => Promise<boolean> }>();
 const standaloneResultToolbarRef = ref<HTMLElement | null>(null);
 const standaloneResultToolbarWidth = ref(0);
 const resultTabsScrollerRef = ref<HTMLElement | null>(null);
@@ -754,7 +756,11 @@ function pasteClipboardAsSqlInCondition() {
   return queryEditorRef.value?.pasteClipboardAsSqlInCondition();
 }
 
-defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExecute, pasteClipboardAsSqlInCondition });
+function applyTableStructureChanges() {
+  return tableStructureEditorRef.value?.applyChanges() ?? Promise.resolve(false);
+}
+
+defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExecute, pasteClipboardAsSqlInCondition, applyTableStructureChanges });
 </script>
 
 <template>
@@ -1127,7 +1133,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                 :total-row-count-loading="activeTab.resultTotalRowCountLoading"
                 :on-execute-sql="async (sql: string) => emit('executeSql', sql)"
                 :full-export-result="(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => queryStore.fetchTabResultForExport(activeTab.id, onProgress)"
-                :query-result-export-request="(options: { exportId: string; filePath: string; format: 'csv' | 'xlsx' }) => queryStore.buildQueryResultExportRequest(activeTab.id, options)"
+                :query-result-export-request="(options: { exportId: string; filePath: string; format: 'csv' | 'xlsx' | 'txt' }) => queryStore.buildQueryResultExportRequest(activeTab.id, options)"
                 :all-export-results="allResultExportSheets"
                 :export-file-base-name="activeTab.title"
                 @update:order-by-input="(v: string) => (activeTab.orderByInput = v)"
@@ -1559,6 +1565,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
     <!-- Structure mode: table structure editor -->
     <template v-else-if="activeTab.mode === 'structure'">
       <TableStructureEditor
+        ref="tableStructureEditorRef"
         :key="activeTab.id"
         :connection-id="activeTab.connectionId"
         :database="activeTab.database"
@@ -1581,6 +1588,12 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
 
     <template v-else-if="activeTab.mode === 'processlist' && activeConnection">
       <MySqlProcessList :key="activeTab.id" :connection="activeConnection" />
+    </template>
+
+    <template v-else-if="activeTab.mode === 'mysql-dashboard'">
+      <div class="min-h-0 flex-1">
+        <MySqlDashboard :key="activeTab.id" :connection-id="activeTab.connectionId" />
+      </div>
     </template>
 
     <template v-else-if="activeTab.mode === 'dameng-jobs' && activeConnection">

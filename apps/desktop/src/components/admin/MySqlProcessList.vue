@@ -11,7 +11,7 @@ import { useToast } from "@/composables/useToast";
 import type { ConnectionConfig } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
-import { buildKillSql, clampInterval, DEFAULT_REFRESH_SECONDS, mapProcessRows, PROCESS_LIST_SQL, type ProcessRow } from "@/lib/database/mysqlProcessList";
+import { buildKillSql, clampInterval, createProcessListLoadCoordinator, DEFAULT_REFRESH_SECONDS, mapProcessRows, processListExecutionError, processListSessionCount, PROCESS_LIST_SQL, type ProcessRow } from "@/lib/database/mysqlProcessList";
 
 const props = defineProps<{
   connection: ConnectionConfig;
@@ -24,8 +24,10 @@ const { toast } = useToast();
 type SortKey = keyof ProcessRow;
 
 const rows = ref<ProcessRow[]>([]);
+const truncated = ref(false);
 const ownSessionId = ref<number | null>(null);
 const loading = ref(false);
+const loadCoordinator = createProcessListLoadCoordinator();
 const loadError = ref("");
 const search = ref("");
 const sortKey = ref<SortKey>("time");
@@ -75,7 +77,7 @@ function toggleSort(key: SortKey) {
 }
 
 async function load(options: { silent?: boolean } = {}) {
-  if (loading.value) return;
+  if (!loadCoordinator.tryStart()) return;
   if (!options.silent) loading.value = true;
   loadError.value = "";
   try {
@@ -92,10 +94,12 @@ async function load(options: { silent?: boolean } = {}) {
     }
     const result = await api.executeQuery(props.connection.id, "", PROCESS_LIST_SQL, undefined, undefined, { maxRows: 5000 });
     rows.value = mapProcessRows(result);
+    truncated.value = result.truncated === true;
   } catch (error: any) {
     loadError.value = error?.message || String(error);
   } finally {
     loading.value = false;
+    loadCoordinator.finish();
   }
 }
 
@@ -122,6 +126,8 @@ async function confirmKill() {
       execute: () => api.executeMulti(props.connection.id, "", killSql, undefined, undefined, { maxRows: 1 }),
     });
     if (result === undefined) return;
+    const executionError = processListExecutionError(result);
+    if (executionError) throw new Error(executionError);
     toast(t("processList.killSuccess", { id: target.id }), 2500);
     killTarget.value = null;
     await load({ silent: true });
@@ -165,6 +171,7 @@ watch(
   () => props.connection.id,
   () => {
     rows.value = [];
+    truncated.value = false;
     ownSessionId.value = null;
     search.value = "";
     void load();
@@ -182,7 +189,7 @@ onBeforeUnmount(stopTimer);
         <Activity class="h-4 w-4 text-primary" />
         <div class="truncate text-sm font-semibold">{{ t("processList.title") }}</div>
         <Badge variant="outline" class="h-5 rounded-md px-1.5 text-[11px]">{{ connection.name }}</Badge>
-        <Badge variant="secondary" class="h-5 rounded-md px-1.5 text-[11px]">{{ t("processList.sessionCount", { count: filteredRows.length }) }}</Badge>
+        <Badge variant="secondary" class="h-5 rounded-md px-1.5 text-[11px]">{{ t("processList.sessionCount", { count: processListSessionCount(truncated ? rows.length : filteredRows.length, truncated) }) }}</Badge>
       </div>
       <div class="ml-auto flex items-center gap-2">
         <div class="flex h-7 items-center gap-1.5 rounded-md border bg-background px-2">

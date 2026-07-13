@@ -8,7 +8,7 @@ import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import { tryStartExclusiveActivation, type ActionActivationGuard } from "@/lib/connection/actionActivation";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { buildDataGridCopyInsertStatement, buildDataGridCopyUpdateStatements, type DataGridCopyInsertMode, type DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
-import { formatSqlInsert } from "@/lib/export/exportFormats";
+import { formatSqlInsert, formatTsv } from "@/lib/export/exportFormats";
 import { uuid } from "@/lib/common/utils";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { expandNestedJsonStringsForCopy } from "@/lib/common/jsonCopyValue";
@@ -16,6 +16,24 @@ import { buildMongoCopyDocumentFromOriginal, buildMongoCopyInsertDocument, forma
 import type { DatabaseType, QueryResult } from "@/types/database";
 import type { QueryResultExportRequest } from "@/lib/backend/api";
 import { DBX_ROWID_COLUMN } from "@/lib/table/tableEditing";
+
+/**
+ * Format metadata for backend table exports. Each entry maps a format key
+ * to its default file extension and native save-dialog filter label.
+ *
+ * When a new export format is added only this table needs to be updated;
+ * the extension / filterName ternary chains that used to live inside
+ * exportFullTableDataViaBackend / exportQueryResultViaBackend are no
+ * longer needed.
+ */
+const FORMAT_META: Record<string, { ext: string; label: string }> = {
+  csv: { ext: "csv", label: "CSV" },
+  xlsx: { ext: "xlsx", label: "Excel" },
+  json: { ext: "json", label: "JSON" },
+  markdown: { ext: "md", label: "Markdown" },
+  sql: { ext: "sql", label: "SQL" },
+  txt: { ext: "txt", label: "Text" },
+};
 
 interface RowItem {
   id: number;
@@ -53,7 +71,7 @@ export interface UseDataGridExportOptions {
   selectedRowIds: Ref<Set<number>> | ComputedRef<Set<number>>;
   hasRowSelection: ComputedRef<boolean>;
   fullExportResult?: (onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => Promise<QueryResult | undefined>;
-  queryResultExportRequest?: (options: { exportId: string; filePath: string; format: "csv" | "xlsx" }) => Promise<QueryResultExportRequest | undefined>;
+  queryResultExportRequest?: (options: { exportId: string; filePath: string; format: "csv" | "xlsx" | "txt" }) => Promise<QueryResultExportRequest | undefined>;
   /**
    * True when the in-memory result already holds the complete result set —
    * i.e. the query ran without server-side pagination, was not truncated, and
@@ -824,6 +842,34 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     });
   }
 
+  async function exportTxt(rowIds?: number[]) {
+    await runExclusiveExport(async () => {
+      try {
+        if (await exportQueryResultViaBackend("txt", rowIds)) return;
+        if (await exportFullTableDataViaBackend("txt", rowIds)) return;
+        const result = await resultToExport(rowIds);
+        const content = formatTsv(result.columns, result.rows);
+        await saveTextFile(content, exportFileName(tableMeta.value?.tableName || "export", "txt", { preferFallback: true }), "Text", "txt");
+        toast(t("grid.exported"));
+      } catch (e: any) {
+        toast(t("grid.exportFailed", { message: e?.message || String(e) }), 5000);
+      }
+    });
+  }
+
+  async function exportCurrentPageTxt() {
+    await runExclusiveExport(async () => {
+      try {
+        const result = await resultToExport(undefined, undefined, false);
+        const content = formatTsv(result.columns, result.rows);
+        await saveTextFile(content, exportFileName("export-page", "txt", { page: true }), "Text", "txt");
+        toast(t("grid.exported"));
+      } catch (e: any) {
+        toast(t("grid.exportFailed", { message: e?.message || String(e) }), 5000);
+      }
+    });
+  }
+
   async function exportXlsx(rowIds?: number[]) {
     await runExclusiveExport(async () => {
       try {
@@ -949,7 +995,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     });
   }
 
-  async function exportFullTableDataViaBackend(format: "csv" | "xlsx" | "json" | "markdown" | "sql", rowIds?: number[]): Promise<boolean> {
+  async function exportFullTableDataViaBackend(format: "csv" | "xlsx" | "json" | "markdown" | "sql" | "txt", rowIds?: number[]): Promise<boolean> {
     const meta = tableMeta.value;
     // The backend table exporter currently builds two-part table names. External
     // Doris/StarRocks catalogs need the data-tab paginator's three-part SQL.
@@ -957,8 +1003,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       return false;
     }
 
-    const extension = format === "markdown" ? "md" : format;
-    const filterName = format === "csv" ? "CSV" : format === "xlsx" ? "Excel" : format === "json" ? "JSON" : format === "markdown" ? "Markdown" : "SQL";
+    const fmt = FORMAT_META[format];
+    const extension = fmt?.ext ?? format;
+    const filterName = fmt?.label ?? format.toUpperCase();
     let outputPath = exportFileName(meta.tableName || "export", extension, { preferFallback: true });
     if (isTauriRuntime()) {
       const { save } = await import("@tauri-apps/plugin-dialog");
@@ -1031,7 +1078,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return true;
   }
 
-  async function exportQueryResultViaBackend(format: "csv" | "xlsx", rowIds?: number[]): Promise<boolean> {
+  async function exportQueryResultViaBackend(format: "csv" | "xlsx" | "txt", rowIds?: number[]): Promise<boolean> {
     if (rowIds !== undefined || context.value !== "results" || !queryResultExportRequest) {
       return false;
     }
@@ -1039,8 +1086,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     // backend just to stream the same rows back to a file.
     if (hasCompleteLocalResult?.value) return false;
 
-    const extension = format;
-    const filterName = format === "csv" ? "CSV" : "Excel";
+    const fmt = FORMAT_META[format];
+    const extension = fmt?.ext ?? format;
+    const filterName = fmt?.label ?? format.toUpperCase();
     let outputPath = exportFileName("query-result", extension);
     if (isTauriRuntime()) {
       const { save } = await import("@tauri-apps/plugin-dialog");
@@ -1195,6 +1243,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     exportCurrentPageJson,
     exportMarkdown,
     exportCurrentPageMarkdown,
+    exportTxt,
+    exportCurrentPageTxt,
     exportXlsx,
     exportCurrentPageXlsx,
     exportAllResultsXlsx,

@@ -86,6 +86,10 @@ test("Cloudflare D1 does not offer a visible database filter for its fixed main 
   assert.equal(connectionCanChooseVisibleDatabases(config({ db_type: "cloudflare-d1" })), false);
 });
 
+test("Turso does not offer a visible database filter for its fixed main namespace", () => {
+  assert.equal(connectionCanChooseVisibleDatabases(config({ db_type: "turso" })), false);
+});
+
 test("OceanBase Oracle uses schema filtering for visible object selection", () => {
   assert.equal(connectionUsesVisibleSchemaFilter(config({ db_type: "oceanbase-oracle" })), true);
   assert.equal(connectionUsesVisibleSchemaFilter(config({ db_type: "mysql", driver_profile: "oceanbase" })), false);

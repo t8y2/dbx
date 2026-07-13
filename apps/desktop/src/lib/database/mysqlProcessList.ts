@@ -26,6 +26,11 @@ export const MIN_REFRESH_SECONDS = 1;
 export const MAX_REFRESH_SECONDS = 3600;
 export const DEFAULT_REFRESH_SECONDS = 5;
 
+export interface ProcessListLoadCoordinator {
+  tryStart(): boolean;
+  finish(): void;
+}
+
 export interface ProcessRow {
   id: number;
   user: string;
@@ -35,6 +40,37 @@ export interface ProcessRow {
   time: number;
   state: string | null;
   info: string | null;
+}
+
+/**
+ * Keep manual and timer-driven refreshes on the same single-flight guard. Slow
+ * servers must not accumulate process-list queries faster than they complete.
+ */
+export function createProcessListLoadCoordinator(): ProcessListLoadCoordinator {
+  let inFlight = false;
+  return {
+    tryStart() {
+      if (inFlight) return false;
+      inFlight = true;
+      return true;
+    },
+    finish() {
+      inFlight = false;
+    },
+  };
+}
+
+/** Return the server-provided message for the first failed batch statement. */
+export function processListExecutionError(results: QueryResult[]): string | null {
+  const failed = results.find((result) => result.execution_error === true);
+  if (!failed) return null;
+  const message = failed.rows?.[0]?.[0];
+  return message === null || message === undefined || String(message).length === 0 ? "Query execution failed" : String(message);
+}
+
+/** A truncated result only establishes a lower bound for the session count. */
+export function processListSessionCount(count: number, truncated: boolean): number | string {
+  return truncated ? `${count}+` : count;
 }
 
 function columnIndex(columns: string[], name: string): number {

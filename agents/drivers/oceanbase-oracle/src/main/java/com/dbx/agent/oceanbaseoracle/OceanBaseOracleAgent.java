@@ -364,7 +364,33 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             foreignKeys = Collections.emptyList();
         }
 
-        return DdlBuilder.buildTableDdl(schema, table, getColumns(schema, table), indexes, foreignKeys, false, true);
+        String tableComment = null;
+        try {
+            tableComment = getTableComment(schema, table);
+        } catch (RuntimeException e) {
+            // Table comment is optional; DDL generation should still succeed without it.
+        }
+
+        return DdlBuilder.buildTableDdl(schema, table, getColumns(schema, table), indexes, foreignKeys, java.util.Collections.emptyList(), false, true, tableComment);
+    }
+
+    @Override
+    public String getTableComment(String schema, String table) {
+        return unchecked(() -> {
+            String owner = normalizeSchema(schema);
+            String sql = "SELECT COMMENTS FROM ALL_TAB_COMMENTS WHERE OWNER = ? AND TABLE_NAME = ? AND TABLE_TYPE = 'TABLE'";
+            try (var stmt = requireConnection().prepareStatement(sql)) {
+                stmt.setString(1, owner);
+                stmt.setString(2, table);
+                try (var rs = stmt.executeQuery()) {
+                    if (rs.next()) {
+                        String comment = rs.getString("COMMENTS");
+                        return (comment != null && !comment.trim().isEmpty()) ? comment : null;
+                    }
+                }
+            }
+            return null;
+        });
     }
 
     @Override

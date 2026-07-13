@@ -609,6 +609,58 @@ mod tests {
     }
 
     #[test]
+    fn writes_mysql_57_numeric_strings_as_numeric_cells() {
+        let workbook = build_xlsx_workbook(&XlsxWorksheetData {
+            sheet_name: Some("MySQL 5.7".to_string()),
+            columns: vec![
+                "id".to_string(),
+                "nullable_int".to_string(),
+                "tinyint_value".to_string(),
+                "unsigned_int_value".to_string(),
+                "bigint_safe".to_string(),
+                "float_value".to_string(),
+                "double_value".to_string(),
+                "decimal_value".to_string(),
+            ],
+            column_types: vec![
+                "bigint".to_string(),
+                "int(11)".to_string(),
+                "tinyint(4)".to_string(),
+                "int(10) unsigned".to_string(),
+                "bigint(20)".to_string(),
+                "float".to_string(),
+                "double".to_string(),
+                "decimal(18,6)".to_string(),
+            ],
+            rows: vec![vec![
+                json!("2"),
+                json!("42"),
+                json!("-7"),
+                json!("4000000000"),
+                json!("123456789012345"),
+                json!("123.5"),
+                json!("987654.321"),
+                json!("2800.000000"),
+            ]],
+        })
+        .expect("build workbook");
+
+        let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
+        for (reference, value) in [
+            ("A2", "2"),
+            ("B2", "42"),
+            ("C2", "-7"),
+            ("D2", "4000000000"),
+            ("E2", "123456789012345"),
+            ("F2", "123.5"),
+            ("G2", "987654.321"),
+            ("H2", "2800.000000"),
+        ] {
+            assert!(sheet.contains(&format!("<c r=\"{reference}\"><v>{value}</v></c>")), "sheet={sheet}");
+        }
+    }
+
+    #[test]
     fn preserves_high_precision_numeric_strings_as_text() {
         let workbook = build_xlsx_workbook(&XlsxWorksheetData {
             sheet_name: Some("Precision".to_string()),
@@ -684,6 +736,27 @@ mod tests {
         assert_eq!(range.get_value((0, 0)).expect("header"), &calamine::Data::String("id".to_string()));
         assert_eq!(range.get_value((1, 0)).expect("row1"), &calamine::Data::Float(1.0));
         assert_eq!(range.get_value((2, 1)).expect("row2"), &calamine::Data::String("Bob".to_string()));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn streams_mysql_numeric_strings_as_numeric_cells() {
+        let path = std::env::temp_dir().join(format!("dbx-mysql-stream-test-{}.xlsx", uuid::Uuid::new_v4()));
+        {
+            let file = fs::File::create(&path).expect("create temp xlsx");
+            let columns = ["nullable_int".to_string(), "float_value".to_string(), "decimal_value".to_string()];
+            let column_types = ["int(11)".to_string(), "float".to_string(), "decimal(18,6)".to_string()];
+            let mut writer = start_streaming_xlsx_workbook(file, Some("MySQL Stream"), &columns, &column_types)
+                .expect("start workbook");
+            writer.write_row(&[json!("42"), json!("123.5"), json!("2800.000000")]).expect("write row");
+            drop(writer.finish().expect("finish workbook"));
+        }
+
+        let bytes = fs::read(&path).expect("read workbook");
+        let sheet = read_zip_entry(&bytes, "xl/worksheets/sheet1.xml");
+        assert!(sheet.contains("<c r=\"A2\"><v>42</v></c>"));
+        assert!(sheet.contains("<c r=\"B2\"><v>123.5</v></c>"));
+        assert!(sheet.contains("<c r=\"C2\"><v>2800.000000</v></c>"));
         let _ = fs::remove_file(&path);
     }
 }

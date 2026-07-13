@@ -1783,7 +1783,7 @@ fn rewrite_mongo_uri_host(uri: &str, new_host: &str, new_port: u16) -> String {
 }
 
 pub fn parse_jdbc_host_port(url: &str) -> Option<(String, u16)> {
-    let rest = url.strip_prefix("jdbc:")?;
+    let rest = jdbc_transport_rest(url)?;
 
     // jdbc:oracle:thin:@host:port:SID  or  jdbc:oracle:thin:@//host:port/service
     if let Some(after) = rest.strip_prefix("oracle:") {
@@ -1825,11 +1825,27 @@ pub fn parse_jdbc_host_port(url: &str) -> Option<(String, u16)> {
     }
 }
 
+fn jdbc_transport_rest(url: &str) -> Option<&str> {
+    if let Some(rest) = url.strip_prefix("jdbc:").or_else(|| url.strip_prefix("JDBC:")) {
+        return Some(rest);
+    }
+
+    let rest = url.strip_prefix("jdbcx:").or_else(|| url.strip_prefix("JDBCX:"))?;
+    let (first, tail) = rest.split_once(':').unwrap_or((rest, ""));
+    if matches!(
+        first.to_ascii_lowercase().as_str(),
+        "codeql" | "graphql" | "prompt" | "prql" | "rest" | "script" | "shell" | "sql"
+    ) {
+        Some(tail)
+    } else {
+        Some(rest)
+    }
+}
+
 pub fn rewrite_jdbc_url_host(url: &str, new_host: &str, new_port: u16) -> String {
     let normalized_url = url.to_ascii_uppercase();
-    if normalized_url.starts_with("JDBC:ORACLE:")
-        && normalized_url.contains("(HOST=")
-        && normalized_url.contains("(PORT=")
+    let normalized_rest = jdbc_transport_rest(url).map(str::to_ascii_uppercase).unwrap_or_default();
+    if normalized_rest.starts_with("ORACLE:") && normalized_url.contains("(HOST=") && normalized_url.contains("(PORT=")
     {
         return rewrite_oracle_descriptor_host(url, new_host, new_port);
     }
@@ -2968,6 +2984,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_jdbcx_host_port_with_and_without_extension() {
+        assert_eq!(
+            super::parse_jdbc_host_port("jdbcx:mysql://db.example.com:3306/app"),
+            Some(("db.example.com".to_string(), 3306))
+        );
+        assert_eq!(
+            super::parse_jdbc_host_port("jdbcx:prql:postgresql://pg.example.com:5432/app"),
+            Some(("pg.example.com".to_string(), 5432))
+        );
+    }
+
+    #[test]
     fn parse_jdbc_host_port_with_userinfo() {
         let (h, p) = super::parse_jdbc_host_port("jdbc:postgresql://user:pass@pghost:5433/db").unwrap();
         assert_eq!(h, "pghost");
@@ -3038,6 +3066,23 @@ mod tests {
         let url = "jdbc:postgresql://myhost:5432/mydb";
         let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 54321);
         assert_eq!(rewritten, "jdbc:postgresql://127.0.0.1:54321/mydb");
+    }
+
+    #[test]
+    fn rewrite_jdbcx_url_preserves_extension() {
+        let url = "jdbcx:script:mysql://db.example.com:3306/app";
+        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 13306);
+        assert_eq!(rewritten, "jdbcx:script:mysql://127.0.0.1:13306/app");
+    }
+
+    #[test]
+    fn rewrite_jdbcx_oracle_descriptor() {
+        let url = "jdbcx:sql:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=orahost)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=orcl)))";
+        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 11521);
+        assert_eq!(
+            rewritten,
+            "jdbcx:sql:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=127.0.0.1)(PORT=11521))(CONNECT_DATA=(SERVICE_NAME=orcl)))"
+        );
     }
 
     #[test]

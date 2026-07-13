@@ -92,6 +92,7 @@ const assetIcons: Record<string, string> = {
   iris: "iris.png",
   influxdb: "influxdb",
   zookeeper: "zookeeper",
+  jdbcx: "jdbcx",
 };
 
 const letterIcons: Record<string, { letter: string; color: string }> = {

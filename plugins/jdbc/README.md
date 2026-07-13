@@ -36,3 +36,8 @@ lib/dbx-jdbc-plugin.jar
 ```
 
 DBX does not bundle Java or JDBC drivers. Install Java locally and add database-specific driver JAR paths in the DBX JDBC connection form.
+
+The first-class JDBCX profile uses `io.github.jdbcx.WrappedDriver` and
+`jdbcx:[extension:][vendor://host:port/database]` URLs. Install a JDBCX Maven bundle such as
+`io.github.jdbcx:jdbcx-driver:0.8.0` in the DBX JDBC driver store, together with the database vendor's JDBC driver.
+JDBCX discovers delegate drivers through JDBC `ServiceLoader`/`Driver.acceptsURL`, without vendor-specific DBX code.

@@ -8,6 +8,7 @@ export interface ConnectionDeepLinkDraft {
   driverLabel: string;
   host?: string;
   port?: number;
+  portExplicit?: boolean;
   username?: string;
   password?: string;
   database?: string;
@@ -54,6 +55,7 @@ function draftFromConnectionUrl(value: string, preferredProfile?: string): Conne
     driverLabel: parsed.driverLabel,
     host: parsed.host,
     port: parsed.port,
+    portExplicit: parsed.portExplicit,
     username: parsed.username,
     password: parsed.password,
     database: parsed.database,
@@ -94,12 +96,14 @@ export function parseConnectionDeepLink(value: string): ConnectionDeepLinkDraft 
       })();
 
   const oneTime = optionalBooleanParam(params, "one_time");
+  const explicitPort = optionalNumberParam(params, "port");
 
   return {
     ...draft,
     name: optionalParam(params, "name") ?? draft.name,
     host: optionalParam(params, "host") ?? draft.host,
-    port: optionalNumberParam(params, "port") ?? draft.port,
+    port: explicitPort ?? draft.port,
+    ...((explicitPort !== undefined && draft.dbType === "sqlserver") || draft.portExplicit ? { portExplicit: true } : {}),
     username: optionalParam(params, "user") ?? draft.username,
     password: optionalParam(params, "password") ?? draft.password,
     database: optionalParam(params, "database") ?? draft.database,

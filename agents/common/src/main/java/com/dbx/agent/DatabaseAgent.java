@@ -78,7 +78,32 @@ public interface DatabaseAgent {
             foreignKeys = Collections.emptyList();
         }
 
-        return buildTableDdl(schema, table, getColumns(schema, table), indexes, foreignKeys);
+        String tableComment = null;
+        try {
+            tableComment = getTableComment(schema, table);
+        } catch (RuntimeException e) {
+            // Table comment is optional; DDL generation should still succeed without it.
+        }
+
+        return DdlBuilder.buildTableDdl(schema, table, getColumns(schema, table), indexes, foreignKeys, false, false, tableComment);
+    }
+
+    /**
+     * Returns the comment/description for a table, or null if not available.
+     * Default implementation looks up the comment from listTables results.
+     * Subclasses can override for more efficient queries.
+     */
+    default String getTableComment(String schema, String table) {
+        try {
+            for (TableInfo info : listTables(schema)) {
+                if (info.getName().equalsIgnoreCase(table) && info.getComment() != null && !info.getComment().trim().isEmpty()) {
+                    return info.getComment().trim();
+                }
+            }
+        } catch (RuntimeException e) {
+            // Ignore; table comment is optional.
+        }
+        return null;
     }
 
     List<IndexInfo> listIndexes(String schema, String table);

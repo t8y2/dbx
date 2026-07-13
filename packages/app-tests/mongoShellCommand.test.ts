@@ -82,6 +82,16 @@ test("parseMongoFindCommand rewrites new Date and single-quoted ISODate", () => 
   });
 });
 
+test("parseMongoFindCommand rewrites NumberLong into extended JSON", () => {
+  const quoted = parseMongoFindCommand('db.orders.find({_id: NumberLong("2048938405781032962")})');
+  const unquoted = parseMongoFindCommand("db.orders.find({snowflake: NumberLong(9007199254740993)})");
+
+  assert.ok(quoted);
+  assert.deepEqual(JSON.parse(quoted.filter), { _id: { $numberLong: "2048938405781032962" } });
+  assert.ok(unquoted);
+  assert.deepEqual(JSON.parse(unquoted.filter), { snowflake: { $numberLong: "9007199254740993" } });
+});
+
 test("parseMongoFindCommand accepts single-quoted string values and unquoted sort keys", () => {
   const command = parseMongoFindCommand("db.products.find({category: 'Electronics'}).sort({price: -1}).limit(2)");
   assert.ok(command);
@@ -513,6 +523,14 @@ test("mongoDocumentsToQueryResult turns mongo documents into grid rows", () => {
   assert.equal(result.affected_rows, 12);
   assert.equal(result.execution_time_ms, 5);
   assert.equal(result.truncated, true);
+});
+
+test("mongoDocumentsToQueryResult displays typed int64 ids without losing raw type metadata", () => {
+  const id = { $numberLong: "2048938405781032962" };
+  const result = mongoDocumentsToQueryResult([{ _id: id, name: "snowflake" }], 1, 1);
+
+  assert.deepEqual(result.rows, [["2048938405781032962", "snowflake"]]);
+  assert.deepEqual(result.mongo_documents, [{ _id: id, name: "snowflake" }]);
 });
 
 test("buildMongoUpdateDocument ignores _id and preserves typed values", () => {

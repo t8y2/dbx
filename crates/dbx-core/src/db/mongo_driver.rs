@@ -991,11 +991,27 @@ pub async fn delete_document(client: &Client, database: &str, collection: &str, 
 }
 
 fn document_id_filters(id: &str) -> Vec<Document> {
+    if let Some(filter) = extended_json_document_id_filter(id) {
+        return vec![filter];
+    }
     let string_filter = doc! { "_id": Bson::String(id.to_string()) };
     match ObjectId::parse_str(id) {
         Ok(oid) => vec![doc! { "_id": Bson::ObjectId(oid) }, string_filter],
         Err(_) => vec![string_filter],
     }
+}
+
+fn extended_json_document_id_filter(id: &str) -> Option<Document> {
+    let trimmed = id.trim();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let bson = json_value_to_bson(&value);
+    if matches!(bson, Bson::Document(_)) {
+        return None;
+    }
+    Some(doc! { "_id": bson })
 }
 
 pub async fn delete_documents(
@@ -1034,12 +1050,21 @@ fn bson_to_json(bson: &Bson) -> serde_json::Value {
         Bson::Document(doc) => {
             let mut map = serde_json::Map::new();
             for (k, v) in doc {
-                map.insert(k.clone(), bson_to_json(v));
+                map.insert(k.clone(), bson_document_field_to_json(k, v));
             }
             serde_json::Value::Object(map)
         }
         _ => serde_json::Value::String(format!("{bson}")),
     }
+}
+
+fn bson_document_field_to_json(key: &str, bson: &Bson) -> serde_json::Value {
+    if key == "_id" {
+        if let Bson::Int64(value) = bson {
+            return serde_json::json!({ "$numberLong": value.to_string() });
+        }
+    }
+    bson_to_json(bson)
 }
 
 /// Convert a `serde_json::Value` (JSON object) to a BSON `Document`,
@@ -1142,6 +1167,9 @@ fn json_value_to_bson(value: &serde_json::Value) -> Bson {
                         return Bson::ObjectId(oid);
                     }
                 }
+                if let Some(value) = parse_extended_json_int64(obj) {
+                    return Bson::Int64(value);
+                }
                 if let Some(date) = parse_extended_json_date(obj) {
                     return Bson::DateTime(date);
                 }
@@ -1207,6 +1235,14 @@ fn parse_extended_json_date(obj: &serde_json::Map<String, serde_json::Value>) ->
     }
 }
 
+fn parse_extended_json_int64(obj: &serde_json::Map<String, serde_json::Value>) -> Option<i64> {
+    match obj.get("$numberLong")? {
+        serde_json::Value::String(value) => value.parse().ok(),
+        serde_json::Value::Number(value) => value.as_i64(),
+        _ => None,
+    }
+}
+
 fn json_filter_value_to_bson(value: &serde_json::Value, field_name: Option<&str>) -> Bson {
     if field_name == Some("_id") {
         if let Some(id) = value.as_str() {
@@ -1224,6 +1260,9 @@ fn json_filter_value_to_bson(value: &serde_json::Value, field_name: Option<&str>
                     if let Ok(oid) = ObjectId::parse_str(hex) {
                         return Bson::ObjectId(oid);
                     }
+                }
+                if let Some(value) = parse_extended_json_int64(obj) {
+                    return Bson::Int64(value);
                 }
                 // Extended JSON dates must be decoded in filters too, otherwise
                 // {"$date": ...} reaches the server as a raw document: a bare
@@ -1390,6 +1429,22 @@ mod tests {
     }
 
     #[test]
+    fn document_id_filters_preserve_extended_json_int64_ids() {
+        let filters = document_id_filters(r#"{"$numberLong":"2048938405781032962"}"#);
+
+        assert_eq!(filters.len(), 1);
+        assert!(matches!(filters[0].get("_id"), Some(Bson::Int64(2_048_938_405_781_032_962))));
+    }
+
+    #[test]
+    fn json_filter_to_document_preserves_extended_json_int64_values() {
+        let filter = serde_json::json!({ "snowflake": { "$numberLong": "2048938405781032962" } });
+        let document = json_filter_to_document(&filter).unwrap();
+
+        assert!(matches!(document.get("snowflake"), Some(Bson::Int64(2_048_938_405_781_032_962))));
+    }
+
+    #[test]
     fn json_filter_to_document_matches_object_id_and_string_for_id_hex() {
         let id = "507f1f77bcf86cd799439011";
         let filter = serde_json::json!({ "_id": id });
@@ -1466,6 +1521,17 @@ mod tests {
         let value = bson_to_json(&Bson::Int64(2_326_645_729_978_441_729));
 
         assert_eq!(value, serde_json::json!("2326645729978441729"));
+    }
+
+    #[test]
+    fn bson_to_json_preserves_int64_id_type_for_updates() {
+        let value = bson_to_json(&Bson::Document(doc! {
+            "_id": Bson::Int64(2_048_938_405_781_032_962),
+            "snowflake": Bson::Int64(2_048_938_405_781_032_962),
+        }));
+
+        assert_eq!(value["_id"], serde_json::json!({ "$numberLong": "2048938405781032962" }));
+        assert_eq!(value["snowflake"], serde_json::json!("2048938405781032962"));
     }
 
     #[test]

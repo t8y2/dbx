@@ -632,7 +632,15 @@ public final class MongoAgent {
         return Collections.singletonMap("inserted_id", insertedId);
     }
 
-    private static Object parseId(String id) {
+    static Object parseId(String id) {
+        String trimmed = id.trim();
+        if (trimmed.startsWith("{")) {
+            try {
+                return Document.parse("{\"_id\":" + trimmed + "}").get("_id");
+            } catch (Exception e) {
+                // Fall through to the legacy ObjectId/string handling below.
+            }
+        }
         try {
             return new ObjectId(id);
         } catch (Exception e) {
@@ -765,9 +773,16 @@ public final class MongoAgent {
     private static Map<String, Object> bsonToJson(Document doc) {
         Map<String, Object> result = new LinkedHashMap<>();
         for (Map.Entry<String, Object> entry : doc.entrySet()) {
-            result.put(entry.getKey(), convertValue(entry.getValue()));
+            result.put(entry.getKey(), convertDocumentFieldValue(entry.getKey(), entry.getValue()));
         }
         return result;
+    }
+
+    static Object convertDocumentFieldValue(String key, Object value) {
+        if ("_id".equals(key) && value instanceof Long longValue) {
+            return Collections.singletonMap("$numberLong", longValue.toString());
+        }
+        return convertValue(value);
     }
 
     static JsonObject bsonToExtendedJson(Document doc) {

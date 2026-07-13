@@ -1,4 +1,5 @@
 import type { QueryResult } from "@/types/database";
+import { mongoDocumentIdForGrid } from "@/lib/mongo/mongoDocumentValues";
 
 export interface MongoFindCommand {
   collection: string;
@@ -638,11 +639,16 @@ function normalizeJsonArgument(value: string): string | null {
   if (!trimmed) return "{}";
   // Rewrite mongo shell constructors that are not valid JSON into the extended
   // JSON the backend understands (mongo_driver::json_value_to_bson): ObjectId(x)
-  // -> {"$oid":x} and ISODate(x)/new Date(x) -> {"$date":x}. Without this a
+  // -> {"$oid":x}, NumberLong(x) -> {"$numberLong":x}, and
+  // ISODate(x)/new Date(x) -> {"$date":x}. Without this a
   // filter such as { createdAt: { $gte: ISODate("...") } } fails JSON.parse,
   // the command is left unrecognized and falls through to the SQL executor,
   // which rejects it with "Use MongoDB-specific commands".
-  const withExtendedJson = trimmed.replace(/ObjectId\s*\(\s*["']([^"']+)["']\s*\)/g, '{"$oid":"$1"}').replace(/(?:ISODate|new\s+Date)\s*\(\s*["']([^"']+)["']\s*\)/g, '{"$date":"$1"}');
+  const withExtendedJson = trimmed
+    .replace(/ObjectId\s*\(\s*["']([^"']+)["']\s*\)/g, '{"$oid":"$1"}')
+    .replace(/NumberLong\s*\(\s*["'](-?\d+)["']\s*\)/g, '{"$numberLong":"$1"}')
+    .replace(/NumberLong\s*\(\s*(-?\d+)\s*\)/g, '{"$numberLong":"$1"}')
+    .replace(/(?:ISODate|new\s+Date)\s*\(\s*["']([^"']+)["']\s*\)/g, '{"$date":"$1"}');
   const preprocessed = quoteUnquotedObjectKeys(convertSingleQuotedStrings(withExtendedJson));
   try {
     JSON.parse(preprocessed);
@@ -1171,5 +1177,5 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function toCellValue(value: unknown): string | number | boolean | null {
   if (value === undefined || value === null) return null;
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
-  return JSON.stringify(value);
+  return mongoDocumentIdForGrid(value);
 }

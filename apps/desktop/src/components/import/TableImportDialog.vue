@@ -743,15 +743,15 @@ watch(targetMode, (mode) => {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogScrollContent class="sm:max-w-[980px]" :trap-focus="false" @interact-outside.prevent>
-      <DialogHeader class="pr-8">
+    <DialogScrollContent class="flex max-h-[calc(100dvh-6rem)] min-h-0 flex-col overflow-hidden sm:max-w-[980px]" :trap-focus="false" @interact-outside.prevent>
+      <DialogHeader class="shrink-0 pr-8">
         <DialogTitle class="flex items-center gap-2 text-base">
           <FileUp class="h-4 w-4" />
           {{ t("tableImport.title") }}
         </DialogTitle>
       </DialogHeader>
 
-      <div class="space-y-4 py-2">
+      <div class="min-h-0 flex-1 space-y-4 overflow-y-auto py-2 pr-1">
         <div class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
           <input ref="fileInput" type="file" accept=".csv,.tsv,.txt,.json,.xlsx,.xlsm,.xls" :multiple="targetMode === 'create'" class="hidden" @change="handleFileInputChange" />
           <div class="flex h-10 min-w-0 items-center gap-2 rounded-md border bg-muted/20 px-3">
@@ -1159,7 +1159,7 @@ watch(targetMode, (mode) => {
         </div>
       </div>
 
-      <DialogFooter>
+      <DialogFooter class="shrink-0">
         <Button variant="outline" :disabled="running" @click="open = false">
           <X class="mr-1.5 h-3.5 w-3.5" />
           {{ terminalStatus ? t("common.close") : t("dangerDialog.cancel") }}

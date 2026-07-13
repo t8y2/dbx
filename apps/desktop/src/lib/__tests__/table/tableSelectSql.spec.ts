@@ -36,4 +36,16 @@ describe("quoteTableIdentifier", () => {
   it("bracket-quotes sqlserver identifiers", () => {
     expect(quoteTableIdentifier("sqlserver", "orders")).toBe("[orders]");
   });
+
+  it("leaves safe Kingbase identifiers unquoted across compatibility modes", () => {
+    expect(quoteTableIdentifier("kingbase", "cqbq_ls")).toBe("cqbq_ls");
+    expect(quoteTableIdentifier("kingbase", "actionlogs")).toBe("actionlogs");
+    expect(qualifiedTableName({ databaseType: "kingbase", schema: "cqbq_ls", tableName: "actionlogs" })).toBe("cqbq_ls.actionlogs");
+  });
+
+  it("still quotes Kingbase reserved or non-simple identifiers", () => {
+    expect(quoteTableIdentifier("kingbase", "order")).toBe('"order"');
+    expect(quoteTableIdentifier("kingbase", "MixedCase")).toBe('"MixedCase"');
+    expect(quoteTableIdentifier("kingbase", "order detail")).toBe('"order detail"');
+  });
 });

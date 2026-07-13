@@ -21,6 +21,11 @@ fn quotes_identifiers_by_database_type() {
     assert_eq!(quote_table_identifier(Some(DatabaseType::StarRocks), "user`name"), "`user``name`");
     assert_eq!(quote_table_identifier(Some(DatabaseType::SqlServer), "user]name"), "[user]]name]");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Postgres), "user\"name"), "\"user\"\"name\"");
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Kingbase), "cqbq_ls"), "cqbq_ls");
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Kingbase), "actionlogs"), "actionlogs");
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Kingbase), "order"), "\"order\"");
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Kingbase), "MixedCase"), "\"MixedCase\"");
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Kingbase), "order detail"), "\"order detail\"");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Informix), "users_1"), "users_1");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Jdbc), "users_1"), "users_1");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Jdbc), "user name"), "user name");
@@ -31,6 +36,7 @@ fn quotes_identifiers_by_database_type() {
 fn qualifies_schema_only_for_schema_aware_databases() {
     assert_eq!(qualified_table_name(Some(DatabaseType::Postgres), Some("public"), "users"), "\"public\".\"users\"");
     assert_eq!(qualified_table_name(Some(DatabaseType::Kwdb), Some("public"), "users"), "\"public\".\"users\"");
+    assert_eq!(qualified_table_name(Some(DatabaseType::Kingbase), Some("cqbq_ls"), "actionlogs"), "cqbq_ls.actionlogs");
     assert_eq!(qualified_table_name(Some(DatabaseType::Mysql), Some("public"), "users"), "`public`.`users`");
     assert_eq!(qualified_table_name(Some(DatabaseType::Goldendb), Some("public"), "users"), "`public`.`users`");
     assert_eq!(qualified_table_name(Some(DatabaseType::StarRocks), Some("warehouse"), "users"), "`warehouse`.`users`");
@@ -297,6 +303,24 @@ fn builds_table_data_where_and_schema_queries() {
             ..Default::default()
         }),
         "SELECT * FROM \"public\".\"orders\" WHERE (amount > 10) LIMIT 50 OFFSET 100;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Kingbase),
+            schema: Some("cqbq_ls".to_string()),
+            table_name: "actionlogs".to_string(),
+            table_type: None,
+            primary_keys: Vec::new(),
+            columns: Vec::new(),
+            fallback_order_columns: Vec::new(),
+            order_by: None,
+            limit: Some(100),
+            offset: None,
+            where_input: None,
+            include_row_id: false,
+            ..Default::default()
+        }),
+        "SELECT * FROM cqbq_ls.actionlogs LIMIT 100;"
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {

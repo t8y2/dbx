@@ -741,7 +741,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
         return unchecked(() -> {
             List<IndexInfo> result = new ArrayList<>();
             String sql = """
-                SELECT i.INDEX_NAME,
+                SELECT /*+ PARALLEL(1) */ i.INDEX_NAME,
                     LISTAGG(ic.COLUMN_NAME, ',') WITHIN GROUP (ORDER BY ic.COLUMN_POSITION) AS COLUMNS,
                     i.UNIQUENESS,
                     CASE WHEN c.CONSTRAINT_TYPE = 'P' THEN 1 ELSE 0 END AS IS_PK,

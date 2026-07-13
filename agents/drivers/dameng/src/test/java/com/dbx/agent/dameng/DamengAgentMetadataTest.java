@@ -38,6 +38,20 @@ class DamengAgentMetadataTest {
     }
 
     @Test
+    void disablesParallelExecutionForIndexMetadataQuery() {
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, JdbcMetadataSqlFake.connection());
+
+        agent.listIndexes("APP", "USERS");
+
+        String indexesSql = JdbcMetadataSqlFake.statements.stream()
+            .filter(sql -> sql.contains("ALL_INDEXES"))
+            .findFirst()
+            .orElseThrow();
+        Assertions.assertTrue(indexesSql.startsWith("SELECT /*+ PARALLEL(1) */"), indexesSql);
+    }
+
+    @Test
     void usesTableCommentsMetadataQuery() {
         DamengAgent agent = new DamengAgent();
         TestSupport.setPrivateConnection(agent, JdbcMetadataSqlFake.connection());

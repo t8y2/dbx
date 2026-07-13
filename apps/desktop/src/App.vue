@@ -1094,6 +1094,7 @@ async function newQuery() {
     preferredSource: newQueryContextSource.value,
     prefillEnabled: settingsStore.editorSettings.prefillNewQueryWithSelect,
     targetConnectionId: target.connectionId,
+    targetDatabase: target.database,
     databaseType: effectiveDatabaseTypeForConnection(conn),
   });
   const tabId = queryStore.createTab(conn.id, target.database, undefined, "query", target.schema, initialSql);

@@ -2,10 +2,11 @@ import { describe, expect, it } from "vitest";
 import { buildSelectAllSql, isNewQueryPrefillSupported, resolveNewQueryInitialSql, resolveNewQueryTable, type ResolveNewQueryTableInput } from "@/lib/sql/newQueryContext";
 import type { QueryTab, TreeNode } from "@/types/database";
 
-function dataTab(overrides: Partial<Pick<QueryTab, "mode" | "connectionId" | "schema" | "tableMeta" | "structureTableName" | "title">> = {}): ResolveNewQueryTableInput["activeTab"] {
+function dataTab(overrides: Partial<Pick<QueryTab, "mode" | "connectionId" | "database" | "schema" | "tableMeta" | "structureTableName" | "title">> = {}): ResolveNewQueryTableInput["activeTab"] {
   return {
     mode: "data",
     connectionId: "conn-1",
+    database: "app_db",
     schema: "public",
     title: "users",
     tableMeta: { schema: "public", tableName: "users", columns: [], primaryKeys: [] },
@@ -13,21 +14,21 @@ function dataTab(overrides: Partial<Pick<QueryTab, "mode" | "connectionId" | "sc
   };
 }
 
-function tableNode(overrides: Partial<Pick<TreeNode, "type" | "connectionId" | "schema" | "catalog" | "tableName" | "label">> = {}): ResolveNewQueryTableInput["selectedTreeNode"] {
-  return { type: "table", connectionId: "conn-1", schema: "public", tableName: "orders", label: "orders", ...overrides };
+function tableNode(overrides: Partial<Pick<TreeNode, "type" | "connectionId" | "database" | "schema" | "catalog" | "tableName" | "label">> = {}): ResolveNewQueryTableInput["selectedTreeNode"] {
+  return { type: "table", connectionId: "conn-1", database: "app_db", schema: "public", tableName: "orders", label: "orders", ...overrides };
 }
 
 describe("resolveNewQueryTable", () => {
   it("resolves the table from an active data tab", () => {
     const table = resolveNewQueryTable({ activeTab: dataTab(), preferredSource: "tab" });
-    expect(table).toEqual({ connectionId: "conn-1", schema: "public", catalog: undefined, tableName: "users" });
+    expect(table).toEqual({ connectionId: "conn-1", database: "app_db", schema: "public", catalog: undefined, tableName: "users" });
   });
 
   it("returns null when a data tab has no loaded tableMeta (still loading or errored)", () => {
     // A data tab's title is schema/catalog-qualified (e.g. "public.events"), so it must
     // not be used as a bare table name - require the loaded tableMeta instead.
     const table = resolveNewQueryTable({
-      activeTab: { mode: "data", connectionId: "conn-1", schema: "public", title: "public.events" },
+      activeTab: { mode: "data", connectionId: "conn-1", database: "app_db", schema: "public", title: "public.events" },
       preferredSource: "tab",
     });
     expect(table).toBeNull();
@@ -35,15 +36,15 @@ describe("resolveNewQueryTable", () => {
 
   it("resolves the table from an active structure tab", () => {
     const table = resolveNewQueryTable({
-      activeTab: { mode: "structure", connectionId: "conn-1", schema: "public", structureTableName: "users" },
+      activeTab: { mode: "structure", connectionId: "conn-1", database: "app_db", schema: "public", structureTableName: "users" },
       preferredSource: "tab",
     });
-    expect(table).toEqual({ connectionId: "conn-1", schema: "public", catalog: undefined, tableName: "users" });
+    expect(table).toEqual({ connectionId: "conn-1", database: "app_db", schema: "public", catalog: undefined, tableName: "users" });
   });
 
   it("returns null for a query tab with no table context", () => {
     const table = resolveNewQueryTable({
-      activeTab: { mode: "query", connectionId: "conn-1", schema: "public", title: "query_1" },
+      activeTab: { mode: "query", connectionId: "conn-1", database: "app_db", schema: "public", title: "query_1" },
       preferredSource: "tab",
     });
     expect(table).toBeNull();
@@ -57,7 +58,7 @@ describe("resolveNewQueryTable", () => {
 
   it("uses the node label when tableName is absent", () => {
     const table = resolveNewQueryTable({
-      selectedTreeNode: { type: "table", connectionId: "conn-1", schema: "public", label: "by_label" },
+      selectedTreeNode: { type: "table", connectionId: "conn-1", database: "app_db", schema: "public", label: "by_label" },
       preferredSource: "sidebar",
     });
     expect(table?.tableName).toBe("by_label");
@@ -83,7 +84,7 @@ describe("resolveNewQueryTable", () => {
 
   it("falls back to the secondary context when the primary has no table", () => {
     const table = resolveNewQueryTable({
-      activeTab: { mode: "query", connectionId: "conn-1", title: "query_1" },
+      activeTab: { mode: "query", connectionId: "conn-1", database: "app_db", title: "query_1" },
       selectedTreeNode: tableNode(),
       preferredSource: "tab",
     });
@@ -145,6 +146,7 @@ describe("resolveNewQueryInitialSql", () => {
         activeTab: dataTab(),
         prefillEnabled: true,
         targetConnectionId: "conn-1",
+        targetDatabase: "app_db",
         databaseType: "postgres",
       }),
     ).toBe('SELECT * FROM "public"."users"');
@@ -156,6 +158,7 @@ describe("resolveNewQueryInitialSql", () => {
         activeTab: dataTab(),
         prefillEnabled: false,
         targetConnectionId: "conn-1",
+        targetDatabase: "app_db",
         databaseType: "postgres",
       }),
     ).toBeUndefined();
@@ -167,7 +170,22 @@ describe("resolveNewQueryInitialSql", () => {
         activeTab: dataTab({ connectionId: "conn-2" }),
         prefillEnabled: true,
         targetConnectionId: "conn-1",
+        targetDatabase: "app_db",
         databaseType: "postgres",
+      }),
+    ).toBeUndefined();
+  });
+
+  it("does not prefill a table from another database on the same connection", () => {
+    expect(
+      resolveNewQueryInitialSql({
+        activeTab: { mode: "query", connectionId: "conn-1", database: "db_a", title: "query_1" },
+        selectedTreeNode: tableNode({ database: "db_b" }),
+        preferredSource: "tab",
+        prefillEnabled: true,
+        targetConnectionId: "conn-1",
+        targetDatabase: "db_a",
+        databaseType: "mysql",
       }),
     ).toBeUndefined();
   });
@@ -177,6 +195,7 @@ describe("resolveNewQueryInitialSql", () => {
       resolveNewQueryInitialSql({
         prefillEnabled: true,
         targetConnectionId: "conn-1",
+        targetDatabase: "app_db",
         databaseType: "postgres",
       }),
     ).toBeUndefined();
@@ -188,6 +207,7 @@ describe("resolveNewQueryInitialSql", () => {
         activeTab: dataTab(),
         prefillEnabled: true,
         targetConnectionId: "conn-1",
+        targetDatabase: "app_db",
         databaseType: "neo4j",
       }),
     ).toBeUndefined();

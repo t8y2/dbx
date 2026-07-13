@@ -63,20 +63,22 @@ function targetFromContext(context: Pick<QueryTab | TreeNode, "connectionId" | "
 
 export interface NewQueryTable {
   connectionId: string;
+  database: string;
   schema?: string;
   catalog?: string;
   tableName: string;
 }
 
 export interface ResolveNewQueryTableInput {
-  activeTab?: Pick<QueryTab, "mode" | "connectionId" | "schema" | "tableMeta" | "structureTableName" | "title"> | null;
-  selectedTreeNode?: Pick<TreeNode, "type" | "connectionId" | "schema" | "catalog" | "tableName" | "label"> | null;
+  activeTab?: Pick<QueryTab, "mode" | "connectionId" | "database" | "schema" | "tableMeta" | "structureTableName" | "title"> | null;
+  selectedTreeNode?: Pick<TreeNode, "type" | "connectionId" | "database" | "schema" | "catalog" | "tableName" | "label"> | null;
   preferredSource?: NewQueryContextSource;
 }
 
 export interface ResolveNewQueryInitialSqlInput extends ResolveNewQueryTableInput {
   prefillEnabled: boolean;
   targetConnectionId: string;
+  targetDatabase: string;
   databaseType?: DatabaseType;
 }
 
@@ -97,12 +99,12 @@ function tableFromTab(tab: ResolveNewQueryTableInput["activeTab"]): NewQueryTabl
     const meta = tab.tableMeta;
     const tableName = meta?.tableName?.trim();
     if (!tableName) return null;
-    return { connectionId: tab.connectionId, schema: meta?.schema ?? tab.schema, catalog: meta?.catalog, tableName };
+    return { connectionId: tab.connectionId, database: tab.database, schema: meta?.schema ?? tab.schema, catalog: meta?.catalog, tableName };
   }
   if (tab.mode === "structure") {
     const tableName = (tab.structureTableName || "").trim();
     if (!tableName) return null;
-    return { connectionId: tab.connectionId, schema: tab.schema, tableName };
+    return { connectionId: tab.connectionId, database: tab.database, schema: tab.schema, tableName };
   }
   return null;
 }
@@ -112,7 +114,7 @@ function tableFromNode(node: ResolveNewQueryTableInput["selectedTreeNode"]): New
   if (node.type !== "table" && node.type !== "view" && node.type !== "materialized_view") return null;
   const tableName = (node.tableName || node.label || "").trim();
   if (!tableName) return null;
-  return { connectionId: node.connectionId, schema: node.schema, catalog: node.catalog, tableName };
+  return { connectionId: node.connectionId, database: node.database || "", schema: node.schema, catalog: node.catalog, tableName };
 }
 
 /**
@@ -140,14 +142,14 @@ export function buildSelectAllSql(databaseType: DatabaseType | undefined, table:
 
 /**
  * Resolves the optional initial SQL for a new query tab. A table from another
- * connection is intentionally ignored because it cannot safely run on the
- * target connection selected for the new tab.
+ * connection or database is intentionally ignored because it cannot safely run
+ * in the execution context selected for the new tab.
  */
 export function resolveNewQueryInitialSql(input: ResolveNewQueryInitialSqlInput): string | undefined {
   if (!input.prefillEnabled || !isNewQueryPrefillSupported(input.databaseType)) return undefined;
 
   const table = resolveNewQueryTable(input);
-  if (!table || table.connectionId !== input.targetConnectionId) return undefined;
+  if (!table || table.connectionId !== input.targetConnectionId || table.database !== input.targetDatabase) return undefined;
 
   return buildSelectAllSql(input.databaseType, table);
 }

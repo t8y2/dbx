@@ -838,6 +838,8 @@ export default withEnglishFallback({
     cellDetails: "セル詳細",
     cellDetailLayoutBottom: "下部に表示",
     cellDetailLayoutRight: "右側に表示",
+    collapseCellDetailMetadata: "セルのメタ情報を折りたたむ",
+    expandCellDetailMetadata: "セルのメタ情報を展開",
     openCellDetailsDialog: "セル詳細を開く",
     rowDetails: "行詳細",
     rowDetailsFor: "行 {row} の詳細",

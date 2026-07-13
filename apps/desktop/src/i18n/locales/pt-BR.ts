@@ -843,6 +843,8 @@ export default withEnglishFallback({
     cellDetails: "Detalhes da Célula",
     cellDetailLayoutBottom: "Mover para Baixo",
     cellDetailLayoutRight: "Mover para a Direita",
+    collapseCellDetailMetadata: "Recolher metadados da célula",
+    expandCellDetailMetadata: "Expandir metadados da célula",
     openCellDetailsDialog: "Abrir Detalhes da Célula",
     rowDetails: "Detalhes da Linha",
     rowDetailsFor: "Detalhes da Linha {row}",

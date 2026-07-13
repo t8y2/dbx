@@ -841,6 +841,8 @@ export default withEnglishFallback({
     cellDetails: "Dettagli Cella",
     cellDetailLayoutBottom: "Sposta in Basso",
     cellDetailLayoutRight: "Sposta a Destra",
+    collapseCellDetailMetadata: "Comprimi metadati cella",
+    expandCellDetailMetadata: "Espandi metadati cella",
     openCellDetailsDialog: "Apri Dettagli Cella",
     rowDetails: "Dettagli Riga",
     rowDetailsFor: "Dettagli Riga {row}",

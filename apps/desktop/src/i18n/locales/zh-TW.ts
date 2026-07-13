@@ -842,6 +842,8 @@ export default withEnglishFallback({
     cellDetails: "儲存格詳情",
     cellDetailLayoutBottom: "移到底部",
     cellDetailLayoutRight: "移到右側",
+    collapseCellDetailMetadata: "收合儲存格中繼資訊",
+    expandCellDetailMetadata: "展開儲存格中繼資訊",
     openCellDetailsDialog: "儲存格詳情",
     rowDetails: "資料詳情",
     rowDetailsFor: "第 {row} 筆資料詳情",

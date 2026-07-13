@@ -79,6 +79,11 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ dataGridSearchMode: "invalid" as any }).dataGridSearchMode).toBe("filter");
   });
 
+  it("shows cell detail metadata by default and preserves collapsed state", () => {
+    expect(normalizeEditorSettings({}).cellDetailMetadataCollapsed).toBe(false);
+    expect(normalizeEditorSettings({ cellDetailMetadataCollapsed: true }).cellDetailMetadataCollapsed).toBe(true);
+  });
+
   it("normalizes toolbar item settings from older saved settings", () => {
     const settings = normalizeEditorSettings({
       toolbarItems: {

@@ -4923,6 +4923,7 @@ const dialogCellDetail = computed(() => {
 });
 
 const cellDetailJsonFormatted = computed(() => settingsStore.editorSettings.cellDetailJsonFormatted);
+const cellDetailMetadataCollapsed = computed(() => settingsStore.editorSettings.cellDetailMetadataCollapsed);
 const sideDetailJsonView = computed(() => cellDetailJsonFormatted.value && !!activeCellDetail.value?.formattedJson);
 const cellDetailJsonView = computed(() => cellDetailJsonFormatted.value && !!dialogCellDetail.value?.formattedJson);
 
@@ -5149,7 +5150,6 @@ const detailTemporalEditorConfig = computed(() => {
   const detail = activeCellDetail.value;
   return detail ? temporalEditorConfigForColumn(detail.colIndex) : undefined;
 });
-const sideDetailPrioritizesValue = computed(() => !cellDetailPanelIsBottom.value && !isEditingDetail.value && !!activeCellDetail.value?.formattedJson);
 const sideDetailValueFillsHeight = computed(() => cellDetailPanelIsBottom.value || isEditingDetail.value || (!cellDetailPanelIsBottom.value && !activeCellDetail.value?.imagePreviewUrl));
 const sideJsonPreviewText = computed(() => {
   const detail = activeCellDetail.value;
@@ -5352,6 +5352,10 @@ function warnFormattedJsonEditIfNeeded(detail: DataGridCellDetail, force = false
 
 function toggleCellDetailJsonFormatted() {
   settingsStore.updateEditorSettings({ cellDetailJsonFormatted: !cellDetailJsonFormatted.value });
+}
+
+function toggleCellDetailMetadataCollapsed() {
+  settingsStore.updateEditorSettings({ cellDetailMetadataCollapsed: !cellDetailMetadataCollapsed.value });
 }
 
 function startDetailEdit() {
@@ -10585,31 +10589,22 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             @contextmenu="onDrawerContextMenu"
           >
             <div v-if="!cellDetailPanelIsBottom" class="absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/30" @mousedown.prevent="onDetailResizeStart" />
-            <div v-else class="absolute left-0 right-0 top-0 z-20 h-1.5 -translate-y-1/2 cursor-row-resize hover:bg-primary/30" @mousedown.prevent="onDetailResizeStart" />
-            <div class="h-9 flex items-center gap-2 px-3 border-b shrink-0 bg-muted/20">
-              <Info class="w-3.5 h-3.5 text-muted-foreground" />
-              <span class="text-xs font-medium flex-1 min-w-0 truncate">{{ t("grid.cellDetails") }}</span>
-              <Button variant="ghost" size="icon" class="h-5 w-5" :title="cellDetailPanelIsBottom ? t('grid.cellDetailLayoutRight') : t('grid.cellDetailLayoutBottom')" @click="toggleCellDetailPanelLayout">
-                <PanelRight v-if="cellDetailPanelIsBottom" class="w-3 h-3" />
-                <PanelBottom v-else class="w-3 h-3" />
-              </Button>
-              <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.openCellDetailsDialog')" @click="openActiveCellDetailDialog">
-                <Maximize2 class="w-3 h-3" />
-              </Button>
-              <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.openRowDetailsDialog')" @click="openActiveRowDetailDialog">
-                <ListTree class="w-3 h-3" />
-              </Button>
-              <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.openColumnDetailsDialog')" @click="openActiveColumnDetailDialog">
-                <TableProperties class="w-3 h-3" />
-              </Button>
-              <Button variant="ghost" size="icon" class="h-5 w-5" @click="closeCellDetails">
-                <X class="w-3 h-3" />
-              </Button>
-            </div>
-
+            <div v-else class="data-grid-detail-resize-handle data-grid-detail-resize-handle--bottom absolute left-0 right-0 top-0 z-20 h-2 -translate-y-1/2 cursor-row-resize" @mousedown.prevent="onDetailResizeStart" />
             <Tabs v-model="activeCellDetailTab" class="flex-1 min-h-0 gap-0">
-              <div class="shrink-0 border-b px-3 py-2">
-                <TabsList class="grid h-7 w-full p-0.5" :class="activeCellDetailTabsGridClass">
+              <div class="h-9 flex items-center gap-2 px-3 border-b shrink-0 bg-muted/20">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  class="h-5 w-5 shrink-0"
+                  :title="cellDetailMetadataCollapsed ? t('grid.expandCellDetailMetadata') : t('grid.collapseCellDetailMetadata')"
+                  :aria-label="cellDetailMetadataCollapsed ? t('grid.expandCellDetailMetadata') : t('grid.collapseCellDetailMetadata')"
+                  :aria-expanded="!cellDetailMetadataCollapsed"
+                  @click="toggleCellDetailMetadataCollapsed"
+                >
+                  <ChevronRight v-if="cellDetailMetadataCollapsed" class="w-3 h-3" />
+                  <ChevronDown v-else class="w-3 h-3" />
+                </Button>
+                <TabsList class="grid h-7 min-w-0 flex-1 p-0.5" :class="activeCellDetailTabsGridClass">
                   <TabsTrigger value="details" class="h-6 text-xs">{{ t("grid.cellDetails") }}</TabsTrigger>
                   <TabsTrigger v-if="activeCellDetailTabs.includes('hexViewer')" value="hexViewer" class="h-6 text-xs">
                     {{ t("grid.hexViewer") }}
@@ -10618,11 +10613,29 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     {{ t("grid.valueEditor") }}
                   </TabsTrigger>
                 </TabsList>
+                <div class="ml-auto flex shrink-0 items-center gap-1">
+                  <Button variant="ghost" size="icon" class="h-5 w-5" :title="cellDetailPanelIsBottom ? t('grid.cellDetailLayoutRight') : t('grid.cellDetailLayoutBottom')" @click="toggleCellDetailPanelLayout">
+                    <PanelRight v-if="cellDetailPanelIsBottom" class="w-3 h-3" />
+                    <PanelBottom v-else class="w-3 h-3" />
+                  </Button>
+                  <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.openCellDetailsDialog')" @click="openActiveCellDetailDialog">
+                    <Maximize2 class="w-3 h-3" />
+                  </Button>
+                  <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.openRowDetailsDialog')" @click="openActiveRowDetailDialog">
+                    <ListTree class="w-3 h-3" />
+                  </Button>
+                  <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.openColumnDetailsDialog')" @click="openActiveColumnDetailDialog">
+                    <TableProperties class="w-3 h-3" />
+                  </Button>
+                  <Button variant="ghost" size="icon" class="h-5 w-5" @click="closeCellDetails">
+                    <X class="w-3 h-3" />
+                  </Button>
+                </div>
               </div>
 
               <TabsContent value="details" class="m-0 min-h-0 flex-1 flex flex-col">
                 <div data-native-clipboard class="flex-1 min-h-0 overflow-auto px-3 pt-3 text-xs" :class="[sideDetailValueFillsHeight ? 'flex flex-col gap-3' : 'space-y-3', isEditingDetail && !cellDetailPanelIsBottom ? 'pb-1' : 'pb-3']">
-                  <div v-if="cellDetailPanelIsBottom" class="grid grid-cols-[minmax(180px,1.6fr)_repeat(4,minmax(74px,0.55fr))_minmax(160px,1fr)] gap-3 rounded border bg-muted/20 p-2">
+                  <div v-if="cellDetailPanelIsBottom && !cellDetailMetadataCollapsed" class="grid grid-cols-[minmax(180px,1.6fr)_repeat(4,minmax(74px,0.55fr))_minmax(160px,1fr)] gap-3 rounded border bg-muted/20 p-2">
                     <div class="min-w-0 space-y-1">
                       <div class="text-muted-foreground">{{ t("grid.columnName") }}</div>
                       <div class="truncate font-medium" :title="activeCellDetail.column">
@@ -10654,7 +10667,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       </div>
                     </div>
                   </div>
-                  <template v-else-if="!isEditingDetail && !sideDetailPrioritizesValue">
+                  <template v-else-if="!cellDetailMetadataCollapsed && !isEditingDetail">
                     <div class="space-y-1">
                       <div class="text-muted-foreground">{{ t("grid.columnName") }}</div>
                       <div class="font-medium break-all">{{ activeCellDetail.column }}</div>
@@ -11909,6 +11922,29 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   top: 2px;
   height: 6px;
   background: var(--data-grid-scrollbar-thumb-hover);
+}
+
+.data-grid-detail-resize-handle--bottom {
+  background: transparent;
+}
+
+.data-grid-detail-resize-handle--bottom::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 42px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--data-grid-scrollbar-thumb-hover);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  transition: opacity 120ms ease;
+}
+
+.detail-drawer-resizing > .data-grid-detail-resize-handle--bottom::after {
+  opacity: 0.7;
 }
 
 .data-grid-vertical-scrollbar {

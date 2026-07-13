@@ -901,6 +901,8 @@ export default withEnglishFallback({
     cellDetails: "单元格详情",
     cellDetailLayoutBottom: "移动到底部",
     cellDetailLayoutRight: "移动到右侧",
+    collapseCellDetailMetadata: "收起单元格元信息",
+    expandCellDetailMetadata: "展开单元格元信息",
     openCellDetailsDialog: "单元格详情",
     rowDetails: "行详情",
     rowDetailsFor: "第 {row} 行详情",

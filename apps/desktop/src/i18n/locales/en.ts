@@ -900,6 +900,8 @@ export default {
     cellDetails: "Cell Details",
     cellDetailLayoutBottom: "Move to Bottom",
     cellDetailLayoutRight: "Move to Right",
+    collapseCellDetailMetadata: "Collapse cell metadata",
+    expandCellDetailMetadata: "Expand cell metadata",
     openCellDetailsDialog: "Open Cell Details",
     rowDetails: "Row Details",
     rowDetailsFor: "Row {row} Details",

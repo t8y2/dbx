@@ -385,14 +385,15 @@ public final class ZooKeeperAgent {
     }
 
     private static Map<String, Object> valueObject(byte[] bytes) {
+        byte[] normalized = bytes == null ? new byte[0] : bytes;
         Map<String, Object> value = new LinkedHashMap<>();
-        String utf8 = strictUtf8(bytes);
+        String utf8 = strictUtf8(normalized);
         if (utf8 != null) {
             value.put("encoding", "utf8");
             value.put("data", utf8);
         } else {
             value.put("encoding", "base64");
-            value.put("data", Base64.getEncoder().encodeToString(bytes));
+            value.put("data", Base64.getEncoder().encodeToString(normalized));
         }
         return value;
     }

@@ -5,12 +5,18 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import org.apache.curator.test.TestingServer;
+import org.apache.zookeeper.CreateMode;
+import org.apache.zookeeper.Watcher;
+import org.apache.zookeeper.ZooDefs;
+import org.apache.zookeeper.ZooKeeper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 final class ZooKeeperAgentTest {
     @AfterEach
@@ -318,6 +324,33 @@ final class ZooKeeperAgentTest {
             JsonObject value = result(request(3, "kv_get", "{\"key\":\"/bin\"}")).getAsJsonObject("value");
             Assertions.assertEquals("base64", value.get("encoding").getAsString());
             Assertions.assertEquals("/wAB", value.get("data").getAsString());
+        }
+    }
+
+    @Test
+    void kvGetTreatsNullZnodeDataAsEmptyUtf8Value() throws Exception {
+        try (TestingServer server = new TestingServer()) {
+            CountDownLatch connected = new CountDownLatch(1);
+            ZooKeeper rawClient = new ZooKeeper(server.getConnectString(), 10000, event -> {
+                if (event.getState() == Watcher.Event.KeeperState.SyncConnected) {
+                    connected.countDown();
+                }
+            });
+            try {
+                Assertions.assertTrue(connected.await(10, TimeUnit.SECONDS));
+                rawClient.create("/null-data", null, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+            } finally {
+                rawClient.close();
+            }
+
+            connect(server);
+            JsonObject get = result(request(3, "kv_get", "{\"key\":\"/null-data\"}"));
+
+            JsonObject value = get.getAsJsonObject("value");
+            Assertions.assertEquals("utf8", value.get("encoding").getAsString());
+            Assertions.assertEquals("", value.get("data").getAsString());
+            Assertions.assertEquals(0, get.getAsJsonObject("metadata").get("dataLength").getAsInt());
+            Assertions.assertEquals(0, get.getAsJsonObject("metadata").get("valueSize").getAsInt());
         }
     }
 

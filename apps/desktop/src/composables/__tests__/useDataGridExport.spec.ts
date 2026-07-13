@@ -55,6 +55,34 @@ function row(data: unknown[]) {
   };
 }
 
+function createMongoExportState(options: { columns: string[]; item: ReturnType<typeof row> & { sourceIndex: number }; mongoDocuments: unknown[] }) {
+  const state: UseDataGridExportOptions = {
+    columns: computed(() => options.columns),
+    displayItems: computed(() => [options.item]),
+    sql: computed(() => undefined),
+    tableMeta: computed(() => undefined),
+    copyInsertTargetLabel: computed(() => "documents"),
+    databaseType: computed(() => "mongodb"),
+    connectionId: computed(() => "connection-1"),
+    database: computed(() => "dbx"),
+    context: computed(() => "results"),
+    sourceColumns: computed(() => options.columns),
+    mongoDocuments: computed(() => options.mongoDocuments),
+    columnTypes: computed(() => undefined),
+    whereInput: computed(() => undefined),
+    orderBy: computed(() => undefined),
+    exportBatchSize: computed(() => 1000),
+    hasCellSelection: computed(() => false),
+    selectedCells: computed(() => ({ columns: [], rows: [] })),
+    selectedRange: computed(() => null),
+    contextCell: ref({ rowId: options.item.id, rowIndex: 0, col: -1 }),
+    getRowItem: (rowId) => (rowId === options.item.id ? options.item : undefined),
+    selectedRowIds: ref(new Set<number>()),
+    hasRowSelection: computed(() => false),
+  };
+  return useDataGridExport(state);
+}
+
 function createExportState(tableMeta: DataGridTableMeta, columns = tableMeta.columns?.map((column) => column.name) ?? ["id", "name"]) {
   const item = row(columns.map((column, index) => (column === "id" ? 1 : `value-${index}`)));
   const options: UseDataGridExportOptions = {
@@ -165,5 +193,43 @@ describe("useDataGridExport prepared row statements", () => {
     await Promise.all([prefetch, copy]);
     expect(toast).toHaveBeenCalledWith("grid.copyFailed: update builder unavailable", 5000);
     expect(copyToClipboard).not.toHaveBeenCalled();
+  });
+
+  it("copies Mongo JSON from the original document using the sorted source index and visible columns", async () => {
+    const item = { ...row(["true", '{"role":"admin"}']), sourceIndex: 1 };
+    const state = createMongoExportState({
+      columns: ["booleanText", "profile"],
+      item,
+      mongoDocuments: [
+        { booleanText: "wrong row", profile: { role: "viewer" } },
+        { booleanText: "true", profile: { role: "admin" }, hidden: "not selected" },
+      ],
+    });
+
+    await state.copyRow();
+
+    expect(copyToClipboard).toHaveBeenCalledWith(JSON.stringify({ booleanText: "true", profile: { role: "admin" } }, null, 2));
+  });
+
+  it("preserves original Mongo string types in INSERT and applies explicit edits", async () => {
+    const item = { ...row(["123", "true", '{"kind":"literal"}', "2024-01-01 00:00:00", '{"role":"maintainer"}']), sourceIndex: 0 };
+    item.isDirtyCol = [false, false, false, false, true];
+    const state = createMongoExportState({
+      columns: ["numericText", "booleanText", "jsonText", "dateText", "profile"],
+      item,
+      mongoDocuments: [
+        {
+          numericText: "123",
+          booleanText: "true",
+          jsonText: '{"kind":"literal"}',
+          dateText: "2024-01-01 00:00:00",
+          profile: { role: "admin" },
+        },
+      ],
+    });
+
+    await state.copyRowAsInsert();
+
+    expect(copyToClipboard).toHaveBeenCalledWith('db.getCollection("documents").insert({"numericText":"123","booleanText":"true","jsonText":"{\\"kind\\":\\"literal\\"}","dateText":"2024-01-01 00:00:00","profile":{"role":"maintainer"}});');
   });
 });

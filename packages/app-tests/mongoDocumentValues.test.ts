@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { applyMongoGridChangesToDocument, buildMongoCopyInsertDocument, buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, parseMongoDocumentInputValue } from "../../apps/desktop/src/lib/mongo/mongoDocumentValues.ts";
+import { applyMongoGridChangesToDocument, buildMongoCopyDocumentFromOriginal, buildMongoCopyInsertDocument, buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, parseMongoDocumentInputValue } from "../../apps/desktop/src/lib/mongo/mongoDocumentValues.ts";
 
 test("parses Mongo shell ISODate literals as extended JSON dates", () => {
   assert.deepEqual(parseMongoDocumentInputValue('ISODate("2026-06-10T13:59:31.287Z")'), {
@@ -86,6 +86,39 @@ test("builds Mongo copy inserts without primary keys when requested", () => {
   assert.deepEqual(buildMongoCopyInsertDocument(["6743e4bfa3f6f84bc3fff6c8", "done"], ["_id", "status"], { excludePrimaryKeys: true }), {
     status: "done",
   });
+});
+
+test("projects original Mongo values without guessing types", () => {
+  const original = {
+    _id: { $oid: "6743e4bfa3f6f84bc3fff6c8" },
+    numericText: "123",
+    booleanText: "true",
+    jsonText: '{"kind":"literal"}',
+    dateText: "2024-01-01 00:00:00",
+    profile: { role: "admin" },
+    hidden: "not selected",
+  };
+
+  assert.deepEqual(
+    buildMongoCopyDocumentFromOriginal(original, ["ignored", "ignored", "ignored", "ignored", "ignored"], ["numericText", "booleanText", "jsonText", "dateText", "profile"], [false, false, false, false, false]),
+    {
+      numericText: "123",
+      booleanText: "true",
+      jsonText: '{"kind":"literal"}',
+      dateText: "2024-01-01 00:00:00",
+      profile: { role: "admin" },
+    },
+  );
+});
+
+test("applies only explicit Mongo grid edits to copied original documents", () => {
+  assert.deepEqual(
+    buildMongoCopyDocumentFromOriginal({ _id: "1", count: "123", profile: { role: "admin" } }, ["1", "456", '{"role":"maintainer"}'], ["_id", "count", "profile"], [false, true, false], { excludePrimaryKeys: true }),
+    {
+      count: 456,
+      profile: { role: "admin" },
+    },
+  );
 });
 
 test("formats extended JSON dates as Mongo shell ISODate literals", () => {

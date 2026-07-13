@@ -100,6 +100,26 @@ export function buildMongoCopyInsertDocument(row: MongoInputValue[], columns: st
   return doc;
 }
 
+export function buildMongoCopyDocumentFromOriginal(original: unknown, row: MongoInputValue[], columns: string[], dirtyColumns: boolean[], options: { excludePrimaryKeys?: boolean } = {}): Record<string, unknown> | null {
+  if (!original || typeof original !== "object" || Array.isArray(original)) return null;
+
+  const source = original as Record<string, unknown>;
+  const document: Record<string, unknown> = {};
+  for (let columnIndex = 0; columnIndex < columns.length; columnIndex++) {
+    const column = columns[columnIndex];
+    if (!column || (options.excludePrimaryKeys && column === "_id")) continue;
+
+    // Display strings are ambiguous, so only explicitly edited cells may replace original BSON values.
+    if (dirtyColumns[columnIndex]) {
+      const value = row[columnIndex];
+      if (value !== null) document[column] = parseMongoDocumentInputValue(value);
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(source, column)) document[column] = source[column];
+  }
+  return document;
+}
+
 export function formatMongoShellLiteral(value: unknown): string {
   if (value === null || value === undefined) return "null";
   if (typeof value === "number" || typeof value === "boolean") return String(value);

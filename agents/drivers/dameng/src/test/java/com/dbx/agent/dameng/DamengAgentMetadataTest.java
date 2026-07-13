@@ -34,6 +34,7 @@ class DamengAgentMetadataTest {
             .findFirst()
             .orElseThrow();
         Assertions.assertTrue(columnsSql.contains("LEFT JOIN ALL_COL_COMMENTS"), columnsSql);
+        Assertions.assertTrue(columnsSql.startsWith("SELECT /*+ PARALLEL(1) */"), columnsSql);
     }
 
     @Test
@@ -204,6 +205,43 @@ class DamengAgentMetadataTest {
     }
 
     @Test
+    void closesDbmsMetadataResultBeforeLoadingSupplementalDdlMetadata() {
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, metadataConnection());
+
+        Assertions.assertDoesNotThrow(() -> agent.getTableDdl("APP", "USERS"));
+    }
+
+    @Test
+    void disablesParallelExecutionForTableDdlMetadataQueries() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, metadataConnection(
+            "id comment",
+            null,
+            false,
+            List.of(),
+            sqls
+        ));
+
+        agent.getTableDdl("APP", "USERS");
+
+        List<String> ddlMetadataSql = sqls.stream()
+            .filter(sql -> sql.contains("DBMS_METADATA.GET_DDL")
+                || sql.contains("ALL_TAB_COLUMNS")
+                || sql.contains("ALL_CONS_COLUMNS")
+                || sql.contains("SYS.SYSCOLUMNS")
+                || sql.contains("ALL_TAB_COMMENTS")
+                || sql.contains("ALL_INDEXES"))
+            .toList();
+        Assertions.assertFalse(ddlMetadataSql.isEmpty());
+        Assertions.assertTrue(
+            ddlMetadataSql.stream().allMatch(sql -> sql.startsWith("SELECT /*+ PARALLEL(1) */")),
+            String.join("\n", ddlMetadataSql)
+        );
+    }
+
+    @Test
     void readsFullTableDdlFromCharacterStreamWhenGetStringIsTruncated() {
         DamengAgent agent = new DamengAgent();
         String fullDdl = "CREATE TABLE \"APP\".\"USERS\" (\n  \"ID\" NUMBER,\n  \"PAYLOAD\" VARCHAR2(2000)\n);\n-- "
@@ -316,15 +354,19 @@ class DamengAgentMetadataTest {
         List<String> sqls,
         String dbmsMetadataDdl
     ) {
+        boolean[] dbmsMetadataResultOpen = {false};
         return proxy(Connection.class, (method, args) -> {
             String name = method.getName();
             if ("prepareStatement".equals(name)) {
                 String sql = (String) args[0];
+                if (dbmsMetadataResultOpen[0]) {
+                    throw new AssertionError("Supplemental metadata query started before DBMS_METADATA ResultSet closed: " + sql);
+                }
                 if (sqls != null) {
                     sqls.add(sql);
                 }
                 if (sql.contains("DBMS_METADATA.GET_DDL")) {
-                    return dbmsMetadataStatement(dbmsMetadataDdl);
+                    return dbmsMetadataStatement(dbmsMetadataDdl, dbmsMetadataResultOpen);
                 }
                 if (sql.contains("SYS.SYSOBJECTS") && sql.contains("TYPE$ = 'SCH'")) {
                     return metadataStatement(List.of(List.of("APP"), List.of("EMPTY_SCHEMA")));
@@ -335,7 +377,7 @@ class DamengAgentMetadataTest {
                 if (sql.contains("SYS.SYSCOLUMNS")) {
                     return metadataStatement(List.of(List.of("ID")));
                 }
-                if (sql.startsWith("SELECT COMMENTS")) {
+                if (sql.contains("SELECT /*+ PARALLEL(1) */ COMMENTS")) {
                     return metadataStatement(List.of(List.of("用户示例表")));
                 }
                 if (sql.contains("USER_COL_COMMENTS")) {
@@ -410,7 +452,7 @@ class DamengAgentMetadataTest {
         return List.of(name, columns, uniqueness, indexType);
     }
 
-    private static PreparedStatement dbmsMetadataStatement(String ddl) {
+    private static PreparedStatement dbmsMetadataStatement(String ddl, boolean[] resultOpen) {
         List<String> params = new ArrayList<>();
         return proxy(PreparedStatement.class, (method, args) -> {
             String name = method.getName();
@@ -419,7 +461,11 @@ class DamengAgentMetadataTest {
                 if ("INDEX".equals(objectType)) {
                     throw new AssertionError("Dameng table DDL should generate index DDL from metadata");
                 }
-                return metadataResultSet(List.of(List.of(new LongText(ddl, ddl.substring(0, Math.min(ddl.length(), 64))))));
+                resultOpen[0] = true;
+                return metadataResultSet(
+                    List.of(List.of(new LongText(ddl, ddl.substring(0, Math.min(ddl.length(), 64))))),
+                    () -> resultOpen[0] = false
+                );
             }
             if ("setString".equals(name)) {
                 int index = ((Integer) args[0]) - 1;
@@ -486,6 +532,10 @@ class DamengAgentMetadataTest {
     }
 
     private static ResultSet metadataResultSet(List<List<Object>> rows) {
+        return metadataResultSet(rows, () -> {});
+    }
+
+    private static ResultSet metadataResultSet(List<List<Object>> rows, Runnable onClose) {
         int[] index = {-1};
         return proxy(ResultSet.class, (method, args) -> {
             String name = method.getName();
@@ -527,6 +577,7 @@ class DamengAgentMetadataTest {
                 };
             }
             if ("close".equals(name)) {
+                onClose.run();
                 return null;
             }
             return defaultValue(method.getReturnType());

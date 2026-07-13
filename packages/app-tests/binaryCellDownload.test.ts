@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "vitest";
 
 import { binaryCellDisplayText, binaryCellDownloadFileName, binaryCellDownloadPayload, canDownloadBinaryCellValue, isBinaryCellColumnType, parseBinaryCellBytes, parseBinaryCellHexValue, retainBinaryCellDownloadMenuForHover } from "../../apps/desktop/src/lib/dataGrid/binaryCellDownload.ts";
@@ -34,6 +35,13 @@ test("binary cell download menu closes when hover moves to another cell", () => 
   assert.equal(retainBinaryCellDownloadMenuForHover(openCell, { rowIndex: 3, col: 4 }), null);
   assert.equal(retainBinaryCellDownloadMenuForHover(openCell, { rowIndex: 2, col: 5 }), null);
   assert.equal(retainBinaryCellDownloadMenuForHover(openCell, { rowIndex: 2, col: 4 }), openCell);
+});
+
+test("transpose cell hover also clears a different binary download menu", () => {
+  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
+  const handler = source.match(/function onTransposeCellMouseenter\([^]*?\n\}/)?.[0] ?? "";
+
+  assert.match(handler, /retainBinaryCellDownloadMenuForHover\(quickDownloadMenuCell\.value, \{ rowIndex, col: actualColIdx \}\)/);
 });
 
 test("canDownloadBinaryCellValue allows displayed binary hex strings", () => {

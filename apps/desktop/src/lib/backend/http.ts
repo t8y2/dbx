@@ -245,6 +245,10 @@ export async function saveTunnelProfiles(profiles: TunnelProfile[]): Promise<voi
   return post("/api/tunnel-profiles/save", { profiles });
 }
 
+export async function testTunnelProfile(profile: TunnelProfile): Promise<string> {
+  return post("/api/tunnel-profiles/test", profile);
+}
+
 export async function readKeychainPassword(_service: string): Promise<string> {
   return ""; // Not available in web backend
 }

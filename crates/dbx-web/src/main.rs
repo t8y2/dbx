@@ -247,6 +247,7 @@ async fn main() {
         // Tunnel profiles
         .route("/tunnel-profiles/list", get(routes::tunnel_profiles::load_tunnel_profiles))
         .route("/tunnel-profiles/save", post(routes::tunnel_profiles::save_tunnel_profiles))
+        .route("/tunnel-profiles/test", post(routes::tunnel_profiles::test_tunnel_profile))
         // Agent drivers
         .route("/agents/installed-local", get(routes::agents::list_installed_agents_local))
         .route("/agents/installed", get(routes::agents::list_installed_agents))

@@ -1118,6 +1118,10 @@ export async function saveTunnelProfiles(profiles: TunnelProfile[]): Promise<voi
   return invoke("save_tunnel_profiles", { profiles });
 }
 
+export async function testTunnelProfile(profile: TunnelProfile): Promise<string> {
+  return invoke("test_tunnel_profile", { profile });
+}
+
 export async function readKeychainPassword(service: string): Promise<string> {
   return invoke("read_keychain_password", { service, account: null });
 }

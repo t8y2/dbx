@@ -44,5 +44,14 @@ export const useTunnelProfileStore = defineStore("tunnelProfiles", () => {
     }
   }
 
-  return { profiles, isLoaded, init, refresh, profileById, saveProfiles };
+  /**
+   * Tests a profile's transport layer in isolation (no downstream database).
+   * The draft profile is passed straight through, so it validates the values
+   * currently in the editor rather than the last-saved copy.
+   */
+  async function testProfile(profile: TunnelProfile): Promise<string> {
+    return api.testTunnelProfile(profile);
+  }
+
+  return { profiles, isLoaded, init, refresh, profileById, saveProfiles, testProfile };
 });

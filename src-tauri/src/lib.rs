@@ -1274,6 +1274,7 @@ pub fn run() {
             commands::ssh_config::list_ssh_config_hosts,
             commands::tunnel_profiles::load_tunnel_profiles,
             commands::tunnel_profiles::save_tunnel_profiles,
+            commands::tunnel_profiles::test_tunnel_profile,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -17,3 +17,11 @@ pub async fn save_tunnel_profiles(
 ) -> Result<(), String> {
     state.storage.save_tunnel_profiles(&profiles).await
 }
+
+#[tauri::command]
+pub async fn test_tunnel_profile(
+    state: State<'_, Arc<AppState>>,
+    profile: TransportLayerConfig,
+) -> Result<String, String> {
+    state.test_tunnel_profile(&profile).await
+}

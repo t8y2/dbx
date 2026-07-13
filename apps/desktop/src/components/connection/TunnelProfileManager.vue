@@ -21,6 +21,8 @@ const draft = ref<TunnelProfile[]>([]);
 const selectedId = ref<string | null>(null);
 const isSaving = ref(false);
 const hasInitializedDraft = ref(false);
+const isTesting = ref(false);
+const testResult = ref<{ ok: boolean; message: string } | null>(null);
 
 function cloneProfiles(profiles: TunnelProfile[]): TunnelProfile[] {
   return JSON.parse(JSON.stringify(profiles)) as TunnelProfile[];
@@ -53,6 +55,12 @@ const selected = computed(() => draft.value.find((profile) => profile.id === sel
 const selectedSsh = computed(() => (selected.value?.type === "ssh" ? selected.value : null));
 const selectedProxy = computed(() => (selected.value?.type === "proxy" ? selected.value : null));
 const selectedHttp = computed(() => (selected.value?.type === "http_tunnel" ? selected.value : null));
+
+// A test result reflects one profile at one moment; drop it when the selection
+// changes so a stale pass/fail never lingers over a different profile.
+watch(selectedId, () => {
+  testResult.value = null;
+});
 
 function profileTypeLabel(profile: TunnelProfile): string {
   if (profile.type === "proxy") return "Proxy";
@@ -104,6 +112,22 @@ async function save() {
     toast(t("settings.tunnelsSaveFailed", { message: translateBackendError(t, String(error)) }), 5000);
   } finally {
     isSaving.value = false;
+  }
+}
+
+async function testSelected() {
+  const profile = selectedSsh.value;
+  if (!profile || isTesting.value) return;
+  isTesting.value = true;
+  testResult.value = null;
+  try {
+    // Clone so the live draft object never crosses the backend boundary.
+    const message = await store.testProfile(cloneProfiles([profile])[0]);
+    testResult.value = { ok: true, message: message || t("settings.tunnelsTestSuccess") };
+  } catch (error) {
+    testResult.value = { ok: false, message: t("settings.tunnelsTestFailed", { message: translateBackendError(t, String(error)) }) };
+  } finally {
+    isTesting.value = false;
   }
 }
 </script>
@@ -244,7 +268,7 @@ async function save() {
       </template>
     </template>
 
-    <div class="flex items-center gap-2">
+    <div class="flex flex-wrap items-center gap-2">
       <Button type="button" size="sm" :disabled="!isDirty || isSaving" @click="save">
         <Loader2 v-if="isSaving" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
         {{ t("settings.tunnelsSave") }}
@@ -252,7 +276,15 @@ async function save() {
       <Button type="button" variant="outline" size="sm" :disabled="!isDirty || isSaving" @click="resetDraft">
         {{ t("settings.tunnelsReset") }}
       </Button>
+      <Button v-if="selectedSsh" type="button" variant="outline" size="sm" :disabled="isTesting || isSaving || !selectedSsh.host.trim()" @click="testSelected">
+        <Loader2 v-if="isTesting" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
+        {{ isTesting ? t("settings.tunnelsTesting") : t("settings.tunnelsTest") }}
+      </Button>
       <p v-if="isDirty" class="text-xs text-muted-foreground">{{ t("settings.tunnelsUnsavedHint") }}</p>
     </div>
+
+    <p v-if="testResult" class="text-xs" :class="testResult.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'">
+      {{ testResult.message }}
+    </p>
   </div>
 </template>

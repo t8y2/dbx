@@ -1434,6 +1434,52 @@ impl AppState {
             .collect()
     }
 
+    /// Tests a shared tunnel profile in isolation (no downstream database), for
+    /// the Test button in Settings > Tunnels. Only SSH profiles are checked:
+    /// starting an SSH tunnel connects and authenticates eagerly, so a
+    /// successful start verifies host reachability and credentials. Proxy and
+    /// HTTP-tunnel layers connect lazily (nothing happens until traffic flows),
+    /// so there is nothing to verify here without a target to probe.
+    pub async fn test_tunnel_profile(&self, profile: &TransportLayerConfig) -> Result<String, String> {
+        let TransportLayerConfig::Ssh(ssh) = profile else {
+            return Err("Tunnel test is currently only supported for SSH profiles.".to_string());
+        };
+        let ssh = crate::ssh_config::resolve_ssh_tunnel_config(ssh);
+        if ssh.host.trim().is_empty() {
+            return Err("SSH host is required.".to_string());
+        }
+        let timeout = if ssh.connect_timeout_secs == 0 {
+            crate::models::connection::default_ssh_connect_timeout_secs()
+        } else {
+            ssh.connect_timeout_secs
+        };
+        // A throwaway id so the probe never reuses or evicts a live tunnel, and
+        // a sentinel forward target: SSH auth completes on connect, before any
+        // channel to this target is opened, so it need not be reachable.
+        let probe_id = format!("__tunnel_profile_test__:{}", uuid::Uuid::new_v4());
+        let result = self
+            .tunnels
+            .start_tunnel(
+                &probe_id,
+                &ssh.host,
+                ssh.port,
+                &ssh.user,
+                &ssh.password,
+                &ssh.key_path,
+                &ssh.key_passphrase,
+                ssh.use_ssh_agent,
+                &ssh.ssh_agent_sock_path,
+                &ssh.auth_method,
+                timeout,
+                "127.0.0.1",
+                1,
+                false,
+            )
+            .await;
+        self.tunnels.stop_tunnel(&probe_id).await;
+        result.map(|_| "SSH tunnel connection successful".to_string())
+    }
+
     pub async fn connection_host_port(
         &self,
         connection_id: &str,
@@ -3640,6 +3686,48 @@ mod tests {
         );
 
         assert_eq!(state.agent_manager.base_dir(), &agent_dir);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_tunnel_profile_rejects_non_ssh_and_missing_host() {
+        let (state, dir) = test_app_state().await;
+
+        // Non-SSH profiles cannot be tested in isolation (they connect lazily).
+        let proxy = TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            id: "p1".to_string(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: "127.0.0.1".to_string(),
+            port: 1080,
+            username: String::new(),
+            password: String::new(),
+            profile_id: String::new(),
+        });
+        let err = state.test_tunnel_profile(&proxy).await.unwrap_err();
+        assert!(err.contains("SSH"), "unexpected error: {err}");
+
+        // An SSH profile with no host fails fast rather than dialing an empty host.
+        let ssh = TransportLayerConfig::Ssh(SshTunnelConfig {
+            id: "s1".to_string(),
+            name: String::new(),
+            enabled: true,
+            host: String::new(),
+            port: 22,
+            user: "root".to_string(),
+            password: String::new(),
+            key_path: String::new(),
+            key_passphrase: String::new(),
+            connect_timeout_secs: 5,
+            expose_lan: false,
+            use_ssh_agent: false,
+            ssh_agent_sock_path: String::new(),
+            auth_method: "password".to_string(),
+            profile_id: String::new(),
+        });
+        assert!(state.test_tunnel_profile(&ssh).await.is_err());
+
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -26,3 +26,10 @@ pub async fn save_tunnel_profiles(
 ) -> Result<Json<()>, AppError> {
     state.app.storage.save_tunnel_profiles(&body.profiles).await.map(Json).map_err(AppError)
 }
+
+pub async fn test_tunnel_profile(
+    State(state): State<Arc<WebState>>,
+    Json(profile): Json<TransportLayerConfig>,
+) -> Result<Json<String>, AppError> {
+    state.app.test_tunnel_profile(&profile).await.map(Json).map_err(AppError)
+}

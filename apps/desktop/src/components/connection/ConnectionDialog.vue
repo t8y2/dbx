@@ -1451,6 +1451,7 @@ watch(
         etcd_endpoints: config.etcd_endpoints || "",
         informix_server: config.informix_server || "",
         external_config: config.external_config,
+        attached_databases: config.attached_databases || [],
         init_script: config.init_script,
         read_only: config.read_only || false,
         is_production: config.is_production || false,

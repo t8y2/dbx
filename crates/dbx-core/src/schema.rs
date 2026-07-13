@@ -75,6 +75,11 @@ pub fn duckdb_query_tables_in_database_with_attached(
         })
         .map_err(|e| e.to_string())?;
     let tables: Vec<db::TableInfo> = rows.filter_map(|r| r.ok()).collect();
+    if tables.is_empty() && duckdb_is_attached(&database, attached_names) {
+        if let Some(remote) = duckdb_quack_remote_tables(con, &database, schema) {
+            return Ok(remote);
+        }
+    }
     Ok(tables)
 }
 
@@ -129,7 +134,134 @@ pub fn duckdb_list_schemas_with_attached(
         .map_err(|e| e.to_string())?;
     let rows = stmt.query_map([database.as_str()], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
     let schemas: Vec<String> = rows.filter_map(|r| r.ok()).collect();
+    if schemas.is_empty() && duckdb_is_attached(&database, attached_names) {
+        if let Some(remote) = duckdb_quack_remote_schemas(con, &database) {
+            return Ok(remote);
+        }
+    }
     Ok(schemas)
+}
+
+#[cfg(feature = "duckdb-bundled")]
+fn duckdb_is_attached(database: &str, attached_names: &[String]) -> bool {
+    attached_names.iter().any(|name| name.eq_ignore_ascii_case(database))
+}
+
+/// Quack-attached catalogs expose no metadata on the client side (the beta
+/// extension implements name resolution and streaming scans, but not catalog
+/// enumeration: `information_schema`, `duckdb_tables()` and `SHOW ALL TABLES`
+/// all skip the remote catalog). The extension's `quack_query_by_name` table
+/// function runs SQL on the remote server, so when a metadata query for an
+/// attached catalog comes back empty we ask the remote for its own
+/// information_schema. For non-quack catalogs (or when the extension is not
+/// loaded) the function call errors and the fallback quietly yields `None`.
+#[cfg(feature = "duckdb-bundled")]
+fn duckdb_quack_remote_query<T>(
+    con: &duckdb::Connection,
+    alias: &str,
+    remote_sql: &str,
+    map_row: impl Fn(&duckdb::Row<'_>) -> Result<T, duckdb::Error>,
+) -> Option<Vec<T>> {
+    let sql = format!(
+        "SELECT * FROM quack_query_by_name({}, {})",
+        duckdb_quote_string(alias),
+        duckdb_quote_string(remote_sql)
+    );
+    let mut stmt = match con.prepare(&sql) {
+        Ok(stmt) => stmt,
+        Err(e) => {
+            log::debug!("quack metadata fallback unavailable for catalog {alias}: {e}");
+            return None;
+        }
+    };
+    let rows = match stmt.query_map([], |row| map_row(row)) {
+        Ok(rows) => rows,
+        Err(e) => {
+            log::debug!("quack metadata fallback query failed for catalog {alias}: {e}");
+            return None;
+        }
+    };
+    Some(rows.filter_map(|r| r.ok()).collect())
+}
+
+#[cfg(feature = "duckdb-bundled")]
+fn duckdb_quack_remote_schemas(con: &duckdb::Connection, alias: &str) -> Option<Vec<String>> {
+    duckdb_quack_remote_query(
+        con,
+        alias,
+        "SELECT DISTINCT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('information_schema', 'pg_catalog') ORDER BY schema_name",
+        |row| row.get::<_, String>(0),
+    )
+}
+
+#[cfg(feature = "duckdb-bundled")]
+fn duckdb_quack_remote_tables(con: &duckdb::Connection, alias: &str, schema: &str) -> Option<Vec<db::TableInfo>> {
+    let remote_sql = format!(
+        "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = {} ORDER BY table_name",
+        duckdb_quote_string(schema)
+    );
+    duckdb_quack_remote_query(con, alias, &remote_sql, |row| {
+        Ok(db::TableInfo {
+            name: row.get::<_, String>(0)?,
+            table_type: row.get::<_, String>(1)?,
+            comment: None,
+            parent_schema: None,
+            parent_name: None,
+        })
+    })
+}
+
+#[cfg(feature = "duckdb-bundled")]
+fn duckdb_quack_remote_columns(
+    con: &duckdb::Connection,
+    alias: &str,
+    schema: &str,
+    table: &str,
+) -> Option<Vec<db::ColumnInfo>> {
+    let pk_sql = format!(
+        "SELECT kcu.column_name
+         FROM information_schema.table_constraints tc
+         JOIN information_schema.key_column_usage kcu
+           ON tc.constraint_name = kcu.constraint_name
+          AND tc.table_schema = kcu.table_schema
+          AND tc.table_name = kcu.table_name
+         WHERE tc.constraint_type = 'PRIMARY KEY'
+           AND tc.table_schema = {schema}
+           AND tc.table_name = {table}
+         ORDER BY kcu.ordinal_position",
+        schema = duckdb_quote_string(schema),
+        table = duckdb_quote_string(table),
+    );
+    let primary_keys: std::collections::HashSet<String> =
+        duckdb_quack_remote_query(con, alias, &pk_sql, |row| row.get::<_, String>(0))
+            .map(|names| names.into_iter().collect())
+            .unwrap_or_default();
+
+    let columns_sql = format!(
+        "SELECT column_name, data_type, is_nullable, column_default
+         FROM information_schema.columns
+         WHERE table_schema = {schema} AND table_name = {table}
+         ORDER BY ordinal_position",
+        schema = duckdb_quote_string(schema),
+        table = duckdb_quote_string(table),
+    );
+    duckdb_quack_remote_query(con, alias, &columns_sql, |row| {
+        let name = row.get::<_, String>(0)?;
+        Ok(db::ColumnInfo {
+            is_primary_key: primary_keys.contains(&name),
+            name,
+            data_type: row.get::<_, String>(1)?,
+            is_nullable: row.get::<_, String>(2).unwrap_or_default() == "YES",
+            column_default: row.get::<_, Option<String>>(3)?,
+            extra: None,
+            comment: None,
+            numeric_precision: None,
+            numeric_scale: None,
+            character_maximum_length: None,
+            enum_values: None,
+            ..Default::default()
+        })
+    })
 }
 
 #[cfg(feature = "duckdb-bundled")]
@@ -246,6 +378,11 @@ pub fn duckdb_query_columns_in_database_with_attached(
         })
         .map_err(|e| e.to_string())?;
     let columns: Vec<db::ColumnInfo> = rows.filter_map(|r| r.ok()).collect();
+    if columns.is_empty() && duckdb_is_attached(&database, attached_names) {
+        if let Some(remote) = duckdb_quack_remote_columns(con, &database, schema, table) {
+            return Ok(remote);
+        }
+    }
     Ok(columns)
 }
 

@@ -34,7 +34,7 @@ import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { dataTabExecutionDatabase } from "@/lib/table/dataTabExecutionDatabase";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { loadTableMetadata } from "@/lib/metadata/tableMetadataCache";
-import { buildTableSelectSql, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
+import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 import { connectionQueryExecutionSchema, effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
 import { frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { queryResultSourceLabel } from "@/lib/sql/queryResultSource";
@@ -1628,7 +1628,7 @@ export const useQueryStore = defineStore("query", () => {
       const conn = useConnectionStore().getConfig(tab.connectionId);
       const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
       const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : tableMeta.primaryKeys;
-      const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableIdentifier(effectiveDbType, tab.resultSortColumn)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
+      const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableDataIdentifier(effectiveDbType, tab.resultSortColumn)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
       const orderBy = tab.orderByInput?.trim() || sortOrder;
       const limit = tab.resultPageLimit ?? settingsStore.editorSettings.pageSize ?? tableOpenPageLimit();
       const offset = tab.resultPageOffset ?? 0;
@@ -3579,7 +3579,7 @@ export const useQueryStore = defineStore("query", () => {
       const pageLimit = TABLE_DATA_EXPORT_PAGE_SIZE;
       const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
       const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : tableMeta.primaryKeys;
-      const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableIdentifier(effectiveDbType, tab.resultSortColumn)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
+      const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableDataIdentifier(effectiveDbType, tab.resultSortColumn)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
       const orderBy = tab.orderByInput?.trim() || sortOrder;
       const queryTimeoutSecs = queryTimeoutSecsForConnection(conn);
       const executionDatabase = dataTabExecutionDatabase(conn, tab.database, tableMeta.catalog);

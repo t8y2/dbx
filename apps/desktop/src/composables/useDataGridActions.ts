@@ -3,7 +3,7 @@ import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { buildTableSelectSql, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
+import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import * as api from "@/lib/backend/api";
@@ -40,7 +40,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
 
   function quoteIdent(tab: QueryTab, name: string): string {
     const config = connectionStore.getConfig(tab.connectionId);
-    return quoteTableIdentifier(effectiveDatabaseTypeForConnection(config), name);
+    return quoteTableDataIdentifier(effectiveDatabaseTypeForConnection(config), name);
   }
 
   function buildTableSql(tab: QueryTab, options: { orderBy?: string; limit?: number; offset?: number; whereInput?: string } = {}): Promise<string> {

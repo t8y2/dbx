@@ -26,7 +26,6 @@ export function quoteTableIdentifier(databaseType: DatabaseType | undefined, nam
   if (databaseType === "jdbc") return name;
   if (databaseType === "mysql" || databaseType === "clickhouse" || databaseType === "hive" || databaseType === "spark" || databaseType === "databend" || databaseType === "tdengine" || databaseType === "access" || databaseType === "doris" || databaseType === "starrocks")
     return `\`${name.replace(/`/g, "``")}\``;
-  if (databaseType === "kingbase" && isSafeUnquotedKingbaseIdentifier(name)) return name;
   if (databaseType === "informix" && /^[A-Za-z_][A-Za-z0-9_$]*$/.test(name)) return name;
   if (databaseType === "neo4j") return quoteCypherIdentifier(name);
   if (databaseType === "sqlserver") return `[${name.replace(/\]/g, "]]")}]`;
@@ -42,6 +41,11 @@ const KINGBASE_RESERVED_IDENTIFIERS = new Set(
 function isSafeUnquotedKingbaseIdentifier(name: string): boolean {
   const hasStableCase = name === name.toLowerCase() || name === name.toUpperCase();
   return hasStableCase && /^[A-Za-z_][A-Za-z0-9_$]*$/.test(name) && !KINGBASE_RESERVED_IDENTIFIERS.has(name.toUpperCase());
+}
+
+export function quoteTableDataIdentifier(databaseType: DatabaseType | undefined, name: string): string {
+  if (databaseType === "kingbase" && isSafeUnquotedKingbaseIdentifier(name)) return name;
+  return quoteTableIdentifier(databaseType, name);
 }
 
 function quoteCypherIdentifier(name: string): string {

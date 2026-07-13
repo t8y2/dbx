@@ -118,27 +118,11 @@ pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -
         ) => {
             format!("`{}`", name.replace('`', "``"))
         }
-        Some(DatabaseType::Kingbase) if is_safe_unquoted_kingbase_identifier(name) => name.to_string(),
         Some(DatabaseType::Informix) if is_simple_informix_identifier(name) => name.to_string(),
         Some(DatabaseType::Neo4j) => format!("`{}`", name.replace('`', "``")),
         Some(DatabaseType::SqlServer) => format!("[{}]", name.replace(']', "]]")),
         _ => format!("\"{}\"", name.replace('"', "\"\"")),
     }
-}
-
-fn is_safe_unquoted_kingbase_identifier(name: &str) -> bool {
-    const RESERVED: &str = "ALL ALTER AND AS ASC BETWEEN BY CASE CHECK COLUMN CREATE CURRENT_DATE CURRENT_TIME CURRENT_TIMESTAMP CURRENT_USER DATABASE DEFAULT DELETE DESC DISTINCT DROP ELSE EXISTS FALSE FETCH FOR FOREIGN FROM FULL GRANT GROUP HAVING IN INDEX INNER INSERT INTERSECT INTO IS JOIN KEY LEFT LIKE LIMIT NOT NULL OFFSET ON OR ORDER OUTER PRIMARY REFERENCES RIGHT SELECT SET TABLE THEN TRUE UNION UNIQUE UPDATE USER USING VALUES VIEW WHEN WHERE WITH";
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !(first.is_ascii_alphabetic() || first == '_')
-        || !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
-        || (name != name.to_ascii_lowercase() && name != name.to_ascii_uppercase())
-    {
-        return false;
-    }
-    !RESERVED.split_ascii_whitespace().any(|keyword| keyword.eq_ignore_ascii_case(name))
 }
 
 pub fn normalize_where_input(where_input: Option<&str>) -> String {

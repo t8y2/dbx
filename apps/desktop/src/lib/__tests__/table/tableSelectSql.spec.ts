@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { qualifiedTableName, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
+import { qualifiedTableName, quoteTableDataIdentifier, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
 
 describe("qualifiedTableName — Doris/StarRocks multi-catalog", () => {
   it("prefixes external catalog for Doris (no schema)", () => {
@@ -37,15 +37,15 @@ describe("quoteTableIdentifier", () => {
     expect(quoteTableIdentifier("sqlserver", "orders")).toBe("[orders]");
   });
 
-  it("leaves safe Kingbase identifiers unquoted across compatibility modes", () => {
-    expect(quoteTableIdentifier("kingbase", "cqbq_ls")).toBe("cqbq_ls");
-    expect(quoteTableIdentifier("kingbase", "actionlogs")).toBe("actionlogs");
-    expect(qualifiedTableName({ databaseType: "kingbase", schema: "cqbq_ls", tableName: "actionlogs" })).toBe("cqbq_ls.actionlogs");
+  it("leaves safe Kingbase table-data identifiers unquoted across compatibility modes", () => {
+    expect(quoteTableDataIdentifier("kingbase", "cqbq_ls")).toBe("cqbq_ls");
+    expect(quoteTableDataIdentifier("kingbase", "actionlogs")).toBe("actionlogs");
+    expect(quoteTableIdentifier("kingbase", "actionlogs")).toBe('"actionlogs"');
   });
 
   it("still quotes Kingbase reserved or non-simple identifiers", () => {
-    expect(quoteTableIdentifier("kingbase", "order")).toBe('"order"');
-    expect(quoteTableIdentifier("kingbase", "MixedCase")).toBe('"MixedCase"');
-    expect(quoteTableIdentifier("kingbase", "order detail")).toBe('"order detail"');
+    expect(quoteTableDataIdentifier("kingbase", "order")).toBe('"order"');
+    expect(quoteTableDataIdentifier("kingbase", "MixedCase")).toBe('"MixedCase"');
+    expect(quoteTableDataIdentifier("kingbase", "order detail")).toBe('"order detail"');
   });
 });

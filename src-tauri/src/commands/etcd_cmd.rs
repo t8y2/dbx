@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use tauri::State;
 
-use crate::commands::connection::{ensure_connection_writable, AppState};
+use crate::commands::connection::{ensure_connection_write_allowed, AppState};
 use dbx_core::agent_kv::{KvDeleteResponse, KvGetResponse, KvListPrefixResponse, KvPutResponse, KvValue};
 
 #[tauri::command]
@@ -32,7 +32,7 @@ pub async fn etcd_put(
     value: KvValue,
     lease: Option<i64>,
 ) -> Result<KvPutResponse, String> {
-    ensure_connection_writable(&state, &connection_id, "Put").await?;
+    ensure_connection_write_allowed(&state, &connection_id, None, "Put").await?;
     dbx_core::agent_kv::kv_put_core(&state, &connection_id, &key, value, lease).await
 }
 
@@ -42,6 +42,6 @@ pub async fn etcd_delete(
     connection_id: String,
     key: String,
 ) -> Result<KvDeleteResponse, String> {
-    ensure_connection_writable(&state, &connection_id, "Delete").await?;
+    ensure_connection_write_allowed(&state, &connection_id, None, "Delete").await?;
     dbx_core::agent_kv::kv_delete_core(&state, &connection_id, &key).await
 }

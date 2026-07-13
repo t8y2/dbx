@@ -34,6 +34,7 @@ const GLOBAL_DDL_TARGET_RE = /^\s*(?:CREATE|ALTER|DROP)\s+(?:USER|ROLE|LOGIN|SER
 const MULTI_TARGET_MUTATION_RE = /^\s*(?:DROP\s+(?:TEMPORARY\s+)?TABLE\b[\s\S]*,|RENAME\s+TABLE\b[\s\S]*,)/i;
 const THREE_PART_DATABASE_QUALIFIER_TYPES = new Set<DatabaseType>(["sqlserver", "snowflake", "trino", "prestosql", "databricks", "bigquery"]);
 const TRANSACTION_KEYWORDS = new Set(["begin", "start", "commit", "rollback", "abort", "savepoint", "release"]);
+const CONNECTION_SCOPED_NON_SQL_TYPES = new Set<DatabaseType>(["elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "nacos", "mq", "neo4j", "influxdb"]);
 const SCHEMA_FIRST_QUALIFIER_TYPES = new Set<DatabaseType>([
   "postgres",
   "redshift",
@@ -95,9 +96,18 @@ export function productionDatabases(connection: ConnectionConfig | undefined): s
   return [...new Set(connection.production_databases.map(normalizeProductionDatabase).filter(Boolean))];
 }
 
+/** Redis and MongoDB expose independently writable databases; other non-SQL products do not. */
+export function supportsDatabaseScopedProduction(dbType: DatabaseType | undefined): boolean {
+  return !!dbType && !CONNECTION_SCOPED_NON_SQL_TYPES.has(dbType);
+}
+
 export function productionContextForDatabase(connection: ConnectionConfig | undefined, database: string | undefined | null): ProductionContext {
   if (!connection) return { active: false, databases: [] };
   if (connection.is_production) return { active: true, reason: "connection", databases: [] };
+  if (!supportsDatabaseScopedProduction(connection.db_type) && connection.production_databases?.length) {
+    // Legacy database markers on connection-scoped products must fail closed.
+    return { active: true, reason: "connection", databases: [] };
+  }
 
   const normalizedDatabase = normalizeProductionDatabase(database);
   const marked = productionDatabases(connection);
@@ -105,6 +115,10 @@ export function productionContextForDatabase(connection: ConnectionConfig | unde
     return { active: true, reason: "database", databases: [String(database)] };
   }
   return { active: false, databases: [] };
+}
+
+export function productionPermitDatabase(connection: ConnectionConfig | undefined, database: string | undefined | null): string | undefined {
+  return connection && (connection.db_type === "redis" || connection.db_type === "mongodb") ? String(database ?? "") : undefined;
 }
 
 export function isProductionMutation(sql: string): boolean {

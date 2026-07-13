@@ -2,7 +2,7 @@ use std::future::Future;
 use std::sync::Arc;
 use tauri::State;
 
-use crate::commands::connection::{ensure_connection_writable, AppState};
+use crate::commands::connection::{ensure_connection_write_allowed, AppState};
 use dbx_core::db::mongo_driver::MongoDocumentResult;
 use dbx_core::document_ops::CollectionInfo;
 
@@ -86,7 +86,7 @@ pub async fn document_insert_document(
     collection: String,
     doc_json: String,
 ) -> Result<String, String> {
-    ensure_connection_writable(&state, &connection_id, "Insert").await?;
+    ensure_connection_write_allowed(&state, &connection_id, Some(&database), "Insert").await?;
     dbx_core::document_ops::insert_document_core(&state, &connection_id, &database, &collection, &doc_json).await
 }
 
@@ -100,7 +100,7 @@ pub async fn document_update_document(
     doc_json: String,
     routing: Option<String>,
 ) -> Result<u64, String> {
-    ensure_connection_writable(&state, &connection_id, "Update").await?;
+    ensure_connection_write_allowed(&state, &connection_id, Some(&database), "Update").await?;
     dbx_core::document_ops::update_document_core(
         &state,
         &connection_id,
@@ -122,7 +122,7 @@ pub async fn document_delete_document(
     id: String,
     routing: Option<String>,
 ) -> Result<u64, String> {
-    ensure_connection_writable(&state, &connection_id, "Delete").await?;
+    ensure_connection_write_allowed(&state, &connection_id, Some(&database), "Delete").await?;
     dbx_core::document_ops::delete_document_core(
         &state,
         &connection_id,
@@ -159,7 +159,7 @@ pub async fn document_create_gridfs_bucket(
     database: String,
     bucket: String,
 ) -> Result<(), String> {
-    ensure_connection_writable(&state, &connection_id, "Create GridFS bucket").await?;
+    ensure_connection_write_allowed(&state, &connection_id, Some(&database), "Create GridFS bucket").await?;
     dbx_core::document_ops::create_gridfs_bucket_core(&state, &connection_id, &database, &bucket).await
 }
 
@@ -170,7 +170,7 @@ pub async fn document_delete_gridfs_bucket(
     database: String,
     bucket: String,
 ) -> Result<(), String> {
-    ensure_connection_writable(&state, &connection_id, "Delete GridFS bucket").await?;
+    ensure_connection_write_allowed(&state, &connection_id, Some(&database), "Delete GridFS bucket").await?;
     dbx_core::document_ops::delete_gridfs_bucket_core(&state, &connection_id, &database, &bucket).await
 }
 
@@ -215,7 +215,7 @@ pub async fn document_upload_gridfs_file(
     data: Vec<u8>,
     content_type: Option<String>,
 ) -> Result<String, String> {
-    ensure_connection_writable(&state, &connection_id, "Upload GridFS file").await?;
+    ensure_connection_write_allowed(&state, &connection_id, Some(&database), "Upload GridFS file").await?;
     dbx_core::document_ops::upload_gridfs_file_core(
         &state,
         &connection_id,
@@ -236,6 +236,6 @@ pub async fn document_delete_gridfs_file(
     bucket: String,
     file_id: String,
 ) -> Result<(), String> {
-    ensure_connection_writable(&state, &connection_id, "Delete GridFS file").await?;
+    ensure_connection_write_allowed(&state, &connection_id, Some(&database), "Delete GridFS file").await?;
     dbx_core::document_ops::delete_gridfs_file_core(&state, &connection_id, &database, &bucket, &file_id).await
 }

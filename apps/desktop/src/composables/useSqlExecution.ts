@@ -16,6 +16,7 @@ import { extractSqlParameterDescriptors, type SqlParameterDescriptor, type SqlPa
 import { expandSqlVariables } from "@/lib/sql/sqlVariables";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { assessProductionSql } from "@/lib/database/productionSafety";
+import * as api from "@/lib/backend/api";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import type { ConnectionConfig, DatabaseType, QueryTab } from "@/types/database";
 
@@ -121,18 +122,27 @@ export function useSqlExecution(deps: {
         }
       }
     }
-    const productionAssessment = assessProductionSql(sql, deps.activeConnection.value, deps.activeTab.value?.database);
-    if (productionAssessment.active && productionAssessment.isMutation) {
-      // Production writes always need a new explicit decision; editor preferences cannot suppress this gate.
-      const confirmed = await productionSafetyStore.requestConfirmation({
-        sql,
-        connectionName: deps.activeConnection.value?.name,
-        database: deps.activeTab.value?.database,
-        productionDatabases: productionAssessment.databases,
-        source: t("production.sourceSqlEditor"),
-      });
-      if (confirmed) await doExecute(sql, sourceOffset);
-      return;
+    const connection = deps.activeConnection.value;
+    const usesDedicatedProductionGuard = connection?.db_type === "redis" || connection?.db_type === "mongodb";
+    if (!usesDedicatedProductionGuard) {
+      const productionAssessment = assessProductionSql(sql, connection, deps.activeTab.value?.database);
+      if (productionAssessment.active && productionAssessment.isMutation) {
+        // Production writes always need a new explicit decision; editor preferences cannot suppress this gate.
+        const confirmed = await productionSafetyStore.requestConfirmation({
+          sql,
+          connectionName: connection?.name,
+          database: deps.activeTab.value?.database,
+          productionDatabases: productionAssessment.databases,
+          source: t("production.sourceSqlEditor"),
+        });
+        if (confirmed) {
+          if (connection && ["elasticsearch", "qdrant", "milvus", "weaviate", "chromadb"].includes(connection.db_type)) {
+            await api.authorizeProductionWrite(connection.id);
+          }
+          await doExecute(sql, sourceOffset);
+        }
+        return;
+      }
     }
     if (isDangerousSql(sql) && settingsStore.editorSettings.confirmDangerousSqlExecution) {
       dangerSql.value = sql;

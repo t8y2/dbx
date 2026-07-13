@@ -2,6 +2,159 @@ use crate::models::connection::{ConnectionConfig, DatabaseType};
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
+
+const PRODUCTION_WRITE_PERMIT_TTL: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ProductionWritePermitKey {
+    connection_id: String,
+    database: String,
+}
+
+/// Stores short-lived, single-use permits created after an operator confirms a production write.
+///
+/// Permits are deliberately kept in memory and bound to both the connection and effective
+/// database. A confirmation for one Redis/MongoDB database therefore cannot authorize another.
+#[derive(Default)]
+pub struct ProductionWritePermitStore {
+    permits: Mutex<HashMap<ProductionWritePermitKey, Vec<Instant>>>,
+}
+
+impl ProductionWritePermitStore {
+    pub async fn authorize(&self, connection_id: &str, database: Option<&str>) {
+        let key = production_write_permit_key(connection_id, database);
+        let mut permits = self.permits.lock().await;
+        let now = Instant::now();
+        permits.retain(|_, expirations| {
+            expirations.retain(|expires_at| *expires_at > now);
+            !expirations.is_empty()
+        });
+        permits.entry(key).or_default().push(now + PRODUCTION_WRITE_PERMIT_TTL);
+    }
+
+    async fn consume(&self, connection_id: &str, database: Option<&str>) -> bool {
+        let key = production_write_permit_key(connection_id, database);
+        let mut permits = self.permits.lock().await;
+        let now = Instant::now();
+        let Some(expirations) = permits.get_mut(&key) else {
+            return false;
+        };
+        expirations.retain(|expires_at| *expires_at > now);
+        let consumed = expirations.pop().is_some();
+        if expirations.is_empty() {
+            permits.remove(&key);
+        }
+        consumed
+    }
+}
+
+fn production_write_permit_key(connection_id: &str, database: Option<&str>) -> ProductionWritePermitKey {
+    ProductionWritePermitKey {
+        connection_id: connection_id.trim().to_string(),
+        database: normalize_database_name(database.unwrap_or_default()),
+    }
+}
+
+/// Registers one request-scoped permit after the operator has confirmed a production mutation.
+pub async fn authorize_production_write(
+    state: &crate::connection::AppState,
+    connection_id: &str,
+    database: Option<&str>,
+) -> Result<(), String> {
+    let config = state.configs.read().await.get(connection_id).cloned().ok_or("Connection not found")?;
+    if is_production_database(&config, database.unwrap_or_default()) {
+        state.production_write_permits.authorize(connection_id, database).await;
+    }
+    Ok(())
+}
+
+/// Applies ordinary read-only protection and consumes explicit confirmation for production writes.
+pub async fn ensure_write_allowed(
+    state: &crate::connection::AppState,
+    connection_id: &str,
+    database: Option<&str>,
+    action: &str,
+) -> Result<(), String> {
+    let config = state.configs.read().await.get(connection_id).cloned().ok_or("Connection not found")?;
+    if config.read_only {
+        return Err(format!(
+            "Read-only mode: connection '{}' has read-only protection enabled. {} blocked.",
+            config.name, action
+        ));
+    }
+    if !is_production_database(&config, database.unwrap_or_default()) {
+        return Ok(());
+    }
+    if state.production_write_permits.consume(connection_id, database).await {
+        return Ok(());
+    }
+    Err(format!(
+        "Production protection: connection '{}' targets a production environment. Explicit confirmation is required before {}.",
+        config.name, action
+    ))
+}
+
+/// Enforces a raw Redis mutation against every logical database the command can affect.
+///
+/// Cross-database commands such as `MOVE`, `COPY ... DB`, `SWAPDB`, and `FLUSHALL`
+/// are resolved before consuming the operator's database-bound production permit.
+pub async fn ensure_redis_command_write_allowed(
+    state: &crate::connection::AppState,
+    connection_id: &str,
+    selected_database: u32,
+    command: &str,
+    action: &str,
+) -> Result<(), String> {
+    let config = state.configs.read().await.get(connection_id).cloned().ok_or("Connection not found")?;
+    let database = redis_command_production_database(&config, selected_database, command)
+        .unwrap_or_else(|| selected_database.to_string());
+    ensure_write_allowed(state, connection_id, Some(&database), action).await
+}
+
+/// Returns the first marked production database affected by a raw Redis command.
+pub fn redis_command_production_database(
+    config: &ConnectionConfig,
+    selected_database: u32,
+    command: &str,
+) -> Option<String> {
+    redis_command_database_targets(config, selected_database, command)
+        .into_iter()
+        .find(|database| is_production_database(config, database))
+}
+
+fn redis_command_database_targets(config: &ConnectionConfig, selected_database: u32, command: &str) -> Vec<String> {
+    let mut databases = vec![selected_database.to_string()];
+    let Ok(argv) = crate::db::redis_driver::parse_command_argv(command) else {
+        return databases;
+    };
+    let command = argv.first().map(|value| value.to_ascii_uppercase()).unwrap_or_default();
+    match command.as_str() {
+        "MOVE" => push_redis_database_argument(&mut databases, argv.get(2)),
+        "COPY" => {
+            if let Some(index) = argv.iter().position(|value| value.eq_ignore_ascii_case("DB")) {
+                push_redis_database_argument(&mut databases, argv.get(index + 1));
+            }
+        }
+        "SWAPDB" => {
+            push_redis_database_argument(&mut databases, argv.get(1));
+            push_redis_database_argument(&mut databases, argv.get(2));
+        }
+        "FLUSHALL" => databases.extend(config.production_databases.iter().cloned()),
+        _ => {}
+    }
+    databases
+}
+
+fn push_redis_database_argument(databases: &mut Vec<String>, value: Option<&String>) {
+    if let Some(database) = value.and_then(|value| value.parse::<u32>().ok()) {
+        let database = database.to_string();
+        if !databases.contains(&database) {
+            databases.push(database);
+        }
+    }
+}
 
 const IDENTIFIER_PATTERN: &str = r"[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*";
 const TARGET_NAME_PATTERN: &str = r"[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*(?:\s*\.\s*(?:\*|[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*)){0,2}";
@@ -97,6 +250,7 @@ struct SqlTargetSafetyText {
 /// Returns whether the selected database inherits an explicit production marker.
 pub fn is_production_database(config: &ConnectionConfig, database: &str) -> bool {
     config.is_production
+        || (connection_scoped_non_sql_type(&config.db_type) && !config.production_databases.is_empty())
         || (!database.trim().is_empty()
             && config
                 .production_databases
@@ -547,9 +701,13 @@ fn append_quoted_identifier_token(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_production_database, targets_production_database};
+    use super::{
+        is_production_database, production_write_permit_key, redis_command_production_database,
+        targets_production_database, ProductionWritePermitStore,
+    };
     use crate::models::connection::{ConnectionConfig, DatabaseType};
     use serde::Deserialize;
+    use std::time::{Duration, Instant};
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -622,6 +780,24 @@ mod tests {
     }
 
     #[test]
+    fn legacy_non_sql_database_markers_fail_closed_as_connection_scope() {
+        for db_type in [
+            DatabaseType::Elasticsearch,
+            DatabaseType::Qdrant,
+            DatabaseType::Etcd,
+            DatabaseType::ZooKeeper,
+            DatabaseType::Nacos,
+            DatabaseType::MessageQueue,
+            DatabaseType::Neo4j,
+            DatabaseType::InfluxDb,
+        ] {
+            let mut connection = config();
+            connection.db_type = db_type;
+            assert!(is_production_database(&connection, "staging"));
+        }
+    }
+
+    #[test]
     fn detects_cross_database_production_targets() {
         assert!(targets_production_database(&config(), "staging", "DELETE FROM prod_app.users WHERE id = 1"));
         assert!(targets_production_database(&config(), "staging", "USE prod_app; DELETE FROM users WHERE id = 1"));
@@ -685,4 +861,58 @@ mod tests {
         assert!(targets_production_database(&sqlserver, "staging", "DELETE FROM prod_app.dbo.users WHERE id = 1"));
         assert!(!targets_production_database(&sqlserver, "staging", "DELETE FROM prod_app.users WHERE id = 1"));
     }
+
+    #[tokio::test]
+    async fn production_write_permits_are_database_bound_and_single_use() {
+        let permits = ProductionWritePermitStore::default();
+        permits.authorize("conn", Some("prod_app")).await;
+
+        assert!(!permits.consume("conn", Some("other_prod")).await);
+        assert!(!permits.consume("other-conn", Some("prod_app")).await);
+        assert!(permits.consume("conn", Some("PROD_APP")).await);
+        assert!(!permits.consume("conn", Some("prod_app")).await);
+    }
+
+    #[tokio::test]
+    async fn expired_production_write_permits_are_rejected() {
+        let permits = ProductionWritePermitStore::default();
+        permits.permits.lock().await.insert(
+            production_write_permit_key("conn", Some("prod_app")),
+            vec![Instant::now().checked_sub(Duration::from_secs(1)).expect("instant supports subtraction")],
+        );
+
+        assert!(!permits.consume("conn", Some("prod_app")).await);
+    }
+
+    #[test]
+    fn resolves_cross_database_redis_write_targets() {
+        let mut redis = config();
+        redis.db_type = DatabaseType::Redis;
+        redis.production_databases = vec!["7".to_string(), "8".to_string()];
+
+        assert_eq!(redis_command_production_database(&redis, 2, "MOVE key 7"), Some("7".to_string()));
+        assert_eq!(
+            redis_command_production_database(&redis, 2, "COPY source dest DB 8 REPLACE"),
+            Some("8".to_string())
+        );
+        assert_eq!(redis_command_production_database(&redis, 2, "FLUSHALL"), Some("7".to_string()));
+        assert_eq!(redis_command_production_database(&redis, 2, "SET key value"), None);
+    }
+}
+
+fn connection_scoped_non_sql_type(db_type: &DatabaseType) -> bool {
+    matches!(
+        db_type,
+        DatabaseType::Elasticsearch
+            | DatabaseType::Qdrant
+            | DatabaseType::Milvus
+            | DatabaseType::Weaviate
+            | DatabaseType::ChromaDb
+            | DatabaseType::Etcd
+            | DatabaseType::ZooKeeper
+            | DatabaseType::Nacos
+            | DatabaseType::MessageQueue
+            | DatabaseType::Neo4j
+            | DatabaseType::InfluxDb
+    )
 }

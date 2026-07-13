@@ -230,6 +230,10 @@ export async function connectionIdentifierQuote(connectionId: string, database?:
   return quote ?? undefined;
 }
 
+export async function authorizeProductionWrite(connectionId: string, database?: string): Promise<void> {
+  return post("/api/connection/authorize-production-write", { connectionId, database });
+}
+
 export async function closeDatabaseConnection(connectionId: string, database: string): Promise<boolean> {
   return post("/api/connection/close-database", { connectionId, database });
 }

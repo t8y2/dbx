@@ -657,6 +657,10 @@ export async function connectionIdentifierQuote(connectionId: string, database?:
   return quote ?? undefined;
 }
 
+export async function authorizeProductionWrite(connectionId: string, database?: string): Promise<void> {
+  return invoke("authorize_production_write", { connectionId, database });
+}
+
 export async function closeDatabaseConnection(connectionId: string, database: string): Promise<boolean> {
   return invoke("close_database_connection", { connectionId, database });
 }

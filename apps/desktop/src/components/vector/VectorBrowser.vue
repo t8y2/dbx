@@ -6,11 +6,14 @@ import { Button } from "@/components/ui/button";
 import ErrorBanner from "@/components/ui/ErrorBanner.vue";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import * as api from "@/lib/backend/api";
+import { useConnectionStore } from "@/stores/connectionStore";
+import { executeWithProductionOperationGuard } from "@/lib/database/productionExecutionGuard";
 import { uuid } from "@/lib/common/utils";
 import type { DatabaseType, QueryResult } from "@/types/database";
 
 const DataGrid = defineAsyncComponent(() => import("@/components/grid/DataGrid.vue"));
 const { t } = useI18n();
+const connectionStore = useConnectionStore();
 
 type VectorOperationMode = "browse" | "upsert" | "delete" | "search";
 
@@ -243,8 +246,31 @@ function firstResult(results: QueryResult[]): QueryResult {
 }
 
 async function executeRequestText(text: string): Promise<QueryResult> {
-  const results = await api.executeMulti(props.connectionId, props.database || "default", text, undefined, executionId.value);
+  const execute = () => api.executeMulti(props.connectionId, props.database || "default", text, undefined, executionId.value);
+  const results = vectorRequestIsMutating(text)
+    ? await executeWithProductionOperationGuard({
+        connection: connectionStore.getConfig(props.connectionId),
+        database: props.database,
+        reviewText: text,
+        source: t("production.sourceSqlEditor"),
+        execute,
+      })
+    : await execute();
+  if (!results) throw new api.ProductionWriteCancelledError();
   return firstResult(results);
+}
+
+function vectorRequestIsMutating(text: string): boolean {
+  const trimmed = text.trim();
+  if (!/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+/i.test(trimmed)) return false;
+  const [head] = trimmed.split("\n", 1);
+  const [method = "", rawPath = ""] = head.trim().split(/\s+/, 2);
+  const path = rawPath.split("?", 1)[0].toLowerCase();
+  if (/^(GET|HEAD|OPTIONS)$/i.test(method)) return false;
+  if (/^(PUT|PATCH|DELETE)$/i.test(method)) return true;
+  if (path.endsWith("/graphql")) return /\bmutation\b/i.test(trimmed);
+  // ChromaDB creates collections through POST /collections; keep the read list limited to explicit query endpoints.
+  return !["/search", "/scroll", "/query", "/get", "/list", "/describe", "/count"].some((suffix) => path.endsWith(suffix));
 }
 
 async function refreshResult() {

@@ -110,6 +110,107 @@ const WRITE_REDIS_COMMANDS = new Set([
   "XSETID",
 ]);
 
+const READ_REDIS_COMMANDS = new Set([
+  "GET",
+  "MGET",
+  "GETRANGE",
+  "STRLEN",
+  "GETBIT",
+  "BITCOUNT",
+  "BITPOS",
+  "HGET",
+  "HGETALL",
+  "HMGET",
+  "HEXISTS",
+  "HLEN",
+  "HKEYS",
+  "HVALS",
+  "HSTRLEN",
+  "HRANDFIELD",
+  "LRANGE",
+  "LINDEX",
+  "LLEN",
+  "LPOS",
+  "SMEMBERS",
+  "SISMEMBER",
+  "SMISMEMBER",
+  "SCARD",
+  "SDIFF",
+  "SINTER",
+  "SUNION",
+  "SRANDMEMBER",
+  "ZRANGE",
+  "ZREVRANGE",
+  "ZRANGEBYSCORE",
+  "ZREVRANGEBYSCORE",
+  "ZRANGEBYLEX",
+  "ZREVRANGEBYLEX",
+  "ZRANK",
+  "ZREVRANK",
+  "ZSCORE",
+  "ZMSCORE",
+  "ZCARD",
+  "ZCOUNT",
+  "ZLEXCOUNT",
+  "ZRANDMEMBER",
+  "ZDIFF",
+  "ZINTER",
+  "ZUNION",
+  "XRANGE",
+  "XREVRANGE",
+  "XLEN",
+  "XPENDING",
+  "XINFO",
+  "XREAD",
+  "TYPE",
+  "TTL",
+  "PTTL",
+  "EXPIRETIME",
+  "PEXPIRETIME",
+  "EXISTS",
+  "SCAN",
+  "SSCAN",
+  "HSCAN",
+  "ZSCAN",
+  "DBSIZE",
+  "SELECT",
+  "INFO",
+  "PING",
+  "ECHO",
+  "TIME",
+  "KEYS",
+  "RANDOMKEY",
+  "DUMP",
+  "OBJECT",
+  "MEMORY",
+  "GEOHASH",
+  "GEOPOS",
+  "GEODIST",
+  "GEOSEARCH",
+  "GEORADIUS_RO",
+  "GEORADIUSBYMEMBER_RO",
+  "PFCOUNT",
+  "PUBSUB",
+  "COMMAND",
+  "JSON.GET",
+  "JSON.TYPE",
+  "JSON.OBJKEYS",
+  "JSON.OBJLEN",
+  "JSON.ARRLEN",
+  "FT.SEARCH",
+  "FT.AGGREGATE",
+  "FT.INFO",
+  "FT._LIST",
+  "TS.GET",
+  "TS.RANGE",
+  "TS.REVRANGE",
+  "TS.MGET",
+  "TS.MRANGE",
+  "TS.MREVRANGE",
+  "TS.INFO",
+  "TS.QUERYINDEX",
+]);
+
 export function firstRedisCommandToken(commandText: string): string | undefined {
   try {
     return parseRedisCommandArgv(commandText)[0]?.toUpperCase();
@@ -126,6 +227,39 @@ export function classifyRedisCommand(commandText: string): RedisCommandSafety {
   if (CONFIRM_REDIS_COMMANDS.has(command)) return "confirm";
   if (WRITE_REDIS_COMMANDS.has(command)) return "write";
   return "allowed";
+}
+
+/** Unknown/module commands fail closed because MCP cannot prove they are read-only. */
+export function redisCommandIsMutation(commandText: string): boolean {
+  const command = firstRedisCommandToken(commandText);
+  return !command || !READ_REDIS_COMMANDS.has(command);
+}
+
+/** Resolves logical databases affected by Redis cross-database commands. */
+export function redisCommandDatabaseTargets(commandText: string, selectedDatabase: number, markedDatabases: string[] = []): string[] {
+  let argv: string[];
+  try {
+    argv = parseRedisCommandArgv(commandText);
+  } catch {
+    return [String(selectedDatabase)];
+  }
+  const databases = new Set([String(selectedDatabase)]);
+  const command = argv[0]?.toUpperCase() ?? "";
+  if (command === "MOVE") addRedisDatabase(databases, argv[2]);
+  if (command === "COPY") {
+    const index = argv.findIndex((value) => value.toUpperCase() === "DB");
+    addRedisDatabase(databases, argv[index + 1]);
+  }
+  if (command === "SWAPDB") {
+    addRedisDatabase(databases, argv[1]);
+    addRedisDatabase(databases, argv[2]);
+  }
+  if (command === "FLUSHALL") markedDatabases.forEach((database) => databases.add(database));
+  return [...databases];
+}
+
+function addRedisDatabase(databases: Set<string>, value: string | undefined) {
+  if (value !== undefined && /^\d+$/.test(value)) databases.add(String(Number(value)));
 }
 
 export function evaluateRedisCommandSafety(commandText: string, options: SqlSafetyOptions = {}): RedisCommandSafetyDecision {

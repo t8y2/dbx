@@ -281,6 +281,136 @@ test("redis command tool blocks write commands in read-only MCP sessions", async
   assert.match(result.content[0].text, /REDIS_COMMAND_BLOCKED:/);
 });
 
+test("redis command tool blocks writes to a marked logical database", async () => {
+  let executed = false;
+  const redisConnection: ConnectionConfig = { ...connection, db_type: "redis", database: "0", production_databases: ["7"] };
+  const scopedBackend: Backend = {
+    ...backend,
+    loadConnections: async () => [redisConnection],
+    executeRedisCommand: async () => {
+      executed = true;
+      return { command: "SET", safety: "write", value: "OK" };
+    },
+  };
+
+  const result = await withScopedEnv({ DBX_MCP_ALLOW_WRITES: "1" }, () => {
+    const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+    return (server as any)._registeredTools.dbx_execute_redis_command.handler({
+      connection_name: "local",
+      db: 7,
+      command: "SET session:1 value",
+    });
+  });
+
+  assert.equal(executed, false);
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /PRODUCTION_WRITE_BLOCKED:/);
+});
+
+test("redis command tool blocks cross-database MOVE into a marked logical database", async () => {
+  let executed = false;
+  const redisConnection: ConnectionConfig = { ...connection, db_type: "redis", database: "2", production_databases: ["7"] };
+  const scopedBackend: Backend = {
+    ...backend,
+    loadConnections: async () => [redisConnection],
+    executeRedisCommand: async () => {
+      executed = true;
+      return { command: "MOVE", safety: "confirm", value: 1 };
+    },
+  };
+
+  const result = await withScopedEnv({ DBX_MCP_ALLOW_WRITES: "1" }, () => {
+    const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+    return (server as any)._registeredTools.dbx_execute_redis_command.handler({
+      connection_name: "local",
+      db: 2,
+      command: "MOVE session:1 7",
+    });
+  });
+
+  assert.equal(executed, false);
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /PRODUCTION_WRITE_BLOCKED:/);
+});
+
+test("execute query blocks SQL writes from a non-production database into a production database", async () => {
+  let executed = false;
+  const sqlConnection: ConnectionConfig = { ...connection, db_type: "mysql", database: "staging", production_databases: ["prod_app"] };
+  const scopedBackend: Backend = {
+    ...backend,
+    loadConnections: async () => [sqlConnection],
+    executeQuery: async () => {
+      executed = true;
+      return { columns: [], rows: [], row_count: 1 };
+    },
+  };
+
+  const result = await withScopedEnv({ DBX_MCP_ALLOW_WRITES: "1" }, () => {
+    const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+    return (server as any)._registeredTools.dbx_execute_query.handler({
+      connection_name: "local",
+      database: "staging",
+      sql: "INSERT INTO prod_app.users(id) VALUES (1)",
+    });
+  });
+
+  assert.equal(executed, false);
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /PRODUCTION_WRITE_BLOCKED:/);
+});
+
+test("execute query blocks MongoDB writes to a production sibling database", async () => {
+  let executed = false;
+  const mongoConnection: ConnectionConfig = { ...connection, db_type: "mongodb", database: "staging", production_databases: ["prod_app"] };
+  const scopedBackend: Backend = {
+    ...backend,
+    loadConnections: async () => [mongoConnection],
+    executeQuery: async () => {
+      executed = true;
+      return { columns: [], rows: [], row_count: 1 };
+    },
+  };
+
+  const result = await withScopedEnv({ DBX_MCP_ALLOW_WRITES: "1" }, () => {
+    const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+    return (server as any)._registeredTools.dbx_execute_query.handler({
+      connection_name: "local",
+      database: "staging",
+      sql: 'db.getSiblingDB("prod_app").users.updateOne({_id: 1}, {$set: {active: true}})',
+    });
+  });
+
+  assert.equal(executed, false);
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /PRODUCTION_WRITE_BLOCKED:/);
+});
+
+test("execute query blocks MongoDB aggregate output to a production sibling database", async () => {
+  let executed = false;
+  const mongoConnection: ConnectionConfig = { ...connection, db_type: "mongodb", database: "staging", production_databases: ["prod_app"] };
+  const scopedBackend: Backend = {
+    ...backend,
+    loadConnections: async () => [mongoConnection],
+    executeQuery: async () => {
+      executed = true;
+      return { columns: [], rows: [], row_count: 1 };
+    },
+  };
+
+  const result = await withScopedEnv({ DBX_MCP_ALLOW_WRITES: "1", DBX_MCP_ALLOW_DANGEROUS_SQL: "1" }, () => {
+    const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+    return (server as any)._registeredTools.dbx_execute_query.handler({
+      connection_name: "local",
+      database: "staging",
+      sql: 'db.users.aggregate([{"$merge":{"into":{"db":"prod_app","coll":"users_snapshot"}}}])',
+    });
+  });
+
+  assert.equal(executed, false);
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /PRODUCTION_WRITE_BLOCKED:/);
+});
+
 test("redis command tool allows dangerous redis commands only when explicitly enabled", async () => {
   const redisConnection: ConnectionConfig = { ...connection, db_type: "redis" };
   let skipSafetyCheck = false;

@@ -1254,6 +1254,16 @@ pub async fn connection_identifier_quote(
     state.connection_identifier_quote(&connection_id, database.as_deref()).await
 }
 
+/// Registers a single-use permit after the operator confirms a production write in the UI.
+#[tauri::command]
+pub async fn authorize_production_write(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: Option<String>,
+) -> Result<(), String> {
+    dbx_core::production_safety::authorize_production_write(&state, &connection_id, database.as_deref()).await
+}
+
 /// Check whether a connection has read-only protection enabled.
 /// Returns an error if the connection is read-only, preventing write operations.
 pub async fn ensure_connection_writable(
@@ -1268,4 +1278,14 @@ pub async fn ensure_connection_writable(
         ));
     }
     Ok(())
+}
+
+/// Enforces read-only mode and consumes an explicit permit for a production write.
+pub async fn ensure_connection_write_allowed(
+    state: &Arc<AppState>,
+    connection_id: &str,
+    database: Option<&str>,
+    action: &str,
+) -> Result<(), String> {
+    dbx_core::production_safety::ensure_write_allowed(state, connection_id, database, action).await
 }

@@ -2,6 +2,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import type * as TauriModule from "@/lib/backend/tauri";
 import { appendDebugLog } from "@/lib/backend/debugLog";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { redisCommandDatabaseTargets, redisCommandIsMutation } from "@/lib/redis/redisCommandSafety";
 
 // ---------------------------------------------------------------------------
 // Lazy backend resolution (avoids top-level await)
@@ -45,6 +46,116 @@ function forward<K extends keyof Backend>(name: K): Backend[K] {
   }) as unknown as Backend[K];
 }
 
+interface ProductionWriteTarget {
+  connectionId: string;
+  database?: string;
+  databaseCandidates?: string[];
+  allDatabases?: boolean;
+  source: string;
+}
+
+export class ProductionWriteCancelledError extends Error {
+  constructor() {
+    super("Production write cancelled.");
+    this.name = "ProductionWriteCancelledError";
+  }
+}
+
+/**
+ * Wraps dedicated non-SQL mutation APIs so new callers inherit production
+ * confirmation automatically instead of relying on every component to remember it.
+ */
+function forwardProductionWrite<K extends keyof Backend>(name: K, resolveTarget: (args: unknown[]) => ProductionWriteTarget | undefined, isMutation: (args: unknown[]) => boolean = () => true): Backend[K] {
+  return (async (...args: unknown[]) => {
+    const target = resolveTarget(args);
+    const b = await getBackend();
+    if (target && isMutation(args)) {
+      const [{ useConnectionStore }, { useProductionSafetyStore }, { productionContextForDatabase }] = await Promise.all([import("@/stores/connectionStore"), import("@/stores/productionSafetyStore"), import("@/lib/database/productionSafety")]);
+      const connection = useConnectionStore().getConfig(target.connectionId);
+      const candidates = target.databaseCandidates?.length ? [...target.databaseCandidates] : [target.database];
+      if (target.allDatabases) candidates.push(...(connection?.production_databases ?? []));
+      const productionTarget = candidates.map((database) => ({ database, context: productionContextForDatabase(connection, database) })).find(({ context }) => context.active);
+      if (productionTarget) {
+        const confirmed = await useProductionSafetyStore().requestConfirmation({
+          sql: target.source,
+          connectionName: connection?.name,
+          database: productionTarget.database,
+          productionDatabases: productionTarget.context.databases,
+          source: target.source,
+        });
+        if (!confirmed) throw new ProductionWriteCancelledError();
+        // The backend consumes this permit on the immediately following mutation.
+        await b.authorizeProductionWrite(target.connectionId, productionTarget.database);
+      }
+    }
+    return (b[name] as (...a: unknown[]) => unknown)(...args);
+  }) as unknown as Backend[K];
+}
+
+const connectionWriteTarget =
+  (source: string) =>
+  (args: unknown[]): ProductionWriteTarget | undefined => {
+    const connectionId = String(args[0] ?? "").trim();
+    return connectionId ? { connectionId, source } : undefined;
+  };
+
+const databaseWriteTarget =
+  (source: string) =>
+  (args: unknown[]): ProductionWriteTarget | undefined => {
+    const connectionId = String(args[0] ?? "").trim();
+    const database = String(args[1] ?? "").trim();
+    return connectionId ? { connectionId, database, source } : undefined;
+  };
+
+function rawRequestIsMutation(args: unknown[]): boolean {
+  const request = args[1] as { method?: unknown } | undefined;
+  return !["GET", "HEAD", "OPTIONS"].includes(String(request?.method ?? "").toUpperCase());
+}
+
+function mongoAggregateWriteTarget(args: unknown[]): ProductionWriteTarget | undefined {
+  const connectionId = String(args[0] ?? "").trim();
+  const activeDatabase = String(args[1] ?? "").trim();
+  if (!connectionId) return undefined;
+  try {
+    const pipeline = JSON.parse(String(args[3] ?? "[]"));
+    if (!Array.isArray(pipeline)) {
+      return { connectionId, database: activeDatabase, source: "Run mutating MongoDB aggregate" };
+    }
+    for (const stage of pipeline) {
+      if (!stage || typeof stage !== "object") continue;
+      const record = stage as Record<string, unknown>;
+      if (!("$out" in record) && !("$merge" in record)) continue;
+      const writeStage = "$out" in record ? record.$out : record.$merge;
+      const target = writeStage && typeof writeStage === "object" && "into" in writeStage ? (writeStage as Record<string, unknown>).into : writeStage;
+      const targetDatabase = target && typeof target === "object" ? String((target as Record<string, unknown>).db ?? "").trim() : "";
+      return {
+        connectionId,
+        database: targetDatabase || activeDatabase,
+        source: "Run mutating MongoDB aggregate",
+      };
+    }
+    return undefined;
+  } catch {
+    // Invalid or unknown pipelines are classified conservatively; the backend will report syntax details.
+    return { connectionId, database: activeDatabase, source: "Run mutating MongoDB aggregate" };
+  }
+}
+
+function redisCommandWriteTarget(args: unknown[]): ProductionWriteTarget | undefined {
+  const connectionId = String(args[0] ?? "").trim();
+  const selectedDatabase = String(args[1] ?? "0").trim();
+  const command = String(args[2] ?? "").trim();
+  if (!connectionId || !redisCommandIsMutation(command)) return undefined;
+  const scope = redisCommandDatabaseTargets(command, selectedDatabase);
+  return {
+    connectionId,
+    database: selectedDatabase,
+    databaseCandidates: scope.databases,
+    allDatabases: scope.allDatabases,
+    source: "Execute Redis write command",
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Re-export all functions via lazy forwarding
 // ---------------------------------------------------------------------------
@@ -56,6 +167,7 @@ export const connectionFinalProxyPort = forward("connectionFinalProxyPort");
 export const disconnectDb = forward("disconnectDb");
 export const checkConnectionHealth = forward("checkConnectionHealth");
 export const connectionIdentifierQuote = forward("connectionIdentifierQuote");
+export const authorizeProductionWrite = forward("authorizeProductionWrite");
 export const closeDatabaseConnection = forward("closeDatabaseConnection");
 export const refreshConnections = forward("refreshConnections");
 export const saveConnections = forward("saveConnections");
@@ -291,19 +403,19 @@ export const listSqlFilesInFolder = forward("listSqlFilesInFolder");
 // Nacos
 export const nacosTestConnection = forward("nacosTestConnection");
 export const nacosListNamespaces = forward("nacosListNamespaces");
-export const nacosCreateNamespace = forward("nacosCreateNamespace");
-export const nacosUpdateNamespace = forward("nacosUpdateNamespace");
+export const nacosCreateNamespace = forwardProductionWrite("nacosCreateNamespace", connectionWriteTarget("Create Nacos namespace"));
+export const nacosUpdateNamespace = forwardProductionWrite("nacosUpdateNamespace", connectionWriteTarget("Update Nacos namespace"));
 export const nacosListConfigs = forward("nacosListConfigs");
 export const nacosGetConfig = forward("nacosGetConfig");
-export const nacosPublishConfig = forward("nacosPublishConfig");
-export const nacosDeleteConfig = forward("nacosDeleteConfig");
+export const nacosPublishConfig = forwardProductionWrite("nacosPublishConfig", connectionWriteTarget("Publish Nacos config"));
+export const nacosDeleteConfig = forwardProductionWrite("nacosDeleteConfig", connectionWriteTarget("Delete Nacos config"));
 export const nacosListConfigHistory = forward("nacosListConfigHistory");
 export const nacosGetConfigHistory = forward("nacosGetConfigHistory");
-export const nacosRollbackConfig = forward("nacosRollbackConfig");
+export const nacosRollbackConfig = forwardProductionWrite("nacosRollbackConfig", connectionWriteTarget("Rollback Nacos config"));
 export const nacosListServices = forward("nacosListServices");
 export const nacosListInstances = forward("nacosListInstances");
-export const nacosUpdateInstance = forward("nacosUpdateInstance");
-export const nacosRawRequest = forward("nacosRawRequest");
+export const nacosUpdateInstance = forwardProductionWrite("nacosUpdateInstance", connectionWriteTarget("Update Nacos instance"));
+export const nacosRawRequest = forwardProductionWrite("nacosRawRequest", connectionWriteTarget("Run Nacos raw write request"), rawRequestIsMutation);
 
 // Data Transfer
 export const startTransfer = forward("startTransfer");
@@ -336,26 +448,26 @@ export const redisScanKeys = forward("redisScanKeys");
 export const redisScanKeysBatch = forward("redisScanKeysBatch");
 export const redisScanValues = forward("redisScanValues");
 export const redisGetValue = forward("redisGetValue");
-export const redisSetString = forward("redisSetString");
-export const redisDeleteKey = forward("redisDeleteKey");
-export const redisHashSet = forward("redisHashSet");
-export const redisHashDel = forward("redisHashDel");
-export const redisListPush = forward("redisListPush");
-export const redisListSet = forward("redisListSet");
-export const redisListRemove = forward("redisListRemove");
-export const redisSetAdd = forward("redisSetAdd");
-export const redisSetRemove = forward("redisSetRemove");
-export const redisZadd = forward("redisZadd");
-export const redisZrem = forward("redisZrem");
-export const redisStreamAdd = forward("redisStreamAdd");
-export const redisJsonSet = forward("redisJsonSet");
+export const redisSetString = forwardProductionWrite("redisSetString", databaseWriteTarget("Redis SET"));
+export const redisDeleteKey = forwardProductionWrite("redisDeleteKey", databaseWriteTarget("Delete Redis key"));
+export const redisHashSet = forwardProductionWrite("redisHashSet", databaseWriteTarget("Redis HSET"));
+export const redisHashDel = forwardProductionWrite("redisHashDel", databaseWriteTarget("Redis HDEL"));
+export const redisListPush = forwardProductionWrite("redisListPush", databaseWriteTarget("Redis LPUSH"));
+export const redisListSet = forwardProductionWrite("redisListSet", databaseWriteTarget("Redis LSET"));
+export const redisListRemove = forwardProductionWrite("redisListRemove", databaseWriteTarget("Redis LREM"));
+export const redisSetAdd = forwardProductionWrite("redisSetAdd", databaseWriteTarget("Redis SADD"));
+export const redisSetRemove = forwardProductionWrite("redisSetRemove", databaseWriteTarget("Redis SREM"));
+export const redisZadd = forwardProductionWrite("redisZadd", databaseWriteTarget("Redis ZADD"));
+export const redisZrem = forwardProductionWrite("redisZrem", databaseWriteTarget("Redis ZREM"));
+export const redisStreamAdd = forwardProductionWrite("redisStreamAdd", databaseWriteTarget("Redis XADD"));
+export const redisJsonSet = forwardProductionWrite("redisJsonSet", databaseWriteTarget("Redis JSON.SET"));
 export const redisCheckJsonModule = forward("redisCheckJsonModule");
-export const redisSetTtl = forward("redisSetTtl");
-export const redisDeleteKeys = forward("redisDeleteKeys");
-export const redisFlushDb = forward("redisFlushDb");
-export const redisExecuteCommand = forward("redisExecuteCommand");
+export const redisSetTtl = forwardProductionWrite("redisSetTtl", databaseWriteTarget("Change Redis TTL"));
+export const redisDeleteKeys = forwardProductionWrite("redisDeleteKeys", databaseWriteTarget("Delete Redis keys"));
+export const redisFlushDb = forwardProductionWrite("redisFlushDb", databaseWriteTarget("Redis FLUSHDB"));
+export const redisExecuteCommand = forwardProductionWrite("redisExecuteCommand", redisCommandWriteTarget);
 export const redisLoadMore = forward("redisLoadMore");
-export const redisPubSubPublish = forward("redisPubSubPublish");
+export const redisPubSubPublish = forwardProductionWrite("redisPubSubPublish", databaseWriteTarget("Publish Redis message"));
 export const redisPubSubConnect = forward("redisPubSubConnect");
 export const redisSlowlogGet = forward("redisSlowlogGet");
 export const redisClusterMasterNodes = forward("redisClusterMasterNodes");
@@ -363,58 +475,58 @@ export const redisClusterMasterNodes = forward("redisClusterMasterNodes");
 // etcd
 export const etcdListPrefix = forward("etcdListPrefix");
 export const etcdGet = forward("etcdGet");
-export const etcdPut = forward("etcdPut");
-export const etcdDelete = forward("etcdDelete");
+export const etcdPut = forwardProductionWrite("etcdPut", connectionWriteTarget("Put Etcd key"));
+export const etcdDelete = forwardProductionWrite("etcdDelete", connectionWriteTarget("Delete Etcd key"));
 
 // ZooKeeper
 export const zookeeperListPrefix = forward("zookeeperListPrefix");
 export const zookeeperGet = forward("zookeeperGet");
-export const zookeeperPut = forward("zookeeperPut");
-export const zookeeperDelete = forward("zookeeperDelete");
+export const zookeeperPut = forwardProductionWrite("zookeeperPut", connectionWriteTarget("Put ZooKeeper node"));
+export const zookeeperDelete = forwardProductionWrite("zookeeperDelete", connectionWriteTarget("Delete ZooKeeper node"));
 
 // Message Queue
 export const mqTestConnection = forward("mqTestConnection");
 export const mqListTenants = forward("mqListTenants");
 export const mqGetTenant = forward("mqGetTenant");
-export const mqCreateTenant = forward("mqCreateTenant");
-export const mqUpdateTenant = forward("mqUpdateTenant");
-export const mqDeleteTenant = forward("mqDeleteTenant");
+export const mqCreateTenant = forwardProductionWrite("mqCreateTenant", connectionWriteTarget("Create MQ tenant"));
+export const mqUpdateTenant = forwardProductionWrite("mqUpdateTenant", connectionWriteTarget("Update MQ tenant"));
+export const mqDeleteTenant = forwardProductionWrite("mqDeleteTenant", connectionWriteTarget("Delete MQ tenant"));
 export const mqListNamespaces = forward("mqListNamespaces");
-export const mqCreateNamespace = forward("mqCreateNamespace");
-export const mqDeleteNamespace = forward("mqDeleteNamespace");
+export const mqCreateNamespace = forwardProductionWrite("mqCreateNamespace", connectionWriteTarget("Create MQ namespace"));
+export const mqDeleteNamespace = forwardProductionWrite("mqDeleteNamespace", connectionWriteTarget("Delete MQ namespace"));
 export const mqGetNamespacePolicies = forward("mqGetNamespacePolicies");
 export const mqListTopics = forward("mqListTopics");
-export const mqCreateTopic = forward("mqCreateTopic");
-export const mqDeleteTopic = forward("mqDeleteTopic");
-export const mqUpdatePartitions = forward("mqUpdatePartitions");
+export const mqCreateTopic = forwardProductionWrite("mqCreateTopic", connectionWriteTarget("Create MQ topic"));
+export const mqDeleteTopic = forwardProductionWrite("mqDeleteTopic", connectionWriteTarget("Delete MQ topic"));
+export const mqUpdatePartitions = forwardProductionWrite("mqUpdatePartitions", connectionWriteTarget("Update MQ partitions"));
 export const mqGetTopicStats = forward("mqGetTopicStats");
 export const mqGetTopicInternalStats = forward("mqGetTopicInternalStats");
 export const mqListSubscriptions = forward("mqListSubscriptions");
-export const mqCreateSubscription = forward("mqCreateSubscription");
-export const mqDeleteSubscription = forward("mqDeleteSubscription");
-export const mqSkipMessages = forward("mqSkipMessages");
-export const mqResetCursor = forward("mqResetCursor");
-export const mqClearBacklog = forward("mqClearBacklog");
+export const mqCreateSubscription = forwardProductionWrite("mqCreateSubscription", connectionWriteTarget("Create MQ subscription"));
+export const mqDeleteSubscription = forwardProductionWrite("mqDeleteSubscription", connectionWriteTarget("Delete MQ subscription"));
+export const mqSkipMessages = forwardProductionWrite("mqSkipMessages", connectionWriteTarget("Skip MQ messages"));
+export const mqResetCursor = forwardProductionWrite("mqResetCursor", connectionWriteTarget("Reset MQ cursor"));
+export const mqClearBacklog = forwardProductionWrite("mqClearBacklog", connectionWriteTarget("Clear MQ backlog"));
 export const mqPeekMessages = forward("mqPeekMessages");
-export const mqExpireMessages = forward("mqExpireMessages");
+export const mqExpireMessages = forwardProductionWrite("mqExpireMessages", connectionWriteTarget("Expire MQ messages"));
 export const mqListProducers = forward("mqListProducers");
 export const mqListConsumers = forward("mqListConsumers");
-export const mqUnloadTopic = forward("mqUnloadTopic");
-export const mqSetPublishRate = forward("mqSetPublishRate");
-export const mqSetDispatchRate = forward("mqSetDispatchRate");
-export const mqSetSubscribeRate = forward("mqSetSubscribeRate");
-export const mqSetBacklogQuota = forward("mqSetBacklogQuota");
-export const mqSetRetention = forward("mqSetRetention");
+export const mqUnloadTopic = forwardProductionWrite("mqUnloadTopic", connectionWriteTarget("Unload MQ topic"));
+export const mqSetPublishRate = forwardProductionWrite("mqSetPublishRate", connectionWriteTarget("Set MQ publish rate"));
+export const mqSetDispatchRate = forwardProductionWrite("mqSetDispatchRate", connectionWriteTarget("Set MQ dispatch rate"));
+export const mqSetSubscribeRate = forwardProductionWrite("mqSetSubscribeRate", connectionWriteTarget("Set MQ subscribe rate"));
+export const mqSetBacklogQuota = forwardProductionWrite("mqSetBacklogQuota", connectionWriteTarget("Set MQ backlog quota"));
+export const mqSetRetention = forwardProductionWrite("mqSetRetention", connectionWriteTarget("Set MQ retention"));
 export const mqGetEffectivePolicies = forward("mqGetEffectivePolicies");
-export const mqGrantPermission = forward("mqGrantPermission");
-export const mqRevokePermission = forward("mqRevokePermission");
+export const mqGrantPermission = forwardProductionWrite("mqGrantPermission", connectionWriteTarget("Grant MQ permission"));
+export const mqRevokePermission = forwardProductionWrite("mqRevokePermission", connectionWriteTarget("Revoke MQ permission"));
 export const mqListPermissions = forward("mqListPermissions");
-export const mqIssueToken = forward("mqIssueToken");
+export const mqIssueToken = forwardProductionWrite("mqIssueToken", connectionWriteTarget("Issue MQ token"));
 export const mqListTokenRecords = forward("mqListTokenRecords");
 export const mqGetBacklog = forward("mqGetBacklog");
 export const mqGetClusterInfo = forward("mqGetClusterInfo");
-export const mqRawRequest = forward("mqRawRequest");
-export const mqSendMessage = forward("mqSendMessage");
+export const mqRawRequest = forwardProductionWrite("mqRawRequest", connectionWriteTarget("Run MQ raw write request"), rawRequestIsMutation);
+export const mqSendMessage = forwardProductionWrite("mqSendMessage", connectionWriteTarget("Send MQ message"));
 
 // MongoDB
 export const documentListDatabases = forward("documentListDatabases");
@@ -422,33 +534,33 @@ export const mongoListDatabases = forward("mongoListDatabases");
 export const documentListCollections = forward("documentListCollections");
 export const mongoListCollections = forward("mongoListCollections");
 export const documentListGridFsBuckets = forward("documentListGridFsBuckets");
-export const documentCreateGridFsBucket = forward("documentCreateGridFsBucket");
-export const documentDeleteGridFsBucket = forward("documentDeleteGridFsBucket");
+export const documentCreateGridFsBucket = forwardProductionWrite("documentCreateGridFsBucket", databaseWriteTarget("Create MongoDB GridFS bucket"));
+export const documentDeleteGridFsBucket = forwardProductionWrite("documentDeleteGridFsBucket", databaseWriteTarget("Delete MongoDB GridFS bucket"));
 export const documentListGridFsFiles = forward("documentListGridFsFiles");
 export const documentDownloadGridFsFile = forward("documentDownloadGridFsFile");
-export const documentUploadGridFsFile = forward("documentUploadGridFsFile");
-export const documentDeleteGridFsFile = forward("documentDeleteGridFsFile");
+export const documentUploadGridFsFile = forwardProductionWrite("documentUploadGridFsFile", databaseWriteTarget("Upload MongoDB GridFS file"));
+export const documentDeleteGridFsFile = forwardProductionWrite("documentDeleteGridFsFile", databaseWriteTarget("Delete MongoDB GridFS file"));
 export const vectorGetCollectionDetail = forward("vectorGetCollectionDetail");
-export const mongoCreateDatabase = forward("mongoCreateDatabase");
-export const mongoDropDatabase = forward("mongoDropDatabase");
-export const mongoDropCollection = forward("mongoDropCollection");
+export const mongoCreateDatabase = forwardProductionWrite("mongoCreateDatabase", databaseWriteTarget("Create MongoDB database"));
+export const mongoDropDatabase = forwardProductionWrite("mongoDropDatabase", databaseWriteTarget("Drop MongoDB database"));
+export const mongoDropCollection = forwardProductionWrite("mongoDropCollection", databaseWriteTarget("Drop MongoDB collection"));
 export const documentFindDocuments = forward("documentFindDocuments");
 export const mongoFindDocuments = forward("mongoFindDocuments");
 export const mongoCountDocuments = forward("mongoCountDocuments");
 export const mongoServerVersion = forward("mongoServerVersion");
-export const mongoAggregateDocuments = forward("mongoAggregateDocuments");
+export const mongoAggregateDocuments = forwardProductionWrite("mongoAggregateDocuments", mongoAggregateWriteTarget);
 export const mongoCollectionStats = forward("mongoCollectionStats");
-export const mongoCreateIndex = forward("mongoCreateIndex");
-export const mongoDropIndexes = forward("mongoDropIndexes");
-export const documentInsertDocument = forward("documentInsertDocument");
-export const mongoInsertDocument = forward("mongoInsertDocument");
-export const mongoInsertDocuments = forward("mongoInsertDocuments");
-export const documentUpdateDocument = forward("documentUpdateDocument");
-export const mongoUpdateDocument = forward("mongoUpdateDocument");
-export const mongoUpdateDocuments = forward("mongoUpdateDocuments");
-export const documentDeleteDocument = forward("documentDeleteDocument");
-export const mongoDeleteDocument = forward("mongoDeleteDocument");
-export const mongoDeleteDocuments = forward("mongoDeleteDocuments");
+export const mongoCreateIndex = forwardProductionWrite("mongoCreateIndex", databaseWriteTarget("Create MongoDB index"));
+export const mongoDropIndexes = forwardProductionWrite("mongoDropIndexes", databaseWriteTarget("Drop MongoDB indexes"));
+export const documentInsertDocument = forwardProductionWrite("documentInsertDocument", databaseWriteTarget("Insert document"));
+export const mongoInsertDocument = forwardProductionWrite("mongoInsertDocument", databaseWriteTarget("Insert MongoDB document"));
+export const mongoInsertDocuments = forwardProductionWrite("mongoInsertDocuments", databaseWriteTarget("Insert MongoDB documents"));
+export const documentUpdateDocument = forwardProductionWrite("documentUpdateDocument", databaseWriteTarget("Update document"));
+export const mongoUpdateDocument = forwardProductionWrite("mongoUpdateDocument", databaseWriteTarget("Update MongoDB document"));
+export const mongoUpdateDocuments = forwardProductionWrite("mongoUpdateDocuments", databaseWriteTarget("Update MongoDB documents"));
+export const documentDeleteDocument = forwardProductionWrite("documentDeleteDocument", databaseWriteTarget("Delete document"));
+export const mongoDeleteDocument = forwardProductionWrite("mongoDeleteDocument", databaseWriteTarget("Delete MongoDB document"));
+export const mongoDeleteDocuments = forwardProductionWrite("mongoDeleteDocuments", databaseWriteTarget("Delete MongoDB documents"));
 
 // Elasticsearch
 export const elasticsearchListIndices = forward("elasticsearchListIndices");

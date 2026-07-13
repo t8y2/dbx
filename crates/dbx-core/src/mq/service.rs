@@ -526,16 +526,7 @@ pub fn resolve_kafka_launch_spec(mqc: &MqAdminConfig, state: &AppState) -> Optio
 }
 
 async fn ensure_connection_writable(state: &AppState, conn_id: &str, operation: &str) -> Result<(), String> {
-    let configs = state.configs.read().await;
-    if let Some(config) = configs.get(conn_id) {
-        if config.read_only {
-            return Err(format!(
-                "Read-only mode: connection '{}' has read-only protection enabled. {} blocked.",
-                config.name, operation
-            ));
-        }
-    }
-    Ok(())
+    crate::production_safety::ensure_write_allowed(state, conn_id, None, operation).await
 }
 
 #[cfg(test)]

@@ -129,7 +129,7 @@ pub async fn nacos_raw_request_core(
     req: NacosRawRequest,
 ) -> Result<NacosRawResponse, String> {
     crate::nacos::http::validate_raw_api_path(&req.path)?;
-    if req.method.to_ascii_uppercase() != "GET" {
+    if !matches!(req.method.to_ascii_uppercase().as_str(), "GET" | "HEAD" | "OPTIONS") {
         ensure_connection_writable(state, conn_id, "Run mutating Nacos raw request").await?;
     }
     let admin = get_admin(state, conn_id).await?;
@@ -149,12 +149,7 @@ async fn get_admin(
 }
 
 async fn ensure_connection_writable(state: &AppState, conn_id: &str, action: &str) -> Result<(), String> {
-    let cfg = state.configs.read().await.get(conn_id).cloned().ok_or("Connection not found")?;
-    if cfg.read_only {
-        Err(format!("{action} is blocked because this connection is read-only"))
-    } else {
-        Ok(())
-    }
+    crate::production_safety::ensure_write_allowed(state, conn_id, None, action).await
 }
 
 #[cfg(test)]

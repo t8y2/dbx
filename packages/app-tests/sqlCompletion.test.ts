@@ -10,6 +10,7 @@ import {
   extractCteDefinitions,
   getSqlCompletionContext,
   recordCompletionSelection,
+  shouldChainSqlCompletionAfterAccept,
   type SqlCompletionColumn,
   type SqlCompletionForeignKey,
   type SqlCompletionObject,
@@ -621,6 +622,16 @@ test("keeps schema-qualified FROM object input in table suggestion mode", () => 
     tableItems.map((item) => item.label),
     ["users", "user_profiles"],
   );
+});
+
+test("keeps an accepted schema with trailing dot in table suggestion mode", () => {
+  const sql = "SELECT *\nFROM DBX_TEST.";
+  const context = getSqlCompletionContext(sql, sql.length);
+
+  assert.equal(context.qualifier, "DBX_TEST");
+  assert.equal(context.prefix, "");
+  assert.equal(context.suggestTables, true);
+  assert.equal(context.exclusiveTableSuggestions, true);
 });
 
 test("keeps database-qualified FROM input in table suggestion mode", () => {
@@ -1827,6 +1838,8 @@ test("schema items include apply value with trailing dot", () => {
   const schemaItems = items.filter((item) => item.type === "schema");
   assert.equal(schemaItems.length, 1);
   assert.equal(schemaItems[0]?.apply, "public.");
+  assert.equal(shouldChainSqlCompletionAfterAccept(schemaItems[0]!), true);
+  assert.equal(shouldChainSqlCompletionAfterAccept({ type: "table", apply: "users" }), false);
 });
 
 // --- Quoted identifier fix ---

@@ -1121,6 +1121,10 @@ export interface SqlCompletionItem {
   exactMatch?: boolean;
 }
 
+export function shouldChainSqlCompletionAfterAccept(item: { type?: string; apply?: string }): boolean {
+  return item.type === "schema" && item.apply?.endsWith(".") === true;
+}
+
 export type SqlKeywordCase = "preserve" | "upper" | "lower";
 
 export interface SqlCompletionReferencedTable {

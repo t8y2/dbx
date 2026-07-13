@@ -63,29 +63,37 @@ struct WorkerProcessState {
 }
 
 impl DuckDbWorkerClient {
-    pub async fn open(path: String, attached_databases: Vec<AttachedDatabaseConfig>) -> Result<Self, String> {
+    pub async fn open(
+        path: String,
+        attached_databases: Vec<AttachedDatabaseConfig>,
+        init_script: Option<String>,
+    ) -> Result<Self, String> {
         let executable = std::env::current_exe().map_err(|e| e.to_string())?;
-        Self::open_with_executable(executable, path, attached_databases).await
+        Self::open_with_executable(executable, path, attached_databases, init_script).await
     }
 
     pub async fn open_with_process_limit(
         path: String,
         attached_databases: Vec<AttachedDatabaseConfig>,
+        init_script: Option<String>,
         process_limit: usize,
     ) -> Result<Self, String> {
         let executable = std::env::current_exe().map_err(|e| e.to_string())?;
-        Self::open_with_executable_and_process_limit(executable, path, attached_databases, process_limit).await
+        Self::open_with_executable_and_process_limit(executable, path, attached_databases, init_script, process_limit)
+            .await
     }
 
     pub async fn open_with_executable(
         executable: PathBuf,
         path: String,
         attached_databases: Vec<AttachedDatabaseConfig>,
+        init_script: Option<String>,
     ) -> Result<Self, String> {
         Self::open_with_executable_and_process_limit(
             executable,
             path,
             attached_databases,
+            init_script,
             DUCKDB_WORKER_MAX_PROCESSES_DEFAULT,
         )
         .await
@@ -95,12 +103,14 @@ impl DuckDbWorkerClient {
         executable: PathBuf,
         path: String,
         attached_databases: Vec<AttachedDatabaseConfig>,
+        init_script: Option<String>,
         process_limit: usize,
     ) -> Result<Self, String> {
         let client = Self::new_unconnected_with_timeouts(
             executable,
             path,
             attached_databases,
+            init_script,
             process_limit,
             DEFAULT_WORKER_REQUEST_TIMEOUT,
             DEFAULT_WORKER_START_WAIT,
@@ -114,6 +124,7 @@ impl DuckDbWorkerClient {
         executable: PathBuf,
         path: String,
         attached_databases: Vec<AttachedDatabaseConfig>,
+        init_script: Option<String>,
         process_limit: usize,
         request_timeout: Duration,
         worker_start_timeout: Duration,
@@ -128,7 +139,7 @@ impl DuckDbWorkerClient {
                 process_limiter,
                 process_limit,
                 executable,
-                connect_params: DuckDbWorkerConnectParams { path, attached_databases },
+                connect_params: DuckDbWorkerConnectParams { path, attached_databases, init_script },
                 request_timeout,
                 worker_start_timeout,
                 next_id: AtomicU64::new(1),

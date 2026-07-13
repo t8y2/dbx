@@ -26,7 +26,7 @@ async fn worker_process_recovers_immediately_after_cancelled_long_query() {
     let _ = std::fs::remove_file(&db_path);
 
     let client =
-        DuckDbWorkerClient::open_with_executable(executable, db_path.to_string_lossy().to_string(), Vec::new())
+        DuckDbWorkerClient::open_with_executable(executable, db_path.to_string_lossy().to_string(), Vec::new(), None)
             .await
             .expect("worker process connects");
 
@@ -77,7 +77,7 @@ async fn worker_process_recovers_after_registered_cancel_interrupt() {
     let _ = std::fs::remove_file(&db_path);
 
     let client =
-        DuckDbWorkerClient::open_with_executable(executable, db_path.to_string_lossy().to_string(), Vec::new())
+        DuckDbWorkerClient::open_with_executable(executable, db_path.to_string_lossy().to_string(), Vec::new(), None)
             .await
             .expect("worker process connects");
 
@@ -140,7 +140,7 @@ async fn worker_process_recovers_after_parser_error() {
     let _ = std::fs::remove_file(&db_path);
 
     let client =
-        DuckDbWorkerClient::open_with_executable(executable, db_path.to_string_lossy().to_string(), Vec::new())
+        DuckDbWorkerClient::open_with_executable(executable, db_path.to_string_lossy().to_string(), Vec::new(), None)
             .await
             .expect("worker process connects");
 
@@ -190,7 +190,7 @@ async fn worker_process_keeps_session_state_after_benign_error() {
     let _ = std::fs::remove_file(&db_path);
 
     let client =
-        DuckDbWorkerClient::open_with_executable(executable, db_path.to_string_lossy().to_string(), Vec::new())
+        DuckDbWorkerClient::open_with_executable(executable, db_path.to_string_lossy().to_string(), Vec::new(), None)
             .await
             .expect("worker process connects");
 
@@ -251,7 +251,11 @@ async fn worker_process_exits_when_stdin_closes_during_active_query() {
         DuckDbWorkerRequest::new(
             "connect",
             DuckDbWorkerMethod::Connect,
-            DuckDbWorkerConnectParams { path: db_path.to_string_lossy().to_string(), attached_databases: Vec::new() },
+            DuckDbWorkerConnectParams {
+                path: db_path.to_string_lossy().to_string(),
+                attached_databases: Vec::new(),
+                init_script: None,
+            },
         )
         .expect("connect request"),
     )
@@ -298,6 +302,7 @@ async fn worker_process_is_killed_after_connect_timeout() {
         executable,
         db_path.to_string_lossy().to_string(),
         Vec::new(),
+        None,
         4,
         Duration::from_secs(1),
         Duration::from_secs(5),
@@ -332,6 +337,7 @@ async fn worker_process_is_killed_after_connect_error() {
         executable,
         db_path.to_string_lossy().to_string(),
         Vec::new(),
+        None,
         4,
         Duration::from_secs(5),
         Duration::from_secs(5),
@@ -386,6 +392,7 @@ async fn worker_process_retries_connect_after_transient_file_lock() {
         executable,
         db_path.to_string_lossy().to_string(),
         Vec::new(),
+        None,
         4,
         Duration::from_secs(5),
         Duration::from_secs(5),

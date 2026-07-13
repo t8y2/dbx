@@ -74,7 +74,8 @@ pub fn duckdb_query_tables_in_database_with_attached(
             })
         })
         .map_err(|e| e.to_string())?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    let tables: Vec<db::TableInfo> = rows.filter_map(|r| r.ok()).collect();
+    Ok(tables)
 }
 
 #[cfg(feature = "duckdb-bundled")]
@@ -127,7 +128,8 @@ pub fn duckdb_list_schemas_with_attached(
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt.query_map([database.as_str()], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    let schemas: Vec<String> = rows.filter_map(|r| r.ok()).collect();
+    Ok(schemas)
 }
 
 #[cfg(feature = "duckdb-bundled")]
@@ -243,7 +245,8 @@ pub fn duckdb_query_columns_in_database_with_attached(
             })
         })
         .map_err(|e| e.to_string())?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    let columns: Vec<db::ColumnInfo> = rows.filter_map(|r| r.ok()).collect();
+    Ok(columns)
 }
 
 #[cfg(feature = "duckdb-bundled")]
@@ -454,13 +457,7 @@ fn duckdb_completion_like_pattern(request: &db::CompletionAssistantRequest) -> S
 
 #[cfg(feature = "duckdb-bundled")]
 async fn duckdb_attached_database_names(state: &AppState, connection_id: &str) -> Vec<String> {
-    state
-        .configs
-        .read()
-        .await
-        .get(connection_id)
-        .map(|config| config.attached_databases.iter().map(|database| database.name.clone()).collect())
-        .unwrap_or_default()
+    state.configs.read().await.get(connection_id).map(crate::db::duckdb_sql::config_attached_names).unwrap_or_default()
 }
 
 fn clickhouse_metadata_database<'a>(database: &'a str, schema: &'a str) -> &'a str {

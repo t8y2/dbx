@@ -100,6 +100,8 @@ pub struct DuckDbWorkerConnectParams {
     pub path: String,
     #[serde(default)]
     pub attached_databases: Vec<AttachedDatabaseConfig>,
+    #[serde(default)]
+    pub init_script: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -148,6 +150,7 @@ mod tests {
                     name: "analytics".to_string(),
                     path: "D:/tmp/analytics.duckdb".to_string(),
                 }],
+                init_script: None,
             },
         )
         .expect("serialize request");

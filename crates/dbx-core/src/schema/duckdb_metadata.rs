@@ -198,6 +198,6 @@ pub(super) async fn duckdb_attached_database_names(state: &AppState, connection_
         .read()
         .await
         .get(connection_id)
-        .map(|config| config.attached_databases.iter().map(|database| database.name.clone()).collect())
+        .map(crate::db::duckdb_sql::config_attached_names)
         .unwrap_or_default()
 }

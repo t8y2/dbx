@@ -30,6 +30,20 @@ impl DuckDbWorkerSession {
                 crate::schema::duckdb_attach_database(&locked, &attached.name, &path)?;
                 attached_names.push(attached.name.clone());
             }
+            if let Some(script) = params.init_script.as_deref() {
+                // Track script attachments by diffing the actual catalog list
+                // instead of parsing the SQL, so ATTACH without an alias,
+                // dynamic statements, and extension-specific syntax all count.
+                let before = duckdb_catalog_list(&locked)?;
+                db::duckdb_driver::run_init_script(&locked, script)?;
+                for name in duckdb_catalog_list(&locked)? {
+                    if !before.iter().any(|existing| existing.eq_ignore_ascii_case(&name))
+                        && !attached_names.iter().any(|attached| attached.eq_ignore_ascii_case(&name))
+                    {
+                        attached_names.push(name);
+                    }
+                }
+            }
         }
         self.connection = Some(connection);
         self.attached_names = attached_names;
@@ -46,7 +60,7 @@ impl DuckDbWorkerSession {
             &params.sql,
             params.max_rows,
         )?;
-        if let Some(name) = duckdb_attached_name_from_attach_sql(&params.sql) {
+        if let Some(name) = crate::db::duckdb_sql::attached_name_from_attach_sql(&params.sql) {
             if !self.attached_names.iter().any(|attached| attached.eq_ignore_ascii_case(&name)) {
                 self.attached_names.push(name);
             }
@@ -123,6 +137,12 @@ impl DuckDbWorkerSession {
             None => false,
         }
     }
+}
+
+fn duckdb_catalog_list(con: &duckdb::Connection) -> Result<Vec<String>, String> {
+    let mut stmt = con.prepare("SHOW DATABASES").map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(|row| row.ok()).collect())
 }
 
 #[derive(Clone, Default)]
@@ -334,83 +354,6 @@ async fn write_response(stdout: Arc<tokio::sync::Mutex<Stdout>>, response: &Duck
     let _ = stdout.flush().await;
 }
 
-fn duckdb_attached_name_from_attach_sql(sql: &str) -> Option<String> {
-    let trimmed = sql.trim_start();
-    let first_word = trimmed.split(|ch: char| ch.is_whitespace() || ch == ';').next().unwrap_or_default();
-    if !first_word.eq_ignore_ascii_case("ATTACH") {
-        return None;
-    }
-
-    let as_index = find_as_keyword_outside_quotes(trimmed)?;
-    parse_identifier_after_as(&trimmed[as_index + 2..])
-}
-
-fn find_as_keyword_outside_quotes(sql: &str) -> Option<usize> {
-    let bytes = sql.as_bytes();
-    let mut i = 0;
-    let mut in_single = false;
-    let mut in_double = false;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\'' if !in_double => {
-                if in_single && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
-                    i += 2;
-                    continue;
-                }
-                in_single = !in_single;
-            }
-            b'"' if !in_single => {
-                if in_double && i + 1 < bytes.len() && bytes[i + 1] == b'"' {
-                    i += 2;
-                    continue;
-                }
-                in_double = !in_double;
-            }
-            b'a' | b'A' if !in_single && !in_double && i + 1 < bytes.len() => {
-                if (bytes[i + 1] == b's' || bytes[i + 1] == b'S')
-                    && is_sql_word_boundary(bytes.get(i.wrapping_sub(1)).copied())
-                    && is_sql_word_boundary(bytes.get(i + 2).copied())
-                {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    None
-}
-
-fn is_sql_word_boundary(byte: Option<u8>) -> bool {
-    !matches!(byte, Some(b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_'))
-}
-
-fn parse_identifier_after_as(input: &str) -> Option<String> {
-    let input = input.trim_start();
-    if input.is_empty() {
-        return None;
-    }
-    if let Some(rest) = input.strip_prefix('"') {
-        let mut name = String::new();
-        let mut chars = rest.chars().peekable();
-        while let Some(ch) = chars.next() {
-            if ch == '"' {
-                if chars.peek() == Some(&'"') {
-                    name.push('"');
-                    chars.next();
-                    continue;
-                }
-                return (!name.trim().is_empty()).then_some(name);
-            }
-            name.push(ch);
-        }
-        return None;
-    }
-
-    let name = input.split(|ch: char| ch.is_whitespace() || ch == ';').next().unwrap_or_default().trim();
-    (!name.is_empty()).then(|| name.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,7 +363,11 @@ mod tests {
         let mut session = DuckDbWorkerSession::default();
 
         session
-            .connect(DuckDbWorkerConnectParams { path: ":memory:".to_string(), attached_databases: Vec::new() })
+            .connect(DuckDbWorkerConnectParams {
+                path: ":memory:".to_string(),
+                attached_databases: Vec::new(),
+                init_script: None,
+            })
             .expect("connect");
 
         assert_eq!(session.list_databases().expect("list databases")[0].name, "main");
@@ -430,7 +377,11 @@ mod tests {
     fn worker_session_executes_select_query() {
         let mut session = DuckDbWorkerSession::default();
         session
-            .connect(DuckDbWorkerConnectParams { path: ":memory:".to_string(), attached_databases: Vec::new() })
+            .connect(DuckDbWorkerConnectParams {
+                path: ":memory:".to_string(),
+                attached_databases: Vec::new(),
+                init_script: None,
+            })
             .expect("connect");
 
         let result = session
@@ -445,7 +396,11 @@ mod tests {
     fn worker_session_lists_tables_and_columns() {
         let mut session = DuckDbWorkerSession::default();
         session
-            .connect(DuckDbWorkerConnectParams { path: ":memory:".to_string(), attached_databases: Vec::new() })
+            .connect(DuckDbWorkerConnectParams {
+                path: ":memory:".to_string(),
+                attached_databases: Vec::new(),
+                init_script: None,
+            })
             .expect("connect");
         session
             .execute(DuckDbWorkerExecuteParams {
@@ -484,7 +439,11 @@ mod tests {
         }
         let mut session = DuckDbWorkerSession::default();
         session
-            .connect(DuckDbWorkerConnectParams { path: ":memory:".to_string(), attached_databases: Vec::new() })
+            .connect(DuckDbWorkerConnectParams {
+                path: ":memory:".to_string(),
+                attached_databases: Vec::new(),
+                init_script: None,
+            })
             .expect("connect");
 
         session
@@ -505,6 +464,79 @@ mod tests {
     }
 
     #[test]
+    fn worker_session_runs_init_script_and_tracks_attached_alias() {
+        let dir = std::env::temp_dir().join(format!("dbx-duckdb-worker-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let attached_path = dir.join("warehouse.duckdb");
+        {
+            let con = duckdb::Connection::open(&attached_path).expect("create attached db");
+            con.execute_batch("CREATE TABLE facts (id INTEGER);").expect("create attached table");
+        }
+        let mut session = DuckDbWorkerSession::default();
+        let script = format!(
+            "SET memory_limit='512MB'; -- session tuning\nATTACH '{}' AS warehouse;\nCREATE TABLE staging (id INTEGER);",
+            attached_path.to_string_lossy().replace('\'', "''")
+        );
+        session
+            .connect(DuckDbWorkerConnectParams {
+                path: ":memory:".to_string(),
+                attached_databases: Vec::new(),
+                init_script: Some(script),
+            })
+            .expect("connect");
+
+        assert!(session.attached_names.iter().any(|name| name == "warehouse"));
+        let databases = session.list_databases().expect("list databases");
+        assert!(databases.iter().any(|database| database.name == "warehouse"));
+        let tables = session
+            .list_tables(DuckDbWorkerTableParams { database: "warehouse".to_string(), schema: "main".to_string() })
+            .expect("list tables");
+        assert!(tables.iter().any(|table| table.name == "facts"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn worker_session_tracks_init_script_attach_without_alias() {
+        let dir = std::env::temp_dir().join(format!("dbx-duckdb-worker-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let attached_path = dir.join("noalias.duckdb");
+        {
+            let con = duckdb::Connection::open(&attached_path).expect("create attached db");
+            con.execute_batch("CREATE TABLE items (id INTEGER);").expect("create attached table");
+        }
+        let mut session = DuckDbWorkerSession::default();
+        session
+            .connect(DuckDbWorkerConnectParams {
+                path: ":memory:".to_string(),
+                attached_databases: Vec::new(),
+                init_script: Some(format!("ATTACH '{}';", attached_path.to_string_lossy().replace('\'', "''"))),
+            })
+            .expect("connect");
+
+        assert!(session.attached_names.iter().any(|name| name == "noalias"), "names: {:?}", session.attached_names);
+        let tables = session
+            .list_tables(DuckDbWorkerTableParams { database: "noalias".to_string(), schema: "main".to_string() })
+            .expect("list tables");
+        assert!(tables.iter().any(|table| table.name == "items"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn worker_session_reports_failing_init_script_statement() {
+        let mut session = DuckDbWorkerSession::default();
+        let err = session
+            .connect(DuckDbWorkerConnectParams {
+                path: ":memory:".to_string(),
+                attached_databases: Vec::new(),
+                init_script: Some("SELECT 1; SELECT * FROM missing_table;".to_string()),
+            })
+            .expect_err("init script should fail");
+        assert!(err.contains("statement 2"), "unexpected error: {err}");
+    }
+
+    #[test]
     fn worker_session_tracks_attach_sql_alias() {
         let dir = std::env::temp_dir().join(format!("dbx-duckdb-worker-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("create temp dir");
@@ -515,7 +547,11 @@ mod tests {
         }
         let mut session = DuckDbWorkerSession::default();
         session
-            .connect(DuckDbWorkerConnectParams { path: ":memory:".to_string(), attached_databases: Vec::new() })
+            .connect(DuckDbWorkerConnectParams {
+                path: ":memory:".to_string(),
+                attached_databases: Vec::new(),
+                init_script: None,
+            })
             .expect("connect");
 
         session
@@ -553,14 +589,5 @@ mod tests {
         let response = result.response.expect("response");
         assert!(!response.ok);
         assert_eq!(response.error.expect("error").code, "duckdb_worker_busy");
-    }
-
-    #[test]
-    fn attach_sql_alias_parser_handles_generated_sql() {
-        assert_eq!(
-            duckdb_attached_name_from_attach_sql("ATTACH 'D:\\tmp\\sales.duckdb' AS \"sales db\";"),
-            Some("sales db".to_string())
-        );
-        assert_eq!(duckdb_attached_name_from_attach_sql("select 'not attach' as value"), None);
     }
 }

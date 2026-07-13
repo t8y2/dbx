@@ -959,6 +959,9 @@ pub async fn connect_db(
                 for attached in &db_config.attached_databases {
                     dbx_core::schema::duckdb_attach_database(&locked, &attached.name, &expand_tilde(&attached.path))?;
                 }
+                if let Some(script) = db_config.init_script.as_deref() {
+                    db::duckdb_driver::run_init_script(&locked, script)?;
+                }
             }
             PoolKind::DuckDb(con)
         }

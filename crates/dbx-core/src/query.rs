@@ -1107,9 +1107,7 @@ pub async fn do_execute(
     let (_duckdb_attached_names, read_only_connection) = {
         let configs = state.configs.read().await;
         let config = crate::connection::config_for_pool_key(pool_key, &configs);
-        let attached = config
-            .map(|c| c.attached_databases.iter().map(|db| db.name.clone()).collect::<Vec<_>>())
-            .unwrap_or_default();
+        let attached = config.map(crate::db::duckdb_sql::config_attached_names).unwrap_or_default();
         let connection = config.filter(|config| config.read_only).map(|config| (config.name.clone(), config.db_type));
         (attached, connection)
     };

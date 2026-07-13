@@ -1121,6 +1121,7 @@ impl AppState {
                     let client = db::duckdb_worker_process::DuckDbWorkerClient::open_with_process_limit(
                         expand_tilde(&db_config.host),
                         attached_databases,
+                        db_config.init_script.clone(),
                         self.duckdb_worker_max_processes.load(Ordering::Relaxed),
                     )
                     .await?;
@@ -1135,6 +1136,9 @@ impl AppState {
                                 &attached.name,
                                 &expand_tilde(&attached.path),
                             )?;
+                        }
+                        if let Some(script) = db_config.init_script.as_deref() {
+                            db::duckdb_driver::run_init_script(&locked, script)?;
                         }
                     }
                     PoolKind::DuckDb(con)

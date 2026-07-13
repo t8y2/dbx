@@ -346,13 +346,14 @@ impl NacosOpenApiAdmin {
         query: &NacosInstanceQuery,
         namespace: &str,
     ) -> Result<Vec<NacosInstanceInfo>, String> {
+        // Nacos catalog controllers derive the group from serviceName and ignore a separate groupName parameter.
+        let catalog_service_name = qualified_nacos_service_name(&query.service_name, query.group_name.as_deref());
         let mut cluster_names = split_nacos_cluster_names(query.clusters.as_deref());
         if cluster_names.is_empty() {
-            let mut detail_params = vec![
-                ("serviceName".to_string(), query.service_name.clone()),
+            let detail_params = vec![
+                ("serviceName".to_string(), catalog_service_name.clone()),
                 ("namespaceId".to_string(), namespace.to_string()),
             ];
-            push_optional(&mut detail_params, "groupName", query.group_name.clone());
             let detail = self.get_json("/v1/ns/catalog/service", detail_params).await?;
             cluster_names = parse_catalog_cluster_names(&detail);
         }
@@ -363,14 +364,13 @@ impl NacosOpenApiAdmin {
             let mut page_no = 1u32;
             let mut loaded = 0u64;
             loop {
-                let mut params = vec![
-                    ("serviceName".to_string(), query.service_name.clone()),
+                let params = vec![
+                    ("serviceName".to_string(), catalog_service_name.clone()),
                     ("namespaceId".to_string(), namespace.to_string()),
                     ("clusterName".to_string(), cluster_name.clone()),
                     ("pageNo".to_string(), page_no.to_string()),
                     ("pageSize".to_string(), page_size.to_string()),
                 ];
-                push_optional(&mut params, "groupName", query.group_name.clone());
                 let value = self.get_json("/v1/ns/catalog/instances", params).await?;
                 let total_count = catalog_instance_count(&value);
                 let page = parse_instances(value);
@@ -394,6 +394,13 @@ impl NacosOpenApiAdmin {
         let mut seen = HashSet::new();
         instances.retain(|instance| seen.insert((instance.ip.clone(), instance.port, instance.cluster_name.clone())));
         Ok(instances)
+    }
+}
+
+fn qualified_nacos_service_name(service_name: &str, group_name: Option<&str>) -> String {
+    match group_name.map(str::trim).filter(|group| !group.is_empty()) {
+        Some(group) => format!("{group}@@{service_name}"),
+        None => service_name.to_string(),
     }
 }
 
@@ -1510,6 +1517,46 @@ impl EmptyFallback for String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn read_request_target(socket: &mut tokio::net::TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 1024];
+        loop {
+            let read = socket.read(&mut buffer).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let request = String::from_utf8(request).unwrap();
+        request.split_whitespace().nth(1).unwrap().to_string()
+    }
+
+    async fn write_json_response(socket: &mut tokio::net::TcpStream, body: &str) {
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    }
+
+    fn test_admin_config(server_addr: String) -> NacosAdminConfig {
+        NacosAdminConfig {
+            server_addr: server_addr.clone(),
+            display_server_addr: server_addr,
+            namespace: String::new(),
+            context_path: String::new(),
+            auth: NacosAuthConfig::None,
+            tls_skip_verify: false,
+            page_size: 100,
+            connect_override: None,
+        }
+    }
 
     #[test]
     fn parses_config_list_shapes() {
@@ -1852,6 +1899,48 @@ mod tests {
         assert_eq!(clusters, vec!["DEFAULT", "GRAY"]);
         assert_eq!(split_nacos_cluster_names(Some(" DEFAULT,GRAY, DEFAULT ,")), vec!["DEFAULT", "GRAY"]);
         assert!(split_nacos_cluster_names(None).is_empty());
+    }
+
+    #[tokio::test]
+    async fn qualifies_group_in_v1_catalog_service_requests() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut detail_socket, _) = listener.accept().await.unwrap();
+            let detail_target = read_request_target(&mut detail_socket).await;
+            let detail_url = reqwest::Url::parse(&format!("http://localhost{detail_target}")).unwrap();
+            let detail_params = detail_url.query_pairs().collect::<HashMap<_, _>>();
+            assert_eq!(detail_url.path(), "/v1/ns/catalog/service");
+            assert_eq!(detail_params.get("serviceName").map(|value| value.as_ref()), Some("GRAY_GROUP@@orders"));
+            assert!(!detail_params.contains_key("groupName"));
+            write_json_response(&mut detail_socket, r#"{"clusters":[{"name":"DEFAULT"}]}"#).await;
+
+            let (mut instances_socket, _) = listener.accept().await.unwrap();
+            let instances_target = read_request_target(&mut instances_socket).await;
+            let instances_url = reqwest::Url::parse(&format!("http://localhost{instances_target}")).unwrap();
+            let instances_params = instances_url.query_pairs().collect::<HashMap<_, _>>();
+            assert_eq!(instances_url.path(), "/v1/ns/catalog/instances");
+            assert_eq!(instances_params.get("serviceName").map(|value| value.as_ref()), Some("GRAY_GROUP@@orders"));
+            assert!(!instances_params.contains_key("groupName"));
+            write_json_response(&mut instances_socket, r#"{"list":[],"count":0}"#).await;
+        });
+
+        let admin = NacosOpenApiAdmin::new(test_admin_config(format!("http://{address}"))).unwrap();
+        let instances = admin
+            .list_v1_catalog_instances(
+                &NacosInstanceQuery {
+                    namespace: Some("public".to_string()),
+                    service_name: "orders".to_string(),
+                    group_name: Some("GRAY_GROUP".to_string()),
+                    clusters: None,
+                },
+                "public",
+            )
+            .await
+            .unwrap();
+
+        assert!(instances.is_empty());
+        server.await.unwrap();
     }
 
     #[test]

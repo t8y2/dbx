@@ -13,7 +13,10 @@ class SqlServerLegacyAgentTest {
         String key = "jdk.tls.disabledAlgorithms";
         String original = Security.getProperty(key);
         try {
-            Security.setProperty(key, "TLSv1, TLSv1.1, 3DES_EDE_CBC, EC keySize < 224");
+            Security.setProperty(
+                key,
+                "TLSv1, TLSv1.1, TLS_RSA_*, rsa_pkcs1_sha1 usage HandshakeSignature, 3DES_EDE_CBC, EC keySize < 224"
+            );
 
             new SqlServerLegacyAgent();
 
@@ -21,6 +24,8 @@ class SqlServerLegacyAgentTest {
             String diagnostics = SqlServerLegacyAgent.legacyTlsDiagnostics();
             Assertions.assertTrue(diagnostics.contains("sslProtocol=TLSv1"));
             Assertions.assertTrue(diagnostics.contains("tlsV1Disabled=false"));
+            Assertions.assertTrue(diagnostics.contains("tlsRsaDisabled=false"));
+            Assertions.assertTrue(diagnostics.contains("rsaPkcs1Sha1HandshakeDisabled=false"));
             Assertions.assertTrue(diagnostics.contains("3desDisabled=false"));
             Assertions.assertTrue(diagnostics.contains("rc4Disabled=false"));
         } finally {
@@ -101,10 +106,14 @@ class SqlServerLegacyAgentTest {
     @Test
     void relaxedDisabledAlgorithmsRemovesOnlyLegacyTlsEntries() {
         String current =
-            "SSLv3, TLSv1, TLSv1.1, DTLSv1.0, RC4, DES, MD5withRSA, DH keySize < 1024, EC keySize < 224, 3DES_EDE_CBC, anon, NULL";
+            "SSLv3, TLSv1, TLSv1.1, DTLSv1.0, RC4, DES, MD5withRSA, TLS_RSA_*, "
+                + "rsa_pkcs1_sha1 usage HandshakeSignature, ecdsa_sha1 usage HandshakeSignature, "
+                + "dsa_sha1 usage HandshakeSignature, DH keySize < 1024, EC keySize < 224, "
+                + "3DES_EDE_CBC, anon, NULL";
 
         Assertions.assertEquals(
-            "SSLv3, EC keySize < 224, anon, NULL",
+            "SSLv3, ecdsa_sha1 usage HandshakeSignature, dsa_sha1 usage HandshakeSignature, "
+                + "EC keySize < 224, anon, NULL",
             SqlServerLegacyAgent.relaxedDisabledAlgorithms(current)
         );
     }

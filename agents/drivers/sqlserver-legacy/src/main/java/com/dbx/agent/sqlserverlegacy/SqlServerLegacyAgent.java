@@ -29,6 +29,10 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
         "RC4",
         "DES",
         "MD5WITHRSA",
+        // Legacy SQL Server TLS 1.0 endpoints commonly rely on static RSA cipher
+        // suites and RSA/SHA-1 handshake signatures disabled by newer JREs.
+        "TLS_RSA_*",
+        "RSA_PKCS1_SHA1 USAGE HANDSHAKESIGNATURE",
         "DH KEYSIZE < 1024",
         "RSA KEYSIZE < 1024"
     );
@@ -101,6 +105,9 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
             + ", jdbc=" + jdbcDriverVersion()
             + ", sslProtocol=TLSv1"
             + ", tlsV1Disabled=" + isDisabled(disabledAlgorithms, "TLSV1")
+            + ", tlsRsaDisabled=" + isDisabled(disabledAlgorithms, "TLS_RSA_*")
+            + ", rsaPkcs1Sha1HandshakeDisabled="
+            + isDisabled(disabledAlgorithms, "RSA_PKCS1_SHA1 USAGE HANDSHAKESIGNATURE")
             + ", 3desDisabled=" + isDisabled(disabledAlgorithms, "3DES_EDE_CBC")
             + ", rc4Disabled=" + isDisabled(disabledAlgorithms, "RC4");
     }

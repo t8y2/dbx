@@ -472,11 +472,47 @@ function sqlDialectCompletionWords(...sources: Array<string | undefined>): strin
     .map((keyword) => keyword.toUpperCase());
 }
 
-const ORACLE_SQL_TYPES = Array.from(new Set([...sqlDialectCompletionWords(PLSQL.spec.types), "BINARY_DOUBLE", "BINARY_FLOAT", "INTERVAL DAY TO SECOND", "INTERVAL YEAR TO MONTH", "TIMESTAMP WITH LOCAL TIME ZONE", "TIMESTAMP WITH TIME ZONE", "UROWID"]));
+const ORACLE_SQL_TYPES = [
+  "BFILE",
+  "BINARY_DOUBLE",
+  "BINARY_FLOAT",
+  "BLOB",
+  "CHAR",
+  "CLOB",
+  "DATE",
+  "DEC",
+  "DECIMAL",
+  "DOUBLE PRECISION",
+  "FLOAT",
+  "INT",
+  "INTEGER",
+  "INTERVAL DAY TO SECOND",
+  "INTERVAL YEAR TO MONTH",
+  "LONG",
+  "LONG RAW",
+  "NCHAR",
+  "NCLOB",
+  "NUMBER",
+  "NUMERIC",
+  "NVARCHAR2",
+  "RAW",
+  "REAL",
+  "ROWID",
+  "SMALLINT",
+  "TIMESTAMP",
+  "TIMESTAMP WITH LOCAL TIME ZONE",
+  "TIMESTAMP WITH TIME ZONE",
+  "UROWID",
+  "VARCHAR",
+  "VARCHAR2",
+  "XMLTYPE",
+];
+
+const NON_ORACLE_COMPLETION_WORDS = new Set(["BIGSERIAL", "BOOLEAN", "ELSEIF", "LIMIT", "LOCALTIME", "SERIAL", "STRING", "TEXT", "TIME", "USE"]);
 
 const ORACLE_SQL_KEYWORDS = Array.from(
   new Set([
-    ...sqlDialectCompletionWords(PLSQL.spec.keywords),
+    ...sqlDialectCompletionWords(PLSQL.spec.keywords).filter((keyword) => !NON_ORACLE_COMPLETION_WORDS.has(keyword)),
     ...ORACLE_SQL_TYPES,
     "BULK COLLECT",
     "CONNECT BY",
@@ -3855,7 +3891,8 @@ function buildNonAggregatedColumnItems(context: SqlCompletionContext, columnsByT
 function activeSqlKeywords(databaseType?: DatabaseType): string[] {
   if (databaseType === "mongodb") return [];
   const databaseKeywords = databaseType ? DATABASE_SQL_KEYWORDS[databaseType] : undefined;
-  return databaseType ? Array.from(new Set([...COMMON_SQL_KEYWORDS, ...(databaseKeywords ?? [])])) : Array.from(new Set(SQL_KEYWORDS));
+  const keywords = databaseType ? Array.from(new Set([...COMMON_SQL_KEYWORDS, ...(databaseKeywords ?? [])])) : Array.from(new Set(SQL_KEYWORDS));
+  return isOracleLikeDatabase(databaseType) ? keywords.filter((keyword) => !NON_ORACLE_COMPLETION_WORDS.has(keyword)) : keywords;
 }
 
 function isOracleLikeDatabase(databaseType?: DatabaseType): boolean {

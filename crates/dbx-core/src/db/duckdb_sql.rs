@@ -276,14 +276,10 @@ mod tests {
 
     #[test]
     fn split_ignores_escaped_quotes_and_semicolons_in_escape_strings() {
-        let script = r#"SELECT E'it\\'s;ok'; SELECT e'path\\\\;name'; SELECT 2"#;
+        let script = r#"SELECT E'it\'s;ok'; SELECT e'path\\;name'; SELECT 2"#;
         assert_eq!(
             split_sql_statements(script),
-            vec![
-                r#"SELECT E'it\\'s;ok'"#.to_string(),
-                r#"SELECT e'path\\\\;name'"#.to_string(),
-                "SELECT 2".to_string()
-            ]
+            vec![r#"SELECT E'it\'s;ok'"#.to_string(), r#"SELECT e'path\\;name'"#.to_string(), "SELECT 2".to_string()]
         );
     }
 

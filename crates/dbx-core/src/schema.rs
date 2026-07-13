@@ -91,7 +91,7 @@ pub fn duckdb_attach_database(con: &duckdb::Connection, name: &str, path: &str) 
         return Err("DuckDB attached database name and path are required".to_string());
     }
     let sql = format!("ATTACH {} AS {}", duckdb_quote_string(path), duckdb_quote_ident(name));
-    con.execute_batch(&sql).map_err(|e| e.to_string())
+    con.execute_batch(&sql).map_err(|e| format!("Failed to attach database \"{name}\": {e}"))
 }
 
 #[cfg(feature = "duckdb-bundled")]

@@ -4303,7 +4303,7 @@ mod tests {
         config.db_type = DatabaseType::DuckDb;
         config.host = ":memory:".to_string();
         config.port = 0;
-        config.init_script = Some(r#"CREATE TABLE probe AS SELECT E'it\\'s;ok' AS value;"#.to_string());
+        config.init_script = Some(r#"CREATE TABLE probe AS SELECT E'it\'s;ok' AS value;"#.to_string());
 
         state.test_duckdb_connection_config(&config).await.expect("memory bootstrap succeeds");
 

@@ -369,6 +369,33 @@ function sshLayersForConfig(config: LegacyConnectionConfig): SshTunnelConfig[] {
 }
 
 const form = ref(defaultForm());
+
+function externalConfigRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? { ...(value as Record<string, unknown>) } : {};
+}
+
+function sqlServerPortExplicitFromConfig(config: Pick<ConnectionConfig, "db_type" | "external_config">): boolean {
+  if (config.db_type !== "sqlserver") return false;
+  const external = externalConfigRecord(config.external_config);
+  return external.portExplicit === true || external.port_explicit === true;
+}
+
+function setSqlServerPortExplicit(config: Pick<ConnectionConfig, "db_type"> & { external_config?: unknown }, explicit: boolean) {
+  if (config.db_type !== "sqlserver") return;
+  const next = externalConfigRecord(config.external_config);
+  delete next.port_explicit;
+  if (explicit) {
+    next.portExplicit = true;
+  } else {
+    delete next.portExplicit;
+  }
+  config.external_config = Object.keys(next).length > 0 ? next : undefined;
+}
+
+function markSqlServerPortExplicit() {
+  setSqlServerPortExplicit(form.value, true);
+}
+
 const keepaliveEnabled = computed({
   get: () => Number(form.value.keepalive_interval_secs) > 0,
   set: (enabled: boolean) => {
@@ -1318,9 +1345,13 @@ function applyProfile(val: string, preserveConnectionFields = false) {
   form.value.db_type = profile.type;
   form.value.driver_profile = val;
   form.value.driver_label = isCustomCompatibleProfile() ? customDriverName.value.trim() || profile.label : profile.label;
+  if (profile.type !== "sqlserver") {
+    form.value.external_config = undefined;
+  }
 
   if (!preserveConnectionFields) {
     form.value.port = profile.port;
+    setSqlServerPortExplicit(form.value, false);
     form.value.username = profile.user;
     form.value.url_params = profile.urlParams || "";
     form.value.agent_java_options = [];
@@ -2391,6 +2422,8 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
       config.password = config.password.trim();
       config.database = config.database?.trim() || undefined;
     }
+  } else if (config.db_type === "sqlserver") {
+    config.external_config = sqlServerPortExplicitFromConfig(config) ? { portExplicit: true } : undefined;
   } else {
     config.external_config = undefined;
   }
@@ -4790,7 +4823,7 @@ function openExternalUrl(url: string) {
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.host") }}</Label>
                     <Input v-model="form.host" class="col-span-2" />
-                    <Input v-model.number="form.port" type="number" class="col-span-1" />
+                    <Input v-model.number="form.port" type="number" class="col-span-1" @input="markSqlServerPortExplicit" />
                   </div>
 
                   <div v-if="form.driver_profile === 'gbase8s'" class="grid grid-cols-4 items-center gap-4">

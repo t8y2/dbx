@@ -274,6 +274,25 @@ test("parses SQL Server JDBC URLs with semicolon properties", () => {
   assert.equal(parsed.password, "s@cret");
   assert.equal(parsed.database, "erp");
   assert.equal(parsed.urlParams, "encrypt=true");
+  assert.equal(parsed.portExplicit, true);
+});
+
+test("marks explicit SQL Server default port when applying connection URLs", () => {
+  const parsed = parseConnectionUrl("jdbc:sqlserver://sql.example.com\\SQLEXPRESS:1433;databaseName=erp;user=sa;password=secret");
+  const applied = applyParsedConnectionUrl({ name: "", db_type: "sqlserver", username: "", password: "" } as any, parsed);
+
+  assert.equal(parsed.port, 1433);
+  assert.equal(parsed.portExplicit, true);
+  assert.deepEqual(applied.external_config, { portExplicit: true });
+});
+
+test("does not mark SQL Server default port explicit when connection URL omits it", () => {
+  const parsed = parseConnectionUrl("jdbc:sqlserver://sql.example.com\\SQLEXPRESS;databaseName=erp;user=sa;password=secret");
+  const applied = applyParsedConnectionUrl({ name: "", db_type: "sqlserver", username: "", password: "" } as any, parsed);
+
+  assert.equal(parsed.port, 1433);
+  assert.equal(parsed.portExplicit, undefined);
+  assert.equal(applied.external_config, undefined);
 });
 
 test("parses H2 split JDBC URLs as file connections", () => {

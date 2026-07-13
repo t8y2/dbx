@@ -46,8 +46,8 @@ fn sqlserver_endpoint(host: &str) -> SqlServerEndpoint<'_> {
     SqlServerEndpoint { host: host.trim(), instance_name: None }
 }
 
-fn sqlserver_uses_named_instance_resolution(endpoint: &SqlServerEndpoint<'_>, port: u16) -> bool {
-    endpoint.instance_name.is_some() && (port == 0 || port == SQLSERVER_DEFAULT_PORT)
+fn sqlserver_uses_named_instance_resolution(endpoint: &SqlServerEndpoint<'_>, port: u16, port_explicit: bool) -> bool {
+    endpoint.instance_name.is_some() && (port == 0 || (port == SQLSERVER_DEFAULT_PORT && !port_explicit))
 }
 
 fn query_result_row_limit(max_rows: Option<usize>) -> usize {
@@ -63,13 +63,28 @@ pub async fn connect(
     _url_params: Option<&str>,
     timeout: Duration,
 ) -> Result<SqlServerClient, String> {
-    match try_connect(host, port, user, pass, database, tiberius::EncryptionLevel::Required, timeout).await {
+    connect_with_port_explicit(host, port, false, user, pass, database, timeout).await
+}
+
+pub async fn connect_with_port_explicit(
+    host: &str,
+    port: u16,
+    port_explicit: bool,
+    user: &str,
+    pass: &str,
+    database: Option<&str>,
+    timeout: Duration,
+) -> Result<SqlServerClient, String> {
+    match try_connect(host, port, port_explicit, user, pass, database, tiberius::EncryptionLevel::Required, timeout)
+        .await
+    {
         Ok(client) => Ok(client),
-        Err(encrypted_error) => try_connect_legacy_sqlserver_encryption(host, port, user, pass, database, timeout)
-            .await
-            .map_err(|plain_error| {
-                if is_sqlserver_tls_handshake_error(&encrypted_error) {
-                    format!(
+        Err(encrypted_error) => {
+            try_connect_legacy_sqlserver_encryption(host, port, port_explicit, user, pass, database, timeout)
+                .await
+                .map_err(|plain_error| {
+                    if is_sqlserver_tls_handshake_error(&encrypted_error) {
+                        format!(
                         "{encrypted_error}\n\nThis may be caused by an old SQL Server TLS/encryption configuration. \
                          If you are connecting to SQL Server 2008/2008 R2/2012 or another legacy instance, \
                          try SQL Server legacy compatibility mode. It first behaves like encrypt=false and, \
@@ -78,16 +93,18 @@ pub async fn connect(
                          or SSH tunnels.\n\n\
                          Automatic native legacy fallback also failed: {plain_error}"
                     )
-                } else {
-                    plain_error
-                }
-            }),
+                    } else {
+                        plain_error
+                    }
+                })
+        }
     }
 }
 
 async fn try_connect_legacy_sqlserver_encryption(
     host: &str,
     port: u16,
+    port_explicit: bool,
     user: &str,
     pass: &str,
     database: Option<&str>,
@@ -95,7 +112,7 @@ async fn try_connect_legacy_sqlserver_encryption(
 ) -> Result<SqlServerClient, String> {
     let mut errors = Vec::new();
     for (label, encryption) in SQLSERVER_LEGACY_ENCRYPTION_FALLBACKS {
-        match try_connect(host, port, user, pass, database, encryption, timeout).await {
+        match try_connect(host, port, port_explicit, user, pass, database, encryption, timeout).await {
             Ok(client) => return Ok(client),
             Err(error) => errors.push(format!("{label} failed: {error}")),
         }
@@ -125,6 +142,7 @@ fn is_sqlserver_tls_handshake_error(error: &str) -> bool {
 async fn try_connect(
     host: &str,
     port: u16,
+    port_explicit: bool,
     user: &str,
     pass: &str,
     database: Option<&str>,
@@ -133,7 +151,7 @@ async fn try_connect(
 ) -> Result<SqlServerClient, String> {
     let mut config = Config::new();
     let endpoint = sqlserver_endpoint(host);
-    let uses_named_instance_resolution = sqlserver_uses_named_instance_resolution(&endpoint, port);
+    let uses_named_instance_resolution = sqlserver_uses_named_instance_resolution(&endpoint, port, port_explicit);
     config.host(endpoint.host);
     if let Some(instance_name) = endpoint.instance_name.filter(|_| uses_named_instance_resolution) {
         config.instance_name(instance_name);
@@ -1902,9 +1920,10 @@ mod tests {
     #[test]
     fn sqlserver_named_instance_resolution_yields_to_explicit_port() {
         let endpoint = super::sqlserver_endpoint(r"db.example.com\SQLEXPRESS");
-        assert!(super::sqlserver_uses_named_instance_resolution(&endpoint, 0));
-        assert!(super::sqlserver_uses_named_instance_resolution(&endpoint, 1433));
-        assert!(!super::sqlserver_uses_named_instance_resolution(&endpoint, 40030));
+        assert!(super::sqlserver_uses_named_instance_resolution(&endpoint, 0, false));
+        assert!(super::sqlserver_uses_named_instance_resolution(&endpoint, 1433, false));
+        assert!(!super::sqlserver_uses_named_instance_resolution(&endpoint, 1433, true));
+        assert!(!super::sqlserver_uses_named_instance_resolution(&endpoint, 40030, false));
     }
 
     #[test]

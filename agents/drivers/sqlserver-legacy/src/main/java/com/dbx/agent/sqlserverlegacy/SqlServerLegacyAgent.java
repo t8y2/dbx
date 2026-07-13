@@ -156,7 +156,7 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
         }
 
         String host = normalizedSqlServerHost(params.getHost());
-        boolean usesNamedInstance = usesNamedInstance(host, params.getPort());
+        boolean usesNamedInstance = usesNamedInstance(host, params.getPort(), params.isPort_explicit());
         StringBuilder url = new StringBuilder("jdbc:sqlserver://")
             .append(usesNamedInstance ? host : serverHost(host));
         if (!usesNamedInstance) {
@@ -184,9 +184,9 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
         return server + "\\" + instance;
     }
 
-    private static boolean usesNamedInstance(String host, int port) {
+    private static boolean usesNamedInstance(String host, int port, boolean portExplicit) {
         int separator = host.indexOf('\\');
-        return separator > 0 && separator < host.length() - 1 && (port <= 0 || port == PROFILE.getDefaultPort());
+        return separator > 0 && separator < host.length() - 1 && (port <= 0 || (port == PROFILE.getDefaultPort() && !portExplicit));
     }
 
     private static String serverHost(String host) {

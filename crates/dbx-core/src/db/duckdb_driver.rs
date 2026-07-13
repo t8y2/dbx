@@ -181,4 +181,16 @@ mod tests {
         assert!(std::fs::metadata(&path).expect("database metadata").len() > 0);
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn run_init_script_executes_duckdb_escape_strings() {
+        let con = connect_path(":memory:").expect("connect in-memory DuckDB");
+        let locked = con.lock().expect("lock connection");
+
+        run_init_script(&locked, r#"CREATE TABLE probe AS SELECT E'it\\'s;ok' AS value; SELECT 2;"#)
+            .expect("run init script");
+        let value: String = locked.query_row("SELECT value FROM probe", [], |row| row.get(0)).expect("select value");
+
+        assert_eq!(value, "it's;ok");
+    }
 }

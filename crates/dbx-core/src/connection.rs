@@ -610,6 +610,49 @@ impl AppState {
         }
     }
 
+    #[cfg(feature = "duckdb-bundled")]
+    async fn create_duckdb_pool(&self, config: &ConnectionConfig) -> Result<PoolKind, String> {
+        if self.duckdb_worker_process_isolation.load(Ordering::Relaxed) {
+            let attached_databases = config
+                .attached_databases
+                .iter()
+                .map(|attached| crate::models::connection::AttachedDatabaseConfig {
+                    name: attached.name.clone(),
+                    path: expand_tilde(&attached.path),
+                })
+                .collect();
+            let client = db::duckdb_worker_process::DuckDbWorkerClient::open_with_process_limit(
+                expand_tilde(&config.host),
+                attached_databases,
+                config.init_script.clone(),
+                self.duckdb_worker_max_processes.load(Ordering::Relaxed),
+            )
+            .await?;
+            Ok(PoolKind::DuckDbWorker(Arc::new(client)))
+        } else {
+            let con = db::duckdb_driver::connect_path(&expand_tilde(&config.host))?;
+            {
+                let locked = con.lock().map_err(|e| e.to_string())?;
+                for attached in &config.attached_databases {
+                    crate::schema::duckdb_attach_database(&locked, &attached.name, &expand_tilde(&attached.path))?;
+                }
+                if let Some(script) = config.init_script.as_deref() {
+                    db::duckdb_driver::run_init_script(&locked, script)?;
+                }
+            }
+            Ok(PoolKind::DuckDb(con))
+        }
+    }
+
+    #[cfg(feature = "duckdb-bundled")]
+    pub async fn test_duckdb_connection_config(&self, config: &ConnectionConfig) -> Result<(), String> {
+        // Test the submitted form as a fresh session so unsaved ATTACH/init
+        // changes cannot be masked by a pool created from older settings.
+        let pool = self.create_duckdb_pool(config).await?;
+        close_pool_kind(pool).await;
+        Ok(())
+    }
+
     pub async fn test_external_driver(&self, driver_id: &str, config: &ConnectionConfig) -> Result<String, String> {
         let params = serde_json::json!({ "connection": config });
         let env = self.external_driver_runtime_env(driver_id)?;
@@ -1108,42 +1151,7 @@ impl AppState {
                 PoolKind::Redis(con)
             }
             #[cfg(feature = "duckdb-bundled")]
-            DatabaseType::DuckDb => {
-                if self.duckdb_worker_process_isolation.load(Ordering::Relaxed) {
-                    let attached_databases = db_config
-                        .attached_databases
-                        .iter()
-                        .map(|attached| crate::models::connection::AttachedDatabaseConfig {
-                            name: attached.name.clone(),
-                            path: expand_tilde(&attached.path),
-                        })
-                        .collect();
-                    let client = db::duckdb_worker_process::DuckDbWorkerClient::open_with_process_limit(
-                        expand_tilde(&db_config.host),
-                        attached_databases,
-                        db_config.init_script.clone(),
-                        self.duckdb_worker_max_processes.load(Ordering::Relaxed),
-                    )
-                    .await?;
-                    PoolKind::DuckDbWorker(Arc::new(client))
-                } else {
-                    let con = db::duckdb_driver::connect_path(&expand_tilde(&db_config.host))?;
-                    {
-                        let locked = con.lock().map_err(|e| e.to_string())?;
-                        for attached in &db_config.attached_databases {
-                            crate::schema::duckdb_attach_database(
-                                &locked,
-                                &attached.name,
-                                &expand_tilde(&attached.path),
-                            )?;
-                        }
-                        if let Some(script) = db_config.init_script.as_deref() {
-                            db::duckdb_driver::run_init_script(&locked, script)?;
-                        }
-                    }
-                    PoolKind::DuckDb(con)
-                }
-            }
+            DatabaseType::DuckDb => self.create_duckdb_pool(&db_config).await?,
             #[cfg(not(feature = "duckdb-bundled"))]
             DatabaseType::DuckDb => {
                 return Err("DuckDB support is not compiled in this build. Rebuild with default features.".to_string());
@@ -2263,39 +2271,6 @@ impl AppState {
         keys
     }
 
-    #[cfg(feature = "duckdb-bundled")]
-    pub async fn duckdb_existing_pool_is_usable_for_config(&self, config: &ConnectionConfig) -> Result<bool, String> {
-        if config.db_type != DatabaseType::DuckDb {
-            return Ok(false);
-        }
-
-        let matches_existing_config = {
-            let configs = self.configs.read().await;
-            configs.get(&config.id).is_some_and(|existing| {
-                existing.db_type == DatabaseType::DuckDb && duckdb_paths_match(&existing.host, &config.host)
-            })
-        };
-        if !matches_existing_config {
-            return Ok(false);
-        }
-
-        let duckdb_pool = {
-            let conns = self.connections.read().await;
-            match conns.get(&config.id) {
-                Some(PoolKind::DuckDb(con)) => Some(con.clone()),
-                _ => None,
-            }
-        };
-
-        let Some(con) = duckdb_pool else {
-            return Ok(false);
-        };
-
-        let locked = con.lock().map_err(|e| e.to_string())?;
-        locked.execute_batch("SELECT 1;").map_err(|e| format!("DuckDb connection failed: {e}"))?;
-        Ok(true)
-    }
-
     pub async fn reset_connection_transport(&self, connection_id: &str) {
         let layer_count = {
             let configs = self.configs.read().await;
@@ -3274,8 +3249,8 @@ mod tests {
     use crate::database_capabilities;
     use crate::db;
     use crate::models::connection::{
-        default_connect_timeout_secs, default_redis_key_separator, ConnectionConfig, DatabaseType, HttpTunnelConfig,
-        ProxyTunnelConfig, ProxyType, SshTunnelConfig, TransportLayerConfig,
+        default_connect_timeout_secs, default_redis_key_separator, AttachedDatabaseConfig, ConnectionConfig,
+        DatabaseType, HttpTunnelConfig, ProxyTunnelConfig, ProxyType, SshTunnelConfig, TransportLayerConfig,
     };
     use crate::query;
     use crate::schema;
@@ -4275,7 +4250,7 @@ mod tests {
 
     #[cfg(feature = "duckdb-bundled")]
     #[tokio::test]
-    async fn duckdb_existing_pool_can_be_used_for_connection_test() {
+    async fn duckdb_connection_test_does_not_reuse_stale_pool_config() {
         let (state, dir) = test_app_state().await;
         let db_path = dir.join("app.duckdb");
         duckdb::Connection::open(&db_path).unwrap();
@@ -4289,7 +4264,48 @@ mod tests {
         state.configs.write().await.insert(config.id.clone(), config.clone());
         state.get_or_create_pool("duckdb-conn", None).await.unwrap();
 
-        assert!(state.duckdb_existing_pool_is_usable_for_config(&config).await.unwrap());
+        config.init_script = Some("SELECT definitely_invalid_syntax(".to_string());
+        let error = state.test_duckdb_connection_config(&config).await.expect_err("invalid submitted script must fail");
+
+        assert!(error.contains("Connection init script statement 1 failed"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(feature = "duckdb-bundled")]
+    #[tokio::test]
+    async fn duckdb_connection_test_validates_attached_databases() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "duckdb-conn".to_string();
+        config.name = "DuckDB".to_string();
+        config.db_type = DatabaseType::DuckDb;
+        config.host = ":memory:".to_string();
+        config.port = 0;
+        config.attached_databases.push(AttachedDatabaseConfig {
+            name: "missing".to_string(),
+            path: dir.join("missing-parent").join("missing.duckdb").to_string_lossy().to_string(),
+        });
+
+        let error = state.test_duckdb_connection_config(&config).await.expect_err("invalid attach must fail");
+
+        assert!(error.to_ascii_lowercase().contains("attach"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(feature = "duckdb-bundled")]
+    #[tokio::test]
+    async fn duckdb_connection_test_supports_memory_bootstrap() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "duckdb-memory".to_string();
+        config.name = "DuckDB memory".to_string();
+        config.db_type = DatabaseType::DuckDb;
+        config.host = ":memory:".to_string();
+        config.port = 0;
+        config.init_script = Some(r#"CREATE TABLE probe AS SELECT E'it\\'s;ok' AS value;"#.to_string());
+
+        state.test_duckdb_connection_config(&config).await.expect("memory bootstrap succeeds");
 
         let _ = std::fs::remove_dir_all(dir);
     }

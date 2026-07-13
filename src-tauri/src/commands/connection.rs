@@ -688,13 +688,8 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
             }
             #[cfg(feature = "duckdb-bundled")]
             DatabaseType::DuckDb => {
-                if state.duckdb_existing_pool_is_usable_for_config(&config).await? {
-                    Ok("Connection successful".to_string())
-                } else {
-                    let con = db::duckdb_driver::connect_path(&expand_tilde(&config.host))?;
-                    dbx_core::db::duckdb_driver::close_connection(con);
-                    Ok("Connection successful".to_string())
-                }
+                state.test_duckdb_connection_config(&config).await?;
+                Ok("Connection successful".to_string())
             }
             #[cfg(not(feature = "duckdb-bundled"))]
             DatabaseType::DuckDb => Err("DuckDB support not compiled (enable duckdb-bundled feature)".to_string()),

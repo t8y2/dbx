@@ -15,14 +15,27 @@ pub fn split_sql_statements(script: &str) -> Vec<String> {
     let mut i = 0;
     let mut in_single = false;
     let mut in_double = false;
+    let mut in_escape_single = false;
     while i < bytes.len() {
         match bytes[i] {
+            b'\\' if in_single && in_escape_single => {
+                // DuckDB E/e strings use backslash escapes, so an escaped
+                // quote or semicolon must not change statement boundaries.
+                i = (i + 2).min(bytes.len());
+                continue;
+            }
             b'\'' if !in_double => {
                 if in_single && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
                     i += 2;
                     continue;
                 }
+                if !in_single {
+                    in_escape_single = is_escape_string_quote(bytes, i);
+                }
                 in_single = !in_single;
+                if !in_single {
+                    in_escape_single = false;
+                }
             }
             b'"' if !in_single => {
                 if in_double && i + 1 < bytes.len() && bytes[i + 1] == b'"' {
@@ -61,6 +74,13 @@ pub fn split_sql_statements(script: &str) -> Vec<String> {
     }
     push_statement(&mut statements, &script[start..]);
     statements
+}
+
+fn is_escape_string_quote(bytes: &[u8], quote_index: usize) -> bool {
+    if quote_index == 0 || !matches!(bytes[quote_index - 1], b'E' | b'e') {
+        return false;
+    }
+    quote_index == 1 || !(bytes[quote_index - 2].is_ascii_alphanumeric() || bytes[quote_index - 2] == b'_')
 }
 
 fn push_statement(statements: &mut Vec<String>, fragment: &str) {
@@ -252,6 +272,19 @@ mod tests {
         assert_eq!(split_sql_statements("SELECT $1; SELECT $2").len(), 2);
         // unterminated dollar quote swallows the rest instead of splitting it
         assert_eq!(split_sql_statements("SELECT $$a;b").len(), 1);
+    }
+
+    #[test]
+    fn split_ignores_escaped_quotes_and_semicolons_in_escape_strings() {
+        let script = r#"SELECT E'it\\'s;ok'; SELECT e'path\\\\;name'; SELECT 2"#;
+        assert_eq!(
+            split_sql_statements(script),
+            vec![
+                r#"SELECT E'it\\'s;ok'"#.to_string(),
+                r#"SELECT e'path\\\\;name'"#.to_string(),
+                "SELECT 2".to_string()
+            ]
+        );
     }
 
     #[test]

@@ -18,6 +18,7 @@ pub type SqlServerClient = Client<Compat<TcpStream>>;
 pub const SQLSERVER_DRIVER_PANIC_ERROR_PREFIX: &str = "SQL Server driver panic:";
 pub const SQLSERVER_LEGACY_DRIVER_PROFILE: &str = "sqlserver-legacy";
 pub const SQLSERVER_LEGACY_DRIVER_LABEL: &str = "SQL Server legacy compatibility component";
+const SQLSERVER_DEFAULT_PORT: u16 = 1433;
 const SIMPLE_QUERY_MODULE_KEYWORDS: &[&str] = &["FUNCTION", "PROC", "PROCEDURE", "TRIGGER", "VIEW"];
 // Match JDBC/tiberius `encrypt=false`: encrypt only login, then drop back to raw TDS.
 const SQLSERVER_LEGACY_ENCRYPTION_LEVEL: tiberius::EncryptionLevel = tiberius::EncryptionLevel::Off;
@@ -43,6 +44,10 @@ fn sqlserver_endpoint(host: &str) -> SqlServerEndpoint<'_> {
     }
 
     SqlServerEndpoint { host: host.trim(), instance_name: None }
+}
+
+fn sqlserver_uses_named_instance_resolution(endpoint: &SqlServerEndpoint<'_>, port: u16) -> bool {
+    endpoint.instance_name.is_some() && (port == 0 || port == SQLSERVER_DEFAULT_PORT)
 }
 
 fn query_result_row_limit(max_rows: Option<usize>) -> usize {
@@ -128,8 +133,9 @@ async fn try_connect(
 ) -> Result<SqlServerClient, String> {
     let mut config = Config::new();
     let endpoint = sqlserver_endpoint(host);
+    let uses_named_instance_resolution = sqlserver_uses_named_instance_resolution(&endpoint, port);
     config.host(endpoint.host);
-    if let Some(instance_name) = endpoint.instance_name {
+    if let Some(instance_name) = endpoint.instance_name.filter(|_| uses_named_instance_resolution) {
         config.instance_name(instance_name);
     } else {
         config.port(port);
@@ -141,7 +147,7 @@ async fn try_connect(
     config.trust_cert();
     config.encryption(encryption);
 
-    let tcp = if endpoint.instance_name.is_some() {
+    let tcp = if uses_named_instance_resolution {
         tokio::time::timeout(timeout, TcpStream::connect_named(&config))
             .await
             .map_err(|_| format!("SQL Server connection timed out ({}s)", timeout.as_secs()))?
@@ -1891,6 +1897,14 @@ mod tests {
             super::sqlserver_endpoint(r"db.example.com\"),
             super::SqlServerEndpoint { host: r"db.example.com\", instance_name: None }
         );
+    }
+
+    #[test]
+    fn sqlserver_named_instance_resolution_yields_to_explicit_port() {
+        let endpoint = super::sqlserver_endpoint(r"db.example.com\SQLEXPRESS");
+        assert!(super::sqlserver_uses_named_instance_resolution(&endpoint, 0));
+        assert!(super::sqlserver_uses_named_instance_resolution(&endpoint, 1433));
+        assert!(!super::sqlserver_uses_named_instance_resolution(&endpoint, 40030));
     }
 
     #[test]

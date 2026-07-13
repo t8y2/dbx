@@ -171,6 +171,17 @@ class MongoAgentTest {
     }
 
     @Test
+    void preservesJsonLookingStringDocumentIds() {
+        assertEquals("{}", MongoAgent.parseId("{}"));
+        assertEquals("{\"tenant\":1}", MongoAgent.parseId("{\"tenant\":1}"));
+        assertEquals(
+            "{\"$numberLong\":\"2048938405781032962\",\"tenant\":1}",
+            MongoAgent.parseId("{\"$numberLong\":\"2048938405781032962\",\"tenant\":1}")
+        );
+        assertEquals("{\"$numberLong\":\"invalid\"}", MongoAgent.parseId("{\"$numberLong\":\"invalid\"}"));
+    }
+
+    @Test
     void serverVersionMethodIsRecognizedOverJsonRpc() {
         String response = MongoAgent.handleRequest(
             "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"server_version\","

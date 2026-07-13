@@ -634,7 +634,7 @@ public final class MongoAgent {
 
     static Object parseId(String id) {
         String trimmed = id.trim();
-        if (trimmed.startsWith("{")) {
+        if (isNumberLongIdWrapper(trimmed)) {
             try {
                 return Document.parse("{\"_id\":" + trimmed + "}").get("_id");
             } catch (Exception e) {
@@ -645,6 +645,23 @@ public final class MongoAgent {
             return new ObjectId(id);
         } catch (Exception e) {
             return id;
+        }
+    }
+
+    private static boolean isNumberLongIdWrapper(String value) {
+        try {
+            JsonElement parsed = JsonParser.parseString(value);
+            if (!parsed.isJsonObject()) {
+                return false;
+            }
+            JsonObject wrapper = parsed.getAsJsonObject();
+            JsonElement numberLong = wrapper.get("$numberLong");
+            return wrapper.size() == 1
+                && numberLong != null
+                && numberLong.isJsonPrimitive()
+                && numberLong.getAsJsonPrimitive().isString();
+        } catch (Exception e) {
+            return false;
         }
     }
 

@@ -75,7 +75,7 @@ pub fn duckdb_query_tables_in_database_with_attached(
         })
         .map_err(|e| e.to_string())?;
     let tables: Vec<db::TableInfo> = rows.filter_map(|r| r.ok()).collect();
-    if tables.is_empty() && duckdb_is_attached(&database, attached_names) {
+    if tables.is_empty() && duckdb_is_quack_catalog(con, &database) {
         if let Some(remote) = duckdb_quack_remote_tables(con, &database, schema) {
             return Ok(remote);
         }
@@ -134,7 +134,7 @@ pub fn duckdb_list_schemas_with_attached(
         .map_err(|e| e.to_string())?;
     let rows = stmt.query_map([database.as_str()], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
     let schemas: Vec<String> = rows.filter_map(|r| r.ok()).collect();
-    if schemas.is_empty() && duckdb_is_attached(&database, attached_names) {
+    if schemas.is_empty() && duckdb_is_quack_catalog(con, &database) {
         if let Some(remote) = duckdb_quack_remote_schemas(con, &database) {
             return Ok(remote);
         }
@@ -142,9 +142,17 @@ pub fn duckdb_list_schemas_with_attached(
     Ok(schemas)
 }
 
+/// Identifies quack catalogs by the storage-extension `type` that
+/// `duckdb_databases()` reports, rather than by the attach aliases parsed from
+/// the init script: `ATTACH 'quack:host:port'` without an `AS` alias gets a
+/// derived catalog name (e.g. `localhost:9494`) that no parser sees.
 #[cfg(feature = "duckdb-bundled")]
-fn duckdb_is_attached(database: &str, attached_names: &[String]) -> bool {
-    attached_names.iter().any(|name| name.eq_ignore_ascii_case(database))
+fn duckdb_is_quack_catalog(con: &duckdb::Connection, database: &str) -> bool {
+    con.query_row("SELECT type FROM duckdb_databases() WHERE lower(database_name) = lower(?)", [database], |row| {
+        row.get::<_, String>(0)
+    })
+    .map(|catalog_type| catalog_type.eq_ignore_ascii_case("quack"))
+    .unwrap_or(false)
 }
 
 /// Quack-attached catalogs expose no metadata on the client side (the beta
@@ -378,7 +386,7 @@ pub fn duckdb_query_columns_in_database_with_attached(
         })
         .map_err(|e| e.to_string())?;
     let columns: Vec<db::ColumnInfo> = rows.filter_map(|r| r.ok()).collect();
-    if columns.is_empty() && duckdb_is_attached(&database, attached_names) {
+    if columns.is_empty() && duckdb_is_quack_catalog(con, &database) {
         if let Some(remote) = duckdb_quack_remote_columns(con, &database, schema, table) {
             return Ok(remote);
         }

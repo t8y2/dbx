@@ -936,6 +936,8 @@ pub fn parse_xlsx_file_with_options(
     };
     let temporal_cell_kinds = xlsx_temporal_cell_kinds(path, &sheet_name).unwrap_or_default();
     let range = workbook.worksheet_range(&sheet_name).map_err(|e| e.to_string())?;
+    let (range_start_row, range_start_column) =
+        range.start().map(|(row, column)| (row as usize, column as usize)).unwrap_or_default();
     let row_range = effective_import_row_range(options)?;
     let mut columns = Vec::new();
     let mut rows = Vec::new();
@@ -947,11 +949,10 @@ pub fn parse_xlsx_file_with_options(
                 .iter()
                 .enumerate()
                 .map(|(index, cell)| {
+                    // Calamine rows are relative to the used range, while XLSX style coordinates are worksheet-absolute.
+                    let cell_position = (range_start_row + row_number, range_start_column + index + 1);
                     normalize_header(
-                        &xlsx_cell_label_with_temporal_kind(
-                            cell,
-                            temporal_cell_kinds.get(&(row_number, index + 1)).copied(),
-                        ),
+                        &xlsx_cell_label_with_temporal_kind(cell, temporal_cell_kinds.get(&cell_position).copied()),
                         index,
                     )
                 })
@@ -973,14 +974,12 @@ pub fn parse_xlsx_file_with_options(
         }
         let mut row = Vec::with_capacity(columns.len());
         for index in 0..columns.len() {
+            let cell_position = (range_start_row + row_number, range_start_column + index + 1);
             row.push(
                 source_row
                     .get(index)
                     .map(|cell| {
-                        xlsx_cell_value_with_temporal_kind(
-                            cell,
-                            temporal_cell_kinds.get(&(row_number, index + 1)).copied(),
-                        )
+                        xlsx_cell_value_with_temporal_kind(cell, temporal_cell_kinds.get(&cell_position).copied())
                     })
                     .unwrap_or(serde_json::Value::Null),
             );
@@ -2012,10 +2011,13 @@ mod tests {
         let cursor = Cursor::new(Vec::new());
         let mut zip = zip::ZipWriter::new(cursor);
         let workbook_pr = if date1904 { r#"<workbookPr date1904="1"/>"# } else { "" };
-        let cells_xml = cells
-            .iter()
-            .map(|(reference, style_id, value)| format!(r#"<c r="{reference}" s="{style_id}"><v>{value}</v></c>"#))
-            .collect::<String>();
+        let mut rows = std::collections::BTreeMap::<usize, String>::new();
+        for (reference, style_id, value) in cells {
+            let (row, _) = xlsx_cell_ref_position(reference).expect("valid XLSX cell reference");
+            rows.entry(row).or_default().push_str(&format!(r#"<c r="{reference}" s="{style_id}"><v>{value}</v></c>"#));
+        }
+        let rows_xml =
+            rows.into_iter().map(|(row, cells)| format!(r#"<row r="{row}">{cells}</row>"#)).collect::<String>();
 
         write_xlsx_test_entry(
             &mut zip,
@@ -2088,7 +2090,7 @@ mod tests {
             &format!(
                 r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <sheetData><row r="1">{cells_xml}</row></sheetData>
+  <sheetData>{rows_xml}</sheetData>
 </worksheet>"#
             ),
         );
@@ -2304,6 +2306,21 @@ mod tests {
 
         assert_eq!(parsed.rows, vec![vec![serde_json::json!("1904-01-02")]]);
         assert_eq!(infer_value_type(&parsed.rows[0][0]), Some(ImportInferredType::Date));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn parses_excel_temporal_styles_from_non_a1_used_range() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-temporal-offset-{}.xlsx", uuid::Uuid::new_v4()));
+        std::fs::write(&path, build_temporal_test_xlsx(false, &[("C3", 1, 45996.0), ("D3", 2, 45996.0)])).unwrap();
+        let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
+
+        let parsed = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
+
+        assert_eq!(parsed.columns, vec!["column_1", "column_2"]);
+        assert_eq!(parsed.rows, vec![vec![serde_json::json!("2025-12-05"), serde_json::json!("2025-12-05 00:00:00")]]);
+        assert_eq!(infer_value_type(&parsed.rows[0][0]), Some(ImportInferredType::Date));
+        assert_eq!(infer_value_type(&parsed.rows[0][1]), Some(ImportInferredType::Timestamp));
         let _ = std::fs::remove_file(path);
     }
 

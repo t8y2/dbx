@@ -32,9 +32,10 @@ async fn ensure_writable(
     app: &dbx_core::connection::AppState,
     connection_id: &str,
     database: &str,
+    operation: &str,
     action: &str,
 ) -> Result<(), AppError> {
-    dbx_core::production_safety::ensure_write_allowed(app, connection_id, Some(database), action)
+    dbx_core::production_safety::ensure_write_allowed(app, connection_id, Some(database), operation, action)
         .await
         .map_err(AppError)
 }
@@ -186,7 +187,7 @@ pub async fn insert_document(
     State(state): State<Arc<WebState>>,
     Json(req): Json<DocumentInsertRequest>,
 ) -> Result<Json<String>, AppError> {
-    ensure_writable(&state.app, &req.connection_id, &req.database, "Insert").await?;
+    ensure_writable(&state.app, &req.connection_id, &req.database, "documentInsertDocument", "Insert").await?;
     let result = dbx_core::document_ops::insert_document_core(
         &state.app,
         &req.connection_id,
@@ -203,7 +204,7 @@ pub async fn update_document(
     State(state): State<Arc<WebState>>,
     Json(req): Json<DocumentUpdateRequest>,
 ) -> Result<Json<u64>, AppError> {
-    ensure_writable(&state.app, &req.connection_id, &req.database, "Update").await?;
+    ensure_writable(&state.app, &req.connection_id, &req.database, "documentUpdateDocument", "Update").await?;
     let result = dbx_core::document_ops::update_document_core(
         &state.app,
         &req.connection_id,
@@ -222,7 +223,7 @@ pub async fn delete_document(
     State(state): State<Arc<WebState>>,
     Json(req): Json<DocumentDeleteRequest>,
 ) -> Result<Json<u64>, AppError> {
-    ensure_writable(&state.app, &req.connection_id, &req.database, "Delete").await?;
+    ensure_writable(&state.app, &req.connection_id, &req.database, "documentDeleteDocument", "Delete").await?;
     let result = dbx_core::document_ops::delete_document_core(
         &state.app,
         &req.connection_id,
@@ -273,7 +274,14 @@ pub async fn create_gridfs_bucket(
     State(state): State<Arc<WebState>>,
     Json(req): Json<GridFsBucketRequest>,
 ) -> Result<Json<()>, AppError> {
-    ensure_writable(&state.app, &req.connection_id, &req.database, "Create GridFS bucket").await?;
+    ensure_writable(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        "documentCreateGridFsBucket",
+        "Create GridFS bucket",
+    )
+    .await?;
     dbx_core::document_ops::create_gridfs_bucket_core(&state.app, &req.connection_id, &req.database, &req.bucket)
         .await
         .map_err(AppError)?;
@@ -284,7 +292,14 @@ pub async fn delete_gridfs_bucket(
     State(state): State<Arc<WebState>>,
     Json(req): Json<GridFsBucketRequest>,
 ) -> Result<Json<()>, AppError> {
-    ensure_writable(&state.app, &req.connection_id, &req.database, "Delete GridFS bucket").await?;
+    ensure_writable(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        "documentDeleteGridFsBucket",
+        "Delete GridFS bucket",
+    )
+    .await?;
     dbx_core::document_ops::delete_gridfs_bucket_core(&state.app, &req.connection_id, &req.database, &req.bucket)
         .await
         .map_err(AppError)?;
@@ -347,7 +362,7 @@ pub async fn upload_gridfs_file(
     let file_name = file_name.ok_or_else(|| AppError("Missing fileName".to_string()))?;
     let file_bytes = file_bytes.ok_or_else(|| AppError("No file uploaded".to_string()))?;
 
-    ensure_writable(&state.app, &connection_id, &database, "Upload GridFS file").await?;
+    ensure_writable(&state.app, &connection_id, &database, "documentUploadGridFsFile", "Upload GridFS file").await?;
     let result = dbx_core::document_ops::upload_gridfs_file_core(
         &state.app,
         &connection_id,
@@ -366,7 +381,8 @@ pub async fn delete_gridfs_file(
     State(state): State<Arc<WebState>>,
     Json(req): Json<GridFsFileDeleteRequest>,
 ) -> Result<Json<()>, AppError> {
-    ensure_writable(&state.app, &req.connection_id, &req.database, "Delete GridFS file").await?;
+    ensure_writable(&state.app, &req.connection_id, &req.database, "documentDeleteGridFsFile", "Delete GridFS file")
+        .await?;
     dbx_core::document_ops::delete_gridfs_file_core(
         &state.app,
         &req.connection_id,

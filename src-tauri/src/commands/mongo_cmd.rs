@@ -55,8 +55,17 @@ pub async fn mongo_create_database(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     database: String,
+    production_write_authorization: Option<dbx_core::production_safety::ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&database), "Create database").await?;
+    ensure_connection_write_allowed(
+        &state,
+        &connection_id,
+        Some(&database),
+        "mongoCreateDatabase",
+        "Create database",
+        production_write_authorization.as_ref(),
+    )
+    .await?;
     dbx_core::mongo_ops::mongo_create_database_core(&state, &connection_id, &database).await
 }
 
@@ -65,8 +74,17 @@ pub async fn mongo_drop_database(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     database: String,
+    production_write_authorization: Option<dbx_core::production_safety::ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&database), "Drop database").await?;
+    ensure_connection_write_allowed(
+        &state,
+        &connection_id,
+        Some(&database),
+        "mongoDropDatabase",
+        "Drop database",
+        production_write_authorization.as_ref(),
+    )
+    .await?;
     dbx_core::mongo_ops::mongo_drop_database_core(&state, &connection_id, &database).await
 }
 
@@ -76,8 +94,17 @@ pub async fn mongo_drop_collection(
     connection_id: String,
     database: String,
     collection: String,
+    production_write_authorization: Option<dbx_core::production_safety::ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&database), "Drop collection").await?;
+    ensure_connection_write_allowed(
+        &state,
+        &connection_id,
+        Some(&database),
+        "mongoDropCollection",
+        "Drop collection",
+        production_write_authorization.as_ref(),
+    )
+    .await?;
     dbx_core::mongo_ops::mongo_drop_collection_core(&state, &connection_id, &database, &collection).await
 }
 
@@ -175,10 +202,19 @@ pub async fn mongo_aggregate_documents(
     pipeline_json: String,
     max_rows: Option<usize>,
     execution_id: Option<String>,
+    production_write_authorization: Option<dbx_core::production_safety::ProductionWriteAuthorization>,
 ) -> Result<MongoDocumentResult, String> {
     let app = state.inner().clone();
     if let Some(write_database) = dbx_core::mongo_ops::mongo_aggregate_write_database(&pipeline_json, &database) {
-        ensure_connection_write_allowed(&app, &connection_id, Some(&write_database), "Run mutating aggregate").await?;
+        ensure_connection_write_allowed(
+            &app,
+            &connection_id,
+            Some(&write_database),
+            "mongoAggregateDocuments",
+            "Run mutating aggregate",
+            production_write_authorization.as_ref(),
+        )
+        .await?;
     }
     run_cancellable(
         &app,
@@ -203,8 +239,17 @@ pub async fn mongo_create_index(
     collection: String,
     keys_json: String,
     options_json: Option<String>,
+    production_write_authorization: Option<dbx_core::production_safety::ProductionWriteAuthorization>,
 ) -> Result<serde_json::Value, String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&database), "Create index").await?;
+    ensure_connection_write_allowed(
+        &state,
+        &connection_id,
+        Some(&database),
+        "mongoCreateIndex",
+        "Create index",
+        production_write_authorization.as_ref(),
+    )
+    .await?;
     let name = dbx_core::mongo_ops::mongo_create_index_core(
         &state,
         &connection_id,
@@ -225,8 +270,17 @@ pub async fn mongo_drop_indexes(
     collection: String,
     indexes_json: Option<String>,
     single: bool,
+    production_write_authorization: Option<dbx_core::production_safety::ProductionWriteAuthorization>,
 ) -> Result<dbx_core::db::mongo_driver::MongoDropIndexesResult, String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&database), "Drop indexes").await?;
+    ensure_connection_write_allowed(
+        &state,
+        &connection_id,
+        Some(&database),
+        "mongoDropIndexes",
+        "Drop indexes",
+        production_write_authorization.as_ref(),
+    )
+    .await?;
     dbx_core::mongo_ops::mongo_drop_indexes_core(
         &state,
         &connection_id,
@@ -245,8 +299,17 @@ pub async fn mongo_insert_document(
     database: String,
     collection: String,
     doc_json: String,
+    production_write_authorization: Option<dbx_core::production_safety::ProductionWriteAuthorization>,
 ) -> Result<String, String> {
-    crate::commands::document_cmd::document_insert_document(state, connection_id, database, collection, doc_json).await
+    crate::commands::document_cmd::document_insert_document(
+        state,
+        connection_id,
+        database,
+        collection,
+        doc_json,
+        production_write_authorization,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -256,8 +319,17 @@ pub async fn mongo_insert_documents(
     database: String,
     collection: String,
     docs_json: String,
+    production_write_authorization: Option<dbx_core::production_safety::ProductionWriteAuthorization>,
 ) -> Result<u64, String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&database), "Insert").await?;
+    ensure_connection_write_allowed(
+        &state,
+        &connection_id,
+        Some(&database),
+        "mongoInsertDocuments",
+        "Insert",
+        production_write_authorization.as_ref(),
+    )
+    .await?;
     dbx_core::mongo_ops::mongo_insert_documents_core(&state, &connection_id, &database, &collection, &docs_json).await
 }
 
@@ -270,6 +342,7 @@ pub async fn mongo_update_document(
     id: String,
     doc_json: String,
     routing: Option<String>,
+    production_write_authorization: Option<dbx_core::production_safety::ProductionWriteAuthorization>,
 ) -> Result<u64, String> {
     crate::commands::document_cmd::document_update_document(
         state,
@@ -279,6 +352,7 @@ pub async fn mongo_update_document(
         id,
         doc_json,
         routing,
+        production_write_authorization,
     )
     .await
 }
@@ -293,8 +367,17 @@ pub async fn mongo_update_documents(
     update_json: String,
     many: bool,
     options_json: Option<String>,
+    production_write_authorization: Option<dbx_core::production_safety::ProductionWriteAuthorization>,
 ) -> Result<u64, String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&database), "Update").await?;
+    ensure_connection_write_allowed(
+        &state,
+        &connection_id,
+        Some(&database),
+        "mongoUpdateDocuments",
+        "Update",
+        production_write_authorization.as_ref(),
+    )
+    .await?;
     dbx_core::mongo_ops::mongo_update_documents_core(
         &state,
         &connection_id,
@@ -316,9 +399,18 @@ pub async fn mongo_delete_document(
     collection: String,
     id: String,
     routing: Option<String>,
+    production_write_authorization: Option<dbx_core::production_safety::ProductionWriteAuthorization>,
 ) -> Result<u64, String> {
-    crate::commands::document_cmd::document_delete_document(state, connection_id, database, collection, id, routing)
-        .await
+    crate::commands::document_cmd::document_delete_document(
+        state,
+        connection_id,
+        database,
+        collection,
+        id,
+        routing,
+        production_write_authorization,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -329,8 +421,17 @@ pub async fn mongo_delete_documents(
     collection: String,
     filter_json: String,
     many: bool,
+    production_write_authorization: Option<dbx_core::production_safety::ProductionWriteAuthorization>,
 ) -> Result<u64, String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&database), "Delete").await?;
+    ensure_connection_write_allowed(
+        &state,
+        &connection_id,
+        Some(&database),
+        "mongoDeleteDocuments",
+        "Delete",
+        production_write_authorization.as_ref(),
+    )
+    .await?;
     dbx_core::mongo_ops::mongo_delete_documents_core(&state, &connection_id, &database, &collection, &filter_json, many)
         .await
 }

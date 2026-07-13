@@ -85,8 +85,17 @@ pub async fn document_insert_document(
     database: String,
     collection: String,
     doc_json: String,
+    production_write_authorization: Option<dbx_core::production_safety::ProductionWriteAuthorization>,
 ) -> Result<String, String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&database), "Insert").await?;
+    ensure_connection_write_allowed(
+        &state,
+        &connection_id,
+        Some(&database),
+        "documentInsertDocument",
+        "Insert",
+        production_write_authorization.as_ref(),
+    )
+    .await?;
     dbx_core::document_ops::insert_document_core(&state, &connection_id, &database, &collection, &doc_json).await
 }
 
@@ -99,8 +108,17 @@ pub async fn document_update_document(
     id: String,
     doc_json: String,
     routing: Option<String>,
+    production_write_authorization: Option<dbx_core::production_safety::ProductionWriteAuthorization>,
 ) -> Result<u64, String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&database), "Update").await?;
+    ensure_connection_write_allowed(
+        &state,
+        &connection_id,
+        Some(&database),
+        "documentUpdateDocument",
+        "Update",
+        production_write_authorization.as_ref(),
+    )
+    .await?;
     dbx_core::document_ops::update_document_core(
         &state,
         &connection_id,
@@ -121,8 +139,17 @@ pub async fn document_delete_document(
     collection: String,
     id: String,
     routing: Option<String>,
+    production_write_authorization: Option<dbx_core::production_safety::ProductionWriteAuthorization>,
 ) -> Result<u64, String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&database), "Delete").await?;
+    ensure_connection_write_allowed(
+        &state,
+        &connection_id,
+        Some(&database),
+        "documentDeleteDocument",
+        "Delete",
+        production_write_authorization.as_ref(),
+    )
+    .await?;
     dbx_core::document_ops::delete_document_core(
         &state,
         &connection_id,
@@ -158,8 +185,17 @@ pub async fn document_create_gridfs_bucket(
     connection_id: String,
     database: String,
     bucket: String,
+    production_write_authorization: Option<dbx_core::production_safety::ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&database), "Create GridFS bucket").await?;
+    ensure_connection_write_allowed(
+        &state,
+        &connection_id,
+        Some(&database),
+        "documentCreateGridFsBucket",
+        "Create GridFS bucket",
+        production_write_authorization.as_ref(),
+    )
+    .await?;
     dbx_core::document_ops::create_gridfs_bucket_core(&state, &connection_id, &database, &bucket).await
 }
 
@@ -169,8 +205,17 @@ pub async fn document_delete_gridfs_bucket(
     connection_id: String,
     database: String,
     bucket: String,
+    production_write_authorization: Option<dbx_core::production_safety::ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&database), "Delete GridFS bucket").await?;
+    ensure_connection_write_allowed(
+        &state,
+        &connection_id,
+        Some(&database),
+        "documentDeleteGridFsBucket",
+        "Delete GridFS bucket",
+        production_write_authorization.as_ref(),
+    )
+    .await?;
     dbx_core::document_ops::delete_gridfs_bucket_core(&state, &connection_id, &database, &bucket).await
 }
 
@@ -214,8 +259,17 @@ pub async fn document_upload_gridfs_file(
     file_name: String,
     data: Vec<u8>,
     content_type: Option<String>,
+    production_write_authorization: Option<dbx_core::production_safety::ProductionWriteAuthorization>,
 ) -> Result<String, String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&database), "Upload GridFS file").await?;
+    ensure_connection_write_allowed(
+        &state,
+        &connection_id,
+        Some(&database),
+        "documentUploadGridFsFile",
+        "Upload GridFS file",
+        production_write_authorization.as_ref(),
+    )
+    .await?;
     dbx_core::document_ops::upload_gridfs_file_core(
         &state,
         &connection_id,
@@ -235,7 +289,16 @@ pub async fn document_delete_gridfs_file(
     database: String,
     bucket: String,
     file_id: String,
+    production_write_authorization: Option<dbx_core::production_safety::ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&database), "Delete GridFS file").await?;
+    ensure_connection_write_allowed(
+        &state,
+        &connection_id,
+        Some(&database),
+        "documentDeleteGridFsFile",
+        "Delete GridFS file",
+        production_write_authorization.as_ref(),
+    )
+    .await?;
     dbx_core::document_ops::delete_gridfs_file_core(&state, &connection_id, &database, &bucket, &file_id).await
 }

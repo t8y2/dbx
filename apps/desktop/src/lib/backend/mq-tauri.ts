@@ -1,5 +1,5 @@
 // Message queue admin API functions - Tauri invoke layer
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "@/lib/backend/productionWriteAuthorization";
 import type {
   MqClusterInfo,
   ClusterInfo,

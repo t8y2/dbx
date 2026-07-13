@@ -246,11 +246,14 @@ function firstResult(results: QueryResult[]): QueryResult {
 }
 
 async function executeRequestText(text: string): Promise<QueryResult> {
-  const execute = () => api.executeMulti(props.connectionId, props.database || "default", text, undefined, executionId.value);
+  const requestArgs = [props.connectionId, props.database || "default", text, undefined, executionId.value, undefined] as const;
+  const execute = (authorization?: import("@/lib/backend/productionWriteAuthorization").ProductionWriteAuthorization) => api.executeMulti(...requestArgs, authorization);
   const results = vectorRequestIsMutating(text)
     ? await executeWithProductionOperationGuard({
         connection: connectionStore.getConfig(props.connectionId),
         database: props.database,
+        operation: "executeRestRequest",
+        requestDigestArgs: requestArgs,
         reviewText: text,
         source: t("production.sourceSqlEditor"),
         execute,

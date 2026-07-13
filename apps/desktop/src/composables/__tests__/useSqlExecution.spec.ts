@@ -278,4 +278,32 @@ describe("useSqlExecution", () => {
     await pendingExecution;
     expect(executeCurrentSql).toHaveBeenCalledTimes(1);
   });
+
+  it("requests a bound token after confirming a production REST mutation", async () => {
+    const activeTab = ref<QueryTab | undefined>(queryTab("default"));
+    const activeConnection = ref<ConnectionConfig | undefined>({ ...connection("qdrant"), is_production: true });
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const productionSafetyStore = useProductionSafetyStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["ok"], rows: [[1]], affected_rows: 1, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    const request = 'PUT /collections/users/points\n{"points":[]}';
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => request),
+      activeOutputView,
+    });
+
+    const pendingExecution = execution.tryExecute();
+    await Promise.resolve();
+    expect(productionSafetyStore.pending?.sql).toBe(request);
+    expect(executeCurrentSql).not.toHaveBeenCalled();
+
+    productionSafetyStore.confirm();
+    await pendingExecution;
+    expect(executeCurrentSql).toHaveBeenCalledWith(request, { authorizeRestProductionWrite: true });
+  });
 });

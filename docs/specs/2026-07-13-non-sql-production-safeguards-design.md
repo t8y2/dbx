@@ -19,14 +19,14 @@ Every user-accessible write operation against an explicitly marked production sc
 
 ## Recommended Approach
 
-Generalize the existing SQL production guard into an operation guard while retaining the SQL helper as a compatibility wrapper. A guarded operation supplies its connection, optional database, operation label, review text, and execution callback. After confirmation, the callback receives request-scoped production authorization that is forwarded to the backend.
+Generalize the existing SQL production guard into an operation guard while retaining the SQL helper as a compatibility wrapper. A guarded operation supplies its connection, optional database, operation label, review text, and execution callback. After confirmation, the frontend requests a random, short-lived, single-use token bound to the mutation and forwards that authorization only while starting the corresponding backend request.
 
 Add a shared Rust write-policy helper that checks, in order:
 
 1. ordinary connection `read_only` state;
 2. connection-level `is_production` state;
 3. Redis logical database or MongoDB database membership in `production_databases`;
-4. request-scoped production confirmation.
+4. request-scoped production authorization matching the connection, effective database, operation, and request digest.
 
 Dedicated Tauri commands and Web routes call this helper before mutation. Raw command/request surfaces use product-aware classifiers and conservatively treat unknown operations as writes. This creates one policy contract without changing persisted connection data.
 
@@ -34,7 +34,8 @@ Dedicated Tauri commands and Web routes call this helper before mutation. Raw co
 
 - Frontend-only wrappers: smaller, but direct backend calls and future entrypoints can silently bypass production safety.
 - Hard backend read-only for production: strongest and simplest enforcement, but conflicts with the existing product behavior that allows a human to confirm an intentional production write.
-- Short-lived server-issued confirmation tickets: stronger protocol separation, but the local backend cannot prove that a human saw the dialog, and multi-request operations add lifecycle and concurrency complexity without a meaningful security gain for the current trust model.
+- A shared permit keyed only by connection and database: insufficient because any concurrent write to the same scope could consume the confirmation intended for another request.
+- Binding only the operation name to that shared key: still permits concurrent writes of the same operation kind to consume each other's confirmation.
 
 ## Design
 
@@ -42,7 +43,7 @@ Dedicated Tauri commands and Web routes call this helper before mutation. Raw co
 
 - Every production write initiated from a dedicated UI shows the existing production confirmation dialog with a product-specific source and an operation preview.
 - Confirmation is never remembered. Repeating an action asks again.
-- One user action that performs a batch of backend calls asks once and forwards authorization only to calls belonging to that action.
+- Each backend mutation consumes its own token. A UI action that performs multiple mutations must request a separately bound token for each request it sends.
 - Cancelling the dialog performs no mutation.
 - Non-production behavior remains unchanged.
 
@@ -62,7 +63,9 @@ Dedicated Tauri commands and Web routes call this helper before mutation. Raw co
 
 ### Backend ownership
 
-- Define a serializable request-scoped production confirmation field with a backward-compatible default of `false`.
+- Issue a UUID v4 token with a 30-second TTL after confirmation. Store permits by token and bind each permit to connection ID, normalized effective database, operation kind, and a stable SHA-256 request digest.
+- Carry the token, operation, and digest through explicit HTTP headers or a Tauri command argument. HTTP middleware and Tauri wrappers bind the authorization to the current Tokio task before core services run.
+- Validate and remove a matching permit while holding the same mutex. Expired, mismatched, and replayed tokens fail closed; unrelated concurrent permits remain available to their own requests.
 - Centralize production scope and read-only evaluation in `dbx-core` so Tauri and Web use identical rules and error messages.
 - Apply the helper to every dedicated mutation endpoint. Core services that are reachable without those endpoints retain or gain their own read-only checks.
 - Detect MongoDB aggregate `$out` and `$merge` stages as mutations.
@@ -74,14 +77,16 @@ Dedicated Tauri commands and Web routes call this helper before mutation. Raw co
 
 - Production confirmation is never exposed to AI Agent or MCP tool calls.
 - Existing SQL, MongoDB, and Redis production blocks remain in place.
+- Cross-database SQL targets, MongoDB sibling-database writes and aggregate output stages, and Redis cross-database commands are resolved before the production block or token validation.
 - Add regression tests proving specialized or raw non-SQL operations cannot acquire human confirmation implicitly.
 
 ## Edge Cases And Risks
 
-- Batch UI actions must not accidentally authorize later unrelated calls.
+- Concurrent writes on the same connection, database, and operation must not consume each other's token.
+- Batch UI actions must not accidentally authorize later unrelated calls or reuse a consumed token.
 - A selected Redis/MongoDB production database must remain protected after an in-session database switch.
 - Raw REST POST classification requires explicit read allowlists for search/query endpoints.
-- Existing HTTP clients omit the new field, so omission must safely mean unconfirmed.
+- Existing HTTP clients omit the authorization headers, so omission must safely mean unconfirmed.
 - Some files contain both guarded SQL calls and unguarded non-SQL calls; tests must inspect individual call sites or shared API contracts rather than only checking whether a file imports the guard.
 
 ## Verification
@@ -89,6 +94,7 @@ Dedicated Tauri commands and Web routes call this helper before mutation. Raw co
 - Unit tests for production scope resolution and each non-SQL mutation classifier.
 - Frontend tests for confirm, cancel, non-production bypass, database-level Redis/MongoDB scope, and batch behavior.
 - Tauri/Web tests proving unconfirmed production mutations fail and confirmed mutations reach the underlying operation.
+- Permit tests for random tokens, atomic single consumption, same-operation concurrency, connection/database/operation/digest mismatch, expiration, and replay.
 - Regression tests for MongoDB `$out`/`$merge` and Redis `ZADD`/`XADD`/`JSON.SET` ordinary read-only protection.
 - Static entrypoint coverage tests for every dedicated write API.
 - Run `make cargo-check-fast`, focused Rust tests, focused frontend/package tests, and `pnpm test` when practical.

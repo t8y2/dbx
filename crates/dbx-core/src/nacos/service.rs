@@ -22,7 +22,7 @@ pub async fn nacos_create_namespace_core(
     conn_id: &str,
     req: NacosNamespaceCreate,
 ) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Create Nacos namespace").await?;
+    ensure_connection_writable(state, conn_id, "nacosCreateNamespace", "Create Nacos namespace").await?;
     let admin = get_admin(state, conn_id).await?;
     admin.create_namespace(req).await
 }
@@ -32,7 +32,7 @@ pub async fn nacos_update_namespace_core(
     conn_id: &str,
     req: NacosNamespaceUpdate,
 ) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Update Nacos namespace").await?;
+    ensure_connection_writable(state, conn_id, "nacosUpdateNamespace", "Update Nacos namespace").await?;
     let admin = get_admin(state, conn_id).await?;
     admin.update_namespace(req).await
 }
@@ -56,13 +56,13 @@ pub async fn nacos_get_config_core(
 }
 
 pub async fn nacos_publish_config_core(state: &AppState, conn_id: &str, req: NacosConfigUpsert) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Publish Nacos config").await?;
+    ensure_connection_writable(state, conn_id, "nacosPublishConfig", "Publish Nacos config").await?;
     let admin = get_admin(state, conn_id).await?;
     admin.publish_config(req).await
 }
 
 pub async fn nacos_delete_config_core(state: &AppState, conn_id: &str, key: NacosConfigKey) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Delete Nacos config").await?;
+    ensure_connection_writable(state, conn_id, "nacosDeleteConfig", "Delete Nacos config").await?;
     let admin = get_admin(state, conn_id).await?;
     admin.delete_config(key).await
 }
@@ -90,7 +90,7 @@ pub async fn nacos_rollback_config_core(
     conn_id: &str,
     req: NacosConfigRollbackRequest,
 ) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Rollback Nacos config").await?;
+    ensure_connection_writable(state, conn_id, "nacosRollbackConfig", "Rollback Nacos config").await?;
     let admin = get_admin(state, conn_id).await?;
     admin.rollback_config(req).await
 }
@@ -118,7 +118,7 @@ pub async fn nacos_update_instance_core(
     conn_id: &str,
     req: NacosInstanceUpdate,
 ) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Update Nacos instance").await?;
+    ensure_connection_writable(state, conn_id, "nacosUpdateInstance", "Update Nacos instance").await?;
     let admin = get_admin(state, conn_id).await?;
     admin.update_instance(req).await
 }
@@ -130,7 +130,7 @@ pub async fn nacos_raw_request_core(
 ) -> Result<NacosRawResponse, String> {
     crate::nacos::http::validate_raw_api_path(&req.path)?;
     if !matches!(req.method.to_ascii_uppercase().as_str(), "GET" | "HEAD" | "OPTIONS") {
-        ensure_connection_writable(state, conn_id, "Run mutating Nacos raw request").await?;
+        ensure_connection_writable(state, conn_id, "nacosRawRequest", "Run mutating Nacos raw request").await?;
     }
     let admin = get_admin(state, conn_id).await?;
     admin.raw_request(req).await
@@ -148,8 +148,13 @@ async fn get_admin(
     state.nacos_registry.get_or_build_config(conn_id, admin_config).await
 }
 
-async fn ensure_connection_writable(state: &AppState, conn_id: &str, action: &str) -> Result<(), String> {
-    crate::production_safety::ensure_write_allowed(state, conn_id, None, action).await
+async fn ensure_connection_writable(
+    state: &AppState,
+    conn_id: &str,
+    operation: &str,
+    action: &str,
+) -> Result<(), String> {
+    crate::production_safety::ensure_write_allowed(state, conn_id, None, operation, action).await
 }
 
 #[cfg(test)]

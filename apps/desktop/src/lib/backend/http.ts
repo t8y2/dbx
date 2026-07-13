@@ -150,6 +150,7 @@ import type {
   NacosServiceQuery,
 } from "@/types/nacos";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { productionWriteAuthorizationHeaders, type ProductionWriteAuthorization } from "@/lib/backend/productionWriteAuthorization";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -174,7 +175,7 @@ const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
 async function post<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(apiUrl(url), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...productionWriteAuthorizationHeaders() },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(await res.text());
@@ -230,8 +231,8 @@ export async function connectionIdentifierQuote(connectionId: string, database?:
   return quote ?? undefined;
 }
 
-export async function authorizeProductionWrite(connectionId: string, database?: string): Promise<void> {
-  return post("/api/connection/authorize-production-write", { connectionId, database });
+export async function authorizeProductionWrite(connectionId: string, database: string | undefined, operation: string, requestDigest: string): Promise<ProductionWriteAuthorization> {
+  return post("/api/connection/authorize-production-write", { connectionId, database, operation, requestDigest });
 }
 
 export async function closeDatabaseConnection(connectionId: string, database: string): Promise<boolean> {
@@ -2065,6 +2066,7 @@ export async function documentUploadGridFsFile(connectionId: string, database: s
   body.append("file", new Blob([bytes], { type: contentType || "application/octet-stream" }), fileName);
   const res = await fetch(apiUrl("/api/document-store/upload-gridfs-file"), {
     method: "POST",
+    headers: productionWriteAuthorizationHeaders(),
     body,
   });
   if (!res.ok) throw new Error(await res.text());

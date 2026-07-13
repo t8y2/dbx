@@ -3,6 +3,7 @@ import type * as TauriModule from "@/lib/backend/tauri";
 import { appendDebugLog } from "@/lib/backend/debugLog";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { redisCommandDatabaseTargets, redisCommandIsMutation } from "@/lib/redis/redisCommandSafety";
+import { productionWriteRequestDigest, withProductionWriteAuthorization, type ProductionWriteAuthorization } from "@/lib/backend/productionWriteAuthorization";
 
 // ---------------------------------------------------------------------------
 // Lazy backend resolution (avoids top-level await)
@@ -51,6 +52,7 @@ interface ProductionWriteTarget {
   database?: string;
   databaseCandidates?: string[];
   allDatabases?: boolean;
+  operation?: string;
   source: string;
 }
 
@@ -69,6 +71,7 @@ function forwardProductionWrite<K extends keyof Backend>(name: K, resolveTarget:
   return (async (...args: unknown[]) => {
     const target = resolveTarget(args);
     const b = await getBackend();
+    let authorization: ProductionWriteAuthorization | undefined;
     if (target && isMutation(args)) {
       const [{ useConnectionStore }, { useProductionSafetyStore }, { productionContextForDatabase }] = await Promise.all([import("@/stores/connectionStore"), import("@/stores/productionSafetyStore"), import("@/lib/database/productionSafety")]);
       const connection = useConnectionStore().getConfig(target.connectionId);
@@ -84,11 +87,14 @@ function forwardProductionWrite<K extends keyof Backend>(name: K, resolveTarget:
           source: target.source,
         });
         if (!confirmed) throw new ProductionWriteCancelledError();
-        // The backend consumes this permit on the immediately following mutation.
-        await b.authorizeProductionWrite(target.connectionId, productionTarget.database);
+        // Aliases such as mongoInsertDocument invoke a differently named backend
+        // command, so the permit must use the operation consumed by that command.
+        const operation = target.operation ?? String(name);
+        const requestDigest = await productionWriteRequestDigest(operation, args);
+        authorization = await b.authorizeProductionWrite(target.connectionId, productionTarget.database, operation, requestDigest);
       }
     }
-    return (b[name] as (...a: unknown[]) => unknown)(...args);
+    return withProductionWriteAuthorization(authorization, () => (b[name] as (...a: unknown[]) => Promise<unknown>)(...args));
   }) as unknown as Backend[K];
 }
 
@@ -100,11 +106,11 @@ const connectionWriteTarget =
   };
 
 const databaseWriteTarget =
-  (source: string) =>
+  (source: string, operation?: string) =>
   (args: unknown[]): ProductionWriteTarget | undefined => {
     const connectionId = String(args[0] ?? "").trim();
     const database = String(args[1] ?? "").trim();
-    return connectionId ? { connectionId, database, source } : undefined;
+    return connectionId ? { connectionId, database, operation, source } : undefined;
   };
 
 function rawRequestIsMutation(args: unknown[]): boolean {
@@ -273,8 +279,18 @@ export const prepareSchemaDiff = forward("prepareSchemaDiff");
 export const generateSchemaSyncSql = forward("generateSchemaSyncSql");
 
 // Query
-export const executeQuery = forward("executeQuery");
-export const executeMulti = forward("executeMulti");
+type ExecuteQueryOptions = Parameters<Backend["executeQuery"]>[5];
+type ExecuteMultiOptions = Parameters<Backend["executeMulti"]>[5];
+
+export async function executeQuery(connectionId: string, database: string, sql: string, schema?: string, executionId?: string, options?: ExecuteQueryOptions, productionWriteAuthorization?: ProductionWriteAuthorization): Promise<Awaited<ReturnType<Backend["executeQuery"]>>> {
+  const backend = await getBackend();
+  return withProductionWriteAuthorization(productionWriteAuthorization, () => backend.executeQuery(connectionId, database, sql, schema, executionId, options));
+}
+
+export async function executeMulti(connectionId: string, database: string, sql: string, schema?: string, executionId?: string, options?: ExecuteMultiOptions, productionWriteAuthorization?: ProductionWriteAuthorization): Promise<Awaited<ReturnType<Backend["executeMulti"]>>> {
+  const backend = await getBackend();
+  return withProductionWriteAuthorization(productionWriteAuthorization, () => backend.executeMulti(connectionId, database, sql, schema, executionId, options));
+}
 export const executeBatch = forward("executeBatch");
 export const executeScript = forward("executeScript");
 export const executeInTransaction = forward("executeInTransaction");
@@ -553,13 +569,13 @@ export const mongoCollectionStats = forward("mongoCollectionStats");
 export const mongoCreateIndex = forwardProductionWrite("mongoCreateIndex", databaseWriteTarget("Create MongoDB index"));
 export const mongoDropIndexes = forwardProductionWrite("mongoDropIndexes", databaseWriteTarget("Drop MongoDB indexes"));
 export const documentInsertDocument = forwardProductionWrite("documentInsertDocument", databaseWriteTarget("Insert document"));
-export const mongoInsertDocument = forwardProductionWrite("mongoInsertDocument", databaseWriteTarget("Insert MongoDB document"));
+export const mongoInsertDocument = forwardProductionWrite("mongoInsertDocument", databaseWriteTarget("Insert MongoDB document", "documentInsertDocument"));
 export const mongoInsertDocuments = forwardProductionWrite("mongoInsertDocuments", databaseWriteTarget("Insert MongoDB documents"));
 export const documentUpdateDocument = forwardProductionWrite("documentUpdateDocument", databaseWriteTarget("Update document"));
-export const mongoUpdateDocument = forwardProductionWrite("mongoUpdateDocument", databaseWriteTarget("Update MongoDB document"));
+export const mongoUpdateDocument = forwardProductionWrite("mongoUpdateDocument", databaseWriteTarget("Update MongoDB document", "documentUpdateDocument"));
 export const mongoUpdateDocuments = forwardProductionWrite("mongoUpdateDocuments", databaseWriteTarget("Update MongoDB documents"));
 export const documentDeleteDocument = forwardProductionWrite("documentDeleteDocument", databaseWriteTarget("Delete document"));
-export const mongoDeleteDocument = forwardProductionWrite("mongoDeleteDocument", databaseWriteTarget("Delete MongoDB document"));
+export const mongoDeleteDocument = forwardProductionWrite("mongoDeleteDocument", databaseWriteTarget("Delete MongoDB document", "documentDeleteDocument"));
 export const mongoDeleteDocuments = forwardProductionWrite("mongoDeleteDocuments", databaseWriteTarget("Delete MongoDB documents"));
 
 // Elasticsearch

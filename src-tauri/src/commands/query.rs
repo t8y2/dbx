@@ -23,6 +23,7 @@ pub async fn execute_query(
     result_session_id: Option<String>,
     client_session_id: Option<String>,
     timeout_secs: Option<u64>,
+    production_write_authorization: Option<dbx_core::production_safety::ProductionWriteAuthorization>,
 ) -> Result<db::QueryResult, String> {
     let execution_id = execution_id.filter(|id| !id.trim().is_empty());
     let registered_query = execution_id.as_ref().map(|id| {
@@ -33,23 +34,26 @@ pub async fn execute_query(
     });
     let cancel_token = registered_query.as_ref().map(|query| query.token());
 
-    dbx_core::query::execute_sql_statement_with_options(
-        &state,
-        &connection_id,
-        &database,
-        &sql,
-        schema.as_deref(),
-        cancel_token,
-        dbx_core::query::QueryExecutionOptions {
-            max_rows,
-            fetch_size,
-            page_size,
-            result_session_id,
-            client_session_id,
-            timeout_secs,
-            execution_id,
-            ..Default::default()
-        },
+    dbx_core::production_safety::with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::query::execute_sql_statement_with_options(
+            &state,
+            &connection_id,
+            &database,
+            &sql,
+            schema.as_deref(),
+            cancel_token,
+            dbx_core::query::QueryExecutionOptions {
+                max_rows,
+                fetch_size,
+                page_size,
+                result_session_id,
+                client_session_id,
+                timeout_secs,
+                execution_id,
+                ..Default::default()
+            },
+        ),
     )
     .await
 }
@@ -70,6 +74,7 @@ pub async fn execute_multi(
     client_session_id: Option<String>,
     timeout_secs: Option<u64>,
     use_transaction: Option<bool>,
+    production_write_authorization: Option<dbx_core::production_safety::ProductionWriteAuthorization>,
 ) -> Result<Vec<dbx_core::query::ExecuteMultiResult>, String> {
     let execution_id = execution_id.filter(|id| !id.trim().is_empty());
     let registered_query = execution_id.as_ref().map(|id| {
@@ -90,23 +95,26 @@ pub async fn execute_multi(
         sql
     );
 
-    let result = dbx_core::query::execute_multi_core_with_options_for_client(
-        &state,
-        &connection_id,
-        &database,
-        &sql,
-        schema.as_deref(),
-        cancel_token,
-        dbx_core::query::QueryExecutionOptions {
-            max_rows,
-            fetch_size,
-            page_size,
-            result_session_id,
-            client_session_id,
-            timeout_secs,
-            execution_id,
-            use_transaction,
-        },
+    let result = dbx_core::production_safety::with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::query::execute_multi_core_with_options_for_client(
+            &state,
+            &connection_id,
+            &database,
+            &sql,
+            schema.as_deref(),
+            cancel_token,
+            dbx_core::query::QueryExecutionOptions {
+                max_rows,
+                fetch_size,
+                page_size,
+                result_session_id,
+                client_session_id,
+                timeout_secs,
+                execution_id,
+                use_transaction,
+            },
+        ),
     )
     .await;
     match &result {

@@ -16,7 +16,6 @@ import { extractSqlParameterDescriptors, type SqlParameterDescriptor, type SqlPa
 import { expandSqlVariables } from "@/lib/sql/sqlVariables";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { assessProductionSql } from "@/lib/database/productionSafety";
-import * as api from "@/lib/backend/api";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import type { ConnectionConfig, DatabaseType, QueryTab } from "@/types/database";
 
@@ -136,10 +135,8 @@ export function useSqlExecution(deps: {
           source: t("production.sourceSqlEditor"),
         });
         if (confirmed) {
-          if (connection && ["elasticsearch", "qdrant", "milvus", "weaviate", "chromadb"].includes(connection.db_type)) {
-            await api.authorizeProductionWrite(connection.id);
-          }
-          await doExecute(sql, sourceOffset);
+          const authorizeRestProductionWrite = !!connection && ["elasticsearch", "qdrant", "milvus", "weaviate", "chromadb"].includes(connection.db_type);
+          await doExecute(sql, sourceOffset, authorizeRestProductionWrite);
         }
         return;
       }
@@ -170,7 +167,7 @@ export function useSqlExecution(deps: {
     return true;
   }
 
-  async function doExecute(sql?: string, sourceOffset?: number) {
+  async function doExecute(sql?: string, sourceOffset?: number, authorizeRestProductionWrite = false) {
     if (sql === undefined) ({ sql, sourceOffset } = await resolvedExecutableSql());
     const tab = deps.activeTab.value;
     if (!tab || !sql.trim()) return;
@@ -184,10 +181,12 @@ export function useSqlExecution(deps: {
     const connName = executionConnection?.name || "";
     const start = Date.now();
     const isRedis = executionDatabaseType === "redis";
-    await queryStore.executeCurrentSql(sql, {
+    const executionOptions = {
       ...(isRedis ? { skipRedisSafetyCheck: deps.blockDangerousRedisCommands?.value === false } : {}),
       ...(sourceOffset !== undefined ? { sourceOffset } : {}),
-    });
+      ...(authorizeRestProductionWrite ? { authorizeRestProductionWrite: true } : {}),
+    };
+    await queryStore.executeCurrentSql(sql, Object.keys(executionOptions).length ? executionOptions : undefined);
     if (tab.result && !tab.result.columns.length && !tab.results?.some((result) => result.columns.length > 0)) {
       deps.activeOutputView.value = "summary";
     }

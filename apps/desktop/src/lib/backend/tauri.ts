@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, type ProductionWriteAuthorization } from "@/lib/backend/productionWriteAuthorization";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   ConnectionConfig,
@@ -657,8 +657,8 @@ export async function connectionIdentifierQuote(connectionId: string, database?:
   return quote ?? undefined;
 }
 
-export async function authorizeProductionWrite(connectionId: string, database?: string): Promise<void> {
-  return invoke("authorize_production_write", { connectionId, database });
+export async function authorizeProductionWrite(connectionId: string, database: string | undefined, operation: string, requestDigest: string): Promise<ProductionWriteAuthorization> {
+  return invoke("authorize_production_write", { connectionId, database, operation, requestDigest });
 }
 
 export async function closeDatabaseConnection(connectionId: string, database: string): Promise<boolean> {

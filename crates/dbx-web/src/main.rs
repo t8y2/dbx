@@ -1,5 +1,6 @@
 mod auth;
 mod error;
+mod production_write_authorization;
 mod routes;
 mod sse;
 mod state;
@@ -419,9 +420,11 @@ async fn main() {
         .route("/redis/set-add", post(routes::redis::set_add))
         .route("/redis/set-remove", post(routes::redis::set_remove))
         .route("/redis/zadd", post(routes::redis::zadd))
+        .route("/redis/zrem", post(routes::redis::zrem))
         .route("/redis/stream-add", post(routes::redis::stream_add))
         .route("/redis/json-set", post(routes::redis::json_set))
         .route("/redis/check-json-module", post(routes::redis::check_json_module))
+        .route("/redis/set-ttl", post(routes::redis::set_ttl))
         .route("/redis/delete-keys", post(routes::redis::delete_keys))
         .route("/redis/flush-db", post(routes::redis::flush_db))
         .route("/redis/execute-command", post(routes::redis::execute_command))
@@ -589,6 +592,7 @@ async fn main() {
         .route("/cloud-sync/snippet/download", post(routes::cloud_sync::snippet_sync_download));
 
     let api = add_mq_routes(api)
+        .layer(middleware::from_fn(production_write_authorization::middleware))
         .layer(middleware::from_fn_with_state(web_state.clone(), auth::auth_middleware))
         .with_state(web_state.clone());
 

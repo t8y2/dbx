@@ -1140,6 +1140,7 @@ pub async fn do_execute(
                 state,
                 &connection_id,
                 None,
+                "executeRestRequest",
                 "executing a mutating REST request",
             )
             .await?;

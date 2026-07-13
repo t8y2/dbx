@@ -33,9 +33,10 @@ async fn ensure_writable(
     app: &dbx_core::connection::AppState,
     connection_id: &str,
     database: &str,
+    operation: &str,
     action: &str,
 ) -> Result<(), AppError> {
-    dbx_core::production_safety::ensure_write_allowed(app, connection_id, Some(database), action)
+    dbx_core::production_safety::ensure_write_allowed(app, connection_id, Some(database), operation, action)
         .await
         .map_err(AppError)
 }
@@ -242,7 +243,7 @@ pub async fn create_database(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MongoCollectionRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    ensure_writable(&state.app, &req.connection_id, &req.database, "Create database").await?;
+    ensure_writable(&state.app, &req.connection_id, &req.database, "mongoCreateDatabase", "Create database").await?;
     dbx_core::mongo_ops::mongo_create_database_core(&state.app, &req.connection_id, &req.database)
         .await
         .map_err(AppError)?;
@@ -253,7 +254,7 @@ pub async fn drop_database(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MongoCollectionRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    ensure_writable(&state.app, &req.connection_id, &req.database, "Drop database").await?;
+    ensure_writable(&state.app, &req.connection_id, &req.database, "mongoDropDatabase", "Drop database").await?;
     dbx_core::mongo_ops::mongo_drop_database_core(&state.app, &req.connection_id, &req.database)
         .await
         .map_err(AppError)?;
@@ -264,7 +265,7 @@ pub async fn drop_collection(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MongoCollectionNameRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    ensure_writable(&state.app, &req.connection_id, &req.database, "Drop collection").await?;
+    ensure_writable(&state.app, &req.connection_id, &req.database, "mongoDropCollection", "Drop collection").await?;
     dbx_core::mongo_ops::mongo_drop_collection_core(&state.app, &req.connection_id, &req.database, &req.collection)
         .await
         .map_err(AppError)?;
@@ -352,7 +353,14 @@ pub async fn aggregate_documents(
 ) -> Result<Json<serde_json::Value>, AppError> {
     if let Some(write_database) = dbx_core::mongo_ops::mongo_aggregate_write_database(&req.pipeline_json, &req.database)
     {
-        ensure_writable(&state.app, &req.connection_id, &write_database, "Run mutating aggregate").await?;
+        ensure_writable(
+            &state.app,
+            &req.connection_id,
+            &write_database,
+            "mongoAggregateDocuments",
+            "Run mutating aggregate",
+        )
+        .await?;
     }
     let result = run_cancellable(
         &state,
@@ -374,7 +382,7 @@ pub async fn create_index(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MongoCreateIndexRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    ensure_writable(&state.app, &req.connection_id, &req.database, "Create index").await?;
+    ensure_writable(&state.app, &req.connection_id, &req.database, "mongoCreateIndex", "Create index").await?;
     let name = dbx_core::mongo_ops::mongo_create_index_core(
         &state.app,
         &req.connection_id,
@@ -392,7 +400,7 @@ pub async fn drop_indexes(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MongoDropIndexesRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    ensure_writable(&state.app, &req.connection_id, &req.database, "Drop indexes").await?;
+    ensure_writable(&state.app, &req.connection_id, &req.database, "mongoDropIndexes", "Drop indexes").await?;
     let result = dbx_core::mongo_ops::mongo_drop_indexes_core(
         &state.app,
         &req.connection_id,
@@ -410,7 +418,7 @@ pub async fn insert_document(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MongoInsertRequest>,
 ) -> Result<Json<String>, AppError> {
-    ensure_writable(&state.app, &req.connection_id, &req.database, "Insert").await?;
+    ensure_writable(&state.app, &req.connection_id, &req.database, "mongoInsertDocument", "Insert").await?;
     let result = dbx_core::document_ops::insert_document_core(
         &state.app,
         &req.connection_id,
@@ -427,7 +435,7 @@ pub async fn insert_documents(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MongoInsertDocumentsRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    ensure_writable(&state.app, &req.connection_id, &req.database, "Insert").await?;
+    ensure_writable(&state.app, &req.connection_id, &req.database, "mongoInsertDocuments", "Insert").await?;
     let result = dbx_core::mongo_ops::mongo_insert_documents_core(
         &state.app,
         &req.connection_id,
@@ -444,7 +452,7 @@ pub async fn update_document(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MongoUpdateRequest>,
 ) -> Result<Json<u64>, AppError> {
-    ensure_writable(&state.app, &req.connection_id, &req.database, "Update").await?;
+    ensure_writable(&state.app, &req.connection_id, &req.database, "mongoUpdateDocument", "Update").await?;
     let result = dbx_core::document_ops::update_document_core(
         &state.app,
         &req.connection_id,
@@ -463,7 +471,7 @@ pub async fn update_documents(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MongoUpdateDocumentsRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    ensure_writable(&state.app, &req.connection_id, &req.database, "Update").await?;
+    ensure_writable(&state.app, &req.connection_id, &req.database, "mongoUpdateDocuments", "Update").await?;
     let result = dbx_core::mongo_ops::mongo_update_documents_core(
         &state.app,
         &req.connection_id,
@@ -483,7 +491,7 @@ pub async fn delete_document(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MongoDeleteRequest>,
 ) -> Result<Json<u64>, AppError> {
-    ensure_writable(&state.app, &req.connection_id, &req.database, "Delete").await?;
+    ensure_writable(&state.app, &req.connection_id, &req.database, "mongoDeleteDocument", "Delete").await?;
     let result = dbx_core::document_ops::delete_document_core(
         &state.app,
         &req.connection_id,
@@ -501,7 +509,7 @@ pub async fn delete_documents(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MongoDeleteDocumentsRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    ensure_writable(&state.app, &req.connection_id, &req.database, "Delete").await?;
+    ensure_writable(&state.app, &req.connection_id, &req.database, "mongoDeleteDocuments", "Delete").await?;
     let result = dbx_core::mongo_ops::mongo_delete_documents_core(
         &state.app,
         &req.connection_id,

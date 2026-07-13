@@ -48,6 +48,7 @@ import { queryResultBaseSql, queryResultExecutionSql } from "@/lib/tabs/tabPrese
 import { isMysqlExecutionErrorResult } from "@/lib/query/queryResultError";
 import { decodeQueryResultArchive, encodeQueryResultArchive, type DecodedQueryResultArchive } from "@/lib/query/queryResultArchive";
 import * as api from "@/lib/backend/api";
+import { productionWriteRequestDigest, type ProductionWriteAuthorization } from "@/lib/backend/productionWriteAuthorization";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
@@ -2073,7 +2074,7 @@ export const useQueryStore = defineStore("query", () => {
     await executeCurrentSql(tab.sql);
   }
 
-  async function executeCurrentSql(sql: string, options?: { skipRedisSafetyCheck?: boolean; sourceOffset?: number }) {
+  async function executeCurrentSql(sql: string, options?: { skipRedisSafetyCheck?: boolean; authorizeRestProductionWrite?: boolean; sourceOffset?: number }) {
     if (!activeTabId.value) return;
     await executeTabSql(activeTabId.value, sql, { resultBaseSql: sql, resultSortedSql: undefined, ...options });
   }
@@ -2489,6 +2490,7 @@ export const useQueryStore = defineStore("query", () => {
       preserveActiveResultIndex?: boolean;
       replaceActiveResultInGroup?: boolean;
       skipRedisSafetyCheck?: boolean;
+      authorizeRestProductionWrite?: boolean;
       sourceOffset?: number;
       sourceTraceId?: string;
       skipEnsureConnected?: boolean;
@@ -2947,7 +2949,16 @@ export const useQueryStore = defineStore("query", () => {
           optionKeys: Object.keys(executionOptions),
           clientSession: Boolean(clientSessionId),
         });
-        executionPromise = api.executeMulti(tab.connectionId, executionDatabase, sqlToExecute, executionSchema, executionId, executionOptions);
+        const requestArgs = [tab.connectionId, executionDatabase, sqlToExecute, executionSchema, executionId, executionOptions] as const;
+        let productionWriteAuthorization: ProductionWriteAuthorization | undefined;
+        if (options?.authorizeRestProductionWrite) {
+          // Issue the short-lived token only after query preparation so it is
+          // bound to the exact REST request sent by this execution.
+          const operation = "executeRestRequest";
+          const requestDigest = await productionWriteRequestDigest(operation, requestArgs);
+          productionWriteAuthorization = await api.authorizeProductionWrite(tab.connectionId, undefined, operation, requestDigest);
+        }
+        executionPromise = productionWriteAuthorization ? api.executeMulti(...requestArgs, productionWriteAuthorization) : api.executeMulti(...requestArgs);
       }
       const results = annotateQueryResultSources(markQueryResultsRowsRaw(await withFrontendQueryTimeout(executionPromise, frontendTimeoutSecs, t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs }))), queryBaseSql, sourceLabelDatabase, effectiveDbType, options?.sourceOffset);
       if (hiddenPrimaryKeys.length > 0 && results.length === 1) {

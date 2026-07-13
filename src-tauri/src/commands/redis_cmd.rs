@@ -5,6 +5,18 @@ use crate::commands::connection::{ensure_connection_write_allowed, AppState};
 use dbx_core::db::redis_driver::{
     RedisCollectionPage, RedisCommandResult, RedisDatabaseInfo, RedisScanResult, RedisValue,
 };
+use dbx_core::production_safety::ProductionWriteAuthorization;
+
+async fn ensure_redis_write(
+    state: &Arc<AppState>,
+    connection_id: &str,
+    db: u32,
+    operation: &str,
+    action: &str,
+    authorization: Option<&ProductionWriteAuthorization>,
+) -> Result<(), String> {
+    ensure_connection_write_allowed(state, connection_id, Some(&db.to_string()), operation, action, authorization).await
+}
 
 #[tauri::command]
 pub async fn redis_list_databases(
@@ -93,8 +105,10 @@ pub async fn redis_set_string(
     key_raw: String,
     value: String,
     ttl: Option<i64>,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&db.to_string()), "SET").await?;
+    ensure_redis_write(&state, &connection_id, db, "redisSetString", "SET", production_write_authorization.as_ref())
+        .await?;
     dbx_core::redis_ops::redis_set_string_in_db_core(&state, &connection_id, db, &key_raw, &value, ttl).await
 }
 
@@ -104,8 +118,17 @@ pub async fn redis_delete_key(
     connection_id: String,
     db: u32,
     key_raw: String,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&db.to_string()), "Delete key").await?;
+    ensure_redis_write(
+        &state,
+        &connection_id,
+        db,
+        "redisDeleteKey",
+        "Delete key",
+        production_write_authorization.as_ref(),
+    )
+    .await?;
     dbx_core::redis_ops::redis_delete_key_in_db_core(&state, &connection_id, db, &key_raw).await
 }
 
@@ -118,8 +141,10 @@ pub async fn redis_hash_set(
     field: String,
     value: String,
     ttl: Option<i64>,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&db.to_string()), "HSET").await?;
+    ensure_redis_write(&state, &connection_id, db, "redisHashSet", "HSET", production_write_authorization.as_ref())
+        .await?;
     dbx_core::redis_ops::redis_hash_set_in_db_core(&state, &connection_id, db, &key_raw, &field, &value, ttl).await
 }
 
@@ -130,8 +155,10 @@ pub async fn redis_hash_del(
     db: u32,
     key_raw: String,
     field: String,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&db.to_string()), "HDEL").await?;
+    ensure_redis_write(&state, &connection_id, db, "redisHashDel", "HDEL", production_write_authorization.as_ref())
+        .await?;
     dbx_core::redis_ops::redis_hash_del_in_db_core(&state, &connection_id, db, &key_raw, &field).await
 }
 
@@ -143,8 +170,10 @@ pub async fn redis_list_push(
     key_raw: String,
     value: String,
     ttl: Option<i64>,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&db.to_string()), "LPUSH").await?;
+    ensure_redis_write(&state, &connection_id, db, "redisListPush", "LPUSH", production_write_authorization.as_ref())
+        .await?;
     dbx_core::redis_ops::redis_list_push_in_db_core(&state, &connection_id, db, &key_raw, &value, ttl).await
 }
 
@@ -156,8 +185,10 @@ pub async fn redis_list_set(
     key_raw: String,
     index: i64,
     value: String,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&db.to_string()), "LSET").await?;
+    ensure_redis_write(&state, &connection_id, db, "redisListSet", "LSET", production_write_authorization.as_ref())
+        .await?;
     dbx_core::redis_ops::redis_list_set_in_db_core(&state, &connection_id, db, &key_raw, index, &value).await
 }
 
@@ -168,8 +199,10 @@ pub async fn redis_list_remove(
     db: u32,
     key_raw: String,
     index: i64,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&db.to_string()), "LREM").await?;
+    ensure_redis_write(&state, &connection_id, db, "redisListRemove", "LREM", production_write_authorization.as_ref())
+        .await?;
     dbx_core::redis_ops::redis_list_remove_in_db_core(&state, &connection_id, db, &key_raw, index).await
 }
 
@@ -181,8 +214,10 @@ pub async fn redis_set_add(
     key_raw: String,
     member: String,
     ttl: Option<i64>,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&db.to_string()), "SADD").await?;
+    ensure_redis_write(&state, &connection_id, db, "redisSetAdd", "SADD", production_write_authorization.as_ref())
+        .await?;
     dbx_core::redis_ops::redis_set_add_in_db_core(&state, &connection_id, db, &key_raw, &member, ttl).await
 }
 
@@ -193,8 +228,10 @@ pub async fn redis_set_remove(
     db: u32,
     key_raw: String,
     member: String,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&db.to_string()), "SREM").await?;
+    ensure_redis_write(&state, &connection_id, db, "redisSetRemove", "SREM", production_write_authorization.as_ref())
+        .await?;
     dbx_core::redis_ops::redis_set_remove_in_db_core(&state, &connection_id, db, &key_raw, &member).await
 }
 
@@ -207,8 +244,10 @@ pub async fn redis_zadd(
     member: String,
     score: f64,
     ttl: Option<i64>,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&db.to_string()), "ZADD").await?;
+    ensure_redis_write(&state, &connection_id, db, "redisZadd", "ZADD", production_write_authorization.as_ref())
+        .await?;
     dbx_core::redis_ops::redis_zadd_in_db_core(&state, &connection_id, db, &key_raw, &member, score, ttl).await
 }
 
@@ -219,8 +258,10 @@ pub async fn redis_zrem(
     db: u32,
     key_raw: String,
     member: String,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&db.to_string()), "ZREM").await?;
+    ensure_redis_write(&state, &connection_id, db, "redisZrem", "ZREM", production_write_authorization.as_ref())
+        .await?;
     dbx_core::redis_ops::redis_zrem_in_db_core(&state, &connection_id, db, &key_raw, &member).await
 }
 
@@ -233,8 +274,10 @@ pub async fn redis_stream_add(
     entry_id: String,
     fields: Vec<(String, String)>,
     ttl: Option<i64>,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&db.to_string()), "XADD").await?;
+    ensure_redis_write(&state, &connection_id, db, "redisStreamAdd", "XADD", production_write_authorization.as_ref())
+        .await?;
     dbx_core::redis_ops::redis_stream_add_in_db_core(&state, &connection_id, db, &key_raw, &entry_id, fields, ttl).await
 }
 
@@ -246,8 +289,10 @@ pub async fn redis_json_set(
     key_raw: String,
     value: String,
     ttl: Option<i64>,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&db.to_string()), "JSON.SET").await?;
+    ensure_redis_write(&state, &connection_id, db, "redisJsonSet", "JSON.SET", production_write_authorization.as_ref())
+        .await?;
     dbx_core::redis_ops::redis_json_set_in_db_core(&state, &connection_id, db, &key_raw, &value, ttl).await
 }
 
@@ -267,8 +312,10 @@ pub async fn redis_set_ttl(
     db: u32,
     key_raw: String,
     ttl: i64,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&db.to_string()), "EXPIRE").await?;
+    ensure_redis_write(&state, &connection_id, db, "redisSetTtl", "EXPIRE", production_write_authorization.as_ref())
+        .await?;
     dbx_core::redis_ops::redis_set_ttl_in_db_core(&state, &connection_id, db, &key_raw, ttl).await
 }
 
@@ -278,14 +325,29 @@ pub async fn redis_delete_keys(
     connection_id: String,
     db: u32,
     key_raws: Vec<String>,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<u64, String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&db.to_string()), "Delete keys").await?;
+    ensure_redis_write(
+        &state,
+        &connection_id,
+        db,
+        "redisDeleteKeys",
+        "Delete keys",
+        production_write_authorization.as_ref(),
+    )
+    .await?;
     dbx_core::redis_ops::redis_delete_keys_in_db_core(&state, &connection_id, db, &key_raws).await
 }
 
 #[tauri::command]
-pub async fn redis_flush_db(state: State<'_, Arc<AppState>>, connection_id: String, db: u32) -> Result<(), String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&db.to_string()), "FLUSHDB").await?;
+pub async fn redis_flush_db(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    db: u32,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
+) -> Result<(), String> {
+    ensure_redis_write(&state, &connection_id, db, "redisFlushDb", "FLUSHDB", production_write_authorization.as_ref())
+        .await?;
     dbx_core::redis_ops::redis_flush_db_core(&state, &connection_id, db).await
 }
 
@@ -296,6 +358,7 @@ pub async fn redis_execute_command(
     db: u32,
     command: String,
     skip_safety_check: Option<bool>,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<RedisCommandResult, String> {
     let cmd_name = command.split_whitespace().next().unwrap_or("");
     if dbx_core::db::redis_driver::command_is_mutating(&command) {
@@ -304,7 +367,9 @@ pub async fn redis_execute_command(
             &connection_id,
             db,
             &command,
+            "redisExecuteCommand",
             &format!("Command '{cmd_name}'"),
+            production_write_authorization.as_ref(),
         )
         .await?;
     }
@@ -349,8 +414,17 @@ pub async fn redis_pubsub_publish(
     db: u32,
     channel: String,
     message: String,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<u64, String> {
-    ensure_connection_write_allowed(&state, &connection_id, Some(&db.to_string()), "PUBLISH").await?;
+    ensure_redis_write(
+        &state,
+        &connection_id,
+        db,
+        "redisPubSubPublish",
+        "PUBLISH",
+        production_write_authorization.as_ref(),
+    )
+    .await?;
     dbx_core::redis_ops::redis_publish_core(&state, &connection_id, db, &channel, &message).await
 }
 

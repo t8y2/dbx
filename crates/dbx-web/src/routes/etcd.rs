@@ -11,9 +11,12 @@ use crate::state::WebState;
 async fn ensure_writable(
     app: &dbx_core::connection::AppState,
     connection_id: &str,
+    operation: &str,
     action: &str,
 ) -> Result<(), AppError> {
-    dbx_core::production_safety::ensure_write_allowed(app, connection_id, None, action).await.map_err(AppError)
+    dbx_core::production_safety::ensure_write_allowed(app, connection_id, None, operation, action)
+        .await
+        .map_err(AppError)
 }
 
 #[derive(Deserialize)]
@@ -69,7 +72,7 @@ pub async fn put(
     State(state): State<Arc<WebState>>,
     Json(req): Json<EtcdPutRequest>,
 ) -> Result<Json<dbx_core::agent_kv::KvPutResponse>, AppError> {
-    ensure_writable(&state.app, &req.connection_id, "Put").await?;
+    ensure_writable(&state.app, &req.connection_id, "etcdPut", "Put").await?;
     let result = dbx_core::agent_kv::kv_put_core(&state.app, &req.connection_id, &req.key, req.value, req.lease)
         .await
         .map_err(AppError)?;
@@ -80,7 +83,7 @@ pub async fn delete(
     State(state): State<Arc<WebState>>,
     Json(req): Json<EtcdKeyRequest>,
 ) -> Result<Json<dbx_core::agent_kv::KvDeleteResponse>, AppError> {
-    ensure_writable(&state.app, &req.connection_id, "Delete").await?;
+    ensure_writable(&state.app, &req.connection_id, "etcdDelete", "Delete").await?;
     let result =
         dbx_core::agent_kv::kv_delete_core(&state.app, &req.connection_id, &req.key).await.map_err(AppError)?;
     Ok(Json(result))

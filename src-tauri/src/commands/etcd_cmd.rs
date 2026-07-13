@@ -31,8 +31,17 @@ pub async fn etcd_put(
     key: String,
     value: KvValue,
     lease: Option<i64>,
+    production_write_authorization: Option<dbx_core::production_safety::ProductionWriteAuthorization>,
 ) -> Result<KvPutResponse, String> {
-    ensure_connection_write_allowed(&state, &connection_id, None, "Put").await?;
+    ensure_connection_write_allowed(
+        &state,
+        &connection_id,
+        None,
+        "etcdPut",
+        "Put",
+        production_write_authorization.as_ref(),
+    )
+    .await?;
     dbx_core::agent_kv::kv_put_core(&state, &connection_id, &key, value, lease).await
 }
 
@@ -41,7 +50,16 @@ pub async fn etcd_delete(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     key: String,
+    production_write_authorization: Option<dbx_core::production_safety::ProductionWriteAuthorization>,
 ) -> Result<KvDeleteResponse, String> {
-    ensure_connection_write_allowed(&state, &connection_id, None, "Delete").await?;
+    ensure_connection_write_allowed(
+        &state,
+        &connection_id,
+        None,
+        "etcdDelete",
+        "Delete",
+        production_write_authorization.as_ref(),
+    )
+    .await?;
     dbx_core::agent_kv::kv_delete_core(&state, &connection_id, &key).await
 }

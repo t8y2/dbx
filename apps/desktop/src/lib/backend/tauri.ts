@@ -2099,6 +2099,7 @@ export type TableImportMode = "append" | "truncate";
 export type TableImportStatus = "running" | "done" | "error" | "cancelled";
 export type TableImportSourceFormat = "csv" | "tsv" | "delimited" | "json" | "excel";
 export type TableImportJsonShape = "auto" | "objects" | "arrays";
+export type TableImportTextEncoding = "auto" | "utf8" | "gbk" | "utf16Le" | "utf16Be";
 
 export interface TableImportColumnMapping {
   sourceColumn: string;
@@ -2108,6 +2109,7 @@ export interface TableImportColumnMapping {
 
 export interface TableImportParseOptions {
   delimiter?: string | null;
+  encoding?: TableImportTextEncoding | null;
   hasHeader?: boolean | null;
   titleRow?: number | null;
   dataStartRow?: number | null;
@@ -2136,6 +2138,7 @@ export interface TableImportPreview {
   columns: string[];
   rows: unknown[][];
   totalRows: number;
+  effectiveEncoding?: TableImportTextEncoding | null;
   sheets?: string[];
 }
 

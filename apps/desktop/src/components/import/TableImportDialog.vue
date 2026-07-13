@@ -72,6 +72,7 @@ const errorMessage = ref("");
 const wizardStep = ref<TableImportWizardStep>("source");
 const fileInput = ref<HTMLInputElement | null>(null);
 const delimiter = ref(",");
+const textEncoding = ref<api.TableImportTextEncoding>("auto");
 const titleRow = ref(1);
 const dataStartRow = ref(2);
 const lastDataRow = ref(0);
@@ -82,6 +83,8 @@ const jsonShape = ref<api.TableImportJsonShape>("auto");
 const previewLimit = ref(50);
 let previewReloadTimer: ReturnType<typeof setTimeout> | null = null;
 let dataTypeOptionsRequestId = 0;
+let previewRequestId = 0;
+let batchEncodingRequestId = 0;
 
 const formatOptions: Array<{ value: api.TableImportSourceFormat; icon: any; labelKey: string; descriptionKey: string }> = [
   { value: "csv", icon: FileText, labelKey: "tableImport.formatCsv", descriptionKey: "tableImport.formatCsvDescription" },
@@ -89,6 +92,14 @@ const formatOptions: Array<{ value: api.TableImportSourceFormat; icon: any; labe
   { value: "delimited", icon: FileText, labelKey: "tableImport.formatDelimited", descriptionKey: "tableImport.formatDelimitedDescription" },
   { value: "json", icon: FileJson, labelKey: "tableImport.formatJson", descriptionKey: "tableImport.formatJsonDescription" },
   { value: "excel", icon: FileSpreadsheet, labelKey: "tableImport.formatExcel", descriptionKey: "tableImport.formatExcelDescription" },
+];
+
+const encodingOptions: Array<{ value: api.TableImportTextEncoding; labelKey: string }> = [
+  { value: "auto", labelKey: "tableImport.encodingAuto" },
+  { value: "utf8", labelKey: "tableImport.encodingUtf8" },
+  { value: "gbk", labelKey: "tableImport.encodingGbk" },
+  { value: "utf16Le", labelKey: "tableImport.encodingUtf16Le" },
+  { value: "utf16Be", labelKey: "tableImport.encodingUtf16Be" },
 ];
 
 const wizardSteps: Array<{ value: TableImportWizardStep; labelKey: string }> = [
@@ -169,6 +180,7 @@ const createColumnSummaries = computed(() =>
 );
 const parseOptions = computed<api.TableImportParseOptions>(() => ({
   delimiter: sourceFormat.value === "tsv" ? "\\t" : sourceFormat.value === "csv" ? "," : delimiter.value,
+  encoding: isDelimitedFormat(sourceFormat.value) ? textEncoding.value : null,
   titleRow: titleRow.value,
   dataStartRow: dataStartRow.value,
   lastDataRow: lastDataRow.value,
@@ -180,6 +192,12 @@ const parseOptions = computed<api.TableImportParseOptions>(() => ({
 const terminalStatus = computed(() => progress.value?.status && ["done", "error", "cancelled"].includes(progress.value.status));
 
 function resetState() {
+  previewRequestId++;
+  batchEncodingRequestId++;
+  if (previewReloadTimer) {
+    clearTimeout(previewReloadTimer);
+    previewReloadTimer = null;
+  }
   targetColumns.value = [];
   targetMode.value = props.prefillTable ? "existing" : "create";
   newTableName.value = "";
@@ -188,6 +206,7 @@ function resetState() {
   activeTaskIndex.value = 0;
   sourceFormat.value = "csv";
   delimiter.value = ",";
+  textEncoding.value = "auto";
   titleRow.value = 1;
   dataStartRow.value = 2;
   lastDataRow.value = 0;
@@ -201,6 +220,7 @@ function resetState() {
   columnDataTypes.value = {};
   importMode.value = "append";
   batchSize.value = 500;
+  loadingPreview.value = false;
   running.value = false;
   cancelling.value = false;
   importId.value = "";
@@ -216,6 +236,14 @@ function detectFormat(name: string): api.TableImportSourceFormat {
   if (lower.endsWith(".json")) return "json";
   if (lower.endsWith(".xls") || lower.endsWith(".xlsx") || lower.endsWith(".xlsm")) return "excel";
   return "csv";
+}
+
+function isDelimitedFormat(format: api.TableImportSourceFormat) {
+  return format === "csv" || format === "tsv" || format === "delimited";
+}
+
+function encodingLabel(encoding: api.TableImportTextEncoding) {
+  return t(encodingOptions.find((option) => option.value === encoding)?.labelKey || "tableImport.encodingAuto");
 }
 
 function suggestedTableName(name: string) {
@@ -240,6 +268,7 @@ function uniqueTableName(baseName: string, usedNames: Set<string>): string {
 function taskParseOptions(format: api.TableImportSourceFormat, sheetName = ""): api.TableImportParseOptions {
   return {
     delimiter: format === "tsv" ? "\\t" : format === "csv" ? "," : delimiter.value,
+    encoding: isDelimitedFormat(format) ? textEncoding.value : null,
     titleRow: titleRow.value,
     dataStartRow: dataStartRow.value,
     lastDataRow: lastDataRow.value,
@@ -248,6 +277,14 @@ function taskParseOptions(format: api.TableImportSourceFormat, sheetName = ""): 
     sheetName: format === "excel" ? sheetName || null : null,
     jsonShape: format === "json" ? jsonShape.value : null,
   };
+}
+
+function importParseOptions(format: api.TableImportSourceFormat, currentPreview: api.TableImportPreview, sheetName = ""): api.TableImportParseOptions {
+  const options = taskParseOptions(format, sheetName);
+  if (isDelimitedFormat(format) && options.encoding === "auto" && currentPreview.effectiveEncoding) {
+    options.encoding = currentPreview.effectiveEncoding;
+  }
+  return options;
 }
 
 function mergeDataTypeOptions(...groups: readonly string[][]): string[] {
@@ -337,10 +374,12 @@ async function previewSelectedImportFile(fileOrPath: string | File) {
 
 async function loadPreview(fileOrPath = selectedSource.value) {
   if (!fileOrPath) return;
+  const requestId = ++previewRequestId;
   loadingPreview.value = true;
   errorMessage.value = "";
   try {
     const nextPreview = await previewSelectedImportFile(fileOrPath);
+    if (requestId !== previewRequestId) return;
     preview.value = nextPreview;
     if (sourceFormat.value === "excel" && !selectedSheet.value && nextPreview.sheets?.length) {
       selectedSheet.value = nextPreview.sheets[0];
@@ -348,12 +387,13 @@ async function loadPreview(fileOrPath = selectedSource.value) {
     applyAutoMapping();
     applySuggestedColumnDataTypes(nextPreview);
   } catch (e: any) {
+    if (requestId !== previewRequestId) return;
     preview.value = null;
     columnMapping.value = {};
     columnDataTypes.value = {};
     errorMessage.value = String(e?.message || e);
   } finally {
-    loadingPreview.value = false;
+    if (requestId === previewRequestId) loadingPreview.value = false;
   }
 }
 
@@ -580,7 +620,7 @@ async function startImport() {
         filePath: currentPreview.filePath,
         sourceRef: currentPreview.sourceRef || null,
         sourceFormat: sourceFormat.value,
-        parseOptions: parseOptions.value,
+        parseOptions: importParseOptions(sourceFormat.value, currentPreview),
         mappings: mappedColumns.value,
         mode: targetMode.value === "create" ? "append" : importMode.value,
         createTable: targetMode.value === "create",
@@ -655,7 +695,7 @@ async function startBatchImport() {
           filePath: task.preview.filePath,
           sourceRef: task.preview.sourceRef || null,
           sourceFormat: task.format,
-          parseOptions: taskParseOptions(task.format, task.sheetName),
+          parseOptions: importParseOptions(task.format, task.preview, task.sheetName),
           mappings,
           mode: "append",
           createTable: true,
@@ -712,6 +752,48 @@ function schedulePreviewReload() {
   }, 250);
 }
 
+function schedulePreviewReloadAfterEncodingChange() {
+  if (isBatchImport.value) {
+    void reloadBatchPreviewsForEncoding();
+    return;
+  }
+  if (!selectedSource.value || running.value) return;
+  previewRequestId++;
+  if (previewReloadTimer) clearTimeout(previewReloadTimer);
+  previewReloadTimer = setTimeout(() => {
+    void loadPreview();
+  }, 250);
+}
+
+async function reloadBatchPreviewsForEncoding() {
+  if (!isBatchImport.value || running.value) return;
+  const requestId = ++batchEncodingRequestId;
+  loadingPreview.value = true;
+  errorMessage.value = "";
+  try {
+    for (const task of batchTasks.value) {
+      if (!isDelimitedFormat(task.format)) continue;
+      const nextPreview = await api.previewTableImportFile(task.source, {
+        sourceFormat: task.format,
+        parseOptions: taskParseOptions(task.format, task.sheetName),
+        previewLimit: Math.max(1, Number(previewLimit.value) || 50),
+      });
+      if (requestId !== batchEncodingRequestId) return;
+      task.preview = nextPreview;
+      task.columnMapping = Object.fromEntries(nextPreview.columns.map((column) => [column, column]));
+      task.columnDataTypes = suggestImportTargetDataTypes(nextPreview.columns, nextPreview.rows, structureDatabaseType.value);
+    }
+    activateBatchTask(activeTaskIndex.value);
+  } catch (e: any) {
+    if (requestId === batchEncodingRequestId) {
+      preview.value = null;
+      errorMessage.value = String(e?.message || e);
+    }
+  } finally {
+    if (requestId === batchEncodingRequestId) loadingPreview.value = false;
+  }
+}
+
 watch(
   open,
   (value) => {
@@ -725,6 +807,7 @@ watch(
 );
 
 watch([sourceFormat, delimiter, titleRow, dataStartRow, lastDataRow, trimValues, emptyStringAsNull, selectedSheet, jsonShape, previewLimit], schedulePreviewReload);
+watch(textEncoding, schedulePreviewReloadAfterEncodingChange);
 watch([newTableName, columnMapping, columnDataTypes], saveActiveBatchTask, { deep: true });
 watch(targetMode, (mode) => {
   if (mode === "existing") {
@@ -886,7 +969,23 @@ watch(targetMode, (mode) => {
             </div>
           </div>
 
-          <div v-if="sourceFormat === 'csv' || sourceFormat === 'tsv' || sourceFormat === 'delimited'" class="grid grid-cols-4 gap-3 rounded-md border p-3">
+          <div v-if="sourceFormat === 'csv' || sourceFormat === 'tsv' || sourceFormat === 'delimited'" class="grid grid-cols-5 gap-3 rounded-md border p-3">
+            <div class="space-y-1.5">
+              <Label class="text-xs">{{ t("tableImport.encoding") }}</Label>
+              <Select :model-value="textEncoding" @update:model-value="(value: any) => (textEncoding = value)">
+                <SelectTrigger class="h-8 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="option in encodingOptions" :key="option.value" :value="option.value">
+                    {{ t(option.labelKey) }}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+              <div v-if="textEncoding === 'auto' && preview?.effectiveEncoding" class="truncate text-[11px] text-muted-foreground" :title="t('tableImport.encodingDetected', { encoding: encodingLabel(preview.effectiveEncoding) })">
+                {{ t("tableImport.encodingDetected", { encoding: encodingLabel(preview.effectiveEncoding) }) }}
+              </div>
+            </div>
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.delimiter") }}</Label>
               <Input v-model="delimiter" :disabled="sourceFormat !== 'delimited'" class="h-8 text-xs font-mono" />

@@ -556,6 +556,7 @@ export type {
   TableImportStatus,
   TableImportSourceFormat,
   TableImportJsonShape,
+  TableImportTextEncoding,
   TableImportColumnMapping,
   TableImportParseOptions,
   TableImportPreviewRequest,

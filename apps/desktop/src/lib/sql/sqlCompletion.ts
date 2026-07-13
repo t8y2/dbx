@@ -883,6 +883,8 @@ const POSTGRES_FUNCTION_SIGNATURES = new Map<string, string[]>([
 
 const MYSQL_FUNCTION_SIGNATURES = new Map<string, string[]>([
   ["DATE_FORMAT", ["date", "format"]],
+  ["FROM_UNIXTIME", ["unix_timestamp"]],
+  ["UNIX_TIMESTAMP", []],
   ["JSON_EXTRACT", ["json", "path"]],
   ["JSON_UNQUOTE", ["json"]],
   ["GROUP_CONCAT", ["expression"]],

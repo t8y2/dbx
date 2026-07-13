@@ -14,6 +14,64 @@ describe("sqlCompletion keyword snippets", () => {
   });
 });
 
+describe("sqlCompletion database functions", () => {
+  it("suggests MySQL Unix timestamp functions with function snippets", () => {
+    const fromUnixSql = "SELECT from_unix";
+    const fromUnixItems = buildSqlCompletionItems(fromUnixSql, fromUnixSql.length, {
+      databaseType: "mysql",
+      tables: [],
+      columnsByTable: new Map(),
+    });
+    const fromUnixTime = fromUnixItems.find((item) => item.label === "FROM_UNIXTIME");
+
+    expect(fromUnixItems[0]).toBe(fromUnixTime);
+    expect(fromUnixTime).toEqual(
+      expect.objectContaining({
+        type: "function",
+        apply: "FROM_UNIXTIME(${unix_timestamp})",
+      }),
+    );
+
+    const unixTimestampSql = "SELECT unix_time";
+    const unixTimestampItems = buildSqlCompletionItems(unixTimestampSql, unixTimestampSql.length, {
+      databaseType: "mysql",
+      tables: [],
+      columnsByTable: new Map(),
+    });
+
+    expect(unixTimestampItems[0]).toEqual(
+      expect.objectContaining({
+        label: "UNIX_TIMESTAMP",
+        type: "function",
+        apply: "UNIX_TIMESTAMP()",
+      }),
+    );
+  });
+
+  it("ranks MySQL function prefixes ahead of ordinary keyword prefixes", () => {
+    const sql = "SELECT uni";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "mysql",
+      tables: [],
+      columnsByTable: new Map(),
+    });
+
+    expect(items.some((item) => item.type === "keyword")).toBe(true);
+    expect(items[0]).toEqual(expect.objectContaining({ label: "UNIX_TIMESTAMP", type: "function" }));
+  });
+
+  it("does not expose MySQL-only functions to other databases", () => {
+    const sql = "SELECT from_unix";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "postgres",
+      tables: [],
+      columnsByTable: new Map(),
+    });
+
+    expect(items.some((item) => item.label === "FROM_UNIXTIME")).toBe(false);
+  });
+});
+
 describe("sqlCompletion quoted schema qualifiers", () => {
   it("parses quoted PostgreSQL schema names before a dot", () => {
     const sql = 'SELECT *\nFROM "order-management".';

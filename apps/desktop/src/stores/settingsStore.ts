@@ -413,6 +413,7 @@ export interface EditorSettings {
   openTabsRestoreMode: OpenTabsRestoreMode;
   disconnectTabHandlingMode: DisconnectTabHandlingMode;
   reuseDataTab: boolean;
+  prefillNewQueryWithSelect: boolean;
   updateNotificationsEnabled: boolean;
   sidebarHiddenTablePrefixes: string[];
   sidebarHideTableComments: boolean;
@@ -548,6 +549,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   openTabsRestoreMode: "all",
   disconnectTabHandlingMode: "close-tabs",
   reuseDataTab: false,
+  prefillNewQueryWithSelect: true,
   updateNotificationsEnabled: true,
   sidebarHiddenTablePrefixes: [],
   sidebarHideTableComments: false,
@@ -783,6 +785,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     openTabsRestoreMode: normalizeOpenTabsRestoreMode((settings as Partial<EditorSettings>).openTabsRestoreMode, (settings as Partial<EditorSettings> & { restoreOpenTabsOnLaunch?: boolean }).restoreOpenTabsOnLaunch),
     disconnectTabHandlingMode: normalizeDisconnectTabHandlingMode((settings as Partial<EditorSettings>).disconnectTabHandlingMode, (settings as Partial<EditorSettings> & { closeQueryTabsOnDisconnect?: boolean }).closeQueryTabsOnDisconnect),
     reuseDataTab: settings.reuseDataTab ?? DEFAULT_EDITOR_SETTINGS.reuseDataTab,
+    prefillNewQueryWithSelect: typeof settings.prefillNewQueryWithSelect === "boolean" ? settings.prefillNewQueryWithSelect : DEFAULT_EDITOR_SETTINGS.prefillNewQueryWithSelect,
     updateNotificationsEnabled: settings.updateNotificationsEnabled ?? DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled,
     sidebarHiddenTablePrefixes: normalizeSidebarHiddenTablePrefixes(settings.sidebarHiddenTablePrefixes),
     sidebarHideTableComments: settings.sidebarHideTableComments ?? DEFAULT_EDITOR_SETTINGS.sidebarHideTableComments,
@@ -1030,6 +1033,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.openTabsRestoreMode !== undefined) editorSettings.value.openTabsRestoreMode = normalizeOpenTabsRestoreMode(partial.openTabsRestoreMode);
     if (partial.disconnectTabHandlingMode !== undefined) editorSettings.value.disconnectTabHandlingMode = normalizeDisconnectTabHandlingMode(partial.disconnectTabHandlingMode);
     if (partial.reuseDataTab !== undefined) editorSettings.value.reuseDataTab = partial.reuseDataTab;
+    if (partial.prefillNewQueryWithSelect !== undefined) editorSettings.value.prefillNewQueryWithSelect = partial.prefillNewQueryWithSelect;
     if (partial.updateNotificationsEnabled !== undefined) editorSettings.value.updateNotificationsEnabled = partial.updateNotificationsEnabled;
     if (partial.sidebarHiddenTablePrefixes !== undefined) editorSettings.value.sidebarHiddenTablePrefixes = normalizeSidebarHiddenTablePrefixes(partial.sidebarHiddenTablePrefixes);
     if (partial.sidebarHideTableComments !== undefined) editorSettings.value.sidebarHideTableComments = partial.sidebarHideTableComments;

@@ -38,7 +38,7 @@ import * as api from "@/lib/backend/api";
 import { connectionRedactedNameLabel } from "@/lib/connection/connectionPresentation";
 import { quickConnectionOpenTarget } from "@/lib/connection/connectionOpenTarget";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
-import { findTreeNodeById, resolveNewQueryTarget } from "@/lib/sql/newQueryContext";
+import { findTreeNodeById, resolveNewQueryTarget, resolveNewQueryInitialSql } from "@/lib/sql/newQueryContext";
 import { buildExecutableObjectSourceStatements, executeObjectSourceSave } from "@/lib/table/objectSourceEditor";
 import { resolveExecutableSql, resolveExecutableSqlWithBackend, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 import { uuid } from "@/lib/common/utils";
@@ -1085,7 +1085,18 @@ async function newQuery() {
   const conn = connectionStore.getConfig(target.connectionId);
   if (!conn) return;
   connectionStore.activeConnectionId = target.connectionId;
-  const tabId = queryStore.createTab(conn.id, target.database, undefined, "query", target.schema);
+  // Prefill the editor with `SELECT * FROM <focused table>` when enabled and a
+  // table context (active data/structure tab or selected table node) is available.
+  // Built before createTab so the tab opens with the content directly (no flash).
+  const initialSql = resolveNewQueryInitialSql({
+    activeTab: activeTab.value,
+    selectedTreeNode: findTreeNodeById(connectionStore.treeNodes, connectionStore.selectedTreeNodeId),
+    preferredSource: newQueryContextSource.value,
+    prefillEnabled: settingsStore.editorSettings.prefillNewQueryWithSelect,
+    targetConnectionId: target.connectionId,
+    databaseType: effectiveDatabaseTypeForConnection(conn),
+  });
+  const tabId = queryStore.createTab(conn.id, target.database, undefined, "query", target.schema, initialSql);
   try {
     await connectionStore.ensureConnected(target.connectionId);
     if (target.shouldRefreshDefaultDatabase) {

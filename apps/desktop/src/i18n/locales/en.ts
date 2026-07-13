@@ -3351,6 +3351,8 @@ export default {
     confirmDangerousSqlExecutionDescription: "When disabled, ALTER, DROP, DELETE, TRUNCATE, and other dangerous SQL run without the warning dialog.",
     confirmUnsavedSqlClose: "Confirm before closing unsaved SQL",
     confirmUnsavedSqlCloseDescription: "When disabled, SQL tabs with unsaved edits close or quit without the save confirmation dialog.",
+    prefillNewQueryWithSelect: "Prefill new query with SELECT *",
+    prefillNewQueryWithSelectDescription: "When creating a new query, prefill the editor with SELECT * FROM <table> based on the active table tab or the table selected in the sidebar.",
     sqlVariableSyntax: "SQL variable & placeholder substitution",
     sqlVariableSyntaxDescription: "Choose which variable and placeholder syntaxes DBX substitutes before running SQL, per database type. All are enabled by default.",
     sqlVariableSyntax_positional: "Positional placeholder",

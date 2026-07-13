@@ -3187,6 +3187,8 @@ export default withEnglishFallback({
     confirmDangerousSqlExecutionDescription: "Quando desativado, ALTER, DROP, DELETE, TRUNCATE e outros SQL perigosos são executados sem a caixa de diálogo de aviso.",
     confirmUnsavedSqlClose: "Confirmar antes de fechar SQL não salvo",
     confirmUnsavedSqlCloseDescription: "Quando desativado, abas SQL com edições não salvas são fechadas ou o app é encerrado sem a caixa de diálogo de confirmação de salvamento.",
+    prefillNewQueryWithSelect: "Preencher nova consulta com SELECT *",
+    prefillNewQueryWithSelectDescription: "Ao criar uma nova consulta, preenche o editor com SELECT * FROM <tabela> com base na aba de tabela ativa ou na tabela selecionada na barra lateral.",
     sqlVariableSyntax: "Substituição de variáveis e espaços reservados SQL",
     sqlVariableSyntaxDescription: "Escolha quais sintaxes de variáveis e espaços reservados o DBX substitui antes de executar SQL, por tipo de banco de dados. Todas ativadas por padrão.",
     sqlVariableSyntax_positional: "Espaço reservado posicional",

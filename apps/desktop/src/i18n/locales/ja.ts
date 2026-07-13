@@ -3175,6 +3175,8 @@ export default withEnglishFallback({
     confirmDangerousSqlExecutionDescription: "無効時、ALTER、DROP、DELETE、TRUNCATEなどの危険なSQLが警告ダイアログなしで実行されます。",
     confirmUnsavedSqlClose: "未保存のSQLを閉じる前に確認",
     confirmUnsavedSqlCloseDescription: "無効時、未保存の編集があるSQLタブは保存確認ダイアログなしで閉じるか終了します。",
+    prefillNewQueryWithSelect: "新規クエリに SELECT を自動入力",
+    prefillNewQueryWithSelectDescription: "新規クエリ作成時、アクティブなテーブルタブまたはサイドバーで選択したテーブルに基づき、エディタに SELECT * FROM <テーブル名> を自動入力します。",
     sqlVariableSyntax: "SQL 変数・プレースホルダー置換",
     sqlVariableSyntaxDescription: "SQL 実行前に置換する変数・プレースホルダー構文をデータベース種別ごとに選択します。既定ではすべて有効です。",
     sqlVariableSyntax_positional: "位置プレースホルダー",

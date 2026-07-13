@@ -3187,6 +3187,8 @@ export default withEnglishFallback({
     confirmDangerousSqlExecutionDescription: "Cuando se desactiva, ALTER, DROP, DELETE, TRUNCATE y otras sentencias peligrosas se ejecutan sin el diálogo de advertencia.",
     confirmUnsavedSqlClose: "Confirmar antes de cerrar SQL sin guardar",
     confirmUnsavedSqlCloseDescription: "Cuando se desactiva, las pestañas SQL con ediciones sin guardar se cierran o salen sin el diálogo de confirmación de guardado.",
+    prefillNewQueryWithSelect: "Rellenar nueva consulta con SELECT *",
+    prefillNewQueryWithSelectDescription: "Al crear una nueva consulta, rellena el editor con SELECT * FROM <tabla> según la pestaña de tabla activa o la tabla seleccionada en la barra lateral.",
     sqlVariableSyntax: "Sustitución de variables y marcadores SQL",
     sqlVariableSyntaxDescription: "Elige qué sintaxis de variables y marcadores sustituye DBX antes de ejecutar SQL, por tipo de base de datos. Todas están habilitadas de forma predeterminada.",
     sqlVariableSyntax_positional: "Marcador posicional",

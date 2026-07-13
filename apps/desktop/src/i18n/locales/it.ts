@@ -3185,6 +3185,8 @@ export default withEnglishFallback({
     confirmDangerousSqlExecutionDescription: "Se disattivato, ALTER, DROP, DELETE, TRUNCATE e altri SQL pericolosi verranno eseguiti senza la finestra di avviso.",
     confirmUnsavedSqlClose: "Conferma prima di chiudere SQL non salvato",
     confirmUnsavedSqlCloseDescription: "Se disattivato, le schede SQL con modifiche non salvate verranno chiuse o usciranno senza la finestra di conferma di salvataggio.",
+    prefillNewQueryWithSelect: "Precompila nuova query con SELECT *",
+    prefillNewQueryWithSelectDescription: "Alla creazione di una nuova query, precompila l'editor con SELECT * FROM <tabella> in base alla scheda tabella attiva o alla tabella selezionata nella barra laterale.",
     sqlVariableSyntax: "Sostituzione di variabili e segnaposto SQL",
     sqlVariableSyntaxDescription: "Scegli quali sintassi di variabili e segnaposto DBX sostituisce prima di eseguire SQL, per tipo di database. Tutte abilitate per impostazione predefinita.",
     sqlVariableSyntax_positional: "Segnaposto posizionale",

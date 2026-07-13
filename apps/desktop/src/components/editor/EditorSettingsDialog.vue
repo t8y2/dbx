@@ -330,6 +330,7 @@ const editAutoSelectActiveSidebarNode = ref(settingsStore.editorSettings.autoSel
 const editOpenTabsRestoreMode = ref<OpenTabsRestoreMode>(settingsStore.editorSettings.openTabsRestoreMode);
 const editDisconnectTabHandlingMode = ref<DisconnectTabHandlingMode>(settingsStore.editorSettings.disconnectTabHandlingMode);
 const editReuseDataTab = ref(settingsStore.editorSettings.reuseDataTab);
+const editPrefillNewQueryWithSelect = ref(settingsStore.editorSettings.prefillNewQueryWithSelect);
 const editUpdateNotificationsEnabled = ref(settingsStore.editorSettings.updateNotificationsEnabled);
 const editSidebarHiddenTablePrefixes = ref(settingsStore.editorSettings.sidebarHiddenTablePrefixes.join("\n"));
 const editSidebarHideTableComments = ref(settingsStore.editorSettings.sidebarHideTableComments);
@@ -415,6 +416,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     openTabsRestoreMode: editOpenTabsRestoreMode.value,
     disconnectTabHandlingMode: editDisconnectTabHandlingMode.value,
     reuseDataTab: editReuseDataTab.value,
+    prefillNewQueryWithSelect: editPrefillNewQueryWithSelect.value,
     updateNotificationsEnabled: editUpdateNotificationsEnabled.value,
     sidebarHideTableComments: editSidebarHideTableComments.value,
     sidebarAllowHorizontalScroll: editSidebarAllowHorizontalScroll.value,
@@ -690,6 +692,7 @@ function syncEditorSettingsDraftFromStore() {
   editOpenTabsRestoreMode.value = settingsStore.editorSettings.openTabsRestoreMode;
   editDisconnectTabHandlingMode.value = settingsStore.editorSettings.disconnectTabHandlingMode;
   editReuseDataTab.value = settingsStore.editorSettings.reuseDataTab;
+  editPrefillNewQueryWithSelect.value = settingsStore.editorSettings.prefillNewQueryWithSelect;
   editUpdateNotificationsEnabled.value = settingsStore.editorSettings.updateNotificationsEnabled;
   editSidebarHiddenTablePrefixes.value = settingsStore.editorSettings.sidebarHiddenTablePrefixes.join("\n");
   editSidebarHideTableComments.value = settingsStore.editorSettings.sidebarHideTableComments;
@@ -882,6 +885,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
     editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
     editReuseDataTab.value = DEFAULT_EDITOR_SETTINGS.reuseDataTab;
+    editPrefillNewQueryWithSelect.value = DEFAULT_EDITOR_SETTINGS.prefillNewQueryWithSelect;
     editUpdateNotificationsEnabled.value = DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled;
     editSidebarHideTableComments.value = DEFAULT_EDITOR_SETTINGS.sidebarHideTableComments;
     editSidebarAllowHorizontalScroll.value = DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll;
@@ -960,6 +964,7 @@ function resetAllDefaults() {
   editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
   editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
   editReuseDataTab.value = DEFAULT_EDITOR_SETTINGS.reuseDataTab;
+  editPrefillNewQueryWithSelect.value = DEFAULT_EDITOR_SETTINGS.prefillNewQueryWithSelect;
   editUpdateNotificationsEnabled.value = DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled;
   editSidebarHideTableComments.value = DEFAULT_EDITOR_SETTINGS.sidebarHideTableComments;
   editSidebarAllowHorizontalScroll.value = DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll;
@@ -2798,6 +2803,14 @@ onUnmounted(cleanupPreviewEditor);
                     </p>
                   </div>
                   <Switch id="editor-confirm-unsaved-sql-close" v-model="editConfirmUnsavedSqlClose" class="mt-0.5" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-prefill-new-query">{{ t("settings.prefillNewQueryWithSelect") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.prefillNewQueryWithSelectDescription") }}</p>
+                  </div>
+                  <Switch id="editor-prefill-new-query" v-model="editPrefillNewQueryWithSelect" class="mt-0.5" />
                 </div>
               </div>
 

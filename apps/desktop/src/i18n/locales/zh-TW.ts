@@ -3036,6 +3036,8 @@ export default withEnglishFallback({
     confirmDangerousSqlExecutionDescription: "關閉後，ALTER、DROP、DELETE、TRUNCATE 等危險 SQL 會直接執行。",
     confirmUnsavedSqlClose: "關閉未儲存 SQL 前彈出確認",
     confirmUnsavedSqlCloseDescription: "關閉後，有未儲存內容的 SQL 分頁會直接關閉或結束，不再彈出儲存確認。",
+    prefillNewQueryWithSelect: "新建查詢時預填 SELECT 語句",
+    prefillNewQueryWithSelectDescription: "新建查詢時，根據目前啟用的資料表分頁或側邊欄選取的資料表，自動在編輯器中填入 SELECT * FROM <資料表名稱>。",
     sqlVariableSyntax: "SQL 變數與佔位符替換",
     sqlVariableSyntaxDescription: "依資料庫類型選擇執行 SQL 前替換哪些變數與佔位符語法，預設全部開啟。",
     sqlVariableSyntax_positional: "位置佔位符",

@@ -38,6 +38,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "openTabsRestoreMode",
   "disconnectTabHandlingMode",
   "reuseDataTab",
+  "prefillNewQueryWithSelect",
   "updateNotificationsEnabled",
   "sidebarHideTableComments",
   "sidebarAllowHorizontalScroll",

@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Loader2, Plus, Trash2 } from "@lucide/vue";
 import { useToast } from "@/composables/useToast";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
-import { createTunnelProfile, tunnelProfileSummary, type TunnelProfileType } from "@/lib/connection/tunnelProfiles";
+import { createTunnelProfile, createTunnelProfileTestGuard, tunnelProfileSummary, type TunnelProfileType } from "@/lib/connection/tunnelProfiles";
 import type { TunnelProfile } from "@/types/database";
 import { translateBackendError } from "@/i18n/backend-errors";
 
@@ -23,6 +23,7 @@ const isSaving = ref(false);
 const hasInitializedDraft = ref(false);
 const isTesting = ref(false);
 const testResult = ref<{ ok: boolean; message: string } | null>(null);
+const testGuard = createTunnelProfileTestGuard();
 
 function cloneProfiles(profiles: TunnelProfile[]): TunnelProfile[] {
   return JSON.parse(JSON.stringify(profiles)) as TunnelProfile[];
@@ -56,11 +57,21 @@ const selectedSsh = computed(() => (selected.value?.type === "ssh" ? selected.va
 const selectedProxy = computed(() => (selected.value?.type === "proxy" ? selected.value : null));
 const selectedHttp = computed(() => (selected.value?.type === "http_tunnel" ? selected.value : null));
 
-// A test result reflects one profile at one moment; drop it when the selection
-// changes so a stale pass/fail never lingers over a different profile.
-watch(selectedId, () => {
+function invalidateProfileTest() {
+  testGuard.invalidate();
+  isTesting.value = false;
   testResult.value = null;
-});
+}
+
+// Profile tests are asynchronous, so any selection or configuration change
+// must invalidate the request before it can publish a stale result.
+watch(
+  [selectedId, selectedSsh],
+  () => {
+    invalidateProfileTest();
+  },
+  { deep: true },
+);
 
 function profileTypeLabel(profile: TunnelProfile): string {
   if (profile.type === "proxy") return "Proxy";
@@ -104,6 +115,7 @@ function updateProxyType(value: unknown) {
 
 async function save() {
   if (isSaving.value) return;
+  invalidateProfileTest();
   isSaving.value = true;
   try {
     await store.saveProfiles(cloneProfiles(draft.value));
@@ -118,16 +130,19 @@ async function save() {
 async function testSelected() {
   const profile = selectedSsh.value;
   if (!profile || isTesting.value) return;
+  const profileSnapshot = cloneProfiles([profile])[0];
+  const requestId = testGuard.start(profileSnapshot);
   isTesting.value = true;
   testResult.value = null;
   try {
-    // Clone so the live draft object never crosses the backend boundary.
-    const message = await store.testProfile(cloneProfiles([profile])[0]);
+    const message = await store.testProfile(profileSnapshot);
+    if (!testGuard.isCurrent(requestId, selectedSsh.value)) return;
     testResult.value = { ok: true, message: message || t("settings.tunnelsTestSuccess") };
   } catch (error) {
+    if (!testGuard.isCurrent(requestId, selectedSsh.value)) return;
     testResult.value = { ok: false, message: t("settings.tunnelsTestFailed", { message: translateBackendError(t, String(error)) }) };
   } finally {
-    isTesting.value = false;
+    if (testGuard.isCurrent(requestId, selectedSsh.value)) isTesting.value = false;
   }
 }
 </script>

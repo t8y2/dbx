@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createTunnelProfile, detachTunnelProfileLayer, tunnelProfileReferenceLayer, tunnelProfileSummary } from "@/lib/connection/tunnelProfiles";
+import { createTunnelProfile, createTunnelProfileTestGuard, detachTunnelProfileLayer, tunnelProfileReferenceLayer, tunnelProfileSummary } from "@/lib/connection/tunnelProfiles";
 import type { TunnelProfile } from "@/types/database";
 
 function sshProfile(overrides: Partial<TunnelProfile> = {}): TunnelProfile {
@@ -31,6 +31,37 @@ describe("tunnelProfileSummary", () => {
 
   it("returns an empty string when the target is not configured yet", () => {
     expect(tunnelProfileSummary(createTunnelProfile("ssh"))).toBe("");
+  });
+});
+
+describe("createTunnelProfileTestGuard", () => {
+  it("invalidates a request when the tested profile changes", () => {
+    const guard = createTunnelProfileTestGuard();
+    const profile = sshProfile();
+    const requestId = guard.start(profile);
+
+    expect(guard.isCurrent(requestId, profile)).toBe(true);
+    expect(guard.isCurrent(requestId, { ...profile, password: "changed" } as TunnelProfile)).toBe(false);
+  });
+
+  it("invalidates a request after switching or removing the profile", () => {
+    const guard = createTunnelProfileTestGuard();
+    const requestId = guard.start(sshProfile());
+
+    guard.invalidate();
+
+    expect(guard.isCurrent(requestId, sshProfile())).toBe(false);
+    expect(guard.isCurrent(requestId, null)).toBe(false);
+  });
+
+  it("ignores an older response after a newer request starts", () => {
+    const guard = createTunnelProfileTestGuard();
+    const profile = sshProfile();
+    const olderRequestId = guard.start(profile);
+    const newerRequestId = guard.start(profile);
+
+    expect(guard.isCurrent(olderRequestId, profile)).toBe(false);
+    expect(guard.isCurrent(newerRequestId, profile)).toBe(true);
   });
 });
 

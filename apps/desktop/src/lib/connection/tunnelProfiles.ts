@@ -3,6 +3,29 @@ import type { TransportLayerConfig, TunnelProfile } from "@/types/database";
 
 export type TunnelProfileType = TunnelProfile["type"];
 
+export interface TunnelProfileTestGuard {
+  invalidate: () => void;
+  start: (profile: TunnelProfile) => number;
+  isCurrent: (requestId: number, profile: TunnelProfile | null) => boolean;
+}
+
+export function createTunnelProfileTestGuard(): TunnelProfileTestGuard {
+  let requestId = 0;
+  let testedProfile = "";
+
+  return {
+    invalidate: () => {
+      requestId++;
+      testedProfile = "";
+    },
+    start: (profile) => {
+      testedProfile = JSON.stringify(profile);
+      return ++requestId;
+    },
+    isCurrent: (candidateRequestId, profile) => candidateRequestId === requestId && profile !== null && JSON.stringify(profile) === testedProfile,
+  };
+}
+
 export function createTunnelProfile(type: TunnelProfileType): TunnelProfile {
   if (type === "proxy") {
     return {

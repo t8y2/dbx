@@ -1265,6 +1265,7 @@ impl Storage {
                 scrub_transport_layer_secrets(&mut sanitized);
                 sanitized.redis_sentinel_password = String::new();
                 sanitized.connection_string = None;
+                sanitized.init_script = None;
                 scrub_mq_auth_secrets(&mut sanitized);
                 scrub_mq_token_signing_secret(&mut sanitized);
                 scrub_nacos_auth_secrets(&mut sanitized);
@@ -1302,6 +1303,7 @@ impl Storage {
                 scrub_transport_layer_secrets(&mut sanitized);
                 sanitized.redis_sentinel_password = String::new();
                 sanitized.connection_string = None;
+                sanitized.init_script = None;
                 scrub_mq_auth_secrets(&mut sanitized);
                 scrub_mq_token_signing_secret(&mut sanitized);
                 scrub_nacos_auth_secrets(&mut sanitized);
@@ -1357,6 +1359,15 @@ impl Storage {
                     tx.execute(
                         "DELETE FROM connection_secrets WHERE connection_id = ?1 AND key = ?2",
                         params![config.id, "connection_string"],
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+                if let Some(script) = &config.init_script {
+                    persist_secret_in_tx(&tx, &config.id, "init_script", script)?;
+                } else {
+                    tx.execute(
+                        "DELETE FROM connection_secrets WHERE connection_id = ?1 AND key = ?2",
+                        params![config.id, "init_script"],
                     )
                     .map_err(|e| e.to_string())?;
                 }
@@ -1447,6 +1458,7 @@ impl Storage {
             }
             config.redis_sentinel_password = self.get_secret(&id, "redis_sentinel_password").await?.unwrap_or_default();
             config.connection_string = self.get_secret(&id, "connection_string").await?;
+            config.init_script = self.get_secret(&id, "init_script").await?;
             let needs_mq_auth_rewrite = self.hydrate_mq_auth_secrets(&id, &mut config).await?;
             let needs_mq_token_signing_rewrite = self.hydrate_mq_token_signing_secret(&id, &mut config).await?;
             let needs_nacos_auth_rewrite = self.hydrate_nacos_auth_secret(&id, &mut config).await?;
@@ -2585,6 +2597,7 @@ mod tests {
             visible_databases: None,
             visible_schemas: None,
             attached_databases: Vec::new(),
+            init_script: None,
             color: None,
             transport_layers: Vec::new(),
             connect_timeout_secs: 30,
@@ -2644,6 +2657,7 @@ mod tests {
             visible_databases: None,
             visible_schemas: None,
             attached_databases: Vec::new(),
+            init_script: None,
             color: None,
             transport_layers: Vec::new(),
             connect_timeout_secs: 30,

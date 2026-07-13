@@ -11,6 +11,7 @@ pub const TRANSPORT_LAYER_SECRET_PREFIX: &str = "transport_layers.";
 pub const PROXY_PASSWORD_KEY: &str = "proxy_password";
 pub const REDIS_SENTINEL_PASSWORD_KEY: &str = "redis_sentinel_password";
 pub const CONNECTION_STRING_KEY: &str = "connection_string";
+pub const INIT_SCRIPT_KEY: &str = "init_script";
 pub const MQ_AUTH_SECRET_PREFIX: &str = "mq.auth.";
 pub const MQ_AUTH_TOKEN_KEY: &str = "mq.auth.token";
 pub const MQ_AUTH_PASSWORD_KEY: &str = "mq.auth.password";
@@ -104,6 +105,7 @@ pub fn save_connections_to_file(
         }
         persist_secret(store, &config.id, REDIS_SENTINEL_PASSWORD_KEY, &config.redis_sentinel_password)?;
         persist_optional_secret(store, &config.id, CONNECTION_STRING_KEY, config.connection_string.as_deref())?;
+        persist_optional_secret(store, &config.id, INIT_SCRIPT_KEY, config.init_script.as_deref())?;
         persist_mq_auth_secrets(store, config)?;
         persist_mq_token_signing_secret(store, config)?;
 
@@ -157,6 +159,18 @@ pub fn load_connections_from_file(
             None => {
                 if let Some(secret) = store.get_secret(&config.id, CONNECTION_STRING_KEY)? {
                     config.connection_string = Some(secret);
+                }
+            }
+        }
+
+        match config.init_script.as_deref().filter(|secret| !secret.is_empty()) {
+            Some(secret) => {
+                store.set_secret(&config.id, INIT_SCRIPT_KEY, secret)?;
+                needs_rewrite = true;
+            }
+            None => {
+                if let Some(secret) = store.get_secret(&config.id, INIT_SCRIPT_KEY)? {
+                    config.init_script = Some(secret);
                 }
             }
         }
@@ -337,6 +351,7 @@ fn delete_removed_connection_secrets(
         delete_secret_prefix(store, &config.id, SSH_TUNNEL_SECRET_PREFIX)?;
         delete_secret_prefix(store, &config.id, TRANSPORT_LAYER_SECRET_PREFIX)?;
         store.delete_secret(&config.id, CONNECTION_STRING_KEY)?;
+        store.delete_secret(&config.id, INIT_SCRIPT_KEY)?;
         delete_secret_prefix(store, &config.id, MQ_AUTH_SECRET_PREFIX)?;
         delete_secret_prefix(store, &config.id, MQ_TOKEN_SIGNING_SECRET_PREFIX)?;
     }
@@ -637,6 +652,7 @@ fn sanitize_connections(configs: &[ConnectionConfig]) -> Vec<ConnectionConfig> {
             }
             config.redis_sentinel_password.clear();
             config.connection_string = None;
+            config.init_script = None;
             scrub_mq_auth_secrets(&mut config);
             scrub_mq_token_signing_secret(&mut config);
             config
@@ -652,8 +668,8 @@ pub fn secret_account(connection_id: &str, key: &str) -> String {
 mod tests {
     use super::{
         load_connections_from_file, save_connections_to_file, ConnectionSecretStore, CONNECTION_STRING_KEY,
-        MAIN_PASSWORD_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, REDIS_SENTINEL_PASSWORD_KEY,
-        SSH_PASSWORD_KEY,
+        INIT_SCRIPT_KEY, MAIN_PASSWORD_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY,
+        REDIS_SENTINEL_PASSWORD_KEY, SSH_PASSWORD_KEY,
     };
     use crate::models::connection::{
         ConnectionConfig, DatabaseType, HttpTunnelConfig, SshTunnelConfig, TransportLayerConfig,
@@ -733,6 +749,7 @@ mod tests {
             visible_databases: None,
             visible_schemas: None,
             attached_databases: Vec::new(),
+            init_script: None,
             color: None,
             transport_layers: Vec::new(),
             connect_timeout_secs: crate::models::connection::default_connect_timeout_secs(),
@@ -959,6 +976,28 @@ mod tests {
 
         let loaded = load_connections_from_file(&path, &store).unwrap();
         assert_eq!(loaded[0].connection_string.as_deref(), Some("mongodb://user:secret@localhost/app"));
+    }
+
+    #[test]
+    fn save_connections_moves_init_script_to_secret_store_and_restores_it() {
+        let path = temp_connections_file("init-script");
+        let store = MemorySecretStore::default();
+        let mut config = connection("duck", "", "");
+        config.db_type = DatabaseType::DuckDb;
+        config.init_script = Some("CREATE SECRET (TYPE quack, TOKEN 'token-value');".to_string());
+
+        save_connections_to_file(&path, &[config], &store).unwrap();
+
+        assert_eq!(
+            store.get_existing("duck", INIT_SCRIPT_KEY).as_deref(),
+            Some("CREATE SECRET (TYPE quack, TOKEN 'token-value');")
+        );
+        let persisted = read_configs(&path);
+        assert_eq!(persisted[0].init_script, None);
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("token-value"));
+
+        let loaded = load_connections_from_file(&path, &store).unwrap();
+        assert_eq!(loaded[0].init_script.as_deref(), Some("CREATE SECRET (TYPE quack, TOKEN 'token-value');"));
     }
 
     #[test]

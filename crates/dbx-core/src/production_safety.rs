@@ -579,6 +579,7 @@ mod tests {
             visible_databases: None,
             visible_schemas: None,
             attached_databases: vec![],
+            init_script: None,
             color: None,
             transport_layers: vec![],
             connect_timeout_secs: 10,

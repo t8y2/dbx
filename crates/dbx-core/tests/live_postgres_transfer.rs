@@ -25,6 +25,7 @@ fn postgres_test_config(id: &str, database: &str) -> ConnectionConfig {
         visible_databases: None,
         visible_schemas: None,
         attached_databases: Vec::new(),
+        init_script: None,
         color: None,
         transport_layers: Vec::new(),
         connect_timeout_secs: 5,

@@ -30,6 +30,7 @@ const SECRET_KEYS: &[&str] = &[
     "proxy_password",
     "redis_sentinel_password",
     "connection_string",
+    "init_script",
     MQ_AUTH_TOKEN_KEY,
     MQ_AUTH_PASSWORD_KEY,
     MQ_AUTH_API_KEY_VALUE_KEY,
@@ -597,6 +598,7 @@ fn scrub_connection_secrets(config: &mut ConnectionConfig) {
     }
     config.redis_sentinel_password.clear();
     config.connection_string = None;
+    config.init_script = None;
     scrub_mq_external_config_secrets(config);
     scrub_nacos_auth_secrets(config);
 }
@@ -617,6 +619,7 @@ async fn build_sensitive_payload(
     let mut connection_secrets = Vec::new();
     for config in connections {
         push_secret(&mut connection_secrets, &config.id, "password", &config.password);
+        push_secret(&mut connection_secrets, &config.id, "init_script", config.init_script.as_deref().unwrap_or(""));
         for (index, layer) in config.transport_layers.iter().enumerate() {
             match layer {
                 TransportLayerConfig::Ssh(ssh) => {
@@ -1063,6 +1066,7 @@ mod tests {
             visible_databases: None,
             visible_schemas: None,
             attached_databases: Vec::new(),
+            init_script: None,
             color: None,
             transport_layers: Vec::new(),
             connect_timeout_secs: 5,
@@ -1115,6 +1119,7 @@ mod tests {
             visible_databases: None,
             visible_schemas: None,
             attached_databases: Vec::new(),
+            init_script: None,
             color: None,
             transport_layers: Vec::new(),
             connect_timeout_secs: 5,
@@ -1204,6 +1209,7 @@ mod tests {
             visible_databases: None,
             visible_schemas: None,
             attached_databases: Vec::new(),
+            init_script: Some("CREATE SECRET (TYPE quack, TOKEN 'token-value');".to_string()),
             color: None,
             transport_layers: vec![
                 TransportLayerConfig::Ssh(crate::models::connection::SshTunnelConfig {
@@ -1279,6 +1285,10 @@ mod tests {
         }
         assert!(config.redis_sentinel_password.is_empty());
         assert!(config.connection_string.is_none());
+        assert!(config.init_script.is_none());
+        let public_json = serde_json::to_string(&config).unwrap();
+        assert!(!public_json.contains("token-value"));
+        assert!(super::SECRET_KEYS.contains(&"init_script"));
     }
 
     #[test]

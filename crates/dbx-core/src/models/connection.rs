@@ -27,6 +27,10 @@ pub struct ConnectionConfig {
     pub visible_schemas: Option<HashMap<String, Vec<String>>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attached_databases: Vec<AttachedDatabaseConfig>,
+    /// SQL statements executed right after the connection is established
+    /// (DuckDB only for now): INSTALL/LOAD, SET, CREATE SECRET, ATTACH, ...
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init_script: Option<String>,
     #[serde(default)]
     pub color: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -477,6 +481,8 @@ struct ConnectionConfigData {
     #[serde(default)]
     pub attached_databases: Vec<AttachedDatabaseConfig>,
     #[serde(default)]
+    pub init_script: Option<String>,
+    #[serde(default)]
     pub color: Option<String>,
     #[serde(default)]
     pub transport_layers: Vec<TransportLayerConfig>,
@@ -560,6 +566,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             visible_databases: data.visible_databases,
             visible_schemas: data.visible_schemas,
             attached_databases: data.attached_databases,
+            init_script: data.init_script,
             color: data.color,
             transport_layers: data.transport_layers,
             connect_timeout_secs: data.connect_timeout_secs,
@@ -1902,6 +1909,7 @@ mod tests {
             visible_databases: None,
             visible_schemas: None,
             attached_databases: Vec::new(),
+            init_script: None,
             color: None,
             transport_layers: Vec::new(),
             connect_timeout_secs: super::default_connect_timeout_secs(),

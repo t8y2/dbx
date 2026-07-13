@@ -72,6 +72,7 @@ interface BuildQueryResultExportRequestOptions {
   exportId: string;
   filePath: string;
   format: "csv" | "xlsx" | "txt";
+  includeSqlSheet?: boolean;
 }
 
 type DroppedTableObjectType = "TABLE" | "VIEW" | "MATERIALIZED_VIEW";
@@ -3844,6 +3845,7 @@ export const useQueryStore = defineStore("query", () => {
       useAgentCursor,
       filePath: options.filePath,
       format: options.format,
+      includeSqlSheet: options.format === "xlsx" && options.includeSqlSheet === true,
       pageSize: settings.exportBatchSize,
       rowLimit,
       totalRows,

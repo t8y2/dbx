@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildXlsxWorkbook } from "../../apps/desktop/src/lib/export/xlsxExport.ts";
+import { buildXlsxWorkbook, buildXlsxWorkbookMulti } from "../../apps/desktop/src/lib/export/xlsxExport.ts";
+import { buildXlsxSqlWorksheet } from "../../apps/desktop/src/lib/export/xlsxSqlSheet.ts";
 
 test("builds an xlsx workbook zip with worksheet data", () => {
   const workbook = buildXlsxWorkbook({
@@ -48,4 +49,35 @@ test("writes MySQL 5.7 numeric strings as numeric cells", () => {
   assert.match(text, /<c r="C2"><v>987654\.321<\/v><\/c>/);
   assert.match(text, /<c r="D2"><v>2800\.000000<\/v><\/c>/);
   assert.match(text, /<c r="E2" t="inlineStr"><is><t>9007199254740992<\/t><\/is><\/c>/);
+});
+
+test("builds a result workbook with a separate SQL worksheet", () => {
+  const sqlWorksheet = buildXlsxSqlWorksheet([{ sql: "SELECT id, name FROM users WHERE active = true" }]);
+  assert.ok(sqlWorksheet);
+  const workbook = buildXlsxWorkbookMulti([{ sheetName: "Result", columns: ["id", "name"], rows: [[1, "Ada"]] }, sqlWorksheet]);
+  const text = new TextDecoder().decode(workbook);
+
+  assert.match(text, /name="Result"/);
+  assert.match(text, /name="SQL"/);
+  assert.match(text, /xl\/worksheets\/sheet2\.xml/);
+  assert.match(text, /SELECT id, name FROM users WHERE active = true/);
+});
+
+test("maps multiple result statements and splits SQL at the Excel cell limit", () => {
+  const bmpPrefix = "x".repeat(32_766);
+  const longSql = `${bmpPrefix}😀tail`;
+  const worksheet = buildXlsxSqlWorksheet([
+    { resultName: "Result 1", sql: "SELECT 1" },
+    { resultName: "Result 2", sql: longSql },
+  ]);
+
+  assert.ok(worksheet);
+  assert.deepEqual(worksheet.columns, ["Result", "SQL"]);
+  assert.equal(worksheet.rows.length, 3);
+  assert.deepEqual(worksheet.rows[0], ["Result 1", "SELECT 1"]);
+  const longSqlRows = worksheet.rows.slice(1);
+  assert.ok(longSqlRows.every((row) => String(row[1]).length <= 32_767));
+  assert.equal(longSqlRows[0][1], bmpPrefix);
+  assert.equal(longSqlRows[1][1], "😀tail");
+  assert.equal(longSqlRows.map((row) => row[1]).join(""), longSql);
 });

@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import { beforeEach, test, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
+import type { QueryResult } from "../../apps/desktop/src/types/database.ts";
 
 const apiMock = vi.hoisted(() => ({
   startQueryResultExport: vi.fn(),
@@ -47,7 +48,14 @@ function installMemoryStorage() {
   };
 }
 
-function buildExportHarness(options: { currentResultLabel?: string; exportFileBaseName?: string; columnTypes?: Array<string | undefined> } = {}) {
+function buildExportHarness(
+  options: {
+    currentResultLabel?: string;
+    exportFileBaseName?: string;
+    columnTypes?: Array<string | undefined>;
+    allExportResults?: Array<{ sheetName: string; result: QueryResult; sql?: string }>;
+  } = {},
+) {
   const exportProgressDialog = ref(false);
   const exportProgressState = ref({
     title: "",
@@ -62,7 +70,7 @@ function buildExportHarness(options: { currentResultLabel?: string; exportFileBa
   const fullExportResult = vi.fn(async () => {
     throw new Error("fullExportResult should not be called for streaming CSV/XLSX query exports");
   });
-  const queryResultExportRequest = vi.fn(async (options: { exportId: string; filePath: string; format: "csv" | "xlsx" }) => ({
+  const queryResultExportRequest = vi.fn(async (options: { exportId: string; filePath: string; format: "csv" | "xlsx" | "txt"; includeSqlSheet?: boolean }) => ({
     exportId: options.exportId,
     connectionId: "conn-1",
     database: "db",
@@ -73,6 +81,7 @@ function buildExportHarness(options: { currentResultLabel?: string; exportFileBa
     useAgentCursor: false,
     filePath: options.filePath,
     format: options.format,
+    includeSqlSheet: options.includeSqlSheet,
     pageSize: 1000,
     rowLimit: 100000,
     totalRows: 2,
@@ -89,6 +98,7 @@ function buildExportHarness(options: { currentResultLabel?: string; exportFileBa
       { id: 2, data: [2, "Lin"], isNew: false, isDeleted: false, isDirtyCol: [false, false], status: "" },
     ]),
     sql: computed(() => "SELECT * FROM users"),
+    exportSql: computed(() => "SELECT * FROM users ORDER BY id DESC"),
     tableMeta: computed(() => undefined),
     databaseType: computed(() => "postgres"),
     connectionId: computed(() => "conn-1"),
@@ -112,6 +122,7 @@ function buildExportHarness(options: { currentResultLabel?: string; exportFileBa
     hasRowSelection: computed(() => false),
     fullExportResult,
     queryResultExportRequest,
+    allExportResults: computed(() => options.allExportResults),
     currentResultLabel: computed(() => options.currentResultLabel),
     exportFileBaseName: computed(() => options.exportFileBaseName),
     exportProgressDialog,
@@ -736,6 +747,62 @@ test("selected query result XLSX export uses the current source label as the she
   assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0][2], ["id", "name"]);
   assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0][3], ["bigint(20)", "varchar(64)"]);
   assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0][4], [[1, "Ada"]]);
+});
+
+test("streaming XLSX with SQL marks the backend request as opt in", async () => {
+  const { composable, queryResultExportRequest } = buildExportHarness();
+
+  await composable.exportXlsxWithSql();
+
+  assert.equal(queryResultExportRequest.mock.calls[0][0].includeSqlSheet, true);
+  assert.equal(apiMock.startQueryResultExport.mock.calls[0][0].includeSqlSheet, true);
+  assert.equal(apiMock.startQueryResultExport.mock.calls[0][0].sql, "SELECT * FROM users");
+  assert.equal(apiMock.exportQueryResultsXlsx.mock.calls.length, 0);
+});
+
+test("streaming TXT export remains on the backend path without a SQL sheet", async () => {
+  const { composable, queryResultExportRequest } = buildExportHarness();
+
+  await composable.exportTxt();
+
+  assert.equal(queryResultExportRequest.mock.calls[0][0].format, "txt");
+  assert.equal(queryResultExportRequest.mock.calls[0][0].includeSqlSheet, false);
+  assert.equal(apiMock.startQueryResultExport.mock.calls[0][0].format, "txt");
+  assert.equal(apiMock.startQueryResultExport.mock.calls[0][0].includeSqlSheet, false);
+  assert.equal(apiMock.exportQueryResultsXlsx.mock.calls.length, 0);
+});
+
+test("selected XLSX with SQL uses the effective result SQL in a second worksheet", async () => {
+  const { composable, queryResultExportRequest } = buildExportHarness({ currentResultLabel: "public.users" });
+
+  await composable.exportXlsxWithSql([1]);
+
+  assert.equal(queryResultExportRequest.mock.calls.length, 0);
+  assert.equal(apiMock.exportQueryResultXlsx.mock.calls.length, 0);
+  assert.equal(apiMock.exportQueryResultsXlsx.mock.calls.length, 1);
+  const worksheets = apiMock.exportQueryResultsXlsx.mock.calls[0][1];
+  assert.equal(worksheets[0].sheetName, "public.users");
+  assert.deepEqual(worksheets[0].rows, [[1, "Ada"]]);
+  assert.equal(worksheets[1].sheetName, "SQL");
+  assert.deepEqual(worksheets[1].rows, [["SELECT * FROM users ORDER BY id DESC"]]);
+});
+
+test("all-results XLSX with SQL maps each result set to its source statement", async () => {
+  const allExportResults = [
+    { sheetName: "Result 1", result: { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, sourceStatement: "SELECT 1" }, sql: "SELECT 1" },
+    { sheetName: "Result 2", result: { columns: ["id"], rows: [[2]], affected_rows: 0, execution_time_ms: 1, sourceStatement: "SELECT 2" }, sql: "SELECT 2 ORDER BY 1" },
+  ];
+  const { composable } = buildExportHarness({ allExportResults });
+
+  await composable.exportAllResultsXlsxWithSql();
+
+  const worksheets = apiMock.exportQueryResultsXlsx.mock.calls[0][1];
+  assert.equal(worksheets.length, 3);
+  assert.equal(worksheets[2].sheetName, "SQL");
+  assert.deepEqual(worksheets[2].rows, [
+    ["Result 1", "SELECT 1"],
+    ["Result 2", "SELECT 2 ORDER BY 1"],
+  ]);
 });
 
 test("cancelled query result CSV export clears the cancel handler without using the in-memory path", async () => {

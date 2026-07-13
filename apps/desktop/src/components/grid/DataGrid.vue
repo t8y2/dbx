@@ -295,10 +295,11 @@ interface DataGridProps {
   totalRowCountLoading?: boolean;
   loading?: boolean;
   cacheKey?: string;
+  exportSql?: string;
   onExecuteSql?: (sql: string) => Promise<void>;
   fullExportResult?: (onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => Promise<QueryResult | undefined>;
-  queryResultExportRequest?: (options: { exportId: string; filePath: string; format: "csv" | "xlsx" | "txt" }) => Promise<api.QueryResultExportRequest | undefined>;
-  allExportResults?: Array<{ sheetName: string; result: QueryResult }>;
+  queryResultExportRequest?: (options: { exportId: string; filePath: string; format: "csv" | "xlsx" | "txt"; includeSqlSheet?: boolean }) => Promise<api.QueryResultExportRequest | undefined>;
+  allExportResults?: Array<{ sheetName: string; result: QueryResult; sql?: string }>;
   exportFileBaseName?: string;
   customSaveHandler?: import("@/composables/useDataGridEditor").CustomSaveHandler;
   queryEditabilityReason?: QueryEditabilityReason;
@@ -4855,6 +4856,12 @@ function exportSelectedRowsXlsx() {
   return exportXlsx(rowIds);
 }
 
+function exportSelectedRowsXlsxWithSql() {
+  const rowIds = affectedRowIds();
+  if (rowIds.length === 0) return;
+  return exportXlsxWithSql(rowIds);
+}
+
 function exportSelectedRowsJson() {
   const rowIds = affectedRowIds();
   if (rowIds.length === 0) return;
@@ -6553,8 +6560,11 @@ const {
   exportMarkdown,
   exportCurrentPageMarkdown,
   exportXlsx,
+  exportXlsxWithSql,
   exportCurrentPageXlsx,
+  exportCurrentPageXlsxWithSql,
   exportAllResultsXlsx,
+  exportAllResultsXlsxWithSql,
   exportSql,
   exportCurrentPageSql,
   exportTxt,
@@ -6564,6 +6574,7 @@ const {
   columns: visibleColumns,
   displayItems: visibleDisplayItems,
   sql: computed(() => props.sql),
+  exportSql: computed(() => props.exportSql),
   tableMeta: computed(() => (props.tableMeta ? { ...props.tableMeta } : undefined)),
   copyInsertTargetLabel: computed(() => props.tableMeta?.tableName ?? props.customSaveHandler?.targetLabel),
   databaseType: computed(() => props.databaseType),
@@ -6606,11 +6617,13 @@ const pageSizeMenuItems = computed(() =>
 
 const exportMenuItems = computed(() => {
   const hasFullResultExport = !!props.fullExportResult;
-  const allResultItems = (props.allExportResults?.length ?? 0) > 1 ? [{ value: "all-results-xlsx", label: t("grid.exportAllResultsXlsx"), separatorBefore: true }] : [];
+  const canIncludeSql = props.context === "results" && !!(props.exportSql || props.sql)?.trim();
+  const allResultItems = (props.allExportResults?.length ?? 0) > 1 ? [{ value: "all-results-xlsx", label: t("grid.exportAllResultsXlsx"), separatorBefore: true }, ...(canIncludeSql ? [{ value: "all-results-xlsx-with-sql", label: t("grid.exportAllResultsXlsxWithSql") }] : [])] : [];
   const selectedItems = isMultiRow.value
     ? [
         { value: "selected-csv", label: t("grid.exportSelectedRowsCsv"), separatorBefore: true },
         { value: "selected-xlsx", label: t("grid.exportSelectedRowsXlsx") },
+        ...(canIncludeSql ? [{ value: "selected-xlsx-with-sql", label: t("grid.exportSelectedRowsXlsxWithSql") }] : []),
         { value: "selected-json", label: t("grid.exportSelectedRowsJson") },
         { value: "selected-markdown", label: t("grid.exportSelectedRowsMarkdown") },
         { value: "selected-sql", label: t("grid.exportSelectedRowsSql") },
@@ -6622,6 +6635,7 @@ const exportMenuItems = computed(() => {
     return [
       { value: "csv", label: t("grid.exportCsv") },
       { value: "xlsx", label: t("grid.exportXlsx") },
+      ...(canIncludeSql ? [{ value: "xlsx-with-sql", label: t("grid.exportXlsxWithSql") }] : []),
       { value: "json", label: t("grid.exportJson") },
       { value: "markdown", label: t("grid.exportMarkdown") },
       { value: "sql", label: t("grid.exportSql") },
@@ -6634,12 +6648,14 @@ const exportMenuItems = computed(() => {
   return [
     { value: "page-csv", label: t("grid.exportCurrentPageCsv") },
     { value: "page-xlsx", label: t("grid.exportCurrentPageXlsx") },
+    ...(canIncludeSql ? [{ value: "page-xlsx-with-sql", label: t("grid.exportCurrentPageXlsxWithSql") }] : []),
     { value: "page-json", label: t("grid.exportCurrentPageJson") },
     { value: "page-markdown", label: t("grid.exportCurrentPageMarkdown") },
     { value: "page-sql", label: t("grid.exportCurrentPageSql") },
     { value: "page-txt", label: t("grid.exportCurrentPageTxt") },
     { value: "csv", label: t("grid.exportCurrentResultCsv"), separatorBefore: true },
     { value: "xlsx", label: t("grid.exportCurrentResultXlsx") },
+    ...(canIncludeSql ? [{ value: "xlsx-with-sql", label: t("grid.exportCurrentResultXlsxWithSql") }] : []),
     { value: "json", label: t("grid.exportCurrentResultJson") },
     { value: "markdown", label: t("grid.exportCurrentResultMarkdown") },
     { value: "sql", label: t("grid.exportCurrentResultSql") },
@@ -6657,19 +6673,23 @@ function selectExportMenuItem(value: string) {
   const actions: Record<string, () => void> = {
     "page-csv": exportCurrentPageCsv,
     "page-xlsx": exportCurrentPageXlsx,
+    "page-xlsx-with-sql": exportCurrentPageXlsxWithSql,
     "page-json": exportCurrentPageJson,
     "page-markdown": exportCurrentPageMarkdown,
     "page-sql": exportCurrentPageSql,
     "page-txt": exportCurrentPageTxt,
     csv: exportCsv,
     xlsx: exportXlsx,
+    "xlsx-with-sql": exportXlsxWithSql,
     "all-results-xlsx": exportAllResultsXlsx,
+    "all-results-xlsx-with-sql": exportAllResultsXlsxWithSql,
     json: exportJson,
     markdown: exportMarkdown,
     sql: exportSql,
     txt: exportTxt,
     "selected-csv": exportSelectedRowsCsv,
     "selected-xlsx": exportSelectedRowsXlsx,
+    "selected-xlsx-with-sql": exportSelectedRowsXlsxWithSql,
     "selected-json": exportSelectedRowsJson,
     "selected-markdown": exportSelectedRowsMarkdown,
     "selected-sql": exportSelectedRowsSql,
@@ -8813,11 +8833,15 @@ function exportSubmenu(): ContextMenuItem {
     { label: t("grid.exportSql"), action: exportSql },
     { label: t("grid.exportTxt"), action: exportTxt },
   ];
+  if (props.context === "results" && !!(props.exportSql || props.sql)?.trim()) {
+    items.splice(2, 0, { label: t("grid.exportXlsxWithSql"), action: exportXlsxWithSql });
+  }
   if (isMultiRow.value) {
     items.push(
       { label: "", separator: true },
       { label: t("grid.exportSelectedRowsCsv"), action: exportSelectedRowsCsv },
       { label: t("grid.exportSelectedRowsXlsx"), action: exportSelectedRowsXlsx },
+      ...(props.context === "results" && !!(props.exportSql || props.sql)?.trim() ? [{ label: t("grid.exportSelectedRowsXlsxWithSql"), action: exportSelectedRowsXlsxWithSql }] : []),
       { label: t("grid.exportSelectedRowsJson"), action: exportSelectedRowsJson },
       { label: t("grid.exportSelectedRowsMarkdown"), action: exportSelectedRowsMarkdown },
       { label: t("grid.exportSelectedRowsSql"), action: exportSelectedRowsSql },

@@ -2279,6 +2279,7 @@ export interface QueryResultExportRequest {
   useAgentCursor: boolean;
   filePath: string;
   format: "csv" | "xlsx" | "txt";
+  includeSqlSheet?: boolean;
   pageSize: number;
   rowLimit?: number | null;
   totalRows?: number | null;
@@ -2425,7 +2426,7 @@ export async function exportQueryResultXlsx(filePath: string, sheetName: string 
   });
 }
 
-export async function exportQueryResultsXlsx(filePath: string, worksheets: readonly { sheetName?: string; columns: string[]; columnTypes?: string[]; rows: readonly (readonly XlsxCellValue[])[] }[]): Promise<void> {
+export async function exportQueryResultsXlsx(filePath: string, worksheets: readonly { sheetName?: string; columns: readonly string[]; columnTypes?: readonly string[]; rows: readonly (readonly XlsxCellValue[])[] }[]): Promise<void> {
   return invoke("export_query_results_xlsx", {
     request: {
       filePath,

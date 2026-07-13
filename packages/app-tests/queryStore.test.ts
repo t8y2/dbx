@@ -3812,6 +3812,7 @@ test("buildQueryResultExportRequest uses sorted SQL and independent row-limit se
     assert.equal(request?.useAgentCursor, false);
     assert.equal(request?.filePath, "C:\\tmp\\events.csv");
     assert.equal(request?.format, "csv");
+    assert.equal(request?.includeSqlSheet, false);
     assert.equal(request?.pageSize, 2500);
     assert.equal(request?.rowLimit, null);
     assert.equal(request?.totalRows, 123456);
@@ -3852,10 +3853,12 @@ test("buildQueryResultExportRequest uses exportRowLimit when enabled", async () 
       exportId: "export-2",
       filePath: "C:\\tmp\\events.xlsx",
       format: "xlsx",
+      includeSqlSheet: true,
     });
 
     assert.equal(request?.pageSize, 2500);
     assert.equal(request?.rowLimit, 200000);
+    assert.equal(request?.includeSqlSheet, true);
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

@@ -121,6 +121,7 @@ async fn live_postgres_query_result_export_uses_single_streamed_query() {
         use_agent_cursor: false,
         file_path: file_path.to_string_lossy().to_string(),
         format: "csv".to_string(),
+        include_sql_sheet: false,
         page_size: 100,
         row_limit: None,
         total_rows: None,

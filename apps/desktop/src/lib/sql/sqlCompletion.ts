@@ -465,6 +465,38 @@ const SQLSERVER_SQL_KEYWORDS = [
   "SHOWPLAN_XML",
 ];
 
+function sqlDialectCompletionWords(...sources: Array<string | undefined>): string[] {
+  return sources
+    .flatMap((source) => (source ?? "").split(/\s+/))
+    .filter((keyword) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(keyword))
+    .map((keyword) => keyword.toUpperCase());
+}
+
+const ORACLE_SQL_TYPES = Array.from(new Set([...sqlDialectCompletionWords(PLSQL.spec.types), "BINARY_DOUBLE", "BINARY_FLOAT", "INTERVAL DAY TO SECOND", "INTERVAL YEAR TO MONTH", "TIMESTAMP WITH LOCAL TIME ZONE", "TIMESTAMP WITH TIME ZONE", "UROWID"]));
+
+const ORACLE_SQL_KEYWORDS = Array.from(
+  new Set([
+    ...sqlDialectCompletionWords(PLSQL.spec.keywords),
+    ...ORACLE_SQL_TYPES,
+    "BULK COLLECT",
+    "CONNECT BY",
+    "DATABASE LINK",
+    "EXECUTE IMMEDIATE",
+    "FLASHBACK",
+    "FOR UPDATE",
+    "MATERIALIZED VIEW",
+    "MERGE",
+    "ORDER SIBLINGS BY",
+    "OR REPLACE",
+    "PACKAGE BODY",
+    "PURGE",
+    "RETURNING INTO",
+    "SEQUENCE",
+    "START WITH",
+    "TYPE BODY",
+  ]),
+);
+
 const DATABASE_SQL_KEYWORDS: Partial<Record<DatabaseType, string[]>> = {
   mysql: MYSQL_SQL_KEYWORDS,
   postgres: POSTGRES_SQL_KEYWORDS,
@@ -473,6 +505,8 @@ const DATABASE_SQL_KEYWORDS: Partial<Record<DatabaseType, string[]>> = {
   turso: SQLITE_SQL_KEYWORDS,
   "cloudflare-d1": SQLITE_SQL_KEYWORDS,
   sqlserver: SQLSERVER_SQL_KEYWORDS,
+  oracle: ORACLE_SQL_KEYWORDS,
+  "oceanbase-oracle": ORACLE_SQL_KEYWORDS,
   manticoresearch: MANTICORESEARCH_SQL_KEYWORDS,
 };
 
@@ -614,6 +648,7 @@ const DATA_TYPE_KEYWORDS = new Set([
   "TINYBLOB",
   "MEDIUMBLOB",
   "LONGBLOB",
+  ...ORACLE_SQL_TYPES,
 ]);
 
 // Window functions that should use OVER() completion
@@ -3848,11 +3883,11 @@ function isPendingJoinKeywordContext(context: SqlCompletionContext): boolean {
 function buildKeywordItems(prefix: string, context: SqlCompletionContext, databaseType?: DatabaseType, keywordCase?: SqlKeywordCase): SqlCompletionItem[] {
   const isDml = context.statementKind === "select" || context.statementKind === "insert" || context.statementKind === "update" || context.statementKind === "delete";
   const showDdl = !isDml || context.suggestTables;
+  const functionSignatures = activeFunctionSignatures(databaseType);
 
   return activeSqlKeywords(databaseType)
     .filter((keyword) => {
-      if (SQL_FUNCTION_SIGNATURES.has(keyword)) return false;
-      if (databaseType && DATABASE_FUNCTION_SIGNATURES[databaseType]?.has(keyword)) return false;
+      if (functionSignatures.has(keyword)) return false;
       if (WINDOW_FUNCTIONS.has(keyword)) return false;
       if (!matchesPrefix(keyword, prefix)) return false;
       if (!showDdl && isDml && (DDL_ONLY_KEYWORDS.has(keyword) || DATA_TYPE_KEYWORDS.has(keyword))) return false;

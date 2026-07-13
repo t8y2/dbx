@@ -1,8 +1,14 @@
 import type { SQLDialect } from "@codemirror/lang-sql";
+import type { DatabaseType } from "@/types/database";
 
 export type CodeMirrorSqlDialectName = "mysql" | "postgres" | "sqlserver";
 
-type CodeMirrorSqlLanguageModule = Pick<typeof import("@codemirror/lang-sql"), "MSSQL" | "MySQL" | "PostgreSQL" | "SQLDialect">;
+type CodeMirrorSqlLanguageModule = Pick<typeof import("@codemirror/lang-sql"), "Cassandra" | "MSSQL" | "MySQL" | "PLSQL" | "PostgreSQL" | "SQLite" | "SQLDialect" | "StandardSQL">;
+
+const MYSQL_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["mysql", "doris", "starrocks", "manticoresearch", "goldendb", "gbase"]);
+const POSTGRES_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["postgres", "redshift", "gaussdb", "kwdb", "kingbase", "highgo", "vastbase", "opengauss", "questdb"]);
+const ORACLE_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["oracle", "dameng", "yashandb", "oscar", "oceanbase-oracle"]);
+const SQLITE_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["sqlite", "rqlite", "turso", "cloudflare-d1"]);
 
 const DBX_COMMON_SQL_KEYWORDS = [
   "PIVOT",
@@ -52,10 +58,23 @@ export function postgresKeywordSyntaxTerms(keywords: string): string {
     .join(" ");
 }
 
-export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModule, dialectName: CodeMirrorSqlDialectName = "mysql"): SQLDialect {
-  const baseDialect = dialectName === "postgres" ? langSql.PostgreSQL : dialectName === "sqlserver" ? langSql.MSSQL : langSql.MySQL;
-  const isPostgres = dialectName === "postgres";
-  const isSqlServer = dialectName === "sqlserver";
+function codeMirrorBaseDialect(langSql: CodeMirrorSqlLanguageModule, dialectName: CodeMirrorSqlDialectName, databaseType?: DatabaseType): SQLDialect {
+  if (databaseType) {
+    if (MYSQL_CODEMIRROR_DATABASE_TYPES.has(databaseType)) return langSql.MySQL;
+    if (POSTGRES_CODEMIRROR_DATABASE_TYPES.has(databaseType)) return langSql.PostgreSQL;
+    if (ORACLE_CODEMIRROR_DATABASE_TYPES.has(databaseType)) return langSql.PLSQL;
+    if (SQLITE_CODEMIRROR_DATABASE_TYPES.has(databaseType)) return langSql.SQLite;
+    if (databaseType === "sqlserver") return langSql.MSSQL;
+    if (databaseType === "cassandra") return langSql.Cassandra;
+    return langSql.StandardSQL;
+  }
+  return dialectName === "postgres" ? langSql.PostgreSQL : dialectName === "sqlserver" ? langSql.MSSQL : langSql.MySQL;
+}
+
+export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModule, dialectName: CodeMirrorSqlDialectName = "mysql", databaseType?: DatabaseType): SQLDialect {
+  const baseDialect = codeMirrorBaseDialect(langSql, dialectName, databaseType);
+  const isPostgres = baseDialect === langSql.PostgreSQL;
+  const isSqlServer = baseDialect === langSql.MSSQL;
   const baseKeywords = isPostgres ? postgresKeywordSyntaxTerms(baseDialect.spec.keywords || "") : baseDialect.spec.keywords || "";
 
   return langSql.SQLDialect.define({

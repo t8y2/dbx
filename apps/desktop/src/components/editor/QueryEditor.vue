@@ -209,6 +209,7 @@ let codeMirrorTheme: import("@codemirror/state").Compartment | null = null;
 let wordWrapComp: import("@codemirror/state").Compartment | null = null;
 let vimModeComp: import("@codemirror/state").Compartment | null = null;
 let closeBracketsComp: import("@codemirror/state").Compartment | null = null;
+let sqlLanguageComp: import("@codemirror/state").Compartment | null = null;
 let codeMirrorCloseBrackets: typeof import("@codemirror/autocomplete").closeBrackets | null = null;
 let codeMirrorCloseBracketsKeymap: readonly import("@codemirror/view").KeyBinding[] | null = null;
 let readOnlyComp: import("@codemirror/state").Compartment | null = null;
@@ -224,6 +225,7 @@ let dbxVimCommandsConfigured = false;
 let buildSqlDiagnosticExtension: (() => import("@codemirror/state").Extension) | null = null;
 let buildSqlSignatureExtension: (() => import("@codemirror/state").Extension) | null = null;
 let buildSqlCompletionExtension: (() => import("@codemirror/state").Extension) | null = null;
+let buildSqlLanguageExtension: (() => import("@codemirror/state").Extension) | null = null;
 let codeMirrorSnippetCompletion: typeof import("@codemirror/autocomplete").snippetCompletion;
 let codeMirrorCompletionStatus: typeof import("@codemirror/autocomplete").completionStatus | null = null;
 let codeMirrorAcceptCompletion: typeof import("@codemirror/autocomplete").acceptCompletion | null = null;
@@ -2586,6 +2588,7 @@ onMounted(async () => {
   wordWrapComp = new Compartment();
   vimModeComp = new Compartment();
   closeBracketsComp = new Compartment();
+  sqlLanguageComp = new Compartment();
   codeMirrorCloseBrackets = closeBrackets;
   codeMirrorCloseBracketsKeymap = closeBracketsKeymap;
   readOnlyComp = new Compartment();
@@ -2700,7 +2703,7 @@ onMounted(async () => {
       override: [async (context: CompletionContext) => provideSqlCompletions(context)],
     });
 
-  const dialect = createDbxCodeMirrorSqlDialect(langSql, props.dialect);
+  buildSqlLanguageExtension = () => langSql.sql({ dialect: createDbxCodeMirrorSqlDialect(langSql, props.dialect, props.databaseType) });
 
   const initialSettings = settingsStore.editorSettings;
   const theme = await loadEditorTheme(initialSettings.theme, editorThemeAppearance(), getCurrentCustomThemeColors(), themePalette.value);
@@ -2856,7 +2859,7 @@ onMounted(async () => {
       // Vim must be mounted before DBX/default keymaps so normal-mode keys are handled first.
       vimModeComp.of(vimModeExtension(initialSettings.vimModeEnabled)),
       keymap.of([...defaultKeymap, ...searchKeymap, ...historyKeymap, ...foldKeymap, ...completionKeymap]),
-      langSql.sql({ dialect }),
+      sqlLanguageComp.of(buildSqlLanguageExtension()),
       tooltips({ parent: document.body }),
       completionComp.of(buildSqlCompletionExtension()),
       sqlCompletionTheme(EditorView),
@@ -3183,13 +3186,11 @@ watch(
   },
 );
 
-watch(
-  () => props.databaseType,
-  () => {
-    executableStatementRangeCache = null;
-    view.value?.dispatch({});
-  },
-);
+watch([() => props.databaseType, () => props.dialect], () => {
+  executableStatementRangeCache = null;
+  if (!view.value || !sqlLanguageComp || !buildSqlLanguageExtension) return;
+  view.value.dispatch({ effects: sqlLanguageComp.reconfigure(buildSqlLanguageExtension()) });
+});
 
 watch(
   () => props.forceWordWrap,

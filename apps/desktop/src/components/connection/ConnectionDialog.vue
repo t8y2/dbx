@@ -1158,7 +1158,6 @@ async function installSqlServerLegacyCompatibilityComponentIfNeeded(): Promise<b
   if (await api.isAgentInstalled(SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY)) return true;
 
   const label = t("connection.sqlServerLegacyCompatibilityComponent");
-  testResult.value = { ok: true, message: t("connection.sqlServerLegacyCompatibilityComponentInstalling") };
   beginAgentDriverInstall(SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY, label);
   try {
     await api.installAgent(SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY);
@@ -1176,6 +1175,7 @@ async function onSqlServerLegacyCompatibilityModeChange(event: Event) {
   if (form.value.db_type !== "sqlserver") return;
   const input = event.target instanceof HTMLInputElement ? event.target : null;
   const enabled = input?.checked === true;
+  testResult.value = null;
   if (!enabled) {
     form.value.url_params = setSqlServerLegacyCompatibilityMode(form.value.url_params, false);
     return;
@@ -1185,7 +1185,7 @@ async function onSqlServerLegacyCompatibilityModeChange(event: Event) {
   try {
     await installSqlServerLegacyCompatibilityComponentIfNeeded();
     form.value.url_params = setSqlServerLegacyCompatibilityMode(form.value.url_params, true);
-    testResult.value = { ok: true, message: t("connection.sqlServerLegacyCompatibilityModeEnabled") };
+    testResult.value = null;
   } catch {
     form.value.url_params = setSqlServerLegacyCompatibilityMode(form.value.url_params, false);
     if (input) input.checked = false;

@@ -80,6 +80,46 @@ describe("sqlSemanticModel baseline fixtures", () => {
     expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "alias_column", qualifierParts: ["b"] }));
   });
 
+  it("consumes correlation column lists before parsing later comma-separated sources", () => {
+    const { sql, cursor } = sqlFixtureCursor("SELECT * FROM table_a a(id), table_b b, table_c c WHERE c.|");
+    const model = buildSqlSemanticModel(sql, cursor, { databaseType: "postgres" });
+
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ name: "table_a", alias: "a", columns: ["id"] }), expect.objectContaining({ name: "table_b", alias: "b" }), expect.objectContaining({ name: "table_c", alias: "c" })]));
+    expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "alias_column", qualifierParts: ["c"] }));
+  });
+
+  it("parses generic PostgreSQL table functions and their correlation columns", () => {
+    const { sql, cursor } = sqlFixtureCursor("SELECT * FROM generate_series(1, 3) g(value) WHERE g.|");
+    const model = buildSqlSemanticModel(sql, cursor, { databaseType: "postgres" });
+
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "table_function", name: "g", alias: "g", columns: ["value"] })]));
+    expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "alias_column", qualifierParts: ["g"] }));
+  });
+
+  it("consumes LATERAL functions before parsing later comma-separated sources", () => {
+    const { sql, cursor } = sqlFixtureCursor("SELECT * FROM users u, LATERAL generate_series(1, 3) g(value), orders o WHERE o.|");
+    const model = buildSqlSemanticModel(sql, cursor, { databaseType: "postgres" });
+
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ name: "users", alias: "u" }), expect.objectContaining({ kind: "table_function", name: "g", alias: "g", columns: ["value"] }), expect.objectContaining({ name: "orders", alias: "o" })]));
+    expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "alias_column", qualifierParts: ["o"] }));
+  });
+
+  it("keeps LATERAL subqueries available as row sources", () => {
+    const { sql, cursor } = sqlFixtureCursor("SELECT * FROM users u, LATERAL (SELECT u.id AS user_id) s WHERE s.|");
+    const model = buildSqlSemanticModel(sql, cursor, { databaseType: "postgres" });
+
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "subquery", name: "s", alias: "s", columns: ["user_id"] })]));
+    expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "alias_column", qualifierParts: ["s"] }));
+  });
+
+  it("does not classify SQL Server table hints as generic table functions", () => {
+    const { sql, cursor } = sqlFixtureCursor("SELECT * FROM users (NOLOCK) WHERE users.|");
+    const model = buildSqlSemanticModel(sql, cursor, { databaseType: "sqlserver" });
+
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "table", name: "users" })]));
+    expect(model.rowSources.some((source) => source.kind === "table_function")).toBe(false);
+  });
+
   it("classifies alias-qualified star with replacement range", () => {
     const { sql, cursor } = sqlFixtureCursor("SELECT u.*| FROM users u");
     const model = buildSqlSemanticModel(sql, cursor);

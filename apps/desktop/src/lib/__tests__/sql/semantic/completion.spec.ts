@@ -58,6 +58,19 @@ describe("semantic SQL completion candidates", () => {
     expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["id", "status"]);
   });
 
+  it("completes correlation columns for generic PostgreSQL table functions", () => {
+    const { context, items } = semanticCompletion("SELECT * FROM generate_series(1, 3) g(value) WHERE g.|", {}, { databaseType: "postgres", dialect: "postgres" });
+
+    expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ name: "g", alias: "g" })]));
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["value"]);
+  });
+
+  it("completes correlation columns for aliased table sources", () => {
+    const { items } = semanticCompletion("SELECT * FROM table_a a(id, label), table_b b WHERE a.|", {}, { databaseType: "postgres", dialect: "postgres" });
+
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["id", "label"]);
+  });
+
   it("uses CTE projected columns without remote metadata", () => {
     const { items, context } = semanticCompletion("WITH recent_orders(id, total) AS (SELECT id, total FROM orders) SELECT * FROM recent_orders ro WHERE ro.|");
 

@@ -17,6 +17,7 @@ import type {
 } from "@/lib/sql/semantic/types";
 
 const TABLE_INTRODUCERS = new Set(["from", "join", "straight_join", "update", "into", "using", "apply"]);
+const TABLE_FUNCTION_NAMES = new Set(["table", "xmltable", "json_table", "the", "read_csv", "read_parquet", "read_json", "unnest"]);
 const JOIN_MODIFIERS = new Set(["left", "right", "inner", "outer", "cross", "full", "natural"]);
 const CLAUSE_BOUNDARIES = new Set(["where", "group", "having", "order", "limit", "offset", "union", "intersect", "except", "on", "set", "values", "returning"]);
 const ALIAS_BLACKLIST = new Set([...CLAUSE_BOUNDARIES, "join", "straight_join", "left", "right", "inner", "outer", "cross", "full", "natural", "as", "select", "from"]);
@@ -218,14 +219,26 @@ function parseCteSources(state: ParseState): SqlSemanticRowSource[] {
   return sources;
 }
 
-function aliasAfter(tokens: readonly SqlSemanticToken[], index: number, dialect: SqlSemanticDialectAdapter): { alias?: string; aliasSpan?: SqlSemanticSpan; nextIndex: number } {
+function correlationColumnsAfter(tokens: readonly SqlSemanticToken[], index: number, dialect: SqlSemanticDialectAdapter): { columns: string[]; nextIndex: number } | null {
+  if (tokens[index]?.text !== "(") return null;
+  const close = findMatchingParenToken(tokens, index);
+  if (close < 0) return null;
+  const columns = splitTopLevelByComma(tokens.slice(index + 1, close))
+    .map((group) => group.find(tokenIsIdentifier))
+    .filter((item): item is SqlSemanticToken => item != null)
+    .map((item) => identifierPart(item, dialect).name);
+  return { columns, nextIndex: close + 1 };
+}
+
+function aliasAfter(tokens: readonly SqlSemanticToken[], index: number, dialect: SqlSemanticDialectAdapter): { alias?: string; aliasSpan?: SqlSemanticSpan; columns?: string[]; nextIndex: number } {
   let cursor = index;
   if (tokens[cursor]?.kind === "word" && tokens[cursor]?.normalized === "as") cursor += 1;
   const aliasToken = tokens[cursor];
   if (tokenIsIdentifier(aliasToken)) {
     const alias = identifierPart(aliasToken, dialect).name;
     if (!ALIAS_BLACKLIST.has(alias.toLowerCase())) {
-      return { alias, aliasSpan: aliasToken.span, nextIndex: cursor + 1 };
+      const columns = correlationColumnsAfter(tokens, cursor + 1, dialect);
+      return { alias, aliasSpan: aliasToken.span, columns: columns?.columns, nextIndex: columns?.nextIndex ?? cursor + 1 };
     }
   }
   return { nextIndex: index };
@@ -237,7 +250,7 @@ function parseSubquerySource(state: ParseState, openIndex: number, introducer: s
   const alias = aliasAfter(state.tokens, close + 1, state.dialect);
   if (!alias.alias) return null;
   const bodyTokens = state.tokens.slice(openIndex + 1, close);
-  const columns = parseSelectProjections(bodyTokens, state.dialect).map((projection) => projection.name);
+  const columns = alias.columns?.length ? alias.columns : parseSelectProjections(bodyTokens, state.dialect).map((projection) => projection.name);
   return {
     source: {
       id: `${introducer}:subquery:${sourceIndex}`,
@@ -246,7 +259,7 @@ function parseSubquerySource(state: ParseState, openIndex: number, introducer: s
       qualifierParts: [],
       alias: alias.alias,
       aliasSpan: alias.aliasSpan,
-      sourceSpan: { start: state.tokens[openIndex]?.span.start ?? 0, end: alias.aliasSpan?.end ?? state.tokens[close]?.span.end ?? 0 },
+      sourceSpan: { start: state.tokens[openIndex]?.span.start ?? 0, end: state.tokens[alias.nextIndex - 1]?.span.end ?? alias.aliasSpan?.end ?? state.tokens[close]?.span.end ?? 0 },
       columns,
     },
     nextIndex: alias.nextIndex,
@@ -254,22 +267,27 @@ function parseSubquerySource(state: ParseState, openIndex: number, introducer: s
 }
 
 function parseTableFunctionSource(state: ParseState, nameIndex: number, introducer: string, sourceIndex: number): { source: SqlSemanticRowSource; nextIndex: number } | null {
-  const nameToken = state.tokens[nameIndex];
-  if (!nameToken || nameToken.kind !== "word" || !["table", "xmltable", "json_table", "the", "read_csv", "read_parquet", "read_json", "unnest"].includes(nameToken.normalized)) return null;
-  if (state.tokens[nameIndex + 1]?.text !== "(") return null;
-  const close = findMatchingParenToken(state.tokens, nameIndex + 1);
-  const safeClose = close < 0 ? nameIndex + 1 : close;
+  const isMutationTarget = introducer === "update" || introducer === "into" || (state.statement.kind === "delete" && introducer === "from");
+  if (isMutationTarget) return null;
+  const qualified = readQualifiedName(state.tokens, nameIndex, state.dialect);
+  if (!qualified || state.tokens[qualified.nextIndex]?.text !== "(") return null;
+  const { name, qualifierParts } = sourceNameFromQualifiedName(qualified.name);
+  if (state.dialect.id !== "postgres" && !TABLE_FUNCTION_NAMES.has(name.toLowerCase())) return null;
+  const close = findMatchingParenToken(state.tokens, qualified.nextIndex);
+  const safeClose = close < 0 ? qualified.nextIndex : close;
   const alias = aliasAfter(state.tokens, safeClose + 1, state.dialect);
-  const sourceName = alias.alias ?? nameToken.normalized;
+  const sourceName = alias.alias ?? name;
   return {
     source: {
       id: `${introducer}:table_function:${sourceIndex}`,
       kind: "table_function",
       name: sourceName,
-      qualifierParts: [],
+      qualifiedName: qualified.name,
+      qualifierParts,
       alias: alias.alias,
       aliasSpan: alias.aliasSpan,
-      sourceSpan: { start: nameToken.span.start, end: alias.aliasSpan?.end ?? state.tokens[safeClose]?.span.end ?? nameToken.span.end },
+      sourceSpan: { start: qualified.name.span.start, end: state.tokens[alias.nextIndex - 1]?.span.end ?? alias.aliasSpan?.end ?? state.tokens[safeClose]?.span.end ?? qualified.name.span.end },
+      columns: alias.columns,
       unresolved: close < 0,
     },
     nextIndex: alias.nextIndex,
@@ -291,8 +309,8 @@ function parseTableSource(state: ParseState, nameIndex: number, introducer: stri
     qualifierParts,
     alias: alias.alias,
     aliasSpan: alias.aliasSpan,
-    sourceSpan: { start: qualified.name.span.start, end: alias.aliasSpan?.end ?? qualified.name.span.end },
-    columns: cte?.columns,
+    sourceSpan: { start: qualified.name.span.start, end: state.tokens[alias.nextIndex - 1]?.span.end ?? alias.aliasSpan?.end ?? qualified.name.span.end },
+    columns: alias.columns?.length ? alias.columns : cte?.columns,
     metadataTarget: {
       schema: qualifierParts[qualifierParts.length - 1],
       table: name,
@@ -302,6 +320,7 @@ function parseTableSource(state: ParseState, nameIndex: number, introducer: stri
 }
 
 function parseRowSource(state: ParseState, target: number, introducer: string, sourceIndex: number): { source: SqlSemanticRowSource; nextIndex: number } | null {
+  if (state.tokens[target]?.normalized === "lateral") target += 1;
   if (state.tokens[target]?.text === "(") return parseSubquerySource(state, target, introducer, sourceIndex);
   return parseTableFunctionSource(state, target, introducer, sourceIndex) ?? parseTableSource(state, target, introducer, sourceIndex);
 }

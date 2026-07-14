@@ -28,17 +28,23 @@ const isWeb = !isTauriRuntime();
 const props = withDefaults(
   defineProps<{
     updateNotificationsEnabled?: boolean;
+    activeTab?: "agent" | "jdbc" | "storage" | "runtime";
   }>(),
   {
     updateNotificationsEnabled: true,
+    activeTab: "agent",
   },
 );
 
 const emit = defineEmits<{
   "update-count-change": [count: number];
+  "update:activeTab": [tab: "agent" | "jdbc" | "storage" | "runtime"];
 }>();
 
-const driverStoreTab = ref("agent");
+const driverStoreTab = computed({
+  get: () => props.activeTab,
+  set: (tab: "agent" | "jdbc" | "storage" | "runtime") => emit("update:activeTab", tab),
+});
 
 // ──────────── Driver store path ────────────
 

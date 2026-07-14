@@ -322,6 +322,7 @@ export default {
     kafkaKerberosPathHint: "The keytab and krb5.conf paths are read by DBX Agent and must exist on the machine running DBX Agent; files are not uploaded from this browser.",
     kafkaKerberosAuthHint: "Uses GSSAPI + keytab login. If the server requires encrypted transport, set Security to SASL_SSL; otherwise Auto or SASL_PLAINTEXT can be used.",
     searchDatabasePlaceholder: "Search database types",
+    jdbcConnection: "JDBC connection",
     iconView: "Icon view",
     listView: "List view",
     selectedDatabase: "Selected",

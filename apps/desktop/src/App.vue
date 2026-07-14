@@ -135,6 +135,7 @@ const settingsInitialSection = ref<string | undefined>(undefined);
 const showQueryEditorDdlDialog = ref(false);
 const driverStoreTabOpen = ref(false);
 const driverStoreActive = ref(false);
+const driverStoreActiveTab = ref<"agent" | "jdbc" | "storage" | "runtime">("agent");
 const settingsReturnSurface = ref<"query" | "driverStore" | "welcome">("welcome");
 const showDriverStore = computed(() => driverStoreTabOpen.value && driverStoreActive.value);
 const showSettingsPage = computed(() => settingsPageTabOpen.value && settingsStore.settingsPageActive);
@@ -316,7 +317,8 @@ function closeSettingsPage() {
   driverStoreActive.value = false;
 }
 
-function openDriverStorePage() {
+function openDriverStorePage(tab?: "agent" | "jdbc" | "storage" | "runtime") {
+  if (tab) driverStoreActiveTab.value = tab;
   driverStoreTabOpen.value = true;
   driverStoreActive.value = true;
   settingsStore.settingsPageActive = false;
@@ -1898,7 +1900,7 @@ onUnmounted(() => {
                 @discard-all-tab-close="handleDiscardAllPendingTabClose"
                 @cancel-tab-close="cancelPendingAppClose"
               />
-              <DriverStorePage v-if="driverStoreTabOpen" v-show="driverStoreActive" class="flex-1 min-h-0" :update-notifications-enabled="updateNotificationsEnabled" @update-count-change="updateAgentDriverUpdateCount" />
+              <DriverStorePage v-if="driverStoreTabOpen" v-show="driverStoreActive" v-model:active-tab="driverStoreActiveTab" class="flex-1 min-h-0" :update-notifications-enabled="updateNotificationsEnabled" @update-count-change="updateAgentDriverUpdateCount" />
               <EditorSettingsPage
                 v-if="settingsPageTabOpen"
                 v-show="settingsStore.settingsPageActive"
@@ -2104,7 +2106,7 @@ onUnmounted(() => {
           "
           @open-driver-store="
             setConnectionDialogOpen(false);
-            openDriverStorePage();
+            openDriverStorePage($event);
           "
           @open-tunnel-profile-settings="
             setConnectionDialogOpen(false);

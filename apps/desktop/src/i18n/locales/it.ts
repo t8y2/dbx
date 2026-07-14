@@ -301,6 +301,7 @@ export default withEnglishFallback({
     nacosTlsSkipVerify: "Salta verifica certificato",
     nacosPageSize: "Dimensione pagina",
     searchDatabasePlaceholder: "Cerca tipi di database",
+    jdbcConnection: "Connessione JDBC",
     iconView: "Vista icone",
     listView: "Vista elenco",
     selectedDatabase: "Selezionato",

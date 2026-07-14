@@ -302,6 +302,7 @@ export default withEnglishFallback({
     nacosTlsSkipVerify: "跳過憑證驗證",
     nacosPageSize: "分頁大小",
     searchDatabasePlaceholder: "搜尋資料庫類型",
+    jdbcConnection: "JDBC 連線",
     iconView: "圖示檢視",
     listView: "清單檢視",
     selectedDatabase: "已選擇",

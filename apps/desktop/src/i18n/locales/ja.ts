@@ -295,6 +295,7 @@ export default withEnglishFallback({
     nacosTlsSkipVerify: "証明書検証をスキップ",
     nacosPageSize: "ページサイズ",
     searchDatabasePlaceholder: "データベースタイプを検索",
+    jdbcConnection: "JDBC 接続",
     iconView: "アイコン表示",
     listView: "リスト表示",
     selectedDatabase: "選択中",

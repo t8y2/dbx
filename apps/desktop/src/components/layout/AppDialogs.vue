@@ -49,7 +49,7 @@ const emit = defineEmits<{
   connectStarted: [name: string];
   connectSucceeded: [name: string];
   connectFailed: [message: string];
-  openDriverStore: [];
+  openDriverStore: [tab?: "jdbc"];
   openTunnelProfileSettings: [];
   openLineageTarget: [
     target: {
@@ -136,7 +136,7 @@ watch(
     @connect-started="emit('connectStarted', $event)"
     @connect-succeeded="emit('connectSucceeded', $event)"
     @connect-failed="emit('connectFailed', $event)"
-    @open-driver-store="emit('openDriverStore')"
+    @open-driver-store="emit('openDriverStore', $event)"
     @open-tunnel-profile-settings="emit('openTunnelProfileSettings')"
   />
   <DangerConfirmDialog

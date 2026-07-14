@@ -302,6 +302,7 @@ export default withEnglishFallback({
     nacosTlsSkipVerify: "Omitir verificación de certificado",
     nacosPageSize: "Tamaño de página",
     searchDatabasePlaceholder: "Buscar tipos de bases de datos",
+    jdbcConnection: "Conexión JDBC",
     iconView: "Vista de íconos",
     listView: "Vista de lista",
     selectedDatabase: "Seleccionada",

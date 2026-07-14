@@ -324,6 +324,7 @@ export default withEnglishFallback({
     kafkaKerberosPathHint: "keytab 和 krb5.conf 路径由 DBX Agent 读取，必须存在于运行 DBX Agent 的机器上；不会从当前浏览器上传文件。",
     kafkaKerberosAuthHint: "使用 GSSAPI + keytab 登录。若服务端要求加密传输，请将 Security 设为 SASL_SSL；否则可使用 Auto 或 SASL_PLAINTEXT。",
     searchDatabasePlaceholder: "搜索数据库类型",
+    jdbcConnection: "JDBC 连接",
     iconView: "图标视图",
     listView: "列表视图",
     selectedDatabase: "已选择",

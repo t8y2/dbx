@@ -96,7 +96,7 @@ impl AiReasoningLevel {
     pub fn as_codex_effort(&self) -> Option<&'static str> {
         match self {
             AiReasoningLevel::Default => None,
-            AiReasoningLevel::Minimal => Some("minimal"),
+            AiReasoningLevel::Minimal => Some("low"),
             AiReasoningLevel::Low => Some("low"),
             AiReasoningLevel::Medium => Some("medium"),
             AiReasoningLevel::High => Some("high"),

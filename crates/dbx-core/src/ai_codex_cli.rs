@@ -67,12 +67,30 @@ fn windows_npm_codex_shim_command(program: &str) -> Option<CodexCommandSpec> {
 }
 
 fn codex_process_env(config: &AiConfig, command: &CodexCommandSpec) -> Result<Vec<(String, String)>, String> {
+    codex_process_env_with_system_proxy(config, command, crate::update::system_proxy_url().as_deref())
+}
+
+fn codex_process_env_with_system_proxy(
+    config: &AiConfig,
+    command: &CodexCommandSpec,
+    system_proxy: Option<&str>,
+) -> Result<Vec<(String, String)>, String> {
     let mut env = BTreeMap::from_iter(codex_cli_env(config)?);
+    if let Some(proxy) = system_proxy.filter(|proxy| !proxy.trim().is_empty()) {
+        insert_env_if_absent(&mut env, "HTTP_PROXY", proxy);
+        insert_env_if_absent(&mut env, "HTTPS_PROXY", proxy);
+    }
     if let Some(dir) = command.parent_dir() {
         let user_path = env.get("PATH").map(String::as_str);
         env.insert("PATH".to_string(), merged_path_with_dir(&dir, user_path));
     }
     Ok(env.into_iter().collect())
+}
+
+fn insert_env_if_absent(env: &mut BTreeMap<String, String>, key: &str, value: &str) {
+    if !env.keys().any(|existing| existing.eq_ignore_ascii_case(key)) {
+        env.insert(key.to_string(), value.to_string());
+    }
 }
 
 trait CommandParentDir {
@@ -588,7 +606,7 @@ mod tests {
         parse_codex_jsonl_event, parse_codex_models, validate_codex_program, CodexRunOptions, DEFAULT_CODEX_MODELS,
     };
     #[cfg(not(windows))]
-    use super::{codex_process_env, common_executable_dirs, merged_path_with_dir};
+    use super::{codex_process_env, codex_process_env_with_system_proxy, common_executable_dirs, merged_path_with_dir};
     #[cfg(windows)]
     use super::{
         direct_program_path, first_windows_program_path, program_path_candidates, resolve_codex_command,
@@ -680,6 +698,17 @@ mod tests {
 
         assert!(!spec.args.contains(&"--reasoning-effort".to_string()));
         assert!(spec.args.contains(&"model_reasoning_effort=\"high\"".to_string()));
+    }
+
+    #[test]
+    fn maps_minimal_reasoning_to_low_for_codex_cli() {
+        let mut config = codex_config("gpt-5.6-luna");
+        config.reasoning_level = AiReasoningLevel::Minimal;
+
+        let spec = build_codex_exec_command(&config, "hello", &run_options());
+
+        assert!(spec.args.contains(&"model_reasoning_effort=\"low\"".to_string()));
+        assert!(!spec.args.contains(&"model_reasoning_effort=\"minimal\"".to_string()));
     }
 
     #[test]
@@ -864,6 +893,31 @@ mod tests {
 
         assert_eq!(dirs.first().unwrap(), std::path::Path::new("/opt/homebrew/bin"));
         assert!(dirs.iter().any(|dir| dir == std::path::Path::new("/custom/bin")));
+    }
+
+    #[test]
+    fn codex_process_env_uses_system_proxy_when_not_configured() {
+        let config = codex_config("default");
+        let command = CliAgentCommandSpec { program: "/opt/homebrew/bin/codex".to_string(), args: Vec::new() };
+
+        let env = codex_process_env_with_system_proxy(&config, &command, Some("http://127.0.0.1:7897")).unwrap();
+
+        assert!(env.contains(&("HTTP_PROXY".to_string(), "http://127.0.0.1:7897".to_string())));
+        assert!(env.contains(&("HTTPS_PROXY".to_string(), "http://127.0.0.1:7897".to_string())));
+    }
+
+    #[test]
+    fn explicit_codex_proxy_env_overrides_system_proxy() {
+        let mut config = codex_config("default");
+        config.codex_cli_env.insert("http_proxy".to_string(), "http://manual-http:9800".to_string());
+        config.codex_cli_env.insert("HTTPS_PROXY".to_string(), "http://manual-https:9801".to_string());
+        let command = CliAgentCommandSpec { program: "/opt/homebrew/bin/codex".to_string(), args: Vec::new() };
+
+        let env = codex_process_env_with_system_proxy(&config, &command, Some("http://127.0.0.1:7897")).unwrap();
+
+        assert!(env.contains(&("http_proxy".to_string(), "http://manual-http:9800".to_string())));
+        assert!(env.contains(&("HTTPS_PROXY".to_string(), "http://manual-https:9801".to_string())));
+        assert!(!env.iter().any(|(_, value)| value == "http://127.0.0.1:7897"));
     }
 
     #[test]

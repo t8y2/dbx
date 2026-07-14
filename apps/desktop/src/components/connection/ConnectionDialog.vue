@@ -1175,7 +1175,8 @@ async function onSqlServerLegacyCompatibilityModeChange(event: Event) {
   if (form.value.db_type !== "sqlserver") return;
   const input = event.target instanceof HTMLInputElement ? event.target : null;
   const enabled = input?.checked === true;
-  testResult.value = null;
+  // The connection test may still be using the previous compatibility mode.
+  resetTestState();
   if (!enabled) {
     form.value.url_params = setSqlServerLegacyCompatibilityMode(form.value.url_params, false);
     return;

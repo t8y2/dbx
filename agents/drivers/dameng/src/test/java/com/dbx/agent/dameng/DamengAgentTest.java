@@ -78,7 +78,8 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
         );
 
         assertTrue(query.sql().contains("FROM ALL_OBJECTS o"));
-        assertTrue(query.sql().contains("FROM USER_MVIEWS m"));
+        assertTrue(query.sql().contains("FROM SYS.SYSOBJECTS materialized_view"));
+        assertTrue(query.sql().contains("schema_object.NAME AS OWNER"));
         assertTrue(query.sql().contains("o.OBJECT_TYPE = 'MATERIALIZED VIEW'"));
         assertTrue(query.sql().contains("mv.MVIEW_NAME IS NOT NULL"));
         assertTrue(query.sql().contains("IN (?, ?)"));
@@ -88,15 +89,30 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
-    void constrainedTableQueryMapsMaterializedViewTypeToDamengCatalogName() {
+    void constrainedTableQueryClassifiesMaterializedViewsForAnotherOwner() {
         DamengAgent.MetadataQuery query = DamengAgent.buildConstrainedTablesQuery(
-            "APP",
+            "REPORTING",
             new MetadataListConstraints(null, 20, null, List.of("MATERIALIZED_VIEW"))
         );
 
         assertTrue(query.sql().contains("MATERIALIZED_VIEW"));
-        assertTrue(query.sql().contains("schema_object.OBJECT_ID = m.SCHID"));
-        assertEquals(List.of("APP", "MATERIALIZED_VIEW", 20), query.args());
+        assertTrue(query.sql().contains("schema_object.ID = materialized_view.SCHID"));
+        assertTrue(query.sql().contains("mv.OWNER = o.OWNER"));
+        assertEquals(List.of("REPORTING", "MATERIALIZED_VIEW", 20), query.args());
+    }
+
+    @Test
+    void constrainedTableOnlyQuerySkipsMaterializedViewCatalog() {
+        DamengAgent.MetadataQuery query = DamengAgent.buildConstrainedTablesQuery(
+            "APP",
+            new MetadataListConstraints(null, 20, null, List.of("TABLE"))
+        );
+
+        assertFalse(query.sql().contains("SYS.SYSOBJECTS materialized_view"));
+        assertFalse(query.sql().contains("USER_MVIEWS"));
+        assertFalse(query.sql().contains("mv.MVIEW_NAME"));
+        assertTrue(query.sql().contains("o.OBJECT_TYPE IN (?)"));
+        assertEquals(List.of("APP", "TABLE", 20), query.args());
     }
 
     @Test
@@ -106,7 +122,7 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
             new MetadataListConstraints(null, 20, null, List.of("VIEW", "MATERIALIZED_VIEW"))
         );
 
-        assertTrue(query.sql().contains("FROM USER_MVIEWS m"));
+        assertTrue(query.sql().contains("FROM SYS.SYSOBJECTS materialized_view"));
         assertTrue(query.sql().contains("mv.MVIEW_NAME IS NOT NULL"));
         assertTrue(query.sql().contains("WHEN 'MATERIALIZED_VIEW' THEN 2"));
         assertEquals(List.of("APP", "VIEW", "MATERIALIZED_VIEW", 20), query.args());
@@ -119,8 +135,10 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
             new MetadataListConstraints("sync", 20, null, List.of("PROCEDURE", "FUNCTION"))
         );
 
-        assertTrue(query.sql().contains("mv.MVIEW_NAME IS NOT NULL"));
-        assertTrue(query.sql().contains("IN (?, ?)"));
+        assertFalse(query.sql().contains("SYS.SYSOBJECTS materialized_view"));
+        assertFalse(query.sql().contains("USER_MVIEWS"));
+        assertFalse(query.sql().contains("mv.MVIEW_NAME"));
+        assertTrue(query.sql().contains("o.OBJECT_TYPE IN (?, ?)"));
         assertTrue(query.sql().contains("WHEN 'PROCEDURE' THEN 3"));
         assertTrue(query.sql().endsWith("LIMIT ?"));
         assertEquals(List.of("APP", "PROCEDURE", "FUNCTION", "%S%Y%N%C%", 20), query.args());

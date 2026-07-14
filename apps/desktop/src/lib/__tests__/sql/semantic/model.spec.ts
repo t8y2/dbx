@@ -72,6 +72,14 @@ describe("sqlSemanticModel baseline fixtures", () => {
     expect(scope.kind).toBe("table");
   });
 
+  it("extracts aliases from completed comma-separated table lists", () => {
+    const { sql, cursor } = sqlFixtureCursor("SELECT * FROM table_a a, table_b b WHERE a.id = b.|");
+    const model = buildSqlSemanticModel(sql, cursor);
+
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ name: "table_a", alias: "a" }), expect.objectContaining({ name: "table_b", alias: "b" })]));
+    expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "alias_column", qualifierParts: ["b"] }));
+  });
+
   it("classifies alias-qualified star with replacement range", () => {
     const { sql, cursor } = sqlFixtureCursor("SELECT u.*| FROM users u");
     const model = buildSqlSemanticModel(sql, cursor);

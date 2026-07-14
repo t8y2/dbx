@@ -46,6 +46,18 @@ describe("semantic SQL completion candidates", () => {
     expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["id", "name", "email"]);
   });
 
+  it("completes columns for aliases in comma-separated table lists", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([
+      ["table_a", ["id", "name"].map((name) => ({ name, table: "table_a" }))],
+      ["table_b", ["id", "status"].map((name) => ({ name, table: "table_b" }))],
+    ]);
+
+    const { context, items } = semanticCompletion("SELECT * FROM table_a a, table_b b WHERE a.id = b.|", { columnsByTable });
+
+    expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ name: "table_b", alias: "b" })]));
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["id", "status"]);
+  });
+
   it("uses CTE projected columns without remote metadata", () => {
     const { items, context } = semanticCompletion("WITH recent_orders(id, total) AS (SELECT id, total FROM orders) SELECT * FROM recent_orders ro WHERE ro.|");
 

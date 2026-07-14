@@ -301,6 +301,11 @@ function parseTableSource(state: ParseState, nameIndex: number, introducer: stri
   return { source, nextIndex: alias.nextIndex };
 }
 
+function parseRowSource(state: ParseState, target: number, introducer: string, sourceIndex: number): { source: SqlSemanticRowSource; nextIndex: number } | null {
+  if (state.tokens[target]?.text === "(") return parseSubquerySource(state, target, introducer, sourceIndex);
+  return parseTableFunctionSource(state, target, introducer, sourceIndex) ?? parseTableSource(state, target, introducer, sourceIndex);
+}
+
 function parseRowSources(state: ParseState): SqlSemanticRowSource[] {
   const sources: SqlSemanticRowSource[] = [...state.cteSources];
   const rootDepth = state.tokens.reduce((min, item) => Math.min(min, item.depth), Number.POSITIVE_INFINITY);
@@ -314,24 +319,15 @@ function parseRowSources(state: ParseState): SqlSemanticRowSource[] {
     if (JOIN_MODIFIERS.has(normalized)) continue;
     let target = index + 1;
     while (JOIN_MODIFIERS.has(state.tokens[target]?.normalized ?? "")) target += 1;
-    if (state.tokens[target]?.text === "(") {
-      const subquery = parseSubquerySource(state, target, normalized, sources.length);
-      if (subquery) {
-        sources.push(subquery.source);
-        index = subquery.nextIndex - 1;
-      }
-      continue;
-    }
-    const tableFunction = parseTableFunctionSource(state, target, normalized, sources.length);
-    if (tableFunction) {
-      sources.push(tableFunction.source);
-      index = tableFunction.nextIndex - 1;
-      continue;
-    }
-    const table = parseTableSource(state, target, normalized, sources.length);
-    if (table) {
-      sources.push(table.source);
-      index = table.nextIndex - 1;
+    for (;;) {
+      const parsed = parseRowSource(state, target, normalized, sources.length);
+      if (!parsed) break;
+      sources.push(parsed.source);
+      index = parsed.nextIndex - 1;
+
+      const separator = state.tokens[parsed.nextIndex];
+      if (normalized !== "from" || separator?.text !== "," || separator.depth !== sourceDepth) break;
+      target = parsed.nextIndex + 1;
     }
   }
   return dedupeSources(sources);

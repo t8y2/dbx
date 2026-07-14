@@ -144,6 +144,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType): string {
     case "dameng":
       return "dm://user:password@host:port";
 
+    case "kingbase":
+      return "kingbase8://user:password@host:54321/database";
+
     case "tdengine":
       return "tdengine://user:password@host:6041/database";
 

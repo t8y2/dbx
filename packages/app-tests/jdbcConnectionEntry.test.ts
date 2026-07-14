@@ -34,3 +34,13 @@ test("opens driver management on the JDBC tab from JDBC connection settings", ()
   assert.match(app, /v-model:active-tab="driverStoreActiveTab"/);
   assert.match(driverStore, /"update:activeTab": \[tab: "agent" \| "jdbc" \| "storage" \| "runtime"\]/);
 });
+
+test("resets the driver management tab after the page is closed", () => {
+  const app = source("apps/desktop/src/App.vue");
+  const closeStart = app.indexOf("function closeDriverStorePage() {");
+  const closeEnd = app.indexOf("\n}", closeStart);
+
+  assert.notEqual(closeStart, -1);
+  assert.notEqual(closeEnd, -1);
+  assert.match(app.slice(closeStart, closeEnd), /driverStoreActiveTab\.value = "agent"/);
+});

@@ -327,6 +327,7 @@ function openDriverStorePage(tab?: "agent" | "jdbc" | "storage" | "runtime") {
 function closeDriverStorePage() {
   driverStoreTabOpen.value = false;
   driverStoreActive.value = false;
+  driverStoreActiveTab.value = "agent";
 }
 const toolbarAgentDriverUpdateCount = computed(() => (updateNotificationsEnabled.value ? agentDriverUpdateCount.value : 0));
 const toolbarHasUpdateAvailable = computed(() => updateNotificationsEnabled.value && hasUpdateAvailable.value);

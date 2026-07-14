@@ -177,26 +177,55 @@ fn build_app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri:
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn linux_has_nvidia_gpu() -> bool {
-    // Detect the proprietary NVIDIA driver by checking for its kernel device
-    // node / proc entry. This is more reliable than parsing lspci output and
-    // has no external deps. Nouveau (open-source) does not create these nodes
-    // and falls through to the Mesa / DMABuf path, which is the desired behavior.
-    std::path::Path::new("/dev/nvidiactl").exists() || std::path::Path::new("/proc/driver/nvidia/version").exists()
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LinuxNvidiaDriver {
+    None,
+    Nouveau,
+    Proprietary,
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn linux_webkit_rendering_workarounds(has_nvidia: bool) -> &'static [(&'static str, &'static str)] {
-    if has_nvidia {
-        // NVIDIA + Wayland: the DMABuf renderer triggers blank-window / Wayland
-        // protocol errors (EGL_EXT_image_dma_buf_import mismatch). Disable it
-        // and suppress explicit-sync to avoid a compositor crash.
-        &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1"), ("__NV_DISABLE_EXPLICIT_SYNC", "1")]
+fn linux_nvidia_driver_from_state(
+    proprietary_control_exists: bool,
+    proprietary_proc_exists: bool,
+    nouveau_module_loaded: bool,
+) -> LinuxNvidiaDriver {
+    if proprietary_control_exists || proprietary_proc_exists {
+        LinuxNvidiaDriver::Proprietary
+    } else if nouveau_module_loaded {
+        LinuxNvidiaDriver::Nouveau
     } else {
-        // AMD / Intel / other Mesa drivers support DMABuf natively.
-        // Keeping DMABUF enabled lets WebKitGTK use GPU compositing, which
-        // dramatically reduces CPU usage and eliminates UI lag on Wayland.
-        &[]
+        LinuxNvidiaDriver::None
+    }
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_nvidia_driver() -> LinuxNvidiaDriver {
+    linux_nvidia_driver_from_state(
+        std::path::Path::new("/dev/nvidiactl").exists(),
+        std::path::Path::new("/proc/driver/nvidia/version").exists(),
+        std::path::Path::new("/sys/module/nouveau").exists(),
+    )
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_webkit_rendering_workarounds(driver: LinuxNvidiaDriver) -> &'static [(&'static str, &'static str)] {
+    match driver {
+        LinuxNvidiaDriver::Proprietary => {
+            // NVIDIA's proprietary driver needs both DMABuf and explicit-sync
+            // workarounds to avoid blank windows and compositor failures.
+            &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1"), ("__NV_DISABLE_EXPLICIT_SYNC", "1")]
+        }
+        LinuxNvidiaDriver::Nouveau => {
+            // WebKitGTK's DMABuf renderer can produce a fully black WebView on
+            // Nouveau while the DOM remains interactive.
+            &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
+        }
+        LinuxNvidiaDriver::None => {
+            // AMD / Intel and other Mesa drivers keep DMABuf enabled to avoid
+            // unnecessary CPU usage and UI lag on Wayland.
+            &[]
+        }
     }
 }
 
@@ -258,8 +287,7 @@ fn linux_appimage_system_gtk_immodules_cache(
 
 #[cfg(target_os = "linux")]
 fn apply_linux_webkit_rendering_workarounds() {
-    let has_nvidia = linux_has_nvidia_gpu();
-    for (key, value) in linux_webkit_rendering_workarounds(has_nvidia) {
+    for (key, value) in linux_webkit_rendering_workarounds(linux_nvidia_driver()) {
         if std::env::var_os(key).is_none() {
             std::env::set_var(key, value);
         }
@@ -502,9 +530,9 @@ pub(crate) fn apply_desktop_settings(app: &tauri::AppHandle, desktop_settings: &
 mod tests {
     use super::{
         linux_appimage_system_gtk_immodules_cache, linux_appimage_wayland_backend_override,
-        linux_webkit_rendering_workarounds, native_window_decorations_override, should_confirm_app_exit_request,
-        should_hide_window_on_close, should_setup_desktop_tray, should_show_main_window_after_setup,
-        uses_application_level_icon,
+        linux_nvidia_driver_from_state, linux_webkit_rendering_workarounds, native_window_decorations_override,
+        should_confirm_app_exit_request, should_hide_window_on_close, should_setup_desktop_tray,
+        should_show_main_window_after_setup, uses_application_level_icon, LinuxNvidiaDriver,
     };
     use std::ffi::OsStr;
 
@@ -585,14 +613,25 @@ mod tests {
     }
 
     #[test]
-    fn applies_linux_webkit_rendering_workarounds_before_webkit_starts() {
-        // NVIDIA: DMABuf must be disabled to avoid blank window / Wayland protocol errors.
+    fn detects_loaded_linux_nvidia_driver() {
+        assert_eq!(linux_nvidia_driver_from_state(true, false, false), LinuxNvidiaDriver::Proprietary);
+        assert_eq!(linux_nvidia_driver_from_state(false, true, false), LinuxNvidiaDriver::Proprietary);
+        assert_eq!(linux_nvidia_driver_from_state(true, false, true), LinuxNvidiaDriver::Proprietary);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, true), LinuxNvidiaDriver::Nouveau);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, false), LinuxNvidiaDriver::None);
+    }
+
+    #[test]
+    fn applies_driver_specific_linux_webkit_rendering_workarounds() {
         assert_eq!(
-            linux_webkit_rendering_workarounds(true),
+            linux_webkit_rendering_workarounds(LinuxNvidiaDriver::Proprietary),
             &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1"), ("__NV_DISABLE_EXPLICIT_SYNC", "1")]
         );
-        // AMD / Intel / Mesa: DMABuf is supported — no workarounds needed.
-        assert_eq!(linux_webkit_rendering_workarounds(false), &[]);
+        assert_eq!(
+            linux_webkit_rendering_workarounds(LinuxNvidiaDriver::Nouveau),
+            &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
+        );
+        assert_eq!(linux_webkit_rendering_workarounds(LinuxNvidiaDriver::None), &[]);
     }
 
     #[test]

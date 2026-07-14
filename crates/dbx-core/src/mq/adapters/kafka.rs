@@ -308,39 +308,47 @@ impl MessageQueueAdmin for KafkaAdmin {
         options: PeekMessagesOptions,
     ) -> Result<Vec<PeekedMessage>, String> {
         let conn_params = build_connection_params(&self.config);
-        let result: serde_json::Value = self
-            .call(
-                "mq_peek_messages",
-                serde_json::json!({
-                    "topic": topic.topic,
-                    "partition": options.partition.unwrap_or(0),
-                    "offset": options.offset.unwrap_or(0),
-                    "count": count,
-                    "connection": conn_params,
-                }),
-            )
-            .await?;
+        let mut params = serde_json::json!({
+            "topic": topic.topic,
+            "count": count,
+            "connection": conn_params,
+        });
+        // Omit partition/offset so the agent defaults to all partitions + earliest.
+        // Do not coerce missing values to 0 — that forced PARTITION 0 OFFSET 0 UX.
+        if let Some(partition) = options.partition {
+            params["partition"] = serde_json::json!(partition);
+        }
+        if let Some(offset) = options.offset {
+            params["offset"] = serde_json::json!(offset);
+        }
+        let result: serde_json::Value = self.call("mq_peek_messages", params).await?;
 
         let messages = result.get("messages").and_then(|v| v.as_array()).cloned().unwrap_or_default();
         Ok(messages
             .into_iter()
             .enumerate()
-            .map(|(idx, m)| PeekedMessage {
-                position: (idx + 1) as u32,
-                message_id: m.get("offset").and_then(|v| v.as_i64()).map(|v| v.to_string()),
-                key: m.get("key").and_then(|v| v.as_str()).map(String::from),
-                publish_time: m.get("timestamp").and_then(|v| v.as_i64()).map(|v| v.to_string()),
-                event_time: None,
-                properties: HashMap::new(),
-                headers: m
-                    .get("headers")
-                    .and_then(|v| v.as_object())
-                    .map(|obj| {
-                        obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string())).collect()
-                    })
-                    .unwrap_or_default(),
-                payload_base64: m.get("payloadBase64").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                payload_text: m.get("payloadText").and_then(|v| v.as_str()).map(String::from),
+            .map(|(idx, m)| {
+                let mut properties = HashMap::new();
+                if let Some(partition) = m.get("partition").and_then(|v| v.as_i64()) {
+                    properties.insert("partition".to_string(), partition.to_string());
+                }
+                PeekedMessage {
+                    position: (idx + 1) as u32,
+                    message_id: m.get("offset").and_then(|v| v.as_i64()).map(|v| v.to_string()),
+                    key: m.get("key").and_then(|v| v.as_str()).map(String::from),
+                    publish_time: m.get("timestamp").and_then(|v| v.as_i64()).map(|v| v.to_string()),
+                    event_time: None,
+                    properties,
+                    headers: m
+                        .get("headers")
+                        .and_then(|v| v.as_object())
+                        .map(|obj| {
+                            obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string())).collect()
+                        })
+                        .unwrap_or_default(),
+                    payload_base64: m.get("payloadBase64").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                    payload_text: m.get("payloadText").and_then(|v| v.as_str()).map(String::from),
+                }
             })
             .collect())
     }

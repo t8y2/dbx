@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 import com.google.gson.JsonParser;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import org.junit.jupiter.api.Test;
@@ -32,6 +33,34 @@ class KafkaAgentTest {
     @Test
     void returnsNoSeekOffsetWhenTopicHasNoReadableMessages() {
         assertNull(KafkaAgent.normalizePeekOffset(0, 5, 5));
+    }
+
+    @Test
+    void resolvePeekPartitionsUsesSinglePartitionWhenSpecified() {
+        var partitions = KafkaAgent.resolvePeekPartitions("events", 2, List.of(0, 1, 2));
+        assertEquals(1, partitions.size());
+        assertEquals(2, partitions.get(0).partition());
+        assertEquals("events", partitions.get(0).topic());
+    }
+
+    @Test
+    void resolvePeekPartitionsUsesAllPartitionsWhenUnspecified() {
+        var partitions = KafkaAgent.resolvePeekPartitions("events", null, List.of(2, 0, 1));
+        assertEquals(List.of(0, 1, 2), partitions.stream().map(org.apache.kafka.common.TopicPartition::partition).toList());
+    }
+
+    @Test
+    void sortPeekedMessagesOrdersByTimestampThenPartitionThenOffset() {
+        var messages = new java.util.ArrayList<Map<String, Object>>();
+        messages.add(Map.of("timestamp", 20L, "partition", 1, "offset", 1L));
+        messages.add(Map.of("timestamp", 10L, "partition", 0, "offset", 5L));
+        messages.add(Map.of("timestamp", 10L, "partition", 0, "offset", 2L));
+        messages.add(Map.of("timestamp", 10L, "partition", 1, "offset", 0L));
+        KafkaAgent.sortPeekedMessages(messages);
+        assertEquals(2L, messages.get(0).get("offset"));
+        assertEquals(5L, messages.get(1).get("offset"));
+        assertEquals(1, messages.get(2).get("partition"));
+        assertEquals(20L, messages.get(3).get("timestamp"));
     }
 
     @Test

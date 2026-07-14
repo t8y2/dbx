@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { formatError } from "@/lib/backend/errorUtils";
 import { computed, ref, onBeforeUnmount, onMounted, watch } from "vue";
+import { useI18n } from "vue-i18n";
 import type { TenantInfo, TenantConfig } from "@/types/mq";
 import { mqListTenants, mqCreateTenant, mqUpdateTenant, mqDeleteTenant } from "@/lib/backend/api";
 import { defaultTenantConfig, normalizeClusterOptions, validateTenantForm } from "@/lib/mq/mqTenantForm";
@@ -16,6 +17,8 @@ const props = defineProps<Props>();
 const emit = defineEmits<{
   tenantSelected: [tenant: string];
 }>();
+
+const { t } = useI18n();
 
 const tenants = ref<TenantInfo[]>([]);
 const loading = ref(false);
@@ -37,7 +40,6 @@ const newRole = ref("");
 const newCluster = ref("");
 const clusterDropdownOpen = ref(false);
 const clusterSelectRef = ref<HTMLElement | null>(null);
-const readOnlyMessage = "当前连接为只读模式，不能执行写操作";
 const normalizedClusterOptions = computed(() => normalizeClusterOptions(props.clusterOptions ?? []));
 const clusterOptionSet = computed(() => new Set(normalizedClusterOptions.value));
 const selectedAllowedClusters = computed(() => normalizeClusterOptions(formData.value.config.allowedClusters));
@@ -46,7 +48,7 @@ const canSubmitTenant = computed(() => Boolean(formData.value.name.trim()) && se
 
 function guardWritable() {
   if (props.readOnly) {
-    error.value = readOnlyMessage;
+    error.value = t("mqTenants.readOnly");
     return false;
   }
   return true;
@@ -96,7 +98,7 @@ async function handleCreate() {
   if (!guardWritable()) return;
   const validationError = validateTenantForm(formData.value.name, formData.value.config);
   if (validationError) {
-    error.value = validationError;
+    error.value = t(validationError);
     return;
   }
   loading.value = true;
@@ -118,7 +120,7 @@ async function handleUpdate() {
   if (!editingTenant.value) return;
   const validationError = validateTenantForm(formData.value.name, formData.value.config);
   if (validationError) {
-    error.value = validationError;
+    error.value = t(validationError);
     return;
   }
   loading.value = true;
@@ -137,7 +139,7 @@ async function handleUpdate() {
 
 async function handleDelete(tenant: TenantInfo) {
   if (!guardWritable()) return;
-  if (!confirm(`确定要删除租户 "${tenant.name}" 吗？此操作不可逆。`)) return;
+  if (!confirm(t("mqTenants.confirmDelete", { name: tenant.name }))) return;
   loading.value = true;
   error.value = undefined;
   try {
@@ -225,24 +227,24 @@ watch(normalizedClusterOptions, (clusters) => {
 <template>
   <div class="tenants-panel">
     <div class="panel-toolbar">
-      <h3>租户管理</h3>
-      <button @click="openCreateDialog" :disabled="loading || readOnly" class="btn-primary">+ 创建租户</button>
+      <h3>{{ t("mqTenants.title") }}</h3>
+      <button @click="openCreateDialog" :disabled="loading || readOnly" class="btn-primary">+ {{ t("mqTenants.createTenant") }}</button>
     </div>
 
-    <div v-if="!supportsTenants" class="panel-placeholder">当前消息队列系统不支持租户管理</div>
+    <div v-if="!supportsTenants" class="panel-placeholder">{{ t("mqTenants.notSupported") }}</div>
 
     <div v-else-if="error" class="panel-error">{{ error }}</div>
 
-    <div v-else-if="loading && !tenants.length" class="panel-loading">加载中...</div>
+    <div v-else-if="loading && !tenants.length" class="panel-loading">{{ t("mqTenants.loading") }}</div>
 
     <div v-else class="tenants-table">
       <table>
         <thead>
           <tr>
-            <th>名称</th>
-            <th>管理角色</th>
-            <th>允许集群</th>
-            <th>操作</th>
+            <th>{{ t("mqTenants.name") }}</th>
+            <th>{{ t("mqTenants.adminRoles") }}</th>
+            <th>{{ t("mqTenants.allowedClusters") }}</th>
+            <th>{{ t("mqTenants.actions") }}</th>
           </tr>
         </thead>
         <tbody>
@@ -252,17 +254,17 @@ watch(normalizedClusterOptions, (clusters) => {
               <span v-if="tenant.adminRoles.length" class="tag-list">
                 <span v-for="role in tenant.adminRoles" :key="role" class="tag">{{ role }}</span>
               </span>
-              <span v-else class="text-muted">无</span>
+              <span v-else class="text-muted">{{ t("mqTenants.none") }}</span>
             </td>
             <td>
               <span v-if="tenant.allowedClusters.length" class="tag-list">
                 <span v-for="cluster in tenant.allowedClusters" :key="cluster" class="tag">{{ cluster }}</span>
               </span>
-              <span v-else class="text-muted">无</span>
+              <span v-else class="text-muted">{{ t("mqTenants.none") }}</span>
             </td>
             <td class="actions">
-              <button @click.stop="openEditDialog(tenant)" :disabled="readOnly" class="btn-sm">编辑</button>
-              <button @click.stop="handleDelete(tenant)" :disabled="readOnly" class="btn-sm btn-danger">删除</button>
+              <button @click.stop="openEditDialog(tenant)" :disabled="readOnly" class="btn-sm">{{ t("mqTenants.edit") }}</button>
+              <button @click.stop="handleDelete(tenant)" :disabled="readOnly" class="btn-sm btn-danger">{{ t("mqTenants.delete") }}</button>
             </td>
           </tr>
         </tbody>
@@ -273,19 +275,19 @@ watch(normalizedClusterOptions, (clusters) => {
     <div v-if="showCreateDialog" class="dialog-overlay" @click="showCreateDialog = false">
       <div class="dialog" @click.stop>
         <div class="dialog-header">
-          <h3>创建租户</h3>
+          <h3>{{ t("mqTenants.createDialogTitle") }}</h3>
           <button @click="showCreateDialog = false" class="btn-close">×</button>
         </div>
         <div class="dialog-body">
           <div class="form-group">
-            <label>租户名称*</label>
-            <input v-model="formData.name" type="text" placeholder="例如: my-tenant" :disabled="readOnly" />
+            <label>{{ t("mqTenants.tenantName") }}</label>
+            <input v-model="formData.name" type="text" :placeholder="t('mqTenants.tenantNamePlaceholder')" :disabled="readOnly" />
           </div>
           <div class="form-group">
-            <label>管理角色</label>
+            <label>{{ t("mqTenants.adminRoles") }}</label>
             <div class="input-with-button">
-              <input v-model="newRole" type="text" placeholder="添加角色" :disabled="readOnly" @keyup.enter="addRole" />
-              <button @click="addRole" :disabled="readOnly" class="btn-sm">添加</button>
+              <input v-model="newRole" type="text" :placeholder="t('mqTenants.addRolePlaceholder')" :disabled="readOnly" @keyup.enter="addRole" />
+              <button @click="addRole" :disabled="readOnly" class="btn-sm">{{ t("mqTenants.add") }}</button>
             </div>
             <div v-if="formData.config.adminRoles.length" class="tag-list">
               <span v-for="role in formData.config.adminRoles" :key="role" class="tag">
@@ -295,7 +297,7 @@ watch(normalizedClusterOptions, (clusters) => {
             </div>
           </div>
           <div class="form-group">
-            <label>允许集群*</label>
+            <label>{{ t("mqTenants.allowedClusters") }}</label>
             <div ref="clusterSelectRef" class="cluster-select-wrap">
               <button type="button" class="cluster-select-trigger" :class="{ open: clusterDropdownOpen }" :disabled="readOnly" @click="clusterDropdownOpen = !clusterDropdownOpen">
                 <span v-if="displayedSelectedClusters.length" class="cluster-selected-tags">
@@ -304,7 +306,7 @@ watch(normalizedClusterOptions, (clusters) => {
                     <span class="tag-remove" role="button" tabindex="0" @click.stop="removeCluster(cluster)" @keyup.enter.stop="removeCluster(cluster)">×</span>
                   </span>
                 </span>
-                <span v-else class="cluster-placeholder">{{ normalizedClusterOptions.length ? "请选择允许集群" : "未探测到集群，可手动添加" }}</span>
+                <span v-else class="cluster-placeholder">{{ normalizedClusterOptions.length ? t("mqTenants.selectClustersPlaceholder") : t("mqTenants.noClustersDetectedPlaceholder") }}</span>
                 <span class="cluster-arrow">{{ clusterDropdownOpen ? "⌃" : "⌄" }}</span>
               </button>
               <div v-if="clusterDropdownOpen" class="cluster-options">
@@ -312,20 +314,20 @@ watch(normalizedClusterOptions, (clusters) => {
                   <span>{{ cluster }}</span>
                   <span v-if="isClusterSelected(cluster)" class="cluster-check">✓</span>
                 </button>
-                <div v-if="!normalizedClusterOptions.length" class="cluster-empty">当前连接未返回集群列表</div>
+                <div v-if="!normalizedClusterOptions.length" class="cluster-empty">{{ t("mqTenants.clustersNotReturned") }}</div>
               </div>
             </div>
             <div class="input-with-button cluster-manual">
-              <input v-model="newCluster" type="text" placeholder="手动添加集群" :disabled="readOnly" @keyup.enter="addCluster" />
-              <button @click="addCluster" :disabled="readOnly" class="btn-sm">添加</button>
+              <input v-model="newCluster" type="text" :placeholder="t('mqTenants.addClusterPlaceholder')" :disabled="readOnly" @keyup.enter="addCluster" />
+              <button @click="addCluster" :disabled="readOnly" class="btn-sm">{{ t("mqTenants.add") }}</button>
             </div>
-            <div v-if="!selectedAllowedClusters.length" class="form-hint form-hint-error">至少选择或添加一个允许集群</div>
+            <div v-if="!selectedAllowedClusters.length" class="form-hint form-hint-error">{{ t("mqTenants.clustersRequiredHint") }}</div>
           </div>
           <div v-if="error" class="form-error">{{ error }}</div>
         </div>
         <div class="dialog-footer">
-          <button @click="showCreateDialog = false" class="btn-secondary">取消</button>
-          <button @click="handleCreate" :disabled="loading || readOnly || !canSubmitTenant" class="btn-primary">创建</button>
+          <button @click="showCreateDialog = false" class="btn-secondary">{{ t("mqTenants.cancel") }}</button>
+          <button @click="handleCreate" :disabled="loading || readOnly || !canSubmitTenant" class="btn-primary">{{ t("mqTenants.create") }}</button>
         </div>
       </div>
     </div>
@@ -334,15 +336,15 @@ watch(normalizedClusterOptions, (clusters) => {
     <div v-if="showEditDialog" class="dialog-overlay" @click="showEditDialog = false">
       <div class="dialog" @click.stop>
         <div class="dialog-header">
-          <h3>编辑租户: {{ editingTenant?.name }}</h3>
+          <h3>{{ t("mqTenants.editDialogTitle", { name: editingTenant?.name }) }}</h3>
           <button @click="showEditDialog = false" class="btn-close">×</button>
         </div>
         <div class="dialog-body">
           <div class="form-group">
-            <label>管理角色</label>
+            <label>{{ t("mqTenants.adminRoles") }}</label>
             <div class="input-with-button">
-              <input v-model="newRole" type="text" placeholder="添加角色" :disabled="readOnly" @keyup.enter="addRole" />
-              <button @click="addRole" :disabled="readOnly" class="btn-sm">添加</button>
+              <input v-model="newRole" type="text" :placeholder="t('mqTenants.addRolePlaceholder')" :disabled="readOnly" @keyup.enter="addRole" />
+              <button @click="addRole" :disabled="readOnly" class="btn-sm">{{ t("mqTenants.add") }}</button>
             </div>
             <div v-if="formData.config.adminRoles.length" class="tag-list">
               <span v-for="role in formData.config.adminRoles" :key="role" class="tag">
@@ -352,7 +354,7 @@ watch(normalizedClusterOptions, (clusters) => {
             </div>
           </div>
           <div class="form-group">
-            <label>允许集群*</label>
+            <label>{{ t("mqTenants.allowedClusters") }}</label>
             <div ref="clusterSelectRef" class="cluster-select-wrap">
               <button type="button" class="cluster-select-trigger" :class="{ open: clusterDropdownOpen }" :disabled="readOnly" @click="clusterDropdownOpen = !clusterDropdownOpen">
                 <span v-if="displayedSelectedClusters.length" class="cluster-selected-tags">
@@ -361,7 +363,7 @@ watch(normalizedClusterOptions, (clusters) => {
                     <span class="tag-remove" role="button" tabindex="0" @click.stop="removeCluster(cluster)" @keyup.enter.stop="removeCluster(cluster)">×</span>
                   </span>
                 </span>
-                <span v-else class="cluster-placeholder">{{ normalizedClusterOptions.length ? "请选择允许集群" : "未探测到集群，可手动添加" }}</span>
+                <span v-else class="cluster-placeholder">{{ normalizedClusterOptions.length ? t("mqTenants.selectClustersPlaceholder") : t("mqTenants.noClustersDetectedPlaceholder") }}</span>
                 <span class="cluster-arrow">{{ clusterDropdownOpen ? "⌃" : "⌄" }}</span>
               </button>
               <div v-if="clusterDropdownOpen" class="cluster-options">
@@ -369,20 +371,20 @@ watch(normalizedClusterOptions, (clusters) => {
                   <span>{{ cluster }}</span>
                   <span v-if="isClusterSelected(cluster)" class="cluster-check">✓</span>
                 </button>
-                <div v-if="!normalizedClusterOptions.length" class="cluster-empty">当前连接未返回集群列表</div>
+                <div v-if="!normalizedClusterOptions.length" class="cluster-empty">{{ t("mqTenants.clustersNotReturned") }}</div>
               </div>
             </div>
             <div class="input-with-button cluster-manual">
-              <input v-model="newCluster" type="text" placeholder="手动添加集群" :disabled="readOnly" @keyup.enter="addCluster" />
-              <button @click="addCluster" :disabled="readOnly" class="btn-sm">添加</button>
+              <input v-model="newCluster" type="text" :placeholder="t('mqTenants.addClusterPlaceholder')" :disabled="readOnly" @keyup.enter="addCluster" />
+              <button @click="addCluster" :disabled="readOnly" class="btn-sm">{{ t("mqTenants.add") }}</button>
             </div>
-            <div v-if="!selectedAllowedClusters.length" class="form-hint form-hint-error">至少选择或添加一个允许集群</div>
+            <div v-if="!selectedAllowedClusters.length" class="form-hint form-hint-error">{{ t("mqTenants.clustersRequiredHint") }}</div>
           </div>
           <div v-if="error" class="form-error">{{ error }}</div>
         </div>
         <div class="dialog-footer">
-          <button @click="showEditDialog = false" class="btn-secondary">取消</button>
-          <button @click="handleUpdate" :disabled="loading || readOnly || !canSubmitTenant" class="btn-primary">保存</button>
+          <button @click="showEditDialog = false" class="btn-secondary">{{ t("mqTenants.cancel") }}</button>
+          <button @click="handleUpdate" :disabled="loading || readOnly || !canSubmitTenant" class="btn-primary">{{ t("mqTenants.save") }}</button>
         </div>
       </div>
     </div>

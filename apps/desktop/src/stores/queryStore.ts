@@ -28,6 +28,7 @@ import { redisCommandResultToQueryResult } from "@/lib/redis/redisQueryResult";
 import { nextRedisCommandDb } from "@/lib/redis/redisCommandSession";
 import { isRedisMutatingCommand } from "@/lib/redis/redisCommandTable";
 import { usesAgentCursorForQuery } from "@/lib/database/databaseDriverManifest";
+import { supportsClearableQuerySchema } from "@/lib/database/databaseFeatureSupport";
 import { canUseKeylessRowPredicate, DBX_ROWID_COLUMN, editablePrimaryKeys, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/table/tableDataExport";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
@@ -1985,6 +1986,16 @@ export const useQueryStore = defineStore("query", () => {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.schema === schema) return;
     rollbackTabTransaction(tab);
+    const clearsQuerySchema = tab.mode === "query" && tab.schema && !schema && supportsClearableQuerySchema(useConnectionStore().getConfig(tab.connectionId)?.db_type);
+    if (clearsQuerySchema) {
+      void closeResultSession(tab);
+      void closeClientConnectionSession(tab);
+      clearResultPayload(tab);
+      tab.lastExecutedSql = undefined;
+      tab.resultBaseSql = undefined;
+      tab.resultSortedSql = undefined;
+      clearExplain(tab);
+    }
     tab.schema = schema;
     if (tab.mode === "objects") tab.objectBrowser = { ...tab.objectBrowser, schema, viewport: undefined };
   }

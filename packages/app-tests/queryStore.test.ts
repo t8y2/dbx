@@ -48,6 +48,13 @@ function oracleConn(id: string): ConnectionConfig {
   };
 }
 
+function oracleCompatibleConn(id: string, dbType: "oracle" | "dameng" | "oceanbase-oracle"): ConnectionConfig {
+  return {
+    ...oracleConn(id),
+    db_type: dbType,
+  };
+}
+
 function sqlServerConn(id: string): ConnectionConfig {
   return {
     ...conn(id),
@@ -760,7 +767,10 @@ test("sortTabResultLocally sorts current rows and restores original order", () =
     [2, "Grace"],
     [3, "Linus"],
   ]);
-  assert.deepEqual(tab.result?.mongo_documents?.map((document) => (document as { id: number }).id), [1, 2, 3]);
+  assert.deepEqual(
+    tab.result?.mongo_documents?.map((document) => (document as { id: number }).id),
+    [1, 2, 3],
+  );
   assert.equal(tab.resultSortColumn, "name");
   assert.equal(tab.resultSortColumnIndex, 1);
   assert.equal(tab.resultSortDirection, "asc");
@@ -774,7 +784,10 @@ test("sortTabResultLocally sorts current rows and restores original order", () =
     [2, "Grace"],
     [1, "Ada"],
   ]);
-  assert.deepEqual(tab.result?.mongo_documents?.map((document) => (document as { id: number }).id), [3, 2, 1]);
+  assert.deepEqual(
+    tab.result?.mongo_documents?.map((document) => (document as { id: number }).id),
+    [3, 2, 1],
+  );
 
   store.sortTabResultLocally(tabId, "name", 1, null);
 
@@ -783,7 +796,10 @@ test("sortTabResultLocally sorts current rows and restores original order", () =
     [1, "Ada"],
     [3, "Linus"],
   ]);
-  assert.deepEqual(tab.result?.mongo_documents?.map((document) => (document as { id: number }).id), [2, 1, 3]);
+  assert.deepEqual(
+    tab.result?.mongo_documents?.map((document) => (document as { id: number }).id),
+    [2, 1, 3],
+  );
   assert.equal(tab.resultSortColumn, undefined);
   assert.equal(tab.resultSortMode, undefined);
 });
@@ -920,7 +936,10 @@ test("removing the active result run clears output when remaining caches are una
   assert.equal(tab.activeResultRunId, undefined);
   assert.equal(tab.result, undefined);
   assert.equal(tab.results, undefined);
-  assert.deepEqual(tab.resultRuns?.map((run) => run.id), ["run-2"]);
+  assert.deepEqual(
+    tab.resultRuns?.map((run) => run.id),
+    ["run-2"],
+  );
 });
 
 test("removed result runs are excluded from result archives", async () => {
@@ -4128,6 +4147,78 @@ test("closing a data tab releases its tab-scoped client session", async () => {
       closedSessions.some((body) => body.clientSessionId === tabId && body.connectionId === "conn-1"),
       `expected close-client-session for tab session, got ${JSON.stringify(closedSessions)}`,
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+for (const dbType of ["oracle", "dameng", "oceanbase-oracle"] as const) {
+  test(`clearing a ${dbType} query schema releases its tab-scoped client session`, async () => {
+    const restoreStorage = installMemoryStorage();
+    setActivePinia(createPinia());
+    const connectionStore = useConnectionStore();
+    const store = useQueryStore();
+    const originalFetch = globalThis.fetch;
+    const connectionId = `${dbType}-1`;
+
+    connectionStore.addEphemeralConnection(oracleCompatibleConn(connectionId, dbType));
+    const tabId = store.createTab(connectionId, "SERVICE", "Query", "query", "REPORTING");
+    const closedSessions: any[] = [];
+
+    globalThis.fetch = async (input, init) => {
+      const url = String(input);
+      if (url === "/api/query/close-client-session") {
+        closedSessions.push(JSON.parse(String(init?.body ?? "{}")));
+        return new Response(JSON.stringify(true), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("unexpected request", { status: 500 });
+    };
+
+    try {
+      store.updateSchema(tabId, undefined);
+
+      await waitFor(() => closedSessions.some((body) => body.clientSessionId === tabId));
+      assert.equal(store.tabs.find((tab) => tab.id === tabId)?.schema, undefined);
+      assert.ok(
+        closedSessions.some((body) => body.connectionId === connectionId && body.database === "SERVICE" && body.clientSessionId === tabId),
+        `expected close-client-session for cleared query schema, got ${JSON.stringify(closedSessions)}`,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+      restoreStorage();
+    }
+  });
+}
+
+test("clearing a non-clearable query schema does not reset its client session", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  let closeRequests = 0;
+
+  connectionStore.addEphemeralConnection(conn("pg-1"));
+  const tabId = store.createTab("pg-1", "app", "Query", "query", "public");
+
+  globalThis.fetch = async (input) => {
+    if (String(input) === "/api/query/close-client-session") closeRequests += 1;
+    return new Response(JSON.stringify(true), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    store.updateSchema(tabId, undefined);
+    await Promise.resolve();
+
+    assert.equal(store.tabs.find((tab) => tab.id === tabId)?.schema, undefined);
+    assert.equal(closeRequests, 0);
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

@@ -39,6 +39,8 @@ export const SCHEMA_AWARE_TYPES = new Set<DatabaseType>([
 
 export const SINGLE_DATABASE_TYPES = new Set<DatabaseType>(["oracle", "dameng", "firebird", "oceanbase-oracle", "access", "questdb"]);
 
+export const CLEARABLE_QUERY_SCHEMA_TYPES = new Set<DatabaseType>(["oracle", "dameng", "oceanbase-oracle"]);
+
 export const FETCH_FIRST_TYPES = new Set<DatabaseType>(["oracle", "dameng"]);
 
 export const TREE_SCHEMA_TYPES = new Set<DatabaseType>([

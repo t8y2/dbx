@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { isSchemaAware, supportsDatabaseCreation, usesTreeSchemaMode } from "../../apps/desktop/src/lib/database/databaseCapabilities.ts";
+import { isSchemaAware, supportsClearableQuerySchema, supportsDatabaseCreation, usesTreeSchemaMode } from "../../apps/desktop/src/lib/database/databaseCapabilities.ts";
 
 test("TDengine uses database/catalog tree nodes without a schema layer", () => {
   assert.equal(isSchemaAware("tdengine"), false);
@@ -15,4 +15,14 @@ test("IoTDB keeps schema-qualified paths without showing a duplicate schema node
 test("GoldenDB and Vastbase expose database creation", () => {
   assert.equal(supportsDatabaseCreation("goldendb"), true);
   assert.equal(supportsDatabaseCreation("vastbase"), true);
+});
+
+test("only Oracle-compatible single-database schemas can be cleared from query tabs", () => {
+  assert.equal(supportsClearableQuerySchema("oracle"), true);
+  assert.equal(supportsClearableQuerySchema("dameng"), true);
+  assert.equal(supportsClearableQuerySchema("oceanbase-oracle"), true);
+  assert.equal(supportsClearableQuerySchema("mysql"), false);
+  assert.equal(supportsClearableQuerySchema("postgres"), false);
+  assert.equal(supportsClearableQuerySchema("sqlserver"), false);
+  assert.equal(supportsClearableQuerySchema("jdbc"), false);
 });

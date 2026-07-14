@@ -33,12 +33,14 @@ const props = withDefaults(
     optionTooltip?: (option: string) => string | undefined;
     normalizeCustom?: (value: string) => string;
     clearable?: boolean;
+    clearSelectedOption?: boolean;
   }>(),
   {
     loading: false,
     disabled: false,
     allowCustom: false,
     clearable: false,
+    clearSelectedOption: false,
     loadingText: "Loading...",
     triggerVariant: "ghost",
     triggerIconClass: "h-3 w-3",
@@ -183,6 +185,10 @@ function selectOption(option: string) {
   open.value = false;
 }
 
+function selectOrClearOption(option: string) {
+  selectOption(props.clearSelectedOption && option === props.modelValue ? "" : option);
+}
+
 function selectCustomOption() {
   if (!canSelectCustom.value) return;
   selectOption(customOptionValue.value);
@@ -214,7 +220,7 @@ function handleKeydown(event: KeyboardEvent) {
     if (highlightIndex.value < 0 || highlightIndex.value >= optionCount()) return;
     event.preventDefault();
     if (highlightIndex.value < filteredOptions.value.length) {
-      selectOption(filteredOptions.value[highlightIndex.value]);
+      selectOrClearOption(filteredOptions.value[highlightIndex.value]);
     } else {
       selectCustomOption();
     }
@@ -255,15 +261,18 @@ function handleKeydown(event: KeyboardEvent) {
                 :title="optionTooltip(option) ? undefined : optionTitle(option)"
                 :class="
                   cn(
-                    'flex h-8 w-full min-w-0 items-center gap-2 rounded-sm px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none',
+                    'group flex h-8 w-full min-w-0 items-center gap-2 rounded-sm px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none',
                     props.itemClass,
                     index === highlightIndex && 'bg-accent text-accent-foreground',
                   )
                 "
                 @pointerenter="activateHelpForOption(option)"
-                @click="selectOption(option)"
+                @click="selectOrClearOption(option)"
               >
-                <Check :class="cn('h-3.5 w-3.5 shrink-0', option === modelValue ? 'opacity-100' : 'opacity-0')" />
+                <span class="relative h-3.5 w-3.5 shrink-0">
+                  <Check :class="cn('absolute inset-0 h-3.5 w-3.5', option !== modelValue ? 'opacity-0' : clearSelectedOption ? 'opacity-100 group-hover:opacity-0 group-focus-visible:opacity-0' : 'opacity-100')" />
+                  <X v-if="clearSelectedOption && option === modelValue" class="absolute inset-0 h-3.5 w-3.5 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100" />
+                </span>
                 <slot name="option-label" :option="option" :label="displayName?.(option)">
                   <span class="truncate">{{ displayName?.(option) }}</span>
                 </slot>

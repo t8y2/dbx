@@ -15,7 +15,7 @@ import { connectionIconType } from "@/lib/connection/connectionPresentation";
 import { formatDatabaseLabel, isDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { connectionDisplayName } from "@/lib/tabs/tabPresentation";
 import { buildConnectionGroupPathMap } from "@/lib/sidebar/sidebarLayout";
-import { isSingleDatabase, supportsSqlInListPaste, supportsTransaction as supportsTransactionFeature } from "@/lib/database/databaseCapabilities";
+import { isSingleDatabase, supportsClearableQuerySchema, supportsSqlInListPaste, supportsTransaction as supportsTransactionFeature } from "@/lib/database/databaseCapabilities";
 import { hexToRgba } from "@/lib/common/color";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import type { QueryTab, ConnectionConfig } from "@/types/database";
@@ -411,6 +411,7 @@ function databaseOptionIsProduction(database: string): boolean {
           :empty-text="t('grid.noSearchResults')"
           :loading-text="t('common.loading')"
           :loading="!!activeConnection && isLoadingSchemas(activeConnection.id, schemaDatabaseKey)"
+          :clear-selected-option="supportsClearableQuerySchema(activeConnection?.db_type)"
           trigger-class="gap-1.5"
           @update:model-value="(schema) => emit('changeSchema', schema || undefined)"
           @update:open="

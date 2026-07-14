@@ -4194,6 +4194,66 @@ for (const dbType of ["oracle", "dameng", "oceanbase-oracle"] as const) {
   });
 }
 
+test("query execution waits for a cleared schema client session to close", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+
+  connectionStore.addEphemeralConnection(oracleConn("oracle-1"));
+  const tabId = store.createTab("oracle-1", "ORCL", "Query", "query", "REPORTING");
+  let resolveClientSessionClose: ((response: Response) => void) | undefined;
+  let executeRequests = 0;
+
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url === "/api/query/close-client-session") {
+      if (!resolveClientSessionClose) {
+        return new Promise<Response>((resolve) => {
+          resolveClientSessionClose = resolve;
+        });
+      }
+      return new Response(JSON.stringify(true), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url === "/api/query/prepare-pagination-plan") {
+      return new Response(
+        JSON.stringify({
+          sqlToExecute: "select 1",
+          pageLimit: 100,
+          pageOffset: 0,
+          useAgentResultSession: false,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/execute-multi") {
+      executeRequests += 1;
+      return new Response(JSON.stringify([{ columns: [], rows: [], affected_rows: 0, execution_time_ms: 1 }]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  };
+
+  try {
+    store.updateSchema(tabId, undefined);
+    const execution = store.executeTabSql(tabId, "select 1", { skipEnsureConnected: true });
+
+    await waitFor(() => !!resolveClientSessionClose);
+    await Promise.resolve();
+    assert.equal(executeRequests, 0);
+
+    resolveClientSessionClose!(new Response(JSON.stringify(true), { status: 200, headers: { "Content-Type": "application/json" } }));
+    await execution;
+    assert.equal(executeRequests, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("clearing a non-clearable query schema does not reset its client session", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());

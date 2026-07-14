@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { defaultGeneratorParams, displayGeneratedValue, generateTableData, generateValue } from "../../apps/desktop/src/lib/dataGrid/dataGenerate.ts";
+import { defaultGeneratorParams, displayGeneratedValue, generateTableData, generateValue, supportsGeneratedMultiRowValues } from "../../apps/desktop/src/lib/dataGrid/dataGenerate.ts";
 
 test("enables default values for columns with schema defaults", () => {
   const params = defaultGeneratorParams(
@@ -97,4 +97,71 @@ test("includeDefault without a schema default no longer emits NULL", () => {
 
   assert.notEqual(value, null);
   assert.notEqual(value, undefined);
+});
+
+test("generates Oracle-compatible single-row inserts with explicit temporal literals", () => {
+  const result = generateTableData(
+    {
+      tableName: "DBX_GENERATE_TEST",
+      schema: "APP",
+      database: "XE",
+      rowCount: 2,
+      columns: [
+        {
+          columnName: "ID",
+          dataType: "NUMBER",
+          rowCount: 2,
+          generatorKey: "sequence",
+          generatorParams: { startValue: 1, increment: 1 },
+        },
+        {
+          columnName: "CREATED_ON",
+          dataType: "DATE",
+          rowCount: 2,
+          generatorKey: "date",
+        },
+        {
+          columnName: "CREATED_AT",
+          dataType: "TIMESTAMP(6)",
+          rowCount: 2,
+          generatorKey: "datetime",
+        },
+      ],
+    },
+    "oracle",
+  );
+
+  assert.equal(supportsGeneratedMultiRowValues("oracle"), false);
+  assert.equal(result.statements.length, 1);
+  assert.match(result.statements[0], /^INSERT ALL\n/);
+  assert.equal(result.statements[0].match(/\n  INTO /g)?.length, 2);
+  assert.match(result.statements[0], /SELECT 1 FROM DUAL;$/);
+  assert.ok(result.statements.every((sql) => /TO_DATE\('[^']+', 'YYYY-MM-DD'\)/.test(sql)));
+  assert.ok(result.statements.every((sql) => /TO_TIMESTAMP\('[^']+', 'YYYY-MM-DD HH24:MI:SS'\)/.test(sql)));
+  assert.doesNotMatch(result.sql, /VALUES\s*\([^;]+\),\s*\(/s);
+});
+
+test("batches large Oracle data generation statements", () => {
+  const result = generateTableData(
+    {
+      tableName: "DBX_GENERATE_TEST",
+      schema: "APP",
+      database: "XE",
+      rowCount: 101,
+      columns: [
+        {
+          columnName: "ID",
+          dataType: "NUMBER",
+          rowCount: 101,
+          generatorKey: "sequence",
+          generatorParams: { startValue: 1, increment: 1 },
+        },
+      ],
+    },
+    "oracle",
+  );
+
+  assert.equal(result.statements.length, 2);
+  assert.equal(result.statements[0].match(/\n  INTO /g)?.length, 100);
+  assert.equal(result.statements[1].match(/\n  INTO /g)?.length, 1);
 });

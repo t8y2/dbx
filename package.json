@@ -96,6 +96,7 @@
     "@types/node": "^25.9.1",
     "@types/splitpanes": "^2.2.6",
     "@vitejs/plugin-vue": "^6.0.7",
+    "@xmldom/xmldom": "^0.8.13",
     "happy-dom": "^20.10.6",
     "husky": "^9.1.7",
     "lint-staged": "^16.4.0",

@@ -5,7 +5,7 @@ import { useI18n } from "vue-i18n";
 import type { ConnectionConfig, DatabaseType, ObjectBrowserViewport, QueryResult, QueryTab, TableInfoTab, TableStructureEditorTarget } from "@/types/database";
 import { orderPinnedFirst } from "@/lib/app/pinnedItems";
 import { canCancelQueryExecution } from "@/lib/sql/queryExecutionState";
-import { buildExplainSql, parseExplainResult, parseDamengExplainText, parseOracleExplainText, type BuildExplainSqlResult } from "@/lib/diagram/explainPlan";
+import { buildExplainSql, parseExplainResult, parseDamengExplainText, parseOracleExplainText, sqlServerExplainResult, type BuildExplainSqlResult } from "@/lib/diagram/explainPlan";
 import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQueryEditability, resolveMetadataColumnName, sourceColumnsForResult, type EditableQueryInfo, type EditableQuerySource } from "@/lib/sql/sqlAnalysis";
 import { buildQueryWithHiddenPrimaryKeys, hiddenResultColumnIndexes, type HiddenPrimaryKeyProjection } from "@/lib/sql/editableQueryHiddenKeys";
 import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY, restoreOpenTabsPayload, restoreOpenTabsState, serializeOpenTabs } from "@/lib/app/openTabsPersistence";
@@ -3548,6 +3548,83 @@ export const useQueryStore = defineStore("query", () => {
         void closeClientSessionId(tab.connectionId, tab.database, clientSessionId, { tabId: tab.id, explainExecutionId: executionId });
       }
       return { ok: true as const, sql: jsonBuilt.sql };
+    }
+
+    if (databaseType === "sqlserver") {
+      let built: BuildExplainSqlResult;
+      try {
+        built = await buildExplainSql(databaseType, sql);
+      } catch (e: any) {
+        tab.isExplaining = false;
+        tab.explainExecutionId = undefined;
+        tab.explainError = String(e?.message || e);
+        return { ok: true as const, sql: "" };
+      }
+      if (!built.ok) {
+        tab.isExplaining = false;
+        tab.explainExecutionId = undefined;
+        tab.explainError = built.reason;
+        return built;
+      }
+
+      tab.explainSql = built.sql;
+      const clientSessionId = `${tabClientSessionId(tab, "explain")}:${executionId}`;
+      tab.explainClientSessionId = clientSessionId;
+      let showplanEnabled = false;
+      try {
+        await api.executeQuery(tab.connectionId, tab.database, "SET SHOWPLAN_XML ON;", tab.schema, executionId, {
+          clientSessionId,
+          timeoutSecs: queryTimeoutSecs,
+        });
+        showplanEnabled = true;
+        if (tabs.value.find((t) => t.id === id)?.explainExecutionId !== executionId) {
+          return { ok: true as const, sql: built.sql };
+        }
+
+        const results = await api.executeMulti(tab.connectionId, tab.database, sql, tab.schema, executionId, {
+          clientSessionId,
+          timeoutSecs: queryTimeoutSecs,
+        });
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.explainExecutionId === executionId) {
+          const outcome = sqlServerExplainResult(results);
+          if (outcome.error !== undefined) {
+            current.explainPlan = undefined;
+            current.explainError = outcome.error;
+          } else if (outcome.result) {
+            current.explainPlan = parseExplainResult("sqlserver", outcome.result);
+            current.explainError = undefined;
+          } else {
+            current.explainPlan = undefined;
+            current.explainError = t("explain.empty");
+          }
+        }
+      } catch (e: any) {
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.explainExecutionId === executionId) {
+          current.explainPlan = undefined;
+          current.explainError = String(e?.message || e);
+        }
+      } finally {
+        if (showplanEnabled) {
+          try {
+            await api.executeQuery(tab.connectionId, tab.database, "SET SHOWPLAN_XML OFF;", tab.schema, undefined, {
+              clientSessionId,
+              timeoutSecs: queryTimeoutSecs > 0 ? Math.min(queryTimeoutSecs, 5) : 5,
+            });
+          } catch (error) {
+            console.warn("[DBX][sqlserver-explain:cleanup:error]", { tabId: tab.id, error });
+          }
+        }
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.explainExecutionId === executionId) {
+          current.isExplaining = false;
+          current.explainExecutionId = undefined;
+        }
+        if (current?.explainClientSessionId === clientSessionId) current.explainClientSessionId = undefined;
+        await closeClientSessionId(tab.connectionId, tab.database, clientSessionId, { tabId: tab.id, explainExecutionId: executionId });
+      }
+      return { ok: true as const, sql: built.sql };
     }
 
     const built = await buildExplainSql(databaseType, sql);

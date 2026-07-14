@@ -53,6 +53,9 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
     if !is_safe_explain_sql(&source) {
         return explain_err("unsafe");
     }
+    if options.database_type == Some(DatabaseType::SqlServer) && crate::sql::split_sql_batches(&source).len() != 1 {
+        return explain_err("unsafe");
+    }
 
     let sql = match options.database_type {
         Some(DatabaseType::Postgres | DatabaseType::MongoDb) => {
@@ -62,6 +65,9 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
             format!("EXPLAIN {source}")
         }
         Some(DatabaseType::Oracle) => format!("EXPLAIN PLAN FOR {source}"),
+        Some(DatabaseType::SqlServer) => {
+            format!("SET SHOWPLAN_XML ON;\nGO\n{source}\nGO\nSET SHOWPLAN_XML OFF;")
+        }
         Some(DatabaseType::Mysql) if options.format == Some(ExplainFormat::Standard) => {
             // MySQL 8.0.32+ may otherwise inherit TREE or JSON from the session-level explain_format.
             format!("EXPLAIN FORMAT=TRADITIONAL {source}")
@@ -99,6 +105,7 @@ pub fn supports_explain_plan(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Questdb
                 | DatabaseType::Dameng
                 | DatabaseType::Oracle
+                | DatabaseType::SqlServer
         )
     )
 }
@@ -202,6 +209,9 @@ pub fn is_write_sql_for_database(sql: &str, database_type: DatabaseType) -> bool
 }
 
 fn is_write_sql_with_database_type(sql: &str, database_type: Option<DatabaseType>) -> bool {
+    if database_type == Some(DatabaseType::SqlServer) && is_sqlserver_showplan_xml_set(sql) {
+        return false;
+    }
     if database_type.is_some_and(|database_type| has_dialect_specific_write(sql, database_type)) {
         return true;
     }
@@ -218,6 +228,14 @@ fn is_write_sql_with_database_type(sql: &str, database_type: Option<DatabaseType
     statements
         .iter()
         .any(|statement| is_write_sql_statement(statement, detect_mysql_executable_comments, detect_select_into))
+}
+
+fn is_sqlserver_showplan_xml_set(sql: &str) -> bool {
+    let normalized = strip_sql_comments(sql)
+        .split_whitespace()
+        .map(|part| part.trim_end_matches(';').to_ascii_uppercase())
+        .collect::<Vec<_>>();
+    matches!(normalized.as_slice(), [set, showplan, value] if set == "SET" && showplan == "SHOWPLAN_XML" && matches!(value.as_str(), "ON" | "OFF"))
 }
 
 fn is_mysql_compatible_database(database_type: DatabaseType) -> bool {
@@ -717,6 +735,44 @@ mod tests {
     }
 
     #[test]
+    fn builds_sqlserver_showplan_xml_batches() {
+        let result = build_explain_sql(ExplainSqlOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            format: None,
+            sql: "WITH rows AS (SELECT 1 AS id) SELECT * FROM rows;".to_string(),
+        });
+
+        assert_eq!(
+            result,
+            ExplainSqlBuildResult {
+                ok: true,
+                sql: Some(
+                    "SET SHOWPLAN_XML ON;\nGO\nWITH rows AS (SELECT 1 AS id) SELECT * FROM rows\nGO\nSET SHOWPLAN_XML OFF;"
+                        .to_string()
+                ),
+                reason: None,
+            }
+        );
+
+        assert_eq!(
+            build_explain_sql(ExplainSqlOptions {
+                database_type: Some(DatabaseType::SqlServer),
+                format: None,
+                sql: "SELECT 1\nGO\nSELECT 2".to_string(),
+            }),
+            ExplainSqlBuildResult { ok: false, sql: None, reason: Some("unsafe".to_string()) }
+        );
+        assert!(
+            build_explain_sql(ExplainSqlOptions {
+                database_type: Some(DatabaseType::SqlServer),
+                format: None,
+                sql: "SELECT 'first line\nGO\nlast line' AS text".to_string(),
+            })
+            .ok
+        );
+    }
+
+    #[test]
     fn validates_dameng_autotrace_sql_safety() {
         assert!(is_safe_dameng_autotrace_sql("SELECT * FROM t WHERE name = 'delete';"));
         assert!(is_safe_dameng_autotrace_sql("/* comment */ WITH q AS (SELECT 1) SELECT * FROM q"));
@@ -1142,6 +1198,16 @@ mod tests {
             check_read_only("SHOW CREATE TABLE users; DELETE FROM users", "prod-db", DatabaseType::Mysql);
         assert!(show_create_err.is_err());
         assert!(show_create_err.unwrap_err().contains("Write operation"));
+    }
+
+    #[test]
+    fn check_read_only_allows_only_sqlserver_showplan_xml_session_switches() {
+        for sql in ["SET SHOWPLAN_XML ON;", "-- explain\nSET SHOWPLAN_XML OFF"] {
+            assert_eq!(check_read_only(sql, "readonly", DatabaseType::SqlServer), Ok(()));
+        }
+        assert!(check_read_only("SET SHOWPLAN_ALL ON", "readonly", DatabaseType::SqlServer).is_err());
+        assert!(check_read_only("SET SHOWPLAN_XML ON; SELECT 1", "readonly", DatabaseType::SqlServer).is_err());
+        assert!(check_read_only("SET SHOWPLAN_XML OFF; DROP TABLE users", "readonly", DatabaseType::SqlServer).is_err());
     }
 
     #[test]

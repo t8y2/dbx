@@ -1,4 +1,5 @@
 import { sqlSemanticDialectFor } from "@/lib/sql/semantic/dialect";
+import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
 import type { DatabaseType } from "@/types/database";
 
@@ -30,7 +31,7 @@ export function buildQueryWithHiddenPrimaryKeys(options: { sql: string; database
     return { sourceName, alias };
   });
   const expressions = projections.map(({ sourceName, alias }) => `${options.sourceExpressions?.[sourceName] ?? dialect.quoteIdentifier(sourceName)} AS ${dialect.quoteIdentifier(alias)}`);
-  const sql = appendSelectProjections(options.sql, expressions);
+  const sql = appendSelectProjections(options.sql, expressions, options.databaseType);
   return sql ? { sql, projections } : undefined;
 }
 
@@ -41,7 +42,7 @@ export function hiddenResultColumnIndexes(columns: string[], projections: Hidden
   });
 }
 
-function appendSelectProjections(sql: string, expressions: string[]): string | undefined {
+function appendSelectProjections(sql: string, expressions: string[], databaseType: DatabaseType): string | undefined {
   if (expressions.length === 0) return sql;
   const tokens = tokenizeSqlSemantic(sql);
   const selectIndex = tokens.findIndex((token) => token.kind === "word" && token.depth === 0 && token.normalized === "select");
@@ -57,5 +58,26 @@ function appendSelectProjections(sql: string, expressions: string[]): string | u
     break;
   }
   if (projectionEnd === undefined) return undefined;
-  return `${sql.slice(0, projectionEnd)}, ${expressions.join(", ")}${sql.slice(projectionEnd)}`;
+
+  const projectionTokens = tokens.slice(selectIndex + 1, fromIndex).filter((token) => token.kind !== "comment");
+  const bareWildcard = projectionTokens.length === 1 && projectionTokens[0]?.text === "*" ? projectionTokens[0] : undefined;
+  const sourceReference = bareWildcard && databaseType === "oracle" ? singleOracleSourceReference(sql, bareWildcard.span.start) : undefined;
+  if (!sourceReference || !bareWildcard) {
+    return `${sql.slice(0, projectionEnd)}, ${expressions.join(", ")}${sql.slice(projectionEnd)}`;
+  }
+
+  const qualifiedWildcard = `${sourceReference}.*`;
+  const qualifiedSql = `${sql.slice(0, bareWildcard.span.start)}${qualifiedWildcard}${sql.slice(bareWildcard.span.end)}`;
+  const qualifiedProjectionEnd = projectionEnd + qualifiedWildcard.length - bareWildcard.text.length;
+  return `${qualifiedSql.slice(0, qualifiedProjectionEnd)}, ${expressions.join(", ")}${qualifiedSql.slice(qualifiedProjectionEnd)}`;
+}
+
+function singleOracleSourceReference(sql: string, cursor: number): string | undefined {
+  const model = buildSqlSemanticModel(sql, cursor, { databaseType: "oracle" });
+  const sources = model.rowSources.filter((source) => source.kind === "table");
+  if (sources.length !== 1) return undefined;
+
+  const source = sources[0]!;
+  if (source.aliasSpan) return sql.slice(source.aliasSpan.start, source.aliasSpan.end);
+  return source.qualifiedName?.parts[source.qualifiedName.parts.length - 1]?.raw;
 }

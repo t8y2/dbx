@@ -633,6 +633,10 @@ public final class MongoAgent {
     }
 
     static Object parseId(String id) {
+        String stringId = decodeStringDocumentId(id);
+        if (stringId != null) {
+            return stringId;
+        }
         String trimmed = id.trim();
         if (isNumberLongIdWrapper(trimmed)) {
             try {
@@ -645,6 +649,19 @@ public final class MongoAgent {
             return new ObjectId(id);
         } catch (Exception e) {
             return id;
+        }
+    }
+
+    private static String decodeStringDocumentId(String id) {
+        String prefix = "__dbx_mongo_string_id__";
+        if (!id.startsWith(prefix)) {
+            return null;
+        }
+        try {
+            JsonElement value = JsonParser.parseString(id.substring(prefix.length()));
+            return value.isJsonPrimitive() && value.getAsJsonPrimitive().isString() ? value.getAsString() : null;
+        } catch (Exception e) {
+            return null;
         }
     }
 

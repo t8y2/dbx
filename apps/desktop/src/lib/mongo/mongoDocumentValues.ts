@@ -168,6 +168,7 @@ export function formatMongoShellLiteral(value: unknown): string {
 }
 
 export function serializeMongoDocumentId(value: unknown): string {
+  if (typeof value === "string") return `__dbx_mongo_string_id__${JSON.stringify(value)}`;
   if (isMongoExtendedJsonId(value)) return JSON.stringify(value);
   return String(value);
 }

@@ -991,6 +991,9 @@ pub async fn delete_document(client: &Client, database: &str, collection: &str, 
 }
 
 fn document_id_filters(id: &str) -> Vec<Document> {
+    if let Some(string_id) = decode_string_document_id(id) {
+        return vec![doc! { "_id": Bson::String(string_id) }];
+    }
     if let Some(filter) = extended_json_document_id_filter(id) {
         return vec![filter];
     }
@@ -999,6 +1002,10 @@ fn document_id_filters(id: &str) -> Vec<Document> {
         Ok(oid) => vec![doc! { "_id": Bson::ObjectId(oid) }, string_filter],
         Err(_) => vec![string_filter],
     }
+}
+
+fn decode_string_document_id(id: &str) -> Option<String> {
+    id.strip_prefix("__dbx_mongo_string_id__").and_then(|payload| serde_json::from_str::<String>(payload).ok())
 }
 
 fn extended_json_document_id_filter(id: &str) -> Option<Document> {
@@ -1412,7 +1419,7 @@ mod tests {
     #[test]
     fn document_id_filters_try_object_id_then_string_for_hex_ids() {
         let id = "507f1f77bcf86cd799439011";
-        let filters = document_id_filters(id);
+        let filters = document_id_filters(&id);
 
         assert_eq!(filters.len(), 2);
         assert!(matches!(filters[0].get("_id"), Some(Bson::ObjectId(_))));
@@ -1422,7 +1429,7 @@ mod tests {
     #[test]
     fn document_id_filters_use_string_only_for_non_hex_ids() {
         let id = "customer-42";
-        let filters = document_id_filters(id);
+        let filters = document_id_filters(&id);
 
         assert_eq!(filters.len(), 1);
         assert!(matches!(filters[0].get("_id"), Some(Bson::String(value)) if value == id));
@@ -1434,6 +1441,18 @@ mod tests {
 
         assert_eq!(filters.len(), 1);
         assert!(matches!(filters[0].get("_id"), Some(Bson::Int64(2_048_938_405_781_032_962))));
+    }
+
+    #[test]
+    fn document_id_filters_decode_explicit_string_ids_before_extended_json() {
+        let original = r#"{"$numberLong":"2048938405781032962"}"#;
+        let id = format!("__dbx_mongo_string_id__{}", serde_json::to_string(original).unwrap());
+        let filters = document_id_filters(&id);
+
+        assert_eq!(filters.len(), 1);
+        assert!(
+            matches!(filters[0].get("_id"), Some(Bson::String(value)) if value == r####"{"$numberLong":"2048938405781032962"}"####)
+        );
     }
 
     #[test]

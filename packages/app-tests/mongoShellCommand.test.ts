@@ -65,6 +65,17 @@ test("parseMongoFindCommand accepts Compass-style unquoted keys and ObjectId", (
   assert.deepEqual(JSON.parse(command.filter), { _id: { $oid: "6a045a92d2971e44243771a1" } });
 });
 
+test("parseMongoFindCommand does not rewrite NumberLong text inside strings", () => {
+  const command = parseMongoFindCommand('db.orders.find({label: "NumberLong(123)"})');
+  assert.deepEqual(command, {
+    collection: "orders",
+    filter: '{"label": "NumberLong(123)"}',
+    skip: 0,
+    limit: 100,
+    sort: undefined,
+  });
+});
+
 test("parseMongoFindCommand rewrites ISODate into extended JSON $date", () => {
   const command = parseMongoFindCommand(`db.trainingdocuments.find({
     createdAt: { $gte: ISODate("2025-02-25T04:57:39.965Z") }

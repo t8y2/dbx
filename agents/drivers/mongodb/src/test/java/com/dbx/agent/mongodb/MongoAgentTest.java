@@ -83,6 +83,14 @@ class MongoAgentTest {
     // ─── existing tests ───
 
     @Test
+    void parsesExplicitStringDocumentIdsWithoutTreatingThemAsExtendedJson() {
+        assertEquals(
+            "{\"$numberLong\":\"2048938405781032962\"}",
+            MongoAgent.parseId("__dbx_mongo_string_id__\"{\\\"$numberLong\\\":\\\"2048938405781032962\\\"}\"")
+        );
+    }
+
+    @Test
     void exposesProtocolHandshakeOverJsonRpc() {
         String response = MongoAgent.handleRequest(
             "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"handshake\","

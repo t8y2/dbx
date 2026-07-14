@@ -203,7 +203,7 @@ fn parse_codex_jsonl_line(line: &str) -> ParsedCliAgentEvent {
         "item.started" => parse_codex_item_started(&value),
         "item.completed" => parse_codex_item_completed(&value),
         "turn.completed" => parse_codex_turn_completed(&value),
-        "turn.failed" | "error" => {
+        "turn.failed" => {
             let message = codex_error_message(&value);
             ParsedCliAgentEvent {
                 error: Some(message.clone()),
@@ -211,8 +211,24 @@ fn parse_codex_jsonl_line(line: &str) -> ParsedCliAgentEvent {
                 ..Default::default()
             }
         }
+        "error" => {
+            let message = codex_error_message(&value);
+            if is_codex_retry_error(&message) {
+                ParsedCliAgentEvent::default()
+            } else {
+                ParsedCliAgentEvent {
+                    error: Some(message.clone()),
+                    events: vec![AgentEvent::Error { message }],
+                    ..Default::default()
+                }
+            }
+        }
         _ => ParsedCliAgentEvent::default(),
     }
+}
+
+fn is_codex_retry_error(message: &str) -> bool {
+    message.trim_start().to_ascii_lowercase().starts_with("reconnecting...")
 }
 
 fn parse_codex_item_started(value: &Value) -> ParsedCliAgentEvent {
@@ -539,5 +555,27 @@ mod tests {
         let pid = std::fs::read_to_string(&pid_file).expect("child pid should be captured");
         assert!(!process_is_alive(pid.trim()));
         let _ = std::fs::remove_file(pid_file);
+    }
+
+    #[tokio::test]
+    async fn jsonl_retry_error_allows_child_to_complete() {
+        let spec = CliAgentProcessSpec {
+            command: CliAgentCommandSpec {
+                program: "sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    "printf '%s\n' '{\"type\":\"error\",\"message\":\"Reconnecting... 2/5 (request timed out)\"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"recovered\"}}' '{\"type\":\"turn.completed\"}'".to_string(),
+                ],
+            },
+            env: Vec::new(),
+            stdin: None,
+            dialect: CliAgentJsonlDialect::CodexExec,
+            classify_spawn_error,
+            classify_run_error,
+        };
+
+        let result = run_cli_jsonl_agent(spec, &Notify::new(), |_| {}).await.unwrap();
+
+        assert_eq!(result, "recovered");
     }
 }

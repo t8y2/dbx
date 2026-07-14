@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { currentLocale } from "@/i18n";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import { changelogLangFromLocale, changelogReleaseUrl, changelogWebsiteUrl, fetchChangelog, type ChangelogLang, type ChangelogRelease } from "@/lib/app/changelog";
+import { changelogLangFromLocale, changelogReleaseUrl, changelogWebsiteUrl, createLatestRequestGuard, fetchChangelog, type ChangelogLang, type ChangelogRelease } from "@/lib/app/changelog";
 
 const PAGE_SIZE = 5;
 
@@ -19,6 +19,7 @@ const releases = ref<ChangelogRelease[]>([]);
 const visibleCount = ref(PAGE_SIZE);
 const expandedTags = ref<Set<string>>(new Set());
 const loadedLang = ref<ChangelogLang | null>(null);
+const loadRequest = createLatestRequestGuard();
 
 const changelogLang = computed(() => changelogLangFromLocale(locale.value || currentLocale()));
 const visibleReleases = computed(() => releases.value.slice(0, visibleCount.value));
@@ -83,20 +84,23 @@ function loadMore() {
 
 async function load(force = false) {
   const lang = changelogLang.value;
+  const requestId = loadRequest.begin();
   loading.value = true;
   error.value = "";
   try {
     const data = await fetchChangelog(lang, { force });
+    if (!loadRequest.isCurrent(requestId)) return;
     releases.value = data.releases;
     loadedLang.value = lang;
     visibleCount.value = PAGE_SIZE;
     expandedTags.value = new Set();
   } catch (e: any) {
+    if (!loadRequest.isCurrent(requestId)) return;
     releases.value = [];
     loadedLang.value = null;
     error.value = e?.message || String(e);
   } finally {
-    loading.value = false;
+    if (loadRequest.isCurrent(requestId)) loading.value = false;
   }
 }
 

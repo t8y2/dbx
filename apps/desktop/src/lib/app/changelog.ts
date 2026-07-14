@@ -25,6 +25,14 @@ export type ChangelogLang = "en" | "cn";
 
 const cache = new Map<ChangelogLang, Promise<ChangelogData>>();
 
+export function createLatestRequestGuard() {
+  let latestRequestId = 0;
+  return {
+    begin: () => ++latestRequestId,
+    isCurrent: (requestId: number) => requestId === latestRequestId,
+  };
+}
+
 export function changelogLangFromLocale(locale: string): ChangelogLang {
   return locale === "zh-CN" || locale === "zh-TW" ? "cn" : "en";
 }

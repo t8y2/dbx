@@ -2158,13 +2158,47 @@ pub async fn set_string<C>(con: &mut C, key: &[u8], value: &str, ttl: Option<i64
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
-    redis::cmd("SET").arg(key).arg(value).query_async::<()>(con).await.map_err(|e| e.to_string())?;
-    if let Some(t) = ttl {
-        if t > 0 {
-            redis::cmd("EXPIRE").arg(key).arg(t).query_async::<()>(con).await.map_err(|e| e.to_string())?;
+    match ttl {
+        Some(t) => {
+            redis::cmd("SET").arg(key).arg(value).query_async::<()>(con).await.map_err(|e| e.to_string())?;
+            if t > 0 {
+                redis::cmd("EXPIRE").arg(key).arg(t).query_async::<()>(con).await.map_err(|e| e.to_string())?;
+            }
+            Ok(())
         }
+        None => set_string_preserving_ttl(con, key, value).await,
     }
-    Ok(())
+}
+
+async fn set_string_preserving_ttl<C>(con: &mut C, key: &[u8], value: &str) -> Result<(), String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    match redis::cmd("SET").arg(key).arg(value).arg("KEEPTTL").query_async::<()>(con).await {
+        Ok(()) => Ok(()),
+        Err(error) if is_unsupported_keepttl_error(&error) => {
+            let remaining_ms = redis::cmd("PTTL").arg(key).query_async::<i64>(con).await.map_err(|e| e.to_string())?;
+            let mut command = redis::cmd("SET");
+            command.arg(key).arg(value);
+            if remaining_ms >= 0 {
+                // Redis requires PX to be positive. A zero PTTL means the key is
+                // about to expire, so one millisecond is the closest equivalent.
+                command.arg("PX").arg(remaining_ms.max(1));
+            }
+            command.query_async::<()>(con).await.map_err(|e| e.to_string())
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn is_unsupported_keepttl_error(error: &redis::RedisError) -> bool {
+    if error.kind() != redis::ErrorKind::ResponseError {
+        return false;
+    }
+
+    let detail = error.detail().unwrap_or_default().to_ascii_lowercase();
+    detail.contains("syntax error")
+        || ((detail.contains("unknown") || detail.contains("unsupported")) && detail.contains("keepttl"))
 }
 
 pub async fn delete_key<C>(con: &mut C, key: &[u8]) -> Result<(), String>
@@ -2574,12 +2608,16 @@ mod tests {
     use redis::{aio::ConnectionLike, Cmd, ConnectionAddr, Pipeline, RedisFuture};
 
     struct FakeRedisConnection {
-        responses: VecDeque<RedisRawValue>,
+        responses: VecDeque<redis::RedisResult<RedisRawValue>>,
         commands: Vec<String>,
     }
 
     impl FakeRedisConnection {
         fn new(responses: Vec<RedisRawValue>) -> Self {
+            Self { responses: responses.into_iter().map(Ok).collect(), commands: Vec::new() }
+        }
+
+        fn with_results(responses: Vec<redis::RedisResult<RedisRawValue>>) -> Self {
             Self { responses: responses.into(), commands: Vec::new() }
         }
 
@@ -2592,8 +2630,8 @@ mod tests {
     impl ConnectionLike for FakeRedisConnection {
         fn req_packed_command<'a>(&'a mut self, cmd: &'a Cmd) -> RedisFuture<'a, RedisRawValue> {
             self.commands.push(String::from_utf8_lossy(&cmd.get_packed_command()).into_owned());
-            let response = self.responses.pop_front().unwrap_or(RedisRawValue::Nil);
-            Box::pin(async move { Ok(response) })
+            let response = self.responses.pop_front().unwrap_or(Ok(RedisRawValue::Nil));
+            Box::pin(async move { response })
         }
 
         fn req_packed_commands<'a>(
@@ -2743,6 +2781,85 @@ mod tests {
         let encoded = redis_key_bytes_to_raw(bytes);
 
         assert_eq!(redis_key_raw_to_bytes(&encoded).unwrap(), bytes);
+    }
+
+    #[tokio::test]
+    async fn set_string_uses_keepttl_when_no_ttl_is_specified() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Okay]);
+
+        super::set_string(&mut con, b"session", "updated", None).await.unwrap();
+
+        assert_eq!(con.commands.len(), 1);
+        assert!(con.commands[0].contains("\r\nSET\r\n"));
+        assert!(con.commands[0].contains("\r\nKEEPTTL\r\n"));
+    }
+
+    #[tokio::test]
+    async fn set_string_with_explicit_no_expiry_uses_plain_set() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Okay]);
+
+        super::set_string(&mut con, b"settings", "updated", Some(-1)).await.unwrap();
+
+        assert_eq!(con.commands.len(), 1);
+        assert!(con.commands[0].contains("\r\nSET\r\n"));
+        assert!(!con.commands[0].contains("\r\nKEEPTTL\r\n"));
+        assert!(!con.commands[0].contains("\r\nEXPIRE\r\n"));
+    }
+
+    #[tokio::test]
+    async fn set_string_falls_back_to_pttl_and_px_when_keepttl_is_unsupported() {
+        let unsupported = redis::RedisError::from((
+            redis::ErrorKind::ResponseError,
+            "An error was signalled by the server",
+            "syntax error".to_string(),
+        ));
+        let mut con = FakeRedisConnection::with_results(vec![
+            Err(unsupported),
+            Ok(RedisRawValue::Int(4_200)),
+            Ok(RedisRawValue::Okay),
+        ]);
+
+        super::set_string(&mut con, b"session", "updated", None).await.unwrap();
+
+        assert_eq!(con.commands.len(), 3);
+        assert!(con.commands[0].contains("\r\nKEEPTTL\r\n"));
+        assert!(con.commands[1].contains("\r\nPTTL\r\n"));
+        assert!(con.commands[2].contains("\r\nPX\r\n$4\r\n4200\r\n"));
+    }
+
+    #[tokio::test]
+    async fn set_string_fallback_keeps_persistent_keys_persistent() {
+        let unsupported = redis::RedisError::from((
+            redis::ErrorKind::ResponseError,
+            "An error was signalled by the server",
+            "syntax error".to_string(),
+        ));
+        let mut con = FakeRedisConnection::with_results(vec![
+            Err(unsupported),
+            Ok(RedisRawValue::Int(-1)),
+            Ok(RedisRawValue::Okay),
+        ]);
+
+        super::set_string(&mut con, b"settings", "updated", None).await.unwrap();
+
+        assert_eq!(con.commands.len(), 3);
+        assert!(!con.commands[2].contains("\r\nPX\r\n"));
+        assert!(!con.commands[2].contains("\r\nKEEPTTL\r\n"));
+    }
+
+    #[tokio::test]
+    async fn set_string_does_not_fallback_for_unrelated_errors() {
+        let read_only = redis::RedisError::from((
+            redis::ErrorKind::ReadOnly,
+            "The server is read-only",
+            "You can't write against a read only replica".to_string(),
+        ));
+        let mut con = FakeRedisConnection::with_results(vec![Err(read_only)]);
+
+        let error = super::set_string(&mut con, b"session", "updated", None).await.unwrap_err();
+
+        assert!(error.contains("read-only"));
+        assert_eq!(con.commands.len(), 1);
     }
 
     #[test]

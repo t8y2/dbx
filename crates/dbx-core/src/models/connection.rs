@@ -2185,6 +2185,16 @@ mod tests {
     }
 
     #[test]
+    fn mysql_url_encodes_proxy_style_username_with_colons_and_at() {
+        let config = mysql_config("1234:xxx@xx.xx:abc123", "p@ss:word", None);
+
+        assert_eq!(
+            config.connection_url(),
+            "mysql://1234%3Axxx%40xx%2Exx%3Aabc123:p%40ss%3Aword@10.1.2.3:2883?ssl-mode=disabled&charset=utf8mb4"
+        );
+    }
+
+    #[test]
     fn mysql_url_encodes_oceanbase_username() {
         let config = mysql_config("user@tenant#cluster", "secret", None);
 

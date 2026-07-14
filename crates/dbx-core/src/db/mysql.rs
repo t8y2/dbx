@@ -1089,7 +1089,21 @@ fn mysql_error_should_retry_with_text_protocol(error: &str) -> bool {
 
 fn mysql_error_should_retry_without_group_concat_max_len(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
-    lower.contains("group_concat_max_len") && (lower.contains("1193") || lower.contains("unknown system variable"))
+    if lower.contains("group_concat_max_len") && (lower.contains("1193") || lower.contains("unknown system variable")) {
+        return true;
+    }
+
+    // Some Chinese MySQL proxies/middleware misparse `@@group_concat_max_len` as a table
+    // name and return 1105 / "parse tablename error" without naming the statement.
+    // SQLSTATE may be 07000 instead of HY000.
+    let parse_table_error = lower.contains("parse tablename")
+        || lower.contains("解析表名")
+        || (lower.contains("operate fail") && lower.contains("sql操作失败"));
+    if parse_table_error && (lower.contains("1105") || lower.contains("07000")) {
+        return true;
+    }
+
+    false
 }
 
 fn ssl_fallback_url(url: &str) -> Option<String> {
@@ -4488,9 +4502,24 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     }
 
     #[test]
+    fn mysql_proxy_parse_tablename_1105_retries_without_group_concat() {
+        let error = "MySQL connection failed: Server error: `ERROR 07000 (1105): SQL操作失败 (operate fail ) ：解析表名出错 ( parse tablename error ) '";
+
+        assert!(mysql_error_should_retry_without_group_concat_max_len(error));
+        assert_eq!(
+            mysql_setup_mode_retry_without_group_concat(MySqlSetupMode::Standard, error),
+            Some(MySqlSetupMode::Compatible)
+        );
+        assert_eq!(mysql_setup_mode_retry_without_group_concat(MySqlSetupMode::Compatible, error), None);
+    }
+
+    #[test]
     fn mysql_group_concat_setup_retry_is_narrow() {
         assert!(!mysql_error_should_retry_without_group_concat_max_len(
             "MySQL connection failed: Server error: `ERROR HY000 (1193): Unknown system variable,stmt:SET @@sql_mode = ANSI'"
+        ));
+        assert!(!mysql_error_should_retry_without_group_concat_max_len(
+            "MySQL connection failed: Server error: `ERROR 07000 (1105): access denied for user'"
         ));
         assert_eq!(
             mysql_setup_mode_retry_without_group_concat(

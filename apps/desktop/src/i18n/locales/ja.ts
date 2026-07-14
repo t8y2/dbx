@@ -994,6 +994,8 @@ export default withEnglishFallback({
     rowsExported: "{count}行をエクスポートしました",
     rowsShort: "行",
     cancel: "キャンセル",
+    openFolder: "保存先フォルダーを開く",
+    openFolderFailed: "フォルダーを開けませんでした：{message}",
     close: "閉じる",
     tooltip: "エクスポートの進行状況",
     popoverTitle: "エクスポート",

@@ -995,6 +995,8 @@ export default withEnglishFallback({
     rowsExported: "{count} linhas exportadas",
     rowsShort: "linhas",
     cancel: "Cancelar",
+    openFolder: "Abrir pasta do arquivo",
+    openFolderFailed: "Falha ao abrir a pasta: {message}",
     close: "Fechar",
     tooltip: "Progresso da Exportação",
     failedTooltip: "{count} tarefa em segundo plano falhou | {count} tarefas em segundo plano falharam",

@@ -1051,6 +1051,8 @@ export default {
     rowsExported: "{count} rows exported",
     rowsShort: "rows",
     cancel: "Cancel",
+    openFolder: "Open containing folder",
+    openFolderFailed: "Failed to open folder: {message}",
     close: "Close",
     tooltip: "Background Tasks",
     failedTooltip: "{count} background task failed | {count} background tasks failed",

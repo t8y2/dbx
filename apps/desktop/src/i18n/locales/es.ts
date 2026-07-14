@@ -995,6 +995,8 @@ export default withEnglishFallback({
     rowsExported: "{count} filas exportadas",
     rowsShort: "filas",
     cancel: "Cancelar",
+    openFolder: "Abrir carpeta contenedora",
+    openFolderFailed: "No se pudo abrir la carpeta: {message}",
     close: "Cerrar",
     tooltip: "Progreso de exportación",
     popoverTitle: "Exportaciones",

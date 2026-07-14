@@ -65,6 +65,7 @@ function buildExportHarness(
     totalRows: null as number | null,
     status: "",
     errorMessage: null as string | null,
+    filePath: null as string | null,
   });
   const exportCancelHandler = ref<(() => Promise<void>) | null>(null);
   const fullExportResult = vi.fn(async () => {
@@ -150,6 +151,7 @@ function buildTableDataExportHarness() {
     totalRows: null as number | null,
     status: "",
     errorMessage: null as string | null,
+    filePath: null as string | null,
   });
   const exportCancelHandler = ref<(() => Promise<void>) | null>(null);
 
@@ -626,6 +628,7 @@ test("full query result CSV export streams through the backend without loading a
   assert.equal(apiMock.exportQueryResultCsv.mock.calls.length, 0);
   assert.equal(exportProgressDialog.value, true);
   assert.equal(exportProgressState.value.status, "Done");
+  assert.equal(exportProgressState.value.filePath, apiMock.startQueryResultExport.mock.calls[0][0].filePath);
 });
 
 test("full query result CSV export defaults to the saved SQL title", async () => {
@@ -662,11 +665,12 @@ test("table data export keeps the table name as the default file base", async ()
   const restoreStorage = installMemoryStorage();
   try {
     vi.setSystemTime(new Date(2026, 5, 2, 15, 4, 5));
-    const { composable } = buildTableDataExportHarness();
+    const { composable, exportProgressState } = buildTableDataExportHarness();
 
     await composable.exportCsv();
 
     assert.equal(apiMock.startTableExport.mock.calls[0][0].filePath, "users_260602150405.csv");
+    assert.equal(exportProgressState.value.filePath, "users_260602150405.csv");
   } finally {
     vi.useRealTimers();
     restoreStorage();

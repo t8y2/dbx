@@ -6524,6 +6524,7 @@ const exportProgressState = ref({
   totalRows: null as number | null,
   status: "",
   errorMessage: null as string | null,
+  filePath: null as string | null,
 });
 const exportCancelHandler = ref<(() => Promise<void>) | null>(null);
 

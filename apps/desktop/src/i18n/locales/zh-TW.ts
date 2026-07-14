@@ -994,6 +994,8 @@ export default withEnglishFallback({
     rowsExported: "已匯出 {count} 列",
     rowsShort: "列",
     cancel: "取消",
+    openFolder: "開啟所在資料夾",
+    openFolderFailed: "開啟資料夾失敗：{message}",
     close: "關閉",
     tooltip: "背景工作",
     failedTooltip: "{count} 個背景工作失敗 | {count} 個背景工作失敗",

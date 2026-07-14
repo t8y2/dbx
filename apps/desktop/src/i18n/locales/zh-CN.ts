@@ -1052,6 +1052,8 @@ export default withEnglishFallback({
     rowsExported: "已导出 {count} 行",
     rowsShort: "行",
     cancel: "取消",
+    openFolder: "打开所在文件夹",
+    openFolderFailed: "打开文件夹失败：{message}",
     close: "关闭",
     tooltip: "后台任务",
     failedTooltip: "{count} 个后台任务失败",

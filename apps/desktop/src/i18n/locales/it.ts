@@ -993,6 +993,8 @@ export default withEnglishFallback({
     rowsExported: "{count} righe esportate",
     rowsShort: "righe",
     cancel: "Annulla",
+    openFolder: "Apri cartella contenente",
+    openFolderFailed: "Impossibile aprire la cartella: {message}",
     close: "Chiudi",
     tooltip: "Stato Esportazione",
     failedTooltip: "{count} attività in background non riuscita | {count} attività in background non riuscite",

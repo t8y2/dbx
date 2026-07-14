@@ -103,6 +103,7 @@ export interface UseDataGridExportOptions {
     totalRows: number | null;
     status: string;
     errorMessage: string | null;
+    filePath: string | null;
   }>;
   exportCancelHandler?: Ref<(() => Promise<void>) | null>;
 }
@@ -688,6 +689,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             totalRows: null,
             status: "Running",
             errorMessage: null,
+            filePath: null,
           };
           exportProgressDialog.value = true;
         }
@@ -733,6 +735,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         if (needsFullExport && exportProgressState) {
           exportProgressState.value = {
             ...exportProgressState.value,
+            filePath: outputPath,
             status: "Done",
             rowsExported: result.rows.length,
             totalRows: result.rows.length,
@@ -920,6 +923,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             totalRows: null,
             status: "Running",
             errorMessage: null,
+            filePath: outputPath,
           };
           exportProgressDialog.value = true;
         }
@@ -1073,6 +1077,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         totalRows: null,
         status: "Running",
         errorMessage: null,
+        filePath: outputPath,
       };
     }
     if (exportProgressDialog) exportProgressDialog.value = true;
@@ -1160,6 +1165,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         totalRows: request.totalRows ?? null,
         status: "Running",
         errorMessage: null,
+        filePath: outputPath,
       };
     }
     if (exportProgressDialog) exportProgressDialog.value = true;

@@ -185,14 +185,22 @@ enum LinuxNvidiaDriver {
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LinuxDrmRenderDevice {
+    device_file: std::path::PathBuf,
+    driver: Option<String>,
+    boot_vga: bool,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn linux_nvidia_driver_from_state(
     proprietary_control_exists: bool,
     proprietary_proc_exists: bool,
-    nouveau_module_loaded: bool,
+    render_driver: Option<&str>,
 ) -> LinuxNvidiaDriver {
     if proprietary_control_exists || proprietary_proc_exists {
         LinuxNvidiaDriver::Proprietary
-    } else if nouveau_module_loaded {
+    } else if render_driver.is_some_and(|driver| driver.eq_ignore_ascii_case("nouveau")) {
         LinuxNvidiaDriver::Nouveau
     } else {
         LinuxNvidiaDriver::None
@@ -200,11 +208,63 @@ fn linux_nvidia_driver_from_state(
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_selected_drm_render_device<'a>(
+    explicit_device_file: Option<&std::path::Path>,
+    devices: &'a [LinuxDrmRenderDevice],
+) -> Option<&'a LinuxDrmRenderDevice> {
+    if let Some(explicit_device_file) = explicit_device_file {
+        // WebKit gives this environment override precedence over EGL/DRM discovery.
+        return devices.iter().find(|device| device.device_file.as_path() == explicit_device_file);
+    }
+    // Before WebKit initializes EGL, boot_vga is the best available default-display signal.
+    // The sorted first render node mirrors WebKit's final DRM-device fallback.
+    devices.iter().find(|device| device.boot_vga).or_else(|| devices.first())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_drm_render_devices() -> Vec<LinuxDrmRenderDevice> {
+    let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
+        return Vec::new();
+    };
+    let mut devices = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let node_name = entry.file_name();
+            let node_name = node_name.to_str()?;
+            let render_index = node_name.strip_prefix("renderD")?;
+            if render_index.is_empty() || !render_index.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            let device_path = entry.path().join("device");
+            let driver = std::fs::read_link(device_path.join("driver"))
+                .ok()
+                .and_then(|path| path.file_name().and_then(std::ffi::OsStr::to_str).map(str::to_ascii_lowercase));
+            let boot_vga = std::fs::read_to_string(device_path.join("boot_vga")).is_ok_and(|value| value.trim() == "1");
+            Some(LinuxDrmRenderDevice {
+                device_file: std::path::Path::new("/dev/dri").join(node_name),
+                driver,
+                boot_vga,
+            })
+        })
+        .collect::<Vec<_>>();
+    devices.sort_by(|left, right| left.device_file.cmp(&right.device_file));
+    devices
+}
+
+#[cfg(target_os = "linux")]
 fn linux_nvidia_driver() -> LinuxNvidiaDriver {
+    let devices = linux_drm_render_devices();
+    let explicit_device_file = std::env::var_os("WEBKIT_WEB_RENDER_DEVICE_FILE")
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
+        // Resolve stable /dev/dri/by-path links to the renderD* node used by sysfs.
+        .map(|path| std::fs::canonicalize(&path).unwrap_or(path));
+    let render_driver = linux_selected_drm_render_device(explicit_device_file.as_deref(), &devices)
+        .and_then(|device| device.driver.as_deref());
     linux_nvidia_driver_from_state(
         std::path::Path::new("/dev/nvidiactl").exists(),
         std::path::Path::new("/proc/driver/nvidia/version").exists(),
-        std::path::Path::new("/sys/module/nouveau").exists(),
+        render_driver,
     )
 }
 
@@ -530,11 +590,13 @@ pub(crate) fn apply_desktop_settings(app: &tauri::AppHandle, desktop_settings: &
 mod tests {
     use super::{
         linux_appimage_system_gtk_immodules_cache, linux_appimage_wayland_backend_override,
-        linux_nvidia_driver_from_state, linux_webkit_rendering_workarounds, native_window_decorations_override,
-        should_confirm_app_exit_request, should_hide_window_on_close, should_setup_desktop_tray,
-        should_show_main_window_after_setup, uses_application_level_icon, LinuxNvidiaDriver,
+        linux_nvidia_driver_from_state, linux_selected_drm_render_device, linux_webkit_rendering_workarounds,
+        native_window_decorations_override, should_confirm_app_exit_request, should_hide_window_on_close,
+        should_setup_desktop_tray, should_show_main_window_after_setup, uses_application_level_icon,
+        LinuxDrmRenderDevice, LinuxNvidiaDriver,
     };
     use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
 
     const TEST_GTK3_IMMODULES_CACHE: &str = "/usr/lib/test/gtk-3.0/3.0.0/immodules.cache";
 
@@ -613,12 +675,68 @@ mod tests {
     }
 
     #[test]
-    fn detects_loaded_linux_nvidia_driver() {
-        assert_eq!(linux_nvidia_driver_from_state(true, false, false), LinuxNvidiaDriver::Proprietary);
-        assert_eq!(linux_nvidia_driver_from_state(false, true, false), LinuxNvidiaDriver::Proprietary);
-        assert_eq!(linux_nvidia_driver_from_state(true, false, true), LinuxNvidiaDriver::Proprietary);
-        assert_eq!(linux_nvidia_driver_from_state(false, false, true), LinuxNvidiaDriver::Nouveau);
-        assert_eq!(linux_nvidia_driver_from_state(false, false, false), LinuxNvidiaDriver::None);
+    fn classifies_linux_nvidia_driver_from_selected_renderer() {
+        assert_eq!(linux_nvidia_driver_from_state(true, false, None), LinuxNvidiaDriver::Proprietary);
+        assert_eq!(linux_nvidia_driver_from_state(false, true, None), LinuxNvidiaDriver::Proprietary);
+        assert_eq!(linux_nvidia_driver_from_state(true, false, Some("nouveau")), LinuxNvidiaDriver::Proprietary);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("nouveau")), LinuxNvidiaDriver::Nouveau);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("i915")), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("amdgpu")), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, None), LinuxNvidiaDriver::None);
+    }
+
+    fn drm_render_device(path: &str, driver: &str, boot_vga: bool) -> LinuxDrmRenderDevice {
+        LinuxDrmRenderDevice { device_file: PathBuf::from(path), driver: Some(driver.to_string()), boot_vga }
+    }
+
+    #[test]
+    fn keeps_linux_dmabuf_when_nouveau_is_loaded_but_not_the_default_renderer() {
+        let devices = [
+            drm_render_device("/dev/dri/renderD128", "i915", true),
+            drm_render_device("/dev/dri/renderD129", "nouveau", false),
+        ];
+
+        let selected = linux_selected_drm_render_device(None, &devices).unwrap();
+        assert_eq!(selected.driver.as_deref(), Some("i915"));
+        assert_eq!(linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()), LinuxNvidiaDriver::None);
+    }
+
+    #[test]
+    fn honors_explicit_webkit_linux_render_device_on_hybrid_gpus() {
+        let devices = [
+            drm_render_device("/dev/dri/renderD128", "i915", true),
+            drm_render_device("/dev/dri/renderD129", "nouveau", false),
+        ];
+
+        let selected = linux_selected_drm_render_device(Some(Path::new("/dev/dri/renderD129")), &devices).unwrap();
+        assert_eq!(selected.driver.as_deref(), Some("nouveau"));
+        assert_eq!(
+            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()),
+            LinuxNvidiaDriver::Nouveau
+        );
+
+        let devices = [
+            drm_render_device("/dev/dri/renderD128", "i915", false),
+            drm_render_device("/dev/dri/renderD129", "nouveau", true),
+        ];
+        let selected = linux_selected_drm_render_device(Some(Path::new("/dev/dri/renderD128")), &devices).unwrap();
+        assert_eq!(selected.driver.as_deref(), Some("i915"));
+        assert_eq!(linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()), LinuxNvidiaDriver::None);
+    }
+
+    #[test]
+    fn uses_nouveau_workaround_for_the_default_linux_renderer() {
+        let devices = [
+            drm_render_device("/dev/dri/renderD128", "amdgpu", false),
+            drm_render_device("/dev/dri/renderD129", "nouveau", true),
+        ];
+
+        let selected = linux_selected_drm_render_device(None, &devices).unwrap();
+        assert_eq!(selected.driver.as_deref(), Some("nouveau"));
+        assert_eq!(
+            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()),
+            LinuxNvidiaDriver::Nouveau
+        );
     }
 
     #[test]

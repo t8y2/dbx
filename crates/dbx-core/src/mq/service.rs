@@ -56,7 +56,7 @@ pub async fn mq_create_tenant_core(
     name: &str,
     cfg: TenantConfig,
 ) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Create tenant").await?;
+    ensure_connection_writable(state, conn_id, "mqCreateTenant", "Create tenant").await?;
     let adapter = get_adapter(state, conn_id).await?;
     adapter.create_tenant(name, cfg).await
 }
@@ -67,13 +67,13 @@ pub async fn mq_update_tenant_core(
     name: &str,
     cfg: TenantConfig,
 ) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Update tenant").await?;
+    ensure_connection_writable(state, conn_id, "mqUpdateTenant", "Update tenant").await?;
     let adapter = get_adapter(state, conn_id).await?;
     adapter.update_tenant(name, cfg).await
 }
 
 pub async fn mq_delete_tenant_core(state: &AppState, conn_id: &str, name: &str, force: bool) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Delete tenant").await?;
+    ensure_connection_writable(state, conn_id, "mqDeleteTenant", "Delete tenant").await?;
     let adapter = get_adapter(state, conn_id).await?;
     adapter.delete_tenant(name, force).await
 }
@@ -95,7 +95,7 @@ pub async fn mq_create_namespace_core(
     ns: NamespaceRef,
     cfg: NamespaceConfig,
 ) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Create namespace").await?;
+    ensure_connection_writable(state, conn_id, "mqCreateNamespace", "Create namespace").await?;
     let adapter = get_adapter(state, conn_id).await?;
     adapter.create_namespace(&ns, cfg).await
 }
@@ -106,7 +106,7 @@ pub async fn mq_delete_namespace_core(
     ns: NamespaceRef,
     force: bool,
 ) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Delete namespace").await?;
+    ensure_connection_writable(state, conn_id, "mqDeleteNamespace", "Delete namespace").await?;
     let adapter = get_adapter(state, conn_id).await?;
     adapter.delete_namespace(&ns, force).await
 }
@@ -138,13 +138,13 @@ pub async fn mq_create_topic_core(
     topic: TopicRef,
     partitions: Option<u32>,
 ) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Create topic").await?;
+    ensure_connection_writable(state, conn_id, "mqCreateTopic", "Create topic").await?;
     let adapter = get_adapter(state, conn_id).await?;
     adapter.create_topic(&topic, partitions).await
 }
 
 pub async fn mq_delete_topic_core(state: &AppState, conn_id: &str, topic: TopicRef, force: bool) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Delete topic").await?;
+    ensure_connection_writable(state, conn_id, "mqDeleteTopic", "Delete topic").await?;
     let adapter = get_adapter(state, conn_id).await?;
     adapter.delete_topic(&topic, force).await
 }
@@ -155,7 +155,7 @@ pub async fn mq_update_partitions_core(
     topic: TopicRef,
     partitions: u32,
 ) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Update partitions").await?;
+    ensure_connection_writable(state, conn_id, "mqUpdatePartitions", "Update partitions").await?;
     let adapter = get_adapter(state, conn_id).await?;
     adapter.update_partitions(&topic, partitions).await
 }
@@ -192,7 +192,7 @@ pub async fn mq_create_subscription_core(
     sub: String,
     pos: ResetPosition,
 ) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Create subscription").await?;
+    ensure_connection_writable(state, conn_id, "mqCreateSubscription", "Create subscription").await?;
     let adapter = get_adapter(state, conn_id).await?;
     adapter.create_subscription(&topic, &sub, pos).await
 }
@@ -204,7 +204,7 @@ pub async fn mq_delete_subscription_core(
     sub: String,
     force: bool,
 ) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Delete subscription").await?;
+    ensure_connection_writable(state, conn_id, "mqDeleteSubscription", "Delete subscription").await?;
     let adapter = get_adapter(state, conn_id).await?;
     adapter.delete_subscription(&topic, &sub, force).await
 }
@@ -216,7 +216,7 @@ pub async fn mq_skip_messages_core(
     sub: String,
     count: SkipCount,
 ) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Skip messages").await?;
+    ensure_connection_writable(state, conn_id, "mqSkipMessages", "Skip messages").await?;
     let adapter = get_adapter(state, conn_id).await?;
     adapter.skip_messages(&topic, &sub, count).await
 }
@@ -228,7 +228,7 @@ pub async fn mq_reset_cursor_core(
     sub: String,
     pos: ResetPosition,
 ) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Reset cursor").await?;
+    ensure_connection_writable(state, conn_id, "mqResetCursor", "Reset cursor").await?;
     let adapter = get_adapter(state, conn_id).await?;
     adapter.reset_cursor(&topic, &sub, pos).await
 }
@@ -239,7 +239,7 @@ pub async fn mq_clear_backlog_core(
     topic: TopicRef,
     sub: String,
 ) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Clear backlog").await?;
+    ensure_connection_writable(state, conn_id, "mqClearBacklog", "Clear backlog").await?;
     let adapter = get_adapter(state, conn_id).await?;
     adapter.clear_backlog(&topic, &sub).await
 }
@@ -269,7 +269,7 @@ pub async fn mq_expire_messages_core(
     sub: String,
     expire_seconds: i64,
 ) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Expire messages").await?;
+    ensure_connection_writable(state, conn_id, "mqExpireMessages", "Expire messages").await?;
     let adapter = get_adapter(state, conn_id).await?;
     adapter.expire_messages(&topic, &sub, expire_seconds).await
 }
@@ -296,7 +296,7 @@ pub async fn mq_list_consumers_core(
 }
 
 pub async fn mq_unload_topic_core(state: &AppState, conn_id: &str, topic: TopicRef) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Unload topic").await?;
+    ensure_connection_writable(state, conn_id, "mqUnloadTopic", "Unload topic").await?;
     let adapter = get_adapter(state, conn_id).await?;
     adapter.unload_topic(&topic).await
 }
@@ -309,7 +309,7 @@ pub async fn mq_set_publish_rate_core(
     scope: PolicyScope,
     rate: PublishRate,
 ) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Set publish rate").await?;
+    ensure_connection_writable(state, conn_id, "mqSetPublishRate", "Set publish rate").await?;
     let adapter = get_adapter(state, conn_id).await?;
     adapter.set_publish_rate(&scope, rate).await
 }
@@ -320,7 +320,7 @@ pub async fn mq_set_dispatch_rate_core(
     scope: PolicyScope,
     rate: DispatchRate,
 ) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Set dispatch rate").await?;
+    ensure_connection_writable(state, conn_id, "mqSetDispatchRate", "Set dispatch rate").await?;
     let adapter = get_adapter(state, conn_id).await?;
     adapter.set_dispatch_rate(&scope, rate).await
 }
@@ -331,7 +331,7 @@ pub async fn mq_set_subscribe_rate_core(
     scope: PolicyScope,
     rate: SubscribeRate,
 ) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Set subscribe rate").await?;
+    ensure_connection_writable(state, conn_id, "mqSetSubscribeRate", "Set subscribe rate").await?;
     let adapter = get_adapter(state, conn_id).await?;
     adapter.set_subscribe_rate(&scope, rate).await
 }
@@ -342,7 +342,7 @@ pub async fn mq_set_backlog_quota_core(
     scope: PolicyScope,
     quota: BacklogQuota,
 ) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Set backlog quota").await?;
+    ensure_connection_writable(state, conn_id, "mqSetBacklogQuota", "Set backlog quota").await?;
     let adapter = get_adapter(state, conn_id).await?;
     adapter.set_backlog_quota(&scope, quota).await
 }
@@ -353,7 +353,7 @@ pub async fn mq_set_retention_core(
     scope: PolicyScope,
     retention: RetentionPolicy,
 ) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Set retention").await?;
+    ensure_connection_writable(state, conn_id, "mqSetRetention", "Set retention").await?;
     let adapter = get_adapter(state, conn_id).await?;
     adapter.set_retention(&scope, retention).await
 }
@@ -376,7 +376,7 @@ pub async fn mq_grant_permission_core(
     role: String,
     actions: Vec<AuthAction>,
 ) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Grant permission").await?;
+    ensure_connection_writable(state, conn_id, "mqGrantPermission", "Grant permission").await?;
     let adapter = get_adapter(state, conn_id).await?;
     adapter.grant_permission(&scope, &role, actions).await
 }
@@ -387,7 +387,7 @@ pub async fn mq_revoke_permission_core(
     scope: PolicyScope,
     role: String,
 ) -> Result<(), String> {
-    ensure_connection_writable(state, conn_id, "Revoke permission").await?;
+    ensure_connection_writable(state, conn_id, "mqRevokePermission", "Revoke permission").await?;
     let adapter = get_adapter(state, conn_id).await?;
     adapter.revoke_permission(&scope, &role).await
 }
@@ -408,7 +408,7 @@ pub async fn mq_issue_token_core(
     conn_id: &str,
     req: MqTokenIssueRequest,
 ) -> Result<MqIssuedToken, String> {
-    ensure_connection_writable(state, conn_id, "Issue MQ token").await?;
+    ensure_connection_writable(state, conn_id, "mqIssueToken", "Issue MQ token").await?;
     let cfg = state.configs.read().await.get(conn_id).cloned().ok_or("Connection not found")?;
     let mqc = MqAdminConfig::from_connection(&cfg)?;
     let signing_config = mqc
@@ -471,7 +471,7 @@ pub async fn mq_get_cluster_info_core(state: &AppState, conn_id: &str) -> Result
 
 pub async fn mq_raw_request_core(state: &AppState, conn_id: &str, req: MqRawRequest) -> Result<MqRawResponse, String> {
     if req.is_mutating() {
-        ensure_connection_writable(state, conn_id, "MQ admin write").await?;
+        ensure_connection_writable(state, conn_id, "mqRawRequest", "MQ admin write").await?;
     }
     let adapter = get_adapter(state, conn_id).await?;
     adapter.raw_request(req).await
@@ -485,7 +485,7 @@ pub async fn mq_send_message_core(
     conn_id: &str,
     req: SendMessageRequest,
 ) -> Result<SendMessageResponse, String> {
-    ensure_connection_writable(state, conn_id, "Send message").await?;
+    ensure_connection_writable(state, conn_id, "mqSendMessage", "Send message").await?;
     let adapter = get_adapter(state, conn_id).await?;
     adapter.send_message(req).await
 }
@@ -525,17 +525,13 @@ pub fn resolve_kafka_launch_spec(mqc: &MqAdminConfig, state: &AppState) -> Optio
     }
 }
 
-async fn ensure_connection_writable(state: &AppState, conn_id: &str, operation: &str) -> Result<(), String> {
-    let configs = state.configs.read().await;
-    if let Some(config) = configs.get(conn_id) {
-        if config.read_only {
-            return Err(format!(
-                "Read-only mode: connection '{}' has read-only protection enabled. {} blocked.",
-                config.name, operation
-            ));
-        }
-    }
-    Ok(())
+async fn ensure_connection_writable(
+    state: &AppState,
+    conn_id: &str,
+    operation: &str,
+    action: &str,
+) -> Result<(), String> {
+    crate::production_safety::ensure_write_allowed(state, conn_id, None, operation, action).await
 }
 
 #[cfg(test)]

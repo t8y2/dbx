@@ -3,11 +3,20 @@
 //! These are thin wrappers around `dbx_core::mq::service::*_core` functions,
 //! with read-only protection (`ensure_connection_writable`) for mutating calls.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use tauri::State;
 
 use crate::commands::connection::{ensure_connection_writable, AppState};
+use dbx_core::production_safety::ProductionWriteAuthorization;
+
+async fn with_production_write_authorization<T>(
+    authorization: Option<ProductionWriteAuthorization>,
+    future: impl Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    dbx_core::production_safety::with_production_write_authorization(authorization, future).await
+}
 
 // ---- Test connection ----
 
@@ -44,9 +53,14 @@ pub async fn mq_create_tenant(
     connection_id: String,
     name: String,
     config: dbx_core::mq::TenantConfig,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "Create tenant").await?;
-    dbx_core::mq::service::mq_create_tenant_core(&state, &connection_id, &name, config).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::mq::service::mq_create_tenant_core(&state, &connection_id, &name, config),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -55,9 +69,14 @@ pub async fn mq_update_tenant(
     connection_id: String,
     name: String,
     config: dbx_core::mq::TenantConfig,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "Update tenant").await?;
-    dbx_core::mq::service::mq_update_tenant_core(&state, &connection_id, &name, config).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::mq::service::mq_update_tenant_core(&state, &connection_id, &name, config),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -66,9 +85,14 @@ pub async fn mq_delete_tenant(
     connection_id: String,
     name: String,
     force: bool,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "Delete tenant").await?;
-    dbx_core::mq::service::mq_delete_tenant_core(&state, &connection_id, &name, force).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::mq::service::mq_delete_tenant_core(&state, &connection_id, &name, force),
+    )
+    .await
 }
 
 // ---- Namespaces ----
@@ -88,9 +112,14 @@ pub async fn mq_create_namespace(
     connection_id: String,
     ns: dbx_core::mq::NamespaceRef,
     config: dbx_core::mq::NamespaceConfig,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "Create namespace").await?;
-    dbx_core::mq::service::mq_create_namespace_core(&state, &connection_id, ns, config).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::mq::service::mq_create_namespace_core(&state, &connection_id, ns, config),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -99,9 +128,14 @@ pub async fn mq_delete_namespace(
     connection_id: String,
     ns: dbx_core::mq::NamespaceRef,
     force: bool,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "Delete namespace").await?;
-    dbx_core::mq::service::mq_delete_namespace_core(&state, &connection_id, ns, force).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::mq::service::mq_delete_namespace_core(&state, &connection_id, ns, force),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -131,9 +165,14 @@ pub async fn mq_create_topic(
     connection_id: String,
     topic: dbx_core::mq::TopicRef,
     partitions: Option<u32>,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "Create topic").await?;
-    dbx_core::mq::service::mq_create_topic_core(&state, &connection_id, topic, partitions).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::mq::service::mq_create_topic_core(&state, &connection_id, topic, partitions),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -142,9 +181,14 @@ pub async fn mq_delete_topic(
     connection_id: String,
     topic: dbx_core::mq::TopicRef,
     force: bool,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "Delete topic").await?;
-    dbx_core::mq::service::mq_delete_topic_core(&state, &connection_id, topic, force).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::mq::service::mq_delete_topic_core(&state, &connection_id, topic, force),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -153,9 +197,14 @@ pub async fn mq_update_partitions(
     connection_id: String,
     topic: dbx_core::mq::TopicRef,
     partitions: u32,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "Update partitions").await?;
-    dbx_core::mq::service::mq_update_partitions_core(&state, &connection_id, topic, partitions).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::mq::service::mq_update_partitions_core(&state, &connection_id, topic, partitions),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -194,9 +243,14 @@ pub async fn mq_create_subscription(
     topic: dbx_core::mq::TopicRef,
     sub: String,
     pos: dbx_core::mq::ResetPosition,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "Create subscription").await?;
-    dbx_core::mq::service::mq_create_subscription_core(&state, &connection_id, topic, sub, pos).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::mq::service::mq_create_subscription_core(&state, &connection_id, topic, sub, pos),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -206,9 +260,14 @@ pub async fn mq_delete_subscription(
     topic: dbx_core::mq::TopicRef,
     sub: String,
     force: bool,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "Delete subscription").await?;
-    dbx_core::mq::service::mq_delete_subscription_core(&state, &connection_id, topic, sub, force).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::mq::service::mq_delete_subscription_core(&state, &connection_id, topic, sub, force),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -218,9 +277,14 @@ pub async fn mq_skip_messages(
     topic: dbx_core::mq::TopicRef,
     sub: String,
     count: dbx_core::mq::SkipCount,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "Skip messages").await?;
-    dbx_core::mq::service::mq_skip_messages_core(&state, &connection_id, topic, sub, count).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::mq::service::mq_skip_messages_core(&state, &connection_id, topic, sub, count),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -230,9 +294,14 @@ pub async fn mq_reset_cursor(
     topic: dbx_core::mq::TopicRef,
     sub: String,
     pos: dbx_core::mq::ResetPosition,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "Reset cursor").await?;
-    dbx_core::mq::service::mq_reset_cursor_core(&state, &connection_id, topic, sub, pos).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::mq::service::mq_reset_cursor_core(&state, &connection_id, topic, sub, pos),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -241,9 +310,14 @@ pub async fn mq_clear_backlog(
     connection_id: String,
     topic: dbx_core::mq::TopicRef,
     sub: String,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "Clear backlog").await?;
-    dbx_core::mq::service::mq_clear_backlog_core(&state, &connection_id, topic, sub).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::mq::service::mq_clear_backlog_core(&state, &connection_id, topic, sub),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -265,9 +339,14 @@ pub async fn mq_expire_messages(
     topic: dbx_core::mq::TopicRef,
     sub: String,
     expire_seconds: i64,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "Expire messages").await?;
-    dbx_core::mq::service::mq_expire_messages_core(&state, &connection_id, topic, sub, expire_seconds).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::mq::service::mq_expire_messages_core(&state, &connection_id, topic, sub, expire_seconds),
+    )
+    .await
 }
 
 // ---- Producers / consumers ----
@@ -296,9 +375,14 @@ pub async fn mq_unload_topic(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     topic: dbx_core::mq::TopicRef,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "Unload topic").await?;
-    dbx_core::mq::service::mq_unload_topic_core(&state, &connection_id, topic).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::mq::service::mq_unload_topic_core(&state, &connection_id, topic),
+    )
+    .await
 }
 
 // ---- Rate limits / quotas / retention ----
@@ -309,9 +393,14 @@ pub async fn mq_set_publish_rate(
     connection_id: String,
     scope: dbx_core::mq::PolicyScope,
     rate: dbx_core::mq::PublishRate,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "Set publish rate").await?;
-    dbx_core::mq::service::mq_set_publish_rate_core(&state, &connection_id, scope, rate).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::mq::service::mq_set_publish_rate_core(&state, &connection_id, scope, rate),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -320,9 +409,14 @@ pub async fn mq_set_dispatch_rate(
     connection_id: String,
     scope: dbx_core::mq::PolicyScope,
     rate: dbx_core::mq::DispatchRate,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "Set dispatch rate").await?;
-    dbx_core::mq::service::mq_set_dispatch_rate_core(&state, &connection_id, scope, rate).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::mq::service::mq_set_dispatch_rate_core(&state, &connection_id, scope, rate),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -331,9 +425,14 @@ pub async fn mq_set_subscribe_rate(
     connection_id: String,
     scope: dbx_core::mq::PolicyScope,
     rate: dbx_core::mq::SubscribeRate,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "Set subscribe rate").await?;
-    dbx_core::mq::service::mq_set_subscribe_rate_core(&state, &connection_id, scope, rate).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::mq::service::mq_set_subscribe_rate_core(&state, &connection_id, scope, rate),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -342,9 +441,14 @@ pub async fn mq_set_backlog_quota(
     connection_id: String,
     scope: dbx_core::mq::PolicyScope,
     quota: dbx_core::mq::BacklogQuota,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "Set backlog quota").await?;
-    dbx_core::mq::service::mq_set_backlog_quota_core(&state, &connection_id, scope, quota).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::mq::service::mq_set_backlog_quota_core(&state, &connection_id, scope, quota),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -353,9 +457,14 @@ pub async fn mq_set_retention(
     connection_id: String,
     scope: dbx_core::mq::PolicyScope,
     retention: dbx_core::mq::RetentionPolicy,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "Set retention").await?;
-    dbx_core::mq::service::mq_set_retention_core(&state, &connection_id, scope, retention).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::mq::service::mq_set_retention_core(&state, &connection_id, scope, retention),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -376,9 +485,14 @@ pub async fn mq_grant_permission(
     scope: dbx_core::mq::PolicyScope,
     role: String,
     actions: Vec<dbx_core::mq::AuthAction>,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "Grant permission").await?;
-    dbx_core::mq::service::mq_grant_permission_core(&state, &connection_id, scope, role, actions).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::mq::service::mq_grant_permission_core(&state, &connection_id, scope, role, actions),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -387,9 +501,14 @@ pub async fn mq_revoke_permission(
     connection_id: String,
     scope: dbx_core::mq::PolicyScope,
     role: String,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "Revoke permission").await?;
-    dbx_core::mq::service::mq_revoke_permission_core(&state, &connection_id, scope, role).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::mq::service::mq_revoke_permission_core(&state, &connection_id, scope, role),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -408,9 +527,14 @@ pub async fn mq_issue_token(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     req: dbx_core::mq::MqTokenIssueRequest,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<dbx_core::mq::MqIssuedToken, String> {
     ensure_connection_writable(&state, &connection_id, "Issue MQ token").await?;
-    dbx_core::mq::service::mq_issue_token_core(&state, &connection_id, req).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::mq::service::mq_issue_token_core(&state, &connection_id, req),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -449,11 +573,16 @@ pub async fn mq_raw_request(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     req: dbx_core::mq::MqRawRequest,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<dbx_core::mq::MqRawResponse, String> {
     if req.is_mutating() {
         ensure_connection_writable(&state, &connection_id, "MQ admin write").await?;
     }
-    dbx_core::mq::service::mq_raw_request_core(&state, &connection_id, req).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::mq::service::mq_raw_request_core(&state, &connection_id, req),
+    )
+    .await
 }
 
 // ---- Message production ----
@@ -463,6 +592,11 @@ pub async fn mq_send_message(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     req: dbx_core::mq::SendMessageRequest,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<dbx_core::mq::SendMessageResponse, String> {
-    dbx_core::mq::service::mq_send_message_core(&state, &connection_id, req).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::mq::service::mq_send_message_core(&state, &connection_id, req),
+    )
+    .await
 }

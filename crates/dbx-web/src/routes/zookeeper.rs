@@ -10,15 +10,12 @@ use crate::state::WebState;
 async fn ensure_writable(
     app: &dbx_core::connection::AppState,
     connection_id: &str,
+    operation: &str,
     action: &str,
 ) -> Result<(), AppError> {
-    if let Some(name) = dbx_core::query::connection_readonly_name(app, connection_id).await {
-        return Err(AppError(format!(
-            "Read-only mode: connection '{}' has read-only protection enabled. {} blocked.",
-            name, action
-        )));
-    }
-    Ok(())
+    dbx_core::production_safety::ensure_write_allowed(app, connection_id, None, operation, action)
+        .await
+        .map_err(AppError)
 }
 
 #[derive(Deserialize)]
@@ -76,7 +73,7 @@ pub async fn put(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ZooKeeperPutRequest>,
 ) -> Result<Json<dbx_core::agent_kv::KvPutResponse>, AppError> {
-    ensure_writable(&state.app, &req.connection_id, "Put").await?;
+    ensure_writable(&state.app, &req.connection_id, "zookeeperPut", "Put").await?;
     let result = dbx_core::agent_kv::kv_put_core_with_options(
         &state.app,
         &req.connection_id,
@@ -93,7 +90,7 @@ pub async fn delete(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ZooKeeperKeyRequest>,
 ) -> Result<Json<dbx_core::agent_kv::KvDeleteResponse>, AppError> {
-    ensure_writable(&state.app, &req.connection_id, "Delete").await?;
+    ensure_writable(&state.app, &req.connection_id, "zookeeperDelete", "Delete").await?;
     let result =
         dbx_core::agent_kv::kv_delete_core(&state.app, &req.connection_id, &req.key).await.map_err(AppError)?;
     Ok(Json(result))

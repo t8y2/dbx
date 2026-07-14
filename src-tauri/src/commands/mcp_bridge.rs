@@ -7,8 +7,6 @@ use tokio::net::TcpListener;
 
 use super::connection::AppState;
 
-use super::connection::ensure_connection_writable;
-
 const BIND_ADDR: &str = "127.0.0.1:0";
 const MCP_BRIDGE_PORT_FILE: &str = "mcp-bridge-port";
 
@@ -606,11 +604,19 @@ async fn handle_mongo_aggregate_documents_data(state: &Arc<AppState>, body: &str
             return;
         }
     };
-    let Some((pool_key, database, _connection_id)) =
+    let Some((pool_key, database, connection_id)) =
         resolve_mongo_pool_key(state, req.connection_id.as_deref(), &req.connection_name, req.database, stream).await
     else {
         return;
     };
+    if let Some(write_database) = dbx_core::mongo_ops::mongo_aggregate_write_database(&req.pipeline_json, &database) {
+        if let Err(e) =
+            ensure_mcp_write_allowed(state, &connection_id, &write_database, "a mutating MongoDB aggregate").await
+        {
+            respond_error(stream, "403 Forbidden", &e).await;
+            return;
+        }
+    }
     match dbx_core::mongo_ops::mongo_aggregate_documents_core(
         state,
         &pool_key,
@@ -639,7 +645,7 @@ async fn handle_mongo_create_index_data(state: &Arc<AppState>, body: &str, strea
     else {
         return;
     };
-    if let Err(e) = ensure_connection_writable(state, &connection_id, "Create index").await {
+    if let Err(e) = ensure_mcp_write_allowed(state, &connection_id, &database, "create index").await {
         respond_error(stream, "403 Forbidden", &e).await;
         return;
     }
@@ -671,7 +677,7 @@ async fn handle_mongo_drop_indexes_data(state: &Arc<AppState>, body: &str, strea
     else {
         return;
     };
-    if let Err(e) = ensure_connection_writable(state, &connection_id, "Drop indexes").await {
+    if let Err(e) = ensure_mcp_write_allowed(state, &connection_id, &database, "drop indexes").await {
         respond_error(stream, "403 Forbidden", &e).await;
         return;
     }
@@ -703,7 +709,7 @@ async fn handle_mongo_drop_collection_data(state: &Arc<AppState>, body: &str, st
     else {
         return;
     };
-    if let Err(e) = ensure_connection_writable(state, &connection_id, "Drop collection").await {
+    if let Err(e) = ensure_mcp_write_allowed(state, &connection_id, &database, "drop collection").await {
         respond_error(stream, "403 Forbidden", &e).await;
         return;
     }
@@ -726,7 +732,7 @@ async fn handle_mongo_insert_documents_data(state: &Arc<AppState>, body: &str, s
     else {
         return;
     };
-    if let Err(e) = ensure_connection_writable(state, &connection_id, "Insert").await {
+    if let Err(e) = ensure_mcp_write_allowed(state, &connection_id, &database, "insert documents").await {
         respond_error(stream, "403 Forbidden", &e).await;
         return;
     }
@@ -751,7 +757,7 @@ async fn handle_mongo_update_documents_data(state: &Arc<AppState>, body: &str, s
     else {
         return;
     };
-    if let Err(e) = ensure_connection_writable(state, &connection_id, "Update").await {
+    if let Err(e) = ensure_mcp_write_allowed(state, &connection_id, &database, "update documents").await {
         respond_error(stream, "403 Forbidden", &e).await;
         return;
     }
@@ -785,7 +791,7 @@ async fn handle_mongo_delete_documents_data(state: &Arc<AppState>, body: &str, s
     else {
         return;
     };
-    if let Err(e) = ensure_connection_writable(state, &connection_id, "Delete").await {
+    if let Err(e) = ensure_mcp_write_allowed(state, &connection_id, &database, "delete documents").await {
         respond_error(stream, "403 Forbidden", &e).await;
         return;
     }
@@ -824,20 +830,15 @@ async fn handle_redis_execute_command_data(state: &Arc<AppState>, body: &str, st
         respond_error(stream, "403 Forbidden", &e).await;
         return;
     }
-    if let Some(name) = dbx_core::query::connection_readonly_name(state, &config.id).await {
-        let cmd_name = req.command.split_whitespace().next().unwrap_or("");
-        if dbx_core::db::redis_driver::classify_command(cmd_name)
-            != dbx_core::db::redis_driver::RedisCommandSafety::Allowed
+    let cmd_name = req.command.split_whitespace().next().unwrap_or("");
+    if dbx_core::db::redis_driver::command_is_mutating(&req.command) {
+        let write_database =
+            dbx_core::production_safety::redis_command_production_database(&config, req.db, &req.command)
+                .unwrap_or_else(|| database.clone());
+        if let Err(e) =
+            ensure_mcp_write_allowed(state, &config.id, &write_database, &format!("Redis command '{cmd_name}'")).await
         {
-            respond_error(
-                stream,
-                "403 Forbidden",
-                &format!(
-                    "Read-only mode: connection '{}' has read-only protection enabled. Command '{}' blocked.",
-                    name, cmd_name
-                ),
-            )
-            .await;
+            respond_error(stream, "403 Forbidden", &e).await;
             return;
         }
     }
@@ -880,10 +881,36 @@ async fn handle_execute_query_data(state: &Arc<AppState>, body: &str, stream: &m
         respond_error(stream, "403 Forbidden", &e).await;
         return;
     }
+    if dbx_core::query_execution_sql::is_write_sql(&req.sql)
+        && dbx_core::production_safety::targets_production_database(&config, &database, &req.sql)
+    {
+        respond_error(
+            stream,
+            "403 Forbidden",
+            "Production protection: MCP cannot execute a write targeting a production database.",
+        )
+        .await;
+        return;
+    }
     match dbx_core::query::execute_sql_statement(state, &config.id, &database, &req.sql, req.schema.as_deref(), None)
         .await
     {
         Ok(result) => respond_json(stream, &result).await,
         Err(e) => respond_error(stream, "500 Internal Server Error", &e).await,
     }
+}
+async fn ensure_mcp_write_allowed(
+    state: &Arc<AppState>,
+    connection_id: &str,
+    database: &str,
+    action: &str,
+) -> Result<(), String> {
+    let config = state.configs.read().await.get(connection_id).cloned().ok_or("Connection not found")?;
+    if config.read_only {
+        return Err(format!("Read-only mode: connection '{}' blocks {action}.", config.name));
+    }
+    if dbx_core::production_safety::is_production_database(&config, database) {
+        return Err(format!("Production protection: MCP cannot perform {action} on production database '{database}'."));
+    }
+    Ok(())
 }

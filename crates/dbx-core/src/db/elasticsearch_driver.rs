@@ -809,6 +809,30 @@ pub async fn execute_rest_query(client: &EsClient, input: &str) -> Result<crate:
     parse_elasticsearch_rest_response(status, &body, start)
 }
 
+/// Classifies Elasticsearch REST text, where POST is read-only only for known query endpoints.
+pub fn rest_query_is_mutating(input: &str) -> bool {
+    let input = input.trim();
+    if input.is_empty() || is_elasticsearch_sql_query(input) {
+        return false;
+    }
+    let Some((method, rest)) = input.split_once(char::is_whitespace) else {
+        return true;
+    };
+    let method = method.to_ascii_uppercase();
+    let path =
+        rest.lines().next().unwrap_or_default().trim().split('?').next().unwrap_or_default().to_ascii_lowercase();
+    match method.as_str() {
+        "GET" | "HEAD" | "OPTIONS" => false,
+        "PUT" | "DELETE" | "PATCH" => true,
+        "POST" => {
+            let read_endpoints =
+                ["/_search", "/_msearch", "/_sql", "/_count", "/_field_caps", "/_terms_enum", "/_validate/query"];
+            !read_endpoints.iter().any(|endpoint| path.ends_with(endpoint))
+        }
+        _ => true,
+    }
+}
+
 // Size to use when `SELECT *` is run without an explicit LIMIT — large enough
 // to be useful, small enough that the user doesn't accidentally pull millions
 // of documents. The result-grid surfaces the index's true total separately so
@@ -1507,10 +1531,21 @@ fn parse_aggregations(aggs: &serde_json::Map<String, serde_json::Value>) -> (Vec
 mod tests {
     use super::{
         build_find_documents_body, elasticsearch_accept_invalid_certs, elasticsearch_base_url_fallbacks,
-        redact_elasticsearch_url, EsClient, SearchResponse,
+        redact_elasticsearch_url, rest_query_is_mutating, EsClient, SearchResponse,
     };
     use serde_json::json;
     use std::time::Duration;
+
+    #[test]
+    fn production_rest_classifier_allows_queries_and_blocks_mutations_conservatively() {
+        assert!(!rest_query_is_mutating("GET /products/_doc/1"));
+        assert!(!rest_query_is_mutating("POST /products/_search\n{}"));
+        assert!(!rest_query_is_mutating("POST /_sql\n{\"query\":\"SELECT * FROM products\"}"));
+        assert!(rest_query_is_mutating("POST /products/_doc\n{\"name\":\"Notebook\"}"));
+        assert!(rest_query_is_mutating("POST /products/_delete_by_query\n{}"));
+        assert!(rest_query_is_mutating("PUT /products/_doc/1\n{}"));
+        assert!(rest_query_is_mutating("CUSTOM /products/_search"));
+    }
 
     async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {
         use tokio::io::AsyncReadExt;

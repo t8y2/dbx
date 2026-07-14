@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { assessProductionSql, isProductionMutation, productionContextForDatabase } from "../productionSafety";
+import { assessProductionSql, isProductionMutation, productionContextForDatabase, supportsDatabaseScopedProduction } from "../productionSafety";
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 
 interface ProductionSafetyCorpusCase {
@@ -38,6 +38,16 @@ describe("production SQL safety", () => {
   it("marks only configured production databases for multi-database connections", () => {
     expect(productionContextForDatabase(connection(), "PROD_APP").active).toBe(true);
     expect(productionContextForDatabase(connection(), "staging").active).toBe(false);
+  });
+
+  it("limits per-database production scope to SQL, Redis, and MongoDB products", () => {
+    expect(supportsDatabaseScopedProduction("mysql")).toBe(true);
+    expect(supportsDatabaseScopedProduction("redis")).toBe(true);
+    expect(supportsDatabaseScopedProduction("mongodb")).toBe(true);
+    for (const dbType of ["elasticsearch", "qdrant", "etcd", "zookeeper", "nacos", "mq", "neo4j", "influxdb"] as DatabaseType[]) {
+      expect(supportsDatabaseScopedProduction(dbType), dbType).toBe(false);
+      expect(productionContextForDatabase(connection({ db_type: dbType }), "staging").active, dbType).toBe(true);
+    }
   });
 
   it("detects a write after a USE production switch despite comments", () => {

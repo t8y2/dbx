@@ -1346,6 +1346,118 @@ pub fn classify_command(command: &str) -> RedisCommandSafety {
     }
 }
 
+/// Returns whether a raw Redis command can modify data or server state.
+///
+/// Dynamic/module commands default to mutating so newly introduced commands cannot bypass
+/// read-only and production protection before DBX's command table is updated.
+pub fn command_is_mutating(command_text: &str) -> bool {
+    let Ok(argv) = parse_command_argv(command_text) else {
+        return true;
+    };
+    let command = argv.first().map(|value| value.to_ascii_uppercase()).unwrap_or_default();
+    !matches!(
+        command.as_str(),
+        "GET"
+            | "MGET"
+            | "GETRANGE"
+            | "STRLEN"
+            | "GETBIT"
+            | "BITCOUNT"
+            | "BITPOS"
+            | "HGET"
+            | "HGETALL"
+            | "HMGET"
+            | "HEXISTS"
+            | "HLEN"
+            | "HKEYS"
+            | "HVALS"
+            | "HSTRLEN"
+            | "HRANDFIELD"
+            | "LRANGE"
+            | "LINDEX"
+            | "LLEN"
+            | "LPOS"
+            | "SMEMBERS"
+            | "SISMEMBER"
+            | "SMISMEMBER"
+            | "SCARD"
+            | "SDIFF"
+            | "SINTER"
+            | "SUNION"
+            | "SRANDMEMBER"
+            | "ZRANGE"
+            | "ZREVRANGE"
+            | "ZRANGEBYSCORE"
+            | "ZREVRANGEBYSCORE"
+            | "ZRANGEBYLEX"
+            | "ZREVRANGEBYLEX"
+            | "ZRANK"
+            | "ZREVRANK"
+            | "ZSCORE"
+            | "ZMSCORE"
+            | "ZCARD"
+            | "ZCOUNT"
+            | "ZLEXCOUNT"
+            | "ZRANDMEMBER"
+            | "ZDIFF"
+            | "ZINTER"
+            | "ZUNION"
+            | "XRANGE"
+            | "XREVRANGE"
+            | "XLEN"
+            | "XPENDING"
+            | "XINFO"
+            | "XREAD"
+            | "TYPE"
+            | "TTL"
+            | "PTTL"
+            | "EXPIRETIME"
+            | "PEXPIRETIME"
+            | "EXISTS"
+            | "SCAN"
+            | "SSCAN"
+            | "HSCAN"
+            | "ZSCAN"
+            | "DBSIZE"
+            | "SELECT"
+            | "INFO"
+            | "PING"
+            | "ECHO"
+            | "TIME"
+            | "KEYS"
+            | "RANDOMKEY"
+            | "DUMP"
+            | "OBJECT"
+            | "MEMORY"
+            | "GEOHASH"
+            | "GEOPOS"
+            | "GEODIST"
+            | "GEOSEARCH"
+            | "GEORADIUS_RO"
+            | "GEORADIUSBYMEMBER_RO"
+            | "PFCOUNT"
+            | "PUBSUB"
+            | "COMMAND"
+            | "JSON.GET"
+            | "JSON.TYPE"
+            | "JSON.OBJKEYS"
+            | "JSON.OBJLEN"
+            | "JSON.ARRLEN"
+            | "FT.SEARCH"
+            | "FT.AGGREGATE"
+            | "FT.INFO"
+            | "FT._LIST"
+            | "TS.GET"
+            | "TS.RANGE"
+            | "TS.REVRANGE"
+            | "TS.MGET"
+            | "TS.MRANGE"
+            | "TS.MREVRANGE"
+            | "TS.INFO"
+            | "TS.QUERYINDEX"
+    )
+}
+
 pub fn redis_command_raw_to_json(value: RedisRawValue) -> serde_json::Value {
     match value {
         RedisRawValue::Nil => serde_json::Value::Null,
@@ -2560,9 +2672,9 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::{
-        classify_command, connection_info, decode_cluster_cursor, encode_cluster_cursor, is_redis_json_type,
-        parse_cluster_slots, parse_command_argv, parse_database_count, parse_redis_endpoint, parse_scan_keys,
-        parse_stream_entries, redis_auth_candidates, redis_blob_from_bytes, redis_cluster_slot,
+        classify_command, command_is_mutating, connection_info, decode_cluster_cursor, encode_cluster_cursor,
+        is_redis_json_type, parse_cluster_slots, parse_command_argv, parse_database_count, parse_redis_endpoint,
+        parse_scan_keys, parse_stream_entries, redis_auth_candidates, redis_blob_from_bytes, redis_cluster_slot,
         redis_command_raw_to_json, redis_database_index, redis_json_raw_to_json, redis_json_value_preview,
         redis_key_bytes_to_display, redis_key_bytes_to_raw, redis_key_matches_query, redis_key_raw_to_bytes,
         redis_key_value_preview, redis_raw_to_json, redis_sentinel_master_endpoint, redis_value_matches_query,
@@ -2572,6 +2684,13 @@ mod tests {
     };
     use crate::models::connection::ConnectionConfig;
     use redis::{aio::ConnectionLike, Cmd, ConnectionAddr, Pipeline, RedisFuture};
+
+    #[test]
+    fn raw_command_mutation_classification_fails_closed() {
+        assert!(!command_is_mutating("GET session:1"));
+        assert!(command_is_mutating("JSON.SET profile:1 $ {}"));
+        assert!(command_is_mutating("VENDOR.NEWWRITE key value"));
+    }
 
     struct FakeRedisConnection {
         responses: VecDeque<RedisRawValue>,

@@ -1,5 +1,6 @@
 // HTTP fetch API for message queue admin (web mode)
 import { apiUrl } from "@/lib/common/webPath";
+import { productionWriteAuthorizationHeaders } from "@/lib/backend/productionWriteAuthorization";
 import type {
   MqClusterInfo,
   ClusterInfo,
@@ -40,7 +41,7 @@ import type {
 async function post<T>(path: string, body: unknown): Promise<T> {
   const resp = await fetch(apiUrl(path), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...productionWriteAuthorizationHeaders() },
     body: JSON.stringify(body),
   });
   if (!resp.ok) {

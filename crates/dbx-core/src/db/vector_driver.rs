@@ -104,6 +104,18 @@ impl VectorClient {
         self.with_auth(self.http.delete(format!("{}{}", self.base_url, path)))
     }
 
+    fn patch(&self, path: &str) -> reqwest::RequestBuilder {
+        self.with_auth(self.http.patch(format!("{}{}", self.base_url, path)))
+    }
+
+    fn head(&self, path: &str) -> reqwest::RequestBuilder {
+        self.with_auth(self.http.head(format!("{}{}", self.base_url, path)))
+    }
+
+    fn options(&self, path: &str) -> reqwest::RequestBuilder {
+        self.with_auth(self.http.request(reqwest::Method::OPTIONS, format!("{}{}", self.base_url, path)))
+    }
+
     fn with_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.auth {
             Some(VectorAuth::Basic(user, pass)) => req.basic_auth(user, Some(pass)),
@@ -578,6 +590,32 @@ pub async fn execute_rest_query(client: &VectorClient, input: &str) -> Result<Qu
     Ok(json_to_query_result(status, body, start))
 }
 
+/// Classifies vector REST text conservatively while allowing known read-only POST endpoints.
+pub fn rest_query_is_mutating(input: &str) -> bool {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || !starts_with_http_method(trimmed) {
+        return false;
+    }
+    let head = trimmed.lines().next().unwrap_or_default();
+    let mut parts = head.split_whitespace();
+    let method = parts.next().unwrap_or_default().to_ascii_uppercase();
+    let path = parts.next().unwrap_or_default().split('?').next().unwrap_or_default().to_ascii_lowercase();
+    match method.as_str() {
+        "GET" | "HEAD" | "OPTIONS" => false,
+        "PUT" | "DELETE" => true,
+        "POST" => {
+            // A bare POST to /collections creates a ChromaDB collection, so only
+            // endpoint shapes that are unambiguously query operations are allowed.
+            let read_suffixes = ["/search", "/scroll", "/query", "/get", "/list", "/describe", "/count"];
+            if path.ends_with("/graphql") {
+                return trimmed.to_ascii_lowercase().contains("mutation");
+            }
+            !read_suffixes.iter().any(|suffix| path.ends_with(suffix))
+        }
+        _ => true,
+    }
+}
+
 fn parse_rest_query(client: &VectorClient, input: &str) -> Result<reqwest::RequestBuilder, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -597,7 +635,10 @@ fn parse_rest_query(client: &VectorClient, input: &str) -> Result<reqwest::Reque
         "GET" => client.get(&path),
         "POST" => client.post(&path),
         "PUT" => client.put(&path),
+        "PATCH" => client.patch(&path),
         "DELETE" => client.delete(&path),
+        "HEAD" => client.head(&path),
+        "OPTIONS" => client.options(&path),
         other => return Err(format!("Unsupported vector REST method: {other}")),
     };
     if body.is_empty() {
@@ -635,7 +676,9 @@ fn default_collection_query(client: &VectorClient, collection: &str) -> Result<r
 }
 
 fn starts_with_http_method(input: &str) -> bool {
-    ["GET ", "POST ", "PUT ", "DELETE "].iter().any(|prefix| input.to_ascii_uppercase().starts_with(prefix))
+    ["GET ", "POST ", "PUT ", "PATCH ", "DELETE ", "HEAD ", "OPTIONS "]
+        .iter()
+        .any(|prefix| input.to_ascii_uppercase().starts_with(prefix))
 }
 
 pub(crate) fn path_segment(value: &str) -> String {
@@ -767,8 +810,8 @@ fn format_reqwest_error(err: &reqwest::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        chroma_get_response_to_rows, starts_with_http_method, values_to_query_result, vector_auth,
-        weaviate_collection_names_from_schema, CollectionInfo, VectorAuth, VectorDbKind,
+        chroma_get_response_to_rows, rest_query_is_mutating, starts_with_http_method, values_to_query_result,
+        vector_auth, weaviate_collection_names_from_schema, CollectionInfo, VectorAuth, VectorDbKind,
     };
     use serde_json::json;
     use std::time::Instant;
@@ -778,6 +821,17 @@ mod tests {
         assert!(starts_with_http_method("post /collections/foo"));
         assert!(starts_with_http_method("GET /collections"));
         assert!(!starts_with_http_method("collection_name"));
+    }
+
+    #[test]
+    fn production_rest_classifier_allows_known_reads_and_blocks_writes() {
+        assert!(!rest_query_is_mutating("POST /collections/products/points/search\n{}"));
+        assert!(!rest_query_is_mutating("POST /graphql\n{ Get { Product { name } } }"));
+        assert!(rest_query_is_mutating("POST /api/v1/collections\n{\"name\":\"products\"}"));
+        assert!(rest_query_is_mutating("POST /collections/products/points\n{}"));
+        assert!(rest_query_is_mutating("POST /graphql\nmutation { DeleteProduct(id: 1) }"));
+        assert!(rest_query_is_mutating("DELETE /collections/products"));
+        assert!(rest_query_is_mutating("PATCH /collections/products"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { assessProductionSql, isLikelyMongoMutation, isProductionDatabase } from "../src/production-safety.js";
+import { assessProductionMongo, assessProductionSql, isLikelyMongoMutation, isProductionDatabase } from "../src/production-safety.js";
 import type { ConnectionConfig } from "../src/connections.js";
 
 interface ProductionSafetyCorpusCase {
@@ -103,6 +103,42 @@ describe("production safety", () => {
 
   it("recognizes Mongo write commands before MCP forwards them", () => {
     expect(isLikelyMongoMutation("db.orders.updateOne({_id: 1}, {$set: {status: 'paid'}})")).toBe(true);
+    expect(isLikelyMongoMutation("db.orders.drop()")).toBe(true);
+    expect(isLikelyMongoMutation('db.orders.aggregate([{"$merge":{"into":{"db":"prod_app","coll":"orders"}}}])')).toBe(true);
     expect(isLikelyMongoMutation("db.orders.find({status: 'paid'})")).toBe(false);
+  });
+
+  it("treats legacy database markers on non-SQL products as connection-wide", () => {
+    for (const dbType of ["elasticsearch", "qdrant", "etcd", "zookeeper", "nacos", "mq", "neo4j", "influxdb"]) {
+      expect(isProductionDatabase(connection({ db_type: dbType }), "staging"), dbType).toBe(true);
+    }
+  });
+
+  it("detects Mongo writes from a non-production database into a production sibling", () => {
+    const mongo = connection({ db_type: "mongodb" });
+    expect(assessProductionMongo('db.getSiblingDB("prod_app").orders.updateOne({_id: 1}, {$set: {status: "paid"}})', mongo, "staging")).toMatchObject({
+      active: true,
+      isMutation: true,
+      databases: ["prod_app"],
+    });
+    expect(assessProductionMongo("use prod_app; db.orders.deleteOne({_id: 1})", mongo, "staging")).toMatchObject({
+      active: true,
+      isMutation: true,
+      databases: ["prod_app"],
+    });
+    expect(assessProductionMongo('db.getSiblingDB("prod_app").orders.drop()', mongo, "staging")).toMatchObject({
+      active: true,
+      isMutation: true,
+      databases: ["prod_app"],
+    });
+  });
+
+  it("detects cross-database Mongo aggregate output targets", () => {
+    const mongo = connection({ db_type: "mongodb" });
+    expect(assessProductionMongo('db.orders.aggregate([{"$merge":{"into":{"db":"prod_app","coll":"orders_snapshot"}}}])', mongo, "staging")).toMatchObject({
+      active: true,
+      isMutation: true,
+      databases: ["prod_app"],
+    });
   });
 });

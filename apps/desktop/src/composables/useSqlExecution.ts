@@ -121,18 +121,25 @@ export function useSqlExecution(deps: {
         }
       }
     }
-    const productionAssessment = assessProductionSql(sql, deps.activeConnection.value, deps.activeTab.value?.database);
-    if (productionAssessment.active && productionAssessment.isMutation) {
-      // Production writes always need a new explicit decision; editor preferences cannot suppress this gate.
-      const confirmed = await productionSafetyStore.requestConfirmation({
-        sql,
-        connectionName: deps.activeConnection.value?.name,
-        database: deps.activeTab.value?.database,
-        productionDatabases: productionAssessment.databases,
-        source: t("production.sourceSqlEditor"),
-      });
-      if (confirmed) await doExecute(sql, sourceOffset);
-      return;
+    const connection = deps.activeConnection.value;
+    const usesDedicatedProductionGuard = connection?.db_type === "redis" || connection?.db_type === "mongodb";
+    if (!usesDedicatedProductionGuard) {
+      const productionAssessment = assessProductionSql(sql, connection, deps.activeTab.value?.database);
+      if (productionAssessment.active && productionAssessment.isMutation) {
+        // Production writes always need a new explicit decision; editor preferences cannot suppress this gate.
+        const confirmed = await productionSafetyStore.requestConfirmation({
+          sql,
+          connectionName: connection?.name,
+          database: deps.activeTab.value?.database,
+          productionDatabases: productionAssessment.databases,
+          source: t("production.sourceSqlEditor"),
+        });
+        if (confirmed) {
+          const authorizeRestProductionWrite = !!connection && ["elasticsearch", "qdrant", "milvus", "weaviate", "chromadb"].includes(connection.db_type);
+          await doExecute(sql, sourceOffset, authorizeRestProductionWrite);
+        }
+        return;
+      }
     }
     if (isDangerousSql(sql) && settingsStore.editorSettings.confirmDangerousSqlExecution) {
       dangerSql.value = sql;
@@ -160,7 +167,7 @@ export function useSqlExecution(deps: {
     return true;
   }
 
-  async function doExecute(sql?: string, sourceOffset?: number) {
+  async function doExecute(sql?: string, sourceOffset?: number, authorizeRestProductionWrite = false) {
     if (sql === undefined) ({ sql, sourceOffset } = await resolvedExecutableSql());
     const tab = deps.activeTab.value;
     if (!tab || !sql.trim()) return;
@@ -174,10 +181,12 @@ export function useSqlExecution(deps: {
     const connName = executionConnection?.name || "";
     const start = Date.now();
     const isRedis = executionDatabaseType === "redis";
-    await queryStore.executeCurrentSql(sql, {
+    const executionOptions = {
       ...(isRedis ? { skipRedisSafetyCheck: deps.blockDangerousRedisCommands?.value === false } : {}),
       ...(sourceOffset !== undefined ? { sourceOffset } : {}),
-    });
+      ...(authorizeRestProductionWrite ? { authorizeRestProductionWrite: true } : {}),
+    };
+    await queryStore.executeCurrentSql(sql, Object.keys(executionOptions).length ? executionOptions : undefined);
     if (tab.result && !tab.result.columns.length && !tab.results?.some((result) => result.columns.length > 0)) {
       deps.activeOutputView.value = "summary";
     }

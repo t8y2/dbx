@@ -49,6 +49,7 @@ import { ArrowLeft, ArrowDown, ArrowUp, CheckSquare, ChevronRight, CircleHelp, C
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleDatabaseSelectionIsStale } from "@/lib/connection/connectionVisibleDatabases";
 import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, isSystemDatabaseName, normalizeVisibleDatabaseSelection, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
 import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
+import { supportsDatabaseScopedProduction } from "@/lib/database/productionSafety";
 import VisibleSchemasDialog from "@/components/sidebar/VisibleSchemasDialog.vue";
 import CloudflareD1ConnectionFields from "@/components/connection/CloudflareD1ConnectionFields.vue";
 import { oceanbaseModeConnectionPatch, oceanbaseSubModeFromConfig } from "@/lib/database/oceanbaseConnectionMode";
@@ -1998,13 +1999,13 @@ const productionDatabaseSummary = computed(() => {
   if (!productionDatabaseNames.value.length) return t("production.databasesConfiguredCount", { count: selected });
   return t("production.databasesSelectedCount", { selected, total: productionDatabaseNames.value.length });
 });
+const canSelectProductionDatabases = computed(() => !isSingleDatabase(form.value.db_type) && supportsDatabaseScopedProduction(form.value.db_type));
 const productionScope = computed<ProductionScope>({
-  get: () => (isSingleDatabase(form.value.db_type) || form.value.is_production ? "connection" : "databases"),
+  get: () => (!canSelectProductionDatabases.value || form.value.is_production ? "connection" : "databases"),
   set: (scope) => {
-    form.value.is_production = isSingleDatabase(form.value.db_type) || scope === "connection";
+    form.value.is_production = !canSelectProductionDatabases.value || scope === "connection";
   },
 });
-const canSelectProductionDatabases = computed(() => !isSingleDatabase(form.value.db_type));
 
 function setProductionProtectionEnabled(enabled: boolean) {
   productionProtectionEnabled.value = enabled;
@@ -2384,8 +2385,8 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
   }
   if (!config.one_time) config.one_time = undefined;
   if (!config.read_only) config.read_only = undefined;
-  if (isSingleDatabase(config.db_type) && config.production_databases?.length) {
-    // Single-database drivers expose schemas or internal names, not independently selectable databases.
+  if ((!supportsDatabaseScopedProduction(config.db_type) || isSingleDatabase(config.db_type)) && config.production_databases?.length) {
+    // Connection-scoped products and single-database drivers cannot safely retain a narrower marker.
     config.is_production = true;
     config.production_databases = [];
   }

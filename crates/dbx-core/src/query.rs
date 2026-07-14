@@ -1116,6 +1116,36 @@ pub async fn do_execute(
         crate::query_execution_sql::check_read_only(sql, &name, database_type)?;
     }
     let pool_db_type = connection_database_type_for_pool_key(state, pool_key).await;
+    if matches!(
+        pool_db_type,
+        Some(
+            DatabaseType::Elasticsearch
+                | DatabaseType::Qdrant
+                | DatabaseType::Milvus
+                | DatabaseType::Weaviate
+                | DatabaseType::ChromaDb
+        )
+    ) {
+        let mutating = match pool_db_type {
+            Some(DatabaseType::Elasticsearch) => db::elasticsearch_driver::rest_query_is_mutating(sql),
+            _ => db::vector_driver::rest_query_is_mutating(sql),
+        };
+        if mutating {
+            let connection_id = {
+                let configs = state.configs.read().await;
+                crate::connection::config_for_pool_key(pool_key, &configs).map(|config| config.id.clone())
+            }
+            .ok_or("Connection not found")?;
+            crate::production_safety::ensure_write_allowed(
+                state,
+                &connection_id,
+                None,
+                "executeRestRequest",
+                "executing a mutating REST request",
+            )
+            .await?;
+        }
+    }
     let connections = state.connections.read().await;
     let pool = connections.get(pool_key).ok_or("Connection not found")?;
 

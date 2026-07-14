@@ -1,8 +1,17 @@
+use std::future::Future;
 use std::sync::Arc;
 
 use tauri::State;
 
 use crate::commands::connection::AppState;
+use dbx_core::production_safety::ProductionWriteAuthorization;
+
+async fn with_production_write_authorization<T>(
+    authorization: Option<ProductionWriteAuthorization>,
+    future: impl Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    dbx_core::production_safety::with_production_write_authorization(authorization, future).await
+}
 
 #[tauri::command]
 pub async fn nacos_test_connection(
@@ -25,8 +34,13 @@ pub async fn nacos_create_namespace(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     req: dbx_core::nacos::NacosNamespaceCreate,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    dbx_core::nacos::service::nacos_create_namespace_core(&state, &connection_id, req).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::nacos::service::nacos_create_namespace_core(&state, &connection_id, req),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -34,8 +48,13 @@ pub async fn nacos_update_namespace(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     req: dbx_core::nacos::NacosNamespaceUpdate,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    dbx_core::nacos::service::nacos_update_namespace_core(&state, &connection_id, req).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::nacos::service::nacos_update_namespace_core(&state, &connection_id, req),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -61,8 +80,13 @@ pub async fn nacos_publish_config(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     req: dbx_core::nacos::NacosConfigUpsert,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    dbx_core::nacos::service::nacos_publish_config_core(&state, &connection_id, req).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::nacos::service::nacos_publish_config_core(&state, &connection_id, req),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -70,8 +94,13 @@ pub async fn nacos_delete_config(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     key: dbx_core::nacos::NacosConfigKey,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    dbx_core::nacos::service::nacos_delete_config_core(&state, &connection_id, key).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::nacos::service::nacos_delete_config_core(&state, &connection_id, key),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -97,8 +126,13 @@ pub async fn nacos_rollback_config(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     req: dbx_core::nacos::NacosConfigRollbackRequest,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    dbx_core::nacos::service::nacos_rollback_config_core(&state, &connection_id, req).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::nacos::service::nacos_rollback_config_core(&state, &connection_id, req),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -124,8 +158,13 @@ pub async fn nacos_update_instance(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     req: dbx_core::nacos::NacosInstanceUpdate,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<(), String> {
-    dbx_core::nacos::service::nacos_update_instance_core(&state, &connection_id, req).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::nacos::service::nacos_update_instance_core(&state, &connection_id, req),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -133,6 +172,11 @@ pub async fn nacos_raw_request(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     req: dbx_core::nacos::NacosRawRequest,
+    production_write_authorization: Option<ProductionWriteAuthorization>,
 ) -> Result<dbx_core::nacos::NacosRawResponse, String> {
-    dbx_core::nacos::service::nacos_raw_request_core(&state, &connection_id, req).await
+    with_production_write_authorization(
+        production_write_authorization,
+        dbx_core::nacos::service::nacos_raw_request_core(&state, &connection_id, req),
+    )
+    .await
 }

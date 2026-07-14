@@ -426,3 +426,75 @@ pub async fn mongo_delete_documents_core(
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
+/// Resolves the database written by an aggregate pipeline containing `$out` or `$merge`.
+///
+/// MongoDB permits these stages to target a sibling database. Invalid pipeline JSON is
+/// classified conservatively against the active database so malformed requests cannot
+/// bypass production protection before the database reports the syntax error.
+pub fn mongo_aggregate_write_database(pipeline_json: &str, active_database: &str) -> Option<String> {
+    let Ok(pipeline) = serde_json::from_str::<serde_json::Value>(pipeline_json) else {
+        return Some(active_database.to_string());
+    };
+    let Some(pipeline) = pipeline.as_array() else {
+        return Some(active_database.to_string());
+    };
+
+    for stage in pipeline {
+        let Some(stage) = stage.as_object() else {
+            continue;
+        };
+        if let Some(target) = stage.get("$out") {
+            return Some(mongo_aggregate_target_database(target, active_database));
+        }
+        if let Some(target) = stage.get("$merge") {
+            let target = target.get("into").unwrap_or(target);
+            return Some(mongo_aggregate_target_database(target, active_database));
+        }
+    }
+    None
+}
+
+/// Returns whether an aggregate pipeline can persist results through `$out` or `$merge`.
+pub fn mongo_aggregate_is_mutating(pipeline_json: &str) -> bool {
+    mongo_aggregate_write_database(pipeline_json, "").is_some()
+}
+
+fn mongo_aggregate_target_database(target: &serde_json::Value, active_database: &str) -> String {
+    target
+        .as_object()
+        .and_then(|target| target.get("db"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|database| !database.trim().is_empty())
+        .unwrap_or(active_database)
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{mongo_aggregate_is_mutating, mongo_aggregate_write_database};
+
+    #[test]
+    fn aggregate_write_database_resolves_cross_database_out_and_merge_targets() {
+        assert_eq!(
+            mongo_aggregate_write_database(r#"[{"$out":{"db":"prod_app","coll":"snapshot"}}]"#, "staging"),
+            Some("prod_app".to_string())
+        );
+        assert_eq!(
+            mongo_aggregate_write_database(
+                r#"[{"$merge":{"into":{"db":"prod_app","coll":"snapshot"},"whenMatched":"replace"}}]"#,
+                "staging"
+            ),
+            Some("prod_app".to_string())
+        );
+        assert_eq!(
+            mongo_aggregate_write_database(r#"[{"$merge":{"into":"snapshot"}}]"#, "staging"),
+            Some("staging".to_string())
+        );
+    }
+
+    #[test]
+    fn aggregate_write_detection_allows_reads_and_classifies_invalid_input_conservatively() {
+        assert!(!mongo_aggregate_is_mutating(r#"[{"$match":{"active":true}}]"#));
+        assert!(mongo_aggregate_is_mutating("not-json"));
+    }
+}

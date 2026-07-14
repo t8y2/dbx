@@ -43,6 +43,32 @@ pub struct SaveConnectionsRequest {
     pub configs: Vec<ConnectionConfig>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthorizeProductionWriteRequest {
+    pub connection_id: String,
+    pub database: Option<String>,
+    pub operation: String,
+    pub request_digest: String,
+}
+
+/// Issues a request-bound single-use token after the Web UI confirms a production write.
+pub async fn authorize_production_write(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<AuthorizeProductionWriteRequest>,
+) -> Result<Json<dbx_core::production_safety::ProductionWriteAuthorization>, AppError> {
+    let authorization = dbx_core::production_safety::authorize_production_write(
+        &state.app,
+        &body.connection_id,
+        body.database.as_deref(),
+        &body.operation,
+        &body.request_digest,
+    )
+    .await
+    .map_err(AppError)?;
+    Ok(Json(authorization))
+}
+
 pub async fn test_connection(
     State(state): State<Arc<WebState>>,
     Json(body): Json<ConnectRequest>,

@@ -1,7 +1,267 @@
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::LazyLock;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
+
+const PRODUCTION_WRITE_PERMIT_TTL: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone)]
+struct ProductionWritePermit {
+    connection_id: String,
+    database: String,
+    operation: String,
+    request_digest: String,
+    expires_at: Instant,
+}
+
+/// Authorization carried by exactly one production mutation after an operator confirms it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductionWriteAuthorization {
+    pub token: String,
+    pub operation: String,
+    pub request_digest: String,
+}
+
+tokio::task_local! {
+    static ACTIVE_PRODUCTION_WRITE_AUTHORIZATION: Option<ProductionWriteAuthorization>;
+}
+
+/// Stores short-lived, single-use permits created after an operator confirms a production write.
+///
+/// Permits are deliberately kept in memory and bound to a random token, connection, effective
+/// database, operation kind, and request digest. Concurrent writes therefore cannot consume
+/// another operation's confirmation merely because they share a connection and database.
+#[derive(Default)]
+pub struct ProductionWritePermitStore {
+    permits: Mutex<HashMap<String, ProductionWritePermit>>,
+}
+
+impl ProductionWritePermitStore {
+    /// Issues a cryptographically random token for one confirmed production mutation.
+    pub async fn authorize(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        operation: &str,
+        request_digest: &str,
+    ) -> Result<ProductionWriteAuthorization, String> {
+        validate_production_write_intent(operation, request_digest)?;
+        let mut permits = self.permits.lock().await;
+        let now = Instant::now();
+        permits.retain(|_, permit| permit.expires_at > now);
+
+        let token = loop {
+            let candidate = uuid::Uuid::new_v4().to_string();
+            if !permits.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        let authorization = ProductionWriteAuthorization {
+            token: token.clone(),
+            operation: operation.trim().to_string(),
+            request_digest: request_digest.trim().to_ascii_lowercase(),
+        };
+        permits.insert(
+            token,
+            ProductionWritePermit {
+                connection_id: connection_id.trim().to_string(),
+                database: normalize_database_name(database.unwrap_or_default()),
+                operation: authorization.operation.clone(),
+                request_digest: authorization.request_digest.clone(),
+                expires_at: now + PRODUCTION_WRITE_PERMIT_TTL,
+            },
+        );
+        Ok(authorization)
+    }
+
+    async fn consume(
+        &self,
+        authorization: &ProductionWriteAuthorization,
+        connection_id: &str,
+        database: Option<&str>,
+        operation: &str,
+    ) -> bool {
+        let mut permits = self.permits.lock().await;
+        let now = Instant::now();
+        permits.retain(|_, permit| permit.expires_at > now);
+        let expected_database = normalize_database_name(database.unwrap_or_default());
+        let expected_operation = operation.trim();
+        let Some(permit) = permits.get(&authorization.token) else {
+            return false;
+        };
+        let matches = permit.connection_id == connection_id.trim()
+            && permit.database == expected_database
+            && permit.operation == expected_operation
+            && permit.operation == authorization.operation
+            && permit.request_digest == authorization.request_digest.trim().to_ascii_lowercase();
+        if matches {
+            // Validation and removal happen under the same lock, making replay impossible.
+            permits.remove(&authorization.token);
+        }
+        matches
+    }
+}
+
+fn validate_production_write_intent(operation: &str, request_digest: &str) -> Result<(), String> {
+    let operation = operation.trim();
+    if operation.is_empty() || operation.len() > 128 {
+        return Err("Production write operation must contain 1 to 128 characters".to_string());
+    }
+    let digest = request_digest.trim();
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Production write request digest must be a SHA-256 hex string".to_string());
+    }
+    Ok(())
+}
+
+/// Runs a backend request with the production authorization explicitly carried by its transport.
+pub async fn with_production_write_authorization<F>(
+    authorization: Option<ProductionWriteAuthorization>,
+    future: F,
+) -> F::Output
+where
+    F: Future,
+{
+    ACTIVE_PRODUCTION_WRITE_AUTHORIZATION.scope(authorization, future).await
+}
+
+fn active_production_write_authorization() -> Option<ProductionWriteAuthorization> {
+    ACTIVE_PRODUCTION_WRITE_AUTHORIZATION.try_with(Clone::clone).ok().flatten()
+}
+
+/// Issues a request-bound permit after the operator has confirmed a production mutation.
+pub async fn authorize_production_write(
+    state: &crate::connection::AppState,
+    connection_id: &str,
+    database: Option<&str>,
+    operation: &str,
+    request_digest: &str,
+) -> Result<ProductionWriteAuthorization, String> {
+    let config = state.configs.read().await.get(connection_id).cloned().ok_or("Connection not found")?;
+    if !is_production_database(&config, database.unwrap_or_default()) {
+        return Err("Production write authorization can only be issued for a production target".to_string());
+    }
+    state.production_write_permits.authorize(connection_id, database, operation, request_digest).await
+}
+
+/// Applies ordinary read-only protection and consumes explicit confirmation for production writes.
+pub async fn ensure_write_allowed(
+    state: &crate::connection::AppState,
+    connection_id: &str,
+    database: Option<&str>,
+    operation: &str,
+    action: &str,
+) -> Result<(), String> {
+    let authorization = active_production_write_authorization();
+    ensure_write_allowed_with_authorization(state, connection_id, database, operation, action, authorization.as_ref())
+        .await
+}
+
+/// Applies production protection using authorization carried by a Tauri command argument.
+pub async fn ensure_write_allowed_with_authorization(
+    state: &crate::connection::AppState,
+    connection_id: &str,
+    database: Option<&str>,
+    operation: &str,
+    action: &str,
+    authorization: Option<&ProductionWriteAuthorization>,
+) -> Result<(), String> {
+    let config = state.configs.read().await.get(connection_id).cloned().ok_or("Connection not found")?;
+    if config.read_only {
+        return Err(format!(
+            "Read-only mode: connection '{}' has read-only protection enabled. {} blocked.",
+            config.name, action
+        ));
+    }
+    if !is_production_database(&config, database.unwrap_or_default()) {
+        return Ok(());
+    }
+    if let Some(authorization) = authorization {
+        if state.production_write_permits.consume(authorization, connection_id, database, operation).await {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "Production protection: connection '{}' targets a production environment. A valid request-bound confirmation is required before {}.",
+        config.name, action
+    ))
+}
+
+/// Enforces a raw Redis mutation against every logical database the command can affect.
+///
+/// Cross-database commands such as `MOVE`, `COPY ... DB`, `SWAPDB`, and `FLUSHALL`
+/// are resolved before consuming the operator's database-bound production permit.
+pub async fn ensure_redis_command_write_allowed(
+    state: &crate::connection::AppState,
+    connection_id: &str,
+    selected_database: u32,
+    command: &str,
+    operation: &str,
+    action: &str,
+    authorization: Option<&ProductionWriteAuthorization>,
+) -> Result<(), String> {
+    let config = state.configs.read().await.get(connection_id).cloned().ok_or("Connection not found")?;
+    let database = redis_command_production_database(&config, selected_database, command)
+        .unwrap_or_else(|| selected_database.to_string());
+    let carried_authorization = authorization.cloned().or_else(active_production_write_authorization);
+    ensure_write_allowed_with_authorization(
+        state,
+        connection_id,
+        Some(&database),
+        operation,
+        action,
+        carried_authorization.as_ref(),
+    )
+    .await
+}
+
+/// Returns the first marked production database affected by a raw Redis command.
+pub fn redis_command_production_database(
+    config: &ConnectionConfig,
+    selected_database: u32,
+    command: &str,
+) -> Option<String> {
+    redis_command_database_targets(config, selected_database, command)
+        .into_iter()
+        .find(|database| is_production_database(config, database))
+}
+
+fn redis_command_database_targets(config: &ConnectionConfig, selected_database: u32, command: &str) -> Vec<String> {
+    let mut databases = vec![selected_database.to_string()];
+    let Ok(argv) = crate::db::redis_driver::parse_command_argv(command) else {
+        return databases;
+    };
+    let command = argv.first().map(|value| value.to_ascii_uppercase()).unwrap_or_default();
+    match command.as_str() {
+        "MOVE" => push_redis_database_argument(&mut databases, argv.get(2)),
+        "COPY" => {
+            if let Some(index) = argv.iter().position(|value| value.eq_ignore_ascii_case("DB")) {
+                push_redis_database_argument(&mut databases, argv.get(index + 1));
+            }
+        }
+        "SWAPDB" => {
+            push_redis_database_argument(&mut databases, argv.get(1));
+            push_redis_database_argument(&mut databases, argv.get(2));
+        }
+        "FLUSHALL" => databases.extend(config.production_databases.iter().cloned()),
+        _ => {}
+    }
+    databases
+}
+
+fn push_redis_database_argument(databases: &mut Vec<String>, value: Option<&String>) {
+    if let Some(database) = value.and_then(|value| value.parse::<u32>().ok()) {
+        let database = database.to_string();
+        if !databases.contains(&database) {
+            databases.push(database);
+        }
+    }
+}
 
 const IDENTIFIER_PATTERN: &str = r"[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*";
 const TARGET_NAME_PATTERN: &str = r"[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*(?:\s*\.\s*(?:\*|[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*)){0,2}";
@@ -97,6 +357,7 @@ struct SqlTargetSafetyText {
 /// Returns whether the selected database inherits an explicit production marker.
 pub fn is_production_database(config: &ConnectionConfig, database: &str) -> bool {
     config.is_production
+        || (connection_scoped_non_sql_type(&config.db_type) && !config.production_databases.is_empty())
         || (!database.trim().is_empty()
             && config
                 .production_databases
@@ -547,9 +808,16 @@ fn append_quoted_identifier_token(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_production_database, targets_production_database};
+    use super::{
+        is_production_database, redis_command_production_database, targets_production_database,
+        ProductionWriteAuthorization, ProductionWritePermit, ProductionWritePermitStore,
+    };
     use crate::models::connection::{ConnectionConfig, DatabaseType};
     use serde::Deserialize;
+    use std::time::{Duration, Instant};
+
+    const DIGEST_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const DIGEST_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -622,6 +890,24 @@ mod tests {
     }
 
     #[test]
+    fn legacy_non_sql_database_markers_fail_closed_as_connection_scope() {
+        for db_type in [
+            DatabaseType::Elasticsearch,
+            DatabaseType::Qdrant,
+            DatabaseType::Etcd,
+            DatabaseType::ZooKeeper,
+            DatabaseType::Nacos,
+            DatabaseType::MessageQueue,
+            DatabaseType::Neo4j,
+            DatabaseType::InfluxDb,
+        ] {
+            let mut connection = config();
+            connection.db_type = db_type;
+            assert!(is_production_database(&connection, "staging"));
+        }
+    }
+
+    #[test]
     fn detects_cross_database_production_targets() {
         assert!(targets_production_database(&config(), "staging", "DELETE FROM prod_app.users WHERE id = 1"));
         assert!(targets_production_database(&config(), "staging", "USE prod_app; DELETE FROM users WHERE id = 1"));
@@ -685,4 +971,118 @@ mod tests {
         assert!(targets_production_database(&sqlserver, "staging", "DELETE FROM prod_app.dbo.users WHERE id = 1"));
         assert!(!targets_production_database(&sqlserver, "staging", "DELETE FROM prod_app.users WHERE id = 1"));
     }
+
+    #[tokio::test]
+    async fn production_write_tokens_are_random() {
+        let permits = ProductionWritePermitStore::default();
+        let first = permits.authorize("conn", Some("prod_app"), "redisSetString", DIGEST_A).await.unwrap();
+        let second = permits.authorize("conn", Some("prod_app"), "redisSetString", DIGEST_A).await.unwrap();
+
+        assert_ne!(first.token, second.token);
+        assert_eq!(uuid::Uuid::parse_str(&first.token).unwrap().get_version_num(), 4);
+        assert_eq!(uuid::Uuid::parse_str(&second.token).unwrap().get_version_num(), 4);
+    }
+
+    #[tokio::test]
+    async fn production_write_permits_reject_mismatched_requests_without_consuming_the_token() {
+        let permits = ProductionWritePermitStore::default();
+        let authorization = permits.authorize("conn", Some("prod_app"), "redisSetString", DIGEST_A).await.unwrap();
+
+        assert!(!permits.consume(&authorization, "other-conn", Some("prod_app"), "redisSetString").await);
+        assert!(!permits.consume(&authorization, "conn", Some("other_prod"), "redisSetString").await);
+        assert!(!permits.consume(&authorization, "conn", Some("prod_app"), "redisDeleteKey").await);
+
+        let mut wrong_operation = authorization.clone();
+        wrong_operation.operation = "redisDeleteKey".to_string();
+        assert!(!permits.consume(&wrong_operation, "conn", Some("prod_app"), "redisSetString").await);
+
+        let mut wrong_digest = authorization.clone();
+        wrong_digest.request_digest = DIGEST_B.to_string();
+        assert!(!permits.consume(&wrong_digest, "conn", Some("prod_app"), "redisSetString").await);
+
+        assert!(permits.consume(&authorization, "conn", Some("PROD_APP"), "redisSetString").await);
+        assert!(!permits.consume(&authorization, "conn", Some("prod_app"), "redisSetString").await);
+    }
+
+    #[tokio::test]
+    async fn a_single_production_write_token_can_only_be_consumed_once_concurrently() {
+        let permits = ProductionWritePermitStore::default();
+        let authorization = permits.authorize("conn", Some("prod_app"), "redisSetString", DIGEST_A).await.unwrap();
+
+        let (first, second) = tokio::join!(
+            permits.consume(&authorization, "conn", Some("prod_app"), "redisSetString"),
+            permits.consume(&authorization, "conn", Some("prod_app"), "redisSetString")
+        );
+
+        assert_eq!(usize::from(first) + usize::from(second), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_production_write_same_operation_permits_do_not_consume_each_other() {
+        let permits = ProductionWritePermitStore::default();
+        let first = permits.authorize("conn", Some("prod_app"), "redisSetString", DIGEST_A).await.unwrap();
+        let second = permits.authorize("conn", Some("prod_app"), "redisSetString", DIGEST_B).await.unwrap();
+
+        let (first_consumed, second_consumed) = tokio::join!(
+            permits.consume(&first, "conn", Some("prod_app"), "redisSetString"),
+            permits.consume(&second, "conn", Some("prod_app"), "redisSetString")
+        );
+
+        assert!(first_consumed);
+        assert!(second_consumed);
+    }
+
+    #[tokio::test]
+    async fn expired_production_write_permits_are_rejected() {
+        let permits = ProductionWritePermitStore::default();
+        let authorization = ProductionWriteAuthorization {
+            token: uuid::Uuid::new_v4().to_string(),
+            operation: "redisSetString".to_string(),
+            request_digest: DIGEST_A.to_string(),
+        };
+        permits.permits.lock().await.insert(
+            authorization.token.clone(),
+            ProductionWritePermit {
+                connection_id: "conn".to_string(),
+                database: "prod_app".to_string(),
+                operation: authorization.operation.clone(),
+                request_digest: authorization.request_digest.clone(),
+                expires_at: Instant::now().checked_sub(Duration::from_secs(1)).expect("instant supports subtraction"),
+            },
+        );
+
+        assert!(!permits.consume(&authorization, "conn", Some("prod_app"), "redisSetString").await);
+    }
+
+    #[test]
+    fn resolves_cross_database_redis_write_targets() {
+        let mut redis = config();
+        redis.db_type = DatabaseType::Redis;
+        redis.production_databases = vec!["7".to_string(), "8".to_string()];
+
+        assert_eq!(redis_command_production_database(&redis, 2, "MOVE key 7"), Some("7".to_string()));
+        assert_eq!(
+            redis_command_production_database(&redis, 2, "COPY source dest DB 8 REPLACE"),
+            Some("8".to_string())
+        );
+        assert_eq!(redis_command_production_database(&redis, 2, "FLUSHALL"), Some("7".to_string()));
+        assert_eq!(redis_command_production_database(&redis, 2, "SET key value"), None);
+    }
+}
+
+fn connection_scoped_non_sql_type(db_type: &DatabaseType) -> bool {
+    matches!(
+        db_type,
+        DatabaseType::Elasticsearch
+            | DatabaseType::Qdrant
+            | DatabaseType::Milvus
+            | DatabaseType::Weaviate
+            | DatabaseType::ChromaDb
+            | DatabaseType::Etcd
+            | DatabaseType::ZooKeeper
+            | DatabaseType::Nacos
+            | DatabaseType::MessageQueue
+            | DatabaseType::Neo4j
+            | DatabaseType::InfluxDb
+    )
 }

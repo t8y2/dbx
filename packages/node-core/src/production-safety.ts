@@ -7,6 +7,8 @@ export interface ProductionSqlAssessment {
   databases: string[];
 }
 
+export type ProductionMongoAssessment = ProductionSqlAssessment;
+
 const IDENTIFIER_PATTERN = String.raw`[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*`;
 const TARGET_NAME_PATTERN = String.raw`${IDENTIFIER_PATTERN}(?:\s*\.\s*(?:\*|${IDENTIFIER_PATTERN})){0,2}`;
 const QUALIFIED_NAME_PATTERN = String.raw`${IDENTIFIER_PATTERN}\s*\.\s*(?:\*|${IDENTIFIER_PATTERN})(?:\s*\.\s*(?:\*|${IDENTIFIER_PATTERN}))?`;
@@ -28,6 +30,7 @@ const GLOBAL_DDL_TARGET_RE = /^\s*(?:CREATE|ALTER|DROP)\s+(?:USER|ROLE|LOGIN|SER
 const MULTI_TARGET_MUTATION_RE = /^\s*(?:DROP\s+(?:TEMPORARY\s+)?TABLE\b[\s\S]*,|RENAME\s+TABLE\b[\s\S]*,)/i;
 const THREE_PART_DATABASE_QUALIFIER_TYPES = new Set(["sqlserver", "snowflake", "trino", "prestosql", "databricks", "bigquery"]);
 const TRANSACTION_KEYWORDS = new Set(["begin", "start", "commit", "rollback", "abort", "savepoint", "release"]);
+const CONNECTION_SCOPED_NON_SQL_TYPES = new Set(["elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "nacos", "mq", "neo4j", "influxdb"]);
 const SCHEMA_FIRST_QUALIFIER_TYPES = new Set([
   "postgres",
   "redshift",
@@ -82,6 +85,10 @@ export function normalizeProductionDatabase(value: string | undefined | null): s
 export function isProductionDatabase(config: ConnectionConfig | undefined, database?: string): boolean {
   if (!config) return false;
   if (config.is_production) return true;
+  if (CONNECTION_SCOPED_NON_SQL_TYPES.has(config.db_type.toLowerCase()) && (config.production_databases?.length ?? 0) > 0) {
+    // Old per-database markers on connection-scoped products are treated as whole-connection protection.
+    return true;
+  }
   const selected = normalizeProductionDatabase(database);
   return !!selected && (config.production_databases ?? []).some((name) => normalizeProductionDatabase(name) === selected);
 }
@@ -308,7 +315,70 @@ function unquoteIdentifier(value: string, open: string, close: string): string {
   return value.slice(open.length, value.length - close.length).replaceAll(close + close, close);
 }
 
+const MONGO_MUTATION_METHOD = String.raw`(?:insert(?:One|Many)?|update(?:One|Many)?|replaceOne|delete(?:One|Many)?|findOneAnd(?:Update|Replace|Delete)|bulkWrite|drop(?:Index|Indexes)?|renameCollection|createIndex)`;
+const MONGO_DIRECT_MUTATION_RE = new RegExp(String.raw`\bdb\s*(?:\.\s*getCollection\s*\([^)]*\)|\.\s*[A-Za-z_$][\w$]*)\s*\.\s*${MONGO_MUTATION_METHOD}\s*\(`, "i");
+const MONGO_EXPLICIT_DATABASE_RE = new RegExp(String.raw`\bdb\s*\.\s*(?:getSiblingDB\s*\(\s*([\"'\x60])([^\"'\x60]+)\1\s*\)|getMongo\s*\(\s*\)\s*\.\s*getDB\s*\(\s*([\"'\x60])([^\"'\x60]+)\3\s*\))[\s\S]*?\.(?:${MONGO_MUTATION_METHOD}|aggregate)\s*\(`, "gi");
+const MONGO_USE_RE = /(?:^|[;\r\n])\s*use\s+([A-Za-z0-9_@$#-]+|`[^`]+`|"[^"]+"|'[^']+')/gi;
+const MONGO_AGGREGATE_DATABASE_RE = /["']?\$(?:out|merge)["']?\s*:\s*\{[\s\S]{0,400}?["']?db["']?\s*:\s*(["'\x60])([^"'\x60]+)\1/gi;
+const MONGO_DYNAMIC_DATABASE_RE = /\b(?:getSiblingDB|getDB)\s*\(\s*(?!["'\x60])/i;
+
 /** MCP receives Mongo shell text rather than SQL, so use a conservative write detector. */
 export function isLikelyMongoMutation(command: string): boolean {
-  return /\.(?:insert(?:One|Many)?|update(?:One|Many)?|replaceOne|delete(?:One|Many)?|findOneAnd(?:Update|Replace|Delete)|drop(?:Index|Indexes)?|renameCollection|createIndex)\s*\(|\bdb\.createCollection\s*\(/i.test(command);
+  return new RegExp(String.raw`\.${MONGO_MUTATION_METHOD}\s*\(`, "i").test(command) || /\bdb\s*\.\s*(?:createCollection|createView|dropDatabase|shutdownServer|runCommand|adminCommand)\s*\(/i.test(command) || /["']?\$(?:out|merge)["']?\s*:/i.test(command);
+}
+
+/**
+ * Finds the effective MongoDB write target, including sibling-database shell
+ * expressions and cross-database `$out`/`$merge` aggregate stages.
+ */
+export function assessProductionMongo(command: string, config: ConnectionConfig | undefined, activeDatabase?: string): ProductionMongoAssessment {
+  const isMutation = isLikelyMongoMutation(command);
+  if (!isMutation || !config) {
+    return { active: isProductionDatabase(config, activeDatabase), isMutation, databases: [] };
+  }
+  if (config.is_production) return { active: true, isMutation, databases: [] };
+  if (isProductionDatabase(config, activeDatabase)) {
+    return { active: true, isMutation, databases: activeDatabase ? [activeDatabase] : [] };
+  }
+
+  const marked = new Set((config.production_databases ?? []).map(normalizeProductionDatabase).filter(Boolean));
+  if (!marked.size) return { active: false, isMutation, databases: [] };
+
+  const targets = mongoWriteTargetDatabases(command, activeDatabase);
+  const databases = [...targets.databases].filter((database) => marked.has(normalizeProductionDatabase(database)));
+  return {
+    active: databases.length > 0 || targets.uncertain,
+    isMutation,
+    databases: databases.length > 0 ? databases : targets.uncertain ? [...marked] : [],
+  };
+}
+
+function mongoWriteTargetDatabases(command: string, activeDatabase?: string): ReferencedDatabaseAssessment {
+  const databases = new Set<string>();
+  let selectedDatabase = normalizeProductionDatabase(activeDatabase);
+
+  MONGO_USE_RE.lastIndex = 0;
+  for (const match of command.matchAll(MONGO_USE_RE)) {
+    selectedDatabase = normalizeProductionDatabase(match[1]);
+  }
+
+  MONGO_EXPLICIT_DATABASE_RE.lastIndex = 0;
+  for (const match of command.matchAll(MONGO_EXPLICIT_DATABASE_RE)) {
+    const database = normalizeProductionDatabase(match[2] ?? match[4]);
+    if (database) databases.add(database);
+  }
+
+  MONGO_AGGREGATE_DATABASE_RE.lastIndex = 0;
+  for (const match of command.matchAll(MONGO_AGGREGATE_DATABASE_RE)) {
+    const database = normalizeProductionDatabase(match[2]);
+    if (database) databases.add(database);
+  }
+
+  // Direct `db.collection.write()` calls inherit the latest `use` target.
+  if (MONGO_DIRECT_MUTATION_RE.test(command) || /\bdb\s*\.\s*(?:createCollection|createView|dropDatabase|shutdownServer|runCommand|adminCommand)\s*\(/i.test(command)) {
+    if (selectedDatabase) databases.add(selectedDatabase);
+  }
+  if (databases.size === 0 && selectedDatabase) databases.add(selectedDatabase);
+
+  return { databases: [...databases], uncertain: MONGO_DYNAMIC_DATABASE_RE.test(command) };
 }

@@ -1,5 +1,7 @@
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
-import { assessProductionSql } from "@/lib/database/productionSafety";
+import * as api from "@/lib/backend/api";
+import { productionWriteRequestDigest, type ProductionWriteAuthorization } from "@/lib/backend/productionWriteAuthorization";
+import { assessProductionSql, productionContextForDatabase, productionPermitDatabase } from "@/lib/database/productionSafety";
 import type { ConnectionConfig } from "@/types/database";
 
 export interface ProductionSqlExecutionGuardOptions<T> {
@@ -8,6 +10,34 @@ export interface ProductionSqlExecutionGuardOptions<T> {
   sql: string;
   source?: string;
   execute: () => Promise<T>;
+}
+
+export interface ProductionOperationExecutionGuardOptions<T> {
+  connection?: ConnectionConfig;
+  database?: string | null;
+  operation: string;
+  requestDigestArgs: readonly unknown[];
+  reviewText: string;
+  source?: string;
+  execute: (authorization?: ProductionWriteAuthorization) => Promise<T>;
+}
+
+export async function executeWithProductionOperationGuard<T>(options: ProductionOperationExecutionGuardOptions<T>): Promise<T | undefined> {
+  const production = productionContextForDatabase(options.connection, options.database);
+  let authorization: ProductionWriteAuthorization | undefined;
+  if (production.active && options.connection) {
+    const confirmed = await useProductionSafetyStore().requestConfirmation({
+      sql: options.reviewText,
+      connectionName: options.connection.name,
+      database: options.database ?? undefined,
+      productionDatabases: production.databases,
+      source: options.source,
+    });
+    if (!confirmed) return undefined;
+    const requestDigest = await productionWriteRequestDigest(options.operation, options.requestDigestArgs);
+    authorization = await api.authorizeProductionWrite(options.connection.id, productionPermitDatabase(options.connection, options.database), options.operation, requestDigest);
+  }
+  return options.execute(authorization);
 }
 
 export async function executeWithProductionSqlGuard<T>(options: ProductionSqlExecutionGuardOptions<T>): Promise<T | undefined> {

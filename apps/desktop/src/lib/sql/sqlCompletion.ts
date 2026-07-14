@@ -1157,6 +1157,9 @@ export interface SqlCompletionTable {
   name: string;
   schema?: string;
   type?: "table" | "view";
+  detail?: string;
+  applyName?: string;
+  boost?: number;
 }
 
 export interface SqlCompletionObject {
@@ -1165,6 +1168,8 @@ export interface SqlCompletionObject {
   type: "procedure" | "function" | "trigger" | "package";
   parentSchema?: string;
   parentName?: string;
+  applyName?: string;
+  boost?: number;
 }
 
 export interface SqlCompletionColumn {
@@ -1192,6 +1197,7 @@ export interface SqlCompletionItem {
   apply?: string;
   boost: number;
   exactMatch?: boolean;
+  dedupeKey?: string;
 }
 
 export function shouldChainSqlCompletionAfterAccept(item: { type?: string; apply?: string }): boolean {
@@ -1272,6 +1278,7 @@ export interface SqlCompletionProviderInput {
   snippets?: SqlSnippet[];
   dialect?: "mysql" | "postgres" | "sqlserver";
   databaseType?: DatabaseType;
+  currentSchema?: string;
   keywordCase?: SqlKeywordCase;
   autoAliasTables?: boolean;
 }
@@ -1288,6 +1295,7 @@ export function buildSqlCompletionItems(
     translations?: SqlCompletionTranslations;
     dialect?: "mysql" | "postgres" | "sqlserver";
     databaseType?: DatabaseType;
+    currentSchema?: string;
     keywordCase?: SqlKeywordCase;
     autoAliasTables?: boolean;
   },
@@ -1375,7 +1383,7 @@ class SqlCompletionProvider {
 
     if (!context.exclusiveColumnSuggestions && context.suggestTables) {
       this.items.push(...buildForeignKeyRelatedTableItems(context, this.input.tables, this.input.foreignKeysByTable, this.dialect));
-      this.items.push(...buildTableItems(context.prefix, this.input.tables, this.dialect, !!this.input.autoAliasTables && context.autoAliasTableCompletions, context.referencedTables, this.databaseType));
+      this.items.push(...buildTableItems(context, this.input.tables, this.dialect, !!this.input.autoAliasTables && context.autoAliasTableCompletions, context.referencedTables, this.databaseType, this.input.currentSchema));
       if (isOracleLikeDatabase(this.databaseType)) {
         this.items.push(...buildOracleTableFunctionItems(context.prefix));
       }
@@ -1385,7 +1393,7 @@ class SqlCompletionProvider {
     }
 
     if (context.suggestRoutines || context.exclusiveRoutineSuggestions || context.oracleTableFunctionContext) {
-      this.items.push(...buildObjectItems(context, this.input.objects ?? [], this.dialect));
+      this.items.push(...buildObjectItems(context, this.input.objects ?? [], this.dialect, this.databaseType, this.input.currentSchema));
     }
 
     if (context.comparisonLeftColumn && context.suggestKeywords) {
@@ -2755,19 +2763,33 @@ function requiresPostgresIdentifierQuote(identifier: string): boolean {
 
 const POSTGRES_IDENTIFIER_KEYWORDS = new Set(SQL_KEYWORDS.map((keyword) => keyword.toLowerCase()).concat(["current_user", "session_user", "user"]));
 
-function buildTableItems(prefix: string, tables: SqlCompletionTable[], dialect?: "mysql" | "postgres" | "sqlserver", autoAliasTables = false, referencedTables: SqlCompletionReferencedTable[] = [], databaseType?: DatabaseType): SqlCompletionItem[] {
+function buildTableItems(
+  context: Pick<SqlCompletionContext, "prefix" | "qualifier">,
+  tables: SqlCompletionTable[],
+  dialect?: "mysql" | "postgres" | "sqlserver",
+  autoAliasTables = false,
+  referencedTables: SqlCompletionReferencedTable[] = [],
+  databaseType?: DatabaseType,
+  currentSchema?: string,
+): SqlCompletionItem[] {
+  const { prefix } = context;
+  const qualifierSchema = context.qualifier?.split(".").filter(Boolean).pop();
   const existingAliases = new Set(referencedTables.map((ref) => ref.alias?.toLowerCase()).filter((alias): alias is string => !!alias));
   return tables
     .filter((table) => matchesPrefix(table.name, prefix))
     .map((table) => {
-      const applyName = quoteSqlIdentifier(table.name, dialect);
+      const qualifiedByContext = !!qualifierSchema && !!table.schema && normalizeIdentifierPart(qualifierSchema) === normalizeIdentifierPart(table.schema);
+      const oracleSchemaQualification = databaseType === "oracle" && table.schema && table.schema.toUpperCase() !== "PUBLIC" && (!currentSchema || normalizeIdentifierPart(table.schema) !== normalizeIdentifierPart(currentSchema));
+      const defaultApplyName = oracleSchemaQualification ? `${quoteSqlIdentifier(table.schema!, dialect)}.${quoteSqlIdentifier(table.name, dialect)}` : quoteSqlIdentifier(table.name, dialect);
+      const applyName = qualifiedByContext ? quoteSqlIdentifier(table.name, dialect) : (table.applyName ?? defaultApplyName);
       const alias = autoAliasTables ? generateTableCompletionAlias(table.name, existingAliases) : "";
       return {
         label: table.name,
         type: "table" as const,
-        detail: table.schema ? `${table.schema}.${table.name}` : table.type,
+        detail: table.detail ?? (table.schema ? `${table.schema}.${table.name}` : table.type),
         apply: formatTableAliasApply(applyName, alias, databaseType),
-        boost: computeBoost(table.name, prefix) + 1000,
+        boost: computeBoost(table.name, prefix) + 1000 + (table.boost ?? 0),
+        dedupeKey: table.applyName || (databaseType === "oracle" && table.schema) ? applyName : undefined,
       };
     })
     .sort(compareCompletionItems)
@@ -2837,31 +2859,47 @@ function buildSchemaItems(prefix: string, schemas: string[], dialect?: "mysql" |
     }));
 }
 
-function buildObjectItems(context: SqlCompletionContext, objects: SqlCompletionObject[], dialect?: "mysql" | "postgres" | "sqlserver"): SqlCompletionItem[] {
-  const onlyProcedures = context.exclusiveRoutineSuggestions;
+function buildObjectItems(context: SqlCompletionContext, objects: SqlCompletionObject[], dialect?: "mysql" | "postgres" | "sqlserver", databaseType?: DatabaseType, currentSchema?: string): SqlCompletionItem[] {
+  if (completionQualifierIsReferencedTable(context)) return [];
+  const onlyProcedures = context.contextKind === "exec";
+  const prioritizeOracleFunctions = databaseType === "oracle" && context.statementKind === "select";
   return objects
     .filter((object) => (!onlyProcedures || object.type === "procedure") && objectMatchesCompletionContext(object, context))
     .map((object) => {
       const qualifiedByContext = objectIsQualifiedByContext(object, context);
+      const objectInCurrentSchema = !!currentSchema && !!object.schema && normalizeIdentifierPart(object.schema) === normalizeIdentifierPart(currentSchema);
       const applyName =
         qualifiedByContext || (context.qualifier && object.schema?.toLowerCase() === context.qualifier.toLowerCase())
           ? quoteSqlIdentifier(object.name, dialect)
-          : object.schema
-            ? `${quoteSqlIdentifier(object.schema, dialect)}.${quoteSqlIdentifier(object.name, dialect)}`
-            : quoteSqlIdentifier(object.name, dialect);
+          : (object.applyName ?? (object.schema && !objectInCurrentSchema ? `${quoteSqlIdentifier(object.schema, dialect)}.${quoteSqlIdentifier(object.name, dialect)}` : quoteSqlIdentifier(object.name, dialect)));
       const detail = object.type === "trigger" && object.parentName ? `trigger on ${object.parentName}` : object.parentName ? `${object.type} in ${object.parentName}` : object.schema ? `${object.type} in ${object.schema}` : object.type;
       return {
         label: object.name,
         type: "function" as const,
         detail,
         apply: object.type === "trigger" || object.type === "package" ? applyName : `${applyName}()`,
-        boost: computeBoost(object.name, context.prefix) + (object.type === "procedure" ? 1800 : object.type === "package" ? 1600 : 900),
+        boost: computeBoost(object.name, context.prefix) + routineTypeBoost(object.type, prioritizeOracleFunctions) + (object.boost ?? 0),
+        dedupeKey: object.applyName || (databaseType === "oracle" && object.schema) ? applyName : undefined,
         // Preserve exact routine matches before the capped candidate list is truncated.
         exactMatch: !!context.prefix && object.name.toLowerCase() === context.prefix.toLowerCase(),
       };
     })
     .sort(compareCompletionItems)
     .slice(0, MAX_TABLE_COMPLETION_ITEMS);
+}
+
+function routineTypeBoost(type: SqlCompletionObject["type"], prioritizeFunctions: boolean): number {
+  if (type === "package") return 1600;
+  if (type === "function") return prioritizeFunctions ? 1800 : 900;
+  return prioritizeFunctions ? 900 : 1800;
+}
+
+function completionQualifierIsReferencedTable(context: SqlCompletionContext): boolean {
+  if (!context.qualifier) return false;
+  const qualifier = context.qualifier;
+  const qualifierLower = qualifier.toLowerCase();
+  const qualifiedTarget = qualifiedTableTargetFromContext(context);
+  return context.referencedTables.some((table) => referencedTableMatchesColumnQualifier(table, qualifier, qualifierLower, qualifiedTarget));
 }
 
 function objectIsQualifiedByContext(object: SqlCompletionObject, context: SqlCompletionContext): boolean {
@@ -4059,7 +4097,7 @@ function getHistoryBoost(label: string, type: string): number {
 function dedupeAndSort(items: SqlCompletionItem[]): SqlCompletionItem[] {
   const seen = new Set<string>();
   return items.sort(compareCompletionItems).filter((item) => {
-    const key = `${item.type}:${item.label}`;
+    const key = `${item.type}:${item.dedupeKey ?? item.label}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;

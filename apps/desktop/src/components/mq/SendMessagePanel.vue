@@ -147,8 +147,8 @@ async function sendMessage() {
     };
     success.value = await mqSendMessage(props.connectionId, req);
     if (canBrowseMessages.value) {
-      peekPartition.value = success.value.partition;
-      peekOffset.value = success.value.offset;
+      peekPartition.value = String(success.value.partition);
+      peekOffset.value = String(success.value.offset);
       void loadMessages();
     }
     messageValue.value = "";

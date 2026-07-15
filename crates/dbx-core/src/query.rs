@@ -2001,10 +2001,7 @@ where
             Ok(result) => results.push(ExecuteMultiResult::success_with_index(result, statement_index)),
             Err(err) => {
                 let action = pool_error_action(db_type, &err);
-                results.push(ExecuteMultiResult::execution_error_with_index(
-                    error_query_result(err),
-                    statement_index,
-                ));
+                results.push(ExecuteMultiResult::execution_error_with_index(error_query_result(err), statement_index));
                 // Statement errors are safe to collect, but connection-level failures leave
                 // the protocol state unusable and must still trigger pool cleanup.
                 if !continue_on_error || action != PoolErrorAction::Keep {
@@ -3298,7 +3295,10 @@ mod tests {
 
         assert_eq!(executor.executed, statements);
         assert_eq!(results.len(), 3);
-        assert_eq!(results.iter().map(|result| result.statement_index).collect::<Vec<_>>(), vec![Some(0), Some(1), Some(2)]);
+        assert_eq!(
+            results.iter().map(|result| result.statement_index).collect::<Vec<_>>(),
+            vec![Some(0), Some(1), Some(2)]
+        );
         assert!(results[1].execution_error);
         assert_eq!(error_action, None);
     }

@@ -487,8 +487,12 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
   for (const lineStart of lineStarts) {
     if (lineStart.from <= statement.from) continue;
 
-    if (currentKeyword === "WITH" && !consumedWithMainStatement && WITH_MAIN_STATEMENT_KEYWORDS.has(lineStart.keyword)) {
+    if (currentBodyKeyword === "WITH" && !consumedWithMainStatement && WITH_MAIN_STATEMENT_KEYWORDS.has(lineStart.keyword)) {
       consumedWithMainStatement = true;
+      // The CTE main statement also satisfies a pending EXPLAIN target, and its
+      // own body rules (e.g. UPDATE ... SET) must take over from here.
+      consumedExplainStatement = true;
+      currentBodyKeyword = lineStart.keyword;
       continue;
     }
 
@@ -511,6 +515,10 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
     }
 
     if (currentBodyKeyword === "INSERT" && INSERT_BODY_KEYWORDS.has(lineStart.keyword)) {
+      // Hand over to the source query's own rules so only its continuations
+      // (CTE main statement, set operations) stay attached to the INSERT.
+      currentBodyKeyword = lineStart.keyword;
+      if (lineStart.keyword === "WITH") consumedWithMainStatement = false;
       continue;
     }
 
@@ -933,9 +941,89 @@ function explainLikeTargetKeywordAt(sql: string, pos: number): string | null {
 
   let i = pos + (prefixMatch?.[0].length ?? 0);
   while (i < sql.length && isSqlWhitespace(sql[i])) i += 1;
+  // Parenthesized EXPLAIN options (e.g. Postgres `EXPLAIN (ANALYZE, BUFFERS) ...`)
+  // sit between the keyword and its target statement. DESC/DESCRIBE take no
+  // options — a paren there is a subquery (ClickHouse `DESCRIBE (SELECT ...)`).
+  if (prefix === "EXPLAIN" && sql[i] === "(") {
+    i = skipBalancedParens(sql, i);
+    while (i < sql.length && isSqlWhitespace(sql[i])) i += 1;
+  }
   const targetMatch = /^[A-Za-z_][\w$]*/.exec(sql.slice(i));
   const targetKeyword = targetMatch?.[0]?.toUpperCase();
   return targetKeyword && EXPLAIN_STATEMENT_KEYWORDS.has(targetKeyword) ? targetKeyword : null;
+}
+
+function skipBalancedParens(sql: string, pos: number): number {
+  let state: "none" | "single" | "double" | "lineComment" | "blockComment" = "none";
+  let depth = 0;
+  let i = pos;
+
+  while (i < sql.length) {
+    const ch = sql[i];
+    const next = sql[i + 1] ?? "";
+
+    if (state === "lineComment") {
+      if (ch === "\n") state = "none";
+      i += 1;
+      continue;
+    }
+    if (state === "blockComment") {
+      if (ch === "*" && next === "/") {
+        state = "none";
+        i += 2;
+        continue;
+      }
+      i += 1;
+      continue;
+    }
+    if (state === "single") {
+      if (ch === "'" && next === "'") {
+        i += 2;
+        continue;
+      }
+      if (ch === "'") state = "none";
+      i += 1;
+      continue;
+    }
+    if (state === "double") {
+      if (ch === '"' && next === '"') {
+        i += 2;
+        continue;
+      }
+      if (ch === '"') state = "none";
+      i += 1;
+      continue;
+    }
+
+    if (ch === "-" && next === "-") {
+      state = "lineComment";
+      i += 2;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      state = "blockComment";
+      i += 2;
+      continue;
+    }
+    if (ch === "'") {
+      state = "single";
+      i += 1;
+      continue;
+    }
+    if (ch === '"') {
+      state = "double";
+      i += 1;
+      continue;
+    }
+    if (ch === "(") depth += 1;
+    if (ch === ")") {
+      depth -= 1;
+      if (depth === 0) return i + 1;
+    }
+    i += 1;
+  }
+
+  return i;
 }
 
 function startsLineComment(sql: string, pos: number): boolean {

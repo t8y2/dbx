@@ -46,6 +46,20 @@ describe("semantic SQL completion candidates", () => {
     expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["id", "name", "email"]);
   });
 
+  it.each([
+    ["PostgreSQL", "postgres", "postgres"],
+    ["SQL Server", "sqlserver", "sqlserver"],
+  ] as const)("uses row-source aliases for %s self-join column collisions", (_label, databaseType, dialect) => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["users", ["id", "name"].map((name) => ({ name, table: "users" }))]]);
+
+    const { items } = semanticCompletion("SELECT * FROM users u JOIN users v ON u.id = v.id WHERE |", { columnsByTable }, { databaseType, dialect });
+    const columns = items.filter((item) => item.type === "column");
+
+    expect(columns.map((item) => item.label)).toEqual(expect.arrayContaining(["u.id", "u.name", "v.id", "v.name"]));
+    expect(columns.find((item) => item.label === "u.id")?.apply).toBe("u.id");
+    expect(columns.find((item) => item.label === "v.id")?.apply).toBe("v.id");
+  });
+
   it("completes columns for aliases in comma-separated table lists", () => {
     const columnsByTable = new Map<string, SqlCompletionColumn[]>([
       ["table_a", ["id", "name"].map((name) => ({ name, table: "table_a" }))],

@@ -1175,6 +1175,7 @@ export interface SqlCompletionObject {
 export interface SqlCompletionColumn {
   name: string;
   table: string;
+  sourceAlias?: string;
   schema?: string;
   dataType?: string;
   isNullable?: boolean;
@@ -3371,10 +3372,11 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
   for (const c of relevantCols) {
     const count = nameCount.get(c.name) || 0;
     if (count > 1) {
-      const qualifiedKey = `${c.table}.${c.name}`;
+      const qualifier = c.sourceAlias ?? c.table;
+      const qualifiedKey = `${qualifier}.${c.name}`;
       if (seen.has(qualifiedKey)) continue;
       seen.add(qualifiedKey);
-      uniqueColumns.push({ ...c, key: c.key, displayLabel: `${c.table}.${c.name}` });
+      uniqueColumns.push({ ...c, key: c.key, displayLabel: `${qualifier}.${c.name}` });
     } else {
       if (seen.has(c.name)) continue;
       seen.add(c.name);
@@ -3406,7 +3408,9 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
 
 function completionColumnsForReferencedTable<T extends SqlCompletionColumn & { key: string }>(table: SqlCompletionReferencedTable, columns: readonly T[]): T[] {
   const matched = columns.filter((column) => columnMatchesReferencedTable(column, table));
-  return applyReferencedColumnAliases(table, matched);
+  const aliasedColumns = applyReferencedColumnAliases(table, matched);
+  if (!table.alias) return aliasedColumns;
+  return aliasedColumns.map((column) => ({ ...column, sourceAlias: table.alias }));
 }
 
 function applyReferencedColumnAliases<T extends SqlCompletionColumn>(table: SqlCompletionReferencedTable, columns: readonly T[]): T[] {
@@ -3463,7 +3467,7 @@ function buildColumnApply(column: SqlCompletionColumn & { displayLabel: string }
   if (context.qualifier || column.displayLabel === column.name || !column.displayLabel.includes(".")) {
     return quoteSqlIdentifier(column.name, dialect);
   }
-  return `${quoteSqlIdentifier(column.table, dialect)}.${quoteSqlIdentifier(column.name, dialect)}`;
+  return `${quoteSqlIdentifier(column.sourceAlias ?? column.table, dialect)}.${quoteSqlIdentifier(column.name, dialect)}`;
 }
 
 function isKeyColumn(name: string): boolean {

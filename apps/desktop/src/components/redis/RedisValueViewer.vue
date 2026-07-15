@@ -3,7 +3,7 @@ import { computed, ref, nextTick, onBeforeUnmount, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { onClickOutside } from "@vueuse/core";
 import { DynamicScroller, DynamicScrollerItem, RecycleScroller } from "vue-virtual-scroller";
-import { Copy, Eye, Terminal, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, IndentIncrease, IndentDecrease, ArrowUp, ArrowDown, ArrowUpDown, Search, Clock } from "@lucide/vue";
+import { Copy, ClipboardCopy, Eye, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, ArrowUp, ArrowDown, ArrowUpDown, Search, Clock } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -11,6 +11,7 @@ import { Switch } from "@/components/ui/switch";
 import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import JsonTree from "@/components/common/JsonTree.vue";
+import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
 import * as api from "@/lib/backend/api";
 import type { RedisBlob, RedisHashItem, RedisKeyInfo, RedisListItem, RedisSetItem, RedisStreamEntry, RedisValue, RedisZsetItem } from "@/lib/backend/api";
 import { useToast } from "@/composables/useToast";
@@ -31,6 +32,8 @@ import {
   REDIS_VALUE_FORMAT_DISPLAY_ORDER,
   redisBlobText,
   redisCollectionPageItems,
+  redisJsonValueText,
+  normalizeRedisJsonDraft,
   redisMemberCopyText,
   redisValueCopyText,
   redisValueCollectionItems,
@@ -39,7 +42,7 @@ import {
   type RedisCollectionItem,
   type RedisValueFormat,
 } from "@/lib/redis/redisValuePresentation";
-import { safeJsonFormat } from "@/lib/common/safeJsonFormat";
+import { formatJsonSource } from "@/lib/common/safeJsonFormat";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -64,8 +67,10 @@ const REDIS_STREAM_MIN_ROW_HEIGHT = 96;
 const data = ref<RedisValue | null>(null);
 const loading = ref(false);
 const loadingMore = ref(false);
+let loadRequestId = 0;
 const editValue = ref("");
-const isEditing = ref(false);
+const savingString = ref(false);
+const savingJson = ref(false);
 const newField = ref("");
 const newValue = ref("");
 const newScore = ref("");
@@ -97,7 +102,6 @@ const zsetScoreWidth = ref(220);
 const isResizingZsetColumns = ref(false);
 const stringValueView = ref<RedisValueFormat>(readPreferredRedisValueFormat());
 const memberValueView = ref<RedisValueFormat>(readPreferredRedisValueFormat());
-const redisJsonView = ref<"raw" | "tree">("raw");
 const redisJsonWordWrap = ref(readRedisJsonWordWrap());
 const redisJsonHighlighter = ref<JsonHighlighter>();
 
@@ -127,9 +131,11 @@ function startAutoRefresh() {
       return;
     }
     if (action.type === "refresh") {
-      load()
-        .then(() => {
-          if (!autoRefreshEnabled.value) return;
+      // Do not let a background refresh overwrite a Redis value draft.
+      if (hasUnsavedRedisDraft.value) return;
+      load({ preserveDraft: true })
+        .then((applied) => {
+          if (!applied || !autoRefreshEnabled.value) return;
           if (!data.value || shouldStopAutoRefresh(data.value.ttl)) {
             stopAutoRefresh();
             autoRefreshEnabled.value = false;
@@ -178,16 +184,52 @@ const stringBlob = computed<RedisBlob | null>(() => {
   return value.data.kind === "string" ? value.data.content : null;
 });
 const stringValueDetail = computed(() => (stringBlob.value ? formatRedisMemberDetail(stringBlob.value, { allowJsonText: true }) : null));
-const redisJsonValue = computed(() => (data.value?.data.kind === "json" ? data.value.data.value : null));
 const selectedMemberDetail = computed(() => formatRedisMemberDetail(selectedMemberRaw.value, { allowJsonText: true }));
 const redisJsonAppearance = computed(() => (isDark.value ? "dark" : "light"));
 const isBinaryStringValue = computed(() => Boolean(stringValueDetail.value?.binary));
 const selectedMemberCanEdit = computed(() => selectedMemberContext.value?.canEdit ?? false);
-const canEditCurrentStringFormat = computed(() => Boolean(stringValueDetail.value?.editable) && stringValueView.value === "utf8");
+const canEditCurrentStringFormat = computed(() => Boolean(stringValueDetail.value?.editable) && (stringValueView.value === "utf8" || stringValueView.value === "json"));
 const showStringEditActions = computed(() => canEditCurrentStringFormat.value);
 const originalStringEditValue = computed(() => (stringBlob.value ? rawRedisValueText(stringBlob.value) : ""));
-const stringValueChanged = computed(() => canEditCurrentStringFormat.value && editValue.value !== originalStringEditValue.value);
+const stringJsonDraftBaseline = ref("");
+const redisJsonDraftBaseline = ref("");
+const memberJsonDraftBaseline = ref("");
+// Keep the comparison semantics from the last editable String view. A draft is
+// retained when the user switches to a read-only representation such as Hex.
+const stringDraftFormat = ref<"utf8" | "json">("utf8");
+function isStringDraftDirty(format: "utf8" | "json"): boolean {
+  if (!stringValueDetail.value?.editable) return false;
+  if (format === "json" && stringValueDetail.value.json) return editValue.value !== stringJsonDraftBaseline.value;
+  return editValue.value !== originalStringEditValue.value;
+}
+const stringValueChanged = computed(() => {
+  if (!canEditCurrentStringFormat.value) return false;
+  return isStringDraftDirty(stringValueView.value === "json" ? "json" : "utf8");
+});
+const hasRetainedStringDraft = computed(() => isStringDraftDirty(stringDraftFormat.value));
+const redisJsonValueChanged = computed(() => data.value?.data.kind === "json" && editValue.value !== redisJsonDraftBaseline.value);
 const canEditCurrentMemberFormat = computed(() => selectedMemberCanEdit.value && memberValueView.value === "utf8");
+const isEditingHashJson = computed(() => selectedMemberContext.value?.kind === "hash" && selectedMemberCanEdit.value && memberValueView.value === "json" && Boolean(selectedMemberDetail.value.json));
+const memberValueChanged = computed(() => {
+  if (!selectedMemberCanEdit.value) return false;
+  const original = selectedMemberDetail.value.rawText;
+  if (isEditingHashJson.value && selectedMemberDetail.value.json) return memberEditValue.value !== memberJsonDraftBaseline.value;
+  return memberEditValue.value !== original;
+});
+// A member sheet can close without discarding its draft, so its dirty state
+// must outlive the sheet and whichever display format is currently selected.
+const memberDraftFormat = ref<"utf8" | "json" | null>(null);
+const hasRetainedMemberDraft = computed(() => {
+  const format = memberDraftFormat.value;
+  if (!format || !selectedMemberCanEdit.value) return false;
+
+  const original = selectedMemberDetail.value.rawText;
+  if (format === "json" && selectedMemberContext.value?.kind === "hash" && selectedMemberDetail.value.json) {
+    return memberEditValue.value !== memberJsonDraftBaseline.value;
+  }
+  return memberEditValue.value !== original;
+});
+const hasUnsavedRedisDraft = computed(() => hasRetainedStringDraft.value || redisJsonValueChanged.value || hasRetainedMemberDraft.value);
 const hasMore = computed(() => scanCursor.value != null && scanCursor.value > 0);
 const collectionTotal = computed(() => (data.value ? redisValueCollectionTotal(data.value) : null));
 const hashGridStyle = computed(() => ({
@@ -332,7 +374,7 @@ async function onHashSearch() {
     activeHashSearchQuery.value = query;
     collectionItems.value = result.items;
     scanCursor.value = result.scan_cursor ?? undefined;
-    clearSelectedMember();
+    if (!hasRetainedMemberDraft.value) clearSelectedMember();
   } finally {
     if (requestId === hashSearchRequestId) searchLoading.value = false;
   }
@@ -367,18 +409,15 @@ function readPreferredRedisValueFormat(): RedisValueFormat {
 
 function formatJsonText(raw: string): string | null {
   try {
-    return safeJsonFormat(raw, 2);
+    // Keep Redis JSON baselines source-preserving (duplicate keys, number text).
+    return formatJsonSource(raw, 2);
   } catch {
     return null;
   }
 }
 
-function compressJsonText(raw: string): string | null {
-  try {
-    return safeJsonFormat(raw);
-  } catch {
-    return null;
-  }
+function jsonDraftForEditor(raw: string): string {
+  return formatJsonText(raw) ?? raw;
 }
 
 function rememberRedisValueFormat(format: RedisValueFormat) {
@@ -390,15 +429,41 @@ function rememberRedisValueFormat(format: RedisValueFormat) {
 }
 
 function setStringValueFormat(format: RedisValueFormat) {
+  if (stringValueView.value === "json" && format !== "json" && stringValueDetail.value?.json && editValue.value === stringJsonDraftBaseline.value) {
+    editValue.value = originalStringEditValue.value;
+    stringDraftFormat.value = "utf8";
+  }
   stringValueView.value = format;
   if (stringValueDetail.value && canRenderRedisValueFormat(stringValueDetail.value, format)) {
+    if (format === "json") {
+      editValue.value = editValue.value === originalStringEditValue.value ? stringJsonDraftBaseline.value : jsonDraftForEditor(editValue.value);
+      stringDraftFormat.value = "json";
+    } else if (format === "utf8") {
+      // Keep a dirty JSON draft marked as json so save still compact-writes after a tab switch.
+      if (!(stringDraftFormat.value === "json" && isStringDraftDirty("json"))) stringDraftFormat.value = "utf8";
+    }
     rememberRedisValueFormat(format);
   }
 }
 
 function setMemberValueFormat(format: RedisValueFormat) {
+  if (memberValueView.value === "json" && format !== "json" && selectedMemberDetail.value.json && memberEditValue.value === memberJsonDraftBaseline.value) {
+    memberEditValue.value = selectedMemberDetail.value.rawText;
+    // Mirror string drafts: a clean leave from JSON must drop the pretty baseline
+    // comparison, or rawText vs formattedText looks dirty and blocks refresh.
+    if (selectedMemberContext.value?.kind === "hash" && selectedMemberCanEdit.value) memberDraftFormat.value = null;
+  }
   memberValueView.value = format;
   if (canRenderRedisValueFormat(selectedMemberDetail.value, format)) {
+    if (format === "json") {
+      memberEditValue.value = memberEditValue.value === selectedMemberDetail.value.rawText ? memberJsonDraftBaseline.value : jsonDraftForEditor(memberEditValue.value);
+      if (selectedMemberContext.value?.kind === "hash" && selectedMemberCanEdit.value) memberDraftFormat.value = "json";
+    } else if (format === "utf8") {
+      // Dirty JSON drafts keep format "json" so save/normalize still runs after leaving the JSON tab.
+      if (selectedMemberContext.value?.kind === "hash" && selectedMemberCanEdit.value && memberDraftFormat.value !== "json") {
+        memberDraftFormat.value = "utf8";
+      }
+    }
     rememberRedisValueFormat(format);
   }
 }
@@ -425,7 +490,7 @@ function redisFormatLabel(format: RedisValueFormat, rawLabel?: string): string {
 }
 
 function isTextRedisFormat(format: RedisValueFormat): boolean {
-  return format === "utf8" || format === "ascii" || format === "binary";
+  return format === "utf8" || format === "ascii" || format === "binary" || format === "json";
 }
 
 function highlightRedisJson(json: string): string {
@@ -477,31 +542,43 @@ const deleteDetails = computed(() => {
   return t("dangerDialog.redisSetMemberDetails", { key, member: formatValue(pending.member) });
 });
 
-async function load(options: { selectDefaultMember?: boolean } = {}) {
+async function load(options: { selectDefaultMember?: boolean; preserveDraft?: boolean } = {}): Promise<boolean> {
   const shouldSelectDefaultMember = options.selectDefaultMember ?? true;
-  if (hashSearchTimer) clearTimeout(hashSearchTimer);
-  hashSearchTimer = null;
-  hashSearchRequestId++;
-  hashSearchQuery.value = "";
-  activeHashSearchQuery.value = "";
-  searchLoading.value = false;
+  const requestId = ++loadRequestId;
   loading.value = true;
   try {
     const loadedValue = await api.redisGetValue(props.connectionId, props.db, props.keyRaw);
+    if (requestId !== loadRequestId || (options.preserveDraft && hasUnsavedRedisDraft.value)) return false;
+
+    if (hashSearchTimer) clearTimeout(hashSearchTimer);
+    hashSearchTimer = null;
+    hashSearchRequestId++;
+    hashSearchQuery.value = "";
+    activeHashSearchQuery.value = "";
+    searchLoading.value = false;
     data.value = loadedValue;
     emit("loaded", loadedValue);
     scanCursor.value = redisValueCollectionScanCursor(loadedValue);
     collectionItems.value = redisValueCollectionItems(loadedValue);
-    isEditing.value = false;
+
+    // A foreground load replaces the current value, so it also starts a new
+    // draft lifecycle. Member saves opt out until selection is restored.
+    if (shouldSelectDefaultMember) {
+      stringDraftFormat.value = "utf8";
+      memberDraftFormat.value = null;
+    }
 
     if (loadedValue.data.kind === "string") {
       const detail = formatRedisMemberDetail(loadedValue.data.content, { allowJsonText: true });
-      editValue.value = detail.rawText;
       stringValueView.value = preferredRedisValueFormat(loadedValue.data.content, readPreferredRedisValueFormat(), { allowJsonText: true });
+      stringJsonDraftBaseline.value = detail.json?.formattedText ?? "";
+      editValue.value = stringValueView.value === "json" && detail.json ? stringJsonDraftBaseline.value : detail.rawText;
+      stringDraftFormat.value = stringValueView.value === "json" ? "json" : "utf8";
       clearSelectedMember();
     } else if (loadedValue.data.kind === "json") {
-      editValue.value = JSON.stringify(loadedValue.data.value, null, 2);
-      redisJsonView.value = "raw";
+      redisJsonDraftBaseline.value = jsonDraftForEditor(redisJsonValueText(loadedValue.data));
+      editValue.value = redisJsonDraftBaseline.value;
+      stringDraftFormat.value = "utf8";
       clearSelectedMember();
     } else if (loadedValue.data.kind === "stream") {
       if (shouldSelectDefaultMember) selectDefaultMember(loadedValue);
@@ -510,10 +587,16 @@ async function load(options: { selectDefaultMember?: boolean } = {}) {
     } else {
       clearSelectedMember();
     }
+    return true;
+  } catch (error) {
+    if (requestId !== loadRequestId) return false;
+    throw error;
   } finally {
-    loading.value = false;
-    if (autoRefreshEnabled.value && data.value && data.value.ttl > 0) {
-      startAutoRefresh();
+    if (requestId === loadRequestId) {
+      loading.value = false;
+      if (autoRefreshEnabled.value && data.value && data.value.ttl > 0) {
+        startAutoRefresh();
+      }
     }
   }
 }
@@ -537,54 +620,52 @@ async function loadMore() {
 }
 
 async function saveString() {
-  if (!data.value || !stringBlob.value || isBinaryStringValue.value || !stringValueChanged.value) return;
-  await api.redisSetString(props.connectionId, props.db, props.keyRaw, editValue.value);
-  isEditing.value = false;
-  await load();
-}
+  if (!data.value || !stringBlob.value || isBinaryStringValue.value || !stringValueChanged.value || savingString.value) return;
 
-function handleStringInput() {
-  if (canEditCurrentStringFormat.value) {
-    isEditing.value = stringValueChanged.value;
+  let value = editValue.value;
+  // Compact whenever this draft is/was JSON-edited, even if the user switched tabs before Save.
+  if (stringValueView.value === "json" || stringDraftFormat.value === "json") {
+    const normalized = normalizeRedisJsonDraft(value);
+    if (!normalized.ok) {
+      toast(t("redis.jsonFormatError"), 3000);
+      return;
+    }
+    value = normalized.compactText;
+  }
+
+  savingString.value = true;
+  try {
+    await api.redisSetString(props.connectionId, props.db, props.keyRaw, value);
+    await load();
+  } finally {
+    savingString.value = false;
   }
 }
 
 function discardStringEdit() {
-  isEditing.value = false;
-  editValue.value = originalStringEditValue.value;
+  editValue.value = stringValueView.value === "json" ? stringJsonDraftBaseline.value : originalStringEditValue.value;
+  stringDraftFormat.value = stringValueView.value === "json" ? "json" : "utf8";
 }
 
 async function saveJson() {
-  if (!data.value || data.value.data.kind !== "json") return;
-  await api.redisJsonSet(props.connectionId, props.db, props.keyRaw, editValue.value);
-  isEditing.value = false;
-  await load();
-}
-
-function handleJsonInput() {
-  if (redisJsonView.value === "raw") {
-    isEditing.value = true;
-  }
-}
-
-function handleFormatJsonEditor() {
-  const result = formatJsonText(editValue.value);
-  if (result != null) {
-    editValue.value = result;
-    isEditing.value = true;
-  } else {
+  if (!data.value || data.value.data.kind !== "json" || !redisJsonValueChanged.value || savingJson.value) return;
+  const normalized = normalizeRedisJsonDraft(editValue.value);
+  if (!normalized.ok) {
     toast(t("redis.jsonFormatError"), 3000);
+    return;
+  }
+  savingJson.value = true;
+  try {
+    // Keep JSON.SET semantics while matching the other JSON editors' validation and compact writes.
+    await api.redisJsonSet(props.connectionId, props.db, props.keyRaw, normalized.compactText);
+    await load();
+  } finally {
+    savingJson.value = false;
   }
 }
 
-function handleCompressJsonEditor() {
-  const result = compressJsonText(editValue.value);
-  if (result != null) {
-    editValue.value = result;
-    isEditing.value = true;
-  } else {
-    toast(t("redis.jsonFormatError"), 3000);
-  }
+function discardRedisJsonEdit() {
+  editValue.value = redisJsonDraftBaseline.value;
 }
 
 async function applyDeleteKey() {
@@ -643,7 +724,7 @@ function generateInsertStatements(): string | null {
       break;
     }
     case "json": {
-      commands.push(`JSON.SET ${escapeRedisArg(key)} $ ${escapeRedisArg(JSON.stringify(data.value.data.value))}`);
+      commands.push(`JSON.SET ${escapeRedisArg(key)} $ ${escapeRedisArg(redisJsonValueText(data.value.data))}`);
       break;
     }
     case "list": {
@@ -720,8 +801,10 @@ function selectMember(title: string, value: unknown, context: RedisMemberContext
   selectedMemberKey.value = getRedisMemberSelectionKey(title, value, identity);
   selectedMemberContext.value = context;
   isEditingMember.value = false;
-  memberEditValue.value = detail.rawText;
   memberValueView.value = preferredRedisValueFormat(value, readPreferredRedisValueFormat(), { allowJsonText: true });
+  memberJsonDraftBaseline.value = detail.json?.formattedText ?? "";
+  memberEditValue.value = memberValueView.value === "json" && detail.json ? memberJsonDraftBaseline.value : detail.rawText;
+  memberDraftFormat.value = context.kind === "hash" && context.canEdit && memberValueView.value === "json" && detail.json ? "json" : null;
 }
 
 function clearSelectedMember() {
@@ -731,6 +814,8 @@ function clearSelectedMember() {
   selectedMemberContext.value = null;
   isEditingMember.value = false;
   memberEditValue.value = "";
+  memberJsonDraftBaseline.value = "";
+  memberDraftFormat.value = null;
 }
 
 function isSelectedMember(title: string, value: unknown, identity?: string) {
@@ -738,7 +823,15 @@ function isSelectedMember(title: string, value: unknown, identity?: string) {
 }
 
 function viewMember(title: string, value: unknown, context: RedisMemberContext, identity?: string) {
-  selectMember(title, value, context, identity);
+  // Do not replace a retained draft just because another row was clicked.
+  // Save or discard it first, then select the next member.
+  if (!isSelectedMember(title, value, identity) && hasRetainedMemberDraft.value) {
+    showMemberDetail.value = true;
+    return;
+  }
+  if (!isSelectedMember(title, value, identity) || !memberValueChanged.value) {
+    selectMember(title, value, context, identity);
+  }
   showMemberDetail.value = true;
 }
 
@@ -827,38 +920,59 @@ function startResizeZsetColumns(event: PointerEvent) {
 
 function startEditMember() {
   if (!canEditCurrentMemberFormat.value) return;
-  memberEditValue.value = selectedMemberDetail.value.rawText;
+  if (!memberValueChanged.value) memberEditValue.value = selectedMemberDetail.value.rawText;
+  // Do not demote a retained JSON draft to utf8; save still needs compact normalization.
+  if (memberDraftFormat.value !== "json") memberDraftFormat.value = "utf8";
   isEditingMember.value = true;
 }
 
 function cancelEditMember() {
   memberEditValue.value = selectedMemberDetail.value.rawText;
+  memberDraftFormat.value = null;
   isEditingMember.value = false;
+}
+
+function discardHashJsonEdit() {
+  memberEditValue.value = memberJsonDraftBaseline.value;
+  memberDraftFormat.value = "json";
 }
 
 async function saveMemberEdit() {
   const context = selectedMemberContext.value;
-  if (!context || !canEditCurrentMemberFormat.value) return;
+  const savingHashJson = isEditingHashJson.value || (context?.kind === "hash" && memberDraftFormat.value === "json");
+  if (!context || savingMember.value || (!canEditCurrentMemberFormat.value && !savingHashJson)) return;
+
+  let writeValue = memberEditValue.value;
+  // Hash JSON drafts may still be open under UTF-8 after a format switch; keep compact writes.
+  if (savingHashJson) {
+    const normalized = normalizeRedisJsonDraft(writeValue);
+    if (!normalized.ok) {
+      toast(t("redis.jsonFormatError"), 3000);
+      return;
+    }
+    writeValue = normalized.compactText;
+  }
+
   let nextContext: RedisMemberContext = context;
   savingMember.value = true;
   try {
     if (context.kind === "list") {
-      await api.redisListSet(props.connectionId, props.db, props.keyRaw, context.index, memberEditValue.value);
+      await api.redisListSet(props.connectionId, props.db, props.keyRaw, context.index, writeValue);
     } else if (context.kind === "hash") {
       if (!context.field) return;
-      await api.redisHashSet(props.connectionId, props.db, props.keyRaw, context.field, memberEditValue.value);
+      await api.redisHashSet(props.connectionId, props.db, props.keyRaw, context.field, writeValue);
     } else if (context.kind === "set") {
       if (!context.member) return;
       await api.redisSetRemove(props.connectionId, props.db, props.keyRaw, context.member);
-      await api.redisSetAdd(props.connectionId, props.db, props.keyRaw, memberEditValue.value);
-      nextContext = { kind: "set", member: memberEditValue.value, canEdit: true };
+      await api.redisSetAdd(props.connectionId, props.db, props.keyRaw, writeValue);
+      nextContext = { kind: "set", member: writeValue, canEdit: true };
     } else if (context.kind === "zset") {
       if (!context.member) return;
       await api.redisZrem(props.connectionId, props.db, props.keyRaw, context.member);
-      await api.redisZadd(props.connectionId, props.db, props.keyRaw, memberEditValue.value, Number(context.score));
-      nextContext = { kind: "zset", member: memberEditValue.value, score: context.score, canEdit: true };
+      await api.redisZadd(props.connectionId, props.db, props.keyRaw, writeValue, Number(context.score));
+      nextContext = { kind: "zset", member: writeValue, score: context.score, canEdit: true };
     }
-    const editedValue = memberEditValue.value;
+    const editedValue = writeValue;
     isEditingMember.value = false;
     await load({ selectDefaultMember: false });
     restoreSelectedMember(nextContext, editedValue);
@@ -1148,9 +1262,9 @@ onBeforeUnmount(() => {
       <div class="shrink-0 border-b bg-background">
         <div class="flex h-9 items-center gap-2 px-4">
           <span class="dbx-editor-font-family min-w-0 flex-1 truncate text-sm font-semibold">{{ formatValue(data.key_display) }}</span>
-          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 animate-none" @click="load"><RefreshCw class="h-3.5 w-3.5 animate-none" /></Button>
-          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" @click="copyValue"><Copy class="h-3.5 w-3.5" /></Button>
-          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('redis.copyInsertStatement')" @click="copyInsertStatement"><Terminal class="h-3.5 w-3.5" /></Button>
+          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 animate-none" :disabled="hasUnsavedRedisDraft" @click="load"><RefreshCw class="h-3.5 w-3.5 animate-none" /></Button>
+          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('grid.copyValue')" :aria-label="t('grid.copyValue')" @click="copyValue"><Copy class="h-3.5 w-3.5" /></Button>
+          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('redis.copyInsertStatement')" :aria-label="t('redis.copyInsertStatement')" @click="copyInsertStatement"><ClipboardCopy class="h-3.5 w-3.5" /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 text-destructive" @click="requestDeleteKey"><Trash2 class="h-3.5 w-3.5" /></Button>
         </div>
 
@@ -1195,9 +1309,7 @@ onBeforeUnmount(() => {
             <Switch size="sm" :model-value="redisJsonWordWrap" @update:model-value="setRedisJsonWordWrap(Boolean($event))" />
           </label>
         </div>
-        <div v-if="stringValueView === 'json' && stringValueDetail.json" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-4 text-sm leading-6">
-          <JsonTree :value="stringValueDetail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
-        </div>
+        <RedisJsonEditor v-if="stringValueView === 'json' && stringValueDetail.json" v-model="editValue" class="min-h-0 flex-1" :save-disabled="savingString || !stringValueChanged" :read-only="savingString" :word-wrap="redisJsonWordWrap" @save="saveString" />
         <div v-else-if="stringValueView === 'javaserialize' && stringValueDetail.javaSerialized" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-4 text-sm leading-6">
           <JsonTree :value="stringValueDetail.javaSerialized.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
         </div>
@@ -1215,9 +1327,8 @@ onBeforeUnmount(() => {
           v-model="editValue"
           class="dbx-editor-font-family flex-1 resize-none bg-background p-4 text-sm outline-none"
           :class="redisJsonWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'"
-          :readonly="!canEditCurrentStringFormat"
+          :readonly="!canEditCurrentStringFormat || savingString"
           spellcheck="false"
-          @input="handleStringInput"
         />
         <pre v-else-if="stringValueView === 'utf8'" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6" :class="detailTextClass(stringValueView)">{{ detailTextForFormat(stringValueDetail, stringValueView) }}</pre>
         <pre v-else class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6" :class="detailTextClass(stringValueView)">{{ detailTextForFormat(stringValueDetail, stringValueView) }}</pre>
@@ -1225,50 +1336,25 @@ onBeforeUnmount(() => {
           {{ t("redis.binaryStringReadonlyHint") }}
         </div>
         <div v-if="showStringEditActions" class="px-4 py-2 border-t flex justify-end gap-2 shrink-0">
-          <Button variant="ghost" size="sm" :disabled="!stringValueChanged" @click="discardStringEdit">{{ t("grid.discard") }}</Button>
-          <Button size="sm" :disabled="!stringValueChanged" @click="saveString"><Save class="w-3 h-3 mr-1" /> {{ t("grid.save") }}</Button>
+          <Button variant="ghost" size="sm" :disabled="savingString || !stringValueChanged" @click="discardStringEdit">{{ t("grid.discard") }}</Button>
+          <Button size="sm" :disabled="savingString || !stringValueChanged" @click="saveString"><Loader2 v-if="savingString" class="w-3 h-3 mr-1 animate-spin" /><Save v-else class="w-3 h-3 mr-1" /> {{ t("grid.save") }}</Button>
         </div>
       </div>
 
       <!-- Redis JSON -->
-      <div v-else-if="redisKind === 'json' && redisJsonValue != null" class="flex-1 flex flex-col overflow-hidden">
+      <div v-else-if="redisKind === 'json'" class="flex-1 flex flex-col overflow-hidden">
         <div class="flex h-9 items-center gap-2 border-b px-4 text-xs shrink-0">
-          <div class="flex overflow-hidden rounded-md border bg-muted/20 p-0.5">
-            <Button variant="ghost" size="sm" class="h-6 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': redisJsonView === 'raw' }" @click="redisJsonView = 'raw'">
-              {{ t("redis.rawContent") }}
-            </Button>
-            <Button variant="ghost" size="sm" class="h-6 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': redisJsonView === 'tree' }" @click="redisJsonView = 'tree'">
-              {{ t("redis.jsonView") }}
-            </Button>
-          </div>
           <span class="flex-1" />
-          <Button v-if="redisJsonView === 'raw'" variant="ghost" size="sm" class="h-6 rounded-[5px] px-2 text-xs" :title="t('redis.formatJson')" @click="handleFormatJsonEditor">
-            <IndentIncrease class="h-3.5 w-3.5" />
-          </Button>
-          <Button v-if="redisJsonView === 'raw'" variant="ghost" size="sm" class="h-6 rounded-[5px] px-2 text-xs" :title="t('redis.compressJson')" @click="handleCompressJsonEditor">
-            <IndentDecrease class="h-3.5 w-3.5" />
-          </Button>
-          <label v-if="redisJsonView === 'raw'" class="flex items-center gap-1.5 text-muted-foreground">
+          <label class="flex items-center gap-1.5 text-muted-foreground">
             <WrapText class="h-3.5 w-3.5" />
             {{ t("redis.wordWrap") }}
             <Switch size="sm" :model-value="redisJsonWordWrap" @update:model-value="setRedisJsonWordWrap(Boolean($event))" />
           </label>
         </div>
-        <div v-if="redisJsonView === 'tree'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-4 text-sm leading-6">
-          <JsonTree :value="redisJsonValue" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
-        </div>
-        <textarea v-else v-model="editValue" class="dbx-editor-font-family flex-1 resize-none bg-background p-4 text-sm outline-none" :class="redisJsonWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'" spellcheck="false" @input="handleJsonInput" />
-        <div v-if="isEditing" class="px-4 py-2 border-t flex justify-end gap-2 shrink-0">
-          <Button
-            variant="ghost"
-            size="sm"
-            @click="
-              isEditing = false;
-              editValue = JSON.stringify(redisJsonValue, null, 2);
-            "
-            >{{ t("grid.discard") }}</Button
-          >
-          <Button size="sm" @click="saveJson"><Save class="w-3 h-3 mr-1" /> {{ t("grid.save") }}</Button>
+        <RedisJsonEditor v-model="editValue" class="min-h-0 flex-1" :save-disabled="savingJson || !redisJsonValueChanged" :read-only="savingJson" :word-wrap="redisJsonWordWrap" @save="saveJson" />
+        <div v-if="redisJsonValueChanged" class="px-4 py-2 border-t flex justify-end gap-2 shrink-0">
+          <Button variant="ghost" size="sm" :disabled="savingJson" @click="discardRedisJsonEdit">{{ t("grid.discard") }}</Button>
+          <Button size="sm" :disabled="savingJson" @click="saveJson"><Loader2 v-if="savingJson" class="w-3 h-3 mr-1 animate-spin" /><Save v-else class="w-3 h-3 mr-1" /> {{ t("grid.save") }}</Button>
         </div>
       </div>
 
@@ -1548,7 +1634,7 @@ onBeforeUnmount(() => {
           </SheetTitle>
         </SheetHeader>
         <template v-if="isEditingMember">
-          <textarea v-model="memberEditValue" class="dbx-editor-font-family min-h-0 flex-1 resize-none bg-background p-5 text-[13px] leading-6 outline-none" spellcheck="false" />
+          <textarea v-model="memberEditValue" class="dbx-editor-font-family min-h-0 flex-1 resize-none bg-background p-5 text-[13px] leading-6 outline-none" :readonly="savingMember" spellcheck="false" />
         </template>
         <template v-else>
           <div class="flex h-9 items-center gap-2 border-b px-5 text-xs">
@@ -1573,7 +1659,8 @@ onBeforeUnmount(() => {
               <Switch size="sm" :model-value="redisJsonWordWrap" @update:model-value="setRedisJsonWordWrap(Boolean($event))" />
             </label>
           </div>
-          <div v-if="memberValueView === 'json' && selectedMemberDetail.json" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-5 text-[13px] leading-6">
+          <RedisJsonEditor v-if="isEditingHashJson" v-model="memberEditValue" class="min-h-0 flex-1" :save-disabled="savingMember || !memberValueChanged" :read-only="savingMember" :word-wrap="redisJsonWordWrap" @save="saveMemberEdit" />
+          <div v-else-if="memberValueView === 'json' && selectedMemberDetail.json" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-5 text-[13px] leading-6">
             <JsonTree :value="selectedMemberDetail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
           </div>
           <div v-else-if="memberValueView === 'javaserialize' && selectedMemberDetail.javaSerialized" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-5 text-[13px] leading-6">
@@ -1596,6 +1683,16 @@ onBeforeUnmount(() => {
               {{ t("grid.discard") }}
             </Button>
             <Button :disabled="savingMember" @click="saveMemberEdit">
+              <Loader2 v-if="savingMember" class="h-4 w-4 animate-spin" />
+              <Save v-else class="h-4 w-4" />
+              {{ t("grid.save") }}
+            </Button>
+          </template>
+          <template v-else-if="isEditingHashJson">
+            <Button variant="ghost" :disabled="savingMember || !memberValueChanged" @click="discardHashJsonEdit">
+              {{ t("grid.discard") }}
+            </Button>
+            <Button :disabled="savingMember || !memberValueChanged" @click="saveMemberEdit">
               <Loader2 v-if="savingMember" class="h-4 w-4 animate-spin" />
               <Save v-else class="h-4 w-4" />
               {{ t("grid.save") }}

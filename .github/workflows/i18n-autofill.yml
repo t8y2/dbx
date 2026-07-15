@@ -11,7 +11,9 @@ on:
 permissions:
   contents: write
   issues: write
-  pull-requests: read
+  # 需要 write 才能通过 gh pr comment (addComment) 在 PR 上发评论；
+  # 之前是 read，导致 autofill 成功 push 了翻译 commit 却无法发评论告知作者
+  pull-requests: write
 
 concurrency:
   group: i18n-autofill-${{ github.event.pull_request.number }}

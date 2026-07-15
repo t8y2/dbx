@@ -95,7 +95,7 @@ pub async fn ai_agent_stream(
         serde_json::from_str(&format!("\"{}\"", db_type)).map_err(|_| format!("Unknown database type: {db_type}"))?;
 
     let cli_mcp_server_command = if matches!(request.config.provider, AiProvider::CodexCli) {
-        super::mcp::resolve_mcp_server_command().map(|(program, args)| CliAgentCommandSpec { program, args })
+        super::mcp::resolve_mcp_server_command().await.map(|(program, args)| CliAgentCommandSpec { program, args })
     } else {
         None
     };

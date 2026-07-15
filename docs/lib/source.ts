@@ -8,6 +8,7 @@ const pageIcons: Record<string, keyof typeof icons> = {
   "what-is-dbx": "BookOpen",
   changelog: "History",
   "getting-started": "Rocket",
+  "1panel": "PanelsTopLeft",
   databases: "Database",
   "query-editor": "SquareTerminal",
   "data-grid": "Table2",

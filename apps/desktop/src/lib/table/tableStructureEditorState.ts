@@ -477,6 +477,16 @@ export function parseExtraToColumnExtra(extra: string | null | undefined, databa
         result.identity.seed = Number(sequenceMatch[1]);
         result.identity.increment = Number(sequenceMatch[2]);
       }
+    } else if (databaseType === "kingbase") {
+      // SQLServer compatibility reports IDENTITY(seed, increment) instead of PostgreSQL identity syntax.
+      const sqlServerIdentityMatch = lower.match(/identity\s*\(\s*(-?\d+)\s*,\s*(-?\d+)\s*\)/i);
+      if (sqlServerIdentityMatch) {
+        result.autoIncrement = true;
+        result.identity = {
+          seed: Number(sqlServerIdentityMatch[1]),
+          increment: Number(sqlServerIdentityMatch[2]),
+        };
+      }
     }
   } else if (databaseType === "sqlserver") {
     if (lower.includes("identity")) {

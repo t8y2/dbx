@@ -1,6 +1,7 @@
-#[cfg(not(windows))]
+use std::collections::HashSet;
 use std::env;
-use std::path::Path;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,8 @@ use serde::{Deserialize, Serialize};
 const MCP_PACKAGE_NAME: &str = "@dbx-app/mcp-server";
 const MCP_LATEST_URL: &str = "https://registry.npmjs.org/@dbx-app%2fmcp-server/latest";
 const MCP_INSTALL_COMMAND: &str = "npm install -g @dbx-app/mcp-server@latest --registry=https://registry.npmjs.org";
+const MCP_MIN_NODE_VERSION: NodeVersion = NodeVersion { major: 22, minor: 13, patch: 0 };
+const MCP_MIN_NODE_VERSION_REQUIREMENT: &str = ">=22.13.0";
 const SHELL_COMMAND_MARKER: &str = "__DBX_MCP_COMMAND_OUTPUT_START__";
 
 #[derive(Debug, Serialize)]
@@ -31,28 +34,94 @@ struct NpmLatestPackage {
     version: String,
 }
 
+#[derive(Debug, Clone)]
+struct NodeRuntimeCandidate {
+    node_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct NodeRuntime {
+    node_path: PathBuf,
+    npm_cli_path: PathBuf,
+    npm_root: PathBuf,
+    node_version: String,
+    mcp_version: Option<String>,
+    mcp_script_path: Option<PathBuf>,
+    mcp_bin_path: Option<PathBuf>,
+}
+
+impl NodeRuntime {
+    fn probe(candidate: NodeRuntimeCandidate) -> Option<Self> {
+        let (node_path, node_version) = resolve_node_identity(&candidate.node_path)?;
+        if !is_mcp_compatible_node_version(&node_version) {
+            return None;
+        }
+        let npm_cli_path = find_npm_cli(&node_path)?;
+
+        let npm_root = npm_stdout(&node_path, &npm_cli_path, &["root", "-g"]).ok()?;
+        let npm_root = normalized_reported_path(Path::new(npm_root.trim()))?;
+        let npm_prefix = npm_stdout(&node_path, &npm_cli_path, &["prefix", "-g"])
+            .ok()
+            .and_then(|value| normalized_reported_path(Path::new(value.trim())))
+            .unwrap_or_else(|| npm_prefix_from_root(&npm_root));
+        let package_root = npm_root.join(MCP_PACKAGE_NAME);
+        let mcp_version = package_version(&package_root);
+        let mcp_script_path = canonical_runtime_path(&package_root.join("dist").join("index.js"));
+        let mcp_bin_path = mcp_bin_path(&npm_prefix);
+
+        Some(Self { node_path, npm_cli_path, npm_root, node_version, mcp_version, mcp_script_path, mcp_bin_path })
+    }
+
+    fn has_mcp_package(&self) -> bool {
+        self.mcp_script_path.is_some()
+    }
+
+    fn npm_output(&self, args: &[&str]) -> Result<CommandOutput, String> {
+        npm_output(&self.node_path, &self.npm_cli_path, args)
+    }
+
+    fn refresh(&self) -> Option<Self> {
+        Self::probe(NodeRuntimeCandidate { node_path: self.node_path.clone() })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct NodeVersion {
+    major: u64,
+    minor: u64,
+    patch: u64,
+}
+
 #[tauri::command]
 pub async fn check_mcp_server_status() -> Result<McpServerStatus, String> {
     let local_status = tauri::async_runtime::spawn_blocking(|| {
-        let npm_available = command_success("npm", &["--version"]);
-        let node_path = locate_command("node");
-        let node_command = node_path.as_deref().unwrap_or("node");
-        let node_version = command_stdout(node_command, &["--version"]).ok().and_then(first_non_empty_line);
-        let current_version = if npm_available { installed_mcp_version() } else { None };
-        let bin_path = locate_mcp_bin();
-        let script_path = if npm_available { installed_mcp_bin_script() } else { None };
-        (npm_available, node_path, node_version, current_version, bin_path, script_path)
+        let runtime = resolve_node_runtime();
+        let fallback_bin = match runtime.as_ref() {
+            Some(runtime) if runtime.has_mcp_package() => runtime.mcp_bin_path.clone(),
+            _ => locate_mcp_bin(),
+        };
+        (runtime, fallback_bin)
     });
     let latest_version = fetch_latest_mcp_version();
     let (local_status, latest_version) = tokio::join!(local_status, latest_version);
-    let (npm_available, node_path, node_version, current_version, bin_path, script_path) =
-        local_status.map_err(|err| err.to_string())?;
+    let (runtime, fallback_bin) = local_status.map_err(|err| err.to_string())?;
+    let npm_available = runtime.is_some();
+    let node_path = runtime.as_ref().map(|runtime| path_string(&runtime.node_path));
+    let node_version = runtime.as_ref().map(|runtime| runtime.node_version.clone());
+    let current_version = runtime.as_ref().and_then(|runtime| runtime.mcp_version.clone());
+    let script_path =
+        runtime.as_ref().and_then(|runtime| runtime.mcp_script_path.as_ref()).map(|path| path_string(path));
+    let bin_path = fallback_bin.as_ref().map(|path| path_string(path));
     let latest_version = latest_version.ok();
     let update_available = current_version
         .as_deref()
         .zip(latest_version.as_deref())
         .is_some_and(|(current, latest)| dbx_core::update::is_newer_version(latest, current));
-    let error = if npm_available { None } else { Some("npm is not available in PATH.".to_string()) };
+    let error = if npm_available {
+        None
+    } else {
+        Some(format!("Unable to resolve a compatible Node.js ({}) and npm runtime.", MCP_MIN_NODE_VERSION_REQUIREMENT))
+    };
 
     Ok(McpServerStatus {
         installed: current_version.is_some() || bin_path.is_some() || script_path.is_some(),
@@ -73,17 +142,38 @@ pub async fn check_mcp_server_status() -> Result<McpServerStatus, String> {
 #[tauri::command]
 pub async fn install_mcp_server() -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(|| {
-        let output = command_output(
-            "npm",
-            &["install", "-g", "@dbx-app/mcp-server@latest", "--registry=https://registry.npmjs.org"],
-        )?;
+        let runtime = resolve_node_runtime().ok_or_else(|| {
+            format!(
+                "Unable to resolve a compatible Node.js ({}) and npm runtime. Install Node.js with npm and try again.",
+                MCP_MIN_NODE_VERSION_REQUIREMENT
+            )
+        })?;
+        let output = runtime.npm_output(&[
+            "install",
+            "-g",
+            "@dbx-app/mcp-server@latest",
+            "--registry=https://registry.npmjs.org",
+        ])?;
 
         if !output.success {
             let error_msg = if !output.stderr.is_empty() { output.stderr } else { output.stdout };
             return Err(format!("Installation failed: {}", error_msg));
         }
 
-        let version = installed_mcp_version().unwrap_or_else(|| "unknown".to_string());
+        let installed = runtime.refresh().ok_or_else(|| {
+            format!(
+                "Installation completed, but the Node.js runtime at {} could not be validated.",
+                runtime.node_path.display()
+            )
+        })?;
+        installed.mcp_script_path.as_ref().ok_or_else(|| {
+            format!(
+                "Installation completed, but {} was not found under {}.",
+                MCP_PACKAGE_NAME,
+                installed.npm_root.display()
+            )
+        })?;
+        let version = installed.mcp_version.unwrap_or_else(|| "unknown".to_string());
         Ok(format!("Successfully installed @dbx-app/mcp-server@{}", version))
     })
     .await
@@ -111,30 +201,350 @@ async fn fetch_latest_mcp_version() -> Result<String, String> {
     Ok(package.version)
 }
 
-fn installed_mcp_version() -> Option<String> {
-    let root = command_stdout("npm", &["root", "-g"]).ok()?;
-    let pkg_json_path = Path::new(root.trim()).join(MCP_PACKAGE_NAME).join("package.json");
-    let content = std::fs::read_to_string(pkg_json_path).ok()?;
+pub(crate) async fn resolve_mcp_server_command() -> Option<(String, Vec<String>)> {
+    tauri::async_runtime::spawn_blocking(resolve_mcp_server_command_sync).await.ok().flatten()
+}
+
+fn resolve_mcp_server_command_sync() -> Option<(String, Vec<String>)> {
+    let runtime = resolve_node_runtime();
+    resolve_managed_mcp_command(runtime.as_ref(), locate_mcp_bin)
+}
+
+fn resolve_managed_mcp_command(
+    runtime: Option<&NodeRuntime>,
+    locate_path_shim: impl FnOnce() -> Option<PathBuf>,
+) -> Option<(String, Vec<String>)> {
+    if let Some(command) = runtime.and_then(mcp_command_for_runtime) {
+        return Some(command);
+    }
+
+    // PATH shims may use `#!/usr/bin/env node`, bypassing the runtime compatibility check above.
+    if let Some(shim) = locate_path_shim() {
+        log::warn!("Ignoring unbound MCP package shim at {}", shim.display());
+    }
+    None
+}
+
+fn resolve_node_runtime() -> Option<NodeRuntime> {
+    let mut seen = HashSet::new();
+    let mut fallback = None;
+
+    if let Some(runtime) = probe_runtime_candidate(current_path_node_candidate(), &mut seen, &mut fallback) {
+        return Some(runtime);
+    }
+    if let Some(runtime) = probe_runtime_candidate(user_shell_node_candidate(), &mut seen, &mut fallback) {
+        return Some(runtime);
+    }
+    for dir in common_node_dirs() {
+        if let Some(runtime) = probe_runtime_candidate(node_candidate_in_dir(&dir), &mut seen, &mut fallback) {
+            return Some(runtime);
+        }
+    }
+
+    fallback
+}
+
+fn probe_runtime_candidate(
+    candidate: Option<NodeRuntimeCandidate>,
+    seen: &mut HashSet<PathBuf>,
+    fallback: &mut Option<NodeRuntime>,
+) -> Option<NodeRuntime> {
+    let candidate = candidate?;
+    let identity = canonical_runtime_path(&candidate.node_path).unwrap_or_else(|| candidate.node_path.clone());
+    if !seen.insert(identity) {
+        return None;
+    }
+
+    let runtime = NodeRuntime::probe(candidate)?;
+    prefer_runtime(runtime, fallback)
+}
+
+fn prefer_runtime(runtime: NodeRuntime, fallback: &mut Option<NodeRuntime>) -> Option<NodeRuntime> {
+    if !is_mcp_compatible_node_version(&runtime.node_version) {
+        return None;
+    }
+    if runtime.has_mcp_package() {
+        return Some(runtime);
+    }
+    if fallback.is_none() {
+        *fallback = Some(runtime);
+    }
+    None
+}
+
+fn is_mcp_compatible_node_version(version: &str) -> bool {
+    parse_node_version(version).is_some_and(|version| version >= MCP_MIN_NODE_VERSION)
+}
+
+fn parse_node_version(version: &str) -> Option<NodeVersion> {
+    let version = version.trim().trim_start_matches('v');
+    let mut parts = version.split('.');
+    Some(NodeVersion {
+        major: parse_node_version_part(parts.next()?)?,
+        minor: parse_node_version_part(parts.next()?)?,
+        patch: parse_node_version_part(parts.next()?)?,
+    })
+}
+
+fn parse_node_version_part(value: &str) -> Option<u64> {
+    let digits = value.chars().take_while(char::is_ascii_digit).collect::<String>();
+    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+}
+
+fn current_path_node_candidate() -> Option<NodeRuntimeCandidate> {
+    let path = env::var_os("PATH")?;
+    let node_path = find_command_in_path("node", &path)?;
+    Some(NodeRuntimeCandidate { node_path })
+}
+
+fn node_candidate_in_dir(dir: &Path) -> Option<NodeRuntimeCandidate> {
+    let node_path = find_command_in_dir("node", dir)?;
+    Some(NodeRuntimeCandidate { node_path })
+}
+
+fn find_command_in_path(command: &str, path: &OsStr) -> Option<PathBuf> {
+    env::split_paths(path).find_map(|dir| find_command_in_dir(command, &dir))
+}
+
+fn find_command_in_dir(command: &str, dir: &Path) -> Option<PathBuf> {
+    command_file_names(command).into_iter().map(|name| dir.join(name)).find(|path| path.is_file())
+}
+
+#[cfg(not(windows))]
+fn command_file_names(command: &str) -> Vec<OsString> {
+    vec![OsString::from(command)]
+}
+
+#[cfg(windows)]
+fn command_file_names(command: &str) -> Vec<OsString> {
+    if Path::new(command).extension().is_some() {
+        return vec![OsString::from(command)];
+    }
+
+    let mut extensions = vec![".exe".to_string(), ".com".to_string(), ".cmd".to_string(), ".bat".to_string()];
+    if let Ok(path_ext) = env::var("PATHEXT") {
+        for extension in path_ext.split(';').map(str::trim).filter(|extension| !extension.is_empty()) {
+            let normalized = if extension.starts_with('.') {
+                extension.to_ascii_lowercase()
+            } else {
+                format!(".{}", extension.to_ascii_lowercase())
+            };
+            if !extensions.iter().any(|existing| existing.eq_ignore_ascii_case(&normalized)) {
+                extensions.push(normalized);
+            }
+        }
+    }
+    let mut names: Vec<OsString> =
+        extensions.into_iter().map(|extension| OsString::from(format!("{command}{extension}"))).collect();
+    names.push(OsString::from(command));
+    names
+}
+
+#[cfg(not(windows))]
+fn common_node_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = env::var_os("HOME") {
+        dirs.push(PathBuf::from(home).join(".local").join("bin"));
+    }
+    dirs.extend(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"].into_iter().map(PathBuf::from));
+    dirs
+}
+
+#[cfg(windows)]
+fn common_node_dirs() -> Vec<PathBuf> {
+    windows_common_command_dirs()
+}
+
+#[cfg(not(windows))]
+fn user_shell_node_candidate() -> Option<NodeRuntimeCandidate> {
+    let script = format!(
+        "printf '%s\\n' {}; printf 'node=%s\\n' \"$(command -v node 2>/dev/null)\"",
+        shell_quote(SHELL_COMMAND_MARKER)
+    );
+    let (shell, shell_args) = user_shell_invocation_args(&script);
+    let output = run_command(&shell, &shell_args).ok()?;
+    if !output.success {
+        return None;
+    }
+    let stdout = stdout_after_shell_marker(&output.stdout);
+    let node_path = prefixed_output_path(&stdout, "node=")?;
+    Some(NodeRuntimeCandidate { node_path })
+}
+
+#[cfg(windows)]
+fn user_shell_node_candidate() -> Option<NodeRuntimeCandidate> {
+    let node_path = locate_windows_command("node").map(PathBuf::from)?;
+    Some(NodeRuntimeCandidate { node_path })
+}
+
+fn prefixed_output_path(output: &str, prefix: &str) -> Option<PathBuf> {
+    output
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix(prefix))
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| PathBuf::from(value.trim()))
+}
+
+fn canonical_runtime_path(path: &Path) -> Option<PathBuf> {
+    let canonical = std::fs::canonicalize(path).ok()?;
+    Some(normalize_canonical_path(canonical))
+}
+
+fn resolve_node_identity(command_path: &Path) -> Option<(PathBuf, String)> {
+    let launcher = canonical_runtime_path(command_path)?;
+    if let Ok(output) = direct_command_stdout(&launcher, &["-p", "process.execPath + '\\n' + process.version"]) {
+        let mut lines = output.lines().map(str::trim).filter(|line| !line.is_empty());
+        if let (Some(exec_path), Some(version)) = (lines.next(), lines.next()) {
+            if let Some(exec_path) = canonical_runtime_path(Path::new(exec_path)) {
+                return Some((exec_path, version.to_string()));
+            }
+        }
+    }
+
+    let version = direct_command_stdout(&launcher, &["--version"]).ok().and_then(first_non_empty_line)?;
+    Some((launcher, version))
+}
+
+fn normalized_reported_path(path: &Path) -> Option<PathBuf> {
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    canonical_runtime_path(path).or_else(|| {
+        if path.is_absolute() {
+            Some(path.to_path_buf())
+        } else {
+            env::current_dir().ok().map(|current| current.join(path))
+        }
+    })
+}
+
+#[cfg(not(windows))]
+fn normalize_canonical_path(path: PathBuf) -> PathBuf {
+    path
+}
+
+#[cfg(windows)]
+fn normalize_canonical_path(path: PathBuf) -> PathBuf {
+    let value = path.to_string_lossy();
+    if let Some(value) = value.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{}", value));
+    }
+    value.strip_prefix(r"\\?\").map(PathBuf::from).unwrap_or(path)
+}
+
+fn find_npm_cli(node_path: &Path) -> Option<PathBuf> {
+    let mut candidates = npm_cli_candidates(node_path);
+    let mut seen = HashSet::new();
+    candidates.retain(|candidate| {
+        let Some(canonical) = canonical_runtime_path(candidate) else {
+            return false;
+        };
+        seen.insert(canonical)
+    });
+
+    candidates.into_iter().find_map(|candidate| {
+        let canonical = canonical_runtime_path(&candidate)?;
+        if is_native_npm_launcher(&canonical) || npm_stdout(node_path, &canonical, &["--version"]).is_err() {
+            return None;
+        }
+        Some(canonical)
+    })
+}
+
+fn npm_cli_candidates(node_path: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(parent) = node_path.parent() {
+        candidates.push(parent.join("npm"));
+        candidates.push(parent.join("npm.cmd"));
+        candidates.push(parent.join("node_modules").join("npm").join("bin").join("npm-cli.js"));
+        candidates.push(parent.join("..").join("lib").join("node_modules").join("npm").join("bin").join("npm-cli.js"));
+        candidates.push(parent.join("..").join("node_modules").join("npm").join("bin").join("npm-cli.js"));
+    }
+    candidates
+}
+
+fn is_native_npm_launcher(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()).map(str::to_ascii_lowercase).as_deref(),
+        Some("cmd" | "bat" | "exe" | "com" | "ps1")
+    )
+}
+
+fn npm_output(node_path: &Path, npm_cli_path: &Path, args: &[&str]) -> Result<CommandOutput, String> {
+    let mut command_args = Vec::with_capacity(args.len() + 1);
+    command_args.push(npm_cli_path.as_os_str().to_os_string());
+    command_args.extend(args.iter().map(|arg| OsString::from(*arg)));
+    let mut command = dbx_core::process::new_std_command(node_path);
+    command.args(&command_args);
+    if let Some(node_dir) = node_path.parent() {
+        let mut paths = vec![node_dir.to_path_buf()];
+        if let Some(current_path) = env::var_os("PATH") {
+            paths.extend(env::split_paths(&current_path));
+        }
+        if let Ok(path) = env::join_paths(paths) {
+            command.env("PATH", path);
+        }
+    }
+    command_output_from_process(command)
+}
+
+fn npm_stdout(node_path: &Path, npm_cli_path: &Path, args: &[&str]) -> Result<String, String> {
+    successful_stdout(npm_output(node_path, npm_cli_path, args)?)
+}
+
+fn direct_command_stdout(command: &Path, args: &[&str]) -> Result<String, String> {
+    successful_stdout(run_command(command, args)?)
+}
+
+fn successful_stdout(output: CommandOutput) -> Result<String, String> {
+    if !output.success {
+        let message = if output.stderr.is_empty() { output.stdout } else { output.stderr };
+        return Err(message.trim().to_string());
+    }
+    Ok(output.stdout.trim().to_string())
+}
+
+fn package_version(package_root: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(package_root.join("package.json")).ok()?;
     let value: serde_json::Value = serde_json::from_str(&content).ok()?;
     value.get("version")?.as_str().map(ToOwned::to_owned)
 }
 
-pub(crate) fn resolve_mcp_server_command() -> Option<(String, Vec<String>)> {
-    #[cfg(windows)]
-    {
-        // Node.js 18.20.2+ rejects direct spawn of .cmd/.bat files without a shell
-        // on Windows. Prefer the package's real JS entry point for Codex CLI.
-        return installed_mcp_bin_script()
-            .map(|script| (locate_command("node").unwrap_or_else(|| "node".to_string()), vec![script]))
-            .or_else(|| locate_mcp_bin().map(|path| (path, Vec::new())));
-    }
+#[cfg(not(windows))]
+fn npm_prefix_from_root(npm_root: &Path) -> PathBuf {
+    npm_root.parent().and_then(Path::parent).unwrap_or(npm_root).to_path_buf()
+}
 
-    #[cfg(not(windows))]
-    {
-        locate_mcp_bin()
-            .map(|path| (path, Vec::new()))
-            .or_else(|| installed_mcp_bin_script().map(|script| ("node".to_string(), vec![script])))
+#[cfg(windows)]
+fn npm_prefix_from_root(npm_root: &Path) -> PathBuf {
+    npm_root.parent().unwrap_or(npm_root).to_path_buf()
+}
+
+#[cfg(not(windows))]
+fn mcp_bin_path(npm_prefix: &Path) -> Option<PathBuf> {
+    let path = npm_prefix.join("bin").join("dbx-mcp-server");
+    path.is_file().then_some(path)
+}
+
+#[cfg(windows)]
+fn mcp_bin_path(npm_prefix: &Path) -> Option<PathBuf> {
+    ["dbx-mcp-server.cmd", "dbx-mcp-server.exe", "dbx-mcp-server.bat", "dbx-mcp-server"]
+        .into_iter()
+        .map(|name| npm_prefix.join(name))
+        .find(|path| path.is_file())
+}
+
+fn mcp_command_for_runtime(runtime: &NodeRuntime) -> Option<(String, Vec<String>)> {
+    if !is_mcp_compatible_node_version(&runtime.node_version) {
+        return None;
     }
+    let script_path = runtime.mcp_script_path.as_ref()?;
+    Some((path_string(&runtime.node_path), vec![path_string(script_path)]))
+}
+
+fn path_string(path: &Path) -> String {
+    path.to_string_lossy().to_string()
 }
 
 pub(crate) fn locate_command(command: &str) -> Option<String> {
@@ -148,14 +558,8 @@ pub(crate) fn locate_command(command: &str) -> Option<String> {
     }
 }
 
-fn locate_mcp_bin() -> Option<String> {
-    locate_command("dbx-mcp-server")
-}
-
-fn installed_mcp_bin_script() -> Option<String> {
-    let root = command_stdout("npm", &["root", "-g"]).ok()?;
-    let script = Path::new(root.trim()).join(MCP_PACKAGE_NAME).join("dist").join("index.js");
-    script.is_file().then(|| script.to_string_lossy().to_string())
+fn locate_mcp_bin() -> Option<PathBuf> {
+    locate_command("dbx-mcp-server").map(PathBuf::from)
 }
 
 #[cfg(windows)]
@@ -194,10 +598,6 @@ fn is_windows_launchable_command(path: &str) -> bool {
     )
 }
 
-fn command_success(command: &str, args: &[&str]) -> bool {
-    command_output(command, args).is_ok_and(|output| output.success)
-}
-
 fn command_stdout(command: &str, args: &[&str]) -> Result<String, String> {
     let output = command_output(command, args)?;
     if !output.success {
@@ -234,10 +634,18 @@ fn command_output(command: &str, args: &[&str]) -> Result<CommandOutput, String>
     }
 }
 
-fn run_command(command: &str, args: &[&str]) -> Result<CommandOutput, String> {
+fn run_command<I, S>(command: impl AsRef<OsStr>, args: I) -> Result<CommandOutput, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     let mut cmd = dbx_core::process::new_std_command(command);
     cmd.args(args);
-    let output = cmd.output().map_err(|e| e.to_string())?;
+    command_output_from_process(cmd)
+}
+
+fn command_output_from_process(mut command: std::process::Command) -> Result<CommandOutput, String> {
+    let output = command.output().map_err(|e| e.to_string())?;
     Ok(CommandOutput {
         success: output.status.success(),
         stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
@@ -385,13 +793,39 @@ fn stdout_after_shell_marker(stdout: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(not(windows))]
-    use super::bash_login_script;
     #[cfg(windows)]
     use super::first_windows_command_path;
     #[cfg(not(windows))]
+    use super::{bash_login_script, canonical_runtime_path, NodeRuntimeCandidate};
+    use super::{
+        is_mcp_compatible_node_version, mcp_command_for_runtime, normalized_reported_path, npm_cli_candidates,
+        parse_node_version, prefer_runtime, prefixed_output_path, resolve_managed_mcp_command,
+        stdout_after_shell_marker, NodeRuntime, NodeVersion, SHELL_COMMAND_MARKER,
+    };
+    #[cfg(not(windows))]
     use super::{shell_command_script, shell_quote};
-    use super::{stdout_after_shell_marker, SHELL_COMMAND_MARKER};
+    use std::path::PathBuf;
+
+    fn runtime(node_path: &str, script_path: Option<&str>) -> NodeRuntime {
+        runtime_with_version_and_root(node_path, &format!("{node_path}-root"), script_path, "v24.16.0")
+    }
+
+    fn runtime_with_version_and_root(
+        node_path: &str,
+        npm_root: &str,
+        script_path: Option<&str>,
+        node_version: &str,
+    ) -> NodeRuntime {
+        NodeRuntime {
+            node_path: PathBuf::from(node_path),
+            npm_cli_path: PathBuf::from(format!("{node_path}-npm-cli.js")),
+            npm_root: PathBuf::from(npm_root),
+            node_version: node_version.to_string(),
+            mcp_version: script_path.map(|_| "0.4.29".to_string()),
+            mcp_script_path: script_path.map(PathBuf::from),
+            mcp_bin_path: None,
+        }
+    }
 
     #[cfg(not(windows))]
     #[test]
@@ -427,6 +861,150 @@ mod tests {
         assert_eq!(stdout_after_shell_marker(&stdout), "22.19.0\n");
     }
 
+    #[test]
+    fn prefixed_output_path_ignores_empty_values() {
+        let output = "node=/opt/node/bin/node\nmissing=\n";
+
+        assert_eq!(prefixed_output_path(output, "node="), Some(PathBuf::from("/opt/node/bin/node")));
+        assert_eq!(prefixed_output_path(output, "missing="), None);
+    }
+
+    #[test]
+    fn reported_global_root_can_be_resolved_before_it_exists() {
+        let path = std::env::temp_dir().join(format!("dbx-mcp-missing-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+
+        assert_eq!(normalized_reported_path(&path), Some(path));
+    }
+
+    #[test]
+    fn installed_runtime_outranks_an_earlier_runtime_without_mcp() {
+        let first = runtime("/runtime/node-26", None);
+        let installed = runtime("/runtime/node-24", Some("/runtime/node-24-mcp/dist/index.js"));
+        let mut fallback = None;
+
+        assert!(prefer_runtime(first.clone(), &mut fallback).is_none());
+        let selected = prefer_runtime(installed.clone(), &mut fallback).unwrap();
+
+        assert_eq!(fallback.unwrap().node_path, first.node_path);
+        assert_eq!(selected.node_path, installed.node_path);
+        assert_eq!(selected.mcp_script_path, installed.mcp_script_path);
+    }
+
+    #[test]
+    fn incompatible_runtime_cannot_win_with_shared_mcp_package() {
+        let shared_npm_root = "/runtime/shared/node_modules";
+        let shared_script = "/runtime/shared/node_modules/@dbx-app/mcp-server/dist/index.js";
+        let old_runtime =
+            runtime_with_version_and_root("/runtime/node-20", shared_npm_root, Some(shared_script), "v20.18.1");
+        let compatible_runtime =
+            runtime_with_version_and_root("/runtime/node-22", shared_npm_root, Some(shared_script), "v22.13.0");
+        let mut fallback = None;
+
+        assert!(prefer_runtime(old_runtime, &mut fallback).is_none());
+        assert!(fallback.is_none());
+        let selected = prefer_runtime(compatible_runtime.clone(), &mut fallback).unwrap();
+
+        assert_eq!(selected.node_path, compatible_runtime.node_path);
+        assert_eq!(selected.mcp_script_path, compatible_runtime.mcp_script_path);
+    }
+
+    #[test]
+    fn node_version_parser_enforces_mcp_minimum() {
+        assert_eq!(parse_node_version("v22.13.0"), Some(NodeVersion { major: 22, minor: 13, patch: 0 }));
+        assert_eq!(parse_node_version("22.13.0-nightly"), Some(NodeVersion { major: 22, minor: 13, patch: 0 }));
+        assert!(!is_mcp_compatible_node_version("v22.12.9"));
+        assert!(!is_mcp_compatible_node_version("v21.99.99"));
+        assert!(is_mcp_compatible_node_version("v22.13.0"));
+        assert!(is_mcp_compatible_node_version("v24.0.0"));
+    }
+
+    #[test]
+    fn mcp_command_binds_script_to_the_installation_node() {
+        let installed = runtime("/runtime/node-24", Some("/runtime/node-24-mcp/dist/index.js"));
+
+        let command = mcp_command_for_runtime(&installed).unwrap();
+
+        assert_eq!(command.0, "/runtime/node-24");
+        assert_eq!(command.1, vec!["/runtime/node-24-mcp/dist/index.js"]);
+    }
+
+    #[test]
+    fn incompatible_runtime_does_not_fall_back_to_available_mcp_shim() {
+        let incompatible = runtime_with_version_and_root(
+            "/runtime/node-20",
+            "/runtime/node-20-root",
+            Some("/runtime/node-20-root/bin/dbx-mcp-server"),
+            "v20.18.1",
+        );
+
+        let command =
+            resolve_managed_mcp_command(Some(&incompatible), || Some(PathBuf::from("/path/bin/dbx-mcp-server")));
+
+        assert!(command.is_none());
+    }
+
+    #[test]
+    fn npm_cli_candidates_stay_with_the_selected_node_installation() {
+        let candidates = npm_cli_candidates(PathBuf::from("/runtime/node-24/bin/node").as_path());
+
+        assert_eq!(candidates.first(), Some(&PathBuf::from("/runtime/node-24/bin/npm")));
+        assert!(candidates.iter().all(|path| !path.starts_with("/runtime/node-26")));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn runtime_probe_canonicalizes_node_and_keeps_npm_root_bound_to_it() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("dbx-mcp-runtime-test-{}-{nonce}", std::process::id()));
+        let prefix = dir.join("prefix");
+        let npm_root = prefix.join("lib").join("node_modules");
+        let package_root = npm_root.join(super::MCP_PACKAGE_NAME);
+        let script_path = package_root.join("dist").join("index.js");
+        let node_path = dir.join("node-v24");
+        let node_alias = dir.join("node");
+        let npm_cli_path = dir.join("npm");
+        let log_path = dir.join("calls.log");
+
+        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        std::fs::write(&npm_cli_path, "// fake npm cli\n").unwrap();
+        std::fs::write(&script_path, "// fake mcp server\n").unwrap();
+        std::fs::write(package_root.join("package.json"), r#"{"version":"0.4.29"}"#).unwrap();
+        let node_script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nprintf 'PATH=%s\\n' \"$PATH\" >> {}\n\
+             if [ \"$1\" = '--version' ]; then printf 'v24.16.0\\n'; \
+             elif [ \"$2\" = '--version' ]; then printf '10.9.2\\n'; \
+             elif [ \"$2\" = 'root' ]; then printf '%s\\n' {}; \
+             elif [ \"$2\" = 'prefix' ]; then printf '%s\\n' {}; \
+             else exit 1; fi\n",
+            shell_quote(log_path.to_string_lossy().as_ref()),
+            shell_quote(log_path.to_string_lossy().as_ref()),
+            shell_quote(npm_root.to_string_lossy().as_ref()),
+            shell_quote(prefix.to_string_lossy().as_ref())
+        );
+        std::fs::write(&node_path, node_script).unwrap();
+        let mut permissions = std::fs::metadata(&node_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&node_path, permissions).unwrap();
+        symlink(&node_path, &node_alias).unwrap();
+
+        let probed = NodeRuntime::probe(NodeRuntimeCandidate { node_path: node_alias.clone() }).unwrap();
+
+        assert_eq!(probed.node_path, canonical_runtime_path(&node_path).unwrap());
+        assert_eq!(probed.npm_root, canonical_runtime_path(&npm_root).unwrap());
+        assert_eq!(probed.node_version, "v24.16.0");
+        assert_eq!(probed.mcp_script_path, canonical_runtime_path(&script_path));
+        let calls = std::fs::read_to_string(log_path).unwrap();
+        assert!(calls.contains("npm root -g"));
+        assert!(calls.contains("npm prefix -g"));
+        assert!(calls.contains(&format!("PATH={}", canonical_runtime_path(&dir).unwrap().display())));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_command_lookup_prefers_cmd_over_extensionless_shim() {
@@ -459,5 +1037,18 @@ mod tests {
         assert!(resolved.is_none());
         let _ = std::fs::remove_file(extensionless);
         let _ = std::fs::remove_dir(dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_canonical_path_preserves_unc_paths() {
+        assert_eq!(
+            super::normalize_canonical_path(PathBuf::from(r"\\?\UNC\server\share\node.exe")),
+            PathBuf::from(r"\\server\share\node.exe")
+        );
+        assert_eq!(
+            super::normalize_canonical_path(PathBuf::from(r"\\?\C:\Program Files\nodejs\node.exe")),
+            PathBuf::from(r"C:\Program Files\nodejs\node.exe")
+        );
     }
 }

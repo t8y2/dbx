@@ -273,9 +273,12 @@ function handleKeydown(event: KeyboardEvent) {
                   <Check :class="cn('absolute inset-0 h-3.5 w-3.5', option !== modelValue ? 'opacity-0' : clearSelectedOption ? 'opacity-100 group-hover:opacity-0 group-focus-visible:opacity-0' : 'opacity-100')" />
                   <X v-if="clearSelectedOption && option === modelValue" class="absolute inset-0 h-3.5 w-3.5 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100" />
                 </span>
-                <slot name="option-label" :option="option" :label="displayName?.(option)">
-                  <span class="truncate">{{ displayName?.(option) }}</span>
-                </slot>
+                <!-- Keep custom labels inside the flex row so long content cannot overlap adjacent UI. -->
+                <div class="dbx-searchable-select-option-label min-w-0 flex-1 overflow-hidden">
+                  <slot name="option-label" :option="option" :label="displayName?.(option)">
+                    <span class="block truncate">{{ displayName?.(option) }}</span>
+                  </slot>
+                </div>
               </button>
               <button
                 v-if="canSelectCustom"
@@ -292,9 +295,11 @@ function handleKeydown(event: KeyboardEvent) {
                 @click="selectCustomOption"
               >
                 <Check class="h-3.5 w-3.5 shrink-0 opacity-0" />
-                <slot name="custom-option-label" :value="customOptionValue">
-                  <span class="truncate">{{ customOptionValue }}</span>
-                </slot>
+                <div class="dbx-searchable-select-option-label min-w-0 flex-1 overflow-hidden">
+                  <slot name="custom-option-label" :value="customOptionValue">
+                    <span class="block truncate">{{ customOptionValue }}</span>
+                  </slot>
+                </div>
               </button>
             </template>
             <button
@@ -312,9 +317,11 @@ function handleKeydown(event: KeyboardEvent) {
               @click="selectCustomOption"
             >
               <Check class="h-3.5 w-3.5 shrink-0 opacity-0" />
-              <slot name="custom-option-label" :value="customOptionValue">
-                <span class="truncate">{{ customOptionValue }}</span>
-              </slot>
+              <div class="dbx-searchable-select-option-label min-w-0 flex-1 overflow-hidden">
+                <slot name="custom-option-label" :value="customOptionValue">
+                  <span class="block truncate">{{ customOptionValue }}</span>
+                </slot>
+              </div>
             </button>
             <div v-else class="px-2 py-2 text-sm text-muted-foreground">
               {{ emptyText }}

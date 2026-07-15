@@ -408,6 +408,10 @@ pub async fn find_documents(
 
     let result: SearchResponse = resp.json().await.map_err(|e| format!("Elasticsearch parse error: {e}"))?;
 
+    search_response_to_document_result(result)
+}
+
+fn search_response_to_document_result(result: SearchResponse) -> Result<MongoDocumentResult, String> {
     let documents: Vec<serde_json::Value> = result
         .hits
         .hits
@@ -425,7 +429,16 @@ pub async fn find_documents(
         })
         .collect();
 
-    Ok(MongoDocumentResult { documents, total: result.hits.total.value() })
+    // Keep the exact JSON numeric tokens alongside the compatibility value tree.
+    // Desktop IPC and browser JSON parsing otherwise coerce ES long values through
+    // JavaScript Number before the document editor can serialize them again.
+    let raw_documents = documents
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Elasticsearch document serialization failed: {e}"))?;
+
+    Ok(MongoDocumentResult { documents, raw_documents: Some(raw_documents), total: result.hits.total.value() })
 }
 
 fn build_find_documents_body(
@@ -1741,6 +1754,21 @@ mod tests {
         .unwrap();
 
         assert_eq!(response.hits.hits[0].routing.as_deref(), Some("tenant-1"));
+    }
+
+    #[test]
+    fn preserves_long_literals_in_document_transport_json() {
+        let response: SearchResponse = serde_json::from_str(
+            r#"{"hits":{"total":{"value":1,"relation":"eq"},"hits":[{"_id":"doc-1","_source":{"id":2018551659033767937,"string_id":"2018551659033767937","legacy":{"$numberLong":"2018551659033767937"}}}]}}"#,
+        )
+        .unwrap();
+
+        let result = super::search_response_to_document_result(response).unwrap();
+
+        assert_eq!(
+            result.raw_documents.as_deref(),
+            Some(&[r#"{"id":2018551659033767937,"string_id":"2018551659033767937","legacy":{"$numberLong":"2018551659033767937"},"_id":"doc-1"}"#.to_string()][..])
+        );
     }
 
     #[test]

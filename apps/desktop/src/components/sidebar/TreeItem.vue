@@ -85,6 +85,7 @@ import { usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { getCachedTableMetadata, loadTableMetadata, TABLE_METADATA_CACHE_TTL_MS, tableMetadataToDataTabMeta } from "@/lib/metadata/tableMetadataCache";
 import {
+  canConfigureVisibleSchemasForTreeNode,
   canCreateConnectionNamespace,
   canCreateDatabaseNodeNamespace,
   canEditDatabaseProperties as canEditDatabasePropertiesForNode,
@@ -161,7 +162,6 @@ import { isSqlServerLinkedNode } from "@/lib/database/sqlServerLinkedServers";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionErrorIndicator from "@/components/connection/ConnectionErrorIndicator.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
-import { isSchemaAware } from "@/lib/database/databaseFeatureSupport";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
@@ -4251,15 +4251,9 @@ const canConfigureVisibleDatabases = computed(() => {
 });
 
 const canConfigureVisibleSchemas = computed(() => {
-  if (props.node.type === "database" && props.node.connectionId && props.node.database != null) {
-    const dbType = connectionStore.getConfig(props.node.connectionId)?.db_type;
-    return isSchemaAware(dbType);
-  }
-  if (props.node.type === "connection" && props.node.connectionId) {
-    const dbType = connectionStore.getConfig(props.node.connectionId)?.db_type;
-    return isSchemaAware(dbType) && !usesTreeSchemaMode(dbType);
-  }
-  return false;
+  if (!props.node.connectionId) return false;
+  const dbType = connectionStore.getConfig(props.node.connectionId)?.db_type;
+  return canConfigureVisibleSchemasForTreeNode(dbType, props.node.type, props.node.database);
 });
 
 const canCopyFinalProxyPort = computed(() => {

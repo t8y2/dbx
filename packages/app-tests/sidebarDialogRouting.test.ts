@@ -6,6 +6,8 @@ const connectionTree = readFileSync("apps/desktop/src/components/sidebar/Connect
 const treeItem = readFileSync("apps/desktop/src/components/sidebar/TreeItem.vue", "utf8");
 const dialogHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeItemDialogs.vue", "utf8");
 const dialogState = readFileSync("apps/desktop/src/components/sidebar/sidebarTreeDialogState.ts", "utf8");
+const visibleDatabasesDialog = readFileSync("apps/desktop/src/components/sidebar/VisibleDatabasesDialog.vue", "utf8");
+const visibleSchemasDialog = readFileSync("apps/desktop/src/components/sidebar/VisibleSchemasDialog.vue", "utf8");
 
 function occurrences(source: string, value: string): number {
   return source.split(value).length - 1;
@@ -41,6 +43,11 @@ test("saved object dialogs refresh the immutable active target", () => {
   assert.match(connectionTree, /<SidebarObjectSourceDialog[\s\S]*?@saved="refreshSidebarActionTarget"/);
   assert.match(connectionTree, /<InstallExtensionDialog[\s\S]*?@close="refreshSidebarActionTarget"/);
   assert.match(connectionTree, /findSidebarActionTarget\(store\.treeNodes, target\)/);
+});
+
+test("lazy visible object dialogs load when first mounted open", () => {
+  assert.match(visibleDatabasesDialog, /watch\([\s\S]*?loadDatabases\(\)[\s\S]*?\{ immediate: true \}/);
+  assert.match(visibleSchemasDialog, /watch\([\s\S]*?loadSchemas\(\)[\s\S]*?\{ immediate: true \}/);
 });
 
 test("shared dialog state is owner-gated and confirm handlers use snapshots", () => {

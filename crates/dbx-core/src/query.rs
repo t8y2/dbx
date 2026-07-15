@@ -305,9 +305,8 @@ pub struct QueryExecutionOptions {
     /// (BEGIN … COMMIT) instead of auto-commit mode. `None` and `Some(false)` behave
     /// identically — auto-commit for each statement.
     pub use_transaction: Option<bool>,
-    /// When `true`, multi-statement execution continues after an error instead of
-    /// stopping at the first failure. Currently affects MySQL-protocol batch execution;
-    /// other databases already continue on error.
+    /// When `true`, multi-statement execution continues after a statement error instead
+    /// of stopping at the first failure. Connection-level failures always stop the batch.
     pub continue_on_error: bool,
 }
 
@@ -847,6 +846,12 @@ pub fn pool_error_action(db_type: Option<DatabaseType>, err: &str) -> PoolErrorA
     } else {
         PoolErrorAction::Keep
     }
+}
+
+fn should_continue_batch_after_error(continue_on_error: bool, action: PoolErrorAction) -> bool {
+    // A broken connection cannot safely execute the remaining statements even when
+    // the user explicitly enabled continue-on-error.
+    continue_on_error && action == PoolErrorAction::Keep
 }
 
 fn should_discard_pool_after_query_timeout(db_type: Option<DatabaseType>) -> bool {
@@ -1931,7 +1936,11 @@ pub async fn execute_multi_core_with_options_for_client(
         {
             Ok(r) => results.push(r),
             Err(e) => {
+                let action = query_pool_error_action(db_type, stmt, &e);
                 results.push(error_query_result(e));
+                if !should_continue_batch_after_error(options.continue_on_error, action) {
+                    break;
+                }
             }
         }
     }
@@ -1993,7 +2002,7 @@ where
                 results.push(ExecuteMultiResult::execution_error(error_query_result(err)));
                 // Statement errors are safe to collect, but connection-level failures leave
                 // the protocol state unusable and must still trigger pool cleanup.
-                if !continue_on_error || action != PoolErrorAction::Keep {
+                if !should_continue_batch_after_error(continue_on_error, action) {
                     return (results, Some(action));
                 }
             }
@@ -2165,6 +2174,8 @@ async fn execute_multi_sqlserver(
                 });
                 if matches!(action, PoolErrorAction::Discard | PoolErrorAction::ReconnectAndRetry) {
                     state.remove_pool_by_key(pool_key).await;
+                }
+                if !should_continue_batch_after_error(options.continue_on_error, action) {
                     break;
                 }
             }
@@ -3146,7 +3157,6 @@ mod tests {
     use crate::plugins::{
         InstalledPlugin, PluginDriverManifest, PluginDriverSession, PluginManifest, PluginRuntimeEnv,
     };
-    #[cfg(feature = "duckdb-bundled")]
     use crate::storage::Storage;
 
     fn test_connection_config(db_type: DatabaseType) -> ConnectionConfig {
@@ -3214,6 +3224,52 @@ mod tests {
         }
     }
 
+    async fn assert_sqlite_batch_error_behavior(failure_first: bool, continue_on_error: bool) {
+        let dir = std::env::temp_dir().join(format!("dbx-query-batch-error-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let connection_id = "sqlite-batch";
+        let sqlite = db::sqlite::connect_path_create_if_missing(dir.join("query.db").to_str().unwrap()).await.unwrap();
+        state.connections.write().await.insert(connection_id.to_string(), PoolKind::Sqlite(sqlite));
+        state.configs.write().await.insert(connection_id.to_string(), test_connection_config(DatabaseType::Sqlite));
+
+        let sql = if failure_first {
+            "INSERT INTO missing_table VALUES (1); CREATE TABLE executed_after_error (id INTEGER);"
+        } else {
+            "CREATE TABLE before_error (id INTEGER); INSERT INTO missing_table VALUES (1); CREATE TABLE executed_after_error (id INTEGER);"
+        };
+        let results = execute_multi_core_with_options(
+            &state,
+            connection_id,
+            "",
+            sql,
+            None,
+            None,
+            QueryExecutionOptions { continue_on_error, ..Default::default() },
+        )
+        .await
+        .unwrap();
+        let error_index = usize::from(!failure_first);
+        assert_eq!(results[error_index].columns, vec!["Error"]);
+        assert_eq!(
+            results.len(),
+            if failure_first { 1 + usize::from(continue_on_error) } else { 2 + usize::from(continue_on_error) }
+        );
+
+        let table_check = execute_sql_statement(
+            &state,
+            connection_id,
+            "",
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'executed_after_error'",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(!table_check.rows.is_empty(), continue_on_error);
+    }
+
     #[test]
     fn agent_execute_batch_unsupported_detects_case_insensitive_method_errors() {
         assert!(is_agent_execute_batch_unsupported("Agent RPC error (-1): unknown method: execute_batch"));
@@ -3244,6 +3300,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_batch_stops_when_the_first_statement_fails() {
+        assert_sqlite_batch_error_behavior(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_batch_continues_when_the_first_statement_fails_and_enabled() {
+        assert_sqlite_batch_error_behavior(true, true).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_batch_stops_when_a_middle_statement_fails() {
+        assert_sqlite_batch_error_behavior(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_batch_continues_when_a_middle_statement_fails_and_enabled() {
+        assert_sqlite_batch_error_behavior(false, true).await;
+    }
+
+    #[tokio::test]
     async fn mysql_batch_stops_after_the_first_statement_error() {
         let statements = vec!["first".to_string(), "fails".to_string(), "must-not-run".to_string()];
         let mut executor = FakeMysqlBatchExecutor {
@@ -3265,6 +3341,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mysql_batch_stops_when_the_first_statement_fails() {
+        let statements = vec!["fails".to_string(), "must-not-run".to_string()];
+        let mut executor = FakeMysqlBatchExecutor {
+            outcomes: std::collections::VecDeque::from([Err("Duplicate entry".to_string()), Ok(empty_query_result(0))]),
+            executed: Vec::new(),
+        };
+
+        let (results, error_action) =
+            execute_mysql_batch_statements(&mut executor, &statements, Some(DatabaseType::Mysql), None, false).await;
+
+        assert_eq!(executor.executed, vec!["fails"]);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].execution_error);
+        assert_eq!(error_action, Some(PoolErrorAction::Keep));
+    }
+
+    #[tokio::test]
     async fn mysql_batch_continues_after_statement_errors_when_enabled() {
         let statements = vec!["first".to_string(), "fails".to_string(), "third".to_string()];
         let mut executor = FakeMysqlBatchExecutor {
@@ -3282,6 +3375,23 @@ mod tests {
         assert_eq!(executor.executed, statements);
         assert_eq!(results.len(), 3);
         assert!(results[1].execution_error);
+        assert_eq!(error_action, None);
+    }
+
+    #[tokio::test]
+    async fn mysql_batch_continues_when_the_first_statement_fails_and_enabled() {
+        let statements = vec!["fails".to_string(), "second".to_string()];
+        let mut executor = FakeMysqlBatchExecutor {
+            outcomes: std::collections::VecDeque::from([Err("Duplicate entry".to_string()), Ok(empty_query_result(0))]),
+            executed: Vec::new(),
+        };
+
+        let (results, error_action) =
+            execute_mysql_batch_statements(&mut executor, &statements, Some(DatabaseType::Mysql), None, true).await;
+
+        assert_eq!(executor.executed, statements);
+        assert_eq!(results.len(), 2);
+        assert!(results[0].execution_error);
         assert_eq!(error_action, None);
     }
 

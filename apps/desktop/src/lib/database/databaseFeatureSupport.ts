@@ -40,6 +40,12 @@ export function usesTreeSchemaMode(dbType?: DatabaseType): boolean {
   return !!dbType && TREE_SCHEMA_TYPES.has(dbType);
 }
 
+export function canConfigureVisibleSchemasForTreeNode(dbType: DatabaseType | undefined, nodeType: TreeNodeType, database?: string | null): boolean {
+  if (!isSchemaAware(dbType)) return false;
+  if (nodeType === "database") return database != null;
+  return nodeType === "connection" && !usesTreeSchemaMode(dbType);
+}
+
 export function usesDatabaseObjectTreeMode(dbType?: DatabaseType): boolean {
   return !!dbType && DATABASE_OBJECT_TREE_TYPES.has(dbType);
 }

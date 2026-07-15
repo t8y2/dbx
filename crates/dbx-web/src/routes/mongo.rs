@@ -80,6 +80,18 @@ pub struct MongoFindRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MongoFindOneRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub collection: String,
+    pub filter: Option<String>,
+    pub projection: Option<String>,
+    pub options: Option<String>,
+    pub execution_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MongoCountRequest {
     pub connection_id: String,
     pub database: String,
@@ -176,6 +188,38 @@ pub struct MongoDeleteDocumentsRequest {
     pub collection: String,
     pub filter_json: String,
     pub many: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MongoFindOneAndUpdateRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub collection: String,
+    pub filter_json: String,
+    pub update_json: String,
+    pub options_json: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MongoFindOneAndReplaceRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub collection: String,
+    pub filter_json: String,
+    pub replacement_json: String,
+    pub options_json: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MongoFindOneAndDeleteRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub collection: String,
+    pub filter_json: String,
+    pub options_json: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -291,6 +335,27 @@ pub async fn find_documents(
             req.filter.as_deref(),
             req.projection.as_deref(),
             req.sort.as_deref(),
+        ),
+    )
+    .await?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
+}
+
+pub async fn find_one(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MongoFindOneRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result = run_cancellable(
+        &state,
+        req.execution_id,
+        dbx_core::mongo_ops::mongo_find_one_core(
+            &state.app,
+            &req.connection_id,
+            &req.database,
+            &req.collection,
+            req.filter.as_deref(),
+            req.projection.as_deref(),
+            req.options.as_deref(),
         ),
     )
     .await?;
@@ -476,6 +541,62 @@ pub async fn update_documents(
     .await
     .map_err(AppError)?;
     Ok(Json(serde_json::json!({ "affected_rows": result })))
+}
+
+pub async fn find_one_and_update(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MongoFindOneAndUpdateRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Update").await?;
+    let result = dbx_core::mongo_ops::mongo_find_one_and_update_core(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        &req.collection,
+        &req.filter_json,
+        &req.update_json,
+        req.options_json.as_deref(),
+    )
+    .await
+    .map_err(AppError)?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
+}
+
+pub async fn find_one_and_replace(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MongoFindOneAndReplaceRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Update").await?;
+    let result = dbx_core::mongo_ops::mongo_find_one_and_replace_core(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        &req.collection,
+        &req.filter_json,
+        &req.replacement_json,
+        req.options_json.as_deref(),
+    )
+    .await
+    .map_err(AppError)?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
+}
+
+pub async fn find_one_and_delete(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MongoFindOneAndDeleteRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Delete").await?;
+    let result = dbx_core::mongo_ops::mongo_find_one_and_delete_core(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        &req.collection,
+        &req.filter_json,
+        req.options_json.as_deref(),
+    )
+    .await
+    .map_err(AppError)?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
 }
 
 pub async fn delete_document(

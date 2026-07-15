@@ -16,12 +16,24 @@ import {
   isMysqlEnumDataType,
   isSqlServerIdentityCompatibleDataType,
   mysqlEnumDataType,
+  parseExtraToColumnExtra,
   rehydrateColumnDraftsFromMetadata,
   restoreDamengLengthUnitsAfterSave,
   splitDataType,
 } from "@/lib/table/tableStructureEditorState";
 
 describe("tableStructureEditorState", () => {
+  it("parses Kingbase SQLServer compatibility identity metadata", () => {
+    expect(parseExtraToColumnExtra("identity(10, 2)", "kingbase")).toEqual({
+      autoIncrement: true,
+      identity: { seed: 10, increment: 2 },
+    });
+    expect(parseExtraToColumnExtra("generated always as identity", "kingbase")).toEqual({
+      identity: { generation: "ALWAYS" },
+    });
+    expect(parseExtraToColumnExtra("identity(1,1)", "postgres")).toEqual({});
+  });
+
   it("keeps mysql unsigned attributes in the editable base type", () => {
     expect(splitDataType("int(11) unsigned")).toEqual({ baseType: "int unsigned", params: "11" });
     expect(splitDataType("bigint(20) unsigned zerofill")).toEqual({

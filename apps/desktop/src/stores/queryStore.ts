@@ -2782,6 +2782,21 @@ export const useQueryStore = defineStore("query", () => {
                 });
                 break;
               }
+              case "findOne": {
+                console.info("[DBX][executeTabSql:mongo-find-one:start]", { traceId, collection: mongoCommand.collection, database: currentDatabase });
+                const result = await api.mongoFindOne(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.filter, mongoCommand.projection, mongoCommand.options, executionId);
+                const queryResult = markQueryResultRowsRaw(annotateMongoResult(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total)));
+                allResults.push(queryResult);
+                mongoEditTarget = mongoCommands.length === 1 && queryResult.columns.includes("_id") ? { collection: mongoCommand.collection, idColumn: "_id" } : undefined;
+                console.info("[DBX][executeTabSql:mongo-find-one:done]", {
+                  traceId,
+                  collection: mongoCommand.collection,
+                  database: currentDatabase,
+                  rowCount: result.documents.length,
+                  elapsed: elapsed(),
+                });
+                break;
+              }
               case "version": {
                 console.info("[DBX][executeTabSql:mongo-version:start]", { traceId, database: currentDatabase });
                 const version = await api.mongoServerVersion(tab.connectionId, currentDatabase, executionId);
@@ -2858,6 +2873,37 @@ export const useQueryStore = defineStore("query", () => {
                   collection: mongoCommand.collection,
                   metric: mongoCommand.metric,
                   database: currentDatabase,
+                  elapsed: elapsed(),
+                });
+                break;
+              }
+              case "findOneAndUpdate":
+              case "findOneAndReplace":
+              case "findOneAndDelete": {
+                if (options?.mongoSafety) {
+                  const safety = evaluateMongoWriteSafety(mongoCommand, options.mongoSafety);
+                  if (!safety.allowed) throw new Error(safety.reason);
+                }
+                console.info("[DBX][executeTabSql:mongo-find-and-modify:start]", {
+                  traceId,
+                  kind: mongoCommand.kind,
+                  collection: mongoCommand.collection,
+                  database: currentDatabase,
+                });
+                const result =
+                  mongoCommand.kind === "findOneAndUpdate"
+                    ? await api.mongoFindOneAndUpdate(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.filter, mongoCommand.update, mongoCommand.options)
+                    : mongoCommand.kind === "findOneAndReplace"
+                      ? await api.mongoFindOneAndReplace(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.filter, mongoCommand.replacement, mongoCommand.options)
+                      : await api.mongoFindOneAndDelete(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.filter, mongoCommand.options);
+                allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total))));
+                mongoEditTarget = undefined;
+                console.info("[DBX][executeTabSql:mongo-find-and-modify:done]", {
+                  traceId,
+                  kind: mongoCommand.kind,
+                  collection: mongoCommand.collection,
+                  database: currentDatabase,
+                  rowCount: result.documents.length,
                   elapsed: elapsed(),
                 });
                 break;

@@ -15,6 +15,8 @@ use std::{collections::HashSet, time::Duration};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MongoDocumentResult {
     pub documents: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_documents: Option<Vec<String>>,
     pub total: u64,
 }
 
@@ -589,7 +591,62 @@ pub async fn find_documents(
         documents.push(bson_to_json(&Bson::Document(doc)));
     }
 
-    Ok(MongoDocumentResult { documents, total })
+    Ok(MongoDocumentResult { documents, raw_documents: None, total })
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MongoFindOneOptions {
+    sort: Option<serde_json::Value>,
+}
+
+pub async fn find_one(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    filter: Option<&str>,
+    projection: Option<&str>,
+    options: Option<&str>,
+) -> Result<MongoDocumentResult, String> {
+    let filter_doc = parse_optional_filter_document(filter)?.unwrap_or_default();
+    let projection_doc = parse_optional_json_document(projection, "projection")?;
+    let options = parse_find_one_options(options)?;
+    let sort_doc = parse_optional_document(options.sort.as_ref(), "sort")?;
+
+    let col = client.database(database).collection::<Document>(collection);
+    let mut action = col.find_one(filter_doc);
+    if let Some(projection) = projection_doc {
+        action = action.projection(projection);
+    }
+    if let Some(sort) = sort_doc {
+        action = action.sort(sort);
+    }
+
+    let result = action.await.map_err(|e| e.to_string())?;
+    Ok(single_document_result(result))
+}
+
+fn parse_optional_filter_document(value: Option<&str>) -> Result<Option<Document>, String> {
+    let Some(raw) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let json: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!("Invalid filter JSON: {e}"))?;
+    json_filter_to_document(&json).map(Some).map_err(|e| format!("Invalid filter: {e}"))
+}
+
+fn parse_find_one_options(options: Option<&str>) -> Result<MongoFindOneOptions, String> {
+    match options.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(raw) => serde_json::from_str(raw).map_err(|e| format!("Invalid findOne options: {e}")),
+        None => Ok(MongoFindOneOptions::default()),
+    }
+}
+
+fn parse_optional_json_document(value: Option<&str>, label: &str) -> Result<Option<Document>, String> {
+    let Some(raw) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let json: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!("Invalid {label} JSON: {e}"))?;
+    json_object_to_document(&json).map(Some).map_err(|e| format!("Invalid {label}: {e}"))
 }
 
 pub async fn count_documents(
@@ -670,7 +727,7 @@ pub async fn find_documents_extended_json(
         documents.push(Bson::Document(doc).into_relaxed_extjson());
     }
 
-    Ok(MongoDocumentResult { documents, total })
+    Ok(MongoDocumentResult { documents, raw_documents: None, total })
 }
 
 pub async fn aggregate_documents(
@@ -700,7 +757,7 @@ pub async fn aggregate_documents(
     if documents.len() > max_rows {
         documents.truncate(max_rows);
     }
-    Ok(MongoDocumentResult { documents, total })
+    Ok(MongoDocumentResult { documents, raw_documents: None, total })
 }
 
 pub async fn create_index(
@@ -977,6 +1034,184 @@ fn parse_update_array_filters(options_json: Option<&str>) -> Result<Option<Vec<D
                 .map_err(|e| format!("Invalid arrayFilters: {e}"))
         })
         .transpose()
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MongoFindOneAndUpdateOptions {
+    return_document: Option<String>,
+    return_new_document: Option<bool>,
+    new: Option<bool>,
+    upsert: Option<bool>,
+    projection: Option<serde_json::Value>,
+    sort: Option<serde_json::Value>,
+    array_filters: Option<Vec<serde_json::Value>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MongoFindOneAndReplaceOptions {
+    return_document: Option<String>,
+    return_new_document: Option<bool>,
+    new: Option<bool>,
+    upsert: Option<bool>,
+    projection: Option<serde_json::Value>,
+    sort: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MongoFindOneAndDeleteOptions {
+    projection: Option<serde_json::Value>,
+    sort: Option<serde_json::Value>,
+}
+
+fn parse_find_and_modify_options<T>(options_json: Option<&str>, command: &str) -> Result<T, String>
+where
+    T: Default + for<'de> Deserialize<'de>,
+{
+    match options_json.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(raw) => serde_json::from_str(raw).map_err(|e| format!("Invalid {command} options: {e}")),
+        None => Ok(T::default()),
+    }
+}
+
+fn find_and_modify_returns_after(
+    return_document: Option<&str>,
+    return_new_document: Option<bool>,
+    new: Option<bool>,
+) -> Result<bool, String> {
+    if let Some(return_document) = return_document {
+        if return_document.eq_ignore_ascii_case("after") {
+            return Ok(true);
+        }
+        if return_document.eq_ignore_ascii_case("before") {
+            return Ok(false);
+        }
+        return Err("returnDocument must be either 'before' or 'after'".to_string());
+    }
+    Ok(return_new_document.or(new).unwrap_or(false))
+}
+
+fn parse_optional_document(field: Option<&serde_json::Value>, label: &str) -> Result<Option<Document>, String> {
+    field.map(|value| json_object_to_document(value).map_err(|e| format!("Invalid {label}: {e}"))).transpose()
+}
+
+fn find_and_modify_array_filters(
+    array_filters: Option<&Vec<serde_json::Value>>,
+) -> Result<Option<Vec<Document>>, String> {
+    array_filters
+        .map(|filters| {
+            filters
+                .iter()
+                .map(json_filter_to_document)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("Invalid arrayFilters: {e}"))
+        })
+        .transpose()
+}
+
+fn single_document_result(document: Option<Document>) -> MongoDocumentResult {
+    match document {
+        Some(document) => MongoDocumentResult {
+            documents: vec![bson_to_json(&Bson::Document(document))],
+            raw_documents: None,
+            total: 1,
+        },
+        None => MongoDocumentResult { documents: Vec::new(), raw_documents: None, total: 0 },
+    }
+}
+
+pub async fn find_one_and_update(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    filter_json: &str,
+    update_json: &str,
+    options_json: Option<&str>,
+) -> Result<MongoDocumentResult, String> {
+    let filter_value: serde_json::Value =
+        serde_json::from_str(filter_json).map_err(|e| format!("Invalid filter JSON: {e}"))?;
+    let update_value: serde_json::Value =
+        serde_json::from_str(update_json).map_err(|e| format!("Invalid update JSON: {e}"))?;
+    let filter = json_filter_to_document(&filter_value).map_err(|e| format!("Invalid filter: {e}"))?;
+    let update = json_object_to_document(&update_value).map_err(|e| format!("Invalid update: {e}"))?;
+    let options: MongoFindOneAndUpdateOptions = parse_find_and_modify_options(options_json, "findOneAndUpdate")?;
+    let col = client.database(database).collection::<Document>(collection);
+    let mut action = col.find_one_and_update(filter, update);
+    if find_and_modify_returns_after(options.return_document.as_deref(), options.return_new_document, options.new)? {
+        action = action.return_document(mongodb::options::ReturnDocument::After);
+    }
+    if let Some(upsert) = options.upsert {
+        action = action.upsert(upsert);
+    }
+    if let Some(projection) = parse_optional_document(options.projection.as_ref(), "projection")? {
+        action = action.projection(projection);
+    }
+    if let Some(sort) = parse_optional_document(options.sort.as_ref(), "sort")? {
+        action = action.sort(sort);
+    }
+    if let Some(array_filters) = find_and_modify_array_filters(options.array_filters.as_ref())? {
+        action = action.array_filters(array_filters);
+    }
+    let result = action.await.map_err(|e| e.to_string())?;
+    Ok(single_document_result(result))
+}
+
+pub async fn find_one_and_replace(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    filter_json: &str,
+    replacement_json: &str,
+    options_json: Option<&str>,
+) -> Result<MongoDocumentResult, String> {
+    let filter_value: serde_json::Value =
+        serde_json::from_str(filter_json).map_err(|e| format!("Invalid filter JSON: {e}"))?;
+    let replacement_value: serde_json::Value =
+        serde_json::from_str(replacement_json).map_err(|e| format!("Invalid replacement JSON: {e}"))?;
+    let filter = json_filter_to_document(&filter_value).map_err(|e| format!("Invalid filter: {e}"))?;
+    let replacement = json_object_to_document(&replacement_value).map_err(|e| format!("Invalid replacement: {e}"))?;
+    let options: MongoFindOneAndReplaceOptions = parse_find_and_modify_options(options_json, "findOneAndReplace")?;
+    let col = client.database(database).collection::<Document>(collection);
+    let mut action = col.find_one_and_replace(filter, replacement);
+    if find_and_modify_returns_after(options.return_document.as_deref(), options.return_new_document, options.new)? {
+        action = action.return_document(mongodb::options::ReturnDocument::After);
+    }
+    if let Some(upsert) = options.upsert {
+        action = action.upsert(upsert);
+    }
+    if let Some(projection) = parse_optional_document(options.projection.as_ref(), "projection")? {
+        action = action.projection(projection);
+    }
+    if let Some(sort) = parse_optional_document(options.sort.as_ref(), "sort")? {
+        action = action.sort(sort);
+    }
+    let result = action.await.map_err(|e| e.to_string())?;
+    Ok(single_document_result(result))
+}
+
+pub async fn find_one_and_delete(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    filter_json: &str,
+    options_json: Option<&str>,
+) -> Result<MongoDocumentResult, String> {
+    let filter_value: serde_json::Value =
+        serde_json::from_str(filter_json).map_err(|e| format!("Invalid filter JSON: {e}"))?;
+    let filter = json_filter_to_document(&filter_value).map_err(|e| format!("Invalid filter: {e}"))?;
+    let options: MongoFindOneAndDeleteOptions = parse_find_and_modify_options(options_json, "findOneAndDelete")?;
+    let col = client.database(database).collection::<Document>(collection);
+    let mut action = col.find_one_and_delete(filter);
+    if let Some(projection) = parse_optional_document(options.projection.as_ref(), "projection")? {
+        action = action.projection(projection);
+    }
+    if let Some(sort) = parse_optional_document(options.sort.as_ref(), "sort")? {
+        action = action.sort(sort);
+    }
+    let result = action.await.map_err(|e| e.to_string())?;
+    Ok(single_document_result(result))
 }
 
 pub async fn delete_document(client: &Client, database: &str, collection: &str, id: &str) -> Result<u64, String> {
@@ -1908,6 +2143,57 @@ mod tests {
         assert!(is_update_operator_document(&doc! { "$set": { "name": "Ada" }, "$unset": { "old": "" } }));
         assert!(!is_update_operator_document(&doc! { "name": "Ada" }));
         assert!(!is_update_operator_document(&Document::new()));
+    }
+
+    #[test]
+    fn find_one_options_accept_sort_and_reject_unimplemented_fields() {
+        let options = parse_find_one_options(Some(r#"{"sort":{"createdAt":-1}}"#)).unwrap();
+        assert_eq!(options.sort, Some(serde_json::json!({ "createdAt": -1 })));
+
+        let error = parse_find_one_options(Some(r#"{"hint":{"createdAt":1}}"#)).unwrap_err();
+        assert!(error.contains("unknown field `hint`"));
+    }
+
+    #[test]
+    fn find_and_modify_options_reject_fields_not_applied_by_each_command() {
+        let update_error = parse_find_and_modify_options::<MongoFindOneAndUpdateOptions>(
+            Some(r#"{"hint":{"name":1}}"#),
+            "findOneAndUpdate",
+        )
+        .unwrap_err();
+        assert!(update_error.contains("unknown field `hint`"));
+
+        let replace_error = parse_find_and_modify_options::<MongoFindOneAndReplaceOptions>(
+            Some(r#"{"arrayFilters":[{"item.active":true}]}"#),
+            "findOneAndReplace",
+        )
+        .unwrap_err();
+        assert!(replace_error.contains("unknown field `arrayFilters`"));
+
+        let delete_error = parse_find_and_modify_options::<MongoFindOneAndDeleteOptions>(
+            Some(r#"{"returnDocument":"after"}"#),
+            "findOneAndDelete",
+        )
+        .unwrap_err();
+        assert!(delete_error.contains("unknown field `returnDocument`"));
+    }
+
+    #[test]
+    fn find_and_modify_return_document_rejects_invalid_values() {
+        assert!(find_and_modify_returns_after(Some("after"), None, None).unwrap());
+        assert!(!find_and_modify_returns_after(Some("before"), None, None).unwrap());
+        assert!(find_and_modify_returns_after(Some("newest"), None, None).is_err());
+    }
+
+    #[test]
+    fn single_document_result_has_zero_or_one_metadata() {
+        let empty = single_document_result(None);
+        assert!(empty.documents.is_empty());
+        assert_eq!(empty.total, 0);
+
+        let one = single_document_result(Some(doc! { "_id": 1, "name": "Ada" }));
+        assert_eq!(one.documents.len(), 1);
+        assert_eq!(one.total, 1);
     }
 
     #[test]

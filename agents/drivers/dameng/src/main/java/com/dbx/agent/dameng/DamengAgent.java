@@ -834,6 +834,11 @@ public final class DamengAgent extends BaseDatabaseAgent {
 
     @Override
     public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
+        String explainSql = explainTargetSql(sql);
+        if (explainSql != null) {
+            // DM JDBC reports raw EXPLAIN as an update count; its driver API is the only source of plan rows.
+            return executeExplainQuery(explainSql, schema, options);
+        }
         return JdbcExecutor.current().execute(
             requireConnected(),
             sql,
@@ -846,8 +851,92 @@ public final class DamengAgent extends BaseDatabaseAgent {
         );
     }
 
+    private QueryResult executeExplainQuery(String sql, String schema, ExecuteQueryOptions options) {
+        return explainQueryResult(sql, schema, options.getTimeoutSecs(), options.getMaxRows());
+    }
+
+    private QueryResult explainQueryResult(String sql, String schema, int timeoutSecs, int maxRows) {
+        long start = System.currentTimeMillis();
+        String planText = getExplainInfo(sql, null, schema, timeoutSecs, "explain");
+        int effectiveMaxRows = Math.max(maxRows, 1);
+        List<List<Object>> rows = new ArrayList<>();
+        boolean truncated = false;
+        for (String line : planText.split("\\R")) {
+            if (line.trim().isEmpty()) {
+                continue;
+            }
+            if (rows.size() >= effectiveMaxRows) {
+                truncated = true;
+                break;
+            }
+            rows.add(List.of(line));
+        }
+        return new QueryResult(
+            List.of("PLAN"),
+            List.of("VARCHAR"),
+            rows,
+            0,
+            System.currentTimeMillis() - start,
+            truncated
+        );
+    }
+
+    static String explainTargetSql(String sql) {
+        if (sql == null) {
+            return null;
+        }
+        int index = skipSqlTrivia(sql, 0);
+        int keywordEnd = index + "EXPLAIN".length();
+        if (keywordEnd > sql.length()
+            || !sql.regionMatches(true, index, "EXPLAIN", 0, "EXPLAIN".length())
+            || (keywordEnd < sql.length() && isIdentifierPart(sql.charAt(keywordEnd)))) {
+            return null;
+        }
+        String targetSql = sql.substring(keywordEnd).trim();
+        while (targetSql.endsWith(";")) {
+            targetSql = targetSql.substring(0, targetSql.length() - 1).trim();
+        }
+        return targetSql.isEmpty() ? null : targetSql;
+    }
+
+    private static int skipSqlTrivia(String sql, int start) {
+        int index = start;
+        while (index < sql.length()) {
+            if (Character.isWhitespace(sql.charAt(index))) {
+                index++;
+            } else if (sql.startsWith("--", index)) {
+                int lineEnd = sql.indexOf('\n', index + 2);
+                index = lineEnd < 0 ? sql.length() : lineEnd + 1;
+            } else if (sql.startsWith("/*", index)) {
+                int commentEnd = sql.indexOf("*/", index + 2);
+                index = commentEnd < 0 ? sql.length() : commentEnd + 2;
+            } else {
+                break;
+            }
+        }
+        return index;
+    }
+
+    private static boolean isIdentifierPart(char value) {
+        return Character.isLetterOrDigit(value) || value == '_' || value == '$';
+    }
+
     @Override
     public QueryPageResult executeQueryPage(String sql, String schema, QueryPageOptions options) {
+        String explainSql = explainTargetSql(sql);
+        if (explainSql != null) {
+            QueryResult result = explainQueryResult(explainSql, schema, options.getTimeoutSecs(), options.getMaxRows());
+            return new QueryPageResult(
+                result.getColumns(),
+                result.getColumn_types(),
+                result.getRows(),
+                result.getAffected_rows(),
+                result.getExecution_time_ms(),
+                result.getTruncated(),
+                null,
+                false
+            );
+        }
         return JdbcExecutor.current().executePage(
             requireConnected(),
             sql,
@@ -1299,6 +1388,11 @@ public final class DamengAgent extends BaseDatabaseAgent {
     public String getExplainInfo(String sql, String database, String schema, int timeoutSecs, String mode) {
         return unchecked(() -> {
             Connection conn = requireConnected();
+            if (schema != null && !schema.trim().isEmpty()) {
+                try (Statement schemaStmt = conn.createStatement()) {
+                    schemaStmt.execute(setSchemaSQL(schema));
+                }
+            }
             boolean autotrace = "autotrace".equalsIgnoreCase(mode);
             String planText = null;
 

@@ -10,7 +10,7 @@ import { useHistoryStore } from "@/stores/historyStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { assessProductionSql, productionContextForDatabase } from "@/lib/database/productionSafety";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
-import { DBX_NEO4J_ELEMENT_ID_COLUMN, DBX_ROWID_COLUMN } from "@/lib/table/tableEditing";
+import { DBX_NEO4J_ELEMENT_ID_COLUMN, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 
 interface RowItem {
@@ -299,6 +299,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function touchPendingChanges() {
+    // Save errors describe the previous pending snapshot; edits, undo/redo, and rollback make them stale.
+    saveError.value = "";
     pendingChangesVersion.value++;
   }
 
@@ -862,7 +864,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function shouldClearClonedColumn(columnName: string, columnInfo: ColumnInfo | undefined): boolean {
-    if (resolvedDatabaseType.value === "oracle" && columnName.toUpperCase() === DBX_ROWID_COLUMN) return true;
+    if (usesSyntheticRowIdKey(resolvedDatabaseType.value, [columnName])) return true;
     if (resolvedDatabaseType.value === "neo4j" && columnName === DBX_NEO4J_ELEMENT_ID_COLUMN) return true;
     const extra = columnInfo?.extra ?? "";
     const columnDefault = columnInfo?.column_default ?? "";

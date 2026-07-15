@@ -1,6 +1,6 @@
 import type { BinaryHexViewRow } from "@/lib/dataGrid/binaryHexViewer";
 import { buildBinaryHexViewRows } from "@/lib/dataGrid/binaryHexViewer";
-import { parseJsonPreservingLargeNumbers, safeJsonFormat } from "@/lib/common/safeJsonFormat";
+import { formatJsonSource, parseJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
 import type { RedisBlob, RedisCollectionPage, RedisHashItem, RedisListItem, RedisSetItem, RedisValue, RedisZsetItem } from "@/lib/backend/api";
 import { parseJavaSerializedDetail, type RedisJavaSerializedDetail } from "@/lib/redis/javaSerialized";
 
@@ -33,6 +33,16 @@ export interface RedisJsonDetail {
   formattedText: string;
   value: unknown;
 }
+
+export type RedisJsonDraftNormalizationResult =
+  | {
+      ok: true;
+      compactText: string;
+    }
+  | {
+      ok: false;
+      error: "invalid_json";
+    };
 
 export interface RedisMemberDetailOptions {
   allowJsonText?: boolean;
@@ -155,6 +165,11 @@ export function formatRedisCommandResult(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
+/** RedisJSON source text stays out of JavaScript's numeric representation. */
+export function redisJsonValueText(value: { value: string }): string {
+  return value.value;
+}
+
 /**
  * Detect if a value is a cluster-aggregated INFO response:
  * `[[addr, infoText], ...]` where each `infoText` starts with `"# "`
@@ -189,14 +204,30 @@ export function parseRedisJsonDetail(value: unknown): RedisJsonDetail | null {
   if (!trimmed) return null;
 
   try {
+    // Pretty-print from source tokens so duplicate members and number spellings
+    // stay intact when Redis string/hash values open in the JSON editor.
+    const formattedText = formatJsonSource(trimmed, 2);
     const parsed = parseJsonPreservingLargeNumbers(trimmed);
     return {
       rawText: value,
-      formattedText: safeJsonFormat(trimmed, 2),
+      formattedText,
       value: parsed,
     };
   } catch {
     return null;
+  }
+}
+
+/**
+ * Validates a JSON editor draft and produces the compact text Redis should
+ * store. Source-preserving minification keeps high-precision numbers and
+ * duplicate object members intact.
+ */
+export function normalizeRedisJsonDraft(text: string): RedisJsonDraftNormalizationResult {
+  try {
+    return { ok: true, compactText: formatJsonSource(text) };
+  } catch {
+    return { ok: false, error: "invalid_json" };
   }
 }
 
@@ -272,7 +303,7 @@ export function redisValueSize(value: RedisValue): number {
     case "string":
       return decodeRedisBlob(value.data.content).byteLength;
     case "json":
-      return new TextEncoder().encode(JSON.stringify(value.data.value)).byteLength;
+      return new TextEncoder().encode(redisJsonValueText(value.data)).byteLength;
     case "list":
     case "set":
     case "hash":
@@ -290,7 +321,7 @@ export function redisValuePreview(value: RedisValue): string {
     case "string":
       return previewText(redisBlobRawText(value.data.content));
     case "json":
-      return previewText(JSON.stringify(value.data.value));
+      return previewText(redisJsonValueText(value.data));
     case "list": {
       const first = value.data.items[0];
       return first ? previewText(redisBlobRawText(first.value)) : "";
@@ -322,8 +353,14 @@ export function redisValueCopyText(value: RedisValue, collectionItems: RedisColl
   switch (value.data.kind) {
     case "string":
       return redisBlobRawText(value.data.content);
-    case "json":
-      return JSON.stringify(value.data.value, null, 2);
+    case "json": {
+      const rawText = redisJsonValueText(value.data);
+      try {
+        return formatJsonSource(rawText, 2);
+      } catch {
+        return rawText;
+      }
+    }
     case "list":
       return JSON.stringify(
         (collectionItems as RedisListItem[]).map((item) => redisBlobRawText(item.value)),

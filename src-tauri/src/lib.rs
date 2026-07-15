@@ -1286,6 +1286,7 @@ pub fn run() {
             commands::document_cmd::document_upload_gridfs_file,
             commands::document_cmd::document_delete_gridfs_file,
             commands::mongo_cmd::mongo_find_documents,
+            commands::mongo_cmd::mongo_find_one,
             commands::mongo_cmd::mongo_count_documents,
             commands::mongo_cmd::mongo_server_version,
             commands::mongo_cmd::mongo_collection_stats,
@@ -1301,6 +1302,9 @@ pub fn run() {
             commands::document_cmd::document_delete_document,
             commands::mongo_cmd::mongo_delete_document,
             commands::mongo_cmd::mongo_delete_documents,
+            commands::mongo_cmd::mongo_find_one_and_update,
+            commands::mongo_cmd::mongo_find_one_and_replace,
+            commands::mongo_cmd::mongo_find_one_and_delete,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_test_connection,
             #[cfg(feature = "mq-admin")]

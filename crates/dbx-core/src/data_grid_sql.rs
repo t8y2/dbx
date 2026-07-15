@@ -16,8 +16,8 @@ use data_grid_tdengine_sql::{
 
 use crate::models::connection::DatabaseType;
 use crate::sql_dialect::{
-    firebird_rows_clause, quote_table_identifier, table_pagination_strategy, uses_single_row_insert_statements,
-    TablePaginationStrategy,
+    firebird_rows_clause, quote_table_identifier, table_pagination_strategy, uses_oracle_row_id,
+    uses_single_row_insert_statements, TablePaginationStrategy,
 };
 use crate::transfer::{format_ch_array_sql_literal, format_pg_array_sql_literal};
 
@@ -828,6 +828,9 @@ fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<Str
     if let Some(error) = validate_tdengine_existing_rows(options) {
         return Some(error);
     }
+    if let Some(error) = validate_oracle_keyless_lob_predicate(options) {
+        return Some(error);
+    }
 
     let not_null_columns: Vec<String> = options
         .table_meta
@@ -861,21 +864,43 @@ fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<Str
         }
     }
 
-    for row in &options.new_rows {
-        for column_index in 0..options.columns.len() {
-            let source_column = effective_column(options, column_index);
-            if is_null_write_to_not_null_column(
-                options.database_type,
-                &not_null_columns,
-                source_column,
-                row.get(column_index).unwrap_or(&Value::Null),
-            ) {
-                return Some(null_write_error(source_column.unwrap_or_default()));
+    // MySQL BEFORE INSERT triggers can populate omitted NOT NULL columns. New-row NULL values are
+    // omitted from the generated INSERT, so let MySQL apply triggers or report missing required fields.
+    if options.database_type != Some(DatabaseType::Mysql) {
+        for row in &options.new_rows {
+            for column_index in 0..options.columns.len() {
+                let source_column = effective_column(options, column_index);
+                if is_null_write_to_not_null_column(
+                    options.database_type,
+                    &not_null_columns,
+                    source_column,
+                    row.get(column_index).unwrap_or(&Value::Null),
+                ) {
+                    return Some(null_write_error(source_column.unwrap_or_default()));
+                }
             }
         }
     }
 
     None
+}
+
+fn validate_oracle_keyless_lob_predicate(options: &DataGridSaveStatementOptions) -> Option<String> {
+    if !uses_oracle_row_id(options.database_type)
+        || !options.table_meta.primary_keys.is_empty()
+        || (options.dirty_rows.is_empty() && options.deleted_rows.is_empty())
+    {
+        return None;
+    }
+    let has_lob_column =
+        options.table_meta.columns.as_deref().unwrap_or(&[]).iter().any(|column| is_oracle_lob_type(&column.data_type));
+    if !has_lob_column {
+        return None;
+    }
+
+    // LOB equality is unsupported in Oracle-compatible SQL. Refuse unsafe
+    // keyless writes instead of dropping LOB predicates and risking extra rows.
+    Some("Cannot safely update or delete this Oracle-compatible row because the table has LOB columns but no primary key or ROWID identifier.".to_string())
 }
 
 fn validate_clickhouse_mutable_updates(options: &DataGridSaveStatementOptions) -> Option<String> {
@@ -1052,6 +1077,10 @@ fn build_data_grid_save_statements(options: &DataGridSaveStatementOptions) -> Ve
             .filter(|(_, value)| !value.is_null())
             .collect();
         if insert_pairs.is_empty() {
+            if options.database_type == Some(DatabaseType::Mysql) {
+                statements
+                    .push(data_grid_statement(options.database_type, format!("INSERT INTO {table} () VALUES ()")));
+            }
             continue;
         }
         let columns = insert_pairs
@@ -1096,8 +1125,13 @@ fn build_data_grid_rollback_statements(options: &DataGridSaveStatementOptions) -
     let mut statements = Vec::new();
 
     for row in &options.new_rows {
-        let where_clause = build_save_row_where(options.database_type, &save_columns, row, column_info);
-        if !where_clause.is_empty() {
+        let where_clause = if options.database_type == Some(DatabaseType::Mysql) {
+            build_mysql_insert_rollback_where(options, &save_columns, row, column_info)
+        } else {
+            let where_clause = build_save_row_where(options.database_type, &save_columns, row, column_info);
+            (!where_clause.is_empty()).then_some(where_clause)
+        };
+        if let Some(where_clause) = where_clause {
             statements
                 .push(data_grid_statement(options.database_type, format!("DELETE FROM {table} WHERE {where_clause}")));
         }
@@ -1206,6 +1240,34 @@ fn build_data_grid_rollback_statements(options: &DataGridSaveStatementOptions) -
     }
 
     statements
+}
+
+fn build_mysql_insert_rollback_where(
+    options: &DataGridSaveStatementOptions,
+    columns: &[Option<String>],
+    row: &[Value],
+    column_info: &[DataGridColumnInfo],
+) -> Option<String> {
+    if options.table_meta.primary_keys.is_empty() {
+        return None;
+    }
+
+    for primary_key in &options.table_meta.primary_keys {
+        let index = columns.iter().position(|column| column.as_deref() == Some(primary_key.as_str()))?;
+        let value = row.get(index).unwrap_or(&Value::Null);
+        let info = column_info_for(column_info, primary_key);
+        if value.is_null()
+            || empty_string_saves_as_null(value, info)
+            || info.is_some_and(is_auto_generated_column)
+            || info.is_some_and(|column| is_non_identity_generated_column(Some(column)))
+        {
+            // Generated or trigger-populated keys are unknown until after INSERT.
+            // Do not emit a rollback predicate that cannot match the inserted row.
+            return None;
+        }
+    }
+
+    Some(build_primary_key_where(options.database_type, &options.table_meta.primary_keys, columns, row, column_info))
 }
 
 pub(crate) fn effective_columns(options: &DataGridSaveStatementOptions) -> Vec<Option<String>> {
@@ -1961,8 +2023,16 @@ fn is_textual_column_type(data_type: &str) -> bool {
         || lower.starts_with("national character varying")
 }
 
+fn is_oracle_lob_type(data_type: &str) -> bool {
+    let lower = data_type.trim().trim_matches('"').to_ascii_lowercase();
+    let base = lower.split(['(', ':', ' ']).next().unwrap_or("");
+    matches!(base, "blob" | "clob" | "nclob" | "bfile" | "lob")
+        || lower.starts_with("binary large object")
+        || lower.starts_with("character large object")
+}
+
 fn is_oracle_row_id(database_type: Option<DatabaseType>, name: Option<&str>) -> bool {
-    database_type == Some(DatabaseType::Oracle) && name.is_some_and(|name| name.eq_ignore_ascii_case(DBX_ROWID_COLUMN))
+    uses_oracle_row_id(database_type) && name.is_some_and(|name| name.eq_ignore_ascii_case(DBX_ROWID_COLUMN))
 }
 
 pub(crate) fn is_neo4j_element_id(database_type: Option<DatabaseType>, name: Option<&str>) -> bool {
@@ -3371,6 +3441,141 @@ mod tests {
     }
 
     #[test]
+    fn prepares_oceanbase_oracle_lob_deletes_with_synthetic_rowid() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".to_string()),
+                table_name: "DATA_REPORT_SUB_TASK".to_string(),
+                primary_keys: vec![DBX_ROWID_COLUMN.to_string()],
+                columns: Some(vec![
+                    column(DBX_ROWID_COLUMN, "VARCHAR2", false, None),
+                    column("ID", "VARCHAR2(100)", false, None),
+                    column("SMC_RESPONSE", "CLOB", true, None),
+                    column("RAW_PAYLOAD", "BLOB", true, None),
+                    column("ARCHIVE_VALUE", "LOB", true, None),
+                ]),
+            },
+            columns: vec![
+                DBX_ROWID_COLUMN.to_string(),
+                "ID".to_string(),
+                "SMC_RESPONSE".to_string(),
+                "RAW_PAYLOAD".to_string(),
+                "ARCHIVE_VALUE".to_string(),
+            ],
+            source_columns: None,
+            rows: vec![
+                vec![json!("*AAABk1AAEAAAAAgAAA"), json!("task-1"), json!("response"), json!("0011"), json!("archive")],
+                vec![json!("*AAABk1AAEAAAAAgAAB"), json!("task-2"), Value::Null, Value::Null, Value::Null],
+            ],
+            dirty_rows: vec![],
+            deleted_rows: vec![0, 1],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "DELETE FROM \"APP\".\"DATA_REPORT_SUB_TASK\" WHERE ROWIDTOCHAR(ROWID) = '*AAABk1AAEAAAAAgAAA';",
+                "DELETE FROM \"APP\".\"DATA_REPORT_SUB_TASK\" WHERE ROWIDTOCHAR(ROWID) = '*AAABk1AAEAAAAAgAAB';",
+            ]
+        );
+    }
+
+    #[test]
+    fn prepares_oceanbase_oracle_lob_delete_with_declared_primary_key() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".to_string()),
+                table_name: "DOCUMENTS".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![
+                    column("ID", "NUMBER", false, None),
+                    column("TITLE", "VARCHAR2(100)", false, None),
+                    column("BODY", "CLOB", true, None),
+                    column("CONTENT", "BLOB", true, None),
+                ]),
+            },
+            columns: vec!["ID".to_string(), "TITLE".to_string(), "BODY".to_string(), "CONTENT".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(42), json!("report"), json!("body"), Value::Null]],
+            dirty_rows: vec![],
+            deleted_rows: vec![0],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["DELETE FROM \"APP\".\"DOCUMENTS\" WHERE \"ID\" = 42;"]);
+    }
+
+    #[test]
+    fn rejects_oceanbase_oracle_keyless_lob_writes_without_rowid() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".to_string()),
+                table_name: "DOCUMENTS".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("TITLE", "VARCHAR2(100)", false, None), column("BODY", "CLOB", true, None)]),
+            },
+            columns: vec!["TITLE".to_string(), "BODY".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("duplicate title"), json!("unique body")]],
+            dirty_rows: vec![],
+            deleted_rows: vec![0],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.validation_error.as_deref(),
+            Some("Cannot safely update or delete this Oracle-compatible row because the table has LOB columns but no primary key or ROWID identifier.")
+        );
+        assert!(result.statements.is_empty());
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn preserves_oceanbase_oracle_keyless_predicates_for_comparable_columns() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".to_string()),
+                table_name: "TASK_STATUS".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![
+                    column("TASK_NAME", "VARCHAR2(100)", false, None),
+                    column("STATUS", "VARCHAR2(16)", true, None),
+                ]),
+            },
+            columns: vec!["TASK_NAME".to_string(), "STATUS".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("task-1"), json!("RUNNING")], vec![json!("task-2"), Value::Null]],
+            dirty_rows: vec![],
+            deleted_rows: vec![0, 1],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "DELETE FROM \"APP\".\"TASK_STATUS\" WHERE \"TASK_NAME\" = 'task-1' AND \"STATUS\" = 'RUNNING';",
+                "DELETE FROM \"APP\".\"TASK_STATUS\" WHERE \"TASK_NAME\" = 'task-2' AND \"STATUS\" IS NULL;",
+            ]
+        );
+    }
+
+    #[test]
     fn formats_mysql_bit_literals_without_string_quotes() {
         let bit = column("flag", "bit(1)", true, None);
         let bit_string = column("flags", "bit(8)", true, None);
@@ -4502,6 +4707,146 @@ mod tests {
 
         assert_eq!(result.validation_error, None);
         assert_eq!(result.statements, vec!["INSERT INTO `app`.`users` (`name`) VALUES ('Ada');"]);
+    }
+
+    #[test]
+    fn prepare_data_grid_save_omits_mysql_not_null_column_for_before_insert_trigger() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app".to_string()),
+                table_name: "events".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    pk_column("id", "BIGINT", false, Some("auto_increment")),
+                    column("trigger_value", "VARCHAR(64)", false, None),
+                    column("payload", "VARCHAR(64)", false, None),
+                ]),
+            },
+            columns: vec!["id".to_string(), "trigger_value".to_string(), "payload".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![Value::Null, Value::Null, json!("created")]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["INSERT INTO `app`.`events` (`payload`) VALUES ('created');"]);
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn prepare_data_grid_save_uses_mysql_default_row_insert_for_trigger_only_rows() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app".to_string()),
+                table_name: "trigger_only".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    pk_column("id", "BIGINT", false, Some("auto_increment")),
+                    column("required_value", "VARCHAR(64)", false, None),
+                ]),
+            },
+            columns: vec!["id".to_string(), "required_value".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![Value::Null, Value::Null]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["INSERT INTO `app`.`trigger_only` () VALUES ();"]);
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn prepare_data_grid_save_uses_known_mysql_primary_key_for_trigger_rollback() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app".to_string()),
+                table_name: "events".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    pk_column("id", "BIGINT", false, None),
+                    column("trigger_value", "VARCHAR(64)", false, None),
+                    column("payload", "VARCHAR(64)", false, None),
+                ]),
+            },
+            columns: vec!["id".to_string(), "trigger_value".to_string(), "payload".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![json!(7), Value::Null, json!("created")]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["INSERT INTO `app`.`events` (`id`, `payload`) VALUES (7, 'created');"]);
+        assert_eq!(result.rollback_statements, vec!["DELETE FROM `app`.`events` WHERE `id` = 7;"]);
+    }
+
+    #[test]
+    fn prepare_data_grid_save_still_rejects_mysql_null_update() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app".to_string()),
+                table_name: "events".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    pk_column("id", "BIGINT", false, Some("auto_increment")),
+                    column("trigger_value", "VARCHAR(64)", false, None),
+                ]),
+            },
+            columns: vec!["id".to_string(), "trigger_value".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("existing")]],
+            dirty_rows: vec![(0, vec![(1, Value::Null)])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, Some(r#"Column "trigger_value" does not allow NULL."#.to_string()));
+        assert!(result.statements.is_empty());
+    }
+
+    #[test]
+    fn prepare_data_grid_save_omits_empty_kingbase_sqlserver_identity_value() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Kingbase),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("dbo".to_string()),
+                table_name: "orders".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    pk_column("id", "int", false, Some("identity(1,1)")),
+                    column("name", "varchar", false, None),
+                ]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![Value::Null, json!("Ada")]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec![r#"INSERT INTO "dbo"."orders" ("name") VALUES ('Ada');"#]);
     }
 
     #[test]

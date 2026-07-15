@@ -124,7 +124,8 @@ pub enum RedisValueData {
         content: RedisBlob,
     },
     Json {
-        value: serde_json::Value,
+        /// Original JSON.GET payload used throughout the RedisJSON UI.
+        value: String,
     },
     List {
         items: Vec<RedisListItem>,
@@ -1403,25 +1404,18 @@ pub fn is_redis_json_type(key_type: &str) -> bool {
     matches!(key_type.to_ascii_uppercase().as_str(), "REJSON-RL" | "JSON")
 }
 
-pub fn redis_json_raw_to_json(value: RedisRawValue) -> Result<serde_json::Value, String> {
-    match redis_raw_to_json(value) {
-        serde_json::Value::Null => Ok(serde_json::Value::Null),
-        serde_json::Value::String(text) => {
-            serde_json::from_str(&text).map(json_value_for_js).map_err(|e| format!("Invalid RedisJSON value: {e}"))
+pub fn redis_json_raw_to_text(value: RedisRawValue) -> Result<String, String> {
+    match value {
+        RedisRawValue::BulkString(bytes) => {
+            String::from_utf8(bytes).map_err(|e| format!("RedisJSON value is not valid UTF-8: {e}"))
         }
-        other => Ok(json_value_for_js(other)),
+        RedisRawValue::SimpleString(text) => Ok(text),
+        RedisRawValue::VerbatimString { text, .. } => Ok(text),
+        // Do not turn a key deleted between TYPE and JSON.GET into an editable
+        // JSON null; saving that draft would recreate a phantom key.
+        RedisRawValue::Nil => Err("RedisJSON key no longer exists".to_string()),
+        other => Err(format!("Unexpected RedisJSON response: {other:?}")),
     }
-}
-
-pub fn redis_json_value_preview(value: &serde_json::Value) -> String {
-    const MAX_PREVIEW_LEN: usize = 160;
-    let text = serde_json::to_string(value).unwrap_or_else(|_| value.to_string());
-    if text.chars().count() <= MAX_PREVIEW_LEN {
-        return text;
-    }
-    let mut preview = text.chars().take(MAX_PREVIEW_LEN).collect::<String>();
-    preview.push('…');
-    preview
 }
 
 pub fn redis_key_value_preview(key_type: &str) -> String {
@@ -1894,7 +1888,7 @@ where
         key_type if is_redis_json_type(key_type) => {
             let raw: RedisRawValue =
                 redis::cmd("JSON.GET").arg(key).query_async(con).await.map_err(|e| e.to_string())?;
-            RedisValueData::Json { value: redis_json_raw_to_json(raw)? }
+            RedisValueData::Json { value: redis_json_raw_to_text(raw)? }
         }
         _ => RedisValueData::Unknown,
     };
@@ -1928,7 +1922,7 @@ fn redis_key_matches_query(key_display: &str, key_raw: &str, query: &str) -> boo
 fn redis_search_value_text(value: &RedisValueData) -> String {
     match value {
         RedisValueData::String { content } => redis_blob_display_text(content),
-        RedisValueData::Json { value } => serde_json::to_string(value).unwrap_or_else(|_| value.to_string()),
+        RedisValueData::Json { value } => value.clone(),
         RedisValueData::List { items, .. } => {
             items.iter().map(|item| redis_blob_display_text(&item.value)).collect::<Vec<_>>().join(" ")
         }
@@ -1973,7 +1967,7 @@ fn redis_search_value_size(value: &RedisValue) -> u64 {
             .decode(&content.raw_base64)
             .map(|bytes| bytes.len() as u64)
             .unwrap_or(0),
-        RedisValueData::Json { value } => serde_json::to_vec(value).map(|bytes| bytes.len() as u64).unwrap_or(0),
+        RedisValueData::Json { value } => value.len() as u64,
         RedisValueData::List { total, .. }
         | RedisValueData::Set { total, .. }
         | RedisValueData::Hash { total, .. }
@@ -2115,14 +2109,6 @@ fn redis_list_items_from_raw(value: RedisRawValue, start_index: u64) -> Vec<Redi
             })
             .collect(),
         _ => Vec::new(),
-    }
-}
-
-fn redis_raw_to_json(value: RedisRawValue) -> serde_json::Value {
-    match value {
-        RedisRawValue::Nil => serde_json::Value::Null,
-        RedisRawValue::Array(values) => serde_json::Value::Array(values.into_iter().map(redis_raw_to_json).collect()),
-        other => serde_json::Value::String(redis_value_to_string(other).unwrap_or_default()),
     }
 }
 
@@ -2597,12 +2583,11 @@ mod tests {
         classify_command, connection_info, decode_cluster_cursor, encode_cluster_cursor, is_redis_json_type,
         parse_cluster_slots, parse_command_argv, parse_database_count, parse_redis_endpoint, parse_scan_keys,
         parse_stream_entries, redis_auth_candidates, redis_blob_from_bytes, redis_cluster_slot,
-        redis_command_raw_to_json, redis_database_index, redis_json_raw_to_json, redis_json_value_preview,
-        redis_key_bytes_to_display, redis_key_bytes_to_raw, redis_key_matches_query, redis_key_raw_to_bytes,
-        redis_key_value_preview, redis_raw_to_json, redis_sentinel_master_endpoint, redis_value_matches_query,
-        redis_value_to_bytes, RedisAuthCandidate, RedisBlob, RedisBlobEncoding, RedisClusterSlotRange,
-        RedisCollectionPage, RedisCommandSafety, RedisHashItem, RedisNodeEndpoint, RedisRawValue, RedisSetItem,
-        RedisStreamEntry, RedisStreamField, RedisValue, RedisValueData,
+        redis_command_raw_to_json, redis_database_index, redis_key_bytes_to_display, redis_key_bytes_to_raw,
+        redis_key_matches_query, redis_key_raw_to_bytes, redis_key_value_preview, redis_sentinel_master_endpoint,
+        redis_value_matches_query, redis_value_to_bytes, RedisAuthCandidate, RedisBlob, RedisBlobEncoding,
+        RedisClusterSlotRange, RedisCollectionPage, RedisCommandSafety, RedisHashItem, RedisNodeEndpoint,
+        RedisRawValue, RedisSetItem, RedisStreamEntry, RedisStreamField, RedisValue, RedisValueData,
     };
     use crate::models::connection::ConnectionConfig;
     use redis::{aio::ConnectionLike, Cmd, ConnectionAddr, Pipeline, RedisFuture};
@@ -2964,15 +2949,6 @@ mod tests {
     }
 
     #[test]
-    fn formats_binary_string_values_like_rdm() {
-        let raw = RedisRawValue::BulkString(vec![0xAC, 0xED, 0x00, 0x05, b's', b'r']);
-
-        let value = redis_raw_to_json(raw);
-
-        assert_eq!(value, serde_json::Value::String("\\xac\\xed\\x00\\x05sr".to_string()));
-    }
-
-    #[test]
     fn does_not_treat_utf8_with_backslashes_as_binary() {
         let raw = RedisRawValue::BulkString(br#"C:\Users\path"#.to_vec());
 
@@ -3290,37 +3266,50 @@ mod tests {
     }
 
     #[test]
-    fn parses_redis_json_get_bulk_string() {
-        let raw = bulk(r#"{"id":1,"embedding":[0.1,0.2],"meta":{"source":"test"}}"#);
+    fn preserves_raw_redis_json_text_without_parsing_numbers_for_js() {
+        let raw_text =
+            r#"{"id":2326645729978441729,"fraction":0.123456789012345678901234,"scientific":1.234567890123456789e20}"#;
 
-        assert_eq!(
-            redis_json_raw_to_json(raw).unwrap(),
-            serde_json::json!({
-                "id": 1,
-                "embedding": [0.1, 0.2],
-                "meta": { "source": "test" }
-            })
-        );
+        assert_eq!(super::redis_json_raw_to_text(bulk(raw_text)).unwrap(), raw_text);
+        assert_eq!(super::redis_json_raw_to_text(RedisRawValue::Nil).unwrap_err(), "RedisJSON key no longer exists");
+        assert!(super::redis_json_raw_to_text(RedisRawValue::BulkString(vec![0xff])).is_err());
     }
 
-    #[test]
-    fn parses_redis_json_unsafe_int64_as_string_for_js() {
-        let raw = bulk(r#"{"id":2326645729978441729,"nested":[1,2326645729978441728]}"#);
+    #[tokio::test]
+    async fn returns_lossless_value_text_for_native_redis_json_values() {
+        let value_text = r#"{"id":2326645729978441729,"fraction":0.123456789012345678901234,"name":"Ada"}"#;
+        let mut con = FakeRedisConnection::new(vec![bulk("ReJSON-RL"), RedisRawValue::Int(-1), bulk(value_text)]);
 
-        assert_eq!(
-            redis_json_raw_to_json(raw).unwrap(),
-            serde_json::json!({
-                "id": "2326645729978441729",
-                "nested": [1, "2326645729978441728"]
-            })
-        );
+        let value = super::get_value(&mut con, b"json:key").await.unwrap();
+        let response = serde_json::to_value(&value).unwrap();
+        let RedisValueData::Json { value: returned } = value.data else {
+            panic!("expected RedisJSON value");
+        };
+        assert_eq!(returned, value_text);
+        assert_eq!(con.command_count("JSON.GET"), 1);
+
+        assert_eq!(response["data"]["value"], value_text);
+        assert!(response["data"].get("raw_text").is_none());
     }
 
-    #[test]
-    fn builds_compact_redis_json_value_preview() {
-        let value = serde_json::json!({ "id": 1, "embedding": [0.1, 0.2] });
+    #[tokio::test]
+    async fn rejects_a_native_redis_json_key_deleted_after_type_lookup() {
+        let mut con = FakeRedisConnection::new(vec![bulk("ReJSON-RL"), RedisRawValue::Int(-1), RedisRawValue::Nil]);
 
-        assert_eq!(redis_json_value_preview(&value), r#"{"id":1,"embedding":[0.1,0.2]}"#);
+        let error = super::get_value(&mut con, b"json:key").await.unwrap_err();
+
+        assert_eq!(error, "RedisJSON key no longer exists");
+    }
+
+    #[tokio::test]
+    async fn redis_json_set_keeps_lossless_numeric_literals_in_the_command() {
+        let raw_text = r#"{"id":2326645729978441729,"fraction":0.123456789012345678901234}"#;
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Okay]);
+
+        super::json_set(&mut con, b"json:key", raw_text, None).await.unwrap();
+
+        assert_eq!(con.command_count("JSON.SET"), 1);
+        assert!(con.commands[0].contains(raw_text));
     }
 
     #[test]

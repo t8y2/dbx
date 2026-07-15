@@ -28,6 +28,8 @@ import {
   type DocumentFilterMode,
   type DocumentFilterRule,
 } from "@/lib/app/documentStoreProvider";
+import { documentStoreValueForGrid, parseDocumentStoreInputValue, serializeDocumentStoreId, stringifyDocumentStoreValue } from "@/lib/app/documentJsonValues";
+import { isLosslessJsonNumber, parseJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
 import { buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, mongoDocumentIdForGrid, parseMongoDocumentInputValue, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -163,8 +165,8 @@ const gridResult = computed<QueryResult>(() => {
     columns.map((col) => {
       const val = doc[col];
       if (val === undefined || val === null) return null;
-      if (col === "_id") return mongoDocumentIdForGrid(val);
-      if (typeof val === "object") return JSON.stringify(val);
+      if (col === "_id") return documentStoreProvider.value.kind === "elasticsearch" ? documentStoreValueForGrid(val, "elasticsearch") : mongoDocumentIdForGrid(val);
+      if (typeof val === "object") return documentStoreValueForGrid(val, documentStoreProvider.value.kind);
       if (typeof val === "string" || typeof val === "number" || typeof val === "boolean") return val;
       return String(val);
     }),
@@ -313,10 +315,10 @@ async function gridSave(changes: DocumentGridChanges) {
         if (newVal === null) {
           delete updated[col];
         } else {
-          updated[col] = parseMongoDocumentInputValue(newVal);
+          updated[col] = parseDocumentStoreInputValue(newVal, "elasticsearch");
         }
       }
-      await api.documentUpdateDocument(props.connectionId, props.database, props.collection, String(id), JSON.stringify(updated), routing);
+      await api.documentUpdateDocument(props.connectionId, props.database, props.collection, String(id), stringifyDocumentStoreValue(updated, "elasticsearch"), routing);
       continue;
     }
 
@@ -337,13 +339,13 @@ async function gridSave(changes: DocumentGridChanges) {
   }
 
   for (const newRow of changes.newRows) {
-    const doc = buildMongoInsertDocument(newRow, cols);
+    const doc = isEs ? buildElasticsearchInsertDocument(newRow, cols) : buildMongoInsertDocument(newRow, cols);
     if (isEs) {
       const id = documentIdFromGridValue(newRow[idColIdx]);
       if (id) {
-        await api.documentUpdateDocument(props.connectionId, props.database, props.collection, id, JSON.stringify(doc), documentRoutingFromGridRow(newRow, cols));
+        await api.documentUpdateDocument(props.connectionId, props.database, props.collection, id, stringifyDocumentStoreValue(doc, "elasticsearch"), documentRoutingFromGridRow(newRow, cols));
       } else {
-        await api.documentInsertDocument(props.connectionId, props.database, props.collection, JSON.stringify(doc));
+        await api.documentInsertDocument(props.connectionId, props.database, props.collection, stringifyDocumentStoreValue(doc, "elasticsearch"));
       }
       continue;
     }
@@ -351,6 +353,17 @@ async function gridSave(changes: DocumentGridChanges) {
   }
 
   await load();
+}
+
+function buildElasticsearchInsertDocument(row: MongoInputValue[], columns: string[]): JsonRecord {
+  const doc: JsonRecord = {};
+  for (let columnIndex = 0; columnIndex < columns.length; columnIndex += 1) {
+    const column = columns[columnIndex];
+    if (!column || column === "_id" || column === "_routing") continue;
+    const value = row[columnIndex];
+    if (value !== null) doc[column] = parseDocumentStoreInputValue(value, "elasticsearch");
+  }
+  return doc;
 }
 
 function mongoIdPreview(val: unknown): string {
@@ -368,13 +381,13 @@ function elasticsearchRoutingPreview(routing: string | undefined): string {
 }
 
 function buildElasticsearchPartialUpdateDocument(changes: Map<number, MongoInputValue>, columns: string[]): Record<string, unknown> {
-  const filtered = new Map<number, MongoInputValue>();
+  const document: Record<string, unknown> = {};
   for (const [colIdx, newVal] of changes) {
     const col = columns[colIdx];
     if (col === "_id" || col === "_routing") continue;
-    filtered.set(colIdx, newVal);
+    if (col && newVal !== null) document[col] = parseDocumentStoreInputValue(newVal, "elasticsearch");
   }
-  return buildMongoUpdateDocument(filtered, columns);
+  return document;
 }
 
 async function previewDocumentChanges(changes: DocumentGridChanges): Promise<string[]> {
@@ -391,7 +404,7 @@ async function previewDocumentChanges(changes: DocumentGridChanges): Promise<str
     if (isEs) {
       const updateDoc = buildElasticsearchPartialUpdateDocument(dirtyCols, columns);
       const routing = documentRoutingFromGridRow(row, columns);
-      stmts.push(`POST /${coll}/_update/${elasticsearchPathIdPreview(String(id))}${elasticsearchRoutingPreview(routing)}\n${JSON.stringify({ doc: updateDoc.$set ?? updateDoc }, null, 2)}`);
+      stmts.push(`POST /${coll}/_update/${elasticsearchPathIdPreview(String(id))}${elasticsearchRoutingPreview(routing)}\n${stringifyDocumentStoreValue({ doc: updateDoc.$set ?? updateDoc }, "elasticsearch", 2)}`);
     } else {
       const updateDoc = buildMongoUpdateDocument(dirtyCols, columns, documents.value[rowIdx]);
       stmts.push(`db.${coll}.updateOne({_id: ${mongoIdPreview(documents.value[rowIdx]?._id ?? id)}}, ${formatMongoShellLiteral(updateDoc)})`);
@@ -411,13 +424,13 @@ async function previewDocumentChanges(changes: DocumentGridChanges): Promise<str
   }
 
   for (const newRow of newRows) {
-    const doc = buildMongoInsertDocument(newRow, columns);
+    const doc = isEs ? buildElasticsearchInsertDocument(newRow, columns) : buildMongoInsertDocument(newRow, columns);
     if (isEs) {
       const id = idColIdx >= 0 ? documentIdFromGridValue(newRow[idColIdx]) : null;
       if (id) {
-        stmts.push(`PUT /${coll}/_doc/${elasticsearchPathIdPreview(id)}\n${JSON.stringify(doc, null, 2)}`);
+        stmts.push(`PUT /${coll}/_doc/${elasticsearchPathIdPreview(id)}\n${stringifyDocumentStoreValue(doc, "elasticsearch", 2)}`);
       } else {
-        stmts.push(`POST /${coll}/_doc\n${JSON.stringify(doc, null, 2)}`);
+        stmts.push(`POST /${coll}/_doc\n${stringifyDocumentStoreValue(doc, "elasticsearch", 2)}`);
       }
     } else {
       stmts.push(`db.${coll}.insertOne(${formatMongoShellLiteral(doc)})`);
@@ -464,7 +477,16 @@ async function load() {
     const sort = currentDocumentSortJson(sortInput.value);
     const result = await api.documentFindDocuments(props.connectionId, props.database, props.collection, page.value * pageSize.value, pageSize.value, filter, undefined, sort, executionId);
     if (documentLoadExecutionId.value !== executionId) return;
-    const nextDocuments = result.documents.map(asRecord);
+    const nextDocuments =
+      documentStoreProvider.value.kind === "elasticsearch" && result.raw_documents?.length === result.documents.length
+        ? result.raw_documents.map((raw, index) => {
+            try {
+              return asRecord(parseJsonPreservingLargeNumbers(raw));
+            } catch {
+              return asRecord(result.documents[index]);
+            }
+          })
+        : result.documents.map(asRecord);
     documents.value = nextDocuments;
     if (nextDocuments.length > 0) {
       const keySet = new Set<string>();
@@ -554,13 +576,13 @@ function syncSelectedDocumentAfterLoad(previousSelectedIdx: number | null, previ
 
   selectedIdx.value = nextIdx;
   if (!isEditing.value) {
-    editJson.value = JSON.stringify(documents.value[nextIdx], null, 2);
+    editJson.value = stringifyDocumentStoreValue(documents.value[nextIdx], documentStoreProvider.value.kind, 2);
   }
 }
 
 function selectDoc(idx: number) {
   selectedIdx.value = idx;
-  editJson.value = JSON.stringify(documents.value[idx], null, 2);
+  editJson.value = stringifyDocumentStoreValue(documents.value[idx], documentStoreProvider.value.kind, 2);
   isEditing.value = false;
   isNew.value = false;
   editFields.value = [];
@@ -593,13 +615,24 @@ function cancelEdit() {
     return;
   }
   if (selectedDoc.value) {
-    editJson.value = JSON.stringify(selectedDoc.value, null, 2);
+    editJson.value = stringifyDocumentStoreValue(selectedDoc.value, documentStoreProvider.value.kind, 2);
   }
   editFields.value = [];
   error.value = "";
 }
 
 function createEditNode(keyName: string, value: unknown, readonlyKey: boolean, readonlyValue: boolean): EditNode {
+  if (isLosslessJsonNumber(value)) {
+    return {
+      key: uuid(),
+      keyName,
+      kind: "value",
+      valueText: value.raw,
+      readonlyKey,
+      readonlyValue,
+      children: [],
+    };
+  }
   if (Array.isArray(value)) {
     return {
       key: uuid(),
@@ -655,12 +688,12 @@ function formatForEdit(value: unknown): string {
   if (value === undefined) return "";
   if (value === null) return "null";
   if (typeof value === "string") return JSON.stringify(value);
-  if (typeof value === "object") return JSON.stringify(value, null, 2);
+  if (typeof value === "object") return stringifyDocumentStoreValue(value, documentStoreProvider.value.kind, 2);
   return String(value);
 }
 
 function parseFieldValue(raw: string): unknown {
-  return parseMongoDocumentInputValue(raw);
+  return parseDocumentStoreInputValue(raw, documentStoreProvider.value.kind);
 }
 
 function buildObjectFromNodes(nodes: EditNode[], path: string): JsonRecord {
@@ -695,7 +728,7 @@ async function saveDoc() {
   try {
     const doc = buildDocumentFromFields();
     if (isNew.value) {
-      await api.documentInsertDocument(props.connectionId, props.database, props.collection, JSON.stringify(doc));
+      await api.documentInsertDocument(props.connectionId, props.database, props.collection, stringifyDocumentStoreValue(doc, documentStoreProvider.value.kind));
     } else if (selectedIdx.value !== null) {
       const current = documents.value[selectedIdx.value];
       const id = current?._id;
@@ -703,14 +736,14 @@ async function saveDoc() {
         error.value = "No _id field";
         return;
       }
-      await api.documentUpdateDocument(props.connectionId, props.database, props.collection, serializeMongoDocumentId(id), JSON.stringify(doc), documentRoutingFromDocument(current));
+      await api.documentUpdateDocument(props.connectionId, props.database, props.collection, serializeDocumentStoreId(id, documentStoreProvider.value.kind), stringifyDocumentStoreValue(doc, documentStoreProvider.value.kind), documentRoutingFromDocument(current));
     }
     isEditing.value = false;
     isNew.value = false;
     editFields.value = [];
     await load();
     if (selectedIdx.value !== null && documents.value[selectedIdx.value]) {
-      editJson.value = JSON.stringify(documents.value[selectedIdx.value], null, 2);
+      editJson.value = stringifyDocumentStoreValue(documents.value[selectedIdx.value], documentStoreProvider.value.kind, 2);
     }
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : String(e);
@@ -723,7 +756,7 @@ async function applyDeleteDoc(idx: number) {
   if (!id) return;
   error.value = "";
   try {
-    await api.documentDeleteDocument(props.connectionId, props.database, props.collection, serializeMongoDocumentId(id), documentRoutingFromDocument(doc));
+    await api.documentDeleteDocument(props.connectionId, props.database, props.collection, serializeDocumentStoreId(id, documentStoreProvider.value.kind), documentRoutingFromDocument(doc));
     if (selectedIdx.value === idx) {
       selectedIdx.value = null;
       editJson.value = "";
@@ -767,7 +800,7 @@ function docPreview(doc: JsonRecord): string {
   const keys = Object.keys(doc)
     .filter((k) => k !== "_id")
     .slice(0, 3);
-  const preview = keys.map((k) => `${k}: ${JSON.stringify(doc[k]).substring(0, 30)}`).join(", ");
+  const preview = keys.map((k) => `${k}: ${stringifyDocumentStoreValue(doc[k], documentStoreProvider.value.kind).substring(0, 30)}`).join(", ");
   return `${id} - ${preview}`;
 }
 

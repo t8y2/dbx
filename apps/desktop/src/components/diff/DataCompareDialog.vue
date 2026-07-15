@@ -915,7 +915,7 @@ watch(
             >
               <template #option-label="{ option, label }">
                 <div class="flex min-w-0 items-center gap-2">
-                  <DatabaseIcon :db-type="connectionIconType(option)" class="w-3.5 h-3.5 shrink-0" />
+                  <DatabaseIcon :db-type="connectionIconType(option)" class="h-3.5 w-3.5 shrink-0" />
                   <ConnectionGroupBadge :connection-id="option" />
                   <span class="min-w-0 flex-1 truncate">{{ label }}</span>
                 </div>
@@ -1002,7 +1002,7 @@ watch(
             >
               <template #option-label="{ option, label }">
                 <div class="flex min-w-0 items-center gap-2">
-                  <DatabaseIcon :db-type="connectionIconType(option)" class="w-3.5 h-3.5 shrink-0" />
+                  <DatabaseIcon :db-type="connectionIconType(option)" class="h-3.5 w-3.5 shrink-0" />
                   <ConnectionGroupBadge :connection-id="option" />
                   <span class="min-w-0 flex-1 truncate">{{ label }}</span>
                 </div>

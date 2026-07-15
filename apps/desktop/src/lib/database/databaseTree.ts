@@ -17,8 +17,8 @@ export function sortSidebarDatabases(databases: readonly DatabaseInfo[]): Databa
 
 export function buildDatabaseTreeNodes(connectionId: string, databases: DatabaseInfo[], options: { includeDefaultWhenEmpty?: boolean } = {}): TreeNode[] {
   const nodes = sortSidebarDatabases(databases).flatMap((db) => {
-    const name = db.name.trim();
-    if (!name) return [];
+    const name = db.name;
+    if (!name.trim()) return [];
     return [
       {
         id: `${connectionId}:${name}`,
@@ -66,8 +66,8 @@ export function buildDuckDbConnectionTreeNodes(connectionId: string, databases: 
   });
 
   const attachedCatalogNodes = sortSidebarDatabases(databases).flatMap((db) => {
-    const name = db.name.trim();
-    if (!name || name === "main") return [];
+    const name = db.name;
+    if (!name.trim() || name === "main") return [];
     return [
       {
         id: `${connectionId}:${name}`,

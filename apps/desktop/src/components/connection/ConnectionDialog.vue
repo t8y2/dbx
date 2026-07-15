@@ -20,6 +20,7 @@ import type { NacosAdminConfig, NacosAuthConfig } from "@/types/nacos";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { detachTunnelProfileLayer, tunnelProfileReferenceLayer, tunnelProfileSummary } from "@/lib/connection/tunnelProfiles";
+import { applySshConfigHostAliasPrefill as prefillSshConfigHostAlias } from "@/lib/connection/sshConfigHosts";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT, REDIS_SCAN_PAGE_SIZE_MIN, REDIS_SCAN_PAGE_SIZE_MAX, REDIS_SCAN_PAGE_SIZE_OPTIONS } from "@/lib/redis/redisKeyPattern";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
@@ -3480,24 +3481,8 @@ watch([() => editingId.value, () => open.value], () => {
 
 const sshConfigHostAliases = computed(() => sshConfigHosts.value.map((entry) => entry.alias));
 
-/**
- * Prefills user/port/key_path from a matching ~/.ssh/config alias, without
- * overwriting values the user already changed away from the form defaults.
- * This is a UX preview only — the authoritative resolution happens in the
- * Rust backend at connect time (see resolve_ssh_tunnel_config), so imported
- * configs that never touched this UI still resolve correctly.
- */
 function applySshConfigHostAliasPrefill(target: SshTunnelConfig) {
-  const entry = sshConfigHosts.value.find((candidate) => candidate.alias === target.host);
-  if (!entry) return;
-  if (target.user === DEFAULT_SSH_USER && entry.user) target.user = entry.user;
-  if (target.port === 22 && entry.port) target.port = entry.port;
-  if (!target.key_path && entry.identity_file) {
-    target.key_path = entry.identity_file;
-    if ((!target.auth_method || target.auth_method === "password") && !target.password?.trim()) {
-      target.auth_method = "key";
-    }
-  }
+  prefillSshConfigHostAlias(target, sshConfigHosts.value);
 }
 
 async function browseSshKeyPath(target?: SshTunnelConfig | null) {

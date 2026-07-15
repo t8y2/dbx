@@ -2015,6 +2015,10 @@ export async function mongoFindDocuments(connectionId: string, database: string,
   return documentFindDocuments(connectionId, database, collection, skip, limit, filter, projection, sort, executionId);
 }
 
+export async function mongoFindOne(connectionId: string, database: string, collection: string, filter?: string, projection?: string, options?: string, executionId?: string): Promise<MongoDocumentResult> {
+  return post("/api/mongo/find-one", { connectionId, database, collection, filter, projection, options, executionId });
+}
+
 export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, executionId?: string): Promise<MongoDocumentResult> {
   return post("/api/document-store/find-documents", { connectionId, database, collection, skip, limit, filter, projection, sort, executionId });
 }
@@ -2126,6 +2130,18 @@ export async function documentDeleteDocument(connectionId: string, database: str
 
 export async function mongoDeleteDocuments(connectionId: string, database: string, collection: string, filterJson: string, many: boolean): Promise<{ affected_rows: number }> {
   return post("/api/mongo/delete-documents", { connectionId, database, collection, filterJson, many });
+}
+
+export async function mongoFindOneAndUpdate(connectionId: string, database: string, collection: string, filterJson: string, updateJson: string, optionsJson?: string): Promise<MongoDocumentResult> {
+  return post("/api/mongo/find-one-and-update", { connectionId, database, collection, filterJson, updateJson, optionsJson });
+}
+
+export async function mongoFindOneAndReplace(connectionId: string, database: string, collection: string, filterJson: string, replacementJson: string, optionsJson?: string): Promise<MongoDocumentResult> {
+  return post("/api/mongo/find-one-and-replace", { connectionId, database, collection, filterJson, replacementJson, optionsJson });
+}
+
+export async function mongoFindOneAndDelete(connectionId: string, database: string, collection: string, filterJson: string, optionsJson?: string): Promise<MongoDocumentResult> {
+  return post("/api/mongo/find-one-and-delete", { connectionId, database, collection, filterJson, optionsJson });
 }
 
 // ---------------------------------------------------------------------------

@@ -91,7 +91,7 @@ import { executableStatementRangeCacheForDoc, executableStatementRangeStartingAt
 import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES } from "@/lib/table/tableColumnTemplates";
 import { DEFAULT_SQL_VARIABLE_SYNTAX_TOGGLES, normalizeSqlVariableSyntaxOverrides, SQL_VARIABLE_SYNTAX_DATABASE_TYPES, SQL_VARIABLE_SYNTAX_KEYS, SQL_VARIABLE_SYNTAX_TOKENS, type SqlVariableSyntaxOverrides, type SqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpVsCodeConfig, type McpEnvEntry, type McpLaunchConfig } from "@/lib/mcp/mcpConfigTemplates";
-import { isMacOS, isWindows } from "@/lib/backend/platform";
+import { isMacOS } from "@/lib/backend/platform";
 import { combineDataTypeForDatabase, dataTypeLengthInputValue, getDataTypeOptions, getDefaultLengthForType, isDataTypeLengthDisabled, splitDataType } from "@/lib/table/tableStructureEditorState";
 import { useToast } from "@/composables/useToast";
 import type { DatabaseType, SqlSnippet } from "@/types/database";
@@ -348,7 +348,7 @@ const editToolbarItems = ref({ ...settingsStore.editorSettings.toolbarItems });
 const systemFonts = ref<string[]>([]);
 const systemFontsLoading = ref(false);
 const systemFontsLoaded = ref(false);
-const uiScaleOptions = [0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
+const uiScaleOptions = [0.75, 0.9, 0.95, 1, 1.05, 1.1, 1.15, 1.2, 1.25, 1.5, 1.75, 2];
 const fontSearchTriggerClass =
   "h-8 w-full max-w-none justify-between gap-1.5 rounded-[6px] border border-input bg-transparent py-2 pl-2.5 pr-2 text-sm font-normal shadow-none hover:bg-transparent focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 aria-expanded:bg-transparent dark:bg-input/30 dark:hover:bg-input/50";
 const appearanceFontSearchTriggerClass = `${fontSearchTriggerClass} gap-0 pl-2 pr-1.5`;
@@ -1389,9 +1389,9 @@ const mcpEnvEntries = computed<McpEnvEntry[]>(() => {
 });
 
 const mcpLaunchConfig = computed<McpLaunchConfig | undefined>(() => {
-  if (!isWindows() || !mcpStatus.value?.script_path) return undefined;
+  if (!mcpStatus.value?.node_path || !mcpStatus.value.script_path) return undefined;
   return {
-    command: mcpStatus.value.node_path || "node",
+    command: mcpStatus.value.node_path,
     args: [mcpStatus.value.script_path],
   };
 });

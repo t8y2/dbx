@@ -4565,6 +4565,16 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     }
 
     #[test]
+    fn mysql_setup_queries_preserve_database_identifier_whitespace() {
+        let queries = mysql_setup_queries("mysql://root:secret@localhost:3306/%20analytics%20?charset=utf8mb4", &[]);
+
+        assert_eq!(
+            queries,
+            vec!["USE ` analytics `", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
+        );
+    }
+
+    #[test]
     fn mysql_setup_queries_can_select_database_without_url_path() {
         let queries = mysql_setup_queries_for_database(
             "mysql://root:secret@localhost:3306?charset=utf8mb4",

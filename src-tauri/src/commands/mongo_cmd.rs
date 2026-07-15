@@ -111,6 +111,35 @@ pub async fn mongo_find_documents(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn mongo_find_one(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    collection: String,
+    filter: Option<String>,
+    projection: Option<String>,
+    options: Option<String>,
+    execution_id: Option<String>,
+) -> Result<MongoDocumentResult, String> {
+    let app = state.inner().clone();
+    run_cancellable(
+        &app,
+        execution_id,
+        dbx_core::mongo_ops::mongo_find_one_core(
+            &app,
+            &connection_id,
+            &database,
+            &collection,
+            filter.as_deref(),
+            projection.as_deref(),
+            options.as_deref(),
+        ),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn mongo_count_documents(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -330,4 +359,71 @@ pub async fn mongo_delete_documents(
     ensure_connection_writable(&state, &connection_id, "Delete").await?;
     dbx_core::mongo_ops::mongo_delete_documents_core(&state, &connection_id, &database, &collection, &filter_json, many)
         .await
+}
+
+#[tauri::command]
+pub async fn mongo_find_one_and_update(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    collection: String,
+    filter_json: String,
+    update_json: String,
+    options_json: Option<String>,
+) -> Result<MongoDocumentResult, String> {
+    ensure_connection_writable(&state, &connection_id, "Update").await?;
+    dbx_core::mongo_ops::mongo_find_one_and_update_core(
+        &state,
+        &connection_id,
+        &database,
+        &collection,
+        &filter_json,
+        &update_json,
+        options_json.as_deref(),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn mongo_find_one_and_replace(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    collection: String,
+    filter_json: String,
+    replacement_json: String,
+    options_json: Option<String>,
+) -> Result<MongoDocumentResult, String> {
+    ensure_connection_writable(&state, &connection_id, "Update").await?;
+    dbx_core::mongo_ops::mongo_find_one_and_replace_core(
+        &state,
+        &connection_id,
+        &database,
+        &collection,
+        &filter_json,
+        &replacement_json,
+        options_json.as_deref(),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn mongo_find_one_and_delete(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    collection: String,
+    filter_json: String,
+    options_json: Option<String>,
+) -> Result<MongoDocumentResult, String> {
+    ensure_connection_writable(&state, &connection_id, "Delete").await?;
+    dbx_core::mongo_ops::mongo_find_one_and_delete_core(
+        &state,
+        &connection_id,
+        &database,
+        &collection,
+        &filter_json,
+        options_json.as_deref(),
+    )
+    .await
 }

@@ -10,7 +10,9 @@ import { Loader2, Plus, Trash2 } from "@lucide/vue";
 import { useToast } from "@/composables/useToast";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { createTunnelProfile, createTunnelProfileTestGuard, tunnelProfileSummary, type TunnelProfileType } from "@/lib/connection/tunnelProfiles";
-import type { TunnelProfile } from "@/types/database";
+import { applySshConfigHostAliasPrefill as prefillSshConfigHostAlias } from "@/lib/connection/sshConfigHosts";
+import * as api from "@/lib/backend/api";
+import type { SshConfigHostEntry, TunnelProfile } from "@/types/database";
 import { translateBackendError } from "@/i18n/backend-errors";
 
 const { t } = useI18n();
@@ -24,6 +26,7 @@ const hasInitializedDraft = ref(false);
 const isTesting = ref(false);
 const testResult = ref<{ ok: boolean; message: string } | null>(null);
 const testGuard = createTunnelProfileTestGuard();
+const sshConfigHosts = ref<SshConfigHostEntry[]>([]);
 
 function cloneProfiles(profiles: TunnelProfile[]): TunnelProfile[] {
   return JSON.parse(JSON.stringify(profiles)) as TunnelProfile[];
@@ -56,6 +59,23 @@ const selected = computed(() => draft.value.find((profile) => profile.id === sel
 const selectedSsh = computed(() => (selected.value?.type === "ssh" ? selected.value : null));
 const selectedProxy = computed(() => (selected.value?.type === "proxy" ? selected.value : null));
 const selectedHttp = computed(() => (selected.value?.type === "http_tunnel" ? selected.value : null));
+const sshConfigHostAliases = computed(() => sshConfigHosts.value.map((entry) => entry.alias));
+
+async function loadSshConfigHosts() {
+  try {
+    sshConfigHosts.value = await api.listSshConfigHosts();
+  } catch {
+    sshConfigHosts.value = [];
+  }
+}
+
+function updateSelectedSshHost(value: string | number) {
+  if (!selectedSsh.value) return;
+  selectedSsh.value.host = String(value);
+  prefillSshConfigHostAlias(selectedSsh.value, sshConfigHosts.value);
+}
+
+void loadSshConfigHosts();
 
 function invalidateProfileTest() {
   testGuard.invalidate();
@@ -190,7 +210,10 @@ async function testSelected() {
       <template v-if="selectedSsh">
         <div class="grid grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.sshHost") }}</Label>
-          <Input v-model="selectedSsh.host" class="col-span-2" :placeholder="t('connection.sshHostPlaceholder')" />
+          <Input :model-value="selectedSsh.host" class="col-span-2" list="tunnel-profile-ssh-config-host-aliases" :placeholder="t('connection.sshHostPlaceholder')" @update:model-value="updateSelectedSshHost" />
+          <datalist id="tunnel-profile-ssh-config-host-aliases">
+            <option v-for="alias in sshConfigHostAliases" :key="alias" :value="alias" />
+          </datalist>
           <Input v-model.number="selectedSsh.port" type="number" min="1" max="65535" class="col-span-1" />
         </div>
         <div class="grid grid-cols-4 items-center gap-4">

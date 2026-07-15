@@ -64,6 +64,14 @@ function sqlServerConn(id: string): ConnectionConfig {
   };
 }
 
+function elasticsearchConn(id: string): ConnectionConfig {
+  return {
+    ...conn(id),
+    db_type: "elasticsearch",
+    port: 9200,
+  };
+}
+
 function sparkConn(id: string): ConnectionConfig {
   return {
     ...conn(id),
@@ -4665,6 +4673,61 @@ test("query results keep readable table source labels with active database conte
     assert.equal(tab?.results?.[0]?.sourceStatement, "update users set active = true");
     assert.equal(tab?.results?.[1]?.sourceLabel, "db.users");
     assert.equal(tab?.results?.[1]?.sourceStatement, "select * from users");
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("Elasticsearch execute all runs each REST request separately", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const executedRequests: string[] = [];
+
+  connectionStore.addEphemeralConnection(elasticsearchConn("es-1"));
+  const tabId = store.createTab("es-1", "", "Elasticsearch query");
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/execute") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      executedRequests.push(body.sql);
+      return new Response(
+        JSON.stringify({
+          columns: ["status", "response"],
+          rows: [[200, body.sql.startsWith("HEAD") ? "null" : '{"ok":true}']],
+          affected_rows: 0,
+          execution_time_ms: 1,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  const sql = `/* 查看节点 JVM 信息 */
+GET /_nodes/stats/jvm?pretty
+
+# 判断索引是否存在
+HEAD /dbx-orders
+
+// 查询文档
+POST /dbx-orders/_search
+{"size":1}`;
+
+  try {
+    await store.executeTabSql(tabId, sql);
+    assert.deepEqual(executedRequests, ["GET /_nodes/stats/jvm?pretty", "HEAD /dbx-orders", 'POST /dbx-orders/_search\n{"size":1}']);
+
+    const tab = store.tabs.find((item) => item.id === tabId);
+    assert.deepEqual(
+      tab?.results?.map((result) => result.sourceStatement),
+      executedRequests,
+    );
+    assert.equal(tab?.activeResultIndex, 0);
+    assert.equal(tab?.result?.rows[0]?.[0], 200);
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

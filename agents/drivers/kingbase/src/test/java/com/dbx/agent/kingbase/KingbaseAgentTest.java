@@ -51,11 +51,11 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
-    void schemaSwitchPlacesSysCatalogAfterSelectedSchema() {
+    void schemaSwitchKeepsSystemCatalogImplicitlyFirst() {
         KingbaseAgent agent = new KingbaseAgent();
 
-        Assertions.assertEquals("SET search_path TO \"app\", sys_catalog", agent.setSchemaSQL("app"));
-        Assertions.assertEquals("SET search_path TO \"app\"\"prod\", sys_catalog", agent.setSchemaSQL("app\"prod"));
+        Assertions.assertEquals("SET search_path TO \"app\"", agent.setSchemaSQL("app"));
+        Assertions.assertEquals("SET search_path TO \"app\"\"prod\"", agent.setSchemaSQL("app\"prod"));
     }
 
     @Test
@@ -84,14 +84,14 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         agent.setMysqlCompatMode(true);
         TestSupport.setPrivateConnection(agent, preparedConnectionWithFailures(
             sql,
-            List.of("sys_catalog.sys_database", "FROM pg_database"),
+            List.of("sys_catalog.sys_database", "FROM pg_catalog.pg_database"),
             resultSet(new String[]{"database_name"}, new Object[][]{{"TEST"}})
         ));
 
         Assertions.assertEquals("TEST", agent.listDatabases().get(0).getName());
         Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_database"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("datallowconn = true"), sql.get(0));
-        Assertions.assertTrue(sql.get(1).contains("FROM pg_database"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("FROM pg_catalog.pg_database"), sql.get(1));
         Assertions.assertTrue(sql.get(1).contains("datallowconn = true"), sql.get(1));
         Assertions.assertEquals("SELECT current_database() AS database_name", sql.get(2));
     }
@@ -127,7 +127,7 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         Assertions.assertEquals(1, databases.size());
         Assertions.assertEquals("test", databases.get(0).getName());
         Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_database"), sql.get(0));
-        Assertions.assertTrue(sql.get(1).contains("FROM pg_database"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("FROM pg_catalog.pg_database"), sql.get(1));
         Assertions.assertTrue(sql.get(1).contains("datallowconn = true"), sql.get(1));
     }
 
@@ -141,7 +141,7 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         )));
 
         Assertions.assertEquals(Arrays.asList("public", "sys_catalog"), agent.listSchemas());
-        Assertions.assertTrue(sql.get(0).contains("FROM sys_namespace"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_namespace"), sql.get(0));
         Assertions.assertFalse(sql.get(0).contains("SYS%"), sql.get(0));
     }
 
@@ -163,7 +163,8 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         Assertions.assertEquals("SELECT 1 FROM sys_catalog.sys_namespace WHERE 1 = 0", sql.get(0));
         Assertions.assertEquals("SELECT 1 FROM pg_catalog.pg_namespace WHERE 1 = 0", sql.get(1));
         Assertions.assertTrue(sql.get(2).contains("FROM pg_catalog.pg_namespace"), sql.get(2));
-        Assertions.assertEquals("SET search_path TO \"app\", pg_catalog", agent.setSchemaSQL("app"));
+        Assertions.assertEquals("SET search_path TO \"app\"", agent.setSchemaSQL("app"));
+        Assertions.assertEquals("RESET search_path", agent.resetSchemaSQL());
     }
 
     @Test
@@ -179,7 +180,7 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         Assertions.assertTrue(agent.isMysqlCompatMode());
         Assertions.assertEquals("`", agent.getIdentifierQuote());
         Assertions.assertEquals("SELECT 1 FROM sys_catalog.sys_namespace WHERE 1 = 0", sql.get(0));
-        Assertions.assertEquals("SELECT 1 FROM sys_settings WHERE LOWER(name) = 'sql_mode'", sql.get(1));
+        Assertions.assertEquals("SELECT 1 FROM sys_catalog.sys_settings WHERE LOWER(name) = 'sql_mode'", sql.get(1));
     }
 
     @Test
@@ -194,7 +195,7 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
 
         Assertions.assertTrue(isSqlServerIdentityCatalogMode(agent));
         Assertions.assertEquals("SELECT 1 FROM sys_catalog.sys_namespace WHERE 1 = 0", sql.get(0));
-        Assertions.assertEquals("SELECT 1 FROM sys_settings WHERE LOWER(name) = 'sql_mode'", sql.get(1));
+        Assertions.assertEquals("SELECT 1 FROM sys_catalog.sys_settings WHERE LOWER(name) = 'sql_mode'", sql.get(1));
         Assertions.assertEquals("SELECT 1 FROM sys.identity_columns WHERE 1 = 0", sql.get(2));
     }
 

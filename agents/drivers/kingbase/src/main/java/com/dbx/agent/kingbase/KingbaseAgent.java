@@ -79,7 +79,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
 
     private static boolean mysqlSqlModeExists(Connection connection) {
         try (Statement stmt = connection.createStatement();
-             ResultSet rs = stmt.executeQuery("SELECT 1 FROM sys_settings WHERE LOWER(name) = 'sql_mode'")) {
+             ResultSet rs = stmt.executeQuery("SELECT 1 FROM sys_catalog.sys_settings WHERE LOWER(name) = 'sql_mode'")) {
             return rs.next();
         } catch (Exception ignored) {
             return false;
@@ -102,7 +102,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
         return unchecked(() -> {
             for (String sql : List.of(
                 "SELECT datname AS database_name FROM sys_catalog.sys_database WHERE datistemplate = false AND datallowconn = true ORDER BY datname",
-                "SELECT datname AS database_name FROM pg_database WHERE datistemplate = false AND datallowconn = true ORDER BY datname"
+                "SELECT datname AS database_name FROM pg_catalog.pg_database WHERE datistemplate = false AND datallowconn = true ORDER BY datname"
             )) {
                 try {
                     List<DatabaseInfo> result = queryDatabases(sql);
@@ -147,7 +147,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
                     "AND UPPER(schema_name) NOT LIKE 'XLOG%' " +
                     "ORDER BY schema_name"
                 : "SELECT nspname AS schema_name " +
-                    "FROM sys_namespace " +
+                    "FROM sys_catalog.sys_namespace " +
                     "WHERE nspname NOT LIKE 'sys_temp_%' " +
                     "AND nspname NOT LIKE 'sys_toast_temp_%' " +
                     "ORDER BY nspname";
@@ -636,13 +636,10 @@ public final class KingbaseAgent extends PostgresLikeAgent {
 
     @Override
     public String setSchemaSQL(String schema) {
-        if (postgresCatalogMode) {
-            return "SET search_path TO " + JdbcIdentifiers.INSTANCE.doubleQuote(effectiveSchema(schema)) + ", pg_catalog";
-        }
-        // Kingbase searches sys_catalog implicitly before user schemas unless it
-        // is listed explicitly. Put it after the selected schema so business
-        // tables named like system tables (for example sys_config) win.
-        return "SET search_path TO " + JdbcIdentifiers.INSTANCE.doubleQuote(effectiveSchema(schema)) + ", sys_catalog";
+        if (postgresCatalogMode) return super.setSchemaSQL(schema);
+        // Keep sys_catalog's implicit priority for functions, types, and
+        // operators. User table references are schema-qualified before execution.
+        return "SET search_path TO " + JdbcIdentifiers.INSTANCE.doubleQuote(effectiveSchema(schema));
     }
 
     @Override

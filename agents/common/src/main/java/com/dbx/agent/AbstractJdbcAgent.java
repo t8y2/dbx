@@ -142,6 +142,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             sql,
             schema,
             this::setSchemaSQL,
+            this::resetSchemaSQL,
             options.getMaxRows(),
             options.getFetchSize(),
             options.getTimeoutSecs(),
@@ -158,6 +159,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             sql,
             schema,
             this::setSchemaSQL,
+            this::resetSchemaSQL,
             options,
             resultValueReader()
         );
@@ -182,6 +184,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             sql,
             schema,
             this::setSchemaSQL,
+            this::resetSchemaSQL,
             options,
             resultValueReader()
         );
@@ -199,7 +202,13 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
 
     @Override
     public QueryResult executeTransaction(List<String> statements, String schema) {
-        return TransactionExecutor.executeUpdateStatements(requireConnected(), statements, schema, this::setSchemaSQL);
+        return TransactionExecutor.executeUpdateStatements(
+            requireConnected(),
+            statements,
+            schema,
+            this::setSchemaSQL,
+            this::resetSchemaSQL
+        );
     }
 
     @Override

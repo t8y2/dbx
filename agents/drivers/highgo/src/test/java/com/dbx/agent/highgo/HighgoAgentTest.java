@@ -37,7 +37,7 @@ class HighgoAgentTest extends JdbcFakeExecutionBehaviorTest {
 
         Assertions.assertEquals(
             Arrays.asList(
-                "SELECT pg_get_viewdef(to_regclass(?), true)",
+                "SELECT pg_catalog.pg_get_viewdef(pg_catalog.to_regclass(?), true)",
                 "param:1=\"bad\"\"schema\".\"view's name\""
             ),
             JdbcMetadataSqlFake.statements

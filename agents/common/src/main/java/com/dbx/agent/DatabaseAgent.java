@@ -167,6 +167,7 @@ public interface DatabaseAgent {
             sql,
             schema,
             this::setSchemaSQL,
+            this::resetSchemaSQL,
             options,
             AgentExecutionContext.jdbcExecutor()::defaultResultValue
         );
@@ -190,6 +191,7 @@ public interface DatabaseAgent {
             sql,
             schema,
             this::setSchemaSQL,
+            this::resetSchemaSQL,
             options,
             AgentExecutionContext.jdbcExecutor()::defaultResultValue
         );
@@ -222,7 +224,13 @@ public interface DatabaseAgent {
         if (conn == null) {
             throw new IllegalStateException("Not connected");
         }
-        return TransactionExecutor.executeUpdateStatements(conn, statements, schema, this::setSchemaSQL);
+        return TransactionExecutor.executeUpdateStatements(
+            conn,
+            statements,
+            schema,
+            this::setSchemaSQL,
+            this::resetSchemaSQL
+        );
     }
 
     default QueryResult executeBatch(List<String> statements, String schema) {
@@ -230,11 +238,15 @@ public interface DatabaseAgent {
         if (conn == null) {
             throw new IllegalStateException("Not connected");
         }
-        return BatchExecutor.executeBatchStatements(conn, statements, schema, this::setSchemaSQL);
+        return BatchExecutor.executeBatchStatements(conn, statements, schema, this::setSchemaSQL, this::resetSchemaSQL);
     }
 
     default String setSchemaSQL(String schema) {
         return "SET SCHEMA " + JdbcIdentifiers.INSTANCE.doubleQuote(schema);
+    }
+
+    default String resetSchemaSQL() {
+        return "";
     }
 
     static String buildTableDdl(

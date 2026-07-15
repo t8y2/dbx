@@ -5,7 +5,9 @@ use duckdb::types::{TimeUnit, Value, ValueRef};
 use futures::StreamExt;
 use mysql_async::prelude::Queryable;
 use serde::Serialize;
-use sqlparser::ast::{visit_relations_mut, Ident, ObjectName, ObjectNamePart, ObjectType, Statement};
+use sqlparser::ast::{
+    visit_relations_mut, Ident, ObjectName, ObjectNamePart, ObjectType, Statement, TableFactor, VisitMut, VisitorMut,
+};
 use sqlparser::dialect::{GenericDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
 use std::collections::HashSet;
@@ -218,12 +220,16 @@ fn schema_for_execution_context(db_type: Option<DatabaseType>, schema: Option<&s
 }
 
 fn sql_for_execution_context(db_type: Option<DatabaseType>, sql: &str, schema: Option<&str>) -> String {
-    if matches!(db_type, Some(DatabaseType::Iris)) {
-        if let Some(schema) = schema.map(str::trim).filter(|schema| !schema.is_empty()) {
-            return qualify_iris_unqualified_dml(sql, schema).unwrap_or_else(|| sql.to_string());
+    let Some(schema) = schema.map(str::trim).filter(|schema| !schema.is_empty()) else {
+        return sql.to_string();
+    };
+    match db_type {
+        Some(DatabaseType::Iris) => qualify_iris_unqualified_dml(sql, schema).unwrap_or_else(|| sql.to_string()),
+        Some(DatabaseType::Kingbase) => {
+            qualify_kingbase_unqualified_relations(sql, schema).unwrap_or_else(|| sql.to_string())
         }
+        _ => sql.to_string(),
     }
-    sql.to_string()
 }
 
 fn qualify_iris_unqualified_dml(sql: &str, schema: &str) -> Option<String> {
@@ -235,12 +241,12 @@ fn qualify_iris_unqualified_dml(sql: &str, schema: &str) -> Option<String> {
 
     let mut changed = false;
     for statement in &mut statements {
-        if !iris_statement_uses_schema_search_path(statement) {
+        if !statement_uses_schema_context(statement) {
             continue;
         }
-        let cte_names = iris_statement_cte_names(statement);
+        let cte_names = statement_cte_names(statement);
         let _ = visit_relations_mut(statement, |name| {
-            if qualify_iris_relation_name(name, schema, &cte_names) {
+            if qualify_unqualified_relation_name(name, schema, &cte_names) {
                 changed = true;
             }
             ControlFlow::<()>::Continue(())
@@ -250,7 +256,63 @@ fn qualify_iris_unqualified_dml(sql: &str, schema: &str) -> Option<String> {
     changed.then(|| statements.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))
 }
 
-fn iris_statement_uses_schema_search_path(statement: &Statement) -> bool {
+fn qualify_kingbase_unqualified_relations(sql: &str, schema: &str) -> Option<String> {
+    let dialect = PostgreSqlDialect {};
+    let mut statements = Parser::parse_sql(&dialect, sql).ok()?;
+    if statements.is_empty() {
+        return None;
+    }
+
+    let mut changed = false;
+    for statement in &mut statements {
+        if !statement_uses_schema_context(statement) {
+            continue;
+        }
+        let cte_names = statement_cte_names(statement);
+        let mut qualifier =
+            KingbaseRelationQualifier { schema, cte_names: &cte_names, parameterized_table_depth: 0, changed: false };
+        let _ = statement.visit(&mut qualifier);
+        changed |= qualifier.changed;
+    }
+
+    changed.then(|| statements.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))
+}
+
+struct KingbaseRelationQualifier<'a> {
+    schema: &'a str,
+    cte_names: &'a HashSet<String>,
+    parameterized_table_depth: usize,
+    changed: bool,
+}
+
+impl VisitorMut for KingbaseRelationQualifier<'_> {
+    type Break = ();
+
+    fn pre_visit_table_factor(&mut self, table_factor: &mut TableFactor) -> ControlFlow<Self::Break> {
+        if matches!(table_factor, TableFactor::Table { args: Some(_), .. }) {
+            self.parameterized_table_depth += 1;
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_table_factor(&mut self, table_factor: &mut TableFactor) -> ControlFlow<Self::Break> {
+        if matches!(table_factor, TableFactor::Table { args: Some(_), .. }) {
+            self.parameterized_table_depth = self.parameterized_table_depth.saturating_sub(1);
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_relation(&mut self, relation: &mut ObjectName) -> ControlFlow<Self::Break> {
+        if self.parameterized_table_depth == 0
+            && qualify_unqualified_relation_name(relation, self.schema, self.cte_names)
+        {
+            self.changed = true;
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+fn statement_uses_schema_context(statement: &Statement) -> bool {
     matches!(
         statement,
         Statement::Query(_)
@@ -261,7 +323,7 @@ fn iris_statement_uses_schema_search_path(statement: &Statement) -> bool {
     )
 }
 
-fn qualify_iris_relation_name(name: &mut ObjectName, schema: &str, cte_names: &HashSet<String>) -> bool {
+fn qualify_unqualified_relation_name(name: &mut ObjectName, schema: &str, cte_names: &HashSet<String>) -> bool {
     let [ObjectNamePart::Identifier(table)] = name.0.as_slice() else {
         return false;
     };
@@ -274,31 +336,35 @@ fn qualify_iris_relation_name(name: &mut ObjectName, schema: &str, cte_names: &H
     true
 }
 
-fn iris_statement_cte_names(statement: &Statement) -> HashSet<String> {
+fn statement_cte_names(statement: &Statement) -> HashSet<String> {
     let mut names = HashSet::new();
-    collect_iris_statement_cte_names(statement, &mut names);
+    collect_statement_cte_names(statement, &mut names);
     names
 }
 
-fn collect_iris_statement_cte_names(statement: &Statement, names: &mut HashSet<String>) {
+fn collect_statement_cte_names(statement: &Statement, names: &mut HashSet<String>) {
     match statement {
-        Statement::Query(query) => collect_iris_query_cte_names(query, names),
+        Statement::Query(query) => collect_query_cte_names(query, names),
         Statement::Insert(insert) => {
             if let Some(source) = &insert.source {
-                collect_iris_query_cte_names(source, names);
+                collect_query_cte_names(source, names);
             }
         }
         _ => {}
     }
 }
 
-fn collect_iris_query_cte_names(query: &sqlparser::ast::Query, names: &mut HashSet<String>) {
+fn collect_query_cte_names(query: &sqlparser::ast::Query, names: &mut HashSet<String>) {
     if let Some(with) = &query.with {
         for cte in &with.cte_tables {
             names.insert(cte.alias.name.value.to_ascii_uppercase());
-            collect_iris_query_cte_names(&cte.query, names);
+            collect_query_cte_names(&cte.query, names);
         }
     }
+}
+
+fn qualifies_unqualified_agent_relations(db_type: Option<DatabaseType>) -> bool {
+    matches!(db_type, Some(DatabaseType::Iris | DatabaseType::Kingbase))
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2240,7 +2306,7 @@ pub async fn execute_statements(
         let db_type = connection_database_type_for_pool_key(state, &pool_key).await;
         let execution_schema = schema_for_execution_context(db_type, schema);
         let rewritten_statements;
-        let statements = if matches!(db_type, Some(DatabaseType::Iris)) {
+        let statements = if qualifies_unqualified_agent_relations(db_type) {
             rewritten_statements =
                 statements.iter().map(|sql| sql_for_execution_context(db_type, sql, schema)).collect::<Vec<_>>();
             rewritten_statements.as_slice()
@@ -2651,7 +2717,7 @@ async fn exec_tx_explicit_inner(
         let db_type = connection_database_type_for_pool_key(state, pool_key).await;
         let execution_schema = schema_for_execution_context(db_type, schema);
         let rewritten_statements;
-        let statements = if matches!(db_type, Some(DatabaseType::Iris)) {
+        let statements = if qualifies_unqualified_agent_relations(db_type) {
             rewritten_statements =
                 statements.iter().map(|sql| sql_for_execution_context(db_type, sql, schema)).collect::<Vec<_>>();
             rewritten_statements.as_slice()
@@ -4360,6 +4426,55 @@ mod tests {
         assert_eq!(
             sql_for_execution_context(Some(DatabaseType::Postgres), "SELECT * FROM events", Some("APP")),
             "SELECT * FROM events"
+        );
+    }
+
+    #[test]
+    fn kingbase_execution_context_qualifies_only_unqualified_relations() {
+        assert_eq!(
+            sql_for_execution_context(Some(DatabaseType::Kingbase), "SELECT * FROM sys_user", Some("app")),
+            "SELECT * FROM \"app\".sys_user"
+        );
+        assert_eq!(
+            sql_for_execution_context(Some(DatabaseType::Kingbase), "SELECT * FROM other_schema.sys_user", Some("app")),
+            "SELECT * FROM other_schema.sys_user"
+        );
+
+        let mixed = sql_for_execution_context(
+            Some(DatabaseType::Kingbase),
+            "SELECT pg_typeof(u.id) FROM generate_series(1, 2) AS n JOIN sys_user u ON true",
+            Some("app"),
+        );
+        assert!(mixed.contains("FROM generate_series(1, 2) AS n"), "{mixed}");
+        assert!(mixed.contains("JOIN \"app\".sys_user u"), "{mixed}");
+        assert!(mixed.contains("pg_typeof(u.id)"), "{mixed}");
+    }
+
+    #[test]
+    fn kingbase_execution_context_preserves_ctes_functions_types_and_unsupported_sql() {
+        assert_eq!(
+            sql_for_execution_context(
+                Some(DatabaseType::Kingbase),
+                "WITH current_user AS (SELECT * FROM sys_user) SELECT * FROM current_user",
+                Some("APP")
+            ),
+            "WITH current_user AS (SELECT * FROM \"APP\".sys_user) SELECT * FROM current_user"
+        );
+        assert_eq!(
+            sql_for_execution_context(
+                Some(DatabaseType::Kingbase),
+                "SELECT pg_typeof(1::int), current_user",
+                Some("APP")
+            ),
+            "SELECT pg_typeof(1::int), current_user"
+        );
+        assert_eq!(
+            sql_for_execution_context(Some(DatabaseType::Kingbase), "CREATE TABLE sys_user (id INT)", Some("APP")),
+            "CREATE TABLE sys_user (id INT)"
+        );
+        assert_eq!(
+            sql_for_execution_context(Some(DatabaseType::Kingbase), "SELECT * FROM", Some("APP")),
+            "SELECT * FROM"
         );
     }
 

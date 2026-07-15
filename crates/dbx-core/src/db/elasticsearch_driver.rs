@@ -783,6 +783,61 @@ fn is_elasticsearch_ndjson_path(path: &str) -> bool {
         || path.ends_with("/_msearch/template")
 }
 
+fn normalize_elasticsearch_rest_path(path: &str) -> String {
+    let (path_part, query) = path.split_once('?').map_or((path, None), |(path, query)| (path, Some(query)));
+    let mut normalized = String::with_capacity(path.len());
+    let mut chars = path_part.chars().peekable();
+    let mut in_date_math = false;
+
+    while let Some(ch) = chars.next() {
+        if ch == '%' {
+            let mut lookahead = chars.clone();
+            if let (Some(first), Some(second)) = (lookahead.next(), lookahead.next()) {
+                if first.is_ascii_hexdigit() && second.is_ascii_hexdigit() {
+                    normalized.push(ch);
+                    normalized.push(chars.next().unwrap());
+                    normalized.push(chars.next().unwrap());
+                    continue;
+                }
+            }
+        }
+
+        if ch == '<' {
+            in_date_math = true;
+        }
+        let encoded = if in_date_math {
+            match ch {
+                '<' => Some("%3C"),
+                '>' => Some("%3E"),
+                '/' => Some("%2F"),
+                '{' => Some("%7B"),
+                '}' => Some("%7D"),
+                '|' => Some("%7C"),
+                '+' => Some("%2B"),
+                ':' => Some("%3A"),
+                ',' => Some("%2C"),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(encoded) = encoded {
+            normalized.push_str(encoded);
+        } else {
+            normalized.push(ch);
+        }
+        if ch == '>' {
+            in_date_math = false;
+        }
+    }
+
+    if let Some(query) = query {
+        normalized.push('?');
+        normalized.push_str(query);
+    }
+    normalized
+}
+
 fn parse_elasticsearch_rest_request(input: &str) -> Result<ElasticsearchRestRequest, String> {
     let input = strip_leading_elasticsearch_comments(input);
     if input.is_empty() {
@@ -807,6 +862,7 @@ fn parse_elasticsearch_rest_request(input: &str) -> Result<ElasticsearchRestRequ
         return Err("Invalid query: expected METHOD /path".to_string());
     }
     let path = if path.starts_with('/') { path.to_string() } else { format!("/{path}") };
+    let path = normalize_elasticsearch_rest_path(&path);
     let body_kind = if is_elasticsearch_ndjson_path(&path) {
         ElasticsearchRestBodyKind::Ndjson
     } else {
@@ -1045,6 +1101,10 @@ fn parse_elasticsearch_rest_response(
 ) -> Result<crate::types::QueryResult, String> {
     if body_text.trim().is_empty() {
         return Ok(json_response_result(status, &serde_json::Value::Null, start));
+    }
+
+    if status >= 400 {
+        return Ok(raw_json_response_result(status, body_text, start));
     }
 
     if serde_json::from_str::<serde_json::Value>(body_text).is_ok() {
@@ -1647,6 +1707,15 @@ mod tests {
     }
 
     #[test]
+    fn encodes_raw_date_math_paths_without_double_encoding() {
+        let raw = super::parse_elasticsearch_rest_request("GET /<logs-{now/d}>/_search?pretty").unwrap();
+        assert_eq!(raw.path, "/%3Clogs-%7Bnow%2Fd%7D%3E/_search?pretty");
+
+        let encoded = super::parse_elasticsearch_rest_request("GET /%3Clogs-%7Bnow%2Fd%7D%3E/_search?pretty").unwrap();
+        assert_eq!(encoded.path, "/%3Clogs-%7Bnow%2Fd%7D%3E/_search?pretty");
+    }
+
+    #[test]
     fn detects_ndjson_endpoints_with_index_and_query_parameters() {
         let request = super::parse_elasticsearch_rest_request(
             "POST /orders/_bulk?refresh=true\n{\"index\":{\"_id\":\"1\"}}\n{\"name\":\"Notebook\"}",
@@ -2000,6 +2069,16 @@ mod tests {
     }
 
     #[test]
+    fn preserves_http_status_for_plain_text_rest_errors() {
+        let result =
+            super::parse_elasticsearch_rest_response(503, "service temporarily unavailable", std::time::Instant::now())
+                .unwrap();
+
+        assert_eq!(result.columns, vec!["status", "response"]);
+        assert_eq!(result.rows, vec![vec![json!(503), json!("service temporarily unavailable")]]);
+    }
+
+    #[test]
     fn keeps_mapping_rest_response_numeric_literals_lossless() {
         let body = r#"{
   "products": {
@@ -2099,6 +2178,24 @@ mod tests {
         assert_eq!(result.columns, vec!["status", "response"]);
         assert_eq!(result.rows[0][0], json!(200));
         assert_eq!(result.rows[0][1], json!("null"));
+    }
+
+    #[tokio::test]
+    async fn execute_rest_query_sends_encoded_date_math_path() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("GET /%3Clogs-%7Bnow%2Fd%7D%3E/_search?pretty "), "{request}");
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        super::execute_rest_query(&client, "GET /<logs-{now/d}>/_search?pretty").await.unwrap();
+        server.await.unwrap();
     }
 
     #[tokio::test]

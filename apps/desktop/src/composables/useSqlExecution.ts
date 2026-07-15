@@ -12,6 +12,7 @@ import { sqlMetadataRefreshTarget } from "@/lib/sql/sqlMetadataRefresh";
 import { isMysqlExecutionErrorResult, usesMysqlProtocolDatabaseType } from "@/lib/query/queryResultError";
 import { classifyRedisCommandSafety, firstRedisCommandToken } from "@/lib/redis/redisCommandSafety";
 import { isSqlExecutionSnapshot, resolveExecutableSql, type SqlExecutionOverride, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
+import { isElasticsearchRestRequestText, parseElasticsearchRestRequestTarget, splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { extractSqlParameterDescriptors, type SqlParameterDescriptor, type SqlParameterSyntax } from "@/lib/sql/sqlParameters";
 import { expandSqlVariables } from "@/lib/sql/sqlVariables";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
@@ -28,7 +29,23 @@ export function stripSqlComments(sql: string): string {
     .replace(/#.*$/gm, " ");
 }
 
-export function isDangerousSql(sql: string): boolean {
+const ELASTICSEARCH_TRANSIENT_DELETE_PATHS = [/^\/_search\/scroll\/?$/i, /^\/_pit\/?$/i, /^\/_async_search\/[^/?]+\/?$/i];
+const ELASTICSEARCH_DESTRUCTIVE_POST_PATHS = [/(?:^|\/)_(?:delete_by_query|update_by_query|bulk)(?:\/|$)/i, /^\/_reindex(?:\/|$)/i, /^\/_aliases(?:\/|$)/i, /\/_restore(?:\/|$)/i];
+
+function isDangerousElasticsearchRequest(method: "GET" | "POST" | "PUT" | "DELETE" | "HEAD", path: string): boolean {
+  const pathname = path.split("?", 1)[0].replace(/\/+$/, "") || "/";
+  if (method === "DELETE") return !ELASTICSEARCH_TRANSIENT_DELETE_PATHS.some((pattern) => pattern.test(pathname));
+  if (method === "PUT") return true;
+  return method === "POST" && ELASTICSEARCH_DESTRUCTIVE_POST_PATHS.some((pattern) => pattern.test(pathname));
+}
+
+export function isDangerousSql(sql: string, databaseType?: DatabaseType): boolean {
+  if (databaseType === "elasticsearch") {
+    const requests = splitSqlStatementRanges(sql, databaseType)
+      .map((statement) => parseElasticsearchRestRequestTarget(statement.sql))
+      .filter((request): request is NonNullable<typeof request> => request !== null);
+    if (requests.length > 0) return requests.some((request) => isDangerousElasticsearchRequest(request.method, request.path));
+  }
   const cleaned = stripSqlComments(sql);
   return cleaned.split(";").some((stmt) => DANGER_RE.test(stmt));
 }
@@ -102,7 +119,7 @@ export function useSqlExecution(deps: {
       deps.onMissingDatabase?.();
       return;
     }
-    if (supportsSqlTemplateParameters(deps.activeConnection.value) && prepareSqlParameterDialog(sql, sourceOffset)) return;
+    if (supportsSqlTemplateParameters(deps.activeConnection.value, sql) && prepareSqlParameterDialog(sql, sourceOffset)) return;
     await continueExecute(sql, sourceOffset);
   }
 
@@ -134,7 +151,7 @@ export function useSqlExecution(deps: {
       if (confirmed) await doExecute(sql, sourceOffset);
       return;
     }
-    if (isDangerousSql(sql) && settingsStore.editorSettings.confirmDangerousSqlExecution) {
+    if (isDangerousSql(sql, deps.activeConnection.value?.db_type) && settingsStore.editorSettings.confirmDangerousSqlExecution) {
       dangerSql.value = sql;
       pendingDangerSql.value = sql;
       pendingSourceOffset.value = sourceOffset;
@@ -289,9 +306,10 @@ export function useSqlExecution(deps: {
   };
 }
 
-export function supportsSqlTemplateParameters(connection: Pick<ConnectionConfig, "db_type"> | undefined): boolean {
+export function supportsSqlTemplateParameters(connection: Pick<ConnectionConfig, "db_type"> | undefined, sql = ""): boolean {
   if (!connection) return false;
-  return connection.db_type !== "redis" && connection.db_type !== "mongodb" && connection.db_type !== "elasticsearch";
+  if (connection.db_type === "elasticsearch") return !isElasticsearchRestRequestText(sql);
+  return connection.db_type !== "redis" && connection.db_type !== "mongodb";
 }
 
 export function requiresDatabaseSelection(tab: QueryTab, connection: ConnectionConfig | undefined, sql = ""): boolean {

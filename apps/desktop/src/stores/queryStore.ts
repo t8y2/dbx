@@ -169,6 +169,14 @@ function elasticsearchRestRequestRanges(sql: string, databaseType?: DatabaseType
   return requests.length > 0 && requests.every((request) => ELASTICSEARCH_REST_REQUEST.test(request.sql)) ? requests : [];
 }
 
+function elasticsearchHttpErrorStatus(result: QueryResult): number | undefined {
+  const statusIndex = result.columns.findIndex((column) => column.toLowerCase() === "status");
+  if (statusIndex < 0) return undefined;
+  const value = result.rows[0]?.[statusIndex];
+  const status = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+  return Number.isInteger(status) && status >= 400 ? status : undefined;
+}
+
 async function withFrontendQueryTimeout<T>(promise: Promise<T>, timeoutSecs: number, message: string): Promise<T> {
   if (timeoutSecs === 0) return promise;
 
@@ -3043,6 +3051,7 @@ export const useQueryStore = defineStore("query", () => {
               timeoutSecs: queryTimeoutSecs,
             });
             allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(result, request.sql, tab.database || conn?.database, effectiveDbType, sourceRange)));
+            if (elasticsearchHttpErrorStatus(result) !== undefined && !continueOnError) break;
           } catch (error) {
             const latest = tabs.value.find((item) => item.id === id);
             if (latest?.executionId !== executionId) break;
@@ -3059,7 +3068,7 @@ export const useQueryStore = defineStore("query", () => {
         });
         const current = tabs.value.find((item) => item.id === id);
         if (current?.executionId === executionId && allResults.length > 0) {
-          const errorResultIndex = allResults.findIndex((result) => result.columns.includes("Error"));
+          const errorResultIndex = allResults.findIndex((result) => result.columns.includes("Error") || elasticsearchHttpErrorStatus(result) !== undefined);
           const resultIndex = errorResultIndex >= 0 ? errorResultIndex : 0;
           current.results = allResults.length > 1 ? allResults : undefined;
           current.activeResultIndex = allResults.length > 1 ? resultIndex : undefined;

@@ -42,6 +42,16 @@ interface ElasticsearchRequestLine {
   text: string;
 }
 
+interface ElasticsearchRequestLineCandidate {
+  lineIndex: number;
+  from: number;
+}
+
+export interface ElasticsearchRestRequestTarget {
+  method: "GET" | "POST" | "PUT" | "DELETE" | "HEAD";
+  path: string;
+}
+
 const ELASTICSEARCH_REST_REQUEST_LINE = /^\s*(?:GET|POST|PUT|DELETE|HEAD)\s+\S+/i;
 
 function leadingElasticsearchPreambleEnd(value: string): number {
@@ -88,19 +98,68 @@ function elasticsearchRequestLines(sql: string): ElasticsearchRequestLine[] {
   return lines;
 }
 
+function elasticsearchRequestLineCandidates(lines: ElasticsearchRequestLine[]): ElasticsearchRequestLineCandidate[] {
+  const candidates: ElasticsearchRequestLineCandidate[] = [];
+  let inBlockComment = false;
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex];
+    let offset = 0;
+
+    while (offset < line.text.length) {
+      if (inBlockComment) {
+        const close = line.text.indexOf("*/", offset);
+        if (close < 0) break;
+        inBlockComment = false;
+        offset = close + 2;
+        continue;
+      }
+
+      while (offset < line.text.length && /\s/.test(line.text[offset] ?? "")) offset += 1;
+      if (offset >= line.text.length) break;
+      if (line.text.startsWith("/*", offset)) {
+        inBlockComment = true;
+        offset += 2;
+        continue;
+      }
+      if (line.text[offset] === "#" || line.text.startsWith("//", offset)) break;
+      if (ELASTICSEARCH_REST_REQUEST_LINE.test(line.text.slice(offset))) {
+        candidates.push({ lineIndex, from: line.from + offset });
+      }
+      break;
+    }
+  }
+
+  return candidates;
+}
+
+export function parseElasticsearchRestRequestTarget(value: string): ElasticsearchRestRequestTarget | null {
+  const requestLine = stripLeadingElasticsearchComments(value).split("\n", 1)[0]?.trim() ?? "";
+  const match = requestLine.match(/^(GET|POST|PUT|DELETE|HEAD)\s+(\S+)/i);
+  if (!match) return null;
+  return {
+    method: match[1].toUpperCase() as ElasticsearchRestRequestTarget["method"],
+    path: match[2].startsWith("/") ? match[2] : `/${match[2]}`,
+  };
+}
+
+export function isElasticsearchRestRequestText(value: string): boolean {
+  return parseElasticsearchRestRequestTarget(value) !== null;
+}
+
 function splitElasticsearchRestRequestRanges(sql: string): RawStatement[] | undefined {
   const lines = elasticsearchRequestLines(sql);
-  const candidates = lines.flatMap((line, index) => (ELASTICSEARCH_REST_REQUEST_LINE.test(line.text) ? [index] : []));
-  const firstRequestIndex = candidates.findIndex((lineIndex) => isElasticsearchRequestPreamble(sql.slice(0, lines[lineIndex].from)));
+  const candidates = elasticsearchRequestLineCandidates(lines);
+  const firstRequestIndex = candidates.findIndex((candidate) => isElasticsearchRequestPreamble(sql.slice(0, candidate.from)));
   if (firstRequestIndex < 0) return undefined;
-  const requestLineIndexes = candidates.slice(firstRequestIndex);
+  const requests = candidates.slice(firstRequestIndex);
 
-  const hitFroms = requestLineIndexes.map((lineIndex, requestIndex) => {
-    const previousRequestLine = requestIndex > 0 ? requestLineIndexes[requestIndex - 1] : -1;
-    let hitFrom = lines[lineIndex].from;
-    for (let preambleLine = previousRequestLine + 1; preambleLine < lineIndex; preambleLine += 1) {
+  const hitFroms = requests.map((request, requestIndex) => {
+    const previousRequestLine = requestIndex > 0 ? requests[requestIndex - 1].lineIndex : -1;
+    let hitFrom = request.from;
+    for (let preambleLine = previousRequestLine + 1; preambleLine < request.lineIndex; preambleLine += 1) {
       const candidateFrom = lines[preambleLine].from;
-      if (isElasticsearchRequestPreamble(sql.slice(candidateFrom, lines[lineIndex].from))) {
+      if (isElasticsearchRequestPreamble(sql.slice(candidateFrom, request.from))) {
         hitFrom = candidateFrom;
         break;
       }
@@ -108,11 +167,9 @@ function splitElasticsearchRestRequestRanges(sql: string): RawStatement[] | unde
     return hitFrom;
   });
 
-  return requestLineIndexes.map((lineIndex, requestIndex) => {
-    const line = lines[lineIndex];
-    const leadingWhitespace = line.text.length - line.text.trimStart().length;
-    const from = line.from + leadingWhitespace;
-    const rawTo = requestIndex + 1 < requestLineIndexes.length ? hitFroms[requestIndex + 1] : sql.length;
+  return requests.map((request, requestIndex) => {
+    const from = request.from;
+    const rawTo = requestIndex + 1 < requests.length ? hitFroms[requestIndex + 1] : sql.length;
     const to = trimRangeEnd(sql, from, rawTo);
     return {
       hitFrom: hitFroms[requestIndex],

@@ -256,6 +256,18 @@ GET /_cluster/health`;
     expect(statementRangeAtCursor(sql, indexOf(sql, "cluster information"), "elasticsearch")?.sql).toBe("GET /_cluster/health");
   });
 
+  it("ignores request-looking lines inside Elasticsearch block comments", () => {
+    const sql = `GET /_cluster/health
+
+/* disabled cleanup
+DELETE /important-index
+*/
+GET /_cat/indices`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "elasticsearch"))).toEqual(["GET /_cluster/health", "GET /_cat/indices"]);
+    expect(statementRangeAtCursor(sql, indexOf(sql, "important-index"), "elasticsearch")?.sql).toBe("GET /_cat/indices");
+  });
+
   it("returns the first statement when the cursor is inside it", () => {
     const sql = "SELECT 1;\nSELECT 2;";
     const pos = indexOf(sql, "1");

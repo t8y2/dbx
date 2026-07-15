@@ -407,6 +407,92 @@ COMMENT = '测试';`;
     expect(range?.sql.trim()).toBe("EXPLAIN\nSELECT * FROM users");
   });
 
+  it("keeps issue #3567 EXPLAIN options and CTE target as one statement", () => {
+    const sql = "explain (analyze,buffers)\nwith tmp as(select* from test.tt)\nselect * from tmp;";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "explain"), "postgres")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(statementRangeAtCursor(sql, indexOf(sql, "select * from tmp"), "postgres")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql, "postgres"))).toEqual([sql.slice(0, -1)]);
+    expect(rangeSqlTexts(executableStatementRanges(sql))).toEqual([sql.slice(0, -1)]);
+  });
+
+  it("keeps EXPLAIN ANALYZE with a CTE main query as one statement", () => {
+    const sql = "explain analyze\nwith tmp as (select 1)\nselect * from tmp;";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "explain"), "postgres")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql, "postgres"))).toEqual([sql.slice(0, -1)]);
+  });
+
+  it("keeps a plain EXPLAIN CTE target as one statement without merging later queries", () => {
+    const sql = "EXPLAIN\nWITH tmp AS (SELECT 1)\nSELECT * FROM tmp\nSELECT * FROM logs;";
+    const expected = "EXPLAIN\nWITH tmp AS (SELECT 1)\nSELECT * FROM tmp";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "EXPLAIN"))?.sql.trim()).toBe(expected);
+    expect(rangeSqlTexts(executableStatementRanges(sql))).toEqual([expected, "SELECT * FROM logs"]);
+  });
+
+  it("does not merge a query after an inline EXPLAIN options CTE statement", () => {
+    const sql = "EXPLAIN (ANALYZE) WITH tmp AS (SELECT 1)\nSELECT * FROM tmp\nSELECT 2;";
+    const expected = "EXPLAIN (ANALYZE) WITH tmp AS (SELECT 1)\nSELECT * FROM tmp";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "EXPLAIN"), "postgres")?.sql.trim()).toBe(expected);
+    expect(rangeSqlTexts(executableStatementRanges(sql, "postgres"))).toEqual([expected, "SELECT 2"]);
+  });
+
+  it("keeps EXPLAIN options CTE UPDATE assignments as one statement", () => {
+    const sql = "EXPLAIN (ANALYZE)\nWITH tmp AS (SELECT 1)\nUPDATE t\nSET x = 1;";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "SET"), "postgres")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql, "postgres"))).toEqual([sql.slice(0, -1)]);
+  });
+
+  it("keeps CTE INSERT ... SELECT with the WITH statement", () => {
+    const sql = "WITH tmp AS (SELECT 1)\nINSERT INTO t (id)\nSELECT * FROM tmp;";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "INSERT"))?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql))).toEqual([sql.slice(0, -1)]);
+  });
+
+  it("does not merge a query after a CTE INSERT ... SELECT statement", () => {
+    const sql = "WITH tmp AS (SELECT 1)\nINSERT INTO t (id)\nSELECT * FROM tmp\nSELECT 2;";
+    const expected = "WITH tmp AS (SELECT 1)\nINSERT INTO t (id)\nSELECT * FROM tmp";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "INSERT"))?.sql.trim()).toBe(expected);
+    expect(rangeSqlTexts(executableStatementRanges(sql))).toEqual([expected, "SELECT 2"]);
+  });
+
+  it("does not merge a query after an INSERT with a CTE source query", () => {
+    const sql = "INSERT INTO t (id)\nWITH tmp AS (SELECT 1)\nSELECT * FROM tmp\nSELECT 2;";
+    const expected = "INSERT INTO t (id)\nWITH tmp AS (SELECT 1)\nSELECT * FROM tmp";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "INSERT"))?.sql.trim()).toBe(expected);
+    expect(rangeSqlTexts(executableStatementRanges(sql))).toEqual([expected, "SELECT 2"]);
+  });
+
+  it("skips block comments inside EXPLAIN options when resolving the target", () => {
+    const sql = "EXPLAIN (ANALYZE /* ) */) UPDATE t\nSET x = 1;";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "SET"), "postgres")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql, "postgres"))).toEqual([sql.slice(0, -1)]);
+  });
+
+  it("recovers later statements from an unclosed EXPLAIN option list", () => {
+    const sql = "EXPLAIN (ANALYZE\nSELECT 1\nSELECT 2;";
+    const explainSql = "EXPLAIN (ANALYZE\nSELECT 1";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "EXPLAIN"), "postgres")?.sql.trim()).toBe(explainSql);
+    expect(statementRangeAtCursor(sql, indexOf(sql, "SELECT 2"), "postgres")?.sql.trim()).toBe("SELECT 2");
+    expect(rangeSqlTexts(executableStatementRanges(sql, "postgres"))).toEqual([explainSql, "SELECT 2"]);
+  });
+
+  it("does not treat a DESCRIBE subquery paren as EXPLAIN options", () => {
+    const sql = "DESCRIBE (SELECT 1)\nSELECT 2;";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "DESCRIBE"), "clickhouse")?.sql.trim()).toBe("DESCRIBE (SELECT 1)");
+    expect(rangeSqlTexts(executableStatementRanges(sql, "clickhouse"))).toEqual(["DESCRIBE (SELECT 1)", "SELECT 2"]);
+    expect(rangeSqlTexts(executableStatementRanges(sql))).toEqual(["DESCRIBE (SELECT 1)", "SELECT 2"]);
+  });
+
   it("keeps MySQL DESC UPDATE joins as one statement", () => {
     const sql = "desc update  test_orders a\njoin test_users b\non a.id=b.id \nset a.name = '张三'\nwhere b.id > 10;";
     expect(statementRangeAtCursor(sql, indexOf(sql, "desc"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));

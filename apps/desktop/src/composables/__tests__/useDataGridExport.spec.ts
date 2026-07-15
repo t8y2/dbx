@@ -212,10 +212,10 @@ describe("useDataGridExport prepared row statements", () => {
   });
 
   it("preserves original Mongo string types in INSERT and applies explicit edits", async () => {
-    const item = { ...row(["123", "true", '{"kind":"literal"}', "2024-01-01 00:00:00", '{"role":"maintainer"}']), sourceIndex: 0 };
-    item.isDirtyCol = [false, false, false, false, true];
+    const item = { ...row(["123", "true", '{"kind":"literal"}', "2024-01-01 00:00:00", '{"role":"maintainer"}', 'ISODate("2025-05-06T08:35:32Z")']), sourceIndex: 0 };
+    item.isDirtyCol = [false, false, false, false, true, false];
     const state = createMongoExportState({
-      columns: ["numericText", "booleanText", "jsonText", "dateText", "profile"],
+      columns: ["numericText", "booleanText", "jsonText", "dateText", "profile", "lastUpdatedDate"],
       item,
       mongoDocuments: [
         {
@@ -224,12 +224,22 @@ describe("useDataGridExport prepared row statements", () => {
           jsonText: '{"kind":"literal"}',
           dateText: "2024-01-01 00:00:00",
           profile: { role: "admin" },
+          lastUpdatedDate: { $date: "2025-05-06T08:35:32Z" },
         },
       ],
     });
 
     await state.copyRowAsInsert();
 
-    expect(copyToClipboard).toHaveBeenCalledWith('db.getCollection("documents").insert({"numericText":"123","booleanText":"true","jsonText":"{\\"kind\\":\\"literal\\"}","dateText":"2024-01-01 00:00:00","profile":{"role":"maintainer"}});');
+    expect(copyToClipboard).toHaveBeenCalledWith(`db.getCollection("documents").insert({
+  "numericText": "123",
+  "booleanText": "true",
+  "jsonText": "{\\"kind\\":\\"literal\\"}",
+  "dateText": "2024-01-01 00:00:00",
+  "profile": {
+    "role": "maintainer"
+  },
+  "lastUpdatedDate": ISODate("2025-05-06T08:35:32Z")
+});`);
   });
 });

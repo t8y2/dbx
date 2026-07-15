@@ -314,6 +314,7 @@ test("copy MongoDB row as INSERT uses Mongo shell insert syntax", async () => {
   const jsonString = '{"endingBalance":{"beginningBalance":"0","endingBalance":"100","endingDate":"2024-11-25"},"Line":[]}';
   const row = {
     id: 1,
+    sourceIndex: 0,
     data: ["6743e4bfa3f6f84bc3fff6c8", "577", "done", jsonString, 'ISODate("2024-11-25T02:45:36.184Z")'],
     isNew: false,
     isDeleted: false,
@@ -331,6 +332,15 @@ test("copy MongoDB row as INSERT uses Mongo shell insert syntax", async () => {
     database: computed(() => "db"),
     context: computed(() => "results"),
     sourceColumns: computed(() => undefined),
+    mongoDocuments: computed(() => [
+      {
+        _id: { $oid: "6743e4bfa3f6f84bc3fff6c8" },
+        accountId: 577,
+        status: "done",
+        data: { endingBalance: { beginningBalance: "0", endingBalance: "100", endingDate: "2024-11-25" }, Line: [] },
+        lastUpdatedDate: { $date: "2024-11-25T02:45:36.184Z" },
+      },
+    ]),
     columnTypes: computed(() => undefined),
     whereInput: computed(() => undefined),
     orderBy: computed(() => undefined),
@@ -350,7 +360,20 @@ test("copy MongoDB row as INSERT uses Mongo shell insert syntax", async () => {
   assert.equal(apiMock.buildDataGridCopyInsertStatement.mock.calls.length, 0);
   assert.equal(
     clipboardMock.copyToClipboard.mock.calls[0][0],
-    'db.getCollection("accounting_reconciliations").insert({"_id":ObjectId("6743e4bfa3f6f84bc3fff6c8"),"accountId":577,"status":"done","data":{"endingBalance":{"beginningBalance":"0","endingBalance":"100","endingDate":"2024-11-25"},"Line":[]},"lastUpdatedDate":ISODate("2024-11-25T02:45:36.184Z")});',
+    `db.getCollection("accounting_reconciliations").insert({
+  "_id": ObjectId("6743e4bfa3f6f84bc3fff6c8"),
+  "accountId": 577,
+  "status": "done",
+  "data": {
+    "endingBalance": {
+      "beginningBalance": "0",
+      "endingBalance": "100",
+      "endingDate": "2024-11-25"
+    },
+    "Line": []
+  },
+  "lastUpdatedDate": ISODate("2024-11-25T02:45:36.184Z")
+});`,
   );
 });
 
@@ -390,7 +413,18 @@ test("copy MongoDB rows as INSERT excludes _id for insert without primary keys",
   await composable.copyRowAsInsertWithoutPrimaryKeys();
 
   assert.equal(apiMock.buildDataGridCopyInsertStatement.mock.calls.length, 0);
-  assert.equal(clipboardMock.copyToClipboard.mock.calls[0][0], 'db.getCollection("accounting_reconciliations").insertMany([{"status":"done"},{"status":"draft"}]);');
+  assert.equal(
+    clipboardMock.copyToClipboard.mock.calls[0][0],
+    `db.getCollection("accounting_reconciliations")
+  .insertMany([
+    {
+      "status": "done"
+    },
+    {
+      "status": "draft"
+    }
+  ]);`,
+  );
 });
 
 test("copy row as INSERT refreshes prepared SQL after row data changes", async () => {

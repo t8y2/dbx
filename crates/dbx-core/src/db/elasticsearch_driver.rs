@@ -438,7 +438,12 @@ fn search_response_to_document_result(result: SearchResponse) -> Result<MongoDoc
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("Elasticsearch document serialization failed: {e}"))?;
 
-    Ok(MongoDocumentResult { documents, raw_documents: Some(raw_documents), total: result.hits.total.value() })
+    Ok(MongoDocumentResult {
+        documents,
+        raw_documents: Some(raw_documents),
+        extended_documents: None,
+        total: result.hits.total.value(),
+    })
 }
 
 fn build_find_documents_body(

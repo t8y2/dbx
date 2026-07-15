@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_SHORTCUT_SETTINGS, SHORTCUT_DEFINITIONS, findShortcutConflict, formatShortcut, normalizeShortcutSettings, shortcutToCodeMirrorKey, type ShortcutActionId } from "@/lib/editor/shortcutRegistry";
+import { DEFAULT_SHORTCUT_SETTINGS, SHORTCUT_DEFINITIONS, findShortcutConflict, formatShortcut, normalizeModifierOnlyShortcut, normalizeShortcutSettings, shortcutToCodeMirrorKey, type ShortcutActionId } from "@/lib/editor/shortcutRegistry";
 
 describe("shortcutRegistry editor actions", () => {
   const formatterEditorActionIds: ShortcutActionId[] = [
@@ -21,6 +21,21 @@ describe("shortcutRegistry editor actions", () => {
     "exPasteSqlInCondition",
   ];
   const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection"];
+
+  it("registers the new-data-tab mouse modifier as a configurable sidebar shortcut", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "openDataInNewTab");
+
+    expect(definition).toMatchObject({ scope: "sidebar", defaultShortcut: "Alt", inputKind: "modifier-only" });
+    expect(DEFAULT_SHORTCUT_SETTINGS.openDataInNewTab).toBe("Alt");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.openDataInNewTab, "MacIntel")).toBe("Alt");
+  });
+
+  it("normalizes custom, cleared, and invalid modifier-only shortcuts", () => {
+    expect(normalizeShortcutSettings({ openDataInNewTab: "Shift" }).openDataInNewTab).toBe("Shift");
+    expect(normalizeShortcutSettings({ openDataInNewTab: "" }).openDataInNewTab).toBe("");
+    expect(normalizeShortcutSettings({ openDataInNewTab: "Mod+Enter" }).openDataInNewTab).toBe("Alt");
+    expect(normalizeModifierOnlyShortcut("Control")).toBe("Ctrl");
+  });
 
   it("registers formatter editor shortcuts in the generic editor scope", () => {
     for (const actionId of formatterEditorActionIds) {

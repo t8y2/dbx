@@ -26,4 +26,6 @@ test("mongo document table passes copy context to the data grid", () => {
   const source = documentBrowserSource();
   assert.match(source, /<DataGrid[\s\S]*?:database-type="props\.databaseType"[\s\S]*?<\/DataGrid>/);
   assert.match(source, /const customSaveHandler = computed<CustomSaveHandler>\(\(\) => \(\{[\s\S]*?targetLabel: props\.collection,[\s\S]*?\}\)\);/);
+  assert.match(source, /mongo_copy_documents: copyDocuments\.value/);
+  assert.match(source, /result\.extended_documents\?\.length === nextDocuments\.length/);
 });

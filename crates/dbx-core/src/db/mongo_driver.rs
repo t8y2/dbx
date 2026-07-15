@@ -17,6 +17,8 @@ pub struct MongoDocumentResult {
     pub documents: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_documents: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extended_documents: Option<Vec<serde_json::Value>>,
     pub total: u64,
 }
 
@@ -586,12 +588,14 @@ pub async fn find_documents(
     let mut cursor = find.await.map_err(|e| e.to_string())?;
 
     let mut documents = Vec::new();
+    let mut extended_documents = Vec::new();
     while cursor.advance().await.map_err(|e| e.to_string())? {
         let doc = cursor.deserialize_current().map_err(|e| e.to_string())?;
-        documents.push(bson_to_json(&Bson::Document(doc)));
+        documents.push(bson_to_json(&Bson::Document(doc.clone())));
+        extended_documents.push(Bson::Document(doc).into_relaxed_extjson());
     }
 
-    Ok(MongoDocumentResult { documents, raw_documents: None, total })
+    Ok(MongoDocumentResult { documents, raw_documents: None, extended_documents: Some(extended_documents), total })
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -727,7 +731,7 @@ pub async fn find_documents_extended_json(
         documents.push(Bson::Document(doc).into_relaxed_extjson());
     }
 
-    Ok(MongoDocumentResult { documents, raw_documents: None, total })
+    Ok(MongoDocumentResult { extended_documents: Some(documents.clone()), documents, raw_documents: None, total })
 }
 
 pub async fn aggregate_documents(
@@ -749,15 +753,18 @@ pub async fn aggregate_documents(
     let max_rows = max_rows.unwrap_or(100);
     let fetch_limit = max_rows.saturating_add(1);
     let mut documents = Vec::new();
+    let mut extended_documents = Vec::new();
     while documents.len() < fetch_limit && cursor.advance().await.map_err(|e| e.to_string())? {
         let doc = cursor.deserialize_current().map_err(|e| e.to_string())?;
-        documents.push(bson_to_json(&Bson::Document(doc)));
+        documents.push(bson_to_json(&Bson::Document(doc.clone())));
+        extended_documents.push(Bson::Document(doc).into_relaxed_extjson());
     }
     let total = documents.len() as u64;
     if documents.len() > max_rows {
         documents.truncate(max_rows);
+        extended_documents.truncate(max_rows);
     }
-    Ok(MongoDocumentResult { documents, raw_documents: None, total })
+    Ok(MongoDocumentResult { documents, raw_documents: None, extended_documents: Some(extended_documents), total })
 }
 
 pub async fn create_index(
@@ -960,7 +967,7 @@ pub async fn update_document(
                 return Ok(result.modified_count);
             }
         }
-        return Err("No MongoDB document matched the provided _id".to_string());
+        return Err(no_matching_document_error(id));
     }
 
     for filter in document_id_filters(id) {
@@ -973,7 +980,12 @@ pub async fn update_document(
             return Ok(result.modified_count);
         }
     }
-    Err("No MongoDB document matched the provided _id".to_string())
+    Err(no_matching_document_error(id))
+}
+
+fn no_matching_document_error(id: &str) -> String {
+    let display = decode_string_document_id(id).unwrap_or_else(|| id.to_string());
+    format!("No document matched _id {display}. It may have been deleted or its _id changed since the query ran.")
 }
 
 fn is_update_operator_document(doc: &Document) -> bool {
@@ -1114,11 +1126,17 @@ fn find_and_modify_array_filters(
 fn single_document_result(document: Option<Document>) -> MongoDocumentResult {
     match document {
         Some(document) => MongoDocumentResult {
-            documents: vec![bson_to_json(&Bson::Document(document))],
+            documents: vec![bson_to_json(&Bson::Document(document.clone()))],
             raw_documents: None,
+            extended_documents: Some(vec![Bson::Document(document).into_relaxed_extjson()]),
             total: 1,
         },
-        None => MongoDocumentResult { documents: Vec::new(), raw_documents: None, total: 0 },
+        None => MongoDocumentResult {
+            documents: Vec::new(),
+            raw_documents: None,
+            extended_documents: Some(Vec::new()),
+            total: 0,
+        },
     }
 }
 
@@ -1227,19 +1245,37 @@ pub async fn delete_document(client: &Client, database: &str, collection: &str, 
 
 fn document_id_filters(id: &str) -> Vec<Document> {
     if let Some(string_id) = decode_string_document_id(id) {
+        // The marker is emitted for an explicitly typed BSON string; do not reinterpret it as ObjectId.
         return vec![doc! { "_id": Bson::String(string_id) }];
     }
     if let Some(filter) = extended_json_document_id_filter(id) {
         return vec![filter];
     }
+    if let Some(numeric) = numeric_document_id(id) {
+        return vec![doc! { "_id": numeric }, doc! { "_id": Bson::String(id.to_string()) }];
+    }
+    object_id_then_string_filters(id)
+}
+
+fn object_id_then_string_filters(id: &str) -> Vec<Document> {
     let string_filter = doc! { "_id": Bson::String(id.to_string()) };
-    if let Ok(oid) = ObjectId::parse_str(id) {
-        return vec![doc! { "_id": Bson::ObjectId(oid) }, string_filter];
+    match ObjectId::parse_str(id) {
+        Ok(oid) => vec![doc! { "_id": Bson::ObjectId(oid) }, string_filter],
+        Err(_) => vec![string_filter],
     }
-    if let Ok(number) = serde_json::from_str::<serde_json::Number>(id) {
-        return vec![doc! { "_id": json_value_to_bson(&serde_json::Value::Number(number)) }, string_filter];
+}
+
+fn numeric_document_id(id: &str) -> Option<Bson> {
+    if id.trim() != id || id.is_empty() {
+        return None;
     }
-    vec![string_filter]
+    if let Ok(value) = id.parse::<i64>() {
+        return Some(Bson::Int64(value));
+    }
+    match id.parse::<f64>() {
+        Ok(value) if value.is_finite() => Some(Bson::Double(value)),
+        _ => None,
+    }
 }
 
 fn decode_string_document_id(id: &str) -> Option<String> {
@@ -1684,33 +1720,6 @@ mod tests {
     }
 
     #[test]
-    fn document_id_filters_preserve_extended_json_object_ids() {
-        let filters = document_id_filters(r#"{"$oid":"507f1f77bcf86cd799439011"}"#);
-
-        assert_eq!(filters.len(), 1);
-        assert!(
-            matches!(filters[0].get("_id"), Some(Bson::ObjectId(value)) if value.to_hex() == "507f1f77bcf86cd799439011")
-        );
-    }
-
-    #[test]
-    fn document_id_filters_preserve_numeric_ids() {
-        let integer_filters = document_id_filters("42");
-        let double_filters = document_id_filters("42.5");
-
-        // Numeric filter first, plain-string fallback second: legacy callers
-        // (MCP bridge, raw grid ids) may pass "42" for a string-typed _id.
-        assert_eq!(
-            integer_filters,
-            vec![doc! { "_id": Bson::Int64(42) }, doc! { "_id": Bson::String("42".to_string()) }]
-        );
-        assert_eq!(
-            double_filters,
-            vec![doc! { "_id": Bson::Double(42.5) }, doc! { "_id": Bson::String("42.5".to_string()) }]
-        );
-    }
-
-    #[test]
     fn document_id_filters_decode_explicit_string_ids_before_extended_json() {
         let original = r#"{"$numberLong":"2048938405781032962"}"#;
         let id = format!("__dbx_mongo_string_id__{}", serde_json::to_string(original).unwrap());
@@ -1720,10 +1729,35 @@ mod tests {
         assert!(
             matches!(filters[0].get("_id"), Some(Bson::String(value)) if value == r####"{"$numberLong":"2048938405781032962"}"####)
         );
+    }
 
+    #[test]
+    fn document_id_filters_keep_explicit_hex_string_ids_as_strings() {
         let hex = "507f1f77bcf86cd799439011";
-        let encoded_hex = format!("__dbx_mongo_string_id__{}", serde_json::to_string(hex).unwrap());
-        assert_eq!(document_id_filters(&encoded_hex), vec![doc! { "_id": Bson::String(hex.to_string()) }]);
+        let id = format!("__dbx_mongo_string_id__{}", serde_json::to_string(hex).unwrap());
+        let filters = document_id_filters(&id);
+
+        assert_eq!(filters.len(), 1);
+        assert!(matches!(filters[0].get("_id"), Some(Bson::String(value)) if value == hex));
+    }
+
+    #[test]
+    fn document_id_filters_keep_explicit_object_ids_as_object_ids() {
+        let filters = document_id_filters(r#"{"$oid":"507f1f77bcf86cd799439011"}"#);
+
+        assert_eq!(filters.len(), 1);
+        assert!(
+            matches!(filters[0].get("_id"), Some(Bson::ObjectId(oid)) if oid.to_hex() == "507f1f77bcf86cd799439011")
+        );
+    }
+
+    #[test]
+    fn document_id_filters_match_numeric_ids_before_string() {
+        let filters = document_id_filters("42");
+
+        assert_eq!(filters.len(), 2);
+        assert!(matches!(filters[0].get("_id"), Some(Bson::Int64(42))));
+        assert!(matches!(filters[1].get("_id"), Some(Bson::String(value)) if value == "42"));
     }
 
     #[test]
@@ -1804,6 +1838,20 @@ mod tests {
         let value = bson_to_json(&Bson::DateTime(date));
 
         assert_eq!(value, serde_json::json!("ISODate(\"2026-06-10T13:59:31.287Z\")"));
+    }
+
+    #[test]
+    fn mongo_document_result_keeps_extended_json_types_for_copying() {
+        let date = DateTime::parse_rfc3339_str("2025-05-06T08:35:32Z").unwrap();
+        let result = single_document_result(Some(doc! {
+            "lastUpdatedDate": date,
+            "dateText": "ISODate(\"2025-05-06T08:35:32Z\")",
+        }));
+
+        assert_eq!(result.documents[0]["lastUpdatedDate"], serde_json::json!("ISODate(\"2025-05-06T08:35:32Z\")"));
+        let extended = result.extended_documents.expect("extended documents");
+        assert_eq!(extended[0]["lastUpdatedDate"], serde_json::json!({ "$date": "2025-05-06T08:35:32Z" }));
+        assert_eq!(extended[0]["dateText"], serde_json::json!("ISODate(\"2025-05-06T08:35:32Z\")"));
     }
 
     #[test]

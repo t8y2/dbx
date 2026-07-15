@@ -80,7 +80,7 @@ import {
   type SnippetSyncConfig,
   type WebDavConfig,
 } from "@/lib/backend/api";
-import { eventToShortcut } from "@/lib/editor/keyboardShortcuts";
+import { eventToModifierOnlyShortcut, eventToShortcut } from "@/lib/editor/keyboardShortcuts";
 import { SHORTCUT_DEFINITIONS, findShortcutConflict, normalizeShortcutSettings, type ShortcutActionId } from "@/lib/editor/shortcutRegistry";
 import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
@@ -1202,7 +1202,8 @@ function onShortcutKeydown(actionId: ShortcutActionId, event: KeyboardEvent) {
     editingShortcutId.value = null;
     return;
   }
-  const shortcut = eventToShortcut(event);
+  const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === actionId);
+  const shortcut = definition?.inputKind === "modifier-only" ? eventToModifierOnlyShortcut(event) : eventToShortcut(event);
   if (!shortcut) return;
   onShortcutChange(actionId, shortcut);
   editingShortcutId.value = null;

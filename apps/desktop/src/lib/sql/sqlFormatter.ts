@@ -1,6 +1,6 @@
 import { DEFAULT_SQL_FORMATTER_SETTINGS, sqlFormatterOptions, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 
-export type SqlFormatDialect = "mysql" | "postgres" | "sqlite" | "sqlserver" | "generic";
+export type SqlFormatDialect = "mysql" | "postgres" | "sqlite" | "sqlserver" | "clickhouse" | "generic";
 
 export const MAX_SQL_FORMAT_CHARS = 1_000_000;
 
@@ -34,6 +34,8 @@ export function sqlFormatDialectForDbType(dbType: string | null | undefined): Sq
       return "sqlite";
     case "sqlserver":
       return "sqlserver";
+    case "clickhouse":
+      return "clickhouse";
     default:
       return "generic";
   }
@@ -49,6 +51,8 @@ function formatterLanguage(dialect: SqlFormatDialect) {
       return "sqlite";
     case "sqlserver":
       return "transactsql";
+    case "clickhouse":
+      return "clickhouse";
     default:
       return "sql";
   }

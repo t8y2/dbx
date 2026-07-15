@@ -169,7 +169,7 @@ import { canGoNextDataGridPage } from "@/lib/dataGrid/dataGridPagination";
 import { dataGridCountQueryOptions } from "@/lib/dataGrid/dataGridQueryOptions";
 import { dataGridBottomScrollTop, dataGridScrollPosition, isDataGridAtScrollBottom, isDataGridNearScrollBottom, restoredDataGridScrollLeft, shouldCheckInfiniteScrollAfterScroll, type DataGridScrollPosition } from "@/lib/dataGrid/dataGridInfiniteScroll";
 import { CANVAS_DATA_GRID_ROW_HEIGHT, drawCanvasDataGrid } from "@/lib/dataGrid/canvasDataGridRenderer";
-import { dataGridSaveActionMode, dataGridSaveToolbarState } from "@/lib/dataGrid/dataGridSaveUi";
+import { dataGridPreviewLabelKey, dataGridSaveActionMode, dataGridSaveToolbarState } from "@/lib/dataGrid/dataGridSaveUi";
 import type { QueryEditabilityReason } from "@/lib/sql/sqlAnalysis";
 import { EDITOR_FONT_FAMILY_CSS_VAR } from "@/lib/editor/editorThemes";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
@@ -4235,6 +4235,7 @@ const saveActionMode = computed(() =>
     useTransaction: !!useTransaction.value,
   }),
 );
+const previewLabelKey = computed(() => dataGridPreviewLabelKey(resolvedDatabaseType.value));
 const saveToolbarState = computed(() =>
   dataGridSaveToolbarState({
     editable: props.editable,
@@ -6650,7 +6651,7 @@ const {
   database: computed(() => props.executionDatabase ?? props.database),
   context: computed(() => props.context),
   sourceColumns: visibleSourceColumns,
-  mongoDocuments: computed(() => props.result.mongo_documents),
+  mongoDocuments: computed(() => props.result.mongo_copy_documents ?? props.result.mongo_documents),
   columnTypes: visibleColumnTypes,
   whereInput: computed(() => currentWhereInput()),
   orderBy: computed(() => currentOrderBy()),
@@ -7270,8 +7271,12 @@ function prepareTransposeCellMouseDown(rowIndex: number, actualColIdx: number) {
   if (item) prepareDataCellMouseDown(item, actualColIdx);
 }
 
+function canSaveGridChangesFromShortcut() {
+  return saveToolbarState.value.showActions && !saveToolbarState.value.actionsDisabled;
+}
+
 async function saveGridChangesFromShortcut() {
-  if (!saveToolbarState.value.showActions || saveToolbarState.value.actionsDisabled) return false;
+  if (!canSaveGridChangesFromShortcut()) return false;
   await onToolbarCommit();
   return true;
 }
@@ -7345,9 +7350,10 @@ async function onGridKeydown(event: KeyboardEvent) {
     return;
   }
   if (isSaveShortcut(event, settingsStore.editorSettings.shortcuts)) {
-    if (await saveGridChangesFromShortcut()) {
+    if (canSaveGridChangesFromShortcut()) {
       event.preventDefault();
       event.stopPropagation();
+      await saveGridChangesFromShortcut();
     }
     return;
   }
@@ -9672,11 +9678,11 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   >
                     <Loader2 v-if="isPreviewLoading" class="data-grid-topbar-action-icon w-3 h-3 animate-spin" />
                     <Eye v-else class="data-grid-topbar-action-icon w-3 h-3" />
-                    <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t("toolbar.previewSql") }}</span>
+                    <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t(previewLabelKey) }}</span>
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent side="bottom" class="max-w-sm">
-                  {{ t("toolbar.previewSql") }}
+                  {{ t(previewLabelKey) }}
                 </TooltipContent>
               </Tooltip>
               <Tooltip>

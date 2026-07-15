@@ -515,6 +515,8 @@ export interface QueryResult {
    * preview. This is populated only for MongoDB document query results.
    */
   mongo_documents?: unknown[];
+  /** Type-preserving Extended JSON documents used when copying MongoDB values. */
+  mongo_copy_documents?: unknown[];
   affected_rows: number;
   execution_time_ms: number;
   truncated?: boolean;

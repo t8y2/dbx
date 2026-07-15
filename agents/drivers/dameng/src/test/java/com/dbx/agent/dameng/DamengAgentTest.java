@@ -116,20 +116,22 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
-    void privilegeSafeTableQueryFetchesRawViewsWithoutSystemCatalogOrPaging() {
-        DamengAgent.MetadataQuery query = DamengAgent.buildPrivilegeSafeConstrainedTablesQuery(
+    void accessibleTableQueryBulkClassifiesViewsAndPreservesPaging() {
+        DamengAgent.MetadataQuery query = DamengAgent.buildAccessibleConstrainedTablesQuery(
             "REPORTING",
             new MetadataListConstraints("sales", 20, 40, List.of("VIEW", "MATERIALIZED_VIEW"))
         );
 
         assertTrue(query.sql().contains("FROM ALL_OBJECTS o"));
+        assertTrue(query.sql().contains("FROM ALL_DEPENDENCIES"));
+        assertTrue(query.sql().contains("TYPE IN ('MATERIALIZED VIEW', 'MATERIALIZED_VIEW')"));
         assertFalse(query.sql().contains("SYS.SYSOBJECTS"));
         assertFalse(query.sql().contains("USER_MVIEWS"));
-        assertTrue(query.sql().contains("o.OBJECT_TYPE IN (?, ?)"));
+        assertFalse(query.sql().contains("DBMS_METADATA.GET_DDL"));
+        assertTrue(query.sql().contains("mv.MVIEW_NAME IS NOT NULL"));
         assertTrue(query.sql().contains("UPPER(o.OBJECT_NAME) LIKE ? ESCAPE '\\\\'"));
-        assertFalse(query.sql().contains("LIMIT"));
-        assertFalse(query.sql().contains("OFFSET"));
-        assertEquals(List.of("REPORTING", "VIEW", "MATERIALIZED VIEW", "%S%A%L%E%S%"), query.args());
+        assertTrue(query.sql().endsWith("LIMIT ? OFFSET ?"));
+        assertEquals(List.of("REPORTING", "VIEW", "MATERIALIZED_VIEW", "%S%A%L%E%S%", 20, 40), query.args());
     }
 
     @Test
@@ -159,5 +161,22 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
         assertTrue(query.sql().contains("WHEN 'PROCEDURE' THEN 3"));
         assertTrue(query.sql().endsWith("LIMIT ?"));
         assertEquals(List.of("APP", "PROCEDURE", "FUNCTION", "%S%Y%N%C%", 20), query.args());
+    }
+
+    @Test
+    void accessibleObjectQueryBulkClassifiesViewsAndPreservesPaging() {
+        DamengAgent.MetadataQuery query = DamengAgent.buildAccessibleConstrainedObjectsQuery(
+            "REPORTING",
+            new MetadataListConstraints("sales", 10, 30, List.of("VIEW", "MATERIALIZED_VIEW"))
+        );
+
+        assertTrue(query.sql().contains("FROM ALL_DEPENDENCIES"));
+        assertTrue(query.sql().contains("TYPE IN ('MATERIALIZED VIEW', 'MATERIALIZED_VIEW')"));
+        assertFalse(query.sql().contains("SYS.SYSOBJECTS"));
+        assertFalse(query.sql().contains("USER_MVIEWS"));
+        assertFalse(query.sql().contains("DBMS_METADATA.GET_DDL"));
+        assertTrue(query.sql().contains("mv.MVIEW_NAME IS NOT NULL"));
+        assertTrue(query.sql().endsWith("LIMIT ? OFFSET ?"));
+        assertEquals(List.of("REPORTING", "VIEW", "MATERIALIZED_VIEW", "%S%A%L%E%S%", 10, 30), query.args());
     }
 }

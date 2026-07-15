@@ -23,6 +23,7 @@ pub async fn execute_query(
     result_session_id: Option<String>,
     client_session_id: Option<String>,
     timeout_secs: Option<u64>,
+    execution_mode: Option<dbx_core::query::QueryExecutionMode>,
 ) -> Result<db::QueryResult, String> {
     let execution_id = execution_id.filter(|id| !id.trim().is_empty());
     let registered_query = execution_id.as_ref().map(|id| {
@@ -48,6 +49,7 @@ pub async fn execute_query(
             client_session_id,
             timeout_secs,
             execution_id,
+            execution_mode: execution_mode.unwrap_or_default(),
             ..Default::default()
         },
     )
@@ -71,6 +73,7 @@ pub async fn execute_multi(
     timeout_secs: Option<u64>,
     use_transaction: Option<bool>,
     continue_on_error: Option<bool>,
+    execution_mode: Option<dbx_core::query::QueryExecutionMode>,
 ) -> Result<Vec<dbx_core::query::ExecuteMultiResult>, String> {
     let execution_id = execution_id.filter(|id| !id.trim().is_empty());
     let registered_query = execution_id.as_ref().map(|id| {
@@ -108,6 +111,7 @@ pub async fn execute_multi(
             execution_id,
             use_transaction,
             continue_on_error: continue_on_error.unwrap_or(false),
+            execution_mode: execution_mode.unwrap_or_default(),
         },
     )
     .await;

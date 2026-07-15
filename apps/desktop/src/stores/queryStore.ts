@@ -3575,6 +3575,7 @@ export const useQueryStore = defineStore("query", () => {
         await api.executeQuery(tab.connectionId, tab.database, "SET SHOWPLAN_XML ON;", tab.schema, executionId, {
           clientSessionId,
           timeoutSecs: queryTimeoutSecs,
+          executionMode: "simple",
         });
         showplanEnabled = true;
         if (tabs.value.find((t) => t.id === id)?.explainExecutionId !== executionId) {
@@ -3584,6 +3585,7 @@ export const useQueryStore = defineStore("query", () => {
         const results = await api.executeMulti(tab.connectionId, tab.database, sql, tab.schema, executionId, {
           clientSessionId,
           timeoutSecs: queryTimeoutSecs,
+          executionMode: "simple",
         });
         const current = tabs.value.find((t) => t.id === id);
         if (current?.explainExecutionId === executionId) {
@@ -3611,6 +3613,7 @@ export const useQueryStore = defineStore("query", () => {
             await api.executeQuery(tab.connectionId, tab.database, "SET SHOWPLAN_XML OFF;", tab.schema, undefined, {
               clientSessionId,
               timeoutSecs: queryTimeoutSecs > 0 ? Math.min(queryTimeoutSecs, 5) : 5,
+              executionMode: "simple",
             });
           } catch (error) {
             console.warn("[DBX][sqlserver-explain:cleanup:error]", { tabId: tab.id, error });

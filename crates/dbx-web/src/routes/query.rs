@@ -24,6 +24,7 @@ pub struct ExecuteQueryRequest {
     pub timeout_secs: Option<u64>,
     pub use_transaction: Option<bool>,
     pub continue_on_error: Option<bool>,
+    pub execution_mode: Option<dbx_core::query::QueryExecutionMode>,
 }
 
 #[derive(Deserialize)]
@@ -335,6 +336,7 @@ pub async fn execute_query(
             timeout_secs: req.timeout_secs,
             execution_id: Some(execution_id),
             use_transaction: req.use_transaction,
+            execution_mode: req.execution_mode.unwrap_or_default(),
             ..Default::default()
         },
     )
@@ -374,6 +376,7 @@ pub async fn execute_multi(
             execution_id: Some(execution_id),
             use_transaction: req.use_transaction,
             continue_on_error: req.continue_on_error.unwrap_or(false),
+            execution_mode: req.execution_mode.unwrap_or_default(),
         },
     )
     .await

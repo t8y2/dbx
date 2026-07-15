@@ -1736,6 +1736,20 @@ pub async fn execute_batch_with_max_rows(
             );
         }
     }
+    execute_simple_batch_with_max_rows(client, sql, max_rows).await
+}
+
+/// Execute a SQL Server batch directly through TDS simple-query mode.
+///
+/// This intentionally bypasses result-set type probing and SQL rewriting. It is
+/// required while `SHOWPLAN_XML` is enabled because any probe issued on the same
+/// session is itself affected by SHOWPLAN state.
+pub async fn execute_simple_batch_with_max_rows(
+    client: &mut SqlServerClient,
+    sql: &str,
+    max_rows: Option<usize>,
+) -> Result<Vec<QueryResult>, String> {
+    let start = Instant::now();
     let stream = sqlserver_driver_result(client.simple_query(sql)).await?;
     let mut results = sqlserver_driver_result(collect_result_sets_limited(stream, start, max_rows)).await?;
     for result in &mut results {
@@ -2073,6 +2087,17 @@ mod tests {
         let execute_batch = source.split("pub async fn execute_batch").nth(1).unwrap();
         let execute_batch = execute_batch.split("#[cfg(test)]").next().unwrap();
         assert!(!execute_batch.contains("into_results"));
+    }
+
+    #[test]
+    fn sqlserver_explicit_simple_batch_bypasses_result_type_probing() {
+        let source = include_str!("sqlserver.rs");
+        let simple_batch = source.split("pub async fn execute_simple_batch_with_max_rows").nth(1).unwrap();
+        let simple_batch = simple_batch.split("fn strip_dbx_sqlserver_row_number_column").next().unwrap();
+
+        assert!(simple_batch.contains("client.simple_query(sql)"));
+        assert!(!simple_batch.contains("sqlserver_unsafe_type_query"));
+        assert!(!simple_batch.contains("describe_sqlserver_result_set"));
     }
 
     #[test]

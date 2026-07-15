@@ -100,8 +100,9 @@ describe("queryStore SQL Server explain", () => {
     expect(planCall[4]).toBe(executionId);
     expect(disableCall[4]).toBeUndefined();
     expect(clientSessionId).toBe(`${tabId}:explain:${executionId}`);
-    expect(planCall[5]).toMatchObject({ clientSessionId, timeoutSecs: 45 });
-    expect(disableCall[5]).toMatchObject({ clientSessionId, timeoutSecs: 5 });
+    expect(enableCall[5]).toMatchObject({ clientSessionId, timeoutSecs: 45, executionMode: "simple" });
+    expect(planCall[5]).toMatchObject({ clientSessionId, timeoutSecs: 45, executionMode: "simple" });
+    expect(disableCall[5]).toMatchObject({ clientSessionId, timeoutSecs: 5, executionMode: "simple" });
     expect(mocks.parseExplainResult).toHaveBeenCalledWith("sqlserver", planResult);
     expect(tab.explainPlan).toEqual(visualPlan);
     expect(tab.explainError).toBeUndefined();

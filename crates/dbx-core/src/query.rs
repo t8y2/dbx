@@ -4,7 +4,7 @@ use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, NaiveDateTime, Nai
 use duckdb::types::{TimeUnit, Value, ValueRef};
 use futures::StreamExt;
 use mysql_async::prelude::Queryable;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlparser::ast::{
     visit_relations_mut, Ident, ObjectName, ObjectNamePart, ObjectType, Statement, TableFactor, VisitMut, VisitorMut,
 };
@@ -367,6 +367,14 @@ fn qualifies_unqualified_agent_relations(db_type: Option<DatabaseType>) -> bool 
     matches!(db_type, Some(DatabaseType::Iris | DatabaseType::Kingbase))
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryExecutionMode {
+    #[default]
+    Standard,
+    Simple,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct QueryExecutionOptions {
     pub max_rows: Option<usize>,
@@ -385,6 +393,9 @@ pub struct QueryExecutionOptions {
     /// When `true`, multi-statement execution continues after a statement error instead
     /// of stopping at the first failure. Connection-level failures always stop the batch.
     pub continue_on_error: bool,
+    /// Explicit low-level execution path. `Simple` is currently used by SQL Server
+    /// SHOWPLAN so the source SQL bypasses result-set probing and query rewriting.
+    pub execution_mode: QueryExecutionMode,
 }
 
 fn query_result_row_limit(max_rows: Option<usize>) -> usize {
@@ -1405,6 +1416,7 @@ pub async fn do_execute(
         PoolKind::SqlServer(client) => {
             let client = client.clone();
             let max_rows = options.max_rows;
+            let execution_mode = options.execution_mode;
             drop(connections);
             let mut client = match cancel_token.as_ref() {
                 Some(token) => tokio::select! {
@@ -1414,13 +1426,18 @@ pub async fn do_execute(
                 },
                 None => client.lock().await,
             };
-            let result = wait_for_query_opt(
-                cancel_token,
-                query_timeout,
-                db::sqlserver::execute_query_with_max_rows(&mut client, sql, max_rows),
-            )
-            .await
-            .map(|result| truncate_result_with_max_rows(result, max_rows));
+            let execution = async {
+                if execution_mode == QueryExecutionMode::Simple {
+                    let mut results =
+                        db::sqlserver::execute_simple_batch_with_max_rows(&mut client, sql, max_rows).await?;
+                    Ok(results.remove(0))
+                } else {
+                    db::sqlserver::execute_query_with_max_rows(&mut client, sql, max_rows).await
+                }
+            };
+            let result = wait_for_query_opt(cancel_token, query_timeout, execution)
+                .await
+                .map(|result| truncate_result_with_max_rows(result, max_rows));
             drop(client);
             if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(pool_db_type, err)) {
                 state.remove_pool_by_key(pool_key).await;
@@ -2186,6 +2203,7 @@ async fn execute_multi_sqlserver(
     let mut all_results = Vec::new();
     let max_rows = options.max_rows;
     let query_timeout = resolve_query_timeout(options.timeout_secs);
+    let execution_mode = options.execution_mode;
 
     for batch in &batches {
         if is_canceled(&cancel_token) {
@@ -2226,12 +2244,14 @@ async fn execute_multi_sqlserver(
             break;
         }
 
-        let result = wait_for_result_opt(
-            cancel_token.clone(),
-            query_timeout,
-            db::sqlserver::execute_batch_with_max_rows(&mut client_guard, batch, max_rows),
-        )
-        .await;
+        let execution = async {
+            if execution_mode == QueryExecutionMode::Simple {
+                db::sqlserver::execute_simple_batch_with_max_rows(&mut client_guard, batch, max_rows).await
+            } else {
+                db::sqlserver::execute_batch_with_max_rows(&mut client_guard, batch, max_rows).await
+            }
+        };
+        let result = wait_for_result_opt(cancel_token.clone(), query_timeout, execution).await;
         drop(client_guard);
 
         match result {
@@ -3234,6 +3254,14 @@ mod tests {
         InstalledPlugin, PluginDriverManifest, PluginDriverSession, PluginManifest, PluginRuntimeEnv,
     };
     use crate::storage::Storage;
+
+    #[test]
+    fn query_execution_mode_deserializes_simple_client_value() {
+        let mode: QueryExecutionMode = serde_json::from_str("\"simple\"").unwrap();
+
+        assert_eq!(mode, QueryExecutionMode::Simple);
+        assert_eq!(QueryExecutionMode::default(), QueryExecutionMode::Standard);
+    }
 
     fn test_connection_config(db_type: DatabaseType) -> ConnectionConfig {
         ConnectionConfig {

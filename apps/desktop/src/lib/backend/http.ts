@@ -712,6 +712,7 @@ export async function executeQuery(
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
+    executionMode?: "simple";
   },
 ): Promise<QueryResult> {
   return post("/api/query/execute", { connectionId, database, sql, schema, executionId, ...options });
@@ -732,6 +733,7 @@ export async function executeMulti(
     timeoutSecs?: number;
     useTransaction?: boolean;
     continueOnError?: boolean;
+    executionMode?: "simple";
   },
 ): Promise<QueryResult[]> {
   return post("/api/query/execute-multi", { connectionId, database, sql, schema, executionId, ...options });

@@ -64,4 +64,29 @@ describe("SQL Server explain plan", () => {
       error: "Invalid object name 'missing_table'",
     });
   });
+
+  it("rejects malformed SHOWPLAN XML", () => {
+    const malformed = result(["Microsoft SQL Server 2005 XML Showplan"], [["<ShowPlanXML><RelOp></ShowPlanXML>"]]);
+
+    expect(() => parseExplainResult("sqlserver", malformed)).toThrow("Invalid SQL Server ShowPlan XML");
+  });
+
+  it("rejects truncated SHOWPLAN XML", () => {
+    const truncated = result(["Microsoft SQL Server 2005 XML Showplan"], [["<ShowPlanXML><RelOp>"]]);
+
+    expect(() => parseExplainResult("sqlserver", truncated)).toThrow("Invalid SQL Server ShowPlan XML");
+  });
+
+  it("rejects XML that is not a SHOWPLAN document", () => {
+    const unrelated = result(["XML"], [["<Root><RelOp /></Root>"]]);
+
+    expect(() => parseExplainResult("sqlserver", unrelated)).toThrow("SQL Server did not return ShowPlan XML");
+    expect(sqlServerExplainResult([unrelated])).toEqual({ error: "SQL Server did not return ShowPlan XML" });
+  });
+
+  it("rejects SHOWPLAN XML without RelOp nodes", () => {
+    const emptyPlan = result(["Microsoft SQL Server 2005 XML Showplan"], [[`<ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan"><BatchSequence /></ShowPlanXML>`]]);
+
+    expect(() => parseExplainResult("sqlserver", emptyPlan)).toThrow("SQL Server ShowPlan XML contains no RelOp nodes");
+  });
 });

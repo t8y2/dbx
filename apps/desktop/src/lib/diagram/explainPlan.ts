@@ -380,20 +380,42 @@ export function sqlServerExplainResult(results: QueryResult[]): { result?: Query
   if (errorResult) return { error: String(errorResult.rows[0]?.[0] ?? "") };
 
   const result = results.find((candidate) => firstSqlServerShowplanXml(candidate) !== undefined);
-  return result ? { result } : {};
+  return result ? { result } : { error: "SQL Server did not return ShowPlan XML" };
 }
 
 function parseSqlServerExplain(result: QueryResult): ParsedExplainPlan {
-  const raw = firstSqlServerShowplanXml(result) ?? "";
-  if (!raw || typeof DOMParser === "undefined") return { databaseType: "sqlserver", raw, nodes: [] };
+  const raw = firstSqlServerShowplanXml(result);
+  if (!raw) throw new Error("SQL Server did not return ShowPlan XML");
+  if (typeof DOMParser === "undefined") throw new Error("XML parser is unavailable");
 
-  const document = new DOMParser().parseFromString(raw, "application/xml");
-  if (xmlElements(document, "parsererror").length > 0) {
-    return { databaseType: "sqlserver", raw, nodes: [] };
+  const parserIssues: string[] = [];
+  type XmlParserConstructor = new (options?: {
+    errorHandler?: {
+      warning: (message: string) => void;
+      error: (message: string) => void;
+      fatalError: (message: string) => void;
+    };
+  }) => DOMParser;
+  const Parser = DOMParser as unknown as XmlParserConstructor;
+  const recordParserIssue = (message: string) => parserIssues.push(message);
+  const document = new Parser({
+    errorHandler: {
+      warning: recordParserIssue,
+      error: recordParserIssue,
+      fatalError: recordParserIssue,
+    },
+  }).parseFromString(raw, "application/xml");
+  if (parserIssues.length > 0 || xmlElements(document, "parsererror").length > 0 || !document.documentElement) {
+    throw new Error("Invalid SQL Server ShowPlan XML");
   }
 
+  const rootName = document.documentElement.localName || document.documentElement.nodeName.split(":").pop();
+  if (rootName !== "ShowPlanXML") throw new Error("Invalid SQL Server ShowPlan XML root element");
+
   const relOps = xmlElements(document, "RelOp");
+  if (relOps.length === 0) throw new Error("SQL Server ShowPlan XML contains no RelOp nodes");
   const roots = relOps.filter((element) => !hasRelOpAncestor(element));
+  if (roots.length === 0) throw new Error("SQL Server ShowPlan XML contains no root RelOp node");
   return {
     databaseType: "sqlserver",
     raw,

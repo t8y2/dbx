@@ -1,26 +1,26 @@
 import { strict as assert } from "node:assert";
-import { readFileSync } from "node:fs";
 import { test } from "vitest";
+import { queryContextObjectRoute } from "../../apps/desktop/src/lib/sql/queryCursorTableTarget.ts";
+import type { SqlObjectNavigationTarget } from "../../apps/desktop/src/lib/sql/sqlNavigation.ts";
 
-const queryEditor = readFileSync("apps/desktop/src/components/editor/QueryEditor.vue", "utf8");
-const contentArea = readFileSync("apps/desktop/src/components/layout/ContentArea.vue", "utf8");
-const app = readFileSync("apps/desktop/src/App.vue", "utf8");
+const tableTarget: SqlObjectNavigationTarget = { name: "orders", database: "analytics", schema: "reporting", type: "table" };
+const viewTarget: SqlObjectNavigationTarget = { ...tableTarget, type: "view" };
+const materializedViewTarget: SqlObjectNavigationTarget = { ...tableTarget, type: "materialized_view" };
 
-test("query editor routes relation-aware context-menu targets through ContentArea", () => {
-  assert.match(queryEditor, /viewTableData: \[target: SqlObjectNavigationTarget\]/);
-  assert.match(queryEditor, /openObjectSource: \[target: SqlObjectNavigationTarget, initialEditing: boolean\]/);
-  assert.match(queryEditor, /queryContextObjectActions\(contextObjectTarget\.value\?\.type\)\.map\(contextObjectMenuItem\)/);
-  assert.match(contentArea, /openObjectSource: \[target: SqlObjectNavigationTarget, initialEditing: boolean\]/);
-  assert.match(contentArea, /@open-object-source="onHandleOpenObjectSource"/);
-  assert.match(app, /@open-object-source="onOpenObjectSource"/);
+test("routes table context actions with the resolved target payload", () => {
+  assert.deepEqual(queryContextObjectRoute("view-data", tableTarget), { event: "viewTableData", payload: [tableTarget] });
+  assert.deepEqual(queryContextObjectRoute("edit-table-structure", tableTarget), { event: "editTableStructure", payload: [tableTarget] });
+  assert.deepEqual(queryContextObjectRoute("view-ddl", tableTarget), { event: "viewTableDdl", payload: [tableTarget] });
 });
 
-test("App keeps view-like targets out of table structure editing and forwards their source kind", () => {
-  assert.match(app, /if \(typeof table !== "string"\) \{[\s\S]*?tableName: table\.name,[\s\S]*?tableType: table\.type \? sqlObjectNavigationTableType\(table\) : undefined/);
-  assert.match(app, /if \(!target \|\| sqlObjectNavigationSourceKind\(table\)\) return;\s*queryStore\.openTableStructure/);
-  assert.match(app, /queryEditorDdlTarget\.value = \{ \.\.\.target, objectType: sqlObjectNavigationSourceKind\(table\) \}/);
-  assert.match(app, /<QueryEditorObjectSourceDialog[\s\S]*?:object-type="queryEditorObjectSourceTarget\.objectType"[\s\S]*?:initial-editing="queryEditorObjectSourceTarget\.initialEditing"/);
-  assert.match(app, /@saved="onQueryEditorObjectSourceSaved"/);
-  assert.match(app, /invalidateCompletionCache\(target\.connectionId, target\.database\);\s*contentAreaRef\.value\?\.refreshQueryEditorCompletionCache\(\)/);
-  assert.match(contentArea, /defineExpose\(\{[\s\S]*?refreshQueryEditorCompletionCache/);
+test("routes view source actions with editing intent and type fidelity", () => {
+  assert.deepEqual(queryContextObjectRoute("edit-view", viewTarget), { event: "openObjectSource", payload: [viewTarget, true] });
+  assert.deepEqual(queryContextObjectRoute("view-source", viewTarget), { event: "openObjectSource", payload: [viewTarget, false] });
+});
+
+test("preserves materialized view type in every routed payload", () => {
+  assert.deepEqual(queryContextObjectRoute("view-data", materializedViewTarget), { event: "viewTableData", payload: [materializedViewTarget] });
+  assert.deepEqual(queryContextObjectRoute("edit-view", materializedViewTarget), { event: "openObjectSource", payload: [materializedViewTarget, true] });
+  assert.deepEqual(queryContextObjectRoute("view-source", materializedViewTarget), { event: "openObjectSource", payload: [materializedViewTarget, false] });
+  assert.deepEqual(queryContextObjectRoute("view-ddl", materializedViewTarget), { event: "viewTableDdl", payload: [materializedViewTarget] });
 });

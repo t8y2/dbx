@@ -22,6 +22,12 @@ export interface QueryTableCandidateAtPositionInput {
 
 export type QueryContextObjectAction = "view-data" | "edit-table-structure" | "edit-view" | "view-source" | "view-ddl";
 
+export type QueryContextObjectRoute =
+  | { event: "viewTableData"; payload: [target: SqlObjectNavigationTarget] }
+  | { event: "editTableStructure"; payload: [target: SqlObjectNavigationTarget] }
+  | { event: "openObjectSource"; payload: [target: SqlObjectNavigationTarget, initialEditing: boolean] }
+  | { event: "viewTableDdl"; payload: [target: SqlObjectNavigationTarget] };
+
 export function extractQualifiedIdentifierPartsAt(sql: string, pos: number) {
   let parts = extractIdentifierPartsAt(sql, pos);
   // CodeMirror can report the boundary immediately after the clicked token;
@@ -91,6 +97,21 @@ export function queryContextObjectActions(type?: SqlObjectNavigationType): Query
   }
   // Unknown metadata preserves the historical table actions instead of disabling existing entry points.
   return ["view-data", "edit-table-structure", "view-ddl"];
+}
+
+export function queryContextObjectRoute(action: QueryContextObjectAction, target: SqlObjectNavigationTarget): QueryContextObjectRoute {
+  switch (action) {
+    case "view-data":
+      return { event: "viewTableData", payload: [target] };
+    case "edit-table-structure":
+      return { event: "editTableStructure", payload: [target] };
+    case "edit-view":
+      return { event: "openObjectSource", payload: [target, true] };
+    case "view-source":
+      return { event: "openObjectSource", payload: [target, false] };
+    case "view-ddl":
+      return { event: "viewTableDdl", payload: [target] };
+  }
 }
 
 export function qualifiedTableNameAtSqlPosition(sql: string, pos: number): string | null {

@@ -64,7 +64,7 @@ import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect
 import { startsQueryEditorRectangularSelection } from "@/lib/editor/queryEditorPointerSelection";
 import { isSchemaAware, isSingleDatabase, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
 import { usesLocalOnlyEditorCompletionMetadata, usesOnDemandOnlyEditorColumnMetadata } from "@/lib/metadata/completionMetadataPolicy";
-import { queryContextObjectActions, queryTableCandidateAtSqlPosition, resolveQueryContextCandidateDatabase, resolveQueryContextObjectTarget, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
+import { queryContextObjectActions, queryContextObjectRoute, queryTableCandidateAtSqlPosition, resolveQueryContextCandidateDatabase, resolveQueryContextObjectTarget, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
 import * as api from "@/lib/backend/api";
 import { areSqlSemanticDiagnosticsEqual, buildSqlParserErrorDiagnostic, buildSqlSemanticDiagnostics, isSqlSemanticDiagnosticInputContext, shouldRunSqlSemanticDiagnostics, sqlSemanticDiagnosticRangesForViewport, tableReferenceKey, type SqlSemanticDiagnostic } from "@/lib/sql/semantic/diagnostics";
 import { buildRedisSyntaxDiagnostics, shouldRunRedisDiagnostics } from "@/lib/redis/redisSyntaxDiagnostics";
@@ -866,27 +866,23 @@ async function pasteClipboardAsSqlInCondition(): Promise<boolean> {
   return true;
 }
 
-function openTableFromContextMenu() {
+function emitContextObjectAction(action: QueryContextObjectAction) {
   if (!contextObjectTarget.value) return;
-  emit("viewTableData", contextObjectTarget.value);
-  focusEditor();
-}
-
-function editTableStructureFromContextMenu() {
-  if (!contextObjectTarget.value) return;
-  emit("editTableStructure", contextObjectTarget.value);
-  focusEditor();
-}
-
-function openTableDdlFromContextMenu() {
-  if (!contextObjectTarget.value) return;
-  emit("viewTableDdl", contextObjectTarget.value);
-  focusEditor();
-}
-
-function openObjectSourceFromContextMenu(initialEditing: boolean) {
-  if (!contextObjectTarget.value) return;
-  emit("openObjectSource", contextObjectTarget.value, initialEditing);
+  const route = queryContextObjectRoute(action, contextObjectTarget.value);
+  switch (route.event) {
+    case "viewTableData":
+      emit("viewTableData", route.payload[0]);
+      break;
+    case "editTableStructure":
+      emit("editTableStructure", route.payload[0]);
+      break;
+    case "openObjectSource":
+      emit("openObjectSource", route.payload[0], route.payload[1]);
+      break;
+    case "viewTableDdl":
+      emit("viewTableDdl", route.payload[0]);
+      break;
+  }
   focusEditor();
 }
 
@@ -894,15 +890,15 @@ function contextObjectMenuItem(action: QueryContextObjectAction): ContextMenuIte
   const disabled = !contextObjectTarget.value;
   switch (action) {
     case "view-data":
-      return { label: t("contextMenu.viewData"), action: openTableFromContextMenu, disabled, icon: Table2 };
+      return { label: t("contextMenu.viewData"), action: () => emitContextObjectAction(action), disabled, icon: Table2 };
     case "edit-table-structure":
-      return { label: t("contextMenu.editStructure"), action: editTableStructureFromContextMenu, disabled, icon: PencilRuler };
+      return { label: t("contextMenu.editStructure"), action: () => emitContextObjectAction(action), disabled, icon: PencilRuler };
     case "edit-view":
-      return { label: t("contextMenu.editView"), action: () => openObjectSourceFromContextMenu(true), disabled, icon: Pencil };
+      return { label: t("contextMenu.editView"), action: () => emitContextObjectAction(action), disabled, icon: Pencil };
     case "view-source":
-      return { label: t("contextMenu.viewSource"), action: () => openObjectSourceFromContextMenu(false), disabled, icon: Code2 };
+      return { label: t("contextMenu.viewSource"), action: () => emitContextObjectAction(action), disabled, icon: Code2 };
     case "view-ddl":
-      return { label: t("contextMenu.viewDdl"), action: openTableDdlFromContextMenu, disabled, icon: FileCode };
+      return { label: t("contextMenu.viewDdl"), action: () => emitContextObjectAction(action), disabled, icon: FileCode };
   }
 }
 

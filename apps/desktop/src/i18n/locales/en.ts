@@ -42,6 +42,7 @@ export default {
     rollback: "Rollback",
     txnAutoRolledBack: "Transaction auto-rolled back after 5 minutes of inactivity",
     previewSql: "Preview SQL",
+    previewQuery: "Preview query",
     hidePreviewSql: "Hide SQL Preview",
     saveSql: "Save to SQL Library",
     openSql: "Open SQL file",

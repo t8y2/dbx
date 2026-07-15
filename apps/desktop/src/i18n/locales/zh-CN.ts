@@ -44,6 +44,7 @@ export default withEnglishFallback({
     rollback: "回滚",
     txnAutoRolledBack: "事务已因 5 分钟无操作而自动回滚",
     previewSql: "预览 SQL",
+    previewQuery: "预览查询",
     hidePreviewSql: "隐藏 SQL 预览",
     saveSql: "保存到 SQL 库",
     openSql: "打开 SQL 文件",

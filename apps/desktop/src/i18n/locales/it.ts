@@ -43,6 +43,7 @@ export default withEnglishFallback({
     rollback: "Rollback",
     txnAutoRolledBack: "Transazione annullata automaticamente dopo 5 minuti di inattività",
     previewSql: "Anteprima SQL",
+    previewQuery: "Anteprima query",
     hidePreviewSql: "Nascondi anteprima SQL",
     saveSql: "Salva nella Libreria SQL",
     openSql: "Apri file SQL",

@@ -150,9 +150,10 @@ const emit = defineEmits<{
   sort: [column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode?: DataGridSortMode];
   executeSql: [sql: string];
   clickTable: [target: SqlObjectNavigationTarget];
-  viewTableData: [tableName: string];
-  viewTableDdl: [tableName: string];
-  editTableStructure: [tableName: string];
+  viewTableData: [target: SqlObjectNavigationTarget];
+  viewTableDdl: [target: SqlObjectNavigationTarget];
+  editTableStructure: [target: SqlObjectNavigationTarget];
+  openObjectSource: [target: SqlObjectNavigationTarget, initialEditing: boolean];
   openObjectTable: [target: { tableName: string; schema?: string; tableType?: string; catalog?: string }];
   objectSchemaChange: [schema: string | undefined];
   objectBrowserViewportChange: [tabId: string, viewport: ObjectBrowserViewport];
@@ -656,16 +657,20 @@ function onHandleClickTable(target: SqlObjectNavigationTarget) {
   emit("clickTable", target);
 }
 
-function onHandleViewTableData(tableName: string) {
-  emit("viewTableData", tableName);
+function onHandleViewTableData(target: SqlObjectNavigationTarget) {
+  emit("viewTableData", target);
 }
 
-function onHandleViewTableDdl(tableName: string) {
-  emit("viewTableDdl", tableName);
+function onHandleViewTableDdl(target: SqlObjectNavigationTarget) {
+  emit("viewTableDdl", target);
 }
 
-function onHandleEditTableStructure(tableName: string) {
-  emit("editTableStructure", tableName);
+function onHandleEditTableStructure(target: SqlObjectNavigationTarget) {
+  emit("editTableStructure", target);
+}
+
+function onHandleOpenObjectSource(target: SqlObjectNavigationTarget, initialEditing: boolean) {
+  emit("openObjectSource", target, initialEditing);
 }
 
 function onHandleCloseColumnPanel() {
@@ -681,6 +686,12 @@ function focusSearch(): boolean {
   if (props.activeTab.mode === "objects") return objectBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "query") return queryEditorRef.value?.openSearch() ?? false;
   return dataGridRef.value?.focusSearch() ?? false;
+}
+
+function refreshQueryEditorCompletionCache(): boolean {
+  if (props.activeTab.mode !== "query" || !queryEditorRef.value) return false;
+  queryEditorRef.value.refreshCompletionCache();
+  return true;
 }
 
 function refreshData(): boolean {
@@ -773,7 +784,7 @@ function applyTableStructureChanges() {
   return tableStructureEditorRef.value?.applyChanges() ?? Promise.resolve(false);
 }
 
-defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExecute, pasteClipboardAsSqlInCondition, applyTableStructureChanges });
+defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, handleModRTarget, requestQueryEditorExecute, pasteClipboardAsSqlInCondition, applyTableStructureChanges });
 </script>
 
 <template>
@@ -821,6 +832,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
               @view-table-data="onHandleViewTableData"
               @edit-table-structure="onHandleEditTableStructure"
               @view-table-ddl="onHandleViewTableDdl"
+              @open-object-source="onHandleOpenObjectSource"
               @click-column="onHandleClickColumn"
               @close-column-panel="onHandleCloseColumnPanel"
             />

@@ -44,6 +44,7 @@ export default withEnglishFallback({
     rollback: "ロールバック",
     txnAutoRolledBack: "5分間操作がなかったため、トランザクションは自動的にロールバックされました",
     previewSql: "SQLをプレビュー",
+    previewQuery: "クエリをプレビュー",
     hidePreviewSql: "SQLプレビューを非表示",
     saveSql: "SQLライブラリに保存",
     openSql: "SQLファイルを開く",

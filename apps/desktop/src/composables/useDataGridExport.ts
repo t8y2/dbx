@@ -13,6 +13,7 @@ import { uuid } from "@/lib/common/utils";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { expandNestedJsonStringsForCopy } from "@/lib/common/jsonCopyValue";
 import { buildMongoCopyDocumentFromOriginal, buildMongoCopyInsertDocument, formatMongoShellLiteral, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
+import { formatMongoShellText } from "@/lib/mongo/mongoFormatter";
 import type { DatabaseType, QueryResult } from "@/types/database";
 import type { QueryResultExportRequest } from "@/lib/backend/api";
 import { usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
@@ -352,15 +353,17 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const promise = Promise.resolve().then(async () => {
       const statement =
         databaseType.value === "mongodb"
-          ? buildMongoCopyInsertStatement({
-              collection: copyInsertTargetLabel?.value || tableMeta.value?.tableName || "collection",
-              columns: columns.value,
-              sourceColumns: sourceColumns.value,
-              rows,
-              mongoDocuments: options.mongoDocuments?.value,
-              excludePrimaryKeys,
-              insertMode,
-            })
+          ? formatMongoCopyInsertStatement(
+              buildMongoCopyInsertStatement({
+                collection: copyInsertTargetLabel?.value || tableMeta.value?.tableName || "collection",
+                columns: columns.value,
+                sourceColumns: sourceColumns.value,
+                rows,
+                mongoDocuments: options.mongoDocuments?.value,
+                excludePrimaryKeys,
+                insertMode,
+              }),
+            )
           : await buildDataGridCopyInsertStatement({
               databaseType: databaseType.value,
               tableMeta: tableMeta.value,
@@ -1373,6 +1376,15 @@ function buildMongoCopyInsertStatement(options: { collection: string; columns: s
     return documents.map((document) => `${collection}.insert(${formatMongoShellLiteral(document)});`).join("\n");
   }
   return `${collection}.insertMany(${formatMongoShellLiteral(documents)});`;
+}
+
+function formatMongoCopyInsertStatement(statement: string | undefined): string | undefined {
+  if (!statement) return undefined;
+  try {
+    return formatMongoShellText(statement);
+  } catch {
+    return statement;
+  }
 }
 
 function compactLocalTimestamp(date = new Date()): string {

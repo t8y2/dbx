@@ -55,6 +55,7 @@ type JsonRecord = Record<string, unknown>;
 type ViewMode = "document" | "table";
 
 const documents = ref<JsonRecord[]>([]);
+const copyDocuments = ref<JsonRecord[]>([]);
 const lastGridColumns = ref<string[]>([]);
 const total = ref(0);
 const loading = ref(false);
@@ -172,7 +173,7 @@ const gridResult = computed<QueryResult>(() => {
     }),
   );
 
-  return { columns, rows, mongo_documents: docs, affected_rows: 0, execution_time_ms: 0, truncated: false };
+  return { columns, rows, mongo_documents: docs, mongo_copy_documents: copyDocuments.value, affected_rows: 0, execution_time_ms: 0, truncated: false };
 });
 const documentFilterFieldOptions = computed(() => gridResult.value.columns);
 const documentStructuredFilterCount = computed(() => (appliedDocumentFilter.value ? 1 : 0));
@@ -487,7 +488,9 @@ async function load() {
             }
           })
         : result.documents.map(asRecord);
+    const nextCopyDocuments = result.extended_documents?.length === nextDocuments.length ? result.extended_documents.map(asRecord) : nextDocuments;
     documents.value = nextDocuments;
+    copyDocuments.value = nextCopyDocuments;
     if (nextDocuments.length > 0) {
       const keySet = new Set<string>();
       keySet.add("_id");

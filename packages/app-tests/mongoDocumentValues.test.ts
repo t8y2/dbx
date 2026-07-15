@@ -228,6 +228,7 @@ test("serializes typed Mongo document ids while keeping their grid display compa
   const id = { $numberLong: "2048938405781032962" };
   assert.equal(serializeMongoDocumentId(id), '{"$numberLong":"2048938405781032962"}');
   assert.equal(mongoDocumentIdForGrid(id), "2048938405781032962");
+  assert.equal(serializeMongoDocumentId({ $oid: "6743e4bfa3f6f84bc3fff6c8" }), '{"$oid":"6743e4bfa3f6f84bc3fff6c8"}');
   assert.equal(serializeMongoDocumentId("2048938405781032962"), '__dbx_mongo_string_id__"2048938405781032962"');
   assert.equal(serializeMongoDocumentId('{"$numberLong":"2048938405781032962"}'), '__dbx_mongo_string_id__"{\\"$numberLong\\":\\"2048938405781032962\\"}"');
 });

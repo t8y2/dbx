@@ -44,6 +44,7 @@ export default withEnglishFallback({
     rollback: "Reverter",
     txnAutoRolledBack: "Transação revertida automaticamente após 5 minutos de inatividade",
     previewSql: "Visualizar SQL",
+    previewQuery: "Visualizar consulta",
     hidePreviewSql: "Ocultar Visualização SQL",
     saveSql: "Salvar na Biblioteca SQL",
     openSql: "Abrir arquivo SQL",

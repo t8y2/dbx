@@ -44,6 +44,7 @@ export default withEnglishFallback({
     rollback: "回溯",
     txnAutoRolledBack: "事務已因 5 分鐘無操作而自動回溯",
     previewSql: "預覽 SQL",
+    previewQuery: "預覽查詢",
     hidePreviewSql: "隱藏 SQL 預覽",
     saveSql: "儲存到 SQL 庫",
     openSql: "開啟 SQL 檔案",

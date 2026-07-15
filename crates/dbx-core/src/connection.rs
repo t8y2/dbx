@@ -3103,7 +3103,7 @@ fn base_pool_key_for(
     if is_single_connection_pool {
         connection_id.to_string()
     } else {
-        match database.map(str::trim).filter(|db| !db.is_empty()) {
+        match database.filter(|db| !db.trim().is_empty()) {
             Some(db) => format!("{connection_id}:{db}"),
             None => connection_id.to_string(),
         }
@@ -4221,6 +4221,22 @@ mod tests {
         assert_eq!(
             super::base_pool_key_for(Some(DatabaseType::MongoDb), "mongo-conn", Some("shop"), false),
             "mongo-conn:shop"
+        );
+    }
+
+    #[test]
+    fn database_scoped_pool_keys_preserve_identifier_whitespace() {
+        assert_eq!(
+            super::base_pool_key_for(Some(DatabaseType::Mysql), "mysql-conn", Some(" analytics"), false),
+            "mysql-conn: analytics"
+        );
+        assert_eq!(
+            super::base_pool_key_for(Some(DatabaseType::Mysql), "mysql-conn", Some("analytics"), false),
+            "mysql-conn:analytics"
+        );
+        assert_eq!(
+            super::base_pool_key_for(Some(DatabaseType::Postgres), "pg-conn", Some("analytics "), false),
+            "pg-conn:analytics "
         );
     }
 

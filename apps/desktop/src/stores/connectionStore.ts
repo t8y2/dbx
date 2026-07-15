@@ -2249,7 +2249,7 @@ export const useConnectionStore = defineStore("connection", () => {
               setChildren(node, children);
               await savePersistedConnectionTreeChildren(cacheKey, node.children || children);
             } else {
-              const cacheKey = schemaCacheKey(connectionId, "databases");
+              const cacheKey = schemaCacheKey(connectionId, "databases-v2");
               if (!options?.force) {
                 const cached = await loadPersistedTreeChildren(node, cacheKey);
                 if (cached.hit) {

@@ -755,11 +755,7 @@ impl ConnectionConfig {
     }
 
     pub fn effective_database(&self) -> Option<&str> {
-        self.database
-            .as_deref()
-            .map(str::trim)
-            .filter(|database| !database.is_empty())
-            .or_else(|| self.default_database())
+        self.database.as_deref().filter(|database| !database.trim().is_empty()).or_else(|| self.default_database())
     }
 
     fn default_database(&self) -> Option<&'static str> {
@@ -1954,6 +1950,30 @@ mod tests {
             is_production: false,
             production_databases: vec![],
         }
+    }
+
+    #[test]
+    fn database_identifier_whitespace_is_preserved_and_percent_encoded() {
+        let mut config = mysql_config("root", "secret", Some(" analytics "));
+
+        assert_eq!(config.effective_database(), Some(" analytics "));
+        assert_eq!(
+            config.connection_url(),
+            "mysql://root:secret@10.1.2.3:2883/%20analytics%20?ssl-mode=disabled&charset=utf8mb4"
+        );
+
+        config.db_type = DatabaseType::Postgres;
+        assert_eq!(config.effective_database(), Some(" analytics "));
+        assert_eq!(config.connection_url(), "postgres://root:secret@10.1.2.3:2883/%20analytics%20");
+    }
+
+    #[test]
+    fn whitespace_only_database_uses_database_type_default() {
+        let mut config = mysql_config("root", "secret", Some("   "));
+        assert_eq!(config.effective_database(), None);
+
+        config.db_type = DatabaseType::Postgres;
+        assert_eq!(config.effective_database(), Some("postgres"));
     }
 
     fn mongodb_config(username: &str, password: &str, database: Option<&str>) -> ConnectionConfig {

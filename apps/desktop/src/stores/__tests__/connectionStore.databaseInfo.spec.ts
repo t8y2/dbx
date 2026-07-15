@@ -46,6 +46,7 @@ describe("connectionStore database info", () => {
       connectionDatabaseInfo,
       saveConnectionDatabaseInfo,
       saveConnections,
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
       connectionIdentifierQuote: vi.fn().mockResolvedValue(undefined),
     }));
 
@@ -86,6 +87,7 @@ describe("connectionStore database info", () => {
       connectionDatabaseInfo: vi.fn(() => databaseInfo),
       saveConnectionDatabaseInfo: vi.fn().mockResolvedValue(undefined),
       saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
       connectionIdentifierQuote: vi.fn().mockResolvedValue(undefined),
     }));
 
@@ -107,6 +109,7 @@ describe("connectionStore database info", () => {
       connectDb: vi.fn().mockResolvedValue(config.id),
       connectionDatabaseInfo: vi.fn().mockRejectedValue(new Error("metadata unavailable")),
       saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
       connectionIdentifierQuote: vi.fn().mockResolvedValue(undefined),
     }));
 

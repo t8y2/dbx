@@ -65,6 +65,20 @@ describe("semantic SQL completion candidates", () => {
     expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["value"]);
   });
 
+  it("completes correlation columns after PostgreSQL WITH ORDINALITY", () => {
+    const { items } = semanticCompletion("SELECT * FROM generate_series(1, 3) WITH ORDINALITY AS g(value, ord), orders o WHERE g.|", {}, { databaseType: "postgres", dialect: "postgres" });
+
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["value", "ord"]);
+  });
+
+  it("completes later comma-separated sources after a joined table", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["audit_log", ["event_id", "action"].map((name) => ({ name, table: "audit_log" }))]]);
+    const { context, items } = semanticCompletion("SELECT * FROM users u JOIN orders o ON o.user_id = u.id, audit_log a WHERE a.|", { columnsByTable }, { databaseType: "postgres", dialect: "postgres" });
+
+    expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ name: "audit_log", alias: "a" })]));
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["event_id", "action"]);
+  });
+
   it("completes correlation columns for aliased table sources", () => {
     const { items } = semanticCompletion("SELECT * FROM table_a a(id, label), table_b b WHERE a.|", {}, { databaseType: "postgres", dialect: "postgres" });
 

@@ -104,6 +104,30 @@ describe("sqlSemanticModel baseline fixtures", () => {
     expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "alias_column", qualifierParts: ["o"] }));
   });
 
+  it("consumes WITH ORDINALITY before function aliases and later sources", () => {
+    const { sql, cursor } = sqlFixtureCursor("SELECT * FROM generate_series(1, 3) WITH ORDINALITY AS g(value, ord), orders o WHERE o.|");
+    const model = buildSqlSemanticModel(sql, cursor, { databaseType: "postgres" });
+
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "table_function", name: "g", alias: "g", columns: ["value", "ord"] }), expect.objectContaining({ name: "orders", alias: "o" })]));
+    expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "alias_column", qualifierParts: ["o"] }));
+  });
+
+  it("parses comma-separated sources after a complete joined table", () => {
+    const { sql, cursor } = sqlFixtureCursor("SELECT * FROM users u JOIN orders o ON o.user_id = u.id, audit_log a WHERE a.|");
+    const model = buildSqlSemanticModel(sql, cursor, { databaseType: "postgres" });
+
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ name: "users", alias: "u" }), expect.objectContaining({ name: "orders", alias: "o" }), expect.objectContaining({ name: "audit_log", alias: "a" })]));
+    expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "alias_column", qualifierParts: ["a"] }));
+  });
+
+  it("does not parse commas in later SELECT clauses as row sources", () => {
+    const { sql, cursor } = sqlFixtureCursor("SELECT * FROM users u WINDOW w1 AS (PARTITION BY u.id), w2 AS (PARTITION BY u.id)|");
+    const model = buildSqlSemanticModel(sql, cursor, { databaseType: "postgres" });
+
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ name: "users", alias: "u" })]));
+    expect(model.rowSources.some((source) => source.name === "w2")).toBe(false);
+  });
+
   it("keeps LATERAL subqueries available as row sources", () => {
     const { sql, cursor } = sqlFixtureCursor("SELECT * FROM users u, LATERAL (SELECT u.id AS user_id) s WHERE s.|");
     const model = buildSqlSemanticModel(sql, cursor, { databaseType: "postgres" });

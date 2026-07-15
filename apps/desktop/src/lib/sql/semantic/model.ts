@@ -20,6 +20,7 @@ const TABLE_INTRODUCERS = new Set(["from", "join", "straight_join", "update", "i
 const TABLE_FUNCTION_NAMES = new Set(["table", "xmltable", "json_table", "the", "read_csv", "read_parquet", "read_json", "unnest"]);
 const JOIN_MODIFIERS = new Set(["left", "right", "inner", "outer", "cross", "full", "natural"]);
 const CLAUSE_BOUNDARIES = new Set(["where", "group", "having", "order", "limit", "offset", "union", "intersect", "except", "on", "set", "values", "returning"]);
+const FROM_CLAUSE_BOUNDARIES = new Set([...CLAUSE_BOUNDARIES, "window", "qualify", "fetch", "for", "connect", "start", "model"].filter((item) => item !== "on"));
 const ALIAS_BLACKLIST = new Set([...CLAUSE_BOUNDARIES, "join", "straight_join", "left", "right", "inner", "outer", "cross", "full", "natural", "as", "select", "from"]);
 
 interface ParseState {
@@ -275,7 +276,9 @@ function parseTableFunctionSource(state: ParseState, nameIndex: number, introduc
   if (state.dialect.id !== "postgres" && !TABLE_FUNCTION_NAMES.has(name.toLowerCase())) return null;
   const close = findMatchingParenToken(state.tokens, qualified.nextIndex);
   const safeClose = close < 0 ? qualified.nextIndex : close;
-  const alias = aliasAfter(state.tokens, safeClose + 1, state.dialect);
+  let aliasIndex = safeClose + 1;
+  if (state.dialect.id === "postgres" && state.tokens[aliasIndex]?.normalized === "with" && state.tokens[aliasIndex + 1]?.normalized === "ordinality") aliasIndex += 2;
+  const alias = aliasAfter(state.tokens, aliasIndex, state.dialect);
   const sourceName = alias.alias ?? name;
   return {
     source: {
@@ -329,10 +332,24 @@ function parseRowSources(state: ParseState): SqlSemanticRowSource[] {
   const sources: SqlSemanticRowSource[] = [...state.cteSources];
   const rootDepth = state.tokens.reduce((min, item) => Math.min(min, item.depth), Number.POSITIVE_INFINITY);
   const sourceDepth = Number.isFinite(rootDepth) ? rootDepth : 0;
+  let inSelectFromClause = false;
   for (let index = 0; index < state.tokens.length; index += 1) {
     const item = state.tokens[index];
-    if (!item || item.kind !== "word") continue;
+    if (!item) continue;
     if (item.depth !== sourceDepth) continue;
+    if (item.kind === "word") {
+      if (state.statement.kind === "select" && item.normalized === "from") inSelectFromClause = true;
+      else if (inSelectFromClause && FROM_CLAUSE_BOUNDARIES.has(item.normalized)) inSelectFromClause = false;
+    }
+    if (inSelectFromClause && item.text === ",") {
+      const parsed = parseRowSource(state, index + 1, "from", sources.length);
+      if (parsed) {
+        sources.push(parsed.source);
+        index = parsed.nextIndex - 1;
+      }
+      continue;
+    }
+    if (item.kind !== "word") continue;
     const normalized = item.normalized;
     if (!TABLE_INTRODUCERS.has(normalized)) continue;
     if (JOIN_MODIFIERS.has(normalized)) continue;

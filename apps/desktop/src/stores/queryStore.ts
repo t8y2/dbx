@@ -6,7 +6,7 @@ import type { ConnectionConfig, DatabaseType, ObjectBrowserViewport, QueryResult
 import { orderPinnedFirst } from "@/lib/app/pinnedItems";
 import { canCancelQueryExecution } from "@/lib/sql/queryExecutionState";
 import { buildExplainSql, parseExplainResult, parseDamengExplainText, parseOracleExplainText, type BuildExplainSqlResult } from "@/lib/diagram/explainPlan";
-import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQueryEditability, sourceColumnsForResult, type EditableQueryInfo, type EditableQuerySource } from "@/lib/sql/sqlAnalysis";
+import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQueryEditability, resolveMetadataColumnName, sourceColumnsForResult, type EditableQueryInfo, type EditableQuerySource } from "@/lib/sql/sqlAnalysis";
 import { buildQueryWithHiddenPrimaryKeys, hiddenResultColumnIndexes, type HiddenPrimaryKeyProjection } from "@/lib/sql/editableQueryHiddenKeys";
 import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY, restoreOpenTabsPayload, restoreOpenTabsState, serializeOpenTabs } from "@/lib/app/openTabsPersistence";
 import {
@@ -246,22 +246,50 @@ function cloneAnalysisForSource(analysis: EditableQueryInfo, source: EditableQue
   };
 }
 
-function sourceMatchesColumn(columnName: string, tableColumns: readonly { name: string }[]): boolean {
-  const normalizedColumn = columnName.toLowerCase();
-  return tableColumns.some((column) => column.name.toLowerCase() === normalizedColumn);
+function resolveSourceColumnName(dbType: string, columnName: string, quoted: boolean | undefined, tableColumns: readonly { name: string }[]): string | undefined {
+  return resolveMetadataColumnName(
+    dbType,
+    columnName,
+    quoted,
+    tableColumns.map((column) => column.name),
+  );
 }
 
-function bindUnqualifiedColumnsForSource(analysis: EditableQueryInfo, source: EditableQuerySource, tableColumns: readonly { name: string }[], allSourceColumns: Array<{ source: EditableQuerySource; columns: readonly { name: string }[] }> = [{ source, columns: tableColumns }]): EditableQueryInfo {
+function bindColumnsForSource(
+  dbType: string,
+  analysis: EditableQueryInfo,
+  source: EditableQuerySource,
+  tableColumns: readonly { name: string }[],
+  allSourceColumns: Array<{ source: EditableQuerySource; columns: readonly { name: string }[] }> = [{ source, columns: tableColumns }],
+): EditableQueryInfo {
   return {
     ...analysis,
     columns: analysis.columns.map((column) => {
-      if (!column.sourceName || column.sourceKey || column.sourceQualifier) return column;
-      if (!sourceMatchesColumn(column.sourceName, tableColumns)) return column;
-      const matchingSources = allSourceColumns.filter((entry) => sourceMatchesColumn(column.sourceName!, entry.columns));
+      if (!column.sourceName) return column;
+      if (column.sourceKey) {
+        if (column.sourceKey !== source.key) return column;
+        const canonicalName = resolveSourceColumnName(dbType, column.sourceName, column.sourceNameQuoted, tableColumns);
+        return { ...column, sourceName: canonicalName };
+      }
+      if (column.sourceQualifier) return column;
+      const matchingSources = allSourceColumns.flatMap((entry) => {
+        const canonicalName = resolveSourceColumnName(dbType, column.sourceName!, column.sourceNameQuoted, entry.columns);
+        return canonicalName ? [{ source: entry.source, canonicalName }] : [];
+      });
       if (matchingSources.length !== 1 || matchingSources[0]?.source.key !== source.key) return column;
-      return { ...column, sourceKey: source.key };
+      return { ...column, sourceName: matchingSources[0].canonicalName, sourceKey: source.key };
     }),
   };
+}
+
+function primaryKeysPresentForSource(dbType: string, primaryKeys: string[], resultColumns: string[], analysis: EditableQueryInfo, sourceKey: string, tableColumns: readonly { name: string }[]): boolean {
+  if (!analysis.selectStar) return allPrimaryKeysPresent(primaryKeys, resultColumns, analysis, sourceKey);
+  const metadataNames = tableColumns.map((column) => column.name);
+  const canonicalResultColumns = resultColumns.flatMap((column) => {
+    const canonicalName = resolveMetadataColumnName(dbType, column, undefined, metadataNames);
+    return canonicalName ? [canonicalName] : [];
+  });
+  return allPrimaryKeysPresent(primaryKeys, canonicalResultColumns);
 }
 
 function expandStarProjectionColumnsForSource(analysis: EditableQueryInfo, source: EditableQuerySource, tableColumns: readonly { name: string }[]): EditableQueryInfo {
@@ -2243,8 +2271,8 @@ export const useQueryStore = defineStore("query", () => {
 
   function missingPrimaryKeysForSource(primaryKeys: string[], analysis: EditableQueryInfo, sourceKey: string): string[] {
     if (analysis.selectStar) return [];
-    const selectedColumns = new Set(analysis.columns.flatMap((column) => (column.sourceName && column.sourceKey === sourceKey ? [column.sourceName.toLowerCase()] : [])));
-    return primaryKeys.filter((primaryKey) => !selectedColumns.has(primaryKey.toLowerCase()));
+    const selectedColumns = new Set(analysis.columns.flatMap((column) => (column.sourceName && column.sourceKey === sourceKey ? [column.sourceName] : [])));
+    return primaryKeys.filter((primaryKey) => !selectedColumns.has(primaryKey));
   }
 
   async function oracleRowIdIsSafeForQuery(tab: QueryTab, loaded: LoadedEditableSource): Promise<boolean> {
@@ -2268,7 +2296,7 @@ export const useQueryStore = defineStore("query", () => {
 
       const loaded = await loadEditableQuerySource(tab, analysis, sources[0]!, conn, databaseType, traceId, elapsed);
       if (loaded.tableMeta.tableType?.toUpperCase().includes("VIEW")) return unchanged;
-      const metadataAnalysis = expandStarProjectionColumnsForSource(bindUnqualifiedColumnsForSource(loaded.analysis, loaded.source, loaded.tableMeta.columns), loaded.source, loaded.tableMeta.columns);
+      const metadataAnalysis = expandStarProjectionColumnsForSource(bindColumnsForSource(databaseType, loaded.analysis, loaded.source, loaded.tableMeta.columns), loaded.source, loaded.tableMeta.columns);
       const declaredPrimaryKeys = loaded.tableMeta.columns.filter((column) => column.is_primary_key).map((column) => column.name);
       // Oracle base tables without declared keys use the same ROWID identity as
       // table-data tabs. Confirm the object is a base table because selecting
@@ -2278,10 +2306,8 @@ export const useQueryStore = defineStore("query", () => {
 
       const missingPrimaryKeys = declaredPrimaryKeys.length === 0 ? primaryKeys : missingPrimaryKeysForSource(primaryKeys, metadataAnalysis, loaded.source.key);
       if (missingPrimaryKeys.length === 0) return unchanged;
-      const primaryKeySet = new Set(primaryKeys.map((primaryKey) => primaryKey.toLowerCase()));
-      const hasWritableProjection = metadataAnalysis.selectStar
-        ? loaded.tableMeta.columns.some((column) => !primaryKeySet.has(column.name.toLowerCase()))
-        : metadataAnalysis.columns.some((column) => column.sourceName && column.sourceKey === loaded.source.key && !primaryKeySet.has(column.sourceName.toLowerCase()));
+      const primaryKeySet = new Set(primaryKeys);
+      const hasWritableProjection = metadataAnalysis.selectStar ? loaded.tableMeta.columns.some((column) => !primaryKeySet.has(column.name)) : metadataAnalysis.columns.some((column) => column.sourceName && column.sourceKey === loaded.source.key && !primaryKeySet.has(column.sourceName));
       if (!hasWritableProjection) return unchanged;
 
       const rewritten = buildQueryWithHiddenPrimaryKeys({
@@ -2360,13 +2386,13 @@ export const useQueryStore = defineStore("query", () => {
       // source table has a complete row identifier and at least one writable column.
       const candidates = loadedSources
         .map((loaded) => {
-          const metadataAnalysis = expandStarProjectionColumnsForSource(bindUnqualifiedColumnsForSource(loaded.analysis, loaded.source, loaded.tableMeta.columns, allSourceColumns), loaded.source, loaded.tableMeta.columns);
+          const metadataAnalysis = expandStarProjectionColumnsForSource(bindColumnsForSource(dbType, loaded.analysis, loaded.source, loaded.tableMeta.columns, allSourceColumns), loaded.source, loaded.tableMeta.columns);
           const primaryKeys = loaded.tableMeta.primaryKeys;
           const sourceColumns = sourceColumnsForResult(metadataAnalysis, tab.result!.columns, loaded.source.key);
-          const primaryKeysPresent = allPrimaryKeysPresent(primaryKeys, tab.result!.columns, metadataAnalysis, loaded.source.key);
+          const primaryKeysPresent = primaryKeysPresentForSource(dbType, primaryKeys, tab.result!.columns, metadataAnalysis, loaded.source.key, loaded.tableMeta.columns);
           const keylessAllowed = sources.length === 1 && canUseKeylessRowPredicate(dbType as DatabaseType, primaryKeys);
-          const primaryKeySet = new Set(primaryKeys.map((key) => key.toLowerCase()));
-          const editableSourceColumnCount = (sourceColumns ?? []).filter((column) => column && !primaryKeySet.has(column.toLowerCase())).length;
+          const primaryKeySet = new Set(primaryKeys);
+          const editableSourceColumnCount = (sourceColumns ?? []).filter((column) => column && !primaryKeySet.has(column)).length;
           return {
             ...loaded,
             analysis: metadataAnalysis,
@@ -2380,7 +2406,7 @@ export const useQueryStore = defineStore("query", () => {
 
       if (loadedSources.length === 1) {
         const loaded = loadedSources[0]!;
-        const metadataAnalysis = expandStarProjectionColumnsForSource(bindUnqualifiedColumnsForSource(loaded.analysis, loaded.source, loaded.tableMeta.columns, allSourceColumns), loaded.source, loaded.tableMeta.columns);
+        const metadataAnalysis = expandStarProjectionColumnsForSource(bindColumnsForSource(dbType, loaded.analysis, loaded.source, loaded.tableMeta.columns, allSourceColumns), loaded.source, loaded.tableMeta.columns);
         const syntheticRowIdProjection = hiddenPrimaryKeys.find((projection) => projection.sourceName.toUpperCase() === DBX_ROWID_COLUMN);
         const primaryKeys = loaded.tableMeta.primaryKeys.length === 0 && syntheticRowIdProjection ? [DBX_ROWID_COLUMN] : loaded.tableMeta.primaryKeys;
         const sourceColumns = sourceColumnsForResult(metadataAnalysis, tab.result.columns, loaded.source.key);
@@ -2397,7 +2423,7 @@ export const useQueryStore = defineStore("query", () => {
           };
         }
 
-        const primaryKeysPresent = syntheticRowIdProjection ? sourceColumns?.some((column) => column?.toUpperCase() === DBX_ROWID_COLUMN) === true : allPrimaryKeysPresent(primaryKeys, tab.result.columns, metadataAnalysis, loaded.source.key);
+        const primaryKeysPresent = syntheticRowIdProjection ? sourceColumns?.some((column) => column?.toUpperCase() === DBX_ROWID_COLUMN) === true : primaryKeysPresentForSource(dbType, primaryKeys, tab.result.columns, metadataAnalysis, loaded.source.key, loaded.tableMeta.columns);
         if (!primaryKeysPresent) {
           return {
             queryAnalysis: undefined,

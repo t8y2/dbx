@@ -1491,6 +1491,90 @@ test("normalizes unquoted Oracle query identifiers before loading editable metad
   }
 });
 
+test("keeps PostgreSQL quoted primary keys distinct from case-only result columns", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  let executedSql = "";
+
+  connectionStore.addEphemeralConnection(conn("postgres-case-keys"));
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url.startsWith("/api/schema/columns?")) {
+      return new Response(
+        JSON.stringify([
+          { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: false, extra: null, comment: null },
+          { name: "ID", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: null },
+          { name: "name", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: null },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/prepare-pagination-plan") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify({ sqlToExecute: body.options.sql, useAgentResultSession: false }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/query/execute-multi") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      executedSql = body.sql;
+      return new Response(
+        JSON.stringify([
+          {
+            columns: ["id", "name", "__DBX_PK_0"],
+            rows: [[1, "lower id row", 101]],
+            affected_rows: 0,
+            execution_time_ms: 1,
+          },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/analyze-editability") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      assert.match(body.sql, /"ID" AS "__DBX_PK_0"/);
+      return new Response(
+        JSON.stringify({
+          editable: true,
+          analysis: {
+            schema: "public",
+            schemaQuoted: false,
+            tableName: "case_keys",
+            tableNameQuoted: false,
+            selectStar: false,
+            columns: [
+              { sourceName: "id", sourceNameQuoted: false, resultName: "id", expression: "id" },
+              { sourceName: "name", sourceNameQuoted: false, resultName: "name", expression: "name" },
+              { sourceName: "ID", sourceNameQuoted: true, resultName: "__DBX_PK_0", expression: '"ID"' },
+            ],
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const tabId = store.createTab("postgres-case-keys", "appdb", "Query 1", "query", "public");
+    await store.executeTabSql(tabId, "select id, name from case_keys");
+
+    const tab = store.tabs.find((item) => item.id === tabId);
+    await waitFor(() => tab?.tableMeta?.tableName === "case_keys");
+    assert.match(executedSql, /"ID" AS "__DBX_PK_0"/);
+    assert.deepEqual(tab?.querySourceColumns, ["id", "name", "ID"]);
+    assert.equal(tab?.queryEditabilityReason, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("binds DISTINCT qualified-star edits to the single safe joined source", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());

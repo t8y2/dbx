@@ -2,6 +2,7 @@ import { Cassandra, MariaSQL, MSSQL, MySQL, PLSQL, PostgreSQL, SQLite, StandardS
 import type { DatabaseType, SqlSnippet } from "@/types/database";
 import { buildMongoCompletionItemsFromContext, type MongoCompletionItem } from "@/lib/mongo/mongoCompletion";
 import { CLOUDFLARE_D1_COMMON_FUNCTION_NAMES } from "@/lib/sql/cloudflareD1";
+import type { SqlObjectNavigationType } from "@/lib/sql/sqlNavigation";
 
 const SQL_KEYWORDS = [
   "SELECT",
@@ -1156,7 +1157,7 @@ function sqlAliasKeywordWords(...sources: Array<string | undefined>): string[] {
 export interface SqlCompletionTable {
   name: string;
   schema?: string;
-  type?: "table" | "view";
+  type?: SqlObjectNavigationType;
   detail?: string;
   applyName?: string;
   boost?: number;

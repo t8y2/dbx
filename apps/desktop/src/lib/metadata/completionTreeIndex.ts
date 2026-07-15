@@ -25,7 +25,7 @@ export function completionTablesFromTree(nodes: readonly TreeNode[], connectionI
     tables.push({
       name: node.tableName || node.label,
       schema: node.schema,
-      type: node.type === "view" || node.type === "materialized_view" ? "view" : "table",
+      type: node.type === "materialized_view" ? "materialized_view" : node.type === "view" ? "view" : "table",
     });
   });
   return dedupeCompletionTables(tables);

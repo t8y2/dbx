@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, onActivated, onDeactivated, watch, shallowRef, computed, nextTick } from "vue";
-import { CaseLower, CaseUpper, FileCode, PencilRuler, Play, Copy, Sparkles, Table2, TextSelect } from "@lucide/vue";
+import { CaseLower, CaseUpper, Code2, FileCode, Pencil, PencilRuler, Play, Copy, Sparkles, Table2, TextSelect } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import type { CompletionContext } from "@codemirror/autocomplete";
 import type { EditorView as EditorViewType } from "@codemirror/view";
@@ -40,7 +40,7 @@ import { mergeSqlSemanticReferenceAnalysis, resolveSqlSemanticNavigationTarget }
 import { buildElasticsearchCompletionItemsFromContext, getElasticsearchCompletionContext, getElasticsearchCompletionResultValidFor, shouldAutoOpenElasticsearchCompletion, type ElasticsearchCompletionItem } from "@/lib/elasticsearch/elasticsearchCompletion";
 import { buildMongoCompletionItemsFromContext, getMongoCompletionContext, getMongoCompletionResultValidFor, shouldAutoOpenMongoCompletion, type MongoCompletionItem } from "@/lib/mongo/mongoCompletion";
 import { resolveSqlCompletionTableLookupTarget } from "@/lib/sql/sqlCompletionLookupTarget";
-import { extractIdentifierDetailsAt, isSqlKeyword, matchTable, splitQualifiedIdentifier, sqlObjectHoverDetail, sqlObjectNavigationTarget, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
+import { extractIdentifierDetailsAt, isSqlKeyword, matchTable, mergeSqlObjectNavigationType, splitQualifiedIdentifier, sqlObjectHoverDetail, sqlObjectNavigationTarget, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { lineColumnToOffset, parseSqlErrorLocation } from "@/lib/sql/sqlDiagnostics";
 import {
   DBX_TABLE_REFERENCE_MIME,
@@ -64,7 +64,7 @@ import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect
 import { startsQueryEditorRectangularSelection } from "@/lib/editor/queryEditorPointerSelection";
 import { isSchemaAware, isSingleDatabase, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
 import { usesLocalOnlyEditorCompletionMetadata, usesOnDemandOnlyEditorColumnMetadata } from "@/lib/metadata/completionMetadataPolicy";
-import { qualifiedTableNameAtSqlPosition } from "@/lib/sql/queryCursorTableTarget";
+import { queryContextObjectActions, queryTableCandidateAtSqlPosition, resolveQueryContextCandidateDatabase, resolveQueryContextObjectTarget, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
 import * as api from "@/lib/backend/api";
 import { areSqlSemanticDiagnosticsEqual, buildSqlParserErrorDiagnostic, buildSqlSemanticDiagnostics, isSqlSemanticDiagnosticInputContext, shouldRunSqlSemanticDiagnostics, sqlSemanticDiagnosticRangesForViewport, tableReferenceKey, type SqlSemanticDiagnostic } from "@/lib/sql/semantic/diagnostics";
 import { buildRedisSyntaxDiagnostics, shouldRunRedisDiagnostics } from "@/lib/redis/redisSyntaxDiagnostics";
@@ -103,9 +103,10 @@ const emit = defineEmits<{
   execute: [source: SqlExecutionOverride];
   save: [];
   clickTable: [target: SqlObjectNavigationTarget];
-  viewTableData: [tableName: string];
-  viewTableDdl: [tableName: string];
-  editTableStructure: [tableName: string];
+  viewTableData: [target: SqlObjectNavigationTarget];
+  viewTableDdl: [target: SqlObjectNavigationTarget];
+  editTableStructure: [target: SqlObjectNavigationTarget];
+  openObjectSource: [target: SqlObjectNavigationTarget, initialEditing: boolean];
   clickColumn: [columns: Array<{ name: string; table: string; schema?: string }>, error?: string | undefined];
   closeColumnPanel: [];
   viewportChange: [viewport: { scrollTop: number; scrollLeft: number }];
@@ -186,7 +187,7 @@ const isGestureZooming = ref(false);
 const searchPanelRef = ref<InstanceType<typeof EditorSearchPanel>>();
 const selectedSql = ref("");
 const executableSql = ref("");
-const contextTableName = ref<string | null>(null);
+const contextObjectTarget = ref<SqlObjectNavigationTarget | null>(null);
 
 const hasSelectedSql = computed(() => selectedSql.value.trim().length > 0);
 const canCopySelectedSql = computed(() => selectedSql.value.length > 0);
@@ -280,7 +281,7 @@ function editorThemeAppearance() {
 }
 
 // Completion cache
-let cachedTables: Array<{ name: string; schema?: string; type?: "table" | "view" }> = [];
+let cachedTables: SqlCompletionTable[] = [];
 let cachedCompletionObjects: SqlCompletionObject[] = [];
 // Persistent column cache keyed by "schema.table" or "table"
 const cachedColumnsByTable = new Map<string, SqlCompletionColumn[]>();
@@ -549,7 +550,28 @@ function syncContextMenuState(currentView: EditorViewType) {
 function syncContextMenuStateAtEvent(currentView: EditorViewType, event: MouseEvent) {
   syncContextMenuState(currentView);
   const pos = currentView.posAtCoords({ x: event.clientX, y: event.clientY });
-  contextTableName.value = pos == null ? null : qualifiedTableNameAtSqlPosition(currentView.state.doc.toString(), pos);
+  if (pos == null) {
+    contextObjectTarget.value = null;
+    return;
+  }
+
+  const sql = currentView.state.doc.toString();
+  if (!props.connectionId || props.database == null) {
+    const candidate = queryTableCandidateAtSqlPosition({ connectionId: "", database: props.database ?? "", schema: props.schema, databaseType: props.databaseType, sql, position: pos });
+    contextObjectTarget.value = candidate ? { name: candidate.tableName, database: candidate.database, schema: candidate.schema } : null;
+    return;
+  }
+
+  const parsedCandidate = queryTableCandidateAtSqlPosition({ connectionId: props.connectionId, database: props.database, schema: props.schema, databaseType: props.databaseType, sql, position: pos });
+  if (!parsedCandidate) {
+    contextObjectTarget.value = null;
+    return;
+  }
+
+  // Right-click must stay instant: resolve from completion/tree caches and keep the legacy table fallback when metadata is unavailable.
+  const candidate = resolveQueryContextCandidateDatabase(parsedCandidate, connectionStore.lookupLocalCompletionDatabases(parsedCandidate.connectionId, parsedCandidate.database, MAX_COMPLETION_TABLES));
+  const tables = connectionStore.lookupLocalCompletionTables(candidate.connectionId, candidate.database, candidate.tableName, MAX_COMPLETION_TABLES, candidate.schema);
+  contextObjectTarget.value = resolveQueryContextObjectTarget(candidate, tables);
 }
 
 function focusEditor() {
@@ -845,21 +867,43 @@ async function pasteClipboardAsSqlInCondition(): Promise<boolean> {
 }
 
 function openTableFromContextMenu() {
-  if (!contextTableName.value) return;
-  emit("viewTableData", contextTableName.value);
+  if (!contextObjectTarget.value) return;
+  emit("viewTableData", contextObjectTarget.value);
   focusEditor();
 }
 
 function editTableStructureFromContextMenu() {
-  if (!contextTableName.value) return;
-  emit("editTableStructure", contextTableName.value);
+  if (!contextObjectTarget.value) return;
+  emit("editTableStructure", contextObjectTarget.value);
   focusEditor();
 }
 
 function openTableDdlFromContextMenu() {
-  if (!contextTableName.value) return;
-  emit("viewTableDdl", contextTableName.value);
+  if (!contextObjectTarget.value) return;
+  emit("viewTableDdl", contextObjectTarget.value);
   focusEditor();
+}
+
+function openObjectSourceFromContextMenu(initialEditing: boolean) {
+  if (!contextObjectTarget.value) return;
+  emit("openObjectSource", contextObjectTarget.value, initialEditing);
+  focusEditor();
+}
+
+function contextObjectMenuItem(action: QueryContextObjectAction): ContextMenuItem {
+  const disabled = !contextObjectTarget.value;
+  switch (action) {
+    case "view-data":
+      return { label: t("contextMenu.viewData"), action: openTableFromContextMenu, disabled, icon: Table2 };
+    case "edit-table-structure":
+      return { label: t("contextMenu.editStructure"), action: editTableStructureFromContextMenu, disabled, icon: PencilRuler };
+    case "edit-view":
+      return { label: t("contextMenu.editView"), action: () => openObjectSourceFromContextMenu(true), disabled, icon: Pencil };
+    case "view-source":
+      return { label: t("contextMenu.viewSource"), action: () => openObjectSourceFromContextMenu(false), disabled, icon: Code2 };
+    case "view-ddl":
+      return { label: t("contextMenu.viewDdl"), action: openTableDdlFromContextMenu, disabled, icon: FileCode };
+  }
 }
 
 function executableStatementRangeStartingAt(currentView: EditorViewType, lineFrom: number) {
@@ -912,24 +956,7 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
             shortcut: shortcuts.executeSql,
           },
         ]),
-    {
-      label: t("contextMenu.viewData"),
-      action: openTableFromContextMenu,
-      disabled: !contextTableName.value,
-      icon: Table2,
-    },
-    {
-      label: t("contextMenu.editStructure"),
-      action: editTableStructureFromContextMenu,
-      disabled: !contextTableName.value,
-      icon: PencilRuler,
-    },
-    {
-      label: t("contextMenu.viewDdl"),
-      action: openTableDdlFromContextMenu,
-      disabled: !contextTableName.value,
-      icon: FileCode,
-    },
+    ...queryContextObjectActions(contextObjectTarget.value?.type).map(contextObjectMenuItem),
     { label: "", separator: true },
     {
       label: t("editor.contextMenu.copySelection"),
@@ -1225,7 +1252,7 @@ function completionTablesMatch(left: { name: string; schema?: string | null }, r
   return left.schema.toLowerCase() === right.schema.toLowerCase();
 }
 
-async function findExactSemanticDiagnosticTable(table: SqlTableReference): Promise<{ name: string; schema?: string; type?: "table" | "view" } | null> {
+async function findExactSemanticDiagnosticTable(table: SqlTableReference): Promise<SqlCompletionTable | null> {
   if (!props.connectionId || props.database == null) return null;
   const target = completionMetadataTarget(table);
   if (!target) return null;
@@ -1368,7 +1395,7 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
     let table = matchTable(qualifiedTableLookup, cachedTables) ?? matchTable(tableLookupName, cachedTables) ?? matchTable(identifier, cachedTables) ?? matchTable(name, cachedTables);
     if (!table && !usesLocalOnlyCompletionMetadata()) {
       const hoverTables = await connectionStore.listCompletionTables(props.connectionId, props.database, tableLookupName, MAX_COMPLETION_TABLES, semanticTarget?.schema ?? props.schema, false, props.schema);
-      cachedTables = [...cachedTables, ...hoverTables];
+      cachedTables = mergeCompletionTables(cachedTables, hoverTables);
       table = matchTable(qualifiedTableLookup, hoverTables) ?? matchTable(tableLookupName, hoverTables) ?? matchTable(identifier, hoverTables) ?? matchTable(name, hoverTables);
     }
     if (table && !semanticQualifierIsRowSource && (!qualifier || table.schema?.toLowerCase() === qualifier.toLowerCase() || table.name === name)) {
@@ -2327,7 +2354,9 @@ function mergeCompletionTables(existing: SqlCompletionTable[], incoming: SqlComp
       indexes.set(key, merged.length);
       merged.push(table);
     } else {
-      merged[index] = { ...merged[index], ...table };
+      const existing = merged[index];
+      // Preserve the more specific tree type if an older metadata endpoint reports a materialized view as VIEW.
+      merged[index] = { ...existing, ...table, type: mergeSqlObjectNavigationType(existing.type, table.type) };
     }
   }
   return merged;
@@ -2639,7 +2668,7 @@ function mergeCompletionObjects(existing: SqlCompletionObject[], incoming: SqlCo
   return merged;
 }
 
-async function refreshCompletionCache() {
+function refreshCompletionCache() {
   cachedTables = [];
   cachedCompletionObjects = [];
   cachedColumnsByTable.clear();
@@ -3578,7 +3607,7 @@ function scrollCursorIntoView() {
   });
 }
 
-defineExpose({ openSearch, openReplace, scrollCursorIntoView, requestExecute, pasteClipboardAsSqlInCondition, previewStatementRange });
+defineExpose({ openSearch, openReplace, scrollCursorIntoView, requestExecute, pasteClipboardAsSqlInCondition, previewStatementRange, refreshCompletionCache });
 </script>
 
 <template>

@@ -160,6 +160,22 @@ class DamengAgentMetadataTest {
     }
 
     @Test
+    void readsViewSourceWithDbmsMetadataType() {
+        DamengAgent agent = new DamengAgent();
+        List<String> params = new ArrayList<>();
+        TestSupport.setPrivateConnection(
+            agent,
+            objectSourceConnection(params, "CREATE VIEW \"APP\".\"V_PROCESSPLAN\" AS SELECT 1 AS ID FROM DUAL")
+        );
+
+        ObjectSource source = agent.getObjectSource("APP", "V_PROCESSPLAN", "VIEW");
+
+        Assertions.assertEquals(List.of("VIEW", "V_PROCESSPLAN", "APP"), params);
+        Assertions.assertEquals("VIEW", source.getObject_type());
+        Assertions.assertTrue(source.getSource().contains("CREATE VIEW"), source.getSource());
+    }
+
+    @Test
     void triggerMetadataDoesNotRequireOracleTriggerTypeColumn() {
         DamengAgent agent = new DamengAgent();
         TestSupport.setPrivateConnection(agent, JdbcMetadataSqlFake.connection());

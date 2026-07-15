@@ -21,6 +21,7 @@ import {
   type DropPosition,
 } from "@/lib/sidebar/sidebarLayout";
 import type { SqlCompletionColumn, SqlCompletionForeignKey, SqlCompletionObject, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
+import { mergeSqlObjectNavigationType, sqlObjectNavigationTypeFromTableType } from "@/lib/sql/sqlNavigation";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
@@ -1160,13 +1161,8 @@ export const useConnectionStore = defineStore("connection", () => {
     return tables.map((table) => ({
       name: table.name,
       schema,
-      type: isViewLikeTableType(table.table_type) ? "view" : "table",
+      type: sqlObjectNavigationTypeFromTableType(table.table_type),
     }));
-  }
-
-  function isViewLikeTableType(tableType: string): boolean {
-    const normalized = tableType.toUpperCase().replace(/[\s-]+/g, "_");
-    return normalized === "VIEW" || normalized === "MATERIALIZED_VIEW";
   }
 
   function sameSidebarObjectName(left: string | undefined, right: string | undefined): boolean {
@@ -4039,7 +4035,7 @@ export const useConnectionStore = defineStore("connection", () => {
         const table: SqlCompletionTable = {
           name: candidate.name,
           schema: candidate.schema ?? undefined,
-          type: candidate.kind === "view" ? "view" : "table",
+          type: sqlObjectNavigationTypeFromTableType(candidate.data_type || candidate.kind),
         };
         if (!withOracleMetadata) return table;
         return {
@@ -4450,7 +4446,7 @@ export const useConnectionStore = defineStore("connection", () => {
                 results = tables.map((table) => ({
                   name: table.name,
                   schema,
-                  type: isViewLikeTableType(table.table_type) ? ("view" as const) : ("table" as const),
+                  type: sqlObjectNavigationTypeFromTableType(table.table_type),
                 }));
               } else {
                 results = lookupLocalCompletionTables(connectionId, database, normalizedFilter, limit);
@@ -4469,7 +4465,7 @@ export const useConnectionStore = defineStore("connection", () => {
                   results = tables.map((table) => ({
                     name: table.name,
                     schema,
-                    type: isViewLikeTableType(table.table_type) ? ("view" as const) : ("table" as const),
+                    type: sqlObjectNavigationTypeFromTableType(table.table_type),
                   }));
                 } catch {
                   results = [];
@@ -4490,7 +4486,7 @@ export const useConnectionStore = defineStore("connection", () => {
             completionTablesCache.value[cacheKey] = tables.map((table) => ({
               name: table.name,
               schema,
-              type: isViewLikeTableType(table.table_type) ? ("view" as const) : ("table" as const),
+              type: sqlObjectNavigationTypeFromTableType(table.table_type),
             }));
           } else {
             completionTablesCache.value[cacheKey] = lookupLocalCompletionTables(connectionId, database, normalizedFilter, limit);
@@ -4506,7 +4502,7 @@ export const useConnectionStore = defineStore("connection", () => {
         }
         completionTablesCache.value[cacheKey] = tables.map((table) => ({
           name: table.name,
-          type: isViewLikeTableType(table.table_type) ? ("view" as const) : ("table" as const),
+          type: sqlObjectNavigationTypeFromTableType(table.table_type),
         }));
         completionTablesCache.value[cacheKey] = limit ? completionTablesCache.value[cacheKey].slice(0, limit) : completionTablesCache.value[cacheKey];
         indexCompletionTables(connectionId, database, schema, completionTablesCache.value[cacheKey]);
@@ -4528,12 +4524,18 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function dedupeCompletionTables(tables: SqlCompletionTable[]): SqlCompletionTable[] {
-    const seen = new Set<string>();
+    const indexByKey = new Map<string, number>();
     const deduped: SqlCompletionTable[] = [];
     for (const table of tables) {
       const key = `${table.schema ?? ""}.${table.name}`.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
+      const existingIndex = indexByKey.get(key);
+      if (existingIndex != null) {
+        const existing = deduped[existingIndex];
+        // Loaded tree metadata can distinguish materialized views even when an older completion endpoint only reports VIEW.
+        deduped[existingIndex] = { ...table, ...existing, type: mergeSqlObjectNavigationType(existing.type, table.type) };
+        continue;
+      }
+      indexByKey.set(key, deduped.length);
       deduped.push(table);
     }
     return deduped;

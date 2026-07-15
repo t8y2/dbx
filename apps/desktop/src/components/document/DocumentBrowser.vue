@@ -366,12 +366,6 @@ function buildElasticsearchInsertDocument(row: MongoInputValue[], columns: strin
   return doc;
 }
 
-function mongoIdPreview(val: unknown): string {
-  if (val === null || val === undefined) return "null";
-  if (typeof val === "string" && /^[a-fA-F0-9]{24}$/.test(val)) return `ObjectId("${val}")`;
-  return formatMongoShellLiteral(val);
-}
-
 function elasticsearchPathIdPreview(id: string): string {
   return encodeURIComponent(id);
 }
@@ -407,7 +401,7 @@ async function previewDocumentChanges(changes: DocumentGridChanges): Promise<str
       stmts.push(`POST /${coll}/_update/${elasticsearchPathIdPreview(String(id))}${elasticsearchRoutingPreview(routing)}\n${stringifyDocumentStoreValue({ doc: updateDoc.$set ?? updateDoc }, "elasticsearch", 2)}`);
     } else {
       const updateDoc = buildMongoUpdateDocument(dirtyCols, columns, documents.value[rowIdx]);
-      stmts.push(`db.${coll}.updateOne({_id: ${mongoIdPreview(documents.value[rowIdx]?._id ?? id)}}, ${formatMongoShellLiteral(updateDoc)})`);
+      stmts.push(`db.${coll}.updateOne({_id: ${formatMongoShellLiteral(documents.value[rowIdx]?._id ?? id)}}, ${formatMongoShellLiteral(updateDoc)})`);
     }
   }
 
@@ -419,7 +413,7 @@ async function previewDocumentChanges(changes: DocumentGridChanges): Promise<str
       const routing = documentRoutingFromGridRow(row, columns);
       stmts.push(`DELETE /${coll}/_doc/${elasticsearchPathIdPreview(String(id))}${elasticsearchRoutingPreview(routing)}`);
     } else {
-      stmts.push(`db.${coll}.deleteOne({_id: ${mongoIdPreview(documents.value[rowIdx]?._id ?? id)}})`);
+      stmts.push(`db.${coll}.deleteOne({_id: ${formatMongoShellLiteral(documents.value[rowIdx]?._id ?? id)}})`);
     }
   }
 

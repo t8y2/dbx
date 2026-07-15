@@ -960,7 +960,7 @@ pub async fn update_document(
                 return Ok(result.modified_count);
             }
         }
-        return Ok(0);
+        return Err("No MongoDB document matched the provided _id".to_string());
     }
 
     for filter in document_id_filters(id) {
@@ -973,7 +973,7 @@ pub async fn update_document(
             return Ok(result.modified_count);
         }
     }
-    Ok(0)
+    Err("No MongoDB document matched the provided _id".to_string())
 }
 
 fn is_update_operator_document(doc: &Document) -> bool {
@@ -1233,10 +1233,13 @@ fn document_id_filters(id: &str) -> Vec<Document> {
         return vec![filter];
     }
     let string_filter = doc! { "_id": Bson::String(id.to_string()) };
-    match ObjectId::parse_str(id) {
-        Ok(oid) => vec![doc! { "_id": Bson::ObjectId(oid) }, string_filter],
-        Err(_) => vec![string_filter],
+    if let Ok(oid) = ObjectId::parse_str(id) {
+        return vec![doc! { "_id": Bson::ObjectId(oid) }, string_filter];
     }
+    if let Ok(number) = serde_json::from_str::<serde_json::Number>(id) {
+        return vec![doc! { "_id": json_value_to_bson(&serde_json::Value::Number(number)) }, string_filter];
+    }
+    vec![string_filter]
 }
 
 fn decode_string_document_id(id: &str) -> Option<String> {
@@ -1302,8 +1305,10 @@ fn bson_to_json(bson: &Bson) -> serde_json::Value {
 
 fn bson_document_field_to_json(key: &str, bson: &Bson) -> serde_json::Value {
     if key == "_id" {
-        if let Bson::Int64(value) = bson {
-            return serde_json::json!({ "$numberLong": value.to_string() });
+        match bson {
+            Bson::Int64(value) => return serde_json::json!({ "$numberLong": value.to_string() }),
+            Bson::ObjectId(value) => return serde_json::json!({ "$oid": value.to_hex() }),
+            _ => {}
         }
     }
     bson_to_json(bson)
@@ -1679,6 +1684,33 @@ mod tests {
     }
 
     #[test]
+    fn document_id_filters_preserve_extended_json_object_ids() {
+        let filters = document_id_filters(r#"{"$oid":"507f1f77bcf86cd799439011"}"#);
+
+        assert_eq!(filters.len(), 1);
+        assert!(
+            matches!(filters[0].get("_id"), Some(Bson::ObjectId(value)) if value.to_hex() == "507f1f77bcf86cd799439011")
+        );
+    }
+
+    #[test]
+    fn document_id_filters_preserve_numeric_ids() {
+        let integer_filters = document_id_filters("42");
+        let double_filters = document_id_filters("42.5");
+
+        // Numeric filter first, plain-string fallback second: legacy callers
+        // (MCP bridge, raw grid ids) may pass "42" for a string-typed _id.
+        assert_eq!(
+            integer_filters,
+            vec![doc! { "_id": Bson::Int64(42) }, doc! { "_id": Bson::String("42".to_string()) }]
+        );
+        assert_eq!(
+            double_filters,
+            vec![doc! { "_id": Bson::Double(42.5) }, doc! { "_id": Bson::String("42.5".to_string()) }]
+        );
+    }
+
+    #[test]
     fn document_id_filters_decode_explicit_string_ids_before_extended_json() {
         let original = r#"{"$numberLong":"2048938405781032962"}"#;
         let id = format!("__dbx_mongo_string_id__{}", serde_json::to_string(original).unwrap());
@@ -1688,6 +1720,10 @@ mod tests {
         assert!(
             matches!(filters[0].get("_id"), Some(Bson::String(value)) if value == r####"{"$numberLong":"2048938405781032962"}"####)
         );
+
+        let hex = "507f1f77bcf86cd799439011";
+        let encoded_hex = format!("__dbx_mongo_string_id__{}", serde_json::to_string(hex).unwrap());
+        assert_eq!(document_id_filters(&encoded_hex), vec![doc! { "_id": Bson::String(hex.to_string()) }]);
     }
 
     #[test]
@@ -1786,6 +1822,16 @@ mod tests {
 
         assert_eq!(value["_id"], serde_json::json!({ "$numberLong": "2048938405781032962" }));
         assert_eq!(value["snowflake"], serde_json::json!("2048938405781032962"));
+    }
+
+    #[test]
+    fn bson_to_json_preserves_object_id_type_for_updates() {
+        let oid = ObjectId::parse_str("507f1f77bcf86cd799439011").unwrap();
+        let value = bson_to_json(&Bson::Document(doc! {
+            "_id": Bson::ObjectId(oid),
+        }));
+
+        assert_eq!(value["_id"], serde_json::json!({ "$oid": "507f1f77bcf86cd799439011" }));
     }
 
     #[test]

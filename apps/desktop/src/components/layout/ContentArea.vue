@@ -378,11 +378,6 @@ type MongoQueryGridChanges = {
   columns: string[];
   rows: MongoInputValue[][];
 };
-function mongoIdPreview(val: unknown): string {
-  if (val === null || val === undefined) return "null";
-  if (typeof val === "string" && /^[a-fA-F0-9]{24}$/.test(val)) return `ObjectId("${val}")`;
-  return formatMongoShellLiteral(val);
-}
 function mongoCollectionExpression(collection: string): string {
   return `db.getCollection(${JSON.stringify(collection)})`;
 }
@@ -423,7 +418,7 @@ const mongoQueryResultSaveHandler = computed<CustomSaveHandler | undefined>(() =
       if (id === null || id === undefined || String(id).trim() === "") continue;
       const updateDoc = buildMongoUpdateDocument(dirtyCols, changes.columns, tab.result?.mongo_documents?.[rowIdx]);
       if (Object.keys(updateDoc).length === 0) continue;
-      stmts.push(`${mongoCollectionExpression(target.collection)}.updateOne({_id: ${mongoIdPreview(mongoQueryResultDocumentId(rowIdx, id))}}, ${formatMongoShellLiteral(updateDoc)})`);
+      stmts.push(`${mongoCollectionExpression(target.collection)}.updateOne({_id: ${formatMongoShellLiteral(mongoQueryResultDocumentId(rowIdx, id))}}, ${formatMongoShellLiteral(updateDoc)})`);
     }
     return stmts;
   };

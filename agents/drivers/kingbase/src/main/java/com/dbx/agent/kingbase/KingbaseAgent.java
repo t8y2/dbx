@@ -101,8 +101,8 @@ public final class KingbaseAgent extends PostgresLikeAgent {
         if (postgresCatalogMode) return super.listDatabases();
         return unchecked(() -> {
             for (String sql : List.of(
-                "SELECT datname AS database_name FROM sys_catalog.sys_database WHERE datistemplate = false ORDER BY datname",
-                "SELECT datname AS database_name FROM pg_database WHERE datistemplate = false ORDER BY datname"
+                "SELECT datname AS database_name FROM sys_catalog.sys_database WHERE datistemplate = false AND datallowconn = true ORDER BY datname",
+                "SELECT datname AS database_name FROM pg_database WHERE datistemplate = false AND datallowconn = true ORDER BY datname"
             )) {
                 try {
                     List<DatabaseInfo> result = queryDatabases(sql);

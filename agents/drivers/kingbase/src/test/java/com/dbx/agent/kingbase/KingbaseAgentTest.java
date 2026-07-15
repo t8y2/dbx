@@ -74,6 +74,7 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         Assertions.assertEquals("app", databases.get(0).getName());
         Assertions.assertEquals("analytics", databases.get(1).getName());
         Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_database"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("datallowconn = true"), sql.get(0));
     }
 
     @Test
@@ -89,7 +90,9 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
 
         Assertions.assertEquals("TEST", agent.listDatabases().get(0).getName());
         Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_database"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("datallowconn = true"), sql.get(0));
         Assertions.assertTrue(sql.get(1).contains("FROM pg_database"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("datallowconn = true"), sql.get(1));
         Assertions.assertEquals("SELECT current_database() AS database_name", sql.get(2));
     }
 
@@ -107,6 +110,7 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         Assertions.assertEquals("app", databases.get(0).getName());
         Assertions.assertEquals("analytics", databases.get(1).getName());
         Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_database"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("datallowconn = true"), sql.get(0));
     }
 
     @Test
@@ -124,6 +128,7 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         Assertions.assertEquals("test", databases.get(0).getName());
         Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_database"), sql.get(0));
         Assertions.assertTrue(sql.get(1).contains("FROM pg_database"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("datallowconn = true"), sql.get(1));
     }
 
     @Test

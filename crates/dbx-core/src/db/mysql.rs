@@ -12,7 +12,7 @@ use std::time::Duration;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::models::connection::DatabaseType;
+use crate::models::connection::{ConnectionConfig, DatabaseConnectionInfo, DatabaseType};
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
     ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
@@ -101,6 +101,55 @@ fn first_nonempty_str_by_name(row: &mysql_async::Row, names: &[&str]) -> String 
         }
     }
     String::new()
+}
+
+fn nonblank(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+async fn query_first_nonblank_string(conn: &mut mysql_async::Conn, sql: &str) -> Option<String> {
+    match conn.query_first::<String, _>(sql).await {
+        Ok(Some(value)) => nonblank(value),
+        Ok(None) => None,
+        Err(error) => {
+            log::debug!("Failed to read optional MySQL database information with `{sql}`: {error}");
+            None
+        }
+    }
+}
+
+pub async fn database_connection_info(
+    pool: &MySqlPool,
+    product_name: impl Into<String>,
+) -> Result<DatabaseConnectionInfo, String> {
+    let product_name = nonblank(product_name.into()).unwrap_or_else(|| "MySQL".to_string());
+    let mut conn = get_conn_with_health_check(pool).await?;
+
+    Ok(DatabaseConnectionInfo {
+        product_name: Some(product_name),
+        product_version: query_first_nonblank_string(&mut conn, "SELECT VERSION()").await,
+        current_database: query_first_nonblank_string(&mut conn, "SELECT COALESCE(DATABASE(), '')").await,
+        server_comment: query_first_nonblank_string(&mut conn, "SELECT @@version_comment").await,
+        server_charset: query_first_nonblank_string(&mut conn, "SELECT @@character_set_server").await,
+        server_collation: query_first_nonblank_string(&mut conn, "SELECT @@collation_server").await,
+        ..DatabaseConnectionInfo::default()
+    })
+}
+
+pub fn protocol_product_name(config: &ConnectionConfig) -> String {
+    config.driver_label.as_deref().map(str::trim).filter(|value| !value.is_empty()).map(str::to_string).unwrap_or_else(
+        || match config.db_type {
+            DatabaseType::Doris => "Doris".to_string(),
+            DatabaseType::StarRocks => "StarRocks".to_string(),
+            DatabaseType::ManticoreSearch => "Manticore Search".to_string(),
+            _ => "MySQL".to_string(),
+        },
+    )
 }
 
 fn get_opt_metadata_string(row: &mysql_async::Row, name: &str) -> Option<String> {

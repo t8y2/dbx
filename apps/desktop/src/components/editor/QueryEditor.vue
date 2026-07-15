@@ -62,6 +62,7 @@ import { createInsertValueHintsExtension, requestInsertValueHintsRefresh } from 
 import { focusEditorView } from "@/lib/editor/queryEditorFocus";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { startsQueryEditorRectangularSelection } from "@/lib/editor/queryEditorPointerSelection";
+import type { StatementExecutionMarker } from "@/lib/tabs/tabPresentation";
 import { isSchemaAware, isSingleDatabase, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
 import { usesLocalOnlyEditorCompletionMetadata, usesOnDemandOnlyEditorColumnMetadata } from "@/lib/metadata/completionMetadataPolicy";
 import { qualifiedTableNameAtSqlPosition } from "@/lib/sql/queryCursorTableTarget";
@@ -89,6 +90,7 @@ const props = defineProps<{
   hideExecutionControls?: boolean;
   initialViewport?: { scrollTop: number; scrollLeft: number };
   initialSelection?: { anchor: number; head: number };
+  statementExecutionMarkers?: StatementExecutionMarker[];
 }>();
 
 const COMPLETION_REMOTE_LATENCY_BUDGET_MS = 120;
@@ -217,6 +219,7 @@ let codeMirrorCloseBrackets: typeof import("@codemirror/autocomplete").closeBrac
 let codeMirrorCloseBracketsKeymap: readonly import("@codemirror/view").KeyBinding[] | null = null;
 let readOnlyComp: import("@codemirror/state").Compartment | null = null;
 let runGutterComp: import("@codemirror/state").Compartment | null = null;
+let statementExecutionGutterComp: import("@codemirror/state").Compartment | null = null;
 let runKeymapComp: import("@codemirror/state").Compartment | null = null;
 let completionComp: import("@codemirror/state").Compartment | null = null;
 let diagnosticComp: import("@codemirror/state").Compartment | null = null;
@@ -250,9 +253,11 @@ let codeMirrorToggleLineComment: typeof import("@codemirror/commands").toggleLin
 let setSqlDiagnosticsEffect: import("@codemirror/state").StateEffectType<SqlSemanticDiagnostic[]> | null = null;
 let setPreviewRangeEffect: import("@codemirror/state").StateEffectType<{ from: number; to: number } | null> | null = null;
 let setResultSourceRangeEffect: import("@codemirror/state").StateEffectType<{ from: number; to: number } | null> | null = null;
+let setStatementExecutionMarkersEffect: import("@codemirror/state").StateEffectType<StatementExecutionMarker[]> | null = null;
 let previewRangeComp: import("@codemirror/state").Compartment | null = null;
 let buildPreviewRangeExtension: (() => import("@codemirror/state").Extension) | null = null;
 let buildResultSourceRangeExtension: (() => import("@codemirror/state").Extension) | null = null;
+let buildStatementExecutionMarkersExtension: (() => import("@codemirror/state").Extension) | null = null;
 let buildRunStatementGutterExtension: (() => import("@codemirror/state").Extension) | null = null;
 let indentComp: import("@codemirror/state").Compartment | null = null;
 let codeMirrorIndentUnit: typeof import("@codemirror/language").indentUnit | null = null;
@@ -2673,6 +2678,7 @@ onMounted(async () => {
   codeMirrorCloseBracketsKeymap = closeBracketsKeymap;
   readOnlyComp = new Compartment();
   runGutterComp = new Compartment();
+  statementExecutionGutterComp = new Compartment();
   runKeymapComp = new Compartment();
   completionComp = new Compartment();
   diagnosticComp = new Compartment();
@@ -2797,6 +2803,85 @@ onMounted(async () => {
         return markers;
       },
       provide: (field) => lineNumberMarkers.from(field),
+    });
+    return field;
+  };
+
+  class StatementExecutionStatusMarker extends GutterMarker {
+    constructor(readonly marker: StatementExecutionMarker) {
+      super();
+    }
+
+    eq(other: import("@codemirror/view").GutterMarker): boolean {
+      return other instanceof StatementExecutionStatusMarker && other.marker.status === this.marker.status && other.marker.successCount === this.marker.successCount && other.marker.errorCount === this.marker.errorCount;
+    }
+
+    toDOM() {
+      const element = document.createElement("span");
+      const title = statementExecutionMarkerTitle(this.marker);
+      element.className = `cm-statement-execution-marker cm-statement-execution-marker--${this.marker.status}`;
+      element.title = title;
+      element.setAttribute("aria-label", title);
+      element.appendChild(createStatementExecutionStatusIconDom(this.marker.status));
+      return element;
+    }
+  }
+
+  function statementExecutionMarkerTitle(marker: StatementExecutionMarker) {
+    const parts = [];
+    if (marker.successCount > 0) parts.push(t("editor.statementExecutionSucceeded", { count: marker.successCount }));
+    if (marker.errorCount > 0) parts.push(t("editor.statementExecutionFailed", { count: marker.errorCount }));
+    return parts.join(", ");
+  }
+
+  function createStatementExecutionStatusIconDom(status: StatementExecutionMarker["status"]) {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.setAttribute("aria-hidden", "true");
+
+    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    circle.setAttribute("cx", "12");
+    circle.setAttribute("cy", "12");
+    circle.setAttribute("r", "10");
+    const mark = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    mark.setAttribute("d", status === "error" ? "m15 9-6 6m0-6 6 6" : "m9 12 2 2 4-4");
+    svg.append(circle, mark);
+
+    return svg;
+  }
+
+  setStatementExecutionMarkersEffect = StateEffect.define<StatementExecutionMarker[]>();
+  buildStatementExecutionMarkersExtension = () => {
+    const effectType = setStatementExecutionMarkersEffect!;
+    const markersForState = (state: import("@codemirror/state").EditorState, markers: readonly StatementExecutionMarker[]) => {
+      const ranges = markers.map((marker) => {
+        const from = Math.max(0, Math.min(marker.from, state.doc.length));
+        return new StatementExecutionStatusMarker(marker).range(state.doc.lineAt(from).from);
+      });
+      return RangeSet.of(ranges, true);
+    };
+
+    const field = StateField.define({
+      create(state) {
+        return markersForState(state, props.statementExecutionMarkers ?? []);
+      },
+      update(markers, transaction) {
+        for (const effect of transaction.effects) {
+          if (effect.is(effectType)) return markersForState(transaction.state, effect.value);
+        }
+        if (transaction.docChanged) return RangeSet.empty;
+        return markers;
+      },
+      provide: (field) =>
+        gutter({
+          class: "cm-statement-execution-gutter",
+          markers: (currentView) => currentView.state.field(field),
+        }),
     });
     return field;
   };
@@ -2992,6 +3077,7 @@ onMounted(async () => {
       }),
       previewRangeComp.of(buildPreviewRangeExtension()),
       buildResultSourceRangeExtension(),
+      statementExecutionGutterComp.of(buildStatementExecutionMarkersExtension()),
       Prec.highest(
         keymap.of([
           { key: "'", run: handleSqlSingleQuote },
@@ -3285,6 +3371,15 @@ watch(
   () => {
     reconfigureDiagnostics();
   },
+);
+
+watch(
+  () => props.statementExecutionMarkers ?? [],
+  (markers) => {
+    if (!view.value || !setStatementExecutionMarkersEffect) return;
+    view.value.dispatch({ effects: setStatementExecutionMarkersEffect.of(markers) });
+  },
+  { deep: true },
 );
 
 watch(
@@ -3656,6 +3751,65 @@ defineExpose({ openSearch, openReplace, scrollCursorIntoView, requestExecute, pa
   justify-content: center;
   min-width: 34px;
   padding: 0 5px;
+}
+
+:deep(.cm-statement-execution-gutter) {
+  min-width: 34px;
+}
+
+:deep(.cm-statement-execution-gutter .cm-gutterElement) {
+  align-items: center;
+  box-sizing: border-box;
+  display: flex;
+  justify-content: center;
+  min-width: 34px;
+  padding: 0 5px;
+}
+
+:deep(.cm-statement-execution-marker) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: min(24px, calc(var(--dbx-editor-font-size, 13px) * 1.6));
+  height: min(24px, calc(var(--dbx-editor-font-size, 13px) * 1.6));
+  margin: 0;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  vertical-align: middle;
+  white-space: nowrap;
+  transition:
+    color 0.15s,
+    background-color 0.15s;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+:deep(.cm-statement-execution-marker--success) {
+  background: rgb(16 185 129 / 0.1);
+  color: rgb(4 120 87);
+}
+
+:deep(.cm-statement-execution-marker--error) {
+  background: rgb(239 68 68 / 0.1);
+  color: rgb(185 28 28);
+}
+
+:deep(.dark .cm-statement-execution-marker--success) {
+  color: rgb(110 231 183);
+}
+
+:deep(.dark .cm-statement-execution-marker--error) {
+  color: rgb(252 165 165);
+}
+
+:deep(.cm-statement-execution-marker svg) {
+  display: block;
+  width: min(14px, 70%);
+  height: min(14px, 70%);
+  pointer-events: none;
+  flex-shrink: 0;
 }
 
 :deep(.cm-run-statement-marker) {

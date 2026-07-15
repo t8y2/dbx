@@ -14,6 +14,7 @@ import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Map;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -54,6 +55,47 @@ class AbstractJdbcAgentTest {
         assertEquals(1, tracking.openCount);
         assertEquals(1, tracking.isValidCount);
         assertEquals(1, tracking.closeCount);
+    }
+
+    @Test
+    void databaseInfoKeepsSupportedFieldsWhenOneMetadataGetterFails() {
+        DatabaseMetaData metadata = proxy(DatabaseMetaData.class, (method, args) -> {
+            switch (method.getName()) {
+                case "getDatabaseProductName":
+                    return "ExampleDB";
+                case "getDatabaseProductVersion":
+                    throw new UnsupportedOperationException("version unavailable");
+                case "storesLowerCaseIdentifiers":
+                    throw new UnsupportedOperationException("case unavailable");
+                case "storesUpperCaseIdentifiers":
+                    return true;
+                case "storesMixedCaseQuotedIdentifiers":
+                    return true;
+                case "getDriverName":
+                    return "Example JDBC";
+                case "getDriverVersion":
+                    return "1.2.3";
+                case "getJDBCMajorVersion":
+                    return 4;
+                case "getJDBCMinorVersion":
+                    return 2;
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        });
+        Connection connection = proxy(Connection.class, (method, args) ->
+            "getMetaData".equals(method.getName()) ? metadata : defaultValue(method.getReturnType())
+        );
+
+        Map<String, String> info = JdbcDatabaseInfo.from(connection);
+
+        assertEquals("ExampleDB", info.get("productName"));
+        assertFalse(info.containsKey("productVersion"));
+        assertEquals("upper", info.get("unquotedIdentifierCase"));
+        assertEquals("mixed", info.get("quotedIdentifierCase"));
+        assertEquals("Example JDBC", info.get("driverName"));
+        assertEquals("1.2.3", info.get("driverVersion"));
+        assertEquals("4.2", info.get("jdbcVersion"));
     }
 
     @Test

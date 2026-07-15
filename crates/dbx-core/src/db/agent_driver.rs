@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+use crate::models::connection::DatabaseConnectionInfo;
+
 type PendingAgentResponse = tokio::sync::oneshot::Sender<Result<Value, String>>;
 
 pub struct AgentRuntimeClient {
@@ -481,7 +483,10 @@ impl AgentMethod {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentConnectionInfo {
+    #[serde(default)]
     pub identifier_quote: String,
+    #[serde(default)]
+    pub database_info: Option<DatabaseConnectionInfo>,
 }
 
 #[derive(Debug, Clone, Serialize)]

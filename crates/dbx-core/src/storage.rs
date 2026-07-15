@@ -14,7 +14,7 @@ use crate::connection_secrets::{
 };
 use crate::db::sqlite::{connect_path_create_if_missing, SqliteHandle};
 use crate::history::{HistoryEntry, MAX_HISTORY};
-use crate::models::connection::{ConnectionConfig, DatabaseType, TransportLayerConfig};
+use crate::models::connection::{ConnectionConfig, DatabaseConnectionInfo, DatabaseType, TransportLayerConfig};
 use crate::saved_sql::{SavedSqlFile, SavedSqlFolder, SavedSqlLibrary};
 
 const SSH_TUNNEL_SECRET_PREFIX: &str = "ssh_tunnels.";
@@ -1390,6 +1390,30 @@ impl Storage {
         .await
     }
 
+    pub async fn save_connection_database_info(
+        &self,
+        connection_id: &str,
+        database_info: Option<DatabaseConnectionInfo>,
+    ) -> Result<(), String> {
+        let connection_id = connection_id.to_string();
+        self.with_conn(move |conn| {
+            let json = conn
+                .query_row("SELECT config_json FROM connections WHERE id = ?1", [&connection_id], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("Connection config not found: {connection_id}"))?;
+            let mut config: ConnectionConfig = serde_json::from_str(&json).map_err(|error| error.to_string())?;
+            config.database_info = database_info;
+            let json = serde_json::to_string(&config).map_err(|error| error.to_string())?;
+            conn.execute("UPDATE connections SET config_json = ?1 WHERE id = ?2", params![json, connection_id])
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
     pub async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
         let rows: Vec<(String, String)> = self
             .with_conn(|conn| {
@@ -2507,7 +2531,9 @@ mod tests {
     use crate::connection_secrets::{
         MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
     };
-    use crate::models::connection::{ConnectionConfig, DatabaseType, SshTunnelConfig, TransportLayerConfig};
+    use crate::models::connection::{
+        ConnectionConfig, DatabaseConnectionInfo, DatabaseType, SshTunnelConfig, TransportLayerConfig,
+    };
     use crate::saved_sql::SavedSqlFile;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2637,6 +2663,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            database_info: None,
         }
     }
 
@@ -2698,6 +2725,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            database_info: None,
         }
     }
 
@@ -2822,6 +2850,38 @@ mod tests {
 
         assert_eq!(result, DataDbImportResult::SkippedInvalidSource);
         assert!(!target_dir.join("dbx.db").exists());
+    }
+
+    #[tokio::test]
+    async fn save_connections_preserves_database_info() {
+        let path = temp_db_path("database-info");
+        let storage = Storage::open(&path).await.unwrap();
+        let mut config = mq_connection("database-info", "mq-secret");
+        config.database_info = Some(DatabaseConnectionInfo {
+            product_name: Some("MySQL".to_string()),
+            product_version: Some("8.4.0".to_string()),
+            current_database: Some("app".to_string()),
+            ..DatabaseConnectionInfo::default()
+        });
+
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+
+        let raw_json = raw_connection_json(&storage, "database-info").await;
+        assert!(raw_json.contains("8.4.0"));
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(loaded[0].database_info, config.database_info);
+
+        let updated_info = DatabaseConnectionInfo {
+            product_name: Some("MySQL".to_string()),
+            product_version: Some("8.4.1".to_string()),
+            ..DatabaseConnectionInfo::default()
+        };
+        storage.save_connection_database_info("database-info", Some(updated_info.clone())).await.unwrap();
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(loaded[0].database_info, Some(updated_info));
+        assert_eq!(mq_token(&loaded[0]), Some("mq-secret"));
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

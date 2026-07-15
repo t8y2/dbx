@@ -55,6 +55,7 @@ import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { createSavedSqlEditorPosition, initSavedSqlEditorPositions, restoreSavedSqlEditorPosition, saveSavedSqlEditorPosition } from "@/lib/app/savedSqlEditorPosition";
 import { ensureSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
+import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
 import type { SavedSqlFile } from "@/types/database";
 
 const ORACLE_LIKE_METADATA_TYPES = new Set<string>(["oracle", "dameng", "oceanbase-oracle"]);
@@ -143,7 +144,10 @@ function annotateQueryResultSources(results: QueryResult[], sql: string, databas
   const statements = splitSqlStatementRanges(sql, databaseType);
   let statementIndex = 0;
   for (const result of results) {
-    const statement = statements[statementIndex++];
+    const explicitIndex = Number.isInteger(result.statement_index) && result.statement_index! >= 0 ? result.statement_index : undefined;
+    const sourceIndex = explicitIndex ?? statementIndex;
+    statementIndex = Math.max(statementIndex, sourceIndex + 1);
+    const statement = statements[sourceIndex];
     if (!statement) continue;
     annotateQueryResultSource(result, statement.sql, database, databaseType, sourceOffset === undefined ? undefined : { from: sourceOffset + statement.from, to: sourceOffset + statement.to });
   }
@@ -454,6 +458,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.result = undefined;
     tab.results = undefined;
     tab.activeResultIndex = undefined;
+    tab.resultEditorFingerprint = undefined;
     tab.resultLocalSortOriginalRows = undefined;
     tab.resultLocalSortOriginalMongoDocuments = undefined;
     tab.resultSortMode = undefined;
@@ -500,6 +505,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.results = run.results;
     tab.activeResultIndex = run.activeResultIndex;
     tab.resultBaseSql = run.resultBaseSql;
+    tab.resultEditorFingerprint = run.resultEditorFingerprint;
     tab.resultSortedSql = run.resultSortedSql;
     tab.resultSortColumn = run.resultSortColumn;
     tab.resultSortColumnIndex = run.resultSortColumnIndex;
@@ -598,6 +604,7 @@ export const useQueryStore = defineStore("query", () => {
       result: run.result,
       results: run.results,
       activeResultIndex: run.activeResultIndex,
+      resultEditorFingerprint: run.resultEditorFingerprint,
       resultRuns: [run],
       activeResultRunId: run.id,
       queryAnalysis: run.queryAnalysis,
@@ -642,6 +649,7 @@ export const useQueryStore = defineStore("query", () => {
       results: tab.results,
       activeResultIndex: tab.activeResultIndex,
       resultBaseSql: tab.resultBaseSql,
+      resultEditorFingerprint: tab.resultEditorFingerprint,
       resultSortedSql: tab.resultSortedSql,
       resultSortColumn: tab.resultSortColumn,
       resultSortColumnIndex: tab.resultSortColumnIndex,
@@ -693,6 +701,7 @@ export const useQueryStore = defineStore("query", () => {
       results: tab.results,
       activeResultIndex: tab.activeResultIndex,
       resultBaseSql: tab.resultBaseSql,
+      resultEditorFingerprint: tab.resultEditorFingerprint,
       resultSortedSql: tab.resultSortedSql,
       resultSortColumn: tab.resultSortColumn,
       resultSortColumnIndex: tab.resultSortColumnIndex,
@@ -2597,6 +2606,7 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab || !sql.trim()) return;
 
     const executionId = uuid();
+    const executionEditorFingerprint = tab.mode === "query" ? sqlTextFingerprint(tab.sql) : undefined;
     const traceId = executionId.slice(0, 8);
     const startedAt = performance.now();
     const elapsed = () => `${Math.round(performance.now() - startedAt)}ms`;
@@ -3133,6 +3143,7 @@ export const useQueryStore = defineStore("query", () => {
           current.result = results[0];
         }
         current.resultBaseSql = shouldReplaceActiveResultInGroup ? (current.resultBaseSql ?? queryBaseSql) : queryBaseSql;
+        current.resultEditorFingerprint = shouldReplaceActiveResultInGroup ? (current.resultEditorFingerprint ?? executionEditorFingerprint) : executionEditorFingerprint;
         current.resultSortedSql = resultSortedSql;
         current.resultPageSql = pageSql;
         current.resultPageLimit = pageLimit;
@@ -3644,6 +3655,7 @@ export const useQueryStore = defineStore("query", () => {
     const activeIndex = snapshot.activeResultIndex ?? 0;
     tab.results = results;
     tab.activeResultIndex = snapshot.activeResultIndex;
+    tab.resultEditorFingerprint = snapshot.resultEditorFingerprint;
     tab.result = snapshot.result ? markQueryResultRowsRaw(snapshot.result) : results?.[activeIndex] ? markQueryResultRowsRaw(results[activeIndex]) : undefined;
     tab.resultLocalSortOriginalRows = snapshot.resultLocalSortOriginalRows ? markRaw(snapshot.resultLocalSortOriginalRows) : undefined;
     tab.resultLocalSortOriginalMongoDocuments = snapshot.resultLocalSortOriginalMongoDocuments ? markRaw(snapshot.resultLocalSortOriginalMongoDocuments) : undefined;

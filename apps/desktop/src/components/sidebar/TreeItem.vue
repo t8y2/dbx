@@ -633,6 +633,7 @@ const connectionInfoTooltip = computed(() => {
     { label: t("connection.database"), value: cleanTooltipValue(config.database) },
     { label: t("connection.user"), value: cleanTooltipValue(config.username) },
     { label: t("connection.type"), value: config.driver_label || config.driver_profile || config.db_type },
+    { label: t("connection.databaseInfo.productVersion"), value: cleanTooltipValue(config.database_info?.productVersion) },
   ].filter((row) => row.value);
 
   return { rows };

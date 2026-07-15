@@ -27,6 +27,18 @@ test("adds SQL Server READONLY for table-valued procedure parameters", () => {
   assert.equal(countParsedNodes(dialect, "CREATE PROCEDURE [dbo].[gylxcx](@tp2 XTableType5 readonly,@tp xtabletype2 readonly) AS SELECT 1", "Keyword", "readonly"), 2);
 });
 
+test("uses MSSQL keywords for an ASE JDBC editor override", () => {
+  const dialect = createDbxCodeMirrorSqlDialect(langSql, "sqlserver", "jdbc");
+
+  assert.equal(countParsedNodes(dialect, "SELECT top 1 * FROM wfAdmin AS wa", "Keyword", "top"), 1);
+});
+
+test("keeps generic JDBC on Standard SQL without the ASE editor override", () => {
+  const dialect = createDbxCodeMirrorSqlDialect(langSql, "mysql", "jdbc");
+
+  assert.equal(countParsedNodes(dialect, "SELECT top 1 * FROM wfAdmin AS wa", "Keyword", "top"), 0);
+});
+
 test("keeps DBX PostgreSQL procedural dialect extensions", () => {
   const dialect = createDbxCodeMirrorSqlDialect(langSql, "postgres");
 

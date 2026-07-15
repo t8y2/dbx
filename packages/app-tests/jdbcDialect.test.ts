@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { effectiveDatabaseTypeForConnection, inferJdbcDialect } from "../../apps/desktop/src/lib/database/jdbcDialect.ts";
+import { codeMirrorSqlDialectForConnection, effectiveDatabaseTypeForConnection, inferJdbcDialect } from "../../apps/desktop/src/lib/database/jdbcDialect.ts";
 
 test("infers GoldenDB for generic JDBC connections", () => {
   assert.equal(
@@ -27,4 +27,17 @@ test("infers JDBC dialect from driver profile", () => {
     }),
     "sqlserver",
   );
+});
+
+test("uses SQL Server editor syntax for ASE without changing its effective JDBC type", () => {
+  const aseConnections = [
+    { db_type: "jdbc" as const, connection_string: "jdbc:sybase:Tds:127.0.0.1:5000/app" },
+    { db_type: "jdbc" as const, jdbc_driver_class: "com.sybase.jdbc4.jdbc.SybDriver" },
+    { db_type: "jdbc" as const, jdbc_driver_paths: ["C:\\drivers\\jconn4.jar"] },
+  ];
+
+  for (const connection of aseConnections) {
+    assert.equal(codeMirrorSqlDialectForConnection(connection), "sqlserver");
+    assert.equal(effectiveDatabaseTypeForConnection(connection), "jdbc");
+  }
 });

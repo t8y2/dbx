@@ -23,6 +23,11 @@ const JDBC_DIALECT_MATCHERS: Array<{ type: DatabaseType; patterns: RegExp[] }> =
   { type: "iris", patterns: [/jdbc:(?:iris|cache):/i, /com\.intersystems\.jdbc\.(?:IRIS|Cache)Driver/i, /intersystems-jdbc/i] },
 ];
 
+// ASE uses Transact-SQL, but treating it as SQL Server globally would also
+// enable SQL Server metadata, pagination, and identifier rules. Keep this
+// narrower matcher exclusively for editor syntax parsing.
+const JDBC_SQLSERVER_EDITOR_DIALECT_PATTERNS = [/jdbc:(?:sybase|jtds:sybase):/i, /com\.sybase\.jdbc\d*\.jdbc\.SybDriver/i, /\bjconn\d*\.jar\b/i, /\b(?:sybase|sap[\s_-]*ase)\b/i];
+
 export function inferJdbcDialect(connection?: JdbcDialectConnection): DatabaseType | undefined {
   if (!connection || connection.db_type !== "jdbc") return undefined;
   const haystack = [connection.driver_profile, connection.connection_string, connection.jdbc_driver_class, ...(connection.jdbc_driver_paths ?? [])].filter(Boolean).join("\n");
@@ -104,6 +109,14 @@ export function codeMirrorSqlDialect(dbType: DatabaseType | undefined): "mysql" 
   if (dbType === "postgres" || dbType === "gaussdb" || dbType === "kwdb" || dbType === "opengauss") return "postgres";
   if (dbType === "sqlserver") return "sqlserver";
   return "mysql";
+}
+
+export function codeMirrorSqlDialectForConnection(connection?: JdbcDialectConnection): "mysql" | "postgres" | "sqlserver" {
+  if (connection?.db_type === "jdbc") {
+    const haystack = [connection.driver_profile, connection.connection_string, connection.jdbc_driver_class, ...(connection.jdbc_driver_paths ?? [])].filter(Boolean).join("\n");
+    if (JDBC_SQLSERVER_EDITOR_DIALECT_PATTERNS.some((pattern) => pattern.test(haystack))) return "sqlserver";
+  }
+  return codeMirrorSqlDialect(effectiveDatabaseTypeForConnection(connection));
 }
 
 function isGbase8sProfile(driverProfile?: string): boolean {

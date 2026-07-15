@@ -9,7 +9,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import MetricCard from "@/components/common/MetricCard.vue";
 import MetricLineChart from "@/components/chart/MetricLineChart.vue";
 import * as api from "@/lib/backend/api";
-import { computeQps, computeRate, formatBytes, formatBytesPerSec, formatNumber, formatUptime, GLOBAL_STATUS_SQL, GLOBAL_VARIABLES_SQL, innodbBufferHitRatio, MAX_SAMPLES, parseStatusResult, statusEntries, statusNumber, type StatusSample } from "@/lib/database/mysqlServerStatus";
+import { computeQps, computeRate, formatBytes, formatBytesPerSec, formatNumber, formatRate, formatUptime, GLOBAL_STATUS_SQL, GLOBAL_VARIABLES_SQL, innodbBufferHitRatio, MAX_SAMPLES, parseStatusResult, statusEntries, statusNumber, type StatusSample } from "@/lib/database/mysqlServerStatus";
 
 const props = defineProps<{
   connectionId: string;
@@ -195,7 +195,7 @@ onUnmounted(stopAutoRefresh);
 
     <div class="flex min-h-0 flex-1 flex-col gap-3 p-3">
       <div class="grid shrink-0 grid-cols-2 gap-3 sm:grid-cols-4">
-        <MetricCard :label="t('serverDashboard.qps')" :value="formatNumber(qps)" :icon="Gauge" />
+        <MetricCard :label="t('serverDashboard.qps')" :value="formatRate(qps)" :icon="Gauge" />
         <MetricCard :label="t('serverDashboard.connections')" :value="`${formatNumber(threadsConnected)}${maxConnections ? ' / ' + formatNumber(maxConnections) : ''}`" :icon="Users" />
         <MetricCard :label="t('serverDashboard.running')" :value="formatNumber(threadsRunning)" :icon="Activity" />
         <MetricCard :label="t('serverDashboard.trafficIn')" :value="formatBytesPerSec(rate('Bytes_received'))" :icon="ArrowDownUp" />
@@ -206,10 +206,10 @@ onUnmounted(stopAutoRefresh);
       </div>
 
       <div class="grid shrink-0 grid-cols-1 gap-3 xl:grid-cols-2">
-        <MetricLineChart :title="t('serverDashboard.qpsChart')" :labels="chartLabels" :series="qpsSeries" :value-formatter="formatNumber" />
-        <MetricLineChart :title="t('serverDashboard.sessionsChart')" :labels="chartLabels" :series="sessionsSeries" :value-formatter="formatNumber" />
+        <MetricLineChart :title="t('serverDashboard.qpsChart')" :labels="chartLabels" :series="qpsSeries" :value-formatter="formatRate" />
+        <MetricLineChart :title="t('serverDashboard.sessionsChart')" :labels="chartLabels" :series="sessionsSeries" :value-formatter="formatRate" />
         <MetricLineChart :title="t('serverDashboard.trafficChart')" :labels="chartLabels" :series="trafficSeries" :value-formatter="formatBytes" />
-        <MetricLineChart :title="t('serverDashboard.commandChart')" :labels="chartLabels" :series="commandSeries" :value-formatter="formatNumber" />
+        <MetricLineChart :title="t('serverDashboard.commandChart')" :labels="chartLabels" :series="commandSeries" :value-formatter="formatRate" />
       </div>
 
       <div class="flex flex-col rounded-lg border bg-card" :class="showStatusTable ? 'min-h-0 flex-1' : 'shrink-0'">

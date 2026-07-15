@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { QueryResult } from "@/types/database";
-import { computeQps, computeRate, connectionSupportsServerDashboard, formatBytes, formatBytesPerSec, formatUptime, innodbBufferHitRatio, parseStatusResult, statusNumber, supportsServerDashboard, type StatusSample } from "@/lib/database/mysqlServerStatus";
+import { computeQps, computeRate, connectionSupportsServerDashboard, formatBytes, formatBytesPerSec, formatNumber, formatRate, formatUptime, innodbBufferHitRatio, parseStatusResult, statusNumber, supportsServerDashboard, type StatusSample } from "@/lib/database/mysqlServerStatus";
 
 function statusResult(rows: [string, string][]): QueryResult {
   return { columns: ["Variable_name", "Value"], rows, affected_rows: 0, execution_time_ms: 0 };
@@ -42,6 +42,14 @@ describe("computeRate", () => {
     expect(computeRate(prev, curr, "Bytes_sent")).toBe(2000); // 4000 bytes / 2s
   });
 
+  it("preserves a fractional connection rate over a longer sample interval", () => {
+    const prev = sample(0, { Connections: "100" });
+    const curr = sample(5000, { Connections: "101" });
+    const rate = computeRate(prev, curr, "Connections");
+    expect(rate).toBe(0.2);
+    expect(formatRate(rate)).toBe("0.2");
+  });
+
   it("returns 0 on counter reset (decrease)", () => {
     const prev = sample(1000, { Queries: "9000" });
     const curr = sample(2000, { Queries: "10" });
@@ -75,6 +83,24 @@ describe("innodbBufferHitRatio", () => {
 });
 
 describe("formatters", () => {
+  it("formats rates with up to three fractional digits", () => {
+    expect(formatRate(0)).toBe("0");
+    expect(formatRate(0.2)).toBe("0.2");
+    expect(formatRate(0.125)).toBe("0.125");
+    expect(formatRate(1 / 3)).toBe("0.333");
+    expect(formatRate(1)).toBe("1");
+    expect(formatRate(1000)).toBe("1,000");
+    expect(formatRate(1234.5678)).toBe("1,234.568");
+    expect(formatRate(Number.NaN)).toBe("0");
+    expect(formatRate(Number.POSITIVE_INFINITY)).toBe("0");
+    expect(formatRate(Number.NEGATIVE_INFINITY)).toBe("0");
+  });
+
+  it("keeps integer metric formatting unchanged", () => {
+    expect(formatNumber(0.2)).toBe("0");
+    expect(formatNumber(1234.6)).toBe("1,235");
+  });
+
   it("formats bytes and bytes/sec", () => {
     expect(formatBytes(0)).toBe("0 B");
     expect(formatBytes(1024)).toBe("1.0 KB");

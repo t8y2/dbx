@@ -59,6 +59,7 @@ export interface SqlSemanticRowSource {
   aliasSpan?: SqlSemanticSpan;
   sourceSpan: SqlSemanticSpan;
   columns?: string[];
+  columnAliases?: string[];
   metadataTarget?: SqlSemanticMetadataTarget;
   unresolved?: boolean;
 }

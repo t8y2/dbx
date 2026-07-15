@@ -80,9 +80,36 @@ describe("semantic SQL completion candidates", () => {
   });
 
   it("completes correlation columns for aliased table sources", () => {
-    const { items } = semanticCompletion("SELECT * FROM table_a a(id, label), table_b b WHERE a.|", {}, { databaseType: "postgres", dialect: "postgres" });
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["table_a", ["source_id", "source_label"].map((name) => ({ name, table: "table_a" }))]]);
+    const { items } = semanticCompletion("SELECT * FROM table_a a(id, label), table_b b WHERE a.|", { columnsByTable }, { databaseType: "postgres", dialect: "postgres" });
 
     expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["id", "label"]);
+  });
+
+  it("loads real SQL Server columns after aliased table hints", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["users", ["id", "name", "email"].map((name) => ({ name, table: "users" }))]]);
+
+    const { items } = semanticCompletion("SELECT * FROM users u (NOLOCK) WHERE u.|", { columnsByTable }, { databaseType: "sqlserver", dialect: "sqlserver" });
+
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["id", "name", "email"]);
+  });
+
+  it("merges partial PostgreSQL correlation names with metadata positionally", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["users", ["id", "name", "email"].map((name) => ({ name, table: "users" }))]]);
+
+    const { context, items } = semanticCompletion("SELECT * FROM users u(user_id) WHERE u.|", { columnsByTable }, { databaseType: "postgres", dialect: "postgres" });
+
+    expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ name: "users", alias: "u", columns: undefined, columnAliases: ["user_id"] })]));
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["user_id", "name", "email"]);
+  });
+
+  it("completes an unquoted SQL Server table named lateral", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["lateral", ["id", "value"].map((name) => ({ name, table: "lateral" }))]]);
+
+    const { context, items } = semanticCompletion("SELECT * FROM lateral l WHERE l.|", { columnsByTable }, { databaseType: "sqlserver", dialect: "sqlserver" });
+
+    expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ name: "lateral", alias: "l" })]));
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["id", "value"]);
   });
 
   it("uses CTE projected columns without remote metadata", () => {

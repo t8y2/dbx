@@ -1211,6 +1211,7 @@ export interface SqlCompletionReferencedTable {
   schema?: string;
   alias?: string;
   columns?: string[];
+  columnAliases?: string[];
 }
 
 export type SqlStatementKind = "select" | "insert" | "update" | "delete" | "create" | "alter" | "drop" | "unknown";
@@ -3352,9 +3353,10 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
     const qLower = q.toLowerCase();
     const qualifiedTarget = qualifiedTableTargetFromContext(context);
     const relatedTables = context.referencedTables.filter((table) => referencedTableMatchesColumnQualifier(table, q, qLower, qualifiedTarget));
-    relevantCols = allColumns.filter((column) => relatedTables.some((table) => columnMatchesReferencedTable(column, table)) || (!!qualifiedTarget && columnMatchesQualifiedTable(column, qualifiedTarget)));
+    relevantCols = relatedTables.flatMap((table) => completionColumnsForReferencedTable(table, allColumns));
+    if (relatedTables.length === 0 && qualifiedTarget) relevantCols = allColumns.filter((column) => columnMatchesQualifiedTable(column, qualifiedTarget));
   } else if (context.referencedTables.length > 0) {
-    relevantCols = allColumns.filter((column) => context.referencedTables.some((table) => columnMatchesReferencedTable(column, table)));
+    relevantCols = context.referencedTables.flatMap((table) => completionColumnsForReferencedTable(table, allColumns));
   }
 
   // Count name frequencies to detect duplicates across tables
@@ -3402,19 +3404,22 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
     .sort(compareCompletionItems);
 }
 
+function completionColumnsForReferencedTable<T extends SqlCompletionColumn & { key: string }>(table: SqlCompletionReferencedTable, columns: readonly T[]): T[] {
+  const matched = columns.filter((column) => columnMatchesReferencedTable(column, table));
+  return applyReferencedColumnAliases(table, matched);
+}
+
+function applyReferencedColumnAliases<T extends SqlCompletionColumn>(table: SqlCompletionReferencedTable, columns: readonly T[]): T[] {
+  if (!table.columnAliases?.length) return [...columns];
+  return columns.map((column, index) => {
+    const alias = table.columnAliases?.[index];
+    return alias ? { ...column, name: alias } : column;
+  });
+}
+
 function hasMatchingReferencedColumnPrefix(context: SqlCompletionContext, columnsByTable: Map<string, SqlCompletionColumn[]>): boolean {
   if (!context.suggestColumns || !context.prefix || context.referencedTables.length === 0) return false;
-
-  for (const [key, cols] of columnsByTable.entries()) {
-    for (const column of cols) {
-      if (!matchesPrefix(column.name, context.prefix)) continue;
-      if (context.referencedTables.some((table) => columnMatchesReferencedTable({ ...column, key }, table))) {
-        return true;
-      }
-    }
-  }
-
-  return false;
+  return context.referencedTables.some((table) => columnsForReferencedTable(table, columnsByTable).some((column) => matchesPrefix(column.name, context.prefix)));
 }
 
 function qualifiedTableTargetFromContext(context: SqlCompletionContext): { schema: string; table: string } | null {
@@ -3510,7 +3515,7 @@ function columnsForReferencedTable(table: SqlCompletionReferencedTable, columnsB
   const keys = table.schema ? [`${table.schema}.${table.name}`, table.name] : [table.name];
   for (const key of keys) {
     const columns = columnsByTable.get(key);
-    if (columns) return columns;
+    if (columns) return applyReferencedColumnAliases(table, columns);
   }
   return [];
 }

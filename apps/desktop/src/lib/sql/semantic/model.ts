@@ -21,7 +21,7 @@ const TABLE_FUNCTION_NAMES = new Set(["table", "xmltable", "json_table", "the", 
 const JOIN_MODIFIERS = new Set(["left", "right", "inner", "outer", "cross", "full", "natural"]);
 const CLAUSE_BOUNDARIES = new Set(["where", "group", "having", "order", "limit", "offset", "union", "intersect", "except", "on", "set", "values", "returning"]);
 const FROM_CLAUSE_BOUNDARIES = new Set([...CLAUSE_BOUNDARIES, "window", "qualify", "fetch", "for", "connect", "start", "model"].filter((item) => item !== "on"));
-const ALIAS_BLACKLIST = new Set([...CLAUSE_BOUNDARIES, "join", "straight_join", "left", "right", "inner", "outer", "cross", "full", "natural", "as", "select", "from"]);
+const ALIAS_BLACKLIST = new Set([...CLAUSE_BOUNDARIES, "join", "straight_join", "left", "right", "inner", "outer", "cross", "full", "natural", "as", "select", "from", "with"]);
 
 interface ParseState {
   dialect: SqlSemanticDialectAdapter;
@@ -231,18 +231,32 @@ function correlationColumnsAfter(tokens: readonly SqlSemanticToken[], index: num
   return { columns, nextIndex: close + 1 };
 }
 
-function aliasAfter(tokens: readonly SqlSemanticToken[], index: number, dialect: SqlSemanticDialectAdapter): { alias?: string; aliasSpan?: SqlSemanticSpan; columns?: string[]; nextIndex: number } {
+function aliasAfter(tokens: readonly SqlSemanticToken[], index: number, dialect: SqlSemanticDialectAdapter, options: { allowCorrelationColumns?: boolean } = {}): { alias?: string; aliasSpan?: SqlSemanticSpan; columns?: string[]; nextIndex: number } {
   let cursor = index;
   if (tokens[cursor]?.kind === "word" && tokens[cursor]?.normalized === "as") cursor += 1;
   const aliasToken = tokens[cursor];
   if (tokenIsIdentifier(aliasToken)) {
     const alias = identifierPart(aliasToken, dialect).name;
     if (!ALIAS_BLACKLIST.has(alias.toLowerCase())) {
-      const columns = correlationColumnsAfter(tokens, cursor + 1, dialect);
+      const columns = options.allowCorrelationColumns === false ? null : correlationColumnsAfter(tokens, cursor + 1, dialect);
       return { alias, aliasSpan: aliasToken.span, columns: columns?.columns, nextIndex: columns?.nextIndex ?? cursor + 1 };
     }
   }
   return { nextIndex: index };
+}
+
+function mergeColumnAliases(columns: readonly string[], aliases: readonly string[] | undefined): string[] {
+  if (!aliases?.length) return [...columns];
+  if (columns.length === 0) return [...aliases];
+  return columns.map((column, index) => aliases[index] ?? column);
+}
+
+function consumeSqlServerTableHint(tokens: readonly SqlSemanticToken[], index: number, dialect: SqlSemanticDialectAdapter): number {
+  if (dialect.id !== "sqlserver") return index;
+  const openIndex = tokens[index]?.normalized === "with" && tokens[index + 1]?.text === "(" ? index + 1 : index;
+  if (tokens[openIndex]?.text !== "(") return index;
+  const close = findMatchingParenToken(tokens, openIndex);
+  return close < 0 ? index : close + 1;
 }
 
 function parseSubquerySource(state: ParseState, openIndex: number, introducer: string, sourceIndex: number): { source: SqlSemanticRowSource; nextIndex: number } | null {
@@ -251,7 +265,10 @@ function parseSubquerySource(state: ParseState, openIndex: number, introducer: s
   const alias = aliasAfter(state.tokens, close + 1, state.dialect);
   if (!alias.alias) return null;
   const bodyTokens = state.tokens.slice(openIndex + 1, close);
-  const columns = alias.columns?.length ? alias.columns : parseSelectProjections(bodyTokens, state.dialect).map((projection) => projection.name);
+  const columns = mergeColumnAliases(
+    parseSelectProjections(bodyTokens, state.dialect).map((projection) => projection.name),
+    alias.columns,
+  );
   return {
     source: {
       id: `${introducer}:subquery:${sourceIndex}`,
@@ -301,7 +318,8 @@ function parseTableSource(state: ParseState, nameIndex: number, introducer: stri
   const qualified = readQualifiedName(state.tokens, nameIndex, state.dialect);
   if (!qualified) return null;
   const { name, qualifierParts } = sourceNameFromQualifiedName(qualified.name);
-  const alias = aliasAfter(state.tokens, qualified.nextIndex, state.dialect);
+  const alias = aliasAfter(state.tokens, qualified.nextIndex, state.dialect, { allowCorrelationColumns: state.dialect.id !== "sqlserver" });
+  const nextIndex = consumeSqlServerTableHint(state.tokens, alias.nextIndex, state.dialect);
   const cte = state.cteSources.find((source) => source.name.toLowerCase() === name.toLowerCase());
   const kind = cte ? "cte" : introducer === "update" || introducer === "into" || (state.statement.kind === "delete" && introducer === "from") ? "mutation_target" : "table";
   const source: SqlSemanticRowSource = {
@@ -312,18 +330,27 @@ function parseTableSource(state: ParseState, nameIndex: number, introducer: stri
     qualifierParts,
     alias: alias.alias,
     aliasSpan: alias.aliasSpan,
-    sourceSpan: { start: qualified.name.span.start, end: state.tokens[alias.nextIndex - 1]?.span.end ?? alias.aliasSpan?.end ?? qualified.name.span.end },
-    columns: alias.columns?.length ? alias.columns : cte?.columns,
+    sourceSpan: { start: qualified.name.span.start, end: state.tokens[nextIndex - 1]?.span.end ?? alias.aliasSpan?.end ?? qualified.name.span.end },
+    columns: cte?.columns ? mergeColumnAliases(cte.columns, alias.columns) : undefined,
+    columnAliases: alias.columns,
     metadataTarget: {
       schema: qualifierParts[qualifierParts.length - 1],
       table: name,
     },
   };
-  return { source, nextIndex: alias.nextIndex };
+  return { source, nextIndex };
+}
+
+function isPostgresLateralSource(state: ParseState, target: number, introducer: string): boolean {
+  if (state.dialect.id !== "postgres" || state.tokens[target]?.normalized !== "lateral" || (introducer !== "from" && introducer !== "join")) return false;
+  const sourceIndex = target + 1;
+  if (state.tokens[sourceIndex]?.text === "(") return true;
+  const qualified = readQualifiedName(state.tokens, sourceIndex, state.dialect);
+  return !!qualified && state.tokens[qualified.nextIndex]?.text === "(";
 }
 
 function parseRowSource(state: ParseState, target: number, introducer: string, sourceIndex: number): { source: SqlSemanticRowSource; nextIndex: number } | null {
-  if (state.tokens[target]?.normalized === "lateral") target += 1;
+  if (isPostgresLateralSource(state, target, introducer)) target += 1;
   if (state.tokens[target]?.text === "(") return parseSubquerySource(state, target, introducer, sourceIndex);
   return parseTableFunctionSource(state, target, introducer, sourceIndex) ?? parseTableSource(state, target, introducer, sourceIndex);
 }

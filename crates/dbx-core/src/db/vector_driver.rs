@@ -523,6 +523,7 @@ pub async fn find_documents(
         return Ok(crate::db::mongo_driver::MongoDocumentResult {
             documents,
             raw_documents: None,
+            extended_documents: None,
             total: result.affected_rows,
         });
     }
@@ -566,7 +567,12 @@ pub async fn find_documents(
             Value::Object(map)
         })
         .collect();
-    Ok(crate::db::mongo_driver::MongoDocumentResult { documents, raw_documents: None, total: result.affected_rows })
+    Ok(crate::db::mongo_driver::MongoDocumentResult {
+        documents,
+        raw_documents: None,
+        extended_documents: None,
+        total: result.affected_rows,
+    })
 }
 
 pub async fn execute_rest_query(client: &VectorClient, input: &str) -> Result<QueryResult, String> {

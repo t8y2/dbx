@@ -17,6 +17,8 @@ pub struct MongoDocumentResult {
     pub documents: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_documents: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extended_documents: Option<Vec<serde_json::Value>>,
     pub total: u64,
 }
 
@@ -586,12 +588,14 @@ pub async fn find_documents(
     let mut cursor = find.await.map_err(|e| e.to_string())?;
 
     let mut documents = Vec::new();
+    let mut extended_documents = Vec::new();
     while cursor.advance().await.map_err(|e| e.to_string())? {
         let doc = cursor.deserialize_current().map_err(|e| e.to_string())?;
-        documents.push(bson_to_json(&Bson::Document(doc)));
+        documents.push(bson_to_json(&Bson::Document(doc.clone())));
+        extended_documents.push(Bson::Document(doc).into_relaxed_extjson());
     }
 
-    Ok(MongoDocumentResult { documents, raw_documents: None, total })
+    Ok(MongoDocumentResult { documents, raw_documents: None, extended_documents: Some(extended_documents), total })
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -727,7 +731,7 @@ pub async fn find_documents_extended_json(
         documents.push(Bson::Document(doc).into_relaxed_extjson());
     }
 
-    Ok(MongoDocumentResult { documents, raw_documents: None, total })
+    Ok(MongoDocumentResult { extended_documents: Some(documents.clone()), documents, raw_documents: None, total })
 }
 
 pub async fn aggregate_documents(
@@ -749,15 +753,18 @@ pub async fn aggregate_documents(
     let max_rows = max_rows.unwrap_or(100);
     let fetch_limit = max_rows.saturating_add(1);
     let mut documents = Vec::new();
+    let mut extended_documents = Vec::new();
     while documents.len() < fetch_limit && cursor.advance().await.map_err(|e| e.to_string())? {
         let doc = cursor.deserialize_current().map_err(|e| e.to_string())?;
-        documents.push(bson_to_json(&Bson::Document(doc)));
+        documents.push(bson_to_json(&Bson::Document(doc.clone())));
+        extended_documents.push(Bson::Document(doc).into_relaxed_extjson());
     }
     let total = documents.len() as u64;
     if documents.len() > max_rows {
         documents.truncate(max_rows);
+        extended_documents.truncate(max_rows);
     }
-    Ok(MongoDocumentResult { documents, raw_documents: None, total })
+    Ok(MongoDocumentResult { documents, raw_documents: None, extended_documents: Some(extended_documents), total })
 }
 
 pub async fn create_index(
@@ -1114,11 +1121,17 @@ fn find_and_modify_array_filters(
 fn single_document_result(document: Option<Document>) -> MongoDocumentResult {
     match document {
         Some(document) => MongoDocumentResult {
-            documents: vec![bson_to_json(&Bson::Document(document))],
+            documents: vec![bson_to_json(&Bson::Document(document.clone()))],
             raw_documents: None,
+            extended_documents: Some(vec![Bson::Document(document).into_relaxed_extjson()]),
             total: 1,
         },
-        None => MongoDocumentResult { documents: Vec::new(), raw_documents: None, total: 0 },
+        None => MongoDocumentResult {
+            documents: Vec::new(),
+            raw_documents: None,
+            extended_documents: Some(Vec::new()),
+            total: 0,
+        },
     }
 }
 
@@ -1768,6 +1781,20 @@ mod tests {
         let value = bson_to_json(&Bson::DateTime(date));
 
         assert_eq!(value, serde_json::json!("ISODate(\"2026-06-10T13:59:31.287Z\")"));
+    }
+
+    #[test]
+    fn mongo_document_result_keeps_extended_json_types_for_copying() {
+        let date = DateTime::parse_rfc3339_str("2025-05-06T08:35:32Z").unwrap();
+        let result = single_document_result(Some(doc! {
+            "lastUpdatedDate": date,
+            "dateText": "ISODate(\"2025-05-06T08:35:32Z\")",
+        }));
+
+        assert_eq!(result.documents[0]["lastUpdatedDate"], serde_json::json!("ISODate(\"2025-05-06T08:35:32Z\")"));
+        let extended = result.extended_documents.expect("extended documents");
+        assert_eq!(extended[0]["lastUpdatedDate"], serde_json::json!({ "$date": "2025-05-06T08:35:32Z" }));
+        assert_eq!(extended[0]["dateText"], serde_json::json!("ISODate(\"2025-05-06T08:35:32Z\")"));
     }
 
     #[test]

@@ -35,6 +35,7 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -215,12 +216,19 @@ public final class DamengAgent extends BaseDatabaseAgent {
         try {
             return executeConstrainedTables(buildConstrainedTablesQuery(schema, constraints), constraints);
         } catch (RuntimeException e) {
-            if (needsMaterializedViewClassification(constraints)) {
+            if (needsMaterializedViewClassification(constraints) && schemaMatchesConnectedUser(schema)) {
                 try {
                     return executeConstrainedTables(
                         buildConstrainedTablesQuery(schema, constraints, DAMENG_USER_MATERIALIZED_VIEW_JOIN_SQL),
                         constraints
                     );
+                } catch (RuntimeException ignored) {
+                    // Fall through to the legacy metadata path below.
+                }
+            }
+            if (needsMaterializedViewClassification(constraints)) {
+                try {
+                    return executePrivilegeSafeConstrainedTables(schema, constraints);
                 } catch (RuntimeException ignored) {
                     // Fall through to the legacy metadata path below.
                 }
@@ -246,8 +254,47 @@ public final class DamengAgent extends BaseDatabaseAgent {
         });
     }
 
+    private List<TableInfo> executePrivilegeSafeConstrainedTables(
+        String schema,
+        MetadataListConstraints constraints
+    ) {
+        List<TableInfo> candidates = executeConstrainedTables(
+            buildPrivilegeSafeConstrainedTablesQuery(schema, constraints),
+            MetadataListConstraints.NONE
+        );
+        List<TableInfo> classified = new ArrayList<>();
+        for (TableInfo candidate : candidates) {
+            String objectType = classifyAccessibleViewType(schema, candidate.getName(), candidate.getTable_type());
+            classified.add(new TableInfo(candidate.getName(), objectType, candidate.getComment()));
+        }
+        return constraints.filterTables(classified);
+    }
+
     static MetadataQuery buildConstrainedTablesQuery(String schema, MetadataListConstraints constraints) {
         return buildConstrainedTablesQuery(schema, constraints, DAMENG_SYSTEM_MATERIALIZED_VIEW_JOIN_SQL);
+    }
+
+    static MetadataQuery buildPrivilegeSafeConstrainedTablesQuery(
+        String schema,
+        MetadataListConstraints constraints
+    ) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        List<String> objectTypes = rawDamengTableObjectTypes(normalized);
+        List<Object> args = new ArrayList<>();
+        StringBuilder sql = new StringBuilder("""
+            SELECT o.OBJECT_NAME AS TABLE_NAME,
+                   o.OBJECT_TYPE AS TABLE_TYPE,
+                   c.COMMENTS
+            FROM ALL_OBJECTS o
+            LEFT JOIN ALL_TAB_COMMENTS c ON c.OWNER = o.OWNER AND c.TABLE_NAME = o.OBJECT_NAME
+            WHERE o.OWNER = ?
+            """.stripIndent().trim());
+        args.add(schema);
+        appendRawObjectTypePredicate(sql, args, objectTypes);
+        sql.append(" AND (o.OBJECT_TYPE <> 'TABLE' OR o.OBJECT_NAME NOT LIKE 'MTAB$_%')");
+        appendNameFilter(sql, args, "o.OBJECT_NAME", normalized);
+        sql.append(" ORDER BY o.OBJECT_NAME");
+        return new MetadataQuery(sql.toString(), args);
     }
 
     private static MetadataQuery buildConstrainedTablesQuery(
@@ -475,6 +522,44 @@ public final class DamengAgent extends BaseDatabaseAgent {
         return result;
     }
 
+    private static List<String> rawDamengTableObjectTypes(MetadataListConstraints constraints) {
+        LinkedHashSet<String> result = new LinkedHashSet<>();
+        if (constraints.tableTypeAllowed("TABLE")) {
+            result.add("TABLE");
+        }
+        if (constraints.tableTypeAllowed("VIEW") || constraints.tableTypeAllowed("MATERIALIZED_VIEW")) {
+            // DM8 may expose a materialized view as VIEW in ALL_OBJECTS. Keep
+            // the direct catalog type too for versions that report it accurately.
+            result.add("VIEW");
+            result.add("MATERIALIZED VIEW");
+        }
+        return new ArrayList<>(result);
+    }
+
+    private static List<String> rawDamengObjectTypes(MetadataListConstraints constraints) {
+        List<String> result = rawDamengTableObjectTypes(constraints);
+        if (constraints.objectTypeAllowed("PROCEDURE")) {
+            result.add("PROCEDURE");
+        }
+        if (constraints.objectTypeAllowed("FUNCTION")) {
+            result.add("FUNCTION");
+        }
+        return result;
+    }
+
+    private static void appendRawObjectTypePredicate(
+        StringBuilder sql,
+        List<Object> args,
+        List<String> objectTypes
+    ) {
+        if (objectTypes.isEmpty()) {
+            sql.append(" AND 1 = 0");
+            return;
+        }
+        sql.append(" AND o.OBJECT_TYPE IN (").append(placeholders(objectTypes.size())).append(")");
+        args.addAll(objectTypes);
+    }
+
     private static boolean needsMaterializedViewClassification(MetadataListConstraints constraints) {
         return constraints.tableTypeAllowed("VIEW") || constraints.tableTypeAllowed("MATERIALIZED_VIEW");
     }
@@ -592,13 +677,20 @@ public final class DamengAgent extends BaseDatabaseAgent {
         try {
             return executeConstrainedObjects(schema, buildConstrainedObjectsQuery(schema, constraints), constraints);
         } catch (RuntimeException e) {
-            if (needsMaterializedViewClassification(constraints)) {
+            if (needsMaterializedViewClassification(constraints) && schemaMatchesConnectedUser(schema)) {
                 try {
                     return executeConstrainedObjects(
                         schema,
                         buildConstrainedObjectsQuery(schema, constraints, DAMENG_USER_MATERIALIZED_VIEW_JOIN_SQL),
                         constraints
                     );
+                } catch (RuntimeException ignored) {
+                    // Fall through to the legacy metadata path below.
+                }
+            }
+            if (needsMaterializedViewClassification(constraints)) {
+                try {
+                    return executePrivilegeSafeConstrainedObjects(schema, constraints);
                 } catch (RuntimeException ignored) {
                     // Fall through to the legacy metadata path below.
                 }
@@ -633,8 +725,51 @@ public final class DamengAgent extends BaseDatabaseAgent {
         });
     }
 
+    private List<ObjectInfo> executePrivilegeSafeConstrainedObjects(
+        String schema,
+        MetadataListConstraints constraints
+    ) {
+        List<ObjectInfo> candidates = executeConstrainedObjects(
+            schema,
+            buildPrivilegeSafeConstrainedObjectsQuery(schema, constraints),
+            MetadataListConstraints.NONE
+        );
+        List<ObjectInfo> classified = new ArrayList<>();
+        for (ObjectInfo candidate : candidates) {
+            String objectType = classifyAccessibleViewType(schema, candidate.getName(), candidate.getObject_type());
+            classified.add(new ObjectInfo(candidate.getName(), objectType, schema, candidate.getComment()));
+        }
+        classified.sort(Comparator
+            .comparingInt((ObjectInfo object) -> damengObjectTypeOrder(object.getObject_type()))
+            .thenComparing(ObjectInfo::getName));
+        return constraints.filterObjects(classified);
+    }
+
     static MetadataQuery buildConstrainedObjectsQuery(String schema, MetadataListConstraints constraints) {
         return buildConstrainedObjectsQuery(schema, constraints, DAMENG_SYSTEM_MATERIALIZED_VIEW_JOIN_SQL);
+    }
+
+    static MetadataQuery buildPrivilegeSafeConstrainedObjectsQuery(
+        String schema,
+        MetadataListConstraints constraints
+    ) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        List<String> objectTypes = rawDamengObjectTypes(normalized);
+        List<Object> args = new ArrayList<>();
+        StringBuilder sql = new StringBuilder("""
+            SELECT o.OBJECT_NAME,
+                   o.OBJECT_TYPE,
+                   c.COMMENTS
+            FROM ALL_OBJECTS o
+            LEFT JOIN ALL_TAB_COMMENTS c ON c.OWNER = o.OWNER AND c.TABLE_NAME = o.OBJECT_NAME
+            WHERE o.OWNER = ?
+            """.stripIndent().trim());
+        args.add(schema);
+        appendRawObjectTypePredicate(sql, args, objectTypes);
+        sql.append(" AND (o.OBJECT_TYPE <> 'TABLE' OR o.OBJECT_NAME NOT LIKE 'MTAB$_%')");
+        appendNameFilter(sql, args, "o.OBJECT_NAME", normalized);
+        sql.append(" ORDER BY o.OBJECT_NAME");
+        return new MetadataQuery(sql.toString(), args);
     }
 
     private static MetadataQuery buildConstrainedObjectsQuery(
@@ -669,6 +804,37 @@ public final class DamengAgent extends BaseDatabaseAgent {
             .append(" ELSE 9 END, o.OBJECT_NAME");
         appendLimitOffset(sql, args, normalized);
         return new MetadataQuery(sql.toString(), args);
+    }
+
+    private String classifyAccessibleViewType(String schema, String name, String objectType) {
+        String normalized = normalizeObjectType(objectType);
+        if (!"VIEW".equals(normalized)) {
+            return normalized;
+        }
+        String sql = "SELECT 1 FROM DUAL WHERE DBMS_METADATA.GET_DDL('MATERIALIZED_VIEW', ?, ?) IS NOT NULL";
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            stmt.setString(1, name);
+            stmt.setString(2, schema);
+            try (ResultSet rs = stmt.executeQuery()) {
+                return rs.next() ? "MATERIALIZED_VIEW" : "VIEW";
+            }
+        } catch (Exception ignored) {
+            // GET_DDL with MATERIALIZED_VIEW fails for an ordinary view. It is
+            // also available to users that only have object-level SELECT grants,
+            // unlike SYS.SYSOBJECTS on restricted DM8 installations.
+            return "VIEW";
+        }
+    }
+
+    private static int damengObjectTypeOrder(String objectType) {
+        return switch (normalizeObjectType(objectType)) {
+            case "TABLE" -> 0;
+            case "VIEW" -> 1;
+            case "MATERIALIZED_VIEW" -> 2;
+            case "PROCEDURE" -> 3;
+            case "FUNCTION" -> 4;
+            default -> 9;
+        };
     }
 
     @Override

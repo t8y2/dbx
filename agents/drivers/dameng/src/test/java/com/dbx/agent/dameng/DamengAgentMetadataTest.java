@@ -1,6 +1,7 @@
 package com.dbx.agent.dameng;
 
 import com.dbx.agent.ColumnInfo;
+import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.TableInfo;
@@ -17,6 +18,7 @@ import java.io.StringReader;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -141,6 +143,39 @@ class DamengAgentMetadataTest {
         Assertions.assertTrue(views.stream().noneMatch(table -> "MATERIALIZED_VIEW".equals(table.getTable_type())));
         Assertions.assertTrue(views.stream().noneMatch(table -> "USER_SUMMARY_MV".equals(table.getName())));
         Assertions.assertEquals(List.of("USER_SUMMARY_MV"), materializedViews.stream().map(TableInfo::getName).toList());
+    }
+
+    @Test
+    void classifiesGrantedCrossOwnerViewsWithoutSystemCatalogAccess() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, restrictedCrossOwnerMetadataConnection(sqls));
+        setConnectedUsername(agent, "LIMITED_READER");
+        MetadataListConstraints constraints = new MetadataListConstraints(
+            null,
+            20,
+            null,
+            List.of("VIEW", "MATERIALIZED_VIEW")
+        );
+
+        List<TableInfo> tables = agent.listTables("REPORTING", constraints);
+        List<ObjectInfo> objects = agent.listObjects("REPORTING", constraints);
+
+        Assertions.assertEquals("VIEW", tables.stream()
+            .filter(table -> "SALES_VIEW".equals(table.getName()))
+            .findFirst().orElseThrow().getTable_type());
+        Assertions.assertEquals("MATERIALIZED_VIEW", tables.stream()
+            .filter(table -> "SALES_MV".equals(table.getName()))
+            .findFirst().orElseThrow().getTable_type());
+        Assertions.assertEquals("VIEW", objects.stream()
+            .filter(object -> "SALES_VIEW".equals(object.getName()))
+            .findFirst().orElseThrow().getObject_type());
+        Assertions.assertEquals("MATERIALIZED_VIEW", objects.stream()
+            .filter(object -> "SALES_MV".equals(object.getName()))
+            .findFirst().orElseThrow().getObject_type());
+        Assertions.assertTrue(sqls.stream().anyMatch(sql -> sql.contains("SYS.SYSOBJECTS materialized_view")));
+        Assertions.assertTrue(sqls.stream().anyMatch(sql -> sql.contains("DBMS_METADATA.GET_DDL('MATERIALIZED_VIEW'")));
+        Assertions.assertTrue(sqls.stream().noneMatch(sql -> sql.contains("USER_MVIEWS")), String.join("\n", sqls));
     }
 
     @Test
@@ -584,6 +619,72 @@ class DamengAgentMetadataTest {
         });
     }
 
+    private static Connection restrictedCrossOwnerMetadataConnection(List<String> sqls) {
+        return proxy(Connection.class, (method, args) -> {
+            String name = method.getName();
+            if ("prepareStatement".equals(name)) {
+                String sql = (String) args[0];
+                sqls.add(sql);
+                if (sql.contains("SYS.SYSOBJECTS materialized_view")) {
+                    return failingMetadataStatement("no SYS.SYSOBJECTS privilege");
+                }
+                if (sql.contains("DBMS_METADATA.GET_DDL('MATERIALIZED_VIEW'")) {
+                    return materializedViewProbeStatement("SALES_MV");
+                }
+                if (sql.contains("FROM ALL_OBJECTS o")) {
+                    return metadataStatement(List.of(
+                        Arrays.asList("SALES_MV", "VIEW", "materialized view"),
+                        Arrays.asList("SALES_VIEW", "VIEW", "regular view")
+                    ));
+                }
+            }
+            if ("close".equals(name)) {
+                return null;
+            }
+            if ("isClosed".equals(name)) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static PreparedStatement failingMetadataStatement(String message) {
+        return proxy(PreparedStatement.class, (method, args) -> {
+            if ("executeQuery".equals(method.getName())) {
+                throw new SQLException(message);
+            }
+            if ("close".equals(method.getName())) {
+                return null;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static PreparedStatement materializedViewProbeStatement(String materializedViewName) {
+        List<String> params = new ArrayList<>();
+        return proxy(PreparedStatement.class, (method, args) -> {
+            String name = method.getName();
+            if ("setString".equals(name)) {
+                int index = ((Integer) args[0]) - 1;
+                while (params.size() <= index) {
+                    params.add("");
+                }
+                params.set(index, String.valueOf(args[1]));
+                return null;
+            }
+            if ("executeQuery".equals(name)) {
+                if (!params.isEmpty() && materializedViewName.equals(params.get(0))) {
+                    return metadataResultSet(List.of(List.of(1)));
+                }
+                throw new SQLException("not a materialized view");
+            }
+            if ("close".equals(name)) {
+                return null;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
     private static PreparedStatement metadataStatement(List<List<Object>> rows) {
         return metadataStatement(rows, null);
     }
@@ -628,6 +729,8 @@ class DamengAgentMetadataTest {
                     return value == null ? null : value.toString();
                 }
                 return switch (((String) args[0]).toUpperCase()) {
+                    case "TABLE_NAME", "OBJECT_NAME" -> string(rows, index[0], 0);
+                    case "TABLE_TYPE", "OBJECT_TYPE" -> string(rows, index[0], 1);
                     case "COLUMN_NAME" -> string(rows, index[0], 0);
                     case "DATA_TYPE" -> string(rows, index[0], 1);
                     case "NULLABLE" -> string(rows, index[0], 2);

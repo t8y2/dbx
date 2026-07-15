@@ -116,6 +116,23 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
+    void privilegeSafeTableQueryFetchesRawViewsWithoutSystemCatalogOrPaging() {
+        DamengAgent.MetadataQuery query = DamengAgent.buildPrivilegeSafeConstrainedTablesQuery(
+            "REPORTING",
+            new MetadataListConstraints("sales", 20, 40, List.of("VIEW", "MATERIALIZED_VIEW"))
+        );
+
+        assertTrue(query.sql().contains("FROM ALL_OBJECTS o"));
+        assertFalse(query.sql().contains("SYS.SYSOBJECTS"));
+        assertFalse(query.sql().contains("USER_MVIEWS"));
+        assertTrue(query.sql().contains("o.OBJECT_TYPE IN (?, ?)"));
+        assertTrue(query.sql().contains("UPPER(o.OBJECT_NAME) LIKE ? ESCAPE '\\\\'"));
+        assertFalse(query.sql().contains("LIMIT"));
+        assertFalse(query.sql().contains("OFFSET"));
+        assertEquals(List.of("REPORTING", "VIEW", "MATERIALIZED VIEW", "%S%A%L%E%S%"), query.args());
+    }
+
+    @Test
     void constrainedObjectQueryClassifiesMaterializedViewsBeforeFiltering() {
         DamengAgent.MetadataQuery query = DamengAgent.buildConstrainedObjectsQuery(
             "APP",

@@ -59,17 +59,38 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
-    void mysqlCompatListDatabasesUsesCurrentDatabase() {
+    void mysqlCompatListDatabasesUsesKingbaseCatalog() {
         List<String> sql = new ArrayList<>();
         KingbaseAgent agent = new KingbaseAgent();
         agent.setMysqlCompatMode(true);
         TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
             new String[]{"database_name"},
-            new Object[][]{{"TEST"}}
+            new Object[][]{{"app"}, {"analytics"}}
         )));
 
+        List<DatabaseInfo> databases = agent.listDatabases();
+
+        Assertions.assertEquals(2, databases.size());
+        Assertions.assertEquals("app", databases.get(0).getName());
+        Assertions.assertEquals("analytics", databases.get(1).getName());
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_database"), sql.get(0));
+    }
+
+    @Test
+    void mysqlCompatListDatabasesFallsBackToCurrentDatabase() {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        agent.setMysqlCompatMode(true);
+        TestSupport.setPrivateConnection(agent, preparedConnectionWithFailures(
+            sql,
+            List.of("sys_catalog.sys_database", "FROM pg_database"),
+            resultSet(new String[]{"database_name"}, new Object[][]{{"TEST"}})
+        ));
+
         Assertions.assertEquals("TEST", agent.listDatabases().get(0).getName());
-        Assertions.assertEquals("SELECT current_database() AS database_name", sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_database"), sql.get(0));
+        Assertions.assertTrue(sql.get(1).contains("FROM pg_database"), sql.get(1));
+        Assertions.assertEquals("SELECT current_database() AS database_name", sql.get(2));
     }
 
     @Test
@@ -602,14 +623,20 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     private static Connection preparedConnectionWithFailure(List<String> sql, String failingSqlFragment, ResultSet fallback) {
+        return preparedConnectionWithFailures(sql, List.of(failingSqlFragment), fallback);
+    }
+
+    private static Connection preparedConnectionWithFailures(List<String> sql, List<String> failingSqlFragments, ResultSet fallback) {
         return proxy(Connection.class, (method, args) -> {
             if ("prepareStatement".equals(method.getName())) {
                 String preparedSql = String.valueOf(args[0]);
                 sql.add(preparedSql);
                 return proxy(PreparedStatement.class, (statementMethod, statementArgs) -> {
                     if ("executeQuery".equals(statementMethod.getName())) {
-                        if (preparedSql.contains(failingSqlFragment)) {
-                            throw new SQLException("relation does not exist: " + failingSqlFragment);
+                        for (String failingSqlFragment : failingSqlFragments) {
+                            if (preparedSql.contains(failingSqlFragment)) {
+                                throw new SQLException("relation does not exist: " + failingSqlFragment);
+                            }
                         }
                         return fallback;
                     }

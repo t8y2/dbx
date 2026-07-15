@@ -100,10 +100,6 @@ public final class KingbaseAgent extends PostgresLikeAgent {
     public List<DatabaseInfo> listDatabases() {
         if (postgresCatalogMode) return super.listDatabases();
         return unchecked(() -> {
-            if (isMysqlCompatMode()) {
-                List<DatabaseInfo> result = queryDatabases("SELECT current_database() AS database_name");
-                if (!result.isEmpty()) return result;
-            }
             for (String sql : List.of(
                 "SELECT datname AS database_name FROM sys_catalog.sys_database WHERE datistemplate = false ORDER BY datname",
                 "SELECT datname AS database_name FROM pg_database WHERE datistemplate = false ORDER BY datname"
@@ -113,6 +109,14 @@ public final class KingbaseAgent extends PostgresLikeAgent {
                     if (!result.isEmpty()) return result;
                 } catch (Exception ignored) {
                     // Kingbase catalog names differ across compatibility modes and versions.
+                }
+            }
+            if (isMysqlCompatMode()) {
+                try {
+                    List<DatabaseInfo> result = queryDatabases("SELECT current_database() AS database_name");
+                    if (!result.isEmpty()) return result;
+                } catch (Exception ignored) {
+                    // Keep the configured database as the final fallback if current_database() is unavailable.
                 }
             }
             return Collections.singletonList(new DatabaseInfo(getConfiguredDatabase()));

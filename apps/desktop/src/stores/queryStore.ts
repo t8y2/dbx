@@ -381,7 +381,7 @@ export const useQueryStore = defineStore("query", () => {
   }
   const MAX_CACHED_RESULTS = 5;
 
-  async function closeResultSession(tab: QueryTab | undefined, preserveSessionId?: string) {
+  async function closeResultSession(tab: QueryTab | undefined, preserveSessionId?: string, throwOnError = false) {
     const sessionId = tab?.resultSessionId ?? tab?.result?.session_id;
     if (!tab || !sessionId || sessionId === preserveSessionId) return;
     try {
@@ -391,28 +391,30 @@ export const useQueryStore = defineStore("query", () => {
       await api.closeQuerySession(tab.connectionId, executionDatabase, sessionId, tab.id);
     } catch (error) {
       console.warn("[DBX][query-session:close:error]", { tabId: tab.id, sessionId, error });
+      if (throwOnError) throw error;
     } finally {
       if (tab.resultSessionId === sessionId) tab.resultSessionId = undefined;
       if (tab.result?.session_id === sessionId) tab.result.session_id = undefined;
     }
   }
 
-  async function closeClientSessionId(connectionId: string, database: string, clientSessionId: string, logContext: Record<string, unknown> = {}) {
+  async function closeClientSessionId(connectionId: string, database: string, clientSessionId: string, logContext: Record<string, unknown> = {}, throwOnError = false) {
     try {
       await api.closeClientConnectionSession(connectionId, database, clientSessionId);
     } catch (error) {
       console.warn("[DBX][client-session:close:error]", { ...logContext, clientSessionId, error });
+      if (throwOnError) throw error;
     }
   }
 
-  async function closeClientConnectionSession(tab: QueryTab | undefined) {
+  async function closeClientConnectionSession(tab: QueryTab | undefined, throwOnError = false) {
     if (!tab?.connectionId) return;
     const catalog = tab.mode === "data" ? tab.tableMeta?.catalog : undefined;
     const connection = catalog ? useConnectionStore().getConfig(tab.connectionId) : undefined;
     const executionDatabase = dataTabExecutionDatabase(connection, tab.database, catalog);
     const clientSessionIds = [...new Set([tabClientSessionId(tab), ...BACKGROUND_CLIENT_SESSION_SUFFIXES.map((suffix) => tabClientSessionId(tab, suffix)), tab.explainClientSessionId].filter((sessionId): sessionId is string => !!sessionId))];
     for (const clientSessionId of clientSessionIds) {
-      await closeClientSessionId(tab.connectionId, executionDatabase, clientSessionId, { tabId: tab.id });
+      await closeClientSessionId(tab.connectionId, executionDatabase, clientSessionId, { tabId: tab.id }, throwOnError);
     }
   }
 
@@ -420,8 +422,9 @@ export const useQueryStore = defineStore("query", () => {
     const previousReset = pendingTabSessionResets.get(tab.id);
     const reset = (async () => {
       if (previousReset) await previousReset;
-      await closeResultSession(tab);
-      await closeClientConnectionSession(tab);
+      // A schema reset must fail closed: reusing the old session would retain Oracle CURRENT_SCHEMA.
+      await closeResultSession(tab, undefined, true);
+      await closeClientConnectionSession(tab, true);
     })();
     pendingTabSessionResets.set(tab.id, reset);
     const clearPendingReset = () => {
@@ -3244,7 +3247,15 @@ export const useQueryStore = defineStore("query", () => {
     tab.explainTableSql = undefined;
     tab.lastExplainedSql = sql;
 
-    await waitForTabSessionReset(id);
+    try {
+      await waitForTabSessionReset(id);
+    } catch (e: any) {
+      // Do not start an explain with a session whose schema reset did not complete.
+      tab.isExplaining = false;
+      tab.explainExecutionId = undefined;
+      tab.explainError = String(e?.message || e);
+      return { ok: false as const, reason: tab.explainError };
+    }
 
     // DM and Oracle agents expose native text plans. DM also supports autotrace.
     if (databaseType === "dameng" || databaseType === "oracle") {

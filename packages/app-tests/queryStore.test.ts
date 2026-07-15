@@ -4254,6 +4254,55 @@ test("query execution waits for a cleared schema client session to close", async
   }
 });
 
+test("failed schema session reset blocks query and Oracle explain execution", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  let executeRequests = 0;
+  let explainRequests = 0;
+
+  connectionStore.addEphemeralConnection(oracleConn("oracle-1"));
+  const queryTabId = store.createTab("oracle-1", "ORCL", "Query", "query", "REPORTING");
+  const explainTabId = store.createTab("oracle-1", "ORCL", "Explain", "query", "REPORTING");
+
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url === "/api/query/close-client-session") return new Response("reset failed", { status: 500 });
+    if (url === "/api/query/execute-multi") {
+      executeRequests += 1;
+      return new Response(JSON.stringify([]), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url === "/api/query/get-explain-info") {
+      explainRequests += 1;
+      return new Response("unexpected explain request", { status: 500 });
+    }
+    return new Response("unexpected request", { status: 500 });
+  };
+
+  try {
+    store.updateSchema(queryTabId, undefined);
+    const queryExecution = store.executeTabSql(queryTabId, "select 1", { skipEnsureConnected: true });
+    await queryExecution;
+    const queryTab = store.tabs.find((tab) => tab.id === queryTabId)!;
+    assert.equal(executeRequests, 0);
+    assert.equal(queryTab.result?.execution_error, true);
+    assert.match(String(queryTab.result?.rows[0]?.[0]), /reset failed/i);
+
+    store.updateSchema(explainTabId, undefined);
+    const explainResult = await store.explainTabSql(explainTabId, "select 1", "oracle");
+    const explainTab = store.tabs.find((tab) => tab.id === explainTabId)!;
+    assert.equal(explainResult.ok, false);
+    assert.equal(explainRequests, 0);
+    assert.equal(explainTab.isExplaining, false);
+    assert.match(explainTab.explainError ?? "", /reset failed/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("clearing a non-clearable query schema does not reset its client session", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());

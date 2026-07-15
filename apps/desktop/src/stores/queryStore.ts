@@ -161,6 +161,10 @@ function annotateQueryResultSource(result: QueryResult, sourceStatement: string,
   return result;
 }
 
+function displayedQueryMetadataSql(tab: QueryTab, fallbackSql: string): string {
+  return tab.results?.length ? (tab.result?.sourceStatement ?? fallbackSql) : fallbackSql;
+}
+
 async function withFrontendQueryTimeout<T>(promise: Promise<T>, timeoutSecs: number, message: string): Promise<T> {
   if (timeoutSecs === 0) return promise;
 
@@ -3158,7 +3162,9 @@ export const useQueryStore = defineStore("query", () => {
           backendMs: current.result?.execution_time_ms,
           elapsed: elapsed(),
         });
-        if (current.mode === "query" && current.result) analyzeQueryMetadataInBackground(id, queryMetadataSql, current.result, traceId, elapsed, hiddenPrimaryKeys);
+        if (current.mode === "query" && current.result) {
+          analyzeQueryMetadataInBackground(id, displayedQueryMetadataSql(current, queryMetadataSql), current.result, traceId, elapsed, hiddenPrimaryKeys);
+        }
       } else {
         console.warn("[DBX][executeTabSql:stale-result]", {
           traceId,
@@ -3510,6 +3516,11 @@ export const useQueryStore = defineStore("query", () => {
     tab.queryEditabilityReason = undefined;
     tab.mongoEditTarget = undefined;
     syncActiveResultRunFromDisplayed(tab);
+    const sourceStatement = tab.result?.sourceStatement;
+    if (tab.mode === "query" && sourceStatement && splitMongoCommandRanges(sourceStatement).length === 0) {
+      const metadataStartedAt = performance.now();
+      analyzeQueryMetadataInBackground(id, sourceStatement, tab.result, uuid().slice(0, 8), () => `${Math.round(performance.now() - metadataStartedAt)}ms`);
+    }
   }
 
   function notifyConnectionMayBeLost() {

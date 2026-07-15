@@ -3,6 +3,7 @@ import { test } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { isReactive } from "vue";
 import { decodeQueryResultArchive } from "../../apps/desktop/src/lib/query/queryResultArchive.ts";
+import { analyzeEditableQueryEditability } from "../../apps/desktop/src/lib/sql/sqlAnalysis.ts";
 import { resultSqlForGrid } from "../../apps/desktop/src/lib/tabs/tabPresentation.ts";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
 import { useQueryStore } from "../../apps/desktop/src/stores/queryStore.ts";
@@ -4559,6 +4560,148 @@ test("multi statement execution shows the first result set by default", async ()
       tab?.results?.every((result) => !isReactive(result.rows)),
       true,
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("multi statement results analyze editability from each active source statement", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const analyzedSql: string[] = [];
+
+  connectionStore.addEphemeralConnection(conn("multi-result-editability"));
+  const tabId = store.createTab("multi-result-editability", "db", "Query");
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/prepare-pagination-plan") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify({ sqlToExecute: body.options.sql, useAgentResultSession: false }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/query/execute-multi") {
+      return new Response(
+        JSON.stringify([
+          { columns: ["id", "name"], rows: [[1, "Ada"]], affected_rows: 0, execution_time_ms: 1 },
+          { columns: ["id", "total"], rows: [[10, 42]], affected_rows: 0, execution_time_ms: 1 },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/analyze-editability") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      analyzedSql.push(body.sql);
+      return new Response(JSON.stringify(analyzeEditableQueryEditability(body.sql)), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url.startsWith("/api/schema/columns?")) {
+      const table = new URL(url, "http://localhost").searchParams.get("table");
+      const columns =
+        table === "users"
+          ? [
+              { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: null },
+              { name: "name", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: null },
+            ]
+          : [
+              { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: null },
+              { name: "total", data_type: "numeric", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: null },
+            ];
+      return new Response(JSON.stringify(columns), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    await store.executeTabSql(tabId, "select * from users; select * from orders");
+
+    const tab = store.tabs.find((item) => item.id === tabId);
+    await waitFor(() => tab?.tableMeta?.tableName === "users" && !!tab.queryAnalysis);
+    assert.deepEqual(analyzedSql, ["select * from users"]);
+    assert.equal(tab?.queryEditabilityReason, undefined);
+    assert.equal(tab?.queryAnalysis?.tableName, "users");
+
+    store.setActiveResultIndex(tabId, 1);
+    await waitFor(() => tab?.tableMeta?.tableName === "orders" && !!tab.queryAnalysis);
+    assert.deepEqual(analyzedSql, ["select * from users", "select * from orders"]);
+    assert.equal(tab?.queryEditabilityReason, undefined);
+    assert.equal(tab?.queryAnalysis?.tableName, "orders");
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("multi statement result switching keeps unsupported statements read-only", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const analyzedSql: string[] = [];
+
+  connectionStore.addEphemeralConnection(conn("multi-result-readonly"));
+  const tabId = store.createTab("multi-result-readonly", "db", "Query");
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/prepare-pagination-plan") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify({ sqlToExecute: body.options.sql, useAgentResultSession: false }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/query/execute-multi") {
+      return new Response(
+        JSON.stringify([
+          { columns: ["id", "name"], rows: [[1, "Ada"]], affected_rows: 0, execution_time_ms: 1 },
+          { columns: ["id", "total"], rows: [[10, 42]], affected_rows: 0, execution_time_ms: 1 },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/analyze-editability") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      analyzedSql.push(body.sql);
+      return new Response(JSON.stringify(analyzeEditableQueryEditability(body.sql)), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url.startsWith("/api/schema/columns?")) {
+      return new Response(
+        JSON.stringify([
+          { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: null },
+          { name: "name", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: null },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const sql = "select * from users; select id, count(*) as total from orders group by id";
+    await store.executeTabSql(tabId, sql);
+
+    const tab = store.tabs.find((item) => item.id === tabId);
+    await waitFor(() => tab?.tableMeta?.tableName === "users" && !!tab.queryAnalysis);
+    assert.equal(tab?.queryEditabilityReason, undefined);
+
+    store.setActiveResultIndex(tabId, 1);
+    await waitFor(() => tab?.queryEditabilityReason === "aggregation");
+    assert.deepEqual(analyzedSql, ["select * from users", "select id, count(*) as total from orders group by id"]);
+    assert.equal(tab?.queryAnalysis, undefined);
+    assert.equal(tab?.tableMeta, undefined);
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

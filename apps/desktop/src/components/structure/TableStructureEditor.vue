@@ -21,6 +21,7 @@ import { useSettingsStore, type StructureEditorDensity } from "@/stores/settings
 import { useTheme } from "@/composables/useTheme";
 import { useToast } from "@/composables/useToast";
 import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sql/sqlHighlighter";
+import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
@@ -99,10 +100,10 @@ onMounted(async () => {
 
 const highlightedSql = computed(() => {
   if (!pendingStatements.value.length) return "";
-  const sql = pendingStatements.value.join("\n");
+  const sql = previewSqlText.value;
   return sqlHighlighter.value?.(sql) ?? sql;
 });
-const previewSqlText = computed(() => pendingStatements.value.join("\n"));
+const previewSqlText = computed(() => joinSqlStatementsForScript(pendingStatements.value, databaseType.value));
 
 const props = defineProps<{
   connectionId: string;

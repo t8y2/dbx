@@ -476,6 +476,15 @@ COMMENT = '测试';`;
     expect(rangeSqlTexts(executableStatementRanges(sql, "postgres"))).toEqual([sql.slice(0, -1)]);
   });
 
+  it("recovers later statements from an unclosed EXPLAIN option list", () => {
+    const sql = "EXPLAIN (ANALYZE\nSELECT 1\nSELECT 2;";
+    const explainSql = "EXPLAIN (ANALYZE\nSELECT 1";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "EXPLAIN"), "postgres")?.sql.trim()).toBe(explainSql);
+    expect(statementRangeAtCursor(sql, indexOf(sql, "SELECT 2"), "postgres")?.sql.trim()).toBe("SELECT 2");
+    expect(rangeSqlTexts(executableStatementRanges(sql, "postgres"))).toEqual([explainSql, "SELECT 2"]);
+  });
+
   it("does not treat a DESCRIBE subquery paren as EXPLAIN options", () => {
     const sql = "DESCRIBE (SELECT 1)\nSELECT 2;";
 

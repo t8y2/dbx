@@ -644,7 +644,9 @@ fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &st
     }
 
     let lower = error.to_ascii_lowercase();
-    if lower.contains("group_concat_max_len") && (lower.contains("1193") || lower.contains("unknown system variable")) {
+    let setup_query_rejected =
+        lower.contains("1193") || lower.contains("unknown system variable") || lower.contains("syntax error");
+    if lower.contains("group_concat_max_len") && setup_query_rejected {
         return Some(MySqlSetupMode::Compatible);
     }
 
@@ -4480,6 +4482,16 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     #[test]
     fn mysql_group_concat_setup_error_retries_without_session_variable() {
         let error = "MySQL connection failed: Server error: `ERROR HY000 (1193): Unknown system variable,stmt:SET @@group_concat_max_len = 1048576'";
+
+        assert_eq!(
+            mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
+            Some(MySqlSetupMode::Compatible)
+        );
+    }
+
+    #[test]
+    fn mysql_cnch_group_concat_syntax_error_retries_without_session_variable() {
+        let error = "MySQL connection failed: Server error: `ERROR HY000 (1105): unknown error: Error 62 (HY000): Code: 62, e.displayText() = DB::Exception: host = cnch-server-2: Syntax error: failed at position 13 ('group_concat_max_len'): group_concat_max_len = 1048576. Expected one of: Dot, token, Equals SQLSTATE: 42000 (version 21.8.7.1)'";
 
         assert_eq!(
             mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),

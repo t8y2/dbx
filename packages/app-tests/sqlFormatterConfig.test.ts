@@ -249,6 +249,9 @@ test("maps DBX formatter settings to sql-formatter options", () => {
       linesBetweenQueries: 1,
       denseOperators: false,
       newlineBeforeSemicolon: true,
+      paramTypes: {
+        custom: [{ regex: String.raw`\$\{[^}]+\}` }, { regex: String.raw`#\{[^}]+\}` }],
+      },
     },
   );
 
@@ -270,7 +273,10 @@ test("maps DBX formatter settings to sql-formatter options", () => {
       linesBetweenQueries: 1,
       denseOperators: false,
       newlineBeforeSemicolon: false,
-      paramTypes: { positional: true },
+      paramTypes: {
+        positional: true,
+        custom: [{ regex: String.raw`\$\{[^}]+\}` }, { regex: String.raw`#\{[^}]+\}` }],
+      },
     },
   );
 });

@@ -14,6 +14,18 @@ describe("sqlFormatter", () => {
     }
   });
 
+  it("preserves DBX brace placeholders in generic and MySQL SQL", async () => {
+    const sql = "SELECT ${x} AS shell_value, #{x} AS mybatis_value, '${date}' AS quoted_value";
+
+    for (const dialect of ["generic", "mysql"] as const) {
+      const formatted = await formatSqlText(sql, dialect);
+
+      expect(formatted).toContain("${x}");
+      expect(formatted).toContain("#{x}");
+      expect(formatted).toContain("'${date}'");
+    }
+  });
+
   it("falls back to the postgres formatter when the generic dialect cannot parse SQL", async () => {
     const formatted = await formatSqlText("SELECT 1::int AS id;", "generic");
 

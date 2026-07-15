@@ -7045,6 +7045,11 @@ function selectionHasEditableCells(): boolean {
   return false;
 }
 
+function setSelectionNull() {
+  if (!props.editable || !selectionHasEditableCells()) return;
+  fillSelectionWithValue(null);
+}
+
 function openBulkEditDialog() {
   if (!props.editable || !selectionHasEditableCells()) return;
   bulkEditValue.value = "";
@@ -8975,10 +8980,19 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   }
 
   if (props.editable && hasCellSelection.value) {
+    const hasEditableSelection = selectionHasEditableCells();
+    if (!contextHeaderColumn.value) {
+      items.push({
+        label: t("grid.setNull"),
+        action: setSelectionNull,
+        disabled: !hasEditableSelection,
+        icon: X,
+      });
+    }
     items.push({
       label: t("grid.bulkEditSelection"),
       action: openBulkEditDialog,
-      disabled: !selectionHasEditableCells(),
+      disabled: !hasEditableSelection,
       icon: Pencil,
     });
   }

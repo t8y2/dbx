@@ -14,7 +14,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
 default = ["duckdb-bundled", "mq-admin", "sqlite-sqlcipher"]
-duckdb-bundled = ["duckdb", "dbx-core/duckdb-bundled"]
+duckdb-bundled = ["duckdb", "duckdb/parquet", "dbx-core/duckdb-bundled"]
 mq-admin = ["dbx-core/mq-admin"]
 sqlite-sqlcipher = ["dbx-core/sqlite-sqlcipher"]
 

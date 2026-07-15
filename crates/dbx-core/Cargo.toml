@@ -33,7 +33,7 @@ bench = false
 
 [features]
 default = ["duckdb-bundled", "mq-admin", "sqlite-sqlcipher"]
-duckdb-bundled = ["duckdb/bundled"]
+duckdb-bundled = ["duckdb/bundled", "duckdb/parquet"]
 mq-admin = []
 sqlite-sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
 

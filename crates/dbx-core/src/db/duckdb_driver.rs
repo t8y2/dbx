@@ -61,6 +61,10 @@ pub fn connect_path(path: &str) -> Result<Arc<DuckDbConnection>, String> {
     let connection = if is_memory { duckdb::Connection::open_in_memory() } else { duckdb::Connection::open(path) }
         .map_err(|e| format!("DuckDb connection failed: {e}"))?;
 
+    connection
+        .execute_batch("LOAD parquet;")
+        .map_err(|e| format!("DuckDb failed to load parquet extension: {e}"))?;
+
     Ok(Arc::new(DuckDbConnection::new(connection)))
 }
 

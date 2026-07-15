@@ -636,7 +636,9 @@ public final class KingbaseAgent extends PostgresLikeAgent {
 
     @Override
     public String setSchemaSQL(String schema) {
-        if (postgresCatalogMode) return super.setSchemaSQL(schema);
+        if (postgresCatalogMode) {
+            return "SET search_path TO " + JdbcIdentifiers.INSTANCE.doubleQuote(effectiveSchema(schema)) + ", pg_catalog";
+        }
         // Kingbase searches sys_catalog implicitly before user schemas unless it
         // is listed explicitly. Put it after the selected schema so business
         // tables named like system tables (for example sys_config) win.

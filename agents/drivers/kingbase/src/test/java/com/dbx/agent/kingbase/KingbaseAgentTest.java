@@ -163,7 +163,7 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         Assertions.assertEquals("SELECT 1 FROM sys_catalog.sys_namespace WHERE 1 = 0", sql.get(0));
         Assertions.assertEquals("SELECT 1 FROM pg_catalog.pg_namespace WHERE 1 = 0", sql.get(1));
         Assertions.assertTrue(sql.get(2).contains("FROM pg_catalog.pg_namespace"), sql.get(2));
-        Assertions.assertEquals("SET search_path TO \"app\"", agent.setSchemaSQL("app"));
+        Assertions.assertEquals("SET search_path TO \"app\", pg_catalog", agent.setSchemaSQL("app"));
     }
 
     @Test

@@ -63,7 +63,7 @@ pub fn connect_path(path: &str) -> Result<Arc<DuckDbConnection>, String> {
 
     connection
         .execute_batch("LOAD parquet;")
-        .map_err(|e| format!("DuckDb failed to load parquet extension: {e}"))?;
+        .map_err(|e| format!("DuckDb failed to load parquet extension (ensure the binary was built with the parquet feature enabled): {e}"))?;
 
     Ok(Arc::new(DuckDbConnection::new(connection)))
 }

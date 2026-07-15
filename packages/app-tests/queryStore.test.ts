@@ -4734,6 +4734,43 @@ POST /dbx-orders/_search
   }
 });
 
+test("Elasticsearch executes a single REST request after a block comment", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const executedRequests: string[] = [];
+
+  connectionStore.addEphemeralConnection(elasticsearchConn("es-single"));
+  const tabId = store.createTab("es-single", "", "Elasticsearch query");
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    if (String(input) === "/api/query/execute") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      executedRequests.push(body.sql);
+      return new Response(
+        JSON.stringify({
+          columns: ["status", "response"],
+          rows: [[200, '{"nodes":{}}']],
+          affected_rows: 0,
+          execution_time_ms: 1,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    await store.executeTabSql(tabId, "/* 查看节点 JVM 信息 */\nGET /_nodes/stats/jvm?pretty");
+    assert.deepEqual(executedRequests, ["GET /_nodes/stats/jvm?pretty"]);
+    assert.equal(store.tabs.find((item) => item.id === tabId)?.result?.sourceStatement, "GET /_nodes/stats/jvm?pretty");
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("tab reuse is scoped by mode and schema instead of title alone", () => {
   const restoreStorage = installMemoryStorage();
   try {

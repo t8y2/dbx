@@ -166,7 +166,7 @@ const ELASTICSEARCH_REST_REQUEST = /^(?:GET|POST|PUT|DELETE|HEAD)\s+\S+/i;
 function elasticsearchRestRequestRanges(sql: string, databaseType?: DatabaseType) {
   if (databaseType !== "elasticsearch") return [];
   const requests = splitSqlStatementRanges(sql, databaseType);
-  return requests.length > 1 && requests.every((request) => ELASTICSEARCH_REST_REQUEST.test(request.sql)) ? requests : [];
+  return requests.length > 0 && requests.every((request) => ELASTICSEARCH_REST_REQUEST.test(request.sql)) ? requests : [];
 }
 
 async function withFrontendQueryTimeout<T>(promise: Promise<T>, timeoutSecs: number, message: string): Promise<T> {

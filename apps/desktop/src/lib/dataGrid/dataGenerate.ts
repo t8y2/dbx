@@ -1,5 +1,5 @@
 import type { DatabaseType } from "@/types/database";
-import { quoteTableIdentifier } from "@/lib/table/tableSelectSql";
+import { qualifiedTableName, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
 
 export interface GeneratorNode {
   key: string;
@@ -1722,12 +1722,41 @@ function generateByType(type: string, rowIndex: number): unknown {
   return `value_${rowIndex + 1}`;
 }
 
-export function formatGeneratedValue(value: unknown): string {
+function quoteGeneratedString(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function formatOracleTemporalValue(value: string, dataType: string): string | null {
+  const type = dataType.toLowerCase();
+  const dateTimeMatch = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(\.\d+)?$/.exec(value);
+  const dateMatch = /^\d{4}-\d{2}-\d{2}$/.test(value);
+
+  if (type.includes("timestamp") && dateTimeMatch) {
+    const mask = dateTimeMatch[3] ? "YYYY-MM-DD HH24:MI:SS.FF" : "YYYY-MM-DD HH24:MI:SS";
+    return `TO_TIMESTAMP(${quoteGeneratedString(value.replace("T", " "))}, '${mask}')`;
+  }
+  if (/^date(?:\b|\()/i.test(type)) {
+    if (dateTimeMatch) {
+      return `TO_DATE(${quoteGeneratedString(value.replace("T", " "))}, 'YYYY-MM-DD HH24:MI:SS')`;
+    }
+    if (dateMatch) {
+      return `TO_DATE(${quoteGeneratedString(value)}, 'YYYY-MM-DD')`;
+    }
+  }
+  return null;
+}
+
+export function formatGeneratedValue(value: unknown, databaseType?: DatabaseType, dataType?: string): string {
   if (isGeneratedSqlExpression(value)) return value.sql;
   if (value === null || value === undefined) return "NULL";
   if (typeof value === "number") return String(value);
   if (typeof value === "boolean") return value ? "1" : "0";
-  return `'${String(value).replace(/'/g, "''")}'`;
+  const stringValue = String(value);
+  if ((databaseType === "oracle" || databaseType === "oceanbase-oracle") && dataType) {
+    const temporalValue = formatOracleTemporalValue(stringValue, dataType);
+    if (temporalValue) return temporalValue;
+  }
+  return quoteGeneratedString(stringValue);
 }
 
 export function displayGeneratedValue(value: unknown): string {
@@ -1740,6 +1769,26 @@ export interface GenerateResult {
   columns: string[];
   rows: unknown[][];
   sql: string;
+  statements: string[];
+}
+
+export function supportsGeneratedMultiRowValues(databaseType?: DatabaseType): boolean {
+  return databaseType !== "oracle" && databaseType !== "oceanbase-oracle" && databaseType !== "iris";
+}
+
+const ORACLE_INSERT_ALL_BATCH_SIZE = 100;
+
+function buildOracleInsertStatements(targetTable: string, columnList: string, valueRows: string[]): string[] {
+  if (valueRows.length === 1) {
+    return [`INSERT INTO ${targetTable} (${columnList}) VALUES ${valueRows[0]};`];
+  }
+
+  const statements: string[] = [];
+  for (let start = 0; start < valueRows.length; start += ORACLE_INSERT_ALL_BATCH_SIZE) {
+    const rows = valueRows.slice(start, start + ORACLE_INSERT_ALL_BATCH_SIZE);
+    statements.push(["INSERT ALL", ...rows.map((values) => `  INTO ${targetTable} (${columnList}) VALUES ${values}`), "SELECT 1 FROM DUAL;"].join("\n"));
+  }
+  return statements;
 }
 
 export function generateTableData(config: TableGenerateConfig, databaseType?: DatabaseType): GenerateResult {
@@ -1751,10 +1800,13 @@ export function generateTableData(config: TableGenerateConfig, databaseType?: Da
     rows.push(row);
   }
 
-  const valuesSql = rows.map((row) => `(${row.map(formatGeneratedValue).join(", ")})`).join(",\n");
-
   const quotedCols = config.columns.map((c) => quoteTableIdentifier(databaseType, c.columnName));
-  const sql = `INSERT INTO ${quoteTableIdentifier(databaseType, config.tableName)} (${quotedCols.join(", ")}) VALUES\n${valuesSql};`;
+  const targetTable = qualifiedTableName({ databaseType, schema: config.schema, tableName: config.tableName, database: config.database });
+  const columnList = quotedCols.join(", ");
+  const insertPrefix = `INSERT INTO ${targetTable} (${columnList}) VALUES`;
+  const valueRows = rows.map((row) => `(${row.map((value, index) => formatGeneratedValue(value, databaseType, config.columns[index]?.dataType)).join(", ")})`);
+  const statements = databaseType === "oracle" ? buildOracleInsertStatements(targetTable, columnList, valueRows) : supportsGeneratedMultiRowValues(databaseType) ? [`${insertPrefix}\n${valueRows.join(",\n")};`] : valueRows.map((values) => `${insertPrefix} ${values};`);
+  const sql = statements.join("\n");
 
-  return { columns: colNames, rows, sql };
+  return { columns: colNames, rows, sql, statements };
 }

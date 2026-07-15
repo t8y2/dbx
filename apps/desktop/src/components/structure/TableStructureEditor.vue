@@ -21,6 +21,7 @@ import { useSettingsStore, type StructureEditorDensity } from "@/stores/settings
 import { useTheme } from "@/composables/useTheme";
 import { useToast } from "@/composables/useToast";
 import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sql/sqlHighlighter";
+import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
@@ -41,16 +42,19 @@ import {
   buildStructureTargetLabel,
   canEditManticoreColumnProperties,
   combineDataTypeForDatabase,
+  combineDataTypeForDatabaseWithLengthUnit,
   createColumnDrafts,
   createForeignKeyDrafts,
   createIndexDrafts,
   createTriggerDrafts,
   dataTypeLengthInputValue,
+  dataTypeLengthUnitValue,
   defaultNewColumnDataType,
   generateIndexName,
   generateUniqueIndexName,
   getColumnEditorControls,
   getDataTypeOptions,
+  getDataTypeLengthUnitOptions,
   getDefaultLengthForType,
   hasExistingColumnTypeChange,
   isDataTypeLengthDisabled,
@@ -62,6 +66,8 @@ import {
   mysqlEnumDataType,
   parseExtraToColumnExtra,
   rehydrateColumnDraftsFromMetadata,
+  resolveInsertColumnIndex,
+  restoreDamengLengthUnitsAfterSave,
   splitDataType,
   toColumnNames,
 } from "@/lib/table/tableStructureEditorState";
@@ -95,10 +101,10 @@ onMounted(async () => {
 
 const highlightedSql = computed(() => {
   if (!pendingStatements.value.length) return "";
-  const sql = pendingStatements.value.join("\n");
+  const sql = previewSqlText.value;
   return sqlHighlighter.value?.(sql) ?? sql;
 });
-const previewSqlText = computed(() => pendingStatements.value.join("\n"));
+const previewSqlText = computed(() => joinSqlStatementsForScript(pendingStatements.value, databaseType.value));
 
 const props = defineProps<{
   connectionId: string;
@@ -273,6 +279,7 @@ const structureDensityMetrics: Record<
     columns: number[];
     indexes: number[];
     minColumnWidth: number;
+    minLengthColumnWidth: number;
     minIndexColumnWidth: number;
     actionButtonWidth: number;
     fontSize: number;
@@ -291,6 +298,7 @@ const structureDensityMetrics: Record<
     columns: [28, 168, 136, 82, 60, 52, 108, 220, 80, 120, 144, 108],
     indexes: [120, 180, 60, 88, 124, 144, 120, 70],
     minColumnWidth: 24,
+    minLengthColumnWidth: 140,
     minIndexColumnWidth: 48,
     actionButtonWidth: 24,
     fontSize: 11,
@@ -308,6 +316,7 @@ const structureDensityMetrics: Record<
     columns: [32, 200, 160, 104, 72, 64, 128, 260, 90, 140, 160, 136],
     indexes: [148, 224, 72, 108, 148, 180, 148, 84],
     minColumnWidth: 28,
+    minLengthColumnWidth: 156,
     minIndexColumnWidth: 60,
     actionButtonWidth: 28,
     fontSize: 12,
@@ -325,6 +334,7 @@ const structureDensityMetrics: Record<
     columns: [36, 232, 188, 116, 84, 76, 152, 300, 100, 160, 188, 148],
     indexes: [176, 260, 84, 124, 176, 216, 176, 104],
     minColumnWidth: 32,
+    minLengthColumnWidth: 176,
     minIndexColumnWidth: 64,
     actionButtonWidth: 32,
     fontSize: 13,
@@ -539,6 +549,7 @@ const indexColWidths = ref(loadStructureIndexColumnWidths(structureDensity.value
 const resizing = ref<{ col: number; startX: number; startW: number } | null>(null);
 const columnSearchInputRef = ref<InstanceType<typeof Input>>();
 const columnSearchText = ref("");
+const selectedColumnId = ref<string | null>(null);
 const highlightedColumnId = ref<string | null>(null);
 const indexSearchInputRef = ref<InstanceType<typeof Input>>();
 const indexSearchText = ref("");
@@ -565,11 +576,12 @@ watch(localStructureDensity, (density, previousDensity) => {
 function onColResize(e: MouseEvent, col: number) {
   e.preventDefault();
   const widthIndex = columnWidthIndex(col);
-  colResizing.value = { col: widthIndex, startX: e.clientX, startW: colWidths.value[widthIndex] };
+  const minimumWidth = widthIndex === 3 && databaseType.value === "dameng" ? structureDensityMetric.value.minLengthColumnWidth : structureDensityMetric.value.minColumnWidth;
+  colResizing.value = { col: widthIndex, startX: e.clientX, startW: Math.max(colWidths.value[widthIndex] ?? minimumWidth, minimumWidth) };
   const onMove = (ev: MouseEvent) => {
     if (!colResizing.value) return;
     const delta = ev.clientX - colResizing.value.startX;
-    colWidths.value[widthIndex] = Math.max(structureDensityMetric.value.minColumnWidth, colResizing.value.startW + delta);
+    colWidths.value[widthIndex] = Math.max(minimumWidth, colResizing.value.startW + delta);
   };
   const onUp = () => {
     colResizing.value = null;
@@ -749,7 +761,13 @@ const columnActionsWidth = computed(() => {
   return metric.actionButtonWidth * count + actionButtonGap * Math.max(0, count - 1) + metric.cellPaddingX * 2;
 });
 const visibleColumnIndexes = computed(() => colLabels.value.map((column) => column.widthIndex));
-const visibleColWidths = computed(() => colLabels.value.map((column) => (column.key === "actions" ? columnActionsWidth.value : (colWidths.value[column.widthIndex] ?? structureDensityMetric.value.minColumnWidth))));
+const visibleColWidths = computed(() =>
+  colLabels.value.map((column) => {
+    if (column.key === "actions") return columnActionsWidth.value;
+    const width = colWidths.value[column.widthIndex] ?? structureDensityMetric.value.minColumnWidth;
+    return column.key === "length" && databaseType.value === "dameng" ? Math.max(width, structureDensityMetric.value.minLengthColumnWidth) : width;
+  }),
+);
 
 function columnWidthIndex(visibleIndex: number) {
   return visibleColumnIndexes.value[visibleIndex] ?? visibleIndex;
@@ -1175,6 +1193,7 @@ function resetState() {
   sqliteSchemaRevision.value = undefined;
   foreignKeys.value = [];
   triggers.value = [];
+  selectedColumnId.value = null;
   ddlContent.value = "";
   ddlFetched.value = false;
   newTableName.value = "";
@@ -1215,7 +1234,7 @@ async function fetchTableCommentValue(connectionId: string, database: string, sc
   }
 }
 
-async function loadStructure(silent = false, scope: StructureRefreshScope = FULL_STRUCTURE_REFRESH_SCOPE, showErrors = true, options: { blockSecondaryMetadata?: boolean; preserveDraft?: boolean } = {}) {
+async function loadStructure(silent = false, scope: StructureRefreshScope = FULL_STRUCTURE_REFRESH_SCOPE, showErrors = true, options: { blockSecondaryMetadata?: boolean; preserveDraft?: boolean; damengLengthUnitsAfterSave?: ReadonlyMap<string, string> } = {}) {
   const connectionId = props.connectionId;
   const database = props.database;
   const schema = metadataSchema.value;
@@ -1251,7 +1270,10 @@ async function loadStructure(silent = false, scope: StructureRefreshScope = FULL
       // Load live charset/collation metadata from the MySQL server so the column
       // editor shows the correct options for the server version.
       void loadCharsetMetadata();
-      columns.value = applyStoredLocalColumnOrder(createColumnDrafts(nextColumns, databaseType.value));
+      const nextColumnDrafts = createColumnDrafts(nextColumns, databaseType.value);
+      const hydratedColumnDrafts = databaseType.value === "dameng" && options.damengLengthUnitsAfterSave ? restoreDamengLengthUnitsAfterSave(nextColumnDrafts, options.damengLengthUnitsAfterSave) : nextColumnDrafts;
+      columns.value = applyStoredLocalColumnOrder(hydratedColumnDrafts);
+      if (!options.preserveDraft) selectedColumnId.value = null;
     }
 
     const nextTableComment = await tableCommentPromise;
@@ -1296,15 +1318,29 @@ async function loadStructure(silent = false, scope: StructureRefreshScope = FULL
   }
 }
 
-async function refreshStructureAfterSave(scope: StructureRefreshScope) {
+async function refreshStructureAfterSave(scope: StructureRefreshScope, damengLengthUnitsAfterSave: ReadonlyMap<string, string>) {
   try {
-    await loadStructure(true, scope, false, { blockSecondaryMetadata: true });
+    await loadStructure(true, scope, false, { blockSecondaryMetadata: true, damengLengthUnitsAfterSave });
   } catch (e) {
     console.warn("[DBX][structure-editor:post-save-refresh-failed]", e);
   } finally {
     postSaveRefreshing.value = false;
     if (activeTab.value === "ddl") void fetchDdl();
   }
+}
+
+async function focusColumnNameInput(columnId: string) {
+  await nextTick();
+  const row = Array.from(rootRef.value?.querySelectorAll<HTMLElement>("[data-column-row-index]") ?? []).find((element) => element.dataset.columnId === columnId);
+  const input = row?.querySelector<HTMLInputElement>("[data-column-name-input]");
+  row?.scrollIntoView({ block: "nearest" });
+  input?.focus();
+  input?.select();
+}
+
+function onColumnRowActivate(column: EditableStructureColumn) {
+  if (column.markedForDrop || !columns.value.some((item) => item.id === column.id)) return;
+  selectedColumnId.value = column.id;
 }
 
 async function addColumn() {
@@ -1325,14 +1361,11 @@ async function addColumn() {
     extra: {},
     markedForDrop: false,
   };
-  columns.value.push(column);
-  await nextTick();
-  const newRows = rootRef.value?.querySelectorAll<HTMLElement>('[data-new-column-row="true"]');
-  const row = newRows?.[newRows.length - 1];
-  const input = row?.querySelector<HTMLInputElement>("[data-column-name-input]");
-  row?.scrollIntoView({ block: "nearest" });
-  input?.focus();
-  input?.select();
+  const insertAt = resolveInsertColumnIndex(columns.value, selectedColumnId.value);
+  columns.value.splice(insertAt, 0, column);
+  selectedColumnId.value = column.id;
+  if (usesLocalTableColumnOrder.value) persistLocalColumnOrder();
+  await focusColumnNameInput(column.id);
 }
 
 function applyColumnTemplate(templateId: string) {
@@ -1346,11 +1379,15 @@ function applyColumnTemplate(templateId: string) {
     createId: uuid,
   });
   if (!templateColumns.length) return;
-  columns.value.push(...templateColumns);
+  const insertAt = resolveInsertColumnIndex(columns.value, selectedColumnId.value);
+  columns.value.splice(insertAt, 0, ...templateColumns);
+  selectedColumnId.value = templateColumns[templateColumns.length - 1]?.id ?? selectedColumnId.value;
+  if (usesLocalTableColumnOrder.value) persistLocalColumnOrder();
 }
 
 function removeNewColumn(column: EditableStructureColumn) {
   columns.value = columns.value.filter((item) => item.id !== column.id);
+  if (selectedColumnId.value === column.id) selectedColumnId.value = null;
 }
 
 type ColumnDragState = {
@@ -1579,7 +1616,16 @@ function removeMysqlEnumValue(column: EditableStructureColumn, index: number) {
 }
 
 function updateColumnDataTypeLength(column: EditableStructureColumn, value: string | number) {
-  column.dataType = combineDataTypeForDatabase(databaseType.value, splitDataType(column.dataType).baseType, String(value));
+  const baseType = splitDataType(column.dataType).baseType;
+  column.dataType = combineDataTypeForDatabaseWithLengthUnit(databaseType.value, baseType, String(value), dataTypeLengthUnitValue(databaseType.value, column.dataType));
+  syncSqlServerIdentityForDataType(column);
+  syncDamengIdentityForDataType(column);
+}
+
+function updateColumnDataTypeLengthUnit(column: EditableStructureColumn, value: unknown) {
+  const baseType = splitDataType(column.dataType).baseType;
+  const unit = value === "__default" ? "" : String(value ?? "");
+  column.dataType = combineDataTypeForDatabaseWithLengthUnit(databaseType.value, baseType, dataTypeLengthInputValue(databaseType.value, column.dataType), unit);
   syncSqlServerIdentityForDataType(column);
   syncDamengIdentityForDataType(column);
 }
@@ -1714,10 +1760,12 @@ function onColumnDragEnd() {
 function columnRowClass(column: EditableStructureColumn, index: number) {
   const dragState = columnDragState.value;
   const isSearchMatch = filteredColumnRowIds.value.has(column.id);
+  const isSelected = selectedColumnId.value === column.id && !column.markedForDrop;
   return {
     "bg-destructive/5 opacity-60": column.markedForDrop,
     "structure-column-search-match": isSearchMatch,
-    "structure-column-search-current": highlightedColumnId.value === column.id,
+    // Reuse the existing search-current highlight for the active/selected row.
+    "structure-column-search-current": highlightedColumnId.value === column.id || isSelected,
     "opacity-55": dragState?.columnId === column.id,
     "bg-primary/5": dragState && (dragState.insertionIndex === index || dragState.insertionIndex === index + 1),
     "[&>td]:border-t-2 [&>td]:border-t-primary": dragState?.insertionIndex === index,
@@ -1867,6 +1915,9 @@ function columnDragInsertionIndex(index: number, event: DragEvent): number {
 function toggleDropColumn(column: EditableStructureColumn) {
   if (!canDropColumn(column)) return;
   column.markedForDrop = !column.markedForDrop;
+  if (column.markedForDrop && selectedColumnId.value === column.id) {
+    selectedColumnId.value = null;
+  }
 }
 
 function isColumnNameDisabled(column: EditableStructureColumn): boolean {
@@ -1883,6 +1934,14 @@ function isColumnLengthDisabled(column: EditableStructureColumn): boolean {
   }
   const baseType = splitDataType(column.dataType).baseType.trim().toLowerCase();
   return isDataTypeLengthDisabled(databaseType.value, baseType);
+}
+
+function columnLengthUnitOptions(column: EditableStructureColumn) {
+  return getDataTypeLengthUnitOptions(databaseType.value, column.dataType);
+}
+
+function isColumnLengthUnitDisabled(column: EditableStructureColumn): boolean {
+  return isColumnLengthDisabled(column) || !dataTypeLengthInputValue(databaseType.value, column.dataType).trim();
 }
 
 function isColumnNullableDisabled(column: EditableStructureColumn): boolean {
@@ -2140,6 +2199,16 @@ async function copyPreviewSql() {
   }
 }
 
+async function copyDdlContent() {
+  if (!ddlContent.value.trim()) return;
+  try {
+    await copyToClipboard(ddlContent.value);
+    toast(t("contextMenu.ddlCopied"), 2000);
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
 function toggleSqlPreviewCollapsed() {
   sqlPreviewCollapsed.value = !sqlPreviewCollapsed.value;
   safeLocalStorageSet(STRUCTURE_SQL_PREVIEW_COLLAPSED_STORAGE_KEY, String(sqlPreviewCollapsed.value));
@@ -2163,6 +2232,14 @@ async function applyChanges() {
   saving.value = true;
   errorMessage.value = "";
   const refreshScope = captureStructureRefreshScope();
+  const damengLengthUnitsAfterSave = new Map<string, string>();
+  if (databaseType.value === "dameng") {
+    for (const column of columns.value) {
+      if (!column.markedForDrop && dataTypeLengthUnitValue("dameng", column.dataType)) {
+        damengLengthUnitsAfterSave.set(column.name.trim().toLowerCase(), column.dataType);
+      }
+    }
+  }
   const startedAt = Date.now();
   try {
     const result = hasSqliteTypeChange.value
@@ -2186,7 +2263,7 @@ async function applyChanges() {
       postSaveRefreshing.value = true;
       skipNextRefreshVersion = true;
       emit("saved", tableComment.value !== originalTableComment.value);
-      await refreshStructureAfterSave(refreshScope);
+      await refreshStructureAfterSave(refreshScope, damengLengthUnitsAfterSave);
     }
     return true;
   } catch (e: any) {
@@ -2378,11 +2455,22 @@ watch(
 );
 
 watch(activeTab, () => {
+  selectedColumnId.value = null;
   highlightedColumnId.value = null;
   highlightedIndexId.value = null;
   restoreStructureScrollPosition();
   syncDraftToParent();
 });
+
+watch(
+  columns,
+  (items) => {
+    if (selectedColumnId.value && !items.some((column) => column.id === selectedColumnId.value)) {
+      selectedColumnId.value = null;
+    }
+  },
+  { deep: false },
+);
 
 watch(secondaryMetadataLoading, (value) => {
   if (value || !deferredSqlPreviewRefresh) return;
@@ -2583,7 +2671,18 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="(column, index) in columns" :key="column.id" :class="columnRowClass(column, index)" :data-new-column-row="!column.original ? 'true' : undefined" :data-column-row-index="index" @dragover="onColumnDragOver(index, $event)" @drop="onColumnDrop(index, $event)">
+                <tr
+                  v-for="(column, index) in columns"
+                  :key="column.id"
+                  :class="columnRowClass(column, index)"
+                  :data-new-column-row="!column.original ? 'true' : undefined"
+                  :data-column-row-index="index"
+                  :data-column-id="column.id"
+                  @click="onColumnRowActivate(column)"
+                  @focusin="onColumnRowActivate(column)"
+                  @dragover="onColumnDragOver(index, $event)"
+                  @drop="onColumnDrop(index, $event)"
+                >
                   <td :class="[structureCellClass, 'text-muted-foreground']">
                     <div class="flex items-center gap-1">
                       <span>{{ index + 1 }}</span>
@@ -2635,7 +2734,22 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                         </div>
                       </PopoverContent>
                     </Popover>
-                    <Input v-else :model-value="dataTypeLengthInputValue(databaseType, column.dataType)" :class="structureMonoControlClass" :disabled="isColumnLengthDisabled(column)" @update:model-value="updateColumnDataTypeLength(column, $event)" />
+                    <div v-else class="flex min-w-0 items-center gap-1">
+                      <Input :model-value="dataTypeLengthInputValue(databaseType, column.dataType)" :class="[structureMonoControlClass, 'min-w-0 flex-1']" :disabled="isColumnLengthDisabled(column)" @update:model-value="updateColumnDataTypeLength(column, $event)" />
+                      <Select v-if="columnLengthUnitOptions(column).length" :model-value="dataTypeLengthUnitValue(databaseType, column.dataType) || '__default'" :disabled="isColumnLengthUnitDisabled(column)" @update:model-value="updateColumnDataTypeLengthUnit(column, $event)">
+                        <SelectTrigger
+                          :aria-label="t('structureEditor.lengthUnit')"
+                          :title="t('structureEditor.lengthUnit')"
+                          class="h-[var(--structure-control-height)] w-16 shrink-0 rounded-[6px] px-[var(--structure-control-px)] font-mono text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25"
+                        >
+                          <SelectValue :placeholder="t('structureEditor.unitPlaceholder')" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__default">{{ t("structureEditor.defaultAction") }}</SelectItem>
+                          <SelectItem v-for="unit in columnLengthUnitOptions(column)" :key="unit" :value="unit">{{ unit }}</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
                   </td>
                   <td v-if="columnEditorControls.nullable" :class="structureCellClass">
                     <label class="flex items-center gap-1.5">
@@ -2897,12 +3011,12 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                         :disabled="!canDropColumn(column)"
                         :title="column.markedForDrop ? t('structureEditor.restore') : t('structureEditor.drop')"
                         :aria-label="column.markedForDrop ? t('structureEditor.restore') : t('structureEditor.drop')"
-                        @click="toggleDropColumn(column)"
+                        @click.stop="toggleDropColumn(column)"
                       >
                         <RefreshCw v-if="column.markedForDrop" :class="structureIconClass" />
                         <Trash2 v-else :class="structureIconClass" />
                       </Button>
-                      <Button v-else variant="ghost" size="icon" :class="structureActionButtonClass" :title="t('structureEditor.remove')" :aria-label="t('structureEditor.remove')" @click="removeNewColumn(column)">
+                      <Button v-else variant="ghost" size="icon" :class="structureActionButtonClass" :title="t('structureEditor.remove')" :aria-label="t('structureEditor.remove')" @click.stop="removeNewColumn(column)">
                         <X :class="structureIconClass" />
                       </Button>
                     </div>
@@ -3115,12 +3229,18 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
             </div>
           </TabsContent>
 
-          <TabsContent ref="ddlScrollerRef" v-if="tableMetadataCapabilities.ddl" value="ddl" class="m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]" @scroll.passive="onStructureContentScroll('ddl', $event)">
+          <TabsContent ref="ddlScrollerRef" v-if="tableMetadataCapabilities.ddl" value="ddl" class="relative m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]" @scroll.passive="onStructureContentScroll('ddl', $event)">
             <div v-if="ddlLoading" class="flex items-center justify-center gap-2 py-10 text-muted-foreground">
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
             </div>
-            <pre v-else ref="ddlPreRef" tabindex="0" class="m-0 min-h-0 flex-1 whitespace-pre p-3 font-mono text-xs leading-5 select-text outline-none" v-html="ddlContent ? (sqlHighlighter?.(ddlContent) ?? ddlContent) : t('structureEditor.emptyReadonly')" @keydown="onDdlKeydown"></pre>
+            <template v-else>
+              <Button v-if="ddlContent" variant="outline" size="sm" class="absolute right-3 top-3 z-10 h-7 gap-1 px-2" :title="t('grid.copyDdl')" @click="copyDdlContent">
+                <Copy class="h-3.5 w-3.5" />
+                {{ t("grid.copyDdl") }}
+              </Button>
+              <pre ref="ddlPreRef" tabindex="0" class="m-0 min-h-0 flex-1 whitespace-pre p-3 font-mono text-xs leading-5 select-text outline-none" v-html="ddlContent ? (sqlHighlighter?.(ddlContent) ?? ddlContent) : t('structureEditor.emptyReadonly')" @keydown="onDdlKeydown"></pre>
+            </template>
           </TabsContent>
         </Tabs>
       </div>
@@ -3189,20 +3309,27 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
 </template>
 
 <style scoped>
+/* --primary is rgb/oklch; use color-mix like DataGrid, not hsl(var(--primary)). */
 .structure-column-search-match > td:first-child {
-  box-shadow: inset 3px 0 0 hsl(var(--primary) / 0.55);
+  box-shadow: inset 3px 0 0 color-mix(in oklab, var(--primary) 55%, transparent);
 }
 
 .structure-column-search-current > td {
+  background-color: color-mix(in oklab, var(--primary) 8%, transparent);
   box-shadow:
-    inset 0 1px 0 hsl(var(--primary) / 0.55),
-    inset 0 -1px 0 hsl(var(--primary) / 0.55);
+    inset 0 1px 0 color-mix(in oklab, var(--primary) 55%, transparent),
+    inset 0 -1px 0 color-mix(in oklab, var(--primary) 55%, transparent);
 }
 
 .structure-column-search-current > td:first-child {
   box-shadow:
-    inset 3px 0 0 hsl(var(--primary)),
-    inset 0 1px 0 hsl(var(--primary) / 0.55),
-    inset 0 -1px 0 hsl(var(--primary) / 0.55);
+    inset 3px 0 0 var(--primary),
+    inset 0 1px 0 color-mix(in oklab, var(--primary) 55%, transparent),
+    inset 0 -1px 0 color-mix(in oklab, var(--primary) 55%, transparent);
+}
+
+/* Inputs are bg-transparent; give them a solid surface on the selected row so fields stay readable. */
+.structure-column-search-current :is(input, button, [role="combobox"], [data-slot="select-trigger"]) {
+  background-color: var(--background);
 }
 </style>

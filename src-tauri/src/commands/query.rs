@@ -70,6 +70,7 @@ pub async fn execute_multi(
     client_session_id: Option<String>,
     timeout_secs: Option<u64>,
     use_transaction: Option<bool>,
+    continue_on_error: Option<bool>,
 ) -> Result<Vec<dbx_core::query::ExecuteMultiResult>, String> {
     let execution_id = execution_id.filter(|id| !id.trim().is_empty());
     let registered_query = execution_id.as_ref().map(|id| {
@@ -106,6 +107,7 @@ pub async fn execute_multi(
             timeout_secs,
             execution_id,
             use_transaction,
+            continue_on_error: continue_on_error.unwrap_or(false),
         },
     )
     .await;

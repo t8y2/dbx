@@ -4,8 +4,15 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public final class DdlBuilder {
+    private static final Pattern SQLSERVER_IDENTITY = Pattern.compile(
+        "^\\s*identity\\s*\\(\\s*(-?\\d+)\\s*,\\s*(-?\\d+)\\s*\\)\\s*$",
+        Pattern.CASE_INSENSITIVE
+    );
+
     private DdlBuilder() {
     }
 
@@ -84,6 +91,10 @@ public final class DdlBuilder {
             line.append(quoteIdent(column.getName(), useBacktick));
             line.append(" ");
             line.append(columnTypeSql(column));
+            String identityClause = sqlServerIdentityClause(column.getExtra());
+            if (identityClause != null) {
+                line.append(" ").append(identityClause);
+            }
             if (!column.getIs_nullable()) {
                 line.append(" NOT NULL");
             }
@@ -228,6 +239,14 @@ public final class DdlBuilder {
 
     private static boolean isNumericType(String normalized) {
         return "numeric".equals(normalized) || "decimal".equals(normalized);
+    }
+
+    private static String sqlServerIdentityClause(String extra) {
+        if (extra == null) {
+            return null;
+        }
+        Matcher matcher = SQLSERVER_IDENTITY.matcher(extra);
+        return matcher.matches() ? "IDENTITY(" + matcher.group(1) + "," + matcher.group(2) + ")" : null;
     }
 
     private static boolean notBlank(String value) {

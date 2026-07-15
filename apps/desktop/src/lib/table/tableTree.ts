@@ -353,7 +353,10 @@ function findTableTreeNode(nodes: readonly TreeNode[], parent: TableTreeLoadMore
 
 export function appendTableTreeLoadMoreNode(children: TreeNode[], loadMoreNode: TreeNode, parent?: TableTreeLoadMoreParent): TreeNode[] {
   const parentNode = parent ? findTableTreeNode(children, parent) : undefined;
-  const childGroup = parentNode ? tablePartitionGroups(parentNode)[0] : undefined;
+  // Only TDengine pages are scoped to a STABLE's child-table group. PostgreSQL
+  // paginates the whole schema, so nesting its global cursor under whichever
+  // partition happens to end the page can hide all remaining schema objects.
+  const childGroup = parentNode && isSuperTable(parentNode) ? tablePartitionGroups(parentNode)[0] : undefined;
   if (!childGroup) return [...children, loadMoreNode];
 
   childGroup.children = [...(childGroup.children ?? []), loadMoreNode];

@@ -19,6 +19,7 @@ import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.PrivateKey;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.Date;
 import org.bson.Document;
 import org.bson.types.ObjectId;
@@ -80,6 +81,14 @@ class MongoAgentTest {
     }
 
     // ─── existing tests ───
+
+    @Test
+    void parsesExplicitStringDocumentIdsWithoutTreatingThemAsExtendedJson() {
+        assertEquals(
+            "{\"$numberLong\":\"2048938405781032962\"}",
+            MongoAgent.parseId("__dbx_mongo_string_id__\"{\\\"$numberLong\\\":\\\"2048938405781032962\\\"}\"")
+        );
+    }
 
     @Test
     void exposesProtocolHandshakeOverJsonRpc() {
@@ -157,6 +166,27 @@ class MongoAgentTest {
         assertNotNull(filter);
         assertEquals(2_048_938_405_781_032_962L, filter.get("processInfoId"));
         assertEquals(9_007_199_254_740_993L, filter.get("snowflake"));
+    }
+
+    @Test
+    void preservesLongDocumentIdTypeForGridUpdates() {
+        Object id = MongoAgent.convertDocumentFieldValue("_id", 2_048_938_405_781_032_962L);
+        Object value = MongoAgent.convertDocumentFieldValue("snowflake", 2_048_938_405_781_032_962L);
+
+        assertEquals(Collections.singletonMap("$numberLong", "2048938405781032962"), id);
+        assertEquals("2048938405781032962", value);
+        assertEquals(2_048_938_405_781_032_962L, MongoAgent.parseId("{\"$numberLong\":\"2048938405781032962\"}"));
+    }
+
+    @Test
+    void preservesJsonLookingStringDocumentIds() {
+        assertEquals("{}", MongoAgent.parseId("{}"));
+        assertEquals("{\"tenant\":1}", MongoAgent.parseId("{\"tenant\":1}"));
+        assertEquals(
+            "{\"$numberLong\":\"2048938405781032962\",\"tenant\":1}",
+            MongoAgent.parseId("{\"$numberLong\":\"2048938405781032962\",\"tenant\":1}")
+        );
+        assertEquals("{\"$numberLong\":\"invalid\"}", MongoAgent.parseId("{\"$numberLong\":\"invalid\"}"));
     }
 
     @Test

@@ -177,6 +177,93 @@ describe("extractSqlParameters", () => {
     expect(extractSqlParameters(sql)).toEqual(["actual_value"]);
   });
 
+  it("ignores Doris STRUCT field type separators", () => {
+    const sql = `
+      create table \`events\` (
+        \`field0\` int not null comment 'field 0',
+        \`field_list\` array<struct<field1:smallint, field2:int, field3:decimal(16,5), field4:varchar(255)>> comment 'field list'
+      )
+      engine = olap
+      properties ("replication_num" = "1");
+    `;
+
+    expect(extractSqlParameters(sql, { databaseType: "doris" })).toEqual([]);
+    // SelectDB connections use the MySQL db type with a SelectDB driver profile.
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual([]);
+    expect(substituteSqlParameters(sql, {}, { databaseType: "doris" })).toBe(sql);
+  });
+
+  it("keeps named parameters that are not STRUCT field type separators", () => {
+    const sql = `
+      create table \`events\` (
+        \`field_list\` array<struct<
+          field1:smallint,
+          nested:struct<\`field2\` /* field type */ :decimal(:precision, :scale)>
+        >>
+      ) properties ("buckets" = :bucket_count);
+    `;
+
+    expect(extractSqlParameters(sql, { databaseType: "doris" })).toEqual(["precision", "scale", "bucket_count"]);
+    expect(
+      substituteSqlParameters(
+        sql,
+        {
+          precision: { kind: "number", value: "16" },
+          scale: { kind: "number", value: "5" },
+          bucket_count: { kind: "number", value: "8" },
+        },
+        { databaseType: "doris" },
+      ),
+    ).toBe(`
+      create table \`events\` (
+        \`field_list\` array<struct<
+          field1:smallint,
+          nested:struct<\`field2\` /* field type */ :decimal(16, 5)>
+        >>
+      ) properties ("buckets" = 8);
+    `);
+  });
+
+  it("does not let an unterminated complex type hide a later named parameter", () => {
+    const sql = "create table `broken` (value struct<field:int,\nselect :real;";
+
+    expect(extractSqlParameters(sql, { databaseType: "doris" })).toEqual(["real"]);
+    expect(substituteSqlParameters(sql, { real: { kind: "number", value: "7" } }, { databaseType: "doris" })).toBe("create table `broken` (value struct<field:int,\nselect 7;");
+  });
+
+  it("ignores Doris VARIANT field type separators", () => {
+    const sql = `
+      create table \`events\` (
+        value variant<
+          match_name 'path_1':decimal(:precision, :scale),
+          match_name_glob 'meta*':bigint,
+          properties('variant_max_subcolumns_count' = :property_value)
+        >
+      );
+    `;
+
+    expect(extractSqlParameters(sql, { databaseType: "doris" })).toEqual(["precision", "scale", "property_value"]);
+    expect(
+      substituteSqlParameters(
+        sql,
+        {
+          precision: { kind: "number", value: "16" },
+          scale: { kind: "number", value: "5" },
+          property_value: { kind: "string", value: "2048" },
+        },
+        { databaseType: "doris" },
+      ),
+    ).toBe(`
+      create table \`events\` (
+        value variant<
+          match_name 'path_1':decimal(16, 5),
+          match_name_glob 'meta*':bigint,
+          properties('variant_max_subcolumns_count' = '2048')
+        >
+      );
+    `);
+  });
+
   it("ignores HANA SQLScript variable references", () => {
     const sql = "DO BEGIN Dummy1 = SELECT 1 FROM DUMMY; SELECT * FROM :Dummy1; END";
     expect(extractSqlParameters(sql, { databaseType: "saphana" })).toEqual([]);

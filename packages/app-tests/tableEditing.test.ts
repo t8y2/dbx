@@ -30,6 +30,7 @@ function column(name: string, isPrimaryKey = false): ColumnInfo {
 
 test("uses ROWID as Oracle editable key when a table has no primary key", () => {
   assert.deepEqual(editablePrimaryKeys("oracle", [column("ID"), column("CITY")]), [DBX_ROWID_COLUMN]);
+  assert.deepEqual(editablePrimaryKeys("oceanbase-oracle", [column("ID"), column("CITY")]), [DBX_ROWID_COLUMN]);
 });
 
 test("keeps declared primary keys ahead of Oracle ROWID fallback", () => {
@@ -141,6 +142,7 @@ test("keeps TDengine existing row identity and tag columns read-only", () => {
 test("detects the synthetic Oracle ROWID key case", () => {
   assert.equal(usesSyntheticRowIdKey("oracle", [DBX_ROWID_COLUMN]), true);
   assert.equal(usesSyntheticRowIdKey("oracle", [DBX_ROWID_COLUMN.toLowerCase()]), true);
+  assert.equal(usesSyntheticRowIdKey("oceanbase-oracle", [DBX_ROWID_COLUMN]), true);
   assert.equal(usesSyntheticRowIdKey("oracle", [DBX_ROWID_COLUMN], "VIEW"), false);
   assert.equal(usesSyntheticRowIdKey("oracle", [DBX_ROWID_COLUMN], "MATERIALIZED_VIEW"), false);
   assert.equal(usesSyntheticRowIdKey("postgres", [DBX_ROWID_COLUMN]), false);
@@ -150,6 +152,7 @@ test("detects the synthetic Oracle ROWID key case", () => {
 
 test("hides only the synthetic Oracle ROWID grid column", () => {
   assert.equal(isHiddenGridColumn("oracle", DBX_ROWID_COLUMN, [DBX_ROWID_COLUMN]), true);
+  assert.equal(isHiddenGridColumn("oceanbase-oracle", DBX_ROWID_COLUMN, [DBX_ROWID_COLUMN]), true);
   assert.equal(isHiddenGridColumn("oracle", DBX_ROWID_COLUMN, [DBX_ROWID_COLUMN], "VIEW"), false);
   assert.equal(isHiddenGridColumn("oracle", "ROWID", [DBX_ROWID_COLUMN]), false);
   assert.equal(isHiddenGridColumn("mysql", DBX_ROWID_COLUMN, [DBX_ROWID_COLUMN]), false);

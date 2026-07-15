@@ -786,6 +786,24 @@ fn builds_oracle_and_neo4j_table_data_queries() {
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            schema: Some("APP".to_string()),
+            table_name: "DATA_REPORT_SUB_TASK".to_string(),
+            table_type: Some("TABLE".to_string()),
+            primary_keys: vec![DBX_ROWID_COLUMN.to_string()],
+            columns: vec!["ID".to_string(), "SMC_RESPONSE".to_string()],
+            fallback_order_columns: Vec::new(),
+            order_by: None,
+            limit: Some(100),
+            offset: None,
+            where_input: None,
+            include_row_id: true,
+            ..Default::default()
+        }),
+        "SELECT \"__DBX_ROWID\", \"ID\", \"SMC_RESPONSE\" FROM (SELECT ROWIDTOCHAR(t.ROWID) AS \"__DBX_ROWID\", t.* FROM \"APP\".\"DATA_REPORT_SUB_TASK\" t) WHERE ROWNUM <= 100"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
             database_type: Some(DatabaseType::Oracle),
             schema: Some("DBXTEST".to_string()),
             table_name: "DBX_JOIN_VIEW".to_string(),

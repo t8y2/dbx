@@ -16,6 +16,10 @@ export function dataGridScrollPosition(top: number, left: number): DataGridScrol
   };
 }
 
+export function restoredDataGridScrollLeft(scrollLeft: number, scrollWidth: number, clientWidth: number): number {
+  return Math.max(0, Math.min(Math.max(0, scrollWidth - clientWidth), scrollLeft));
+}
+
 export function shouldCheckInfiniteScrollAfterScroll(previous: DataGridScrollPosition | undefined, current: DataGridScrollPosition): boolean {
   if (!previous) return false;
   // Shift+wheel horizontal scrolling changes scrollLeft only and must not paginate.

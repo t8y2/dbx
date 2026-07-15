@@ -1,0 +1,457 @@
+---
+title: 从源码编译与参与贡献
+description: 从零搭建 DBX 开发环境，运行桌面版，完成第一次修改、测试并提交 Pull Request。
+---
+
+这是一份面向第一次参与 DBX 开发者的完整教程。跟着本页操作，你将完成：
+
+1. 准备 Node.js、pnpm、Rust 和系统编译依赖
+2. Fork、克隆并运行 DBX 桌面版
+3. 找到要修改的代码并完成一次小改动
+4. 运行与改动范围匹配的检查和测试
+5. 推送分支并提交 Pull Request
+
+<Callout type="info">
+  第一次贡献推荐从文档、翻译、小型 UI 问题或你熟悉的数据库问题开始。一个 PR 只解决一个明确问题，会更容易验证和合并。
+</Callout>
+
+## 1. 选择并认领任务
+
+打开 [DBX Issues](https://github.com/t8y2/dbx/issues)，选择一个尚未分配、评论中也没有人正在处理的 Issue。第一次贡献优先考虑：
+
+- 复现步骤和预期行为已经写清楚的问题
+- 改动范围较小的文档、翻译或 UI 问题
+- 你正在使用并且可以连接真实环境验证的数据库问题
+
+不要只根据标签判断是否适合处理；先阅读完整正文、评论、截图和已有讨论，确认需求仍然有效并且没有重复实现。
+
+确认 Issue 没有人处理后，在评论中单独发送：
+
+```text
+/claim
+```
+
+认领成功后，机器人会把 Issue 分配给你。如果你准备采用的方案可能影响现有行为，先在 Issue 中简要说明思路，等维护者确认后再开始大规模修改。
+
+## 2. 安装开发环境
+
+DBX 桌面版基于 Tauri、Vue 和 Rust。仓库当前要求：
+
+| 工具 | 版本 |
+| --- | --- |
+| Node.js | 22.13.0 或更高版本 |
+| pnpm | 10.27.0 |
+| Rust | 1.77 或更高版本 |
+| Git | 当前稳定版本 |
+| Make | macOS 和 Linux 推荐使用 |
+
+### 安装 Node.js 和 pnpm
+
+先从 [Node.js 官网](https://nodejs.org/)安装 Node.js 22 或更新的 LTS 版本，然后启用仓库指定的 pnpm：
+
+```bash
+corepack enable
+corepack prepare pnpm@10.27.0 --activate
+node --version
+pnpm --version
+```
+
+如果你的 Node.js 安装不包含 Corepack，也可以执行：
+
+```bash
+npm install --global pnpm@10.27.0
+```
+
+### 安装 Rust
+
+按照 [Rust 官方安装说明](https://www.rust-lang.org/tools/install)安装 `rustup`。安装后重新打开终端并检查：
+
+```bash
+rustc --version
+cargo --version
+```
+
+### 安装系统依赖
+
+Tauri 的完整系统要求可以参考 [Tauri 官方前置依赖文档](https://v2.tauri.app/start/prerequisites/)。DBX 还需要 ODBC 开发库。
+
+<Tabs groupId="contributing-platform" items={["macOS", "Ubuntu / Debian", "Windows"]}>
+  <Tab value="macOS">
+    安装 Xcode Command Line Tools 和 unixODBC：
+
+    ```bash
+    xcode-select --install
+    brew install unixodbc
+    ```
+
+    如果尚未安装 Homebrew，请先按照 [Homebrew 官网](https://brew.sh/)完成安装。
+
+  </Tab>
+  <Tab value="Ubuntu / Debian">
+    安装编译工具、Tauri WebKit/GTK 依赖和 unixODBC：
+
+    ```bash
+    sudo apt update
+    sudo apt install -y \
+      build-essential curl wget file pkg-config \
+      libwebkit2gtk-4.1-dev libgtk-3-dev libxdo-dev \
+      libayatana-appindicator3-dev librsvg2-dev patchelf \
+      libssl-dev unixodbc-dev
+    ```
+
+  </Tab>
+  <Tab value="Windows">
+    1. 安装 [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)。
+    2. 在安装器中选择 **Desktop development with C++**。
+    3. 确认已安装 Windows 10/11 SDK 和 WebView2。Windows 11 通常已自带 WebView2。
+    4. 使用 PowerShell 执行本页的 Windows 命令。
+
+    Windows 不必安装 Make，本页会同时给出对应的 pnpm 命令。
+
+  </Tab>
+</Tabs>
+
+## 3. Fork 和克隆仓库
+
+先在 GitHub 打开 [t8y2/dbx](https://github.com/t8y2/dbx)，点击右上角 **Fork** 创建自己的仓库副本。
+
+将下面的 `<你的 GitHub 用户名>` 替换为你的账号：
+
+```bash
+git clone https://github.com/<你的 GitHub 用户名>/dbx.git
+cd dbx
+git remote add upstream https://github.com/t8y2/dbx.git
+git remote -v
+```
+
+推荐每个 Issue 使用一个独立分支：
+
+```bash
+git switch -c fix/issue-1234-short-description
+```
+
+开始新任务前，先同步主仓库：
+
+```bash
+git switch main
+git fetch upstream
+git rebase upstream/main
+git push origin main
+```
+
+## 4. 第一次运行 DBX
+
+### macOS 和 Linux
+
+在仓库根目录执行：
+
+```bash
+make
+```
+
+`make` 会使用锁文件安装依赖，然后启动 Tauri 桌面开发环境。第一次编译 Rust 依赖需要较长时间，后续启动会明显更快。
+
+如果你修改的功能与 DuckDB 无关，推荐跳过 DuckDB 源码编译：
+
+```bash
+make dev-fast
+```
+
+### Windows
+
+在 PowerShell 中执行：
+
+```powershell
+pnpm install --frozen-lockfile
+pnpm dev:tauri
+```
+
+不需要 DuckDB 时使用：
+
+```powershell
+pnpm tauri dev -- --no-default-features
+```
+
+### 判断是否启动成功
+
+成功时会出现 DBX 桌面窗口，并且终端中没有编译错误。建议完成三个快速检查：
+
+1. 打开设置页面
+2. 创建或打开一个本地测试连接
+3. 关闭窗口后再次启动，确认开发环境可重复运行
+
+如果端口 `1420` 已被占用，先关闭旧的 DBX/Vite 开发进程再重新启动。
+
+## 5. 认识项目结构
+
+| 路径 | 适合修改的内容 |
+| --- | --- |
+| `apps/desktop/src/` | Vue 页面、组件、状态管理、交互和多语言文本 |
+| `src-tauri/` | Tauri 桌面命令、系统集成和应用打包 |
+| `crates/dbx-core/` | 数据库连接、查询、元数据和共享 Rust 逻辑 |
+| `crates/dbx-web/` | Docker/Web 后端 |
+| `packages/app-tests/` | 前端共享逻辑测试 |
+| `packages/cli/` | DBX CLI |
+| `packages/mcp-server/` | MCP Server |
+| `docs/content/docs/` | 官网中英文文档 |
+| `agents/drivers/` | Java/JDBC 和部分原生数据库 Agent |
+
+不确定代码位置时，可以先用功能名称、界面文字或错误信息搜索：
+
+```bash
+rg "要查找的文字" apps/desktop/src crates src-tauri packages
+```
+
+## 6. 完成第一次修改
+
+### 路线 A：修改官网文档
+
+文档是最容易完成的第一次贡献。英文和中文页面使用相同文件名：
+
+```text
+docs/content/docs/example.mdx
+docs/content/docs/example.cn.mdx
+```
+
+启动文档站：
+
+```bash
+make docs
+```
+
+Windows 使用：
+
+```powershell
+cd docs
+pnpm install --frozen-lockfile --ignore-workspace
+pnpm dev
+```
+
+浏览器打开终端显示的本地地址。新增页面时，还要同时更新：
+
+```text
+docs/content/docs/meta.json
+docs/content/docs/meta.cn.json
+```
+
+### 路线 B：修改桌面前端
+
+前端代码位于 `apps/desktop/src/`。开发时可以运行完整桌面版，也可以只运行 Web 前端：
+
+```bash
+make dev-web
+```
+
+完成修改后至少运行：
+
+```bash
+pnpm typecheck
+pnpm lint
+pnpm test
+```
+
+涉及 UI 时，请同时检查亮色/暗色主题、窄窗口、空数据、加载中和失败状态，并在 PR 中附截图或录屏。
+
+### 路线 C：修改 Rust 后端
+
+Rust 共享逻辑主要位于 `crates/dbx-core/`，桌面命令位于 `src-tauri/`。不涉及 DuckDB 时先运行快速检查：
+
+```bash
+make cargo-check-fast
+make cargo-test-fast
+```
+
+数据库相关修改应使用真实数据库实例验证，不要只依赖 mock。PR 中写清数据库类型、版本、复现 SQL、修改前行为和修改后行为。
+
+### 路线 D：修改 Agent 驱动
+
+Agent 是独立进程，通过 stdin/stdout JSON-RPC 与 DBX 通信。Java/JDBC Agent 通常使用 JDK 21；原生 Agent 使用 Go 或 Rust。开始前先阅读：
+
+- [`agents/README.zh-CN.md`](https://github.com/t8y2/dbx/blob/main/agents/README.zh-CN.md)
+- [`agents/docs/agent-authoring.md`](https://github.com/t8y2/dbx/blob/main/agents/docs/agent-authoring.md)
+
+#### 修改现有 Java/JDBC Agent
+
+从仓库根目录进入 `agents/`，只构建和测试目标模块：
+
+```bash
+cd agents
+java --version
+./gradlew :<驱动模块名>:test :<驱动模块名>:shadowJar
+```
+
+Shadow JAR 输出在：
+
+```text
+agents/drivers/<驱动模块名>/build/libs/
+```
+
+仅仅构建成功还不代表本地 DBX 使用了新代码。DBX 运行时读取用户目录下 `.dbx/agents/drivers/<db_type>/agent.jar`，因此必须备份并替换运行时 JAR：
+
+<Tabs groupId="agent-runtime-replace" items={["macOS / Linux", "Windows PowerShell"]}>
+  <Tab value="macOS / Linux">
+    ```bash
+    cp ~/.dbx/agents/drivers/<db_type>/agent.jar \
+      ~/.dbx/agents/drivers/<db_type>/agent.jar.bak
+    cp drivers/<驱动模块名>/build/libs/*-all.jar \
+      ~/.dbx/agents/drivers/<db_type>/agent.jar
+    ```
+  </Tab>
+  <Tab value="Windows PowerShell">
+    ```powershell
+    Copy-Item "$HOME\.dbx\agents\drivers\<db_type>\agent.jar" `
+      "$HOME\.dbx\agents\drivers\<db_type>\agent.jar.bak"
+    $jar = Get-ChildItem "drivers\<驱动模块名>\build\libs\*-all.jar" | Select-Object -First 1
+    Copy-Item $jar.FullName "$HOME\.dbx\agents\drivers\<db_type>\agent.jar" -Force
+    ```
+  </Tab>
+</Tabs>
+
+替换后重启 DBX，或者断开并重新连接数据库，确保旧 Agent 进程退出并加载新 JAR。然后使用 Issue 对应的真实数据库版本重新执行复现步骤。
+
+#### `agents/versions.json` 什么时候修改
+
+<Callout type="warn">
+  修改已有驱动时，不要手动修改 `agents/versions.json`。Agent 发布工作流会对比上一个 `agents-v*` 标签，自动为发生变化的模块增加 patch 版本。
+</Callout>
+
+- 修改 `agents/drivers/<module>/`：发布时自动 bump 该模块版本
+- 修改 `agents/common/src/main/` 或 `agents/common/build.gradle`：发布时自动 bump 所有打包了 shared common runtime 的模块
+- 新增驱动模块：必须在 `agents/versions.json` 增加初始版本，例如 `"rabbitmq": "0.1.0"`
+- 新增 Java/JDBC 驱动时还必须同步 `agents/settings.gradle`、Agent README 支持列表、构建配置和测试
+- 新增原生驱动时按照 Agent authoring/release checklist 登记对应构建和发布产物，不要假设 Gradle 会处理原生模块
+- `versions.json` 中的键必须与实际发布模块一致；`common` 和 `test-support` 是基础设施模块，不登记版本
+
+普通修复 PR 不需要为了“让更新生效”手动 bump 版本。版本 bump 和发布产物由 Agent release workflow 统一处理。
+
+#### 原生 Agent
+
+`oracle`、`xugu` 等原生 Agent 使用 `agent` 可执行文件，而不是 `agent.jar`。在对应模块目录运行 Go 测试和构建，并按模块 README 替换本地运行时可执行文件：
+
+```bash
+cd agents/drivers/<原生模块>
+go test ./...
+go build -o agent .
+```
+
+新增数据库 Agent 时，如果存在成熟且许可证兼容的 Go/Rust 驱动，优先使用原生 Agent；只有缺少可靠原生驱动时再使用 Java/JDBC。
+
+#### Agent 提交前完整验证
+
+在 `agents/` 目录执行：
+
+```bash
+python3 -m unittest discover -s scripts -p '*_test.py'
+python3 scripts/validate_agents.py
+./gradlew test shadowJar --continue
+python3 scripts/validate_agent_jars.py
+```
+
+`validate_agents.py` 会检查模块声明、`versions.json`、Gradle 配置、Main-Class、运行时分类和禁止残留文件；`validate_agent_jars.py` 会检查构建出的 JAR 是否包含正确入口类。
+
+## 7. 提交前检查
+
+先查看实际改动，确认没有提交构建产物、数据库文件、密钥或无关格式化：
+
+```bash
+git status
+git diff
+```
+
+按修改范围执行检查：
+
+| 修改范围 | 最低检查 |
+| --- | --- |
+| 官网文档 | `make docs-build` |
+| 前端/UI | `pnpm typecheck && pnpm lint && pnpm test` |
+| Rust | `make cargo-check-fast && make cargo-test-fast` |
+| CLI/MCP/Node Core | `pnpm test:packages` |
+| Agent | Agent 脚本校验、对应 Gradle/Go 测试、构建产物校验和本地运行时真实验证 |
+
+如果修改跨越多个区域，需要合并执行对应检查。修复 Bug 时，还应再次执行原始复现步骤，证明问题已消失，并检查相邻正常场景没有回归。
+
+## 8. 提交并推送
+
+提交信息使用简短的 conventional commit 格式：
+
+```bash
+git add <本次修改的文件>
+git commit -m "fix(scope): describe the change"
+git push -u origin HEAD
+```
+
+常用前缀：
+
+- `fix(scope):` 修复问题
+- `feat(scope):` 增加功能
+- `docs:` 修改文档
+- `test(scope):` 补充测试
+
+不要把多个无关问题放在同一个提交或 PR 中。
+
+## 9. 创建 Pull Request
+
+在 GitHub 打开你的 Fork，点击 **Compare & pull request**，目标仓库选择 `t8y2/dbx`，目标分支选择 `main`。
+
+PR 描述至少写清：
+
+1. 关联的 Issue，例如 `Fixes #1234`
+2. 修改了什么
+3. 为什么这样修改
+4. 运行了哪些测试
+5. UI 改动的截图或录屏
+6. 数据库改动的数据库名称、版本和验证步骤
+
+提交 PR 后，如果 CI 失败，点击失败任务查看日志，在原分支继续提交修复即可，不需要重新创建 PR。
+
+## 10. 根据 Review 更新代码
+
+维护者提出修改意见后，在同一分支继续修改、提交并推送：
+
+```bash
+git add <修改的文件>
+git commit -m "fix(scope): address review feedback"
+git push
+```
+
+如果主分支在 Review 期间有较多变化，可以同步后重新推送：
+
+```bash
+git fetch upstream
+git rebase upstream/main
+git push --force-with-lease
+```
+
+<Callout type="warn">
+  使用 `--force-with-lease`，不要使用裸 `--force`。它会在远程分支出现你未拉取的新提交时拒绝覆盖。
+</Callout>
+
+## 常见问题
+
+### 第一次 Rust 编译很慢
+
+这是正常现象。与 DuckDB 无关的开发优先使用 `make dev-fast`、`make cargo-check-fast` 和 `make cargo-test-fast`。
+
+### pnpm 提示版本不正确
+
+重新启用仓库指定版本：
+
+```bash
+corepack prepare pnpm@10.27.0 --activate
+```
+
+### 改了代码但界面没有变化
+
+确认修改的是 `apps/desktop/src/`，终端中的 Vite/Tauri 进程仍在运行，并检查浏览器控制台或终端是否有编译错误。Rust 命令改动通常会触发重新编译。
+
+### 不知道需要跑哪些测试
+
+先运行与改动目录对应的最低检查，再针对 Issue 的复现路径做真实验证。仍不确定时，在 PR 中列出已完成的验证和未覆盖风险，维护者会补充建议。
+
+## 获取帮助
+
+- 在原 Issue 中描述卡点，并附完整错误信息和操作系统版本
+- 加入 [Discord](https://discord.gg/W7NyVDRt6a)
+- 查看仓库根目录的 [CONTRIBUTING.zh-CN.md](https://github.com/t8y2/dbx/blob/main/CONTRIBUTING.zh-CN.md)
+
+请不要只发送“编译失败”。至少附上执行的命令、错误日志中最早出现的错误、操作系统、Node.js、pnpm 和 Rust 版本。

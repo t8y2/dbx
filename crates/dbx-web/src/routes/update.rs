@@ -1,5 +1,5 @@
 use axum::{extract::Query, Json};
-use dbx_core::update;
+use dbx_core::{changelog, update};
 
 use crate::error::AppError;
 
@@ -18,4 +18,18 @@ pub async fn check_for_updates(Query(params): Query<UpdateCheckParams>) -> Resul
     let release = update::fetch_latest_release(&locale).await.map_err(AppError)?;
     let info = update::build_update_info(release, env!("CARGO_PKG_VERSION"));
     Ok(Json(serde_json::to_value(info).map_err(|e| AppError(e.to_string()))?))
+}
+
+#[derive(serde::Deserialize)]
+pub struct ChangelogParams {
+    #[serde(default)]
+    pub lang: Option<String>,
+}
+
+pub async fn fetch_changelog(
+    Query(params): Query<ChangelogParams>,
+) -> Result<Json<changelog::ChangelogData>, AppError> {
+    let lang = params.lang.unwrap_or_else(|| "en".to_string());
+    let data = changelog::fetch_changelog(&lang).await.map_err(AppError)?;
+    Ok(Json(data))
 }

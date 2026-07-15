@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read as IoRead, Seek, SeekFrom};
 use std::path::Path;
 
 use calamine::{open_workbook_auto, Data, ExcelDateTime, Reader as CalamineReader};
@@ -29,6 +29,7 @@ pub struct ParsedImportFile {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<serde_json::Value>>,
     pub total_rows: usize,
+    pub effective_encoding: Option<TableImportTextEncoding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,10 +100,43 @@ pub enum TableImportJsonShape {
     Arrays,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TableImportTextEncoding {
+    Auto,
+    Utf8,
+    Gbk,
+    Utf16Le,
+    Utf16Be,
+}
+
+impl TableImportTextEncoding {
+    fn encoding(self) -> Option<&'static encoding_rs::Encoding> {
+        match self {
+            TableImportTextEncoding::Auto => None,
+            TableImportTextEncoding::Utf8 => Some(encoding_rs::UTF_8),
+            TableImportTextEncoding::Gbk => Some(encoding_rs::GBK),
+            TableImportTextEncoding::Utf16Le => Some(encoding_rs::UTF_16LE),
+            TableImportTextEncoding::Utf16Be => Some(encoding_rs::UTF_16BE),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            TableImportTextEncoding::Auto => "auto",
+            TableImportTextEncoding::Utf8 => "UTF-8",
+            TableImportTextEncoding::Gbk => "GBK / GB18030",
+            TableImportTextEncoding::Utf16Le => "UTF-16 LE",
+            TableImportTextEncoding::Utf16Be => "UTF-16 BE",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableImportParseOptions {
     pub delimiter: Option<String>,
+    pub encoding: Option<TableImportTextEncoding>,
     pub has_header: Option<bool>,
     pub title_row: Option<usize>,
     pub data_start_row: Option<usize>,
@@ -118,6 +152,7 @@ impl Default for TableImportParseOptions {
     fn default() -> Self {
         Self {
             delimiter: None,
+            encoding: Some(TableImportTextEncoding::Auto),
             has_header: None,
             title_row: None,
             data_start_row: None,
@@ -179,6 +214,8 @@ pub struct TableImportPreview {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<serde_json::Value>>,
     pub total_rows: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_encoding: Option<TableImportTextEncoding>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sheets: Vec<String>,
 }
@@ -361,14 +398,240 @@ pub fn csv_value(value: &str) -> serde_json::Value {
     )
 }
 
+const IMPORT_ENCODING_READ_CHUNK_BYTES: usize = 16 * 1024;
+
+struct StrictTranscodingReader<R> {
+    reader: R,
+    decoder: encoding_rs::Decoder,
+    encoding: TableImportTextEncoding,
+    pending_input: Vec<u8>,
+    pending_output: Vec<u8>,
+    output_offset: usize,
+    reached_eof: bool,
+    finished: bool,
+}
+
+impl<R: IoRead> StrictTranscodingReader<R> {
+    fn new(reader: R, encoding: TableImportTextEncoding) -> Result<Self, String> {
+        let decoder = encoding
+            .encoding()
+            .ok_or_else(|| "Automatic text encoding must be resolved before decoding".to_string())?
+            .new_decoder_without_bom_handling();
+        Ok(Self {
+            reader,
+            decoder,
+            encoding,
+            pending_input: Vec::with_capacity(IMPORT_ENCODING_READ_CHUNK_BYTES),
+            pending_output: Vec::new(),
+            output_offset: 0,
+            reached_eof: false,
+            finished: false,
+        })
+    }
+
+    fn invalid_data_error(&self) -> std::io::Error {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Invalid byte sequence for {} encoding", self.encoding.label()),
+        )
+    }
+}
+
+impl<R: IoRead> IoRead for StrictTranscodingReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+
+        loop {
+            if self.output_offset < self.pending_output.len() {
+                let available = &self.pending_output[self.output_offset..];
+                let copied = available.len().min(buffer.len());
+                buffer[..copied].copy_from_slice(&available[..copied]);
+                self.output_offset += copied;
+                if self.output_offset == self.pending_output.len() {
+                    self.pending_output.clear();
+                    self.output_offset = 0;
+                }
+                return Ok(copied);
+            }
+            if self.finished {
+                return Ok(0);
+            }
+
+            if self.pending_input.is_empty() && !self.reached_eof {
+                let mut input = [0u8; IMPORT_ENCODING_READ_CHUNK_BYTES];
+                let read = self.reader.read(&mut input)?;
+                if read == 0 {
+                    self.reached_eof = true;
+                } else {
+                    self.pending_input.extend_from_slice(&input[..read]);
+                }
+            }
+
+            let output_capacity = self
+                .decoder
+                .max_utf8_buffer_length_without_replacement(self.pending_input.len())
+                .unwrap_or(self.pending_input.len().saturating_mul(3).saturating_add(4))
+                .max(4);
+            let mut output = vec![0u8; output_capacity];
+            let (result, read, written) =
+                self.decoder.decode_to_utf8_without_replacement(&self.pending_input, &mut output, self.reached_eof);
+            self.pending_input.drain(..read);
+            output.truncate(written);
+            self.pending_output = output;
+
+            match result {
+                encoding_rs::DecoderResult::Malformed(_, _) => return Err(self.invalid_data_error()),
+                encoding_rs::DecoderResult::InputEmpty if self.reached_eof => self.finished = true,
+                encoding_rs::DecoderResult::InputEmpty | encoding_rs::DecoderResult::OutputFull => {}
+            }
+        }
+    }
+}
+
+fn bom_text_encoding(bytes: &[u8]) -> Option<(TableImportTextEncoding, usize)> {
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        Some((TableImportTextEncoding::Utf8, 3))
+    } else if bytes.starts_with(&[0xFF, 0xFE]) {
+        Some((TableImportTextEncoding::Utf16Le, 2))
+    } else if bytes.starts_with(&[0xFE, 0xFF]) {
+        Some((TableImportTextEncoding::Utf16Be, 2))
+    } else {
+        None
+    }
+}
+
+fn matching_bom_len(bytes: &[u8], encoding: TableImportTextEncoding) -> usize {
+    bom_text_encoding(bytes).filter(|(bom_encoding, _)| *bom_encoding == encoding).map(|(_, len)| len).unwrap_or(0)
+}
+
+fn reader_is_valid_for_encoding<R: IoRead>(reader: R, encoding: TableImportTextEncoding) -> Result<bool, String> {
+    let mut reader = StrictTranscodingReader::new(reader, encoding)?;
+    match std::io::copy(&mut reader, &mut std::io::sink()) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => Ok(false),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn auto_detect_text_encoding_from_bytes(bytes: &[u8]) -> Result<(TableImportTextEncoding, usize), String> {
+    if let Some(detected) = bom_text_encoding(bytes) {
+        return Ok(detected);
+    }
+    for encoding in [TableImportTextEncoding::Utf8, TableImportTextEncoding::Gbk] {
+        if reader_is_valid_for_encoding(std::io::Cursor::new(bytes), encoding)? {
+            return Ok((encoding, 0));
+        }
+    }
+    Err("Could not detect text encoding; select UTF-8, GBK / GB18030, or UTF-16 manually".to_string())
+}
+
+fn resolve_text_encoding_from_bytes(
+    bytes: &[u8],
+    requested: Option<TableImportTextEncoding>,
+) -> Result<(TableImportTextEncoding, usize), String> {
+    let requested = requested.unwrap_or(TableImportTextEncoding::Auto);
+    if requested == TableImportTextEncoding::Auto {
+        auto_detect_text_encoding_from_bytes(bytes)
+    } else {
+        Ok((requested, matching_bom_len(bytes, requested)))
+    }
+}
+
+fn auto_detect_text_encoding_from_file(path: &str) -> Result<(TableImportTextEncoding, usize), String> {
+    let mut file = File::open(path).map_err(|error| error.to_string())?;
+    let mut prefix = [0u8; 3];
+    let prefix_len = file.read(&mut prefix).map_err(|error| error.to_string())?;
+    if let Some(detected) = bom_text_encoding(&prefix[..prefix_len]) {
+        return Ok(detected);
+    }
+
+    for encoding in [TableImportTextEncoding::Utf8, TableImportTextEncoding::Gbk] {
+        let file = File::open(path).map_err(|error| error.to_string())?;
+        if reader_is_valid_for_encoding(file, encoding)? {
+            return Ok((encoding, 0));
+        }
+    }
+    Err("Could not detect text encoding; select UTF-8, GBK / GB18030, or UTF-16 manually".to_string())
+}
+
+fn resolve_text_encoding_from_file(
+    path: &str,
+    requested: Option<TableImportTextEncoding>,
+) -> Result<(TableImportTextEncoding, usize), String> {
+    let requested = requested.unwrap_or(TableImportTextEncoding::Auto);
+    if requested == TableImportTextEncoding::Auto {
+        return auto_detect_text_encoding_from_file(path);
+    }
+
+    let mut file = File::open(path).map_err(|error| error.to_string())?;
+    let mut prefix = [0u8; 3];
+    let prefix_len = file.read(&mut prefix).map_err(|error| error.to_string())?;
+    Ok((requested, matching_bom_len(&prefix[..prefix_len], requested)))
+}
+
+fn open_delimited_csv_reader(
+    path: &str,
+    source_format: TableImportSourceFormat,
+    options: &TableImportParseOptions,
+) -> Result<(csv::Reader<StrictTranscodingReader<File>>, DelimitedParseConfig, TableImportTextEncoding), String> {
+    let config = effective_delimited_config(source_format, options)?;
+    let (encoding, bom_len) = resolve_text_encoding_from_file(path, options.encoding)?;
+    let mut file = File::open(path).map_err(|error| error.to_string())?;
+    file.seek(SeekFrom::Start(bom_len as u64)).map_err(|error| error.to_string())?;
+    let transcoded = StrictTranscodingReader::new(file, encoding)?;
+    let reader =
+        csv::ReaderBuilder::new().delimiter(config.delimiter).has_headers(false).flexible(true).from_reader(transcoded);
+    Ok((reader, config, encoding))
+}
+
 pub fn parse_delimited_reader<R: std::io::Read>(
     reader: R,
     config: DelimitedParseConfig,
     preview_limit: usize,
 ) -> Result<ParsedImportFile, String> {
-    let mut reader =
-        csv::ReaderBuilder::new().delimiter(config.delimiter).has_headers(false).flexible(true).from_reader(reader);
+    parse_decoded_delimited_reader(reader, config, preview_limit, TableImportTextEncoding::Utf8)
+}
 
+fn parse_decoded_delimited_reader<R: IoRead>(
+    reader: R,
+    config: DelimitedParseConfig,
+    preview_limit: usize,
+    effective_encoding: TableImportTextEncoding,
+) -> Result<ParsedImportFile, String> {
+    let reader =
+        csv::ReaderBuilder::new().delimiter(config.delimiter).has_headers(false).flexible(true).from_reader(reader);
+    parse_csv_reader(reader, config, preview_limit, effective_encoding)
+}
+
+pub fn parse_delimited_bytes_with_options(
+    bytes: &[u8],
+    source_format: TableImportSourceFormat,
+    options: &TableImportParseOptions,
+    preview_limit: usize,
+) -> Result<ParsedImportFile, String> {
+    let (encoding, bom_len) = resolve_text_encoding_from_bytes(bytes, options.encoding)?;
+    let reader = StrictTranscodingReader::new(std::io::Cursor::new(&bytes[bom_len..]), encoding)?;
+    parse_decoded_delimited_reader(reader, effective_delimited_config(source_format, options)?, preview_limit, encoding)
+}
+
+pub fn parse_delimited_file_with_options(
+    path: &str,
+    source_format: TableImportSourceFormat,
+    options: &TableImportParseOptions,
+    preview_limit: usize,
+) -> Result<ParsedImportFile, String> {
+    let (reader, config, encoding) = open_delimited_csv_reader(path, source_format, options)?;
+    parse_csv_reader(reader, config, preview_limit, encoding)
+}
+
+fn parse_csv_reader<R: IoRead>(
+    mut reader: csv::Reader<R>,
+    config: DelimitedParseConfig,
+    preview_limit: usize,
+    effective_encoding: TableImportTextEncoding,
+) -> Result<ParsedImportFile, String> {
     let mut rows = Vec::new();
     let mut total_rows = 0;
     let mut columns = Vec::new();
@@ -396,13 +659,7 @@ pub fn parse_delimited_reader<R: std::io::Read>(
         if rows.len() >= preview_limit {
             continue;
         }
-        let mut row = Vec::with_capacity(columns.len());
-        for index in 0..columns.len() {
-            row.push(
-                record.get(index).map(|value| csv_value_with_config(value, config)).unwrap_or(serde_json::Value::Null),
-            );
-        }
-        rows.push(row);
+        rows.push(delimited_record_to_row(&record, columns.len(), config));
     }
     if columns.is_empty() {
         return Err("Import file has no columns in the selected row range".to_string());
@@ -410,30 +667,7 @@ pub fn parse_delimited_reader<R: std::io::Read>(
     if total_rows == 0 {
         return Err("Import file has no data rows in the selected row range".to_string());
     }
-    Ok(ParsedImportFile { columns, rows, total_rows })
-}
-
-pub fn parse_delimited_bytes_with_options(
-    bytes: &[u8],
-    source_format: TableImportSourceFormat,
-    options: &TableImportParseOptions,
-    preview_limit: usize,
-) -> Result<ParsedImportFile, String> {
-    parse_delimited_reader(
-        bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes),
-        effective_delimited_config(source_format, options)?,
-        preview_limit,
-    )
-}
-
-pub fn parse_delimited_file_with_options(
-    path: &str,
-    source_format: TableImportSourceFormat,
-    options: &TableImportParseOptions,
-    preview_limit: usize,
-) -> Result<ParsedImportFile, String> {
-    let file = File::open(path).map_err(|e| e.to_string())?;
-    parse_delimited_reader(file, effective_delimited_config(source_format, options)?, preview_limit)
+    Ok(ParsedImportFile { columns, rows, total_rows, effective_encoding: Some(effective_encoding) })
 }
 
 pub fn parse_csv_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImportFile, String> {
@@ -505,7 +739,7 @@ pub fn parse_json_bytes_with_options(
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        return Ok(ParsedImportFile { columns, rows, total_rows: items.len() });
+        return Ok(ParsedImportFile { columns, rows, total_rows: items.len(), effective_encoding: None });
     }
 
     if all_arrays {
@@ -524,7 +758,7 @@ pub fn parse_json_bytes_with_options(
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        return Ok(ParsedImportFile { columns, rows, total_rows: items.len() });
+        return Ok(ParsedImportFile { columns, rows, total_rows: items.len(), effective_encoding: None });
     }
 
     Err("JSON rows must all be objects or all be arrays; mixed row shapes are not supported".to_string())
@@ -992,7 +1226,7 @@ pub fn parse_xlsx_file_with_options(
     if total_rows == 0 {
         return Err("Import file has no data rows in the selected row range".to_string());
     }
-    Ok(ParsedImportFile { columns, rows, total_rows })
+    Ok(ParsedImportFile { columns, rows, total_rows, effective_encoding: None })
 }
 
 pub fn parse_xlsx_file(path: &str, preview_limit: usize) -> Result<ParsedImportFile, String> {
@@ -1598,6 +1832,7 @@ pub async fn preview_table_import_file_with_request(
         columns: parsed.columns,
         rows: parsed.rows,
         total_rows: parsed.total_rows,
+        effective_encoding: parsed.effective_encoding,
         sheets,
     })
 }
@@ -1742,24 +1977,17 @@ where
             }
         }
 
-        let config = match effective_delimited_config(source_format, &request.parse_options) {
-            Ok(config) => config,
-            Err(error) => return Err(emit_import_error(&mut progress_callback, request, 0, total_rows, error)),
-        };
-        let file = match File::open(&request.file_path) {
-            Ok(file) => file,
-            Err(error) => {
-                return Err(emit_import_error(
-                    &mut progress_callback,
-                    request,
-                    0,
-                    total_rows,
-                    format!("Import source is no longer available: {error}"),
-                ));
-            }
-        };
-        let mut reader =
-            csv::ReaderBuilder::new().delimiter(config.delimiter).has_headers(false).flexible(true).from_reader(file);
+        let mut streaming_options = request.parse_options.clone();
+        if streaming_options.encoding.unwrap_or(TableImportTextEncoding::Auto) == TableImportTextEncoding::Auto {
+            streaming_options.encoding = parsed.effective_encoding;
+        }
+        let (mut reader, config, _) =
+            match open_delimited_csv_reader(&request.file_path, source_format, &streaming_options) {
+                Ok(result) => result,
+                Err(error) => {
+                    return Err(emit_import_error(&mut progress_callback, request, 0, total_rows, error));
+                }
+            };
         let (columns, first_record) = match delimited_columns_and_first_record(&mut reader, config) {
             Ok(result) => result,
             Err(error) => return Err(emit_import_error(&mut progress_callback, request, 0, total_rows, error)),
@@ -2123,6 +2351,152 @@ mod tests {
     }
 
     #[test]
+    fn auto_detects_and_parses_gbk_csv() {
+        let (bytes, _, had_errors) = encoding_rs::GBK.encode("id,name\n1,中文\n2,上海\n");
+        assert!(!had_errors);
+
+        let parsed = parse_delimited_bytes_with_options(
+            bytes.as_ref(),
+            TableImportSourceFormat::Csv,
+            &TableImportParseOptions::default(),
+            10,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.effective_encoding, Some(TableImportTextEncoding::Gbk));
+        assert_eq!(parsed.columns, vec!["id", "name"]);
+        assert_eq!(parsed.rows[0], vec![serde_json::json!("1"), serde_json::json!("中文")]);
+        assert_eq!(parsed.rows[1], vec![serde_json::json!("2"), serde_json::json!("上海")]);
+    }
+
+    #[test]
+    fn explicit_utf8_rejects_gbk_csv_without_replacing_data() {
+        let (bytes, _, had_errors) = encoding_rs::GBK.encode("id,name\n1,中文\n");
+        assert!(!had_errors);
+        let options = TableImportParseOptions {
+            encoding: Some(TableImportTextEncoding::Utf8),
+            ..TableImportParseOptions::default()
+        };
+
+        let error =
+            parse_delimited_bytes_with_options(bytes.as_ref(), TableImportSourceFormat::Csv, &options, 10).unwrap_err();
+
+        assert!(error.contains("Invalid byte sequence for UTF-8 encoding"), "{error}");
+    }
+
+    #[test]
+    fn gbk_option_decodes_gb18030_four_byte_characters() {
+        let (bytes, _, had_errors) = encoding_rs::GB18030.encode("id,name\n1,😀\n");
+        assert!(!had_errors);
+
+        let parsed = parse_delimited_bytes_with_options(
+            bytes.as_ref(),
+            TableImportSourceFormat::Csv,
+            &TableImportParseOptions::default(),
+            10,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.effective_encoding, Some(TableImportTextEncoding::Gbk));
+        assert_eq!(parsed.rows[0], vec![serde_json::json!("1"), serde_json::json!("😀")]);
+    }
+
+    #[test]
+    fn auto_detects_utf16le_bom_csv() {
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in "id,name\n1,中文\n".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+
+        let parsed = parse_delimited_bytes_with_options(
+            &bytes,
+            TableImportSourceFormat::Csv,
+            &TableImportParseOptions::default(),
+            10,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.effective_encoding, Some(TableImportTextEncoding::Utf16Le));
+        assert_eq!(parsed.rows[0], vec![serde_json::json!("1"), serde_json::json!("中文")]);
+    }
+
+    #[test]
+    fn auto_detects_utf16be_bom_csv() {
+        let mut bytes = vec![0xFE, 0xFF];
+        for unit in "id,name\n1,中文\n".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_be_bytes());
+        }
+
+        let parsed = parse_delimited_bytes_with_options(
+            &bytes,
+            TableImportSourceFormat::Csv,
+            &TableImportParseOptions::default(),
+            10,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.effective_encoding, Some(TableImportTextEncoding::Utf16Be));
+        assert_eq!(parsed.columns, vec!["id", "name"]);
+        assert_eq!(parsed.rows[0], vec![serde_json::json!("1"), serde_json::json!("中文")]);
+    }
+
+    #[test]
+    fn explicit_utf16le_parses_csv_without_bom() {
+        let bytes = "id,name\n1,中文\n".encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>();
+        let options = TableImportParseOptions {
+            encoding: Some(TableImportTextEncoding::Utf16Le),
+            ..TableImportParseOptions::default()
+        };
+
+        let parsed = parse_delimited_bytes_with_options(&bytes, TableImportSourceFormat::Csv, &options, 10).unwrap();
+
+        assert_eq!(parsed.effective_encoding, Some(TableImportTextEncoding::Utf16Le));
+        assert_eq!(parsed.columns, vec!["id", "name"]);
+        assert_eq!(parsed.rows[0], vec![serde_json::json!("1"), serde_json::json!("中文")]);
+    }
+
+    #[test]
+    fn gbk_decoder_preserves_multibyte_character_across_read_chunks() {
+        let ascii_prefix = "a".repeat(IMPORT_ENCODING_READ_CHUNK_BYTES - "name\n".len() - 1);
+        let csv = format!("name\n{ascii_prefix}中\n");
+        let (bytes, _, had_errors) = encoding_rs::GBK.encode(&csv);
+        assert!(!had_errors);
+        let options = TableImportParseOptions {
+            encoding: Some(TableImportTextEncoding::Gbk),
+            ..TableImportParseOptions::default()
+        };
+
+        let parsed =
+            parse_delimited_bytes_with_options(bytes.as_ref(), TableImportSourceFormat::Csv, &options, 10).unwrap();
+
+        assert_eq!(parsed.rows[0][0], serde_json::json!(format!("{ascii_prefix}中")));
+    }
+
+    #[tokio::test]
+    async fn preview_reads_real_gbk_file_and_reports_detected_encoding() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-gbk-{}.csv", uuid::Uuid::new_v4()));
+        let (bytes, _, had_errors) = encoding_rs::GBK.encode("编号,城市\n1,北京\n2,上海\n");
+        assert!(!had_errors);
+        std::fs::write(&path, bytes.as_ref()).unwrap();
+
+        let preview = preview_table_import_file_with_request(TableImportPreviewRequest {
+            file_path: path.to_string_lossy().to_string(),
+            source_ref: None,
+            source_format: Some(TableImportSourceFormat::Csv),
+            parse_options: TableImportParseOptions::default(),
+            preview_limit: Some(10),
+        })
+        .await
+        .unwrap();
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(preview.effective_encoding, Some(TableImportTextEncoding::Gbk));
+        assert_eq!(preview.columns, vec!["编号", "城市"]);
+        assert_eq!(preview.total_rows, 2);
+        assert_eq!(preview.rows[0], vec![serde_json::json!("1"), serde_json::json!("北京")]);
+    }
+
+    #[test]
     fn parses_tsv_with_tab_delimiter() {
         let parsed = parse_delimited_bytes(b"id\tname\n1\tAda\n", b'\t', 10).unwrap();
 
@@ -2385,6 +2759,7 @@ mod tests {
                 ],
             ],
             total_rows: 2,
+            effective_encoding: None,
         };
         let mappings = data
             .columns
@@ -2418,8 +2793,12 @@ mod tests {
 
     #[test]
     fn create_table_plan_requires_target_table_name() {
-        let data =
-            ParsedImportFile { columns: vec!["id".to_string()], rows: vec![vec![serde_json::json!(1)]], total_rows: 1 };
+        let data = ParsedImportFile {
+            columns: vec!["id".to_string()],
+            rows: vec![vec![serde_json::json!(1)]],
+            total_rows: 1,
+            effective_encoding: None,
+        };
         let mappings = vec![TableImportColumnMapping {
             source_column: "id".to_string(),
             target_column: "id".to_string(),
@@ -2437,6 +2816,7 @@ mod tests {
             columns: vec!["notes".to_string()],
             rows: vec![vec![serde_json::json!("long text")]],
             total_rows: 1,
+            effective_encoding: None,
         };
         let mappings = vec![TableImportColumnMapping {
             source_column: "notes".to_string(),
@@ -2455,6 +2835,7 @@ mod tests {
             columns: vec!["code".to_string(), "amount".to_string()],
             rows: vec![vec![serde_json::json!("1001"), serde_json::json!("12.5")]],
             total_rows: 1,
+            effective_encoding: None,
         };
         let mappings = vec![
             TableImportColumnMapping {
@@ -2487,6 +2868,7 @@ mod tests {
             columns: vec!["name".to_string()],
             rows: vec![vec![serde_json::json!("Ada")]],
             total_rows: 1,
+            effective_encoding: None,
         };
         let mappings = vec![TableImportColumnMapping {
             source_column: "name".to_string(),
@@ -2521,6 +2903,7 @@ mod tests {
                 vec![serde_json::json!(3), serde_json::Value::Null, serde_json::json!("z")],
             ],
             total_rows: 3,
+            effective_encoding: None,
         };
 
         let batches =
@@ -2549,6 +2932,7 @@ mod tests {
             columns: vec!["id".to_string()],
             rows: vec![vec![serde_json::json!(1)], vec![serde_json::json!(2)]],
             total_rows: 2,
+            effective_encoding: None,
         };
 
         let batches =
@@ -2662,6 +3046,7 @@ mod tests {
                 vec![serde_json::json!(3), serde_json::Value::Null],
             ],
             total_rows: 3,
+            effective_encoding: None,
         };
 
         let batches =
@@ -2707,6 +3092,7 @@ mod tests {
                 serde_json::json!("2026-05-12T00:00:00+00:00"),
             ]],
             total_rows: 1,
+            effective_encoding: None,
         };
 
         let batches = build_import_insert_batches(
@@ -2740,6 +3126,7 @@ mod tests {
             columns: vec!["name".to_string()],
             rows: vec![vec![serde_json::json!("Tiếng Việt")]],
             total_rows: 1,
+            effective_encoding: None,
         };
 
         let batches = build_import_insert_batches(

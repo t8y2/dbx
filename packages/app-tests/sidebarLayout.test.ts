@@ -14,6 +14,7 @@ import {
   emptyLayout,
   remapSidebarLayoutConnectionIds,
   collapseAllGroups,
+  buildConnectionGroupPathMap,
 } from "../../apps/desktop/src/lib/sidebar/sidebarLayout.ts";
 import type { ConnectionConfig, SidebarLayout } from "../../apps/desktop/src/types/database.ts";
 
@@ -33,6 +34,31 @@ function groupConnectionIds(entry: SidebarLayout["order"][number]): string[] {
   assert.equal(entry.type, "group");
   return (entry.children ?? []).filter((child) => child.type === "connection").map((child) => child.id);
 }
+
+test("builds all connection group paths in one layout traversal", () => {
+  const paths = buildConnectionGroupPathMap({
+    groups: [
+      { id: "project", name: "Project", collapsed: false },
+      { id: "staging", name: "Staging", collapsed: false },
+    ],
+    order: [
+      { type: "connection", id: "ungrouped" },
+      {
+        type: "group",
+        id: "project",
+        children: [
+          { type: "connection", id: "project-db" },
+          { type: "group", id: "staging", children: [{ type: "connection", id: "staging-db" }] },
+        ],
+      },
+    ],
+  });
+
+  assert.deepEqual(paths.get("ungrouped"), []);
+  assert.deepEqual(paths.get("project-db"), ["Project"]);
+  assert.deepEqual(paths.get("staging-db"), ["Project", "Staging"]);
+  assert.equal(paths.has("missing"), false);
+});
 
 // --- reconcileLayout ---
 

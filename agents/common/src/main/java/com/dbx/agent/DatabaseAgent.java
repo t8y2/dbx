@@ -4,7 +4,9 @@ import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -12,6 +14,16 @@ public interface DatabaseAgent {
     void connect(ConnectParams params);
 
     boolean testConnection(ConnectParams params);
+
+    default Map<String, Object> testConnectionWithInfo(ConnectParams params) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("ok", testConnection(params));
+        return result;
+    }
+
+    default Map<String, String> getDatabaseInfo() {
+        return Collections.emptyMap();
+    }
 
     default String getIdentifierQuote() {
         return "";

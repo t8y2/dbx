@@ -632,11 +632,53 @@ public final class MongoAgent {
         return Collections.singletonMap("inserted_id", insertedId);
     }
 
-    private static Object parseId(String id) {
+    static Object parseId(String id) {
+        String stringId = decodeStringDocumentId(id);
+        if (stringId != null) {
+            return stringId;
+        }
+        String trimmed = id.trim();
+        if (isNumberLongIdWrapper(trimmed)) {
+            try {
+                return Document.parse("{\"_id\":" + trimmed + "}").get("_id");
+            } catch (Exception e) {
+                // Fall through to the legacy ObjectId/string handling below.
+            }
+        }
         try {
             return new ObjectId(id);
         } catch (Exception e) {
             return id;
+        }
+    }
+
+    private static String decodeStringDocumentId(String id) {
+        String prefix = "__dbx_mongo_string_id__";
+        if (!id.startsWith(prefix)) {
+            return null;
+        }
+        try {
+            JsonElement value = JsonParser.parseString(id.substring(prefix.length()));
+            return value.isJsonPrimitive() && value.getAsJsonPrimitive().isString() ? value.getAsString() : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static boolean isNumberLongIdWrapper(String value) {
+        try {
+            JsonElement parsed = JsonParser.parseString(value);
+            if (!parsed.isJsonObject()) {
+                return false;
+            }
+            JsonObject wrapper = parsed.getAsJsonObject();
+            JsonElement numberLong = wrapper.get("$numberLong");
+            return wrapper.size() == 1
+                && numberLong != null
+                && numberLong.isJsonPrimitive()
+                && numberLong.getAsJsonPrimitive().isString();
+        } catch (Exception e) {
+            return false;
         }
     }
 
@@ -765,9 +807,16 @@ public final class MongoAgent {
     private static Map<String, Object> bsonToJson(Document doc) {
         Map<String, Object> result = new LinkedHashMap<>();
         for (Map.Entry<String, Object> entry : doc.entrySet()) {
-            result.put(entry.getKey(), convertValue(entry.getValue()));
+            result.put(entry.getKey(), convertDocumentFieldValue(entry.getKey(), entry.getValue()));
         }
         return result;
+    }
+
+    static Object convertDocumentFieldValue(String key, Object value) {
+        if ("_id".equals(key) && value instanceof Long longValue) {
+            return Collections.singletonMap("$numberLong", longValue.toString());
+        }
+        return convertValue(value);
     }
 
     static JsonObject bsonToExtendedJson(Document doc) {

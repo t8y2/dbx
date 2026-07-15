@@ -33,6 +33,23 @@ test("parses encoded database URL with password", () => {
   assert.equal(draft?.urlParams, "sslmode=require");
 });
 
+test("preserves explicit SQL Server default port from nested URLs", () => {
+  const nested = encodeURIComponent("sqlserver://sa:secret@db.internal:1433/erp");
+  const draft = parseConnectionDeepLink(`dbx://connection/new?url=${nested}`);
+
+  assert.equal(draft?.dbType, "sqlserver");
+  assert.equal(draft?.port, 1433);
+  assert.equal(draft?.portExplicit, true);
+});
+
+test("marks top-level SQL Server ports explicit for one-time links", () => {
+  const draft = parseConnectionDeepLink("dbx://connection/new?type=sqlserver&host=db\\instance&port=1433&one_time=1");
+
+  assert.equal(draft?.port, 1433);
+  assert.equal(draft?.portExplicit, true);
+  assert.equal(draft?.oneTime, true);
+});
+
 test("uses the nested database URL name as connection name", () => {
   const nested = encodeURIComponent("mysql://root:123456@localhost/?name=%E5%85%AC%E5%8F%B8+-+%E6%9C%AC%E5%9C%B0Docker&charset=utf8mb4");
   const draft = parseConnectionDeepLink(`dbx://connection/new?url=${nested}`);

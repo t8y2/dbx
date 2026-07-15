@@ -666,6 +666,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
                     c.DATA_SCALE,
                     c.DATA_LENGTH,
                     c.CHAR_LENGTH,
+                    c.CHAR_USED,
                     cc.COMMENTS
                 FROM ALL_TAB_COLUMNS c
                 LEFT JOIN ALL_COL_COMMENTS cc
@@ -688,7 +689,8 @@ public final class DamengAgent extends BaseDatabaseAgent {
                         Integer numScale = intObject(rs, "DATA_SCALE");
                         Integer dataLen = intObject(rs, "DATA_LENGTH");
                         Integer charLen = intObject(rs, "CHAR_LENGTH");
-                        String dataType = formatDataType(baseType, numPrec, numScale, dataLen, charLen);
+                        String charUsed = rs.getString("CHAR_USED");
+                        String dataType = formatDataType(baseType, numPrec, numScale, dataLen, charLen, charUsed);
 
                         result.add(new ColumnInfo(
                             name,
@@ -832,6 +834,11 @@ public final class DamengAgent extends BaseDatabaseAgent {
 
     @Override
     public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
+        String explainSql = explainTargetSql(sql);
+        if (explainSql != null) {
+            // DM JDBC reports raw EXPLAIN as an update count; its driver API is the only source of plan rows.
+            return executeExplainQuery(explainSql, schema, options);
+        }
         return JdbcExecutor.current().execute(
             requireConnected(),
             sql,
@@ -844,8 +851,92 @@ public final class DamengAgent extends BaseDatabaseAgent {
         );
     }
 
+    private QueryResult executeExplainQuery(String sql, String schema, ExecuteQueryOptions options) {
+        return explainQueryResult(sql, schema, options.getTimeoutSecs(), options.getMaxRows());
+    }
+
+    private QueryResult explainQueryResult(String sql, String schema, int timeoutSecs, int maxRows) {
+        long start = System.currentTimeMillis();
+        String planText = getExplainInfo(sql, null, schema, timeoutSecs, "explain");
+        int effectiveMaxRows = Math.max(maxRows, 1);
+        List<List<Object>> rows = new ArrayList<>();
+        boolean truncated = false;
+        for (String line : planText.split("\\R")) {
+            if (line.trim().isEmpty()) {
+                continue;
+            }
+            if (rows.size() >= effectiveMaxRows) {
+                truncated = true;
+                break;
+            }
+            rows.add(List.of(line));
+        }
+        return new QueryResult(
+            List.of("PLAN"),
+            List.of("VARCHAR"),
+            rows,
+            0,
+            System.currentTimeMillis() - start,
+            truncated
+        );
+    }
+
+    static String explainTargetSql(String sql) {
+        if (sql == null) {
+            return null;
+        }
+        int index = skipSqlTrivia(sql, 0);
+        int keywordEnd = index + "EXPLAIN".length();
+        if (keywordEnd > sql.length()
+            || !sql.regionMatches(true, index, "EXPLAIN", 0, "EXPLAIN".length())
+            || (keywordEnd < sql.length() && isIdentifierPart(sql.charAt(keywordEnd)))) {
+            return null;
+        }
+        String targetSql = sql.substring(keywordEnd).trim();
+        while (targetSql.endsWith(";")) {
+            targetSql = targetSql.substring(0, targetSql.length() - 1).trim();
+        }
+        return targetSql.isEmpty() ? null : targetSql;
+    }
+
+    private static int skipSqlTrivia(String sql, int start) {
+        int index = start;
+        while (index < sql.length()) {
+            if (Character.isWhitespace(sql.charAt(index))) {
+                index++;
+            } else if (sql.startsWith("--", index)) {
+                int lineEnd = sql.indexOf('\n', index + 2);
+                index = lineEnd < 0 ? sql.length() : lineEnd + 1;
+            } else if (sql.startsWith("/*", index)) {
+                int commentEnd = sql.indexOf("*/", index + 2);
+                index = commentEnd < 0 ? sql.length() : commentEnd + 2;
+            } else {
+                break;
+            }
+        }
+        return index;
+    }
+
+    private static boolean isIdentifierPart(char value) {
+        return Character.isLetterOrDigit(value) || value == '_' || value == '$';
+    }
+
     @Override
     public QueryPageResult executeQueryPage(String sql, String schema, QueryPageOptions options) {
+        String explainSql = explainTargetSql(sql);
+        if (explainSql != null) {
+            QueryResult result = explainQueryResult(explainSql, schema, options.getTimeoutSecs(), options.getMaxRows());
+            return new QueryPageResult(
+                result.getColumns(),
+                result.getColumn_types(),
+                result.getRows(),
+                result.getAffected_rows(),
+                result.getExecution_time_ms(),
+                result.getTruncated(),
+                null,
+                false
+            );
+        }
         return JdbcExecutor.current().executePage(
             requireConnected(),
             sql,
@@ -965,9 +1056,20 @@ public final class DamengAgent extends BaseDatabaseAgent {
         return "jdbc:dm://" + params.getHost() + ":" + params.getPort() + suffix;
     }
 
-    private static String formatDataType(String base, Integer numPrec, Integer numScale, Integer dataLen, Integer charLen) {
+    private static String formatDataType(
+        String base,
+        Integer numPrec,
+        Integer numScale,
+        Integer dataLen,
+        Integer charLen,
+        String charUsed
+    ) {
         return switch (base.toUpperCase(Locale.ROOT)) {
-            case "VARCHAR2", "NVARCHAR2", "VARCHAR", "CHAR", "NCHAR" -> {
+            case "VARCHAR2", "VARCHAR", "CHAR" -> {
+                Integer length = characterLength(dataLen, charLen, charUsed);
+                yield length != null ? base + "(" + length + characterLengthUnit(charUsed) + ")" : base;
+            }
+            case "NVARCHAR2", "NCHAR" -> {
                 Integer length = charLen != null ? charLen : dataLen;
                 yield length != null ? base + "(" + length + ")" : base;
             }
@@ -979,6 +1081,25 @@ public final class DamengAgent extends BaseDatabaseAgent {
             }
             case "RAW" -> dataLen != null ? "RAW(" + dataLen + ")" : "RAW";
             default -> base;
+        };
+    }
+
+    private static Integer characterLength(Integer dataLen, Integer charLen, String charUsed) {
+        String normalized = charUsed == null ? "" : charUsed.trim().toUpperCase(Locale.ROOT);
+        if ("B".equals(normalized) || "BYTE".equals(normalized)) {
+            return dataLen != null ? dataLen : charLen;
+        }
+        return charLen != null ? charLen : dataLen;
+    }
+
+    private static String characterLengthUnit(String charUsed) {
+        if (charUsed == null) {
+            return "";
+        }
+        return switch (charUsed.trim().toUpperCase(Locale.ROOT)) {
+            case "B", "BYTE" -> " BYTE";
+            case "C", "CHAR" -> " CHAR";
+            default -> "";
         };
     }
 
@@ -1267,6 +1388,11 @@ public final class DamengAgent extends BaseDatabaseAgent {
     public String getExplainInfo(String sql, String database, String schema, int timeoutSecs, String mode) {
         return unchecked(() -> {
             Connection conn = requireConnected();
+            if (schema != null && !schema.trim().isEmpty()) {
+                try (Statement schemaStmt = conn.createStatement()) {
+                    schemaStmt.execute(setSchemaSQL(schema));
+                }
+            }
             boolean autotrace = "autotrace".equalsIgnoreCase(mode);
             String planText = null;
 

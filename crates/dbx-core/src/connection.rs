@@ -22,8 +22,8 @@ use crate::db::http_tunnel::HttpTunnelManager;
 use crate::db::proxy_tunnel::ProxyTunnelManager;
 use crate::db::ssh_tunnel::TunnelManager;
 use crate::models::connection::{
-    parse_jdbc_host_port, parse_mongo_first_host, rewrite_jdbc_url_host, ConnectionConfig, DatabaseType,
-    TransportLayerConfig,
+    database_info_from_protocol_value, parse_jdbc_host_port, parse_mongo_first_host, rewrite_jdbc_url_host,
+    ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType, TransportLayerConfig,
 };
 use crate::path_utils::expand_tilde;
 use crate::plugins::{PluginDriverSession, PluginRegistry, PluginRuntimeEnv};
@@ -108,6 +108,12 @@ pub enum PoolKind {
     MessageQueue,
     /// Nacos admin connection marker.
     Nacos,
+}
+
+enum ConnectionDatabaseInfoSource {
+    Agent(Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>),
+    ExternalDriver { config: Arc<ConnectionConfig>, session: Arc<PluginDriverSession> },
+    NativeMysql(db::mysql::MySqlPool),
 }
 
 /// Held connection for a manual transaction session
@@ -654,9 +660,18 @@ impl AppState {
     }
 
     pub async fn test_external_driver(&self, driver_id: &str, config: &ConnectionConfig) -> Result<String, String> {
+        self.test_external_driver_with_info(driver_id, config).await.map(|result| result.message)
+    }
+
+    pub async fn test_external_driver_with_info(
+        &self,
+        driver_id: &str,
+        config: &ConnectionConfig,
+    ) -> Result<ConnectionTestResult, String> {
         let params = serde_json::json!({ "connection": config });
         let env = self.external_driver_runtime_env(driver_id)?;
-        self.plugins
+        let response = self
+            .plugins
             .invoke_driver_with_env_and_timeout::<serde_json::Value>(
                 driver_id,
                 "testConnection",
@@ -665,7 +680,8 @@ impl AppState {
                 Some(external_driver_connect_timeout(config)),
             )
             .await?;
-        Ok("Connection successful".to_string())
+        Ok(ConnectionTestResult::success("Connection successful")
+            .with_database_info(database_info_from_protocol_value(&response)))
     }
 
     pub async fn external_driver_pool(&self, driver_id: &str, config: &ConnectionConfig) -> Result<PoolKind, String> {
@@ -685,18 +701,30 @@ impl AppState {
         port: u16,
         connect_timeout: Duration,
     ) -> Result<String, String> {
-        match db::sqlserver::connect(
+        self.test_sqlserver_connection_with_legacy_fallback_with_info(config, host, port, connect_timeout)
+            .await
+            .map(|result| result.message)
+    }
+
+    pub async fn test_sqlserver_connection_with_legacy_fallback_with_info(
+        &self,
+        config: &ConnectionConfig,
+        host: &str,
+        port: u16,
+        connect_timeout: Duration,
+    ) -> Result<ConnectionTestResult, String> {
+        match db::sqlserver::connect_with_port_explicit(
             host,
             port,
+            config.sqlserver_port_explicit(),
             &config.username,
             &config.password,
             config.database.as_deref(),
-            config.url_params.as_deref(),
             connect_timeout,
         )
         .await
         {
-            Ok(_) => Ok("Connection successful".to_string()),
+            Ok(_) => Ok(ConnectionTestResult::success("Connection successful")),
             Err(native_error)
                 if db::sqlserver::sqlserver_legacy_compatibility_enabled(config.url_params.as_deref()) =>
             {
@@ -708,7 +736,7 @@ impl AppState {
                     .spawn(&legacy_config.db_type, legacy_config.driver_profile.as_deref())
                     .await
                     .map_err(|err| sqlserver_legacy_agent_error(&native_error, &err))?;
-                client
+                let response = client
                     .call_method_with_timeout::<serde_json::Value>(
                         AgentMethod::TestConnection,
                         connect_params,
@@ -717,7 +745,8 @@ impl AppState {
                     .await
                     .map_err(|err| sqlserver_legacy_agent_error(&native_error, &err))?;
                 client.disconnect().await.ok();
-                Ok("Connection successful (via SQL Server legacy compatibility driver)".to_string())
+                Ok(ConnectionTestResult::success("Connection successful (via SQL Server legacy compatibility driver)")
+                    .with_database_info(database_info_from_protocol_value(&response)))
             }
             Err(err) => Err(err),
         }
@@ -730,13 +759,13 @@ impl AppState {
         port: u16,
         connect_timeout: Duration,
     ) -> Result<PoolKind, String> {
-        match db::sqlserver::connect(
+        match db::sqlserver::connect_with_port_explicit(
             host,
             port,
+            config.sqlserver_port_explicit(),
             &config.username,
             &config.password,
             config.database.as_deref(),
-            config.url_params.as_deref(),
             connect_timeout,
         )
         .await
@@ -2346,6 +2375,68 @@ impl AppState {
         Ok(Some(info.identifier_quote))
     }
 
+    pub async fn connection_database_info(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+    ) -> Result<Option<DatabaseConnectionInfo>, String> {
+        let config = self
+            .configs
+            .read()
+            .await
+            .get(connection_id)
+            .cloned()
+            .ok_or_else(|| format!("Connection config not found: {connection_id}"))?;
+        let pool_key = self.get_or_create_pool(connection_id, database).await?;
+        let source = {
+            let connections = self.connections.read().await;
+            match connections.get(&pool_key) {
+                Some(PoolKind::Agent(client)) => Some(ConnectionDatabaseInfoSource::Agent(client.clone())),
+                Some(PoolKind::ExternalDriver { config, session, .. }) => {
+                    Some(ConnectionDatabaseInfoSource::ExternalDriver {
+                        config: config.clone(),
+                        session: session.clone(),
+                    })
+                }
+                Some(PoolKind::Mysql(pool, _)) => Some(ConnectionDatabaseInfoSource::NativeMysql(pool.clone())),
+                _ => None,
+            }
+        };
+
+        match source {
+            Some(ConnectionDatabaseInfoSource::Agent(client)) => {
+                let mut agent = client.lock().await;
+                Ok(agent.connection_info(Some(db::connection_timeout())).await?.database_info)
+            }
+            Some(ConnectionDatabaseInfoSource::ExternalDriver { config, session }) => {
+                let response = session
+                    .invoke_with_timeout::<serde_json::Value>(
+                        "connectionInfo",
+                        serde_json::json!({ "connection": config.as_ref() }),
+                        Some(db::connection_timeout()),
+                    )
+                    .await?;
+                Ok(database_info_from_protocol_value(&response))
+            }
+            Some(ConnectionDatabaseInfoSource::NativeMysql(pool)) => {
+                db::mysql::database_connection_info(&pool, db::mysql::protocol_product_name(&config)).await.map(Some)
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub async fn save_connection_database_info(
+        &self,
+        connection_id: &str,
+        database_info: Option<DatabaseConnectionInfo>,
+    ) -> Result<(), String> {
+        self.storage.save_connection_database_info(connection_id, database_info.clone()).await?;
+        if let Some(config) = self.configs.write().await.get_mut(connection_id) {
+            config.database_info = database_info;
+        }
+        Ok(())
+    }
+
     pub async fn reset_connection_transport(&self, connection_id: &str) {
         let layer_count = {
             let configs = self.configs.read().await;
@@ -3103,7 +3194,7 @@ fn base_pool_key_for(
     if is_single_connection_pool {
         connection_id.to_string()
     } else {
-        match database.map(str::trim).filter(|db| !db.is_empty()) {
+        match database.filter(|db| !db.trim().is_empty()) {
             Some(db) => format!("{connection_id}:{db}"),
             None => connection_id.to_string(),
         }
@@ -3382,6 +3473,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            database_info: None,
         }
     }
 
@@ -3480,6 +3572,17 @@ mod tests {
         assert_eq!(params["username"], "informix");
         assert_eq!(params["password"], "in4mix");
         assert_eq!(params["url_params"], "INFORMIXSERVER=informix;CLIENT_LOCALE=en_US.utf8");
+    }
+
+    #[test]
+    fn agent_connect_params_include_sqlserver_explicit_port_state() {
+        let mut config = mysql_config(Some("master"));
+        config.db_type = DatabaseType::SqlServer;
+        config.external_config = Some(serde_json::json!({ "portExplicit": true }));
+
+        let params = agent_connect_params(&config, r"db.example.com\SQLEXPRESS", 1433, "master");
+
+        assert_eq!(params["port_explicit"], true);
     }
 
     #[test]
@@ -4210,6 +4313,22 @@ mod tests {
         assert_eq!(
             super::base_pool_key_for(Some(DatabaseType::MongoDb), "mongo-conn", Some("shop"), false),
             "mongo-conn:shop"
+        );
+    }
+
+    #[test]
+    fn database_scoped_pool_keys_preserve_identifier_whitespace() {
+        assert_eq!(
+            super::base_pool_key_for(Some(DatabaseType::Mysql), "mysql-conn", Some(" analytics"), false),
+            "mysql-conn: analytics"
+        );
+        assert_eq!(
+            super::base_pool_key_for(Some(DatabaseType::Mysql), "mysql-conn", Some("analytics"), false),
+            "mysql-conn:analytics"
+        );
+        assert_eq!(
+            super::base_pool_key_for(Some(DatabaseType::Postgres), "pg-conn", Some("analytics "), false),
+            "pg-conn:analytics "
         );
     }
 

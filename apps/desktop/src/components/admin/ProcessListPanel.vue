@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { Activity, AlertTriangle, ArrowDown, ArrowUp, Ban, Loader2, RefreshCcw, Search } from "@lucide/vue";
+import { Activity, AlertTriangle, ArrowDown, ArrowUp, Ban, Copy, Loader2, RefreshCcw, Search } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -11,7 +11,8 @@ import { useToast } from "@/composables/useToast";
 import type { ConnectionConfig } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
-import { buildKillSql, clampInterval, createProcessListLoadCoordinator, DEFAULT_REFRESH_SECONDS, mapProcessRows, processListExecutionError, processListSessionCount, PROCESS_LIST_SQL, type ProcessRow } from "@/lib/database/mysqlProcessList";
+import { clampInterval, createProcessListLoadCoordinator, DEFAULT_REFRESH_SECONDS, processListExecutionError, processListSessionCount } from "@/lib/database/mysqlProcessList";
+import { resolveProcessListDriverForConnection, type ProcessRow } from "@/lib/database/processListDrivers";
 
 const props = defineProps<{
   connection: ConnectionConfig;
@@ -21,7 +22,11 @@ const { t } = useI18n();
 const connectionStore = useConnectionStore();
 const { toast } = useToast();
 
-type SortKey = keyof ProcessRow;
+// The panel is only opened for supported engines; guard the driver defensively so
+// a missing one degrades to an empty table rather than crashing the render.
+const driver = computed(() => resolveProcessListDriverForConnection(props.connection));
+const columns = computed(() => driver.value?.columns ?? []);
+const numericKeys = computed(() => new Set(columns.value.filter((column) => column.numeric).map((column) => column.key)));
 
 const rows = ref<ProcessRow[]>([]);
 const truncated = ref(false);
@@ -30,7 +35,7 @@ const loading = ref(false);
 const loadCoordinator = createProcessListLoadCoordinator();
 const loadError = ref("");
 const search = ref("");
-const sortKey = ref<SortKey>("time");
+const sortKey = ref<string>(driver.value?.defaultSortKey ?? "time");
 const sortDir = ref<"asc" | "desc">("desc");
 
 const autoRefresh = ref(false);
@@ -39,21 +44,29 @@ let timer: ReturnType<typeof setInterval> | undefined;
 
 const killTarget = ref<ProcessRow | null>(null);
 const killing = ref(false);
+const fallbackListSql = ref<string | null>(null);
 
-const COLUMNS: { key: SortKey; labelKey: string; mono?: boolean }[] = [
-  { key: "id", labelKey: "processList.colId", mono: true },
-  { key: "user", labelKey: "processList.colUser" },
-  { key: "host", labelKey: "processList.colHost" },
-  { key: "db", labelKey: "processList.colDb" },
-  { key: "command", labelKey: "processList.colCommand" },
-  { key: "time", labelKey: "processList.colTime", mono: true },
-  { key: "state", labelKey: "processList.colState" },
-  { key: "info", labelKey: "processList.colInfo" },
-];
+// Full-text preview for long cells (SQL statement / info), opened by clicking them.
+const previewText = ref<string | null>(null);
+
+function openPreview(value: string | number | null) {
+  if (value === null || value === undefined || String(value).length === 0) return;
+  previewText.value = String(value);
+}
+
+async function copyPreview() {
+  if (previewText.value === null) return;
+  try {
+    await navigator.clipboard.writeText(previewText.value);
+    toast(t("processList.copied"), 1500);
+  } catch (error: any) {
+    toast(error?.message || String(error), 3000);
+  }
+}
 
 const filteredRows = computed(() => {
   const query = search.value.trim().toLowerCase();
-  const base = query ? rows.value.filter((row) => [row.id, row.user, row.host, row.db, row.command, row.state, row.info].some((value) => value !== null && value !== undefined && String(value).toLowerCase().includes(query))) : rows.value.slice();
+  const base = query ? rows.value.filter((row) => Object.values(row).some((value) => value !== null && value !== undefined && String(value).toLowerCase().includes(query))) : rows.value.slice();
   const key = sortKey.value;
   const dir = sortDir.value === "asc" ? 1 : -1;
   return base.sort((a, b) => {
@@ -67,16 +80,18 @@ const filteredRows = computed(() => {
   });
 });
 
-function toggleSort(key: SortKey) {
+function toggleSort(key: string) {
   if (sortKey.value === key) {
     sortDir.value = sortDir.value === "asc" ? "desc" : "asc";
   } else {
     sortKey.value = key;
-    sortDir.value = key === "time" || key === "id" ? "desc" : "asc";
+    sortDir.value = numericKeys.value.has(key) ? "desc" : "asc";
   }
 }
 
 async function load(options: { silent?: boolean } = {}) {
+  const activeDriver = driver.value;
+  if (!activeDriver) return;
   if (!loadCoordinator.tryStart()) return;
   if (!options.silent) loading.value = true;
   loadError.value = "";
@@ -84,7 +99,7 @@ async function load(options: { silent?: boolean } = {}) {
     await connectionStore.ensureConnected(props.connection.id);
     if (ownSessionId.value === null) {
       try {
-        const idResult = await api.executeQuery(props.connection.id, "", "SELECT CONNECTION_ID()", undefined, undefined, { maxRows: 1 });
+        const idResult = await api.executeQuery(props.connection.id, "", activeDriver.ownSessionSql, undefined, undefined, { maxRows: 1 });
         const raw = idResult?.rows?.[0]?.[0];
         const parsed = Number(raw);
         if (Number.isFinite(parsed)) ownSessionId.value = parsed;
@@ -92,8 +107,17 @@ async function load(options: { silent?: boolean } = {}) {
         // Non-fatal: without our own id we simply cannot dim the self row.
       }
     }
-    const result = await api.executeQuery(props.connection.id, "", PROCESS_LIST_SQL, undefined, undefined, { maxRows: 5000 });
-    rows.value = mapProcessRows(result);
+    const listSql = fallbackListSql.value ?? activeDriver.listSql;
+    let result;
+    try {
+      result = await api.executeQuery(props.connection.id, "", listSql, undefined, undefined, { maxRows: activeDriver.maxRows });
+    } catch (error) {
+      if (fallbackListSql.value || !activeDriver.fallbackListSql || !activeDriver.shouldUseFallbackListSql?.(error)) throw error;
+      result = await api.executeQuery(props.connection.id, "", activeDriver.fallbackListSql, undefined, undefined, { maxRows: activeDriver.maxRows });
+      // Cache the compatible query so old servers do not fail once per refresh.
+      fallbackListSql.value = activeDriver.fallbackListSql;
+    }
+    rows.value = activeDriver.mapRows(result);
     truncated.value = result.truncated === true;
   } catch (error: any) {
     loadError.value = error?.message || String(error);
@@ -114,10 +138,11 @@ function requestKill(row: ProcessRow) {
 
 async function confirmKill() {
   const target = killTarget.value;
-  if (!target) return;
+  const activeDriver = driver.value;
+  if (!target || !activeDriver) return;
   killing.value = true;
   try {
-    const killSql = buildKillSql(target.id);
+    const killSql = activeDriver.buildKillSql(target.id);
     const result = await executeWithProductionSqlGuard({
       connection: props.connection,
       database: "",
@@ -128,6 +153,8 @@ async function confirmKill() {
     if (result === undefined) return;
     const executionError = processListExecutionError(result);
     if (executionError) throw new Error(executionError);
+    const killResultError = activeDriver.killResultError?.(result);
+    if (killResultError) throw new Error(killResultError);
     toast(t("processList.killSuccess", { id: target.id }), 2500);
     killTarget.value = null;
     await load({ silent: true });
@@ -174,6 +201,8 @@ watch(
     truncated.value = false;
     ownSessionId.value = null;
     search.value = "";
+    sortKey.value = driver.value?.defaultSortKey ?? "time";
+    sortDir.value = "desc";
     void load();
   },
 );
@@ -218,7 +247,7 @@ onBeforeUnmount(stopTimer);
       <table class="w-full border-collapse text-xs">
         <thead class="sticky top-0 z-10 bg-muted/40 backdrop-blur">
           <tr>
-            <th v-for="column in COLUMNS" :key="column.key" class="cursor-pointer select-none whitespace-nowrap border-b px-3 py-2 text-left font-medium hover:bg-accent" @click="toggleSort(column.key)">
+            <th v-for="column in columns" :key="column.key" class="cursor-pointer select-none whitespace-nowrap border-b px-3 py-2 text-left font-medium hover:bg-accent" @click="toggleSort(column.key)">
               <span class="inline-flex items-center gap-1">
                 {{ t(column.labelKey) }}
                 <ArrowUp v-if="sortKey === column.key && sortDir === 'asc'" class="h-3 w-3" />
@@ -230,17 +259,20 @@ onBeforeUnmount(stopTimer);
         </thead>
         <tbody>
           <tr v-for="row in filteredRows" :key="row.id" class="border-b hover:bg-accent/40" :class="{ 'bg-primary/5': isOwnSession(row) }">
-            <td class="whitespace-nowrap px-3 py-1.5 font-mono">
-              {{ row.id }}
-              <Badge v-if="isOwnSession(row)" variant="outline" class="ml-1 h-4 rounded px-1 text-[10px]">{{ t("processList.self") }}</Badge>
+            <td
+              v-for="column in columns"
+              :key="column.key"
+              class="px-3 py-1.5"
+              :class="[column.mono ? 'font-mono' : '', column.wide ? 'max-w-md cursor-pointer truncate hover:text-foreground hover:underline' : 'whitespace-nowrap', column.wide || column.key === 'db' || column.key === 'state' || column.key === 'wait' ? 'text-muted-foreground' : '']"
+              :title="column.wide ? (row[column.key] === null || row[column.key] === undefined ? '' : t('processList.previewTitle')) : undefined"
+              @click="column.wide ? openPreview(row[column.key]) : undefined"
+            >
+              <template v-if="column.key === 'id'">
+                {{ row.id }}
+                <Badge v-if="isOwnSession(row)" variant="outline" class="ml-1 h-4 rounded px-1 text-[10px]">{{ t("processList.self") }}</Badge>
+              </template>
+              <template v-else>{{ row[column.key] === null || row[column.key] === undefined ? "—" : row[column.key] }}</template>
             </td>
-            <td class="whitespace-nowrap px-3 py-1.5">{{ row.user }}</td>
-            <td class="whitespace-nowrap px-3 py-1.5">{{ row.host }}</td>
-            <td class="whitespace-nowrap px-3 py-1.5 text-muted-foreground">{{ row.db ?? "—" }}</td>
-            <td class="whitespace-nowrap px-3 py-1.5">{{ row.command }}</td>
-            <td class="whitespace-nowrap px-3 py-1.5 font-mono">{{ row.time }}</td>
-            <td class="whitespace-nowrap px-3 py-1.5 text-muted-foreground">{{ row.state ?? "—" }}</td>
-            <td class="max-w-md truncate px-3 py-1.5 font-mono text-muted-foreground" :title="row.info ?? ''">{{ row.info ?? "—" }}</td>
             <td class="px-3 py-1.5 text-right">
               <Button
                 variant="ghost"
@@ -256,7 +288,7 @@ onBeforeUnmount(stopTimer);
             </td>
           </tr>
           <tr v-if="!loading && filteredRows.length === 0">
-            <td :colspan="COLUMNS.length + 1" class="px-3 py-10 text-center text-muted-foreground">
+            <td :colspan="columns.length + 1" class="px-3 py-10 text-center text-muted-foreground">
               {{ search ? t("grid.noSearchResults") : t("processList.empty") }}
             </td>
           </tr>
@@ -288,6 +320,29 @@ onBeforeUnmount(stopTimer);
             <Loader2 v-if="killing" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
             {{ t("processList.kill") }}
           </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog
+      :open="previewText !== null"
+      @update:open="
+        (open) => {
+          if (!open) previewText = null;
+        }
+      "
+    >
+      <DialogContent class="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{{ t("processList.previewTitle") }}</DialogTitle>
+        </DialogHeader>
+        <pre class="max-h-[60vh] overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/30 p-3 font-mono text-xs">{{ previewText }}</pre>
+        <DialogFooter>
+          <Button variant="outline" class="gap-1.5" @click="copyPreview">
+            <Copy class="h-3.5 w-3.5" />
+            {{ t("processList.copy") }}
+          </Button>
+          <Button variant="secondary" @click="previewText = null">{{ t("dangerDialog.cancel") }}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

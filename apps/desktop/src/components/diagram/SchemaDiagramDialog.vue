@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
+import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import * as api from "@/lib/backend/api";
 import { DIAGRAM_SQL_TYPES, isSchemaAware as isSchemaAwareDatabase } from "@/lib/database/databaseCapabilities";
 import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
@@ -814,9 +815,10 @@ onUnmounted(stopDrag);
           </SelectTrigger>
           <SelectContent>
             <SelectItem v-for="connection in sqlConnections" :key="connection.id" :value="connection.id">
-              <div class="flex items-center gap-2">
-                <DatabaseIcon :db-type="connection.driver_profile || connection.db_type" class="w-3.5 h-3.5" />
-                {{ connection.name }}
+              <div class="flex min-w-0 items-center gap-2">
+                <DatabaseIcon :db-type="connection.driver_profile || connection.db_type" class="w-3.5 h-3.5 shrink-0" />
+                <ConnectionGroupBadge :connection-id="connection.id" />
+                <span class="min-w-0 flex-1 truncate">{{ connection.name }}</span>
               </div>
             </SelectItem>
           </SelectContent>

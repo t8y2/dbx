@@ -21,6 +21,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { useDialogSources } from "@/composables/useDialogSources";
 import type { ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
+import type { DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
 import type { SqlParameterDescriptor, SqlParameterSyntax } from "@/lib/sql/sqlParameters";
 import type { ConfigTab } from "@/components/connection/ConnectionDialog.vue";
 import type { DatabaseType } from "@/types/database";
@@ -49,7 +50,7 @@ const emit = defineEmits<{
   connectStarted: [name: string];
   connectSucceeded: [name: string];
   connectFailed: [message: string];
-  openDriverStore: [];
+  openDriverStore: [focus?: DriverStoreFocus];
   openTunnelProfileSettings: [];
   openLineageTarget: [
     target: {
@@ -136,7 +137,7 @@ watch(
     @connect-started="emit('connectStarted', $event)"
     @connect-succeeded="emit('connectSucceeded', $event)"
     @connect-failed="emit('connectFailed', $event)"
-    @open-driver-store="emit('openDriverStore')"
+    @open-driver-store="emit('openDriverStore', $event)"
     @open-tunnel-profile-settings="emit('openTunnelProfileSettings')"
   />
   <DangerConfirmDialog

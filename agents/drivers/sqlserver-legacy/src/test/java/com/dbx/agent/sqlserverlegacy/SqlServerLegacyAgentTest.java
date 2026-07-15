@@ -85,6 +85,45 @@ class SqlServerLegacyAgentTest {
     }
 
     @Test
+    void legacyTlsUrlUsesExplicitPortInsteadOfNamedInstanceResolution() {
+        ConnectParams params = new ConnectParams(
+            "db.example.com\\SQLEXPRESS",
+            40030,
+            "appdb",
+            "sa",
+            "secret",
+            "applicationName=dbx",
+            "",
+            false
+        );
+
+        Assertions.assertEquals(
+            "jdbc:sqlserver://db.example.com:40030;databaseName=appdb;applicationName=dbx;encrypt=true;trustServerCertificate=true;sslProtocol=TLSv1",
+            SqlServerLegacyAgent.legacyTlsUrl(params)
+        );
+    }
+
+    @Test
+    void legacyTlsUrlUsesExplicitDefaultPortInsteadOfNamedInstanceResolution() {
+        ConnectParams params = new ConnectParams(
+            "db.example.com\\SQLEXPRESS",
+            1433,
+            "appdb",
+            "sa",
+            "secret",
+            "applicationName=dbx",
+            "",
+            false
+        );
+        params.setPort_explicit(true);
+
+        Assertions.assertEquals(
+            "jdbc:sqlserver://db.example.com:1433;databaseName=appdb;applicationName=dbx;encrypt=true;trustServerCertificate=true;sslProtocol=TLSv1",
+            SqlServerLegacyAgent.legacyTlsUrl(params)
+        );
+    }
+
+    @Test
     void legacyTlsUrlNormalizesExplicitConnectionString() {
         ConnectParams params = new ConnectParams(
             "ignored",

@@ -77,7 +77,11 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
         StructureDialect::Doris => statements.extend(build_doris_existing_column_sql(&table, &options.column, "")),
         StructureDialect::Postgres => statements.extend(build_postgres_existing_column_sql(&table, &options.column)),
         StructureDialect::Oracle | StructureDialect::Dameng => {
-            statements.extend(build_oracle_like_existing_column_sql(dialect, &table, &options.column))
+            if options.database_type == Some(crate::models::connection::DatabaseType::Xugu) {
+                statements.extend(build_xugu_existing_column_sql(&table, &options.column));
+            } else {
+                statements.extend(build_oracle_like_existing_column_sql(dialect, &table, &options.column))
+            }
         }
         StructureDialect::H2 => statements.extend(build_h2_existing_column_sql(&table, &options.column)),
         StructureDialect::ClickHouse => {
@@ -287,6 +291,19 @@ pub(super) fn build_doris_existing_column_sql(
 }
 
 pub(super) fn build_postgres_existing_column_sql(table: &str, column: &EditableStructureColumn) -> Vec<String> {
+    build_postgres_like_existing_column_sql(table, column, false)
+}
+
+pub(super) fn build_xugu_existing_column_sql(table: &str, column: &EditableStructureColumn) -> Vec<String> {
+    // Xugu shares PostgreSQL's per-attribute ALTER flow, but its type clause omits TYPE entirely.
+    build_postgres_like_existing_column_sql(table, column, true)
+}
+
+fn build_postgres_like_existing_column_sql(
+    table: &str,
+    column: &EditableStructureColumn,
+    use_xugu_type_syntax: bool,
+) -> Vec<String> {
     let Some(original) = &column.original else {
         return Vec::new();
     };
@@ -300,11 +317,10 @@ pub(super) fn build_postgres_existing_column_sql(table: &str, column: &EditableS
         ));
     }
     if column.data_type.trim() != original.data_type.trim() {
-        statements.push(format!(
-            "ALTER TABLE {table} ALTER COLUMN {} TYPE {};",
-            quote_ident(StructureDialect::Postgres, current_name),
-            column_data_type(StructureDialect::Postgres, column)
-        ));
+        let column_name = quote_ident(StructureDialect::Postgres, current_name);
+        let data_type = column_data_type(StructureDialect::Postgres, column);
+        let type_clause = if use_xugu_type_syntax { data_type } else { format!("TYPE {data_type}") };
+        statements.push(format!("ALTER TABLE {table} ALTER COLUMN {column_name} {type_clause};"));
     }
     if column.is_nullable != original.is_nullable {
         let action = if column.is_nullable { "DROP NOT NULL" } else { "SET NOT NULL" };

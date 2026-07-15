@@ -1,13 +1,21 @@
 package com.dbx.agent.dameng;
 
 import com.dbx.agent.DatabaseAgent;
+import com.dbx.agent.ExecuteQueryOptions;
 import com.dbx.agent.MetadataListConstraints;
+import com.dbx.agent.QueryPageOptions;
+import com.dbx.agent.QueryPageResult;
+import com.dbx.agent.QueryResult;
 import com.dbx.agent.test.JdbcFakeExecutionBehaviorTest;
+import com.dbx.agent.test.JdbcAgentFake;
+import com.dbx.agent.test.TestSupport;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
@@ -19,6 +27,47 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
     @Override
     protected String resultSetSql() {
         return "CALL SP_SAMPLE()";
+    }
+
+    @Test
+    void executeQueryReturnsPlanRowsForExplainStatements() {
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, JdbcAgentFake.connection());
+
+        QueryResult result = agent.executeQuery(
+            "/* inspect */ EXPLAIN SELECT 1 FROM DUAL;",
+            null,
+            new ExecuteQueryOptions()
+        );
+
+        assertEquals(List.of("PLAN"), result.getColumns());
+        assertEquals(List.of(List.of("row-value")), result.getRows());
+        assertEquals(List.of("executeQuery"), JdbcAgentFake.calls);
+    }
+
+    @Test
+    void executeQueryPageReturnsPlanRowsForExplainStatements() {
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, JdbcAgentFake.connection());
+
+        QueryPageResult result = agent.executeQueryPage(
+            "EXPLAIN SELECT 1 FROM DUAL",
+            null,
+            new QueryPageOptions(100, 100, 1000)
+        );
+
+        assertEquals(List.of("PLAN"), result.getColumns());
+        assertEquals(List.of(List.of("row-value")), result.getRows());
+        assertNull(result.getSession_id());
+        assertFalse(result.getHas_more());
+        assertEquals(List.of("executeQuery"), JdbcAgentFake.calls);
+    }
+
+    @Test
+    void explainTargetSqlOnlyMatchesStandaloneLeadingKeyword() {
+        assertEquals("SELECT 1 FROM DUAL", DamengAgent.explainTargetSql("-- comment\n explain SELECT 1 FROM DUAL;;"));
+        assertNull(DamengAgent.explainTargetSql("EXPLAINER SELECT 1"));
+        assertNull(DamengAgent.explainTargetSql("SELECT 'EXPLAIN' FROM DUAL"));
     }
 
     @Test

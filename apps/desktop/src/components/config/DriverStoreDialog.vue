@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed, watch } from "vue";
+import { ref, onMounted, onUnmounted, computed, watch, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
 import { Activity, ExternalLink, Cpu, FolderOpen, FolderSync, MemoryStick, Search, Square, Trash2, Download, RotateCcw, Loader2, RefreshCw, Check, Clock3, FileUp } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
@@ -20,6 +20,7 @@ import type { AgentDriverInfo, DriverRuntimeInfo, DriverRuntimeSummary, DriverSt
 import { formatRuntimeBytes, formatRuntimeCpu, formatRuntimeUptime, runtimeHealthClass, runtimeStatusClass, runtimeStatusDotClass } from "@/lib/connection/driverRuntimePresentation";
 import { addDriverInstallQueue, driverInstallProgressPercent, isDriverInstallProgressTarget, removeDriverInstallQueue, takeNextDriverInstallQueue, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 import { PRESTOSQL_DRIVER_DB_TYPE, prestoSqlBuiltinDriverRow, prestoSqlMavenBundle } from "@/lib/database/prestoSqlBuiltinDriver";
+import type { DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -28,17 +29,25 @@ const isWeb = !isTauriRuntime();
 const props = withDefaults(
   defineProps<{
     updateNotificationsEnabled?: boolean;
+    activeTab?: "agent" | "jdbc" | "storage" | "runtime";
+    focusTarget?: DriverStoreFocus | null;
   }>(),
   {
     updateNotificationsEnabled: true,
+    activeTab: "agent",
+    focusTarget: null,
   },
 );
 
 const emit = defineEmits<{
   "update-count-change": [count: number];
+  "update:activeTab": [tab: "agent" | "jdbc" | "storage" | "runtime"];
 }>();
 
-const driverStoreTab = ref("agent");
+const driverStoreTab = computed({
+  get: () => props.activeTab,
+  set: (tab: "agent" | "jdbc" | "storage" | "runtime") => emit("update:activeTab", tab),
+});
 
 // ──────────── Driver store path ────────────
 
@@ -658,6 +667,35 @@ const filteredAgentDrivers = computed(() => {
   return builtinDriverRows.value.filter((driver) => [driver.label, driver.db_type, driver.version, driver.installed_version, driverRequiresJavaRuntime(driver) ? driver.jre : ""].filter(Boolean).join(" ").toLowerCase().includes(query));
 });
 
+const highlightedFocusKey = ref<string | null>(null);
+let focusHighlightTimer: ReturnType<typeof setTimeout> | undefined;
+
+function focusElementKey(focus: DriverStoreFocus): string {
+  return focus.target === "driver" ? `driver:${focus.driver ?? ""}` : "jre";
+}
+
+watch(
+  [() => props.focusTarget, builtinDriverRows],
+  async ([focus]) => {
+    if (!focus || focus.target === "tab") return;
+    driverStoreTab.value = "agent";
+    if (focus.target === "driver") {
+      // Wait until the requested driver row is loaded before scrolling to it.
+      if (!focus.driver || !builtinDriverRows.value.some((driver) => driver.db_type === focus.driver)) return;
+      agentDriverSearch.value = "";
+    }
+    const key = focusElementKey(focus);
+    highlightedFocusKey.value = key;
+    await nextTick();
+    document.querySelector(`[data-driver-store-focus="${CSS.escape(key)}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+    clearTimeout(focusHighlightTimer);
+    focusHighlightTimer = setTimeout(() => {
+      if (highlightedFocusKey.value === key) highlightedFocusKey.value = null;
+    }, 6000);
+  },
+  { immediate: true },
+);
+
 const jdbcDriverListItems = computed<JdbcDriverListItem[]>(() => {
   const localBundleItems = jdbcLocalBundles.value.map((bundle) => ({
     kind: "local" as const,
@@ -1093,7 +1131,7 @@ watch(driverStoreTab, (tab) => {
           <!-- Agent Tab -->
           <TabsContent value="agent" class="driver-store-tab driver-store-agent-tab mt-5 space-y-5">
             <!-- Java Runtime -->
-            <div class="rounded-xl border bg-muted/20 p-4 space-y-3">
+            <div class="rounded-xl border bg-muted/20 p-4 space-y-3" data-driver-store-focus="jre" :class="{ 'driver-store-focus-highlight': highlightedFocusKey === 'jre' }">
               <div class="flex flex-wrap items-center gap-2">
                 <Label class="shrink-0">{{ t("driverStore.javaRuntime") }}</Label>
                 <Select :model-value="javaRuntimeConfig.mode" @update:model-value="setJavaRuntimeMode">
@@ -1167,7 +1205,13 @@ watch(driverStoreTab, (tab) => {
                   {{ upgradingAll ? t("driverStore.upgradingProgress", { current: upgradingIndex, total: upgradingTotal }) : t("driverStore.upgradeAll") }}
                 </Button>
               </div>
-              <div v-for="driver in filteredAgentDrivers" :key="driver.db_type" class="driver-store-agent-row flex items-center gap-3 px-4 py-2 transition hover:bg-muted/30">
+              <div
+                v-for="driver in filteredAgentDrivers"
+                :key="driver.db_type"
+                :data-driver-store-focus="`driver:${driver.db_type}`"
+                class="driver-store-agent-row flex items-center gap-3 px-4 py-2 transition hover:bg-muted/30"
+                :class="{ 'driver-store-focus-highlight': highlightedFocusKey === `driver:${driver.db_type}` }"
+              >
                 <span class="flex h-8 w-8 items-center justify-center rounded-lg bg-muted/60 shrink-0">
                   <DatabaseIcon :db-type="driver.db_type" class="h-4 w-4" />
                 </span>
@@ -1535,6 +1579,12 @@ watch(driverStoreTab, (tab) => {
 </template>
 
 <style>
+.driver-store-focus-highlight {
+  background-color: hsl(var(--primary) / 0.08);
+  box-shadow: inset 0 0 0 1.5px hsl(var(--primary) / 0.45);
+  border-radius: 8px;
+}
+
 .driver-store-view,
 .driver-store-scroll {
   overflow-x: hidden;

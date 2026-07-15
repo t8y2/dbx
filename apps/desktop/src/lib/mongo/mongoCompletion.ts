@@ -38,6 +38,9 @@ const COLLECTION_METHODS = [
   { label: "updateMany", detail: "Update all matching documents", apply: "updateMany({}, { $set: {} })" },
   { label: "deleteOne", detail: "Delete one matching document", apply: "deleteOne({})" },
   { label: "deleteMany", detail: "Delete all matching documents", apply: "deleteMany({})" },
+  { label: "findOneAndUpdate", detail: "Atomically update and return a document", apply: "findOneAndUpdate({}, { $set: {} })" },
+  { label: "findOneAndReplace", detail: "Atomically replace and return a document", apply: "findOneAndReplace({}, {})" },
+  { label: "findOneAndDelete", detail: "Atomically delete and return a document", apply: "findOneAndDelete({})" },
   { label: "getIndexes", detail: "List collection indexes", apply: "getIndexes()" },
   { label: "stats", detail: "Show collection statistics", apply: "stats()" },
   { label: "dataSize", detail: "Total size of documents in bytes", apply: "dataSize()" },
@@ -72,7 +75,7 @@ const FIELD_SNIPPETS = [
 const QUERY_OPERATORS = ["$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in", "$nin", "$exists", "$regex", "$and", "$or", "$nor", "$not", "$elemMatch"];
 const UPDATE_OPERATORS = ["$set", "$unset", "$inc", "$push", "$pull", "$addToSet", "$rename", "$currentDate", "$setOnInsert"];
 const PIPELINE_STAGES = ["$match", "$project", "$group", "$sort", "$limit", "$skip", "$unwind", "$lookup", "$addFields", "$count", "$facet"];
-const QUERY_METHODS = ["find", "findOne", "countDocuments", "updateOne", "updateMany", "deleteOne", "deleteMany", "dropIndex", "dropIndexes", "sort"];
+const QUERY_METHODS = ["find", "findOne", "findOneAndUpdate", "findOneAndReplace", "findOneAndDelete", "countDocuments", "updateOne", "updateMany", "deleteOne", "deleteMany", "dropIndex", "dropIndexes", "sort"];
 
 export function getMongoCompletionContext(text: string, cursor: number): MongoCompletionContext {
   const safeCursor = Math.max(0, Math.min(cursor, text.length));
@@ -365,7 +368,7 @@ function mongoFieldApplyText(field: string, prefix: string): string {
 }
 
 function findInnermostMongoCall(beforeCursor: string): { method: string; openParenIndex: number } | null {
-  const callPattern = /\.(find|findOne|countDocuments|updateOne|updateMany|deleteOne|deleteMany|aggregate|sort)\s*\(/g;
+  const callPattern = /\.(find|findOne|findOneAndUpdate|findOneAndReplace|findOneAndDelete|countDocuments|updateOne|updateMany|deleteOne|deleteMany|aggregate|sort)\s*\(/g;
   let match: RegExpExecArray | null;
   let result: { method: string; openParenIndex: number } | null = null;
   while ((match = callPattern.exec(beforeCursor))) {

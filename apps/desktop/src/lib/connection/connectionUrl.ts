@@ -16,6 +16,7 @@ export interface ParsedConnectionUrl {
   connectionString?: string;
   oracleConnectionType?: "service_name" | "sid";
   useMongoUrl?: boolean;
+  portExplicit?: boolean;
 }
 
 export type ConnectionProfile = {
@@ -46,8 +47,10 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   milvus: { type: "milvus", profile: "milvus", label: "Milvus", defaultPort: 19530 },
   weaviate: { type: "weaviate", profile: "weaviate", label: "Weaviate", defaultPort: 8080 },
   chromadb: { type: "chromadb", profile: "chromadb", label: "ChromaDB", defaultPort: 8000 },
-  dm: { type: "dameng", profile: "dm", label: "DM (Dameng)", defaultPort: 5236 },
-  dameng: { type: "dameng", profile: "dm", label: "DM (Dameng)", defaultPort: 5236 },
+  dm: { type: "dameng", profile: "dm", label: "达梦 Dameng", defaultPort: 5236 },
+  dameng: { type: "dameng", profile: "dm", label: "达梦 Dameng", defaultPort: 5236 },
+  kingbase: { type: "kingbase", profile: "kingbase", label: "KingBase", defaultPort: 54321 },
+  kingbase8: { type: "kingbase", profile: "kingbase", label: "KingBase", defaultPort: 54321 },
   gaussdb: { type: "gaussdb", profile: "gaussdb", label: "GaussDB", defaultPort: 5432 },
   kwdb: { type: "kwdb", profile: "kwdb", label: "KWDB", defaultPort: 26257 },
   gbase: { type: "gbase", profile: "gbase", label: "GBase", defaultPort: 5258 },
@@ -276,6 +279,7 @@ function parseJdbcSqlServerUrl(source: string): ParsedConnectionUrl | null {
     driverLabel: profile.label,
     host: match[1],
     port: match[2] ? Number(match[2]) : profile.defaultPort,
+    ...(match[2] ? { portExplicit: true } : {}),
     username: decodeUrlPart(props.get("user") || ""),
     password: decodeUrlPart(props.get("password") || ""),
     database: decodeUrlPart(props.get("databasename") || props.get("database") || "") || undefined,
@@ -568,6 +572,7 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
     driverLabel: profile.label,
     host: parsed.hostname,
     port: parsed.port ? Number(parsed.port) : profile.defaultPort,
+    ...(profile.type === "sqlserver" && parsed.port ? { portExplicit: true } : {}),
     username: mysqlCredentials?.username ?? decodeUrlPart(parsed.username),
     password: mysqlCredentials?.password ?? decodeUrlPart(parsed.password),
     database: databaseFromPath(parsed.pathname),
@@ -588,6 +593,9 @@ function applyParsedUsername(config: Omit<ConnectionConfig, "id">, parsed: Parse
   if (parsed.dbType === "h2" && config.db_type === "h2" && !h2JdbcUrlHasUserParam(parsed.connectionString)) {
     return config.username || parsed.username;
   }
+  if (parsed.dbType === "kingbase" && config.db_type === "kingbase" && !parsed.username) {
+    return config.username;
+  }
   return parsed.username;
 }
 
@@ -595,7 +603,27 @@ function applyParsedPassword(config: Omit<ConnectionConfig, "id">, parsed: Parse
   if (parsed.dbType === "h2" && config.db_type === "h2" && !h2JdbcUrlHasPasswordParam(parsed.connectionString)) {
     return config.password || parsed.password;
   }
+  if (parsed.dbType === "kingbase" && config.db_type === "kingbase" && !parsed.password) {
+    return config.password;
+  }
   return parsed.password;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function sqlServerExternalConfig(existing: unknown, parsed: ParsedConnectionUrl): unknown {
+  if (parsed.dbType !== "sqlserver") return existing;
+
+  const next = isRecord(existing) ? { ...existing } : {};
+  delete next.port_explicit;
+  if (parsed.portExplicit) {
+    next.portExplicit = true;
+  } else {
+    delete next.portExplicit;
+  }
+  return Object.keys(next).length > 0 ? next : undefined;
 }
 
 export function applyParsedConnectionUrl(config: Omit<ConnectionConfig, "id">, parsed: ParsedConnectionUrl): Omit<ConnectionConfig, "id"> {
@@ -614,5 +642,6 @@ export function applyParsedConnectionUrl(config: Omit<ConnectionConfig, "id">, p
     ssl: parsed.ssl,
     connection_string: parsed.connectionString,
     oracle_connection_type: parsed.oracleConnectionType,
+    external_config: sqlServerExternalConfig(config.external_config, parsed),
   };
 }

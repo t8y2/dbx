@@ -110,6 +110,13 @@ export function formatNumber(value: number): string {
   return Math.round(value).toLocaleString("en-US");
 }
 
+const RATE_NUMBER_FORMATTER = new Intl.NumberFormat("en-US", { maximumFractionDigits: 3 });
+
+/** Cumulative-counter rates can be below 1/s, so preserve their fractional value. */
+export function formatRate(value: number): string {
+  return Number.isFinite(value) ? RATE_NUMBER_FORMATTER.format(value) : "0";
+}
+
 const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB"];
 
 export function formatBytes(value: number): string {

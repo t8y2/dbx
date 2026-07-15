@@ -1,7 +1,9 @@
 ﻿import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { findConnectionGroupPath } from "@/lib/sidebar/sidebarLayout";
 import { splitMongoCommandRanges } from "@/lib/mongo/mongoShellCommand";
 import { executableStatementRanges, splitSqlStatementRanges, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
+import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
 import type { ConnectionConfig, DatabaseType, QueryResult, QueryTab } from "@/types/database";
 
 type Translate = (key: string, params?: Record<string, unknown>) => string;
@@ -10,6 +12,13 @@ export type OutputView = "result" | "summary" | "explain" | "chart";
 export function connectionDisplayName(connectionId: string): string {
   const connectionStore = useConnectionStore();
   return connectionStore.getConfig(connectionId)?.name || connectionId;
+}
+
+export function connectionGroupDisplayName(connectionId: string, t: Translate): string | undefined {
+  const connectionStore = useConnectionStore();
+  const path = findConnectionGroupPath(connectionStore.sidebarLayout, connectionId);
+  if (path === null) return undefined;
+  return path.join(" / ") || t("connectionGroup.ungroupedLabel");
 }
 
 export function connectionColor(connectionId: string): string {
@@ -111,11 +120,9 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
 
 export function tabTooltipLines(tab: QueryTab, t: Translate): { label: string; value: string }[] {
   const connName = connectionDisplayName(tab.connectionId);
+  const groupName = connectionGroupDisplayName(tab.connectionId, t);
   const database = databaseDisplayNameForTab(tab.connectionId, tab.database, t);
-  const lines: { label: string; value: string }[] = [
-    { label: t("tabs.tooltipConnection"), value: connName },
-    { label: t("tabs.tooltipDatabase"), value: database },
-  ];
+  const lines: { label: string; value: string }[] = [{ label: t("tabs.tooltipConnection"), value: connName }, ...(groupName ? [{ label: t("tabs.tooltipGroup"), value: groupName }] : []), { label: t("tabs.tooltipDatabase"), value: database }];
   if (tab.mode === "query" && queryTitle(tab)) {
     lines.unshift({ label: t("tabs.tooltipTitle"), value: tab.title });
   }
@@ -173,7 +180,7 @@ export function resultSourceRange(editorSql: string, result: Pick<QueryResult, "
     return { from: result.sourceFrom, to: result.sourceTo, sql: sourceStatement };
   }
 
-  const statements = databaseType === "redis" ? executableStatementRanges(editorSql, databaseType) : databaseType === "mongodb" ? splitMongoCommandRanges(editorSql).map(({ from, to, text }) => ({ from, to, sql: text })) : splitSqlStatementRanges(editorSql, databaseType);
+  const statements = statementRanges(editorSql, databaseType);
   const indexed = typeof resultIndex === "number" ? statements[resultIndex] : undefined;
   if (indexed?.sql === sourceStatement) {
     return { from: indexed.from, to: indexed.to, sql: indexed.sql };
@@ -183,6 +190,63 @@ export function resultSourceRange(editorSql: string, result: Pick<QueryResult, "
   if (matches.length !== 1) return undefined;
   const [match] = matches;
   return { from: match.from, to: match.to, sql: match.sql };
+}
+
+export type StatementExecutionMarkerStatus = "success" | "error";
+
+export interface StatementExecutionMarker {
+  from: number;
+  status: StatementExecutionMarkerStatus;
+  successCount: number;
+  errorCount: number;
+}
+
+function lineStartOffset(sql: string, from: number): number {
+  return sql.lastIndexOf("\n", Math.max(0, from - 1)) + 1;
+}
+
+function statementRanges(sql: string, databaseType?: DatabaseType): SqlTextRange[] {
+  if (databaseType === "redis") return executableStatementRanges(sql, databaseType);
+  if (databaseType === "mongodb") return splitMongoCommandRanges(sql).map(({ from, to, text }) => ({ from, to, sql: text }));
+  return splitSqlStatementRanges(sql, databaseType);
+}
+
+export function statementExecutionMarkers(editorSql: string, results: QueryResult[] | undefined, databaseType?: DatabaseType, submittedSql = editorSql, executionEditorFingerprint = sqlTextFingerprint(editorSql)): StatementExecutionMarker[] {
+  if (!results?.length || sqlTextFingerprint(editorSql) !== executionEditorFingerprint) return [];
+  const submittedStatements = statementRanges(submittedSql, databaseType);
+  if (submittedStatements.length <= 1) return [];
+  const editorStatements = submittedSql === editorSql ? submittedStatements : statementRanges(editorSql, databaseType);
+
+  const byLine = new Map<number, { success: number; error: number }>();
+  for (const result of results) {
+    if (!Number.isInteger(result.statement_index) || result.statement_index! < 0) continue;
+    const statementIndex = result.statement_index!;
+    const submittedStatement = submittedStatements[statementIndex];
+    if (!submittedStatement || submittedStatement.sql !== result.sourceStatement) continue;
+    const range =
+      typeof result.sourceFrom === "number" && typeof result.sourceTo === "number" && editorSql.slice(result.sourceFrom, result.sourceTo) === result.sourceStatement
+        ? { from: result.sourceFrom, to: result.sourceTo, sql: result.sourceStatement }
+        : editorStatements[statementIndex]?.sql === result.sourceStatement
+          ? editorStatements[statementIndex]
+          : undefined;
+    if (!range) continue;
+    const from = lineStartOffset(editorSql, range.from);
+    const current = byLine.get(from) ?? { success: 0, error: 0 };
+    if (result.execution_error === true) current.error += 1;
+    else current.success += 1;
+    byLine.set(from, current);
+  }
+
+  return [...byLine.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([from, counts]) => {
+      return {
+        from,
+        status: counts.error > 0 ? "error" : "success",
+        successCount: counts.success,
+        errorCount: counts.error,
+      };
+    });
 }
 
 export function queryResultBaseSql(tab: Pick<QueryTab, "result" | "resultBaseSql" | "lastExecutedSql" | "sql">): string {

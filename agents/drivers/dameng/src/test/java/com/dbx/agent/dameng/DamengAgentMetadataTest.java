@@ -34,6 +34,7 @@ class DamengAgentMetadataTest {
             .findFirst()
             .orElseThrow();
         Assertions.assertTrue(columnsSql.contains("LEFT JOIN ALL_COL_COMMENTS"), columnsSql);
+        Assertions.assertTrue(columnsSql.contains("c.CHAR_USED"), columnsSql);
         Assertions.assertTrue(columnsSql.startsWith("SELECT /*+ PARALLEL(1) */"), columnsSql);
     }
 
@@ -159,6 +160,22 @@ class DamengAgentMetadataTest {
     }
 
     @Test
+    void readsViewSourceWithDbmsMetadataType() {
+        DamengAgent agent = new DamengAgent();
+        List<String> params = new ArrayList<>();
+        TestSupport.setPrivateConnection(
+            agent,
+            objectSourceConnection(params, "CREATE VIEW \"APP\".\"V_PROCESSPLAN\" AS SELECT 1 AS ID FROM DUAL")
+        );
+
+        ObjectSource source = agent.getObjectSource("APP", "V_PROCESSPLAN", "VIEW");
+
+        Assertions.assertEquals(List.of("VIEW", "V_PROCESSPLAN", "APP"), params);
+        Assertions.assertEquals("VIEW", source.getObject_type());
+        Assertions.assertTrue(source.getSource().contains("CREATE VIEW"), source.getSource());
+    }
+
+    @Test
     void triggerMetadataDoesNotRequireOracleTriggerTypeColumn() {
         DamengAgent agent = new DamengAgent();
         TestSupport.setPrivateConnection(agent, JdbcMetadataSqlFake.connection());
@@ -204,6 +221,30 @@ class DamengAgentMetadataTest {
 
         Assertions.assertEquals(1, columns.size());
         Assertions.assertEquals("identity", columns.get(0).getExtra());
+    }
+
+    @Test
+    void preservesCharacterLengthUnitsFromMetadata() {
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, metadataConnectionForColumns(List.of(
+            Arrays.asList("BYTE_VALUE", "VARCHAR2", "Y", null, null, 256, 64, "B", "byte length"),
+            Arrays.asList("CHAR_VALUE", "VARCHAR", "Y", null, null, 256, 64, "C", "character length"),
+            Arrays.asList("FIXED_VALUE", "CHAR", "Y", null, null, 40, 10, "C", "fixed length"),
+            Arrays.asList("DEFAULT_VALUE", "VARCHAR2", "Y", null, null, 80, 20, null, "default length"),
+            Arrays.asList("WORD_VALUE", "VARCHAR2", "Y", null, null, 128, 32, "BYTE", "word byte length"),
+            Arrays.asList("NATIONAL_VALUE", "NVARCHAR2", "Y", null, null, 80, 20, "C", "national length"),
+            Arrays.asList("NATIONAL_FIXED", "NCHAR", "Y", null, null, 40, 10, "B", "national fixed length")
+        )));
+
+        List<ColumnInfo> columns = agent.getColumns("APP", "USERS");
+
+        Assertions.assertEquals("VARCHAR2(256 BYTE)", columns.get(0).getData_type());
+        Assertions.assertEquals("VARCHAR(64 CHAR)", columns.get(1).getData_type());
+        Assertions.assertEquals("CHAR(10 CHAR)", columns.get(2).getData_type());
+        Assertions.assertEquals("VARCHAR2(20)", columns.get(3).getData_type());
+        Assertions.assertEquals("VARCHAR2(128 BYTE)", columns.get(4).getData_type());
+        Assertions.assertEquals("NVARCHAR2(20)", columns.get(5).getData_type());
+        Assertions.assertEquals("NCHAR(10)", columns.get(6).getData_type());
     }
 
     @Test
@@ -368,6 +409,38 @@ class DamengAgentMetadataTest {
         List<String> sqls,
         String dbmsMetadataDdl
     ) {
+        return metadataConnection(
+            allColumnComment,
+            fallbackColumnComment,
+            includeMaterializedView,
+            independentIndexes,
+            sqls,
+            dbmsMetadataDdl,
+            defaultColumnMetadataRows(allColumnComment)
+        );
+    }
+
+    private static Connection metadataConnectionForColumns(List<List<Object>> columnRows) {
+        return metadataConnection(
+            "id comment",
+            null,
+            false,
+            List.of(),
+            null,
+            "CREATE TABLE \"APP\".\"USERS\" (\n  \"ID\" NUMBER\n);",
+            columnRows
+        );
+    }
+
+    private static Connection metadataConnection(
+        String allColumnComment,
+        String fallbackColumnComment,
+        boolean includeMaterializedView,
+        List<List<Object>> independentIndexes,
+        List<String> sqls,
+        String dbmsMetadataDdl,
+        List<List<Object>> columnRows
+    ) {
         boolean[] dbmsMetadataResultOpen = {false};
         return proxy(Connection.class, (method, args) -> {
             String name = method.getName();
@@ -440,16 +513,7 @@ class DamengAgentMetadataTest {
                     return metadataStatement(List.of());
                 }
                 if (sql.contains("ALL_TAB_COLUMNS")) {
-                    return metadataStatement(List.of(Arrays.asList(
-                        "ID",
-                        "NUMBER",
-                        "N",
-                        Integer.valueOf(10),
-                        Integer.valueOf(0),
-                        Integer.valueOf(22),
-                        Integer.valueOf(10),
-                        allColumnComment
-                    )));
+                    return metadataStatement(columnRows);
                 }
             }
             if ("close".equals(name)) {
@@ -460,6 +524,20 @@ class DamengAgentMetadataTest {
             }
             return defaultValue(method.getReturnType());
         });
+    }
+
+    private static List<List<Object>> defaultColumnMetadataRows(String allColumnComment) {
+        return List.of(Arrays.asList(
+            "ID",
+            "NUMBER",
+            "N",
+            Integer.valueOf(10),
+            Integer.valueOf(0),
+            Integer.valueOf(22),
+            Integer.valueOf(10),
+            null,
+            allColumnComment
+        ));
     }
 
     private static List<Object> indexRow(String name, String columns, String uniqueness, String indexType) {
@@ -570,6 +648,7 @@ class DamengAgentMetadataTest {
                     case "DATA_TYPE" -> string(rows, index[0], 1);
                     case "NULLABLE" -> string(rows, index[0], 2);
                     case "DATA_DEFAULT" -> null;
+                    case "CHAR_USED" -> string(rows, index[0], 7);
                     case "COMMENTS", "COMMENT$" -> string(rows, index[0], rows.get(index[0]).size() - 1);
                     case "COLNAME" -> string(rows, index[0], 0);
                     default -> null;

@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
+import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import { useToast } from "@/composables/useToast";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
@@ -438,15 +439,16 @@ watch(
 
 <template>
   <Dialog :open="open" @update:open="handleOpenChange">
-    <DialogScrollContent class="sm:max-w-[860px] min-w-0 overflow-hidden" :trap-focus="false" @interact-outside.prevent>
-      <DialogHeader>
+    <DialogScrollContent class="flex max-h-[calc(100dvh-6rem)] min-h-0 min-w-0 flex-col overflow-hidden sm:max-w-[860px]" :trap-focus="false" @interact-outside.prevent>
+      <DialogHeader class="shrink-0">
         <DialogTitle class="flex items-center gap-2">
           <FileCode class="w-4 h-4" />
           {{ t("sqlFile.title") }}
         </DialogTitle>
       </DialogHeader>
 
-      <div class="grid min-w-0 gap-4 py-3">
+      <!-- Keep terminal actions reachable while long previews and errors scroll inside the viewport. -->
+      <div class="grid min-h-0 min-w-0 flex-1 gap-4 overflow-y-auto py-3">
         <div class="min-w-0 space-y-3">
           <div class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
             {{ t("sqlFile.file") }}
@@ -488,7 +490,7 @@ watch(
             {{ t("sqlFile.target") }}
           </div>
 
-          <div class="grid grid-cols-2 gap-3">
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("sqlFile.connection") }}</Label>
               <Select v-model="connectionId" :disabled="running">
@@ -501,9 +503,10 @@ watch(
                 </SelectTrigger>
                 <SelectContent position="popper">
                   <SelectItem v-for="c in sqlConnections" :key="c.id" :value="c.id">
-                    <div class="flex items-center gap-1.5">
-                      <DatabaseIcon :db-type="c.driver_profile || c.db_type" class="w-3.5 h-3.5" />
-                      {{ c.name }}
+                    <div class="flex min-w-0 items-center gap-1.5">
+                      <DatabaseIcon :db-type="c.driver_profile || c.db_type" class="w-3.5 h-3.5 shrink-0" />
+                      <ConnectionGroupBadge :connection-id="c.id" />
+                      <span class="min-w-0 flex-1 truncate">{{ c.name }}</span>
                     </div>
                   </SelectItem>
                 </SelectContent>
@@ -595,7 +598,7 @@ watch(
         </div>
       </div>
 
-      <DialogFooter>
+      <DialogFooter class="shrink-0">
         <template v-if="running">
           <Button variant="outline" size="sm" @click="open = false">
             {{ t("sqlFile.runInBackground") }}

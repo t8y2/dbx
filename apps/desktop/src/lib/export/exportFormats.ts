@@ -6,7 +6,7 @@ export type ExportCellValue = string | number | boolean | null;
 export function formatCsv(columns: string[], rows: ExportCellValue[][]): string {
   const esc = (v: string) => `"${v.replace(/"/g, '""')}"`;
   const header = columns.map(esc).join(",");
-  const body = rows.map((row) => row.map((c) => esc(c === null ? "NULL" : String(c))).join(",")).join("\n");
+  const body = rows.map((row) => row.map((c) => (c === null ? "" : esc(String(c)))).join(",")).join("\n");
   return `${header}\n${body}`;
 }
 

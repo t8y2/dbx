@@ -563,24 +563,42 @@ jobs:
       matrix:
         tag: ["${{ github.ref_name }}", "agents-latest"]
     steps:
-      - name: Sync release assets to CNB
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Download GitHub release assets
         env:
           TAG_NAME: ${{ matrix.tag }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_USERNAME: ${{ github.repository_owner }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CNB_REPOSITORY: dbxio.com/dbx
-          CNB_USERNAME: cnb
-          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          wget -q https://cnb.cool/znb/mpgrm/-/releases/download/v0.1.0/mpgrm_linux_amd64.tar.gz
-          tar -xf mpgrm_linux_amd64.tar.gz
-          chmod +x mpgrm
-          ./mpgrm releases sync \
-            --repo "https://github.com/${GITHUB_REPOSITORY}.git" \
-            --target-repo "https://cnb.cool/${CNB_REPOSITORY}.git" \
-            --tags "${TAG_NAME}"
+          mkdir -p "$RUNNER_TEMP/github-release" "$RUNNER_TEMP/release-assets"
+          gh release view "$TAG_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json tagName,name,body,targetCommitish,isPrerelease,isDraft,assets \
+            > "$RUNNER_TEMP/github-release/release.json"
+          gh release download "$TAG_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/release-assets" \
+            --clobber
+
+      - name: Sync release assets to CNB
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CNB_UPLOAD_CONCURRENCY: "3"
+          OVERWRITE_EXISTING: ${{ matrix.tag == 'agents-latest' }}
+        run: |
+          set -euo pipefail
+          args=(
+            --github-release "$RUNNER_TEMP/github-release/release.json"
+            --assets-dir "$RUNNER_TEMP/release-assets"
+          )
+          # agents-latest is mutable, so its stable asset names must replace the previous release contents.
+          if [[ "$OVERWRITE_EXISTING" == "true" ]]; then
+            args+=(--overwrite-existing)
+          fi
+          node .github/scripts/sync-cnb-release.mjs "${args[@]}"
 
   sync-release-to-atomgit:
     name: Sync agents releases to AtomGit

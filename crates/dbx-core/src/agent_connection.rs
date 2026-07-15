@@ -47,6 +47,7 @@ pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, da
     serde_json::json!({
         "host": agent_host,
         "port": agent_port,
+        "port_explicit": config.sqlserver_port_explicit(),
         "database": agent_database,
         "username": config.username,
         "password": config.password,
@@ -623,6 +624,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            database_info: None,
         }
     }
 

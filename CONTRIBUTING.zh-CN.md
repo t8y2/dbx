@@ -4,11 +4,11 @@
 
 ## 从哪里开始
 
-1. 浏览 [Issues](https://github.com/t8y2/dbx/issues)。优先看 `documentation`、`good first issue`，或者你手头正好有测试环境的数据库相关问题。
-2. 在 Issue 下留言说明你想做什么，避免重复劳动。部分社区 Issue 也支持评论 `/claim` 来认领。
+1. 浏览 [Issues](https://github.com/t8y2/dbx/issues)，选择尚未分配、评论中也没有人正在处理的问题。不要只依赖标签，先阅读完整正文、评论和截图。
+2. 在 Issue 下留言说明你想做什么，避免重复劳动；可以评论 `/claim` 来认领。
 3. Fork 仓库，新建分支开发，然后向 `main` 提 PR。
 
-如果暂时不确定做什么，文档和小体验修复很适合第一次贡献。可以先看 [examples/](examples/) 和[官方文档](https://dbxio.com/cn/docs/what-is-dbx) 熟悉项目结构。
+如果暂时不确定做什么，优先选择复现清晰、改动范围小，或者你能使用真实数据库验证的问题。完整流程见[官网贡献教程](https://dbxio.com/cn/docs/contributing)。
 
 ## 开发环境
 
@@ -50,11 +50,15 @@ cd agents
 ./gradlew test
 ```
 
+修改已有 Agent 时不要手动修改 `agents/versions.json`，发布工作流会自动 bump 发生变化的模块。只有新增驱动时才需要登记初始版本；新增 Java/JDBC 驱动还要同步 `agents/settings.gradle` 和支持列表，原生驱动按 Agent authoring/release checklist 登记构建产物。
+
+本地验证 Java Agent 时，需要构建目标 `shadowJar`，备份并覆盖 `~/.dbx/agents/drivers/<db_type>/agent.jar`，然后重启 DBX 或重新连接数据库。完整命令见[官网贡献教程](https://dbxio.com/cn/docs/contributing)。
+
 ## 项目结构
 
 | 路径 | 说明 |
 | --- | --- |
-| `src/` | Vue 前端 |
+| `apps/desktop/src/` | Vue 前端 |
 | `src-tauri/` | Tauri 桌面端壳层与命令层 |
 | `crates/dbx-core/` | 共享 Rust 数据库逻辑 |
 | `crates/dbx-web/` | Docker / Web HTTP 后端 |

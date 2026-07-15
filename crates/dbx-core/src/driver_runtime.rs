@@ -215,14 +215,30 @@ async fn collect_runtime_seeds(state: &AppState) -> Vec<RuntimeSeed> {
     }
 
     let mut output = seeds.into_values().collect::<Vec<_>>();
-    output.sort_by(|left, right| {
-        left.kind
-            .cmp(&right.kind)
-            .then(left.label.cmp(&right.label))
-            .then(left.source.cmp(&right.source))
-            .then(left.id.cmp(&right.id))
-    });
+    sort_runtime_seeds(&mut output);
     output
+}
+
+fn sort_runtime_seeds(runtimes: &mut [RuntimeSeed]) {
+    runtimes.sort_by(|left, right| {
+        // Active runtimes are the primary operational focus; preserve the
+        // existing deterministic order within active and inactive groups.
+        runtime_activity_rank(&left.status).cmp(&runtime_activity_rank(&right.status)).then(
+            left.kind
+                .cmp(&right.kind)
+                .then(left.label.cmp(&right.label))
+                .then(left.source.cmp(&right.source))
+                .then(left.id.cmp(&right.id)),
+        )
+    });
+}
+
+fn runtime_activity_rank(status: &str) -> u8 {
+    if status == "running" {
+        0
+    } else {
+        1
+    }
 }
 
 async fn collect_process_stats(pids: HashSet<u32>) -> HashMap<u32, ProcessStats> {
@@ -309,7 +325,7 @@ fn non_empty(value: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_summary, runtime_agent_key, ProcessStats, RuntimeSeed};
+    use super::{build_summary, runtime_agent_key, sort_runtime_seeds, ProcessStats, RuntimeSeed};
     use std::collections::HashMap;
 
     fn seed(id: &str, status: &str, pid: Option<u32>) -> RuntimeSeed {
@@ -349,5 +365,14 @@ mod tests {
         assert_eq!(runtime_agent_key("agent:oracle"), Some("oracle"));
         assert_eq!(runtime_agent_key("agent-runtime:oracle:123"), Some("oracle"));
         assert_eq!(runtime_agent_key("plugin-connection:test"), None);
+    }
+
+    #[test]
+    fn running_runtimes_sort_before_stopped_runtimes() {
+        let mut runtimes = vec![seed("h2", "stopped", None), seed("oracle", "running", Some(42))];
+
+        sort_runtime_seeds(&mut runtimes);
+
+        assert_eq!(runtimes.iter().map(|runtime| runtime.id.as_str()).collect::<Vec<_>>(), vec!["oracle", "h2"]);
     }
 }

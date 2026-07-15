@@ -70,6 +70,8 @@ function close() {
   show.value = false;
 }
 
+defineExpose({ close });
+
 function onPointerDownOutside(e: PointerEvent) {
   // Only respond to primary (left) button presses. This avoids a macOS
   // issue where Ctrl+right-click generates a synthetic click event on
@@ -125,9 +127,12 @@ function handleSubItemClick(item: ContextMenuItem) {
   item.action?.();
 }
 
-function onContextMenu(event: MouseEvent) {
+function onContextMenu(event: MouseEvent, itemsOverride?: ContextMenuItem[]) {
   // Some callers build large context menus; resolve them only for actual opens.
-  const items = typeof props.items === "function" ? props.items() : props.items;
+  // Tree-level hosts may replace their items and open in the same event turn.
+  // Accepting the resolved items directly avoids reading the previous prop
+  // value before Vue has flushed the parent-to-child update.
+  const items = itemsOverride ?? (typeof props.items === "function" ? props.items() : props.items);
   if (items.length === 0) return;
   activeItems.value = items;
   event.preventDefault();
@@ -243,7 +248,7 @@ function adjustSubPosition() {
 
 function itemButtonClass(variant?: "default" | "destructive") {
   return [
-    "w-full gap-2 rounded-md px-2 py-1 text-[13px] leading-4 outline-hidden select-none text-left cursor-default flex items-center disabled:pointer-events-none disabled:opacity-50",
+    "w-full gap-2 rounded-sm px-2 py-1 text-[13px] leading-4 outline-hidden select-none text-left cursor-default flex items-center disabled:pointer-events-none disabled:opacity-50",
     variant === "destructive" ? "text-destructive hover:bg-destructive/10 hover:text-destructive focus-visible:bg-destructive/10 focus-visible:text-destructive" : "hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground",
   ];
 }

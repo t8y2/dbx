@@ -121,6 +121,83 @@ fn builds_mysql_column_and_index_changes() {
 }
 
 #[test]
+fn builds_xugu_type_change_with_native_syntax() {
+    let mut code = column("code");
+    code.data_type = "bigint".to_string();
+    code.original = Some(ColumnInfo {
+        name: "code".to_string(),
+        data_type: "integer".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Xugu),
+        schema: Some("public".to_string()),
+        table_name: "info_x".to_string(),
+        column: code,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE \"public\".\"info_x\" ALTER COLUMN \"code\" bigint;"]);
+
+    let mut code = column("code");
+    code.data_type = "bigint".to_string();
+    code.original = Some(ColumnInfo {
+        name: "code".to_string(),
+        data_type: "integer".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Xugu),
+        schema: Some("public".to_string()),
+        table_name: "info_x".to_string(),
+        columns: vec![code],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE \"public\".\"info_x\" ALTER COLUMN \"code\" bigint;"]);
+
+    let mut postgres_code = column("code");
+    postgres_code.data_type = "integer".to_string();
+    postgres_code.original = Some(ColumnInfo {
+        name: "code".to_string(),
+        data_type: "varchar(20)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+    let postgres_result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: Some("public".to_string()),
+        table_name: "info_x".to_string(),
+        column: postgres_code,
+    });
+
+    assert_eq!(
+        postgres_result.statements,
+        vec!["ALTER TABLE \"public\".\"info_x\" ALTER COLUMN \"code\" TYPE integer;"]
+    );
+}
+
+#[test]
 fn builds_mysql_unsigned_integer_column_with_length_before_attribute() {
     let mut score = column("score");
     score.data_type = "int unsigned(11)".to_string();
@@ -2267,6 +2344,61 @@ fn dameng_create_table_with_identity() {
     assert_eq!(result.warnings, Vec::<String>::new());
     assert!(result.statements[0].contains("\"ID\" INT IDENTITY(100, 5)"), "ddl: {}", result.statements[0]);
     assert!(result.statements[0].contains("PRIMARY KEY (\"ID\")"), "ddl: {}", result.statements[0]);
+}
+
+#[test]
+fn dameng_create_table_preserves_character_length_units() {
+    let mut name = column("NAME");
+    name.data_type = "VARCHAR2(255 CHAR)".to_string();
+    let mut code = column("CODE");
+    code.data_type = "VARCHAR(64 BYTE)".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Dameng),
+        schema: Some("SYSDBA".to_string()),
+        table_name: "USERS".to_string(),
+        columns: vec![name, code],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(result.statements[0].contains("\"NAME\" VARCHAR2(255 CHAR)"), "ddl: {}", result.statements[0]);
+    assert!(result.statements[0].contains("\"CODE\" VARCHAR(64 BYTE)"), "ddl: {}", result.statements[0]);
+}
+
+#[test]
+fn dameng_alter_column_preserves_character_length_unit() {
+    let mut name = column("NAME");
+    name.data_type = "VARCHAR2(64 BYTE)".to_string();
+    name.original = Some(ColumnInfo {
+        name: "NAME".to_string(),
+        data_type: "VARCHAR2(64 CHAR)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Dameng),
+        schema: Some("SYSDBA".to_string()),
+        table_name: "USERS".to_string(),
+        columns: vec![name],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE \"SYSDBA\".\"USERS\" MODIFY (\"NAME\" VARCHAR2(64 BYTE));"]);
 }
 
 #[test]

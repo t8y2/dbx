@@ -1,5 +1,6 @@
 import type { ConnectionConfig, ConnectionGroup, SidebarLayout, SidebarOrderEntry, TreeNode } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
+import { orderPinnedTreeNodes } from "@/lib/app/pinnedItems";
 
 export function emptyLayout(): SidebarLayout {
   return { groups: [], order: [] };
@@ -89,16 +90,6 @@ function makeConnectionNode(config: ConnectionConfig, pinned: boolean): TreeNode
   };
 }
 
-function orderPinnedFirst(nodes: TreeNode[]): TreeNode[] {
-  const pinned: TreeNode[] = [];
-  const unpinned: TreeNode[] = [];
-  for (const node of nodes) {
-    if (node.pinned) pinned.push(node);
-    else unpinned.push(node);
-  }
-  return [...pinned, ...unpinned];
-}
-
 export function buildTreeNodesFromLayout(layout: SidebarLayout, connections: ConnectionConfig[], pinnedIds: Set<string>): TreeNode[] {
   const configMap = new Map(connections.map((connection) => [connection.id, connection]));
   const groupMap = new Map(layout.groups.map((group) => [group.id, group]));
@@ -120,13 +111,13 @@ export function buildTreeNodesFromLayout(layout: SidebarLayout, connections: Con
         type: "connection-group",
         pinned: pinnedIds.has(group.id),
         isExpanded: !group.collapsed,
-        children: orderPinnedFirst(build(entryChildren(entry))),
+        children: orderPinnedTreeNodes(build(entryChildren(entry))),
       });
     }
     return nodes;
   };
 
-  return orderPinnedFirst(build(layout.order));
+  return orderPinnedTreeNodes(build(layout.order));
 }
 
 export function findConnectionLocation(layout: SidebarLayout, connectionId: string): { entries: SidebarOrderEntry[]; entryIndex: number; groupId?: string } | null {
@@ -142,6 +133,53 @@ export function findConnectionLocation(layout: SidebarLayout, connectionId: stri
     return null;
   };
   return visit(layout.order);
+}
+
+/**
+ * Returns the display-name path for a connection's containing groups.
+ * A top-level connection returns an empty path; an absent connection returns null.
+ */
+export function findConnectionGroupPath(layout: SidebarLayout, connectionId: string): string[] | null {
+  const groupMap = new Map(layout.groups.map((group) => [group.id, group]));
+
+  const visit = (entries: SidebarOrderEntry[], path: string[]): string[] | null => {
+    for (const entry of entries) {
+      if (entry.type === "connection") {
+        if (entry.id === connectionId) return path;
+        continue;
+      }
+
+      const group = groupMap.get(entry.id);
+      if (!group) continue;
+      const found = visit(entryChildren(entry), [...path, group.name]);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  return visit(layout.order, []);
+}
+
+/** Build all connection group paths in one traversal for list rendering. */
+export function buildConnectionGroupPathMap(layout: SidebarLayout): Map<string, string[]> {
+  const groupMap = new Map(layout.groups.map((group) => [group.id, group]));
+  const paths = new Map<string, string[]>();
+
+  const visit = (entries: SidebarOrderEntry[], path: string[]) => {
+    for (const entry of entries) {
+      if (entry.type === "connection") {
+        paths.set(entry.id, path);
+        continue;
+      }
+
+      const group = groupMap.get(entry.id);
+      if (!group) continue;
+      visit(entryChildren(entry), [...path, group.name]);
+    }
+  };
+
+  visit(layout.order, []);
+  return paths;
 }
 
 function findGroupEntry(entries: SidebarOrderEntry[], groupId: string): Extract<SidebarOrderEntry, { type: "group" }> | null {

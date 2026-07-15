@@ -2,6 +2,8 @@
  * Utilities for SQL identifier navigation (Ctrl/Cmd + click on table/column names).
  */
 
+import type { ObjectSourceKind } from "@/types/database";
+
 const SQL_KEYWORDS_SET = new Set([
   "select",
   "from",
@@ -128,6 +130,60 @@ export interface ExtractedSqlIdentifier {
   quoted: boolean;
 }
 
+export interface ExtractedSqlIdentifierPart {
+  value: string;
+  quoted: boolean;
+}
+
+export type SqlObjectNavigationType = "table" | "view" | "materialized_view";
+
+export interface SqlObjectNavigationTarget {
+  name: string;
+  database?: string;
+  schema?: string;
+  type?: SqlObjectNavigationType;
+}
+
+export function sqlObjectNavigationTarget(table: SqlObjectNavigationTarget): SqlObjectNavigationTarget {
+  return {
+    name: table.name,
+    ...(table.database ? { database: table.database } : {}),
+    ...(table.schema ? { schema: table.schema } : {}),
+    ...(table.type ? { type: table.type } : {}),
+  };
+}
+
+export function sqlObjectHoverDetail(table: SqlObjectNavigationTarget): string {
+  const objectType = table.type === "materialized_view" ? "materialized view" : table.type === "view" ? "view" : "table";
+  return table.schema ? `${objectType} in ${table.schema}` : objectType;
+}
+
+export function sqlObjectNavigationTableType(table: SqlObjectNavigationTarget): "TABLE" | "VIEW" | "MATERIALIZED_VIEW" {
+  if (table.type === "materialized_view") return "MATERIALIZED_VIEW";
+  return table.type === "view" ? "VIEW" : "TABLE";
+}
+
+export function sqlObjectNavigationSourceKind(table: SqlObjectNavigationTarget): ObjectSourceKind | undefined {
+  const type = sqlObjectNavigationTableType(table);
+  return type === "TABLE" ? undefined : type;
+}
+
+export function sqlObjectNavigationTypeFromTableType(tableType: string | null | undefined): SqlObjectNavigationType {
+  const normalized = tableType
+    ?.trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, "_");
+  if (normalized === "MATERIALIZED_VIEW") return "materialized_view";
+  if (normalized === "VIEW") return "view";
+  return "table";
+}
+
+export function mergeSqlObjectNavigationType(left?: SqlObjectNavigationType, right?: SqlObjectNavigationType): SqlObjectNavigationType | undefined {
+  if (left === "materialized_view" || right === "materialized_view") return "materialized_view";
+  if (left === "view" || right === "view") return "view";
+  return left ?? right;
+}
+
 function isIdentifierChar(char: string | undefined): boolean {
   return !!char && /^[A-Za-z0-9_$]$/.test(char);
 }
@@ -190,12 +246,12 @@ function identifierSearchBounds(doc: string, pos: number): { start: number; end:
   return { start, end };
 }
 
-/** Extract identifier and quote metadata at position `pos` in the document. */
-export function extractIdentifierDetailsAt(doc: string, pos: number): ExtractedSqlIdentifier | null {
-  if (pos < 0 || pos > doc.length) return null;
+/** Extract qualified identifier parts and per-part quote metadata at position `pos`. */
+export function extractIdentifierPartsAt(doc: string, pos: number): ExtractedSqlIdentifierPart[] {
+  if (pos < 0 || pos > doc.length) return [];
 
   const clickPos = pos === doc.length ? pos - 1 : pos;
-  if (clickPos < 0) return null;
+  if (clickPos < 0) return [];
 
   const bounds = identifierSearchBounds(doc, clickPos);
   let index = bounds.start;
@@ -203,10 +259,7 @@ export function extractIdentifierDetailsAt(doc: string, pos: number): ExtractedS
     const parsed = parseQualifiedIdentifier(doc, index);
     if (parsed) {
       if (clickPos >= parsed.start && clickPos < parsed.end) {
-        return {
-          identifier: parsed.parts.map((part) => part.value).join("."),
-          quoted: parsed.parts.some((part) => part.quoted),
-        };
+        return parsed.parts.map((part) => ({ value: part.value, quoted: part.quoted }));
       }
       index = Math.max(parsed.end, index + 1);
       continue;
@@ -214,7 +267,17 @@ export function extractIdentifierDetailsAt(doc: string, pos: number): ExtractedS
     index += 1;
   }
 
-  return null;
+  return [];
+}
+
+/** Extract identifier and quote metadata at position `pos` in the document. */
+export function extractIdentifierDetailsAt(doc: string, pos: number): ExtractedSqlIdentifier | null {
+  const parts = extractIdentifierPartsAt(doc, pos);
+  if (parts.length === 0) return null;
+  return {
+    identifier: parts.map((part) => part.value).join("."),
+    quoted: parts.some((part) => part.quoted),
+  };
 }
 
 /** Extract identifier at position `pos` in the document. */
@@ -237,7 +300,7 @@ export function splitQualifiedIdentifier(identifier: string): string[] {
 }
 
 /** Match identifier against known table names (case-insensitive). Supports qualified identifiers like schema.table. */
-export function matchTable(identifier: string, tables: Array<{ name: string; schema?: string }>): { name: string; schema?: string } | null {
+export function matchTable<T extends { name: string; schema?: string }>(identifier: string, tables: T[]): T | null {
   const parts = splitQualifiedIdentifier(identifier);
   const normalizedIdentifier = parts.length > 0 ? parts.join(".").toLowerCase() : identifier.toLowerCase();
 

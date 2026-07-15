@@ -10,7 +10,9 @@ use crate::connection::MysqlMode;
 use crate::connection::{task_client_session_id, AppState, PoolKind};
 use crate::csv_export::{escape_csv, format_csv, format_tsv, format_tsv_rows, value_to_csv_text};
 pub use crate::database_export::ExportStatus;
-use crate::database_export::{build_export_insert_statements, is_export_cancelled, BuildExportInsertStatementsOptions};
+use crate::database_export::{
+    build_export_insert_statements, is_export_cancelled, is_internal_export_column, BuildExportInsertStatementsOptions,
+};
 use crate::db::agent_driver::AgentTableReadStartParams;
 use crate::models::connection::DatabaseType;
 use crate::transfer::{
@@ -85,6 +87,37 @@ fn export_column_types(request: &TableExportRequest) -> Vec<String> {
         .iter()
         .map(|column_type| column_type.clone().unwrap_or_default())
         .collect()
+}
+
+fn resolve_requested_export_columns(
+    database_type: DatabaseType,
+    columns: &[String],
+    column_types: Option<&[Option<String>]>,
+    primary_keys: Option<&[String]>,
+) -> (Vec<String>, Vec<Option<String>>, Vec<String>) {
+    let mut resolved_columns = Vec::with_capacity(columns.len());
+    let mut resolved_column_types = column_types.map(|_| Vec::with_capacity(columns.len())).unwrap_or_default();
+
+    // Filter names and their index-aligned type metadata together so the
+    // fetched rows and later SQL literal formatting keep the same positions.
+    for (index, column) in columns.iter().enumerate() {
+        if is_internal_export_column(Some(database_type), column) {
+            continue;
+        }
+        resolved_columns.push(column.clone());
+        if let Some(column_types) = column_types {
+            resolved_column_types.push(column_types.get(index).cloned().unwrap_or(None));
+        }
+    }
+
+    let resolved_primary_keys = primary_keys
+        .unwrap_or_default()
+        .iter()
+        .filter(|column| !is_internal_export_column(Some(database_type), column))
+        .cloned()
+        .collect();
+
+    (resolved_columns, resolved_column_types, resolved_primary_keys)
 }
 
 fn write_json_row_object<W: Write>(writer: &mut W, columns: &[String], row: &[Value]) -> Result<(), String> {
@@ -825,9 +858,13 @@ pub async fn export_table_data_core(
     // directly, which avoids expensive metadata round-trips on JDBC drivers.
     let requested_columns = request.columns.as_ref().filter(|columns| !columns.is_empty());
     let (col_names, column_types, column_extras, primary_keys) = if let Some(requested_columns) = requested_columns {
-        let primary_keys = request.primary_keys.clone().unwrap_or_default();
-        let column_types = request.column_types.clone().unwrap_or_default();
-        (requested_columns.clone(), column_types, Vec::new(), primary_keys)
+        let (col_names, column_types, primary_keys) = resolve_requested_export_columns(
+            db_type,
+            requested_columns,
+            request.column_types.as_deref(),
+            request.primary_keys.as_deref(),
+        );
+        (col_names, column_types, Vec::new(), primary_keys)
     } else {
         let columns = crate::schema::get_columns_core(
             state,
@@ -1601,6 +1638,66 @@ mod tests {
         assert!(!sql.contains("OFFSET"));
         assert!(!sql.contains("FETCH NEXT"));
         assert!(!sql.contains("ROWNUM"));
+    }
+
+    #[test]
+    fn oracle_requested_export_columns_omit_synthetic_rowid_and_keep_metadata_aligned() {
+        let columns = vec!["__DBX_ROWID".to_string(), "ID".to_string(), "NAME".to_string()];
+        let column_types = vec![Some("VARCHAR2".to_string()), Some("NUMBER".to_string()), Some("VARCHAR2".to_string())];
+        let primary_keys = vec!["__DBX_ROWID".to_string()];
+
+        let (columns, column_types, primary_keys) =
+            resolve_requested_export_columns(DatabaseType::Oracle, &columns, Some(&column_types), Some(&primary_keys));
+
+        assert_eq!(columns, vec!["ID", "NAME"]);
+        assert_eq!(column_types, vec![Some("NUMBER".to_string()), Some("VARCHAR2".to_string())]);
+        assert!(primary_keys.is_empty());
+
+        let request = TableExportRequest {
+            export_id: "export-rowid".to_string(),
+            connection_id: "conn-1".to_string(),
+            database: "ORCL".to_string(),
+            schema: Some("APP".to_string()),
+            table_name: "USERS".to_string(),
+            file_path: "users.sql".to_string(),
+            format: "sql".to_string(),
+            columns: None,
+            column_types: None,
+            primary_keys: None,
+            where_input: None,
+            order_by: None,
+            skip_count: false,
+            batch_size: Some(100),
+            row_limit: None,
+        };
+        let sql = table_cursor_sql(&request, &DatabaseType::Oracle, &columns, &primary_keys);
+        assert_eq!(sql, "SELECT \"ID\", \"NAME\" FROM \"APP\".\"USERS\"");
+
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Oracle),
+            schema: request.schema,
+            table_name: Some(request.table_name),
+            qualified_table_name: None,
+            columns,
+            column_types,
+            column_extras: Vec::new(),
+            rows: vec![vec![json!(1), json!("Ada")]],
+            batch_size: Some(100),
+        })
+        .unwrap();
+        assert_eq!(statements, vec!["INSERT INTO \"APP\".\"USERS\" (\"ID\", \"NAME\") VALUES (1, 'Ada');"]);
+    }
+
+    #[test]
+    fn requested_export_columns_preserve_regular_oracle_and_non_oracle_columns() {
+        let oracle_columns = vec!["ROW_ID".to_string(), "NAME".to_string()];
+        let (resolved_oracle, _, _) =
+            resolve_requested_export_columns(DatabaseType::Oracle, &oracle_columns, None, None);
+        assert_eq!(resolved_oracle, oracle_columns);
+
+        let mysql_columns = vec!["__DBX_ROWID".to_string(), "name".to_string()];
+        let (resolved_mysql, _, _) = resolve_requested_export_columns(DatabaseType::Mysql, &mysql_columns, None, None);
+        assert_eq!(resolved_mysql, mysql_columns);
     }
 
     #[test]

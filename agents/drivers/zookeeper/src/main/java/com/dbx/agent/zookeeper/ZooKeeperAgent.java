@@ -11,6 +11,8 @@ import org.apache.zookeeper.data.Stat;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CharsetDecoder;
@@ -23,15 +25,18 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public final class ZooKeeperAgent {
     private static final Gson GSON = new GsonBuilder().serializeNulls().create();
     private static final int DEFAULT_LIMIT = 100;
     private static final int DEFAULT_SESSION_TIMEOUT_MS = 30000;
-    private static final int DEFAULT_CONNECTION_TIMEOUT_MS = 15000;
-    private static final int DEFAULT_BASE_SLEEP_TIME_MS = 1000;
-    private static final int DEFAULT_MAX_RETRIES = 3;
+    private static final int DEFAULT_CONNECTION_TIMEOUT_MS = 5000;
+    private static final int DEFAULT_BASE_SLEEP_TIME_MS = 250;
+    private static final int DEFAULT_MAX_RETRIES = 2;
+    private static final int DEFAULT_PORT = 2181;
+    private static final int DEFAULT_PROBE_TIMEOUT_MS = 2000;
     private static final String STAT_LOOKUP_CONCURRENCY_PROPERTY = "dbx.zookeeper.statLookupConcurrency";
     private static final String STAT_LOOKUP_CONCURRENCY_ENV = "DBX_ZOOKEEPER_STAT_LOOKUP_CONCURRENCY";
     private static final int DEFAULT_STAT_LOOKUP_CONCURRENCY = 16;
@@ -88,10 +93,15 @@ public final class ZooKeeperAgent {
 
         int baseSleepTimeMs = intOrDefault(connection, "base_sleep_time_ms", DEFAULT_BASE_SLEEP_TIME_MS);
         int maxRetries = intOrDefault(connection, "max_retries", DEFAULT_MAX_RETRIES);
+        int connectionTimeoutMs = intOrDefault(connection, "connection_timeout_ms", DEFAULT_CONNECTION_TIMEOUT_MS);
+        String connectString = reachableConnectString(
+            connectString(connection),
+            Math.min(DEFAULT_PROBE_TIMEOUT_MS, connectionTimeoutMs)
+        );
         CuratorFrameworkFactory.Builder builder = CuratorFrameworkFactory.builder()
-            .connectString(connectString(connection))
+            .connectString(connectString)
             .sessionTimeoutMs(intOrDefault(connection, "session_timeout_ms", DEFAULT_SESSION_TIMEOUT_MS))
-            .connectionTimeoutMs(intOrDefault(connection, "connection_timeout_ms", DEFAULT_CONNECTION_TIMEOUT_MS))
+            .connectionTimeoutMs(connectionTimeoutMs)
             .retryPolicy(new ExponentialBackoffRetry(baseSleepTimeMs, maxRetries));
 
         String namespace = trimSlashes(stringOrEmpty(connection, "namespace"));
@@ -118,7 +128,93 @@ public final class ZooKeeperAgent {
             return configured;
         }
         return stringOrDefault(connection, "host", "127.0.0.1") + ":"
-            + intOrDefault(connection, "port", 2181);
+            + intOrDefault(connection, "port", DEFAULT_PORT);
+    }
+
+    static String reachableConnectString(String connectString, int probeTimeoutMs) {
+        int slash = connectString.indexOf('/');
+        String hostsPart = slash >= 0 ? connectString.substring(0, slash) : connectString;
+        String chroot = slash >= 0 ? connectString.substring(slash) : "";
+
+        List<String> hosts = new ArrayList<>();
+        for (String item : hostsPart.split(",")) {
+            String trimmed = item.trim();
+            if (!trimmed.isEmpty()) {
+                hosts.add(trimmed);
+            }
+        }
+
+        List<String> reachable = probeReachableHosts(hosts, probeTimeoutMs);
+        if (reachable.isEmpty()) {
+            throw new IllegalStateException(
+                "No reachable ZooKeeper server within " + probeTimeoutMs + "ms: " + hostsPart
+            );
+        }
+        // Curator needs the complete ensemble to reconnect when nodes recover or fail over later.
+        return String.join(",", hosts) + chroot;
+    }
+
+    private static List<String> probeReachableHosts(List<String> hosts, int probeTimeoutMs) {
+        if (hosts.isEmpty()) {
+            return Collections.emptyList();
+        }
+        ExecutorService executor = Executors.newFixedThreadPool(
+            Math.min(hosts.size(), 8),
+            daemonThreadFactory("dbx-zookeeper-probe-")
+        );
+        try {
+            List<Future<Boolean>> probes = new ArrayList<>();
+            for (String host : hosts) {
+                probes.add(executor.submit(() -> isEndpointReachable(host, probeTimeoutMs)));
+            }
+            // Probes run in parallel; the deadline covers socket timeout plus DNS slack.
+            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(probeTimeoutMs + 500L);
+            List<String> reachable = new ArrayList<>();
+            for (int i = 0; i < hosts.size(); i++) {
+                long remainingMs = Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()));
+                try {
+                    if (probes.get(i).get(remainingMs, TimeUnit.MILLISECONDS)) {
+                        reachable.add(hosts.get(i));
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("ZooKeeper reachability probe interrupted", e);
+                } catch (ExecutionException | TimeoutException e) {
+                    // Treat probe failures as unreachable.
+                }
+            }
+            return reachable;
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    private static boolean isEndpointReachable(String endpoint, int probeTimeoutMs) {
+        try (Socket socket = new Socket()) {
+            socket.connect(parseEndpoint(endpoint), probeTimeoutMs);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    static InetSocketAddress parseEndpoint(String endpoint) {
+        String host = endpoint;
+        int port = DEFAULT_PORT;
+        int bracketEnd = endpoint.indexOf(']');
+        if (endpoint.startsWith("[") && bracketEnd > 0) {
+            host = endpoint.substring(1, bracketEnd);
+            if (bracketEnd + 1 < endpoint.length() && endpoint.charAt(bracketEnd + 1) == ':') {
+                port = Integer.parseInt(endpoint.substring(bracketEnd + 2));
+            }
+        } else {
+            int colon = endpoint.lastIndexOf(':');
+            if (colon >= 0 && endpoint.indexOf(':') == colon) {
+                host = endpoint.substring(0, colon);
+                port = Integer.parseInt(endpoint.substring(colon + 1));
+            }
+        }
+        return new InetSocketAddress(host, port);
     }
 
     private static void startAndVerify(CuratorFramework active, JsonObject connection) throws Exception {

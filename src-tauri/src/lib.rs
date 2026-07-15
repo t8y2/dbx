@@ -177,26 +177,115 @@ fn build_app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri:
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn linux_has_nvidia_gpu() -> bool {
-    // Detect the proprietary NVIDIA driver by checking for its kernel device
-    // node / proc entry. This is more reliable than parsing lspci output and
-    // has no external deps. Nouveau (open-source) does not create these nodes
-    // and falls through to the Mesa / DMABuf path, which is the desired behavior.
-    std::path::Path::new("/dev/nvidiactl").exists() || std::path::Path::new("/proc/driver/nvidia/version").exists()
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LinuxNvidiaDriver {
+    None,
+    Nouveau,
+    Proprietary,
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn linux_webkit_rendering_workarounds(has_nvidia: bool) -> &'static [(&'static str, &'static str)] {
-    if has_nvidia {
-        // NVIDIA + Wayland: the DMABuf renderer triggers blank-window / Wayland
-        // protocol errors (EGL_EXT_image_dma_buf_import mismatch). Disable it
-        // and suppress explicit-sync to avoid a compositor crash.
-        &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1"), ("__NV_DISABLE_EXPLICIT_SYNC", "1")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LinuxDrmRenderDevice {
+    device_file: std::path::PathBuf,
+    driver: Option<String>,
+    boot_vga: bool,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_nvidia_driver_from_state(
+    proprietary_control_exists: bool,
+    proprietary_proc_exists: bool,
+    render_driver: Option<&str>,
+) -> LinuxNvidiaDriver {
+    if proprietary_control_exists || proprietary_proc_exists {
+        LinuxNvidiaDriver::Proprietary
+    } else if render_driver.is_some_and(|driver| driver.eq_ignore_ascii_case("nouveau")) {
+        LinuxNvidiaDriver::Nouveau
     } else {
-        // AMD / Intel / other Mesa drivers support DMABuf natively.
-        // Keeping DMABUF enabled lets WebKitGTK use GPU compositing, which
-        // dramatically reduces CPU usage and eliminates UI lag on Wayland.
-        &[]
+        LinuxNvidiaDriver::None
+    }
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_selected_drm_render_device<'a>(
+    explicit_device_file: Option<&std::path::Path>,
+    devices: &'a [LinuxDrmRenderDevice],
+) -> Option<&'a LinuxDrmRenderDevice> {
+    if let Some(explicit_device_file) = explicit_device_file {
+        // WebKit gives this environment override precedence over EGL/DRM discovery.
+        return devices.iter().find(|device| device.device_file.as_path() == explicit_device_file);
+    }
+    // Before WebKit initializes EGL, boot_vga is the best available default-display signal.
+    // The sorted first render node mirrors WebKit's final DRM-device fallback.
+    devices.iter().find(|device| device.boot_vga).or_else(|| devices.first())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_drm_render_devices() -> Vec<LinuxDrmRenderDevice> {
+    let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
+        return Vec::new();
+    };
+    let mut devices = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let node_name = entry.file_name();
+            let node_name = node_name.to_str()?;
+            let render_index = node_name.strip_prefix("renderD")?;
+            if render_index.is_empty() || !render_index.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            let device_path = entry.path().join("device");
+            let driver = std::fs::read_link(device_path.join("driver"))
+                .ok()
+                .and_then(|path| path.file_name().and_then(std::ffi::OsStr::to_str).map(str::to_ascii_lowercase));
+            let boot_vga = std::fs::read_to_string(device_path.join("boot_vga")).is_ok_and(|value| value.trim() == "1");
+            Some(LinuxDrmRenderDevice {
+                device_file: std::path::Path::new("/dev/dri").join(node_name),
+                driver,
+                boot_vga,
+            })
+        })
+        .collect::<Vec<_>>();
+    devices.sort_by(|left, right| left.device_file.cmp(&right.device_file));
+    devices
+}
+
+#[cfg(target_os = "linux")]
+fn linux_nvidia_driver() -> LinuxNvidiaDriver {
+    let devices = linux_drm_render_devices();
+    let explicit_device_file = std::env::var_os("WEBKIT_WEB_RENDER_DEVICE_FILE")
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
+        // Resolve stable /dev/dri/by-path links to the renderD* node used by sysfs.
+        .map(|path| std::fs::canonicalize(&path).unwrap_or(path));
+    let render_driver = linux_selected_drm_render_device(explicit_device_file.as_deref(), &devices)
+        .and_then(|device| device.driver.as_deref());
+    linux_nvidia_driver_from_state(
+        std::path::Path::new("/dev/nvidiactl").exists(),
+        std::path::Path::new("/proc/driver/nvidia/version").exists(),
+        render_driver,
+    )
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_webkit_rendering_workarounds(driver: LinuxNvidiaDriver) -> &'static [(&'static str, &'static str)] {
+    match driver {
+        LinuxNvidiaDriver::Proprietary => {
+            // NVIDIA's proprietary driver needs both DMABuf and explicit-sync
+            // workarounds to avoid blank windows and compositor failures.
+            &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1"), ("__NV_DISABLE_EXPLICIT_SYNC", "1")]
+        }
+        LinuxNvidiaDriver::Nouveau => {
+            // WebKitGTK's DMABuf renderer can produce a fully black WebView on
+            // Nouveau while the DOM remains interactive.
+            &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
+        }
+        LinuxNvidiaDriver::None => {
+            // AMD / Intel and other Mesa drivers keep DMABuf enabled to avoid
+            // unnecessary CPU usage and UI lag on Wayland.
+            &[]
+        }
     }
 }
 
@@ -258,8 +347,7 @@ fn linux_appimage_system_gtk_immodules_cache(
 
 #[cfg(target_os = "linux")]
 fn apply_linux_webkit_rendering_workarounds() {
-    let has_nvidia = linux_has_nvidia_gpu();
-    for (key, value) in linux_webkit_rendering_workarounds(has_nvidia) {
+    for (key, value) in linux_webkit_rendering_workarounds(linux_nvidia_driver()) {
         if std::env::var_os(key).is_none() {
             std::env::set_var(key, value);
         }
@@ -502,11 +590,13 @@ pub(crate) fn apply_desktop_settings(app: &tauri::AppHandle, desktop_settings: &
 mod tests {
     use super::{
         linux_appimage_system_gtk_immodules_cache, linux_appimage_wayland_backend_override,
-        linux_webkit_rendering_workarounds, native_window_decorations_override, should_confirm_app_exit_request,
-        should_hide_window_on_close, should_setup_desktop_tray, should_show_main_window_after_setup,
-        uses_application_level_icon,
+        linux_nvidia_driver_from_state, linux_selected_drm_render_device, linux_webkit_rendering_workarounds,
+        native_window_decorations_override, should_confirm_app_exit_request, should_hide_window_on_close,
+        should_setup_desktop_tray, should_show_main_window_after_setup, uses_application_level_icon,
+        LinuxDrmRenderDevice, LinuxNvidiaDriver,
     };
     use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
 
     const TEST_GTK3_IMMODULES_CACHE: &str = "/usr/lib/test/gtk-3.0/3.0.0/immodules.cache";
 
@@ -585,14 +675,81 @@ mod tests {
     }
 
     #[test]
-    fn applies_linux_webkit_rendering_workarounds_before_webkit_starts() {
-        // NVIDIA: DMABuf must be disabled to avoid blank window / Wayland protocol errors.
+    fn classifies_linux_nvidia_driver_from_selected_renderer() {
+        assert_eq!(linux_nvidia_driver_from_state(true, false, None), LinuxNvidiaDriver::Proprietary);
+        assert_eq!(linux_nvidia_driver_from_state(false, true, None), LinuxNvidiaDriver::Proprietary);
+        assert_eq!(linux_nvidia_driver_from_state(true, false, Some("nouveau")), LinuxNvidiaDriver::Proprietary);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("nouveau")), LinuxNvidiaDriver::Nouveau);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("i915")), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("amdgpu")), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, None), LinuxNvidiaDriver::None);
+    }
+
+    fn drm_render_device(path: &str, driver: &str, boot_vga: bool) -> LinuxDrmRenderDevice {
+        LinuxDrmRenderDevice { device_file: PathBuf::from(path), driver: Some(driver.to_string()), boot_vga }
+    }
+
+    #[test]
+    fn keeps_linux_dmabuf_when_nouveau_is_loaded_but_not_the_default_renderer() {
+        let devices = [
+            drm_render_device("/dev/dri/renderD128", "i915", true),
+            drm_render_device("/dev/dri/renderD129", "nouveau", false),
+        ];
+
+        let selected = linux_selected_drm_render_device(None, &devices).unwrap();
+        assert_eq!(selected.driver.as_deref(), Some("i915"));
+        assert_eq!(linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()), LinuxNvidiaDriver::None);
+    }
+
+    #[test]
+    fn honors_explicit_webkit_linux_render_device_on_hybrid_gpus() {
+        let devices = [
+            drm_render_device("/dev/dri/renderD128", "i915", true),
+            drm_render_device("/dev/dri/renderD129", "nouveau", false),
+        ];
+
+        let selected = linux_selected_drm_render_device(Some(Path::new("/dev/dri/renderD129")), &devices).unwrap();
+        assert_eq!(selected.driver.as_deref(), Some("nouveau"));
         assert_eq!(
-            linux_webkit_rendering_workarounds(true),
+            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()),
+            LinuxNvidiaDriver::Nouveau
+        );
+
+        let devices = [
+            drm_render_device("/dev/dri/renderD128", "i915", false),
+            drm_render_device("/dev/dri/renderD129", "nouveau", true),
+        ];
+        let selected = linux_selected_drm_render_device(Some(Path::new("/dev/dri/renderD128")), &devices).unwrap();
+        assert_eq!(selected.driver.as_deref(), Some("i915"));
+        assert_eq!(linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()), LinuxNvidiaDriver::None);
+    }
+
+    #[test]
+    fn uses_nouveau_workaround_for_the_default_linux_renderer() {
+        let devices = [
+            drm_render_device("/dev/dri/renderD128", "amdgpu", false),
+            drm_render_device("/dev/dri/renderD129", "nouveau", true),
+        ];
+
+        let selected = linux_selected_drm_render_device(None, &devices).unwrap();
+        assert_eq!(selected.driver.as_deref(), Some("nouveau"));
+        assert_eq!(
+            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()),
+            LinuxNvidiaDriver::Nouveau
+        );
+    }
+
+    #[test]
+    fn applies_driver_specific_linux_webkit_rendering_workarounds() {
+        assert_eq!(
+            linux_webkit_rendering_workarounds(LinuxNvidiaDriver::Proprietary),
             &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1"), ("__NV_DISABLE_EXPLICIT_SYNC", "1")]
         );
-        // AMD / Intel / Mesa: DMABuf is supported — no workarounds needed.
-        assert_eq!(linux_webkit_rendering_workarounds(false), &[]);
+        assert_eq!(
+            linux_webkit_rendering_workarounds(LinuxNvidiaDriver::Nouveau),
+            &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
+        );
+        assert_eq!(linux_webkit_rendering_workarounds(LinuxNvidiaDriver::None), &[]);
     }
 
     #[test]
@@ -909,6 +1066,7 @@ pub fn run() {
             commands::cloud_sync::snippet_sync_upload,
             commands::cloud_sync::snippet_sync_download,
             commands::connection::test_connection,
+            commands::connection::test_connection_with_info,
             commands::connection::connect_db,
             commands::connection::connection_final_proxy_port,
             commands::connection::disconnect_db,
@@ -916,6 +1074,8 @@ pub fn run() {
             commands::connection::refresh_connections,
             commands::connection::check_connection_health,
             commands::connection::connection_identifier_quote,
+            commands::connection::connection_database_info,
+            commands::connection::save_connection_database_info,
             commands::connection::save_connections,
             commands::connection::load_connections,
             commands::connection::save_sidebar_layout,
@@ -1129,6 +1289,7 @@ pub fn run() {
             commands::document_cmd::document_upload_gridfs_file,
             commands::document_cmd::document_delete_gridfs_file,
             commands::mongo_cmd::mongo_find_documents,
+            commands::mongo_cmd::mongo_find_one,
             commands::mongo_cmd::mongo_count_documents,
             commands::mongo_cmd::mongo_server_version,
             commands::mongo_cmd::mongo_collection_stats,
@@ -1144,6 +1305,9 @@ pub fn run() {
             commands::document_cmd::document_delete_document,
             commands::mongo_cmd::mongo_delete_document,
             commands::mongo_cmd::mongo_delete_documents,
+            commands::mongo_cmd::mongo_find_one_and_update,
+            commands::mongo_cmd::mongo_find_one_and_replace,
+            commands::mongo_cmd::mongo_find_one_and_delete,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_test_connection,
             #[cfg(feature = "mq-admin")]
@@ -1235,6 +1399,7 @@ pub fn run() {
             commands::mcp::check_mcp_server_status,
             commands::mcp::install_mcp_server,
             commands::update::check_for_updates,
+            commands::update::fetch_changelog,
             commands::update::get_system_proxy_url,
             commands::update::download_and_install_update,
             commands::transfer::start_transfer,

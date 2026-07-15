@@ -14,7 +14,8 @@ import { useSchemaOptions } from "@/composables/useSchemaOptions";
 import { connectionIconType } from "@/lib/connection/connectionPresentation";
 import { formatDatabaseLabel, isDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { connectionDisplayName } from "@/lib/tabs/tabPresentation";
-import { isSingleDatabase, supportsSqlInListPaste, supportsTransaction as supportsTransactionFeature } from "@/lib/database/databaseCapabilities";
+import { useConnectionGroupLabel } from "@/composables/useConnectionGroupLabel";
+import { isSingleDatabase, supportsClearableQuerySchema, supportsSqlInListPaste, supportsTransaction as supportsTransactionFeature } from "@/lib/database/databaseCapabilities";
 import { hexToRgba } from "@/lib/common/color";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import type { QueryTab, ConnectionConfig } from "@/types/database";
@@ -66,6 +67,7 @@ const activeDatabaseOptions = computed(() => {
 });
 
 const connectionOptionIds = computed(() => connectionStore.connections.map((connection) => connection.id));
+const { connectionGroupLabel } = useConnectionGroupLabel();
 const activeDatabaseValue = computed(() => props.activeTab.database || "");
 const activeProductionContext = computed(() => productionContextForDatabase(props.activeConnection, props.activeTab.database));
 const showConnectionProductionBadge = computed(() => activeProductionContext.value.reason === "connection");
@@ -326,6 +328,8 @@ function databaseOptionIsProduction(database: string): boolean {
           :loading-text="t('common.loading')"
           trigger-class="font-medium text-foreground"
           :display-name="connectionDisplayName"
+          list-class="w-96 max-w-[calc(100vw-2rem)]"
+          item-class="h-9"
           @update:model-value="(connectionId) => emit('changeConnection', connectionId)"
         >
           <template #trigger-label="{ label }">
@@ -339,7 +343,10 @@ function databaseOptionIsProduction(database: string): boolean {
           <template #option-label="{ option, label }">
             <div class="flex min-w-0 items-center gap-2">
               <DatabaseIcon :db-type="connectionIconType(connectionById(option))" class="h-3.5 w-3.5 shrink-0" />
-              <TruncatedTextTooltip :text="label" class="min-w-0 flex-1" side="left" :side-offset="8" />
+              <div class="flex min-w-0 flex-1 items-center gap-2">
+                <TruncatedTextTooltip :text="connectionGroupLabel(option)" class="block min-w-0 max-w-48 shrink-0 rounded-sm bg-muted/70 px-1.5 py-0.5 text-[11px] text-muted-foreground" side="left" :side-offset="8" />
+                <TruncatedTextTooltip :text="label" class="block min-w-[7rem] flex-1 text-sm font-medium" side="left" :side-offset="8" />
+              </div>
             </div>
           </template>
         </SearchableSelect>
@@ -400,6 +407,7 @@ function databaseOptionIsProduction(database: string): boolean {
           :empty-text="t('grid.noSearchResults')"
           :loading-text="t('common.loading')"
           :loading="!!activeConnection && isLoadingSchemas(activeConnection.id, schemaDatabaseKey)"
+          :clear-selected-option="supportsClearableQuerySchema(activeConnection?.db_type)"
           trigger-class="gap-1.5"
           @update:model-value="(schema) => emit('changeSchema', schema || undefined)"
           @update:open="

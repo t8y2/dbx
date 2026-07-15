@@ -14,7 +14,7 @@ import { useSchemaOptions } from "@/composables/useSchemaOptions";
 import { connectionIconType } from "@/lib/connection/connectionPresentation";
 import { formatDatabaseLabel, isDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { connectionDisplayName } from "@/lib/tabs/tabPresentation";
-import { buildConnectionGroupPathMap } from "@/lib/sidebar/sidebarLayout";
+import { useConnectionGroupLabel } from "@/composables/useConnectionGroupLabel";
 import { isSingleDatabase, supportsClearableQuerySchema, supportsSqlInListPaste, supportsTransaction as supportsTransactionFeature } from "@/lib/database/databaseCapabilities";
 import { hexToRgba } from "@/lib/common/color";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
@@ -67,7 +67,7 @@ const activeDatabaseOptions = computed(() => {
 });
 
 const connectionOptionIds = computed(() => connectionStore.connections.map((connection) => connection.id));
-const connectionGroupPaths = computed(() => buildConnectionGroupPathMap(connectionStore.sidebarLayout));
+const { connectionGroupLabel } = useConnectionGroupLabel();
 const activeDatabaseValue = computed(() => props.activeTab.database || "");
 const activeProductionContext = computed(() => productionContextForDatabase(props.activeConnection, props.activeTab.database));
 const showConnectionProductionBadge = computed(() => activeProductionContext.value.reason === "connection");
@@ -154,10 +154,6 @@ function databaseDisplayName(database: string): string {
 
 function connectionById(connectionId: string): ConnectionConfig | undefined {
   return connectionStore.getConfig(connectionId);
-}
-
-function connectionGroupLabel(connectionId: string): string {
-  return connectionGroupPaths.value.get(connectionId)?.join(" / ") || t("connectionGroup.ungroupedLabel");
 }
 
 function databaseOptionIsProduction(database: string): boolean {

@@ -50,6 +50,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { connectionIconType } from "@/lib/connection/connectionPresentation";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
+import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
@@ -1989,6 +1990,7 @@ async function openExternalUrl(url: string) {
                 <SelectItem v-for="conn in connectionStore.connections" :key="conn.id" :value="conn.id">
                   <div class="flex min-w-0 items-center gap-2">
                     <DatabaseIcon :db-type="connectionIconType(conn)" class="h-3.5 w-3.5 shrink-0" />
+                    <ConnectionGroupBadge :connection-id="conn.id" />
                     <span class="truncate">{{ conn.name }}</span>
                   </div>
                 </SelectItem>

@@ -76,6 +76,52 @@ test("builds fallback metadata from a data tab when column metadata is unavailab
   });
 });
 
+test("uses result columns when persisted table metadata has no columns", () => {
+  const tableMeta = {
+    schema: "public",
+    tableName: "users",
+    columns: [],
+    primaryKeys: ["id"],
+  };
+
+  assert.deepEqual(
+    tableMetaForDataTab(
+      tab({
+        tableMeta,
+        result: {
+          columns: ["id", "name"],
+          rows: [],
+          affected_rows: 0,
+          execution_time_ms: 1,
+        },
+      }),
+    ),
+    {
+      schema: "public",
+      tableName: "users",
+      columns: [
+        {
+          name: "id",
+          data_type: "",
+          is_nullable: true,
+          column_default: null,
+          is_primary_key: false,
+          extra: null,
+        },
+        {
+          name: "name",
+          data_type: "",
+          is_nullable: true,
+          column_default: null,
+          is_primary_key: false,
+          extra: null,
+        },
+      ],
+      primaryKeys: ["id"],
+    },
+  );
+});
+
 test("does not infer table metadata for query tabs", () => {
   assert.equal(tableMetaForDataTab(tab({ mode: "query" })), undefined);
 });

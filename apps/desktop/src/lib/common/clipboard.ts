@@ -63,6 +63,10 @@ function closestElement(target: unknown, selector: string): unknown {
   return (target as { closest?: (selector: string) => unknown } | null)?.closest?.(selector) ?? null;
 }
 
+export function eventTargetUsesNativeClipboard(event: Pick<ClipboardShortcutEvent, "target">): boolean {
+  return !!closestElement(event.target, EDITABLE_CLIPBOARD_TARGET_SELECTOR);
+}
+
 function selectionNodeElement(node: Node | null): Element | null {
   if (!node) return null;
   if (typeof Element !== "undefined" && node instanceof Element) return node;
@@ -82,13 +86,13 @@ export function hasNativeClipboardSelection(env: NativeClipboardSelectionEnviron
 }
 
 export function eventTargetAllowsNativeClipboard(event: ClipboardShortcutEvent, env: NativeClipboardSelectionEnvironment = globalThis as unknown as NativeClipboardSelectionEnvironment): boolean {
-  if (closestElement(event.target, EDITABLE_CLIPBOARD_TARGET_SELECTOR)) return true;
+  if (eventTargetUsesNativeClipboard(event)) return true;
   return isPlainClipboardShortcut(event, "c") && hasNativeClipboardSelection(env);
 }
 
 export function eventTargetAllowsAppClipboardShortcut(event: ClipboardShortcutEvent, key = "v"): boolean {
   if (!isPlainClipboardShortcut(event, key)) return false;
-  return !closestElement(event.target, EDITABLE_CLIPBOARD_TARGET_SELECTOR);
+  return !eventTargetUsesNativeClipboard(event);
 }
 
 export async function readTextFromClipboard(env: ClipboardEnvironment = globalThis as unknown as ClipboardEnvironment): Promise<string> {

@@ -299,6 +299,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function touchPendingChanges() {
+    // Save errors describe the previous pending snapshot; edits, undo/redo, and rollback make them stale.
+    saveError.value = "";
     pendingChangesVersion.value++;
   }
 

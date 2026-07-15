@@ -321,8 +321,10 @@ async fn remove_connection_pools_for_connection_ids(state: &WebState, connection
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "mq-admin")]
+    use super::connect_db;
     use super::{
-        connect_db, disconnect_db, load_connections, save_connection_database_info, save_connections, test_connection,
+        disconnect_db, load_connections, save_connection_database_info, save_connections, test_connection,
         test_connection_with_info, ConnectRequest, DisconnectRequest, SaveConnectionDatabaseInfoRequest,
         SaveConnectionsRequest,
     };
@@ -334,7 +336,9 @@ mod tests {
     use dbx_core::storage::Storage;
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
+    #[cfg(feature = "mq-admin")]
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    #[cfg(feature = "mq-admin")]
     use tokio::net::TcpListener;
     use tokio::sync::{Mutex, RwLock};
 
@@ -429,6 +433,7 @@ mod tests {
     async fn connection_test_info_preserves_legacy_string_and_cleans_up_temporary_state() {
         let (state, dir) = test_web_state().await;
         let db_path = dir.join("test-info.db");
+        std::fs::File::create(&db_path).unwrap();
         let config = sqlite_config("sqlite-test", &db_path.to_string_lossy());
 
         let legacy = test_connection(
@@ -451,6 +456,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(feature = "mq-admin")]
     async fn spawn_pulsar_clusters_server() -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

@@ -438,15 +438,16 @@ watch(
 
 <template>
   <Dialog :open="open" @update:open="handleOpenChange">
-    <DialogScrollContent class="sm:max-w-[860px] min-w-0 overflow-hidden" :trap-focus="false" @interact-outside.prevent>
-      <DialogHeader>
+    <DialogScrollContent class="flex max-h-[calc(100dvh-6rem)] min-h-0 min-w-0 flex-col overflow-hidden sm:max-w-[860px]" :trap-focus="false" @interact-outside.prevent>
+      <DialogHeader class="shrink-0">
         <DialogTitle class="flex items-center gap-2">
           <FileCode class="w-4 h-4" />
           {{ t("sqlFile.title") }}
         </DialogTitle>
       </DialogHeader>
 
-      <div class="grid min-w-0 gap-4 py-3">
+      <!-- Keep terminal actions reachable while long previews and errors scroll inside the viewport. -->
+      <div class="grid min-h-0 min-w-0 flex-1 gap-4 overflow-y-auto py-3">
         <div class="min-w-0 space-y-3">
           <div class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
             {{ t("sqlFile.file") }}
@@ -488,7 +489,7 @@ watch(
             {{ t("sqlFile.target") }}
           </div>
 
-          <div class="grid grid-cols-2 gap-3">
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("sqlFile.connection") }}</Label>
               <Select v-model="connectionId" :disabled="running">
@@ -595,7 +596,7 @@ watch(
         </div>
       </div>
 
-      <DialogFooter>
+      <DialogFooter class="shrink-0">
         <template v-if="running">
           <Button variant="outline" size="sm" @click="open = false">
             {{ t("sqlFile.runInBackground") }}

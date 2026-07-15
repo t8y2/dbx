@@ -15,6 +15,8 @@ use std::{collections::HashSet, time::Duration};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MongoDocumentResult {
     pub documents: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_documents: Option<Vec<String>>,
     pub total: u64,
 }
 
@@ -589,7 +591,7 @@ pub async fn find_documents(
         documents.push(bson_to_json(&Bson::Document(doc)));
     }
 
-    Ok(MongoDocumentResult { documents, total })
+    Ok(MongoDocumentResult { documents, raw_documents: None, total })
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -725,7 +727,7 @@ pub async fn find_documents_extended_json(
         documents.push(Bson::Document(doc).into_relaxed_extjson());
     }
 
-    Ok(MongoDocumentResult { documents, total })
+    Ok(MongoDocumentResult { documents, raw_documents: None, total })
 }
 
 pub async fn aggregate_documents(
@@ -755,7 +757,7 @@ pub async fn aggregate_documents(
     if documents.len() > max_rows {
         documents.truncate(max_rows);
     }
-    Ok(MongoDocumentResult { documents, total })
+    Ok(MongoDocumentResult { documents, raw_documents: None, total })
 }
 
 pub async fn create_index(
@@ -1111,8 +1113,12 @@ fn find_and_modify_array_filters(
 
 fn single_document_result(document: Option<Document>) -> MongoDocumentResult {
     match document {
-        Some(document) => MongoDocumentResult { documents: vec![bson_to_json(&Bson::Document(document))], total: 1 },
-        None => MongoDocumentResult { documents: Vec::new(), total: 0 },
+        Some(document) => MongoDocumentResult {
+            documents: vec![bson_to_json(&Bson::Document(document))],
+            raw_documents: None,
+            total: 1,
+        },
+        None => MongoDocumentResult { documents: Vec::new(), raw_documents: None, total: 0 },
     }
 }
 

@@ -1799,7 +1799,7 @@ async function openExternalUrl(url: string) {
         <div class="flex flex-col gap-3 p-3">
           <template v-for="(msg, i) in visibleMessages" :key="i">
             <div v-if="msg.role === 'user'" class="group flex justify-end">
-              <div class="min-w-0 max-w-[85%]" :class="{ 'w-[85%]': editingMessageIndex === i }">
+              <div class="relative min-w-0 max-w-[85%]" :class="{ 'w-[85%]': editingMessageIndex === i }">
                 <template v-if="editingMessageIndex === i">
                   <div v-if="editingMentions.length" class="mb-1.5 flex flex-wrap justify-end gap-1">
                     <button
@@ -1831,8 +1831,14 @@ async function openExternalUrl(url: string) {
                   </div>
                 </template>
                 <template v-else>
-                  <div class="flex items-start gap-1">
-                    <button v-if="!isGenerating" class="mt-1 hidden h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground group-hover:flex" :title="t('ai.editMessage')" @click="startEditMessage(i)">
+                  <div class="min-w-0">
+                    <!-- Keep the hover action out of normal flow so message wrapping stays stable. -->
+                    <button
+                      v-if="!isGenerating"
+                      class="pointer-events-none absolute right-full top-1 mr-1 flex h-5 w-5 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground focus:pointer-events-auto focus:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100"
+                      :title="t('ai.editMessage')"
+                      @click="startEditMessage(i)"
+                    >
                       <Pencil class="h-3 w-3" />
                     </button>
                     <div class="min-w-0 rounded-lg bg-primary px-3 py-2 text-xs text-primary-foreground">
@@ -1899,7 +1905,7 @@ async function openExternalUrl(url: string) {
                     </div>
                   </div>
                 </div>
-                <div v-if="isGenerating && msg === messages[messages.length - 1]" class="whitespace-pre-wrap break-words text-sm leading-relaxed">{{ msg.content }}</div>
+                <div v-if="isGenerating && msg === messages[messages.length - 1]" class="whitespace-pre-wrap break-words leading-relaxed">{{ msg.content }}</div>
                 <template v-else v-for="(seg, j) in messageRenderer.render(msg.content)" :key="j">
                   <div v-if="seg.type === 'text'" class="ai-markdown whitespace-normal" @click.capture="onMarkdownClick">
                     <div v-html="seg.html" />

@@ -618,6 +618,109 @@ test("undo and redo restore pending cell edits before save", () => {
   assert.deepEqual(editor.rowDataWithChanges(result.value.rows[0], 0), [1, "Ada Lovelace"]);
 });
 
+test("setting a cell to NULL records pending SQL and supports undo and redo", async () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const result = computed(() => ({
+    columns: ["id", "name"],
+    rows: [[1, "Ada"] as CellValue[]],
+  }));
+  const editor = createPeopleGridEditor(result);
+
+  editor.applyCellValue(0, 1, null);
+
+  assert.equal(editor.dirtyRows.value.get(0)?.get(1), null);
+  assert.equal(editor.hasPendingChanges.value, true);
+  assert.deepEqual(editor.rowDataWithChanges(result.value.rows[0], 0), [1, null]);
+
+  const statements = await editor.previewChanges();
+  assert.deepEqual(statements, ['UPDATE "people" SET "name" = NULL WHERE "id" = 1;']);
+  assert.doesNotMatch(statements.join("\n"), /["']NULL["']/);
+
+  editor.undoPendingChange();
+  assert.equal(editor.dirtyRows.value.size, 0);
+  assert.deepEqual(editor.rowDataWithChanges(result.value.rows[0], 0), [1, "Ada"]);
+
+  editor.redoPendingChange();
+  assert.equal(editor.dirtyRows.value.get(0)?.get(1), null);
+  assert.deepEqual(editor.rowDataWithChanges(result.value.rows[0], 0), [1, null]);
+});
+
+test("setting an existing NULL cell to NULL is a no-op", async () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const result = computed(() => ({
+    columns: ["id", "name"],
+    rows: [[1, null] as CellValue[]],
+  }));
+  const editor = createPeopleGridEditor(result);
+
+  editor.applyCellValue(0, 1, null);
+
+  assert.equal(editor.dirtyRows.value.size, 0);
+  assert.equal(editor.hasPendingChanges.value, false);
+  assert.equal(editor.canUndoPendingChange.value, false);
+  assert.deepEqual(await editor.previewChanges(), []);
+});
+
+test("a failed NULL save keeps the pending cell edit", async () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+  const editor = createQuickEntryEditor({
+    quickEntryEnabled: false,
+    save: async () => {
+      throw new Error("NULL write rejected");
+    },
+  });
+
+  editor.applyCellValue(0, 1, null);
+  await editor.saveChanges();
+
+  assert.equal(editor.saveError.value, "NULL write rejected");
+  assert.equal(editor.dirtyRows.value.get(0)?.get(1), null);
+  assert.equal(editor.hasPendingChanges.value, true);
+});
+
+test("a NOT NULL validation failure keeps the pending NULL cell edit recoverable", async () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+  globalThis.fetch = (async (input) => {
+    if (String(input) !== "/api/query/prepare-data-grid-save") return new Response("unexpected request", { status: 500 });
+    return new Response(
+      JSON.stringify({
+        validationError: 'Column "name" does not allow NULL.',
+        statements: [],
+        rollbackStatements: [],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }) as typeof fetch;
+  const editor = createPeopleGridEditor();
+
+  editor.applyCellValue(0, 1, null);
+  await editor.saveChanges();
+
+  assert.equal(editor.saveError.value, 'Column "name" does not allow NULL.');
+  assert.equal(editor.dirtyRows.value.get(0)?.get(1), null);
+  assert.equal(editor.hasPendingChanges.value, true);
+  assert.equal(editor.canUndoPendingChange.value, true);
+
+  editor.undoPendingChange();
+  assert.equal(editor.dirtyRows.value.size, 0);
+  assert.equal(editor.saveError.value, "");
+
+  editor.redoPendingChange();
+  await editor.saveChanges();
+  assert.equal(editor.saveError.value, 'Column "name" does not allow NULL.');
+
+  editor.discardChanges();
+  assert.equal(editor.dirtyRows.value.size, 0);
+  assert.equal(editor.hasPendingChanges.value, false);
+  assert.equal(editor.saveError.value, "");
+});
+
 test("restoring a pending cell edit records undo and redo history", () => {
   setActivePinia(createPinia());
   installBrowserTestGlobals();

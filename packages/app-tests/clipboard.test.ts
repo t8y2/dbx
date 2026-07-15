@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { copyToClipboard, eventTargetAllowsAppClipboardShortcut, eventTargetAllowsNativeClipboard, hasNativeClipboardSelection, isPlainClipboardShortcut, readTextFromClipboard } from "../../apps/desktop/src/lib/common/clipboard.ts";
+import { copyToClipboard, eventTargetAllowsAppClipboardShortcut, eventTargetAllowsNativeClipboard, eventTargetUsesNativeClipboard, hasNativeClipboardSelection, isPlainClipboardShortcut, readTextFromClipboard } from "../../apps/desktop/src/lib/common/clipboard.ts";
 
 test("copyToClipboard falls back when navigator clipboard is unavailable", async () => {
   const appended: unknown[] = [];
@@ -74,6 +74,7 @@ test("eventTargetAllowsNativeClipboard lets editable targets keep clipboard shor
   } as unknown as EventTarget;
 
   assert.equal(eventTargetAllowsNativeClipboard({ key: "v", ctrlKey: true, target: inputTarget }), true);
+  assert.equal(eventTargetUsesNativeClipboard({ target: inputTarget }), true);
 });
 
 test("eventTargetAllowsAppClipboardShortcut ignores editable targets only", () => {

@@ -828,6 +828,9 @@ fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<Str
     if let Some(error) = validate_tdengine_existing_rows(options) {
         return Some(error);
     }
+    if let Some(error) = validate_existing_row_primary_keys(options) {
+        return Some(error);
+    }
     if let Some(error) = validate_oracle_keyless_lob_predicate(options) {
         return Some(error);
     }
@@ -875,6 +878,46 @@ fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<Str
             ) {
                 return Some(null_write_error(source_column.unwrap_or_default()));
             }
+        }
+    }
+
+    None
+}
+
+fn validate_existing_row_primary_keys(options: &DataGridSaveStatementOptions) -> Option<String> {
+    let primary_keys = &options.table_meta.primary_keys;
+    if primary_keys.is_empty() || (options.dirty_rows.is_empty() && options.deleted_rows.is_empty()) {
+        return None;
+    }
+
+    let save_columns = effective_columns(options);
+    let primary_key_indexes: Vec<Option<usize>> =
+        primary_keys.iter().map(|primary_key| find_column_index(&save_columns, primary_key)).collect();
+    let missing_primary_keys = primary_keys
+        .iter()
+        .zip(&primary_key_indexes)
+        .filter_map(|(primary_key, index)| index.is_none().then_some(primary_key.as_str()))
+        .collect::<Vec<_>>();
+    if !missing_primary_keys.is_empty() {
+        return Some(format!(
+            "Cannot safely update or delete rows because the query result does not include every primary key column (missing: {}). Refresh or rerun the query before saving.",
+            missing_primary_keys.join(", ")
+        ));
+    }
+
+    let primary_key_indexes = primary_key_indexes.into_iter().flatten().collect::<Vec<_>>();
+    for row_index in
+        options.dirty_rows.iter().map(|(row_index, _)| *row_index).chain(options.deleted_rows.iter().copied())
+    {
+        let Some(row) = options.rows.get(row_index) else {
+            continue;
+        };
+        if let Some((primary_key, _)) =
+            primary_keys.iter().zip(&primary_key_indexes).find(|(_, index)| row.get(**index).is_none_or(Value::is_null))
+        {
+            return Some(format!(
+                "Cannot safely update or delete rows because primary key column \"{primary_key}\" has no value in the query result. Refresh or rerun the query before saving."
+            ));
         }
     }
 
@@ -1822,14 +1865,7 @@ fn build_primary_key_where(
     primary_keys
         .iter()
         .map(|primary_key| {
-            let value = row
-                .get(
-                    columns
-                        .iter()
-                        .position(|column| column.as_deref() == Some(primary_key.as_str()))
-                        .unwrap_or(usize::MAX),
-                )
-                .unwrap_or(&Value::Null);
+            let value = row.get(find_column_index(columns, primary_key).unwrap_or(usize::MAX)).unwrap_or(&Value::Null);
             build_column_predicate(database_type, primary_key, value, column_info_for(column_info, primary_key), false)
         })
         .collect::<Vec<_>>()
@@ -2088,6 +2124,9 @@ fn is_null_write_to_not_null_column(
 }
 
 fn find_column_index(columns: &[Option<String>], target: &str) -> Option<usize> {
+    if let Some(index) = columns.iter().position(|column| column.as_deref() == Some(target)) {
+        return Some(index);
+    }
     let normalized_target = normalize_column_name(target);
     columns
         .iter()
@@ -3365,6 +3404,116 @@ mod tests {
 
         assert_eq!(result.validation_error, None);
         assert_eq!(result.statements, vec!["UPDATE [dbo].[users] SET [UserId] = 144847503924137986 WHERE [Id] = 1;"]);
+    }
+
+    #[test]
+    fn prepares_kingbase_update_when_source_primary_key_case_differs() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Kingbase),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("ltcins_qd_db".to_string()),
+                table_name: "KG07".to_string(),
+                primary_keys: vec!["CKG023".to_string()],
+                columns: Some(vec![
+                    column("CKG023", "varchar", false, None),
+                    column("CKG096", "character", true, None),
+                ]),
+            },
+            columns: vec!["ckg023".to_string(), "CKG096".to_string()],
+            source_columns: Some(vec![Some("ckg023".to_string()), Some("CKG096".to_string())]),
+            rows: vec![vec![json!("2026071511071859"), json!("03")]],
+            dirty_rows: vec![(0, vec![(1, json!("02"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![r#"UPDATE "ltcins_qd_db"."KG07" SET "CKG096" = '02' WHERE "CKG023" = '2026071511071859';"#]
+        );
+        assert_eq!(
+            result.rollback_statements,
+            vec![
+                r#"UPDATE "ltcins_qd_db"."KG07" SET "CKG096" = '03' WHERE "CKG023" = '2026071511071859' AND "CKG096" = '02';"#
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_existing_row_save_when_primary_key_is_missing() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Kingbase),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("ltcins_qd_db".to_string()),
+                table_name: "KG07".to_string(),
+                primary_keys: vec!["CKG023".to_string()],
+                columns: Some(vec![
+                    column("CKG023", "varchar", false, None),
+                    column("CKG096", "character", true, None),
+                ]),
+            },
+            columns: vec!["CKG096".to_string()],
+            source_columns: Some(vec![Some("CKG096".to_string())]),
+            rows: vec![vec![json!("03")]],
+            dirty_rows: vec![(0, vec![(0, json!("02"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.validation_error.as_deref(),
+            Some(
+                "Cannot safely update or delete rows because the query result does not include every primary key column (missing: CKG023). Refresh or rerun the query before saving."
+            )
+        );
+        assert!(result.statements.is_empty());
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn rejects_existing_row_save_when_primary_key_value_is_null() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Kingbase),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("ltcins_qd_db".to_string()),
+                table_name: "KG07".to_string(),
+                primary_keys: vec!["CKG023".to_string()],
+                columns: Some(vec![
+                    column("CKG023", "varchar", false, None),
+                    column("CKG096", "character", true, None),
+                ]),
+            },
+            columns: vec!["CKG023".to_string(), "CKG096".to_string()],
+            source_columns: None,
+            rows: vec![vec![Value::Null, json!("03")]],
+            dirty_rows: vec![(0, vec![(1, json!("02"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.validation_error.as_deref(),
+            Some(
+                "Cannot safely update or delete rows because primary key column \"CKG023\" has no value in the query result. Refresh or rerun the query before saving."
+            )
+        );
+        assert!(result.statements.is_empty());
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn find_column_index_prefers_exact_case_before_case_insensitive_fallback() {
+        let columns = vec![Some("ckg023".to_string()), Some("CKG023".to_string())];
+
+        assert_eq!(find_column_index(&columns, "CKG023"), Some(1));
+        assert_eq!(find_column_index(&columns[..1], "CKG023"), Some(0));
     }
 
     #[test]

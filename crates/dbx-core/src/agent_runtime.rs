@@ -67,24 +67,33 @@ pub async fn spawn_shared_connection_client(
     let jre_key = state.installed_drivers.get(key).map(|driver| driver.jre.as_str()).unwrap_or(DEFAULT_JRE_KEY);
     let launch = manager.resolve_agent_launch_spec_with_extra_args(&state, key, jre_key, extra_java_args)?;
     let runtime_key = shared_runtime_key(key, &launch);
-
-    let runtime_cell = {
-        let mut runtimes = manager.connection_runtimes.lock().await;
-        if runtimes.get(&runtime_key).and_then(|cell| cell.get()).is_some_and(|runtime| runtime.is_failed()) {
-            runtimes.remove(&runtime_key);
-        }
-        runtimes.entry(runtime_key.clone()).or_insert_with(|| std::sync::Arc::new(tokio::sync::OnceCell::new())).clone()
-    };
-    let runtime =
-        runtime_cell.get_or_try_init(|| AgentRuntimeClient::spawn(launch, manager.agent_app_version())).await?.clone();
     let mut session_params = connect_params;
     session_params
         .as_object_mut()
         .ok_or_else(|| "Agent connect parameters must be an object".to_string())?
         .insert("agentSessionId".to_string(), serde_json::Value::String(agent_session_id.clone()));
-    // Count pending opens as reservations so one failed connection cannot retire
-    // a runtime while another session is being opened concurrently.
-    runtime.increment_session_count();
+
+    let (runtime_cell, runtime) = loop {
+        let runtime_cell = {
+            let mut runtimes = manager.connection_runtimes.lock().await;
+            if runtimes.get(&runtime_key).and_then(|cell| cell.get()).is_some_and(|runtime| runtime.is_failed()) {
+                runtimes.remove(&runtime_key);
+            }
+            runtimes
+                .entry(runtime_key.clone())
+                .or_insert_with(|| std::sync::Arc::new(tokio::sync::OnceCell::new()))
+                .clone()
+        };
+        let runtime = runtime_cell
+            .get_or_try_init(|| AgentRuntimeClient::spawn(launch.clone(), manager.agent_app_version()))
+            .await?
+            .clone();
+
+        let mut runtimes = manager.connection_runtimes.lock().await;
+        if reserve_runtime_locked(&mut runtimes, &runtime_key, &runtime_cell, &runtime) {
+            break (runtime_cell, runtime);
+        }
+    };
     if let Err(err) = runtime
         .call::<serde_json::Value>(AgentMethod::OpenSession.as_str(), session_params, Some(connect_timeout), None)
         .await
@@ -105,12 +114,40 @@ async fn forget_unused_runtime_after_failed_open(
         return;
     }
 
-    // A runtime with no successful or pending sessions may retain driver-level
-    // network failure state. Stop reusing it; the idle grace task will terminate
-    // it unless a racing opener already acquired this runtime.
+    remove_unused_runtime_if_current(manager, runtime_key, runtime_cell, runtime).await;
+}
+
+async fn remove_unused_runtime_if_current(
+    manager: &AgentManager,
+    runtime_key: &str,
+    runtime_cell: &std::sync::Arc<tokio::sync::OnceCell<std::sync::Arc<AgentRuntimeClient>>>,
+    runtime: &std::sync::Arc<AgentRuntimeClient>,
+) {
+    // Keep reservation and map-entry validation under the same lock as openers.
     let mut runtimes = manager.connection_runtimes.lock().await;
-    if runtimes.get(runtime_key).is_some_and(|current| std::sync::Arc::ptr_eq(current, runtime_cell)) {
+    if runtime.active_session_count() == 0
+        && runtimes.get(runtime_key).is_some_and(|current| std::sync::Arc::ptr_eq(current, runtime_cell))
+    {
         runtimes.remove(runtime_key);
+    }
+}
+
+fn reserve_runtime_locked(
+    runtimes: &mut std::collections::HashMap<
+        String,
+        std::sync::Arc<tokio::sync::OnceCell<std::sync::Arc<AgentRuntimeClient>>>,
+    >,
+    runtime_key: &str,
+    runtime_cell: &std::sync::Arc<tokio::sync::OnceCell<std::sync::Arc<AgentRuntimeClient>>>,
+    runtime: &std::sync::Arc<AgentRuntimeClient>,
+) -> bool {
+    if runtimes.get(runtime_key).is_some_and(|current| std::sync::Arc::ptr_eq(current, runtime_cell))
+        && !runtime.is_failed()
+    {
+        runtime.increment_session_count();
+        true
+    } else {
+        false
     }
 }
 
@@ -335,6 +372,27 @@ for line in sys.stdin:
         runtime.increment_session_count();
 
         forget_unused_runtime_after_failed_open(&manager, runtime_key, &cell, &runtime).await;
+
+        assert!(manager.connection_runtimes.lock().await.contains_key(runtime_key));
+        assert_eq!(runtime.active_session_count(), 1);
+        AgentRuntimeClient::decrement_session_count(&runtime);
+        runtime.kill();
+        let _ = std::fs::remove_file(script_path);
+    }
+
+    #[tokio::test]
+    async fn failed_open_cleanup_cannot_remove_runtime_after_reservation() {
+        let (manager, cell, runtime, script_path) = test_shared_runtime("failed-open-race").await;
+        let runtime_key = "oracle|test";
+        manager.connection_runtimes.lock().await.insert(runtime_key.to_string(), cell.clone());
+        runtime.increment_session_count();
+
+        assert_eq!(AgentRuntimeClient::decrement_session_count(&runtime), 0);
+        let mut runtimes = manager.connection_runtimes.lock().await;
+        assert!(reserve_runtime_locked(&mut runtimes, runtime_key, &cell, &runtime));
+        drop(runtimes);
+
+        remove_unused_runtime_if_current(&manager, runtime_key, &cell, &runtime).await;
 
         assert!(manager.connection_runtimes.lock().await.contains_key(runtime_key));
         assert_eq!(runtime.active_session_count(), 1);

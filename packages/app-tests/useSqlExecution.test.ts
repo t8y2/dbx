@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { isDangerousSql, stripSqlComments } from "../../apps/desktop/src/composables/useSqlExecution.ts";
+import { isDangerousSql, stripSqlComments, supportsSqlTemplateParameters } from "../../apps/desktop/src/composables/useSqlExecution.ts";
 
 test("stripSqlComments removes block comments", () => {
   assert.equal(stripSqlComments("SELECT /* drop */ 1").includes("drop"), false);
@@ -65,4 +65,9 @@ test("complex SELECT with joins and functions is not dangerous", () => {
       select xxx from m_alarm where alarm_time >= SUBDATE(now(), interval 3 minute)
     ) as xxxx on m_alarm.mid = m_alarm_tmp.mid`;
   assert.equal(isDangerousSql(sql), false);
+});
+
+test("does not treat Elasticsearch URL query strings as SQL template parameters", () => {
+  assert.equal(supportsSqlTemplateParameters({ db_type: "elasticsearch" }), false);
+  assert.equal(supportsSqlTemplateParameters({ db_type: "mysql" }), true);
 });

@@ -1,5 +1,5 @@
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
-use reqwest::Client as HttpClient;
+use reqwest::{Client as HttpClient, Method};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashSet;
@@ -84,6 +84,11 @@ impl EsClient {
 
     fn delete(&self, path: &str) -> reqwest::RequestBuilder {
         let req = self.http.delete(format!("{}{}", self.base_url, path));
+        self.with_auth(req)
+    }
+
+    fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
+        let req = self.http.request(method, format!("{}{}", self.base_url, path));
         self.with_auth(req)
     }
 
@@ -486,6 +491,12 @@ fn translate_document_filter_value(value: &serde_json::Value) -> Result<Option<s
                     must.push(serde_json::json!({ "bool": { "should": should, "minimum_should_match": 1 } }));
                 }
             }
+            "$esQuery" => {
+                if !value.is_object() {
+                    return Err("$esQuery must be an object".to_string());
+                }
+                must.push(value.clone());
+            }
             key if key.starts_with('$') => {
                 return Err(format!("Unsupported Elasticsearch filter operator: {key}"));
             }
@@ -732,9 +743,96 @@ pub async fn delete_document(client: &EsClient, index: &str, id: &str, routing: 
     Ok(1)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ElasticsearchRestBodyKind {
+    Json,
+    Ndjson,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ElasticsearchRestRequest {
+    method: Method,
+    path: String,
+    body: Option<String>,
+    body_kind: ElasticsearchRestBodyKind,
+}
+
+fn strip_leading_elasticsearch_comments(input: &str) -> &str {
+    let mut rest = input;
+    loop {
+        rest = rest.trim_start();
+        if let Some(comment) = rest.strip_prefix('#').or_else(|| rest.strip_prefix("//")) {
+            rest = comment.split_once('\n').map_or("", |(_, remaining)| remaining);
+            continue;
+        }
+        if let Some(comment) = rest.strip_prefix("/*") {
+            rest = comment.split_once("*/").map_or("", |(_, remaining)| remaining);
+            continue;
+        }
+        return rest.trim();
+    }
+}
+
+fn is_elasticsearch_ndjson_path(path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path).trim_end_matches('/');
+    path == "/_bulk"
+        || path.ends_with("/_bulk")
+        || path == "/_msearch"
+        || path.ends_with("/_msearch")
+        || path == "/_msearch/template"
+        || path.ends_with("/_msearch/template")
+}
+
+fn parse_elasticsearch_rest_request(input: &str) -> Result<ElasticsearchRestRequest, String> {
+    let input = strip_leading_elasticsearch_comments(input);
+    if input.is_empty() {
+        return Err("Invalid query: expected METHOD /path".to_string());
+    }
+
+    let (request_line, body) = input.split_once('\n').map_or((input, None), |(line, body)| {
+        let body = body.trim();
+        (line, (!body.is_empty()).then(|| body.to_string()))
+    });
+    let (method, path) =
+        request_line.trim().split_once(char::is_whitespace).ok_or("Invalid query: expected METHOD /path")?;
+    let method = method.to_ascii_uppercase();
+    let method = Method::from_bytes(method.as_bytes())
+        .map_err(|_| format!("Unsupported HTTP method: {method}. Use GET, POST, PUT, DELETE, or HEAD."))?;
+    if !matches!(method, Method::GET | Method::POST | Method::PUT | Method::DELETE | Method::HEAD) {
+        return Err(format!("Unsupported HTTP method: {}. Use GET, POST, PUT, DELETE, or HEAD.", method.as_str()));
+    }
+
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("Invalid query: expected METHOD /path".to_string());
+    }
+    let path = if path.starts_with('/') { path.to_string() } else { format!("/{path}") };
+    let body_kind = if is_elasticsearch_ndjson_path(&path) {
+        ElasticsearchRestBodyKind::Ndjson
+    } else {
+        ElasticsearchRestBodyKind::Json
+    };
+
+    Ok(ElasticsearchRestRequest { method, path, body, body_kind })
+}
+
+fn validate_elasticsearch_ndjson(body: &str) -> Result<String, String> {
+    for (index, line) in body.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        serde_json::from_str::<serde_json::Value>(line)
+            .map_err(|error| format!("Invalid NDJSON body at line {}: {error}", index + 1))?;
+    }
+    let mut normalized = body.trim_end().to_string();
+    normalized.push('\n');
+    Ok(normalized)
+}
+
 pub async fn execute_rest_query(client: &EsClient, input: &str) -> Result<crate::types::QueryResult, String> {
     let start = std::time::Instant::now();
-    let input = input.trim();
+    let input = strip_leading_elasticsearch_comments(input);
 
     if let Some(search_query) = parse_select_star_search_query(input) {
         return execute_search_query(client, search_query, start).await;
@@ -762,59 +860,21 @@ pub async fn execute_rest_query(client: &EsClient, input: &str) -> Result<crate:
         return execute_sql_query(client, input, start).await;
     }
 
-    let (method, rest) = input.split_once(char::is_whitespace).ok_or("Invalid query: expected METHOD /path")?;
-    let method = method.to_uppercase();
-
-    let (path, body) = if let Some(pos) = rest.find('\n') {
-        let p = rest[..pos].trim();
-        let b = rest[pos + 1..].trim();
-        (p, if b.is_empty() { None } else { Some(b) })
-    } else {
-        (rest.trim(), None)
-    };
-
-    let path = if path.starts_with('/') { path.to_string() } else { format!("/{path}") };
-
-    let resp = match method.as_str() {
-        "GET" => {
-            let req = client.get(&path);
-            if let Some(b) = body {
-                let json: serde_json::Value = serde_json::from_str(b).map_err(|e| format!("Invalid JSON body: {e}"))?;
-                req.json(&json).send().await
-            } else {
-                req.send().await
+    let request = parse_elasticsearch_rest_request(input)?;
+    let mut builder = client.request(request.method, &request.path);
+    if let Some(body) = request.body {
+        builder = match request.body_kind {
+            ElasticsearchRestBodyKind::Json => {
+                let json: serde_json::Value =
+                    serde_json::from_str(&body).map_err(|e| format!("Invalid JSON body: {e}"))?;
+                builder.json(&json)
             }
-        }
-        "POST" => {
-            let req = client.post(&path);
-            if let Some(b) = body {
-                let json: serde_json::Value = serde_json::from_str(b).map_err(|e| format!("Invalid JSON body: {e}"))?;
-                req.json(&json).send().await
-            } else {
-                req.send().await
-            }
-        }
-        "PUT" => {
-            let req = client.put(&path);
-            if let Some(b) = body {
-                let json: serde_json::Value = serde_json::from_str(b).map_err(|e| format!("Invalid JSON body: {e}"))?;
-                req.json(&json).send().await
-            } else {
-                req.send().await
-            }
-        }
-        "DELETE" => {
-            let req = client.delete(&path);
-            if let Some(b) = body {
-                let json: serde_json::Value = serde_json::from_str(b).map_err(|e| format!("Invalid JSON body: {e}"))?;
-                req.json(&json).send().await
-            } else {
-                req.send().await
-            }
-        }
-        _ => return Err(format!("Unsupported HTTP method: {method}. Use GET, POST, PUT, or DELETE.")),
+            ElasticsearchRestBodyKind::Ndjson => builder
+                .header(reqwest::header::CONTENT_TYPE, "application/x-ndjson")
+                .body(validate_elasticsearch_ndjson(&body)?),
+        };
     }
-    .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    let resp = builder.send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
 
     let status = resp.status().as_u16();
     let body = resp.text().await.map_err(|e| format!("Elasticsearch response read failed: {e}"))?;
@@ -1555,6 +1615,57 @@ mod tests {
     }
 
     #[test]
+    fn parses_rest_request_after_comments_and_preserves_query_parameters() {
+        let request = super::parse_elasticsearch_rest_request(
+            "# JVM statistics\n// available on Elasticsearch 7+\nGET /_nodes/stats/jvm?pretty",
+        )
+        .unwrap();
+
+        assert_eq!(request.method, reqwest::Method::GET);
+        assert_eq!(request.path, "/_nodes/stats/jvm?pretty");
+        assert_eq!(request.body, None);
+        assert_eq!(request.body_kind, super::ElasticsearchRestBodyKind::Json);
+    }
+
+    #[test]
+    fn parses_rest_request_after_multiline_block_comment() {
+        let request = super::parse_elasticsearch_rest_request(
+            "/* node statistics\n   safe on supported clusters */\nGET /_nodes/stats/jvm?pretty",
+        )
+        .unwrap();
+
+        assert_eq!(request.method, reqwest::Method::GET);
+        assert_eq!(request.path, "/_nodes/stats/jvm?pretty");
+    }
+
+    #[test]
+    fn parses_lowercase_rest_method() {
+        let request = super::parse_elasticsearch_rest_request("get /_cluster/health").unwrap();
+
+        assert_eq!(request.method, reqwest::Method::GET);
+        assert_eq!(request.path, "/_cluster/health");
+    }
+
+    #[test]
+    fn detects_ndjson_endpoints_with_index_and_query_parameters() {
+        let request = super::parse_elasticsearch_rest_request(
+            "POST /orders/_bulk?refresh=true\n{\"index\":{\"_id\":\"1\"}}\n{\"name\":\"Notebook\"}",
+        )
+        .unwrap();
+
+        assert_eq!(request.method, reqwest::Method::POST);
+        assert_eq!(request.body_kind, super::ElasticsearchRestBodyKind::Ndjson);
+        assert!(request.body.is_some());
+    }
+
+    #[test]
+    fn normalizes_ndjson_with_a_required_trailing_newline() {
+        let body = "{\"index\":{}}\n{\"name\":\"Notebook\"}";
+        assert_eq!(super::validate_elasticsearch_ndjson(body).unwrap(), format!("{body}\n"));
+        assert!(super::validate_elasticsearch_ndjson("{\"index\":{}}\nnot-json").is_err());
+    }
+
+    #[test]
     fn url_params_can_disable_elasticsearch_tls_verification() {
         assert!(elasticsearch_accept_invalid_certs(false, Some("sslmode=disable")));
         assert!(elasticsearch_accept_invalid_certs(false, Some("?tlsVerify=false")));
@@ -1642,6 +1753,38 @@ mod tests {
                 "size": 10,
                 "query": { "term": { "city": "长治" } },
                 "sort": [{ "created_at": { "order": "desc" } }]
+            })
+        );
+    }
+
+    #[test]
+    fn builds_elasticsearch_find_body_with_native_query_builder_filter() {
+        let body = build_find_documents_body(
+            0,
+            25,
+            Some(
+                r#"{
+                    "$esQuery": {
+                        "bool": {
+                            "must": [{"match": {"customer_name": "Customer"}}],
+                            "filter": [{"range": {"amount": {"gte": 500}}}],
+                            "must_not": [{"term": {"status": "cancelled"}}]
+                        }
+                    }
+                }"#,
+            ),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            body["query"],
+            json!({
+                "bool": {
+                    "must": [{"match": {"customer_name": "Customer"}}],
+                    "filter": [{"range": {"amount": {"gte": 500}}}],
+                    "must_not": [{"term": {"status": "cancelled"}}]
+                }
             })
         );
     }
@@ -1934,6 +2077,63 @@ mod tests {
         assert_eq!(result.columns, vec!["status", "response"]);
         assert_eq!(result.rows[0][0], json!(200));
         assert_eq!(result.rows[0][1].as_str(), Some(response_body));
+    }
+
+    #[tokio::test]
+    async fn execute_rest_head_request_returns_http_status() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("HEAD /orders "));
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result = super::execute_rest_query(&client, "HEAD /orders").await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result.columns, vec!["status", "response"]);
+        assert_eq!(result.rows[0][0], json!(200));
+        assert_eq!(result.rows[0][1], json!("null"));
+    }
+
+    #[tokio::test]
+    async fn execute_rest_msearch_sends_ndjson_content_type_and_trailing_newline() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            let (headers, body) = request.split_once("\r\n\r\n").unwrap();
+            assert!(headers.starts_with("POST /_msearch "));
+            assert!(headers.lines().any(|line| line.eq_ignore_ascii_case("content-type: application/x-ndjson")));
+            assert_eq!(body, "{\"index\":\"orders\"}\n{\"size\":0}\n");
+
+            let response_body = r#"{"responses":[]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result = super::execute_rest_query(
+            &client,
+            "// run two searches\nPOST /_msearch\n{\"index\":\"orders\"}\n{\"size\":0}",
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result.rows[0][0], json!(200));
     }
 
     #[tokio::test]

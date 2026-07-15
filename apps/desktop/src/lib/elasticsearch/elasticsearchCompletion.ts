@@ -22,14 +22,21 @@ export interface ElasticsearchCompletionInput {
   indices?: string[];
 }
 
-const HTTP_METHODS = ["GET", "POST", "PUT", "DELETE"] as const;
+const HTTP_METHODS = ["GET", "POST", "PUT", "DELETE", "HEAD"] as const;
 
 const ROOT_ENDPOINTS = [
   { label: "/_search", apply: "_search", method: "GET", detail: "Search all indices" },
   { label: "/_cat/indices", apply: "_cat/indices?v", method: "GET", detail: "List indices" },
   { label: "/_cluster/health", apply: "_cluster/health", method: "GET", detail: "Cluster health" },
+  { label: "/_cluster/stats", apply: "_cluster/stats?pretty", method: "GET", detail: "Cluster statistics" },
+  { label: "/_nodes/stats", apply: "_nodes/stats?pretty", method: "GET", detail: "Node statistics" },
+  { label: "/_cat/nodes", apply: "_cat/nodes?v", method: "GET", detail: "List nodes" },
+  { label: "/_cat/shards", apply: "_cat/shards?v", method: "GET", detail: "List shards" },
+  { label: "/_cat/thread_pool", apply: "_cat/thread_pool?v", method: "GET", detail: "Thread pools" },
   { label: "/_aliases", apply: "_aliases", method: "GET", detail: "List aliases" },
   { label: "/_bulk", apply: "_bulk\n", method: "POST", detail: "Bulk operations" },
+  { label: "/_msearch", apply: "_msearch\n", method: "POST", detail: "Multi search" },
+  { label: "/_tasks", apply: "_tasks?detailed=true", method: "GET", detail: "List tasks" },
   { label: "/_count", apply: "_count", method: "GET", detail: "Count documents" },
 ];
 
@@ -86,44 +93,47 @@ export function getElasticsearchCompletionContext(text: string, cursor: number):
   const firstLineEnd = text.indexOf("\n");
   const firstLineLimit = firstLineEnd >= 0 ? firstLineEnd : text.length;
 
+  // Check the current line before falling back to JSON mode so completion also
+  // works after leading comments and on subsequent REST requests.
+  const methodMatch = /^\s*([A-Za-z]*)$/.exec(beforeCursorOnLine);
+  if (methodMatch) {
+    const leadingWhitespace = beforeCursorOnLine.length - beforeCursorOnLine.trimStart().length;
+    return {
+      mode: "method",
+      prefix: methodMatch[1] ?? "",
+      from: lineStart + leadingWhitespace,
+    };
+  }
+
+  const commandMatch = /^\s*([A-Za-z]+)\s+(\S*)/.exec(text.slice(lineStart, currentLineEnd));
+  if (commandMatch) {
+    const method = commandMatch[1]?.toUpperCase();
+    const path = commandMatch[2] ?? "";
+    const pathStart = lineStart + commandMatch[0].length - path.length;
+    const pathCursor = Math.max(0, safeCursor - pathStart);
+    const boundedPathCursor = Math.min(pathCursor, path.length);
+    const beforePathCursor = path.slice(0, boundedPathCursor);
+    const segmentStartInPath = beforePathCursor.lastIndexOf("/") + 1;
+    const prefix = beforePathCursor.slice(segmentStartInPath);
+    const segmentIndex = beforePathCursor.slice(0, segmentStartInPath).split("/").filter(Boolean).length;
+
+    return {
+      mode: "path",
+      prefix,
+      from: pathStart + segmentStartInPath,
+      method,
+      path,
+      segmentIndex,
+    };
+  }
+
   if (lineStart > 0 || safeCursor > firstLineLimit || looksLikeJsonBody(text, safeCursor)) {
     const jsonPrefix = readJsonPrefix(text, safeCursor);
     return { mode: "json", prefix: jsonPrefix.prefix, from: jsonPrefix.from };
   }
 
-  const methodMatch = /^([A-Za-z]*)$/.exec(beforeCursorOnLine);
-  if (methodMatch) {
-    return {
-      mode: "method",
-      prefix: methodMatch[1] ?? "",
-      from: lineStart,
-    };
-  }
-
-  const commandMatch = /^([A-Za-z]+)\s+(\S*)/.exec(text.slice(lineStart, currentLineEnd));
-  if (!commandMatch) {
-    const prefix = readWordPrefix(text, safeCursor);
-    return { mode: "method", prefix: prefix.prefix, from: prefix.from };
-  }
-
-  const method = commandMatch[1]?.toUpperCase();
-  const path = commandMatch[2] ?? "";
-  const pathStart = lineStart + (commandMatch[0].indexOf(path) >= 0 ? commandMatch[0].indexOf(path) : 0);
-  const pathCursor = Math.max(0, safeCursor - pathStart);
-  const boundedPathCursor = Math.min(pathCursor, path.length);
-  const beforePathCursor = path.slice(0, boundedPathCursor);
-  const segmentStartInPath = beforePathCursor.lastIndexOf("/") + 1;
-  const prefix = beforePathCursor.slice(segmentStartInPath);
-  const segmentIndex = beforePathCursor.slice(0, segmentStartInPath).split("/").filter(Boolean).length;
-
-  return {
-    mode: "path",
-    prefix,
-    from: pathStart + segmentStartInPath,
-    method,
-    path,
-    segmentIndex,
-  };
+  const prefix = readWordPrefix(text, safeCursor);
+  return { mode: "method", prefix: prefix.prefix, from: prefix.from };
 }
 
 export function buildElasticsearchCompletionItems(text: string, cursor: number, input: ElasticsearchCompletionInput = {}): ElasticsearchCompletionItem[] {

@@ -18,6 +18,7 @@ import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
 import { documentViewerFontStyle } from "@/lib/document/documentViewerFontStyle";
 import {
   buildDocumentFilterCondition,
+  buildElasticsearchQueryFromRules,
   combineDocumentFilterConditions,
   currentDocumentFilterJson,
   currentDocumentSortJson,
@@ -25,8 +26,14 @@ import {
   documentFilterModeNeedsValue,
   documentFilterModeOptions,
   documentStoreProviderFor,
+  elasticsearchBoolClauseOptions,
+  elasticsearchQueryTypeNeedsValue,
+  elasticsearchQueryTypeOptions,
+  elasticsearchStructuredFilter,
   type DocumentFilterMode,
   type DocumentFilterRule,
+  type ElasticsearchBoolClause,
+  type ElasticsearchQueryType,
 } from "@/lib/app/documentStoreProvider";
 import { documentStoreValueForGrid, parseDocumentStoreInputValue, serializeDocumentStoreId, stringifyDocumentStoreValue } from "@/lib/app/documentJsonValues";
 import { isLosslessJsonNumber, parseJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
@@ -35,7 +42,7 @@ import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { useSettingsStore } from "@/stores/settingsStore";
 import JsonEditNode from "./JsonEditNode.vue";
 import type { EditNode } from "@/types/editor";
-import type { DatabaseType, QueryResult } from "@/types/database";
+import type { ColumnInfo, DatabaseType, QueryResult } from "@/types/database";
 import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
@@ -113,6 +120,7 @@ type DocumentGridChanges = {
 const documentFilterBuilderOpen = ref(false);
 const documentFilterRules = ref<DocumentFilterRule[]>([]);
 const appliedDocumentFilter = ref<Record<string, unknown> | null>(null);
+const elasticsearchMappingFields = ref<ColumnInfo[]>([]);
 
 const pendingDelete = ref<PendingDelete | null>(null);
 
@@ -174,13 +182,34 @@ const gridResult = computed<QueryResult>(() => {
 
   return { columns, rows, mongo_documents: docs, affected_rows: 0, execution_time_ms: 0, truncated: false };
 });
-const documentFilterFieldOptions = computed(() => gridResult.value.columns);
-const documentStructuredFilterCount = computed(() => (appliedDocumentFilter.value ? 1 : 0));
+const documentFilterFieldOptions = computed(() => {
+  if (documentStoreProvider.value.kind !== "elasticsearch") return gridResult.value.columns;
+  const names = [...elasticsearchMappingFields.value.map((field) => field.name), ...gridResult.value.columns, "_id", "_routing"];
+  return [...new Set(names.filter(Boolean))];
+});
+const elasticsearchFieldTypes = computed(() => new Map(elasticsearchMappingFields.value.map((field) => [field.name, field.data_type])));
+const documentStructuredFilterCount = computed(() => {
+  if (!appliedDocumentFilter.value) return 0;
+  if (documentStoreProvider.value.kind !== "elasticsearch") return 1;
+  const query = appliedDocumentFilter.value.$esQuery;
+  if (!query || typeof query !== "object" || Array.isArray(query)) return 0;
+  const bool = (query as Record<string, unknown>).bool;
+  if (!bool || typeof bool !== "object" || Array.isArray(bool)) return 0;
+  return elasticsearchBoolClauseOptions.reduce((count, clause) => {
+    const rules = (bool as Record<string, unknown>)[clause];
+    return count + (Array.isArray(rules) ? rules.length : 0);
+  }, 0);
+});
 const documentLoadingLabelKey = computed(() => (documentLoadCancelling.value ? "common.stopping" : "common.loading"));
 let documentLoadingTimer: ReturnType<typeof setInterval> | undefined;
 
 function createDocumentFilterRule(): DocumentFilterRule {
-  return defaultDocumentFilterRule(uuid(), documentFilterFieldOptions.value[0] ?? "");
+  const fieldName = documentFilterFieldOptions.value[0] ?? "";
+  const rule = defaultDocumentFilterRule(uuid(), fieldName);
+  if (documentStoreProvider.value.kind === "elasticsearch") {
+    rule.elasticsearchQueryType = elasticsearchQueryTypeOptions(elasticsearchFieldTypes.value.get(fieldName))[0];
+  }
+  return rule;
 }
 
 function ensureDocumentFilterRule() {
@@ -203,9 +232,31 @@ function updateDocumentFilterRule(ruleId: string, patch: Partial<DocumentFilterR
   documentFilterRules.value = documentFilterRules.value.map((rule) => {
     if (rule.id !== ruleId) return rule;
     const next = { ...rule, ...patch };
-    if (!documentFilterModeNeedsValue(next.mode)) next.rawValue = "";
+    if (documentStoreProvider.value.kind === "elasticsearch") {
+      const queryTypes = elasticsearchQueryTypeOptions(elasticsearchFieldTypes.value.get(next.fieldName));
+      if (!next.elasticsearchQueryType || !queryTypes.includes(next.elasticsearchQueryType)) {
+        next.elasticsearchQueryType = queryTypes[0];
+      }
+      if (!elasticsearchQueryTypeNeedsValue(next.elasticsearchQueryType)) next.rawValue = "";
+    } else if (!documentFilterModeNeedsValue(next.mode)) {
+      next.rawValue = "";
+    }
     return next;
   });
+}
+
+function elasticsearchRuleQueryTypes(rule: DocumentFilterRule): ElasticsearchQueryType[] {
+  return elasticsearchQueryTypeOptions(elasticsearchFieldTypes.value.get(rule.fieldName));
+}
+
+function elasticsearchQueryTypeLabel(queryType: ElasticsearchQueryType): string {
+  const rangeOperator: Partial<Record<ElasticsearchQueryType, string>> = {
+    range_gt: "range >",
+    range_gte: "range >=",
+    range_lt: "range <",
+    range_lte: "range <=",
+  };
+  return rangeOperator[queryType] ?? queryType;
 }
 
 function resetDocumentFilterBuilder() {
@@ -234,6 +285,12 @@ const documentQueryPreview = computed(() => {
 });
 
 async function applyDocumentStructuredFilters() {
+  if (documentStoreProvider.value.kind === "elasticsearch") {
+    appliedDocumentFilter.value = elasticsearchStructuredFilter(buildElasticsearchQueryFromRules(documentFilterRules.value));
+    documentFilterBuilderOpen.value = false;
+    applyFilter();
+    return;
+  }
   const items = documentFilterRules.value
     .map((rule) => ({
       rule,
@@ -247,6 +304,15 @@ async function applyDocumentStructuredFilters() {
   appliedDocumentFilter.value = structured;
   documentFilterBuilderOpen.value = false;
   applyFilter();
+}
+
+async function loadElasticsearchMappingFields() {
+  if (documentStoreProvider.value.kind !== "elasticsearch") return;
+  try {
+    elasticsearchMappingFields.value = await api.getColumns(props.connectionId, props.database, "", props.collection);
+  } catch {
+    elasticsearchMappingFields.value = [];
+  }
 }
 
 function clearDocumentFilters(clearLocalFilter?: (columnIndex?: number) => void) {
@@ -822,7 +888,10 @@ onMounted(async () => {
   } catch (e) {
     console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
   }
-  load();
+  // Mapping metadata enriches the filter builder, but it must not delay the
+  // first page of documents when the mapping endpoint is slow.
+  void loadElasticsearchMappingFields();
+  void load();
 });
 onBeforeUnmount(() => {
   if (documentLoadExecutionId.value) void api.cancelQuery(documentLoadExecutionId.value);
@@ -1017,7 +1086,7 @@ function resetTableSearchSplitWidth() {
                   </span>
                 </button>
               </PopoverTrigger>
-              <PopoverContent align="start" class="w-[360px] max-w-[calc(100vw-24px)] gap-3 p-3">
+              <PopoverContent align="start" class="max-w-[calc(100vw-32px)] gap-3 p-3" :class="documentStoreProvider.kind === 'elasticsearch' ? 'w-[680px]' : 'w-[360px]'">
                 <div class="flex items-center justify-between gap-3">
                   <div class="text-xs font-medium text-foreground">{{ t("grid.filter") }}</div>
                   <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="addDocumentFilterRule">
@@ -1059,7 +1128,7 @@ function resetTableSearchSplitWidth() {
 
                 <div v-if="documentFilterRules.length" class="space-y-2">
                   <template v-for="(rule, index) in documentFilterRules" :key="rule.id">
-                    <div v-if="index > 0" class="flex justify-center">
+                    <div v-if="index > 0 && documentStoreProvider.kind !== 'elasticsearch'" class="flex justify-center">
                       <Button
                         variant="ghost"
                         size="sm"
@@ -1073,19 +1142,44 @@ function resetTableSearchSplitWidth() {
                         {{ rule.conjunction }}
                       </Button>
                     </div>
-                    <div class="grid grid-cols-[minmax(0,1fr)_minmax(0,0.95fr)_minmax(0,1fr)_auto] items-center gap-1.5">
-                      <Select :model-value="rule.fieldName" @update:model-value="(value: any) => updateDocumentFilterRule(rule.id, { fieldName: String(value) })">
+                    <div class="grid items-center gap-1.5" :class="documentStoreProvider.kind === 'elasticsearch' ? 'grid-cols-[minmax(0,0.75fr)_minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1fr)_auto]' : 'grid-cols-[minmax(0,1fr)_minmax(0,0.95fr)_minmax(0,1fr)_auto]'">
+                      <Select v-if="documentStoreProvider.kind === 'elasticsearch'" :model-value="rule.elasticsearchClause || 'filter'" @update:model-value="(value: any) => updateDocumentFilterRule(rule.id, { elasticsearchClause: value as ElasticsearchBoolClause })">
                         <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
-                          <SelectValue :placeholder="t('grid.filterBuilderColumn')" />
+                          <SelectValue />
                         </SelectTrigger>
                         <SelectContent position="popper">
-                          <SelectItem v-for="fieldName in documentFilterFieldOptions" :key="fieldName" :value="fieldName">
-                            {{ fieldName }}
+                          <SelectItem v-for="clause in elasticsearchBoolClauseOptions" :key="clause" :value="clause">
+                            {{ clause }}
                           </SelectItem>
                         </SelectContent>
                       </Select>
 
-                      <Select :model-value="rule.mode" @update:model-value="(value: any) => updateDocumentFilterRule(rule.id, { mode: value as DocumentFilterMode })">
+                      <Select :model-value="rule.fieldName" @update:model-value="(value: any) => updateDocumentFilterRule(rule.id, { fieldName: String(value) })">
+                        <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
+                          <SelectValue :placeholder="t('grid.filterBuilderColumn')"> {{ rule.fieldName }}{{ elasticsearchFieldTypes.get(rule.fieldName) ? ` (${elasticsearchFieldTypes.get(rule.fieldName)})` : "" }} </SelectValue>
+                        </SelectTrigger>
+                        <SelectContent position="popper">
+                          <SelectItem v-for="fieldName in documentFilterFieldOptions" :key="fieldName" :value="fieldName">
+                            <span class="flex min-w-0 items-center gap-2">
+                              <span class="truncate">{{ fieldName }}</span>
+                              <span v-if="elasticsearchFieldTypes.get(fieldName)" class="shrink-0 text-[10px] text-muted-foreground">({{ elasticsearchFieldTypes.get(fieldName) }})</span>
+                            </span>
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+
+                      <Select v-if="documentStoreProvider.kind === 'elasticsearch'" :model-value="rule.elasticsearchQueryType || elasticsearchRuleQueryTypes(rule)[0]" @update:model-value="(value: any) => updateDocumentFilterRule(rule.id, { elasticsearchQueryType: value as ElasticsearchQueryType })">
+                        <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent position="popper">
+                          <SelectItem v-for="queryType in elasticsearchRuleQueryTypes(rule)" :key="queryType" :value="queryType">
+                            {{ elasticsearchQueryTypeLabel(queryType) }}
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+
+                      <Select v-else :model-value="rule.mode" @update:model-value="(value: any) => updateDocumentFilterRule(rule.id, { mode: value as DocumentFilterMode })">
                         <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
                           <SelectValue />
                         </SelectTrigger>
@@ -1097,7 +1191,7 @@ function resetTableSearchSplitWidth() {
                       </Select>
 
                       <Input
-                        v-if="documentFilterModeNeedsValue(rule.mode)"
+                        v-if="documentStoreProvider.kind === 'elasticsearch' ? elasticsearchQueryTypeNeedsValue(rule.elasticsearchQueryType) : documentFilterModeNeedsValue(rule.mode)"
                         :model-value="rule.rawValue"
                         class="h-8 min-w-0 text-xs"
                         :placeholder="t('grid.filterBuilderValue')"

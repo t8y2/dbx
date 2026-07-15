@@ -289,9 +289,9 @@ export function useSqlExecution(deps: {
   };
 }
 
-function supportsSqlTemplateParameters(connection: ConnectionConfig | undefined): boolean {
+export function supportsSqlTemplateParameters(connection: Pick<ConnectionConfig, "db_type"> | undefined): boolean {
   if (!connection) return false;
-  return connection.db_type !== "redis" && connection.db_type !== "mongodb";
+  return connection.db_type !== "redis" && connection.db_type !== "mongodb" && connection.db_type !== "elasticsearch";
 }
 
 export function requiresDatabaseSelection(tab: QueryTab, connection: ConnectionConfig | undefined, sql = ""): boolean {

@@ -18,6 +18,7 @@ import {
   moveConnectionToGroup as moveConnectionToGroupOp,
   remapSidebarLayoutConnectionIds,
   reorderEntry as reorderEntryOp,
+  buildConnectionGroupPathMap,
   type DropPosition,
 } from "@/lib/sidebar/sidebarLayout";
 import type { SqlCompletionColumn, SqlCompletionForeignKey, SqlCompletionObject, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
@@ -310,6 +311,7 @@ export const useConnectionStore = defineStore("connection", () => {
     allDatabases?: boolean;
   } | null>(null);
   const sidebarLayout = ref<SidebarLayout>(emptyLayout());
+  const connectionGroupPaths = computed(() => buildConnectionGroupPathMap(sidebarLayout.value));
   let layoutPersistTimer: ReturnType<typeof setTimeout> | null = null;
   const staleTreeRefreshIds = new Set<string>();
   const metadataLoadCoordinator = new MetadataLoadCoordinator((event) => {
@@ -5269,6 +5271,7 @@ export const useConnectionStore = defineStore("connection", () => {
     markConnectionLost,
     recordConnectionLostError,
     sidebarLayout,
+    connectionGroupPaths,
     getConfig,
     connectionIdentifierQuote,
     isTreeNodePinned,

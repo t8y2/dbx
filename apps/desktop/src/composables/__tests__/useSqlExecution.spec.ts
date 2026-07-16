@@ -179,6 +179,58 @@ describe("useSqlExecution", () => {
     expect(executedSql).toContain("where fp.create_at < @date_start");
   });
 
+  it("keeps quoted braced placeholders unchanged when interpolation is not configured", async () => {
+    const sql = "select 'C:\\', '${date_end}'";
+    const activeTab = ref<QueryTab | undefined>(queryTab("app"));
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    useSettingsStore().editorSettings.sqlVariableSyntaxOverrides = { mysql: { noBackslashEscapes: true } };
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(execution.showSqlParameterDialog.value).toBe(false);
+    expect(executeCurrentSql).toHaveBeenCalledWith(sql, {});
+  });
+
+  it("opens the parameter dialog for quoted braced placeholders after per-database opt-in", async () => {
+    const sql = "select '${date_end}', '#{status}'";
+    const activeTab = ref<QueryTab | undefined>(queryTab("app"));
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockResolvedValue(undefined);
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    useSettingsStore().editorSettings.sqlVariableSyntaxOverrides = { mysql: { replaceInsideQuotes: true, ansiQuotes: true, noBackslashEscapes: true } };
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(execution.showSqlParameterDialog.value).toBe(true);
+    expect(execution.sqlParameterNames.value.map((parameter) => parameter.name)).toEqual(["date_end", "status"]);
+    expect(execution.sqlParameterReplaceInsideQuotes.value).toBe(true);
+    expect(execution.sqlParameterAnsiQuotes.value).toBe(true);
+    expect(execution.sqlParameterNoBackslashEscapes.value).toBe(true);
+    expect(executeCurrentSql).not.toHaveBeenCalled();
+  });
+
   it("sends Doris STRUCT DDL unchanged without opening the parameter dialog", async () => {
     const sql = `
       create table \`events\` (

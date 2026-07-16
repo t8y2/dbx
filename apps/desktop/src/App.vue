@@ -264,6 +264,9 @@ const {
   sqlParameterNames,
   sqlParameterDatabaseType,
   sqlParameterEnabledSyntaxes,
+  sqlParameterReplaceInsideQuotes,
+  sqlParameterAnsiQuotes,
+  sqlParameterNoBackslashEscapes,
   onSqlParametersConfirm,
   explainMode,
 } = useSqlExecution({
@@ -2202,6 +2205,9 @@ onUnmounted(() => {
           :sql-parameter-names="sqlParameterNames"
           :sql-parameter-database-type="sqlParameterDatabaseType"
           :sql-parameter-enabled-syntaxes="sqlParameterEnabledSyntaxes"
+          :sql-parameter-replace-inside-quotes="sqlParameterReplaceInsideQuotes"
+          :sql-parameter-ansi-quotes="sqlParameterAnsiQuotes"
+          :sql-parameter-no-backslash-escapes="sqlParameterNoBackslashEscapes"
           @update:show-connection-dialog="setConnectionDialogOpen"
           @update:show-danger-dialog="showDangerDialog = $event"
           @update:suppress-danger-confirm="suppressDangerConfirm = $event"

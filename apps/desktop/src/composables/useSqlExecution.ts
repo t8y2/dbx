@@ -96,6 +96,9 @@ export function useSqlExecution(deps: {
   const sqlParameterNames = ref<SqlParameterDescriptor[]>([]);
   const sqlParameterDatabaseType = ref<DatabaseType | undefined>();
   const sqlParameterEnabledSyntaxes = ref<SqlParameterSyntax[]>([]);
+  const sqlParameterReplaceInsideQuotes = ref(false);
+  const sqlParameterAnsiQuotes = ref(false);
+  const sqlParameterNoBackslashEscapes = ref(false);
   const pendingSourceOffset = ref<number | undefined>();
 
   async function resolvedExecutableSql(source?: SqlExecutionOverride): Promise<{ sql: string; sourceOffset?: number }> {
@@ -166,12 +169,21 @@ export function useSqlExecution(deps: {
     const databaseType = deps.activeConnection.value?.db_type;
     const toggles = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, databaseType);
     const enabledSyntaxes = enabledSqlParameterSyntaxes(toggles);
-    const parameters = extractSqlParameterDescriptors(sql, { databaseType, enabledSyntaxes });
+    const parameters = extractSqlParameterDescriptors(sql, {
+      databaseType,
+      enabledSyntaxes,
+      replaceInsideQuotes: toggles.replaceInsideQuotes,
+      ansiQuotes: toggles.ansiQuotes,
+      noBackslashEscapes: toggles.noBackslashEscapes,
+    });
     if (!parameters.length) return false;
     sqlParameterSourceSql.value = sql;
     sqlParameterNames.value = parameters;
     sqlParameterDatabaseType.value = databaseType;
     sqlParameterEnabledSyntaxes.value = enabledSyntaxes;
+    sqlParameterReplaceInsideQuotes.value = toggles.replaceInsideQuotes;
+    sqlParameterAnsiQuotes.value = toggles.ansiQuotes;
+    sqlParameterNoBackslashEscapes.value = toggles.noBackslashEscapes;
     pendingSourceOffset.value = sourceOffset;
     showSqlParameterDialog.value = true;
     return true;
@@ -272,6 +284,9 @@ export function useSqlExecution(deps: {
     sqlParameterNames.value = [];
     sqlParameterDatabaseType.value = undefined;
     sqlParameterEnabledSyntaxes.value = [];
+    sqlParameterReplaceInsideQuotes.value = false;
+    sqlParameterAnsiQuotes.value = false;
+    sqlParameterNoBackslashEscapes.value = false;
     const sourceOffset = pendingSourceOffset.value;
     pendingSourceOffset.value = undefined;
     await continueExecute(sql, sourceOffset);
@@ -283,6 +298,9 @@ export function useSqlExecution(deps: {
     sqlParameterNames.value = [];
     sqlParameterDatabaseType.value = undefined;
     sqlParameterEnabledSyntaxes.value = [];
+    sqlParameterReplaceInsideQuotes.value = false;
+    sqlParameterAnsiQuotes.value = false;
+    sqlParameterNoBackslashEscapes.value = false;
     pendingSourceOffset.value = undefined;
   });
 
@@ -301,6 +319,9 @@ export function useSqlExecution(deps: {
     sqlParameterNames,
     sqlParameterDatabaseType,
     sqlParameterEnabledSyntaxes,
+    sqlParameterReplaceInsideQuotes,
+    sqlParameterAnsiQuotes,
+    sqlParameterNoBackslashEscapes,
     onSqlParametersConfirm,
     explainMode,
   };

@@ -26,6 +26,9 @@ const props = defineProps<{
   parameters: SqlParameterDescriptor[];
   databaseType?: DatabaseType;
   enabledSyntaxes?: SqlParameterSyntax[];
+  replaceInsideQuotes?: boolean;
+  ansiQuotes?: boolean;
+  noBackslashEscapes?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -47,7 +50,15 @@ const syntaxLabels: Record<SqlParameterSyntax, string> = {
   sqlserver: "@name",
 };
 
-const resolvedSql = computed(() => substituteSqlParameters(props.sql, values.value, { databaseType: props.databaseType, enabledSyntaxes: props.enabledSyntaxes }));
+const resolvedSql = computed(() =>
+  substituteSqlParameters(props.sql, values.value, {
+    databaseType: props.databaseType,
+    enabledSyntaxes: props.enabledSyntaxes,
+    replaceInsideQuotes: props.replaceInsideQuotes,
+    ansiQuotes: props.ansiQuotes,
+    noBackslashEscapes: props.noBackslashEscapes,
+  }),
+);
 const highlightedSql = computed(() => highlight(resolvedSql.value));
 
 watch(

@@ -38,6 +38,9 @@ const props = defineProps<{
   sqlParameterNames: SqlParameterDescriptor[];
   sqlParameterDatabaseType?: DatabaseType;
   sqlParameterEnabledSyntaxes?: SqlParameterSyntax[];
+  sqlParameterReplaceInsideQuotes?: boolean;
+  sqlParameterAnsiQuotes?: boolean;
+  sqlParameterNoBackslashEscapes?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -169,6 +172,9 @@ watch(
     :parameters="sqlParameterNames"
     :database-type="sqlParameterDatabaseType"
     :enabled-syntaxes="sqlParameterEnabledSyntaxes"
+    :replace-inside-quotes="sqlParameterReplaceInsideQuotes"
+    :ansi-quotes="sqlParameterAnsiQuotes"
+    :no-backslash-escapes="sqlParameterNoBackslashEscapes"
     @update:open="emit('update:showSqlParameterDialog', $event)"
     @execute="emit('sqlParametersConfirm', $event)"
   />

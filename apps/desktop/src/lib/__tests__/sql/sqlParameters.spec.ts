@@ -21,6 +21,48 @@ describe("extractSqlParameters", () => {
     expect(extractSqlParameters(sql)).toEqual(["id"]);
   });
 
+  it("detects braced placeholders inside quoted text only when explicitly enabled", () => {
+    const sql = "select '${date_end}', \"${schema_name}\", `${table_name}`, [${column_name}], '#{mybatis_name}', ':named', '@sqlserver', '?'";
+
+    expect(extractSqlParameters(sql)).toEqual([]);
+    expect(extractSqlParameters(sql, { replaceInsideQuotes: true })).toEqual(["date_end", "schema_name", "table_name", "column_name", "mybatis_name"]);
+  });
+
+  it("uses NO_BACKSLASH_ESCAPES while scanning quoted boundaries", () => {
+    const sql = "select 'C:\\', '${value}'";
+
+    expect(extractSqlParameters(sql, { databaseType: "mysql", noBackslashEscapes: true })).toEqual([]);
+    expect(extractSqlParameters(sql, { databaseType: "mysql", replaceInsideQuotes: true, noBackslashEscapes: true })).toEqual(["value"]);
+  });
+
+  it("keeps escaped double quotes inside MySQL strings and honors ANSI_QUOTES identifiers", () => {
+    const stringSql = 'select "prefix \\" ${first}", "${second}"';
+    const identifierSql = 'select "C:\\", "${identifier}"';
+
+    expect(extractSqlParameters(stringSql, { databaseType: "mysql", replaceInsideQuotes: true })).toEqual(["first", "second"]);
+    expect(extractSqlParameters(identifierSql, { databaseType: "mysql", ansiQuotes: true })).toEqual([]);
+    expect(extractSqlParameters(identifierSql, { databaseType: "mysql", replaceInsideQuotes: true, ansiQuotes: true })).toEqual(["identifier"]);
+  });
+
+  it("keeps quoted placeholders in comments and dollar-quoted code ignored", () => {
+    const sql = ["select '${visible}', $$ '${body}' $$, $tag$ \"#{tag_body}\" $tag$", "-- '${line_comment}'", "/* '#{block_comment}' */"].join("\n");
+
+    expect(extractSqlParameters(sql, { replaceInsideQuotes: true })).toEqual(["visible"]);
+  });
+
+  it("honors syntax toggles when detecting placeholders inside quotes", () => {
+    const sql = "select '${shell_name}', '#{mybatis_name}'";
+
+    expect(extractSqlParameters(sql, { enabledSyntaxes: ["shell"], replaceInsideQuotes: true })).toEqual(["shell_name"]);
+    expect(extractSqlParameters(sql, { enabledSyntaxes: ["mybatis"], replaceInsideQuotes: true })).toEqual(["mybatis_name"]);
+  });
+
+  it("skips malformed quoted placeholders and continues scanning valid ones", () => {
+    const sql = "select '${bad-name} ${valid_name}', '${unfinished'";
+
+    expect(extractSqlParameters(sql, { replaceInsideQuotes: true })).toEqual(["valid_name"]);
+  });
+
   it("ignores placeholders inside Postgres dollar-quoted strings", () => {
     const sql = "select $$ ${body_param} $$, $tag$ ${tag_param} $tag$, ${real_param}";
     expect(extractSqlParameters(sql)).toEqual(["real_param"]);
@@ -291,6 +333,104 @@ describe("substituteSqlParameters", () => {
         expression: { kind: "raw", value: "current_date" },
       }),
     ).toBe("select 'O''Reilly', NULL, current_date");
+  });
+
+  it("inserts escaped text inside existing quote delimiters", () => {
+    const sql = "select '${single_value}', \"${double_value}\", `${backtick_value}`, [${bracket_value}]";
+    expect(
+      substituteSqlParameters(
+        sql,
+        {
+          single_value: { kind: "string", value: "O'Reilly" },
+          double_value: { kind: "string", value: 'a"b' },
+          backtick_value: { kind: "string", value: "a`b" },
+          bracket_value: { kind: "string", value: "a]b" },
+        },
+        { replaceInsideQuotes: true },
+      ),
+    ).toBe("select 'O''Reilly', \"a\"\"b\", `a``b`, [a]]b]");
+  });
+
+  it.each(["mysql", "doris", "starrocks"] as const)("preserves backslash sequences inside %s single-quoted strings", (databaseType) => {
+    const sql = "select '${path}', '${newline}', '${nul}', '${quote_and_path}'";
+    const values = {
+      path: { kind: "string" as const, value: String.raw`C:\new` },
+      newline: { kind: "string" as const, value: String.raw`\n` },
+      nul: { kind: "string" as const, value: String.raw`\0` },
+      quote_and_path: { kind: "string" as const, value: String.raw`O'Reilly\path` },
+    };
+
+    expect(substituteSqlParameters(sql, values, { databaseType, replaceInsideQuotes: true })).toBe(String.raw`select 'C:\\new', '\\n', '\\0', 'O''Reilly\\path'`);
+  });
+
+  it.each(["mysql", "doris", "starrocks"] as const)("classifies %s double quotes from the active SQL mode", (databaseType) => {
+    const sql = 'select "${path}", "${newline}"';
+    const values = {
+      path: { kind: "string" as const, value: String.raw`C:\new` },
+      newline: { kind: "string" as const, value: String.raw`\n` },
+    };
+
+    expect(substituteSqlParameters(sql, values, { databaseType, replaceInsideQuotes: true })).toBe(String.raw`select "C:\\new", "\\n"`);
+    expect(substituteSqlParameters(sql, values, { databaseType, replaceInsideQuotes: true, noBackslashEscapes: true })).toBe(String.raw`select "C:\new", "\n"`);
+    expect(substituteSqlParameters(sql, values, { databaseType, replaceInsideQuotes: true, ansiQuotes: true })).toBe(String.raw`select "C:\new", "\n"`);
+  });
+
+  it("keeps backslashes literal for MySQL-family NO_BACKSLASH_ESCAPES sessions", () => {
+    const sql = "select '${path}', '${newline}', '${nul}', '${quote_and_path}'";
+    const values = {
+      path: { kind: "string" as const, value: String.raw`C:\new` },
+      newline: { kind: "string" as const, value: String.raw`\n` },
+      nul: { kind: "string" as const, value: String.raw`\0` },
+      quote_and_path: { kind: "string" as const, value: String.raw`O'Reilly\path` },
+    };
+
+    expect(substituteSqlParameters(sql, values, { databaseType: "mysql", replaceInsideQuotes: true, noBackslashEscapes: true })).toBe(String.raw`select 'C:\new', '\n', '\0', 'O''Reilly\path'`);
+  });
+
+  it("preserves a preceding string ending in backslash under NO_BACKSLASH_ESCAPES", () => {
+    const sql = "select 'C:\\', '${value}'";
+
+    expect(substituteSqlParameters(sql, { value: { kind: "string", value: String.raw`C:\new` } }, { databaseType: "mysql", replaceInsideQuotes: true, noBackslashEscapes: true })).toBe("select 'C:\\', 'C:\\new'");
+  });
+
+  it("does not double backslashes in quoted identifiers", () => {
+    const sql = 'select "${double_name}", `${backtick_name}`, [${bracket_name}]';
+    const values = {
+      double_name: { kind: "string" as const, value: String.raw`a\b` },
+      backtick_name: { kind: "string" as const, value: String.raw`c\d` },
+      bracket_name: { kind: "string" as const, value: String.raw`e\f` },
+    };
+
+    expect(substituteSqlParameters(sql, values, { databaseType: "mysql", replaceInsideQuotes: true, ansiQuotes: true })).toBe(String.raw`select "a\b", ` + "`c\\d`" + String.raw`, [e\f]`);
+  });
+
+  it("preserves doubled quote escapes surrounding a quoted placeholder", () => {
+    const sql = "select 'prefix ''${name}'' suffix'";
+
+    expect(substituteSqlParameters(sql, { name: { kind: "string", value: "O'Reilly" } }, { replaceInsideQuotes: true })).toBe("select 'prefix ''O''Reilly'' suffix'");
+  });
+
+  it("uses typed literals outside quotes and textual values inside quotes", () => {
+    const sql = "select ${date_end}, '${date_end}', '${nullable}', '#{enabled}'";
+    expect(
+      substituteSqlParameters(
+        sql,
+        {
+          date_end: { kind: "string", value: "2026-07-16" },
+          nullable: { kind: "null", value: "" },
+          enabled: { kind: "boolean", value: "yes" },
+        },
+        { replaceInsideQuotes: true },
+      ),
+    ).toBe("select '2026-07-16', '2026-07-16', 'NULL', 'yes'");
+  });
+
+  it("replaces repeated quoted placeholders without changing the default-off path", () => {
+    const sql = "select '${date_end}', '${date_end}'";
+    const values = { date_end: { kind: "string" as const, value: "2026-07-16" } };
+
+    expect(substituteSqlParameters(sql, values)).toBe(sql);
+    expect(substituteSqlParameters(sql, values, { replaceInsideQuotes: true })).toBe("select '2026-07-16', '2026-07-16'");
   });
 
   it("replaces all supported placeholder syntaxes with SQL literals", () => {

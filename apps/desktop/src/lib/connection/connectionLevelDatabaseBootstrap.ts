@@ -167,6 +167,13 @@ function isAllowedBootstrapPrelude(statement: string): boolean {
     return true;
   }
 
+  // Connection-scoped SHOW (DATABASES, VARIABLES, PROCESSLIST, …) does not need a
+  // selected schema. SHOW TABLES / SHOW COLUMNS still fail at the server when no
+  // database is selected — matching Navicat-style query windows.
+  if (normalized === "SHOW") {
+    return true;
+  }
+
   if (normalized !== "CREATE" && normalized !== "DROP") {
     return false;
   }

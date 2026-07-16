@@ -695,6 +695,12 @@ pub fn mysql_like_sql_file_can_execute_without_selected_database(file_content: &
             continue;
         }
 
+        // Connection-scoped SHOW (DATABASES, VARIABLES, PROCESSLIST, …) does not
+        // need a selected schema. Object-scoped SHOW still fails at the server.
+        if keyword.eq_ignore_ascii_case("SHOW") {
+            continue;
+        }
+
         if mysql_use_database_target(statement).is_some() {
             has_database_context = true;
             continue;
@@ -1431,8 +1437,15 @@ mod tests {
         assert!(mysql_like_sql_file_can_execute_without_selected_database(
             "SET NAMES utf8mb4;\nCREATE DATABASE app_db;\n-- switch tenant\nUSE app_db;\nCREATE TABLE users(id INT)"
         ));
+        assert!(mysql_like_sql_file_can_execute_without_selected_database("SHOW DATABASES"));
+        assert!(mysql_like_sql_file_can_execute_without_selected_database(
+            "SHOW SCHEMAS;\nSHOW VARIABLES LIKE 'version%'"
+        ));
         assert!(!mysql_like_sql_file_can_execute_without_selected_database(
             "CREATE DATABASE app_db;\nCREATE TABLE users(id INT)"
+        ));
+        assert!(!mysql_like_sql_file_can_execute_without_selected_database(
+            "SHOW DATABASES;\nCREATE TABLE users(id INT)"
         ));
         assert!(!mysql_like_sql_file_can_execute_without_selected_database(
             "CREATE DATABASE app_db;\nUSE app_db SELECT 1;\nCREATE TABLE users(id INT)"

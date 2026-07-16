@@ -66,6 +66,14 @@ describe("requiresDatabaseSelection", () => {
     expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "CREATE DATABASE app_db")).toBe(false);
   });
 
+  it("allows MySQL SHOW DATABASES to run without a selected database", () => {
+    expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "SHOW DATABASES")).toBe(false);
+  });
+
+  it("allows MySQL SHOW VARIABLES without a selected database", () => {
+    expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "SHOW VARIABLES LIKE 'version%'")).toBe(false);
+  });
+
   it("allows MySQL CREATE SCHEMA with options to run without a selected database", () => {
     expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "CREATE SCHEMA `app-db` DEFAULT CHARACTER SET utf8mb4")).toBe(false);
   });

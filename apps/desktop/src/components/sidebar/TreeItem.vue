@@ -662,6 +662,10 @@ function isTooltipDisabled(): boolean {
 async function toggle() {
   const node = props.node;
   if (node.isLoading) {
+    if (!node.isExpanded) {
+      node.isExpanded = true;
+      emit("node-toggled", node, false);
+    }
     return;
   }
   emit("search-toggle", node);

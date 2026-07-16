@@ -165,7 +165,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
     public List<TableInfo> listTables(String schema) {
         if (postgresCatalogMode) return super.listTables(schema);
         if (isMysqlCompatMode()) {
-            return listTables(schema, "table_type IN ('BASE TABLE', 'VIEW')");
+            return queryMysqlCompatTables(schema, MetadataListConstraints.NONE);
         }
         return queryRegularTables(schema, MetadataListConstraints.NONE);
     }
@@ -222,17 +222,26 @@ public final class KingbaseAgent extends PostgresLikeAgent {
         return unchecked(() -> {
             List<TableInfo> result = new ArrayList<>();
             List<Object> args = new ArrayList<>();
-            StringBuilder sql = new StringBuilder("SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = ?");
-            args.add(effectiveSchema(schema));
+            StringBuilder sql = new StringBuilder("SELECT t.table_name, t.table_type, ")
+                .append(KINGBASE_DESCRIPTION).append(" AS table_comment ")
+                .append("FROM information_schema.tables t ")
+                .append("LEFT JOIN sys_catalog.sys_namespace n ON ").append(KINGBASE_SCHEMA_NAME)
+                .append(" = CAST(t.table_schema AS varchar(256)) ")
+                .append("LEFT JOIN sys_catalog.sys_class c ON ").append(KINGBASE_REL_NAMESPACE)
+                .append(" = ").append(KINGBASE_NAMESPACE_OID)
+                .append(" AND ").append(KINGBASE_REL_NAME).append(" = CAST(t.table_name AS varchar(256)) ")
+                .append("LEFT JOIN sys_catalog.sys_description d ON CAST(d.objoid AS varchar(64)) = ")
+                .append(KINGBASE_REL_OID).append(" AND d.objsubid = 0 ")
+                .append("WHERE t.table_schema = ").append(sqlString(effectiveSchema(schema)));
             appendMysqlCompatTableTypePredicate(sql, args, constraints);
-            MetadataSqlSupport.appendNameFilter(sql, args, "table_name", constraints);
-            sql.append(" ORDER BY table_name");
+            MetadataSqlSupport.appendNameFilter(sql, args, "t.table_name", constraints);
+            sql.append(" ORDER BY t.table_name");
             MetadataSqlSupport.appendLiteralLimitOffset(sql, constraints);
             try (PreparedStatement stmt = requireConnected().prepareStatement(sql.toString())) {
                 MetadataSqlSupport.bind(stmt, args);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
-                        result.add(new TableInfo(rs.getString(1), normalizeTableType(rs.getString(2))));
+                        result.add(new TableInfo(rs.getString(1), normalizeTableType(rs.getString(2)), rs.getString(3)));
                     }
                 }
             }
@@ -696,23 +705,6 @@ public final class KingbaseAgent extends PostgresLikeAgent {
                 }
             }
             return primaryKeys;
-        });
-    }
-
-    private List<TableInfo> listTables(String schema, String tableTypePredicate) {
-        return unchecked(() -> {
-            List<TableInfo> result = new ArrayList<>();
-            String sql = "SELECT table_name, table_type " +
-                "FROM information_schema.tables " +
-                "WHERE table_schema = " + sqlString(effectiveSchema(schema)) + " AND " + tableTypePredicate + " " +
-                "ORDER BY table_name";
-            try (Statement stmt = requireConnected().createStatement();
-                 ResultSet rs = stmt.executeQuery(sql)) {
-                    while (rs.next()) {
-                        result.add(new TableInfo(rs.getString(1), normalizeTableType(rs.getString(2))));
-                    }
-            }
-            return result;
         });
     }
 

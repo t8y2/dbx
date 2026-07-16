@@ -200,18 +200,43 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
-    void mysqlCompatListTablesUsesInformationSchema() {
+    void mysqlCompatListTablesUsesInformationSchemaAndPreservesComments() {
         List<String> sql = new ArrayList<>();
         KingbaseAgent agent = new KingbaseAgent();
         agent.setMysqlCompatMode(true);
         TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
-            new String[]{"table_name", "table_type"},
-            new Object[][]{{"test_timestamps", "BASE TABLE"}}
+            new String[]{"table_name", "table_type", "table_comment"},
+            new Object[][]{{"test_timestamps", "BASE TABLE", "timestamp samples"}}
         )));
 
-        Assertions.assertEquals("test_timestamps", agent.listTables("PUBLIC").get(0).getName());
+        TableInfo table = agent.listTables("PUBLIC").get(0);
+
+        Assertions.assertEquals("test_timestamps", table.getName());
+        Assertions.assertEquals("timestamp samples", table.getComment());
         Assertions.assertTrue(sql.get(0).contains("FROM information_schema.tables"));
+        Assertions.assertTrue(sql.get(0).contains("LEFT JOIN sys_catalog.sys_description"), sql.get(0));
         Assertions.assertFalse(sql.get(0).contains("SHOW"));
+    }
+
+    @Test
+    void constrainedMysqlCompatTableMetadataPreservesCommentsAndPaging() {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        agent.setMysqlCompatMode(true);
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"table_name", "table_type", "table_comment"},
+            new Object[][]{{"orders", "BASE TABLE", "customer orders"}}
+        )));
+
+        List<TableInfo> tables = agent.listTables(
+            "sales",
+            new MetadataListConstraints("ord", 20, 40, List.of("TABLE"))
+        );
+
+        Assertions.assertEquals("customer orders", tables.get(0).getComment());
+        Assertions.assertTrue(sql.get(0).contains("UPPER(t.table_name) LIKE ? ESCAPE '\\\\'"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("LEFT JOIN sys_catalog.sys_description"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).endsWith("LIMIT 20 OFFSET 40"), sql.get(0));
     }
 
     @Test
@@ -382,7 +407,7 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         KingbaseAgent agent = new KingbaseAgent();
         agent.setMysqlCompatMode(true);
         TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
-            new String[]{"table_name", "table_type"},
+            new String[]{"table_name", "table_type", "table_comment"},
             new Object[][]{}
         )));
 
@@ -390,7 +415,7 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
 
         Assertions.assertTrue(sql.get(0).contains("FROM information_schema.tables"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("table_type IN (?)"), sql.get(0));
-        Assertions.assertTrue(sql.get(0).contains("UPPER(table_name) LIKE ? ESCAPE '\\\\'"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("UPPER(t.table_name) LIKE ? ESCAPE '\\\\'"), sql.get(0));
         Assertions.assertTrue(sql.get(0).endsWith("LIMIT 20 OFFSET 40"), sql.get(0));
     }
 

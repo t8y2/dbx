@@ -18,7 +18,7 @@ import type {
   TunnelProfile,
   VectorCollectionMeta,
 } from "@/types/database";
-import { applyPinnedTreeNodeState, inheritNaturalTreeNodeOrder, migrateLegacyPinnedTreeNodeIds, syncPinnedTreeNodeStateInPlace, treeNodePinKey } from "@/lib/app/pinnedItems";
+import { inheritNaturalTreeNodeOrder, migrateLegacyPinnedTreeNodeIds, syncPinnedTreeNodeStateInPlace, treeNodePinKey } from "@/lib/app/pinnedItems";
 import {
   reconcileLayout,
   buildTreeNodesFromLayout,
@@ -989,7 +989,17 @@ export const useConnectionStore = defineStore("connection", () => {
       const oldMap = new Map(parent.children.map((c) => [c.id, c] as const));
       children = children.map((child) => {
         const old = oldMap.get(child.id);
-        if (old && old.isExpanded && old.children && old.children.length > 0) {
+        if (old?.isLoading) {
+          const isExpanded = old.isExpanded;
+          const isLoading = old.isLoading;
+          const oldChildren = old.children;
+          Object.assign(old, child);
+          old.isExpanded = isExpanded;
+          old.isLoading = isLoading;
+          old.children = oldChildren;
+          return old;
+        }
+        if (old?.isExpanded) {
           return { ...child, isExpanded: true, children: old.children };
         }
         return child;
@@ -1000,7 +1010,8 @@ export const useConnectionStore = defineStore("connection", () => {
       pinnedTreeNodeIds.value = migratedPins.ids;
       persistPinnedTreeNodeIds();
     }
-    parent.children = markRawLeafTreeNodes(applyPinnedTreeNodeState(children, migratedPins.ids));
+    syncPinnedTreeNodeStateInPlace(children, migratedPins.ids);
+    parent.children = markRawLeafTreeNodes(children);
     loadedTreeNodeChildrenIds.value.add(parent.id);
   }
 

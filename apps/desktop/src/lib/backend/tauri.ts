@@ -2201,6 +2201,7 @@ export interface TableImportRequest {
   mode: TableImportMode;
   createTable?: boolean;
   batchSize: number;
+  dateTimeFormat?: string;
 }
 
 export interface TableImportSummary {
@@ -2291,6 +2292,7 @@ export interface TableExportRequest {
   skipCount?: boolean;
   batchSize?: number;
   rowLimit?: number | null;
+  dateTimeFormat?: string;
 }
 
 export interface TableCsvExportOptions {
@@ -2332,6 +2334,7 @@ export interface QueryResultExportRequest {
   keysetOptimizationEnabled: boolean;
   clientSessionId?: string;
   executionId?: string;
+  dateTimeFormat?: string;
 }
 
 export async function startTableExport(request: TableExportRequest, onProgress: (progress: TableExportProgress) => void): Promise<TableExportProgress> {

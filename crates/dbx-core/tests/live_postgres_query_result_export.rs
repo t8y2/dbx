@@ -130,6 +130,7 @@ async fn live_postgres_query_result_export_uses_single_streamed_query() {
         keyset_optimization_enabled: true,
         client_session_id: None,
         execution_id: Some(format!("live-postgres-query-export-{suffix}")),
+        date_time_format: None,
     };
     let done_seen = AtomicBool::new(false);
     let result = export_query_result_core(&state, &request, None, |progress| {

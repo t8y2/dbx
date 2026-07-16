@@ -18,6 +18,7 @@ import type { DatabaseType, QueryResult } from "@/types/database";
 import type { QueryResultExportRequest } from "@/lib/backend/api";
 import { usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { buildXlsxSqlWorksheet } from "@/lib/export/xlsxSqlSheet";
+import { formatTemporalRowsForExport } from "@/lib/dataGrid/columnFormatter";
 
 /**
  * Format metadata for backend table exports. Each entry maps a format key
@@ -202,10 +203,15 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return displayItems.value.filter((item) => rowIdSet.has(item.id) && !item.isDraft);
   }
 
-  async function resultToExport(rowIds?: number[], onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void, useFullExport = true): Promise<{ columns: string[]; columnTypes: string[]; rows: CellValue[][] }> {
+  function applyGlobalDateTimeExportFormat(result: { columns: string[]; columnTypes: string[]; rows: CellValue[][] }, enabled: boolean) {
+    const pattern = enabled ? useSettingsStore().editorSettings.globalDateTimeExportFormat : "";
+    return pattern ? { ...result, rows: formatTemporalRowsForExport(result.rows, result.columnTypes, pattern) } : result;
+  }
+
+  async function resultToExport(rowIds?: number[], onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void, useFullExport = true, formatDateTime = true): Promise<{ columns: string[]; columnTypes: string[]; rows: CellValue[][] }> {
     if (useFullExport && rowIds === undefined && fullExportResult && !hasCompleteLocalResult?.value) {
       const result = await fullExportResult(onProgress);
-      if (result) return { columns: result.columns, columnTypes: result.column_types ?? [], rows: result.rows };
+      if (result) return applyGlobalDateTimeExportFormat({ columns: result.columns, columnTypes: result.column_types ?? [], rows: result.rows }, formatDateTime);
     }
     // The full result is already in memory — export the raw QueryResult (all
     // rows, all columns, committed values) so "export all data" matches the
@@ -213,13 +219,16 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     // and reflects client-side filters/search and unsaved edits, which would
     // silently change what the export contains.
     if (useFullExport && rowIds === undefined && hasCompleteLocalResult?.value && completeLocalResult?.value) {
-      return { columns: completeLocalResult.value.columns, columnTypes: completeLocalResult.value.column_types ?? [], rows: completeLocalResult.value.rows };
+      return applyGlobalDateTimeExportFormat({ columns: completeLocalResult.value.columns, columnTypes: completeLocalResult.value.column_types ?? [], rows: completeLocalResult.value.rows }, formatDateTime);
     }
-    return {
-      columns: columns.value,
-      columnTypes: (columnTypes.value ?? []).map((type) => type ?? ""),
-      rows: rowsToExport(rowIds).map((item) => item.data),
-    };
+    return applyGlobalDateTimeExportFormat(
+      {
+        columns: columns.value,
+        columnTypes: (columnTypes.value ?? []).map((type) => type ?? ""),
+        rows: rowsToExport(rowIds).map((item) => item.data),
+      },
+      formatDateTime,
+    );
   }
 
   function currentXlsxSheetName(): string {
@@ -1026,11 +1035,12 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           outputPath = path as string;
         }
 
+        const exportPattern = useSettingsStore().editorSettings.globalDateTimeExportFormat;
         const worksheets = sheets.map((sheet) => ({
           sheetName: sheet.sheetName,
           columns: sheet.result.columns,
           columnTypes: sheet.result.column_types ?? [],
-          rows: sheet.result.rows,
+          rows: formatTemporalRowsForExport(sheet.result.rows, sheet.result.column_types ?? [], exportPattern),
         }));
         const sqlWorksheet = includeSqlSheet ? buildXlsxSqlWorksheet(sheets.map((sheet) => ({ resultName: sheet.sheetName, sql: sheet.sql || sheet.result.sourceStatement || "" }))) : undefined;
         await api.exportQueryResultsXlsx(outputPath, sqlWorksheet ? [...worksheets, sqlWorksheet] : worksheets);
@@ -1110,6 +1120,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           skipCount: false,
           batchSize: exportBatchSize.value,
           rowLimit,
+          dateTimeFormat: editorSettings.globalDateTimeExportFormat || undefined,
         },
         (progress) => {
           if (exportProgressState) {
@@ -1156,7 +1167,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     }
 
     const exportId = uuid();
-    const request = await queryResultExportRequest({ exportId, filePath: outputPath, format, includeSqlSheet });
+    const baseRequest = await queryResultExportRequest({ exportId, filePath: outputPath, format, includeSqlSheet });
+    const request = baseRequest ? { ...baseRequest, dateTimeFormat: useSettingsStore().editorSettings.globalDateTimeExportFormat || undefined } : undefined;
     if (!request) throw new Error("Unable to build query result export request");
 
     if (exportProgressState) {
@@ -1204,7 +1216,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       try {
         if (await exportFullTableDataViaBackend("sql", rowIds)) return;
 
-        const result = await resultToExport(rowIds);
+        const result = await resultToExport(rowIds, undefined, true, false);
         const exportData = sqlInsertExportData(result);
         const content = await formatSqlInsert({
           databaseType: databaseType.value,
@@ -1225,7 +1237,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   async function exportCurrentPageSql() {
     await runExclusiveExport(async () => {
       try {
-        const result = await resultToExport(undefined, undefined, false);
+        const result = await resultToExport(undefined, undefined, false, false);
         const exportData = sqlInsertExportData(result);
         const content = await formatSqlInsert({
           databaseType: databaseType.value,

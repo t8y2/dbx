@@ -1564,7 +1564,10 @@ function columnFormatter(columnIndex: number): ColumnFormatterConfig | undefined
   const column = props.result.columns[columnIndex];
   if (!column) return undefined;
   const key = formatterKeyForColumn(column);
-  return key ? resolveColumnFormatter(settingsStore.editorSettings.columnFormatters[key], settingsStore.editorSettings.customColumnFormatters) : undefined;
+  return resolveColumnFormatter(key ? settingsStore.editorSettings.columnFormatters[key] : undefined, settingsStore.editorSettings.customColumnFormatters, {
+    pattern: settingsStore.editorSettings.globalDateTimeDisplayFormat,
+    columnType: props.result.column_types?.[columnIndex] ?? tableColumnForGridColumn(columnIndex)?.data_type,
+  });
 }
 
 function savedColumnFormatter(columnIndex: number): ColumnFormatterConfig | undefined {

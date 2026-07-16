@@ -61,6 +61,7 @@ pub mod table_export;
 pub mod table_import;
 pub mod table_structure_sql;
 pub mod task_supervisor;
+pub mod temporal_format;
 pub mod text_export;
 pub mod token_usage;
 pub mod transfer;

@@ -279,7 +279,7 @@ async fn live_sqlserver_stream_first_result_set_exports_cte_query_rows() {
     let mut rows = Vec::new();
     let result = dbx_core::db::sqlserver::stream_first_result_set(&mut client, &sql, None, None, |item| {
         match item {
-            dbx_core::db::sqlserver::SqlServerStreamItem::Columns(stream_columns) => {
+            dbx_core::db::sqlserver::SqlServerStreamItem::Columns { columns: stream_columns, .. } => {
                 columns = stream_columns.to_vec();
             }
             dbx_core::db::sqlserver::SqlServerStreamItem::Row(row) => {
@@ -369,6 +369,7 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
         keyset_optimization_enabled: true,
         client_session_id: None,
         execution_id: Some(format!("live-sqlserver-export-{suffix}")),
+        date_time_format: None,
     };
     let done_seen = AtomicBool::new(false);
     let result = export_query_result_core(&state, &request, None, |progress| {

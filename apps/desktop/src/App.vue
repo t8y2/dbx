@@ -1131,6 +1131,28 @@ async function newQuery() {
   const conn = connectionStore.getConfig(target.connectionId);
   if (!conn) return;
   connectionStore.activeConnectionId = target.connectionId;
+  const connectionTarget = quickConnectionOpenTarget(conn);
+  if (connectionTarget.kind !== "query") {
+    try {
+      await connectionStore.ensureConnected(target.connectionId);
+      if (connectionTarget.kind === "mq-admin") {
+        queryStore.openMqAdmin(target.connectionId);
+      } else if (connectionTarget.kind === "nacos-admin") {
+        await connectionStore.loadNacosNamespaces(target.connectionId);
+        queryStore.openNacosAdmin(target.connectionId);
+      } else {
+        queryStore.createTab(target.connectionId, "", `${conn.name}:keys`, connectionTarget.kind);
+      }
+    } catch (e: any) {
+      toast(
+        t("connection.connectFailed", {
+          message: translateBackendError(t, e?.message || String(e)),
+        }),
+        5000,
+      );
+    }
+    return;
+  }
   // Prefill the editor with `SELECT * FROM <focused table>` when enabled and a
   // table context (active data/structure tab or selected table node) is available.
   // Built before createTab so the tab opens with the content directly (no flash).
@@ -1173,6 +1195,20 @@ async function openConnectionQuery(connectionId: string) {
     try {
       await connectionStore.ensureConnected(connectionId);
       await connectionStore.loadNacosNamespaces(connectionId);
+    } catch (e: any) {
+      toast(
+        t("connection.connectFailed", {
+          message: translateBackendError(t, e?.message || String(e)),
+        }),
+        5000,
+      );
+    }
+    return;
+  }
+  if (initialTarget.kind === "etcd" || initialTarget.kind === "zookeeper") {
+    try {
+      await connectionStore.ensureConnected(connectionId);
+      queryStore.createTab(connectionId, "", `${connection.name}:keys`, initialTarget.kind);
     } catch (e: any) {
       toast(
         t("connection.connectFailed", {

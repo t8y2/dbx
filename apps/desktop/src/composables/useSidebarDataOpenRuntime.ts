@@ -7,7 +7,7 @@ import { uuid } from "@/lib/common/utils";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { effectiveDatabaseTypeForConnection, connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema } from "@/lib/database/jdbcDialect";
 import { getCachedTableMetadata, loadTableMetadata, TABLE_METADATA_CACHE_TTL_MS, tableMetadataToDataTabMeta } from "@/lib/metadata/tableMetadataCache";
-import { canApplyDataTabMetadata, findExistingDataTabCandidate, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
+import { canApplyDataTabMetadata, dataTabMetadataNeedsRefresh, findExistingDataTabCandidate, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
@@ -65,6 +65,57 @@ export function useSidebarDataOpenRuntime() {
       catalog: node.catalog,
       tableName: node.label,
     };
+    const canApplyTableMetadata = (targetTabId: string) =>
+      canApplyDataTabMetadata(
+        queryStore.tabs.find((tab) => tab.id === targetTabId),
+        dataTabTarget,
+        request?.signal,
+      );
+    const refreshTableMetaInBackground = async (targetTabId: string, ensureConnected = false) => {
+      if (!config) return;
+      const metadataStartedAt = performance.now();
+      openDataLog("info", "metadata:start", {
+        traceId,
+        elapsed: elapsed(),
+      });
+      try {
+        if (ensureConnected) await connectionStore.ensureConnected(node.connectionId);
+        const loadedMetadata = await loadTableMetadata({
+          connectionId: node.connectionId,
+          database: node.database,
+          schema: querySchema,
+          tableName: node.label,
+          tableType,
+          databaseType: metadataDatabaseType,
+          driverProfile: config.driver_profile || config.db_type,
+          catalog: node.catalog,
+          traceLogger: isDebugLoggingEnabled() ? (event) => openDataLog("debug", "metadata:trace", { sourceTraceId: traceId, ...event }) : undefined,
+        });
+        if (!canApplyTableMetadata(targetTabId)) {
+          openDataLog("info", "metadata:stale", {
+            traceId,
+            tabId: targetTabId,
+            columnCount: loadedMetadata.metadata.columns.length,
+            elapsed: elapsed(),
+          });
+          return;
+        }
+        const nextTableMeta = tableMetadataToDataTabMeta(loadedMetadata.metadata, tableSchema);
+        queryStore.setTableMeta(targetTabId, nextTableMeta);
+        openDataLog("info", "metadata:done", {
+          traceId,
+          tabId: targetTabId,
+          columnCount: nextTableMeta.columns.length,
+          primaryKeyCount: nextTableMeta.primaryKeys.length,
+          cacheStatus: loadedMetadata.cacheStatus,
+          ageMs: Math.round(loadedMetadata.ageMs),
+          elapsed: elapsed(),
+          metadataMs: Math.round(performance.now() - metadataStartedAt),
+        });
+      } catch (error) {
+        openDataLog("warn", "metadata:error", { traceId, tabId: targetTabId, elapsed: elapsed(), error });
+      }
+    };
     const existingDataTabCandidate = findExistingDataTabCandidate(queryStore.tabs, dataTabTarget, { openMode, reuseDataTab: settingsStore.editorSettings.reuseDataTab });
     const existingSameTableTab = existingDataTabCandidate?.match === "same-table" ? existingDataTabCandidate.tab : undefined;
     const resetReusedDataTabState = (tab: (typeof queryStore.tabs)[number]) => {
@@ -93,6 +144,10 @@ export function useSidebarDataOpenRuntime() {
     if (existingSameTableTab && canActivateExistingDataTableTab(existingSameTableTab, { activateExecuting: false })) {
       queryStore.switchTab(existingSameTableTab.id);
       logPhase("existing-tab-activated", { table: node.label });
+      if (dataTabMetadataNeedsRefresh(existingSameTableTab, DATA_TAB_METADATA_TTL_MS)) {
+        void refreshTableMetaInBackground(existingSameTableTab.id, true);
+        logPhase("metadata-started", { tabId: existingSameTableTab.id, reason: "existing-tab-stale" });
+      }
       return;
     }
 
@@ -171,12 +226,6 @@ export function useSidebarDataOpenRuntime() {
 
     // Helper to check if this openData call is still active (not superseded by a newer click)
     const isActive = () => (request?.isCurrent() ?? true) && queryStore.tabs.find((t) => t.id === tabId)?.executionId === openDataId;
-    const canApplyTableMetadata = () =>
-      canApplyDataTabMetadata(
-        queryStore.tabs.find((t) => t.id === tabId),
-        dataTabTarget,
-        request?.signal,
-      );
 
     try {
       openDataLog("info", "ensure-connected:start", { traceId, elapsed: elapsed() });
@@ -190,49 +239,6 @@ export function useSidebarDataOpenRuntime() {
       if (!config) throw new Error("Connection config not found");
 
       const limit = tableOpenPageLimit();
-      const refreshTableMetaInBackground = async () => {
-        const metadataStartedAt = performance.now();
-        openDataLog("info", "metadata:start", {
-          traceId,
-          elapsed: elapsed(),
-        });
-        try {
-          const loadedMetadata = await loadTableMetadata({
-            connectionId: node.connectionId,
-            database: node.database,
-            schema: querySchema,
-            tableName: node.label,
-            tableType,
-            databaseType: metadataDatabaseType,
-            driverProfile: config.driver_profile || config.db_type,
-            catalog: node.catalog,
-            traceLogger: isDebugLoggingEnabled() ? (event) => openDataLog("debug", "metadata:trace", { sourceTraceId: traceId, ...event }) : undefined,
-          });
-          if (!canApplyTableMetadata()) {
-            openDataLog("info", "metadata:stale", {
-              traceId,
-              tabId,
-              columnCount: loadedMetadata.metadata.columns.length,
-              elapsed: elapsed(),
-            });
-            return;
-          }
-          const nextTableMeta = tableMetadataToDataTabMeta(loadedMetadata.metadata, tableSchema);
-          queryStore.setTableMeta(tabId, nextTableMeta);
-          openDataLog("info", "metadata:done", {
-            traceId,
-            tabId,
-            columnCount: nextTableMeta.columns.length,
-            primaryKeyCount: nextTableMeta.primaryKeys.length,
-            cacheStatus: loadedMetadata.cacheStatus,
-            ageMs: Math.round(loadedMetadata.ageMs),
-            elapsed: elapsed(),
-            metadataMs: Math.round(performance.now() - metadataStartedAt),
-          });
-        } catch (error) {
-          openDataLog("warn", "metadata:error", { traceId, tabId, elapsed: elapsed(), error });
-        }
-      };
       const shouldRefreshTableMeta = !cachedTableMeta;
       if (cachedTableMeta) {
         openDataLog("info", "metadata:cache-hit", {
@@ -289,8 +295,8 @@ export function useSidebarDataOpenRuntime() {
       });
       openDataLog("info", "execute:done", { traceId, tabId, elapsed: elapsed() });
       logPhase("execute-tab-sql", { tabId });
-      if (shouldRefreshTableMeta && canApplyTableMetadata()) {
-        void refreshTableMetaInBackground();
+      if (shouldRefreshTableMeta && canApplyTableMetadata(tabId)) {
+        void refreshTableMetaInBackground(tabId);
         logPhase("metadata-started", { tabId });
       }
     } catch (e: any) {

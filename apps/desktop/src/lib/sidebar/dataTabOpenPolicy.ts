@@ -3,7 +3,7 @@ import type { QueryTab, TreeNodeType } from "@/types/database";
 
 export type DataTabOpenMode = "default" | "new-tab";
 
-type DataTabLike = Pick<QueryTab, "id" | "mode" | "connectionId" | "database" | "schema" | "title" | "tableMeta">;
+type DataTabLike = Pick<QueryTab, "id" | "mode" | "connectionId" | "database" | "schema" | "title" | "tableMeta" | "tableMetaUpdatedAt">;
 
 export interface DataTabTarget {
   connectionId: string;
@@ -39,6 +39,11 @@ function isSameTable(tab: DataTabLike, target: DataTabTarget): boolean {
 
 export function canApplyDataTabMetadata(tab: DataTabLike | undefined, target: DataTabTarget, signal?: AbortSignal): boolean {
   return signal?.aborted !== true && tab !== undefined && isSameTable(tab, target);
+}
+
+export function dataTabMetadataNeedsRefresh(tab: DataTabLike, maxAgeMs: number, now = Date.now()): boolean {
+  if (!tab.tableMeta?.columns.length || tab.tableMetaUpdatedAt === undefined) return true;
+  return now - tab.tableMetaUpdatedAt >= maxAgeMs;
 }
 
 export function findExistingDataTabCandidate<T extends DataTabLike>(tabs: T[], target: DataTabTarget, options: { openMode: DataTabOpenMode; reuseDataTab: boolean }): ExistingDataTabCandidate<T> | undefined {

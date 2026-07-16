@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canApplyDataTabMetadata, dataTabOpenModeFromTreeClick, findExistingDataTabCandidate } from "@/lib/sidebar/dataTabOpenPolicy";
+import { canApplyDataTabMetadata, dataTabMetadataNeedsRefresh, dataTabOpenModeFromTreeClick, findExistingDataTabCandidate } from "@/lib/sidebar/dataTabOpenPolicy";
 import type { QueryTab } from "@/types/database";
 
 function click(modifiers: Partial<Pick<MouseEvent, "metaKey" | "ctrlKey" | "altKey" | "shiftKey">> = {}) {
@@ -87,5 +87,27 @@ describe("dataTabOpenPolicy", () => {
     tab.tableMeta = { schema: "public", tableName: "orders", columns: [], primaryKeys: [] };
 
     expect(canApplyDataTabMetadata(tab, usersTarget, new AbortController().signal)).toBe(false);
+  });
+
+  it("refreshes missing, restored, and expired table metadata", () => {
+    const now = 100_000;
+    const ttl = 30_000;
+    const tab = dataTab("users", "users");
+
+    expect(dataTabMetadataNeedsRefresh(tab, ttl, now)).toBe(true);
+
+    tab.tableMeta = {
+      schema: "public",
+      tableName: "users",
+      columns: [{ name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    };
+    expect(dataTabMetadataNeedsRefresh(tab, ttl, now)).toBe(true);
+
+    tab.tableMetaUpdatedAt = now - ttl + 1;
+    expect(dataTabMetadataNeedsRefresh(tab, ttl, now)).toBe(false);
+
+    tab.tableMetaUpdatedAt = now - ttl;
+    expect(dataTabMetadataNeedsRefresh(tab, ttl, now)).toBe(true);
   });
 });

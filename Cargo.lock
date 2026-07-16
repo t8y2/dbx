@@ -1909,6 +1909,7 @@ dependencies = [
  "deadpool-postgres",
  "duckdb",
  "encoding_rs",
+ "excelstream",
  "font-kit",
  "futures",
  "iana-time-zone",
@@ -1919,7 +1920,6 @@ dependencies = [
  "pageant",
  "percent-encoding",
  "portpicker",
- "quick-xml 0.37.5",
  "rayon",
  "redis",
  "regex",
@@ -2541,6 +2541,19 @@ checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
 dependencies = [
  "event-listener",
  "pin-project-lite",
+]
+
+[[package]]
+name = "excelstream"
+version = "0.20.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e827bd87c061f00cb273a8e56499ddca8a14cd495a3291954ecb5dbf7694b3fc"
+dependencies = [
+ "chrono",
+ "indexmap 2.14.0",
+ "itoa",
+ "s-zip",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -6868,6 +6881,17 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "s-zip"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2637bab029fec4b0803f3ccf7f0fc0602babbe417e769d5117fc14db2c3bd158"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "zstd",
+]
 
 [[package]]
 name = "salsa20"

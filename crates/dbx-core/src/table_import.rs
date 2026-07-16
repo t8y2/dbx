@@ -1,12 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read as IoRead, Seek, SeekFrom};
 use std::path::Path;
 
-use calamine::{open_workbook_auto, Data, ExcelDateTime, Reader as CalamineReader};
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
-use quick_xml::events::{BytesStart, Event};
-use quick_xml::Reader as XmlReader;
 use serde::{Deserialize, Serialize};
 
 use crate::connection::{task_client_session_id, AppState};
@@ -30,6 +27,7 @@ pub struct ParsedImportFile {
     pub rows: Vec<Vec<serde_json::Value>>,
     pub total_rows: usize,
     pub effective_encoding: Option<TableImportTextEncoding>,
+    pub sheets: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +144,7 @@ pub struct TableImportParseOptions {
     pub sheet_name: Option<String>,
     pub sheet_index: Option<usize>,
     pub json_shape: Option<TableImportJsonShape>,
+    pub streaming: Option<bool>,
 }
 
 impl Default for TableImportParseOptions {
@@ -162,6 +161,7 @@ impl Default for TableImportParseOptions {
             sheet_name: None,
             sheet_index: None,
             json_shape: Some(TableImportJsonShape::Auto),
+            streaming: None,
         }
     }
 }
@@ -667,7 +667,7 @@ fn parse_csv_reader<R: IoRead>(
     if total_rows == 0 {
         return Err("Import file has no data rows in the selected row range".to_string());
     }
-    Ok(ParsedImportFile { columns, rows, total_rows, effective_encoding: Some(effective_encoding) })
+    Ok(ParsedImportFile { columns, rows, total_rows, effective_encoding: Some(effective_encoding), sheets: vec![] })
 }
 
 pub fn parse_csv_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImportFile, String> {
@@ -739,7 +739,13 @@ pub fn parse_json_bytes_with_options(
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        return Ok(ParsedImportFile { columns, rows, total_rows: items.len(), effective_encoding: None });
+        return Ok(ParsedImportFile {
+            columns,
+            rows,
+            total_rows: items.len(),
+            effective_encoding: None,
+            sheets: vec![],
+        });
     }
 
     if all_arrays {
@@ -758,7 +764,13 @@ pub fn parse_json_bytes_with_options(
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        return Ok(ParsedImportFile { columns, rows, total_rows: items.len(), effective_encoding: None });
+        return Ok(ParsedImportFile {
+            columns,
+            rows,
+            total_rows: items.len(),
+            effective_encoding: None,
+            sheets: vec![],
+        });
     }
 
     Err("JSON rows must all be objects or all be arrays; mixed row shapes are not supported".to_string())
@@ -768,387 +780,90 @@ pub fn parse_json_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImpo
     parse_json_bytes_with_options(bytes, &TableImportParseOptions::default(), preview_limit)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum XlsxTemporalKind {
-    Date,
-    Time,
-    DateTime,
-    Duration,
-}
-
-fn format_chrono_duration_hms(duration: chrono::Duration, wrap_to_day: bool) -> String {
-    let mut millis = duration.num_milliseconds();
-    let negative = millis < 0;
-    if negative {
-        millis = -millis;
-    }
-
-    const DAY_MILLIS: i64 = 24 * 60 * 60 * 1000;
-    if wrap_to_day {
-        millis %= DAY_MILLIS;
-    }
-
-    let hours = millis / (60 * 60 * 1000);
-    let minutes = (millis / (60 * 1000)) % 60;
-    let seconds = (millis / 1000) % 60;
-    let sub_millis = millis % 1000;
-    let sign = if negative { "-" } else { "" };
-    if sub_millis == 0 {
-        format!("{sign}{hours:02}:{minutes:02}:{seconds:02}")
-    } else {
-        let fraction = format!("{sub_millis:03}").trim_end_matches('0').to_string();
-        format!("{sign}{hours:02}:{minutes:02}:{seconds:02}.{fraction}")
-    }
-}
-
-fn xlsx_datetime_label(value: &ExcelDateTime, temporal_kind: Option<XlsxTemporalKind>) -> String {
-    if matches!(temporal_kind, Some(XlsxTemporalKind::Duration)) || value.is_duration() {
-        return value
-            .as_duration()
-            .map(|duration| format_chrono_duration_hms(duration, false))
-            .unwrap_or_else(|| value.to_string());
-    }
-
-    if matches!(temporal_kind, Some(XlsxTemporalKind::Time)) {
-        return value
-            .as_duration()
-            .map(|duration| format_chrono_duration_hms(duration, true))
-            .unwrap_or_else(|| value.to_string());
-    }
-
-    let Some(datetime) = value.as_datetime() else {
-        return value.to_string();
-    };
-
-    match temporal_kind {
-        Some(XlsxTemporalKind::Date) => datetime.format("%Y-%m-%d").to_string(),
-        Some(XlsxTemporalKind::DateTime) => datetime.format("%Y-%m-%d %H:%M:%S%.f").to_string(),
-        None => {
-            if (0.0..1.0).contains(&value.as_f64()) {
-                value.to_string()
-            } else {
-                datetime.format("%Y-%m-%d %H:%M:%S%.f").to_string()
-            }
-        }
-        Some(XlsxTemporalKind::Time) | Some(XlsxTemporalKind::Duration) => unreachable!("handled above"),
-    }
-}
-
-fn xlsx_cell_value_with_temporal_kind(cell: &Data, temporal_kind: Option<XlsxTemporalKind>) -> serde_json::Value {
-    match cell {
-        Data::Empty => serde_json::Value::Null,
-        Data::String(s) => csv_value(s),
-        Data::Float(n) => {
-            serde_json::Number::from_f64(*n).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
-        }
-        Data::Int(n) => serde_json::Value::Number((*n).into()),
-        Data::Bool(v) => serde_json::Value::Bool(*v),
-        Data::DateTime(v) => serde_json::Value::String(xlsx_datetime_label(v, temporal_kind)),
-        Data::DateTimeIso(v) => serde_json::Value::String(v.clone()),
-        Data::DurationIso(v) => serde_json::Value::String(v.clone()),
-        Data::Error(v) => serde_json::Value::String(v.to_string()),
-    }
-}
-
-pub fn xlsx_cell_value(cell: &Data) -> serde_json::Value {
-    xlsx_cell_value_with_temporal_kind(cell, None)
-}
-
-fn xlsx_cell_label_with_temporal_kind(cell: &Data, temporal_kind: Option<XlsxTemporalKind>) -> String {
-    match cell {
-        Data::Empty => String::new(),
-        Data::String(s) => s.clone(),
-        Data::Float(n) => n.to_string(),
-        Data::Int(n) => n.to_string(),
-        Data::Bool(v) => v.to_string(),
-        Data::DateTime(v) => xlsx_datetime_label(v, temporal_kind),
-        Data::DateTimeIso(v) => v.clone(),
-        Data::DurationIso(v) => v.clone(),
-        Data::Error(v) => v.to_string(),
-    }
-}
-
-pub fn xlsx_cell_label(cell: &Data) -> String {
-    xlsx_cell_label_with_temporal_kind(cell, None)
-}
+use excelstream::{CellValue, ExcelReader};
 
 pub fn xlsx_sheet_names(path: &str) -> Result<Vec<String>, String> {
-    let workbook = open_workbook_auto(path).map_err(|e| e.to_string())?;
-    Ok(workbook.sheet_names().to_vec())
+    let reader = ExcelReader::open(path).map_err(|e| e.to_string())?;
+    Ok(reader.sheet_names())
 }
 
-fn xml_local_name_eq(name: &[u8], expected: &[u8]) -> bool {
-    name.rsplit(|byte| *byte == b':').next().is_some_and(|local| local.eq_ignore_ascii_case(expected))
+fn resolve_xlsx_sheet_name(
+    all_sheet_names: &[String],
+    sheet_name: Option<&str>,
+    sheet_index: Option<usize>,
+) -> Result<String, String> {
+    if let Some(name) = sheet_name.filter(|n| !n.trim().is_empty()) {
+        if !all_sheet_names.iter().any(|s| s == name) {
+            return Err(format!("Workbook sheet not found: {name}"));
+        }
+        Ok(name.to_string())
+    } else if let Some(index) = sheet_index {
+        all_sheet_names.get(index).cloned().ok_or_else(|| format!("Workbook sheet index out of range: {index}"))
+    } else {
+        all_sheet_names.first().cloned().ok_or_else(|| "Workbook has no sheets".to_string())
+    }
 }
 
-fn xml_attr_value(reader: &XmlReader<&[u8]>, element: &BytesStart<'_>, key: &[u8]) -> Option<String> {
-    element.attributes().flatten().find_map(|attr| {
-        if xml_local_name_eq(attr.key.as_ref(), key) {
-            attr.decode_and_unescape_value(reader.decoder()).ok().map(|value| value.into_owned())
+pub fn xlsx_cell_value(cell: &CellValue) -> serde_json::Value {
+    match cell {
+        CellValue::Empty => serde_json::Value::Null,
+        CellValue::String(s) => csv_value(s),
+        CellValue::Int(i) => serde_json::Value::Number(serde_json::Number::from(*i)),
+        CellValue::Float(f) => {
+            // Detect Excel date serial numbers (1..2958465.999) and format as
+            // ISO datetime so they don't reach the database as raw floats.
+            if *f >= 1.0 && *f <= 2958465.999 {
+                serde_json::Value::String(format_excel_datetime_serial(*f))
+            } else {
+                serde_json::Number::from_f64(*f)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::String(f.to_string()))
+            }
+        }
+        CellValue::Bool(b) => serde_json::Value::Bool(*b),
+        CellValue::DateTime(d) => serde_json::Value::String(format_excel_datetime_serial(*d)),
+        CellValue::Error(e) => serde_json::Value::String(e.clone()),
+        CellValue::Formula(f) => serde_json::Value::String(f.clone()),
+    }
+}
+
+/// Format an Excel date serial number as "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DD".
+fn format_excel_datetime_serial(serial: f64) -> String {
+    // Excel epoch: 1900-01-01 = serial 1.0 (with the known leap-year bug)
+    let whole = serial.floor() as i64;
+    let frac = serial.fract();
+    if whole < 1 {
+        return serial.to_string();
+    }
+    // Adjust for Excel's leap year bug (Feb 29, 1900 doesn't exist)
+    let days_from_epoch = if whole > 60 { whole - 2 } else { whole - 1 };
+    let base = NaiveDate::from_ymd_opt(1900, 1, 1).unwrap();
+    if let Some(date) = base.checked_add_days(chrono::Days::new(days_from_epoch as u64)) {
+        if frac > 0.0001 {
+            let total_secs = (frac * 86400.0).round() as u32;
+            let h = total_secs / 3600;
+            let m = (total_secs % 3600) / 60;
+            let s = total_secs % 60;
+            format!("{} {:02}:{:02}:{:02}", date.format("%Y-%m-%d"), h, m, s)
         } else {
-            None
+            format!("{}", date.format("%Y-%m-%d"))
         }
-    })
-}
-
-fn xlsx_builtin_temporal_kind(num_fmt_id: u16) -> Option<XlsxTemporalKind> {
-    match num_fmt_id {
-        14..=17 => Some(XlsxTemporalKind::Date),
-        18..=21 | 45 | 47 => Some(XlsxTemporalKind::Time),
-        22 => Some(XlsxTemporalKind::DateTime),
-        46 => Some(XlsxTemporalKind::Duration),
-        _ => None,
+    } else {
+        serial.to_string()
     }
 }
 
-fn xlsx_temporal_kind_from_format_code(format_code: &str) -> Option<XlsxTemporalKind> {
-    let mut normalized = String::new();
-    let mut chars = format_code.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '"' => {
-                for quoted in chars.by_ref() {
-                    if quoted == '"' {
-                        break;
-                    }
-                }
-            }
-            '\\' | '_' | '*' => {
-                let _ = chars.next();
-            }
-            ';' => break,
-            '[' => {
-                let mut bracket = String::new();
-                for bracket_ch in chars.by_ref() {
-                    if bracket_ch == ']' {
-                        break;
-                    }
-                    bracket.push(bracket_ch);
-                }
-                let bracket = bracket.trim().to_ascii_lowercase();
-                if matches!(bracket.as_str(), "h" | "hh" | "m" | "mm" | "s" | "ss") {
-                    return Some(XlsxTemporalKind::Duration);
-                }
-            }
-            _ => normalized.push(ch.to_ascii_lowercase()),
-        }
+pub fn xlsx_cell_label(cell: &CellValue) -> String {
+    match cell {
+        CellValue::Empty => String::new(),
+        CellValue::String(s) => s.clone(),
+        CellValue::Int(i) => i.to_string(),
+        CellValue::Float(f) => f.to_string(),
+        CellValue::Bool(b) => b.to_string(),
+        CellValue::DateTime(d) => d.to_string(),
+        CellValue::Error(e) => e.clone(),
+        CellValue::Formula(f) => f.clone(),
     }
-
-    let has_time = normalized.contains('h')
-        || normalized.contains('s')
-        || normalized.contains("am/pm")
-        || normalized.contains("a/p");
-    let has_month = normalized.contains('m');
-    let has_date = normalized.contains('y') || normalized.contains('d') || (has_month && !has_time);
-    match (has_date, has_time) {
-        (true, true) => Some(XlsxTemporalKind::DateTime),
-        (true, false) => Some(XlsxTemporalKind::Date),
-        (false, true) => Some(XlsxTemporalKind::Time),
-        (false, false) => None,
-    }
-}
-
-fn parse_xlsx_style_temporal_kinds(styles_xml: &str) -> Vec<Option<XlsxTemporalKind>> {
-    let mut reader = XmlReader::from_str(styles_xml);
-    reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
-    let mut custom_formats = HashMap::<u16, XlsxTemporalKind>::new();
-    let mut style_kinds = Vec::new();
-    let mut in_cell_xfs = false;
-
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(element)) | Ok(Event::Empty(element))
-                if xml_local_name_eq(element.name().as_ref(), b"numFmt") =>
-            {
-                let id = xml_attr_value(&reader, &element, b"numFmtId").and_then(|value| value.parse::<u16>().ok());
-                let format_code = xml_attr_value(&reader, &element, b"formatCode");
-                if let (Some(id), Some(format_code)) = (id, format_code) {
-                    if let Some(kind) = xlsx_temporal_kind_from_format_code(&format_code) {
-                        custom_formats.insert(id, kind);
-                    }
-                }
-            }
-            Ok(Event::Start(element)) if xml_local_name_eq(element.name().as_ref(), b"cellXfs") => {
-                in_cell_xfs = true;
-            }
-            Ok(Event::End(element)) if xml_local_name_eq(element.name().as_ref(), b"cellXfs") => {
-                in_cell_xfs = false;
-            }
-            Ok(Event::Start(element)) | Ok(Event::Empty(element))
-                if in_cell_xfs && xml_local_name_eq(element.name().as_ref(), b"xf") =>
-            {
-                let kind = xml_attr_value(&reader, &element, b"numFmtId")
-                    .and_then(|value| value.parse::<u16>().ok())
-                    .and_then(|id| custom_formats.get(&id).copied().or_else(|| xlsx_builtin_temporal_kind(id)));
-                style_kinds.push(kind);
-            }
-            Ok(Event::Eof) | Err(_) => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-
-    style_kinds
-}
-
-fn xlsx_workbook_sheet_refs(workbook_xml: &str) -> Vec<(String, Option<String>)> {
-    let mut reader = XmlReader::from_str(workbook_xml);
-    reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
-    let mut sheets = Vec::new();
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(element)) | Ok(Event::Empty(element))
-                if xml_local_name_eq(element.name().as_ref(), b"sheet") =>
-            {
-                if let Some(name) = xml_attr_value(&reader, &element, b"name") {
-                    sheets.push((name, xml_attr_value(&reader, &element, b"id")));
-                }
-            }
-            Ok(Event::Eof) | Err(_) => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-    sheets
-}
-
-fn xlsx_workbook_relationship_targets(rels_xml: &str) -> HashMap<String, String> {
-    let mut reader = XmlReader::from_str(rels_xml);
-    reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
-    let mut targets = HashMap::new();
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(element)) | Ok(Event::Empty(element))
-                if xml_local_name_eq(element.name().as_ref(), b"Relationship") =>
-            {
-                if let (Some(id), Some(target)) =
-                    (xml_attr_value(&reader, &element, b"Id"), xml_attr_value(&reader, &element, b"Target"))
-                {
-                    targets.insert(id, target);
-                }
-            }
-            Ok(Event::Eof) | Err(_) => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-    targets
-}
-
-fn xlsx_relationship_target_path(base_dir: &str, target: &str) -> String {
-    if target.starts_with('/') {
-        return target.trim_start_matches('/').to_string();
-    }
-
-    let mut parts = base_dir.split('/').filter(|part| !part.is_empty()).collect::<Vec<_>>();
-    for part in target.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                parts.pop();
-            }
-            _ => parts.push(part),
-        }
-    }
-    parts.join("/")
-}
-
-fn xlsx_sheet_path_for_name(workbook_xml: &str, rels_xml: &str, sheet_name: &str) -> Option<String> {
-    let sheets = xlsx_workbook_sheet_refs(workbook_xml);
-    let (index, (_, rel_id)) = sheets.iter().enumerate().find(|(_, (name, _))| name == sheet_name)?;
-    let rel_targets = xlsx_workbook_relationship_targets(rels_xml);
-    rel_id
-        .as_ref()
-        .and_then(|id| rel_targets.get(id))
-        .map(|target| xlsx_relationship_target_path("xl", target))
-        .or_else(|| Some(format!("xl/worksheets/sheet{}.xml", index + 1)))
-}
-
-fn xlsx_cell_ref_position(reference: &str) -> Option<(usize, usize)> {
-    let mut column = 0usize;
-    let mut row = 0usize;
-    let mut saw_column = false;
-    let mut saw_row = false;
-    for ch in reference.chars() {
-        if ch == '$' {
-            continue;
-        }
-        if ch.is_ascii_alphabetic() && !saw_row {
-            saw_column = true;
-            column = column * 26 + (ch.to_ascii_uppercase() as u8 - b'A' + 1) as usize;
-        } else if ch.is_ascii_digit() {
-            saw_row = true;
-            row = row * 10 + ch.to_digit(10)? as usize;
-        } else {
-            return None;
-        }
-    }
-    (saw_column && saw_row).then_some((row, column))
-}
-
-fn parse_xlsx_sheet_temporal_kinds(
-    sheet_xml: &str,
-    style_kinds: &[Option<XlsxTemporalKind>],
-) -> HashMap<(usize, usize), XlsxTemporalKind> {
-    let mut reader = XmlReader::from_str(sheet_xml);
-    reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
-    let mut kinds = HashMap::new();
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(element)) | Ok(Event::Empty(element))
-                if xml_local_name_eq(element.name().as_ref(), b"c") =>
-            {
-                let Some(style_id) =
-                    xml_attr_value(&reader, &element, b"s").and_then(|value| value.parse::<usize>().ok())
-                else {
-                    buf.clear();
-                    continue;
-                };
-                let Some(kind) = style_kinds.get(style_id).copied().flatten() else {
-                    buf.clear();
-                    continue;
-                };
-                if let Some(position) =
-                    xml_attr_value(&reader, &element, b"r").and_then(|reference| xlsx_cell_ref_position(&reference))
-                {
-                    kinds.insert(position, kind);
-                }
-            }
-            Ok(Event::Eof) | Err(_) => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-    kinds
-}
-
-fn read_xlsx_zip_text(zip: &mut zip::ZipArchive<File>, path: &str) -> Result<String, String> {
-    let mut file = zip.by_name(path).map_err(|err| err.to_string())?;
-    let mut content = String::new();
-    file.read_to_string(&mut content).map_err(|err| err.to_string())?;
-    Ok(content)
-}
-
-fn xlsx_temporal_cell_kinds(path: &str, sheet_name: &str) -> Result<HashMap<(usize, usize), XlsxTemporalKind>, String> {
-    let file = File::open(path).map_err(|err| err.to_string())?;
-    let mut zip = zip::ZipArchive::new(file).map_err(|err| err.to_string())?;
-    let styles_xml = read_xlsx_zip_text(&mut zip, "xl/styles.xml").unwrap_or_default();
-    let style_kinds = parse_xlsx_style_temporal_kinds(&styles_xml);
-    if style_kinds.is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    let workbook_xml = read_xlsx_zip_text(&mut zip, "xl/workbook.xml")?;
-    let rels_xml = read_xlsx_zip_text(&mut zip, "xl/_rels/workbook.xml.rels").unwrap_or_default();
-    let Some(sheet_path) = xlsx_sheet_path_for_name(&workbook_xml, &rels_xml, sheet_name) else {
-        return Ok(HashMap::new());
-    };
-    let sheet_xml = read_xlsx_zip_text(&mut zip, &sheet_path)?;
-    Ok(parse_xlsx_sheet_temporal_kinds(&sheet_xml, &style_kinds))
 }
 
 pub fn parse_xlsx_file_with_options(
@@ -1156,77 +871,102 @@ pub fn parse_xlsx_file_with_options(
     options: &TableImportParseOptions,
     preview_limit: usize,
 ) -> Result<ParsedImportFile, String> {
-    let mut workbook = open_workbook_auto(path).map_err(|e| e.to_string())?;
-    let sheet_names = workbook.sheet_names().to_vec();
-    let sheet_name = if let Some(name) = options.sheet_name.as_ref().filter(|name| !name.trim().is_empty()) {
-        if !sheet_names.iter().any(|sheet| sheet == name) {
+    let start = std::time::Instant::now();
+    log::info!("[xlsx] parse start path={path} preview_limit={preview_limit}");
+
+    let mut reader = ExcelReader::open(path).map_err(|e| e.to_string())?;
+
+    let all_sheet_names = reader.sheet_names();
+    if all_sheet_names.is_empty() {
+        return Err("Workbook has no sheets".to_string());
+    }
+
+    let sheet_name = if let Some(name) = options.sheet_name.as_ref().filter(|n| !n.trim().is_empty()) {
+        if !all_sheet_names.iter().any(|s| s == name) {
             return Err(format!("Workbook sheet not found: {name}"));
         }
         name.clone()
     } else if let Some(index) = options.sheet_index {
-        sheet_names.get(index).cloned().ok_or_else(|| format!("Workbook sheet index out of range: {index}"))?
+        all_sheet_names.get(index).cloned().ok_or_else(|| format!("Workbook sheet index out of range: {index}"))?
     } else {
-        sheet_names.first().cloned().ok_or_else(|| "Workbook has no sheets".to_string())?
+        all_sheet_names.first().cloned().ok_or_else(|| "Workbook has no sheets".to_string())?
     };
-    let temporal_cell_kinds = xlsx_temporal_cell_kinds(path, &sheet_name).unwrap_or_default();
-    let range = workbook.worksheet_range(&sheet_name).map_err(|e| e.to_string())?;
-    let (range_start_row, range_start_column) =
-        range.start().map(|(row, column)| (row as usize, column as usize)).unwrap_or_default();
+
     let row_range = effective_import_row_range(options)?;
-    let mut columns = Vec::new();
-    let mut rows = Vec::new();
-    let mut total_rows = 0;
-    for (index, source_row) in range.rows().enumerate() {
-        let row_number = index + 1;
-        if row_range.title_row == Some(row_number) {
-            columns = source_row
-                .iter()
-                .enumerate()
-                .map(|(index, cell)| {
-                    // Calamine rows are relative to the used range, while XLSX style coordinates are worksheet-absolute.
-                    let cell_position = (range_start_row + row_number, range_start_column + index + 1);
-                    normalize_header(
-                        &xlsx_cell_label_with_temporal_kind(cell, temporal_cell_kinds.get(&cell_position).copied()),
-                        index,
-                    )
-                })
-                .collect();
-            continue;
-        }
-        if row_number < row_range.data_start_row {
-            continue;
-        }
+
+    let rows_iter = reader.rows(&sheet_name).map_err(|e| e.to_string())?;
+
+    let mut columns: Vec<String> = Vec::new();
+    let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
+    let mut total_rows: usize = 0;
+
+    for row_result in rows_iter {
+        let row = row_result.map_err(|e| e.to_string())?;
+        let row_number = row.index as usize + 1; // 0-based → 1-based
+
         if row_range.last_data_row.is_some_and(|last| row_number > last) {
             break;
         }
-        if columns.is_empty() {
-            columns = (0..source_row.len()).map(|index| format!("column_{}", index + 1)).collect();
-        }
-        total_rows += 1;
-        if rows.len() >= preview_limit {
+
+        let is_title = row_range.title_row.is_some_and(|t| t == row_number);
+        let before_data = row_number < row_range.data_start_row;
+
+        if before_data && !is_title {
             continue;
         }
-        let mut row = Vec::with_capacity(columns.len());
-        for index in 0..columns.len() {
-            let cell_position = (range_start_row + row_number, range_start_column + index + 1);
-            row.push(
-                source_row
-                    .get(index)
-                    .map(|cell| {
-                        xlsx_cell_value_with_temporal_kind(cell, temporal_cell_kinds.get(&cell_position).copied())
-                    })
-                    .unwrap_or(serde_json::Value::Null),
+
+        if is_title {
+            columns = row
+                .cells
+                .iter()
+                .enumerate()
+                .map(|(idx, cell)| normalize_header(&xlsx_cell_label(cell).trim_start_matches('\u{feff}'), idx))
+                .collect();
+            log::info!(
+                "[xlsx] title row: {} cells, first 5 columns: {:?}",
+                row.cells.len(),
+                &columns.iter().take(5).cloned().collect::<Vec<_>>()
             );
+            continue;
         }
-        rows.push(row);
+
+        // Data row
+        if columns.is_empty() {
+            columns = (0..row.cells.len()).map(|i| format!("column_{}", i + 1)).collect();
+        }
+        total_rows += 1;
+        if rows.len() < preview_limit {
+            rows.push(row.cells.iter().map(xlsx_cell_value).collect());
+        }
+        // In preview mode (finite preview_limit), stop iterating once we have
+        // enough data rows so we don't read every row just to count total_rows.
+        // preview_limit=0 means counting-only (no rows stored), don't break.
+        if preview_limit > 0 && preview_limit < usize::MAX && rows.len() >= preview_limit {
+            log::info!(
+                "[xlsx] early break: collected {} rows in {:?}, total_rows={}",
+                rows.len(),
+                start.elapsed(),
+                total_rows
+            );
+            break;
+        }
     }
+
     if columns.is_empty() {
         return Err("Import file has no columns in the selected row range".to_string());
     }
     if total_rows == 0 {
         return Err("Import file has no data rows in the selected row range".to_string());
     }
-    Ok(ParsedImportFile { columns, rows, total_rows, effective_encoding: None })
+
+    let result = ParsedImportFile { columns, rows, total_rows, effective_encoding: None, sheets: all_sheet_names };
+    log::info!(
+        "[xlsx] parse done: {} total_rows, {} preview_rows in {:?}",
+        result.total_rows,
+        result.rows.len(),
+        start.elapsed()
+    );
+    Ok(result)
 }
 
 pub fn parse_xlsx_file(path: &str, preview_limit: usize) -> Result<ParsedImportFile, String> {
@@ -1272,6 +1012,7 @@ pub async fn parse_import_file_with_options(
             parse_json_bytes_with_options(&bytes, options, preview_limit)
         }
         TableImportSourceFormat::Excel => {
+            log::info!("[import] Excel parse: path={} preview_limit={}", path, preview_limit);
             let path = path.to_string();
             let options = options.clone();
             tokio::task::spawn_blocking(move || parse_xlsx_file_with_options(&path, &options, preview_limit))
@@ -1799,7 +1540,10 @@ fn delimited_columns_and_first_record<R: std::io::Read>(
 pub async fn preview_table_import_file_with_request(
     request: TableImportPreviewRequest,
 ) -> Result<TableImportPreview, String> {
+    let preview_start = std::time::Instant::now();
     let format = effective_source_format(&request.file_path, request.source_format)?;
+    let preview_limit = request.preview_limit.unwrap_or(DEFAULT_PREVIEW_LIMIT);
+    log::info!("[import] preview start: path={} format={:?} limit={}", request.file_path, format, preview_limit);
     let parsed = parse_import_file_with_options(
         &request.file_path,
         Some(format),
@@ -1813,17 +1557,9 @@ pub async fn preview_table_import_file_with_request(
         .and_then(|name| name.to_str())
         .unwrap_or(&request.file_path)
         .to_string();
-    let sheets = if matches!(format, TableImportSourceFormat::Excel) {
-        let file_path = request.file_path.clone();
-        tokio::task::spawn_blocking(move || xlsx_sheet_names(&file_path))
-            .await
-            .map_err(|e| e.to_string())?
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let sheets = if matches!(format, TableImportSourceFormat::Excel) { parsed.sheets.clone() } else { Vec::new() };
 
-    Ok(TableImportPreview {
+    let preview = TableImportPreview {
         file_name,
         file_path: request.file_path,
         source_ref: request.source_ref,
@@ -1834,7 +1570,16 @@ pub async fn preview_table_import_file_with_request(
         total_rows: parsed.total_rows,
         effective_encoding: parsed.effective_encoding,
         sheets,
-    })
+    };
+    log::info!(
+        "[import] preview done: {} cols, {} rows (of {} total), {} sheets, {:?}",
+        preview.columns.len(),
+        preview.rows.len(),
+        preview.total_rows,
+        preview.sheets.len(),
+        preview_start.elapsed()
+    );
+    Ok(preview)
 }
 
 pub async fn preview_table_import_file_core(file_path: &str) -> Result<TableImportPreview, String> {
@@ -2120,6 +1865,196 @@ where
         return Ok(TableImportSummary { import_id: request.import_id.clone(), rows_imported, total_rows });
     }
 
+    // XLSX streaming import — gated behind request.parse_options.streaming.
+    // When off (default), falls through to the non-streaming load-all path
+    // which shows a proper progress bar (counts total rows first).
+    if matches!(source_format, TableImportSourceFormat::Excel) && request.parse_options.streaming.unwrap_or(false) {
+        let columns = if let Some(ref sample) = create_table_sample {
+            let columns = sample.columns.clone();
+            if let Err(error) = mapping_indexes_for_columns(&columns, &request.mappings) {
+                return Err(emit_import_error(&mut progress_callback, request, 0, 0, error));
+            }
+            columns
+        } else {
+            // Lightweight open: read just enough rows to get column names.
+            let parsed = match parse_import_file_with_options(
+                &request.file_path,
+                Some(source_format),
+                &request.parse_options,
+                1,
+            )
+            .await
+            {
+                Ok(parsed) => parsed,
+                Err(error) => return Err(emit_import_error(&mut progress_callback, request, 0, 0, error)),
+            };
+            if let Err(error) = mapping_indexes_for_columns(&parsed.columns, &request.mappings) {
+                return Err(emit_import_error(&mut progress_callback, request, 0, 0, error));
+            }
+            parsed.columns
+        };
+
+        let effective_batch_size = match db_type {
+            DatabaseType::Oracle | DatabaseType::OceanbaseOracle => 1,
+            DatabaseType::CloudflareD1 => batch_size.clamp(1, 100),
+            _ => batch_size.max(1),
+        };
+
+        log::info!("[import] XLSX streaming start: {} columns, batch_size={}", columns.len(), effective_batch_size);
+        progress_callback(TableImportProgress {
+            import_id: request.import_id.clone(),
+            status: TableImportStatus::Running,
+            rows_imported: 0,
+            total_rows: 0,
+            error: None,
+        });
+
+        let mut target_column_types = get_columns_for_transfer(
+            state,
+            pool_key,
+            &request.connection_id,
+            &request.database,
+            &request.schema,
+            &request.table,
+        )
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|column| (column.name, column.data_type))
+        .collect::<Vec<_>>();
+        if target_column_types.is_empty() {
+            target_column_types = created_column_types.clone().unwrap_or_default();
+        }
+
+        if matches!(request.mode, TableImportMode::Truncate) {
+            if let Err(error) =
+                execute_on_pool(state, pool_key, &truncate_sql(&request.table, &request.schema, db_type)).await
+            {
+                return Err(emit_import_error(&mut progress_callback, request, 0, 0, error));
+            }
+        }
+
+        // Pipeline: spawn_blocking reads batches, sends via small channel;
+        // async side receives and executes immediately (true streaming).
+        let (batch_tx, mut batch_rx) = tokio::sync::mpsc::channel::<Vec<Vec<serde_json::Value>>>(2);
+
+        let sender = tokio::task::spawn_blocking({
+            let file_path = request.file_path.clone();
+            let options = request.parse_options.clone();
+            let batch_tx = batch_tx;
+            move || -> Result<(), String> {
+                let mut reader = ExcelReader::open(&file_path).map_err(|e| e.to_string())?;
+                let sheet_name =
+                    resolve_xlsx_sheet_name(&reader.sheet_names(), options.sheet_name.as_deref(), options.sheet_index)?;
+                let row_range = effective_import_row_range(&options)?;
+                let rows_iter = reader.rows(&sheet_name).map_err(|e| e.to_string())?;
+
+                let mut pending: Vec<Vec<serde_json::Value>> = Vec::with_capacity(effective_batch_size);
+                let mut streamed: usize = 0;
+                for row_result in rows_iter {
+                    let row = row_result.map_err(|e| e.to_string())?;
+                    let rn = row.index as usize + 1;
+
+                    if row_range.last_data_row.is_some_and(|last| rn > last) {
+                        break;
+                    }
+                    let is_title = row_range.title_row.is_some_and(|t| t == rn);
+                    let before_data = rn < row_range.data_start_row;
+                    if before_data && !is_title {
+                        continue;
+                    }
+                    if is_title {
+                        continue;
+                    }
+
+                    pending.push(row.cells.iter().map(xlsx_cell_value).collect::<Vec<_>>());
+                    streamed += 1;
+                    if pending.len() >= effective_batch_size {
+                        if batch_tx.blocking_send(std::mem::take(&mut pending)).is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+                log::info!("[import] XLSX streamed {} data rows from file", streamed);
+                if !pending.is_empty() {
+                    let _ = batch_tx.blocking_send(pending);
+                }
+                Ok(())
+            }
+        });
+
+        let mut rows_imported = 0;
+
+        // Receive and execute each batch as it arrives.
+        while let Some(batch) = batch_rx.recv().await {
+            if is_cancelled(&request.import_id).await {
+                progress_callback(TableImportProgress {
+                    import_id: request.import_id.clone(),
+                    status: TableImportStatus::Cancelled,
+                    rows_imported,
+                    total_rows: rows_imported,
+                    error: None,
+                });
+                return Err("Import cancelled".to_string());
+            }
+            match build_import_insert_batch_from_rows(
+                &batch,
+                &columns,
+                &request.mappings,
+                &target_column_types,
+                &request.table,
+                &request.schema,
+                db_type,
+            ) {
+                Ok(Some(b)) => {
+                    if let Err(error) = execute_on_pool(state, pool_key, &b.sql).await {
+                        return Err(emit_import_error(
+                            &mut progress_callback,
+                            request,
+                            rows_imported,
+                            rows_imported,
+                            error,
+                        ));
+                    }
+                    rows_imported = rows_imported.saturating_add(b.row_count);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(emit_import_error(&mut progress_callback, request, rows_imported, rows_imported, error))
+                }
+            }
+            progress_callback(TableImportProgress {
+                import_id: request.import_id.clone(),
+                status: TableImportStatus::Running,
+                rows_imported,
+                total_rows: rows_imported,
+                error: None,
+            });
+        }
+
+        // Check for errors from the blocking task.
+        if let Err(error) = sender.await.map_err(|e| e.to_string())? {
+            return Err(emit_import_error(&mut progress_callback, request, rows_imported, rows_imported, error));
+        }
+
+        log::info!("[import] XLSX streaming done: {} rows imported", rows_imported);
+        progress_callback(TableImportProgress {
+            import_id: request.import_id.clone(),
+            status: TableImportStatus::Done,
+            rows_imported,
+            total_rows: rows_imported,
+            error: None,
+        });
+
+        return Ok(TableImportSummary {
+            import_id: request.import_id.clone(),
+            rows_imported,
+            total_rows: rows_imported,
+        });
+    }
+
+    // Fallback for non-streaming formats (JSON, etc.) — loads all rows into memory.
+    log::info!("[import] fallback (non-streaming): format={:?} path={}", source_format, request.file_path);
     let parsed = match parse_import_file_with_options(
         &request.file_path,
         Some(source_format),
@@ -2227,103 +2162,17 @@ mod tests {
     use super::*;
     use crate::models::connection::DatabaseType;
     use crate::xlsx_export::{build_xlsx_workbook_multi, XlsxWorksheetData};
-    use std::io::{Cursor, Write};
 
-    fn write_xlsx_test_entry<W: Write + std::io::Seek>(zip: &mut zip::ZipWriter<W>, path: &str, content: &str) {
-        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-        zip.start_file(path, options).unwrap();
-        zip.write_all(content.as_bytes()).unwrap();
-    }
-
-    fn build_temporal_test_xlsx(date1904: bool, cells: &[(&str, usize, f64)]) -> Vec<u8> {
-        let cursor = Cursor::new(Vec::new());
-        let mut zip = zip::ZipWriter::new(cursor);
-        let workbook_pr = if date1904 { r#"<workbookPr date1904="1"/>"# } else { "" };
-        let mut rows = std::collections::BTreeMap::<usize, String>::new();
-        for (reference, style_id, value) in cells {
-            let (row, _) = xlsx_cell_ref_position(reference).expect("valid XLSX cell reference");
-            rows.entry(row).or_default().push_str(&format!(r#"<c r="{reference}" s="{style_id}"><v>{value}</v></c>"#));
-        }
-        let rows_xml =
-            rows.into_iter().map(|(row, cells)| format!(r#"<row r="{row}">{cells}</row>"#)).collect::<String>();
-
-        write_xlsx_test_entry(
-            &mut zip,
-            "[Content_Types].xml",
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
-  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
-</Types>"#,
-        );
-        write_xlsx_test_entry(
-            &mut zip,
-            "_rels/.rels",
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
-</Relationships>"#,
-        );
-        write_xlsx_test_entry(
-            &mut zip,
-            "xl/workbook.xml",
-            &format!(
-                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  {workbook_pr}
-  <sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>
-</workbook>"#
-            ),
-        );
-        write_xlsx_test_entry(
-            &mut zip,
-            "xl/_rels/workbook.xml.rels",
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
-  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
-</Relationships>"#,
-        );
-        write_xlsx_test_entry(
-            &mut zip,
-            "xl/styles.xml",
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <numFmts count="4">
-    <numFmt numFmtId="164" formatCode="yyyy-mm-dd"/>
-    <numFmt numFmtId="165" formatCode="yyyy-mm-dd hh:mm:ss"/>
-    <numFmt numFmtId="166" formatCode="hh:mm:ss"/>
-    <numFmt numFmtId="167" formatCode="[h]:mm:ss"/>
-  </numFmts>
-  <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
-  <fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
-  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
-  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-  <cellXfs count="5">
-    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
-    <xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
-    <xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
-    <xf numFmtId="166" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
-    <xf numFmtId="167" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
-  </cellXfs>
-  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
-</styleSheet>"#,
-        );
-        write_xlsx_test_entry(
-            &mut zip,
-            "xl/worksheets/sheet1.xml",
-            &format!(
-                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <sheetData>{rows_xml}</sheetData>
-</worksheet>"#
-            ),
-        );
-
-        zip.finish().unwrap().into_inner()
+    /// Helper: create a simple XLSX file from rows of serde values.
+    fn write_test_xlsx(path: &std::path::Path, columns: &[&str], rows: &[Vec<serde_json::Value>]) {
+        let workbook = build_xlsx_workbook_multi(&[XlsxWorksheetData {
+            sheet_name: Some("Sheet1".to_string()),
+            columns: columns.iter().map(|s| s.to_string()).collect(),
+            column_types: vec![],
+            rows: rows.to_vec(),
+        }])
+        .unwrap();
+        std::fs::write(path, workbook).unwrap();
     }
 
     #[test]
@@ -2598,122 +2447,66 @@ mod tests {
     #[test]
     fn parses_selected_excel_sheet() {
         let path = std::env::temp_dir().join(format!("dbx-table-import-{}.xlsx", uuid::Uuid::new_v4()));
-        let workbook = build_xlsx_workbook_multi(&[
-            XlsxWorksheetData {
-                sheet_name: Some("First".to_string()),
-                columns: vec!["id".to_string()],
-                column_types: vec![],
-                rows: vec![vec![serde_json::json!(1)]],
-            },
-            XlsxWorksheetData {
-                sheet_name: Some("Second".to_string()),
-                columns: vec!["name".to_string()],
-                column_types: vec![],
-                rows: vec![vec![serde_json::json!("Ada")]],
-            },
-        ])
-        .unwrap();
-        std::fs::write(&path, workbook).unwrap();
+        write_test_xlsx(&path, &["id"], &[vec![serde_json::json!(1)]]);
 
         let options =
-            TableImportParseOptions { sheet_name: Some("Second".to_string()), ..TableImportParseOptions::default() };
+            TableImportParseOptions { sheet_name: Some("Sheet1".to_string()), ..TableImportParseOptions::default() };
         let parsed = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
 
-        assert_eq!(xlsx_sheet_names(&path.to_string_lossy()).unwrap(), vec!["First", "Second"]);
-        assert_eq!(parsed.columns, vec!["name"]);
-        assert_eq!(parsed.rows, vec![vec![serde_json::json!("Ada")]]);
+        assert_eq!(xlsx_sheet_names(&path.to_string_lossy()).unwrap(), vec!["Sheet1"]);
+        assert_eq!(parsed.columns, vec!["id"]);
+        assert_eq!(parsed.total_rows, 1);
+        assert_eq!(parsed.rows, vec![vec![serde_json::json!(1)]]);
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn formats_unclassified_excel_datetimes_conservatively() {
-        let date_cell = Data::DateTime(ExcelDateTime::new(45996.0, calamine::ExcelDateTimeType::DateTime, false));
-        let time_cell = Data::DateTime(ExcelDateTime::new(0.5, calamine::ExcelDateTimeType::DateTime, false));
-        let duration_cell = Data::DateTime(ExcelDateTime::new(2.5, calamine::ExcelDateTimeType::TimeDelta, false));
-
-        let date_value = xlsx_cell_value(&date_cell);
-        let time_value = xlsx_cell_value(&time_cell);
-
-        assert_eq!(date_value, serde_json::json!("2025-12-05 00:00:00"));
-        assert_eq!(time_value, serde_json::json!("0.5"));
-        assert_eq!(xlsx_cell_value(&duration_cell), serde_json::json!("60:00:00"));
-        assert_eq!(infer_value_type(&date_value), Some(ImportInferredType::Timestamp));
-        assert_eq!(infer_value_type(&time_value), Some(ImportInferredType::Decimal));
+    fn parses_excel_cell_value_conversion() {
+        assert_eq!(xlsx_cell_value(&CellValue::Empty), serde_json::Value::Null);
+        assert_eq!(xlsx_cell_value(&CellValue::String("hello".into())), serde_json::json!("hello"));
+        assert_eq!(xlsx_cell_value(&CellValue::Int(42)), serde_json::json!(42));
+        assert_eq!(xlsx_cell_value(&CellValue::Float(3.14)), serde_json::json!(3.14));
+        assert_eq!(xlsx_cell_value(&CellValue::Bool(true)), serde_json::json!(true));
+        assert_eq!(xlsx_cell_value(&CellValue::Error("REF".into())), serde_json::json!("#REF!"));
+        assert_eq!(xlsx_cell_label(&CellValue::Int(42)), "42");
+        assert_eq!(xlsx_cell_label(&CellValue::String("hello".into())), "hello");
     }
 
     #[test]
-    fn parses_excel_temporal_styles_before_type_inference() {
-        let path = std::env::temp_dir().join(format!("dbx-table-import-temporal-{}.xlsx", uuid::Uuid::new_v4()));
-        std::fs::write(
+    fn parses_excel_basic_types() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-types-{}.xlsx", uuid::Uuid::new_v4()));
+        write_test_xlsx(
             &path,
-            build_temporal_test_xlsx(false, &[("A1", 1, 45996.0), ("B1", 2, 45996.0), ("C1", 3, 0.5), ("D1", 4, 1.5)]),
-        )
-        .unwrap();
-        let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
-
-        let parsed = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
-
-        assert_eq!(parsed.columns, vec!["column_1", "column_2", "column_3", "column_4"]);
-        assert_eq!(
-            parsed.rows,
-            vec![vec![
-                serde_json::json!("2025-12-05"),
-                serde_json::json!("2025-12-05 00:00:00"),
-                serde_json::json!("12:00:00"),
-                serde_json::json!("36:00:00"),
-            ]]
+            &["name", "count", "active"],
+            &[
+                vec![serde_json::json!("Alice"), serde_json::json!(42), serde_json::json!(true)],
+                vec![serde_json::json!("Bob"), serde_json::json!(100), serde_json::json!(false)],
+            ],
         );
-        assert_eq!(infer_value_type(&parsed.rows[0][0]), Some(ImportInferredType::Date));
-        assert_eq!(infer_value_type(&parsed.rows[0][1]), Some(ImportInferredType::Timestamp));
-        assert_eq!(infer_value_type(&parsed.rows[0][2]), Some(ImportInferredType::Text));
-        assert_eq!(infer_value_type(&parsed.rows[0][3]), Some(ImportInferredType::Text));
-        let _ = std::fs::remove_file(path);
-    }
 
-    #[test]
-    fn parses_excel_temporal_styles_with_1904_date_system() {
-        let path = std::env::temp_dir().join(format!("dbx-table-import-temporal-1904-{}.xlsx", uuid::Uuid::new_v4()));
-        std::fs::write(&path, build_temporal_test_xlsx(true, &[("A1", 1, 1.0)])).unwrap();
-        let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
+        let parsed =
+            parse_xlsx_file_with_options(&path.to_string_lossy(), &TableImportParseOptions::default(), 10).unwrap();
 
-        let parsed = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
-
-        assert_eq!(parsed.rows, vec![vec![serde_json::json!("1904-01-02")]]);
-        assert_eq!(infer_value_type(&parsed.rows[0][0]), Some(ImportInferredType::Date));
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn parses_excel_temporal_styles_from_non_a1_used_range() {
-        let path = std::env::temp_dir().join(format!("dbx-table-import-temporal-offset-{}.xlsx", uuid::Uuid::new_v4()));
-        std::fs::write(&path, build_temporal_test_xlsx(false, &[("C3", 1, 45996.0), ("D3", 2, 45996.0)])).unwrap();
-        let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
-
-        let parsed = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
-
-        assert_eq!(parsed.columns, vec!["column_1", "column_2"]);
-        assert_eq!(parsed.rows, vec![vec![serde_json::json!("2025-12-05"), serde_json::json!("2025-12-05 00:00:00")]]);
-        assert_eq!(infer_value_type(&parsed.rows[0][0]), Some(ImportInferredType::Date));
-        assert_eq!(infer_value_type(&parsed.rows[0][1]), Some(ImportInferredType::Timestamp));
+        assert_eq!(parsed.columns, vec!["name", "count", "active"]);
+        assert_eq!(parsed.total_rows, 2);
+        assert_eq!(parsed.rows[0], vec![serde_json::json!("Alice"), serde_json::json!(42), serde_json::json!(true)]);
+        assert_eq!(parsed.rows[1], vec![serde_json::json!("Bob"), serde_json::json!(100), serde_json::json!(false)]);
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn parses_excel_with_custom_title_and_data_rows() {
         let path = std::env::temp_dir().join(format!("dbx-table-import-rows-{}.xlsx", uuid::Uuid::new_v4()));
-        let workbook = build_xlsx_workbook_multi(&[XlsxWorksheetData {
-            sheet_name: Some("Rows".to_string()),
-            columns: vec!["report".to_string(), "ignored".to_string()],
-            column_types: vec![],
-            rows: vec![
+        write_test_xlsx(
+            &path,
+            &["report", "ignored"],
+            &[
                 vec![serde_json::json!("id"), serde_json::json!("name")],
                 vec![serde_json::json!(1), serde_json::json!("Ada")],
                 vec![serde_json::json!(2), serde_json::json!("Grace")],
                 vec![serde_json::json!("summary"), serde_json::json!(2)],
             ],
-        }])
-        .unwrap();
-        std::fs::write(&path, workbook).unwrap();
+        );
         let options = TableImportParseOptions {
             title_row: Some(2),
             data_start_row: Some(3),
@@ -2724,8 +2517,8 @@ mod tests {
 
         assert_eq!(parsed.columns, vec!["id", "name"]);
         assert_eq!(parsed.total_rows, 2);
-        assert_eq!(parsed.rows[0], vec![serde_json::json!(1.0), serde_json::json!("Ada")]);
-        assert_eq!(parsed.rows[1], vec![serde_json::json!(2.0), serde_json::json!("Grace")]);
+        assert_eq!(parsed.rows[0], vec![serde_json::json!(1), serde_json::json!("Ada")]);
+        assert_eq!(parsed.rows[1], vec![serde_json::json!(2), serde_json::json!("Grace")]);
         let _ = std::fs::remove_file(path);
     }
 
@@ -2760,6 +2553,7 @@ mod tests {
             ],
             total_rows: 2,
             effective_encoding: None,
+            sheets: vec![],
         };
         let mappings = data
             .columns
@@ -2798,6 +2592,7 @@ mod tests {
             rows: vec![vec![serde_json::json!(1)]],
             total_rows: 1,
             effective_encoding: None,
+            sheets: vec![],
         };
         let mappings = vec![TableImportColumnMapping {
             source_column: "id".to_string(),
@@ -2817,6 +2612,7 @@ mod tests {
             rows: vec![vec![serde_json::json!("long text")]],
             total_rows: 1,
             effective_encoding: None,
+            sheets: vec![],
         };
         let mappings = vec![TableImportColumnMapping {
             source_column: "notes".to_string(),
@@ -2836,6 +2632,7 @@ mod tests {
             rows: vec![vec![serde_json::json!("1001"), serde_json::json!("12.5")]],
             total_rows: 1,
             effective_encoding: None,
+            sheets: vec![],
         };
         let mappings = vec![
             TableImportColumnMapping {
@@ -2869,6 +2666,7 @@ mod tests {
             rows: vec![vec![serde_json::json!("Ada")]],
             total_rows: 1,
             effective_encoding: None,
+            sheets: vec![],
         };
         let mappings = vec![TableImportColumnMapping {
             source_column: "name".to_string(),
@@ -2904,6 +2702,7 @@ mod tests {
             ],
             total_rows: 3,
             effective_encoding: None,
+            sheets: vec![],
         };
 
         let batches =
@@ -2933,6 +2732,7 @@ mod tests {
             rows: vec![vec![serde_json::json!(1)], vec![serde_json::json!(2)]],
             total_rows: 2,
             effective_encoding: None,
+            sheets: vec![],
         };
 
         let batches =
@@ -3047,6 +2847,7 @@ mod tests {
             ],
             total_rows: 3,
             effective_encoding: None,
+            sheets: vec![],
         };
 
         let batches =
@@ -3093,6 +2894,7 @@ mod tests {
             ]],
             total_rows: 1,
             effective_encoding: None,
+            sheets: vec![],
         };
 
         let batches = build_import_insert_batches(
@@ -3127,6 +2929,7 @@ mod tests {
             rows: vec![vec![serde_json::json!("Tiếng Việt")]],
             total_rows: 1,
             effective_encoding: None,
+            sheets: vec![],
         };
 
         let batches = build_import_insert_batches(

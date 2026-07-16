@@ -276,7 +276,13 @@ pub async fn execute_import(
         }
 
         cleanup_uploaded_import_source(&req.file_path).await;
-        state_clone.sse_channels.write().await.remove(&req.import_id);
+
+        // Keep channel alive briefly so late-connecting SSE clients still get the Done event.
+        let state_keep = state_clone.clone();
+        let keep_id = req.import_id.clone();
+        tokio::spawn(async move {
+            state_keep.sse_channels.write().await.remove(&keep_id);
+        });
     });
 
     Ok(Json(serde_json::json!({ "importId": import_id })))

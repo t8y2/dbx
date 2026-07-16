@@ -2141,6 +2141,7 @@ export interface TableImportParseOptions {
   sheetName?: string | null;
   sheetIndex?: number | null;
   jsonShape?: TableImportJsonShape | null;
+  streaming?: boolean | null;
 }
 
 export interface TableImportPreviewRequest {

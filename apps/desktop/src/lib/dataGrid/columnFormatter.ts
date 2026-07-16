@@ -58,6 +58,19 @@ export interface CustomColumnFormatterConfig {
   template: string;
 }
 
+interface IntlTimeZoneSupport {
+  supportedValuesOf?: (key: "timeZone") => string[];
+}
+
+export function getSupportedTimeZoneOptions(intl: IntlTimeZoneSupport, fallbackTimeZone = "UTC"): string[] {
+  try {
+    const timeZones = intl.supportedValuesOf?.("timeZone");
+    if (timeZones?.length) return timeZones;
+  } catch {}
+  // Older WebViews may omit or throw from this API, so keep the detected timezone selectable.
+  return [fallbackTimeZone || "UTC"];
+}
+
 export function normalizeSupportedDateTimePattern(value: string): string {
   const pattern = value.trim();
   if (!pattern || pattern.length > 100 || pattern.includes("%")) return "";

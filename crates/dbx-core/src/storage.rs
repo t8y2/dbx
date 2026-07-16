@@ -7,7 +7,7 @@ use rusqlite::{params, params_from_iter, Connection, DatabaseName, OpenFlags, Op
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::ai::{AiChatMessage, AiConfig, AiConversation, AiProvider};
+use crate::ai::{AiChatMessage, AiConfig, AiConfigItem, AiConversation, AiProvider};
 use crate::connection_secrets::{
     MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_SECRET_PREFIX,
     MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, MQ_TOKEN_SIGNING_SECRET_PREFIX, NACOS_AUTH_PASSWORD_KEY,
@@ -332,6 +332,14 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         created_at TEXT NOT NULL DEFAULT '',
         updated_at TEXT NOT NULL DEFAULT ''
     )",
+    "CREATE TABLE IF NOT EXISTS ai_configs (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        model TEXT NOT NULL DEFAULT '',
+        models TEXT NOT NULL DEFAULT '[]',
+        config_json TEXT NOT NULL,
+        is_default INTEGER NOT NULL DEFAULT 0
+    )",
 ];
 
 impl Storage {
@@ -351,6 +359,7 @@ impl Storage {
             ensure_history_columns_sync(conn)?;
             ensure_saved_sql_columns_sync(conn)?;
             ensure_tab_runtime_cache_columns_sync(conn)?;
+            ensure_ai_configs_columns_sync(conn)?;
             Ok(())
         })
     }
@@ -484,6 +493,24 @@ fn unix_timestamp_millis() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().min(i64::MAX as u128) as i64
 }
 
+fn ensure_ai_configs_columns_sync(conn: &Connection) -> Result<(), String> {
+    const COLUMNS: &[(&str, &str)] = &[
+        ("model", "TEXT NOT NULL DEFAULT ''"),
+        ("models", "TEXT NOT NULL DEFAULT '[]'"),
+        ("is_default", "INTEGER NOT NULL DEFAULT 0"),
+    ];
+
+    ensure_table_columns(conn, "ai_configs", COLUMNS)?;
+
+    // Create partial unique index (if not exists)
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_configs_default ON ai_configs(is_default) WHERE is_default = 1",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
 fn ensure_table_columns(conn: &Connection, table_name: &str, columns: &[(&str, &str)]) -> Result<(), String> {
     let mut stmt =
         conn.prepare(&format!("SELECT name FROM pragma_table_info('{table_name}')")).map_err(|e| e.to_string())?;
@@ -812,6 +839,136 @@ impl Storage {
                 }
             }
             Ok(map)
+        })
+        .await
+    }
+
+    pub async fn save_ai_configs(&self, configs: &[AiConfigItem]) -> Result<(), String> {
+        let configs = configs.to_vec();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM ai_configs", []).map_err(|e| e.to_string())?;
+            for config in &configs {
+                let json = serde_json::to_string(&config.config).map_err(|e| e.to_string())?;
+                let models_json = serde_json::to_string(&config.config.models).map_err(|e| e.to_string())?;
+                tx.execute(
+                    "INSERT OR REPLACE INTO ai_configs (id, name, model, models, config_json, is_default) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![config.id, config.name, config.config.model, models_json, json, config.is_default as i32],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            // Clear old single-config tables — migration is complete, avoids re-migration on empty ai_configs
+            tx.execute("DELETE FROM ai_config", []).map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM ai_provider_configs", []).map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn load_ai_configs(&self) -> Result<Vec<AiConfigItem>, String> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT id, name, model, models, config_json, is_default FROM ai_configs")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, bool>(5)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            let mut configs = Vec::new();
+            for row in rows {
+                let (id, name, model_col, models_json_col, json, is_default_col) = row.map_err(|e| e.to_string())?;
+                match serde_json::from_str::<AiConfig>(&json) {
+                    Ok(mut config) => {
+                        // 优先使用列值，如果列值为空则从 config_json 回退读取
+                        if model_col.is_empty() {
+                            // config.model 已经从 json 解析出来了
+                        } else {
+                            config.model = model_col;
+                        }
+                        if models_json_col.is_empty() || models_json_col == "[]" {
+                            // config.models 已经从 json 解析出来了
+                        } else {
+                            config.models = serde_json::from_str(&models_json_col).unwrap_or_default();
+                        }
+                        let is_default = is_default_col;
+                        configs.push(AiConfigItem { id, name, is_default, config });
+                    }
+                    Err(e) => {
+                        warn!("Failed to deserialize AI config item '{}': {}", id, e);
+                    }
+                }
+            }
+            Ok(configs)
+        })
+        .await
+    }
+
+    pub async fn set_default_ai_config(&self, config_id: &str) -> Result<(), String> {
+        let config_id = config_id.to_string();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            tx.execute("UPDATE ai_configs SET is_default = 0 WHERE is_default = 1", []).map_err(|e| e.to_string())?;
+            tx.execute("UPDATE ai_configs SET is_default = 1 WHERE id = ?1", params![config_id])
+                .map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn save_ai_config_item(&self, config: &AiConfigItem) -> Result<(), String> {
+        let config = config.clone();
+        self.with_conn(move |conn| {
+            let json = serde_json::to_string(&config.config).map_err(|e| e.to_string())?;
+            let models_json = serde_json::to_string(&config.config.models).map_err(|e| e.to_string())?;
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+            // 如果设该配置为默认，先清除其他默认，避免与 idx_ai_configs_default 冲突
+            if config.is_default {
+                tx.execute(
+                    "UPDATE ai_configs SET is_default = 0 WHERE is_default = 1 AND id != ?1",
+                    params![config.id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+
+            tx.execute(
+                "INSERT INTO ai_configs (id, name, model, models, config_json, is_default)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(id) DO UPDATE SET name = excluded.name, model = excluded.model,
+                 models = excluded.models, config_json = excluded.config_json, is_default = excluded.is_default",
+                params![config.id, config.name, config.config.model, models_json, json, config.is_default as i32],
+            )
+            .map_err(|e| {
+                let msg = e.to_string();
+                // SQLite UNIQUE constraint error contains the table and column name
+                if msg.contains("UNIQUE constraint failed") && msg.contains("ai_configs.name") {
+                    format!("ai.configNameExists:{}", config.name)
+                } else {
+                    msg
+                }
+            })?;
+
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn delete_ai_config(&self, config_id: &str) -> Result<(), String> {
+        let config_id = config_id.to_string();
+        self.with_conn(move |conn| {
+            conn.execute("DELETE FROM ai_configs WHERE id = ?1", params![config_id]).map_err(|e| e.to_string())?;
+            Ok(())
         })
         .await
     }
@@ -3591,5 +3748,195 @@ mod tests {
         assert_eq!(loaded.name, "renamed.sql");
         assert_eq!(loaded.open_count, 1);
         assert_eq!(loaded.sql, "SELECT 1;");
+    }
+
+    // ---- AI Config tests ----
+
+    use crate::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiConfigItem, AiProvider, AiReasoningLevel};
+
+    fn make_ai_config(name: &str, is_default: bool) -> AiConfigItem {
+        AiConfigItem {
+            id: format!("cfg-{name}"),
+            name: name.to_string(),
+            is_default,
+            config: AiConfig {
+                provider: AiProvider::Openai,
+                api_key: "sk-test".to_string(),
+                auth_method: AiAuthMethod::ApiKey,
+                endpoint: "https://api.openai.com/v1".to_string(),
+                model: "gpt-4o".to_string(),
+                models: Vec::new(),
+                api_style: AiApiStyle::Completions,
+                proxy_enabled: false,
+                proxy_url: String::new(),
+                enable_thinking: true,
+                reasoning_level: AiReasoningLevel::Default,
+                context_window: None,
+                codex_cli_path: None,
+                codex_cli_env: std::collections::HashMap::new(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn ai_config_save_load_roundtrip() {
+        let db = temp_db_path("ai-roundtrip");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let cfg = make_ai_config("test-config", true);
+        storage.save_ai_config_item(&cfg).await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "cfg-test-config");
+        assert_eq!(loaded[0].name, "test-config");
+        assert!(loaded[0].is_default);
+        assert_eq!(loaded[0].config.model, "gpt-4o");
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn ai_config_only_one_default() {
+        let db = temp_db_path("ai-one-default");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let cfg1 = make_ai_config("config-a", true);
+        let cfg2 = make_ai_config("config-b", true);
+        storage.save_ai_config_item(&cfg1).await.unwrap();
+
+        // Second default config should succeed and cascade-clear the first
+        storage.save_ai_config_item(&cfg2).await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        let defaults: Vec<_> = loaded.iter().filter(|c| c.is_default).collect();
+        assert_eq!(defaults.len(), 1);
+        assert_eq!(defaults[0].id, "cfg-config-b");
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn ai_config_update_existing_to_default() {
+        let db = temp_db_path("ai-update-default");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let cfg1 = make_ai_config("config-a", true);
+        let cfg2 = make_ai_config("config-b", false);
+        storage.save_ai_config_item(&cfg1).await.unwrap();
+        storage.save_ai_config_item(&cfg2).await.unwrap();
+        assert_eq!(storage.load_ai_configs().await.unwrap().iter().filter(|c| c.is_default).count(), 1);
+
+        // Update cfg-b to be default via save_ai_config_item — should succeed and clear cfg-a
+        let cfg2 = make_ai_config("config-b", true);
+        storage.save_ai_config_item(&cfg2).await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        let defaults: Vec<_> = loaded.iter().filter(|c| c.is_default).collect();
+        assert_eq!(defaults.len(), 1);
+        assert_eq!(defaults[0].id, "cfg-config-b");
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn ai_config_duplicate_name_error() {
+        let db = temp_db_path("ai-dup-name");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let cfg1 = make_ai_config("same-name", false);
+        storage.save_ai_config_item(&cfg1).await.unwrap();
+
+        // Different id, same name → should fail with name conflict
+        let mut cfg2 = make_ai_config("same-name", false);
+        cfg2.id = "cfg-other".to_string();
+        let err = storage.save_ai_config_item(&cfg2).await.unwrap_err();
+        assert!(err.contains("ai.configNameExists"), "Expected name conflict error, got: {err}");
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn ai_config_set_default_switches() {
+        let db = temp_db_path("ai-set-default");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let cfg1 = make_ai_config("first", true);
+        let cfg2 = make_ai_config("second", false);
+        storage.save_ai_config_item(&cfg1).await.unwrap();
+        storage.save_ai_config_item(&cfg2).await.unwrap();
+
+        // Switch default to second
+        storage.set_default_ai_config("cfg-second").await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        let first = loaded.iter().find(|c| c.id == "cfg-first").unwrap();
+        let second = loaded.iter().find(|c| c.id == "cfg-second").unwrap();
+        assert!(!first.is_default);
+        assert!(second.is_default);
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn ai_config_delete_default_no_cascade() {
+        let db = temp_db_path("ai-delete-default");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let cfg1 = make_ai_config("default-one", true);
+        let cfg2 = make_ai_config("other", false);
+        storage.save_ai_config_item(&cfg1).await.unwrap();
+        storage.save_ai_config_item(&cfg2).await.unwrap();
+
+        // Delete the default config
+        storage.delete_ai_config("cfg-default-one").await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        // Remaining config should NOT be auto-promoted to default
+        assert!(!loaded[0].is_default);
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn ai_config_save_configs_batch() {
+        let db = temp_db_path("ai-batch");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let configs =
+            vec![make_ai_config("batch-a", true), make_ai_config("batch-b", false), make_ai_config("batch-c", false)];
+        storage.save_ai_configs(&configs).await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert_eq!(loaded.len(), 3);
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn ai_config_save_configs_clears_old_tables() {
+        let db = temp_db_path("ai-clear-old");
+        let storage = Storage::open(&db).await.unwrap();
+
+        // Pre-populate old tables as if migration hasn't run yet
+        storage.save_ai_config(&make_ai_config("legacy-active", false).config).await.unwrap();
+        storage.save_ai_provider_config("openai", &make_ai_config("legacy-openai", false).config).await.unwrap();
+
+        // save_ai_configs should clear old tables
+        let configs = vec![make_ai_config("new-a", true)];
+        storage.save_ai_configs(&configs).await.unwrap();
+
+        // New table has the saved config
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "new-a");
+
+        // Old tables are cleared — prevents re-migration on restart
+        assert!(storage.load_ai_config().await.unwrap().is_none(), "ai_config should be deleted");
+        let old_providers = storage.load_ai_provider_configs().await.unwrap();
+        assert!(old_providers.is_empty(), "ai_provider_configs should be deleted");
+
+        std::fs::remove_file(&db).ok();
     }
 }

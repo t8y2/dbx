@@ -147,7 +147,7 @@ import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { shouldMeasureSidebarLabelOverflow } from "@/lib/sidebar/sidebarLabelTooltip";
 import { selectedTreeNodesInVisibleOrder as orderSelectedTreeNodes, treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "@/lib/sidebar/sidebarTreeSelection";
 import { connectionPasteTargetGroupId, selectedConnectionClipboardTargets, selectedConnectionDeleteTargets, selectedConnectionDuplicateTargets, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
-import { supportsDatabaseUserAdmin } from "@/lib/database/databaseUserAdmin";
+import { connectionSupportsDatabaseUserAdmin } from "@/lib/database/databaseUserAdmin";
 import { connectionSupportsProcessList } from "@/lib/database/processListDrivers";
 import { connectionSupportsServerDashboard } from "@/lib/database/mysqlServerStatus";
 import { connectionSupportsServerDashboard as connectionSupportsPgServerDashboard } from "@/lib/database/postgresServerStatus";
@@ -1802,9 +1802,9 @@ async function generateDdlTemplate() {
     const schema = node.schema || node.database;
     let ddl: string;
     if (node.type === "table") {
-      ddl = await api.getTableDdl(node.connectionId, node.database, schema, node.label);
+      ddl = await api.getTableDdl(node.connectionId, node.database, schema, node.label, undefined, node.catalog);
     } else if (node.type === "materialized_view") {
-      ddl = await api.getTableDdl(node.connectionId, node.database, schema, node.label, "MATERIALIZED_VIEW");
+      ddl = await api.getTableDdl(node.connectionId, node.database, schema, node.label, "MATERIALIZED_VIEW", node.catalog);
     } else {
       const result = await api.getObjectSource(node.connectionId, node.database, schema, node.label, "VIEW");
       ddl = await buildViewDdl({
@@ -3707,7 +3707,7 @@ async function exportStructure() {
     const parts: string[] = [];
     for (const target of targets) {
       await connectionStore.ensureConnected(target.connectionId);
-      const ddl = await api.getTableDdl(target.connectionId, target.database, target.schema || target.database, target.label, tableDdlObjectTypeForNode(target.type));
+      const ddl = await api.getTableDdl(target.connectionId, target.database, target.schema || target.database, target.label, tableDdlObjectTypeForNode(target.type), target.catalog);
       parts.push(ddl.trim());
     }
     structurePreviewSql.value = joinExportedDdls(parts);
@@ -4204,19 +4204,19 @@ function openStructureEditor() {
   const node = props.node;
   if (!node.connectionId || !node.database) return;
   if (node.type === "table") {
-    queryStore.openTableStructure(node.connectionId, node.database, node.schema, node.label);
+    queryStore.openTableStructure(node.connectionId, node.database, node.schema, node.label, undefined, undefined, node.catalog);
     return;
   }
   if (node.type === "column" && node.tableName) {
     const columnName = tableChildDropObjectName(node).trim();
     if (!columnName) return;
-    queryStore.openTableStructure(node.connectionId, node.database, node.schema, node.tableName, "columns", { kind: "column", name: columnName });
+    queryStore.openTableStructure(node.connectionId, node.database, node.schema, node.tableName, "columns", { kind: "column", name: columnName }, node.catalog);
     return;
   }
   if (node.type === "index" && node.tableName) {
     const indexName = tableChildDropObjectName(node).trim();
     if (!indexName) return;
-    queryStore.openTableStructure(node.connectionId, node.database, node.schema, node.tableName, "indexes", { kind: "index", name: indexName });
+    queryStore.openTableStructure(node.connectionId, node.database, node.schema, node.tableName, "indexes", { kind: "index", name: indexName }, node.catalog);
   }
 }
 
@@ -5128,7 +5128,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
     }
     const sqlHistoryMenu = savedSqlHistorySubmenu();
     if (sqlHistoryMenu) items.push(sqlHistoryMenu);
-    if (supportsDatabaseUserAdmin(currentDatabaseType())) {
+    if (node.connectionId && connectionSupportsDatabaseUserAdmin(connectionStore.getConfig(node.connectionId))) {
       items.push({ label: t("contextMenu.userAdmin"), action: openUserAdmin, icon: UsersRound });
     }
     if (node.connectionId && connectionSupportsProcessList(connectionStore.getConfig(node.connectionId))) {

@@ -14,6 +14,7 @@ import {
   evaluateMongoWriteSafety,
   mongoCollectionStatsToQueryResult,
   mongoCountToQueryResult,
+  mongoDistinctToQueryResult,
   mongoCreateIndexToQueryResult,
   mongoDocumentsToQueryResult,
   mongoDroppedIndexesToQueryResult,
@@ -1344,7 +1345,7 @@ export const useQueryStore = defineStore("query", () => {
   function openTableStructure(connectionId: string, database: string, schema?: string, tableName?: string, initialTab?: TableInfoTab, initialTarget?: TableStructureEditorTarget, catalog?: string) {
     const resolvedTableName = tableName || "";
     if (resolvedTableName) {
-      const existing = tabs.value.find((tab) => tab.mode === "structure" && tab.connectionId === connectionId && tab.database === database && (tab.structureTableName || "") === resolvedTableName);
+      const existing = tabs.value.find((tab) => tab.mode === "structure" && tab.connectionId === connectionId && tab.database === database && (tab.catalog || "") === (catalog || "") && (tab.structureTableName || "") === resolvedTableName);
       if (existing) {
         applyTableStructureInitialTab(existing, initialTab, initialTarget);
         switchTab(existing.id);
@@ -2980,6 +2981,21 @@ export const useQueryStore = defineStore("query", () => {
                   database: currentDatabase,
                   rowCount: result.documents.length,
                   total: result.total,
+                  elapsed: elapsed(),
+                });
+                break;
+              }
+              case "distinct": {
+                queryExecutionLog("info", "mongo-distinct:start", { traceId, collection: mongoCommand.collection, database: currentDatabase, field: mongoCommand.field });
+                const result = await api.mongoDistinct(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.field, mongoCommand.filter, executionId);
+                allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoDistinctToQueryResult(mongoCommand.field, result.documents, performance.now() - commandStartedAt))));
+                mongoEditTarget = undefined;
+                queryExecutionLog("info", "mongo-distinct:done", {
+                  traceId,
+                  collection: mongoCommand.collection,
+                  database: currentDatabase,
+                  field: mongoCommand.field,
+                  valueCount: result.documents.length,
                   elapsed: elapsed(),
                 });
                 break;

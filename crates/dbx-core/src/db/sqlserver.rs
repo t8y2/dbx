@@ -5,7 +5,6 @@ use crate::types::{
     TriggerInfo,
 };
 use futures::{FutureExt, TryStreamExt};
-use rust_decimal::Decimal;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::time::{Duration, Instant};
@@ -696,7 +695,32 @@ pub async fn stream_first_result_set(
     Ok(SqlServerStreamExportSummary { columns, rows_exported })
 }
 
+// rust_decimal (behind tiberius's `Decimal: FromSql`) only supports scale <= 28 and a
+// 96-bit mantissa, while SQL Server NUMERIC allows precision/scale up to 38; converting
+// such values panics and aborts the app (issue #3648). Format the raw i128 value and
+// scale manually instead.
+fn format_sqlserver_numeric(value: i128, scale: u8) -> String {
+    if scale == 0 {
+        return value.to_string();
+    }
+    let digits = value.unsigned_abs().to_string();
+    let scale = scale as usize;
+    let sign = if value < 0 { "-" } else { "" };
+    if digits.len() > scale {
+        let (int_part, frac_part) = digits.split_at(digits.len() - scale);
+        format!("{}{}.{}", sign, int_part, frac_part)
+    } else {
+        format!("{}0.{:0>width$}", sign, digits, width = scale)
+    }
+}
+
 fn sqlserver_cell_to_json(cell: &ColumnData<'static>) -> serde_json::Value {
+    if let ColumnData::Numeric(numeric) = cell {
+        return match numeric {
+            Some(n) => serde_json::Value::String(format_sqlserver_numeric(n.value(), n.scale())),
+            None => serde_json::Value::Null,
+        };
+    }
     if let Ok(Some(v)) = <&tiberius::xml::XmlData as FromSql>::from_sql(cell) {
         return serde_json::Value::String(v.as_ref().to_string());
     }
@@ -718,9 +742,6 @@ fn sqlserver_cell_to_json(cell: &ColumnData<'static>) -> serde_json::Value {
     }
     if let Ok(Some(v)) = <chrono::DateTime<chrono::FixedOffset> as FromSql>::from_sql(cell) {
         return serde_json::Value::String(v.to_rfc3339());
-    }
-    if let Ok(Some(v)) = <Decimal as FromSql>::from_sql(cell) {
-        return serde_json::Value::String(v.to_string());
     }
     if let Ok(Some(v)) = <u8 as FromSql>::from_sql(cell) {
         return serde_json::Value::Number(v.into());
@@ -1913,12 +1934,13 @@ fn first_sql_tokens(sql: &str, limit: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_sqlserver_unsafe_type_query, is_sqlserver_spatial_column, is_sqlserver_variant_column,
-        requires_simple_query_batch, sqlserver_batch_can_use_execute, sqlserver_cell_to_json, sqlserver_columns_sql,
-        sqlserver_completion_assistant_sql, sqlserver_dml_output_returns_rows, sqlserver_hidden_schema_names,
-        sqlserver_indexes_sql, sqlserver_list_objects_sql, sqlserver_list_schemas_sql, sqlserver_list_tables_sql,
-        sqlserver_table_comment_sql, sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column,
-        SqlServerDescribedColumn, SqlServerResultSet,
+        build_sqlserver_unsafe_type_query, format_sqlserver_numeric, is_sqlserver_spatial_column,
+        is_sqlserver_variant_column, requires_simple_query_batch, sqlserver_batch_can_use_execute,
+        sqlserver_cell_to_json, sqlserver_columns_sql, sqlserver_completion_assistant_sql,
+        sqlserver_dml_output_returns_rows, sqlserver_hidden_schema_names, sqlserver_indexes_sql,
+        sqlserver_list_objects_sql, sqlserver_list_schemas_sql, sqlserver_list_tables_sql, sqlserver_table_comment_sql,
+        sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn,
+        SqlServerResultSet,
     };
     use crate::types::{
         CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest, QueryResult,
@@ -2376,6 +2398,42 @@ mod tests {
     #[test]
     fn sqlserver_tinyint_cells_are_json_numbers() {
         assert_eq!(sqlserver_cell_to_json(&ColumnData::U8(Some(7))), serde_json::json!(7));
+    }
+
+    #[test]
+    fn sqlserver_numeric_cells_with_scale_over_28_do_not_panic() {
+        // NUMERIC(38, 29) with data used to abort the app: rust_decimal caps scale at 28 (issue #3648).
+        let cell = ColumnData::Numeric(Some(tiberius::numeric::Numeric::new_with_scale(5, 29)));
+        assert_eq!(sqlserver_cell_to_json(&cell), serde_json::json!("0.00000000000000000000000000005"));
+    }
+
+    #[test]
+    fn sqlserver_numeric_cells_beyond_96_bit_mantissa_do_not_panic() {
+        // Precision-38 values overflow rust_decimal's 96-bit mantissa even at low scale.
+        let value: i128 = 12_345_678_901_234_567_890_123_456_789_012_345_678;
+        let cell = ColumnData::Numeric(Some(tiberius::numeric::Numeric::new_with_scale(value, 10)));
+        assert_eq!(sqlserver_cell_to_json(&cell), serde_json::json!("1234567890123456789012345678.9012345678"));
+    }
+
+    #[test]
+    fn sqlserver_null_numeric_cells_are_json_null() {
+        assert_eq!(sqlserver_cell_to_json(&ColumnData::Numeric(None)), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn format_sqlserver_numeric_covers_sign_scale_and_padding() {
+        assert_eq!(format_sqlserver_numeric(42, 0), "42");
+        assert_eq!(format_sqlserver_numeric(-42, 0), "-42");
+        assert_eq!(format_sqlserver_numeric(12345, 2), "123.45");
+        // Trailing zeros are kept, matching the previous rust_decimal display.
+        assert_eq!(format_sqlserver_numeric(1500, 3), "1.500");
+        assert_eq!(format_sqlserver_numeric(-15, 1), "-1.5");
+        assert_eq!(format_sqlserver_numeric(-5, 2), "-0.05");
+        assert_eq!(format_sqlserver_numeric(0, 2), "0.00");
+        // digits.len() == scale must keep the leading "0." (guards `>` vs `>=` in the split).
+        assert_eq!(format_sqlserver_numeric(123, 3), "0.123");
+        // Largest scale tiberius can deliver (its decoder asserts scale < 38).
+        assert_eq!(format_sqlserver_numeric(9, 37), format!("0.{}9", "0".repeat(36)));
     }
 
     #[test]

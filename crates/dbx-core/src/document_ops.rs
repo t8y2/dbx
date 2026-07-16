@@ -405,6 +405,7 @@ pub async fn insert_document_core(
     database: &str,
     collection: &str,
     doc_json: &str,
+    routing: Option<&str>,
 ) -> Result<String, String> {
     ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
@@ -413,7 +414,7 @@ pub async fn insert_document_core(
         PoolKind::Elasticsearch(client) => {
             let client = client.clone();
             drop(connections);
-            elasticsearch_driver::insert_document(&client, collection, doc_json).await
+            elasticsearch_driver::insert_document(&client, collection, doc_json, routing).await
         }
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;

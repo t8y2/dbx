@@ -116,7 +116,7 @@ import {
 import { buildBinaryHexViewRows } from "@/lib/dataGrid/binaryHexViewer";
 import { canFormatCellDetailJson, cellDetailEditorText, compactJsonText, defaultCellDetailTab, formatJsonText, isGeometryColumnType, linkedCellDetailTarget, looksLikeJsonContainerText, valueEditorActions, visibleCellDetailTabs, type CellDetailTab } from "@/lib/dataGrid/cellDetailPresentation";
 import { buildDataGridCellDetail, buildDataGridColumnDetail, buildDataGridRowDetail, CELL_DETAIL_VALUE_PREVIEW_MAX_LENGTH, dataGridColumnDetailJson, dataGridColumnDetailTsv, dataGridRowDetailJson, dataGridRowDetailTsv, type DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
-import { applyColumnFormatter, buildColumnFormatterKey, normalizeColumnFormatter, resolveColumnFormatter, type ColumnFormatterConfig, type DateTimeFormatterUnit, DateTimePatterns } from "@/lib/dataGrid/columnFormatter";
+import { applyColumnFormatter, buildColumnFormatterKey, getSupportedTimeZoneOptions, normalizeColumnFormatter, resolveColumnFormatter, type ColumnFormatterConfig, type DateTimeFormatterUnit, DateTimePatterns } from "@/lib/dataGrid/columnFormatter";
 import { temporalCellEditorConfig, type TemporalCellEditorConfig } from "@/lib/dataGrid/dataGridTemporalEditor";
 import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowShortcut, isFocusSearchShortcut, isModRShortcut, isSaveShortcut, isToggleTransposeShortcut } from "@/lib/editor/keyboardShortcuts";
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
@@ -642,9 +642,8 @@ const CUSTOM_FORMATTER_NEW = "__new";
 const formatterKind = ref<FormatterDraftKind>("datetime");
 const formatterDateUnit = ref<DateTimeFormatterUnit>("auto");
 const formatterDatetimePattern = ref<string>("YYYY-MM-DD HH:mm:ss");
-const formatterDateTimezone = ref<string>(dayjs.tz.guess());
-// @ts-ignore
-const timezoneOptions = Intl.supportedValuesOf("timeZone");
+const formatterDateTimezone = ref<string>(dayjs.tz.guess() || "UTC");
+const timezoneOptions = getSupportedTimeZoneOptions(Intl as typeof Intl & { supportedValuesOf?: (key: "timeZone") => string[] }, formatterDateTimezone.value);
 const formatterJsonPath = ref("$.user.name");
 const formatterMaskPrefix = ref(4);
 const formatterMaskSuffix = ref(4);
@@ -1013,7 +1012,7 @@ function loadFormatterDraft(formatter: ColumnFormatterConfig | undefined) {
   if (draft.kind === "datetime") {
     formatterDateUnit.value = draft.unit;
     formatterDatetimePattern.value = draft.pattern;
-    formatterDateTimezone.value = draft.timezone || dayjs.tz.guess();
+    formatterDateTimezone.value = draft.timezone || dayjs.tz.guess() || "UTC";
   } else if (draft.kind === "json-path") {
     formatterJsonPath.value = draft.path;
   } else if (draft.kind === "mask") {
@@ -6754,7 +6753,7 @@ function copyDdl() {
 
 function openTableStructureEditor() {
   if (!props.connectionId || !props.database || !props.tableMeta?.tableName || !canOpenTableStructureEditor.value) return;
-  queryStore.openTableStructure(props.connectionId, props.database, props.tableMeta.schema, props.tableMeta.tableName, activeTableInfoTab.value);
+  queryStore.openTableStructure(props.connectionId, props.database, props.tableMeta.schema, props.tableMeta.tableName, activeTableInfoTab.value, undefined, props.tableMeta.catalog);
 }
 
 function toggleDdlWrap() {

@@ -162,7 +162,7 @@ const cursorPos = ref(0);
 const formatSqlRequest = ref<{ id: number; tabId: string } | null>(null);
 const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
 const newQueryContextSource = ref<"tab" | "sidebar">("tab");
-const queryEditorDdlTarget = ref<{ connectionId: string; database: string; schema?: string; tableName: string; objectType?: ObjectSourceKind } | null>(null);
+const queryEditorDdlTarget = ref<{ connectionId: string; database: string; catalog?: string; schema?: string; tableName: string; objectType?: ObjectSourceKind } | null>(null);
 const queryEditorObjectSourceTarget = ref<{ connectionId: string; database: string; schema?: string; name: string; objectType: ObjectSourceKind; initialEditing: boolean } | null>(null);
 const showSaveSqlDialog = ref(false);
 const saveSqlName = ref("");
@@ -1250,11 +1250,13 @@ function tableTargetFromActiveTab(table: string | SqlObjectNavigationTarget) {
   const tab = activeTab.value;
   if (!tab) return null;
   const connectionId = tab.connectionId;
+  const catalog = tab.tableMeta?.catalog || tab.catalog;
   if (typeof table !== "string") {
     // Structured targets already separate qualifiers; reparsing would corrupt quoted object names that contain dots.
     return {
       connectionId,
       database: table.database || tab.database,
+      catalog,
       schema: table.schema || tab.schema,
       tableName: table.name,
       tableType: table.type ? sqlObjectNavigationTableType(table) : undefined,
@@ -1280,7 +1282,7 @@ function tableTargetFromActiveTab(table: string | SqlObjectNavigationTarget) {
     }
   }
 
-  return { connectionId, database, schema, tableName: rawTableName, tableType: undefined };
+  return { connectionId, database, catalog, schema, tableName: rawTableName, tableType: undefined };
 }
 
 async function onClickTable(table: SqlObjectNavigationTarget) {
@@ -1321,7 +1323,7 @@ function onEditTableStructure(table: SqlObjectNavigationTarget) {
   const target = tableTargetFromActiveTab(table);
   // Keep view-like objects out of the table editor even if a stale menu dispatches this event.
   if (!target || sqlObjectNavigationSourceKind(table)) return;
-  queryStore.openTableStructure(target.connectionId, target.database, target.schema, target.tableName);
+  queryStore.openTableStructure(target.connectionId, target.database, target.schema, target.tableName, undefined, undefined, target.catalog);
 }
 
 async function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditing: boolean) {
@@ -1765,7 +1767,7 @@ function onLoginSuccess() {
 async function initApp() {
   const t0 = performance.now();
   console.log("[STARTUP] initApp begin");
-  settingsStore.initAiConfig();
+  await settingsStore.initAiConfigs();
   try {
     await settingsStore.initEditorSettings();
     console.log(`[STARTUP]   settingsStore.initEditorSettings: ${(performance.now() - t0).toFixed(0)}ms`);
@@ -2286,6 +2288,7 @@ onUnmounted(() => {
         v-model:open="showQueryEditorDdlDialog"
         :connection-id="queryEditorDdlTarget.connectionId"
         :database="queryEditorDdlTarget.database"
+        :catalog="queryEditorDdlTarget.catalog"
         :schema="queryEditorDdlTarget.schema"
         :table-name="queryEditorDdlTarget.tableName"
         :object-type="queryEditorDdlTarget.objectType"

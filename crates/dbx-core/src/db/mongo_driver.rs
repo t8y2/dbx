@@ -767,6 +767,38 @@ pub async fn aggregate_documents(
     Ok(MongoDocumentResult { documents, raw_documents: None, extended_documents: Some(extended_documents), total })
 }
 
+/// Distinct values of a field, matching the mongo shell's `db.coll.distinct(field, filter)`:
+/// array fields contribute their elements rather than the whole array, and the server may
+/// answer from an index with a DISTINCT_SCAN. Values are returned in the `documents` slot as
+/// bare scalars, which `mongoDocumentsToQueryResult` already renders as a single column.
+pub async fn distinct(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    field: &str,
+    filter: Option<&str>,
+) -> Result<MongoDocumentResult, String> {
+    if field.trim().is_empty() {
+        return Err("Distinct field name is required".to_string());
+    }
+
+    let filter_doc: Document = match filter {
+        Some(f) if !f.trim().is_empty() => {
+            let json: serde_json::Value = serde_json::from_str(f).map_err(|e| format!("Invalid filter JSON: {e}"))?;
+            json_filter_to_document(&json)?
+        }
+        _ => doc! {},
+    };
+
+    let col = client.database(database).collection::<Document>(collection);
+    let values = col.distinct(field, filter_doc).await.map_err(|e| e.to_string())?;
+    let documents = values.iter().map(bson_to_json).collect::<Vec<_>>();
+    let extended_documents = values.into_iter().map(|value| value.into_relaxed_extjson()).collect::<Vec<_>>();
+    let total = documents.len() as u64;
+
+    Ok(MongoDocumentResult { documents, raw_documents: None, extended_documents: Some(extended_documents), total })
+}
+
 pub async fn create_index(
     client: &Client,
     database: &str,

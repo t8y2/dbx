@@ -605,6 +605,7 @@ mod tests {
             auth_method: AiAuthMethod::Bearer,
             endpoint: String::new(),
             model: model.to_string(),
+            models: Vec::new(),
             api_style: AiApiStyle::Completions,
             proxy_enabled: false,
             proxy_url: String::new(),

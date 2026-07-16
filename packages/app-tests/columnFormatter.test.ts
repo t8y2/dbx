@@ -1,9 +1,50 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { applyColumnFormatter, buildColumnFormatterKey, resolveColumnFormatter, normalizeColumnFormatter, type ColumnFormatterConfig } from "../../apps/desktop/src/lib/dataGrid/columnFormatter.ts";
+import { applyColumnFormatter, buildColumnFormatterKey, getSupportedTimeZoneOptions, resolveColumnFormatter, normalizeColumnFormatter, type ColumnFormatterConfig } from "../../apps/desktop/src/lib/dataGrid/columnFormatter.ts";
 import timezone from "dayjs/plugin/timezone";
 import utc from "dayjs/plugin/utc";
 import dayjs from "dayjs";
+
+test("builds timezone options when Intl.supportedValuesOf is available", () => {
+  assert.deepEqual(
+    getSupportedTimeZoneOptions(
+      {
+        supportedValuesOf: (key) => {
+          assert.equal(key, "timeZone");
+          return ["Asia/Shanghai", "Europe/London"];
+        },
+      },
+      "UTC",
+    ),
+    ["Asia/Shanghai", "Europe/London"],
+  );
+});
+
+test("falls back when Intl.supportedValuesOf is missing", () => {
+  assert.deepEqual(getSupportedTimeZoneOptions({}, "Asia/Shanghai"), ["Asia/Shanghai"]);
+});
+
+test("falls back when Intl.supportedValuesOf throws", () => {
+  assert.deepEqual(
+    getSupportedTimeZoneOptions(
+      {
+        supportedValuesOf: () => {
+          throw new Error("unsupported");
+        },
+      },
+      "Asia/Shanghai",
+    ),
+    ["Asia/Shanghai"],
+  );
+});
+
+test("falls back when Intl.supportedValuesOf returns no timezones", () => {
+  assert.deepEqual(getSupportedTimeZoneOptions({ supportedValuesOf: () => [] }, "Asia/Shanghai"), ["Asia/Shanghai"]);
+});
+
+test("uses UTC when no fallback timezone can be detected", () => {
+  assert.deepEqual(getSupportedTimeZoneOptions({}, ""), ["UTC"]);
+});
 
 test("formats unix timestamps in seconds, milliseconds, and auto mode", () => {
   dayjs.extend(utc);

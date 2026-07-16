@@ -3,7 +3,7 @@ import { ref, watch, shallowRef, computed, onMounted, onUnmounted, nextTick } fr
 import type { Ref } from "vue";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { useI18n } from "vue-i18n";
-import { AlertTriangle, CheckCircle2, CircleHelp, Cloud, Copy, Download, ExternalLink, GripVertical, Loader2, Moon, PackageSearch, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings, Sun, SunMoon, Terminal, Trash2, Upload, X } from "@lucide/vue";
+import { AlertTriangle, ArrowLeft, Check, CheckCircle2, CircleHelp, Cloud, Copy, Download, ExternalLink, GripVertical, Loader2, Moon, PackageSearch, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings, Sun, SunMoon, Terminal, Trash2, Upload, X } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -44,9 +44,9 @@ import {
   type CustomTheme,
 } from "@/stores/settingsStore";
 import { createRunStatementButtonDom, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
-import { formatAiModelOption } from "@/lib/ai/aiModelPresentation";
 import ThemeCustomizerDialog from "./ThemeCustomizerDialog.vue";
 import TunnelProfileManager from "@/components/connection/TunnelProfileManager.vue";
+import DangerConfirmDialog from "./DangerConfirmDialog.vue";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useTheme } from "@/composables/useTheme";
 import { copyToClipboard } from "@/lib/common/clipboard";
@@ -74,7 +74,6 @@ import {
   webdavSyncTest,
   webdavSyncUpload,
   type AppSupportInfo,
-  type AiModelInfo,
   type McpServerStatus,
   type SnippetProvider,
   type SnippetSyncConfig,
@@ -86,6 +85,7 @@ import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { currentStatementFrameRangeTo, visualSqlColumnsWithInlineHints } from "@/lib/sql/currentStatementFrame";
 import { normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
+import { validateConfigName, generateId, type AiConfigItem, type ConfigNameValidationResult } from "@/lib/ai/aiConfigList";
 import { currentExecutableStatementRange, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeCacheForDoc, executableStatementRangeStartingAt, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
 import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES } from "@/lib/table/tableColumnTemplates";
@@ -1610,6 +1610,7 @@ async function downloadSnippetSnapshot() {
     // Snapshot downloads replace backend-managed tunnel profiles, so refresh
     // the already-loaded Pinia store instead of leaving the UI stale.
     await tunnelProfileStore.refresh();
+    await settingsStore.reloadAiConfigs();
     let message = t("settings.syncSnippetDownloadSuccess", { bytes: result.summary.bytes, id: result.summary.snippetId });
     if (result.applySummary.encryptedSecretsPresent && !result.applySummary.secretsApplied) message += ` ${t("settings.syncSecretsSkipped")}`;
     if (result.applySummary.secretsApplied) message += ` ${t("settings.syncSecretsApplied")}`;
@@ -1748,6 +1749,7 @@ async function downloadWebDavSnapshot() {
     await savedSqlStore.initFromStorage();
     // Keep the shared tunnel profile UI consistent with the downloaded snapshot.
     await tunnelProfileStore.refresh();
+    await settingsStore.reloadAiConfigs();
     const message = t("settings.syncDownloadSuccess", {
       bytes: result.summary.bytes,
       path: result.summary.remotePath,
@@ -1780,12 +1782,14 @@ watch(
   () => settingsVisible.value,
   async (open) => {
     if (open) {
+      aiConfigListMode.value = "list";
+      aiEditConfigId.value = null;
       activeSettingsTab.value = props.initialTab || "appearance";
       passwordMessage.value = "";
       oldPassword.value = "";
       newPassword.value = "";
       confirmNewPassword.value = "";
-      await settingsStore.initAiConfig();
+      await settingsStore.initAiConfigs();
       await settingsStore.initDesktopSettings();
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
       editQuitOnClose.value = settingsStore.desktopSettings.quit_on_close;
@@ -1907,28 +1911,43 @@ async function changePassword() {
 }
 
 // ---------- AI Settings ----------
+// AI Config List Mode
+const aiConfigListMode = ref<"list" | "edit">("list");
+const aiEditConfigName = ref("");
+const aiEditConfigId = ref<string | null>(null);
+
+// AI Config Delete Confirmation
+const aiDeleteConfirmOpen = ref(false);
+const aiDeleteConfigId = ref<string | null>(null);
+
+// Model list management
+const aiEditModels = ref<Array<{ name: string; label?: string }>>([]);
+const aiModelListLoading = ref(false);
+let aiModelListRequestToken = 0;
+
+// AI Model Multi-Select
+const aiModelMultiSelectOpen = ref(false);
+const aiModelMultiSelectSearch = ref("");
+const aiFetchedModels = ref<Array<{ id: string; displayName?: string }>>([]);
+
 const aiProviderOptions = computed(() => Object.values(AI_PROVIDER_PRESETS).filter((provider) => !isWeb || provider.provider !== "codex-cli"));
 const selectedAiProviderPreset = computed(() => AI_PROVIDER_PRESETS[aiEditProvider.value]);
 
-const aiEditProvider = ref<AiProvider>(settingsStore.aiConfig.provider);
-const aiEditApiKey = ref(settingsStore.aiConfig.apiKey);
-const aiEditAuthMethod = ref<AiAuthMethod>(settingsStore.aiConfig.authMethod || AI_PROVIDER_PRESETS[settingsStore.aiConfig.provider].authMethod);
-const aiEditEndpoint = ref(settingsStore.aiConfig.endpoint);
-const aiEditModel = ref(settingsStore.aiConfig.model);
-const aiEditApiStyle = ref<AiApiStyle>(settingsStore.aiConfig.apiStyle || "completions");
-const aiEditProxyEnabled = ref(!!settingsStore.aiConfig.proxyEnabled);
-const aiEditProxyUrl = ref(settingsStore.aiConfig.proxyUrl || "");
-const aiEditEnableThinking = ref(settingsStore.aiConfig.enableThinking ?? true);
-const aiEditReasoningLevel = ref<AiReasoningLevel>(settingsStore.aiConfig.reasoningLevel || "default");
-const aiEditContextWindow = ref<number | undefined>(settingsStore.aiConfig.contextWindow);
-const aiEditCodexCliPath = ref(settingsStore.aiConfig.codexCliPath || "");
-const aiEditCodexCliEnvRows = ref<AiEnvRow[]>(aiEnvRowsFromConfig(settingsStore.aiConfig.codexCliEnv));
+const aiEditProvider = ref<AiProvider>("claude");
+const aiEditApiKey = ref("");
+const aiEditAuthMethod = ref<AiAuthMethod>("api-key");
+const aiEditEndpoint = ref("");
+const aiEditModel = ref("");
+const aiEditApiStyle = ref<AiApiStyle>("completions");
+const aiEditProxyEnabled = ref(false);
+const aiEditProxyUrl = ref("");
+const aiEditEnableThinking = ref(true);
+const aiEditReasoningLevel = ref<AiReasoningLevel>("default");
+const aiEditContextWindow = ref<number | undefined>(undefined);
+const aiEditCodexCliPath = ref("");
+const aiEditCodexCliEnvRows = ref<AiEnvRow[]>([]);
 
-const aiModelOptions = ref<AiModelInfo[]>([]);
-const aiModelLoading = ref(false);
 const aiModelError = ref("");
-const aiModelLoadedSignature = ref("");
-let aiModelRequestToken = 0;
 
 const aiCompletionsMode = computed(() => aiEditApiStyle.value === "completions");
 const aiAnthropicMessagesMode = computed(() => aiEditApiStyle.value === "anthropic-messages");
@@ -1989,12 +2008,6 @@ const aiCodexMcpActionLabel = computed(() => {
 });
 const aiModelListSupported = computed(() => aiEditProvider.value !== "gemini");
 const aiCanListModels = computed(() => aiModelListSupported.value && (aiIsCodexCli.value || !!aiEditEndpoint.value.trim()) && (!aiRequiresApiKey.value || !!aiEditApiKey.value.trim()));
-const aiModelOptionIds = computed(() => aiModelOptions.value.map((model) => model.id));
-const aiModelEmptyText = computed(() => {
-  if (aiModelError.value) return aiModelError.value;
-  if (!aiModelListSupported.value) return t("ai.modelListUnsupported");
-  return t("ai.noModels");
-});
 const aiCodexEnvError = computed(() => codexEnvValidationError());
 const aiCodexPathError = computed(() => {
   const path = aiEditCodexCliPath.value.trim();
@@ -2017,14 +2030,6 @@ function codexEnvFromRows(): Record<string, string> {
   return result;
 }
 
-function codexEnvSignature(): string {
-  return JSON.stringify(Object.entries(codexEnvFromRows()).sort(([left], [right]) => left.localeCompare(right)));
-}
-
-function savedCodexEnvSignature(): string {
-  return JSON.stringify(Object.entries(normalizeAiEnv(settingsStore.aiConfig.codexCliEnv)).sort(([left], [right]) => left.localeCompare(right)));
-}
-
 function codexEnvValidationError(): string {
   for (const row of aiEditCodexCliEnvRows.value) {
     const key = row.key.trim();
@@ -2040,27 +2045,6 @@ function addCodexEnvRow() {
 
 function removeCodexEnvRow(id: string) {
   aiEditCodexCliEnvRows.value = aiEditCodexCliEnvRows.value.filter((row) => row.id !== id);
-}
-
-function clearAiModelOptions() {
-  aiModelRequestToken += 1;
-  aiModelOptions.value = [];
-  aiModelError.value = "";
-  aiModelLoadedSignature.value = "";
-  aiModelLoading.value = false;
-}
-
-function aiModelConfigSignature() {
-  return JSON.stringify({
-    provider: aiEditProvider.value,
-    endpoint: aiEditEndpoint.value.trim(),
-    apiKey: aiEditApiKey.value.trim(),
-    authMethod: aiEditAuthMethod.value,
-    proxyEnabled: aiEditProxyEnabled.value,
-    proxyUrl: aiEditProxyUrl.value.trim(),
-    codexCliPath: aiEditCodexCliPath.value.trim(),
-    codexCliEnv: codexEnvSignature(),
-  });
 }
 
 function currentAiEditConfig() {
@@ -2081,107 +2065,27 @@ function currentAiEditConfig() {
   };
 }
 
-function normalizeAiModelOptions(models: AiModelInfo[]): AiModelInfo[] {
-  const seen = new Set<string>();
-  const normalized: AiModelInfo[] = [];
-  for (const model of models) {
-    const id = model.id?.trim();
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    normalized.push({ id, displayName: model.displayName?.trim() || undefined });
-  }
-  return normalized;
-}
-
-function displayAiModelName(modelId: string): string {
-  return aiModelOptions.value.find((model) => model.id === modelId)?.displayName || modelId;
-}
-
-function aiModelOptionPresentation(modelId: string, label = displayAiModelName(modelId)) {
-  return formatAiModelOption(label, modelId);
-}
-
-function aiModelOptionSecondary(modelId: string, label = displayAiModelName(modelId)) {
-  return aiModelOptionPresentation(modelId, label).secondary;
-}
-
-async function aiRefreshModels() {
-  if (aiModelLoading.value) return;
-  if (!aiModelListSupported.value) {
-    aiModelError.value = t("ai.modelListUnsupported");
-    return;
-  }
-  if (!aiIsCodexCli.value && !aiEditEndpoint.value.trim()) {
-    aiModelError.value = t("ai.modelListEndpointRequired");
-    return;
-  }
-  if (aiRequiresApiKey.value && !aiEditApiKey.value.trim()) {
-    aiModelError.value = t("ai.modelListApiKeyRequired");
-    return;
-  }
-
-  const token = ++aiModelRequestToken;
-  const signature = aiModelConfigSignature();
-  aiModelLoading.value = true;
-  aiModelError.value = "";
-  try {
-    const models = normalizeAiModelOptions(await aiListModels(currentAiEditConfig()));
-    if (token !== aiModelRequestToken) return;
-    aiModelOptions.value = models;
-    aiModelLoadedSignature.value = signature;
-    if (!aiEditModel.value.trim() && models[0]) aiEditModel.value = models[0].id;
-  } catch (e: any) {
-    if (token !== aiModelRequestToken) return;
-    aiModelOptions.value = [];
-    aiModelError.value = e?.message || String(e);
-  } finally {
-    if (token === aiModelRequestToken) aiModelLoading.value = false;
-  }
-}
-
-function onAiModelListOpen(open: boolean) {
-  if (open && aiCanListModels.value && !aiModelLoading.value && (!aiModelOptions.value.length || aiModelLoadedSignature.value !== aiModelConfigSignature())) {
-    void aiRefreshModels();
-  }
-}
-
-function aiSelectModel(modelId: string) {
-  aiEditModel.value = modelId;
-}
-
 function syncAiEditState() {
-  const provider = isWeb && settingsStore.aiConfig.provider === "codex-cli" ? "claude" : settingsStore.aiConfig.provider;
-  aiEditProvider.value = provider;
-  aiEditApiKey.value = settingsStore.aiConfig.apiKey;
-  aiEditAuthMethod.value = settingsStore.aiConfig.authMethod || AI_PROVIDER_PRESETS[provider].authMethod;
-  aiEditEndpoint.value = provider === settingsStore.aiConfig.provider ? settingsStore.aiConfig.endpoint : AI_PROVIDER_PRESETS[provider].endpoint;
-  aiEditModel.value = provider === settingsStore.aiConfig.provider ? settingsStore.aiConfig.model : AI_PROVIDER_PRESETS[provider].model;
-  aiEditApiStyle.value = provider === settingsStore.aiConfig.provider ? settingsStore.aiConfig.apiStyle || "completions" : AI_PROVIDER_PRESETS[provider].apiStyle;
-  aiEditProxyEnabled.value = !!settingsStore.aiConfig.proxyEnabled;
-  aiEditProxyUrl.value = settingsStore.aiConfig.proxyUrl || "";
-  aiEditEnableThinking.value = settingsStore.aiConfig.enableThinking ?? true;
-  aiEditReasoningLevel.value = settingsStore.aiConfig.reasoningLevel || "default";
-  aiEditContextWindow.value = settingsStore.aiConfig.contextWindow;
-  aiEditCodexCliPath.value = settingsStore.aiConfig.codexCliPath || "";
-  aiEditCodexCliEnvRows.value = aiEnvRowsFromConfig(settingsStore.aiConfig.codexCliEnv);
   aiTestResult.value = "";
   aiTestError.value = "";
   aiTestLatency.value = null;
   aiTestErrorCopied.value = false;
-  clearAiModelOptions();
 }
 
 function aiSelectProvider(provider: AiProvider) {
   if (isWeb && provider === "codex-cli") return;
   if (provider === aiEditProvider.value) return;
 
-  // Save current form edits before switching to prevent data loss.
-  if (aiHasChanges()) {
-    settingsStore.updateAiConfig(currentAiEditConfig());
-  }
-
-  settingsStore.updateAiConfig({ provider });
-  syncAiEditState();
+  // Apply new provider's preset defaults to edit state
+  const preset = AI_PROVIDER_PRESETS[provider];
+  aiEditProvider.value = provider;
+  aiEditApiKey.value = "";
+  aiEditAuthMethod.value = preset.authMethod;
+  aiEditEndpoint.value = preset.endpoint;
+  aiEditModel.value = preset.model;
+  aiEditApiStyle.value = preset.apiStyle;
+  aiEditModels.value = [];
+  aiFetchedModels.value = [];
   if (provider === "codex-cli") void ensureCodexMcpStatus();
 }
 
@@ -2192,31 +2096,215 @@ function aiSelectApiStyle(style: AiApiStyle) {
   }
 }
 
-function aiHasChanges(): boolean {
-  return (
-    aiEditProvider.value !== settingsStore.aiConfig.provider ||
-    aiEditApiKey.value !== settingsStore.aiConfig.apiKey ||
-    aiEditAuthMethod.value !== (settingsStore.aiConfig.authMethod || AI_PROVIDER_PRESETS[settingsStore.aiConfig.provider].authMethod) ||
-    aiEditEndpoint.value !== settingsStore.aiConfig.endpoint ||
-    aiEditModel.value !== settingsStore.aiConfig.model ||
-    aiEditApiStyle.value !== (settingsStore.aiConfig.apiStyle || "completions") ||
-    aiEditProxyEnabled.value !== !!settingsStore.aiConfig.proxyEnabled ||
-    aiEditProxyUrl.value !== (settingsStore.aiConfig.proxyUrl || "") ||
-    aiEditEnableThinking.value !== (settingsStore.aiConfig.enableThinking ?? true) ||
-    aiEditReasoningLevel.value !== (settingsStore.aiConfig.reasoningLevel || "default") ||
-    aiEditContextWindow.value !== settingsStore.aiConfig.contextWindow ||
-    aiEditCodexCliPath.value !== (settingsStore.aiConfig.codexCliPath || "") ||
-    codexEnvSignature() !== savedCodexEnvSignature()
-  );
+function aiEnterListMode() {
+  aiConfigListMode.value = "list";
+  aiEditConfigId.value = null;
 }
 
-function aiApplySettings() {
-  if (aiCodexValidationError.value) {
-    aiTestResult.value = "error";
-    aiTestError.value = aiCodexValidationError.value;
+function aiEnterEditMode(configId?: string) {
+  aiConfigListMode.value = "edit";
+  aiEditConfigId.value = configId || null;
+
+  if (configId) {
+    const config = settingsStore.aiConfigs.find((c) => c.id === configId);
+    if (config) {
+      aiEditConfigName.value = config.name;
+      aiEditProvider.value = config.provider;
+      aiEditApiKey.value = config.apiKey;
+      aiEditAuthMethod.value = config.authMethod;
+      aiEditEndpoint.value = config.endpoint;
+      aiEditModel.value = config.model;
+      aiEditApiStyle.value = config.apiStyle;
+      aiEditProxyEnabled.value = config.proxyEnabled ?? false;
+      aiEditProxyUrl.value = config.proxyUrl ?? "";
+      aiEditEnableThinking.value = config.enableThinking ?? true;
+      aiEditReasoningLevel.value = config.reasoningLevel ?? "default";
+      aiEditContextWindow.value = config.contextWindow;
+      aiEditCodexCliPath.value = config.codexCliPath ?? "";
+      aiEditCodexCliEnvRows.value = aiEnvRowsFromConfig(config.codexCliEnv);
+      aiEditModels.value = config.models ? [...config.models] : [];
+    }
+  } else {
+    aiEditConfigName.value = "";
+    aiEditModels.value = [];
+    aiEditProvider.value = "claude";
+    aiEditApiKey.value = "";
+    aiEditAuthMethod.value = AI_PROVIDER_PRESETS["claude"].authMethod;
+    aiEditEndpoint.value = AI_PROVIDER_PRESETS["claude"].endpoint;
+    aiEditModel.value = AI_PROVIDER_PRESETS["claude"].model;
+    aiEditApiStyle.value = AI_PROVIDER_PRESETS["claude"].apiStyle;
+    aiEditProxyEnabled.value = false;
+    aiEditProxyUrl.value = "";
+    aiEditEnableThinking.value = true;
+    aiEditReasoningLevel.value = "default";
+    aiEditContextWindow.value = undefined;
+    aiEditCodexCliPath.value = "";
+    aiEditCodexCliEnvRows.value = [];
+  }
+}
+
+function aiAddModel() {
+  aiEditModels.value.push({ name: "", label: "" });
+}
+
+function aiRemoveModel(index: number) {
+  aiEditModels.value.splice(index, 1);
+}
+
+async function aiFetchModelList() {
+  if (aiModelListLoading.value) return;
+  if (!aiCanListModels.value) return;
+  const token = ++aiModelListRequestToken;
+  aiModelListLoading.value = true;
+  aiModelError.value = "";
+  try {
+    const models = await aiListModels({
+      provider: aiEditProvider.value,
+      apiKey: aiEditApiKey.value,
+      endpoint: aiEditEndpoint.value,
+      model: aiEditModel.value,
+      authMethod: aiEditAuthMethod.value,
+      apiStyle: aiEditApiStyle.value,
+      proxyEnabled: aiEditProxyEnabled.value,
+      proxyUrl: aiEditProxyUrl.value,
+      enableThinking: aiEditEnableThinking.value,
+      reasoningLevel: aiEditReasoningLevel.value,
+      contextWindow: aiEditContextWindow.value,
+      codexCliPath: aiEditCodexCliPath.value,
+      codexCliEnv: codexEnvFromRows(),
+    });
+    if (token !== aiModelListRequestToken) return;
+    const seen = new Set<string>();
+    aiFetchedModels.value = models
+      .filter((m: any) => {
+        const id = m.id?.trim();
+        if (!id || seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      })
+      .map((m: any) => ({ id: m.id.trim(), displayName: m.displayName?.trim() || undefined }));
+  } catch (e: any) {
+    if (token === aiModelListRequestToken) {
+      aiModelError.value = e?.message || String(e);
+    }
+  } finally {
+    if (token === aiModelListRequestToken) aiModelListLoading.value = false;
+  }
+}
+
+function aiIsModelSelected(modelId: string): boolean {
+  return aiEditModels.value.some((m) => m.name === modelId);
+}
+
+function aiToggleModel(model: { id: string; displayName?: string }) {
+  const index = aiEditModels.value.findIndex((m) => m.name === model.id);
+  if (index >= 0) {
+    aiEditModels.value.splice(index, 1);
+  } else {
+    aiEditModels.value.push({ name: model.id, label: model.displayName || model.id });
+  }
+}
+
+const aiFilteredFetchedModels = computed(() => {
+  const search = aiModelMultiSelectSearch.value.trim().toLowerCase();
+  if (!search) return aiFetchedModels.value;
+  return aiFetchedModels.value.filter((m) => m.id.toLowerCase().includes(search) || (m.displayName && m.displayName.toLowerCase().includes(search)));
+});
+
+const aiModelFetchSignature = computed(() =>
+  JSON.stringify({
+    provider: aiEditProvider.value,
+    endpoint: aiEditEndpoint.value.trim(),
+    apiKey: aiEditApiKey.value.trim(),
+    authMethod: aiEditAuthMethod.value,
+    apiStyle: aiEditApiStyle.value,
+  }),
+);
+
+let aiLastModelFetchSignature = "";
+
+function aiOnModelPopoverOpen(open: boolean) {
+  if (!open) return;
+  if (aiModelFetchSignature.value !== aiLastModelFetchSignature) {
+    aiFetchedModels.value = [];
+    aiLastModelFetchSignature = aiModelFetchSignature.value;
+    if (aiCanListModels.value) void aiFetchModelList();
+  } else if (aiFetchedModels.value.length === 0 && aiCanListModels.value) {
+    void aiFetchModelList();
+  }
+}
+
+async function aiSaveConfig() {
+  const validationResult: ConfigNameValidationResult = validateConfigName(aiEditConfigName.value, settingsStore.aiConfigs, aiEditConfigId.value || undefined);
+  if (validationResult === "empty") {
+    toast(t("ai.configNameEmpty"), 3000);
     return;
   }
-  settingsStore.updateAiConfig(currentAiEditConfig());
+  if (validationResult === "duplicate") {
+    toast(t("ai.configNameExists", { name: aiEditConfigName.value }), 3000);
+    return;
+  }
+
+  const config: AiConfigItem = {
+    id: aiEditConfigId.value || generateId(),
+    name: aiEditConfigName.value,
+    provider: aiEditProvider.value,
+    apiKey: aiEditApiKey.value,
+    authMethod: aiEditAuthMethod.value,
+    endpoint: aiEditEndpoint.value,
+    model: aiEditModel.value,
+    models: aiEditModels.value.length > 0 ? aiEditModels.value.filter((m) => m.name.trim()) : undefined,
+    apiStyle: aiEditApiStyle.value,
+    proxyEnabled: aiEditProxyEnabled.value,
+    proxyUrl: aiEditProxyUrl.value,
+    enableThinking: aiEditEnableThinking.value,
+    reasoningLevel: aiEditReasoningLevel.value,
+    contextWindow: aiEditContextWindow.value,
+    codexCliPath: aiEditCodexCliPath.value,
+    codexCliEnv: codexEnvFromRows(),
+  };
+
+  try {
+    if (aiEditConfigId.value) {
+      await settingsStore.updateAiConfigItem(aiEditConfigId.value, config);
+    } else {
+      await settingsStore.createAiConfig(config);
+    }
+    aiEnterListMode();
+  } catch (e: any) {
+    toast(e?.message || String(e), 5000);
+  }
+}
+
+function aiDeleteConfig(id: string) {
+  aiDeleteConfigId.value = id;
+  aiDeleteConfirmOpen.value = true;
+}
+
+async function aiConfirmDeleteConfig() {
+  if (aiDeleteConfigId.value) {
+    if (settingsStore.activeModel?.configId === aiDeleteConfigId.value) {
+      toast(t("ai.cannotDeleteActiveConfig"), 5000);
+      aiDeleteConfirmOpen.value = false;
+      aiDeleteConfigId.value = null;
+      return;
+    }
+    try {
+      await settingsStore.deleteAiConfig(aiDeleteConfigId.value);
+    } catch (e: any) {
+      toast(e?.message || String(e), 5000);
+    }
+  }
+  aiDeleteConfirmOpen.value = false;
+  aiDeleteConfigId.value = null;
+}
+
+async function aiSetDefaultConfig(id: string) {
+  try {
+    await settingsStore.setDefaultAiConfig(id);
+  } catch (e: any) {
+    toast(e?.message || String(e), 5000);
+  }
 }
 
 async function aiTestConn() {
@@ -4152,7 +4240,62 @@ onUnmounted(cleanupPreviewEditor);
 
             <!-- AI Settings Tab -->
             <section v-else-if="activeSettingsTab === 'ai'" class="flex flex-col gap-5 py-2">
-              <div class="space-y-3">
+              <!-- Config List View -->
+              <div v-if="aiConfigListMode === 'list'" class="space-y-4">
+                <div class="flex items-center justify-between">
+                  <h3 class="text-sm font-medium">{{ t("ai.configList") }}</h3>
+                  <Button type="button" size="sm" @click="aiEnterEditMode()">
+                    <Plus class="mr-1 h-3.5 w-3.5" />
+                    {{ t("ai.addConfig") }}
+                  </Button>
+                </div>
+
+                <div v-if="settingsStore.aiConfigs.length === 0" class="rounded-md border border-dashed p-6 text-center">
+                  <p class="text-sm text-muted-foreground">{{ t("ai.noAiConfigs") }}</p>
+                  <Button type="button" size="sm" class="mt-2" @click="aiEnterEditMode()">
+                    <Plus class="mr-1 h-3.5 w-3.5" />
+                    {{ t("ai.addConfig") }}
+                  </Button>
+                </div>
+
+                <div v-else class="space-y-2">
+                  <div v-for="config in settingsStore.aiConfigs" :key="config.id" class="flex items-center justify-between rounded-md border p-3" :class="{ 'border-primary bg-primary/5': config.isDefault }">
+                    <div class="flex items-center gap-3">
+                      <AiProviderLogo :provider="config.provider" :label="config.provider" :icon-slug="AI_PROVIDER_PRESETS[config.provider].iconSlug" />
+                      <div>
+                        <div class="flex items-center gap-2">
+                          <span class="text-sm font-medium">{{ config.name }}</span>
+                          <Badge v-if="config.isDefault" variant="default" class="h-5 text-[10px]"> {{ t("ai.default") }} </Badge>
+                        </div>
+                        <div class="text-xs text-muted-foreground">{{ AI_PROVIDER_PRESETS[config.provider].label }} - {{ config.model }}</div>
+                      </div>
+                    </div>
+                    <div class="flex items-center gap-1">
+                      <Button v-if="!config.isDefault" type="button" size="sm" variant="ghost" @click="aiSetDefaultConfig(config.id)"> {{ t("ai.setDefault") }} </Button>
+                      <Button type="button" size="sm" variant="ghost" @click="aiEnterEditMode(config.id)"> {{ t("common.edit") }} </Button>
+                      <Button v-if="!config.isDefault" type="button" size="sm" variant="ghost" class="text-destructive" @click="aiDeleteConfig(config.id)"> {{ t("common.delete") }} </Button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Config Edit View -->
+              <div v-else class="space-y-4">
+                <div class="flex items-center justify-between">
+                  <Button type="button" variant="ghost" size="sm" @click="aiEnterListMode()">
+                    <ArrowLeft class="mr-1 h-3.5 w-3.5" />
+                    {{ t("common.back") }}
+                  </Button>
+                  <h3 class="text-sm font-medium">{{ aiEditConfigId ? t("ai.editConfig") : t("ai.addConfig") }}</h3>
+                </div>
+
+                <!-- Config Name Input -->
+                <div class="grid grid-cols-3 items-center gap-3">
+                  <Label class="text-right text-xs">{{ t("ai.configName") }}</Label>
+                  <Input v-model="aiEditConfigName" class="col-span-2 h-8 text-xs" :placeholder="t('ai.configNamePlaceholder')" />
+                </div>
+
+                <!-- Provider Selection -->
                 <div class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.provider") }}</Label>
                   <Select :model-value="aiEditProvider" @update:model-value="(v: any) => aiSelectProvider(v)">
@@ -4171,18 +4314,13 @@ onUnmounted(cleanupPreviewEditor);
                             <AiProviderLogo :provider="provider.provider" :label="provider.label" :icon-slug="provider.iconSlug" />
                             <span>{{ provider.label }}</span>
                           </span>
-                          <span class="flex shrink-0 items-center gap-1">
-                            <span v-if="aiEditProvider === provider.provider" class="rounded px-1 py-0.5 text-[10px] font-medium leading-none" :class="settingsStore.isAiProviderConfigured(provider.provider) ? 'bg-primary/15 text-primary' : 'bg-muted text-muted-foreground'">{{
-                              t("ai.providerStatusActive")
-                            }}</span>
-                            <span v-else-if="settingsStore.isAiProviderConfigured(provider.provider)" class="rounded bg-green-500/15 px-1 py-0.5 text-[10px] font-medium leading-none text-green-700 dark:text-green-400">{{ t("ai.providerStatusConfigured") }}</span>
-                          </span>
                         </span>
                       </SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
 
+                <!-- Codex CLI MCP Status -->
                 <div v-if="aiIsCodexCli && !isWeb" class="rounded-md border px-3 py-2.5 text-xs" :class="aiCodexMcpNeedsInstall ? 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300' : 'border-green-500/30 bg-green-500/10 text-green-700 dark:text-green-300'">
                   <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                     <div class="min-w-0 space-y-1">
@@ -4216,6 +4354,7 @@ onUnmounted(cleanupPreviewEditor);
                   </div>
                 </div>
 
+                <!-- Authentication -->
                 <div v-if="!aiIsCodexCli && aiSupportsAuthMethod" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">Authentication</Label>
                   <Select v-model="aiEditAuthMethod">
@@ -4229,11 +4368,13 @@ onUnmounted(cleanupPreviewEditor);
                   </Select>
                 </div>
 
+                <!-- API Key -->
                 <div v-if="!aiIsCodexCli" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ aiCredentialLabel }}</Label>
                   <PasswordInput v-model="aiEditApiKey" autocomplete="off" class="col-span-2" inputClass="h-8 text-xs" :placeholder="aiCredentialPlaceholder" />
                 </div>
 
+                <!-- Endpoint -->
                 <div v-if="!aiIsCodexCli" class="grid grid-cols-3 items-start gap-3">
                   <Label class="pt-2 text-right text-xs">Endpoint</Label>
                   <div class="col-span-2 space-y-1.5">
@@ -4242,6 +4383,7 @@ onUnmounted(cleanupPreviewEditor);
                   </div>
                 </div>
 
+                <!-- Codex CLI Path -->
                 <div v-if="aiIsCodexCli" class="grid grid-cols-3 items-start gap-3">
                   <Label class="pt-2 text-right text-xs">{{ t("ai.codexCliPath") }}</Label>
                   <div class="col-span-2 space-y-1.5">
@@ -4251,6 +4393,7 @@ onUnmounted(cleanupPreviewEditor);
                   </div>
                 </div>
 
+                <!-- Codex CLI Env -->
                 <div v-if="aiIsCodexCli" class="grid grid-cols-3 items-start gap-3">
                   <Label class="pt-2 text-right text-xs">{{ t("ai.codexCliEnv") }}</Label>
                   <div class="col-span-2 space-y-2">
@@ -4272,48 +4415,63 @@ onUnmounted(cleanupPreviewEditor);
                   </div>
                 </div>
 
+                <!-- Model -->
                 <div class="grid grid-cols-3 items-start gap-3">
-                  <Label class="pt-2 text-right text-xs">{{ t("ai.model") }}</Label>
-                  <div class="col-span-2 space-y-1.5">
-                    <div class="flex min-w-0 items-center gap-2">
-                      <Input v-model="aiEditModel" autocomplete="off" class="h-8 min-w-0 flex-1 text-xs" />
-                      <SearchableSelect
-                        :model-value="aiEditModel"
-                        :options="aiModelOptionIds"
-                        :placeholder="t('ai.browseModels')"
-                        :search-placeholder="t('ai.searchModels')"
-                        :empty-text="aiModelEmptyText"
-                        :loading-text="t('ai.loadingModels')"
-                        :loading="aiModelLoading"
-                        :display-name="displayAiModelName"
-                        trigger-class="h-8 min-w-[104px] max-w-[150px] shrink-0 border border-border bg-background px-2 text-xs shadow-none hover:bg-muted/50"
-                        content-class="w-72"
-                        item-class="h-auto min-h-8 py-1.5"
-                        @update:model-value="aiSelectModel"
-                        @update:open="onAiModelListOpen"
-                      >
-                        <template #trigger-label="{ loading }">
-                          <span class="truncate">{{ loading ? t("ai.loadingModels") : t("ai.browseModels") }}</span>
-                        </template>
-                        <template #option-label="{ option, label }">
-                          <span class="flex min-w-0 flex-col leading-tight">
-                            <span class="truncate">{{ aiModelOptionPresentation(option, label).primary }}</span>
-                            <span v-if="aiModelOptionSecondary(option, label)" class="mt-0.5 truncate text-[11px] text-muted-foreground">{{ aiModelOptionSecondary(option, label) }}</span>
-                          </span>
-                        </template>
-                      </SearchableSelect>
-                      <Button type="button" size="icon" variant="outline" class="shrink-0" :disabled="aiModelLoading || !aiModelListSupported" :title="t('ai.refreshModels')" :aria-label="t('ai.refreshModels')" @click="aiRefreshModels">
-                        <Loader2 v-if="aiModelLoading" class="h-3.5 w-3.5 animate-spin" />
-                        <RefreshCw v-else class="h-3.5 w-3.5" />
-                      </Button>
-                    </div>
-                    <p v-if="aiModelError" class="text-xs text-destructive">{{ aiModelError }}</p>
-                    <p v-else-if="!aiModelOptionIds.length" class="text-xs text-muted-foreground">
-                      {{ aiModelListSupported ? t("ai.modelListHint") : t("ai.modelListUnsupported") }}
-                    </p>
+                  <Label class="pt-2 text-right text-xs">{{ t("ai.defaultModel") }}</Label>
+                  <div class="col-span-2">
+                    <Input v-model="aiEditModel" autocomplete="off" class="h-8 text-xs" />
                   </div>
                 </div>
 
+                <!-- Model List -->
+                <div class="grid grid-cols-3 items-start gap-3">
+                  <Label class="pt-2 text-right text-xs">{{ t("ai.modelList") }}</Label>
+                  <div class="col-span-2 space-y-2">
+                    <div v-for="(m, index) in aiEditModels" :key="index" class="flex items-center gap-2">
+                      <Input v-model="m.name" :placeholder="t('ai.modelId')" class="h-8 flex-1 text-xs" />
+                      <Input v-model="m.label" :placeholder="t('ai.modelDisplayName')" class="h-8 flex-1 text-xs" />
+                      <Button type="button" variant="ghost" size="icon" class="h-8 w-8 shrink-0" @click="aiRemoveModel(index)">
+                        <X class="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                    <div class="flex gap-2">
+                      <Button type="button" size="sm" variant="outline" class="h-7 px-2 text-xs" @click="aiAddModel">
+                        <Plus class="mr-1 h-3 w-3" />
+                        {{ t("ai.add") }}
+                      </Button>
+                      <Popover v-model:open="aiModelMultiSelectOpen" @update:open="aiOnModelPopoverOpen">
+                        <PopoverTrigger as-child>
+                          <Button type="button" size="sm" variant="outline" class="h-7 px-2 text-xs" :disabled="!aiCanListModels">
+                            <Loader2 v-if="aiModelListLoading" class="mr-1 h-3 w-3 animate-spin" />
+                            <Download v-else class="mr-1 h-3 w-3" />
+                            {{ aiModelListLoading ? t("ai.fetching") : t("ai.fetchModelList") }}
+                          </Button>
+                        </PopoverTrigger>
+                        <PopoverContent class="w-56 p-0" align="start">
+                          <div class="flex flex-col">
+                            <div class="border-b px-3 py-2">
+                              <Input v-model="aiModelMultiSelectSearch" :placeholder="t('ai.searchModels')" class="h-8 text-xs" />
+                            </div>
+                            <div class="max-h-60 overflow-y-auto p-1">
+                              <div v-if="aiFilteredFetchedModels.length === 0" class="px-3 py-4 text-center text-xs text-muted-foreground">
+                                {{ aiModelListLoading ? t("ai.loadingModels") : aiModelError || t("ai.noModels") }}
+                              </div>
+                              <button v-for="model in aiFilteredFetchedModels" :key="model.id" type="button" class="flex w-full items-center gap-1.5 rounded-sm px-2 py-1.5 text-xs hover:bg-muted" @click="aiToggleModel(model)">
+                                <div class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border" :class="aiIsModelSelected(model.id) ? 'border-primary bg-primary text-primary-foreground' : ''">
+                                  <Check v-if="aiIsModelSelected(model.id)" class="h-3 w-3" />
+                                </div>
+                                <span class="flex-1 truncate text-left">{{ model.displayName || model.id }}</span>
+                              </button>
+                            </div>
+                          </div>
+                        </PopoverContent>
+                      </Popover>
+                    </div>
+                    <p v-if="aiModelError" class="text-xs text-destructive">{{ aiModelError }}</p>
+                  </div>
+                </div>
+
+                <!-- Reasoning Level -->
                 <div v-if="aiIsCodexCli" class="grid grid-cols-3 items-start gap-3">
                   <Label class="pt-2 text-right text-xs">{{ t("ai.reasoningLevel") }}</Label>
                   <div class="col-span-2 space-y-1.5">
@@ -4331,6 +4489,7 @@ onUnmounted(cleanupPreviewEditor);
                   </div>
                 </div>
 
+                <!-- API Style -->
                 <div v-if="aiSupportsApiStyle" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">API</Label>
                   <div class="col-span-2 flex gap-2">
@@ -4340,6 +4499,7 @@ onUnmounted(cleanupPreviewEditor);
                   </div>
                 </div>
 
+                <!-- Enable Thinking -->
                 <div v-if="!aiIsCodexCli" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.enableThinking") }}</Label>
                   <div class="col-span-2 flex items-center gap-2">
@@ -4358,6 +4518,7 @@ onUnmounted(cleanupPreviewEditor);
                   </div>
                 </div>
 
+                <!-- Context Window -->
                 <div v-if="!aiIsCodexCli" class="grid grid-cols-3 items-start gap-3">
                   <Label class="text-right text-xs">{{ t("ai.contextWindow") }}</Label>
                   <div class="col-span-2">
@@ -4366,6 +4527,7 @@ onUnmounted(cleanupPreviewEditor);
                   </div>
                 </div>
 
+                <!-- Proxy -->
                 <div v-if="!aiIsCodexCli" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.proxy") }}</Label>
                   <label class="col-span-2 flex items-center gap-2 text-xs text-muted-foreground">
@@ -4374,6 +4536,7 @@ onUnmounted(cleanupPreviewEditor);
                   </label>
                 </div>
 
+                <!-- Proxy URL -->
                 <div v-if="!aiIsCodexCli" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.proxyUrl") }}</Label>
                   <Input v-model="aiEditProxyUrl" autocomplete="off" class="col-span-2" inputClass="h-8 text-xs" placeholder="socks5://127.0.0.1:7890" :disabled="!aiEditProxyEnabled" />
@@ -4755,33 +4918,39 @@ onUnmounted(cleanupPreviewEditor);
           </DialogFooter>
 
           <DialogFooter v-else-if="activeSettingsTab === 'ai'" class="mx-0 mb-0 flex-row flex-wrap items-center justify-end gap-2 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 sm:flex-row sm:gap-2 [&>button]:w-auto [&>button]:shrink-0">
-            <div class="flex flex-1 items-center gap-2">
-              <Button size="sm" variant="outline" :disabled="aiTesting || !!aiCodexValidationError || (aiRequiresApiKey && !aiEditApiKey?.trim()) || (!aiIsCodexCli && !aiEditEndpoint?.trim()) || (!aiIsCodexCli && !aiEditModel?.trim())" @click="aiTestConn">
-                <Loader2 v-if="aiTesting" class="h-3 w-3 animate-spin mr-1" />
-                {{ t("connection.test") }}
-              </Button>
-              <span v-if="aiTestResult === 'success'" class="text-xs text-green-500 flex items-center gap-1.5">
-                <span>{{ t("connection.testSuccess") }}</span>
-                <span v-if="aiTestLatency != null" class="text-green-500/70">{{ aiTestLatency }}ms</span>
-              </span>
-              <span v-else-if="aiTestResult === 'error'" class="min-w-0 max-w-[360px] flex items-center gap-1.5 text-xs text-destructive">
-                <span class="select-text truncate" :title="aiTestError">{{ aiTestError }}</span>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  class="h-6 w-6 shrink-0 text-destructive/80 hover:text-destructive"
-                  :title="aiTestErrorCopied ? t('ai.copied') : t('ai.copyTestResult')"
-                  :aria-label="aiTestErrorCopied ? t('ai.copied') : t('ai.copyTestResult')"
-                  @click="copyAiTestError"
-                >
-                  <CheckCircle2 v-if="aiTestErrorCopied" class="h-3.5 w-3.5" />
-                  <Copy v-else class="h-3.5 w-3.5" />
+            <template v-if="aiConfigListMode === 'list'">
+              <div class="flex-1" />
+              <Button variant="outline" @click="closeSettings">{{ t("common.close") }}</Button>
+            </template>
+            <template v-else>
+              <div class="flex flex-1 items-center gap-2">
+                <Button size="sm" variant="outline" :disabled="aiTesting || !!aiCodexValidationError || (aiRequiresApiKey && !aiEditApiKey?.trim()) || (!aiIsCodexCli && !aiEditEndpoint?.trim()) || (!aiIsCodexCli && !aiEditModel?.trim())" @click="aiTestConn">
+                  <Loader2 v-if="aiTesting" class="h-3 w-3 animate-spin mr-1" />
+                  {{ t("connection.test") }}
                 </Button>
-              </span>
-            </div>
-            <Button variant="outline" @click="closeSettings">{{ t("common.close") }}</Button>
-            <Button :disabled="!aiHasChanges() || !!aiCodexValidationError" @click="aiApplySettings">{{ t("settings.apply") }}</Button>
+                <span v-if="aiTestResult === 'success'" class="text-xs text-green-500 flex items-center gap-1.5">
+                  <span>{{ t("connection.testSuccess") }}</span>
+                  <span v-if="aiTestLatency != null" class="text-green-500/70">{{ aiTestLatency }}ms</span>
+                </span>
+                <span v-else-if="aiTestResult === 'error'" class="min-w-0 max-w-[360px] flex items-center gap-1.5 text-xs text-destructive">
+                  <span class="select-text truncate" :title="aiTestError">{{ aiTestError }}</span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    class="h-6 w-6 shrink-0 text-destructive/80 hover:text-destructive"
+                    :title="aiTestErrorCopied ? t('ai.copied') : t('ai.copyTestResult')"
+                    :aria-label="aiTestErrorCopied ? t('ai.copied') : t('ai.copyTestResult')"
+                    @click="copyAiTestError"
+                  >
+                    <CheckCircle2 v-if="aiTestErrorCopied" class="h-3.5 w-3.5" />
+                    <Copy v-else class="h-3.5 w-3.5" />
+                  </Button>
+                </span>
+              </div>
+              <Button variant="outline" @click="aiEnterListMode()">{{ t("common.cancel") }}</Button>
+              <Button :disabled="!aiEditConfigName.trim() || !!aiCodexValidationError" @click="aiSaveConfig">{{ t("settings.apply") }}</Button>
+            </template>
           </DialogFooter>
 
           <DialogFooter v-else-if="activeSettingsTab === 'sync'" class="mx-0 mb-0 flex-row flex-wrap items-center justify-end gap-2 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 sm:flex-row sm:gap-2 [&>button]:w-auto [&>button]:shrink-0">
@@ -4872,6 +5041,9 @@ onUnmounted(cleanupPreviewEditor);
         </DialogFooter>
       </DialogContent>
     </Dialog>
+
+    <!-- AI Config Delete Confirmation -->
+    <DangerConfirmDialog v-model:open="aiDeleteConfirmOpen" :title="t('ai.deleteConfigTitle')" :message="t('ai.deleteConfigConfirm')" :confirm-label="t('common.delete')" @confirm="aiConfirmDeleteConfig" />
   </component>
 </template>
 

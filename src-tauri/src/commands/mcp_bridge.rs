@@ -99,6 +99,16 @@ struct MongoAggregateDocumentsRequest {
 }
 
 #[derive(Deserialize)]
+struct MongoDistinctRequest {
+    connection_name: String,
+    connection_id: Option<String>,
+    database: Option<String>,
+    collection: String,
+    field: String,
+    filter: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct MongoCreateIndexRequest {
     connection_name: String,
     connection_id: Option<String>,
@@ -234,6 +244,8 @@ pub fn start(app_handle: AppHandle, state: Arc<AppState>, data_dir: PathBuf) {
                     handle_mongo_collection_stats_data(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /data/mongo/aggregate-documents") {
                     handle_mongo_aggregate_documents_data(&st, body, &mut stream).await;
+                } else if first_line.starts_with("POST /data/mongo/distinct") {
+                    handle_mongo_distinct_data(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /data/mongo/create-index") {
                     handle_mongo_create_index_data(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /data/mongo/drop-indexes") {
@@ -652,6 +664,34 @@ async fn handle_mongo_aggregate_documents_data(state: &Arc<AppState>, body: &str
         &req.collection,
         &req.pipeline_json,
         req.max_rows,
+    )
+    .await
+    {
+        Ok(result) => respond_json(stream, &result).await,
+        Err(e) => respond_error(stream, "500 Internal Server Error", &e).await,
+    }
+}
+
+async fn handle_mongo_distinct_data(state: &Arc<AppState>, body: &str, stream: &mut tokio::net::TcpStream) {
+    let req: MongoDistinctRequest = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(_) => {
+            respond_error(stream, "400 Bad Request", "Invalid JSON").await;
+            return;
+        }
+    };
+    let Some((connection_id, database)) =
+        resolve_mongo_target(state, req.connection_id.as_deref(), &req.connection_name, req.database, stream).await
+    else {
+        return;
+    };
+    match dbx_core::mongo_ops::mongo_distinct_core(
+        state,
+        &connection_id,
+        &database,
+        &req.collection,
+        &req.field,
+        req.filter.as_deref(),
     )
     .await
     {

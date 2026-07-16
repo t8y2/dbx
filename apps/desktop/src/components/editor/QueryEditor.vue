@@ -38,7 +38,7 @@ import { sqlCompletionContextFromSemantic } from "@/lib/sql/semantic/completion"
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import { mergeSqlSemanticReferenceAnalysis, resolveSqlSemanticNavigationTarget } from "@/lib/sql/semantic/references";
 import { buildElasticsearchCompletionItemsFromContext, getElasticsearchCompletionContext, getElasticsearchCompletionResultValidFor, shouldAutoOpenElasticsearchCompletion, type ElasticsearchCompletionItem } from "@/lib/elasticsearch/elasticsearchCompletion";
-import { buildMongoCompletionItemsFromContext, getMongoCompletionContext, getMongoCompletionResultValidFor, shouldAutoOpenMongoCompletion, type MongoCompletionItem } from "@/lib/mongo/mongoCompletion";
+import { buildMongoCompletionItemsFromContext, getMongoCompletionContext, getMongoCompletionResultValidFor, mongoCompletionNeedsCollections, mongoCompletionNeedsFields, shouldAutoOpenMongoCompletion, type MongoCompletionItem } from "@/lib/mongo/mongoCompletion";
 import { resolveSqlCompletionTableLookupTarget } from "@/lib/sql/sqlCompletionLookupTarget";
 import { extractIdentifierDetailsAt, isSqlKeyword, matchTable, mergeSqlObjectNavigationType, splitQualifiedIdentifier, sqlObjectHoverDetail, sqlObjectNavigationTarget, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { lineColumnToOffset, parseSqlErrorLocation } from "@/lib/sql/sqlDiagnostics";
@@ -1983,7 +1983,7 @@ async function provideMongoCompletions(currentState: import("@codemirror/state")
   let collections: string[] = [];
   let fields: Awaited<ReturnType<typeof connectionStore.listMongoCompletionFields>> = [];
 
-  if (props.database && completionContext.mode === "collection") {
+  if (props.database && mongoCompletionNeedsCollections(completionContext.mode)) {
     try {
       collections = await connectionStore.listMongoCompletionCollections(props.connectionId, props.database);
     } catch {
@@ -1991,7 +1991,7 @@ async function provideMongoCompletions(currentState: import("@codemirror/state")
     }
   }
 
-  if (props.database && completionContext.mode === "field" && completionContext.collection) {
+  if (props.database && mongoCompletionNeedsFields(completionContext.mode) && completionContext.collection) {
     try {
       fields = await connectionStore.listMongoCompletionFields(props.connectionId, props.database, completionContext.collection);
     } catch {

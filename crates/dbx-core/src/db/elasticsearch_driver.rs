@@ -203,6 +203,16 @@ fn elasticsearch_query_value(value: &str) -> String {
 
 fn elasticsearch_document_path(index: &str, id: &str, routing: Option<&str>) -> String {
     let base = format!("/{}/_doc/{}", elasticsearch_path_segment(index), elasticsearch_path_segment(id));
+    elasticsearch_path_with_routing_refresh(base, routing)
+}
+
+/// Auto-id index path: `POST /{index}/_doc` with optional custom routing.
+fn elasticsearch_auto_id_document_path(index: &str, routing: Option<&str>) -> String {
+    let base = format!("/{}/_doc", elasticsearch_path_segment(index));
+    elasticsearch_path_with_routing_refresh(base, routing)
+}
+
+fn elasticsearch_path_with_routing_refresh(base: String, routing: Option<&str>) -> String {
     if let Some(routing) = routing.map(str::trim).filter(|value| !value.is_empty()) {
         format!("{base}?routing={}&refresh=true", elasticsearch_query_value(routing))
     } else {
@@ -671,10 +681,16 @@ fn elasticsearch_sort_from_document_sort(sort: Option<&str>) -> Result<serde_jso
     Ok(serde_json::Value::Array(items))
 }
 
-pub async fn insert_document(client: &EsClient, index: &str, doc_json: &str) -> Result<String, String> {
-    let doc = elasticsearch_document_body_from_json(doc_json)?;
+pub async fn insert_document(
+    client: &EsClient,
+    index: &str,
+    doc_json: &str,
+    routing: Option<&str>,
+) -> Result<String, String> {
+    // Prefer explicit routing arg; fall back to body metadata for backward compatibility.
+    let (doc, routing) = elasticsearch_document_body_and_routing_from_json(doc_json, routing)?;
 
-    let path = elasticsearch_index_path(index, "_doc?refresh=true");
+    let path = elasticsearch_auto_id_document_path(index, routing.as_deref());
     let resp = client.post(&path).json(&doc).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
 
     if !resp.status().is_success() {
@@ -704,10 +720,6 @@ pub async fn update_document(
     }
 
     Ok(1)
-}
-
-fn elasticsearch_document_body_from_json(doc_json: &str) -> Result<serde_json::Value, String> {
-    elasticsearch_document_body_and_routing_from_json(doc_json, None).map(|(doc, _)| doc)
 }
 
 fn elasticsearch_document_body_and_routing_from_json(
@@ -1808,6 +1820,28 @@ mod tests {
     }
 
     #[test]
+    fn builds_elasticsearch_auto_id_document_path_with_routing() {
+        assert_eq!(
+            super::elasticsearch_auto_id_document_path("orders/2026", Some("tenant/a&b")),
+            "/orders%2F2026/_doc?routing=tenant%2Fa%26b&refresh=true"
+        );
+        assert_eq!(super::elasticsearch_auto_id_document_path("orders", None), "/orders/_doc?refresh=true");
+    }
+
+    #[test]
+    fn insert_document_body_extracts_routing_without_embedding_it() {
+        let (doc, routing) =
+            super::elasticsearch_document_body_and_routing_from_json(r#"{"_routing":"tenant-1","name":"Alice"}"#, None)
+                .expect("parse insert body");
+        assert_eq!(routing.as_deref(), Some("tenant-1"));
+        assert_eq!(doc, serde_json::json!({"name":"Alice"}));
+        assert_eq!(
+            super::elasticsearch_auto_id_document_path("orders", routing.as_deref()),
+            "/orders/_doc?routing=tenant-1&refresh=true"
+        );
+    }
+
+    #[test]
     fn elasticsearch_sql_detection_does_not_treat_rest_methods_as_sql() {
         assert!(super::is_elasticsearch_sql_query("SELECT * FROM index_task_v1"));
         assert!(super::is_elasticsearch_sql_query(" select count(*) from index_task_v1"));
@@ -2387,8 +2421,11 @@ mod tests {
 
     #[test]
     fn document_body_removes_elasticsearch_id_metadata() {
-        let doc = super::elasticsearch_document_body_from_json(r#"{"_id":"abc","_routing":"tenant-1","name":"Alice"}"#)
-            .unwrap();
+        let (doc, _) = super::elasticsearch_document_body_and_routing_from_json(
+            r#"{"_id":"abc","_routing":"tenant-1","name":"Alice"}"#,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(doc, json!({ "name": "Alice" }));
     }
@@ -2419,7 +2456,8 @@ mod tests {
 
     #[test]
     fn document_body_preserves_user_field_order() {
-        let doc = super::elasticsearch_document_body_from_json(r#"{"z":1,"_id":"abc","a":2}"#).unwrap();
+        let (doc, _) =
+            super::elasticsearch_document_body_and_routing_from_json(r#"{"z":1,"_id":"abc","a":2}"#, None).unwrap();
 
         assert_eq!(serde_json::to_string(&doc).unwrap(), r#"{"z":1,"a":2}"#);
     }

@@ -518,6 +518,8 @@ pub struct AgentTableReadStartParams {
     pub max_rows: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fetch_size: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2359,6 +2361,7 @@ for line in sys.stdin:
             page_size: 500,
             max_rows: 1000,
             fetch_size: Some(500),
+            timeout_secs: None,
         })
         .unwrap();
         assert_eq!(
@@ -2379,6 +2382,44 @@ for line in sys.stdin:
 
         let close = serde_json::to_value(AgentTableReadCloseParams { session_id: "table-1".to_string() }).unwrap();
         assert_eq!(close, serde_json::json!({ "sessionId": "table-1" }));
+    }
+
+    #[test]
+    fn serializes_table_read_timeout_secs() {
+        let with_timeout = serde_json::to_value(AgentTableReadStartParams {
+            sql: "SELECT 1".to_string(),
+            database: None,
+            schema: None,
+            page_size: 100,
+            max_rows: 1000,
+            fetch_size: None,
+            timeout_secs: Some(30),
+        })
+        .unwrap();
+        assert_eq!(
+            with_timeout,
+            serde_json::json!({
+                "sql": "SELECT 1",
+                "pageSize": 100,
+                "maxRows": 1000,
+                "timeoutSecs": 30,
+            })
+        );
+
+        let without_timeout = serde_json::to_value(AgentTableReadStartParams {
+            sql: "SELECT 1".to_string(),
+            database: None,
+            schema: None,
+            page_size: 100,
+            max_rows: 1000,
+            fetch_size: None,
+            timeout_secs: None,
+        })
+        .unwrap();
+        assert!(
+            !without_timeout.as_object().unwrap().contains_key("timeoutSecs"),
+            "timeoutSecs key should be absent when None"
+        );
     }
 
     #[test]

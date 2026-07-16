@@ -21,6 +21,7 @@ const props = withDefaults(
     open: boolean;
     connectionId: string;
     database: string;
+    catalog?: string;
     schema?: string;
     tableName: string;
     objectType?: ObjectSourceKind;
@@ -60,7 +61,7 @@ watch(
     ddlLoading.value = true;
     try {
       const schema = props.schema || props.database;
-      const ddl = await api.getTableDdl(props.connectionId, props.database, schema, props.tableName, props.objectType);
+      const ddl = await api.getTableDdl(props.connectionId, props.database, schema, props.tableName, props.objectType, props.catalog);
       ddlContent.value = await formatSqlForDisplay(ddl, props.formatDialect ?? props.dialect, settingsStore.editorSettings.sqlFormatter);
     } catch (e: any) {
       ddlError.value = e?.message || String(e);

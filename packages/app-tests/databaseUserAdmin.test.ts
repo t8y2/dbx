@@ -1,7 +1,9 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import {
+  connectionSupportsDatabaseUserAdmin,
   grantsFromQueryResult,
+  getDatabaseUserAdminProvider,
   mysqlAlterUserAccountLockSql,
   mysqlAlterUserPasswordSql,
   mysqlCreateUserSql,
@@ -25,11 +27,18 @@ import {
   quoteMySqlIdentifier,
   quoteMySqlString,
   quotePostgresIdentifier,
+  resolveDatabaseUserAdminProviderForConnection,
+  starrocksGrantPrivilegesSql,
+  starrocksGrantsResult,
+  starrocksListUsersSql,
+  starrocksPrivilegeTargetSql,
+  starrocksRevokePrivilegesSql,
+  starrocksUsersResult,
   usersFromMySqlGranteeResult,
   usersFromMySqlUserResult,
   usersFromPostgresRolesResult,
 } from "../../apps/desktop/src/lib/database/databaseUserAdmin.ts";
-import type { QueryResult } from "../../apps/desktop/src/types/database.ts";
+import type { ConnectionConfig, QueryResult } from "../../apps/desktop/src/types/database.ts";
 
 function result(columns: string[], rows: QueryResult["rows"]): QueryResult {
   return {
@@ -174,4 +183,91 @@ test("builds PostgreSQL role metadata SQL without directly requiring rolbypassrl
   assert.match(grantsSql, /AS rolbypassrls/);
   assert.match(grantsSql, /n\.nspname NOT LIKE 'pg~_%' ESCAPE '~'/);
   assert.ok(!grantsSql.includes("ESCAPE '\\'"));
+});
+
+test("builds StarRocks user listing SQL", () => {
+  assert.equal(starrocksListUsersSql(), "SHOW USERS;");
+});
+
+test("builds StarRocks table privilege SQL", () => {
+  const input = {
+    user: { user: "reporter", host: "%" },
+    privileges: ["select", "EXPORT"],
+    database: "analytics",
+    table: "daily`rollup",
+    grantOption: true,
+  };
+
+  assert.equal(starrocksPrivilegeTargetSql("*"), "ALL TABLES IN ALL DATABASES");
+  assert.equal(starrocksPrivilegeTargetSql("analytics"), "ALL TABLES IN DATABASE `analytics`");
+  assert.equal(starrocksPrivilegeTargetSql("analytics", "daily`rollup"), "TABLE `analytics`.`daily``rollup`");
+  assert.equal(starrocksGrantPrivilegesSql(input), "GRANT SELECT, EXPORT ON TABLE `analytics`.`daily``rollup` TO USER 'reporter'@'%' WITH GRANT OPTION;");
+  assert.equal(starrocksRevokePrivilegesSql(input), "REVOKE SELECT, EXPORT ON TABLE `analytics`.`daily``rollup` FROM USER 'reporter'@'%';");
+});
+
+test("parses StarRocks SHOW USERS result", () => {
+  assert.deepEqual(starrocksUsersResult(result(["User"], [["'root'@'%'"], ["'grader_reader'@'%'"], ["'o''brien'@'localhost'"], ["malformed"]])), [
+    { user: "root", host: "%" },
+    { user: "grader_reader", host: "%" },
+    { user: "o'brien", host: "localhost" },
+  ]);
+});
+
+test("parses StarRocks SHOW GRANTS three-column result", () => {
+  assert.deepEqual(
+    starrocksGrantsResult(
+      result(
+        ["UserIdentity", "Catalog", "Grants"],
+        [
+          ["'root'@'%'", null, "GRANT 'root' TO 'root'@'%'"],
+          ["'grader_reader'@'%'", "default_catalog", "GRANT SELECT ON ALL TABLES IN DATABASE grader_events TO USER 'grader_reader'@'%'"],
+          ["'reader'@'%'", "paimon", null],
+        ],
+      ),
+    ),
+    ["GRANT 'root' TO 'root'@'%'", "GRANT SELECT ON ALL TABLES IN DATABASE grader_events TO USER 'grader_reader'@'%'"],
+  );
+});
+
+test("StarRocks grants parser falls back to first column when Grants column is absent", () => {
+  assert.deepEqual(starrocksGrantsResult(result(["Grants for app@%"], [["GRANT SELECT ON `app`.* TO 'app'@'%'"]])), ["GRANT SELECT ON `app`.* TO 'app'@'%'"]);
+});
+
+test("routes StarRocks to the StarRocks user admin provider", () => {
+  const provider = getDatabaseUserAdminProvider("starrocks");
+  assert.ok(provider, "expected a provider for starrocks");
+  assert.equal(provider?.dialect, "mysql");
+  assert.equal(provider?.listUsersSql(), "SHOW USERS;");
+  assert.equal(provider?.showGrantsSql({ user: "root", host: "%" }), "SHOW GRANTS FOR 'root'@'%';");
+  assert.equal(provider?.createUserSql?.({ user: "app", host: "%", password: "secret" }), "CREATE USER 'app'@'%' IDENTIFIED BY 'secret';");
+  assert.equal(provider?.dropUserSql?.({ user: "app", host: "%" }), "DROP USER 'app'@'%';");
+  assert.equal(
+    provider?.grantPrivilegesSql?.({
+      user: { user: "reporter", host: "%" },
+      privileges: ["SELECT"],
+      database: "analytics",
+    }),
+    "GRANT SELECT ON ALL TABLES IN DATABASE `analytics` TO USER 'reporter'@'%';",
+  );
+  assert.equal(provider?.alterLoginSql, undefined);
+  assert.deepEqual(provider?.privilegesForScope?.("table"), ["SELECT", "INSERT", "UPDATE", "DELETE", "ALTER", "DROP", "EXPORT", "ALL"]);
+});
+
+test("resolves user admin support from the effective connection type", () => {
+  const mysqlProtocolStarRocks = {
+    id: "starrocks-1",
+    db_type: "mysql",
+    driver_profile: "starrocks",
+  } as ConnectionConfig;
+  const jdbcStarRocks = {
+    id: "starrocks-jdbc-1",
+    db_type: "jdbc",
+    connection_string: "jdbc:mysql://localhost:9030/analytics",
+    driver_profile: "starrocks",
+  } as ConnectionConfig;
+
+  assert.equal(resolveDatabaseUserAdminProviderForConnection(mysqlProtocolStarRocks), getDatabaseUserAdminProvider("starrocks"));
+  assert.equal(resolveDatabaseUserAdminProviderForConnection(jdbcStarRocks), getDatabaseUserAdminProvider("starrocks"));
+  assert.equal(connectionSupportsDatabaseUserAdmin(mysqlProtocolStarRocks), true);
+  assert.equal(connectionSupportsDatabaseUserAdmin({ id: "sqlite-1", db_type: "sqlite" } as ConnectionConfig), false);
 });

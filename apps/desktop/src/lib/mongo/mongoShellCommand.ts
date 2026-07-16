@@ -48,6 +48,12 @@ export interface MongoCollectionStatsCommand {
   scale?: number;
 }
 
+export interface MongoDistinctCommand {
+  collection: string;
+  field: string;
+  filter?: string;
+}
+
 type MongoWriteKind = "insert" | "update" | "delete" | "createIndex" | "dropIndex" | "dropIndexes" | "dropCollection" | "findOneAndUpdate" | "findOneAndReplace" | "findOneAndDelete";
 
 export type MongoCommand =
@@ -56,6 +62,7 @@ export type MongoCommand =
   | MongoVersionCommand
   | ({ kind: "countDocuments" } & MongoCountDocumentsCommand)
   | ({ kind: "aggregate" } & MongoAggregateCommand)
+  | ({ kind: "distinct" } & MongoDistinctCommand)
   | ({ kind: "getIndexes" } & MongoGetIndexesCommand)
   | ({ kind: "collectionStats" } & MongoCollectionStatsCommand)
   | ({ kind: "use" } & MongoUseCommand)
@@ -326,6 +333,35 @@ export function parseMongoAggregateCommand(input: string): MongoAggregateCommand
   };
 }
 
+export function parseMongoDistinctCommand(input: string): MongoDistinctCommand | null {
+  const source = input.trim().replace(/;$/, "").trim();
+  const target = parseCollectionMethodTarget(source, "distinct");
+  if (!target) return null;
+
+  const openIndex = source.indexOf("(", target.methodCallIndex);
+  const closeIndex = findMatchingParen(source, openIndex);
+  if (closeIndex < 0 || source.slice(closeIndex + 1).trim()) return null;
+
+  const args = splitTopLevel(source.slice(openIndex + 1, closeIndex));
+  if (args.length < 1 || args.length > 2) return null;
+
+  const fieldJson = normalizeJsonArgument(args[0] ?? "");
+  if (!fieldJson) return null;
+  let field: unknown;
+  try {
+    field = JSON.parse(fieldJson);
+  } catch {
+    return null;
+  }
+  if (typeof field !== "string" || !field.trim()) return null;
+
+  if (args.length === 1) return { collection: target.collection, field };
+
+  const filter = normalizeJsonArgument(args[1] ?? "");
+  if (!filter) return null;
+  return { collection: target.collection, field, filter };
+}
+
 export function parseMongoGetIndexesCommand(input: string): MongoGetIndexesCommand | null {
   const source = input.trim().replace(/;$/, "").trim();
   const target = parseCollectionMethodTarget(source, "getIndexes");
@@ -505,6 +541,10 @@ export function parseMongoCommand(input: string): ParsedMongoCommand | null {
       return aggregate ? { kind: "aggregate", ...aggregate } : null;
     },
     (source) => {
+      const distinct = parseMongoDistinctCommand(source);
+      return distinct ? { kind: "distinct", ...distinct } : null;
+    },
+    (source) => {
       const getIndexes = parseMongoGetIndexesCommand(source);
       return getIndexes ? { kind: "getIndexes", ...getIndexes } : null;
     },
@@ -630,6 +670,15 @@ export function mongoDocumentsToQueryResult(documents: unknown[], executionTimeM
     affected_rows: total,
     execution_time_ms: Math.max(0, Math.round(executionTimeMs)),
     truncated: total > documents.length,
+  };
+}
+
+export function mongoDistinctToQueryResult(field: string, values: unknown[], executionTimeMs: number): QueryResult {
+  return {
+    columns: [field],
+    rows: values.map((value) => [toCellValue(value)]),
+    affected_rows: values.length,
+    execution_time_ms: Math.max(0, Math.round(executionTimeMs)),
   };
 }
 
@@ -883,7 +932,9 @@ function splitMongoSemicolonSeparatedSegments(input: string): MongoTextRange[] {
       continue;
     }
 
-    if (char === "/" && next === "/") {
+    // `--` is a line comment too: the editor runs Mongo through its SQL language
+    // mode, which comments with `--` alongside the shell's native `//`.
+    if ((char === "/" && next === "/") || (char === "-" && next === "-")) {
       lineComment = true;
       i += 1;
       continue;
@@ -980,7 +1031,9 @@ function mongoTopLevelCommandLineStarts(segment: string): number[] {
       continue;
     }
 
-    if (char === "/" && next === "/") {
+    // `--` is a line comment too: the editor runs Mongo through its SQL language
+    // mode, which comments with `--` alongside the shell's native `//`.
+    if ((char === "/" && next === "/") || (char === "-" && next === "-")) {
       lineComment = true;
       i += 1;
       continue;
@@ -1020,19 +1073,68 @@ function pushMongoSegment(segments: MongoTextRange[], source: string, from: numb
   if (trimmed) segments.push(trimmed);
 }
 
+/**
+ * Index just past the last code character in `source[start, end)`, treating
+ * quoted strings and `//` / `--` / block comments as non-code. Trailing
+ * whitespace and comments sit after the returned index; a comment marker inside
+ * a string value (`{ note: "a--b" }`) stays code, so it is never mistaken for a
+ * trailing comment and truncated away.
+ */
+function mongoCommentAwareBodyEnd(source: string, start: number, end: number): number {
+  let bodyEnd = start;
+  let quote: string | null = null;
+  let i = start;
+  while (i < end) {
+    const char = source[i] ?? "";
+    const next = source[i + 1] ?? "";
+    if (quote) {
+      if (char === "\\") {
+        i += 2;
+        bodyEnd = Math.min(i, end);
+        continue;
+      }
+      if (char === quote) quote = null;
+      i += 1;
+      bodyEnd = i;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      i += 1;
+      bodyEnd = i;
+      continue;
+    }
+    if ((char === "/" && next === "/") || (char === "-" && next === "-")) {
+      const newline = source.indexOf("\n", i + 2);
+      i = newline < 0 || newline >= end ? end : newline;
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      const close = source.indexOf("*/", i + 2);
+      i = close < 0 || close + 2 > end ? end : close + 2;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      i += 1;
+      continue;
+    }
+    i += 1;
+    bodyEnd = i;
+  }
+  return bodyEnd;
+}
+
 function trimMongoOuterComments(source: string): string {
   let value = source.trim();
+  // Leading comments sit before any string, so a simple regex is safe here.
   while (value) {
-    const next = value.replace(/^(?:\/\/[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)\s*/u, "");
+    const next = value.replace(/^(?:(?:\/\/|--)[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)\s*/u, "");
     if (next === value) break;
     value = next.trimStart();
   }
-  while (value) {
-    const next = value.replace(/\s*(?:\/\/[^\n]*|\/\*[\s\S]*?\*\/)\s*$/u, "");
-    if (next === value) break;
-    value = next.trimEnd();
-  }
-  return value.trim();
+  // Trailing comments need string awareness so a comment marker inside a string
+  // value near the end is not truncated as if it began a comment.
+  return value.slice(0, mongoCommentAwareBodyEnd(value, 0, value.length)).trim();
 }
 
 function trimMongoOuterCommentRange(source: string, from: number, to: number): MongoTextRange | null {
@@ -1046,7 +1148,7 @@ function trimMongoOuterCommentRange(source: string, from: number, to: number): M
       start += value.length - trimmed.length;
       continue;
     }
-    const next = value.replace(/^(?:\/\/[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)\s*/u, "");
+    const next = value.replace(/^(?:(?:\/\/|--)[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)\s*/u, "");
     if (next !== value) {
       start += value.length - next.length;
       continue;
@@ -1054,20 +1156,10 @@ function trimMongoOuterCommentRange(source: string, from: number, to: number): M
     break;
   }
 
-  while (start < end) {
-    const value = source.slice(start, end);
-    const trimmed = value.trimEnd();
-    if (trimmed !== value) {
-      end -= value.length - trimmed.length;
-      continue;
-    }
-    const next = value.replace(/\s*(?:\/\/[^\n]*|\/\*[\s\S]*?\*\/)\s*$/u, "");
-    if (next !== value) {
-      end -= value.length - next.length;
-      continue;
-    }
-    break;
-  }
+  // Trailing comments are found with string awareness (see mongoCommentAwareBodyEnd)
+  // so a `--`/`//` inside a trailing string value is not treated as a comment.
+  end = mongoCommentAwareBodyEnd(source, start, end);
+  while (end > start && /\s/.test(source[end - 1] ?? "")) end -= 1;
 
   if (start >= end) return null;
   return {

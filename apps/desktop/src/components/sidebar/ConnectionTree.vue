@@ -1416,6 +1416,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       v-model:open="sidebarDdlOpen"
       :connection-id="sidebarDdlTarget.connectionId!"
       :database="sidebarDdlTarget.database!"
+      :catalog="sidebarDdlTarget.catalog"
       :schema="sidebarDdlTarget.schema"
       :table-name="sidebarDdlTarget.label"
       :object-type="tableDdlObjectTypeForSidebarNode(sidebarDdlTarget.type)"

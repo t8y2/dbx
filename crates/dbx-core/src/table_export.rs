@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::connection::MysqlMode;
-use crate::connection::{task_client_session_id, AppState, PoolKind};
+use crate::connection::{config_for_pool_key, task_client_session_id, AppState, PoolKind};
 use crate::csv_export::{escape_csv, format_csv, format_tsv, format_tsv_rows, value_to_csv_text};
 pub use crate::database_export::ExportStatus;
 use crate::database_export::{
@@ -286,6 +286,15 @@ async fn fetch_table_export_batch(
         *table_read_attempted = true;
         let sql = table_cursor_sql(request, db_type, col_names, primary_keys);
         let max_rows = request.row_limit.unwrap_or(i32::MAX as usize);
+        let timeout_secs = {
+            let configs = state.configs.read().await;
+            let query_timeout = config_for_pool_key(pool_key, &configs).map(|c| c.query_timeout_secs).unwrap_or(0);
+            if query_timeout == 0 {
+                None
+            } else {
+                Some(query_timeout)
+            }
+        };
         let params = AgentTableReadStartParams {
             sql,
             database: Some(request.database.clone()),
@@ -293,6 +302,7 @@ async fn fetch_table_export_batch(
             page_size: active_batch_size,
             max_rows,
             fetch_size: Some(active_batch_size),
+            timeout_secs,
         };
         let connections = state.connections.read().await;
         let Some(PoolKind::Agent(client)) = connections.get(pool_key) else {

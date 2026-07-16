@@ -138,4 +138,15 @@ describe("sidebarDataOpenCoordinator", () => {
 
     expect(signal?.aborted).toBe(true);
   });
+
+  it("marks a completed request non-current without aborting its signal", async () => {
+    let requestState: { isCurrent: () => boolean; signal: AbortSignal } | undefined;
+
+    runSidebarDataOpenImmediately({ connectionKey: "conn" }, (request) => {
+      requestState = request;
+    });
+
+    await vi.waitFor(() => expect(requestState?.isCurrent()).toBe(false));
+    expect(requestState?.signal.aborted).toBe(false);
+  });
 });

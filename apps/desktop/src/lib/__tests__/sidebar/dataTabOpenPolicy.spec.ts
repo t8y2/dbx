@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dataTabOpenModeFromTreeClick, findExistingDataTabCandidate } from "@/lib/sidebar/dataTabOpenPolicy";
+import { canApplyDataTabMetadata, dataTabOpenModeFromTreeClick, findExistingDataTabCandidate } from "@/lib/sidebar/dataTabOpenPolicy";
 import type { QueryTab } from "@/types/database";
 
 function click(modifiers: Partial<Pick<MouseEvent, "metaKey" | "ctrlKey" | "altKey" | "shiftKey">> = {}) {
@@ -64,5 +64,28 @@ describe("dataTabOpenPolicy", () => {
     expect(findExistingDataTabCandidate([sameTable], usersTarget, { openMode: "default", reuseDataTab: false })).toEqual({ tab: sameTable, match: "same-table" });
     expect(findExistingDataTabCandidate([otherTable], usersTarget, { openMode: "default", reuseDataTab: true })).toEqual({ tab: otherTable, match: "database" });
     expect(findExistingDataTabCandidate([otherTable], usersTarget, { openMode: "default", reuseDataTab: false })).toBeUndefined();
+  });
+
+  it("allows metadata to update a tab that still points to the requested table", () => {
+    const tab = dataTab("users", "users");
+    tab.tableMeta = { schema: "public", tableName: "users", columns: [], primaryKeys: [] };
+
+    expect(canApplyDataTabMetadata(tab, usersTarget, new AbortController().signal)).toBe(true);
+  });
+
+  it("rejects metadata after its request is cancelled", () => {
+    const tab = dataTab("users", "users");
+    tab.tableMeta = { schema: "public", tableName: "users", columns: [], primaryKeys: [] };
+    const controller = new AbortController();
+    controller.abort();
+
+    expect(canApplyDataTabMetadata(tab, usersTarget, controller.signal)).toBe(false);
+  });
+
+  it("rejects stale metadata after a reusable tab switches to another table", () => {
+    const tab = dataTab("reused", "orders");
+    tab.tableMeta = { schema: "public", tableName: "orders", columns: [], primaryKeys: [] };
+
+    expect(canApplyDataTabMetadata(tab, usersTarget, new AbortController().signal)).toBe(false);
   });
 });

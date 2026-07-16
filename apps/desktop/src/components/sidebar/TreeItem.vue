@@ -104,7 +104,7 @@ import {
   usesTreeSchemaMode,
 } from "@/lib/database/databaseCapabilities";
 import { copyNameForTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/sidebar/treeNodeClick";
-import { dataTabOpenModeFromTreeClick, findExistingDataTabCandidate, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
+import { canApplyDataTabMetadata, dataTabOpenModeFromTreeClick, findExistingDataTabCandidate, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
 import { formatSqlInsert } from "@/lib/export/exportFormats";
 import { joinExportedDdls } from "@/lib/export/ddlExport";
@@ -1397,17 +1397,14 @@ async function openData(node: TreeNode, request?: SidebarDataOpenRequest, openMo
   const querySchema = config ? connectionObjectTreeQuerySchema(config, node.database, tableSchema) : (tableSchema ?? "");
   const effectiveDbType = effectiveDatabaseTypeForConnection(config);
   const metadataDatabaseType = effectiveDbType || config?.db_type || "";
-  const existingDataTabCandidate = findExistingDataTabCandidate(
-    queryStore.tabs,
-    {
-      connectionId: node.connectionId,
-      database: node.database,
-      schema: tableSchema,
-      catalog: node.catalog,
-      tableName: node.label,
-    },
-    { openMode, reuseDataTab: settingsStore.editorSettings.reuseDataTab },
-  );
+  const dataTabTarget = {
+    connectionId: node.connectionId,
+    database: node.database,
+    schema: tableSchema,
+    catalog: node.catalog,
+    tableName: node.label,
+  };
+  const existingDataTabCandidate = findExistingDataTabCandidate(queryStore.tabs, dataTabTarget, { openMode, reuseDataTab: settingsStore.editorSettings.reuseDataTab });
   const existingSameTableTab = existingDataTabCandidate?.match === "same-table" ? existingDataTabCandidate.tab : undefined;
   const resetReusedDataTabState = (tab: (typeof queryStore.tabs)[number]) => {
     tab.title = node.label;
@@ -1513,11 +1510,12 @@ async function openData(node: TreeNode, request?: SidebarDataOpenRequest, openMo
 
   // Helper to check if this openData call is still active (not superseded by a newer click)
   const isActive = () => (request?.isCurrent() ?? true) && queryStore.tabs.find((t) => t.id === tabId)?.executionId === openDataId;
-  const isCurrentDataTab = () => {
-    if (!(request?.isCurrent() ?? true)) return false;
-    const current = queryStore.tabs.find((t) => t.id === tabId);
-    return current?.mode === "data" && current.connectionId === node.connectionId && current.database === node.database && current.schema === tableSchema && current.title === node.label;
-  };
+  const canApplyTableMetadata = () =>
+    canApplyDataTabMetadata(
+      queryStore.tabs.find((t) => t.id === tabId),
+      dataTabTarget,
+      request?.signal,
+    );
 
   try {
     openDataLog("info", "ensure-connected:start", { traceId, elapsed: elapsed() });
@@ -1549,7 +1547,7 @@ async function openData(node: TreeNode, request?: SidebarDataOpenRequest, openMo
           catalog: node.catalog,
           traceLogger: isDebugLoggingEnabled() ? (event) => openDataLog("debug", "metadata:trace", { sourceTraceId: traceId, ...event }) : undefined,
         });
-        if (!isCurrentDataTab()) {
+        if (!canApplyTableMetadata()) {
           openDataLog("info", "metadata:stale", {
             traceId,
             tabId,
@@ -1630,7 +1628,7 @@ async function openData(node: TreeNode, request?: SidebarDataOpenRequest, openMo
     });
     openDataLog("info", "execute:done", { traceId, tabId, elapsed: elapsed() });
     logPhase("execute-tab-sql", { tabId });
-    if (shouldRefreshTableMeta && isCurrentDataTab()) {
+    if (shouldRefreshTableMeta && canApplyTableMetadata()) {
       void refreshTableMetaInBackground();
       logPhase("metadata-started", { tabId });
     }

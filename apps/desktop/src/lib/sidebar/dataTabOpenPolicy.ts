@@ -37,6 +37,10 @@ function isSameTable(tab: DataTabLike, target: DataTabTarget): boolean {
   return isSameDatabase(tab, target) && (tab.tableMeta?.catalog || "") === (target.catalog || "") && (tab.schema || "") === (target.schema || "") && (tab.tableMeta?.tableName || tab.title) === target.tableName;
 }
 
+export function canApplyDataTabMetadata(tab: DataTabLike | undefined, target: DataTabTarget, signal?: AbortSignal): boolean {
+  return signal?.aborted !== true && tab !== undefined && isSameTable(tab, target);
+}
+
 export function findExistingDataTabCandidate<T extends DataTabLike>(tabs: T[], target: DataTabTarget, options: { openMode: DataTabOpenMode; reuseDataTab: boolean }): ExistingDataTabCandidate<T> | undefined {
   if (options.openMode === "new-tab") return undefined;
 

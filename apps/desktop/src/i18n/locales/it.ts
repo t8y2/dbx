@@ -786,6 +786,8 @@ export default withEnglishFallback({
     formatterDatetimePattern: "Formato data e orario",
     formatterDatetimePatternPlaceholder: "Seleziona o inserisci un formato data e orario",
     formatterDatetimePatternEmpty: "Formato ISO8601 predefinito",
+    formatterDatetimeTimezone: "Fuso orario",
+    formatterDatetimeTimezonePlaceholder: "Seleziona o inserisci un fuso orario",
     formatterJsonPathInput: "Percorso JSON",
     formatterMaskPrefix: "Prefisso visibile",
     formatterMaskSuffix: "Suffisso visibile",

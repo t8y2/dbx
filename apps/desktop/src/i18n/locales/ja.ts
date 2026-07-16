@@ -783,6 +783,8 @@ export default withEnglishFallback({
     formatterDatetimePattern: "日時フォーマット",
     formatterDatetimePatternPlaceholder: "日時フォーマットを選択または入力",
     formatterDatetimePatternEmpty: "ISO8601フォーマット",
+    formatterDatetimeTimezone: "タイムゾーン",
+    formatterDatetimeTimezonePlaceholder: "タイムゾーンを選択または入力",
     formatterJsonPathInput: "JSONパス",
     formatterMaskPrefix: "表示する接頭辞",
     formatterMaskSuffix: "表示する接尾辞",

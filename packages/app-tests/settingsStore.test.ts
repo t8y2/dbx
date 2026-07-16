@@ -373,7 +373,7 @@ test("keeps only valid saved column formatter configs", () => {
   } as any);
 
   assert.deepEqual(settings.columnFormatters, {
-    "conn::db::public::users::created_at": { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DD HH:mm:ss" },
+    "conn::db::public::users::created_at": { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DD HH:mm:ss", timezone: undefined },
     "conn::db::public::users::name": { kind: "mask", prefix: 2, suffix: 2 },
     "conn::db::public::users::payload": { kind: "json-path", path: "$.user.name" },
     "conn::db::public::users::status": { kind: "custom-ref", formatterId: "fmt_1" },

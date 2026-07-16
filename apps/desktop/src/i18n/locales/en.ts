@@ -841,6 +841,8 @@ export default {
     formatterDatetimePattern: "Datetime pattern",
     formatterDatetimePatternPlaceholder: "Select or enter a datetime pattern",
     formatterDatetimePatternEmpty: "Default ISO8601 format",
+    formatterDatetimeTimezone: "Timezone",
+    formatterDatetimeTimezonePlaceholder: "Select a timezone",
     formatterJsonPathInput: "JSON path",
     formatterMaskPrefix: "Visible prefix",
     formatterMaskSuffix: "Visible suffix",

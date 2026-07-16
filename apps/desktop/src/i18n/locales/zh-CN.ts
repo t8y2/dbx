@@ -843,6 +843,8 @@ export default withEnglishFallback({
     formatterDatetimePattern: "日期时间格式",
     formatterDatetimePatternPlaceholder: "选择或输入日期时间格式",
     formatterDatetimePatternEmpty: "默认 ISO8601 格式",
+    formatterDatetimeTimezone: "时区",
+    formatterDatetimeTimezonePlaceholder: "选择时区",
     formatterJsonPathInput: "JSON 路径",
     formatterMaskPrefix: "前缀保留",
     formatterMaskSuffix: "后缀保留",

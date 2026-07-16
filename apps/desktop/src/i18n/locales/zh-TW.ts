@@ -788,6 +788,8 @@ export default withEnglishFallback({
     formatterDatetimePattern: "日期時間格式",
     formatterDatetimePatternPlaceholder: "選擇或輸入日期時間格式",
     formatterDatetimePatternEmpty: "預設 ISO8601 格式",
+    formatterDatetimeTimezone: "時區",
+    formatterDatetimeTimezonePlaceholder: "選擇時區",
     formatterJsonPathInput: "JSON 路徑",
     formatterMaskPrefix: "字首保留",
     formatterMaskSuffix: "字尾保留",

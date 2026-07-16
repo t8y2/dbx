@@ -197,6 +197,12 @@ import { isMacOS } from "@/lib/backend/platform";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import timezone from "dayjs/plugin/timezone";
+import utc from "dayjs/plugin/utc";
+import dayjs from "dayjs";
+
+dayjs.extend(utc);
+dayjs.extend(timezone);
 
 const SqlPreviewPanel = defineAsyncComponent(() => import("@/components/editor/SqlPreviewPanel.vue"));
 const ImagePreviewDialog = defineAsyncComponent(() => import("@/components/grid/ImagePreviewDialog.vue"));
@@ -636,6 +642,9 @@ const CUSTOM_FORMATTER_NEW = "__new";
 const formatterKind = ref<FormatterDraftKind>("datetime");
 const formatterDateUnit = ref<DateTimeFormatterUnit>("auto");
 const formatterDatetimePattern = ref<string>("YYYY-MM-DD HH:mm:ss");
+const formatterDateTimezone = ref<string | undefined>(dayjs.tz.guess());
+// @ts-ignore
+const timezoneOptions = Intl.supportedValuesOf("timeZone");
 const formatterJsonPath = ref("$.user.name");
 const formatterMaskPrefix = ref(4);
 const formatterMaskSuffix = ref(4);
@@ -995,15 +1004,16 @@ function currentFormatterDraft(): ColumnFormatterConfig {
   if (formatterKind.value === "custom-template") {
     return { kind: "custom-template", template: formatterCustomTemplate.value.trim() || "${value}" };
   }
-  return { kind: "datetime", unit: formatterDateUnit.value, pattern: formatterDatetimePattern.value };
+  return { kind: "datetime", unit: formatterDateUnit.value, pattern: formatterDatetimePattern.value, timezone: formatterDateTimezone.value };
 }
 
 function loadFormatterDraft(formatter: ColumnFormatterConfig | undefined) {
-  const draft = formatter ?? { kind: "datetime", unit: "auto" as const, pattern: "YYYY-MM-DD HH:mm:ss" as const };
+  const draft = formatter ?? { kind: "datetime", unit: "auto" as const, pattern: "YYYY-MM-DD HH:mm:ss" as const, timezone: dayjs.tz.guess() };
   formatterKind.value = draft.kind === "custom-ref" ? "custom-template" : draft.kind;
   if (draft.kind === "datetime") {
     formatterDateUnit.value = draft.unit;
     formatterDatetimePattern.value = draft.pattern;
+    formatterDateTimezone.value = draft.timezone;
   } else if (draft.kind === "json-path") {
     formatterJsonPath.value = draft.path;
   } else if (draft.kind === "mask") {
@@ -7743,7 +7753,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                               <Code2 class="h-3.5 w-3.5" />
                             </button>
                           </PopoverTrigger>
-                          <PopoverContent align="start" side="bottom" class="w-[420px] max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-xl border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>
+                          <PopoverContent align="start" side="bottom" class="w-[450px] max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-xl border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>
                             <div class="border-b bg-muted/40 px-3 py-2">
                               <div class="text-sm font-semibold">
                                 {{ t("grid.columnFormatterFor", { column: col.name }) }}
@@ -7802,6 +7812,22 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                                     content-class="w-72"
                                     item-class="h-auto min-h-8 px-2 py-1.5 text-xs"
                                     @update:model-value="(value: any) => (formatterDatetimePattern = value)"
+                                  />
+                                </div>
+                                <div class="space-y-1.5 flex-1">
+                                  <div class="text-xs font-medium text-muted-foreground">
+                                    {{ t("grid.formatterDatetimeTimezone") }}
+                                  </div>
+                                  <SearchableSelect
+                                    :model-value="formatterDateTimezone"
+                                    :options="timezoneOptions"
+                                    :placeholder="t('grid.formatterDatetimeTimezonePlaceholder')"
+                                    :search-placeholder="t('grid.formatterDatetimeTimezonePlaceholder')"
+                                    :empty-text="t('grid.formatterDatetimeTimezonePlaceholder')"
+                                    :loading-text="t('common.loading')"
+                                    :trigger-class="['border border-input h-8 pl-2.5 text-xs']"
+                                    item-class="h-auto min-h-8 px-2 py-1.5 text-xs"
+                                    @update:model-value="(value: any) => (formatterDateTimezone = value)"
                                   />
                                 </div>
                               </div>

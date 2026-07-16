@@ -1,6 +1,16 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { extractQualifiedIdentifierPartsAt, findLoadedTableTargetForCandidate, qualifiedTableNameAtSqlPosition, queryContextTargetFromCandidate, queryCursorTableCandidate } from "../../apps/desktop/src/lib/sql/queryCursorTableTarget.ts";
+import {
+  extractQualifiedIdentifierPartsAt,
+  findLoadedTableTargetForCandidate,
+  qualifiedTableNameAtSqlPosition,
+  queryContextObjectActions,
+  queryContextTargetFromCandidate,
+  queryCursorTableCandidate,
+  queryTableCandidateAtSqlPosition,
+  resolveQueryContextCandidateDatabase,
+  resolveQueryContextObjectTarget,
+} from "../../apps/desktop/src/lib/sql/queryCursorTableTarget.ts";
 import type { QueryTab, TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 function queryTab(sql: string, head: number, schema = "public"): QueryTab {
@@ -38,6 +48,7 @@ test("resolves the table name at a context-menu position", () => {
 
   assert.equal(qualifiedTableNameAtSqlPosition(sql, sql.indexOf("users") + 2), "reporting.users");
   assert.equal(qualifiedTableNameAtSqlPosition("select * from users", "select * from users".length), "users");
+  assert.equal(qualifiedTableNameAtSqlPosition(sql, sql.indexOf(" where")), "reporting.users");
   assert.equal(qualifiedTableNameAtSqlPosition(sql, sql.indexOf("where") + 1), null);
 });
 
@@ -61,6 +72,74 @@ test("builds database-qualified candidates for multi-database non-schema engines
     schema: undefined,
     tableName: "events",
   });
+});
+
+test("builds three-part candidates at an explicit context-menu position", () => {
+  const sql = 'select * from "warehouse"."reporting"."Daily Sales"';
+
+  assert.deepEqual(queryTableCandidateAtSqlPosition({ connectionId: "conn-1", database: "app", schema: "public", databaseType: "postgres", sql, position: sql.indexOf("Daily") + 2 }), {
+    connectionId: "conn-1",
+    database: "warehouse",
+    schema: "reporting",
+    tableName: "Daily Sales",
+  });
+});
+
+test("parses escaped quotes inside qualified identifiers", () => {
+  const sql = 'select * from "warehouse"."reporting"."Daily ""Sales"""';
+
+  assert.deepEqual(queryTableCandidateAtSqlPosition({ connectionId: "conn-1", database: "app", schema: "public", databaseType: "postgres", sql, position: sql.indexOf("Sales") }), {
+    connectionId: "conn-1",
+    database: "warehouse",
+    schema: "reporting",
+    tableName: 'Daily "Sales"',
+  });
+});
+
+test("resolves database qualifiers case-insensitively from local metadata", () => {
+  const candidate = { connectionId: "conn-1", database: "analytics", schema: undefined, tableName: "events" };
+
+  assert.deepEqual(resolveQueryContextCandidateDatabase(candidate, ["App", "Analytics"]), {
+    ...candidate,
+    database: "Analytics",
+  });
+  assert.equal(resolveQueryContextCandidateDatabase(candidate, []), candidate);
+});
+
+test("resolves cached relation types and actual casing for context-menu targets", () => {
+  const candidate = { connectionId: "conn-1", database: "app", schema: "REPORTING", tableName: "daily_sales" };
+
+  assert.deepEqual(
+    resolveQueryContextObjectTarget(candidate, [
+      { name: "daily_sales", schema: "archive", type: "table" },
+      { name: "Daily_Sales", schema: "reporting", type: "materialized_view" },
+    ]),
+    {
+      name: "Daily_Sales",
+      database: "app",
+      schema: "reporting",
+      type: "materialized_view",
+    },
+  );
+});
+
+test("preserves table actions when context-menu metadata is unavailable", () => {
+  const candidate = { connectionId: "conn-1", database: "app", schema: "public", tableName: "unknown_relation" };
+
+  assert.deepEqual(resolveQueryContextObjectTarget(candidate, []), {
+    name: "unknown_relation",
+    database: "app",
+    schema: "public",
+  });
+  assert.deepEqual(queryContextObjectActions(undefined), ["view-data", "edit-table-structure", "view-ddl"]);
+});
+
+test("uses source actions for views and materialized views", () => {
+  const expected = ["view-data", "edit-view", "view-source", "view-ddl"];
+
+  assert.deepEqual(queryContextObjectActions("view"), expected);
+  assert.deepEqual(queryContextObjectActions("materialized_view"), expected);
+  assert.deepEqual(queryContextObjectActions("table"), ["view-data", "edit-table-structure", "view-ddl"]);
 });
 
 test("falls back to the candidate database and schema when no table is loaded", () => {

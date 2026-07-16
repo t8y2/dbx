@@ -174,7 +174,7 @@ export function serializeMongoDocumentId(value: unknown): string {
 }
 
 export function mongoDocumentIdForGrid(value: unknown): MongoInputValue {
-  if (isMongoNumberLong(value)) return value.$numberLong;
+  if (isMongoExtendedJsonId(value)) return String(value.$numberLong ?? value.$oid);
   if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
   return JSON.stringify(value);
 }
@@ -184,8 +184,4 @@ function isMongoExtendedJsonId(value: unknown): value is Record<string, unknown>
   const object = value as Record<string, unknown>;
   const keys = Object.keys(object);
   return keys.length === 1 && (typeof object.$numberLong === "string" || typeof object.$oid === "string");
-}
-
-function isMongoNumberLong(value: unknown): value is { $numberLong: string } {
-  return !!value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 1 && typeof (value as Record<string, unknown>).$numberLong === "string";
 }

@@ -52,10 +52,18 @@ function buildExportHarness(
   options: {
     currentResultLabel?: string;
     exportFileBaseName?: string;
+    columns?: string[];
     columnTypes?: Array<string | undefined>;
+    rows?: QueryResult["rows"];
     allExportResults?: Array<{ sheetName: string; result: QueryResult; sql?: string }>;
   } = {},
 ) {
+  const exportColumns = options.columns ?? ["id", "name"];
+  const exportRows = options.rows ?? [
+    [1, "Ada"],
+    [2, "Lin"],
+  ];
+  const rowItems = exportRows.map((data, index) => ({ id: index + 1, data, isNew: false, isDeleted: false, isDirtyCol: data.map(() => false), status: "" }));
   const exportProgressDialog = ref(false);
   const exportProgressState = ref({
     title: "",
@@ -65,6 +73,7 @@ function buildExportHarness(
     totalRows: null as number | null,
     status: "",
     errorMessage: null as string | null,
+    filePath: null as string | null,
   });
   const exportCancelHandler = ref<(() => Promise<void>) | null>(null);
   const fullExportResult = vi.fn(async () => {
@@ -92,11 +101,8 @@ function buildExportHarness(
   }));
 
   const composable = useDataGridExport({
-    columns: computed(() => ["id", "name"]),
-    displayItems: computed(() => [
-      { id: 1, data: [1, "Ada"], isNew: false, isDeleted: false, isDirtyCol: [false, false], status: "" },
-      { id: 2, data: [2, "Lin"], isNew: false, isDeleted: false, isDirtyCol: [false, false], status: "" },
-    ]),
+    columns: computed(() => exportColumns),
+    displayItems: computed(() => rowItems),
     sql: computed(() => "SELECT * FROM users"),
     exportSql: computed(() => "SELECT * FROM users ORDER BY id DESC"),
     tableMeta: computed(() => undefined),
@@ -113,11 +119,7 @@ function buildExportHarness(
     selectedCells: computed(() => ({ columns: [], rows: [] })),
     selectedRange: computed(() => null),
     contextCell: ref(null),
-    getRowItem: (rowId: number) =>
-      [
-        { id: 1, data: [1, "Ada"], isNew: false, isDeleted: false, isDirtyCol: [false, false], status: "" },
-        { id: 2, data: [2, "Lin"], isNew: false, isDeleted: false, isDirtyCol: [false, false], status: "" },
-      ].find((item) => item.id === rowId),
+    getRowItem: (rowId: number) => rowItems.find((item) => item.id === rowId),
     selectedRowIds: ref(new Set<number>()),
     hasRowSelection: computed(() => false),
     fullExportResult,
@@ -150,6 +152,7 @@ function buildTableDataExportHarness() {
     totalRows: null as number | null,
     status: "",
     errorMessage: null as string | null,
+    filePath: null as string | null,
   });
   const exportCancelHandler = ref<(() => Promise<void>) | null>(null);
 
@@ -312,6 +315,7 @@ test("copy MongoDB row as INSERT uses Mongo shell insert syntax", async () => {
   const jsonString = '{"endingBalance":{"beginningBalance":"0","endingBalance":"100","endingDate":"2024-11-25"},"Line":[]}';
   const row = {
     id: 1,
+    sourceIndex: 0,
     data: ["6743e4bfa3f6f84bc3fff6c8", "577", "done", jsonString, 'ISODate("2024-11-25T02:45:36.184Z")'],
     isNew: false,
     isDeleted: false,
@@ -329,6 +333,15 @@ test("copy MongoDB row as INSERT uses Mongo shell insert syntax", async () => {
     database: computed(() => "db"),
     context: computed(() => "results"),
     sourceColumns: computed(() => undefined),
+    mongoDocuments: computed(() => [
+      {
+        _id: { $oid: "6743e4bfa3f6f84bc3fff6c8" },
+        accountId: 577,
+        status: "done",
+        data: { endingBalance: { beginningBalance: "0", endingBalance: "100", endingDate: "2024-11-25" }, Line: [] },
+        lastUpdatedDate: { $date: "2024-11-25T02:45:36.184Z" },
+      },
+    ]),
     columnTypes: computed(() => undefined),
     whereInput: computed(() => undefined),
     orderBy: computed(() => undefined),
@@ -348,7 +361,20 @@ test("copy MongoDB row as INSERT uses Mongo shell insert syntax", async () => {
   assert.equal(apiMock.buildDataGridCopyInsertStatement.mock.calls.length, 0);
   assert.equal(
     clipboardMock.copyToClipboard.mock.calls[0][0],
-    'db.getCollection("accounting_reconciliations").insert({"_id":ObjectId("6743e4bfa3f6f84bc3fff6c8"),"accountId":577,"status":"done","data":{"endingBalance":{"beginningBalance":"0","endingBalance":"100","endingDate":"2024-11-25"},"Line":[]},"lastUpdatedDate":ISODate("2024-11-25T02:45:36.184Z")});',
+    `db.getCollection("accounting_reconciliations").insert({
+  "_id": ObjectId("6743e4bfa3f6f84bc3fff6c8"),
+  "accountId": 577,
+  "status": "done",
+  "data": {
+    "endingBalance": {
+      "beginningBalance": "0",
+      "endingBalance": "100",
+      "endingDate": "2024-11-25"
+    },
+    "Line": []
+  },
+  "lastUpdatedDate": ISODate("2024-11-25T02:45:36.184Z")
+});`,
   );
 });
 
@@ -388,7 +414,18 @@ test("copy MongoDB rows as INSERT excludes _id for insert without primary keys",
   await composable.copyRowAsInsertWithoutPrimaryKeys();
 
   assert.equal(apiMock.buildDataGridCopyInsertStatement.mock.calls.length, 0);
-  assert.equal(clipboardMock.copyToClipboard.mock.calls[0][0], 'db.getCollection("accounting_reconciliations").insertMany([{"status":"done"},{"status":"draft"}]);');
+  assert.equal(
+    clipboardMock.copyToClipboard.mock.calls[0][0],
+    `db.getCollection("accounting_reconciliations")
+  .insertMany([
+    {
+      "status": "done"
+    },
+    {
+      "status": "draft"
+    }
+  ]);`,
+  );
 });
 
 test("copy row as INSERT refreshes prepared SQL after row data changes", async () => {
@@ -616,6 +653,7 @@ test("default data grid export file names use sanitized base names and compact l
 });
 
 test("full query result CSV export streams through the backend without loading all rows", async () => {
+  useSettingsStore().updateEditorSettings({ globalDateTimeExportFormat: "YYYY/M/D HH:mm:ss" });
   const { composable, fullExportResult, queryResultExportRequest, exportProgressDialog, exportProgressState } = buildExportHarness();
 
   await composable.exportCsv();
@@ -623,9 +661,11 @@ test("full query result CSV export streams through the backend without loading a
   assert.equal(fullExportResult.mock.calls.length, 0);
   assert.equal(queryResultExportRequest.mock.calls.length, 1);
   assert.equal(apiMock.startQueryResultExport.mock.calls.length, 1);
+  assert.equal(apiMock.startQueryResultExport.mock.calls[0][0].dateTimeFormat, "YYYY/M/D HH:mm:ss");
   assert.equal(apiMock.exportQueryResultCsv.mock.calls.length, 0);
   assert.equal(exportProgressDialog.value, true);
   assert.equal(exportProgressState.value.status, "Done");
+  assert.equal(exportProgressState.value.filePath, apiMock.startQueryResultExport.mock.calls[0][0].filePath);
 });
 
 test("full query result CSV export defaults to the saved SQL title", async () => {
@@ -662,11 +702,12 @@ test("table data export keeps the table name as the default file base", async ()
   const restoreStorage = installMemoryStorage();
   try {
     vi.setSystemTime(new Date(2026, 5, 2, 15, 4, 5));
-    const { composable } = buildTableDataExportHarness();
+    const { composable, exportProgressState } = buildTableDataExportHarness();
 
     await composable.exportCsv();
 
     assert.equal(apiMock.startTableExport.mock.calls[0][0].filePath, "users_260602150405.csv");
+    assert.equal(exportProgressState.value.filePath, "users_260602150405.csv");
   } finally {
     vi.useRealTimers();
     restoreStorage();
@@ -733,6 +774,20 @@ test("selected query result CSV export keeps the existing in-memory path", async
   assert.equal(apiMock.exportQueryResultCsv.mock.calls.length, 1);
   assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][1], ["id", "name"]);
   assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][2], [[1, "Ada"]]);
+});
+
+test("selected query result CSV export formats only typed temporal columns", async () => {
+  useSettingsStore().updateEditorSettings({ globalDateTimeExportFormat: "YYYY/M/D HH:mm:ss" });
+  const rawDateTime = "2024-02-25 13:02:15";
+  const { composable } = buildExportHarness({
+    columns: ["created_at", "note"],
+    columnTypes: ["timestamp", "varchar"],
+    rows: [[rawDateTime, rawDateTime]],
+  });
+
+  await composable.exportCsv([1]);
+
+  assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][2], [["2024/2/25 13:02:15", rawDateTime]]);
 });
 
 test("selected query result XLSX export uses the current source label as the sheet name", async () => {
@@ -845,6 +900,20 @@ test("table data export leaves row limit unset by default", async () => {
 
     assert.equal(apiMock.startTableExport.mock.calls.length, 1);
     assert.equal(apiMock.startTableExport.mock.calls[0][0].rowLimit, null);
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("table data export passes the global date time export format", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    useSettingsStore().updateEditorSettings({ globalDateTimeExportFormat: "YYYY/MM/DD HH:mm:ss" });
+    const { composable } = buildTableDataExportHarness();
+
+    await composable.exportCsv();
+
+    assert.equal(apiMock.startTableExport.mock.calls[0][0].dateTimeFormat, "YYYY/MM/DD HH:mm:ss");
   } finally {
     restoreStorage();
   }

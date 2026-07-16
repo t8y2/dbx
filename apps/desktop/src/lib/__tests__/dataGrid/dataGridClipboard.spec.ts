@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { claimDataGridPaste } from "@/lib/dataGrid/dataGridClipboard";
+import { claimDataGridPaste, planDataGridPaste } from "@/lib/dataGrid/dataGridClipboard";
 
 function target(nativeClipboard: boolean): EventTarget {
   return {
@@ -47,5 +47,28 @@ describe("claimDataGridPaste", () => {
     expect(claimDataGridPaste(event, true, false)).toBe("block");
     expect(event.preventDefault).toHaveBeenCalledOnce();
     expect(event.stopPropagation).toHaveBeenCalledOnce();
+  });
+});
+
+describe("planDataGridPaste", () => {
+  it("flattens a clipboard matrix within grid bounds", () => {
+    expect(
+      planDataGridPaste(
+        [
+          ["a", "b"],
+          ["c", "d"],
+        ],
+        2,
+        1,
+      ),
+    ).toEqual([
+      { rowOffset: 0, columnOffset: 0, value: "a" },
+      { rowOffset: 1, columnOffset: 0, value: "c" },
+    ]);
+  });
+
+  it("returns no cells for empty bounds", () => {
+    expect(planDataGridPaste([["a"]], 0, 1)).toEqual([]);
+    expect(planDataGridPaste([["a"]], 1, 0)).toEqual([]);
   });
 });

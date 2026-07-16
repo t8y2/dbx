@@ -21,6 +21,7 @@ export function sqlSemanticReferencedTables(model: SqlSemanticModel): SqlComplet
       schema: source.qualifierParts[source.qualifierParts.length - 1],
       alias: source.alias,
       columns: source.columns,
+      columnAliases: source.columnAliases,
     }));
 }
 

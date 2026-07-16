@@ -1066,6 +1066,14 @@ export function defaultNewColumnDataType(dbType: DatabaseType | undefined, dataT
   return dbType === "sqlite" ? "text" : "varchar(255)";
 }
 
+/** Index at which to insert a new column (after the selected row, or append when none). */
+export function resolveInsertColumnIndex(columns: readonly { id: string; markedForDrop?: boolean }[], selectedColumnId: string | null | undefined): number {
+  if (!selectedColumnId) return columns.length;
+  // Dropped rows are not valid insertion anchors.
+  const index = columns.findIndex((column) => column.id === selectedColumnId && !column.markedForDrop);
+  return index >= 0 ? index + 1 : columns.length;
+}
+
 function isMysqlDeprecatedDefaultParameterType(baseType: string): boolean {
   const typeName = baseType.split(/\s+/)[0];
   return ["tinyint", "smallint", "mediumint", "int", "integer", "bigint", "float", "double", "real"].includes(typeName ?? "");

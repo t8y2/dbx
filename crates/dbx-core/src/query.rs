@@ -5,7 +5,9 @@ use duckdb::types::{TimeUnit, Value, ValueRef};
 use futures::StreamExt;
 use mysql_async::prelude::Queryable;
 use serde::Serialize;
-use sqlparser::ast::{visit_relations_mut, Ident, ObjectName, ObjectNamePart, ObjectType, Statement};
+use sqlparser::ast::{
+    visit_relations_mut, Ident, ObjectName, ObjectNamePart, ObjectType, Statement, TableFactor, VisitMut, VisitorMut,
+};
 use sqlparser::dialect::{GenericDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
 use std::collections::HashSet;
@@ -46,19 +48,30 @@ pub enum PoolErrorAction {
 
 /// A multi-statement result with metadata intended for query clients.
 ///
-/// `execution_error` is emitted only for synthesized MySQL-protocol errors so
-/// clients can distinguish them from a successful result column named `Error`.
+/// `execution_error` is emitted for synthesized per-statement errors so clients
+/// can distinguish them from a successful result column named `Error`.
+/// `statement_index` is emitted only after a concrete statement starts running.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExecuteMultiResult {
     #[serde(flatten)]
     pub result: db::QueryResult,
     #[serde(skip_serializing_if = "is_false")]
     pub execution_error: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statement_index: Option<usize>,
 }
 
 impl ExecuteMultiResult {
     fn execution_error(result: db::QueryResult) -> Self {
-        Self { result, execution_error: true }
+        Self { result, execution_error: true, statement_index: None }
+    }
+
+    fn execution_error_with_index(result: db::QueryResult, statement_index: usize) -> Self {
+        Self { result, execution_error: true, statement_index: Some(statement_index) }
+    }
+
+    fn success_with_index(result: db::QueryResult, statement_index: usize) -> Self {
+        Self { result, execution_error: false, statement_index: Some(statement_index) }
     }
 
     fn into_query_result(self) -> db::QueryResult {
@@ -68,7 +81,7 @@ impl ExecuteMultiResult {
 
 impl From<db::QueryResult> for ExecuteMultiResult {
     fn from(result: db::QueryResult) -> Self {
-        Self { result, execution_error: false }
+        Self { result, execution_error: false, statement_index: None }
     }
 }
 
@@ -207,12 +220,16 @@ fn schema_for_execution_context(db_type: Option<DatabaseType>, schema: Option<&s
 }
 
 fn sql_for_execution_context(db_type: Option<DatabaseType>, sql: &str, schema: Option<&str>) -> String {
-    if matches!(db_type, Some(DatabaseType::Iris)) {
-        if let Some(schema) = schema.map(str::trim).filter(|schema| !schema.is_empty()) {
-            return qualify_iris_unqualified_dml(sql, schema).unwrap_or_else(|| sql.to_string());
+    let Some(schema) = schema.map(str::trim).filter(|schema| !schema.is_empty()) else {
+        return sql.to_string();
+    };
+    match db_type {
+        Some(DatabaseType::Iris) => qualify_iris_unqualified_dml(sql, schema).unwrap_or_else(|| sql.to_string()),
+        Some(DatabaseType::Kingbase) => {
+            qualify_kingbase_unqualified_relations(sql, schema).unwrap_or_else(|| sql.to_string())
         }
+        _ => sql.to_string(),
     }
-    sql.to_string()
 }
 
 fn qualify_iris_unqualified_dml(sql: &str, schema: &str) -> Option<String> {
@@ -224,12 +241,12 @@ fn qualify_iris_unqualified_dml(sql: &str, schema: &str) -> Option<String> {
 
     let mut changed = false;
     for statement in &mut statements {
-        if !iris_statement_uses_schema_search_path(statement) {
+        if !statement_uses_schema_context(statement) {
             continue;
         }
-        let cte_names = iris_statement_cte_names(statement);
+        let cte_names = statement_cte_names(statement);
         let _ = visit_relations_mut(statement, |name| {
-            if qualify_iris_relation_name(name, schema, &cte_names) {
+            if qualify_unqualified_relation_name(name, schema, &cte_names) {
                 changed = true;
             }
             ControlFlow::<()>::Continue(())
@@ -239,7 +256,63 @@ fn qualify_iris_unqualified_dml(sql: &str, schema: &str) -> Option<String> {
     changed.then(|| statements.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))
 }
 
-fn iris_statement_uses_schema_search_path(statement: &Statement) -> bool {
+fn qualify_kingbase_unqualified_relations(sql: &str, schema: &str) -> Option<String> {
+    let dialect = PostgreSqlDialect {};
+    let mut statements = Parser::parse_sql(&dialect, sql).ok()?;
+    if statements.is_empty() {
+        return None;
+    }
+
+    let mut changed = false;
+    for statement in &mut statements {
+        if !statement_uses_schema_context(statement) {
+            continue;
+        }
+        let cte_names = statement_cte_names(statement);
+        let mut qualifier =
+            KingbaseRelationQualifier { schema, cte_names: &cte_names, parameterized_table_depth: 0, changed: false };
+        let _ = statement.visit(&mut qualifier);
+        changed |= qualifier.changed;
+    }
+
+    changed.then(|| statements.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))
+}
+
+struct KingbaseRelationQualifier<'a> {
+    schema: &'a str,
+    cte_names: &'a HashSet<String>,
+    parameterized_table_depth: usize,
+    changed: bool,
+}
+
+impl VisitorMut for KingbaseRelationQualifier<'_> {
+    type Break = ();
+
+    fn pre_visit_table_factor(&mut self, table_factor: &mut TableFactor) -> ControlFlow<Self::Break> {
+        if matches!(table_factor, TableFactor::Table { args: Some(_), .. }) {
+            self.parameterized_table_depth += 1;
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_table_factor(&mut self, table_factor: &mut TableFactor) -> ControlFlow<Self::Break> {
+        if matches!(table_factor, TableFactor::Table { args: Some(_), .. }) {
+            self.parameterized_table_depth = self.parameterized_table_depth.saturating_sub(1);
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_relation(&mut self, relation: &mut ObjectName) -> ControlFlow<Self::Break> {
+        if self.parameterized_table_depth == 0
+            && qualify_unqualified_relation_name(relation, self.schema, self.cte_names)
+        {
+            self.changed = true;
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+fn statement_uses_schema_context(statement: &Statement) -> bool {
     matches!(
         statement,
         Statement::Query(_)
@@ -250,7 +323,7 @@ fn iris_statement_uses_schema_search_path(statement: &Statement) -> bool {
     )
 }
 
-fn qualify_iris_relation_name(name: &mut ObjectName, schema: &str, cte_names: &HashSet<String>) -> bool {
+fn qualify_unqualified_relation_name(name: &mut ObjectName, schema: &str, cte_names: &HashSet<String>) -> bool {
     let [ObjectNamePart::Identifier(table)] = name.0.as_slice() else {
         return false;
     };
@@ -263,31 +336,35 @@ fn qualify_iris_relation_name(name: &mut ObjectName, schema: &str, cte_names: &H
     true
 }
 
-fn iris_statement_cte_names(statement: &Statement) -> HashSet<String> {
+fn statement_cte_names(statement: &Statement) -> HashSet<String> {
     let mut names = HashSet::new();
-    collect_iris_statement_cte_names(statement, &mut names);
+    collect_statement_cte_names(statement, &mut names);
     names
 }
 
-fn collect_iris_statement_cte_names(statement: &Statement, names: &mut HashSet<String>) {
+fn collect_statement_cte_names(statement: &Statement, names: &mut HashSet<String>) {
     match statement {
-        Statement::Query(query) => collect_iris_query_cte_names(query, names),
+        Statement::Query(query) => collect_query_cte_names(query, names),
         Statement::Insert(insert) => {
             if let Some(source) = &insert.source {
-                collect_iris_query_cte_names(source, names);
+                collect_query_cte_names(source, names);
             }
         }
         _ => {}
     }
 }
 
-fn collect_iris_query_cte_names(query: &sqlparser::ast::Query, names: &mut HashSet<String>) {
+fn collect_query_cte_names(query: &sqlparser::ast::Query, names: &mut HashSet<String>) {
     if let Some(with) = &query.with {
         for cte in &with.cte_tables {
             names.insert(cte.alias.name.value.to_ascii_uppercase());
-            collect_iris_query_cte_names(&cte.query, names);
+            collect_query_cte_names(&cte.query, names);
         }
     }
+}
+
+fn qualifies_unqualified_agent_relations(db_type: Option<DatabaseType>) -> bool {
+    matches!(db_type, Some(DatabaseType::Iris | DatabaseType::Kingbase))
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1918,9 +1995,9 @@ pub async fn execute_multi_core_with_options_for_client(
     }
 
     let mut results = Vec::with_capacity(statements.len());
-    for stmt in &statements {
+    for (statement_index, stmt) in statements.iter().enumerate() {
         if is_canceled(&cancel_token) {
-            results.push(error_query_result(canceled_error()));
+            results.push(ExecuteMultiResult::execution_error(error_query_result(canceled_error())));
             break;
         }
         match execute_sql_statement_with_options(
@@ -1934,10 +2011,10 @@ pub async fn execute_multi_core_with_options_for_client(
         )
         .await
         {
-            Ok(r) => results.push(r),
+            Ok(r) => results.push(ExecuteMultiResult::success_with_index(r, statement_index)),
             Err(e) => {
                 let action = query_pool_error_action(db_type, stmt, &e);
-                results.push(error_query_result(e));
+                results.push(ExecuteMultiResult::execution_error_with_index(error_query_result(e), statement_index));
                 if !should_continue_batch_after_error(options.continue_on_error, action) {
                     break;
                 }
@@ -1945,7 +2022,7 @@ pub async fn execute_multi_core_with_options_for_client(
         }
     }
 
-    Ok(results.into_iter().map(Into::into).collect())
+    Ok(results)
 }
 
 trait MysqlBatchStatementExecutor {
@@ -1989,17 +2066,17 @@ where
     E: MysqlBatchStatementExecutor,
 {
     let mut results = Vec::with_capacity(statements.len());
-    for statement in statements {
+    for (statement_index, statement) in statements.iter().enumerate() {
         if is_canceled(&cancel_token) {
             results.push(ExecuteMultiResult::execution_error(error_query_result(canceled_error())));
             return (results, None);
         }
 
         match executor.execute_statement(statement).await {
-            Ok(result) => results.push(result.into()),
+            Ok(result) => results.push(ExecuteMultiResult::success_with_index(result, statement_index)),
             Err(err) => {
                 let action = pool_error_action(db_type, &err);
-                results.push(ExecuteMultiResult::execution_error(error_query_result(err)));
+                results.push(ExecuteMultiResult::execution_error_with_index(error_query_result(err), statement_index));
                 // Statement errors are safe to collect, but connection-level failures leave
                 // the protocol state unusable and must still trigger pool cleanup.
                 if !should_continue_batch_after_error(continue_on_error, action) {
@@ -2229,7 +2306,7 @@ pub async fn execute_statements(
         let db_type = connection_database_type_for_pool_key(state, &pool_key).await;
         let execution_schema = schema_for_execution_context(db_type, schema);
         let rewritten_statements;
-        let statements = if matches!(db_type, Some(DatabaseType::Iris)) {
+        let statements = if qualifies_unqualified_agent_relations(db_type) {
             rewritten_statements =
                 statements.iter().map(|sql| sql_for_execution_context(db_type, sql, schema)).collect::<Vec<_>>();
             rewritten_statements.as_slice()
@@ -2640,7 +2717,7 @@ async fn exec_tx_explicit_inner(
         let db_type = connection_database_type_for_pool_key(state, pool_key).await;
         let execution_schema = schema_for_execution_context(db_type, schema);
         let rewritten_statements;
-        let statements = if matches!(db_type, Some(DatabaseType::Iris)) {
+        let statements = if qualifies_unqualified_agent_relations(db_type) {
             rewritten_statements =
                 statements.iter().map(|sql| sql_for_execution_context(db_type, sql, schema)).collect::<Vec<_>>();
             rewritten_statements.as_slice()
@@ -3048,8 +3125,7 @@ async fn execute_manual_txn_mysql_statement(
         let start = std::time::Instant::now();
         let mut result = conn.query_iter(sql).await.map_err(|e| format!("Query failed: {e}"))?;
         let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
-        let column_types: Vec<String> =
-            result.columns_ref().iter().map(|c| db::mysql::mysql_column_type_name(c.column_type())).collect();
+        let column_types: Vec<String> = result.columns_ref().iter().map(db::mysql::mysql_column_type_name).collect();
         let mut data: Vec<Vec<serde_json::Value>> = Vec::with_capacity(row_limit.min(1024));
         let mut stream = result
             .stream::<mysql_async::Row>()
@@ -3209,6 +3285,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            database_info: None,
         }
     }
 
@@ -3336,6 +3413,8 @@ mod tests {
 
         assert_eq!(executor.executed, vec!["first", "fails"]);
         assert_eq!(results.len(), 2);
+        assert_eq!(results[0].statement_index, Some(0));
+        assert_eq!(results[1].statement_index, Some(1));
         assert!(results[1].execution_error);
         assert_eq!(error_action, Some(PoolErrorAction::Keep));
     }
@@ -3374,6 +3453,10 @@ mod tests {
 
         assert_eq!(executor.executed, statements);
         assert_eq!(results.len(), 3);
+        assert_eq!(
+            results.iter().map(|result| result.statement_index).collect::<Vec<_>>(),
+            vec![Some(0), Some(1), Some(2)]
+        );
         assert!(results[1].execution_error);
         assert_eq!(error_action, None);
     }
@@ -3412,19 +3495,24 @@ mod tests {
 
         assert_eq!(executor.executed, vec!["first", "disconnects"]);
         assert_eq!(results.len(), 2);
+        assert_eq!(results.iter().map(|result| result.statement_index).collect::<Vec<_>>(), vec![Some(0), Some(1)]);
         assert!(results[1].execution_error);
         assert_eq!(error_action, Some(PoolErrorAction::ReconnectAndRetry));
     }
 
     #[test]
-    fn execute_multi_result_serializes_error_marker_only_for_synthesized_errors() {
+    fn execute_multi_result_serializes_client_metadata_only_when_present() {
         let success = serde_json::to_value(ExecuteMultiResult::from(empty_query_result(0))).unwrap();
         assert!(success.get("execution_error").is_none());
+        assert!(success.get("statement_index").is_none());
 
-        let failure =
-            serde_json::to_value(ExecuteMultiResult::execution_error(error_query_result("failed".to_string())))
-                .unwrap();
+        let failure = serde_json::to_value(ExecuteMultiResult::execution_error_with_index(
+            error_query_result("failed".to_string()),
+            2,
+        ))
+        .unwrap();
         assert_eq!(failure.get("execution_error"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(failure.get("statement_index"), Some(&serde_json::json!(2)));
         assert_eq!(failure.get("columns"), Some(&serde_json::json!(["Error"])));
     }
 
@@ -4222,6 +4310,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            database_info: None,
         };
 
         let params = external_driver_query_params(
@@ -4336,6 +4425,55 @@ mod tests {
         assert_eq!(
             sql_for_execution_context(Some(DatabaseType::Postgres), "SELECT * FROM events", Some("APP")),
             "SELECT * FROM events"
+        );
+    }
+
+    #[test]
+    fn kingbase_execution_context_qualifies_only_unqualified_relations() {
+        assert_eq!(
+            sql_for_execution_context(Some(DatabaseType::Kingbase), "SELECT * FROM sys_user", Some("app")),
+            "SELECT * FROM \"app\".sys_user"
+        );
+        assert_eq!(
+            sql_for_execution_context(Some(DatabaseType::Kingbase), "SELECT * FROM other_schema.sys_user", Some("app")),
+            "SELECT * FROM other_schema.sys_user"
+        );
+
+        let mixed = sql_for_execution_context(
+            Some(DatabaseType::Kingbase),
+            "SELECT pg_typeof(u.id) FROM generate_series(1, 2) AS n JOIN sys_user u ON true",
+            Some("app"),
+        );
+        assert!(mixed.contains("FROM generate_series(1, 2) AS n"), "{mixed}");
+        assert!(mixed.contains("JOIN \"app\".sys_user u"), "{mixed}");
+        assert!(mixed.contains("pg_typeof(u.id)"), "{mixed}");
+    }
+
+    #[test]
+    fn kingbase_execution_context_preserves_ctes_functions_types_and_unsupported_sql() {
+        assert_eq!(
+            sql_for_execution_context(
+                Some(DatabaseType::Kingbase),
+                "WITH current_user AS (SELECT * FROM sys_user) SELECT * FROM current_user",
+                Some("APP")
+            ),
+            "WITH current_user AS (SELECT * FROM \"APP\".sys_user) SELECT * FROM current_user"
+        );
+        assert_eq!(
+            sql_for_execution_context(
+                Some(DatabaseType::Kingbase),
+                "SELECT pg_typeof(1::int), current_user",
+                Some("APP")
+            ),
+            "SELECT pg_typeof(1::int), current_user"
+        );
+        assert_eq!(
+            sql_for_execution_context(Some(DatabaseType::Kingbase), "CREATE TABLE sys_user (id INT)", Some("APP")),
+            "CREATE TABLE sys_user (id INT)"
+        );
+        assert_eq!(
+            sql_for_execution_context(Some(DatabaseType::Kingbase), "SELECT * FROM", Some("APP")),
+            "SELECT * FROM"
         );
     }
 

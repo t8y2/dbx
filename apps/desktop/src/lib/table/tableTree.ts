@@ -211,6 +211,12 @@ export function sortDatabaseObjectsByName<T>(items: readonly T[], getName: (item
   return [...items].sort((left, right) => databaseObjectNameCollator.compare(getName(left), getName(right)));
 }
 
+// Shared with the object browser so both sides of the UI list objects in the
+// same natural visible-name order as the sidebar tree (issue #3604).
+export function compareDatabaseObjectNames(left: string, right: string): number {
+  return databaseObjectNameCollator.compare(left, right);
+}
+
 export function mergeTableInfosIntoObjects(objects: readonly ObjectInfo[], tables: readonly TableInfo[], schema?: string): ObjectInfo[] {
   const merged = [...objects];
   const seen = new Set(

@@ -50,6 +50,7 @@ export type ShortcutActionId =
   | "copySidebarSelection"
   | "pasteSidebarSelection"
   | "editSidebarConnection"
+  | "openDataInNewTab"
   | "sendSelectionToAi";
 
 export type ShortcutScope = "global" | "editor" | "grid" | "search" | "sidebar";
@@ -59,6 +60,7 @@ export interface ShortcutDefinition {
   labelKey: string;
   scope: ShortcutScope;
   defaultShortcut: string;
+  inputKind?: "keyboard" | "modifier-only";
 }
 
 export type ShortcutSettings = Record<ShortcutActionId, string>;
@@ -359,6 +361,13 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "Mod+E",
   },
   {
+    id: "openDataInNewTab",
+    labelKey: "settings.shortcutOpenDataInNewTab",
+    scope: "sidebar",
+    defaultShortcut: "Alt",
+    inputKind: "modifier-only",
+  },
+  {
     id: "sendSelectionToAi",
     labelKey: "settings.shortcutSendSelectionToAi",
     scope: "editor",
@@ -368,8 +377,23 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
 
 export const DEFAULT_SHORTCUT_SETTINGS: ShortcutSettings = Object.fromEntries(SHORTCUT_DEFINITIONS.map((definition) => [definition.id, definition.defaultShortcut])) as ShortcutSettings;
 
+const modifierOnlyShortcuts = new Set(["Alt", "Shift", "Mod", "Ctrl", "Meta"]);
+
+export function normalizeModifierOnlyShortcut(shortcut: string, fallback = ""): string {
+  const normalized = shortcut.trim() === "Control" ? "Ctrl" : shortcut.trim();
+  if (normalized === "") return "";
+  return modifierOnlyShortcuts.has(normalized) ? normalized : fallback;
+}
+
 export function normalizeShortcutSettings(settings?: Partial<ShortcutSettings>): ShortcutSettings {
-  return Object.fromEntries(SHORTCUT_DEFINITIONS.map((definition) => [definition.id, typeof settings?.[definition.id] === "string" ? settings[definition.id] : definition.defaultShortcut])) as ShortcutSettings;
+  return Object.fromEntries(
+    SHORTCUT_DEFINITIONS.map((definition) => {
+      const configuredValue = settings?.[definition.id];
+      const configured = typeof configuredValue === "string" ? configuredValue : definition.defaultShortcut;
+      const normalized = definition.inputKind === "modifier-only" ? normalizeModifierOnlyShortcut(configured, definition.defaultShortcut) : configured;
+      return [definition.id, normalized];
+    }),
+  ) as ShortcutSettings;
 }
 
 export function shortcutToCodeMirrorKey(shortcut: string): string {

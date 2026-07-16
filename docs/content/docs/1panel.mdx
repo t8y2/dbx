@@ -1,0 +1,67 @@
+---
+title: Deploy DBX with 1Panel
+description: Install, access, and update the DBX web edition from the 1Panel app store.
+---
+
+The 1Panel app store provides the official DBX Docker image, so you can install and update the DBX web edition without writing Docker commands manually.
+
+## Install DBX
+
+1. Sign in to 1Panel and open **App Store**.
+2. Search for `DBX` and select the official DBX app.
+3. Select the version to install and click **Install**.
+4. Review the installation fields:
+
+   | Setting | Default | Description |
+   | --- | --- | --- |
+   | Port | `4224` | The host port used to access DBX Web. Change it if the port is already in use. |
+   | Access Password | Automatically generated | The password used to sign in to DBX Web. 1Panel generates the default value according to `random: true`, and you can change it during installation. |
+
+5. Click **Confirm** and wait for 1Panel to pull the image and start the container.
+
+<Callout type="info">
+  The access password is the DBX Web login password, not a database password. Save the password shown or entered during installation.
+</Callout>
+
+## Open DBX
+
+After installation, open the following address in a browser:
+
+```text
+http://SERVER_IP:PORT
+```
+
+For example, when using the default port:
+
+```text
+http://192.168.1.100:4224
+```
+
+Enter the **Access Password** from the installation form. If the page does not open, check that:
+
+- the DBX app is running in 1Panel;
+- the browser port matches the port in the installation form;
+- the cloud security group and host firewall allow that port;
+- the port is not already used by another service.
+
+## Persistence and updates
+
+DBX application data is stored in the 1Panel app directory's `data` directory and mounted at `/app/data` inside the container. Restarting or updating the container preserves saved connections and other application data.
+
+To update DBX, open it under **Installed** apps in 1Panel, select an available version, and start the update. Confirm that the data directory is included in your server backup before updating.
+
+<Callout type="warn">
+  Do not delete DBX's application data directory unless you intend to remove saved connections and other local data. Back up the directory before uninstalling the app.
+</Callout>
+
+## Connect to a database
+
+After signing in, click **New Connection** and enter the target database type, address, port, username, and database password. The DBX container must be able to reach the target database:
+
+- For a database on the same server, use an address and port reachable from that server.
+- For a database on the same Docker network, use its container name and container port.
+- For a private-network database, connect the 1Panel server to that network or configure an [SSH tunnel](/en/docs/ssh-tunnel) as needed.
+
+<Callout type="info">
+  `4224` is the DBX Web service port, not the target database port. Enter the database's own port when creating a MySQL, PostgreSQL, Redis, or other connection.
+</Callout>

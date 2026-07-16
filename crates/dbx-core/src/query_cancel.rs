@@ -1,6 +1,14 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RunningQueryDiagnostics {
+    pub active_execution_ids: Vec<String>,
+    pub active_by_connection: HashMap<String, usize>,
+    pub interrupt_registrations: usize,
+}
 
 type InterruptFn = Box<dyn Fn() + Send + 'static>;
 
@@ -25,6 +33,7 @@ pub struct RunningTaskMetadata {
     pub connection_id: Option<String>,
     pub database: Option<String>,
     pub client_session_id: Option<String>,
+    pub owner_scope: Option<String>,
 }
 
 impl RunningTaskMetadata {
@@ -34,12 +43,25 @@ impl RunningTaskMetadata {
         client_session_id: Option<String>,
     ) -> Self {
         let kind = task_kind_from_client_session_id(client_session_id.as_deref());
-        Self { kind, connection_id: Some(connection_id.into()), database: Some(database.into()), client_session_id }
+        let owner_scope = client_session_id.as_deref().and_then(owner_scope_from_client_session_id);
+        Self {
+            kind,
+            connection_id: Some(connection_id.into()),
+            database: Some(database.into()),
+            client_session_id,
+            owner_scope,
+        }
+    }
+
+    pub fn with_owner_scope(mut self, owner_scope: impl Into<String>) -> Self {
+        self.owner_scope = Some(owner_scope.into());
+        self
     }
 }
 
 #[derive(Clone)]
 struct RunningTask {
+    registration_id: u64,
     token: CancellationToken,
     metadata: RunningTaskMetadata,
     pool_key: Option<String>,
@@ -49,6 +71,7 @@ struct RunningTask {
 pub struct RunningQueries {
     inner: Arc<Mutex<HashMap<String, RunningTask>>>,
     interrupts: Arc<Mutex<HashMap<String, InterruptFn>>>,
+    next_registration_id: Arc<AtomicU64>,
 }
 
 impl RunningQueries {
@@ -58,12 +81,19 @@ impl RunningQueries {
 
     pub fn register_task(&self, execution_id: String, metadata: RunningTaskMetadata) -> RegisteredQuery {
         let token = CancellationToken::new();
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(execution_id.clone(), RunningTask { token: token.clone(), metadata, pool_key: None });
+        let registration_id = self.next_registration_id.fetch_add(1, Ordering::Relaxed) + 1;
+        let previous = self.inner.lock().unwrap_or_else(|e| e.into_inner()).insert(
+            execution_id.clone(),
+            RunningTask { registration_id, token: token.clone(), metadata, pool_key: None },
+        );
+        if let Some(previous) = previous {
+            previous.token.cancel();
+            if let Some(interrupt) = self.interrupts.lock().unwrap_or_else(|e| e.into_inner()).remove(&execution_id) {
+                interrupt();
+            }
+        }
 
-        RegisteredQuery { execution_id, token, running_queries: self.clone() }
+        RegisteredQuery { execution_id, registration_id, token, running_queries: self.clone() }
     }
 
     pub fn register_interrupt(&self, execution_id: &str, interrupt: impl Fn() + Send + 'static) {
@@ -84,6 +114,52 @@ impl RunningQueries {
         } else {
             false
         }
+    }
+
+    pub fn cancel_connection(&self, connection_id: &str) -> usize {
+        self.cancel_matching(|task| task.metadata.connection_id.as_deref() == Some(connection_id))
+    }
+
+    pub fn cancel_client_session(&self, client_session_id: &str) -> usize {
+        self.cancel_matching(|task| task.metadata.client_session_id.as_deref() == Some(client_session_id))
+    }
+
+    pub fn cancel_owner_scope(&self, owner_scope: &str) -> usize {
+        self.cancel_matching(|task| task.metadata.owner_scope.as_deref() == Some(owner_scope))
+    }
+
+    pub fn cancel_all(&self) -> usize {
+        self.cancel_matching(|_| true)
+    }
+
+    pub fn diagnostics(&self) -> RunningQueryDiagnostics {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut active_execution_ids = inner.keys().cloned().collect::<Vec<_>>();
+        active_execution_ids.sort();
+        let mut active_by_connection = HashMap::new();
+        for task in inner.values() {
+            if let Some(connection_id) = &task.metadata.connection_id {
+                *active_by_connection.entry(connection_id.clone()).or_insert(0) += 1;
+            }
+        }
+        drop(inner);
+        RunningQueryDiagnostics {
+            active_execution_ids,
+            active_by_connection,
+            interrupt_registrations: self.interrupts.lock().unwrap_or_else(|e| e.into_inner()).len(),
+        }
+    }
+
+    fn cancel_matching(&self, predicate: impl Fn(&RunningTask) -> bool) -> usize {
+        let execution_ids: Vec<String> = self
+            .inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|(_, task)| predicate(task))
+            .map(|(execution_id, _)| execution_id.clone())
+            .collect();
+        execution_ids.iter().filter(|execution_id| self.cancel(execution_id)).count()
     }
 
     pub fn set_pool_key(&self, execution_id: &str, pool_key: impl Into<String>) {
@@ -109,9 +185,27 @@ impl RunningQueries {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).get(execution_id).map(|task| task.metadata.kind)
     }
 
-    fn remove(&self, execution_id: &str) {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).remove(execution_id);
-        self.interrupts.lock().unwrap_or_else(|e| e.into_inner()).remove(execution_id);
+    #[cfg(test)]
+    pub fn registration_counts(&self) -> (usize, usize) {
+        (
+            self.inner.lock().unwrap_or_else(|e| e.into_inner()).len(),
+            self.interrupts.lock().unwrap_or_else(|e| e.into_inner()).len(),
+        )
+    }
+
+    fn remove(&self, execution_id: &str, registration_id: u64) {
+        let removed = {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if inner.get(execution_id).is_some_and(|task| task.registration_id == registration_id) {
+                inner.remove(execution_id);
+                true
+            } else {
+                false
+            }
+        };
+        if removed {
+            self.interrupts.lock().unwrap_or_else(|e| e.into_inner()).remove(execution_id);
+        }
     }
 }
 
@@ -131,8 +225,14 @@ fn task_kind_from_client_session_id(client_session_id: Option<&str>) -> RunningT
     }
 }
 
+fn owner_scope_from_client_session_id(client_session_id: &str) -> Option<String> {
+    let owner = client_session_id.trim().split(':').next()?.trim();
+    (!owner.is_empty()).then(|| owner.to_string())
+}
+
 pub struct RegisteredQuery {
     execution_id: String,
+    registration_id: u64,
     token: CancellationToken,
     running_queries: RunningQueries,
 }
@@ -145,7 +245,7 @@ impl RegisteredQuery {
 
 impl Drop for RegisteredQuery {
     fn drop(&mut self) {
-        self.running_queries.remove(&self.execution_id);
+        self.running_queries.remove(&self.execution_id, self.registration_id);
     }
 }
 
@@ -188,6 +288,61 @@ mod tests {
     }
 
     #[test]
+    fn stale_registration_drop_does_not_remove_replacement() {
+        let running = RunningQueries::default();
+        let first = running.register("exec-1".to_string());
+        let second = running.register("exec-1".to_string());
+
+        assert!(first.token().is_cancelled());
+        drop(first);
+        assert!(running.has("exec-1"));
+        drop(second);
+        assert!(!running.has("exec-1"));
+    }
+
+    #[test]
+    fn scoped_cancellation_only_cancels_matching_tasks() {
+        let running = RunningQueries::default();
+        let first = running.register_task(
+            "exec-1".to_string(),
+            RunningTaskMetadata::query("conn-1", "main", Some("tab-1".to_string())),
+        );
+        let second = running.register_task(
+            "exec-2".to_string(),
+            RunningTaskMetadata::query("conn-2", "main", Some("tab-2".to_string())),
+        );
+
+        assert_eq!(running.cancel_connection("conn-1"), 1);
+        assert!(first.token().is_cancelled());
+        assert!(!second.token().is_cancelled());
+        assert_eq!(running.cancel_client_session("tab-2"), 1);
+        assert!(second.token().is_cancelled());
+    }
+
+    #[test]
+    fn query_metadata_derives_stable_owner_scope() {
+        let metadata = RunningTaskMetadata::query("conn-1", "main", Some("tab-1:export".to_string()));
+        assert_eq!(metadata.owner_scope.as_deref(), Some("tab-1"));
+    }
+
+    #[test]
+    fn owner_scope_cancellation_matches_related_task_kinds() {
+        let running = RunningQueries::default();
+        let query = running.register_task(
+            "exec-query".to_string(),
+            RunningTaskMetadata::query("conn-1", "main", Some("tab-1".to_string())),
+        );
+        let export = running.register_task(
+            "exec-export".to_string(),
+            RunningTaskMetadata::query("conn-1", "main", Some("tab-1:export".to_string())),
+        );
+
+        assert_eq!(running.cancel_owner_scope("tab-1"), 2);
+        assert!(query.token().is_cancelled());
+        assert!(export.token().is_cancelled());
+    }
+
+    #[test]
     fn register_task_tracks_kind_and_pool_activity() {
         let running = RunningQueries::default();
         let registered = running.register_task(
@@ -201,5 +356,49 @@ mod tests {
         assert!(running.is_pool_active("conn-1:main:session:tab-1_export"));
         drop(registered);
         assert!(!running.is_pool_active("conn-1:main:session:tab-1_export"));
+    }
+
+    #[test]
+    fn unwind_removes_task_and_interrupt_registrations() {
+        let running = RunningQueries::default();
+        let unwind_running = running.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _registered = unwind_running.register("exec-unwind".to_string());
+            unwind_running.register_interrupt("exec-unwind", || {});
+            panic!("simulate driver unwind");
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(running.registration_counts(), (0, 0));
+    }
+
+    #[test]
+    fn completion_after_cancel_removes_all_registrations() {
+        let running = RunningQueries::default();
+        let registered = running.register("exec-cancel".to_string());
+        running.register_interrupt("exec-cancel", || {});
+
+        assert!(running.cancel("exec-cancel"));
+        drop(registered);
+
+        assert_eq!(running.registration_counts(), (0, 0));
+    }
+
+    #[test]
+    fn diagnostics_expose_ids_and_scoped_counts_without_query_text() {
+        let running = RunningQueries::default();
+        let _first = running.register_task(
+            "exec-2".to_string(),
+            RunningTaskMetadata::query("conn-1", "main", Some("tab-1".to_string())),
+        );
+        let _second = running.register_task(
+            "exec-1".to_string(),
+            RunningTaskMetadata::query("conn-1", "main", Some("tab-2".to_string())),
+        );
+
+        let diagnostics = running.diagnostics();
+
+        assert_eq!(diagnostics.active_execution_ids, vec!["exec-1", "exec-2"]);
+        assert_eq!(diagnostics.active_by_connection.get("conn-1"), Some(&2));
     }
 }

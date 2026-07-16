@@ -14,7 +14,10 @@ pub use dbx_core::connection::{
 use dbx_core::database_capabilities;
 use dbx_core::db;
 use dbx_core::db::agent_driver::AgentMethod;
-use dbx_core::models::connection::{rewrite_jdbc_url_host, ConnectionConfig, DatabaseType};
+use dbx_core::models::connection::{
+    database_info_from_protocol_value, rewrite_jdbc_url_host, ConnectionConfig, ConnectionTestResult,
+    DatabaseConnectionInfo, DatabaseType,
+};
 pub use dbx_core::path_utils::expand_tilde;
 
 const MONGO_LEGACY_DRIVER_PROFILE: &str = "mongodb-legacy";
@@ -58,7 +61,7 @@ async fn test_agent_connection(
     config: &ConnectionConfig,
     host: &str,
     port: u16,
-) -> Result<String, String> {
+) -> Result<ConnectionTestResult, String> {
     let connect_params = agent_connect_params(config, host, port, config.database.as_deref().unwrap_or(""));
     let result = state
         .agent_manager
@@ -71,32 +74,49 @@ async fn test_agent_connection(
         )
         .await;
 
-    if let Err(err) = result {
-        if let Some(alternate_config) = oracle_alternate_connect_config(config, &err) {
-            state
-                .agent_manager
-                .call_daemon_method_with_timeout::<serde_json::Value>(
-                    &alternate_config.db_type,
-                    alternate_config.driver_profile.as_deref(),
-                    AgentMethod::TestConnection,
-                    agent_connect_params(
-                        &alternate_config,
-                        host,
-                        port,
-                        alternate_config.database.as_deref().unwrap_or(""),
-                    ),
-                    Some(agent_connect_timeout(&alternate_config)),
-                )
-                .await
-                .map_err(|alternate_err| {
-                    format!("{err}\n\nFallback with alternate Oracle descriptor failed: {alternate_err}")
-                })?;
-        } else {
-            return Err(oracle_error_with_driver_hint(config, &err));
+    let response = match result {
+        Ok(response) => response,
+        Err(err) => {
+            if let Some(alternate_config) = oracle_alternate_connect_config(config, &err) {
+                state
+                    .agent_manager
+                    .call_daemon_method_with_timeout::<serde_json::Value>(
+                        &alternate_config.db_type,
+                        alternate_config.driver_profile.as_deref(),
+                        AgentMethod::TestConnection,
+                        agent_connect_params(
+                            &alternate_config,
+                            host,
+                            port,
+                            alternate_config.database.as_deref().unwrap_or(""),
+                        ),
+                        Some(agent_connect_timeout(&alternate_config)),
+                    )
+                    .await
+                    .map_err(|alternate_err| {
+                        format!("{err}\n\nFallback with alternate Oracle descriptor failed: {alternate_err}")
+                    })?
+            } else {
+                return Err(oracle_error_with_driver_hint(config, &err));
+            }
+        }
+    };
+
+    Ok(ConnectionTestResult::success("Connection successful")
+        .with_database_info(database_info_from_protocol_value(&response)))
+}
+
+async fn optional_mysql_database_info(
+    pool: &db::mysql::MySqlPool,
+    config: &ConnectionConfig,
+) -> Option<DatabaseConnectionInfo> {
+    match db::mysql::database_connection_info(pool, db::mysql::protocol_product_name(config)).await {
+        Ok(info) => Some(info),
+        Err(error) => {
+            log::warn!("Failed to read optional MySQL database information: {error}");
+            None
         }
     }
-
-    Ok("Connection successful".to_string())
 }
 
 async fn connect_agent_pool(
@@ -207,6 +227,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            database_info: None,
         }
     }
 
@@ -577,6 +598,21 @@ async fn connect_sqlite_from_config(config: &ConnectionConfig) -> Result<db::sql
 
 #[tauri::command]
 pub async fn test_connection(state: State<'_, Arc<AppState>>, config: ConnectionConfig) -> Result<String, String> {
+    test_connection_with_info_inner(state.inner(), config).await.map(|result| result.message)
+}
+
+#[tauri::command]
+pub async fn test_connection_with_info(
+    state: State<'_, Arc<AppState>>,
+    config: ConnectionConfig,
+) -> Result<ConnectionTestResult, String> {
+    test_connection_with_info_inner(state.inner(), config).await
+}
+
+async fn test_connection_with_info_inner(
+    state: &Arc<AppState>,
+    config: ConnectionConfig,
+) -> Result<ConnectionTestResult, String> {
     let tunnel_id = format!("{}:test", config.id);
     let has_transport_layers = config.has_effective_transport_layers();
     let connection_id = if has_transport_layers { tunnel_id.as_str() } else { config.id.as_str() };
@@ -587,12 +623,14 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
     let connect_timeout = std::time::Duration::from_secs(config.effective_connect_timeout_secs());
     let idle_timeout = std::time::Duration::from_secs(config.idle_timeout_secs);
     log::info!("[test_connection] db_type={:?} target={}", config.db_type, target);
+    let mut database_info = None;
     let result = match probe_result {
         Err(e) => Err(e),
         Ok(()) => match config.db_type {
             DatabaseType::Mysql if config.needs_bare_mysql() && !config.bare_mysql_uses_tls() => {
                 match db::mysql::connect_bare(&url, connect_timeout).await {
                     Ok(pool) => {
+                        database_info = optional_mysql_database_info(&pool, &config).await;
                         let _ = pool.disconnect().await;
                         Ok("Connection successful".to_string())
                     }
@@ -611,6 +649,7 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                 .await
                 {
                     Ok(pool) => {
+                        database_info = optional_mysql_database_info(&pool, &config).await;
                         let _ = pool.disconnect().await;
                         Ok("Connection successful".to_string())
                     }
@@ -620,6 +659,7 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
             DatabaseType::Mysql => {
                 match db::mysql::connect_with_ca_cert(&url, Some(&config.ca_cert_path), connect_timeout).await {
                     Ok(pool) => {
+                        database_info = optional_mysql_database_info(&pool, &config).await;
                         let _ = pool.disconnect().await;
                         Ok("Connection successful".to_string())
                     }
@@ -629,6 +669,7 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
             DatabaseType::Doris | DatabaseType::ManticoreSearch => {
                 match db::mysql::connect_bare(&url, connect_timeout).await {
                     Ok(pool) => {
+                        database_info = optional_mysql_database_info(&pool, &config).await;
                         let _ = pool.disconnect().await;
                         Ok("Connection successful".to_string())
                     }
@@ -651,6 +692,7 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                 };
                 match connect {
                     Ok(pool) => {
+                        database_info = optional_mysql_database_info(&pool, &config).await;
                         let _ = pool.disconnect().await;
                         Ok("Connection successful".to_string())
                     }
@@ -676,10 +718,10 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
             DatabaseType::Redis => {
                 let con = if config.uses_redis_cluster() {
                     state.connect_redis_cluster(&tunnel_id, &config).await?;
-                    return Ok("Connection successful".to_string());
+                    return Ok(ConnectionTestResult::success("Connection successful"));
                 } else if config.uses_redis_sentinel() {
                     state.connect_redis_sentinel(&tunnel_id, &config).await?;
-                    return Ok("Connection successful".to_string());
+                    return Ok(ConnectionTestResult::success("Connection successful"));
                 } else {
                     db::redis_driver::connect(&url, connect_timeout).await?
                 };
@@ -702,7 +744,7 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                         .await
                         .map_err(|err| mongo_legacy_error_with_auth_hint(&err))?;
                     client.disconnect().await.ok();
-                    return Ok("Connection successful (via legacy driver)".to_string());
+                    return Ok(ConnectionTestResult::success("Connection successful (via legacy driver)"));
                 }
 
                 let native_err = match db::mongo_driver::connect(&url, connect_timeout, idle_timeout).await {
@@ -710,7 +752,7 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                         match db::mongo_driver::test_connection(&client, connect_timeout, config.effective_database())
                             .await
                         {
-                            Ok(()) => return Ok("Connection successful".to_string()),
+                            Ok(()) => return Ok(ConnectionTestResult::success("Connection successful")),
                             Err(e) => e,
                         }
                     }
@@ -746,7 +788,16 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                     .map(|_| "Connection successful".to_string())
             }
             DatabaseType::SqlServer => {
-                state.test_sqlserver_connection_with_legacy_fallback(&config, &host, port, connect_timeout).await
+                match state
+                    .test_sqlserver_connection_with_legacy_fallback_with_info(&config, &host, port, connect_timeout)
+                    .await
+                {
+                    Ok(details) => {
+                        database_info = details.database_info;
+                        Ok(details.message)
+                    }
+                    Err(err) => Err(err),
+                }
             }
             DatabaseType::Elasticsearch => {
                 let mut client = db::elasticsearch_driver::EsClient::from_config(
@@ -857,11 +908,23 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                     .to_string())
             }
             db_type if database_capabilities::is_agent_type(&db_type) => {
-                test_agent_connection(state.inner(), &config, &host, port).await
+                match test_agent_connection(state, &config, &host, port).await {
+                    Ok(details) => {
+                        database_info = details.database_info;
+                        Ok(details.message)
+                    }
+                    Err(err) => Err(err),
+                }
             }
             DatabaseType::PrestoSql => {
                 let jdbc_config = prestosql_jdbc_config_for_endpoint(&config, &host, port);
-                state.test_external_driver("jdbc", &jdbc_config).await
+                match state.test_external_driver_with_info("jdbc", &jdbc_config).await {
+                    Ok(details) => {
+                        database_info = details.database_info;
+                        Ok(details.message)
+                    }
+                    Err(err) => Err(err),
+                }
             }
             DatabaseType::Jdbc => {
                 let mut jdbc_config = config.clone();
@@ -870,7 +933,13 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                         jdbc_config.connection_string = Some(rewrite_jdbc_url_host(url, &host, port));
                     }
                 }
-                state.test_external_driver("jdbc", &jdbc_config).await
+                match state.test_external_driver_with_info("jdbc", &jdbc_config).await {
+                    Ok(details) => {
+                        database_info = details.database_info;
+                        Ok(details.message)
+                    }
+                    Err(err) => Err(err),
+                }
             }
             db_type => Err(format!("Unsupported database type: {db_type:?}")),
         },
@@ -880,7 +949,7 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
         state.reset_connection_transport_for_config(&tunnel_id, &config).await;
     }
 
-    result
+    result.map(|message| ConnectionTestResult::success(message).with_database_info(database_info))
 }
 
 #[tauri::command]
@@ -1213,6 +1282,7 @@ pub async fn disconnect_db(
     if !should_disconnect {
         return Ok(());
     }
+    state.running_queries.cancel_connection(&connection_id);
     state.remove_connection_pools_detached(&connection_id).await;
     drop_nacos_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;
     drop_mq_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;
@@ -1252,6 +1322,24 @@ pub async fn connection_identifier_quote(
     database: Option<String>,
 ) -> Result<Option<String>, String> {
     state.connection_identifier_quote(&connection_id, database.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn connection_database_info(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: Option<String>,
+) -> Result<Option<DatabaseConnectionInfo>, String> {
+    state.connection_database_info(&connection_id, database.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn save_connection_database_info(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database_info: Option<DatabaseConnectionInfo>,
+) -> Result<(), String> {
+    state.save_connection_database_info(&connection_id, database_info).await
 }
 
 /// Check whether a connection has read-only protection enabled.

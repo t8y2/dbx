@@ -256,7 +256,7 @@ pub struct SqlServerStreamExportSummary {
 }
 
 pub enum SqlServerStreamItem<'a> {
-    Columns(&'a [String]),
+    Columns { columns: &'a [String], column_types: &'a [String] },
     Row(&'a [serde_json::Value]),
 }
 
@@ -638,6 +638,7 @@ pub async fn stream_first_result_set(
     let mut stream = sqlserver_driver_result(client.query(query_sql.as_str(), &[])).await?;
     let mut active_result_index: Option<usize> = None;
     let mut columns: Vec<String> = Vec::new();
+    let mut column_types: Vec<String> = Vec::new();
     let mut columns_emitted = false;
     let mut rows_exported = 0_u64;
 
@@ -663,7 +664,8 @@ pub async fn stream_first_result_set(
                 if active_result_index.is_none() {
                     active_result_index = Some(metadata.result_index());
                     columns = columns_from_metadata(&metadata);
-                    on_item(SqlServerStreamItem::Columns(&columns))?;
+                    column_types = column_types_from_metadata(&metadata);
+                    on_item(SqlServerStreamItem::Columns { columns: &columns, column_types: &column_types })?;
                     columns_emitted = true;
                 }
             }
@@ -671,7 +673,8 @@ pub async fn stream_first_result_set(
                 if active_result_index.is_none() {
                     active_result_index = Some(row.result_index());
                     columns = row.columns().iter().map(|c| c.name().to_string()).collect();
-                    on_item(SqlServerStreamItem::Columns(&columns))?;
+                    column_types = row.columns().iter().map(sqlserver_column_type_name).collect();
+                    on_item(SqlServerStreamItem::Columns { columns: &columns, column_types: &column_types })?;
                     columns_emitted = true;
                 }
                 if Some(row.result_index()) != active_result_index {
@@ -688,7 +691,7 @@ pub async fn stream_first_result_set(
     }
 
     if !columns_emitted {
-        on_item(SqlServerStreamItem::Columns(&columns))?;
+        on_item(SqlServerStreamItem::Columns { columns: &columns, column_types: &column_types })?;
     }
     Ok(SqlServerStreamExportSummary { columns, rows_exported })
 }

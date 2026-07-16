@@ -31,7 +31,7 @@ test("tree host owns sidebar data-open generations", () => {
   const connectionTree = readFileSync("apps/desktop/src/components/sidebar/ConnectionTree.vue", "utf8");
 
   assert.doesNotMatch(treeItem, /runSidebarDataOpenImmediately/);
-  assert.match(treeItem, /emit\("open-data", node, true, openData\)/);
+  assert.match(treeItem, /emit\("open-data", node, true, "default", openData\)/);
   assert.match(connectionTree, /function openSidebarData/);
   assert.match(connectionTree, /runSidebarDataOpenImmediately/);
   assert.match(connectionTree, /createSidebarActionTarget\(node\)/);

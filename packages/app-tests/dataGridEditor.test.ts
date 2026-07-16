@@ -1062,7 +1062,7 @@ test("saving manually typed JSON arrays from a Postgres array column uses array 
   assert.deepEqual(executedSql, [`UPDATE "articles" SET "tags" = '{"draft","发布"}' WHERE "id" = 1;`]);
 });
 
-test("failed table data save records a failed history entry", async () => {
+test("single-statement table data save uses auto-commit and records a failed history entry", async () => {
   setActivePinia(createPinia());
   installBrowserTestGlobals();
 
@@ -1082,7 +1082,7 @@ test("failed table data save records a failed history entry", async () => {
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
     }
-    if (url === "/api/query/execute-in-transaction") {
+    if (url === "/api/query/execute-batch") {
       return new Response(permissionError, { status: 500 });
     }
     if (url === "/api/history/save") {
@@ -1148,6 +1148,89 @@ test("failed table data save records a failed history entry", async () => {
   assert.equal(historyEntry.rollback_sql, undefined);
   assert.equal(historyEntry.affected_rows, undefined);
   assert.equal(historyEntry.sql, `UPDATE "pp_questions" SET "title" = 'New title' WHERE "id" = 1;`);
+});
+
+test("multi-statement table data save remains transactional", async () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const executionEndpoints: string[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/prepare-data-grid-save") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      const options = body.options as DataGridSaveStatementOptions;
+      return new Response(
+        JSON.stringify({
+          statements: mockPreparedSaveStatements(options),
+          rollbackStatements: [],
+          executionSchema: options.tableMeta.schema,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/execute-in-transaction" || url === "/api/query/execute-batch") {
+      executionEndpoints.push(url);
+      return new Response(JSON.stringify({ affected_rows: 2 }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url === "/api/history/save") {
+      return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(`unexpected request: ${url}`, { status: 500 });
+  }) as typeof fetch;
+
+  const result = computed(() => ({
+    columns: ["id", "title"],
+    rows: [
+      [1, "Old title 1"],
+      [2, "Old title 2"],
+    ] as CellValue[][],
+  }));
+  const rowStatusFilter = ref<"all" | "changed" | "edited" | "new" | "deleted">("all");
+  const editor = useDataGridEditor({
+    result,
+    editable: computed(() => true),
+    databaseType: computed(() => "mysql"),
+    connectionId: computed(() => "conn-1"),
+    database: computed(() => "app_db"),
+    tableMeta: computed(() => ({
+      tableName: "pp_questions",
+      columns: [column("id", true), column("title")],
+      primaryKeys: ["id"],
+    })),
+    onExecuteSql: computed(() => undefined),
+    customSaveHandler: computed(() => undefined),
+    sql: computed(() => "SELECT id, title FROM pp_questions"),
+    searchText: ref(""),
+    whereFilterInput: ref(""),
+    currentWhereInput: computed(() => undefined),
+    orderByInput: ref(""),
+    rowStatusFilter,
+    pageSize: ref(50),
+    currentPage: ref(1),
+    getRowItem: (rowId) => {
+      const row = result.value.rows[rowId];
+      if (!row) return undefined;
+      return {
+        id: rowId,
+        sourceIndex: rowId,
+        data: row,
+        isNew: false,
+        isDeleted: false,
+        isDirtyCol: [false, false],
+        status: "clean",
+      };
+    },
+    emit: () => {},
+  });
+
+  editor.applyCellValue(0, 1, "New title 1");
+  editor.applyCellValue(1, 1, "New title 2");
+  await editor.saveChanges();
+
+  assert.deepEqual(executionEndpoints, ["/api/query/execute-in-transaction"]);
+  assert.equal(editor.saveError.value, "");
+  assert.equal(editor.dirtyRows.value.size, 0);
 });
 
 test("quick entry off keeps blur edits pending without saving", async () => {

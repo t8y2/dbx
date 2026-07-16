@@ -5,6 +5,7 @@ import java.sql.Statement;
 import java.util.Collections;
 import java.util.List;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 public final class TransactionExecutor {
     private TransactionExecutor() {
@@ -16,7 +17,17 @@ public final class TransactionExecutor {
         String schema,
         Function<String, String> setSchemaSql
     ) {
-        return executeStatements(conn, statements, schema, setSchemaSql, new StatementRunner() {
+        return executeUpdateStatements(conn, statements, schema, setSchemaSql, () -> "");
+    }
+
+    public static QueryResult executeUpdateStatements(
+        Connection conn,
+        List<String> statements,
+        String schema,
+        Function<String, String> setSchemaSql,
+        Supplier<String> resetSchemaSql
+    ) {
+        return executeStatements(conn, statements, schema, setSchemaSql, resetSchemaSql, new StatementRunner() {
             @Override
             public long run(Statement stmt, String sql) throws Exception {
                 return stmt.executeUpdate(sql);
@@ -31,17 +42,28 @@ public final class TransactionExecutor {
         Function<String, String> setSchemaSql,
         StatementRunner runner
     ) {
+        return executeStatements(conn, statements, schema, setSchemaSql, () -> "", runner);
+    }
+
+    public static QueryResult executeStatements(
+        Connection conn,
+        List<String> statements,
+        String schema,
+        Function<String, String> setSchemaSql,
+        Supplier<String> resetSchemaSql,
+        StatementRunner runner
+    ) {
         return unchecked(() -> {
             long start = System.currentTimeMillis();
             if (!supportsTransactions(conn)) {
-                long totalAffected = executeAll(conn, statements, schema, setSchemaSql, runner);
+                long totalAffected = executeAll(conn, statements, schema, setSchemaSql, resetSchemaSql, runner);
                 return result(totalAffected, start);
             }
 
             boolean savedAutoCommit = conn.getAutoCommit();
             conn.setAutoCommit(false);
             try {
-                long totalAffected = executeAll(conn, statements, schema, setSchemaSql, runner);
+                long totalAffected = executeAll(conn, statements, schema, setSchemaSql, resetSchemaSql, runner);
                 conn.commit();
                 return result(totalAffected, start);
             } catch (Exception e) {
@@ -58,9 +80,10 @@ public final class TransactionExecutor {
         List<String> statements,
         String schema,
         Function<String, String> setSchemaSql,
+        Supplier<String> resetSchemaSql,
         StatementRunner runner
     ) throws Exception {
-        applySchema(conn, schema, setSchemaSql);
+        applySchema(conn, schema, setSchemaSql, resetSchemaSql);
         long totalAffected = 0;
         for (String statement : statements) {
             try (Statement stmt = conn.createStatement()) {
@@ -70,8 +93,13 @@ public final class TransactionExecutor {
         return totalAffected;
     }
 
-    private static void applySchema(Connection conn, String schema, Function<String, String> setSchemaSql) throws Exception {
-        JdbcSchemaSwitcher.apply(conn, schema, setSchemaSql);
+    private static void applySchema(
+        Connection conn,
+        String schema,
+        Function<String, String> setSchemaSql,
+        Supplier<String> resetSchemaSql
+    ) throws Exception {
+        JdbcSchemaSwitcher.apply(conn, schema, setSchemaSql, resetSchemaSql);
     }
 
     private static boolean supportsTransactions(Connection conn) {

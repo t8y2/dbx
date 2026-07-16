@@ -22,6 +22,11 @@ export interface SqlFormatterCustomParameter {
   regex: string;
 }
 
+// DBX substitutes `${name}`/`#{name}` placeholders client-side (see sqlVariableSyntax.ts),
+// but no sql-formatter dialect tokenizes them, so raw SQL containing them would fail to
+// format with a parse error. Always registering them as custom params keeps formatting working.
+const DBX_CUSTOM_PARAM_TYPES: SqlFormatterCustomParameter[] = [{ regex: String.raw`\$\{[^}]+\}` }, { regex: String.raw`#\{[^}]+\}` }];
+
 export interface SqlFormatterParamTypes {
   positional?: boolean;
   numbered?: ("?" | ":" | "$")[];
@@ -239,6 +244,7 @@ export function syncSqlFormatterConfigDraft(text: string, syncSettings: (setting
 
 export function sqlFormatterOptions(settings: unknown) {
   const normalized = sqlFormatterOptionSettings(settings);
+  const paramTypes = normalized.paramTypes ?? {};
   return {
     keywordCase: normalized.keywordCase,
     dataTypeCase: normalized.dataTypeCase,
@@ -252,6 +258,9 @@ export function sqlFormatterOptions(settings: unknown) {
     linesBetweenQueries: normalized.linesBetweenQueries,
     denseOperators: normalized.denseOperators,
     newlineBeforeSemicolon: normalized.newlineBeforeSemicolon,
-    ...(normalized.paramTypes !== null ? { paramTypes: normalized.paramTypes } : {}),
+    paramTypes: {
+      ...paramTypes,
+      custom: [...(paramTypes.custom ?? []), ...DBX_CUSTOM_PARAM_TYPES],
+    },
   };
 }

@@ -961,12 +961,20 @@ function openSidebarProcedure(node: TreeNode) {
   sidebarProcedureOpen.value = true;
 }
 
-function openSidebarData(node: TreeNode, requireSelection: boolean, runner: (node: TreeNode, request: SidebarDataOpenRequest) => Promise<void>) {
+function openSidebarData(node: TreeNode, requireSelection: boolean, openMode: "default" | "new-tab", runner: (node: TreeNode, request: SidebarDataOpenRequest) => Promise<void>) {
   const target = createSidebarActionTarget(node);
-  runSidebarDataOpenImmediately((request) => {
-    if (requireSelection && store.selectedTreeNodeId !== target.id) return;
-    return runner(target, request);
-  });
+  runSidebarDataOpenImmediately(
+    {
+      connectionKey: target.connectionId || target.id,
+      // Explicit new-tab opens are intentional independent work; ordinary
+      // navigation keeps latest-request-wins behavior.
+      supersede: openMode !== "new-tab",
+    },
+    (request) => {
+      if (requireSelection && store.selectedTreeNodeId !== target.id) return;
+      return runner(target, request);
+    },
+  );
 }
 
 function openSidebarVisibleDatabases(node: TreeNode) {

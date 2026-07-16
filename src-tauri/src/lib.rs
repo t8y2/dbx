@@ -10,7 +10,7 @@ use commands::connection::AppState;
 use dbx_core::storage::{maybe_import_user_data_db, DesktopIconTheme, DesktopSettings, Storage};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 #[cfg(target_os = "macos")]
 use tauri::menu::Menu;
 #[cfg(target_os = "macos")]
@@ -1066,6 +1066,7 @@ pub fn run() {
             commands::cloud_sync::snippet_sync_upload,
             commands::cloud_sync::snippet_sync_download,
             commands::connection::test_connection,
+            commands::connection::test_connection_with_info,
             commands::connection::connect_db,
             commands::connection::connection_final_proxy_port,
             commands::connection::disconnect_db,
@@ -1073,6 +1074,8 @@ pub fn run() {
             commands::connection::refresh_connections,
             commands::connection::check_connection_health,
             commands::connection::connection_identifier_quote,
+            commands::connection::connection_database_info,
+            commands::connection::save_connection_database_info,
             commands::connection::save_connections,
             commands::connection::load_connections,
             commands::connection::save_sidebar_layout,
@@ -1126,6 +1129,9 @@ pub fn run() {
             commands::schema_cache::delete_schema_cache_prefix,
             commands::tab_runtime_cache::save_tab_runtime_cache,
             commands::tab_runtime_cache::load_tab_runtime_cache,
+            commands::tab_runtime_cache::list_tab_runtime_cache_metadata,
+            commands::tab_runtime_cache::prune_tab_runtime_cache,
+            commands::tab_runtime_cache::delete_tab_runtime_cache_owner,
             commands::tab_runtime_cache::delete_tab_runtime_cache,
             commands::query::execute_query,
             commands::query::execute_multi,
@@ -1454,6 +1460,8 @@ pub fn run() {
                 if should_confirm_app_exit_request(std::env::consts::OS, *code, confirmed_exit) {
                     api.prevent_exit();
                     request_app_close(app_handle, "quit");
+                } else if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
+                    tauri::async_runtime::block_on(state.shutdown_background_tasks(Duration::from_secs(3)));
                 }
             }
 

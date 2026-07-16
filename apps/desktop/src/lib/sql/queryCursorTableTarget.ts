@@ -1,6 +1,7 @@
 import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
-import { isSqlKeyword } from "@/lib/sql/sqlNavigation";
+import { extractIdentifierPartsAt, isSqlKeyword, sqlObjectNavigationTarget, type SqlObjectNavigationTarget, type SqlObjectNavigationType } from "@/lib/sql/sqlNavigation";
 import type { ActiveTabSidebarTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
+import type { SqlCompletionTable } from "@/lib/sql/sqlCompletion";
 import type { DatabaseType, QueryTab, TreeNode } from "@/types/database";
 
 export interface QueryCursorTableCandidate {
@@ -10,99 +11,28 @@ export interface QueryCursorTableCandidate {
   tableName: string;
 }
 
-export interface IdentifierPart {
-  value: string;
-  quoted: boolean;
+export interface QueryTableCandidateAtPositionInput {
+  connectionId: string;
+  database: string;
+  schema?: string;
+  databaseType?: DatabaseType;
+  sql: string;
+  position: number;
 }
 
-function identifierChar(ch: string | undefined): boolean {
-  return !!ch && (/[A-Za-z0-9_$."`-]/.test(ch) || ch === "[" || ch === "]");
-}
+export type QueryContextObjectAction = "view-data" | "edit-table-structure" | "edit-view" | "view-source" | "view-ddl";
 
-function readIdentifierWindow(sql: string, pos: number): string {
-  const clamped = Math.max(0, Math.min(pos, sql.length));
-  let from = clamped;
-  let to = clamped;
+export type QueryContextObjectRoute =
+  | { event: "viewTableData"; payload: [target: SqlObjectNavigationTarget] }
+  | { event: "editTableStructure"; payload: [target: SqlObjectNavigationTarget] }
+  | { event: "openObjectSource"; payload: [target: SqlObjectNavigationTarget, initialEditing: boolean] }
+  | { event: "viewTableDdl"; payload: [target: SqlObjectNavigationTarget] };
 
-  if (!identifierChar(sql[from]) && identifierChar(sql[from - 1])) {
-    from -= 1;
-    to = from + 1;
-  }
-
-  if (!identifierChar(sql[from])) return "";
-
-  while (from > 0 && identifierChar(sql[from - 1])) from -= 1;
-  while (to < sql.length && identifierChar(sql[to])) to += 1;
-  return sql.slice(from, to).replace(/^\.+|\.+$/g, "");
-}
-
-function splitQualifiedIdentifier(text: string): IdentifierPart[] {
-  const parts: IdentifierPart[] = [];
-  let current = "";
-  let quoted = false;
-  let quote: "`" | '"' | "]" | null = null;
-
-  function pushPart() {
-    const value = current.trim();
-    if (value) parts.push({ value, quoted });
-    current = "";
-    quoted = false;
-  }
-
-  for (let i = 0; i < text.length; i += 1) {
-    const ch = text[i];
-
-    if (quote) {
-      if (quote === "]" && ch === "]") {
-        if (text[i + 1] === "]") {
-          current += "]";
-          i += 1;
-        } else {
-          quote = null;
-        }
-        continue;
-      }
-      if ((quote === "`" || quote === '"') && ch === quote) {
-        if (text[i + 1] === quote) {
-          current += ch;
-          i += 1;
-        } else {
-          quote = null;
-        }
-        continue;
-      }
-      current += ch;
-      continue;
-    }
-
-    if (ch === ".") {
-      pushPart();
-      continue;
-    }
-
-    if (ch === "`" || ch === '"') {
-      quoted = true;
-      quote = ch;
-      continue;
-    }
-
-    if (ch === "[") {
-      quoted = true;
-      quote = "]";
-      continue;
-    }
-
-    current += ch;
-  }
-
-  pushPart();
-  return parts;
-}
-
-export function extractQualifiedIdentifierPartsAt(sql: string, pos: number): IdentifierPart[] {
-  const text = readIdentifierWindow(sql, pos);
-  if (!text) return [];
-  const parts = splitQualifiedIdentifier(text);
+export function extractQualifiedIdentifierPartsAt(sql: string, pos: number) {
+  let parts = extractIdentifierPartsAt(sql, pos);
+  // CodeMirror can report the boundary immediately after the clicked token;
+  // retain the legacy behavior that treats that boundary as part of the identifier.
+  if (parts.length === 0 && pos > 0) parts = extractIdentifierPartsAt(sql, pos - 1);
   const last = parts[parts.length - 1];
   if (!last || (!last.quoted && isSqlKeyword(last.value))) return [];
   return parts;
@@ -112,18 +42,29 @@ export function queryCursorTableCandidate(tab: QueryTab | undefined | null, data
   if (!tab || tab.mode !== "query" || !tab.connectionId || !tab.database) return null;
 
   const cursor = tab.editorSelection?.head ?? tab.editorSelection?.anchor ?? tab.sql.length;
-  const parts = extractQualifiedIdentifierPartsAt(tab.sql, cursor).map((part) => part.value);
+  return queryTableCandidateAtSqlPosition({
+    connectionId: tab.connectionId,
+    database: tab.database,
+    schema: tab.schema,
+    databaseType,
+    sql: tab.sql,
+    position: cursor,
+  });
+}
+
+export function queryTableCandidateAtSqlPosition(input: QueryTableCandidateAtPositionInput): QueryCursorTableCandidate | null {
+  const parts = extractQualifiedIdentifierPartsAt(input.sql, input.position).map((part) => part.value);
   if (parts.length === 0) return null;
 
   const tableName = parts[parts.length - 1];
-  let database = tab.database;
-  let schema = tab.schema;
+  let database = input.database;
+  let schema = input.schema;
 
   if (parts.length >= 3) {
     database = parts[parts.length - 3];
     schema = parts[parts.length - 2];
   } else if (parts.length === 2) {
-    if (databaseType && !isSchemaAware(databaseType) && !isSingleDatabase(databaseType)) {
+    if (input.databaseType && !isSchemaAware(input.databaseType) && !isSingleDatabase(input.databaseType)) {
       database = parts[0];
       schema = undefined;
     } else {
@@ -131,7 +72,46 @@ export function queryCursorTableCandidate(tab: QueryTab | undefined | null, data
     }
   }
 
-  return { connectionId: tab.connectionId, database, schema, tableName };
+  return { connectionId: input.connectionId, database, schema, tableName };
+}
+
+export function resolveQueryContextCandidateDatabase(candidate: QueryCursorTableCandidate, databases: readonly string[]): QueryCursorTableCandidate {
+  const database = databases.find((name) => sameIdentifier(name, candidate.database));
+  return database && database !== candidate.database ? { ...candidate, database } : candidate;
+}
+
+export function resolveQueryContextObjectTarget(candidate: QueryCursorTableCandidate, tables: readonly SqlCompletionTable[]): SqlObjectNavigationTarget {
+  const nameMatches = tables.filter((table) => sameIdentifier(table.name, candidate.tableName));
+  const match = candidate.schema ? (nameMatches.find((table) => sameIdentifier(table.schema, candidate.schema)) ?? nameMatches.find((table) => !table.schema)) : nameMatches[0];
+  return sqlObjectNavigationTarget({
+    name: match?.name ?? candidate.tableName,
+    database: candidate.database,
+    schema: match?.schema ?? candidate.schema,
+    type: match?.type,
+  });
+}
+
+export function queryContextObjectActions(type?: SqlObjectNavigationType): QueryContextObjectAction[] {
+  if (type === "view" || type === "materialized_view") {
+    return ["view-data", "edit-view", "view-source", "view-ddl"];
+  }
+  // Unknown metadata preserves the historical table actions instead of disabling existing entry points.
+  return ["view-data", "edit-table-structure", "view-ddl"];
+}
+
+export function queryContextObjectRoute(action: QueryContextObjectAction, target: SqlObjectNavigationTarget): QueryContextObjectRoute {
+  switch (action) {
+    case "view-data":
+      return { event: "viewTableData", payload: [target] };
+    case "edit-table-structure":
+      return { event: "editTableStructure", payload: [target] };
+    case "edit-view":
+      return { event: "openObjectSource", payload: [target, true] };
+    case "view-source":
+      return { event: "openObjectSource", payload: [target, false] };
+    case "view-ddl":
+      return { event: "viewTableDdl", payload: [target] };
+  }
 }
 
 export function qualifiedTableNameAtSqlPosition(sql: string, pos: number): string | null {

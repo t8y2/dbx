@@ -2,6 +2,7 @@
 
 import { createReadStream, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const DEFAULT_API_BASE = "https://api.cnb.cool";
 const DEFAULT_REPOSITORY = "dbxio.com/dbx";
@@ -76,7 +77,7 @@ async function uploadWithRetry(client, releaseId, filePath, overwriteExisting) {
   }
 }
 
-class CnbClient {
+export class CnbClient {
   constructor({ apiBase, repository, token }) {
     this.apiBase = apiBase.replace(/\/+$/, "");
     this.repository = repository;
@@ -135,7 +136,14 @@ class CnbClient {
     });
     if (allow404 && response.status === 404) return null;
     if (!response.ok) throw new Error(`CNB API ${method} ${path} failed with ${response.status}: ${await response.text()}`);
-    return response.status === 204 ? null : response.json();
+    const responseBody = await response.text();
+    // CNB may acknowledge release metadata updates with HTTP 200 and an empty body.
+    if (!responseBody.trim()) return null;
+    try {
+      return JSON.parse(responseBody);
+    } catch (error) {
+      throw new Error(`CNB API ${method} ${path} returned invalid JSON: ${error.message}`);
+    }
   }
 
   headers(json = false) {
@@ -165,7 +173,9 @@ async function mapWithConcurrency(items, concurrency, worker) {
   await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, runWorker));
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

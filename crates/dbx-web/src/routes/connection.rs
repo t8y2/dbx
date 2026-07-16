@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::Json;
-use dbx_core::models::connection::ConnectionConfig;
+use dbx_core::connection::AppState;
+use dbx_core::models::connection::{ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo};
 use serde::Deserialize;
 
 use crate::error::AppError;
@@ -39,34 +40,73 @@ pub struct ConnectionIdentifierQuoteRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SaveConnectionDatabaseInfoRequest {
+    pub connection_id: String,
+    pub database_info: Option<DatabaseConnectionInfo>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SaveConnectionsRequest {
     pub configs: Vec<ConnectionConfig>,
+}
+
+fn is_connection_info_capability_unsupported(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("connectioninfo")
+        && (error.contains("unsupported") || error.contains("unknown method") || error.contains("method not found"))
+}
+
+async fn run_temporary_connection_test(
+    app: &Arc<AppState>,
+    config: ConnectionConfig,
+    include_database_info: bool,
+) -> Result<ConnectionTestResult, String> {
+    let temp_id = format!("__test_{}", uuid::Uuid::new_v4());
+    app.configs.write().await.insert(temp_id.clone(), config.clone());
+
+    let pool_result = app.get_or_create_pool(&temp_id, config.database.as_deref()).await;
+    let database_info = if include_database_info {
+        match &pool_result {
+            Ok(_) => match app.connection_database_info(&temp_id, config.database.as_deref()).await {
+                Ok(info) => info,
+                Err(error) if is_connection_info_capability_unsupported(&error) => {
+                    log::debug!("Connection information capability is unavailable: {error}");
+                    None
+                }
+                Err(error) => {
+                    log::warn!("Failed to read optional connection information: {error}");
+                    None
+                }
+            },
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    app.remove_connection_pools(&temp_id).await;
+    app.reset_connection_transport_for_config(&temp_id, &config).await;
+    app.configs.write().await.remove(&temp_id);
+
+    pool_result.map(|_| ConnectionTestResult::success("Connection successful").with_database_info(database_info))
 }
 
 pub async fn test_connection(
     State(state): State<Arc<WebState>>,
     Json(body): Json<ConnectRequest>,
 ) -> Result<Json<String>, AppError> {
-    let config = body.config;
-    let app = &state.app;
+    run_temporary_connection_test(&state.app, body.config, false)
+        .await
+        .map(|result| Json(result.message))
+        .map_err(AppError)
+}
 
-    // Store config temporarily
-    let temp_id = format!("__test_{}", uuid::Uuid::new_v4());
-    app.configs.write().await.insert(temp_id.clone(), config.clone());
-
-    // Try to connect
-    let result = app.get_or_create_pool(&temp_id, config.database.as_deref()).await;
-
-    // Clean up any pool keys created for the temporary connection, including
-    // database-scoped keys like "__test_uuid:database".
-    app.remove_connection_pools(&temp_id).await;
-    app.reset_connection_transport_for_config(&temp_id, &config).await;
-    app.configs.write().await.remove(&temp_id);
-
-    match result {
-        Ok(_) => Ok(Json("Connection successful".to_string())),
-        Err(e) => Err(AppError(e)),
-    }
+pub async fn test_connection_with_info(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<ConnectRequest>,
+) -> Result<Json<ConnectionTestResult>, AppError> {
+    run_temporary_connection_test(&state.app, body.config, true).await.map(Json).map_err(AppError)
 }
 
 pub async fn connect_db(
@@ -85,6 +125,25 @@ pub async fn connect_db(
     app.get_or_create_pool_for_connection_attempt(&connection_id, None, attempt).await.map_err(AppError)?;
 
     Ok(Json(connection_id))
+}
+
+pub async fn connected_database_info(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<ConnectionIdentifierQuoteRequest>,
+) -> Result<Json<Option<DatabaseConnectionInfo>>, AppError> {
+    state.app.connection_database_info(&body.connection_id, body.database.as_deref()).await.map(Json).map_err(AppError)
+}
+
+pub async fn save_connection_database_info(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<SaveConnectionDatabaseInfoRequest>,
+) -> Result<Json<()>, AppError> {
+    state
+        .app
+        .save_connection_database_info(&body.connection_id, body.database_info)
+        .await
+        .map(|_| Json(()))
+        .map_err(AppError)
 }
 
 pub async fn connection_final_proxy_port(
@@ -120,6 +179,7 @@ pub async fn disconnect_db(
     if !should_disconnect {
         return Ok(Json(()));
     }
+    app.running_queries.cancel_connection(&body.connection_id);
     app.remove_connection_pools_detached(&body.connection_id).await;
     app.nacos_registry.drop_connection(&body.connection_id).await;
     #[cfg(feature = "mq-admin")]
@@ -262,19 +322,24 @@ async fn remove_connection_pools_for_connection_ids(state: &WebState, connection
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "mq-admin")]
+    use super::connect_db;
     use super::{
-        connect_db, disconnect_db, load_connections, save_connections, ConnectRequest, DisconnectRequest,
+        disconnect_db, load_connections, save_connection_database_info, save_connections, test_connection,
+        test_connection_with_info, ConnectRequest, DisconnectRequest, SaveConnectionDatabaseInfoRequest,
         SaveConnectionsRequest,
     };
     use crate::state::{LoginRateLimit, WebState};
     use axum::extract::State;
     use axum::Json;
     use dbx_core::connection::{AppState, PoolKind};
-    use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
+    use dbx_core::models::connection::{ConnectionConfig, DatabaseConnectionInfo, DatabaseType};
     use dbx_core::storage::Storage;
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
+    #[cfg(feature = "mq-admin")]
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    #[cfg(feature = "mq-admin")]
     use tokio::net::TcpListener;
     use tokio::sync::{Mutex, RwLock};
 
@@ -328,6 +393,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            database_info: None,
         }
     }
 
@@ -364,6 +430,34 @@ mod tests {
         (state, dir)
     }
 
+    #[tokio::test]
+    async fn connection_test_info_preserves_legacy_string_and_cleans_up_temporary_state() {
+        let (state, dir) = test_web_state().await;
+        let db_path = dir.join("test-info.db");
+        std::fs::File::create(&db_path).unwrap();
+        let config = sqlite_config("sqlite-test", &db_path.to_string_lossy());
+
+        let legacy = test_connection(
+            State(state.clone()),
+            Json(ConnectRequest { config: config.clone(), client_attempt: None }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{}", error.0));
+        assert_eq!(legacy.0, "Connection successful");
+
+        let detailed =
+            test_connection_with_info(State(state.clone()), Json(ConnectRequest { config, client_attempt: None }))
+                .await
+                .unwrap_or_else(|error| panic!("{}", error.0));
+        assert_eq!(detailed.0.message, "Connection successful");
+        assert_eq!(detailed.0.database_info, None);
+        assert!(state.app.configs.read().await.keys().all(|key| !key.starts_with("__test_")));
+        assert!(state.app.connections.read().await.keys().all(|key| !key.starts_with("__test_")));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(feature = "mq-admin")]
     async fn spawn_pulsar_clusters_server() -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -405,6 +499,36 @@ mod tests {
 
         let configs = state.app.configs.read().await;
         assert_eq!(configs.get("sqlite-conn").map(|c| c.host.as_str()), Some(config.host.as_str()));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn save_connection_database_info_preserves_connected_pool() {
+        let (state, dir) = test_web_state().await;
+        let config = mq_config("mq-info", "http://127.0.0.1:8080");
+        state.app.storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+        state.app.configs.write().await.insert(config.id.clone(), config.clone());
+        state.app.connections.write().await.insert(config.id.clone(), PoolKind::MessageQueue);
+        let database_info = DatabaseConnectionInfo {
+            product_name: Some("Apache Pulsar".to_string()),
+            product_version: Some("3.3.0".to_string()),
+            ..DatabaseConnectionInfo::default()
+        };
+
+        let result = save_connection_database_info(
+            State(state.clone()),
+            Json(SaveConnectionDatabaseInfoRequest {
+                connection_id: config.id.clone(),
+                database_info: Some(database_info.clone()),
+            }),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert!(state.app.connections.read().await.contains_key(&config.id));
+        assert_eq!(state.app.configs.read().await[&config.id].database_info, Some(database_info.clone()));
+        assert_eq!(state.app.storage.load_connections().await.unwrap()[0].database_info, Some(database_info));
 
         let _ = std::fs::remove_dir_all(dir);
     }

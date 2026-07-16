@@ -80,6 +80,7 @@ import { buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTem
 import { connectionFilePath, defaultSqliteBackupFileName, isMemorySqlitePath, sqliteBackupSourcePath } from "@/lib/connection/connectionFile";
 import { driverStoreFocusForInstallError } from "@/lib/connection/agentDriverInstallHint";
 import { revealPathInFileManager } from "@/lib/backend/tauri";
+import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { clearActiveTableReferencePayload, createTableReferencePayload, createTableReferenceDropEvent, setActiveTableReferencePayload, type QueryEditorTableReferencePayload } from "@/lib/editor/queryEditorTableDrop";
 import { usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
@@ -103,11 +104,12 @@ import {
   usesTreeSchemaMode,
 } from "@/lib/database/databaseCapabilities";
 import { copyNameForTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/sidebar/treeNodeClick";
+import { canApplyDataTabMetadata, dataTabOpenModeFromTreeClick, findExistingDataTabCandidate, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
 import { formatSqlInsert } from "@/lib/export/exportFormats";
 import { joinExportedDdls } from "@/lib/export/ddlExport";
 import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
-import { canActivateExistingDataTableTab } from "@/lib/tabs/dataTabActivation";
+import { canActivateExistingDataTableTab, canRefreshDataTableFromSingleActivationDoubleClick, dataTableDoubleClickAction } from "@/lib/tabs/dataTabActivation";
 import { buildCreateDatabaseSql, buildDuckDbAttachDatabaseSql, duckDbAttachedDatabaseNameFromPath, supportsCreateDatabaseCharset, uniqueDuckDbAttachedDatabaseName } from "@/lib/database/createDatabaseSql";
 import {
   buildCreateSchemaSql,
@@ -353,7 +355,7 @@ const emit = defineEmits<{
   "open-ddl": [node: TreeNode];
   "open-object-source": [node: TreeNode, initialEditing: boolean];
   "open-procedure": [node: TreeNode];
-  "open-data": [node: TreeNode, requireSelection: boolean, runner: (node: TreeNode, request: SidebarDataOpenRequest) => Promise<void>];
+  "open-data": [node: TreeNode, requireSelection: boolean, openMode: DataTabOpenMode, runner: (node: TreeNode, request: SidebarDataOpenRequest) => Promise<void>];
   "open-visible-databases": [node: TreeNode];
   "open-visible-schemas": [node: TreeNode];
   "open-danger-dialog": [request: SidebarDangerDialogRequest];
@@ -633,6 +635,7 @@ const connectionInfoTooltip = computed(() => {
     { label: t("connection.database"), value: cleanTooltipValue(config.database) },
     { label: t("connection.user"), value: cleanTooltipValue(config.username) },
     { label: t("connection.type"), value: config.driver_label || config.driver_profile || config.db_type },
+    { label: t("connection.databaseInfo.productVersion"), value: cleanTooltipValue(config.database_info?.productVersion) },
   ].filter((row) => row.value);
 
   return { rows };
@@ -837,6 +840,9 @@ function runRowClickAction(clickDetail: number) {
   const action = treeNodeRowAction(node.type, canExpand.value, settingsStore.editorSettings.sidebarActivation);
   if (!shouldRunTreeNodeRowAction(action, clickDetail)) return;
   if (action === "open-data") {
+    if (node.type === "table") {
+      singleActivationDoubleClickRefreshAllowed = canRefreshDataTableFromSingleActivationDoubleClick(findExistingSameTableDataTab());
+    }
     scheduleOpenData(node);
   } else if (isDocumentBrowserTreeNode(node.type)) {
     openMongoTreeData(node);
@@ -846,6 +852,8 @@ function runRowClickAction(clickDetail: number) {
     toggle();
   }
 }
+
+let singleActivationDoubleClickRefreshAllowed = false;
 
 function refreshActiveKvBrowserAfterOpen(mode: "etcd" | "zookeeper", connectionId: string) {
   void nextTick(() => {
@@ -971,6 +979,7 @@ function toggleConnectionMultiSelection(event: MouseEvent) {
 }
 
 function onClick(event: MouseEvent) {
+  if (props.node.type === "table" && event.detail <= 1) singleActivationDoubleClickRefreshAllowed = false;
   if (suppressNextTableReferenceClick) {
     suppressNextTableReferenceClick = false;
     event.preventDefault();
@@ -980,6 +989,15 @@ function onClick(event: MouseEvent) {
   // Row clicks must not bubble to the tree container, whose click handler
   // clears the selection when the blank area is clicked (issue #681).
   event.stopPropagation();
+  const dataTabOpenMode = dataTabOpenModeFromTreeClick(props.node.type, event, settingsStore.editorSettings.shortcuts.openDataInNewTab);
+  if (dataTabOpenMode === "new-tab") {
+    event.preventDefault();
+    if (event.detail > 1) return;
+    selectSingleTreeNode(props.node);
+    rowRef.value?.focus({ preventScroll: true });
+    openDataInNewTabImmediately(props.node);
+    return;
+  }
   if (event.shiftKey) {
     selectTreeNodeRange(props.node);
     rowRef.value?.focus({ preventScroll: true });
@@ -1183,7 +1201,8 @@ function requestDeleteSelectedNode(): boolean {
   return false;
 }
 
-function onDoubleClick() {
+function onDoubleClick(event: MouseEvent) {
+  if (dataTabOpenModeFromTreeClick(props.node.type, event, settingsStore.editorSettings.shortcuts.openDataInNewTab) === "new-tab") return;
   const action = treeNodeRowDoubleClickAction(props.node.type, canOpenObjectBrowser.value, settingsStore.editorSettings.sidebarActivation, canExpand.value);
   if (action === "open-object-browser") {
     void openObjectBrowser();
@@ -1192,6 +1211,8 @@ function onDoubleClick() {
     if (!props.node.isExpanded) void toggle();
   } else if (action === "open-data") {
     openDataImmediately(props.node);
+  } else if (action === "refresh-data") {
+    void refreshData();
   } else if (action === "open-source") {
     openObjectSourceDialog(false);
   } else if (action === "open-saved-sql") {
@@ -1201,6 +1222,34 @@ function onDoubleClick() {
   } else if (action === "toggle") {
     toggle();
   }
+}
+
+async function refreshData() {
+  const node = props.node;
+  if (node.type !== "table" || !hasNodeDatabaseContext(node)) return;
+  const singleActivationRefreshAllowed = singleActivationDoubleClickRefreshAllowed;
+  singleActivationDoubleClickRefreshAllowed = false;
+  const activation = settingsStore.editorSettings.sidebarActivation;
+  if (activation === "single" && !singleActivationRefreshAllowed) return;
+  const existingSameTableTab = findExistingSameTableDataTab();
+  const action = dataTableDoubleClickAction(existingSameTableTab, activation, singleActivationRefreshAllowed);
+  if (action === "none") return;
+  if (action === "open") {
+    openDataImmediately(node);
+    return;
+  }
+  if (!existingSameTableTab) return;
+  queryStore.switchTab(existingSameTableTab.id);
+  if (action === "activate") return;
+  await queryStore.refreshDataTab(existingSameTableTab.id);
+}
+
+function findExistingSameTableDataTab() {
+  const node = props.node;
+  if (node.type !== "table" || !hasNodeDatabaseContext(node)) return undefined;
+  const config = connectionStore.getConfig(node.connectionId);
+  const tableSchema = connectionObjectTreeNodeSchema(config, node.database, node.schema);
+  return queryStore.tabs.find((tab) => tab.mode === "data" && tab.connectionId === node.connectionId && tab.database === node.database && (tab.tableMeta?.catalog || "") === (node.catalog || "") && (tab.schema || "") === (tableSchema || "") && (tab.tableMeta?.tableName || tab.title) === node.label);
 }
 
 function openMongoTreeData(node: TreeNode) {
@@ -1305,23 +1354,30 @@ async function openDamengJobAdmin() {
 }
 
 function scheduleOpenData(node: TreeNode) {
-  emit("open-data", node, true, openData);
+  emit("open-data", node, true, "default", openData);
 }
 
 function openDataImmediately(node: TreeNode = props.node) {
-  emit("open-data", node, false, openData);
+  emit("open-data", node, false, "default", openData);
 }
 
-async function openData(node: TreeNode, request?: SidebarDataOpenRequest) {
+function openDataInNewTabImmediately(node: TreeNode = props.node) {
+  emit("open-data", node, false, "new-tab", (target, request) => openData(target, request, "new-tab"));
+}
+
+async function openData(node: TreeNode, request?: SidebarDataOpenRequest, openMode: DataTabOpenMode = "default") {
   if (!(node.type === "table" || node.type === "view" || node.type === "materialized_view") || !hasNodeDatabaseContext(node)) return;
   const config = connectionStore.getConfig(node.connectionId);
   const traceId = uuid().slice(0, 8);
   const startedAt = performance.now();
   let lastPhaseAt = startedAt;
   const elapsed = () => `${Math.round(performance.now() - startedAt)}ms`;
+  const openDataLog = (level: "info" | "warn" | "error" | "debug", event: string, details: Record<string, unknown>) => {
+    appendDebugLog(level, `[DBX][openData:${event}]`, details);
+  };
   const logPhase = (phase: string, extra: Record<string, unknown> = {}) => {
     const now = performance.now();
-    console.info("[DBX][openData:phase]", {
+    openDataLog("info", "phase", {
       traceId,
       phase,
       deltaMs: Math.round(now - lastPhaseAt),
@@ -1330,23 +1386,26 @@ async function openData(node: TreeNode, request?: SidebarDataOpenRequest) {
     });
     lastPhaseAt = now;
   };
-  console.info("[DBX][openData:start]", {
+  openDataLog("info", "start", {
     traceId,
     type: node.type,
-    connectionId: node.connectionId,
-    database: node.database,
-    schema: node.schema,
-    table: node.label,
     dbType: config?.db_type,
+    openMode,
   });
   const tableSchema = connectionObjectTreeNodeSchema(config, node.database, node.schema);
   const tableType = node.type === "view" ? "VIEW" : node.type === "materialized_view" ? "MATERIALIZED_VIEW" : (node.tableType ?? "TABLE");
   const querySchema = config ? connectionObjectTreeQuerySchema(config, node.database, tableSchema) : (tableSchema ?? "");
   const effectiveDbType = effectiveDatabaseTypeForConnection(config);
   const metadataDatabaseType = effectiveDbType || config?.db_type || "";
-  const isSameDataTableTab = (tab: (typeof queryStore.tabs)[number]) =>
-    tab.mode === "data" && tab.connectionId === node.connectionId && tab.database === node.database && (tab.tableMeta?.catalog || "") === (node.catalog || "") && (tab.schema || "") === (tableSchema || "") && (tab.tableMeta?.tableName || tab.title) === node.label;
-  const existingSameTableTab = queryStore.tabs.find(isSameDataTableTab);
+  const dataTabTarget = {
+    connectionId: node.connectionId,
+    database: node.database,
+    schema: tableSchema,
+    catalog: node.catalog,
+    tableName: node.label,
+  };
+  const existingDataTabCandidate = findExistingDataTabCandidate(queryStore.tabs, dataTabTarget, { openMode, reuseDataTab: settingsStore.editorSettings.reuseDataTab });
+  const existingSameTableTab = existingDataTabCandidate?.match === "same-table" ? existingDataTabCandidate.tab : undefined;
   const resetReusedDataTabState = (tab: (typeof queryStore.tabs)[number]) => {
     tab.title = node.label;
     tab.schema = tableSchema;
@@ -1377,22 +1436,14 @@ async function openData(node: TreeNode, request?: SidebarDataOpenRequest) {
   }
 
   const tabId = (() => {
-    if (existingSameTableTab) {
-      queryStore.switchTab(existingSameTableTab.id);
-      resetReusedDataTabState(existingSameTableTab);
-      return existingSameTableTab.id;
-    }
-    if (settingsStore.editorSettings.reuseDataTab) {
-      const existing = queryStore.tabs.find((tab) => tab.mode === "data" && tab.connectionId === node.connectionId && tab.database === node.database);
-      if (existing) {
-        queryStore.switchTab(existing.id);
-        resetReusedDataTabState(existing);
-        return existing.id;
-      }
+    if (existingDataTabCandidate) {
+      queryStore.switchTab(existingDataTabCandidate.tab.id);
+      resetReusedDataTabState(existingDataTabCandidate.tab);
+      return existingDataTabCandidate.tab.id;
     }
     return queryStore.createTab(node.connectionId, node.database, node.label, "data", tableSchema);
   })();
-  console.info("[DBX][openData:tab-created]", { traceId, tabId, elapsed: elapsed() });
+  openDataLog("info", "tab-created", { traceId, tabId, elapsed: elapsed() });
   logPhase("tab-created", { tabId });
 
   // Cancel any previous execution on this tab before starting a new one
@@ -1459,31 +1510,29 @@ async function openData(node: TreeNode, request?: SidebarDataOpenRequest) {
 
   // Helper to check if this openData call is still active (not superseded by a newer click)
   const isActive = () => (request?.isCurrent() ?? true) && queryStore.tabs.find((t) => t.id === tabId)?.executionId === openDataId;
-  const isCurrentDataTab = () => {
-    if (!(request?.isCurrent() ?? true)) return false;
-    const current = queryStore.tabs.find((t) => t.id === tabId);
-    return current?.mode === "data" && current.connectionId === node.connectionId && current.database === node.database && current.schema === tableSchema && current.title === node.label;
-  };
+  const canApplyTableMetadata = () =>
+    canApplyDataTabMetadata(
+      queryStore.tabs.find((t) => t.id === tabId),
+      dataTabTarget,
+      request?.signal,
+    );
 
   try {
-    console.info("[DBX][openData:ensure-connected:start]", { traceId, elapsed: elapsed() });
+    openDataLog("info", "ensure-connected:start", { traceId, elapsed: elapsed() });
     await connectionStore.ensureConnected(node.connectionId);
     if (!isActive()) {
       logPhase("superseded-after-ensure-connected", { tabId });
       return;
     }
-    console.info("[DBX][openData:ensure-connected:done]", { traceId, elapsed: elapsed() });
+    openDataLog("info", "ensure-connected:done", { traceId, elapsed: elapsed() });
     logPhase("ensure-connected", { tabId });
     if (!config) throw new Error("Connection config not found");
 
     const limit = tableOpenPageLimit();
     const refreshTableMetaInBackground = async () => {
       const metadataStartedAt = performance.now();
-      console.info("[DBX][openData:metadata:start]", {
+      openDataLog("info", "metadata:start", {
         traceId,
-        database: node.database,
-        schema: querySchema,
-        table: node.label,
         elapsed: elapsed(),
       });
       try {
@@ -1496,10 +1545,10 @@ async function openData(node: TreeNode, request?: SidebarDataOpenRequest) {
           databaseType: metadataDatabaseType,
           driverProfile: config.driver_profile || config.db_type,
           catalog: node.catalog,
-          traceLogger: (event) => console.debug("[DBX][openData:metadata:trace]", { sourceTraceId: traceId, ...event }),
+          traceLogger: isDebugLoggingEnabled() ? (event) => openDataLog("debug", "metadata:trace", { sourceTraceId: traceId, ...event }) : undefined,
         });
-        if (!isCurrentDataTab()) {
-          console.info("[DBX][openData:metadata:stale]", {
+        if (!canApplyTableMetadata()) {
+          openDataLog("info", "metadata:stale", {
             traceId,
             tabId,
             columnCount: loadedMetadata.metadata.columns.length,
@@ -1509,7 +1558,7 @@ async function openData(node: TreeNode, request?: SidebarDataOpenRequest) {
         }
         const nextTableMeta = tableMetadataToDataTabMeta(loadedMetadata.metadata, tableSchema);
         queryStore.setTableMeta(tabId, nextTableMeta);
-        console.info("[DBX][openData:metadata:done]", {
+        openDataLog("info", "metadata:done", {
           traceId,
           tabId,
           columnCount: nextTableMeta.columns.length,
@@ -1520,12 +1569,12 @@ async function openData(node: TreeNode, request?: SidebarDataOpenRequest) {
           metadataMs: Math.round(performance.now() - metadataStartedAt),
         });
       } catch (error) {
-        console.warn("[DBX][openData:metadata:error]", { traceId, tabId, elapsed: elapsed(), error });
+        openDataLog("warn", "metadata:error", { traceId, tabId, elapsed: elapsed(), error });
       }
     };
     const shouldRefreshTableMeta = !cachedTableMeta;
     if (cachedTableMeta) {
-      console.info("[DBX][openData:metadata:cache-hit]", {
+      openDataLog("info", "metadata:cache-hit", {
         traceId,
         tabId,
         columnCount: cachedTableMeta.columns.length,
@@ -1560,26 +1609,26 @@ async function openData(node: TreeNode, request?: SidebarDataOpenRequest) {
       limit,
       includeRowId,
     });
-    console.info("[DBX][openData:sql-built]", {
+    openDataLog("info", "sql-built", {
       traceId,
-      primaryKeys,
+      primaryKeyCount: primaryKeys.length,
       includeRowId,
-      sql,
+      sqlLength: sql.length,
       elapsed: elapsed(),
     });
     logPhase("sql-built", { tabId, columnCount: columns.length, primaryKeyCount: primaryKeys.length });
     queryStore.updateSql(tabId, sql);
     logPhase("sql-updated", { tabId });
 
-    console.info("[DBX][openData:execute:start]", { traceId, tabId, elapsed: elapsed() });
+    openDataLog("info", "execute:start", { traceId, tabId, elapsed: elapsed() });
     await queryStore.executeTabSql(tabId, sql, {
       sourceTraceId: traceId,
       skipEnsureConnected: true,
       pagination: { limit, offset: 0 },
     });
-    console.info("[DBX][openData:execute:done]", { traceId, tabId, elapsed: elapsed() });
+    openDataLog("info", "execute:done", { traceId, tabId, elapsed: elapsed() });
     logPhase("execute-tab-sql", { tabId });
-    if (shouldRefreshTableMeta && isCurrentDataTab()) {
+    if (shouldRefreshTableMeta && canApplyTableMetadata()) {
       void refreshTableMetaInBackground();
       logPhase("metadata-started", { tabId });
     }
@@ -1588,7 +1637,7 @@ async function openData(node: TreeNode, request?: SidebarDataOpenRequest) {
       logPhase("superseded-after-error", { tabId });
       return;
     }
-    console.error("[DBX][openData:error]", { traceId, elapsed: elapsed(), error: e });
+    openDataLog("error", "error", { traceId, elapsed: elapsed(), error: e });
     logPhase("error", { tabId });
     queryStore.setErrorResult(tabId, e);
   }
@@ -4940,6 +4989,7 @@ onBeforeUnmount(() => {
 });
 
 const shortcutCopyName = computed(() => settingsStore.editorSettings.shortcuts.copySidebarSelection);
+const shortcutOpenDataInNewTab = computed(() => settingsStore.editorSettings.shortcuts.openDataInNewTab);
 const shortcutEditConnection = computed(() => settingsStore.editorSettings.shortcuts.editSidebarConnection);
 const shortcutRename = "F2";
 const shortcutRefresh = "F5";
@@ -5386,6 +5436,12 @@ function treeItemMenuItems(): ContextMenuItem[] {
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.viewData"), action: openDataImmediately, icon: TableProperties });
+    items.push({
+      label: t("contextMenu.openInNewDataTab"),
+      action: openDataInNewTabImmediately,
+      icon: CopyPlus,
+      shortcut: shortcutOpenDataInNewTab.value,
+    });
     if (node.type === "table") {
       items.push({
         label: t("contextMenu.viewDdl"),

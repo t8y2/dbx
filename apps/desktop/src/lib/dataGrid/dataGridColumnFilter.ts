@@ -3,9 +3,10 @@ import type { DataGridColumnInfo, DataGridContextFilterMode, GridCellValue } fro
 import { buildDataGridColumnValueFilterCondition, buildDataGridColumnValuesFilterCondition } from "@/lib/dataGrid/dataGridSql";
 import { normalizeWhereInput } from "@/lib/table/tableSelectSql";
 
-export function buildColumnValueFilterCondition(options: { databaseType?: DatabaseType; columnName: string; columnInfo?: Pick<ColumnInfo, "data_type">; rawValue: string }): Promise<string | undefined> {
+export function buildColumnValueFilterCondition(options: { databaseType?: DatabaseType; identifierQuote?: string; columnName: string; columnInfo?: Pick<ColumnInfo, "data_type">; rawValue: string }): Promise<string | undefined> {
   return buildDataGridColumnValueFilterCondition({
     databaseType: options.databaseType,
+    identifierQuote: options.identifierQuote,
     columnName: options.columnName,
     columnInfo: options.columnInfo
       ? {
@@ -18,9 +19,10 @@ export function buildColumnValueFilterCondition(options: { databaseType?: Databa
   });
 }
 
-export function buildColumnValuesFilterCondition(options: { databaseType?: DatabaseType; columnName: string; columnInfo?: Pick<ColumnInfo, "data_type">; values: GridCellValue[] }): Promise<string | undefined> {
+export function buildColumnValuesFilterCondition(options: { databaseType?: DatabaseType; identifierQuote?: string; columnName: string; columnInfo?: Pick<ColumnInfo, "data_type">; values: GridCellValue[] }): Promise<string | undefined> {
   return buildDataGridColumnValuesFilterCondition({
     databaseType: options.databaseType,
+    identifierQuote: options.identifierQuote,
     columnName: options.columnName,
     columnInfo: options.columnInfo
       ? {

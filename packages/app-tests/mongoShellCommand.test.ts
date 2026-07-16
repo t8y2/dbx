@@ -626,12 +626,24 @@ test("mongoDocumentsToQueryResult turns mongo documents into grid rows", () => {
   assert.equal(result.truncated, true);
 });
 
-test("mongoDocumentsToQueryResult displays typed int64 ids without losing raw type metadata", () => {
-  const id = { $numberLong: "2048938405781032962" };
-  const result = mongoDocumentsToQueryResult([{ _id: id, name: "snowflake" }], 1, 1);
+test("mongoDocumentsToQueryResult displays ids without losing raw type metadata", () => {
+  const documents = [
+    { _id: { $oid: "6743e4bfa3f6f84bc3fff6c8" }, name: "object id" },
+    { _id: { $numberLong: "2048938405781032962" }, name: "int64" },
+    { _id: 42, name: "int" },
+    { _id: 42.5, name: "double" },
+    { _id: "customer-42", name: "string" },
+  ];
+  const result = mongoDocumentsToQueryResult(documents, documents.length, documents.length);
 
-  assert.deepEqual(result.rows, [["2048938405781032962", "snowflake"]]);
-  assert.deepEqual(result.mongo_documents, [{ _id: id, name: "snowflake" }]);
+  assert.deepEqual(result.rows, [
+    ["6743e4bfa3f6f84bc3fff6c8", "object id"],
+    ["2048938405781032962", "int64"],
+    [42, "int"],
+    [42.5, "double"],
+    ["customer-42", "string"],
+  ]);
+  assert.deepEqual(result.mongo_documents, documents);
 });
 
 test("buildMongoUpdateDocument ignores _id and preserves typed values", () => {

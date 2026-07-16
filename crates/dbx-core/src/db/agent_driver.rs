@@ -230,6 +230,23 @@ impl AgentRuntimeClient {
         }
         fail_pending_requests(&self.pending, "Agent runtime terminated".to_string());
     }
+
+    pub async fn kill_and_wait(&self) {
+        self.failed.store(true, Ordering::Release);
+        fail_pending_requests(&self.pending, "Agent runtime terminated".to_string());
+        let child = self.child.clone();
+        match tokio::task::spawn_blocking(move || {
+            let mut child = child.lock().map_err(|_| "Shared agent process lock poisoned".to_string())?;
+            let _ = child.kill();
+            child.wait().map(|_| ()).map_err(|err| format!("Failed to wait for shared agent runtime: {err}"))
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => log::warn!("{err}"),
+            Err(err) => log::warn!("Failed to join shared agent shutdown task: {err}"),
+        }
+    }
 }
 
 fn decode_agent_response<T: DeserializeOwned>(response: Value) -> Result<T, String> {
@@ -1807,6 +1824,20 @@ fn format_agent_startup_error(base: &str, child: &mut Child, stderr_tail: &Arc<M
 }
 
 impl AgentDriverClient {
+    #[cfg(test)]
+    pub(crate) fn test_stub() -> Self {
+        Self {
+            child: None,
+            stdin: None,
+            stdout: None,
+            stderr_tail: Arc::new(Mutex::new(StderrTail::default())),
+            handshake: None,
+            next_id: 0,
+            shared_runtime: None,
+            agent_session_id: None,
+        }
+    }
+
     fn format_agent_process_error(&mut self, base: &str) -> String {
         // Runtime RPC errors are common SQL/driver paths. Do not wait for the
         // child to exit unless startup diagnostics already expect the process to die.

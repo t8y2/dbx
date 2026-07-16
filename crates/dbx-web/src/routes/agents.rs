@@ -289,7 +289,7 @@ async fn ensure_no_agent_update_blockers(
         return Ok(());
     }
     let mut blockers = state
-        .active_agent_driver_keys()
+        .prepare_agent_driver_updates(db_types)
         .await
         .into_iter()
         .filter(|key| candidate_keys.contains(key.as_str()))

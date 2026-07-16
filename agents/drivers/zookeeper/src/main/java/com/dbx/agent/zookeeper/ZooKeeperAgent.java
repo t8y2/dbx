@@ -32,7 +32,7 @@ public final class ZooKeeperAgent {
     private static final Gson GSON = new GsonBuilder().serializeNulls().create();
     private static final int DEFAULT_LIMIT = 100;
     private static final int DEFAULT_SESSION_TIMEOUT_MS = 30000;
-    private static final int DEFAULT_CONNECTION_TIMEOUT_MS = 5000;
+    private static final int DEFAULT_CONNECTION_TIMEOUT_MS = 15000;
     private static final int DEFAULT_BASE_SLEEP_TIME_MS = 250;
     private static final int DEFAULT_MAX_RETRIES = 2;
     private static final int DEFAULT_PORT = 2181;

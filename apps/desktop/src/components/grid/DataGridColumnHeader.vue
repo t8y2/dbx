@@ -15,6 +15,8 @@ defineProps<{
   columnComment?: string;
   tooltipColumnType?: string;
   tooltipColumnComment?: string;
+  showTypeLine?: boolean;
+  showCommentLine?: boolean;
   typeClass?: HTMLAttributes["class"];
   dragClass?: HTMLAttributes["class"];
   columnStyle?: CSSProperties;
@@ -51,8 +53,10 @@ const emit = defineEmits<{
       <span class="flex min-w-0 items-center gap-1 overflow-hidden">
         <span class="flex min-w-0 flex-1 flex-col overflow-hidden">
           <span class="min-w-0 truncate leading-4">{{ name }}</span>
-          <span v-if="columnType" class="min-w-0 truncate text-[10px] font-normal leading-3" :class="typeClass" :title="columnType">{{ columnType }}</span>
-          <span v-if="columnComment" class="min-w-0 truncate text-[10px] font-normal leading-3 text-muted-foreground" :title="columnComment">{{ columnComment }}</span>
+          <span v-if="showTypeLine" data-grid-header-type-line class="h-3 min-w-0 truncate text-[10px] font-normal leading-3" :class="[typeClass, { invisible: !columnType }]" :title="columnType || undefined" :aria-hidden="columnType ? undefined : true">{{ columnType }}</span>
+          <span v-if="showCommentLine" data-grid-header-comment-line class="h-3 min-w-0 truncate text-[10px] font-normal leading-3 text-muted-foreground" :class="{ invisible: !columnComment }" :title="columnComment || undefined" :aria-hidden="columnComment ? undefined : true">{{
+            columnComment
+          }}</span>
         </span>
         <slot name="actions" />
       </span>

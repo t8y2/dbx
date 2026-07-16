@@ -212,6 +212,67 @@ describe("DataGridColumnHeader", () => {
     dispatch(handle, "dblclick");
     expect(autoFit).toHaveBeenCalledOnce();
   });
+
+  it("keeps configured type and comment lines mounted for columns without values", () => {
+    const empty = mountComponent(DataGridColumnHeader, {
+      name: "id",
+      actualColumnIndex: 0,
+      visibleColumnIndex: 0,
+      showTypeLine: true,
+      showCommentLine: true,
+      copyColumnNameLabel: "copy",
+      columnNameLabel: "name",
+      columnTypeLabel: "type",
+      columnCommentLabel: "comment",
+    });
+    const emptyType = findOne(empty.root, (node) => node.props["data-grid-header-type-line"] === "");
+    const emptyComment = findOne(empty.root, (node) => node.props["data-grid-header-comment-line"] === "");
+
+    expect(String(emptyType.props.class)).toContain("h-3");
+    expect(String(emptyType.props.class)).toContain("invisible");
+    expect(emptyType.props.title).toBeUndefined();
+    expect(String(emptyComment.props.class)).toContain("h-3");
+    expect(String(emptyComment.props.class)).toContain("invisible");
+    expect(emptyComment.props.title).toBeUndefined();
+
+    const populated = mountComponent(DataGridColumnHeader, {
+      name: "status",
+      actualColumnIndex: 1,
+      visibleColumnIndex: 1,
+      columnType: "varchar",
+      columnComment: "Current status",
+      showTypeLine: true,
+      showCommentLine: true,
+      copyColumnNameLabel: "copy",
+      columnNameLabel: "name",
+      columnTypeLabel: "type",
+      columnCommentLabel: "comment",
+    });
+    const populatedType = findOne(populated.root, (node) => node.props["data-grid-header-type-line"] === "");
+    const populatedComment = findOne(populated.root, (node) => node.props["data-grid-header-comment-line"] === "");
+
+    expect(String(populatedType.props.class)).not.toContain("invisible");
+    expect(populatedType.props.title).toBe("varchar");
+    expect(String(populatedComment.props.class)).not.toContain("invisible");
+    expect(populatedComment.props.title).toBe("Current status");
+  });
+
+  it("omits optional header lines when both display settings are off", () => {
+    const mounted = mountComponent(DataGridColumnHeader, {
+      name: "id",
+      actualColumnIndex: 0,
+      visibleColumnIndex: 0,
+      columnType: "number",
+      columnComment: "Identifier",
+      copyColumnNameLabel: "copy",
+      columnNameLabel: "name",
+      columnTypeLabel: "type",
+      columnCommentLabel: "comment",
+    });
+
+    expect(findAll(mounted.root, (node) => node.props["data-grid-header-type-line"] === "")).toHaveLength(0);
+    expect(findAll(mounted.root, (node) => node.props["data-grid-header-comment-line"] === "")).toHaveLength(0);
+  });
 });
 
 describe("DataGridFilterBuilder", () => {

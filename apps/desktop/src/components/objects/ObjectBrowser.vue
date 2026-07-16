@@ -94,6 +94,7 @@ import {
   type ObjectBrowserSortKey,
 } from "@/lib/table/objectBrowserRows";
 import { resolveRowClickAction, shouldDeferSingleClick, type ObjectBrowserRowAction } from "@/lib/table/objectBrowserRowAction";
+import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
 import { createSidePanelRequestGuard } from "@/lib/table/sidePanelRequestGuard";
 import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
 
@@ -776,11 +777,7 @@ const tableInfoTabListStyle = computed(() => ({
   gridTemplateColumns: `repeat(${tableInfoTabs.value.length}, minmax(0, 1fr))`,
 }));
 
-const filteredTableColumns = computed(() => {
-  if (!tableInfoSearchQuery.value) return tableColumns.value;
-  const q = tableInfoSearchQuery.value.toLowerCase();
-  return tableColumns.value.filter((c) => c.name.toLowerCase().includes(q) || c.data_type.toLowerCase().includes(q));
-});
+const filteredTableColumns = computed(() => filterObjectBrowserTableColumns(tableColumns.value, tableInfoSearchQuery.value));
 
 const filteredTableIndexes = computed(() => {
   if (!tableInfoSearchQuery.value) return tableIndexes.value;

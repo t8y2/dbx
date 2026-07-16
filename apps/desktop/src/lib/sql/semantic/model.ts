@@ -25,6 +25,7 @@ const ALIAS_BLACKLIST = new Set([...CLAUSE_BOUNDARIES, "join", "straight_join", 
 const TABLE_TARGET_MODIFIERS = new Set(["lateral", "only"]);
 const TABLE_FUNCTION_INTRODUCERS = new Set(["from", "join", "straight_join", "apply"]);
 const TOP_LEVEL_STATEMENT_WORDS = new Set(["select", "insert", "delete", "merge", "create", "alter", "drop", "truncate", "call", "exec", "execute", "grant", "revoke"]);
+const SQLSERVER_UPDATE_STATISTICS_SCOPES = new Set(["all", "index", "table"]);
 
 interface ParseState {
   dialect: SqlSemanticDialectAdapter;
@@ -101,7 +102,9 @@ function readQualifiedName(tokens: readonly SqlSemanticToken[], startIndex: numb
 function sqlServerMaintenanceTableTarget(tokens: readonly SqlSemanticToken[], target: number, introducer: string, dialect: SqlSemanticDialectAdapter): number {
   if (dialect.id !== "sqlserver" || introducer !== "update") return target;
   if (tokens[target]?.normalized === "statistics") return target + 1;
-  if (tokens[target]?.normalized === "index" && tokens[target + 1]?.normalized === "statistics") return target + 2;
+  // ASE accepts UPDATE {ALL | INDEX | TABLE} STATISTICS; these scope words
+  // describe the maintenance operation and must never become table targets.
+  if (SQLSERVER_UPDATE_STATISTICS_SCOPES.has(tokens[target]?.normalized ?? "") && tokens[target + 1]?.normalized === "statistics") return target + 2;
   return target;
 }
 

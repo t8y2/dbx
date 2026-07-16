@@ -278,14 +278,19 @@ describe("sqlSemanticModel baseline fixtures", () => {
   });
 
   it("skips ASE maintenance keywords before update table targets", () => {
-    const statements = ["UPDATE STATISTICS wfAdmin", "UPDATE INDEX STATISTICS wfAdmin ix_name"];
+    const statements = [
+      { sql: "UPDATE STATISTICS wfAdmin", table: "wfAdmin" },
+      { sql: "UPDATE INDEX STATISTICS wfAdmin ix_name", table: "wfAdmin" },
+      { sql: "UPDATE TABLE STATISTICS dbo.wfAdmin", table: "wfAdmin" },
+      { sql: "UPDATE ALL STATISTICS [dbo].[wfAdmin]", table: "wfAdmin" },
+    ];
 
-    for (const sql of statements) {
+    for (const { sql, table } of statements) {
       const spans = sqlSemanticTableNameSpans(sql, { dialect: "sqlserver" });
       const model = buildSqlSemanticModel(sql, sql.length, { dialect: "sqlserver" });
-      expect(spans.map((span) => sql.slice(span.start, span.end))).toEqual(["wfAdmin"]);
-      expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ name: "wfAdmin", kind: "mutation_target" })]));
-      expect(model.rowSources.some((source) => source.name === "STATISTICS" || source.name === "INDEX")).toBe(false);
+      expect(spans.map((span) => sql.slice(span.start, span.end))).toEqual([sql.includes("[wfAdmin]") ? "[wfAdmin]" : table]);
+      expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ name: table, kind: "mutation_target" })]));
+      expect(model.rowSources.some((source) => ["ALL", "INDEX", "TABLE", "STATISTICS"].includes(source.name.toUpperCase()))).toBe(false);
     }
   });
 

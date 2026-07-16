@@ -1088,6 +1088,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (!tableMeta.value) return null;
     return {
       databaseType: resolvedDatabaseType.value,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(connectionId.value),
       tableMeta: tableMeta.value,
       columns: result.value.columns,
       sourceColumns: sourceColumns.value,

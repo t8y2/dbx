@@ -171,7 +171,7 @@ pub(crate) fn table_data_qualified_table_name(
         .unwrap_or(table)
 }
 
-fn quote_table_data_identifier(
+pub(crate) fn quote_table_data_identifier(
     database_type: Option<DatabaseType>,
     name: &str,
     identifier_quote: Option<&str>,

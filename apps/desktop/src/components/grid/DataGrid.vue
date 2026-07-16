@@ -7366,7 +7366,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
     <CustomContextMenu :items="gridContextMenuItems" v-slot="{ onContextMenu }">
       <div v-if="hasData || canShowWhereSearch" class="flex-1 flex flex-col overflow-hidden" @contextmenu="onContextMenu">
         <!-- Search bar -->
-        <div ref="dataGridTopbarRef" v-if="showDataGridTopbar" class="data-grid-topbar-shell shrink-0 flex min-w-0 border-b bg-muted/20">
+        <!-- Result and standalone output views must share a fixed toolbar height to prevent layout shifts. -->
+        <div ref="dataGridTopbarRef" v-if="showDataGridTopbar" class="data-grid-topbar-shell flex h-7 min-w-0 shrink-0 border-b bg-muted/20">
           <div v-if="hasResultToolbarLeadingSlot" class="flex shrink-0 items-center border-r">
             <slot name="result-toolbar-leading" :compact="compactDataGridToolbar" />
           </div>

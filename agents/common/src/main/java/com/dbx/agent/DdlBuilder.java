@@ -218,8 +218,9 @@ public final class DdlBuilder {
     private static String columnTypeSql(ColumnInfo column) {
         String type = column.getData_type();
         String normalized = type.toLowerCase(Locale.ROOT);
-        if (isCharacterType(normalized) && column.getCharacter_maximum_length() != null) {
-            return type + "(" + column.getCharacter_maximum_length() + ")";
+        Integer characterLength = column.getCharacter_maximum_length();
+        if (isCharacterType(normalized) && characterLength != null && characterLength > 0) {
+            return type + "(" + characterLength + ")";
         }
         if (isNumericType(normalized) && column.getNumeric_precision() != null) {
             if (column.getNumeric_scale() != null) {

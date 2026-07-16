@@ -541,6 +541,23 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
+    void ddlOmitsUnknownCharacterLengthSentinel() {
+        ColumnInfo unlimited = new ColumnInfo("display_name", "varchar", true, null, false, null, null, null, null, -1);
+
+        String ddl = DdlBuilder.buildTableDdl(
+            "public",
+            "accounts",
+            Collections.singletonList(unlimited),
+            Collections.emptyList(),
+            Collections.emptyList(),
+            true
+        );
+
+        Assertions.assertTrue(ddl.contains("`display_name` varchar"), ddl);
+        Assertions.assertFalse(ddl.contains("varchar(-1)"), ddl);
+    }
+
+    @Test
     void regularListIndexesIncludesPrimaryUniqueAndSecondaryIndexes() {
         List<String> sql = new ArrayList<>();
         KingbaseAgent agent = new KingbaseAgent();

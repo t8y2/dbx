@@ -1,6 +1,6 @@
 import { effectScope, nextTick, ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { useDataGridConditionEditor } from "@/composables/useDataGridConditionEditor";
+import { useDataGridConditionEditor, type DataGridConditionSuggestionInput } from "@/composables/useDataGridConditionEditor";
 import { rememberDataGridConditionHistory } from "@/lib/dataGrid/dataGridConditionHistory";
 
 const storage = new Map<string, string>();
@@ -41,10 +41,31 @@ describe("useDataGridConditionEditor", () => {
     expect(value.value).toBe("status = customer_name");
   });
 
+  it("keeps column details separate from inserted values and deduplicates by value", async () => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({
+      kind: "where",
+      value,
+      columns: [{ value: "customer_id", detail: " Customer identifier " }, { value: "customer_id", detail: "duplicate" }, { value: "customer_name", detail: "   " }, "customer_code"],
+      historyScope: {},
+    });
+
+    value.value = "cus";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value).toHaveLength(3));
+    expect(editor.suggestions.value).toEqual([
+      { value: "customer_id", kind: "column", detail: "Customer identifier" },
+      { value: "customer_name", kind: "column" },
+      { value: "customer_code", kind: "column" },
+    ]);
+    expect(editor.accept(0)).toBe(true);
+    expect(value.value).toBe("customer_id");
+  });
+
   it("ignores stale asynchronous suggestion responses", async () => {
     vi.useFakeTimers();
     const value = ref("");
-    const resolvers = new Map<string, (values: string[]) => void>();
+    const resolvers = new Map<string, (values: DataGridConditionSuggestionInput[]) => void>();
     const editor = useDataGridConditionEditor({
       kind: "where",
       value,
@@ -62,9 +83,9 @@ describe("useDataGridConditionEditor", () => {
     vi.advanceTimersByTime(10);
     await nextTick();
 
-    resolvers.get("ord")?.(["order_id"]);
+    resolvers.get("ord")?.([{ value: "order_id", detail: "Order identifier" }]);
     await Promise.resolve();
-    expect(editor.suggestions.value.map((item) => item.value)).toEqual(["order_id"]);
+    expect(editor.suggestions.value).toEqual([{ value: "order_id", kind: "column", detail: "Order identifier" }]);
     resolvers.get("cus")?.(["customer_id"]);
     await Promise.resolve();
     expect(editor.suggestions.value.map((item) => item.value)).toEqual(["order_id"]);
@@ -115,7 +136,7 @@ describe("useDataGridConditionEditor", () => {
 
   it("maps Enter, Tab, arrows, and Escape without applying stale selections", async () => {
     const value = ref("");
-    const editor = useDataGridConditionEditor({ kind: "orderBy", value, columns: ["name"], historyScope: {} });
+    const editor = useDataGridConditionEditor({ kind: "orderBy", value, columns: [{ value: "name", detail: "Display name" }], historyScope: {} });
     value.value = "na";
     await nextTick();
     await vi.waitFor(() => expect(editor.suggestions.value).toHaveLength(1));

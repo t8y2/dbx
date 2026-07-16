@@ -3,9 +3,17 @@ import { forgetDataGridConditionHistory, loadDataGridConditionHistory, rememberD
 
 export type DataGridConditionSuggestionKind = "column" | "history";
 
+export type DataGridConditionSuggestionInput =
+  | string
+  | {
+      value: string;
+      detail?: string;
+    };
+
 export interface DataGridConditionSuggestion {
   value: string;
   kind: DataGridConditionSuggestionKind;
+  detail?: string;
 }
 
 export interface DataGridConditionSuggestionContext {
@@ -15,12 +23,12 @@ export interface DataGridConditionSuggestionContext {
   signal: AbortSignal;
 }
 
-export type DataGridConditionSuggestionProvider = (context: DataGridConditionSuggestionContext) => readonly string[] | Promise<readonly string[]>;
+export type DataGridConditionSuggestionProvider = (context: DataGridConditionSuggestionContext) => readonly DataGridConditionSuggestionInput[] | Promise<readonly DataGridConditionSuggestionInput[]>;
 
 export interface UseDataGridConditionEditorOptions {
   kind: DataGridConditionHistoryKind;
   value: Ref<string>;
-  columns?: MaybeRefOrGetter<readonly string[] | undefined>;
+  columns?: MaybeRefOrGetter<readonly DataGridConditionSuggestionInput[] | undefined>;
   historyScope: MaybeRefOrGetter<DataGridConditionHistoryScope>;
   suggestionProvider?: DataGridConditionSuggestionProvider;
   suggestionDebounceMs?: number;
@@ -43,6 +51,25 @@ function replaceActiveToken(kind: DataGridConditionHistoryKind, value: string, r
   const match = value.match(kind === "where" ? WHERE_TOKEN_PATTERN : ORDER_BY_TOKEN_PATTERN);
   if (!match) return value;
   return `${value.slice(0, -match[1].length)}${replacement}`;
+}
+
+function suggestionValue(suggestion: DataGridConditionSuggestionInput): string {
+  return typeof suggestion === "string" ? suggestion : suggestion.value;
+}
+
+function columnSuggestions(values: readonly DataGridConditionSuggestionInput[], limit: number): DataGridConditionSuggestion[] {
+  if (limit <= 0) return [];
+  const seen = new Set<string>();
+  const suggestions: DataGridConditionSuggestion[] = [];
+  for (const value of values) {
+    const valueText = suggestionValue(value);
+    if (seen.has(valueText)) continue;
+    seen.add(valueText);
+    const detail = typeof value === "string" ? undefined : value.detail?.trim() || undefined;
+    suggestions.push({ value: valueText, kind: "column", ...(detail ? { detail } : {}) });
+    if (suggestions.length >= limit) break;
+  }
+  return suggestions;
 }
 
 export function useDataGridConditionEditor(options: UseDataGridConditionEditorOptions) {
@@ -73,10 +100,13 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
     historyOpen.value = false;
   }
 
-  function defaultSuggestions(token: string): readonly string[] {
+  function defaultSuggestions(token: string): readonly DataGridConditionSuggestionInput[] {
     const normalizedToken = token.toLowerCase();
     if (!normalizedToken) return [];
-    return (toValue(options.columns) ?? []).filter((column) => column.toLowerCase().startsWith(normalizedToken) && column.toLowerCase() !== normalizedToken);
+    return (toValue(options.columns) ?? []).filter((column) => {
+      const normalizedColumn = suggestionValue(column).toLowerCase();
+      return normalizedColumn.startsWith(normalizedToken) && normalizedColumn !== normalizedToken;
+    });
   }
 
   async function loadSuggestions(value: string, requestId: number, controller: AbortController) {
@@ -88,7 +118,7 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
       // A slower request must never replace suggestions for a newer editor value.
       if (controller.signal.aborted || requestId !== suggestionRequestId || options.value.value !== value || historyOpen.value) return;
       const limit = options.suggestionLimit ?? 8;
-      suggestions.value = [...new Set(values)].slice(0, limit).map((suggestion) => ({ value: suggestion, kind: "column" }));
+      suggestions.value = columnSuggestions(values, limit);
       highlightedIndex.value = suggestions.value.length > 0 ? 0 : -1;
     } catch (error) {
       if (!controller.signal.aborted && requestId === suggestionRequestId) {

@@ -179,6 +179,7 @@ import { useDataGridSort } from "@/composables/useDataGridSort";
 import { useDataGridSearch, type DataGridSearchMatch } from "@/composables/useDataGridSearch";
 import { useDataGridResultLifecycle } from "@/composables/useDataGridResultLifecycle";
 import { useDataGridAutoRefresh } from "@/composables/useDataGridAutoRefresh";
+import type { DataGridConditionSuggestionInput } from "@/composables/useDataGridConditionEditor";
 import { useDataGridAsyncSurface } from "@/composables/useDataGridAsyncSurface";
 import { useDataGridFilterBuilder, type DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 import { cloneDataGridStructuredFilterRules, loadDataGridStructuredFilterState, saveDataGridStructuredFilterState, type DataGridCachedServerColumnFilter, type DataGridStructuredFilterCacheState } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
@@ -410,6 +411,11 @@ const columnCommentMap = computed(() => {
     }
   }
   return map;
+});
+// Reuse loaded table metadata so condition suggestions never trigger an extra metadata request.
+const conditionColumnSuggestions = computed<DataGridConditionSuggestionInput[]>(() => {
+  if (!props.tableMeta?.columns) return props.result.columns;
+  return props.tableMeta.columns.map((column) => ({ value: column.name, detail: column.comment?.trim() || undefined }));
 });
 const dataGridTopbarWidth = ref(0);
 const showColumnCommentsInHeader = computed(() => settingsStore.editorSettings.showColumnCommentsInHeader);
@@ -7401,6 +7407,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   v-model:order-by-input="orderByInput"
                   v-model:filter-builder-open="filterBuilderOpen"
                   :columns="props.tableMeta?.columns.map((column) => column.name) ?? props.result.columns"
+                  :condition-columns="conditionColumnSuggestions"
                   :history-scope="conditionHistoryScope"
                   :can-use-where-search="canUseWhereSearch"
                   :compact="compactDataGridToolbar"

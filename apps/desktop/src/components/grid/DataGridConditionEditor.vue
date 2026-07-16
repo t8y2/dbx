@@ -1,14 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, useId, watch, type CSSProperties } from "vue";
 import { ChevronDown, X } from "@lucide/vue";
-import { useDataGridConditionEditor, type DataGridConditionSuggestionProvider } from "@/composables/useDataGridConditionEditor";
+import { useDataGridConditionEditor, type DataGridConditionSuggestionInput, type DataGridConditionSuggestionProvider } from "@/composables/useDataGridConditionEditor";
 import { getDataGridConditionSuggestionPosition } from "@/lib/dataGrid/dataGridConditionSuggestionPosition";
 import type { DataGridConditionHistoryKind, DataGridConditionHistoryScope } from "@/lib/dataGrid/dataGridConditionHistory";
 
 const props = withDefaults(
   defineProps<{
     kind: DataGridConditionHistoryKind;
-    columns?: readonly string[];
+    columns?: readonly DataGridConditionSuggestionInput[];
     historyScope: DataGridConditionHistoryScope;
     placeholder?: string;
     ariaLabel?: string;
@@ -357,7 +357,8 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
           "
           @mouseleave="hideHistoryPreview"
         >
-          <span data-condition-history-text class="min-w-0 flex-1 truncate font-mono">{{ suggestion.value }}</span>
+          <span data-condition-history-text data-condition-suggestion-value class="min-w-0 flex-1 truncate font-mono">{{ suggestion.value }}</span>
+          <span v-if="suggestion.kind === 'column' && suggestion.detail" data-condition-suggestion-detail class="ml-3 max-w-[55%] shrink-0 truncate text-muted-foreground" :title="suggestion.detail">{{ suggestion.detail }}</span>
           <button v-if="suggestion.kind === 'history'" type="button" class="ml-2 shrink-0 text-muted-foreground hover:text-foreground" @mousedown.stop.prevent="editor.deleteHistory(suggestion.value)">
             <X class="h-3 w-3" />
           </button>

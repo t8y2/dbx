@@ -783,6 +783,12 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
       if (force || !databaseChildrenLoaded) {
         await store.loadSqlServerDatabaseObjects(connId, target.database, loadOptions);
       }
+      if (targetSchema) {
+        const schemaNode = findSchemaNode(store.treeNodes, connId, target.database, targetSchema);
+        if (schemaNode && (force || !schemaNode.children || schemaNode.children.length === 0)) {
+          await store.loadTables(connId, target.database, targetSchema, loadOptions);
+        }
+      }
     } else if (usesSchemaTree) {
       if (force || !databaseChildrenLoaded) {
         await store.loadSchemas(connId, target.database, loadOptions);

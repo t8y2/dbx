@@ -63,6 +63,18 @@ test("builds schema-aware cursor table candidates", () => {
   });
 });
 
+test("builds SQL Server view candidates from bracket-quoted identifiers", () => {
+  const sql = "SELECT * FROM [sales].[v_city_sales]";
+  const tab = queryTab(sql, sql.length, undefined);
+
+  assert.deepEqual(queryCursorTableCandidate(tab, "sqlserver"), {
+    connectionId: "conn-1",
+    database: "app",
+    schema: "sales",
+    tableName: "v_city_sales",
+  });
+});
+
 test("builds database-qualified candidates for multi-database non-schema engines", () => {
   const tab = queryTab("select * from analytics.events", "select * from analytics.events".length, undefined);
 

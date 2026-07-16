@@ -3,9 +3,17 @@ import { forgetDataGridConditionHistory, loadDataGridConditionHistory, rememberD
 
 export type DataGridConditionSuggestionKind = "column" | "history";
 
+export interface DataGridConditionColumnSuggestion {
+  name: string;
+  comment?: string | null;
+}
+
+export type DataGridConditionColumnOption = string | DataGridConditionColumnSuggestion;
+
 export interface DataGridConditionSuggestion {
   value: string;
   kind: DataGridConditionSuggestionKind;
+  comment?: string;
 }
 
 export interface DataGridConditionSuggestionContext {
@@ -20,7 +28,7 @@ export type DataGridConditionSuggestionProvider = (context: DataGridConditionSug
 export interface UseDataGridConditionEditorOptions {
   kind: DataGridConditionHistoryKind;
   value: Ref<string>;
-  columns?: MaybeRefOrGetter<readonly string[] | undefined>;
+  columns?: MaybeRefOrGetter<readonly DataGridConditionColumnOption[] | undefined>;
   historyScope: MaybeRefOrGetter<DataGridConditionHistoryScope>;
   suggestionProvider?: DataGridConditionSuggestionProvider;
   suggestionDebounceMs?: number;
@@ -73,10 +81,20 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
     historyOpen.value = false;
   }
 
-  function defaultSuggestions(token: string): readonly string[] {
+  function defaultSuggestions(token: string): DataGridConditionSuggestion[] {
     const normalizedToken = token.toLowerCase();
     if (!normalizedToken) return [];
-    return (toValue(options.columns) ?? []).filter((column) => column.toLowerCase().startsWith(normalizedToken) && column.toLowerCase() !== normalizedToken);
+    const seen = new Set<string>();
+    const suggestions: DataGridConditionSuggestion[] = [];
+    for (const column of toValue(options.columns) ?? []) {
+      const value = typeof column === "string" ? column : column.name;
+      const normalizedValue = value.toLowerCase();
+      if (!normalizedValue.startsWith(normalizedToken) || normalizedValue === normalizedToken || seen.has(value)) continue;
+      seen.add(value);
+      const comment = typeof column === "string" ? "" : column.comment?.trim();
+      suggestions.push({ value, kind: "column", ...(comment ? { comment } : {}) });
+    }
+    return suggestions;
   }
 
   async function loadSuggestions(value: string, requestId: number, controller: AbortController) {
@@ -84,11 +102,11 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
     if (!token) return;
     suggestionsLoading.value = true;
     try {
-      const values = options.suggestionProvider ? await options.suggestionProvider({ kind: options.kind, value, token, signal: controller.signal }) : defaultSuggestions(token);
+      const values = options.suggestionProvider ? await options.suggestionProvider({ kind: options.kind, value, token, signal: controller.signal }) : undefined;
       // A slower request must never replace suggestions for a newer editor value.
       if (controller.signal.aborted || requestId !== suggestionRequestId || options.value.value !== value || historyOpen.value) return;
       const limit = options.suggestionLimit ?? 8;
-      suggestions.value = [...new Set(values)].slice(0, limit).map((suggestion) => ({ value: suggestion, kind: "column" }));
+      suggestions.value = values ? [...new Set(values)].slice(0, limit).map((suggestion) => ({ value: suggestion, kind: "column" })) : defaultSuggestions(token).slice(0, limit);
       highlightedIndex.value = suggestions.value.length > 0 ? 0 : -1;
     } catch (error) {
       if (!controller.signal.aborted && requestId === suggestionRequestId) {

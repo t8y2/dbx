@@ -7401,6 +7401,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   v-model:order-by-input="orderByInput"
                   v-model:filter-builder-open="filterBuilderOpen"
                   :columns="props.tableMeta?.columns.map((column) => column.name) ?? props.result.columns"
+                  :condition-columns="props.tableMeta?.columns ?? props.result.columns"
                   :history-scope="conditionHistoryScope"
                   :can-use-where-search="canUseWhereSearch"
                   :compact="compactDataGridToolbar"

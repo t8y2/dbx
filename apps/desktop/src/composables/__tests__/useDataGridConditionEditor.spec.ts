@@ -41,6 +41,35 @@ describe("useDataGridConditionEditor", () => {
     expect(value.value).toBe("status = customer_name");
   });
 
+  it("reuses column comments for field suggestions without adding them to history", async () => {
+    const scope = { connectionId: "connection", database: "db", tableName: "users" };
+    rememberDataGridConditionHistory("where", scope, "customer_id = 1");
+    const value = ref("");
+    const editor = useDataGridConditionEditor({
+      kind: "where",
+      value,
+      columns: [
+        { name: "customer_id", comment: "客户编号" },
+        { name: "customer_name", comment: null },
+      ],
+      historyScope: scope,
+    });
+
+    value.value = "cust";
+    await nextTick();
+    await vi.waitFor(() =>
+      expect(editor.suggestions.value).toEqual([
+        { value: "customer_id", kind: "column", comment: "客户编号" },
+        { value: "customer_name", kind: "column" },
+      ]),
+    );
+
+    value.value = "customer";
+    editor.dismiss();
+    editor.openHistory();
+    expect(editor.suggestions.value).toEqual([{ value: "customer_id = 1", kind: "history" }]);
+  });
+
   it("ignores stale asynchronous suggestion responses", async () => {
     vi.useFakeTimers();
     const value = ref("");

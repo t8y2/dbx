@@ -1,14 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, useId, watch, type CSSProperties } from "vue";
 import { ChevronDown, X } from "@lucide/vue";
-import { useDataGridConditionEditor, type DataGridConditionSuggestionProvider } from "@/composables/useDataGridConditionEditor";
-import { getDataGridConditionSuggestionPosition } from "@/lib/dataGrid/dataGridConditionSuggestionPosition";
+import { useDataGridConditionEditor, type DataGridConditionColumnOption, type DataGridConditionSuggestionProvider } from "@/composables/useDataGridConditionEditor";
+import { getDataGridConditionSuggestionPosition, getDataGridConditionSuggestionPreferredWidth } from "@/lib/dataGrid/dataGridConditionSuggestionPosition";
 import type { DataGridConditionHistoryKind, DataGridConditionHistoryScope } from "@/lib/dataGrid/dataGridConditionHistory";
 
 const props = withDefaults(
   defineProps<{
     kind: DataGridConditionHistoryKind;
-    columns?: readonly string[];
+    columns?: readonly DataGridConditionColumnOption[];
     historyScope: DataGridConditionHistoryScope;
     placeholder?: string;
     ariaLabel?: string;
@@ -64,6 +64,7 @@ const activeEditor = computed(() => overlayRef.value ?? inputRef.value);
 const hasValue = computed(() => modelValue.value.trim().length > 0);
 const emptyHistoryText = computed(() => (modelValue.value.trim() ? props.historyNoMatchesText : props.historyEmptyText));
 const activeSuggestionId = computed(() => (editor.highlightedIndex.value >= 0 ? `${suggestionListId}-${editor.highlightedIndex.value}` : undefined));
+const suggestionPreferredWidth = computed(() => getDataGridConditionSuggestionPreferredWidth(editor.suggestions.value));
 const suggestionStyle = computed<CSSProperties>(() => ({
   left: `${suggestionPosition.value.left}px`,
   top: `${suggestionPosition.value.top}px`,
@@ -112,7 +113,11 @@ function updateSuggestionPosition() {
   void nextTick(() => {
     const target = activeEditor.value;
     if (!target) return;
-    suggestionPosition.value = getDataGridConditionSuggestionPosition(target.getBoundingClientRect(), { viewportWidth: window.innerWidth });
+    suggestionPosition.value = getDataGridConditionSuggestionPosition(target.getBoundingClientRect(), {
+      viewportWidth: window.innerWidth,
+      preferredWidth: suggestionPreferredWidth.value,
+      maxWidth: suggestionPreferredWidth.value === undefined ? undefined : 520,
+    });
   });
 }
 
@@ -234,6 +239,9 @@ function hideHistoryPreview() {
 }
 
 watch(modelValue, () => resizeEditor());
+watch(suggestionPreferredWidth, () => {
+  if (editor.dropdownOpen.value) updateSuggestionPosition();
+});
 watch(
   () => editor.dropdownOpen.value,
   (open) => {
@@ -357,7 +365,10 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
           "
           @mouseleave="hideHistoryPreview"
         >
-          <span data-condition-history-text class="min-w-0 flex-1 truncate font-mono">{{ suggestion.value }}</span>
+          <span data-condition-history-text class="min-w-0 truncate font-mono" :class="suggestion.comment ? 'max-w-[75%] shrink-0' : 'flex-1'" :title="suggestion.value">
+            {{ suggestion.value }}
+          </span>
+          <span v-if="suggestion.comment" class="ml-3 min-w-0 flex-1 truncate text-muted-foreground" :title="suggestion.comment">{{ suggestion.comment }}</span>
           <button v-if="suggestion.kind === 'history'" type="button" class="ml-2 shrink-0 text-muted-foreground hover:text-foreground" @mousedown.stop.prevent="editor.deleteHistory(suggestion.value)">
             <X class="h-3 w-3" />
           </button>

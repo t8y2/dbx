@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import DataGridConditionEditor from "@/components/grid/DataGridConditionEditor.vue";
 import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
+import type { DataGridConditionColumnOption } from "@/composables/useDataGridConditionEditor";
 import type { DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 import type { DataGridConditionHistoryScope } from "@/lib/dataGrid/dataGridConditionHistory";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
@@ -22,6 +23,7 @@ const props = defineProps<{
   whereInput: string;
   orderByInput: string;
   columns: readonly string[];
+  conditionColumns: readonly DataGridConditionColumnOption[];
   historyScope: DataGridConditionHistoryScope;
   canUseWhereSearch: boolean;
   compact: boolean;
@@ -174,7 +176,7 @@ onUnmounted(onResizeEnd);
       <DataGridConditionEditor
         :model-value="whereInput"
         kind="where"
-        :columns="columns"
+        :columns="conditionColumns"
         :history-scope="historyScope"
         placeholder="WHERE"
         :history-empty-text="t('grid.conditionHistoryEmpty')"
@@ -199,7 +201,7 @@ onUnmounted(onResizeEnd);
       <DataGridConditionEditor
         :model-value="orderByInput"
         kind="orderBy"
-        :columns="columns"
+        :columns="conditionColumns"
         :history-scope="historyScope"
         placeholder="ORDER BY"
         :history-empty-text="t('grid.conditionHistoryEmpty')"

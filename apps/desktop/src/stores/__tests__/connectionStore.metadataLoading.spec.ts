@@ -123,6 +123,115 @@ describe("connectionStore metadata loading", () => {
     expect(schemaNode.children?.map((node) => node.label)).toEqual(["users"]);
   });
 
+  it("clears a stale connection error after a schema metadata retry succeeds", async () => {
+    const listSchemaInfos = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("connection slots exhausted"))
+      .mockResolvedValueOnce([{ name: "public", comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
+      listSchemaInfos,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection();
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [
+          {
+            id: `${connection.id}:app`,
+            label: "app",
+            type: "database",
+            connectionId: connection.id,
+            database: "app",
+            isExpanded: false,
+            children: [],
+          },
+        ],
+      },
+    ];
+
+    await expect(store.loadSchemas(connection.id, "app", { force: true })).rejects.toThrow("connection slots exhausted");
+    expect(store.connectionErrors[connection.id]).toBe("connection slots exhausted");
+
+    await store.loadSchemas(connection.id, "app", { force: true });
+
+    expect(store.connectionErrors[connection.id]).toBeUndefined();
+    expect(store.treeNodes[0]?.children?.[0]?.children?.map((node) => node.label)).toEqual(["public"]);
+  });
+
+  it("does not clear a newer error when an older metadata request succeeds", async () => {
+    let resolveSchemas!: (schemas: Array<{ name: string; comment: null }>) => void;
+    const listSchemaInfos = vi.fn(
+      () =>
+        new Promise<Array<{ name: string; comment: null }>>((resolve) => {
+          resolveSchemas = resolve;
+        }),
+    );
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listSchemaInfos,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection();
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [
+          {
+            id: `${connection.id}:app`,
+            label: "app",
+            type: "database",
+            connectionId: connection.id,
+            database: "app",
+            isExpanded: false,
+            children: [],
+          },
+        ],
+      },
+    ];
+    store.setConnectionError(connection.id, "old error");
+
+    const load = store.loadSchemas(connection.id, "app", { force: true });
+    await vi.waitFor(() => expect(listSchemaInfos).toHaveBeenCalledOnce());
+    store.setConnectionError(connection.id, "newer error");
+    resolveSchemas([{ name: "public", comment: null }]);
+    await load;
+
+    expect(store.connectionErrors[connection.id]).toBe("newer error");
+  });
+
   it("keeps an expanding schema attached while its parent refreshes", async () => {
     const listSchemaInfos = vi.fn().mockResolvedValue([{ name: "core", comment: null }]);
 

@@ -351,6 +351,7 @@ export const useConnectionStore = defineStore("connection", () => {
   const cancelledLocalConnectionAttempts = new Map<string, Set<number>>();
   const successfulLocalConnectionAttempts = new Map<string, number>();
   const connectionStateRevisions = new Map<string, number>();
+  const connectionErrorRevisions = new Map<string, number>();
   let nextLocalConnectionAttempt = 0;
   let beforeConnectHandler: BeforeConnectHandler | null = null;
   let initFromDiskPromise: Promise<void> | null = null;
@@ -374,7 +375,9 @@ export const useConnectionStore = defineStore("connection", () => {
     }
 
     logMetadataLoadTrace(metadataTraceLogger, trace, "cache-miss", { cacheStatus: options?.force ? "refresh" : "miss", force: options?.force === true });
+    const errorRevision = connectionErrorRevision(scope.connectionId);
     const result = await load();
+    clearConnectionErrorIfUnchanged(scope.connectionId, errorRevision);
     metadataListPageCache.set(scope, result);
     logMetadataLoadTrace(metadataTraceLogger, trace, "done", {
       cacheStatus: options?.force ? "refresh" : "miss",
@@ -609,6 +612,16 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function setConnectionError(connectionId: string, message: string) {
     connectionErrors.value[connectionId] = message;
+    connectionErrorRevisions.set(connectionId, connectionErrorRevision(connectionId) + 1);
+  }
+
+  function connectionErrorRevision(connectionId?: string | null): number {
+    return connectionId ? (connectionErrorRevisions.get(connectionId) ?? 0) : 0;
+  }
+
+  function clearConnectionErrorIfUnchanged(connectionId: string | null | undefined, revision: number) {
+    if (!connectionId || connectionErrorRevision(connectionId) !== revision) return;
+    clearConnectionError(connectionId);
   }
 
   function agentDriverUpdateHint(): string {
@@ -653,6 +666,7 @@ export const useConnectionStore = defineStore("connection", () => {
   function clearConnectionError(connectionId: string) {
     if (!connectionErrors.value[connectionId]) return;
     delete connectionErrors.value[connectionId];
+    connectionErrorRevisions.set(connectionId, connectionErrorRevision(connectionId) + 1);
   }
 
   function markConnectionHealthChecked(connectionId: string) {
@@ -702,9 +716,10 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function withMetadataLoadTimeout<T>(connectionId: string, promise: Promise<T>, label: string): Promise<T> {
     const timeoutMs = metadataLoadTimeoutMs(getConfig(connectionId));
+    const errorRevision = connectionErrorRevision(connectionId);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      return await Promise.race([
+      const result = await Promise.race([
         promise,
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => {
@@ -712,6 +727,8 @@ export const useConnectionStore = defineStore("connection", () => {
           }, timeoutMs);
         }),
       ]);
+      clearConnectionErrorIfUnchanged(connectionId, errorRevision);
+      return result;
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -1752,6 +1769,7 @@ export const useConnectionStore = defineStore("connection", () => {
     persistPinnedTreeNodeIds();
     for (const id of removedIds) {
       clearConnectionError(id);
+      connectionErrorRevisions.delete(id);
       connectedIds.value.delete(id);
       clearConnectionIdentifierQuote(id);
       clearConnectionHealthCheck(id);
@@ -2795,7 +2813,7 @@ export const useConnectionStore = defineStore("connection", () => {
             }
           }
 
-          const schemas = sortSidebarSchemaInfos(await api.listSchemaInfos(connectionId, database));
+          const schemas = sortSidebarSchemaInfos(await withMetadataLoadTimeout(connectionId, api.listSchemaInfos(connectionId, database), "schemas"));
           const visibleSchemaNames = new Set(
             filterSchemaNamesForConnection(
               schemas.map((schema) => schema.name),

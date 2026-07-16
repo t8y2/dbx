@@ -479,14 +479,14 @@ async function toggle() {
   const databaseObjectGroup = node.type === "group-tables" || node.type === "group-views" || node.type === "group-materialized-views" || node.type === "group-procedures" || node.type === "group-functions" || node.type === "group-sequences" || node.type === "group-packages";
   if (databaseObjectGroup && connectionStore.isTreeNodeChildrenLoaded(node.id)) {
     node.isExpanded = !node.isExpanded;
-    if (wasExpanded) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
+    if (wasExpanded && !connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emit("node-toggled", node, wasExpanded);
     return;
   }
 
   if (node.isExpanded) {
     node.isExpanded = false;
-    connectionStore.releaseCollapsedTreeNodeChildren(node.id);
+    if (!connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emit("node-toggled", node, wasExpanded);
     return;
   }

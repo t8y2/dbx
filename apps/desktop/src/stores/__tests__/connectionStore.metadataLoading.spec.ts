@@ -58,6 +58,95 @@ describe("connectionStore metadata loading", () => {
     setActivePinia(createPinia());
   });
 
+  it("loads missing database roots only for connected sidebar search targets", async () => {
+    const checkConnectionHealth = vi.fn().mockResolvedValue(undefined);
+    const listDatabases = vi.fn().mockResolvedValue([{ name: "dajia", comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth,
+      listDatabases,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { filterSidebarTree } = await import("@/lib/sidebar/sidebarSearchTree");
+    const store = useConnectionStore();
+    const active = { ...mysqlConnection(), id: "mysql-active", name: "localhost" };
+    const connected = { ...mysqlConnection(), id: "mysql-connected", name: "PLM-PRO" };
+    const disconnected = { ...mysqlConnection(), id: "mysql-disconnected", name: "offline" };
+    const nodes: TreeNode[] = [
+      {
+        id: active.id,
+        label: active.name,
+        type: "connection",
+        connectionId: active.id,
+        isExpanded: true,
+        children: [{ id: `${active.id}:dajia`, label: "dajia", type: "database", connectionId: active.id, database: "dajia", isExpanded: false }],
+      },
+      { id: connected.id, label: connected.name, type: "connection", connectionId: connected.id, isExpanded: false, children: [] },
+      { id: disconnected.id, label: disconnected.name, type: "connection", connectionId: disconnected.id, isExpanded: false, children: [] },
+    ];
+    store.connections = [active, connected, disconnected];
+    store.connectedIds = new Set([active.id, connected.id]);
+    store.activeConnectionId = active.id;
+    store.treeNodes = nodes;
+
+    await Promise.all(nodes.map((node) => store.loadConnectedConnectionRootForSidebarSearch(node.connectionId!)));
+
+    expect(listDatabases).toHaveBeenCalledTimes(1);
+    expect(listDatabases).toHaveBeenCalledWith(connected.id);
+    expect(checkConnectionHealth).not.toHaveBeenCalled();
+    expect(store.activeConnectionId).toBe(active.id);
+    expect(nodes.map((node) => node.isExpanded)).toEqual([true, false, false]);
+    expect(filterSidebarTree(nodes, "dajia", new Set()).map((node) => node.id)).toEqual([active.id, connected.id]);
+  });
+
+  it("does not collapse a connection whose normal root load is already in flight", async () => {
+    let resolveDatabases!: (databases: Array<{ name: string; comment: null }>) => void;
+    let markListStarted!: () => void;
+    const listStarted = new Promise<void>((resolve) => {
+      markListStarted = resolve;
+    });
+    const listDatabases = vi.fn(
+      () =>
+        new Promise<Array<{ name: string; comment: null }>>((resolve) => {
+          resolveDatabases = resolve;
+          markListStarted();
+        }),
+    );
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      listDatabases,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = mysqlConnection();
+    const node: TreeNode = { id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, isExpanded: false, children: [] };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [node];
+
+    const normalLoad = store.loadDatabases(connection.id);
+    const searchLoad = store.loadConnectedConnectionRootForSidebarSearch(connection.id);
+    await listStarted;
+    resolveDatabases([{ name: "dajia", comment: null }]);
+    await Promise.all([normalLoad, searchLoad]);
+
+    expect(listDatabases).toHaveBeenCalledTimes(1);
+    expect(node.isExpanded).toBe(true);
+  });
+
   it("renders simple-mode table children without waiting for supplemental objects", async () => {
     const tables: TableInfo[] = [{ name: "users", table_type: "TABLE", comment: null }];
     const listTables = vi.fn().mockResolvedValue(tables);

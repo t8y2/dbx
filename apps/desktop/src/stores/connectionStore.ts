@@ -205,6 +205,7 @@ export type TreeClipboard =
 
 interface LoadTreeOptions {
   force?: boolean;
+  connectedOnly?: boolean;
   expectedSidebarSearchQuery?: string;
   searchFilter?: string;
   sidebarTableSearchParentId?: string;
@@ -2227,7 +2228,11 @@ export const useConnectionStore = defineStore("connection", () => {
         if (!node) return;
         node.isLoading = true;
         try {
-          await ensureConnected(connectionId);
+          if (options?.connectedOnly) {
+            if (!connectedIds.value.has(connectionId)) return;
+          } else {
+            await ensureConnected(connectionId);
+          }
           if (useCachedChildren(node, options)) return;
 
           const config = getConfig(connectionId);
@@ -2366,6 +2371,25 @@ export const useConnectionStore = defineStore("connection", () => {
       },
       options,
     );
+  }
+
+  async function loadConnectedConnectionRootForSidebarSearch(connectionId: string) {
+    if (!connectedIds.value.has(connectionId)) return;
+    const config = getConfig(connectionId);
+    if (!config || ["redis", "etcd", "zookeeper", "mongodb", "elasticsearch", "milvus", "qdrant", "weaviate", "chromadb", "mq", "nacos"].includes(config.db_type)) return;
+    const node = findNode(treeNodes.value, connectionId);
+    if (!node || node.type !== "connection" || node.isLoading || hasConnectionMetadataChildren(node.children)) return;
+    const scope = { kind: "connection-databases" as const, connectionId, driverProfile: metadataDriverProfile(config) };
+    if (metadataLoadCoordinator.has(scope)) return;
+
+    const wasExpanded = !!node.isExpanded;
+    node.isLoading = true;
+    try {
+      await loadDatabases(connectionId, { connectedOnly: true });
+    } finally {
+      node.isExpanded = wasExpanded;
+      node.isLoading = false;
+    }
   }
 
   async function loadRedisDatabases(connectionId: string) {
@@ -5369,6 +5393,7 @@ export const useConnectionStore = defineStore("connection", () => {
     disconnect,
     closeDatabaseConnection,
     ensureConnected,
+    loadConnectedConnectionRootForSidebarSearch,
     isTreeNodeChildrenLoaded,
     releaseCollapsedTreeNodeChildren,
     setBeforeConnectHandler,

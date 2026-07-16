@@ -163,6 +163,12 @@ function isSimpleObjectSearchParent(node: TreeNode): boolean {
 }
 
 function collectExpandedObjectSearchTargets(node: TreeNode, tasks: Promise<void>[], refreshedNodeIds?: Set<string>) {
+  if (refreshedNodeIds && node.type === "connection" && node.connectionId) {
+    if (store.connectedIds.has(node.connectionId)) {
+      tasks.push(store.loadConnectedConnectionRootForSidebarSearch(node.connectionId));
+    }
+    if (node.connectionId !== store.activeConnectionId) return;
+  }
   if (refreshedNodeIds && isSimpleObjectSearchParent(node)) {
     refreshedNodeIds.add(node.id);
     tasks.push(store.refreshTreeNode(node));

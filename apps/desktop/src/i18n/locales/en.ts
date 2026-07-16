@@ -420,6 +420,7 @@ export default {
     agentDriverUpdateConnectionHint: "A built-in driver update is available for this connection. The connection failure may be related to an outdated local driver. Update the corresponding driver in Driver Manager, then retry.",
     jdbcPluginNotInstalled: "JDBC plugin is not installed. Install the optional JDBC plugin to use this connection.",
     lastError: "Connection error",
+    errorIndicatorHint: "Connection error. Click to view details",
     clearError: "Clear connection error",
     saveFailed: "Failed to save connection: {message}",
     deleted: "Connection deleted",

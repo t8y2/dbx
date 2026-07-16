@@ -334,6 +334,7 @@ export default withEnglishFallback({
     agentDriverUpdateConnectionHint: "目前連線使用的內建驅動有可用更新，連線失敗可能與本機驅動版本過舊有關。請在「驅動管理」中更新對應驅動後重試。",
     jdbcPluginNotInstalled: "JDBC 外掛程式未安裝，請先安裝 JDBC 外掛程式再使用此連線。",
     lastError: "連線錯誤",
+    errorIndicatorHint: "連線錯誤，點擊檢視詳情",
     clearError: "清除連線錯誤",
     saveFailed: "儲存連線失敗：{message}",
     deleted: "連線已刪除",

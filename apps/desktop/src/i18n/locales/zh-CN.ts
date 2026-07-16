@@ -424,6 +424,7 @@ export default withEnglishFallback({
     agentDriverUpdateConnectionHint: "当前连接使用的内置驱动有可用更新，连接失败可能与本地驱动版本过旧有关。请在「驱动管理」中更新对应驱动后重试。",
     jdbcPluginNotInstalled: "JDBC 插件未安装，请先安装 JDBC 插件再使用此连接。",
     lastError: "连接错误",
+    errorIndicatorHint: "连接错误，点击查看详情",
     clearError: "清除连接错误",
     saveFailed: "保存连接失败：{message}",
     deleted: "连接已删除",

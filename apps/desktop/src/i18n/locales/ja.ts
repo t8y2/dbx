@@ -327,6 +327,7 @@ export default withEnglishFallback({
     agentDriverUpdateConnectionHint: "この接続で使用中の内蔵ドライバに更新が利用可能です。接続失敗はローカルドライバの旧版が原因の可能性があります。ドライバマネージャーで該当ドライバを更新してから再試行してください。",
     jdbcPluginNotInstalled: "JDBCプラグインがインストールされていません。この接続を使用するにはオプションのJDBCプラグインをインストールしてください。",
     lastError: "接続エラー",
+    errorIndicatorHint: "接続エラー。クリックして詳細を表示",
     clearError: "接続エラーをクリア",
     saveFailed: "接続の保存に失敗しました: {message}",
     deleted: "接続を削除しました",

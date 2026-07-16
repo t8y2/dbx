@@ -335,6 +335,7 @@ export default withEnglishFallback({
       "Hay una actualización de controlador integrada disponible para esta conexión. El error de conexión puede estar relacionado con un controlador local desactualizado. Actualiza el controlador correspondiente en el Administrador de controladores y vuelve a intentarlo.",
     jdbcPluginNotInstalled: "El plugin JDBC no está instalado. Instale el plugin JDBC opcional para usar esta conexión.",
     lastError: "Error de conexión",
+    errorIndicatorHint: "Error de conexión. Haz clic para ver los detalles",
     clearError: "Limpiar error de conexión",
     saveFailed: "Error al guardar la conexión: {message}",
     deleted: "Conexión eliminada",

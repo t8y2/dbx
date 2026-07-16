@@ -334,6 +334,7 @@ export default withEnglishFallback({
     agentDriverUpdateConnectionHint: "Há uma atualização de driver integrada disponível para esta conexão. A falha de conexão pode estar relacionada a um driver local desatualizado. Atualize o driver correspondente no Gerenciador de Drivers e tente novamente.",
     jdbcPluginNotInstalled: "O plugin JDBC não está instalado. Instale o plugin JDBC opcional para usar esta conexão.",
     lastError: "Erro de conexão",
+    errorIndicatorHint: "Erro de conexão. Clique para ver os detalhes",
     clearError: "Limpar erro de conexão",
     saveFailed: "Falha ao salvar a conexão: {message}",
     deleted: "Conexão excluída",

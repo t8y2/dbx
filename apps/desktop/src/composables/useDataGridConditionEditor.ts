@@ -38,6 +38,11 @@ export interface UseDataGridConditionEditorOptions {
 const WHERE_TOKEN_PATTERN = /([^\s,()><=!&|]+)$/;
 const ORDER_BY_TOKEN_PATTERN = /([^\s,()]+)$/;
 
+function normalizedColumnComment(column: DataGridConditionColumnOption): string | undefined {
+  if (typeof column === "string" || typeof column.comment !== "string") return undefined;
+  return column.comment.trim() || undefined;
+}
+
 function activeToken(kind: DataGridConditionHistoryKind, value: string): string {
   return (
     value
@@ -91,7 +96,7 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
       const normalizedValue = value.toLowerCase();
       if (!normalizedValue.startsWith(normalizedToken) || normalizedValue === normalizedToken || seen.has(value)) continue;
       seen.add(value);
-      const comment = typeof column === "string" ? "" : column.comment?.trim();
+      const comment = normalizedColumnComment(column);
       suggestions.push({ value, kind: "column", ...(comment ? { comment } : {}) });
     }
     return suggestions;

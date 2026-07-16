@@ -2562,8 +2562,36 @@ mod tests {
 
     #[test]
     fn oracle_copy_insert_statement_uses_one_statement_per_row() {
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+                database_type: Some(database_type),
+                table_meta: Some(DataGridTableMeta {
+                    catalog: None,
+                    database: None,
+                    schema: Some("APP".to_string()),
+                    table_name: "USERS".to_string(),
+                    primary_keys: vec!["ID".to_string()],
+                    columns: None,
+                }),
+                columns: vec!["ID".to_string(), "NAME".to_string()],
+                column_types: None,
+                source_columns: None,
+                rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("Linus")]],
+                exclude_primary_keys: false,
+                insert_mode: DataGridCopyInsertMode::Merged,
+            });
+
+            assert_eq!(
+                statement.as_deref(),
+                Some("INSERT INTO \"APP\".\"USERS\" (\"ID\", \"NAME\") VALUES (1, 'Ada');\nINSERT INTO \"APP\".\"USERS\" (\"ID\", \"NAME\") VALUES (2, 'Linus');")
+            );
+        }
+    }
+
+    #[test]
+    fn iris_copy_insert_statement_uses_one_statement_per_row() {
         let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
-            database_type: Some(DatabaseType::Oracle),
+            database_type: Some(DatabaseType::Iris),
             table_meta: Some(DataGridTableMeta {
                 catalog: None,
                 database: None,
@@ -2584,6 +2612,59 @@ mod tests {
             statement.as_deref(),
             Some("INSERT INTO \"APP\".\"USERS\" (\"ID\", \"NAME\") VALUES (1, 'Ada');\nINSERT INTO \"APP\".\"USERS\" (\"ID\", \"NAME\") VALUES (2, 'Linus');")
         );
+    }
+
+    #[test]
+    fn sqlserver_copy_insert_uses_bracketed_identifiers_and_typed_literals() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("dbo".to_string()),
+                table_name: "user data".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    column("id", "bigint", false, Some("IDENTITY(1,1)")),
+                    column("display name", "nvarchar(100)", false, None),
+                    column("enabled", "bit", false, None),
+                ]),
+            }),
+            columns: vec!["id".to_string(), "display name".to_string(), "enabled".to_string()],
+            column_types: None,
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("Ada's account"), json!(true)]],
+            exclude_primary_keys: false,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+
+        assert_eq!(
+            statement.as_deref(),
+            Some("INSERT INTO [dbo].[user data] ([id], [display name], [enabled]) VALUES (1, N'Ada''s account', 1);")
+        );
+    }
+
+    #[test]
+    fn clickhouse_copy_insert_formats_array_values() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::ClickHouse),
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("default".to_string()),
+                table_name: "events".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "UInt64", false, None), column("tags", "Array(String)", false, None)]),
+            }),
+            columns: vec!["id".to_string(), "tags".to_string()],
+            column_types: None,
+            source_columns: None,
+            rows: vec![vec![json!(1), json!(["alpha", "beta"])]],
+            exclude_primary_keys: false,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+
+        assert_eq!(statement.as_deref(), Some("INSERT INTO `events` (`id`, `tags`) VALUES (1, ['alpha','beta']);"));
     }
 
     #[test]

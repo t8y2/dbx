@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useDataGridExport, type UseDataGridExportOptions } from "@/composables/useDataGridExport";
 import { buildDataGridCopyInsertStatement, buildDataGridCopyUpdateStatements } from "@/lib/dataGrid/dataGridSql";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import type { DatabaseType } from "@/types/database";
 import type { DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 
 const toast = vi.fn();
@@ -83,14 +84,14 @@ function createMongoExportState(options: { columns: string[]; item: ReturnType<t
   return useDataGridExport(state);
 }
 
-function createExportState(tableMeta: DataGridTableMeta, columns = tableMeta.columns?.map((column) => column.name) ?? ["id", "name"]) {
+function createExportState(tableMeta: DataGridTableMeta, columns = tableMeta.columns?.map((column) => column.name) ?? ["id", "name"], databaseType: DatabaseType = "mysql") {
   const item = row(columns.map((column, index) => (column === "id" ? 1 : `value-${index}`)));
   const options: UseDataGridExportOptions = {
     columns: computed(() => columns),
     displayItems: computed(() => [item]),
     sql: computed(() => undefined),
     tableMeta: computed(() => tableMeta),
-    databaseType: computed(() => "mysql"),
+    databaseType: computed(() => databaseType),
     connectionId: computed(() => "connection-1"),
     database: computed(() => "dbx"),
     context: computed(() => "table-data"),
@@ -124,10 +125,10 @@ describe("useDataGridExport prepared row statements", () => {
     vi.clearAllMocks();
   });
 
-  it("reuses an in-flight INSERT prefetch when the copy action runs", async () => {
+  it.each<DatabaseType>(["mysql", "postgres", "sqlserver", "oracle", "clickhouse", "tdengine"])("reuses an in-flight %s INSERT prefetch when the first copy action runs", async (databaseType) => {
     const pending = deferred<string | undefined>();
     vi.mocked(buildDataGridCopyInsertStatement).mockReturnValueOnce(pending.promise);
-    const state = createExportState(editableTable);
+    const state = createExportState(editableTable, undefined, databaseType);
 
     const prefetch = state.prefetchRowAsInsertStatement(false);
     const copy = state.copyRowAsInsert();
@@ -152,17 +153,31 @@ describe("useDataGridExport prepared row statements", () => {
     expect(copyToClipboard).toHaveBeenCalledWith("UPDATE users SET name = 'Alice' WHERE id = 1;");
   });
 
-  it.each(["GENERATED ALWAYS AS (1)", "IDENTITY(1, 1)"])("disables copy-as-insert when every result column is non-insertable (%s)", (extra) => {
+  it("disables copy-as-insert when every result column is a non-identity generated column", () => {
     const state = createExportState(
       {
         tableName: "generated_values",
         primaryKeys: [],
-        columns: [{ name: "computed_value", data_type: "int", is_nullable: true, extra }],
+        columns: [{ name: "computed_value", data_type: "int", is_nullable: true, extra: "GENERATED ALWAYS AS (1)" }],
       },
       ["computed_value"],
     );
 
     expect(state.canCopyRowAsInsert.value).toBe(false);
+  });
+
+  it.each(["auto_increment", "AUTOINCREMENT", "IDENTITY(1, 1)"])("keeps copy-as-insert available for explicit generated key values (%s)", (extra) => {
+    const state = createExportState(
+      {
+        tableName: "generated_values",
+        primaryKeys: ["id"],
+        columns: [{ name: "id", data_type: "bigint", is_nullable: false, is_primary_key: true, extra }],
+      },
+      ["id"],
+    );
+
+    expect(state.canCopyRowAsInsert.value).toBe(true);
+    expect(state.canCopyRowAsInsertWithoutPrimaryKeys.value).toBe(false);
   });
 
   it("reports a shared builder failure when the user invokes copy", async () => {

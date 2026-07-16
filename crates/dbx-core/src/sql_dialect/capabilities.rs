@@ -69,10 +69,9 @@ pub fn uses_oracle_row_id(database_type: Option<DatabaseType>) -> bool {
     matches!(database_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle))
 }
 
-/// Oracle 系方言不支持 `INSERT ... VALUES (...), (...)` 多行语法，
-/// 复制为 INSERT 与导出 INSERT 都需按行生成单条语句。
+/// These dialects do not support `INSERT ... VALUES (...), (...)` multi-row syntax.
 pub fn uses_single_row_insert_statements(database_type: DatabaseType) -> bool {
-    matches!(database_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
+    matches!(database_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Iris)
 }
 
 pub fn pagination_strategy(database_type: Option<DatabaseType>, context: PaginationContext) -> TablePaginationStrategy {

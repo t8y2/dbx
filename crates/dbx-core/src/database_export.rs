@@ -1742,6 +1742,30 @@ mod tests {
     }
 
     #[test]
+    fn iris_export_inserts_use_one_statement_per_row() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Iris),
+            schema: Some("APP".to_string()),
+            table_name: Some("USERS".to_string()),
+            qualified_table_name: None,
+            columns: vec!["ID".to_string(), "NAME".to_string()],
+            column_types: Vec::new(),
+            column_extras: Vec::new(),
+            rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("Linus")]],
+            batch_size: Some(100),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                "INSERT INTO \"APP\".\"USERS\" (\"ID\", \"NAME\") VALUES (1, 'Ada');",
+                "INSERT INTO \"APP\".\"USERS\" (\"ID\", \"NAME\") VALUES (2, 'Linus');",
+            ]
+        );
+    }
+
+    #[test]
     fn oracle_export_omits_synthetic_rowid_from_insert_columns() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Oracle),

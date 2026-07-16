@@ -1408,7 +1408,7 @@ function isCopyInsertOmittedColumn(databaseType: DatabaseType | undefined, colum
   const normalizedType = columnInfo?.data_type.trim().replace(/^"|"$/g, "").toLowerCase();
   if (databaseType === "postgres" && (normalizedType === "tsvector" || normalizedType?.endsWith(".tsvector"))) return true;
   const extra = columnInfo?.extra?.toLowerCase() ?? "";
-  return /\b(auto_increment|autoincrement|identity)\b/.test(extra) || (extra.includes("generated always as") && !extra.includes("identity"));
+  return extra.includes("generated always as") && !extra.includes("identity");
 }
 
 function findColumnIndex(columns: Array<string | undefined>, target: string): number {

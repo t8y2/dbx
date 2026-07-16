@@ -1696,6 +1696,8 @@ fn postgres_table_comment_sql() -> &'static str {
 fn postgres_tables_sql() -> &'static str {
     // PostgreSQL and Redshift can infer different wire types for LIMIT/OFFSET
     // placeholders. Keep them explicit so the shared i64 parameters serialize reliably.
+    // Root relations must precede partition descendants so a large partition
+    // hierarchy cannot push unrelated schema tables into later sidebar pages.
     "SELECT c.relname AS table_name, \
          CASE c.relkind WHEN 'r' THEN 'BASE TABLE' WHEN 'v' THEN 'VIEW' \
            WHEN 'm' THEN 'MATERIALIZED_VIEW' WHEN 'f' THEN 'FOREIGN TABLE' \
@@ -1710,7 +1712,7 @@ fn postgres_tables_sql() -> &'static str {
          LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace \
          WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p') \
            AND ($2 = '%%' OR c.relname ILIKE $2 ESCAPE '~' OR ($3 <> '' AND c.relname ILIKE $3 ESCAPE '~')) \
-         ORDER BY c.relname \
+         ORDER BY CASE WHEN pc.relkind = 'p' THEN 1 ELSE 0 END, c.relname \
          LIMIT CAST($4 AS BIGINT) OFFSET CAST($5 AS BIGINT)"
 }
 
@@ -4197,6 +4199,7 @@ mod tests {
         assert!(sql.contains("ILIKE $2 ESCAPE '~'"));
         assert!(sql.contains("$3 <> ''"));
         assert!(sql.contains("ILIKE $3 ESCAPE '~'"));
+        assert!(sql.contains("ORDER BY CASE WHEN pc.relkind = 'p' THEN 1 ELSE 0 END, c.relname"));
         assert!(sql.contains("LIMIT CAST($4 AS BIGINT) OFFSET CAST($5 AS BIGINT)"));
     }
 

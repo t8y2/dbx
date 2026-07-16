@@ -665,6 +665,25 @@ test("setting an existing NULL cell to NULL is a no-op", async () => {
   assert.deepEqual(await editor.previewChanges(), []);
 });
 
+test("generated empty strings remain distinct from NULL cells", async () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const result = computed(() => ({
+    columns: ["id", "name"],
+    rows: [[1, null] as CellValue[]],
+  }));
+  const editor = createPeopleGridEditor(result);
+
+  editor.applyCellValue(0, 1, "");
+  assert.equal(editor.dirtyRows.value.size, 0);
+
+  editor.applyCellValue(0, 1, "", { preserveEmptyString: true });
+  assert.equal(editor.dirtyRows.value.get(0)?.get(1), "");
+  assert.deepEqual(editor.rowDataWithChanges(result.value.rows[0], 0), [1, ""]);
+  assert.deepEqual(await editor.previewChanges(), [`UPDATE "people" SET "name" = '' WHERE "id" = 1;`]);
+});
+
 test("a failed NULL save keeps the pending cell edit", async () => {
   setActivePinia(createPinia());
   installBrowserTestGlobals();

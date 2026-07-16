@@ -480,12 +480,17 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   // --- Cell value coercion ---
-  function coerceCellValue(value: string, oldValue: CellValue | undefined, columnIndex: number): CellValue {
+  interface ApplyCellValueOptions {
+    preserveEmptyString?: boolean;
+  }
+
+  function coerceCellValue(value: string, oldValue: CellValue | undefined, columnIndex: number, options: ApplyCellValueOptions = {}): CellValue {
     return coerceDataGridCellValue({
       value,
       oldValue,
       databaseType: resolvedDatabaseType.value,
       columnInfo: tableColumnForGridColumn(columnIndex),
+      preserveEmptyString: options.preserveEmptyString,
     }) as CellValue;
   }
 
@@ -722,7 +727,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     await commitEditAndMaybeAutoSave(options);
   }
 
-  function applyCellValue(rowId: number, col: number, value: string | null) {
+  function applyCellValue(rowId: number, col: number, value: string | null, options: ApplyCellValueOptions = {}) {
     if (!canEditColumn(col)) return;
     const item = getRowItem(rowId);
     if (!item || item.isDeleted) return;
@@ -731,7 +736,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       ensureQuickEntryDraftRow();
       const oldVal = quickEntryDraftRow.value[col] ?? null;
       const nextDraftRow = [...quickEntryDraftRow.value];
-      nextDraftRow[col] = value === null ? null : coerceCellValue(value, oldVal, col);
+      nextDraftRow[col] = value === null ? null : coerceCellValue(value, oldVal, col, options);
       if (nextDraftRow[col] === oldVal) return;
       pushUndoSnapshot();
       quickEntryDraftRow.value = draftRowHasValue(nextDraftRow) ? nextDraftRow : emptyDraftRow();
@@ -745,7 +750,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       const row = newRows.value[item.newIndex];
       if (!row) return;
       const oldVal = row[col];
-      const newVal = value === null ? null : coerceCellValue(value, oldVal, col);
+      const newVal = value === null ? null : coerceCellValue(value, oldVal, col, options);
       if (newVal === oldVal) return;
       pushUndoSnapshot();
       row[col] = newVal;
@@ -761,7 +766,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const rowChanges = dirtyRows.value.get(item.sourceIndex);
     const hasPendingCellChange = rowChanges?.has(col) ?? false;
     const currentVal = hasPendingCellChange ? rowChanges!.get(col) : oldVal;
-    const newVal = value === null ? null : coerceCellValue(value, oldVal, col);
+    const newVal = value === null ? null : coerceCellValue(value, oldVal, col, options);
     if (newVal === currentVal) return;
     if (newVal !== oldVal) {
       pushUndoSnapshot();

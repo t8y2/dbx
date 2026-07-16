@@ -70,6 +70,7 @@ import {
   Columns3,
   PencilRuler,
   Timer,
+  WandSparkles,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
@@ -98,6 +99,7 @@ import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
 import type { BuildSingleColumnAlterSqlOptions } from "@/lib/table/tableStructureEditorSql";
 import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 import { uuid } from "@/lib/common/utils";
+import { generateCellValues, type CellValueGenerationKind } from "@/lib/dataGrid/cellValueGeneration";
 import { compactHeaderColumnType, resolveHeaderColumnType } from "@/lib/dataGrid/dataGridColumnType";
 import {
   canDeleteExistingTdengineRows,
@@ -552,6 +554,9 @@ const contextHeaderColumn = ref<string | null>(null);
 const contextHeaderColumnIndex = ref<number | null>(null);
 const bulkEditDialogOpen = ref(false);
 const bulkEditValue = ref("");
+const generateIncrementDialogOpen = ref(false);
+const generateIncrementStartValue = ref("1");
+const generateIncrementTarget = ref<"selection" | "detail">("selection");
 const detailCell = ref<{ rowIndex: number; col: number } | null>(null);
 const hoveredDetailCell = ref<{ rowIndex: number; col: number } | null>(null);
 const quickDownloadMenuCell = ref<{ rowIndex: number; col: number } | null>(null);
@@ -6973,16 +6978,16 @@ function selectedVisibleColumnIndexes(): number[] {
   return [...selectedColumnIndexes.value].filter((index) => index >= 0 && index < visibleColumns.value.length).sort((a, b) => a - b);
 }
 
-function applyVisibleCellValue(item: RowItem, visibleCol: number, value: string | null): boolean {
+function applyVisibleCellValue(item: RowItem, visibleCol: number, value: string | null, options: { preserveEmptyString?: boolean } = {}): boolean {
   const actualCol = actualColumnIndex(visibleCol);
   if (!canEditCellItem(item, actualCol)) return false;
-  applyCellValue(item.id, actualCol, value);
+  applyCellValue(item.id, actualCol, value, options);
   return true;
 }
 
-function applyVisibleSelectedCellValue(item: RowItem, visibleCol: number, value: string | null, allowDraft = selectedRangeTargetsOnlyDraftRow()): boolean {
+function applyVisibleSelectedCellValue(item: RowItem, visibleCol: number, value: string | null, allowDraft = selectedRangeTargetsOnlyDraftRow(), options: { preserveEmptyString?: boolean } = {}): boolean {
   if (!canApplyGridSelectionValue({ isDraft: !!item.isDraft, allowDraft })) return false;
-  return applyVisibleCellValue(item, visibleCol, value);
+  return applyVisibleCellValue(item, visibleCol, value, options);
 }
 
 function selectedRangeTargetsOnlyDraftRow(): boolean {
@@ -7061,6 +7066,94 @@ function applyBulkEditValue() {
   const value = bulkEditValue.value === "" ? null : bulkEditValue.value;
   if (!fillSelectionWithValue(value)) return;
   bulkEditDialogOpen.value = false;
+}
+
+interface EditableSelectionCell {
+  item: RowItem;
+  visibleCol: number;
+}
+
+function editableSelectionCells(): EditableSelectionCell[] {
+  const cells: EditableSelectionCell[] = [];
+  const range = selectedRange.value;
+  if (range) {
+    for (let rowIndex = range.startRow; rowIndex <= range.endRow; rowIndex++) {
+      const item = displayItemAt(rowIndex);
+      if (!item) continue;
+      for (let visibleCol = range.startCol; visibleCol <= range.endCol; visibleCol++) {
+        if (canEditCellItem(item, actualColumnIndex(visibleCol))) cells.push({ item, visibleCol });
+      }
+    }
+    return cells;
+  }
+
+  const visibleColumnIndexes = selectedVisibleColumnIndexes();
+  for (let rowIndex = 0; rowIndex < displayRowCount.value; rowIndex++) {
+    const item = displayItemAt(rowIndex);
+    if (!item) continue;
+    for (const visibleCol of visibleColumnIndexes) {
+      if (canEditCellItem(item, actualColumnIndex(visibleCol))) cells.push({ item, visibleCol });
+    }
+  }
+  return cells;
+}
+
+function applyGeneratedSelectionValue(kind: CellValueGenerationKind, startValue = 1n): boolean {
+  if (!props.editable) return false;
+  const cells = editableSelectionCells();
+  if (!cells.length) return false;
+  const values = generateCellValues(kind, cells.length, { startValue });
+  const allowDraftSelectionValue = selectedRangeTargetsOnlyDraftRow();
+  let applied = false;
+  cells.forEach((cell, index) => {
+    applied = applyVisibleSelectedCellValue(cell.item, cell.visibleCol, values[index] ?? null, allowDraftSelectionValue, { preserveEmptyString: kind === "empty" }) || applied;
+  });
+  if (applied) toast(t("grid.generatedValuesApplied", { count: cells.length }));
+  return applied;
+}
+
+function applyGeneratedDetailValue(kind: CellValueGenerationKind, startValue = 1n): boolean {
+  const detail = activeCellDetail.value;
+  if (!detail?.isEditable) return false;
+  const value = generateCellValues(kind, 1, { startValue })[0] ?? null;
+  applyCellValue(detail.rowId, detail.colIndex, value, { preserveEmptyString: kind === "empty" });
+  detailEditValue.value = cellDetailEditorText(value);
+  syncEditorFromDetailEdit();
+  isEditingDetail.value = activeCellDetailTab.value === "valueEditor";
+  detailCell.value = { ...detailCell.value! };
+  return true;
+}
+
+function openGenerateIncrementDialog(target: "selection" | "detail") {
+  if (target === "selection" && (!props.editable || !selectionHasEditableCells())) return;
+  if (target === "detail" && !activeCellDetail.value?.isEditable) return;
+  generateIncrementTarget.value = target;
+  generateIncrementStartValue.value = "1";
+  generateIncrementDialogOpen.value = true;
+}
+
+function applyGenerateIncrementValue() {
+  let startValue: bigint;
+  try {
+    startValue = BigInt(generateIncrementStartValue.value.trim() || "1");
+  } catch {
+    toast(t("grid.generateStartInvalid"));
+    return;
+  }
+  const applied = generateIncrementTarget.value === "detail" ? applyGeneratedDetailValue("increment", startValue) : applyGeneratedSelectionValue("increment", startValue);
+  if (applied) generateIncrementDialogOpen.value = false;
+}
+
+function generateSelectionMenuItems(disabled: boolean): ContextMenuItem[] {
+  return [
+    { label: t("grid.generateEmptyString"), action: () => applyGeneratedSelectionValue("empty"), disabled },
+    { label: t("grid.generateNull"), action: () => applyGeneratedSelectionValue("null"), disabled },
+    { label: t("grid.generateCurrentDatetime"), action: () => applyGeneratedSelectionValue("datetime"), disabled },
+    { label: t("grid.generateCurrentDate"), action: () => applyGeneratedSelectionValue("date"), disabled },
+    { label: t("grid.generateUuid"), action: () => applyGeneratedSelectionValue("uuid"), disabled },
+    { label: t("grid.generateSnowflakeId"), action: () => applyGeneratedSelectionValue("snowflake"), disabled },
+    { label: t("grid.generateIncrementId"), action: () => openGenerateIncrementDialog("selection"), disabled },
+  ];
 }
 
 function cutSelection() {
@@ -9011,6 +9104,12 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       action: openBulkEditDialog,
       disabled: !hasEditableSelection,
       icon: Pencil,
+    });
+    items.push({
+      label: t("grid.generateValue"),
+      icon: WandSparkles,
+      disabled: !hasEditableSelection,
+      children: generateSelectionMenuItems(!hasEditableSelection),
     });
   }
 
@@ -11093,6 +11192,23 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <div v-else ref="valueEditorContainer" data-cell-detail-editor-root class="min-h-0 flex-1 w-full rounded border overflow-auto" />
                 </div>
                 <div class="flex gap-1 mt-2 shrink-0">
+                  <DropdownMenu v-if="activeCellDetail?.isEditable">
+                    <DropdownMenuTrigger as-child>
+                      <Button variant="outline" size="sm" class="h-6 gap-1 text-xs" @mousedown.prevent>
+                        <WandSparkles class="h-3 w-3" />
+                        {{ t("grid.generateValue") }}
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start" class="w-44">
+                      <DropdownMenuItem @click="applyGeneratedDetailValue('empty')">{{ t("grid.generateEmptyString") }}</DropdownMenuItem>
+                      <DropdownMenuItem @click="applyGeneratedDetailValue('null')">{{ t("grid.generateNull") }}</DropdownMenuItem>
+                      <DropdownMenuItem @click="applyGeneratedDetailValue('datetime')">{{ t("grid.generateCurrentDatetime") }}</DropdownMenuItem>
+                      <DropdownMenuItem @click="applyGeneratedDetailValue('date')">{{ t("grid.generateCurrentDate") }}</DropdownMenuItem>
+                      <DropdownMenuItem @click="applyGeneratedDetailValue('uuid')">{{ t("grid.generateUuid") }}</DropdownMenuItem>
+                      <DropdownMenuItem @click="applyGeneratedDetailValue('snowflake')">{{ t("grid.generateSnowflakeId") }}</DropdownMenuItem>
+                      <DropdownMenuItem @click="openGenerateIncrementDialog('detail')">{{ t("grid.generateIncrementId") }}</DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                   <Button v-if="activeValueEditorActions.includes('formatJson')" variant="outline" size="sm" class="h-6 text-xs" @mousedown.prevent @click="formatValueEditorJson">
                     {{ t("grid.formatJson") }}
                   </Button>
@@ -11547,6 +11663,24 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         <DialogFooter>
           <Button variant="outline" @click="bulkEditDialogOpen = false">{{ t("dangerDialog.cancel") }}</Button>
           <Button @click="applyBulkEditValue">{{ t("grid.applyBulkEdit") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog v-model:open="generateIncrementDialogOpen">
+      <DialogContent class="sm:max-w-[380px]">
+        <DialogHeader>
+          <DialogTitle>{{ t("grid.generateIncrementId") }}</DialogTitle>
+        </DialogHeader>
+        <div class="space-y-2">
+          <p class="text-sm text-muted-foreground">
+            {{ t("grid.generateSequenceDescription", { count: generateIncrementTarget === "detail" ? 1 : editableSelectionCells().length }) }}
+          </p>
+          <Input v-model="generateIncrementStartValue" inputmode="numeric" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="1" @keydown.enter.prevent="applyGenerateIncrementValue" />
+        </div>
+        <DialogFooter>
+          <Button variant="outline" @click="generateIncrementDialogOpen = false">{{ t("dangerDialog.cancel") }}</Button>
+          <Button @click="applyGenerateIncrementValue">{{ t("grid.applyBulkEdit") }}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -24,6 +24,56 @@ import {
 } from "@/lib/table/tableStructureEditorState";
 
 describe("tableStructureEditorState", () => {
+  it("hydrates Kingbase type parameters returned separately from the data type", () => {
+    const columns = createColumnDrafts(
+      [
+        {
+          name: "display_name",
+          data_type: "varchar",
+          is_nullable: true,
+          column_default: null,
+          is_primary_key: false,
+          extra: null,
+          character_maximum_length: 255,
+        },
+        {
+          name: "amount",
+          data_type: "numeric",
+          is_nullable: false,
+          column_default: null,
+          is_primary_key: false,
+          extra: null,
+          numeric_precision: 12,
+          numeric_scale: 2,
+        },
+        {
+          name: "attempts",
+          data_type: "integer",
+          is_nullable: false,
+          column_default: null,
+          is_primary_key: false,
+          extra: null,
+          numeric_precision: 32,
+          numeric_scale: 0,
+        },
+        {
+          name: "code",
+          data_type: "character varying(64)",
+          is_nullable: true,
+          column_default: null,
+          is_primary_key: false,
+          extra: null,
+          character_maximum_length: 64,
+        },
+      ],
+      "kingbase",
+    );
+
+    expect(columns.map((column) => column.dataType)).toEqual(["varchar(255)", "numeric(12,2)", "integer", "character varying(64)"]);
+    expect(columns.map((column) => column.original?.data_type)).toEqual(["varchar(255)", "numeric(12,2)", "integer", "character varying(64)"]);
+    expect(dataTypeLengthInputValue("kingbase", columns[0]?.dataType ?? "")).toBe("255");
+  });
+
   it("parses Kingbase SQLServer compatibility identity metadata", () => {
     expect(parseExtraToColumnExtra("identity(10, 2)", "kingbase")).toEqual({
       autoIncrement: true,

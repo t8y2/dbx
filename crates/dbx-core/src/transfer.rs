@@ -1038,7 +1038,7 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
                     }
                 }
             }
-            DatabaseType::SqlServer => {
+            DatabaseType::SqlServer | DatabaseType::Dameng => {
                 if *b {
                     "1".to_string()
                 } else {
@@ -6104,6 +6104,25 @@ mod tests {
         );
 
         assert_eq!(sql, "INSERT INTO [dbo].[flags] ([enabled], [deleted]) VALUES\n(1, 0)");
+    }
+
+    #[test]
+    fn dameng_insert_formats_bit_booleans_as_numeric_literals() {
+        let sql = generate_insert_typed(
+            &[String::from("enabled"), String::from("deleted"), String::from("optional")],
+            &[Some(String::from("BIT")), Some(String::from("bit")), Some(String::from("BIT"))],
+            &[vec![json!(true), json!(false), serde_json::Value::Null]],
+            "flags",
+            "DBX_TEST",
+            &DatabaseType::Dameng,
+        );
+
+        assert_eq!(
+            sql,
+            "INSERT INTO \"DBX_TEST\".\"flags\" (\"enabled\", \"deleted\", \"optional\") VALUES\n(1, 0, NULL)"
+        );
+        assert!(!sql.contains("TRUE"));
+        assert!(!sql.contains("FALSE"));
     }
 
     #[test]

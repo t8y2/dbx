@@ -96,6 +96,7 @@ import {
 import { resolveRowClickAction, shouldDeferSingleClick, type ObjectBrowserRowAction } from "@/lib/table/objectBrowserRowAction";
 import { createSidePanelRequestGuard } from "@/lib/table/sidePanelRequestGuard";
 import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
+import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
 
 type ObjectFilter = "all" | "tables" | "views" | "materializedViews" | "procedures" | "functions" | "sequences" | "packages";
 type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
@@ -2726,6 +2727,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                   <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.columnName") }}</th>
                   <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.columnType") }}</th>
                   <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.tableInfoNullable") }}</th>
+                  <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("structureEditor.defaultValue") }}</th>
                 </tr>
               </thead>
               <tbody>
@@ -2742,6 +2744,9 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                   </td>
                   <td class="px-3 py-2 font-mono text-[11px] text-muted-foreground">{{ column.data_type }}</td>
                   <td class="px-3 py-2">{{ column.is_nullable ? "YES" : "NO" }}</td>
+                  <td data-table-info-column-default class="max-w-56 px-3 py-2 font-mono text-[11px]" :class="{ 'text-muted-foreground/70': column.column_default == null }" :title="column.column_default ?? undefined">
+                    <span class="block max-w-56 truncate">{{ tableColumnDefaultDisplayValue(column.column_default) }}</span>
+                  </td>
                 </tr>
               </tbody>
             </table>

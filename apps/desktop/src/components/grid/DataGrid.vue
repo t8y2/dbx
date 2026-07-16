@@ -59,6 +59,7 @@ import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
 import EnumCellEditor from "@/components/grid/EnumCellEditor.vue";
 import type { QueryResult, ColumnInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo, TableInfoTab } from "@/types/database";
 import { tableObjectSourceKind } from "@/lib/table/tableObjectSourceKind";
+import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
 import * as api from "@/lib/backend/api";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
 import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
@@ -8472,6 +8473,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.columnName") }}</th>
                     <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.columnType") }}</th>
                     <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.tableInfoNullable") }}</th>
+                    <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("structureEditor.defaultValue") }}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -8498,6 +8500,9 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     </td>
                     <td class="px-3 py-2 font-mono text-[11px] text-muted-foreground">{{ column.data_type }}</td>
                     <td class="px-3 py-2">{{ column.is_nullable ? "YES" : "NO" }}</td>
+                    <td data-table-info-column-default class="max-w-56 px-3 py-2 font-mono text-[11px]" :class="{ 'text-muted-foreground/70': column.column_default == null }" :title="column.column_default ?? undefined">
+                      <span class="block max-w-56 truncate">{{ tableColumnDefaultDisplayValue(column.column_default) }}</span>
+                    </td>
                   </tr>
                 </tbody>
               </table>

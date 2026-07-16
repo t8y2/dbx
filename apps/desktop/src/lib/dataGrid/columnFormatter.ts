@@ -26,6 +26,7 @@ export const DateTimePatterns = [
   "YYYY/MM/DDTHH:mm:ssZ",
   "YYYY/MM/DDTHH:mm:ss.SSSZ",
 ];
+const SUPPORTED_DATE_TIME_PATTERN_TOKENS = ["YYYY", "SSS", "ZZ", "MM", "DD", "HH", "mm", "ss", "M", "D", "H", "m", "s", "Z"];
 const STRICT_LOCAL_DATETIME_INPUT_PATTERNS = [
   "YYYY-MM-DD",
   "YYYY-M-D",
@@ -55,6 +56,33 @@ export interface CustomColumnFormatterConfig {
   id: string;
   name: string;
   template: string;
+}
+
+export function normalizeSupportedDateTimePattern(value: string): string {
+  const pattern = value.trim();
+  if (!pattern || pattern.length > 100 || pattern.includes("%")) return "";
+
+  let index = 0;
+  while (index < pattern.length) {
+    const remaining = pattern.slice(index);
+    if (remaining.startsWith("[")) {
+      const closeIndex = remaining.indexOf("]");
+      if (closeIndex < 0) return "";
+      index += closeIndex + 1;
+      continue;
+    }
+
+    const token = SUPPORTED_DATE_TIME_PATTERN_TOKENS.find((candidate) => remaining.startsWith(candidate));
+    if (token) {
+      index += token.length;
+      continue;
+    }
+
+    if (/[A-Za-z]/.test(pattern[index])) return "";
+    index += 1;
+  }
+
+  return pattern;
 }
 
 export type ColumnFormatterConfig = { kind: "datetime"; unit: DateTimeFormatterUnit; pattern: string } | { kind: "json-path"; path: string } | { kind: "mask"; prefix: number; suffix: number } | { kind: "custom-template"; template: string } | { kind: "custom-ref"; formatterId: string };

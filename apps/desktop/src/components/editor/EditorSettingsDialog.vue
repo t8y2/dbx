@@ -112,7 +112,7 @@ import { DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES, DEFAULT_WEB_DAV_REMOTE_PA
 import { apiUrl } from "@/lib/common/webPath";
 import { DEFAULT_UI_FONT_FAMILY, SYSTEM_UI_FONT_FAMILY } from "@/lib/app/appFonts";
 import { buildAppSupportInfoRows, formatAppSupportInfoForClipboard, type AppSupportInfoLabels } from "@/lib/app/supportInfo";
-import { DateTimePatterns } from "@/lib/dataGrid/columnFormatter";
+import { DateTimePatterns, normalizeSupportedDateTimePattern } from "@/lib/dataGrid/columnFormatter";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -3619,6 +3619,7 @@ onUnmounted(cleanupPreviewEditor);
                     :placeholder="t('settings.dateTimeFormatRaw')"
                     :search-placeholder="t('settings.dateTimeFormatSearchPlaceholder')"
                     :empty-text="t('settings.dateTimeFormatEmpty')"
+                    :normalize-custom="normalizeSupportedDateTimePattern"
                     allow-custom
                     clearable
                     trigger-variant="outline"
@@ -3634,6 +3635,7 @@ onUnmounted(cleanupPreviewEditor);
                     :placeholder="t('settings.dateTimeFormatRaw')"
                     :search-placeholder="t('settings.dateTimeFormatSearchPlaceholder')"
                     :empty-text="t('settings.dateTimeFormatEmpty')"
+                    :normalize-custom="normalizeSupportedDateTimePattern"
                     allow-custom
                     clearable
                     trigger-variant="outline"
@@ -3649,6 +3651,7 @@ onUnmounted(cleanupPreviewEditor);
                     :placeholder="t('settings.dateTimeFormatAuto')"
                     :search-placeholder="t('settings.dateTimeFormatSearchPlaceholder')"
                     :empty-text="t('settings.dateTimeFormatEmpty')"
+                    :normalize-custom="normalizeSupportedDateTimePattern"
                     allow-custom
                     clearable
                     trigger-variant="outline"

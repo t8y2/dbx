@@ -1,5 +1,6 @@
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime};
 use serde_json::Value;
+use std::fmt::Write as _;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TemporalKind {
@@ -72,6 +73,10 @@ fn dayjs_to_chrono_pattern(pattern: &str) -> Option<String> {
             continue;
         }
         let ch = remaining.chars().next()?;
+        // Reject unknown Day.js tokens instead of silently exporting different text than the frontend displays.
+        if ch.is_ascii_alphabetic() {
+            return None;
+        }
         output.push(ch);
         index += ch.len_utf8();
     }
@@ -119,12 +124,16 @@ fn parse_temporal(value: &str, preferred_pattern: Option<&str>) -> Option<Parsed
 
 fn format_parsed(parsed: ParsedTemporal, pattern: &str) -> Option<String> {
     let pattern = dayjs_to_chrono_pattern(pattern)?;
-    Some(match parsed {
-        ParsedTemporal::Zoned(value) => value.format(&pattern).to_string(),
-        ParsedTemporal::DateTime(value) => value.format(&pattern).to_string(),
-        ParsedTemporal::Date(value) => value.format(&pattern).to_string(),
-        ParsedTemporal::Time(value) => value.format(&pattern).to_string(),
-    })
+    let mut output = String::new();
+    // Chrono reports missing date/time fields through fmt::Error; propagate it so exports preserve the raw value.
+    match parsed {
+        ParsedTemporal::Zoned(value) => write!(&mut output, "{}", value.format(&pattern)),
+        ParsedTemporal::DateTime(value) => write!(&mut output, "{}", value.format(&pattern)),
+        ParsedTemporal::Date(value) => write!(&mut output, "{}", value.format(&pattern)),
+        ParsedTemporal::Time(value) => write!(&mut output, "{}", value.format(&pattern)),
+    }
+    .ok()?;
+    Some(output)
 }
 
 pub fn format_temporal_export_value(value: &Value, data_type: Option<&str>, pattern: Option<&str>) -> Value {
@@ -263,6 +272,24 @@ mod tests {
             ),
             vec![json!(1), json!("2024/2/25 13:02:15"), json!("2024-02-25 13:02:15")]
         );
+    }
+
+    #[test]
+    fn preserves_raw_export_values_when_pattern_requires_missing_fields() {
+        assert_eq!(
+            format_temporal_export_value(&json!("2024-02-25"), Some("DATE"), Some("YYYY-MM-DD HH:mm:ss")),
+            json!("2024-02-25")
+        );
+        assert_eq!(
+            format_temporal_export_value(&json!("13:02:15"), Some("TIME"), Some("YYYY-MM-DD HH:mm:ss")),
+            json!("13:02:15")
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_dayjs_tokens_but_allows_literal_text() {
+        assert_eq!(dayjs_to_chrono_pattern("MM/DD/YYYY hh:mm A"), None);
+        assert_eq!(dayjs_to_chrono_pattern("YYYY-MM-DD [at] HH:mm:ss"), Some("%Y-%m-%d at %H:%M:%S".into()));
     }
 
     #[test]

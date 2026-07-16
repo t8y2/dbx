@@ -285,8 +285,15 @@ fn mysql_bytes_to_json(bytes: Vec<u8>, column: &mysql_async::Column) -> serde_js
 /// Map a MySQL column to a user-facing type name for the result-grid header.
 /// Returns the bare lowercase type name (no length/precision/signedness), which
 /// is enough for display; unknown variants fall back to a lowercased debug name.
-pub(crate) fn mysql_column_type_name(ty: ColumnType) -> String {
+///
+/// MySQL's wire protocol uses the same `MYSQL_TYPE_*BLOB` codes for TEXT and BLOB
+/// families. Binary charset (63) means BLOB; any other charset means TEXT. Value
+/// decoding already follows that rule — the header type must match, or TEXT
+/// columns flash as `blob` until table metadata arrives.
+pub(crate) fn mysql_column_type_name(column: &mysql_async::Column) -> String {
     use mysql_async::consts::ColumnType::*;
+    let ty = column.column_type();
+    let binary = is_mysql_binary_charset(column);
     match ty {
         MYSQL_TYPE_TINY => "tinyint",
         MYSQL_TYPE_SHORT => "smallint",
@@ -305,12 +312,48 @@ pub(crate) fn mysql_column_type_name(ty: ColumnType) -> String {
         MYSQL_TYPE_JSON => "json",
         MYSQL_TYPE_ENUM => "enum",
         MYSQL_TYPE_SET => "set",
-        MYSQL_TYPE_TINY_BLOB => "tinyblob",
-        MYSQL_TYPE_MEDIUM_BLOB => "mediumblob",
-        MYSQL_TYPE_LONG_BLOB => "longblob",
-        MYSQL_TYPE_BLOB => "blob",
-        MYSQL_TYPE_VARCHAR | MYSQL_TYPE_VAR_STRING => "varchar",
-        MYSQL_TYPE_STRING => "char",
+        MYSQL_TYPE_TINY_BLOB => {
+            if binary {
+                "tinyblob"
+            } else {
+                "tinytext"
+            }
+        }
+        MYSQL_TYPE_MEDIUM_BLOB => {
+            if binary {
+                "mediumblob"
+            } else {
+                "mediumtext"
+            }
+        }
+        MYSQL_TYPE_LONG_BLOB => {
+            if binary {
+                "longblob"
+            } else {
+                "longtext"
+            }
+        }
+        MYSQL_TYPE_BLOB => {
+            if binary {
+                "blob"
+            } else {
+                "text"
+            }
+        }
+        MYSQL_TYPE_VARCHAR | MYSQL_TYPE_VAR_STRING => {
+            if binary {
+                "varbinary"
+            } else {
+                "varchar"
+            }
+        }
+        MYSQL_TYPE_STRING => {
+            if binary {
+                "binary"
+            } else {
+                "char"
+            }
+        }
         MYSQL_TYPE_GEOMETRY => "geometry",
         MYSQL_TYPE_NULL => "null",
         other => return format!("{:?}", other).to_lowercase(),
@@ -2778,8 +2821,7 @@ async fn execute_result_set_with_text_protocol_on_conn(
         });
     }
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
-    let column_types: Vec<String> =
-        result.columns_ref().iter().map(|c| mysql_column_type_name(c.column_type())).collect();
+    let column_types: Vec<String> = result.columns_ref().iter().map(mysql_column_type_name).collect();
 
     if should_collect_text_result_set(sql, row_limit, max_rows) {
         let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
@@ -2857,8 +2899,7 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
 ) -> Result<QueryResult, String> {
     let mut result = conn.exec_iter(sql, ()).await.map_err(|e| e.to_string())?;
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
-    let column_types: Vec<String> =
-        result.columns_ref().iter().map(|c| mysql_column_type_name(c.column_type())).collect();
+    let column_types: Vec<String> = result.columns_ref().iter().map(mysql_column_type_name).collect();
 
     let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::new();
     let mut stream = result
@@ -2964,8 +3005,7 @@ async fn stream_query_result_text(
         return Ok(0);
     }
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
-    let column_types: Vec<String> =
-        result.columns_ref().iter().map(|c| mysql_column_type_name(c.column_type())).collect();
+    let column_types: Vec<String> = result.columns_ref().iter().map(mysql_column_type_name).collect();
     on_item(MySqlQueryStreamItem::Columns { columns, column_types })?;
 
     let mut stream = result
@@ -3003,8 +3043,7 @@ async fn stream_query_result_prepared(
     if columns.is_empty() {
         return Ok(0);
     }
-    let column_types: Vec<String> =
-        result.columns_ref().iter().map(|c| mysql_column_type_name(c.column_type())).collect();
+    let column_types: Vec<String> = result.columns_ref().iter().map(mysql_column_type_name).collect();
     on_item(MySqlQueryStreamItem::Columns { columns, column_types })?;
 
     let mut stream = result
@@ -3858,16 +3897,66 @@ mod tests {
     #[test]
     fn mysql_column_type_names_map_to_friendly_names() {
         use mysql_async::consts::ColumnType::*;
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_TINY), "tinyint");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_LONG), "int");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_LONGLONG), "bigint");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_NEWDECIMAL), "decimal");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_VARCHAR), "varchar");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_VAR_STRING), "varchar");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_STRING), "char");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_DATETIME), "datetime");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_JSON), "json");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_BLOB), "blob");
+        let utf8 = 45u16;
+        let binary = 63u16;
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_TINY, utf8, ColumnFlags::empty(), 4)),
+            "tinyint"
+        );
+        assert_eq!(mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_LONG, utf8, ColumnFlags::empty(), 11)), "int");
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_LONGLONG, utf8, ColumnFlags::empty(), 20)),
+            "bigint"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_NEWDECIMAL, utf8, ColumnFlags::empty(), 10)),
+            "decimal"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_VARCHAR, utf8, ColumnFlags::empty(), 255)),
+            "varchar"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_VAR_STRING, utf8, ColumnFlags::empty(), 255)),
+            "varchar"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_STRING, utf8, ColumnFlags::empty(), 16)),
+            "char"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_DATETIME, utf8, ColumnFlags::empty(), 19)),
+            "datetime"
+        );
+        assert_eq!(mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_JSON, utf8, ColumnFlags::empty(), 0)), "json");
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_BLOB, binary, ColumnFlags::BLOB_FLAG, 65_535)),
+            "blob"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_BLOB, utf8, ColumnFlags::empty(), 65_535)),
+            "text"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_TINY_BLOB, utf8, ColumnFlags::empty(), 255)),
+            "tinytext"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_MEDIUM_BLOB, utf8, ColumnFlags::empty(), 16_777_215)),
+            "mediumtext"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_LONG_BLOB, utf8, ColumnFlags::empty(), 4_294_967_295)),
+            "longtext"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_VAR_STRING, binary, ColumnFlags::BINARY_FLAG, 16)),
+            "varbinary"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_STRING, binary, ColumnFlags::BINARY_FLAG, 16)),
+            "binary"
+        );
     }
 
     #[test]

@@ -3125,8 +3125,7 @@ async fn execute_manual_txn_mysql_statement(
         let start = std::time::Instant::now();
         let mut result = conn.query_iter(sql).await.map_err(|e| format!("Query failed: {e}"))?;
         let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
-        let column_types: Vec<String> =
-            result.columns_ref().iter().map(|c| db::mysql::mysql_column_type_name(c.column_type())).collect();
+        let column_types: Vec<String> = result.columns_ref().iter().map(db::mysql::mysql_column_type_name).collect();
         let mut data: Vec<Vec<serde_json::Value>> = Vec::with_capacity(row_limit.min(1024));
         let mut stream = result
             .stream::<mysql_async::Row>()

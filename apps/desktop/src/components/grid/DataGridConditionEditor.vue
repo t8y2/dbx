@@ -365,7 +365,7 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
           "
           @mouseleave="hideHistoryPreview"
         >
-          <span data-condition-history-text class="min-w-0 truncate font-mono" :class="suggestion.comment ? 'max-w-[75%] shrink-0' : 'flex-1'" :title="suggestion.value">
+          <span data-condition-history-text class="data-grid-condition-suggestion-field min-w-0 truncate" :class="suggestion.comment ? 'max-w-[75%] shrink-0' : 'flex-1'" :title="suggestion.value">
             {{ suggestion.value }}
           </span>
           <span v-if="suggestion.comment" class="ml-3 min-w-0 flex-1 truncate text-right text-muted-foreground" :title="suggestion.comment">{{ suggestion.comment }}</span>
@@ -429,6 +429,16 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
   transform: translateX(-4px);
 }
 
+.data-grid-topbar-condition-input,
+.data-grid-condition-suggestion-field {
+  font-family: var(--data-grid-condition-font-family, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);
+  font-size: 0.875rem;
+  font-variant-ligatures: none;
+  font-feature-settings:
+    "liga" 0,
+    "calt" 0;
+}
+
 .data-grid-topbar-condition-input {
   width: 100%;
   max-width: 100%;
@@ -441,13 +451,7 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
   border-radius: 0;
   appearance: none;
   scrollbar-width: none;
-  font-family: var(--data-grid-condition-font-family, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);
-  font-size: 0.875rem;
   line-height: 1.5rem;
-  font-variant-ligatures: none;
-  font-feature-settings:
-    "liga" 0,
-    "calt" 0;
 }
 
 :global(.dark) .data-grid-topbar-condition-input {

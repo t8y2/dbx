@@ -368,7 +368,7 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
           <span data-condition-history-text class="min-w-0 truncate font-mono" :class="suggestion.comment ? 'max-w-[75%] shrink-0' : 'flex-1'" :title="suggestion.value">
             {{ suggestion.value }}
           </span>
-          <span v-if="suggestion.comment" class="ml-3 min-w-0 flex-1 truncate text-muted-foreground" :title="suggestion.comment">{{ suggestion.comment }}</span>
+          <span v-if="suggestion.comment" class="ml-3 min-w-0 flex-1 truncate text-right text-muted-foreground" :title="suggestion.comment">{{ suggestion.comment }}</span>
           <button v-if="suggestion.kind === 'history'" type="button" class="ml-2 shrink-0 text-muted-foreground hover:text-foreground" @mousedown.stop.prevent="editor.deleteHistory(suggestion.value)">
             <X class="h-3 w-3" />
           </button>

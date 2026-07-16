@@ -1,12 +1,21 @@
 package com.dbx.agent.kafka;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.google.gson.JsonParser;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.atomic.AtomicInteger;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.common.TopicPartition;
 import org.junit.jupiter.api.Test;
 
 class KafkaAgentTest {
@@ -61,6 +70,71 @@ class KafkaAgentTest {
         assertEquals(5L, messages.get(1).get("offset"));
         assertEquals(1, messages.get(2).get("partition"));
         assertEquals(20L, messages.get(3).get("timestamp"));
+    }
+
+    @Test
+    void allPeekPartitionsCaughtUpRequiresEveryPartitionAtEndOffset() {
+        TopicPartition p0 = new TopicPartition("events", 0);
+        TopicPartition p1 = new TopicPartition("events", 1);
+        Map<TopicPartition, Long> endOffsets = Map.of(p0, 10L, p1, 5L);
+
+        assertFalse(KafkaAgent.allPeekPartitionsCaughtUp(
+            List.of(p0, p1),
+            Map.of(p0, 10L, p1, 4L),
+            endOffsets
+        ));
+        assertTrue(KafkaAgent.allPeekPartitionsCaughtUp(
+            List.of(p0, p1),
+            Map.of(p0, 10L, p1, 5L),
+            endOffsets
+        ));
+    }
+
+    @Test
+    void collectPeekedMessagesRetriesAfterEmptyFirstPoll() {
+        TopicPartition tp = new TopicPartition("events", 0);
+        ConsumerRecord<String, byte[]> record = new ConsumerRecord<>(
+            "events",
+            0,
+            7L,
+            "k",
+            "hello".getBytes(StandardCharsets.UTF_8)
+        );
+        Map<TopicPartition, List<ConsumerRecord<String, byte[]>>> batch = new HashMap<>();
+        batch.put(tp, List.of(record));
+        ConsumerRecords<String, byte[]> withData = new ConsumerRecords<>(batch);
+
+        AtomicInteger polls = new AtomicInteger();
+        List<Map<String, Object>> messages = KafkaAgent.collectPeekedMessages(
+            timeout -> polls.getAndIncrement() == 0 ? ConsumerRecords.empty() : withData,
+            () -> false,
+            1,
+            System.nanoTime() + Duration.ofSeconds(5).toNanos(),
+            Duration.ofMillis(1)
+        );
+
+        assertEquals(2, polls.get());
+        assertEquals(1, messages.size());
+        assertEquals(7L, messages.get(0).get("offset"));
+        assertEquals("hello", messages.get(0).get("payloadText"));
+    }
+
+    @Test
+    void collectPeekedMessagesStopsOnEmptyPollWhenCaughtUp() {
+        AtomicInteger polls = new AtomicInteger();
+        List<Map<String, Object>> messages = KafkaAgent.collectPeekedMessages(
+            timeout -> {
+                polls.incrementAndGet();
+                return ConsumerRecords.empty();
+            },
+            () -> true,
+            10,
+            System.nanoTime() + Duration.ofSeconds(5).toNanos(),
+            Duration.ofMillis(1)
+        );
+
+        assertEquals(1, polls.get());
+        assertTrue(messages.isEmpty());
     }
 
     @Test

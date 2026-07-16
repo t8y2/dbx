@@ -851,26 +851,88 @@ public final class KafkaAgent {
                 consumer.seek(entry.getKey(), entry.getValue());
             }
 
-            List<Map<String, Object>> messages = new ArrayList<>();
-            long deadlineNs = System.nanoTime() + Duration.ofSeconds(5).toNanos();
-            while (messages.size() < count && System.nanoTime() < deadlineNs) {
-                ConsumerRecords<String, byte[]> records = consumer.poll(Duration.ofMillis(500));
-                if (records.isEmpty()) {
-                    break;
-                }
-                for (ConsumerRecord<String, byte[]> record : records) {
-                    messages.add(peekedMessageFromRecord(record));
-                    if (messages.size() >= count) {
-                        break;
+            List<Map<String, Object>> messages = collectPeekedMessages(
+                timeout -> consumer.poll(timeout),
+                () -> {
+                    Map<TopicPartition, Long> positions = new LinkedHashMap<>();
+                    for (TopicPartition tp : readablePartitions) {
+                        positions.put(tp, consumer.position(tp));
                     }
-                }
-            }
+                    return allPeekPartitionsCaughtUp(readablePartitions, positions, endOffsets);
+                },
+                count,
+                System.nanoTime() + Duration.ofSeconds(5).toNanos(),
+                Duration.ofMillis(500)
+            );
             sortPeekedMessages(messages);
             if (messages.size() > count) {
                 messages = new ArrayList<>(messages.subList(0, count));
             }
             return Collections.singletonMap("messages", messages);
         }
+    }
+
+    /**
+     * Poll until {@code count} messages are collected, every assigned partition has reached its
+     * end offset, or {@code deadlineNs} expires. Empty polls retry until caught-up or deadline —
+     * they must not abort early (broker / network / first-fetch latency can exceed one poll).
+     */
+    static List<Map<String, Object>> collectPeekedMessages(
+        PeekRecordPoller poller,
+        PeekCaughtUpChecker caughtUpChecker,
+        int count,
+        long deadlineNs,
+        Duration pollTimeout
+    ) {
+        List<Map<String, Object>> messages = new ArrayList<>();
+        while (messages.size() < count && System.nanoTime() < deadlineNs) {
+            long remainingNs = deadlineNs - System.nanoTime();
+            if (remainingNs <= 0) {
+                break;
+            }
+            Duration timeout = pollTimeout.toNanos() > remainingNs
+                ? Duration.ofNanos(remainingNs)
+                : pollTimeout;
+            ConsumerRecords<String, byte[]> records = poller.poll(timeout);
+            if (records.isEmpty()) {
+                if (caughtUpChecker.allPartitionsCaughtUp()) {
+                    break;
+                }
+                continue;
+            }
+            for (ConsumerRecord<String, byte[]> record : records) {
+                messages.add(peekedMessageFromRecord(record));
+                if (messages.size() >= count) {
+                    break;
+                }
+            }
+        }
+        return messages;
+    }
+
+    static boolean allPeekPartitionsCaughtUp(
+        List<TopicPartition> partitions,
+        Map<TopicPartition, Long> positions,
+        Map<TopicPartition, Long> endOffsets
+    ) {
+        for (TopicPartition tp : partitions) {
+            long endOffset = endOffsets.getOrDefault(tp, 0L);
+            long position = positions.getOrDefault(tp, 0L);
+            if (position < endOffset) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    @FunctionalInterface
+    interface PeekRecordPoller {
+        ConsumerRecords<String, byte[]> poll(Duration timeout);
+    }
+
+    @FunctionalInterface
+    interface PeekCaughtUpChecker {
+        boolean allPartitionsCaughtUp();
     }
 
     /** When partition is null, peek across every partition of the topic. */

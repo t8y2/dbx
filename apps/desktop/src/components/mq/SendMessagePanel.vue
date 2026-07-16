@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import type { PeekedMessage, TopicInfo, TopicRef, SendMessageRequest, SendMessageResponse } from "@/types/mq";
 import { mqSendMessage, mqListTopics, mqPeekMessages } from "@/lib/backend/api";
 import { formatError } from "@/lib/backend/errorUtils";
+import { parseNonNegativeSafeInteger } from "@/lib/mq/mqPeekFilters";
 
 interface Props {
   connectionId: string;
@@ -176,20 +177,20 @@ async function loadMessages() {
     const partitionText = peekPartition.value.trim();
     const offsetText = peekOffset.value.trim();
     if (partitionText !== "") {
-      const partition = Number(partitionText);
-      if (!Number.isFinite(partition) || partition < 0) {
+      const partition = parseNonNegativeSafeInteger(partitionText);
+      if (partition == null) {
         throw new Error(t("mqMessages.partitionMustBeNonNegativeInt"));
       }
-      options.partition = Math.floor(partition);
-      peekPartition.value = String(options.partition);
+      options.partition = partition;
+      peekPartition.value = String(partition);
     }
     if (offsetText !== "") {
-      const offset = Number(offsetText);
-      if (!Number.isFinite(offset) || offset < 0) {
+      const offset = parseNonNegativeSafeInteger(offsetText);
+      if (offset == null) {
         throw new Error(t("mqMessages.offsetMustBeNonNegativeInt"));
       }
-      options.offset = Math.floor(offset);
-      peekOffset.value = String(options.offset);
+      options.offset = offset;
+      peekOffset.value = String(offset);
     }
     peekMessages.value = await mqPeekMessages(props.connectionId, topic, "__dbx_kafka_viewer__", count, options);
   } catch (e: unknown) {

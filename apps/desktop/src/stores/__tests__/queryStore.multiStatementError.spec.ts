@@ -30,7 +30,7 @@ vi.mock("@/stores/connectionStore", () => ({
 
 vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({
-    editorSettings: { autoCalculateTotalRows: false, pageSize: 100 },
+    editorSettings: { autoCalculateTotalRows: false, pageSize: 100, continueOnErrorOnBatch: false },
   }),
 }));
 
@@ -99,6 +99,34 @@ describe("queryStore multi-statement errors", () => {
     });
   });
 
+  it("uses explicit statement indexes for selected multi-statement ranges", async () => {
+    mocks.executeMulti.mockResolvedValue([
+      { columns: ["value"], rows: [[2]], affected_rows: 0, execution_time_ms: 1, statement_index: 1 },
+      { columns: ["Error"], rows: [["failed"]], affected_rows: 0, execution_time_ms: 1, execution_error: true, statement_index: 2 },
+    ]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+    const selectedSql = "SELECT 1; SELECT 2; SELECT bad";
+
+    await store.executeTabSql(tabId, selectedSql, { sourceOffset: 10 });
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.results?.[0]).toMatchObject({
+      sourceStatement: "SELECT 2",
+      sourceFrom: 20,
+      sourceTo: 28,
+      statement_index: 1,
+    });
+    expect(tab.results?.[1]).toMatchObject({
+      sourceStatement: "SELECT bad",
+      sourceFrom: 30,
+      sourceTo: 40,
+      statement_index: 2,
+      execution_error: true,
+    });
+  });
+
   it("does not promote an unmarked Error alias without type metadata as a batch failure", async () => {
     mocks.executeMulti.mockResolvedValue([
       { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 },
@@ -137,5 +165,16 @@ describe("queryStore multi-statement errors", () => {
     const tab = store.tabs.find((item) => item.id === tabId)!;
     expect(tab.activeResultIndex).toBe(0);
     expect(tab.result?.columns).toEqual(["value"]);
+  });
+
+  it("passes continueOnError=false from settings to executeMulti by default", async () => {
+    mocks.executeMulti.mockResolvedValue([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+
+    await store.executeTabSql(tabId, "SELECT 1");
+
+    expect(mocks.executeMulti).toHaveBeenCalledWith("mysql-1", "app", "SELECT 1", undefined, expect.any(String), expect.objectContaining({ continueOnError: false }));
   });
 });

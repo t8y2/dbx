@@ -1,0 +1,457 @@
+---
+title: Build From Source and Contribute
+description: Set up DBX from scratch, run the desktop app, make your first change, test it, and open a pull request.
+---
+
+This tutorial is for first-time DBX contributors. By the end, you will have:
+
+1. Installed Node.js, pnpm, Rust, and native build dependencies
+2. Forked, cloned, and run DBX Desktop
+3. Located the relevant code and completed a small change
+4. Run checks and tests that match the change
+5. Pushed a branch and opened a pull request
+
+<Callout type="info">
+  Documentation, translations, small UI fixes, and issues for a database you can test are good first contributions. Keep each pull request focused on one verifiable problem.
+</Callout>
+
+## 1. Choose and Claim an Issue
+
+Open [DBX Issues](https://github.com/t8y2/dbx/issues) and choose an issue that has no assignee and no active contributor in its comments. Good first contributions have one of these properties:
+
+- The reproduction steps and expected behavior are already clear
+- The scope is a small documentation, translation, or UI change
+- It affects a database you use and can verify against a real instance
+
+Do not rely only on labels. Read the full issue, comments, screenshots, and previous discussion to confirm that the request is still valid and has not already been implemented elsewhere.
+
+If nobody is working on the issue, post this as a standalone comment:
+
+```text
+/claim
+```
+
+The claim workflow assigns the issue to you when it is available. If your proposed solution changes existing behavior, explain the approach briefly in the issue before making a large patch.
+
+## 2. Install the Toolchain
+
+DBX Desktop uses Tauri, Vue, and Rust. The repository currently requires:
+
+| Tool | Version |
+| --- | --- |
+| Node.js | 22.13.0 or newer |
+| pnpm | 10.27.0 |
+| Rust | 1.77 or newer |
+| Git | Current stable version |
+| Make | Recommended on macOS and Linux |
+
+### Install Node.js and pnpm
+
+Install Node.js 22 or a newer LTS release from the [Node.js website](https://nodejs.org/), then enable the pnpm version used by the repository:
+
+```bash
+corepack enable
+corepack prepare pnpm@10.27.0 --activate
+node --version
+pnpm --version
+```
+
+If your Node.js installation does not include Corepack, use:
+
+```bash
+npm install --global pnpm@10.27.0
+```
+
+### Install Rust
+
+Follow the [official Rust installation guide](https://www.rust-lang.org/tools/install) to install `rustup`. Reopen the terminal and verify the installation:
+
+```bash
+rustc --version
+cargo --version
+```
+
+### Install Native Dependencies
+
+See the [official Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for complete platform details. DBX also uses ODBC development libraries.
+
+<Tabs groupId="contributing-platform" items={["macOS", "Ubuntu / Debian", "Windows"]}>
+  <Tab value="macOS">
+    Install Xcode Command Line Tools and unixODBC:
+
+    ```bash
+    xcode-select --install
+    brew install unixodbc
+    ```
+
+    Install Homebrew first from the [Homebrew website](https://brew.sh/) if needed.
+
+  </Tab>
+  <Tab value="Ubuntu / Debian">
+    Install the compiler toolchain, Tauri WebKit/GTK dependencies, and unixODBC:
+
+    ```bash
+    sudo apt update
+    sudo apt install -y \
+      build-essential curl wget file pkg-config \
+      libwebkit2gtk-4.1-dev libgtk-3-dev libxdo-dev \
+      libayatana-appindicator3-dev librsvg2-dev patchelf \
+      libssl-dev unixodbc-dev
+    ```
+
+  </Tab>
+  <Tab value="Windows">
+    1. Install [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/).
+    2. Select **Desktop development with C++** in the installer.
+    3. Make sure a Windows 10/11 SDK and WebView2 are installed. Windows 11 normally includes WebView2.
+    4. Run the Windows commands on this page in PowerShell.
+
+    Make is optional on Windows because equivalent pnpm commands are provided below.
+
+  </Tab>
+</Tabs>
+
+## 3. Fork and Clone the Repository
+
+Open [t8y2/dbx](https://github.com/t8y2/dbx) on GitHub and click **Fork**.
+
+Replace `<your-github-name>` with your account name:
+
+```bash
+git clone https://github.com/<your-github-name>/dbx.git
+cd dbx
+git remote add upstream https://github.com/t8y2/dbx.git
+git remote -v
+```
+
+Use a separate branch for each issue:
+
+```bash
+git switch -c fix/issue-1234-short-description
+```
+
+Before starting another task, synchronize your `main` branch:
+
+```bash
+git switch main
+git fetch upstream
+git rebase upstream/main
+git push origin main
+```
+
+## 4. Run DBX for the First Time
+
+### macOS and Linux
+
+From the repository root, run:
+
+```bash
+make
+```
+
+`make` installs dependencies from the lockfile and starts the Tauri desktop development environment. The first Rust build can take a while; later starts are much faster.
+
+If your change does not involve DuckDB, skip the DuckDB source build:
+
+```bash
+make dev-fast
+```
+
+### Windows
+
+Run in PowerShell:
+
+```powershell
+pnpm install --frozen-lockfile
+pnpm dev:tauri
+```
+
+To skip DuckDB:
+
+```powershell
+pnpm tauri dev -- --no-default-features
+```
+
+### Confirm the Environment Works
+
+A successful run opens the DBX desktop window without a compiler error in the terminal. Complete three quick checks:
+
+1. Open Settings
+2. Create or open a local test connection
+3. Close and start the app again to confirm the setup is repeatable
+
+If port `1420` is already in use, stop the previous DBX/Vite development process and restart.
+
+## 5. Understand the Repository Layout
+
+| Path | What to change there |
+| --- | --- |
+| `apps/desktop/src/` | Vue pages, components, state, interactions, and translations |
+| `src-tauri/` | Tauri desktop commands, system integration, and packaging |
+| `crates/dbx-core/` | Connections, queries, metadata, and shared Rust database logic |
+| `crates/dbx-web/` | Docker/Web backend |
+| `packages/app-tests/` | Tests for shared frontend logic |
+| `packages/cli/` | DBX CLI |
+| `packages/mcp-server/` | MCP Server |
+| `docs/content/docs/` | Bilingual website documentation |
+| `agents/drivers/` | Java/JDBC and selected native database agents |
+
+Search for a feature name, visible label, or error message when you do not know the file yet:
+
+```bash
+rg "text to find" apps/desktop/src crates src-tauri packages
+```
+
+## 6. Make Your First Change
+
+### Path A: Update the Website Docs
+
+Documentation is the easiest first contribution. English and Chinese pages use the same base filename:
+
+```text
+docs/content/docs/example.mdx
+docs/content/docs/example.cn.mdx
+```
+
+Start the docs site:
+
+```bash
+make docs
+```
+
+On Windows:
+
+```powershell
+cd docs
+pnpm install --frozen-lockfile --ignore-workspace
+pnpm dev
+```
+
+Open the local address printed in the terminal. When adding a page, also register it in:
+
+```text
+docs/content/docs/meta.json
+docs/content/docs/meta.cn.json
+```
+
+### Path B: Change the Desktop Frontend
+
+Frontend code lives in `apps/desktop/src/`. Run the full desktop app or start only the web frontend:
+
+```bash
+make dev-web
+```
+
+After the change, run at least:
+
+```bash
+pnpm typecheck
+pnpm lint
+pnpm test
+```
+
+For UI changes, check light and dark themes, narrow windows, empty data, loading, and failure states. Include screenshots or a recording in the pull request.
+
+### Path C: Change the Rust Backend
+
+Shared Rust logic is mainly in `crates/dbx-core/`; desktop commands are in `src-tauri/`. When DuckDB is unrelated, start with the fast checks:
+
+```bash
+make cargo-check-fast
+make cargo-test-fast
+```
+
+Database behavior changes should be verified against a real database, not only mocks. Include the database type and version, reproduction SQL, previous behavior, and fixed behavior in the pull request.
+
+### Path D: Change an Agent Driver
+
+Agents are separate processes that communicate with DBX through stdin/stdout JSON-RPC. Java/JDBC agents normally use JDK 21; native agents use Go or Rust. Read these first:
+
+- [`agents/README.md`](https://github.com/t8y2/dbx/blob/main/agents/README.md)
+- [`agents/docs/agent-authoring.md`](https://github.com/t8y2/dbx/blob/main/agents/docs/agent-authoring.md)
+
+#### Change an Existing Java/JDBC Agent
+
+From the repository root, enter `agents/` and build only the target module:
+
+```bash
+cd agents
+java --version
+./gradlew :<driver-module>:test :<driver-module>:shadowJar
+```
+
+The Shadow JAR is written under:
+
+```text
+agents/drivers/<driver-module>/build/libs/
+```
+
+A successful build does not mean the local DBX app is using the new code. DBX runs `.dbx/agents/drivers/<db_type>/agent.jar` under the user home directory, so back up and replace the runtime JAR:
+
+<Tabs groupId="agent-runtime-replace" items={["macOS / Linux", "Windows PowerShell"]}>
+  <Tab value="macOS / Linux">
+    ```bash
+    cp ~/.dbx/agents/drivers/<db_type>/agent.jar \
+      ~/.dbx/agents/drivers/<db_type>/agent.jar.bak
+    cp drivers/<driver-module>/build/libs/*-all.jar \
+      ~/.dbx/agents/drivers/<db_type>/agent.jar
+    ```
+  </Tab>
+  <Tab value="Windows PowerShell">
+    ```powershell
+    Copy-Item "$HOME\.dbx\agents\drivers\<db_type>\agent.jar" `
+      "$HOME\.dbx\agents\drivers\<db_type>\agent.jar.bak"
+    $jar = Get-ChildItem "drivers\<driver-module>\build\libs\*-all.jar" | Select-Object -First 1
+    Copy-Item $jar.FullName "$HOME\.dbx\agents\drivers\<db_type>\agent.jar" -Force
+    ```
+  </Tab>
+</Tabs>
+
+Restart DBX or disconnect and reconnect the database so the old agent process exits and the new JAR is loaded. Repeat the issue's reproduction flow against the real database version.
+
+#### When to Change `agents/versions.json`
+
+<Callout type="warn">
+  Do not edit `agents/versions.json` when changing an existing driver. The agent release workflow compares against the previous `agents-v*` tag and automatically increments the patch version of changed modules.
+</Callout>
+
+- A change under `agents/drivers/<module>/` automatically bumps that module during release
+- A change under `agents/common/src/main/` or `agents/common/build.gradle` bumps every module that packages the shared common runtime
+- A new driver module must add an initial entry such as `"rabbitmq": "0.1.0"` to `agents/versions.json`
+- A new Java/JDBC driver must also update `agents/settings.gradle`, the supported-agent table, build configuration, and tests
+- A new native driver must register its build and release artifacts according to the agent authoring/release checklist instead of assuming Gradle handles it
+- Keys in `versions.json` must match published modules; infrastructure modules `common` and `test-support` do not have version entries
+
+Normal bug-fix pull requests do not manually bump a version to make the change take effect. The agent release workflow owns version bumps and release artifacts.
+
+#### Native Agents
+
+Native agents such as `oracle` and `xugu` use an `agent` executable instead of `agent.jar`. Run the Go tests and build from the module, then follow its README to replace the local runtime executable:
+
+```bash
+cd agents/drivers/<native-module>
+go test ./...
+go build -o agent .
+```
+
+For a new database agent, prefer a mature, license-compatible Go or Rust driver. Use Java/JDBC when there is no reliable native driver.
+
+#### Complete Agent Validation
+
+From `agents/`, run:
+
+```bash
+python3 -m unittest discover -s scripts -p '*_test.py'
+python3 scripts/validate_agents.py
+./gradlew test shadowJar --continue
+python3 scripts/validate_agent_jars.py
+```
+
+`validate_agents.py` checks module declarations, `versions.json`, Gradle configuration, Main-Class metadata, runtime classification, and forbidden residue. `validate_agent_jars.py` verifies that built JARs contain the expected entry classes.
+
+## 7. Check the Change Before Committing
+
+Review the patch and make sure it does not include build artifacts, database files, secrets, or unrelated formatting:
+
+```bash
+git status
+git diff
+```
+
+Run checks that match the changed area:
+
+| Changed area | Minimum check |
+| --- | --- |
+| Website docs | `make docs-build` |
+| Frontend/UI | `pnpm typecheck && pnpm lint && pnpm test` |
+| Rust | `make cargo-check-fast && make cargo-test-fast` |
+| CLI/MCP/Node Core | `pnpm test:packages` |
+| Agent | Agent script validation, relevant Gradle/Go tests, artifact validation, and a real local runtime test |
+
+Run the combined checks when a change crosses multiple areas. For a bug fix, repeat the original reproduction steps to prove the bug is gone and test adjacent normal behavior for regressions.
+
+## 8. Commit and Push
+
+Use a short conventional commit message:
+
+```bash
+git add <files-changed-for-this-task>
+git commit -m "fix(scope): describe the change"
+git push -u origin HEAD
+```
+
+Common prefixes:
+
+- `fix(scope):` for a bug fix
+- `feat(scope):` for a feature
+- `docs:` for documentation
+- `test(scope):` for tests
+
+Do not combine unrelated problems in the same commit or pull request.
+
+## 9. Open a Pull Request
+
+Open your fork on GitHub and click **Compare & pull request**. Set the target repository to `t8y2/dbx` and the target branch to `main`.
+
+The pull request description should include:
+
+1. The related issue, for example `Fixes #1234`
+2. What changed
+3. Why this approach was used
+4. Tests you ran
+5. Screenshots or recordings for UI changes
+6. Database name, version, and verification steps for database changes
+
+If CI fails, open the failed job and inspect its logs. Push the fix to the same branch; you do not need to create another pull request.
+
+## 10. Update the Pull Request After Review
+
+Continue working on the same branch after receiving review feedback:
+
+```bash
+git add <changed-files>
+git commit -m "fix(scope): address review feedback"
+git push
+```
+
+If `main` changed significantly during review, synchronize and push again:
+
+```bash
+git fetch upstream
+git rebase upstream/main
+git push --force-with-lease
+```
+
+<Callout type="warn">
+  Use `--force-with-lease`, not plain `--force`. It refuses to overwrite remote commits that you have not fetched.
+</Callout>
+
+## Troubleshooting
+
+### The First Rust Build Is Slow
+
+This is expected. Use `make dev-fast`, `make cargo-check-fast`, and `make cargo-test-fast` when DuckDB is not part of the change.
+
+### pnpm Reports the Wrong Version
+
+Reactivate the repository version:
+
+```bash
+corepack prepare pnpm@10.27.0 --activate
+```
+
+### The UI Does Not Reflect the Change
+
+Confirm that you changed `apps/desktop/src/`, the Vite/Tauri process is still running, and the terminal or browser console has no compilation error. Rust command changes normally trigger a rebuild.
+
+### You Do Not Know Which Tests to Run
+
+Start with the minimum check for the changed directory, then perform the issue's real reproduction flow. If coverage remains uncertain, list completed validation and known gaps in the pull request so maintainers can advise.
+
+## Get Help
+
+- Describe the blocker in the original issue and include the complete error and operating system version
+- Join [Discord](https://discord.gg/W7NyVDRt6a)
+- Read the repository [CONTRIBUTING.md](https://github.com/t8y2/dbx/blob/main/CONTRIBUTING.md)
+
+Do not report only "the build failed." Include the command, the first meaningful error in the log, your operating system, and your Node.js, pnpm, and Rust versions.

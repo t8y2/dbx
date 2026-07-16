@@ -221,10 +221,10 @@ pub fn build_count_query_sql(options: CountQuerySqlOptions) -> QuerySqlBuildResu
     }
 
     let alias = quote_table_identifier(options.database_type, "dbx_count");
-    let wrapped_sql = if options.database_type == Some(DatabaseType::SqlServer) {
-        sql_server_statement_for_derived_table(&statement)
-    } else {
-        statement
+    let wrapped_sql = match options.database_type {
+        Some(DatabaseType::SqlServer) => sql_server_statement_for_derived_table(&statement),
+        Some(DatabaseType::Iris) => iris_statement_for_derived_table(&statement),
+        _ => statement,
     };
     ok(derived_table_sql("SELECT COUNT(*) AS dbx_total_rows FROM", &wrapped_sql, &format!("{alias};")))
 }
@@ -765,12 +765,22 @@ fn strip_sql_server_select_modifier<'a>(rest: &'a str, modifier: &str) -> Option
 }
 
 fn sql_server_statement_for_derived_table(statement: &str) -> String {
-    let Some(order_by) = find_top_level_trailing_order_by(statement) else {
-        return statement.to_string();
-    };
     if has_top_level_select_top(statement) || has_top_level_for_xml(statement) {
         return statement.to_string();
     }
+    statement_for_order_insensitive_derived_table(statement)
+}
+
+fn iris_statement_for_derived_table(statement: &str) -> String {
+    statement_for_order_insensitive_derived_table(statement)
+}
+
+fn statement_for_order_insensitive_derived_table(statement: &str) -> String {
+    let Some(order_by) = find_top_level_trailing_order_by(statement) else {
+        return statement.to_string();
+    };
+    // Result ordering does not change COUNT cardinality, and stripping only
+    // depth-zero ORDER BY keeps nested query semantics intact.
     statement[..order_by].trim_end().to_string()
 }
 
@@ -2206,6 +2216,47 @@ WHERE u.id = picked.id;
         assert_eq!(
             result.sql.unwrap(),
             "SELECT COUNT(*) AS dbx_total_rows FROM (SELECT * FROM users WHERE active = 1 LIMIT 100 OFFSET 50) \"dbx_count\";"
+        );
+    }
+
+    #[test]
+    fn iris_count_query_removes_top_level_order_by() {
+        let result = build_count_query_sql(CountQuerySqlOptions {
+            original_sql: "SELECT id, appointment_time FROM patients WHERE status = ? ORDER BY appointment_time DESC"
+                .to_string(),
+            database_type: Some(DatabaseType::Iris),
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT COUNT(*) AS dbx_total_rows FROM (SELECT id, appointment_time FROM patients WHERE status = ?) \"dbx_count\";"
+        );
+    }
+
+    #[test]
+    fn iris_count_query_preserves_nested_order_by_and_parameters() {
+        let result = build_count_query_sql(CountQuerySqlOptions {
+            original_sql: "SELECT * FROM (SELECT TOP ? id FROM visits WHERE status = ? ORDER BY created_at DESC) recent WHERE id > ? ORDER BY id"
+                .to_string(),
+            database_type: Some(DatabaseType::Iris),
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT COUNT(*) AS dbx_total_rows FROM (SELECT * FROM (SELECT TOP ? id FROM visits WHERE status = ? ORDER BY created_at DESC) recent WHERE id > ?) \"dbx_count\";"
+        );
+    }
+
+    #[test]
+    fn iris_count_query_without_order_by_is_unchanged() {
+        let result = build_count_query_sql(CountQuerySqlOptions {
+            original_sql: "SELECT id FROM visits WHERE status = ?".to_string(),
+            database_type: Some(DatabaseType::Iris),
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT COUNT(*) AS dbx_total_rows FROM (SELECT id FROM visits WHERE status = ?) \"dbx_count\";"
         );
     }
 

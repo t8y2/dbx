@@ -90,6 +90,7 @@ async fn live_clickhouse_query_result_export_xlsx_streams_random_order_query_onc
         use_agent_cursor: false,
         file_path: file_path.to_string_lossy().to_string(),
         format: "xlsx".to_string(),
+        include_sql_sheet: false,
         page_size: 100,
         row_limit: None,
         total_rows: Some(2050),

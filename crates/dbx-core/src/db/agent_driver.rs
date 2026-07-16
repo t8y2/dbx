@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+use crate::models::connection::DatabaseConnectionInfo;
+
 type PendingAgentResponse = tokio::sync::oneshot::Sender<Result<Value, String>>;
 
 pub struct AgentRuntimeClient {
@@ -203,11 +205,12 @@ impl AgentRuntimeClient {
         self.active_sessions.fetch_add(1, Ordering::AcqRel);
     }
 
-    pub fn decrement_session_count(runtime: &Arc<Self>) {
+    pub fn decrement_session_count(runtime: &Arc<Self>) -> u64 {
         let previous = runtime
             .active_sessions
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| Some(value.saturating_sub(1)))
             .unwrap_or_default();
+        let remaining = previous.saturating_sub(1);
         if previous <= 1 {
             let runtime = runtime.clone();
             tokio::spawn(async move {
@@ -217,6 +220,7 @@ impl AgentRuntimeClient {
                 }
             });
         }
+        remaining
     }
 
     pub fn kill(&self) {
@@ -479,7 +483,10 @@ impl AgentMethod {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentConnectionInfo {
+    #[serde(default)]
     pub identifier_quote: String,
+    #[serde(default)]
+    pub database_info: Option<DatabaseConnectionInfo>,
 }
 
 #[derive(Debug, Clone, Serialize)]

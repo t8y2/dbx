@@ -124,6 +124,9 @@ const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<Databa
   oracle: {
     syntheticKey: "oracle-rowid",
   },
+  "oceanbase-oracle": {
+    syntheticKey: "oracle-rowid",
+  },
   trino: {
     tableData: {
       insert: true,

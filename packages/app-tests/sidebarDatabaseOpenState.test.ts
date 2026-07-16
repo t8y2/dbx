@@ -41,3 +41,12 @@ test("non-SQL database nodes can be marked open without showing close database c
   assert.equal(isSidebarDatabaseOpened(mongoDatabase, isLoaded), true);
   assert.equal(canCloseSidebarDatabaseConnection(mongoDatabase, isLoaded), false);
 });
+
+test("database connections can be closed while an open tab still uses the database", () => {
+  const node = databaseNode("conn-1:app");
+
+  assert.equal(
+    canCloseSidebarDatabaseConnection(node, () => false, (connectionId, database) => connectionId === "conn-1" && database === "app"),
+    true,
+  );
+});

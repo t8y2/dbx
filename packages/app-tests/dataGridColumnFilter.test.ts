@@ -1,6 +1,16 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { appendColumnValueFilterCondition, buildColumnValueFilterCondition, buildColumnValuesFilterCondition, filterModeHasCompleteValue, filterModeIsSupportedForDatabase, parseFilterValue, parseFilterValues } from "../../apps/desktop/src/lib/dataGrid/dataGridColumnFilter.ts";
+import {
+  appendColumnValueFilterCondition,
+  buildColumnValueFilterCondition,
+  buildColumnValuesFilterCondition,
+  filterModeHasCompleteValue,
+  filterModeIsSupportedForDatabase,
+  parseFilterValue,
+  parseFilterValues,
+  removeColumnValueFilterCondition,
+  replaceColumnValueFilterCondition,
+} from "../../apps/desktop/src/lib/dataGrid/dataGridColumnFilter.ts";
 import { buildDataGridContextFilterCondition } from "../../apps/desktop/src/lib/dataGrid/dataGridSql.ts";
 
 let lastContextFilterOptions: Record<string, unknown> | undefined;
@@ -58,6 +68,23 @@ test("quotes text server-side column filters and appends them to existing WHERE 
 
   assert.equal(condition, `"status" = 'active'`);
   assert.equal(appendColumnValueFilterCondition("deleted_at IS NULL", condition), `(deleted_at IS NULL) AND ("status" = 'active')`);
+});
+
+test("replaces a repeated database value filter without stacking incompatible conditions", () => {
+  const firstStatus = `"status" = 'active'`;
+  const secondStatus = `"status" IN ('pending', 'disabled')`;
+  const initial = appendColumnValueFilterCondition("deleted_at IS NULL", firstStatus);
+
+  assert.equal(replaceColumnValueFilterCondition(initial, firstStatus, secondStatus), `(deleted_at IS NULL) AND ("status" IN ('pending', 'disabled'))`);
+});
+
+test("removes nested database value filters while preserving unrelated predicates", () => {
+  const status = `"status" = 'active'`;
+  const tenant = `"tenant_id" = 42`;
+  const whereInput = appendColumnValueFilterCondition(appendColumnValueFilterCondition("deleted_at IS NULL", status), tenant);
+
+  assert.equal(removeColumnValueFilterCondition(whereInput, status), `(deleted_at IS NULL) AND ("tenant_id" = 42)`);
+  assert.equal(removeColumnValueFilterCondition(`score BETWEEN 10 AND 20`, status), `score BETWEEN 10 AND 20`);
 });
 
 test("builds IS NULL for typed NULL filters", async () => {

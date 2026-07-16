@@ -477,6 +477,16 @@ export function parseExtraToColumnExtra(extra: string | null | undefined, databa
         result.identity.seed = Number(sequenceMatch[1]);
         result.identity.increment = Number(sequenceMatch[2]);
       }
+    } else if (databaseType === "kingbase") {
+      // SQLServer compatibility reports IDENTITY(seed, increment) instead of PostgreSQL identity syntax.
+      const sqlServerIdentityMatch = lower.match(/identity\s*\(\s*(-?\d+)\s*,\s*(-?\d+)\s*\)/i);
+      if (sqlServerIdentityMatch) {
+        result.autoIncrement = true;
+        result.identity = {
+          seed: Number(sqlServerIdentityMatch[1]),
+          increment: Number(sqlServerIdentityMatch[2]),
+        };
+      }
     }
   } else if (databaseType === "sqlserver") {
     if (lower.includes("identity")) {
@@ -1054,6 +1064,14 @@ export function defaultNewColumnDataType(dbType: DatabaseType | undefined, dataT
     return combineDataTypeForDatabase(dbType, baseType, getDefaultLengthForType(dbType, baseType));
   }
   return dbType === "sqlite" ? "text" : "varchar(255)";
+}
+
+/** Index at which to insert a new column (after the selected row, or append when none). */
+export function resolveInsertColumnIndex(columns: readonly { id: string; markedForDrop?: boolean }[], selectedColumnId: string | null | undefined): number {
+  if (!selectedColumnId) return columns.length;
+  // Dropped rows are not valid insertion anchors.
+  const index = columns.findIndex((column) => column.id === selectedColumnId && !column.markedForDrop);
+  return index >= 0 ? index + 1 : columns.length;
 }
 
 function isMysqlDeprecatedDefaultParameterType(baseType: string): boolean {

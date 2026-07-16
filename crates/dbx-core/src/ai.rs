@@ -530,6 +530,12 @@ fn apply_chat_completion_thinking_toggle(body: &mut serde_json::Value, config: &
         return;
     }
 
+    if is_openai_api_config(config) {
+        // `extra_body.chat_template_kwargs` is a third-party compatibility extension,
+        // not an OpenAI API parameter. OpenAI models use their native defaults here.
+        return;
+    }
+
     if matches!(config.provider, AiProvider::Ollama) {
         // Ollama's OpenAI-compatible API uses reasoning_effort instead of
         // forwarding provider-specific chat template arguments.
@@ -3189,6 +3195,42 @@ mod tests {
 
         assert!(body.get("extra_body").is_none());
         assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn omits_thinking_toggle_for_openai_requests() {
+        let mut config = AiConfig {
+            provider: AiProvider::Openai,
+            api_key: "key".to_string(),
+            auth_method: AiAuthMethod::Bearer,
+            endpoint: "https://api.openai.com/v1/chat/completions".to_string(),
+            model: "gpt-5".to_string(),
+            api_style: AiApiStyle::Completions,
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            enable_thinking: false,
+            reasoning_level: AiReasoningLevel::Default,
+            context_window: None,
+            codex_cli_path: None,
+            codex_cli_env: Default::default(),
+        };
+        let mut body = serde_json::json!({ "model": &config.model });
+
+        apply_chat_completion_thinking_toggle(&mut body, &config);
+
+        assert!(body.get("extra_body").is_none());
+        assert!(body.get("reasoning_effort").is_none());
+
+        // Provider identity preserves OpenAI semantics when requests use a custom gateway.
+        config.endpoint = "https://gateway.example.com/v1/chat/completions".to_string();
+        apply_chat_completion_thinking_toggle(&mut body, &config);
+        assert!(body.get("extra_body").is_none());
+
+        // The official endpoint must also stay strict if a legacy config has a compatible provider value.
+        config.provider = AiProvider::OpenaiCompatible;
+        config.endpoint = "https://api.openai.com/v1/chat/completions".to_string();
+        apply_chat_completion_thinking_toggle(&mut body, &config);
+        assert!(body.get("extra_body").is_none());
     }
 
     #[test]

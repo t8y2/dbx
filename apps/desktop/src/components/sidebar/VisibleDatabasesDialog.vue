@@ -67,6 +67,8 @@ watch(
     if (!open) return;
     loadDatabases().catch(() => {});
   },
+  // Tree-level async hosts mount the dialog with `open` already true.
+  { immediate: true },
 );
 
 watch(showSystemDatabases, (show) => {

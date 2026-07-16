@@ -30,6 +30,8 @@ import java.util.Map;
 import java.util.Set;
 
 public final class KingbaseAgent extends PostgresLikeAgent {
+    private static final int TRIGGER_TYPE_BEFORE = 1 << 1;
+    private static final int TRIGGER_TYPE_INSTEAD = 1 << 6;
     private static final int KINGBASE_VOID_TYPE_OID = 2278;
     private static final String KINGBASE_REL_NAME = "CAST(c.relname AS varchar(256))";
     private static final String KINGBASE_REL_OID = "CAST(c.oid AS varchar(64))";
@@ -45,6 +47,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
     private static final String KINGBASE_MATVIEW_NAME = "CAST(mv.matviewname AS varchar(256))";
     private static final String KINGBASE_MATVIEW_SCHEMA = "CAST(mv.schemaname AS varchar(256))";
     private boolean postgresCatalogMode;
+    private boolean sqlServerIdentityCatalogMode;
 
     public static final PostgresLikeAgentProfile KINGBASE_PROFILE = new PostgresLikeAgentProfile(
         "com.kingbase8.Driver",
@@ -58,6 +61,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
     @Override
     protected void afterConnect(ConnectParams params, Connection connection) {
         postgresCatalogMode = false;
+        sqlServerIdentityCatalogMode = false;
         setMysqlCompatMode(params.isMysql_compat_mode());
         if (params.isMysql_compat_mode()) {
             return;
@@ -67,11 +71,15 @@ public final class KingbaseAgent extends PostgresLikeAgent {
         if (!postgresCatalogMode && mysqlSqlModeExists(connection)) {
             setMysqlCompatMode(true);
         }
+        // SQLServer compatibility exposes identity metadata through this catalog only.
+        sqlServerIdentityCatalogMode = !postgresCatalogMode
+            && !isMysqlCompatMode()
+            && catalogExists(connection, "sys.identity_columns");
     }
 
     private static boolean mysqlSqlModeExists(Connection connection) {
         try (Statement stmt = connection.createStatement();
-             ResultSet rs = stmt.executeQuery("SELECT 1 FROM sys_settings WHERE LOWER(name) = 'sql_mode'")) {
+             ResultSet rs = stmt.executeQuery("SELECT 1 FROM sys_catalog.sys_settings WHERE LOWER(name) = 'sql_mode'")) {
             return rs.next();
         } catch (Exception ignored) {
             return false;
@@ -92,19 +100,23 @@ public final class KingbaseAgent extends PostgresLikeAgent {
     public List<DatabaseInfo> listDatabases() {
         if (postgresCatalogMode) return super.listDatabases();
         return unchecked(() -> {
-            if (isMysqlCompatMode()) {
-                List<DatabaseInfo> result = queryDatabases("SELECT current_database() AS database_name");
-                if (!result.isEmpty()) return result;
-            }
             for (String sql : List.of(
-                "SELECT datname AS database_name FROM sys_catalog.sys_database WHERE datistemplate = false ORDER BY datname",
-                "SELECT datname AS database_name FROM pg_database WHERE datistemplate = false ORDER BY datname"
+                "SELECT datname AS database_name FROM sys_catalog.sys_database WHERE datistemplate = false AND datallowconn = true ORDER BY datname",
+                "SELECT datname AS database_name FROM pg_catalog.pg_database WHERE datistemplate = false AND datallowconn = true ORDER BY datname"
             )) {
                 try {
                     List<DatabaseInfo> result = queryDatabases(sql);
                     if (!result.isEmpty()) return result;
                 } catch (Exception ignored) {
                     // Kingbase catalog names differ across compatibility modes and versions.
+                }
+            }
+            if (isMysqlCompatMode()) {
+                try {
+                    List<DatabaseInfo> result = queryDatabases("SELECT current_database() AS database_name");
+                    if (!result.isEmpty()) return result;
+                } catch (Exception ignored) {
+                    // Keep the configured database as the final fallback if current_database() is unavailable.
                 }
             }
             return Collections.singletonList(new DatabaseInfo(getConfiguredDatabase()));
@@ -135,7 +147,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
                     "AND UPPER(schema_name) NOT LIKE 'XLOG%' " +
                     "ORDER BY schema_name"
                 : "SELECT nspname AS schema_name " +
-                    "FROM sys_namespace " +
+                    "FROM sys_catalog.sys_namespace " +
                     "WHERE nspname NOT LIKE 'sys_temp_%' " +
                     "AND nspname NOT LIKE 'sys_toast_temp_%' " +
                     "ORDER BY nspname";
@@ -411,13 +423,19 @@ public final class KingbaseAgent extends PostgresLikeAgent {
                 "CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 " +
                 "THEN (a.atttypmod - 4) & 65535 ELSE NULL END AS numeric_scale, " +
                 "CASE WHEN t.typname IN ('varchar', 'bpchar') AND a.atttypmod > 0 " +
-                "THEN a.atttypmod - 4 ELSE NULL END AS character_maximum_length " +
+                "THEN a.atttypmod - 4 ELSE NULL END AS character_maximum_length, " +
+                (sqlServerIdentityCatalogMode
+                    ? "ic.seed_value AS identity_seed, ic.increment_value AS identity_increment "
+                    : "NULL AS identity_seed, NULL AS identity_increment ") +
                 "FROM sys_catalog.sys_attribute a " +
                 "JOIN sys_catalog.sys_type t ON t.oid = a.atttypid " +
                 "JOIN sys_catalog.sys_class c ON c.oid = a.attrelid " +
                 "JOIN sys_catalog.sys_namespace n ON n.oid = c.relnamespace " +
                 "LEFT JOIN sys_catalog.sys_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum " +
                 "LEFT JOIN sys_catalog.sys_description d ON d.objoid = a.attrelid AND d.objsubid = a.attnum " +
+                (sqlServerIdentityCatalogMode
+                    ? "LEFT JOIN sys.identity_columns ic ON ic.object_id = c.oid AND ic.column_id = a.attnum "
+                    : "") +
                 "WHERE n.nspname = " + sqlString(effectiveSchema(schema)) +
                 " AND c.relname = " + sqlString(table) + " " +
                 "AND a.attnum > 0 AND NOT a.attisdropped " +
@@ -432,7 +450,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
                             rs.getBoolean("is_nullable"),
                             rs.getString("column_default"),
                             primaryKeys.contains(columnName),
-                            null,
+                            identityExtra(rs),
                             rs.getString("column_comment"),
                             intObject(rs, "numeric_precision"),
                             intObject(rs, "numeric_scale"),
@@ -445,15 +463,31 @@ public final class KingbaseAgent extends PostgresLikeAgent {
         });
     }
 
+    private static String identityExtra(ResultSet rs) throws Exception {
+        String seed = rs.getString("identity_seed");
+        String increment = rs.getString("identity_increment");
+        if (seed == null || increment == null) {
+            return null;
+        }
+        return "identity(" + seed + "," + increment + ")";
+    }
+
     private List<ColumnInfo> getInformationSchemaColumns(String schema, String table, Set<String> primaryKeys) {
         return unchecked(() -> {
             List<ColumnInfo> result = new ArrayList<>();
-            String sql = "SELECT column_name, data_type, is_nullable, column_default, " +
-                "numeric_precision, numeric_scale, character_maximum_length " +
-                "FROM information_schema.columns " +
-                "WHERE table_schema = " + sqlString(effectiveSchema(schema)) +
-                " AND table_name = " + sqlString(table) + " " +
-                "ORDER BY ordinal_position";
+            String sql = "SELECT ic.column_name, ic.data_type, ic.is_nullable, ic.column_default, " +
+                "ic.numeric_precision, ic.numeric_scale, ic.character_maximum_length, " +
+                "d.description AS column_comment " +
+                "FROM information_schema.columns ic " +
+                // information_schema preserves MySQL-compatible type metadata but does not expose comments.
+                "LEFT JOIN sys_catalog.sys_namespace n ON n.nspname = ic.table_schema " +
+                "LEFT JOIN sys_catalog.sys_class c ON c.relnamespace = n.oid AND c.relname = ic.table_name " +
+                "LEFT JOIN sys_catalog.sys_attribute a ON a.attrelid = c.oid AND a.attname = ic.column_name " +
+                "AND a.attnum > 0 AND NOT a.attisdropped " +
+                "LEFT JOIN sys_catalog.sys_description d ON d.objoid = a.attrelid AND d.objsubid = a.attnum " +
+                "WHERE ic.table_schema = " + sqlString(effectiveSchema(schema)) +
+                " AND ic.table_name = " + sqlString(table) + " " +
+                "ORDER BY ic.ordinal_position";
             try (Statement stmt = requireConnected().createStatement()) {
                 try (ResultSet rs = stmt.executeQuery(sql)) {
                     while (rs.next()) {
@@ -465,7 +499,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
                             rs.getString("column_default"),
                             primaryKeys.contains(columnName),
                             null,
-                            null,
+                            rs.getString("column_comment"),
                             intObject(rs, "numeric_precision"),
                             intObject(rs, "numeric_scale"),
                             intObject(rs, "character_maximum_length")
@@ -563,16 +597,49 @@ public final class KingbaseAgent extends PostgresLikeAgent {
     @Override
     public List<TriggerInfo> listTriggers(String schema, String table) {
         if (postgresCatalogMode) return super.listTriggers(schema, table);
-        return Collections.emptyList();
+        return unchecked(() -> {
+            List<TriggerInfo> result = new ArrayList<>();
+            String sql = "SELECT tg.tgname AS trigger_name, " +
+                "trim(trailing ',' FROM (" +
+                "CASE WHEN (tg.tgtype & 4) <> 0 THEN 'INSERT,' ELSE '' END || " +
+                "CASE WHEN (tg.tgtype & 8) <> 0 THEN 'DELETE,' ELSE '' END || " +
+                "CASE WHEN (tg.tgtype & 16) <> 0 THEN 'UPDATE,' ELSE '' END || " +
+                "CASE WHEN (tg.tgtype & 32) <> 0 THEN 'TRUNCATE,' ELSE '' END" +
+                ")) AS event_manipulation, tg.tgtype AS trigger_type " +
+                "FROM sys_catalog.sys_trigger tg " +
+                "JOIN sys_catalog.sys_class c ON c.oid = tg.tgrelid " +
+                "JOIN sys_catalog.sys_namespace n ON n.oid = c.relnamespace " +
+                "WHERE n.nspname = " + sqlString(effectiveSchema(schema)) +
+                " AND c.relname = " + sqlString(table) + " AND NOT tg.tgisinternal " +
+                "ORDER BY tg.tgname";
+            try (Statement stmt = requireConnected().createStatement()) {
+                try (ResultSet rs = stmt.executeQuery(sql)) {
+                    while (rs.next()) {
+                        result.add(new TriggerInfo(
+                            rs.getString("trigger_name"),
+                            rs.getString("event_manipulation"),
+                            decodeTriggerTiming(rs.getInt("trigger_type"))
+                        ));
+                    }
+                }
+            }
+            return result;
+        });
+    }
+
+    private static String decodeTriggerTiming(int triggerType) {
+        // INSTEAD OF has its own catalog bit and must not fall through to AFTER.
+        if ((triggerType & TRIGGER_TYPE_INSTEAD) != 0) return "INSTEAD OF";
+        if ((triggerType & TRIGGER_TYPE_BEFORE) != 0) return "BEFORE";
+        return "AFTER";
     }
 
     @Override
     public String setSchemaSQL(String schema) {
         if (postgresCatalogMode) return super.setSchemaSQL(schema);
-        // Kingbase searches sys_catalog implicitly before user schemas unless it
-        // is listed explicitly. Put it after the selected schema so business
-        // tables named like system tables (for example sys_config) win.
-        return "SET search_path TO " + JdbcIdentifiers.INSTANCE.doubleQuote(effectiveSchema(schema)) + ", sys_catalog";
+        // Keep sys_catalog's implicit priority for functions, types, and
+        // operators. User table references are schema-qualified before execution.
+        return "SET search_path TO " + JdbcIdentifiers.INSTANCE.doubleQuote(effectiveSchema(schema));
     }
 
     @Override

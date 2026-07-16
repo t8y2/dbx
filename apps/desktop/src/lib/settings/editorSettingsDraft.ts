@@ -51,6 +51,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "toolbarItems",
   "snippets",
   "sqlVariableSyntaxOverrides",
+  "continueOnErrorOnBatch",
 ] as const satisfies readonly (keyof EditorSettings)[];
 
 export type EditorSettingsDraftKey = (typeof EDITOR_SETTINGS_DRAFT_KEYS)[number];

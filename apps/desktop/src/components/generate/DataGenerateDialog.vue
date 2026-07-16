@@ -3,9 +3,9 @@ import { reactive, ref, computed, onMounted, watch, type ComponentPublicInstance
 import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 import * as api from "@/lib/backend/api";
-import type { TableGenerateConfig } from "@/lib/dataGrid/dataGenerate";
-import { displayGeneratedValue, findGeneratorKey, formatGeneratedValue, generateTableData, defaultGeneratorParams } from "@/lib/dataGrid/dataGenerate";
-import { quoteTableIdentifier } from "@/lib/table/tableSelectSql";
+import type { GenerateResult, TableGenerateConfig } from "@/lib/dataGrid/dataGenerate";
+import { displayGeneratedValue, findGeneratorKey, formatGeneratedValue, generateTableData, defaultGeneratorParams, supportsGeneratedMultiRowValues } from "@/lib/dataGrid/dataGenerate";
+import { qualifiedTableName, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
@@ -56,7 +56,11 @@ const panelColumnName = ref<string | null>(null);
 
 // Step state: config -> preview
 const currentStep = ref<"config" | "preview" | "result">("config");
-const generatedResults = ref<{ tableName: string; columns: string[]; rows: unknown[][]; sql: string }[]>([]);
+interface GeneratedTableResult extends GenerateResult {
+  tableName: string;
+  schema: string;
+}
+const generatedResults = ref<GeneratedTableResult[]>([]);
 
 const connectionName = computed(() => (props.prefillConnectionId ? store.getConfig(props.prefillConnectionId)?.name : ""));
 
@@ -142,6 +146,9 @@ async function loadSchemas() {
             for (const c of cols) {
               checkedColumns[colKey(targetSchema, props.prefillTable, c.name)] = true;
             }
+            panelTableKey.value = key;
+            panelMode.value = "table";
+            panelColumnName.value = null;
             break;
           }
         } catch {
@@ -263,6 +270,26 @@ async function selectTable(schema: string, table: string, checked: boolean) {
   }
 }
 
+async function activateTable(schema: string, table: string) {
+  const key = tableKey(schema, table);
+  if (!checkedTables[key]) {
+    await selectTable(schema, table, true);
+  }
+  await showTable(schema, table);
+}
+
+async function updateTableSelection(schema: string, table: string, checked: boolean) {
+  const key = tableKey(schema, table);
+  await selectTable(schema, table, checked);
+  if (checked) {
+    await showTable(schema, table);
+  } else if (panelTableKey.value === key) {
+    panelTableKey.value = null;
+    panelMode.value = null;
+    panelColumnName.value = null;
+  }
+}
+
 function toggleColumn(schema: string, table: string, column: string) {
   const ck = colKey(schema, table, column);
   const key = tableKey(schema, table);
@@ -325,7 +352,7 @@ function onPreviewColResizeStart(ci: number, event: MouseEvent) {
   document.addEventListener("pointerup", onUp);
   document.body.classList.add("select-none", "cursor-col-resize");
 }
-const currentPreview = computed(() => generatedResults.value[previewTableIndex.value] ?? { tableName: "", columns: [], rows: [], sql: "" });
+const currentPreview = computed<GeneratedTableResult>(() => generatedResults.value[previewTableIndex.value] ?? { tableName: "", schema: "", columns: [], rows: [], sql: "", statements: [] });
 
 function displayPreviewCell(cell: unknown): string {
   return displayGeneratedValue(cell);
@@ -355,7 +382,8 @@ async function fetchMaxValues(cfg: TableGenerateConfig): Promise<Record<string, 
 }
 
 async function doGenerate() {
-  const results: { tableName: string; columns: string[]; rows: unknown[][]; sql: string }[] = [];
+  if (!Object.values(checkedTables).some(Boolean)) return;
+  const results: GeneratedTableResult[] = [];
   const order = tableOrder.value.length > 0 ? tableOrder.value : Object.keys(configs);
   for (const key of order) {
     if (!checkedTables[key]) continue;
@@ -373,7 +401,7 @@ async function doGenerate() {
       });
     }
     const result = generateTableData({ ...cfg, columns }, dbType.value);
-    results.push({ tableName: cfg.tableName, columns: result.columns, rows: result.rows, sql: result.sql });
+    results.push({ tableName: cfg.tableName, schema: cfg.schema, ...result });
   }
   generatedResults.value = results;
   previewTableIndex.value = 0;
@@ -382,7 +410,8 @@ async function doGenerate() {
 
 async function regenerate() {
   if (generatedResults.value.length === 0) return;
-  const key = Object.keys(configs).find((k) => configs[k].tableName === generatedResults.value[previewTableIndex.value]?.tableName);
+  const preview = generatedResults.value[previewTableIndex.value];
+  const key = Object.keys(configs).find((k) => configs[k].tableName === preview?.tableName && configs[k].schema === preview?.schema);
   if (!key) return;
   const cfg = configs[key];
   let columns = cfg.columns.filter((col) => checkedColumns[colKey(cfg.schema, cfg.tableName, col.columnName)] !== false);
@@ -397,7 +426,7 @@ async function regenerate() {
     });
   }
   const result = generateTableData({ ...cfg, columns }, dbType.value);
-  generatedResults.value[previewTableIndex.value] = { tableName: cfg.tableName, columns: result.columns, rows: result.rows, sql: result.sql };
+  generatedResults.value[previewTableIndex.value] = { tableName: cfg.tableName, schema: cfg.schema, ...result };
 }
 
 function copyAllSql() {
@@ -422,21 +451,30 @@ const generateOptions = reactive({
   useTransaction: true,
   extendedInsert: true,
 });
+const supportsExtendedInsert = computed(() => supportsGeneratedMultiRowValues(dbType.value));
+watch(
+  supportsExtendedInsert,
+  (supported) => {
+    if (!supported) generateOptions.extendedInsert = false;
+  },
+  { immediate: true },
+);
 
 const optionsDialogOpen = ref(false);
 
-function sqlStatementsForTable(r: { tableName: string; columns: string[]; rows: unknown[][]; sql: string }): string[] {
+function sqlStatementsForTable(r: GeneratedTableResult): string[] {
   const stmts: string[] = [];
+  const targetTable = qualifiedTableName({ databaseType: dbType.value, schema: r.schema, tableName: r.tableName, database: props.prefillDatabase });
   if (generateOptions.truncate) {
-    stmts.push(`TRUNCATE TABLE ${quoteTableIdentifier(dbType.value, r.tableName)};`);
+    stmts.push(`TRUNCATE TABLE ${targetTable};`);
   }
-  if (generateOptions.extendedInsert) {
-    stmts.push(r.sql);
+  if (generateOptions.extendedInsert || !supportsGeneratedMultiRowValues(dbType.value)) {
+    stmts.push(...r.statements);
   } else {
     const colList = r.columns.map((c) => quoteTableIdentifier(dbType.value, c)).join(", ");
     for (const row of r.rows) {
-      const vals = row.map(formatGeneratedValue).join(", ");
-      stmts.push(`INSERT INTO ${quoteTableIdentifier(dbType.value, r.tableName)} (${colList}) VALUES (${vals});`);
+      const vals = row.map((value) => formatGeneratedValue(value)).join(", ");
+      stmts.push(`INSERT INTO ${targetTable} (${colList}) VALUES (${vals});`);
     }
   }
   return stmts;
@@ -462,37 +500,55 @@ async function startInsert() {
       execute: async () => {
         executing.value = true;
         const perTable: TableResult[] = [];
+        let stopAfterTable = false;
         for (const r of generatedResults.value) {
           const stmts = sqlStatementsForTable(r);
           const rowCount = r.rows.length;
           let ok = 0;
           let lastError = "";
-          for (let si = 0; si < stmts.length; si++) {
+
+          const executeAsStatementGroup = generateOptions.useTransaction && !supportsGeneratedMultiRowValues(dbType.value);
+          if (executeAsStatementGroup) {
             try {
-              if (generateOptions.useTransaction) {
-                await api.executeInTransaction(cid, db, [stmts[si]], props.prefillSchema);
-              } else {
-                await api.executeQuery(cid, db, stmts[si], props.prefillSchema);
-              }
-              if (generateOptions.extendedInsert) {
-                ok = rowCount;
-              } else if (!(generateOptions.truncate && si === 0)) {
-                ok++;
-              }
+              await api.executeInTransaction(cid, db, stmts, r.schema || props.prefillSchema);
+              ok = rowCount;
             } catch (e: unknown) {
               const msg = e instanceof Error ? e.message : String(e);
               console.error("[startInsert] SQL error:", msg);
-              if (!lastError) lastError = msg;
-              if (generateOptions.extendedInsert) {
-                ok = 0;
+              lastError = msg;
+              stopAfterTable = !generateOptions.continueOnError;
+            }
+          } else {
+            const usesMultiRowStatement = generateOptions.extendedInsert && supportsGeneratedMultiRowValues(dbType.value);
+            for (let si = 0; si < stmts.length; si++) {
+              try {
+                if (generateOptions.useTransaction) {
+                  await api.executeInTransaction(cid, db, [stmts[si]], r.schema || props.prefillSchema);
+                } else {
+                  await api.executeQuery(cid, db, stmts[si], r.schema || props.prefillSchema);
+                }
+                if (usesMultiRowStatement) {
+                  ok = rowCount;
+                } else if (!(generateOptions.truncate && si === 0)) {
+                  ok++;
+                }
+              } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                console.error("[startInsert] SQL error:", msg);
+                if (!lastError) lastError = msg;
+                if (usesMultiRowStatement) ok = 0;
+                if (!generateOptions.continueOnError) {
+                  stopAfterTable = true;
+                  break;
+                }
               }
-              if (!generateOptions.continueOnError) break;
             }
           }
           perTable.push({ table: r.tableName, total: rowCount, ok, err: rowCount - ok, error: lastError || undefined });
           if (ok > 0) {
-            store.invalidateMetadataCache(cid, db, props.prefillSchema || undefined, r.tableName);
+            store.invalidateMetadataCache(cid, db, r.schema || props.prefillSchema || undefined, r.tableName);
           }
+          if (stopAfterTable) break;
         }
         executeResults.value = perTable;
         currentStep.value = "result";
@@ -510,6 +566,7 @@ const tableOrder = ref<string[]>([]);
 const orderableTables = computed(() => {
   return Object.keys(checkedTables).filter((k) => checkedTables[k]);
 });
+const hasSelectedTables = computed(() => orderableTables.value.length > 0);
 
 function openOrderDialog() {
   tableOrder.value = [...orderableTables.value];
@@ -763,14 +820,14 @@ async function onFileSelected(event: Event) {
                 <div v-if="expandedSchemas[sc] && schemaTables[sc]" class="ml-[18px]">
                   <div v-for="tbl in schemaTables[sc]" :key="tbl.name">
                     <!-- table row -->
-                    <div class="group flex items-center gap-1.5 py-1 px-2 cursor-pointer hover:bg-accent">
-                      <button type="button" class="-m-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground" @click="toggleTable(sc, tbl.name)">
+                    <div class="group flex items-center gap-1.5 py-1 px-2 cursor-pointer hover:bg-accent" @click="activateTable(sc, tbl.name)">
+                      <button type="button" class="-m-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground" @click.stop="toggleTable(sc, tbl.name)">
                         <Loader2 v-if="tableColumnsLoading[tableKey(sc, tbl.name)]" class="h-3.5 w-3.5 animate-spin" />
                         <ChevronRight v-else class="h-3.5 w-3.5 transition-transform" :class="{ 'rotate-90': expandedTables[tableKey(sc, tbl.name)] }" />
                       </button>
-                      <input type="checkbox" class="h-3.5 w-3.5 accent-primary shrink-0" :checked="!!checkedTables[tableKey(sc, tbl.name)]" :ref="(el) => setTableRef(el, tableKey(sc, tbl.name))" @change="selectTable(sc, tbl.name, ($event.target as HTMLInputElement).checked)" />
+                      <input type="checkbox" class="h-3.5 w-3.5 accent-primary shrink-0" :checked="!!checkedTables[tableKey(sc, tbl.name)]" :ref="(el) => setTableRef(el, tableKey(sc, tbl.name))" @click.stop @change="updateTableSelection(sc, tbl.name, ($event.target as HTMLInputElement).checked)" />
                       <Table class="h-3.5 w-3.5 shrink-0 text-green-500" />
-                      <span class="text-sm truncate" :class="{ 'text-foreground font-medium': panelTableKey === tableKey(sc, tbl.name), 'text-muted-foreground': panelTableKey !== tableKey(sc, tbl.name) }" @click="showTable(sc, tbl.name)">
+                      <span class="text-sm truncate" :class="{ 'text-foreground font-medium': panelTableKey === tableKey(sc, tbl.name), 'text-muted-foreground': panelTableKey !== tableKey(sc, tbl.name) }">
                         {{ tbl.name }}
                       </span>
                     </div>
@@ -948,7 +1005,7 @@ async function onFileSelected(event: Event) {
             {{ t("dangerDialog.cancel") }}
           </Button>
           <template v-if="currentStep === 'config'">
-            <Button variant="default" size="sm" class="h-7 text-xs" @click="doGenerate">
+            <Button variant="default" size="sm" class="h-7 text-xs" :disabled="!hasSelectedTables" @click="doGenerate">
               {{ t("dataGenerate.nextStep") }}
             </Button>
           </template>
@@ -986,8 +1043,8 @@ async function onFileSelected(event: Event) {
             <input type="checkbox" v-model="generateOptions.useTransaction" class="h-4 w-4 accent-primary" />
             <span class="text-xs">{{ t("dataGenerate.useTransaction") }}</span>
           </label>
-          <label class="flex items-center gap-3 cursor-pointer">
-            <input type="checkbox" v-model="generateOptions.extendedInsert" class="h-4 w-4 accent-primary" />
+          <label class="flex items-center gap-3 cursor-pointer" :class="{ 'cursor-not-allowed opacity-50': !supportsExtendedInsert }">
+            <input type="checkbox" v-model="generateOptions.extendedInsert" class="h-4 w-4 accent-primary" :disabled="!supportsExtendedInsert" />
             <span class="text-xs">{{ t("dataGenerate.extendedInsert") }}</span>
           </label>
         </div>

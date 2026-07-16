@@ -3,6 +3,71 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum IdentifierCase {
+    Lower,
+    Upper,
+    Mixed,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseConnectionInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_database: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_comment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_charset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_collation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unquoted_identifier_case: Option<IdentifierCase>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quoted_identifier_case: Option<IdentifierCase>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jdbc_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionTestResult {
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_info: Option<DatabaseConnectionInfo>,
+}
+
+impl ConnectionTestResult {
+    pub fn success(message: impl Into<String>) -> Self {
+        Self { message: message.into(), database_info: None }
+    }
+
+    pub fn with_database_info(mut self, database_info: Option<DatabaseConnectionInfo>) -> Self {
+        self.database_info = database_info;
+        self
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DatabaseInfoEnvelope {
+    #[serde(default)]
+    database_info: Option<DatabaseConnectionInfo>,
+}
+
+pub fn database_info_from_protocol_value(value: &Value) -> Option<DatabaseConnectionInfo> {
+    serde_json::from_value::<DatabaseInfoEnvelope>(value.clone()).ok()?.database_info
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ConnectionConfig {
     pub id: String,
@@ -100,6 +165,9 @@ pub struct ConnectionConfig {
     /// Database-level production markers for multi-database connections.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub production_databases: Vec<String>,
+    /// Metadata captured from the latest successful connection test for this saved config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_info: Option<DatabaseConnectionInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -546,6 +614,8 @@ struct ConnectionConfigData {
     pub is_production: bool,
     #[serde(default)]
     pub production_databases: Vec<String>,
+    #[serde(default)]
+    pub database_info: Option<DatabaseConnectionInfo>,
 }
 
 impl From<ConnectionConfigData> for ConnectionConfig {
@@ -599,6 +669,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             read_only: data.read_only,
             is_production: data.is_production,
             production_databases: data.production_databases,
+            database_info: data.database_info,
         }
     }
 }
@@ -755,11 +826,7 @@ impl ConnectionConfig {
     }
 
     pub fn effective_database(&self) -> Option<&str> {
-        self.database
-            .as_deref()
-            .map(str::trim)
-            .filter(|database| !database.is_empty())
-            .or_else(|| self.default_database())
+        self.database.as_deref().filter(|database| !database.trim().is_empty()).or_else(|| self.default_database())
     }
 
     fn default_database(&self) -> Option<&'static str> {
@@ -1893,14 +1960,50 @@ fn bracket_ipv6(host: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_query_timeout_secs, default_redis_key_separator, default_ssh_connect_timeout_secs, ConnectionConfig,
-        DatabaseType, ProxyTunnelConfig, ProxyType, TransportLayerConfig,
+        database_info_from_protocol_value, default_query_timeout_secs, default_redis_key_separator,
+        default_ssh_connect_timeout_secs, ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType,
+        IdentifierCase, ProxyTunnelConfig, ProxyType, TransportLayerConfig,
     };
     use std::str::FromStr;
 
     #[test]
     fn default_query_timeout_is_sixty_seconds() {
         assert_eq!(default_query_timeout_secs(), 60);
+    }
+
+    #[test]
+    fn connection_test_result_uses_camel_case_and_omits_missing_details() {
+        let result =
+            ConnectionTestResult::success("Connection successful").with_database_info(Some(DatabaseConnectionInfo {
+                product_name: Some("H2".to_string()),
+                unquoted_identifier_case: Some(IdentifierCase::Upper),
+                ..DatabaseConnectionInfo::default()
+            }));
+
+        let value = serde_json::to_value(result).unwrap();
+        assert_eq!(value["message"], "Connection successful");
+        assert_eq!(value["databaseInfo"]["productName"], "H2");
+        assert_eq!(value["databaseInfo"]["unquotedIdentifierCase"], "upper");
+        assert!(value["databaseInfo"].get("driverName").is_none());
+    }
+
+    #[test]
+    fn protocol_database_info_parser_accepts_details_and_legacy_responses() {
+        let parsed = database_info_from_protocol_value(&serde_json::json!({
+            "ok": true,
+            "databaseInfo": {
+                "productName": "H2",
+                "currentDatabase": "app",
+                "serverCharset": "utf8mb4",
+                "jdbcVersion": "4.2"
+            }
+        }))
+        .unwrap();
+        assert_eq!(parsed.product_name.as_deref(), Some("H2"));
+        assert_eq!(parsed.current_database.as_deref(), Some("app"));
+        assert_eq!(parsed.server_charset.as_deref(), Some("utf8mb4"));
+        assert_eq!(parsed.jdbc_version.as_deref(), Some("4.2"));
+        assert_eq!(database_info_from_protocol_value(&serde_json::json!({ "ok": true })), None);
     }
 
     fn mysql_config(username: &str, password: &str, database: Option<&str>) -> ConnectionConfig {
@@ -1953,7 +2056,32 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            database_info: None,
         }
+    }
+
+    #[test]
+    fn database_identifier_whitespace_is_preserved_and_percent_encoded() {
+        let mut config = mysql_config("root", "secret", Some(" analytics "));
+
+        assert_eq!(config.effective_database(), Some(" analytics "));
+        assert_eq!(
+            config.connection_url(),
+            "mysql://root:secret@10.1.2.3:2883/%20analytics%20?ssl-mode=disabled&charset=utf8mb4"
+        );
+
+        config.db_type = DatabaseType::Postgres;
+        assert_eq!(config.effective_database(), Some(" analytics "));
+        assert_eq!(config.connection_url(), "postgres://root:secret@10.1.2.3:2883/%20analytics%20");
+    }
+
+    #[test]
+    fn whitespace_only_database_uses_database_type_default() {
+        let mut config = mysql_config("root", "secret", Some("   "));
+        assert_eq!(config.effective_database(), None);
+
+        config.db_type = DatabaseType::Postgres;
+        assert_eq!(config.effective_database(), Some("postgres"));
     }
 
     fn mongodb_config(username: &str, password: &str, database: Option<&str>) -> ConnectionConfig {
@@ -2000,6 +2128,25 @@ mod tests {
         .unwrap();
 
         assert!(config.agent_java_options.is_empty());
+        assert_eq!(config.database_info, None);
+    }
+
+    #[test]
+    fn connection_config_database_info_survives_json_round_trip() {
+        let mut config = mysql_config("root", "secret", Some("app"));
+        config.database_info = Some(DatabaseConnectionInfo {
+            product_name: Some("MySQL".to_string()),
+            product_version: Some("8.4.0".to_string()),
+            current_database: Some("app".to_string()),
+            server_charset: Some("utf8mb4".to_string()),
+            ..DatabaseConnectionInfo::default()
+        });
+
+        let value = serde_json::to_value(&config).unwrap();
+        assert_eq!(value["database_info"]["productVersion"], "8.4.0");
+
+        let restored: ConnectionConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.database_info, config.database_info);
     }
 
     #[test]
@@ -2182,6 +2329,16 @@ mod tests {
         config.query_timeout_secs = 3600;
 
         assert_eq!(config.effective_query_timeout_secs(), 3600);
+    }
+
+    #[test]
+    fn mysql_url_encodes_proxy_style_username_with_colons_and_at() {
+        let config = mysql_config("1234:xxx@xx.xx:abc123", "p@ss:word", None);
+
+        assert_eq!(
+            config.connection_url(),
+            "mysql://1234%3Axxx%40xx%2Exx%3Aabc123:p%40ss%3Aword@10.1.2.3:2883?ssl-mode=disabled&charset=utf8mb4"
+        );
     }
 
     #[test]

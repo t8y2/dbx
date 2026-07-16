@@ -1664,7 +1664,7 @@ pub async fn execute_query_with_max_rows(
         let mut result = sqlserver_driver_result(collect_first_result_limited(stream, start, max_rows)).await?;
         strip_dbx_sqlserver_row_number_column(&mut result, sql);
         Ok(result)
-    } else if requires_simple_query_batch(sql) || is_transaction_control(sql) {
+    } else if requires_simple_query_batch(sql) || contains_transaction_control(sql) {
         let stream = sqlserver_driver_result(client.simple_query(sql)).await?;
         let _ = sqlserver_driver_result(collect_result_sets_limited(stream, start, max_rows)).await?;
         Ok(QueryResult {
@@ -1784,6 +1784,10 @@ fn is_dbx_sqlserver_row_number_page_sql(sql: &str) -> bool {
 
 fn sqlserver_batch_can_use_execute(sql: &str) -> bool {
     !requires_simple_query_batch(sql)
+        // Tiberius executes this path through an RPC. SQL Server rejects an RPC
+        // that changes @@TRANCOUNT with error 266, while a regular batch is allowed
+        // to leave an explicit transaction open for a later COMMIT or ROLLBACK.
+        && !contains_transaction_control(sql)
         && !sqlserver_batch_may_return_result_set(sql)
         && !sqlserver_dml_output_returns_rows(sql)
 }
@@ -1798,19 +1802,26 @@ fn sqlserver_dml_output_returns_rows(sql: &str) -> bool {
         && first_sql_tokens(sql, 64).iter().any(|token| token.eq_ignore_ascii_case("OUTPUT"))
 }
 
-fn is_transaction_control(sql: &str) -> bool {
-    let tokens = first_sql_tokens(sql, 2);
-    if tokens.is_empty() {
-        return false;
-    }
-    let first = &tokens[0];
-    if first.eq_ignore_ascii_case("COMMIT") || first.eq_ignore_ascii_case("ROLLBACK") {
-        return true;
-    }
-    if first.eq_ignore_ascii_case("BEGIN") {
-        return tokens.get(1).is_some_and(|t| t.eq_ignore_ascii_case("TRANSACTION") || t.eq_ignore_ascii_case("TRAN"));
-    }
-    false
+fn contains_transaction_control(sql: &str) -> bool {
+    let tokens = top_level_sqlserver_tokens(sql);
+    tokens.iter().enumerate().any(|(index, token)| {
+        if matches!(token.text.as_str(), "COMMIT" | "ROLLBACK") {
+            return true;
+        }
+        if token.text == "BEGIN" {
+            if tokens.get(index + 1).is_some_and(|next| matches!(next.text.as_str(), "TRANSACTION" | "TRAN")) {
+                return true;
+            }
+            if tokens.get(index + 1).is_some_and(|next| next.text == "DISTRIBUTED")
+                && tokens.get(index + 2).is_some_and(|next| matches!(next.text.as_str(), "TRANSACTION" | "TRAN"))
+            {
+                return true;
+            }
+        }
+        token.text == "SET"
+            && tokens.get(index + 1).is_some_and(|next| next.text == "IMPLICIT_TRANSACTIONS")
+            && tokens.get(index + 2).is_some_and(|next| next.text == "ON")
+    })
 }
 
 fn requires_simple_query_batch(sql: &str) -> bool {
@@ -1993,6 +2004,24 @@ mod tests {
         assert!(sqlserver_batch_can_use_execute(
             "MERGE dbo.t AS t USING dbo.s AS s ON t.id = s.id WHEN MATCHED THEN UPDATE SET name = s.name;"
         ));
+    }
+
+    #[test]
+    fn sqlserver_transaction_batches_keep_simple_query_path() {
+        assert!(!sqlserver_batch_can_use_execute("BEGIN TRANSACTION\nUPDATE dbo.users SET active = 0 WHERE id = 1;"));
+        assert!(!sqlserver_batch_can_use_execute("UPDATE dbo.users SET active = 0 WHERE id = 1;\nCOMMIT;"));
+        assert!(!sqlserver_batch_can_use_execute("ROLLBACK TRANSACTION;"));
+        assert!(!sqlserver_batch_can_use_execute(
+            "BEGIN DISTRIBUTED TRANSACTION\nUPDATE dbo.users SET active = 0 WHERE id = 1;"
+        ));
+        assert!(!sqlserver_batch_can_use_execute(
+            "SET IMPLICIT_TRANSACTIONS ON\nUPDATE dbo.users SET active = 0 WHERE id = 1;"
+        ));
+        assert!(sqlserver_batch_can_use_execute("BEGIN TRY\nUPDATE dbo.users SET active = 0 WHERE id = 1;\nEND TRY"));
+        assert!(sqlserver_batch_can_use_execute(
+            "UPDATE dbo.users SET note = 'BEGIN TRANSACTION; ROLLBACK' WHERE id = 1;"
+        ));
+        assert!(sqlserver_batch_can_use_execute("UPDATE dbo.users SET [rollback] = 1 WHERE id = 1;"));
     }
 
     #[test]

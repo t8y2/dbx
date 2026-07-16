@@ -112,3 +112,18 @@ describe("normalizeDesktopSettings", () => {
     expect(normalizeDesktopSettings({ duckdb_worker_max_processes: 3.6 }).duckdb_worker_max_processes).toBe(4);
   });
 });
+
+describe("normalizeEditorSettings - continueOnErrorOnBatch", () => {
+  it("defaults continueOnErrorOnBatch to false", () => {
+    expect(normalizeEditorSettings({}).continueOnErrorOnBatch).toBe(false);
+  });
+
+  it("preserves enabled continueOnErrorOnBatch", () => {
+    expect(normalizeEditorSettings({ continueOnErrorOnBatch: true }).continueOnErrorOnBatch).toBe(true);
+  });
+
+  it("treats non-boolean values as false", () => {
+    expect(normalizeEditorSettings({ continueOnErrorOnBatch: "yes" } as any).continueOnErrorOnBatch).toBe(false);
+    expect(normalizeEditorSettings({ continueOnErrorOnBatch: 1 } as any).continueOnErrorOnBatch).toBe(false);
+  });
+});

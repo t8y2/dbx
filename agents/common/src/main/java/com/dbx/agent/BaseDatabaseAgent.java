@@ -59,6 +59,7 @@ public abstract class BaseDatabaseAgent implements DatabaseAgent {
             sql,
             schema,
             this::setSchemaSQL,
+            this::resetSchemaSQL,
             options,
             JdbcExecutor.current()::defaultResultValue
         );
@@ -81,6 +82,7 @@ public abstract class BaseDatabaseAgent implements DatabaseAgent {
             sql,
             schema,
             this::setSchemaSQL,
+            this::resetSchemaSQL,
             options,
             JdbcExecutor.current()::defaultResultValue
         );
@@ -98,12 +100,24 @@ public abstract class BaseDatabaseAgent implements DatabaseAgent {
 
     @Override
     public QueryResult executeTransaction(List<String> statements, String schema) {
-        return TransactionExecutor.executeUpdateStatements(requireConnected(), statements, schema, this::setSchemaSQL);
+        return TransactionExecutor.executeUpdateStatements(
+            requireConnected(),
+            statements,
+            schema,
+            this::setSchemaSQL,
+            this::resetSchemaSQL
+        );
     }
 
     @Override
     public QueryResult executeBatch(List<String> statements, String schema) {
-        return BatchExecutor.executeBatchStatements(requireConnected(), statements, schema, this::setSchemaSQL);
+        return BatchExecutor.executeBatchStatements(
+            requireConnected(),
+            statements,
+            schema,
+            this::setSchemaSQL,
+            this::resetSchemaSQL
+        );
     }
 
     protected Connection requireConnected() {

@@ -828,6 +828,102 @@ func TestOracleFuzzyLikePatternEscapesSpecialCharacters(t *testing.T) {
 	}
 }
 
+func TestOracleCompletionTablesQuerySearchesAcrossSchemasWithPriority(t *testing.T) {
+	query := oracleCompletionTablesQuery(completionAssistantRequest{
+		Database:     "ORCL",
+		Schema:       "APP",
+		ObjectKinds:  []string{"table", "view"},
+		Mask:         "dept_d",
+		GlobalSearch: true,
+		MatchMode:    "prefix",
+	}, "APP", 201)
+	sqlText := strings.ToUpper(query.SQL)
+
+	if !strings.Contains(sqlText, "ALL_OBJECTS") || !strings.Contains(sqlText, "ALL_SYNONYMS") {
+		t.Fatalf("global completion should include objects and synonyms: %s", query.SQL)
+	}
+	if !strings.Contains(sqlText, "S.TABLE_OWNER AS TARGET_OWNER") || !strings.Contains(sqlText, "S.TABLE_NAME AS TARGET_NAME") || !strings.Contains(sqlText, "S.DB_LINK IS NULL") {
+		t.Fatalf("table completion should return local synonym targets for bounded validation: %s", query.SQL)
+	}
+	if strings.Contains(sqlText, "JOIN ALL_OBJECTS TARGET") {
+		t.Fatalf("Oracle 11g completion must not join full dictionary views before applying the result limit: %s", query.SQL)
+	}
+	if !strings.Contains(sqlText, "SELECT OWNER, OBJECT_NAME, OBJECT_TYPE, TARGET_OWNER, TARGET_NAME\nFROM (\nSELECT O.OWNER") {
+		t.Fatalf("Oracle 11g requires the union to be wrapped before expression-based ordering: %s", query.SQL)
+	}
+	if strings.Contains(sqlText, "WHERE UPPER(OBJECT_NAME) LIKE UPPER(:1) ESCAPE '\\' AND OWNER =") {
+		t.Fatalf("global completion must not restrict results to one owner: %s", query.SQL)
+	}
+	if !strings.Contains(sqlText, "WHEN OWNER = :3 THEN 0") || !strings.Contains(sqlText, "WHERE ROWNUM <= :5") {
+		t.Fatalf("completion should prioritize the current schema and use Oracle 11g rownum limiting: %s", query.SQL)
+	}
+	if len(query.Args) != 5 || query.Args[0] != `dept\_d%` || query.Args[1] != `dept\_d%` || query.Args[2] != "APP" || query.Args[3] != "dept_d" || query.Args[4] != 201 {
+		t.Fatalf("unexpected completion args: %#v", query.Args)
+	}
+}
+
+func TestOracleCompletionSynonymTargetsQueryIsBoundedToCandidates(t *testing.T) {
+	query := oracleCompletionSynonymTargetsQuery([]oracleCompletionSynonymTarget{{Owner: "DBX_TEST", Name: "DEPT_DICT"}, {Owner: "HR", Name: "EMP_VIEW"}}, []string{"'TABLE'", "'VIEW'"})
+	sqlText := strings.ToUpper(query.SQL)
+
+	if !strings.Contains(sqlText, "O.OBJECT_TYPE IN ('TABLE','VIEW')") || !strings.Contains(sqlText, "(O.OWNER = :1 AND O.OBJECT_NAME = :2)") || !strings.Contains(sqlText, "(O.OWNER = :3 AND O.OBJECT_NAME = :4)") {
+		t.Fatalf("synonym target validation should query only returned targets: %s", query.SQL)
+	}
+	wantArgs := []any{"DBX_TEST", "DEPT_DICT", "HR", "EMP_VIEW"}
+	if !reflect.DeepEqual(query.Args, wantArgs) {
+		t.Fatalf("unexpected synonym target args: %#v", query.Args)
+	}
+}
+
+func TestOracleCompletionTablesQueryScopesExplicitSchema(t *testing.T) {
+	query := oracleCompletionTablesQuery(completionAssistantRequest{
+		Schema:       "APP",
+		ParentSchema: "HR",
+		ObjectKinds:  []string{"table"},
+		Mask:         "EMP",
+	}, "APP", 50)
+
+	if !strings.Contains(strings.ToUpper(query.SQL), "AND O.OWNER = :2") || !strings.Contains(strings.ToUpper(query.SQL), "AND S.OWNER = :4") {
+		t.Fatalf("explicit schema completion should restrict owner: %s", query.SQL)
+	}
+	if len(query.Args) != 7 || query.Args[1] != "HR" || query.Args[3] != "HR" || query.Args[4] != "APP" {
+		t.Fatalf("unexpected scoped completion args: %#v", query.Args)
+	}
+}
+
+func TestOracleCompletionRoutinesQueryUsesPublicPackageMetadata(t *testing.T) {
+	query := oracleCompletionRoutinesQuery(completionAssistantRequest{
+		Schema:       "HR",
+		ParentSchema: "HR",
+		ParentName:   "PAYROLL",
+		ObjectKinds:  []string{"routine"},
+		Mask:         "CALC",
+	}, "HR", 200)
+	sqlText := strings.ToUpper(query.SQL)
+
+	if !strings.Contains(sqlText, "ALL_PROCEDURES") || !strings.Contains(sqlText, "ALL_ARGUMENTS") {
+		t.Fatalf("package completion should use callable procedure metadata: %s", query.SQL)
+	}
+	if strings.Contains(sqlText, "ALL_SOURCE") || strings.Contains(sqlText, "PACKAGE BODY") {
+		t.Fatalf("package completion must not expose private package body source: %s", query.SQL)
+	}
+	if !strings.Contains(sqlText, "P.OBJECT_NAME = :1") || !strings.Contains(sqlText, "UPPER(OBJECT_NAME) LIKE UPPER(:2)") || !strings.Contains(sqlText, "AND OWNER = :3") {
+		t.Fatalf("package completion should scope package and owner: %s", query.SQL)
+	}
+	if len(query.Args) != 6 || query.Args[0] != "PAYROLL" || query.Args[1] != "CALC%" || query.Args[2] != "HR" {
+		t.Fatalf("unexpected package completion args: %#v", query.Args)
+	}
+}
+
+func TestOracleCompletionLikePatternSupportsPrefixAndContains(t *testing.T) {
+	if got := oracleCompletionLikePattern(`A_%`, "prefix"); got != `A\_\%%` {
+		t.Fatalf("prefix pattern = %q", got)
+	}
+	if got := oracleCompletionLikePattern("DEPT", "contains"); got != "%DEPT%" {
+		t.Fatalf("contains pattern = %q", got)
+	}
+}
+
 func TestIsOraclePGALimitError(t *testing.T) {
 	if !isOraclePGALimitError(errors.New("ORA-04036: PGA memory used by the instance exceeds PGA_AGGREGATE_LIMIT")) {
 		t.Fatal("expected ORA-04036 to be detected")

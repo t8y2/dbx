@@ -432,6 +432,7 @@ export interface EditorSettings {
   objectBrowserShowCheckbox: boolean;
   objectBrowserViewMode: "list" | "grid";
   sqlVariableSyntaxOverrides: SqlVariableSyntaxOverrides;
+  continueOnErrorOnBatch: boolean;
 }
 
 export interface ToolbarItems {
@@ -569,6 +570,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   objectBrowserShowCheckbox: false,
   objectBrowserViewMode: "list",
   sqlVariableSyntaxOverrides: {},
+  continueOnErrorOnBatch: false,
 };
 
 export const STORAGE_KEY = "dbx-editor-settings";
@@ -806,6 +808,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     objectBrowserShowCheckbox: typeof settings.objectBrowserShowCheckbox === "boolean" ? settings.objectBrowserShowCheckbox : DEFAULT_EDITOR_SETTINGS.objectBrowserShowCheckbox,
     objectBrowserViewMode: settings.objectBrowserViewMode === "grid" ? "grid" : DEFAULT_EDITOR_SETTINGS.objectBrowserViewMode,
     sqlVariableSyntaxOverrides: normalizeSqlVariableSyntaxOverrides(settings.sqlVariableSyntaxOverrides),
+    continueOnErrorOnBatch: settings.continueOnErrorOnBatch === true,
   };
 }
 
@@ -1055,6 +1058,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.objectBrowserShowCheckbox !== undefined) editorSettings.value.objectBrowserShowCheckbox = partial.objectBrowserShowCheckbox === true;
     if (partial.objectBrowserViewMode !== undefined) editorSettings.value.objectBrowserViewMode = partial.objectBrowserViewMode === "grid" ? "grid" : "list";
     if (partial.sqlVariableSyntaxOverrides !== undefined) editorSettings.value.sqlVariableSyntaxOverrides = normalizeSqlVariableSyntaxOverrides(partial.sqlVariableSyntaxOverrides);
+    if (partial.continueOnErrorOnBatch !== undefined) editorSettings.value.continueOnErrorOnBatch = partial.continueOnErrorOnBatch === true;
     saveEditorSettings(editorSettings.value);
   }
 

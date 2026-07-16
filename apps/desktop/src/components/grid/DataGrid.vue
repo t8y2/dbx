@@ -8,17 +8,23 @@ type CachedStructuredFilterRule = {
   conjunction: "AND" | "OR";
   disabled?: boolean;
 };
+type CachedServerColumnFilter = {
+  condition: string;
+  keys: string[];
+  labels: string[];
+};
 type StructuredFilterCacheState = {
   scopeKey: string;
   manualWhereInput: string;
   rules: CachedStructuredFilterRule[];
   appliedWhereInput: string;
+  serverColumnFilters?: Record<number, CachedServerColumnFilter>;
 };
 const structuredFilterStateCache = new Map<string, StructuredFilterCacheState>();
 </script>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, onActivated, onDeactivated, ref, shallowRef, useSlots, watch, defineAsyncComponent, type Component, type CSSProperties } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, onActivated, onDeactivated, ref, shallowRef, toRaw, useSlots, watch, defineAsyncComponent, type Component, type CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
 import {
   ArrowUp,
@@ -62,7 +68,7 @@ import {
   TableProperties,
   Database,
   Columns3,
-  Columns3Cog,
+  PencilRuler,
   Timer,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
@@ -84,6 +90,7 @@ import ImagePreviewDialog from "@/components/grid/ImagePreviewDialog.vue";
 import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
 import EnumCellEditor from "@/components/grid/EnumCellEditor.vue";
 import type { QueryResult, ColumnInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo, TableInfoTab } from "@/types/database";
+import { tableObjectSourceKind } from "@/lib/table/tableObjectSourceKind";
 import * as api from "@/lib/backend/api";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
 import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
@@ -160,9 +167,9 @@ import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowSho
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
 import { canGoNextDataGridPage } from "@/lib/dataGrid/dataGridPagination";
 import { dataGridCountQueryOptions } from "@/lib/dataGrid/dataGridQueryOptions";
-import { dataGridBottomScrollTop, dataGridScrollPosition, isDataGridAtScrollBottom, isDataGridNearScrollBottom, shouldCheckInfiniteScrollAfterScroll, type DataGridScrollPosition } from "@/lib/dataGrid/dataGridInfiniteScroll";
+import { dataGridBottomScrollTop, dataGridScrollPosition, isDataGridAtScrollBottom, isDataGridNearScrollBottom, restoredDataGridScrollLeft, shouldCheckInfiniteScrollAfterScroll, type DataGridScrollPosition } from "@/lib/dataGrid/dataGridInfiniteScroll";
 import { CANVAS_DATA_GRID_ROW_HEIGHT, drawCanvasDataGrid } from "@/lib/dataGrid/canvasDataGridRenderer";
-import { dataGridSaveActionMode, dataGridSaveToolbarState } from "@/lib/dataGrid/dataGridSaveUi";
+import { dataGridPreviewLabelKey, dataGridSaveActionMode, dataGridSaveToolbarState } from "@/lib/dataGrid/dataGridSaveUi";
 import type { QueryEditabilityReason } from "@/lib/sql/sqlAnalysis";
 import { EDITOR_FONT_FAMILY_CSS_VAR } from "@/lib/editor/editorThemes";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
@@ -178,6 +185,8 @@ import {
   filterModeUsesRange,
   parseFilterValue,
   parseFilterValues,
+  removeColumnValueFilterCondition,
+  replaceColumnValueFilterCondition,
 } from "@/lib/dataGrid/dataGridColumnFilter";
 import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
 import { MAX_RESULT_PAGE_SIZE, MIN_RESULT_PAGE_SIZE, normalizeResultPageSize, resultPageSizeMenuOptions } from "@/lib/dataGrid/paginationPageSize";
@@ -203,6 +212,7 @@ import { columnHeaderCanvasPointerDisabled, columnHeaderClickShouldBeSuppressed,
 import { useToast } from "@/composables/useToast";
 import { useDataGridExport } from "@/composables/useDataGridExport";
 import { eventTargetAllowsNativeClipboard, isPlainClipboardShortcut, readTextFromClipboard } from "@/lib/common/clipboard";
+import { claimDataGridPaste } from "@/lib/dataGrid/dataGridClipboard";
 import ExportProgressDialog from "@/components/export/ExportProgressDialog.vue";
 import { DATA_GRID_ROW_NUM_WIDTH, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
 import { useDataGridSelection } from "@/composables/useDataGridSelection";
@@ -295,10 +305,11 @@ interface DataGridProps {
   totalRowCountLoading?: boolean;
   loading?: boolean;
   cacheKey?: string;
+  exportSql?: string;
   onExecuteSql?: (sql: string) => Promise<void>;
   fullExportResult?: (onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => Promise<QueryResult | undefined>;
-  queryResultExportRequest?: (options: { exportId: string; filePath: string; format: "csv" | "xlsx" | "txt" }) => Promise<api.QueryResultExportRequest | undefined>;
-  allExportResults?: Array<{ sheetName: string; result: QueryResult }>;
+  queryResultExportRequest?: (options: { exportId: string; filePath: string; format: "csv" | "xlsx" | "txt"; includeSqlSheet?: boolean }) => Promise<api.QueryResultExportRequest | undefined>;
+  allExportResults?: Array<{ sheetName: string; result: QueryResult; sql?: string }>;
   exportFileBaseName?: string;
   customSaveHandler?: import("@/composables/useDataGridEditor").CustomSaveHandler;
   queryEditabilityReason?: QueryEditabilityReason;
@@ -1170,6 +1181,7 @@ const serverFilterError = ref("");
 const serverFilterOptions = ref<LocalFilterOption[]>([]);
 const serverFilterLimited = ref(false);
 const serverFilterValueByKey = ref<Map<string, CellValue>>(new Map());
+const serverColumnFilters = ref<Record<number, CachedServerColumnFilter>>({});
 let serverFilterRequestId = 0;
 let serverFilterSearchTimer: ReturnType<typeof window.setTimeout> | undefined;
 const filterBuilderOpen = ref(false);
@@ -1232,27 +1244,34 @@ function localFilterLabel(value: CellValue, columnIndex: number): string {
 }
 
 function localFilterActive(colIdx: number): boolean {
-  return !!localColumnFilters.value[colIdx]?.size;
+  return !!localColumnFilters.value[colIdx]?.size || !!serverColumnFilters.value[colIdx];
 }
 
 const localFilterCount = computed(() => Object.values(localColumnFilters.value).filter((values) => values.size).length);
+const serverColumnFilterCount = computed(() => Object.keys(serverColumnFilters.value).length);
 const hasLocalColumnFilters = computed(() => localFilterCount.value > 0);
-const filterButtonCount = computed(() => structuredFilterCount.value + localFilterCount.value);
-const filterButtonActive = computed(() => hasStructuredFilters.value || hasLocalColumnFilters.value);
+const hasServerColumnFilters = computed(() => serverColumnFilterCount.value > 0);
+const filterButtonCount = computed(() => structuredFilterCount.value + localFilterCount.value + serverColumnFilterCount.value);
+const filterButtonActive = computed(() => hasStructuredFilters.value || hasLocalColumnFilters.value || hasServerColumnFilters.value);
 const localFilterSummaries = computed(() =>
-  Object.entries(localColumnFilters.value)
-    .filter(([, selected]) => selected.size > 0)
-    .map(([columnIndexText, selected]) => {
-      const columnIndex = Number(columnIndexText);
-      const labelByKey = new Map(buildLocalFilterOptions(columnIndex).map((option) => [option.key, option.label]));
-      const values = [...selected].map((key) => labelByKey.get(key) ?? key);
-      return {
-        columnIndex,
-        columnName: props.result.columns[columnIndex] ?? `#${columnIndex + 1}`,
-        values: values.slice(0, 3),
-        hiddenValueCount: Math.max(0, values.length - 3),
-      };
-    }),
+  [
+    ...Object.entries(localColumnFilters.value)
+      .filter(([, selected]) => selected.size > 0)
+      .map(([columnIndexText, selected]) => {
+        const columnIndex = Number(columnIndexText);
+        const labelByKey = new Map(buildLocalFilterOptions(columnIndex).map((option) => [option.key, option.label]));
+        return { columnIndex, values: [...selected].map((key) => labelByKey.get(key) ?? key) };
+      }),
+    ...Object.entries(serverColumnFilters.value).map(([columnIndexText, filter]) => ({
+      columnIndex: Number(columnIndexText),
+      values: filter.labels,
+    })),
+  ].map(({ columnIndex, values }) => ({
+    columnIndex,
+    columnName: props.result.columns[columnIndex] ?? `#${columnIndex + 1}`,
+    values: values.slice(0, 3),
+    hiddenValueCount: Math.max(0, values.length - 3),
+  })),
 );
 
 function rowMatchesLocalColumnFilters(data: CellValue[]): boolean {
@@ -1400,9 +1419,10 @@ function syncServerFilterDraft(columnIndex: number, options: LocalFilterOption[]
   const draft = localFilterDraft.value;
   if (!draft || draft.mode !== "server" || draft.columnIndex !== columnIndex) return;
   if (draft.touched) return;
+  const activeFilter = serverColumnFilters.value[columnIndex];
   localFilterDraft.value = {
     ...draft,
-    values: new Set(options.map((option) => option.key)),
+    values: new Set(activeFilter?.keys ?? options.map((option) => option.key)),
   };
 }
 
@@ -1426,7 +1446,8 @@ async function loadServerFilterValues(columnIndex: number, searchValue: string) 
       tableName: tableMeta.tableName,
       columnName,
       columnInfo,
-      whereInput: currentWhereInput(),
+      // Database value enumeration must remain independent from the active filter;
+      // otherwise reopening the same column can only return its previously selected values.
       searchValue: searchValue.trim() || undefined,
       limit: SERVER_COLUMN_FILTER_LIMIT,
       includeCounts: true,
@@ -1764,7 +1785,16 @@ async function applyServerColumnFilter(draft: LocalColumnFilterDraft) {
   const next = { ...localColumnFilters.value };
   delete next[draft.columnIndex];
   localColumnFilters.value = next;
-  whereFilterInput.value = appendColumnValueFilterCondition(whereFilterInput.value, condition);
+  const previousCondition = serverColumnFilters.value[draft.columnIndex]?.condition;
+  whereFilterInput.value = replaceColumnValueFilterCondition(whereFilterInput.value, previousCondition, condition);
+  serverColumnFilters.value = {
+    ...serverColumnFilters.value,
+    [draft.columnIndex]: {
+      condition,
+      keys: [...draft.values],
+      labels: values.map((value) => localFilterLabel(value, draft.columnIndex)),
+    },
+  };
   closeLocalFilter();
   await applyWhereFilter();
 }
@@ -1774,31 +1804,64 @@ async function applyTypedLocalFilterValue() {
   if (!draft) return;
   const columnName = props.result.columns[draft.columnIndex];
   if (!columnName) return;
+  const columnInfo = props.tableMeta?.columns.find((column) => column.name === columnName);
   const condition = await buildColumnValueFilterCondition({
     databaseType: resolvedDatabaseType.value,
     columnName,
-    columnInfo: props.tableMeta?.columns.find((column) => column.name === columnName),
+    columnInfo,
     rawValue: localFilterTypedValue.value,
   });
   if (!condition) return;
   const next = { ...localColumnFilters.value };
   delete next[draft.columnIndex];
   localColumnFilters.value = next;
-  whereFilterInput.value = appendColumnValueFilterCondition(whereFilterInput.value, condition);
+  if (draft.mode === "server") {
+    const previousCondition = serverColumnFilters.value[draft.columnIndex]?.condition;
+    const rawValue = localFilterTypedValue.value.trim();
+    const value = (/^null$/i.test(rawValue) ? null : parseFilterValue(rawValue, columnInfo, resolvedDatabaseType.value)) as CellValue;
+    whereFilterInput.value = replaceColumnValueFilterCondition(whereFilterInput.value, previousCondition, condition);
+    serverColumnFilters.value = {
+      ...serverColumnFilters.value,
+      [draft.columnIndex]: {
+        condition,
+        keys: [localFilterKey(value)],
+        labels: [localFilterLabel(value, draft.columnIndex)],
+      },
+    };
+  } else {
+    whereFilterInput.value = appendColumnValueFilterCondition(whereFilterInput.value, condition);
+  }
   closeLocalFilter();
   await applyWhereFilter();
 }
 
-function clearLocalFilter(colIdx?: number) {
+function clearLocalFilter(colIdx?: number, applyServerWhereFilter = true) {
+  let removedServerFilter = false;
   if (colIdx === undefined) {
     localColumnFilters.value = {};
+    let nextWhereInput = whereFilterInput.value;
+    for (const filter of Object.values(serverColumnFilters.value)) {
+      nextWhereInput = removeColumnValueFilterCondition(nextWhereInput, filter.condition);
+    }
+    removedServerFilter = Object.keys(serverColumnFilters.value).length > 0;
+    serverColumnFilters.value = {};
+    whereFilterInput.value = nextWhereInput;
   } else {
     const next = { ...localColumnFilters.value };
     delete next[colIdx];
     localColumnFilters.value = next;
+    const serverFilter = serverColumnFilters.value[colIdx];
+    if (serverFilter) {
+      removedServerFilter = true;
+      const nextServerFilters = { ...serverColumnFilters.value };
+      delete nextServerFilters[colIdx];
+      serverColumnFilters.value = nextServerFilters;
+      whereFilterInput.value = removeColumnValueFilterCondition(whereFilterInput.value, serverFilter.condition);
+    }
   }
   closeLocalFilter();
   resetGridVerticalScroll();
+  if (removedServerFilter && applyServerWhereFilter && canUseWhereSearch.value) void applyWhereFilter();
 }
 
 watch(localFilterSearch, (value) => {
@@ -1876,6 +1939,8 @@ function persistStructuredFilterState() {
     manualWhereInput: whereFilterInput.value,
     rules: cloneStructuredFilterRules(structuredFilterRules.value),
     appliedWhereInput: appliedStructuredWhereInput.value,
+    // Vue wraps ref-held objects in proxies; structuredClone cannot clone those proxies.
+    serverColumnFilters: structuredClone(toRaw(serverColumnFilters.value)),
   });
 }
 
@@ -1886,6 +1951,7 @@ function loadStructuredFilterStateForScope() {
     const scopeKey = structuredFilterScopeKey.value;
     structuredFilterRules.value = cloneStructuredFilterRules(cached.rules);
     whereFilterInput.value = cached.manualWhereInput;
+    serverColumnFilters.value = structuredClone(cached.serverColumnFilters ?? {});
     appliedStructuredWhereInput.value = "";
     void buildStructuredWhereFromRules(structuredFilterRules.value).then((whereInput) => {
       if (structuredFilterCacheKey.value !== cacheKey || structuredFilterScopeKey.value !== scopeKey) return;
@@ -1895,6 +1961,7 @@ function loadStructuredFilterStateForScope() {
     return;
   }
   appliedStructuredWhereInput.value = "";
+  serverColumnFilters.value = {};
   structuredFilterRules.value = filterBuilderColumnOptions.value.length > 0 ? [defaultStructuredFilterRule()] : [];
   persistStructuredFilterState();
 }
@@ -1963,7 +2030,7 @@ function resetStructuredFilters() {
 async function clearAllFilters() {
   whereFilterInput.value = "";
   resetStructuredFilters();
-  clearLocalFilter();
+  clearLocalFilter(undefined, false);
   if (canUseWhereSearch.value) await applyWhereFilter();
 }
 
@@ -2016,7 +2083,7 @@ watch(filterBuilderOpen, (open) => {
 });
 
 watch(
-  [structuredFilterRules, appliedStructuredWhereInput],
+  [structuredFilterRules, appliedStructuredWhereInput, serverColumnFilters],
   () => {
     const columns = filterBuilderColumnOptions.value;
     if (columns.length > 0 && structuredFilterRules.value.some((rule) => !columns.includes(rule.columnName))) {
@@ -2846,6 +2913,7 @@ const gridStyle = computed(() => ({
 }));
 const gridHorizontalScrollLeft = ref(0);
 const gridViewportWidth = ref(0);
+let gridScrollLeftBeforeTranspose = 0;
 const renderedColumnOffsets = computed(() => {
   const widths = renderedColumnWidths.value;
   const offsets = Array.from({ length: widths.length + 1 }, () => 0);
@@ -4167,6 +4235,7 @@ const saveActionMode = computed(() =>
     useTransaction: !!useTransaction.value,
   }),
 );
+const previewLabelKey = computed(() => dataGridPreviewLabelKey(resolvedDatabaseType.value));
 const saveToolbarState = computed(() =>
   dataGridSaveToolbarState({
     editable: props.editable,
@@ -4723,7 +4792,7 @@ const exportContextCell = computed(() => {
 const deleteRowDetails = computed(() => (props.tableMeta?.tableName ? t("dangerDialog.deleteRowDetails", { table: props.tableMeta.tableName }) : t("dangerDialog.deleteRowDetailsNoTable")));
 
 const hasVisibleRows = computed(() => displayRowCount.value > 0);
-const hasActiveFilter = computed(() => (dataGridSearchMode.value === "filter" && !!deferredClientSearchText.value) || rowStatusFilter.value !== "all" || hasLocalColumnFilters.value);
+const hasActiveFilter = computed(() => (dataGridSearchMode.value === "filter" && !!deferredClientSearchText.value) || rowStatusFilter.value !== "all" || hasLocalColumnFilters.value || hasServerColumnFilters.value);
 const emptyTitle = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRows") : t("grid.noRows")));
 const emptyDescription = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRowsDescription") : t("grid.noRowsDescription")));
 watch(
@@ -4853,6 +4922,12 @@ function exportSelectedRowsXlsx() {
   const rowIds = affectedRowIds();
   if (rowIds.length === 0) return;
   return exportXlsx(rowIds);
+}
+
+function exportSelectedRowsXlsxWithSql() {
+  const rowIds = affectedRowIds();
+  if (rowIds.length === 0) return;
+  return exportXlsxWithSql(rowIds);
 }
 
 function exportSelectedRowsJson() {
@@ -6517,6 +6592,7 @@ const exportProgressState = ref({
   totalRows: null as number | null,
   status: "",
   errorMessage: null as string | null,
+  filePath: null as string | null,
 });
 const exportCancelHandler = ref<(() => Promise<void>) | null>(null);
 
@@ -6553,8 +6629,11 @@ const {
   exportMarkdown,
   exportCurrentPageMarkdown,
   exportXlsx,
+  exportXlsxWithSql,
   exportCurrentPageXlsx,
+  exportCurrentPageXlsxWithSql,
   exportAllResultsXlsx,
+  exportAllResultsXlsxWithSql,
   exportSql,
   exportCurrentPageSql,
   exportTxt,
@@ -6564,6 +6643,7 @@ const {
   columns: visibleColumns,
   displayItems: visibleDisplayItems,
   sql: computed(() => props.sql),
+  exportSql: computed(() => props.exportSql),
   tableMeta: computed(() => (props.tableMeta ? { ...props.tableMeta } : undefined)),
   copyInsertTargetLabel: computed(() => props.tableMeta?.tableName ?? props.customSaveHandler?.targetLabel),
   databaseType: computed(() => props.databaseType),
@@ -6571,7 +6651,7 @@ const {
   database: computed(() => props.executionDatabase ?? props.database),
   context: computed(() => props.context),
   sourceColumns: visibleSourceColumns,
-  mongoDocuments: computed(() => props.result.mongo_documents),
+  mongoDocuments: computed(() => props.result.mongo_copy_documents ?? props.result.mongo_documents),
   columnTypes: visibleColumnTypes,
   whereInput: computed(() => currentWhereInput()),
   orderBy: computed(() => currentOrderBy()),
@@ -6606,11 +6686,13 @@ const pageSizeMenuItems = computed(() =>
 
 const exportMenuItems = computed(() => {
   const hasFullResultExport = !!props.fullExportResult;
-  const allResultItems = (props.allExportResults?.length ?? 0) > 1 ? [{ value: "all-results-xlsx", label: t("grid.exportAllResultsXlsx"), separatorBefore: true }] : [];
+  const canIncludeSql = props.context === "results" && !!(props.exportSql || props.sql)?.trim();
+  const allResultItems = (props.allExportResults?.length ?? 0) > 1 ? [{ value: "all-results-xlsx", label: t("grid.exportAllResultsXlsx"), separatorBefore: true }, ...(canIncludeSql ? [{ value: "all-results-xlsx-with-sql", label: t("grid.exportAllResultsXlsxWithSql") }] : [])] : [];
   const selectedItems = isMultiRow.value
     ? [
         { value: "selected-csv", label: t("grid.exportSelectedRowsCsv"), separatorBefore: true },
         { value: "selected-xlsx", label: t("grid.exportSelectedRowsXlsx") },
+        ...(canIncludeSql ? [{ value: "selected-xlsx-with-sql", label: t("grid.exportSelectedRowsXlsxWithSql") }] : []),
         { value: "selected-json", label: t("grid.exportSelectedRowsJson") },
         { value: "selected-markdown", label: t("grid.exportSelectedRowsMarkdown") },
         { value: "selected-sql", label: t("grid.exportSelectedRowsSql") },
@@ -6622,6 +6704,7 @@ const exportMenuItems = computed(() => {
     return [
       { value: "csv", label: t("grid.exportCsv") },
       { value: "xlsx", label: t("grid.exportXlsx") },
+      ...(canIncludeSql ? [{ value: "xlsx-with-sql", label: t("grid.exportXlsxWithSql") }] : []),
       { value: "json", label: t("grid.exportJson") },
       { value: "markdown", label: t("grid.exportMarkdown") },
       { value: "sql", label: t("grid.exportSql") },
@@ -6634,12 +6717,14 @@ const exportMenuItems = computed(() => {
   return [
     { value: "page-csv", label: t("grid.exportCurrentPageCsv") },
     { value: "page-xlsx", label: t("grid.exportCurrentPageXlsx") },
+    ...(canIncludeSql ? [{ value: "page-xlsx-with-sql", label: t("grid.exportCurrentPageXlsxWithSql") }] : []),
     { value: "page-json", label: t("grid.exportCurrentPageJson") },
     { value: "page-markdown", label: t("grid.exportCurrentPageMarkdown") },
     { value: "page-sql", label: t("grid.exportCurrentPageSql") },
     { value: "page-txt", label: t("grid.exportCurrentPageTxt") },
     { value: "csv", label: t("grid.exportCurrentResultCsv"), separatorBefore: true },
     { value: "xlsx", label: t("grid.exportCurrentResultXlsx") },
+    ...(canIncludeSql ? [{ value: "xlsx-with-sql", label: t("grid.exportCurrentResultXlsxWithSql") }] : []),
     { value: "json", label: t("grid.exportCurrentResultJson") },
     { value: "markdown", label: t("grid.exportCurrentResultMarkdown") },
     { value: "sql", label: t("grid.exportCurrentResultSql") },
@@ -6657,19 +6742,23 @@ function selectExportMenuItem(value: string) {
   const actions: Record<string, () => void> = {
     "page-csv": exportCurrentPageCsv,
     "page-xlsx": exportCurrentPageXlsx,
+    "page-xlsx-with-sql": exportCurrentPageXlsxWithSql,
     "page-json": exportCurrentPageJson,
     "page-markdown": exportCurrentPageMarkdown,
     "page-sql": exportCurrentPageSql,
     "page-txt": exportCurrentPageTxt,
     csv: exportCsv,
     xlsx: exportXlsx,
+    "xlsx-with-sql": exportXlsxWithSql,
     "all-results-xlsx": exportAllResultsXlsx,
+    "all-results-xlsx-with-sql": exportAllResultsXlsxWithSql,
     json: exportJson,
     markdown: exportMarkdown,
     sql: exportSql,
     txt: exportTxt,
     "selected-csv": exportSelectedRowsCsv,
     "selected-xlsx": exportSelectedRowsXlsx,
+    "selected-xlsx-with-sql": exportSelectedRowsXlsxWithSql,
     "selected-json": exportSelectedRowsJson,
     "selected-markdown": exportSelectedRowsMarkdown,
     "selected-sql": exportSelectedRowsSql,
@@ -6832,8 +6921,6 @@ function clipboardShortcut(event: KeyboardEvent, key: string): boolean {
   return isPlainClipboardShortcut(event, key);
 }
 
-let lastPasteEventAt = 0;
-
 async function pasteClipboardIntoSelection() {
   if (!props.editable) return;
   const text = await readTextFromClipboard();
@@ -6866,13 +6953,11 @@ function pasteTextIntoSelection(text: string): boolean {
 }
 
 function onGridPaste(event: ClipboardEvent) {
-  if (!props.editable || (!selectedRange.value && !hasColumnSelection.value)) return;
-  const target = event.target as HTMLElement | null;
-  if (target?.closest("input, textarea, [contenteditable='true'], [role='textbox']")) return;
+  const intent = claimDataGridPaste(event, props.editable, !!selectedRange.value || hasColumnSelection.value);
+  if (intent === "native") return;
+  if (intent === "block") return;
   const text = event.clipboardData?.getData("text/plain");
   if (text === undefined) return;
-  event.preventDefault();
-  lastPasteEventAt = Date.now();
   pasteTextIntoSelection(text);
 }
 
@@ -6958,6 +7043,11 @@ function selectionHasEditableCells(): boolean {
     }
   }
   return false;
+}
+
+function setSelectionNull() {
+  if (!props.editable || !selectionHasEditableCells()) return;
+  fillSelectionWithValue(null);
 }
 
 function openBulkEditDialog() {
@@ -7181,8 +7271,12 @@ function prepareTransposeCellMouseDown(rowIndex: number, actualColIdx: number) {
   if (item) prepareDataCellMouseDown(item, actualColIdx);
 }
 
+function canSaveGridChangesFromShortcut() {
+  return saveToolbarState.value.showActions && !saveToolbarState.value.actionsDisabled;
+}
+
 async function saveGridChangesFromShortcut() {
-  if (!saveToolbarState.value.showActions || saveToolbarState.value.actionsDisabled) return false;
+  if (!canSaveGridChangesFromShortcut()) return false;
   await onToolbarCommit();
   return true;
 }
@@ -7256,9 +7350,10 @@ async function onGridKeydown(event: KeyboardEvent) {
     return;
   }
   if (isSaveShortcut(event, settingsStore.editorSettings.shortcuts)) {
-    if (await saveGridChangesFromShortcut()) {
+    if (canSaveGridChangesFromShortcut()) {
       event.preventDefault();
       event.stopPropagation();
+      await saveGridChangesFromShortcut();
     }
     return;
   }
@@ -7329,12 +7424,11 @@ async function onGridKeydown(event: KeyboardEvent) {
     return;
   }
   if (clipboardShortcut(event, "v")) {
-    if (!props.editable || (!selectedRange.value && !hasColumnSelection.value)) return;
-    const keydownAt = Date.now();
-    window.setTimeout(() => {
-      if (lastPasteEventAt >= keydownAt) return;
-      pasteClipboardIntoSelection().catch((e) => toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000));
-    }, 50);
+    const intent = claimDataGridPaste(event, props.editable, !!selectedRange.value || hasColumnSelection.value);
+    if (intent === "native") return;
+    // A focused grid owns the shortcut even when read-only; otherwise the webview may paste into the previously focused SQL editor.
+    if (intent === "block") return;
+    pasteClipboardIntoSelection().catch((e) => toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000));
     return;
   }
 }
@@ -7792,7 +7886,20 @@ function transposeNav(delta: number) {
 }
 
 watch(isTransposeMode, (active) => {
-  if (active) nextTick(updateTransposeViewport);
+  if (active) {
+    gridScrollLeftBeforeTranspose = gridScrollerElement()?.scrollLeft ?? gridHorizontalScrollLeft.value;
+    nextTick(updateTransposeViewport);
+    return;
+  }
+
+  nextTick(() => {
+    const scroller = gridScrollerElement();
+    if (!scroller) return;
+    // Transpose mode replaces the normal grid scroller, so restore its state and
+    // reconnect overflow observers only after Vue mounts the new element.
+    scroller.scrollLeft = restoredDataGridScrollLeft(gridScrollLeftBeforeTranspose, scroller.scrollWidth, scroller.clientWidth);
+    refreshGridScrollerMetrics();
+  });
 });
 
 watch(
@@ -8269,7 +8376,8 @@ async function fetchDdl() {
   showTableInfo.value = true;
   ddlLoading.value = true;
   try {
-    ddlContent.value = await api.getTableDdl(props.connectionId, props.database || "", props.tableMeta.schema || props.database || "", props.tableMeta.tableName, undefined, props.tableMeta.catalog);
+    // Preserve view identity so the backend loads the stored view source instead of synthesizing table DDL.
+    ddlContent.value = await api.getTableDdl(props.connectionId, props.database || "", props.tableMeta.schema || props.database || "", props.tableMeta.tableName, tableObjectSourceKind(props.tableMeta.tableType), props.tableMeta.catalog);
   } catch (e: any) {
     ddlContent.value = `-- Error: ${e}`;
   } finally {
@@ -8813,11 +8921,15 @@ function exportSubmenu(): ContextMenuItem {
     { label: t("grid.exportSql"), action: exportSql },
     { label: t("grid.exportTxt"), action: exportTxt },
   ];
+  if (props.context === "results" && !!(props.exportSql || props.sql)?.trim()) {
+    items.splice(2, 0, { label: t("grid.exportXlsxWithSql"), action: exportXlsxWithSql });
+  }
   if (isMultiRow.value) {
     items.push(
       { label: "", separator: true },
       { label: t("grid.exportSelectedRowsCsv"), action: exportSelectedRowsCsv },
       { label: t("grid.exportSelectedRowsXlsx"), action: exportSelectedRowsXlsx },
+      ...(props.context === "results" && !!(props.exportSql || props.sql)?.trim() ? [{ label: t("grid.exportSelectedRowsXlsxWithSql"), action: exportSelectedRowsXlsxWithSql }] : []),
       { label: t("grid.exportSelectedRowsJson"), action: exportSelectedRowsJson },
       { label: t("grid.exportSelectedRowsMarkdown"), action: exportSelectedRowsMarkdown },
       { label: t("grid.exportSelectedRowsSql"), action: exportSelectedRowsSql },
@@ -8885,10 +8997,19 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   }
 
   if (props.editable && hasCellSelection.value) {
+    const hasEditableSelection = selectionHasEditableCells();
+    if (!contextHeaderColumn.value) {
+      items.push({
+        label: t("grid.setNull"),
+        action: setSelectionNull,
+        disabled: !hasEditableSelection,
+        icon: X,
+      });
+    }
     items.push({
       label: t("grid.bulkEditSelection"),
       action: openBulkEditDialog,
-      disabled: !selectionHasEditableCells(),
+      disabled: !hasEditableSelection,
       icon: Pencil,
     });
   }
@@ -9427,7 +9548,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 </div>
               </template>
 
-              <slot name="search-bar" :local-filter-count="localFilterCount" :has-local-column-filters="hasLocalColumnFilters" :local-filter-summaries="localFilterSummaries" :clear-local-filter="clearLocalFilter" />
+              <slot name="search-bar" :local-filter-count="localFilterCount + serverColumnFilterCount" :has-local-column-filters="hasLocalColumnFilters || hasServerColumnFilters" :local-filter-summaries="localFilterSummaries" :clear-local-filter="clearLocalFilter" />
             </div>
           </div>
 
@@ -9557,11 +9678,11 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   >
                     <Loader2 v-if="isPreviewLoading" class="data-grid-topbar-action-icon w-3 h-3 animate-spin" />
                     <Eye v-else class="data-grid-topbar-action-icon w-3 h-3" />
-                    <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t("toolbar.previewSql") }}</span>
+                    <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t(previewLabelKey) }}</span>
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent side="bottom" class="max-w-sm">
-                  {{ t("toolbar.previewSql") }}
+                  {{ t(previewLabelKey) }}
                 </TooltipContent>
               </Tooltip>
               <Tooltip>
@@ -10543,7 +10664,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 </Button>
               </div>
               <Button v-if="canOpenTableStructureEditor" variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs" :title="t('contextMenu.editStructure')" :aria-label="t('contextMenu.editStructure')" @click="openTableStructureEditor">
-                <Columns3Cog class="w-3 h-3" />
+                <PencilRuler class="w-3 h-3" />
                 <span class="table-info-action-label">{{ t("contextMenu.editStructure") }}</span>
               </Button>
               <Button variant="ghost" size="icon" class="h-5 w-5" @click="showTableInfo = false">

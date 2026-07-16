@@ -16,6 +16,7 @@ import java.util.Locale;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 public final class JdbcExecutor {
     public static final JdbcExecutor INSTANCE = new JdbcExecutor();
@@ -70,11 +71,25 @@ public final class JdbcExecutor {
         int timeoutSecs,
         ResultValueReader valueReader
     ) {
+        return execute(conn, sql, schema, setSchemaSql, () -> "", maxRows, fetchSize, timeoutSecs, valueReader);
+    }
+
+    public QueryResult execute(
+        Connection conn,
+        String sql,
+        String schema,
+        Function<String, String> setSchemaSql,
+        Supplier<String> resetSchemaSql,
+        int maxRows,
+        Integer fetchSize,
+        int timeoutSecs,
+        ResultValueReader valueReader
+    ) {
         return unchecked(() -> {
             String trimmedSql = trimSql(sql);
             long start = System.currentTimeMillis();
 
-            applySchema(conn, schema, setSchemaSql);
+            applySchema(conn, schema, setSchemaSql, resetSchemaSql);
 
             try (Statement stmt = conn.createStatement()) {
                 activeStatements.add(stmt);
@@ -178,7 +193,19 @@ public final class JdbcExecutor {
         QueryPageOptions options,
         ResultValueReader valueReader
     ) {
-        return executePage(conn, sql, schema, setSchemaSql, options, valueReader, sessions);
+        return executePage(conn, sql, schema, setSchemaSql, () -> "", options, valueReader, sessions);
+    }
+
+    public QueryPageResult executePage(
+        Connection conn,
+        String sql,
+        String schema,
+        Function<String, String> setSchemaSql,
+        Supplier<String> resetSchemaSql,
+        QueryPageOptions options,
+        ResultValueReader valueReader
+    ) {
+        return executePage(conn, sql, schema, setSchemaSql, resetSchemaSql, options, valueReader, sessions);
     }
 
     public QueryPageResult startTableRead(
@@ -189,7 +216,19 @@ public final class JdbcExecutor {
         QueryPageOptions options,
         ResultValueReader valueReader
     ) {
-        return executePage(conn, sql, schema, setSchemaSql, options, valueReader, tableReadSessions);
+        return executePage(conn, sql, schema, setSchemaSql, () -> "", options, valueReader, tableReadSessions);
+    }
+
+    public QueryPageResult startTableRead(
+        Connection conn,
+        String sql,
+        String schema,
+        Function<String, String> setSchemaSql,
+        Supplier<String> resetSchemaSql,
+        QueryPageOptions options,
+        ResultValueReader valueReader
+    ) {
+        return executePage(conn, sql, schema, setSchemaSql, resetSchemaSql, options, valueReader, tableReadSessions);
     }
 
     private QueryPageResult executePage(
@@ -197,6 +236,7 @@ public final class JdbcExecutor {
         String sql,
         String schema,
         Function<String, String> setSchemaSql,
+        Supplier<String> resetSchemaSql,
         QueryPageOptions options,
         ResultValueReader valueReader,
         ConcurrentHashMap<String, QuerySession> targetSessions
@@ -206,7 +246,7 @@ public final class JdbcExecutor {
             String trimmedSql = trimSql(sql);
             long start = System.currentTimeMillis();
 
-            applySchema(conn, schema, setSchemaSql);
+            applySchema(conn, schema, setSchemaSql, resetSchemaSql);
 
             Statement stmt = conn.createStatement();
             activeStatements.add(stmt);
@@ -592,9 +632,14 @@ public final class JdbcExecutor {
         return Math.min(requestedRows, 1024);
     }
 
-    private void applySchema(Connection conn, String schema, Function<String, String> setSchemaSql) throws SQLException {
+    private void applySchema(
+        Connection conn,
+        String schema,
+        Function<String, String> setSchemaSql,
+        Supplier<String> resetSchemaSql
+    ) throws SQLException {
         try {
-            JdbcSchemaSwitcher.apply(conn, schema, setSchemaSql);
+            JdbcSchemaSwitcher.apply(conn, schema, setSchemaSql, resetSchemaSql);
         } catch (SQLException e) {
             throw e;
         } catch (Exception e) {

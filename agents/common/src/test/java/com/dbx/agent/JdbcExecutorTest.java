@@ -85,6 +85,17 @@ class JdbcExecutorTest {
         assertEquals(Arrays.asList("execute:USE APP", "setSchema:APP"), calls);
     }
 
+    @Test
+    void schemaSwitcherRestoresOriginalContextWhenNextQueryHasNoSchema() throws Exception {
+        List<String> calls = new ArrayList<>();
+        Connection connection = schemaConnection(calls, false);
+
+        JdbcSchemaSwitcher.apply(connection, "APP", schema -> "SET search_path TO " + schema, () -> "RESET search_path");
+        JdbcSchemaSwitcher.apply(connection, null, schema -> "SET search_path TO " + schema, () -> "RESET search_path");
+
+        assertEquals(Arrays.asList("execute:SET search_path TO APP", "execute:RESET search_path"), calls);
+    }
+
     private static ResultSet resultSet(byte[] bytes, StringSupplier stringSupplier) {
         return resultSet(bytes, stringSupplier, false);
     }

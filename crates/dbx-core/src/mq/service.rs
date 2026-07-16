@@ -599,6 +599,7 @@ mod tests {
             read_only,
             is_production: false,
             production_databases: Vec::new(),
+            database_info: None,
         }
     }
 

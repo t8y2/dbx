@@ -27,17 +27,20 @@ const props = withDefaults(
     triggerClass?: HTMLAttributes["class"];
     triggerIconClass?: HTMLAttributes["class"];
     contentClass?: HTMLAttributes["class"];
+    listClass?: HTMLAttributes["class"];
     itemClass?: HTMLAttributes["class"];
     displayName?: (option: string) => string;
     optionTooltip?: (option: string) => string | undefined;
     normalizeCustom?: (value: string) => string;
     clearable?: boolean;
+    clearSelectedOption?: boolean;
   }>(),
   {
     loading: false,
     disabled: false,
     allowCustom: false,
     clearable: false,
+    clearSelectedOption: false,
     loadingText: "Loading...",
     triggerVariant: "ghost",
     triggerIconClass: "h-3 w-3",
@@ -182,6 +185,10 @@ function selectOption(option: string) {
   open.value = false;
 }
 
+function selectOrClearOption(option: string) {
+  selectOption(props.clearSelectedOption && option === props.modelValue ? "" : option);
+}
+
 function selectCustomOption() {
   if (!canSelectCustom.value) return;
   selectOption(customOptionValue.value);
@@ -213,7 +220,7 @@ function handleKeydown(event: KeyboardEvent) {
     if (highlightIndex.value < 0 || highlightIndex.value >= optionCount()) return;
     event.preventDefault();
     if (highlightIndex.value < filteredOptions.value.length) {
-      selectOption(filteredOptions.value[highlightIndex.value]);
+      selectOrClearOption(filteredOptions.value[highlightIndex.value]);
     } else {
       selectCustomOption();
     }
@@ -236,13 +243,13 @@ function handleKeydown(event: KeyboardEvent) {
     </PopoverTrigger>
     <PopoverContent :align="SEARCHABLE_SELECT_HELP_PANEL_ALIGN" :class="cn('w-auto max-w-[calc(100vw-1rem)] border-0 bg-transparent p-0 shadow-none ring-0', contentClass)">
       <div class="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start">
-        <div ref="listCard" class="w-52 shrink-0 rounded-md border bg-popover p-1.5 shadow-md">
+        <div ref="listCard" :class="cn('w-52 shrink-0 rounded-md border bg-popover p-1.5 shadow-md', listClass)">
           <div class="relative rounded-sm border bg-background">
             <Search class="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
             <span v-if="!searchText" class="pointer-events-none absolute left-[25px] top-1/2 -translate-y-1/2 text-sm text-muted-foreground">{{ searchPlaceholder }}</span>
             <Input ref="searchInput" :model-value="searchText" class="h-6 border-0 pl-6 pr-2 text-sm caret-foreground shadow-none focus-visible:ring-0" @update:model-value="(value) => (searchText = String(value))" @keydown="handleKeydown" />
           </div>
-          <div ref="listContainer" class="max-h-64 overflow-y-auto py-1" @scroll="updateHelpPanelOffset">
+          <div ref="listContainer" class="dbx-searchable-select-list max-h-64 overflow-y-auto py-1" @scroll="updateHelpPanelOffset">
             <div v-if="loading" class="px-2 py-2 text-sm text-muted-foreground">
               {{ loadingText }}
             </div>
@@ -254,18 +261,24 @@ function handleKeydown(event: KeyboardEvent) {
                 :title="optionTooltip(option) ? undefined : optionTitle(option)"
                 :class="
                   cn(
-                    'flex h-8 w-full min-w-0 items-center gap-2 rounded-sm px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none',
+                    'group flex h-8 w-full min-w-0 items-center gap-2 rounded-sm px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none',
                     props.itemClass,
                     index === highlightIndex && 'bg-accent text-accent-foreground',
                   )
                 "
                 @pointerenter="activateHelpForOption(option)"
-                @click="selectOption(option)"
+                @click="selectOrClearOption(option)"
               >
-                <Check :class="cn('h-3.5 w-3.5 shrink-0', option === modelValue ? 'opacity-100' : 'opacity-0')" />
-                <slot name="option-label" :option="option" :label="displayName?.(option)">
-                  <span class="truncate">{{ displayName?.(option) }}</span>
-                </slot>
+                <span class="relative h-3.5 w-3.5 shrink-0">
+                  <Check :class="cn('absolute inset-0 h-3.5 w-3.5', option !== modelValue ? 'opacity-0' : clearSelectedOption ? 'opacity-100 group-hover:opacity-0 group-focus-visible:opacity-0' : 'opacity-100')" />
+                  <X v-if="clearSelectedOption && option === modelValue" class="absolute inset-0 h-3.5 w-3.5 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100" />
+                </span>
+                <!-- Keep custom labels inside the flex row so long content cannot overlap adjacent UI. -->
+                <div class="dbx-searchable-select-option-label min-w-0 flex-1 overflow-hidden">
+                  <slot name="option-label" :option="option" :label="displayName?.(option)">
+                    <span class="block truncate">{{ displayName?.(option) }}</span>
+                  </slot>
+                </div>
               </button>
               <button
                 v-if="canSelectCustom"
@@ -282,9 +295,11 @@ function handleKeydown(event: KeyboardEvent) {
                 @click="selectCustomOption"
               >
                 <Check class="h-3.5 w-3.5 shrink-0 opacity-0" />
-                <slot name="custom-option-label" :value="customOptionValue">
-                  <span class="truncate">{{ customOptionValue }}</span>
-                </slot>
+                <div class="dbx-searchable-select-option-label min-w-0 flex-1 overflow-hidden">
+                  <slot name="custom-option-label" :value="customOptionValue">
+                    <span class="block truncate">{{ customOptionValue }}</span>
+                  </slot>
+                </div>
               </button>
             </template>
             <button
@@ -302,9 +317,11 @@ function handleKeydown(event: KeyboardEvent) {
               @click="selectCustomOption"
             >
               <Check class="h-3.5 w-3.5 shrink-0 opacity-0" />
-              <slot name="custom-option-label" :value="customOptionValue">
-                <span class="truncate">{{ customOptionValue }}</span>
-              </slot>
+              <div class="dbx-searchable-select-option-label min-w-0 flex-1 overflow-hidden">
+                <slot name="custom-option-label" :value="customOptionValue">
+                  <span class="block truncate">{{ customOptionValue }}</span>
+                </slot>
+              </div>
             </button>
             <div v-else class="px-2 py-2 text-sm text-muted-foreground">
               {{ emptyText }}
@@ -347,5 +364,44 @@ function handleKeydown(event: KeyboardEvent) {
 .dark .dbx-searchable-select-trigger:focus-visible {
   border-color: rgb(147, 197, 253) !important;
   box-shadow: 0 0 0 2px rgba(147, 197, 253, 0.24) !important;
+}
+
+.dbx-searchable-select-list {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklch, var(--foreground) 30%, transparent) transparent;
+}
+
+.dbx-searchable-select-list::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.dbx-searchable-select-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.dbx-searchable-select-list::-webkit-scrollbar-thumb {
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--foreground) 30%, transparent);
+  background-clip: padding-box;
+}
+
+.dbx-searchable-select-list:hover::-webkit-scrollbar-thumb {
+  border: 0;
+  background: color-mix(in oklch, var(--foreground) 48%, transparent);
+}
+
+.dark .dbx-searchable-select-list {
+  scrollbar-color: rgb(82, 82, 91) transparent;
+}
+
+.dark .dbx-searchable-select-list::-webkit-scrollbar-thumb {
+  background: rgb(82, 82, 91);
+  background-clip: padding-box;
+}
+
+.dark .dbx-searchable-select-list:hover::-webkit-scrollbar-thumb {
+  background: rgb(113, 113, 122);
 }
 </style>

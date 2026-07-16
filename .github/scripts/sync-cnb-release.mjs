@@ -19,7 +19,7 @@ async function main() {
   const existingAssets = new Set((release.assets || []).map((asset) => asset.name));
   const assets = localAssets(args.assetsDir).filter((assetPath) => {
     const name = basename(assetPath);
-    if (existingAssets.has(name)) {
+    if (existingAssets.has(name) && !args.overwriteExisting) {
       console.log(`Skipping existing CNB asset: ${name}`);
       return false;
     }
@@ -27,7 +27,9 @@ async function main() {
   });
 
   console.log(`Uploading ${assets.length} CNB asset(s) with concurrency ${args.concurrency}.`);
-  await mapWithConcurrency(assets, args.concurrency, (assetPath) => uploadWithRetry(client, release.id, assetPath));
+  await mapWithConcurrency(assets, args.concurrency, (assetPath) =>
+    uploadWithRetry(client, release.id, assetPath, args.overwriteExisting),
+  );
 }
 
 function parseArgs(argv) {
@@ -36,6 +38,7 @@ function parseArgs(argv) {
     repository: process.env.CNB_REPOSITORY || DEFAULT_REPOSITORY,
     token: process.env.CNB_TOKEN || "",
     concurrency: Number.parseInt(process.env.CNB_UPLOAD_CONCURRENCY || `${DEFAULT_CONCURRENCY}`, 10),
+    overwriteExisting: false,
     githubReleasePath: "",
     assetsDir: "",
   };
@@ -43,6 +46,7 @@ function parseArgs(argv) {
     const arg = argv[index];
     if (arg === "--github-release") args.githubReleasePath = argv[++index];
     else if (arg === "--assets-dir") args.assetsDir = argv[++index];
+    else if (arg === "--overwrite-existing") args.overwriteExisting = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
   if (!args.token) throw new Error("CNB_TOKEN is required.");
@@ -55,12 +59,12 @@ function parseArgs(argv) {
   return args;
 }
 
-async function uploadWithRetry(client, releaseId, filePath) {
+async function uploadWithRetry(client, releaseId, filePath, overwriteExisting) {
   const name = basename(filePath);
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
       console.log(`Uploading ${name}, attempt ${attempt}/${MAX_ATTEMPTS}.`);
-      await client.uploadAsset(releaseId, filePath);
+      await client.uploadAsset(releaseId, filePath, overwriteExisting);
       console.log(`Uploaded ${name}.`);
       return;
     } catch (error) {
@@ -98,12 +102,12 @@ class CnbClient {
     return existing;
   }
 
-  async uploadAsset(releaseId, filePath) {
+  async uploadAsset(releaseId, filePath, overwriteExisting) {
     const size = statSync(filePath).size;
     const target = await this.request("POST", `/${this.repository}/-/releases/${releaseId}/asset-upload-url`, {
       asset_name: basename(filePath),
       size,
-      overwrite: false,
+      overwrite: overwriteExisting,
     });
     const uploadResponse = await fetch(target.upload_url, {
       method: "PUT",

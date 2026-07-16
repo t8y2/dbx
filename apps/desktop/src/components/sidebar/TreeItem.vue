@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, watch, onBeforeUnmount, inject, type Component } from "vue";
+import { ref, computed, nextTick, watch, onBeforeUnmount, inject, reactive } from "vue";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -63,7 +63,7 @@ import {
   Square,
   X,
 } from "@lucide/vue";
-import CustomContextMenu from "@/components/ui/CustomContextMenu.vue";
+import type { ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -78,12 +78,15 @@ import { canTreeNodePin, canTreeNodeShowExpander, treeItemPaddingLeft, treeLabel
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
 import { buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTemplate, buildTableUpdateTemplate } from "@/lib/table/tableSqlTemplates";
 import { connectionFilePath, defaultSqliteBackupFileName, isMemorySqlitePath, sqliteBackupSourcePath } from "@/lib/connection/connectionFile";
+import { driverStoreFocusForInstallError } from "@/lib/connection/agentDriverInstallHint";
 import { revealPathInFileManager } from "@/lib/backend/tauri";
+import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { clearActiveTableReferencePayload, createTableReferencePayload, createTableReferenceDropEvent, setActiveTableReferencePayload, type QueryEditorTableReferencePayload } from "@/lib/editor/queryEditorTableDrop";
 import { usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { getCachedTableMetadata, loadTableMetadata, TABLE_METADATA_CACHE_TTL_MS, tableMetadataToDataTabMeta } from "@/lib/metadata/tableMetadataCache";
 import {
+  canConfigureVisibleSchemasForTreeNode,
   canCreateConnectionNamespace,
   canCreateDatabaseNodeNamespace,
   canEditDatabaseProperties as canEditDatabasePropertiesForNode,
@@ -101,11 +104,12 @@ import {
   usesTreeSchemaMode,
 } from "@/lib/database/databaseCapabilities";
 import { copyNameForTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/sidebar/treeNodeClick";
+import { dataTabOpenModeFromTreeClick, findExistingDataTabCandidate, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
 import { formatSqlInsert } from "@/lib/export/exportFormats";
 import { joinExportedDdls } from "@/lib/export/ddlExport";
 import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
-import { canActivateExistingDataTableTab } from "@/lib/tabs/dataTabActivation";
+import { canActivateExistingDataTableTab, canRefreshDataTableFromSingleActivationDoubleClick, dataTableDoubleClickAction } from "@/lib/tabs/dataTabActivation";
 import { buildCreateDatabaseSql, buildDuckDbAttachDatabaseSql, duckDbAttachedDatabaseNameFromPath, supportsCreateDatabaseCharset, uniqueDuckDbAttachedDatabaseName } from "@/lib/database/createDatabaseSql";
 import {
   buildCreateSchemaSql,
@@ -133,28 +137,23 @@ import { buildRenameObjectSql, supportsObjectRename, type RenameableObjectType }
 import { buildRoutineRenameObjectSourceStatements, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
 import { buildViewDdl } from "@/lib/table/viewDdl";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
-import DdlViewDialog from "@/components/objects/DdlViewDialog.vue";
-import ObjectSourceDialog from "@/components/objects/ObjectSourceDialog.vue";
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
-import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { hexToRgba } from "@/lib/common/color";
 import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
-import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableDataCopy, tableClipboardMatchesTarget, tableDataCopyColumnOptions, type PasteTableMode, type TableClipboardContext } from "@/lib/table/tableClipboard";
+import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableDataCopy, tableClipboardMatchesTarget, tableDataCopyColumnOptions, type TableClipboardContext } from "@/lib/table/tableClipboard";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { shouldMeasureSidebarLabelOverflow } from "@/lib/sidebar/sidebarLabelTooltip";
 import { selectedTreeNodesInVisibleOrder as orderSelectedTreeNodes, treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "@/lib/sidebar/sidebarTreeSelection";
 import { connectionPasteTargetGroupId, selectedConnectionClipboardTargets, selectedConnectionDeleteTargets, selectedConnectionDuplicateTargets, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
 import { supportsDatabaseUserAdmin } from "@/lib/database/databaseUserAdmin";
-import { supportsProcessList } from "@/lib/database/mysqlProcessList";
+import { connectionSupportsProcessList } from "@/lib/database/processListDrivers";
 import { connectionSupportsServerDashboard } from "@/lib/database/mysqlServerStatus";
 import { canCloseSidebarDatabaseConnection, isSidebarDatabaseOpened } from "@/lib/sidebar/sidebarDatabaseOpenState";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { batchTableEmptyFeedback, runBatchTableEmpty } from "@/lib/sidebar/batchTableEmpty";
 import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
-import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
-import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
-import InstallExtensionDialog from "@/components/objects/InstallExtensionDialog.vue";
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { copyToClipboard } from "@/lib/common/clipboard";
@@ -165,19 +164,110 @@ import { isSqlServerLinkedNode } from "@/lib/database/sqlServerLinkedServers";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionErrorIndicator from "@/components/connection/ConnectionErrorIndicator.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
-import { isSchemaAware } from "@/lib/database/databaseFeatureSupport";
-import VisibleDatabasesDialog from "@/components/sidebar/VisibleDatabasesDialog.vue";
-import SchemaFilterDialog from "@/components/sidebar/VisibleSchemasDialog.vue";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { SearchableSelect } from "@/components/ui/searchable-select";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { flattenTree } from "@/composables/useFlatTree";
-import { createDatabaseCollationOptionsForCharset, fallbackCreateDatabaseCharsetMetadata, nextCreateDatabaseCollation, normalizeCreateDatabaseCharset, parseCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
+import { createDatabaseCollationOptionsForCharset, nextCreateDatabaseCollation, normalizeCreateDatabaseCharset, parseCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
+import { createSidebarActionTarget, findSidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
+import type { SidebarDangerDialogRequest } from "@/lib/sidebar/sidebarDangerDialog";
+import {
+  fallbackCreateDatabaseCharset,
+  sidebarTreeDialogOwner,
+  sidebarDangerTarget,
+  sidebarFormTarget,
+  connectionDeleteTargetSnapshot,
+  showDeleteConfirm,
+  showDropTableConfirm,
+  showDropTableChildObjectConfirm,
+  showBatchDropConfirm,
+  showBatchEmptyConfirm,
+  showBatchTruncateConfirm,
+  showStructurePreviewDialog,
+  showStructureDocCopyDialog,
+  structurePreviewSql,
+  structurePreviewTitle,
+  structurePreviewDefaultFileName,
+  structurePreviewError,
+  structureDocCopyText,
+  structureDocCopyTitle,
+  isLoadingStructurePreview,
+  showEmptyTableConfirm,
+  showTruncateTableConfirm,
+  showRenameObjectDialog,
+  renameObjectName,
+  renameObjectError,
+  renameObjectPreviewSql,
+  dropTablePreviewSql,
+  dropTableCascade,
+  batchDropCascade,
+  emptyTablePreviewSql,
+  truncateTablePreviewSql,
+  truncateTableCascade,
+  dropObjectPreviewSql,
+  showDropObjectConfirm,
+  dropTableChildObjectPreviewSql,
+  batchDropPreviewSql,
+  batchEmptyPreviewSql,
+  batchEmptyTargets,
+  batchDropTargets,
+  batchTruncateTargets,
+  batchTruncatePreviewSql,
+  batchTruncateCascade,
+  dropDatabasePreviewSql,
+  dropSchemaPreviewSql,
+  showDuplicateDialog,
+  duplicateTableName,
+  duplicateStructureSource,
+  showPasteDialog,
+  pasteTableMode,
+  pasteTableEntries,
+  showCreateDatabaseDialog,
+  createDatabaseName,
+  createDatabaseCharset,
+  createDatabaseCollation,
+  showCreateNacosNamespaceDialog,
+  createNacosNamespaceId,
+  createNacosNamespaceName,
+  createNacosNamespaceDesc,
+  createNacosNamespaceLoading,
+  showEditNacosNamespaceDialog,
+  editNacosNamespaceName,
+  editNacosNamespaceDesc,
+  editNacosNamespaceLoading,
+  createDatabaseCharsetOptions,
+  createDatabaseCollationsByCharset,
+  createDatabaseCharsetLoading,
+  showDropDatabaseConfirm,
+  dropDatabaseLoading,
+  showDropMongoCollectionConfirm,
+  dropMongoCollectionLoading,
+  showDropMongoIndexConfirm,
+  dropMongoIndexLoading,
+  showDropAllMongoIndexesConfirm,
+  dropAllMongoIndexesLoading,
+  showFlushRedisDbConfirm,
+  showCreateSchemaDialog,
+  createSchemaName,
+  showDropSchemaConfirm,
+  showEditDatabasePropertiesDialog,
+  editDatabasePropertiesLoading,
+  editDatabasePropertiesPreviewSql,
+  editDatabaseCharset,
+  editDatabaseCollation,
+  editDatabaseCommentText,
+  showEditSchemaCommentDialog,
+  schemaCommentText,
+  schemaCommentLoading,
+  schemaCommentPreviewSql,
+  showDeleteGroupConfirm,
+  showMoveToNewGroupDialog,
+  moveToNewGroupName,
+  type DuplicateStructureSource,
+} from "./sidebarTreeDialogState";
 
 const { t } = useI18n();
 const labelRef = ref<HTMLElement>();
@@ -185,19 +275,6 @@ const rowRef = ref<HTMLElement>();
 const labelOverflowing = ref(false);
 let labelResizeObserver: ResizeObserver | null = null;
 let labelMeasureFrame = 0;
-
-interface ContextMenuItem {
-  label: string;
-  action?: () => void;
-  disabled?: boolean;
-  separator?: boolean;
-  icon?: Component;
-  iconClass?: string;
-  shortcut?: string;
-  variant?: "default" | "destructive";
-  visible?: boolean;
-  children?: ContextMenuItem[];
-}
 
 function cancelLabelOverflowMeasure() {
   if (!labelMeasureFrame) return;
@@ -257,11 +334,8 @@ const { highlight } = useSqlHighlighter();
 const useWindowsSidebarCommentFont = isWindows();
 
 type StructureCopyFormat = "tsv" | "markdown";
-type DuplicateStructureSource = TreeNode & { connectionId: string; database: string };
 const DATA_TAB_METADATA_TTL_MS = TABLE_METADATA_CACHE_TTL_MS;
 const { getDatabaseOptions } = useDatabaseOptions();
-const showVisibleDatabasesDialog = ref(false);
-const showVisibleSchemasDialog = ref(false);
 const { addTask: addExportTask } = useExportTracker();
 
 const props = defineProps<{
@@ -277,7 +351,34 @@ const emit = defineEmits<{
   "group-created": [groupId: string];
   "node-toggled": [node: TreeNode, wasExpanded: boolean];
   "search-toggle": [node: TreeNode];
+  "context-menu": [event: MouseEvent, node: TreeNode, items: ContextMenuItem[]];
+  "open-ddl": [node: TreeNode];
+  "open-object-source": [node: TreeNode, initialEditing: boolean];
+  "open-procedure": [node: TreeNode];
+  "open-data": [node: TreeNode, requireSelection: boolean, openMode: DataTabOpenMode, runner: (node: TreeNode, request: SidebarDataOpenRequest) => Promise<void>];
+  "open-visible-databases": [node: TreeNode];
+  "open-visible-schemas": [node: TreeNode];
+  "open-danger-dialog": [request: SidebarDangerDialogRequest];
+  "open-dialog-controller": [controller: Record<string, any> | null];
+  "open-install-extension": [node: TreeNode];
 }>();
+const treeItemDialogOwner = Symbol("sidebar-tree-dialog-owner");
+
+function claimTreeItemDialogOwnership() {
+  sidebarTreeDialogOwner.value = treeItemDialogOwner;
+}
+
+function routeTreeItemDialogController() {
+  const controller = getTreeItemDialogController();
+  const target = createSidebarActionTarget(props.node);
+  sidebarFormTarget.value = target;
+  controller.node = target;
+  controller.pasteTableDataCopySupported = pasteTableDataCopySupported.value;
+  controller.canSetCreateDatabaseCharset = canSetCreateDatabaseCharset.value;
+  controller.canEditDatabaseCharsetCollation = canEditDatabaseCharsetCollation.value;
+  controller.canEditDatabaseComment = canEditDatabaseComment.value;
+  emit("open-dialog-controller", controller);
+}
 
 const usesFullWidthLabel = computed(() => usesFullWidthTreeLabel(props.node.type, settingsStore.editorSettings.sidebarAllowHorizontalScroll));
 const sidebarTreeContext = inject(sidebarTreeContextKey, null);
@@ -534,6 +635,7 @@ const connectionInfoTooltip = computed(() => {
     { label: t("connection.database"), value: cleanTooltipValue(config.database) },
     { label: t("connection.user"), value: cleanTooltipValue(config.username) },
     { label: t("connection.type"), value: config.driver_label || config.driver_profile || config.db_type },
+    { label: t("connection.databaseInfo.productVersion"), value: cleanTooltipValue(config.database_info?.productVersion) },
   ].filter((row) => row.value);
 
   return { rows };
@@ -715,9 +817,7 @@ async function toggle() {
     const errMsg = e?.message || String(e);
     if (errMsg.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
     toast(t("connection.connectFailed", { message: translateBackendError(t, errMsg) }), 5000);
-    if (errMsg.includes("driver is not installed") || errMsg.includes("is not installed")) {
-      window.dispatchEvent(new Event("dbx-open-driver-store"));
-    }
+    openDriverStoreForInstallError(errMsg);
   }
 }
 
@@ -740,7 +840,10 @@ function runRowClickAction(clickDetail: number) {
   const action = treeNodeRowAction(node.type, canExpand.value, settingsStore.editorSettings.sidebarActivation);
   if (!shouldRunTreeNodeRowAction(action, clickDetail)) return;
   if (action === "open-data") {
-    openData();
+    if (node.type === "table") {
+      singleActivationDoubleClickRefreshAllowed = canRefreshDataTableFromSingleActivationDoubleClick(findExistingSameTableDataTab());
+    }
+    scheduleOpenData(node);
   } else if (isDocumentBrowserTreeNode(node.type)) {
     openMongoTreeData(node);
   } else if (node.type === "procedure" || node.type === "function" || node.type === "sequence" || node.type === "package" || node.type === "package-body") {
@@ -750,10 +853,18 @@ function runRowClickAction(clickDetail: number) {
   }
 }
 
+let singleActivationDoubleClickRefreshAllowed = false;
+
 function refreshActiveKvBrowserAfterOpen(mode: "etcd" | "zookeeper", connectionId: string) {
   void nextTick(() => {
     window.dispatchEvent(new CustomEvent("dbx-refresh-active-kv-browser", { detail: { mode, connectionId } }));
   });
+}
+
+function openDriverStoreForInstallError(errMsg: string) {
+  const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
+  const focus = driverStoreFocusForInstallError(errMsg, config?.db_type, config?.driver_profile);
+  if (focus) window.dispatchEvent(new CustomEvent("dbx-open-driver-store", { detail: focus }));
 }
 
 async function loadMoreObjectGroupChildren() {
@@ -868,6 +979,7 @@ function toggleConnectionMultiSelection(event: MouseEvent) {
 }
 
 function onClick(event: MouseEvent) {
+  if (props.node.type === "table" && event.detail <= 1) singleActivationDoubleClickRefreshAllowed = false;
   if (suppressNextTableReferenceClick) {
     suppressNextTableReferenceClick = false;
     event.preventDefault();
@@ -877,6 +989,15 @@ function onClick(event: MouseEvent) {
   // Row clicks must not bubble to the tree container, whose click handler
   // clears the selection when the blank area is clicked (issue #681).
   event.stopPropagation();
+  const dataTabOpenMode = dataTabOpenModeFromTreeClick(props.node.type, event, settingsStore.editorSettings.shortcuts.openDataInNewTab);
+  if (dataTabOpenMode === "new-tab") {
+    event.preventDefault();
+    if (event.detail > 1) return;
+    selectSingleTreeNode(props.node);
+    rowRef.value?.focus({ preventScroll: true });
+    openDataInNewTabImmediately(props.node);
+    return;
+  }
   if (event.shiftKey) {
     selectTreeNodeRange(props.node);
     rowRef.value?.focus({ preventScroll: true });
@@ -893,14 +1014,17 @@ function onClick(event: MouseEvent) {
   runRowClickAction(event.detail);
 }
 
-function onTreeItemContextMenu(event: MouseEvent, openContextMenu: (event: MouseEvent) => void) {
+function onTreeItemContextMenu(event: MouseEvent) {
+  claimTreeItemDialogOwnership();
+  ensureDangerDialogRouting();
+  routeTreeItemDialogController();
   if (!connectionStore.selectedTreeNodeIds.includes(props.node.id)) {
     selectSingleTreeNode(props.node);
   } else {
     connectionStore.selectedTreeNodeId = props.node.id;
   }
   rowRef.value?.focus({ preventScroll: true });
-  openContextMenu(event);
+  emit("context-menu", event, props.node, treeItemMenuItems());
 }
 
 function isEditableShortcutTarget(target: EventTarget | null): boolean {
@@ -909,6 +1033,7 @@ function isEditableShortcutTarget(target: EventTarget | null): boolean {
 }
 
 function onKeydown(event: KeyboardEvent) {
+  claimTreeItemDialogOwnership();
   if ((!isSelected.value && !isMultiSelected.value) || isEditableShortcutTarget(event.target)) return;
   if (isPasteTreeClipboardShortcut(event)) {
     if (!requestPasteTreeClipboard()) return;
@@ -977,6 +1102,9 @@ function canPasteTreeClipboardToCurrentNode(): boolean {
 }
 
 function requestPasteTreeClipboard(): boolean {
+  claimTreeItemDialogOwnership();
+  ensureDangerDialogRouting();
+  routeTreeItemDialogController();
   const clipboard = connectionStore.treeClipboard;
   if (clipboard?.kind === "connection-copy") {
     const targetGroupId = connectionPasteTargetGroupId(props.node, (connectionId) => connectionStore.groupIdForConnection(connectionId));
@@ -1042,6 +1170,9 @@ function requestEditSelectedConnection(): boolean {
 }
 
 function requestDeleteSelectedNode(): boolean {
+  claimTreeItemDialogOwnership();
+  ensureDangerDialogRouting();
+  routeTreeItemDialogController();
   if (requestDropSelectedNodes()) return true;
   if (props.node.type === "connection") {
     deleteConnection();
@@ -1070,7 +1201,8 @@ function requestDeleteSelectedNode(): boolean {
   return false;
 }
 
-function onDoubleClick() {
+function onDoubleClick(event: MouseEvent) {
+  if (dataTabOpenModeFromTreeClick(props.node.type, event, settingsStore.editorSettings.shortcuts.openDataInNewTab) === "new-tab") return;
   const action = treeNodeRowDoubleClickAction(props.node.type, canOpenObjectBrowser.value, settingsStore.editorSettings.sidebarActivation, canExpand.value);
   if (action === "open-object-browser") {
     void openObjectBrowser();
@@ -1078,7 +1210,9 @@ function onDoubleClick() {
     void openObjectBrowser();
     if (!props.node.isExpanded) void toggle();
   } else if (action === "open-data") {
-    openData();
+    openDataImmediately(props.node);
+  } else if (action === "refresh-data") {
+    void refreshData();
   } else if (action === "open-source") {
     openObjectSourceDialog(false);
   } else if (action === "open-saved-sql") {
@@ -1088,6 +1222,34 @@ function onDoubleClick() {
   } else if (action === "toggle") {
     toggle();
   }
+}
+
+async function refreshData() {
+  const node = props.node;
+  if (node.type !== "table" || !hasNodeDatabaseContext(node)) return;
+  const singleActivationRefreshAllowed = singleActivationDoubleClickRefreshAllowed;
+  singleActivationDoubleClickRefreshAllowed = false;
+  const activation = settingsStore.editorSettings.sidebarActivation;
+  if (activation === "single" && !singleActivationRefreshAllowed) return;
+  const existingSameTableTab = findExistingSameTableDataTab();
+  const action = dataTableDoubleClickAction(existingSameTableTab, activation, singleActivationRefreshAllowed);
+  if (action === "none") return;
+  if (action === "open") {
+    openDataImmediately(node);
+    return;
+  }
+  if (!existingSameTableTab) return;
+  queryStore.switchTab(existingSameTableTab.id);
+  if (action === "activate") return;
+  await queryStore.refreshDataTab(existingSameTableTab.id);
+}
+
+function findExistingSameTableDataTab() {
+  const node = props.node;
+  if (node.type !== "table" || !hasNodeDatabaseContext(node)) return undefined;
+  const config = connectionStore.getConfig(node.connectionId);
+  const tableSchema = connectionObjectTreeNodeSchema(config, node.database, node.schema);
+  return queryStore.tabs.find((tab) => tab.mode === "data" && tab.connectionId === node.connectionId && tab.database === node.database && (tab.tableMeta?.catalog || "") === (node.catalog || "") && (tab.schema || "") === (tableSchema || "") && (tab.tableMeta?.tableName || tab.title) === node.label);
 }
 
 function openMongoTreeData(node: TreeNode) {
@@ -1139,9 +1301,7 @@ async function openObjectBrowser() {
     }
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
-    if (e?.message?.includes("driver is not installed") || (e?.message?.includes("JRE") && e?.message?.includes("not installed"))) {
-      window.dispatchEvent(new Event("dbx-open-driver-store"));
-    }
+    openDriverStoreForInstallError(e?.message || String(e));
   }
 }
 
@@ -1193,17 +1353,31 @@ async function openDamengJobAdmin() {
   }
 }
 
-async function openData() {
-  const node = props.node;
+function scheduleOpenData(node: TreeNode) {
+  emit("open-data", node, true, "default", openData);
+}
+
+function openDataImmediately(node: TreeNode = props.node) {
+  emit("open-data", node, false, "default", openData);
+}
+
+function openDataInNewTabImmediately(node: TreeNode = props.node) {
+  emit("open-data", node, false, "new-tab", (target, request) => openData(target, request, "new-tab"));
+}
+
+async function openData(node: TreeNode, request?: SidebarDataOpenRequest, openMode: DataTabOpenMode = "default") {
   if (!(node.type === "table" || node.type === "view" || node.type === "materialized_view") || !hasNodeDatabaseContext(node)) return;
   const config = connectionStore.getConfig(node.connectionId);
   const traceId = uuid().slice(0, 8);
   const startedAt = performance.now();
   let lastPhaseAt = startedAt;
   const elapsed = () => `${Math.round(performance.now() - startedAt)}ms`;
+  const openDataLog = (level: "info" | "warn" | "error" | "debug", event: string, details: Record<string, unknown>) => {
+    appendDebugLog(level, `[DBX][openData:${event}]`, details);
+  };
   const logPhase = (phase: string, extra: Record<string, unknown> = {}) => {
     const now = performance.now();
-    console.info("[DBX][openData:phase]", {
+    openDataLog("info", "phase", {
       traceId,
       phase,
       deltaMs: Math.round(now - lastPhaseAt),
@@ -1212,23 +1386,29 @@ async function openData() {
     });
     lastPhaseAt = now;
   };
-  console.info("[DBX][openData:start]", {
+  openDataLog("info", "start", {
     traceId,
     type: node.type,
-    connectionId: node.connectionId,
-    database: node.database,
-    schema: node.schema,
-    table: node.label,
     dbType: config?.db_type,
+    openMode,
   });
   const tableSchema = connectionObjectTreeNodeSchema(config, node.database, node.schema);
   const tableType = node.type === "view" ? "VIEW" : node.type === "materialized_view" ? "MATERIALIZED_VIEW" : (node.tableType ?? "TABLE");
   const querySchema = config ? connectionObjectTreeQuerySchema(config, node.database, tableSchema) : (tableSchema ?? "");
   const effectiveDbType = effectiveDatabaseTypeForConnection(config);
   const metadataDatabaseType = effectiveDbType || config?.db_type || "";
-  const isSameDataTableTab = (tab: (typeof queryStore.tabs)[number]) =>
-    tab.mode === "data" && tab.connectionId === node.connectionId && tab.database === node.database && (tab.tableMeta?.catalog || "") === (node.catalog || "") && (tab.schema || "") === (tableSchema || "") && (tab.tableMeta?.tableName || tab.title) === node.label;
-  const existingSameTableTab = queryStore.tabs.find(isSameDataTableTab);
+  const existingDataTabCandidate = findExistingDataTabCandidate(
+    queryStore.tabs,
+    {
+      connectionId: node.connectionId,
+      database: node.database,
+      schema: tableSchema,
+      catalog: node.catalog,
+      tableName: node.label,
+    },
+    { openMode, reuseDataTab: settingsStore.editorSettings.reuseDataTab },
+  );
+  const existingSameTableTab = existingDataTabCandidate?.match === "same-table" ? existingDataTabCandidate.tab : undefined;
   const resetReusedDataTabState = (tab: (typeof queryStore.tabs)[number]) => {
     tab.title = node.label;
     tab.schema = tableSchema;
@@ -1252,29 +1432,21 @@ async function openData() {
     tab.queryEditabilityReason = undefined;
   };
 
-  if (existingSameTableTab && canActivateExistingDataTableTab(existingSameTableTab)) {
+  if (existingSameTableTab && canActivateExistingDataTableTab(existingSameTableTab, { activateExecuting: false })) {
     queryStore.switchTab(existingSameTableTab.id);
     logPhase("existing-tab-activated", { table: node.label });
     return;
   }
 
   const tabId = (() => {
-    if (existingSameTableTab) {
-      queryStore.switchTab(existingSameTableTab.id);
-      resetReusedDataTabState(existingSameTableTab);
-      return existingSameTableTab.id;
-    }
-    if (settingsStore.editorSettings.reuseDataTab) {
-      const existing = queryStore.tabs.find((tab) => tab.mode === "data" && tab.connectionId === node.connectionId && tab.database === node.database);
-      if (existing) {
-        queryStore.switchTab(existing.id);
-        resetReusedDataTabState(existing);
-        return existing.id;
-      }
+    if (existingDataTabCandidate) {
+      queryStore.switchTab(existingDataTabCandidate.tab.id);
+      resetReusedDataTabState(existingDataTabCandidate.tab);
+      return existingDataTabCandidate.tab.id;
     }
     return queryStore.createTab(node.connectionId, node.database, node.label, "data", tableSchema);
   })();
-  console.info("[DBX][openData:tab-created]", { traceId, tabId, elapsed: elapsed() });
+  openDataLog("info", "tab-created", { traceId, tabId, elapsed: elapsed() });
   logPhase("tab-created", { tabId });
 
   // Cancel any previous execution on this tab before starting a new one
@@ -1325,6 +1497,12 @@ async function openData() {
     },
   );
   queryStore.setExecutingWithId(tabId, openDataId);
+  request?.registerCancel(async () => {
+    const current = queryStore.tabs.find((item) => item.id === tabId);
+    if (current?.isExecuting && current.executionId === openDataId) {
+      await queryStore.cancelTabExecution(tabId);
+    }
+  });
   logPhase("state-prepared", { tabId });
 
   // Yield to Vue's scheduler so the new tab becomes visible in the UI (tab
@@ -1334,31 +1512,29 @@ async function openData() {
   await nextTick();
 
   // Helper to check if this openData call is still active (not superseded by a newer click)
-  const isActive = () => queryStore.tabs.find((t) => t.id === tabId)?.executionId === openDataId;
+  const isActive = () => (request?.isCurrent() ?? true) && queryStore.tabs.find((t) => t.id === tabId)?.executionId === openDataId;
   const isCurrentDataTab = () => {
+    if (!(request?.isCurrent() ?? true)) return false;
     const current = queryStore.tabs.find((t) => t.id === tabId);
     return current?.mode === "data" && current.connectionId === node.connectionId && current.database === node.database && current.schema === tableSchema && current.title === node.label;
   };
 
   try {
-    console.info("[DBX][openData:ensure-connected:start]", { traceId, elapsed: elapsed() });
+    openDataLog("info", "ensure-connected:start", { traceId, elapsed: elapsed() });
     await connectionStore.ensureConnected(node.connectionId);
     if (!isActive()) {
       logPhase("superseded-after-ensure-connected", { tabId });
       return;
     }
-    console.info("[DBX][openData:ensure-connected:done]", { traceId, elapsed: elapsed() });
+    openDataLog("info", "ensure-connected:done", { traceId, elapsed: elapsed() });
     logPhase("ensure-connected", { tabId });
     if (!config) throw new Error("Connection config not found");
 
     const limit = tableOpenPageLimit();
     const refreshTableMetaInBackground = async () => {
       const metadataStartedAt = performance.now();
-      console.info("[DBX][openData:metadata:start]", {
+      openDataLog("info", "metadata:start", {
         traceId,
-        database: node.database,
-        schema: querySchema,
-        table: node.label,
         elapsed: elapsed(),
       });
       try {
@@ -1371,10 +1547,10 @@ async function openData() {
           databaseType: metadataDatabaseType,
           driverProfile: config.driver_profile || config.db_type,
           catalog: node.catalog,
-          traceLogger: (event) => console.debug("[DBX][openData:metadata:trace]", { sourceTraceId: traceId, ...event }),
+          traceLogger: isDebugLoggingEnabled() ? (event) => openDataLog("debug", "metadata:trace", { sourceTraceId: traceId, ...event }) : undefined,
         });
         if (!isCurrentDataTab()) {
-          console.info("[DBX][openData:metadata:stale]", {
+          openDataLog("info", "metadata:stale", {
             traceId,
             tabId,
             columnCount: loadedMetadata.metadata.columns.length,
@@ -1384,7 +1560,7 @@ async function openData() {
         }
         const nextTableMeta = tableMetadataToDataTabMeta(loadedMetadata.metadata, tableSchema);
         queryStore.setTableMeta(tabId, nextTableMeta);
-        console.info("[DBX][openData:metadata:done]", {
+        openDataLog("info", "metadata:done", {
           traceId,
           tabId,
           columnCount: nextTableMeta.columns.length,
@@ -1395,12 +1571,12 @@ async function openData() {
           metadataMs: Math.round(performance.now() - metadataStartedAt),
         });
       } catch (error) {
-        console.warn("[DBX][openData:metadata:error]", { traceId, tabId, elapsed: elapsed(), error });
+        openDataLog("warn", "metadata:error", { traceId, tabId, elapsed: elapsed(), error });
       }
     };
     const shouldRefreshTableMeta = !cachedTableMeta;
     if (cachedTableMeta) {
-      console.info("[DBX][openData:metadata:cache-hit]", {
+      openDataLog("info", "metadata:cache-hit", {
         traceId,
         tabId,
         columnCount: cachedTableMeta.columns.length,
@@ -1435,24 +1611,24 @@ async function openData() {
       limit,
       includeRowId,
     });
-    console.info("[DBX][openData:sql-built]", {
+    openDataLog("info", "sql-built", {
       traceId,
-      primaryKeys,
+      primaryKeyCount: primaryKeys.length,
       includeRowId,
-      sql,
+      sqlLength: sql.length,
       elapsed: elapsed(),
     });
     logPhase("sql-built", { tabId, columnCount: columns.length, primaryKeyCount: primaryKeys.length });
     queryStore.updateSql(tabId, sql);
     logPhase("sql-updated", { tabId });
 
-    console.info("[DBX][openData:execute:start]", { traceId, tabId, elapsed: elapsed() });
+    openDataLog("info", "execute:start", { traceId, tabId, elapsed: elapsed() });
     await queryStore.executeTabSql(tabId, sql, {
       sourceTraceId: traceId,
       skipEnsureConnected: true,
       pagination: { limit, offset: 0 },
     });
-    console.info("[DBX][openData:execute:done]", { traceId, tabId, elapsed: elapsed() });
+    openDataLog("info", "execute:done", { traceId, tabId, elapsed: elapsed() });
     logPhase("execute-tab-sql", { tabId });
     if (shouldRefreshTableMeta && isCurrentDataTab()) {
       void refreshTableMetaInBackground();
@@ -1463,7 +1639,7 @@ async function openData() {
       logPhase("superseded-after-error", { tabId });
       return;
     }
-    console.error("[DBX][openData:error]", { traceId, elapsed: elapsed(), error: e });
+    openDataLog("error", "error", { traceId, elapsed: elapsed(), error: e });
     logPhase("error", { tabId });
     queryStore.setErrorResult(tabId, e);
   }
@@ -1489,9 +1665,7 @@ async function newQuery() {
     queryStore.createTab(node.connectionId, resolveDefaultDatabase(connection, options), undefined, "query");
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
-    if (e?.message?.includes("driver is not installed") || (e?.message?.includes("JRE") && e?.message?.includes("not installed"))) {
-      window.dispatchEvent(new Event("dbx-open-driver-store"));
-    }
+    openDriverStoreForInstallError(e?.message || String(e));
   }
 }
 
@@ -1665,15 +1839,12 @@ async function refresh() {
     await connectionStore.refreshTreeNode(props.node);
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
-    if (e?.message?.includes("driver is not installed") || (e?.message?.includes("JRE") && e?.message?.includes("not installed"))) {
-      window.dispatchEvent(new Event("dbx-open-driver-store"));
-    }
+    openDriverStoreForInstallError(e?.message || String(e));
   }
 }
 
-const showDeleteConfirm = ref(false);
-
 function connectionDeleteTargets() {
+  if (showDeleteConfirm.value && connectionDeleteTargetSnapshot.value.length) return connectionDeleteTargetSnapshot.value;
   return selectedConnectionDeleteTargets(props.node, selectedTreeNodesInVisibleOrder());
 }
 
@@ -1693,11 +1864,13 @@ function connectionDuplicateMenuLabel(): string {
 
 function connectionDeleteConfirmMessage(): string {
   const targets = connectionDeleteTargets();
-  return targets.length > 1 ? t("contextMenu.confirmDeleteSelectedMessage", { count: targets.length }) : t("contextMenu.confirmDeleteMessage", { name: props.node.label });
+  return targets.length > 1 ? t("contextMenu.confirmDeleteSelectedMessage", { count: targets.length }) : t("contextMenu.confirmDeleteMessage", { name: targets[0]?.label || sidebarFormTarget.value?.label || props.node.label });
 }
 
 function deleteConnection() {
-  if (!connectionDeleteTargets().length) return;
+  const targets = selectedConnectionDeleteTargets(props.node, selectedTreeNodesInVisibleOrder());
+  if (!targets.length) return;
+  connectionDeleteTargetSnapshot.value = targets.slice();
   showDeleteConfirm.value = true;
 }
 
@@ -1793,122 +1966,14 @@ async function duplicateConnection() {
 }
 
 // --- Table Management Operations ---
-const showDropTableConfirm = ref(false);
-const showDropTableChildObjectConfirm = ref(false);
-const showBatchDropConfirm = ref(false);
-const showBatchEmptyConfirm = ref(false);
-const showBatchTruncateConfirm = ref(false);
-const showStructurePreviewDialog = ref(false);
-const showStructureDocCopyDialog = ref(false);
-const structurePreviewSql = ref("");
-const structurePreviewTitle = ref("");
-const structurePreviewDefaultFileName = ref("structure.sql");
-const structurePreviewError = ref("");
-const structureDocCopyText = ref("");
-const structureDocCopyTitle = ref("");
-const isLoadingStructurePreview = ref(false);
-const showEmptyTableConfirm = ref(false);
-const showTruncateTableConfirm = ref(false);
-const showRenameObjectDialog = ref(false);
-const renameObjectName = ref("");
-const renameObjectError = ref("");
-const renameObjectPreviewSql = ref("");
-const dropTablePreviewSql = ref("");
-const dropTableCascade = ref(false);
-const batchDropCascade = ref(false);
-const emptyTablePreviewSql = ref("");
-const truncateTablePreviewSql = ref("");
-const truncateTableCascade = ref(false);
-const dropObjectPreviewSql = ref("");
-const dropTableChildObjectPreviewSql = ref("");
-const batchDropPreviewSql = ref("");
-const batchEmptyPreviewSql = ref("");
-const batchEmptyTargets = ref<TreeNode[]>([]);
-const batchTruncatePreviewSql = ref("");
-const batchTruncateCascade = ref(false);
-const dropDatabasePreviewSql = ref("");
-const dropSchemaPreviewSql = ref("");
-const showDuplicateDialog = ref(false);
-const duplicateTableName = ref("");
-const duplicateStructureSource = ref<DuplicateStructureSource | null>(null);
-
-// Paste table dialog state
-const showPasteDialog = ref(false);
-const pasteTableMode = ref<PasteTableMode>("structure-and-data");
-const pasteTableEntries = ref<{ sourceName: string; targetName: string; connectionId: string; database: string; schema?: string }[]>([]);
 const pasteTableDataCopySupported = computed(() => supportsWholeRowTableDataCopy(currentDatabaseType()));
 
-const ddlTarget = ref<TreeNode | null>(null);
-const showDdlDialog = ref(false);
-const ddlDatabaseType = computed(() => {
-  if (!ddlTarget.value?.connectionId) return undefined;
-  return effectiveDatabaseTypeForConnection(connectionStore.getConfig(ddlTarget.value.connectionId));
-});
-const ddlDialect = computed(() => {
-  return codeMirrorSqlDialect(ddlDatabaseType.value);
-});
-const ddlFormatDialect = computed(() => {
-  return sqlFormatDialectForDbType(ddlDatabaseType.value);
-});
-const objectSourceTarget = ref<{ node: TreeNode; initialEditing: boolean } | null>(null);
-const showObjectSourceDialog = ref(false);
-const objectSourceType = computed(() => (objectSourceTarget.value ? objectSourceKindForTreeNode(objectSourceTarget.value.node.type) : null));
-const objectSourceDatabaseType = computed(() => {
-  const connectionId = objectSourceTarget.value?.node.connectionId;
-  return connectionId ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(connectionId)) : undefined;
-});
-const objectSourceDialect = computed(() => codeMirrorSqlDialect(objectSourceDatabaseType.value));
-const objectSourceFormatDialect = computed(() => sqlFormatDialectForDbType(objectSourceDatabaseType.value));
-const showCreateDatabaseDialog = ref(false);
-const createDatabaseName = ref("");
-const createDatabaseCharset = ref("utf8mb4");
-const createDatabaseCollation = ref("utf8mb4_unicode_ci");
-const showCreateNacosNamespaceDialog = ref(false);
-const createNacosNamespaceId = ref("");
-const createNacosNamespaceName = ref("");
-const createNacosNamespaceDesc = ref("");
-const createNacosNamespaceLoading = ref(false);
-const showEditNacosNamespaceDialog = ref(false);
-const editNacosNamespaceName = ref("");
-const editNacosNamespaceDesc = ref("");
-const editNacosNamespaceLoading = ref(false);
-const fallbackCreateDatabaseCharset = fallbackCreateDatabaseCharsetMetadata();
-const createDatabaseCharsetOptions = ref<string[]>(fallbackCreateDatabaseCharset.charsets);
-const createDatabaseCollationsByCharset = ref<Record<string, string[]>>(fallbackCreateDatabaseCharset.collationsByCharset);
-const createDatabaseCharsetLoading = ref(false);
-const showDropDatabaseConfirm = ref(false);
-const dropDatabaseLoading = ref(false);
-const showDropMongoCollectionConfirm = ref(false);
-const dropMongoCollectionLoading = ref(false);
-const showDropMongoIndexConfirm = ref(false);
-const dropMongoIndexLoading = ref(false);
-const showDropAllMongoIndexesConfirm = ref(false);
-const dropAllMongoIndexesLoading = ref(false);
-const showFlushRedisDbConfirm = ref(false);
-const showCreateSchemaDialog = ref(false);
-const createSchemaName = ref("");
-const showDropSchemaConfirm = ref(false);
-const showEditDatabasePropertiesDialog = ref(false);
-const editDatabasePropertiesLoading = ref(false);
-const editDatabasePropertiesPreviewSql = ref("");
-const editDatabaseCharset = ref("utf8mb4");
-const editDatabaseCollation = ref("utf8mb4_unicode_ci");
-const editDatabaseCommentText = ref("");
-const showEditSchemaCommentDialog = ref(false);
-const schemaCommentText = ref("");
-const schemaCommentLoading = ref(false);
-
 // --- Extension Management ---
-const installExtensionDialogRef = ref<InstanceType<typeof InstallExtensionDialog> | null>(null);
-
-function openInstallExtensionDialog(_node: TreeNode) {
-  installExtensionDialogRef.value?.show();
+function openInstallExtensionDialog(node: TreeNode) {
+  emit("open-install-extension", node);
 }
 
 // --- Procedure / Function Management ---
-const showDropObjectConfirm = ref(false);
-const showProcedureExecutionConfirm = ref(false);
-
 function dropObjectSqlOptions(): DropObjectSqlOptions | null {
   return dropObjectSqlOptionsForNode(props.node);
 }
@@ -2039,8 +2104,7 @@ function openObjectSourceDialog(initialEditing: boolean) {
     .ensureConnected(node.connectionId)
     .then(() => {
       connectionStore.activeConnectionId = node.connectionId!;
-      objectSourceTarget.value = { node, initialEditing };
-      showObjectSourceDialog.value = true;
+      emit("open-object-source", node, initialEditing);
     })
     .catch((e: any) => {
       toast(e?.message || String(e), 5000);
@@ -2050,22 +2114,7 @@ function openObjectSourceDialog(initialEditing: boolean) {
 function openProcedureExecution() {
   const node = props.node;
   if (node.type !== "procedure" || !node.connectionId || !node.database) return;
-  showProcedureExecutionConfirm.value = true;
-}
-
-function openProcedureExecutionSql(sql: string) {
-  const node = props.node;
-  if (node.type !== "procedure" || !node.connectionId || !node.database || !sql) return;
-  const tabId = queryStore.createTab(node.connectionId, node.database, `Execute - ${node.label}`, "query", node.schema);
-  queryStore.updateSql(tabId, sql);
-}
-
-async function executeProcedureSql(sql: string) {
-  const node = props.node;
-  if (node.type !== "procedure" || !node.connectionId || !node.database || !sql) return;
-  const tabId = queryStore.createTab(node.connectionId, node.database, `Execute - ${node.label}`, "query", node.schema);
-  queryStore.updateSql(tabId, sql);
-  await queryStore.executeTabSql(tabId, sql);
+  emit("open-procedure", node);
 }
 
 function requestDropObject() {
@@ -2166,11 +2215,6 @@ function selectedBatchEmptyTargets(): TreeNode[] {
   return selectedBatchTableTargets();
 }
 
-function selectedBatchMongoIndexTargets(): TreeNode[] {
-  const targets = selectedBatchDropTargets();
-  return targets.length > 1 && targets.every((node) => canDropMongoIndexNode(node)) ? targets : [];
-}
-
 function selectedBatchIndexTableName(targets: TreeNode[]): string | null {
   const first = targets[0];
   if (!first) return null;
@@ -2187,7 +2231,7 @@ function batchDropMenuLabel(): string {
 }
 
 function batchDropConfirmTitle(): string {
-  const targets = selectedBatchDropTargets();
+  const targets = batchDropTargets.value;
   if (targets.length > 1 && targets.every((node) => node.type === "index")) {
     return t("contextMenu.confirmDropIndexTitle");
   }
@@ -2195,7 +2239,7 @@ function batchDropConfirmTitle(): string {
 }
 
 function batchDropConfirmMessage(): string {
-  const targets = selectedBatchDropTargets();
+  const targets = batchDropTargets.value;
   const table = selectedBatchIndexTableName(targets);
   if (targets.length > 1 && targets.every((node) => node.type === "index") && table) {
     return t("contextMenu.confirmDropBatchIndexesMessage", { count: targets.length, table });
@@ -2224,11 +2268,11 @@ function batchEmptyConfirmLabel(): string {
 }
 
 function batchTruncateConfirmTitle(): string {
-  return t("contextMenu.confirmBatchTruncateTitle", { count: selectedBatchTruncateTargets().length });
+  return t("contextMenu.confirmBatchTruncateTitle", { count: batchTruncateTargets.value.length });
 }
 
 function batchTruncateConfirmMessage(): string {
-  return t("contextMenu.confirmBatchTruncateMessage", { count: selectedBatchTruncateTargets().length });
+  return t("contextMenu.confirmBatchTruncateMessage", { count: batchTruncateTargets.value.length });
 }
 
 async function dropSqlForTreeNode(node: TreeNode, options?: { cascade?: boolean }): Promise<string | null> {
@@ -2270,8 +2314,8 @@ async function emptySqlForTreeNode(node: TreeNode): Promise<string | null> {
 }
 
 async function refreshBatchDropPreviewSql() {
-  const targets = selectedBatchDropTargets();
-  const mongoIndexTargets = selectedBatchMongoIndexTargets();
+  const targets = batchDropTargets.value;
+  const mongoIndexTargets = targets.filter(canDropMongoIndexNode);
   if (mongoIndexTargets.length) {
     batchDropPreviewSql.value = mongoIndexTargets.map((target) => mongoIndexDropPreview(target, mongoIndexNameForNode(target))).join("\n");
     return;
@@ -2286,7 +2330,7 @@ async function refreshBatchDropPreviewSql() {
 }
 
 async function refreshBatchTruncatePreviewSql() {
-  const targets = selectedBatchTruncateTargets();
+  const targets = batchTruncateTargets.value;
   const statements: string[] = [];
   const useCascade = canBatchTruncateCascade.value && batchTruncateCascade.value;
   for (const target of targets) {
@@ -2306,14 +2350,18 @@ async function refreshBatchEmptyPreviewSql(targets: TreeNode[]) {
 }
 
 function requestBatchDrop() {
-  if (!selectedBatchDropTargets().length) return;
+  const targets = selectedBatchDropTargets();
+  if (!targets.length) return;
+  batchDropTargets.value = targets.slice();
   batchDropCascade.value = false;
   void refreshBatchDropPreviewSql();
   showBatchDropConfirm.value = true;
 }
 
 function requestBatchTruncate() {
-  if (!selectedBatchTruncateTargets().length) return;
+  const targets = selectedBatchTruncateTargets();
+  if (!targets.length) return;
+  batchTruncateTargets.value = targets.slice();
   batchTruncateCascade.value = false;
   void refreshBatchTruncatePreviewSql();
   showBatchTruncateConfirm.value = true;
@@ -2380,6 +2428,8 @@ const canRenameObject = computed(() => {
 });
 
 function openRenameObjectDialog() {
+  claimTreeItemDialogOwnership();
+  routeTreeItemDialogController();
   renameObjectName.value = props.node.label;
   renameObjectError.value = "";
   renameObjectPreviewSql.value = "";
@@ -2431,13 +2481,13 @@ watch([showRenameObjectDialog, renameObjectName, () => props.node.label, () => p
 });
 
 async function confirmRenameObject() {
-  const node = props.node;
-  const objectType = nodeRenameObjectType();
+  const node = sidebarFormTarget.value ?? props.node;
+  const objectType = node.type === "table" ? "TABLE" : node.type === "view" ? "VIEW" : node.type === "materialized_view" ? "MATERIALIZED_VIEW" : node.type === "procedure" ? "PROCEDURE" : node.type === "function" ? "FUNCTION" : null;
   const newName = renameObjectName.value.trim();
   if (!objectType || !newName || newName === node.label || !node.connectionId || !node.database) return;
   renameObjectError.value = "";
   try {
-    const dbType = currentDatabaseType();
+    const dbType = databaseTypeForNode(node);
     await connectionStore.ensureConnected(node.connectionId);
     if (supportsSourceBackedRoutineRename(dbType, objectType as any)) {
       const schema = node.schema || node.database;
@@ -2472,9 +2522,9 @@ async function confirmRenameObject() {
 }
 
 async function confirmDropObject() {
-  const node = props.node;
+  const node = sidebarDangerTarget.value ?? props.node;
   if (!node.connectionId || !node.database) return;
-  const options = dropObjectSqlOptions();
+  const options = dropObjectSqlOptionsForNode(node);
   if (!options) return;
   try {
     await connectionStore.ensureConnected(node.connectionId);
@@ -2494,9 +2544,9 @@ async function confirmDropObject() {
 }
 
 async function confirmDropTableChildObject() {
-  const node = props.node;
+  const node = sidebarDangerTarget.value ?? props.node;
   if (!node.connectionId || !node.database) return;
-  const options = dropTableChildObjectSqlOptions();
+  const options = dropTableChildObjectSqlOptionsForNode(node);
   if (!options) return;
   try {
     await connectionStore.ensureConnected(node.connectionId);
@@ -2510,10 +2560,10 @@ async function confirmDropTableChildObject() {
 }
 
 async function confirmBatchDrop() {
-  const targets = selectedBatchDropTargets();
+  const targets = batchDropTargets.value.slice();
   if (!targets.length) return;
   try {
-    const mongoIndexTargets = selectedBatchMongoIndexTargets();
+    const mongoIndexTargets = targets.filter(canDropMongoIndexNode);
     if (mongoIndexTargets.length) {
       const grouped = new Map<string, TreeNode[]>();
       for (const target of mongoIndexTargets) {
@@ -2539,7 +2589,7 @@ async function confirmBatchDrop() {
       showBatchDropConfirm.value = false;
       return;
     }
-    const useCascade = canBatchDropCascade.value && batchDropCascade.value;
+    const useCascade = batchDropCascade.value && targets.every((node) => node.type !== "table" || supportsDropTableCascade(databaseTypeForNode(node)));
     for (const target of targets) {
       if (!target.connectionId || !target.database) continue;
       await connectionStore.ensureConnected(target.connectionId);
@@ -2557,10 +2607,10 @@ async function confirmBatchDrop() {
 }
 
 async function confirmBatchTruncate() {
-  const targets = selectedBatchTruncateTargets();
+  const targets = batchTruncateTargets.value.slice();
   if (!targets.length) return;
   try {
-    const useCascade = canBatchTruncateCascade.value && batchTruncateCascade.value;
+    const useCascade = batchTruncateCascade.value && targets.every((node) => supportsTruncateTableCascade(databaseTypeForNode(node)));
     await runBatchTableTruncate(
       targets,
       async (target) => {
@@ -2741,6 +2791,16 @@ function tableAdminSqlOptions(options?: { cascade?: boolean }): TableAdminSqlOpt
   return result;
 }
 
+function tableAdminSqlOptionsForNode(node: TreeNode, options?: { cascade?: boolean }): TableAdminSqlOptions {
+  const result: TableAdminSqlOptions = {
+    databaseType: databaseTypeForNode(node),
+    schema: node.schema,
+    tableName: node.label,
+  };
+  if (options?.cascade) result.cascade = true;
+  return result;
+}
+
 function dropTableSqlOptions(): TableAdminSqlOptions {
   return tableAdminSqlOptions({ cascade: canDropTableCascade.value && dropTableCascade.value });
 }
@@ -2776,11 +2836,11 @@ async function refreshTableList(node: TreeNode) {
 }
 
 async function confirmDropTable() {
-  const node = props.node;
+  const node = sidebarDangerTarget.value ?? props.node;
   if (!node.connectionId || !node.database) return;
   try {
     await connectionStore.ensureConnected(node.connectionId);
-    const sql = dropTablePreviewSql.value || (await buildDropTableSql(dropTableSqlOptions()));
+    const sql = dropTablePreviewSql.value || (await buildDropTableSql(tableAdminSqlOptionsForNode(node, { cascade: dropTableCascade.value && supportsDropTableCascade(databaseTypeForNode(node)) })));
     await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
     toast(t("contextMenu.dropTableSuccess", { name: node.label }), 3000);
     closeDroppedTableObjectTabsForNode(node);
@@ -2796,13 +2856,13 @@ function emptyTable() {
 }
 
 async function confirmEmptyTable() {
-  const node = props.node;
+  const node = sidebarDangerTarget.value ?? props.node;
   if (!node.connectionId || !node.database) return;
   try {
     await connectionStore.ensureConnected(node.connectionId);
-    const sql = emptyTablePreviewSql.value || (await buildEmptyTableSql(tableAdminSqlOptions()));
+    const sql = emptyTablePreviewSql.value || (await buildEmptyTableSql(tableAdminSqlOptionsForNode(node)));
     await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
-    const messageKey = currentDatabaseType() === "clickhouse" ? "contextMenu.emptyTableSubmitted" : "contextMenu.emptyTableSuccess";
+    const messageKey = databaseTypeForNode(node) === "clickhouse" ? "contextMenu.emptyTableSubmitted" : "contextMenu.emptyTableSuccess";
     toast(t(messageKey, { name: node.label }), 3000);
     await refreshMutatedTableDataTabsForNode(node);
   } catch (e: any) {
@@ -2817,11 +2877,11 @@ function truncateTable() {
 }
 
 async function confirmTruncateTable() {
-  const node = props.node;
+  const node = sidebarDangerTarget.value ?? props.node;
   if (!node.connectionId || !node.database) return;
   try {
     await connectionStore.ensureConnected(node.connectionId);
-    const sql = truncateTablePreviewSql.value || (await buildTruncateTableSql(truncateTableSqlOptions()));
+    const sql = truncateTablePreviewSql.value || (await buildTruncateTableSql(tableAdminSqlOptionsForNode(node, { cascade: truncateTableCascade.value && supportsTruncateTableCascade(databaseTypeForNode(node)) })));
     await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
     toast(t("contextMenu.truncateTableSuccess", { name: node.label }), 3000);
     await refreshMutatedTableDataTabsForNode(node);
@@ -2949,15 +3009,23 @@ async function openEditDatabasePropertiesDialog() {
 }
 
 async function confirmEditDatabaseProperties() {
-  const node = props.node;
-  if (!canEditDatabaseProperties.value || !node.connectionId || editDatabasePropertiesLoading.value) return;
+  const node = sidebarFormTarget.value ?? props.node;
+  const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
+  const propertyGroups = editableDatabasePropertyGroups(config, node);
+  if (!propertyGroups.length || !node.connectionId || editDatabasePropertiesLoading.value) return;
   editDatabasePropertiesLoading.value = true;
   try {
     await connectionStore.ensureConnected(node.connectionId);
-    const options = databasePropertyEditOptions();
+    const base = {
+      databaseType: databaseTypeForNode(node),
+      driverProfile: config?.driver_profile,
+      target: "database" as const,
+      name: node.database || node.label,
+    };
+    const options = propertyGroups.includes("charsetCollation") ? { ...base, charset: editDatabaseCharset.value, collation: editDatabaseCollation.value } : propertyGroups.includes("databaseComment") ? { ...base, comment: editDatabaseCommentText.value } : null;
     if (!options) return;
     const sql = await buildUpdateDatabasePropertiesSql(options);
-    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: databasePropertyName() });
+    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database || node.label });
     toast(t("contextMenu.editDatabasePropertiesSuccess", { name: node.label }), 3000);
     showEditDatabasePropertiesDialog.value = false;
     await connectionStore.loadDatabases(node.connectionId, { force: true });
@@ -2971,8 +3039,6 @@ async function confirmEditDatabaseProperties() {
 watch([editDatabaseCharset, editDatabaseCollation, editDatabaseCommentText], () => {
   if (showEditDatabasePropertiesDialog.value) void refreshEditDatabasePropertiesPreviewSql();
 });
-
-const schemaCommentPreviewSql = ref("");
 
 async function refreshSchemaCommentPreviewSql() {
   if (!canEditSchemaComment.value) {
@@ -3019,13 +3085,13 @@ async function openEditSchemaCommentDialog() {
 }
 
 async function confirmEditSchemaComment() {
-  const node = props.node;
+  const node = sidebarFormTarget.value ?? props.node;
   if (!canEditSchemaComment.value || !node.connectionId || !node.database || schemaCommentLoading.value) return;
   schemaCommentLoading.value = true;
   try {
     await connectionStore.ensureConnected(node.connectionId);
     const sql = await buildUpdateDatabasePropertiesSql({
-      databaseType: currentDatabaseType(),
+      databaseType: databaseTypeForNode(node),
       target: "schema",
       name: node.schema || node.label,
       comment: schemaCommentText.value,
@@ -3129,7 +3195,7 @@ function openCreateNacosNamespaceDialog() {
 }
 
 async function confirmCreateNacosNamespace() {
-  const node = props.node;
+  const node = sidebarFormTarget.value ?? props.node;
   const namespaceName = createNacosNamespaceName.value.trim();
   if (!node.connectionId || !namespaceName || createNacosNamespaceLoading.value) return;
   createNacosNamespaceLoading.value = true;
@@ -3141,7 +3207,8 @@ async function confirmCreateNacosNamespace() {
     });
     showCreateNacosNamespaceDialog.value = false;
     await connectionStore.loadNacosNamespaces(node.connectionId, { force: true });
-    node.isExpanded = true;
+    const liveNode = findSidebarActionTarget(connectionStore.treeNodes, node);
+    if (liveNode) liveNode.isExpanded = true;
     toast(t("nacos.namespaceCreated", { name: namespaceName }), 3000);
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
@@ -3157,7 +3224,7 @@ function openEditNacosNamespaceDialog() {
 }
 
 async function confirmEditNacosNamespace() {
-  const node = props.node;
+  const node = sidebarFormTarget.value ?? props.node;
   const namespaceId = node.nacosNamespace?.trim() || "";
   const namespaceName = editNacosNamespaceName.value.trim();
   if (!node.connectionId || !namespaceId || !namespaceName || editNacosNamespaceLoading.value) return;
@@ -3225,7 +3292,7 @@ async function createDuckDbAttachedDatabaseFile() {
 }
 
 async function confirmCreateDatabase() {
-  const node = props.node;
+  const node = sidebarFormTarget.value ?? props.node;
   const name = createDatabaseName.value.trim();
   if (!name || !node.connectionId) return;
   showCreateDatabaseDialog.value = false;
@@ -3282,7 +3349,7 @@ function flushRedisDb() {
 }
 
 async function confirmFlushRedisDb() {
-  const node = props.node;
+  const node = sidebarDangerTarget.value ?? props.node;
   if (node.type !== "redis-db" || !node.connectionId || !node.database) return;
   try {
     await connectionStore.ensureConnected(node.connectionId);
@@ -3300,7 +3367,7 @@ async function confirmFlushRedisDb() {
 }
 
 async function confirmDropDatabase() {
-  const node = props.node;
+  const node = sidebarDangerTarget.value ?? props.node;
   if (!node.connectionId || dropDatabaseLoading.value) return;
   dropDatabaseLoading.value = true;
   try {
@@ -3315,7 +3382,7 @@ async function confirmDropDatabase() {
     const sql =
       dropDatabasePreviewSql.value ||
       (await buildDropDatabaseSql({
-        databaseType: currentDatabaseType(),
+        databaseType: databaseTypeForNode(node),
         name: node.label,
       }));
     await executeTreeNodeSqlWithProductionGuard(node, sql, { database: "" });
@@ -3330,7 +3397,7 @@ async function confirmDropDatabase() {
 }
 
 async function confirmDropMongoCollection() {
-  const node = props.node;
+  const node = sidebarDangerTarget.value ?? props.node;
   if (node.type !== "mongo-collection" || !node.connectionId || !node.database || dropMongoCollectionLoading.value) return;
   dropMongoCollectionLoading.value = true;
   try {
@@ -3359,7 +3426,7 @@ async function refreshMongoIndexTree(node: Pick<TreeNode, "connectionId" | "data
 }
 
 async function confirmDropMongoIndex() {
-  const node = props.node;
+  const node = sidebarDangerTarget.value ?? props.node;
   if (!canDropMongoIndexNode(node) || !node.connectionId || !node.database || !node.tableName || dropMongoIndexLoading.value) return;
   dropMongoIndexLoading.value = true;
   try {
@@ -3377,7 +3444,7 @@ async function confirmDropMongoIndex() {
 }
 
 async function confirmDropAllMongoIndexes() {
-  const node = props.node;
+  const node = sidebarDangerTarget.value ?? props.node;
   if (node.type !== "mongo-collection" || !node.connectionId || !node.database || dropAllMongoIndexesLoading.value) return;
   dropAllMongoIndexesLoading.value = true;
   try {
@@ -3399,7 +3466,7 @@ function openCreateSchemaDialog() {
 }
 
 async function confirmCreateSchema() {
-  const node = props.node;
+  const node = sidebarFormTarget.value ?? props.node;
   const name = createSchemaName.value.trim();
   const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
   const isConnectionLevelSchemaCreation = node.type === "connection" && connectionNamespaceCreationTarget(config) === "schema";
@@ -3432,14 +3499,14 @@ function dropSchema() {
 }
 
 async function confirmDropSchema() {
-  const node = props.node;
+  const node = sidebarDangerTarget.value ?? props.node;
   if (!node.connectionId || !node.database) return;
   try {
     await connectionStore.ensureConnected(node.connectionId);
     const sql =
       dropSchemaPreviewSql.value ||
       (await buildDropSchemaSql({
-        databaseType: currentDatabaseType(),
+        databaseType: databaseTypeForNode(node),
         name: node.label,
       }));
     await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database });
@@ -4195,7 +4262,7 @@ const canOpenStructureEditor = computed(() => {
 const canOpenFieldLineage = computed(() => {
   return props.node.type === "column" && !!props.node.database && !!props.node.tableName && supportsFieldLineage(currentDatabaseType());
 });
-const isPinned = computed(() => props.node.pinned || connectionStore.isTreeNodePinned(props.node.id));
+const isPinned = computed(() => props.node.pinned || connectionStore.isTreeNodePinned(props.node));
 const isNodeDefaultDatabase = computed(() => (props.node.type === "database" || props.node.type === "redis-db" || props.node.type === "mongo-db") && !!props.node.connectionId && !!props.node.database && connectionStore.isDefaultDatabase(props.node.connectionId, props.node.database));
 const hasTypeMenu = computed(() => {
   const t = props.node.type;
@@ -4221,7 +4288,7 @@ const isConnecting = computed(() => props.node.type === "connection" && !!props.
 const isConnectionReadonly = computed(() => props.node.type === "connection" && !!props.node.connectionId && (connectionStore.getConfig(props.node.connectionId)?.read_only ?? false));
 const isOpenedDatabase = computed(() => isSidebarDatabaseOpened(props.node, connectionStore.isTreeNodeChildrenLoaded));
 const showsDatabaseOpenIndicator = computed(() => props.node.type === "database" && (isOpenedDatabase.value || (!!props.node.connectionId && props.node.database != null && queryStore.openDatabaseKeys.has(`${props.node.connectionId}\x00${props.node.database}`))));
-const canCloseDatabaseConnection = computed(() => canCloseSidebarDatabaseConnection(props.node, connectionStore.isTreeNodeChildrenLoaded));
+const canCloseDatabaseConnection = computed(() => canCloseSidebarDatabaseConnection(props.node, connectionStore.isTreeNodeChildrenLoaded, (connectionId, database) => queryStore.openDatabaseKeys.has(`${connectionId}\x00${database}`)));
 const nodeIconClass = computed(() => {
   const infoClass = getIconInfo(props.node)?.colorClass;
   if (props.node.type !== "database") return infoClass;
@@ -4235,15 +4302,9 @@ const canConfigureVisibleDatabases = computed(() => {
 });
 
 const canConfigureVisibleSchemas = computed(() => {
-  if (props.node.type === "database" && props.node.connectionId && props.node.database != null) {
-    const dbType = connectionStore.getConfig(props.node.connectionId)?.db_type;
-    return isSchemaAware(dbType);
-  }
-  if (props.node.type === "connection" && props.node.connectionId) {
-    const dbType = connectionStore.getConfig(props.node.connectionId)?.db_type;
-    return isSchemaAware(dbType) && !usesTreeSchemaMode(dbType);
-  }
-  return false;
+  if (!props.node.connectionId) return false;
+  const dbType = connectionStore.getConfig(props.node.connectionId)?.db_type;
+  return canConfigureVisibleSchemasForTreeNode(dbType, props.node.type, props.node.database);
 });
 
 const canCopyFinalProxyPort = computed(() => {
@@ -4288,7 +4349,7 @@ const tableSearchStyle = computed(() => {
 });
 
 function togglePin() {
-  connectionStore.toggleTreeNodePin(props.node.id);
+  connectionStore.toggleTreeNodePin(props.node);
 }
 
 function updateTableSearchQuery(value: string | number) {
@@ -4308,11 +4369,11 @@ function clearTableSearchQuery() {
 }
 
 function openVisibleDatabasesDialog() {
-  showVisibleDatabasesDialog.value = true;
+  emit("open-visible-databases", props.node);
 }
 
 function openVisibleSchemasDialog() {
-  showVisibleSchemasDialog.value = true;
+  emit("open-visible-schemas", props.node);
 }
 
 // --- Connection Group Management ---
@@ -4377,12 +4438,11 @@ function newSubgroup() {
 }
 
 function confirmDeleteGroup() {
-  connectionStore.deleteConnectionGroup(props.node.id);
+  const node = sidebarFormTarget.value ?? props.node;
+  connectionStore.deleteConnectionGroup(node.id);
   showDeleteGroupConfirm.value = false;
   toast(t("connection.groupDeleted"), 2000);
 }
-
-const showDeleteGroupConfirm = ref(false);
 
 function moveToGroup(groupId: string | null) {
   if (props.node.connectionId) {
@@ -4390,8 +4450,255 @@ function moveToGroup(groupId: string | null) {
   }
 }
 
-const showMoveToNewGroupDialog = ref(false);
-const moveToNewGroupName = ref("");
+const dangerDialogRoutes: Array<{ flag: { value: boolean }; createRequest: () => SidebarDangerDialogRequest }> = [];
+let stopDangerDialogRouting: (() => void) | null = null;
+
+function routeDangerDialog(flag: { value: boolean }, createRequest: () => SidebarDangerDialogRequest) {
+  dangerDialogRoutes.push({ flag, createRequest });
+}
+
+function ensureDangerDialogRouting() {
+  if (stopDangerDialogRouting) return;
+  stopDangerDialogRouting = watch(
+    dangerDialogRoutes.map((route) => route.flag),
+    (openFlags) => {
+      if (sidebarTreeDialogOwner.value !== treeItemDialogOwner) return;
+      openFlags.forEach((open, index) => {
+        if (!open) return;
+        const route = dangerDialogRoutes[index];
+        route.flag.value = false;
+        emit("open-danger-dialog", route.createRequest());
+      });
+    },
+  );
+}
+
+function dangerRequest(request: Omit<SidebarDangerDialogRequest, "target">): SidebarDangerDialogRequest {
+  const routedRequest = request as SidebarDangerDialogRequest;
+  routedRequest.target = createSidebarActionTarget(props.node);
+  sidebarDangerTarget.value = routedRequest.target;
+  return routedRequest;
+}
+
+routeDangerDialog(showDropTableConfirm, () =>
+  dangerRequest({
+    title: t("contextMenu.confirmDropTableTitle"),
+    message: t("contextMenu.confirmDropTableMessage", { name: props.node.label }),
+    get sql() {
+      return dropTablePreviewSql.value;
+    },
+    confirmLabel: t("contextMenu.dropTable"),
+    option: canDropTableCascade.value
+      ? {
+          checked: dropTableCascade.value,
+          label: t("contextMenu.dropTableCascade"),
+          hint: t("contextMenu.dropTableCascadeHint"),
+          async onChange(checked) {
+            dropTableCascade.value = checked;
+            await refreshDropTablePreviewSql();
+          },
+        }
+      : undefined,
+    confirm: confirmDropTable,
+  }),
+);
+
+routeDangerDialog(showEmptyTableConfirm, () =>
+  dangerRequest({
+    title: t("contextMenu.confirmEmptyTableTitle"),
+    message: t("contextMenu.confirmEmptyTableMessage", { name: props.node.label }),
+    get sql() {
+      return emptyTablePreviewSql.value;
+    },
+    confirmLabel: t("contextMenu.emptyTable"),
+    confirm: confirmEmptyTable,
+  }),
+);
+
+routeDangerDialog(showBatchEmptyConfirm, () =>
+  dangerRequest({
+    title: batchEmptyConfirmTitle(),
+    message: batchEmptyConfirmMessage(),
+    get sql() {
+      return batchEmptyPreviewSql.value;
+    },
+    confirmLabel: batchEmptyConfirmLabel(),
+    confirm: confirmBatchEmpty,
+  }),
+);
+
+routeDangerDialog(showTruncateTableConfirm, () =>
+  dangerRequest({
+    title: t("contextMenu.confirmTruncateTableTitle"),
+    message: t("contextMenu.confirmTruncateTableMessage", { name: props.node.label }),
+    get sql() {
+      return truncateTablePreviewSql.value;
+    },
+    confirmLabel: t("contextMenu.truncateTable"),
+    option: canTruncateTableCascade.value
+      ? {
+          checked: truncateTableCascade.value,
+          label: t("contextMenu.truncateTableCascade"),
+          hint: t("contextMenu.truncateTableCascadeHint"),
+          async onChange(checked) {
+            truncateTableCascade.value = checked;
+            await refreshTruncateTablePreviewSql();
+          },
+        }
+      : undefined,
+    confirm: confirmTruncateTable,
+  }),
+);
+
+routeDangerDialog(showDropObjectConfirm, () =>
+  dangerRequest({
+    title: dropObjectConfirmTitle(),
+    message: dropObjectConfirmMessage(),
+    get sql() {
+      return dropObjectPreviewSql.value;
+    },
+    confirmLabel: dropObjectMenuLabel(),
+    confirm: confirmDropObject,
+  }),
+);
+
+routeDangerDialog(showDropTableChildObjectConfirm, () =>
+  dangerRequest({
+    title: dropTableChildObjectConfirmTitle(),
+    message: dropTableChildObjectConfirmMessage(),
+    get sql() {
+      return dropTableChildObjectPreviewSql.value;
+    },
+    confirmLabel: dropTableChildObjectMenuLabel(),
+    confirm: confirmDropTableChildObject,
+  }),
+);
+
+routeDangerDialog(showBatchDropConfirm, () =>
+  dangerRequest({
+    title: batchDropConfirmTitle(),
+    message: batchDropConfirmMessage(),
+    get sql() {
+      return batchDropPreviewSql.value;
+    },
+    confirmLabel: batchDropMenuLabel(),
+    option: canBatchDropCascade.value
+      ? {
+          checked: batchDropCascade.value,
+          label: t("contextMenu.dropTableCascade"),
+          hint: t("contextMenu.dropTableCascadeHint"),
+          async onChange(checked) {
+            batchDropCascade.value = checked;
+            await refreshBatchDropPreviewSql();
+          },
+        }
+      : undefined,
+    confirm: confirmBatchDrop,
+  }),
+);
+
+routeDangerDialog(showBatchTruncateConfirm, () =>
+  dangerRequest({
+    title: batchTruncateConfirmTitle(),
+    message: batchTruncateConfirmMessage(),
+    get sql() {
+      return batchTruncatePreviewSql.value;
+    },
+    confirmLabel: batchTruncateMenuLabel(),
+    option: canBatchTruncateCascade.value
+      ? {
+          checked: batchTruncateCascade.value,
+          label: t("contextMenu.truncateTableCascade"),
+          hint: t("contextMenu.truncateTableCascadeHint"),
+          async onChange(checked) {
+            batchTruncateCascade.value = checked;
+            await refreshBatchTruncatePreviewSql();
+          },
+        }
+      : undefined,
+    confirm: confirmBatchTruncate,
+  }),
+);
+
+routeDangerDialog(showDropDatabaseConfirm, () =>
+  dangerRequest({
+    title: t("contextMenu.confirmDropDatabaseTitle"),
+    message: t("contextMenu.confirmDropDatabaseMessage", { name: props.node.label }),
+    get sql() {
+      return dropDatabasePreviewSql.value;
+    },
+    confirmLabel: t("contextMenu.dropDatabase"),
+    get loading() {
+      return dropDatabaseLoading.value;
+    },
+    closeOnConfirm: false,
+    confirm: confirmDropDatabase,
+  }),
+);
+
+routeDangerDialog(showDropMongoCollectionConfirm, () =>
+  dangerRequest({
+    title: t("contextMenu.confirmDropCollectionTitle"),
+    message: t("contextMenu.confirmDropCollectionMessage", { name: props.node.label }),
+    confirmLabel: t("contextMenu.dropCollection"),
+    get loading() {
+      return dropMongoCollectionLoading.value;
+    },
+    closeOnConfirm: false,
+    confirm: confirmDropMongoCollection,
+  }),
+);
+
+routeDangerDialog(showDropMongoIndexConfirm, () =>
+  dangerRequest({
+    title: t("contextMenu.confirmDropIndexTitle"),
+    message: t("contextMenu.confirmDropMongoIndexMessage", { name: mongoIndexNameForNode(props.node), collection: props.node.tableName || "" }),
+    details: mongoIndexDropPreview(props.node, mongoIndexNameForNode(props.node)),
+    confirmLabel: t("contextMenu.dropIndex"),
+    get loading() {
+      return dropMongoIndexLoading.value;
+    },
+    closeOnConfirm: false,
+    confirm: confirmDropMongoIndex,
+  }),
+);
+
+routeDangerDialog(showDropAllMongoIndexesConfirm, () =>
+  dangerRequest({
+    title: t("contextMenu.dropAllIndexes"),
+    message: t("contextMenu.confirmDropMongoAllIndexesMessage", { name: props.node.label }),
+    detailsText: t("contextMenu.confirmDropMongoAllIndexesDetails"),
+    sql: mongoDropAllIndexesPreview(props.node),
+    confirmLabel: t("contextMenu.dropAllIndexes"),
+    get loading() {
+      return dropAllMongoIndexesLoading.value;
+    },
+    closeOnConfirm: false,
+    confirm: confirmDropAllMongoIndexes,
+  }),
+);
+
+routeDangerDialog(showFlushRedisDbConfirm, () =>
+  dangerRequest({
+    title: t("redis.flushDb"),
+    message: t("redis.flushDbMessage"),
+    details: t("redis.flushDbDetails", { db: props.node.database }),
+    confirmLabel: t("redis.flushDbConfirm"),
+    confirm: confirmFlushRedisDb,
+  }),
+);
+
+routeDangerDialog(showDropSchemaConfirm, () =>
+  dangerRequest({
+    title: t("contextMenu.confirmDropSchemaTitle"),
+    message: t("contextMenu.confirmDropSchemaMessage", { name: props.node.label }),
+    get sql() {
+      return dropSchemaPreviewSql.value;
+    },
+    confirmLabel: t("contextMenu.dropSchema"),
+    confirm: confirmDropSchema,
+  }),
+);
 
 function moveToNewGroup() {
   moveToNewGroupName.value = "";
@@ -4400,11 +4707,99 @@ function moveToNewGroup() {
 
 function confirmMoveToNewGroup() {
   const name = moveToNewGroupName.value.trim();
-  if (name && props.node.connectionId) {
+  const node = sidebarFormTarget.value ?? props.node;
+  if (name && node.connectionId) {
     const groupId = connectionStore.createConnectionGroup(name);
-    connectionStore.moveConnectionToGroup(props.node.connectionId, groupId);
+    connectionStore.moveConnectionToGroup(node.connectionId, groupId);
   }
   showMoveToNewGroupDialog.value = false;
+}
+
+let treeItemDialogController: Record<string, any> | null = null;
+
+function getTreeItemDialogController(): Record<string, any> {
+  if (treeItemDialogController) return treeItemDialogController;
+  treeItemDialogController = reactive<Record<string, any>>({
+    node: createSidebarActionTarget(props.node),
+    t,
+    highlight,
+    showDeleteConfirm,
+    connectionDeleteConfirmMessage,
+    confirmDelete,
+    connectionDeleteMenuLabel,
+    showMoveToNewGroupDialog,
+    moveToNewGroupName,
+    confirmMoveToNewGroup,
+    showDeleteGroupConfirm,
+    confirmDeleteGroup,
+    showRenameObjectDialog,
+    renameObjectName,
+    renameObjectPreviewSql,
+    renameObjectError,
+    confirmRenameObject,
+    showStructurePreviewDialog,
+    structurePreviewTitle,
+    isLoadingStructurePreview,
+    structurePreviewError,
+    structurePreviewSql,
+    copyStructurePreview,
+    saveStructurePreview,
+    showStructureDocCopyDialog,
+    structureDocCopyTitle,
+    structureDocCopyText,
+    selectTextareaContent,
+    copyStructureDocText,
+    showDuplicateDialog,
+    duplicateTableName,
+    confirmDuplicateStructure,
+    showPasteDialog,
+    pasteTableEntries,
+    pasteTableMode,
+    pasteTableDataCopySupported: pasteTableDataCopySupported.value,
+    confirmPasteTable,
+    showCreateDatabaseDialog,
+    createDatabaseName,
+    canSetCreateDatabaseCharset: canSetCreateDatabaseCharset.value,
+    createDatabaseCharset,
+    createDatabaseCharsetOptions,
+    createDatabaseCharsetLoading,
+    normalizeCreateDatabaseCharset,
+    createDatabaseCollation,
+    createDatabaseCollationOptionsForCharset,
+    createDatabaseCollationsByCharset,
+    confirmCreateDatabase,
+    showEditDatabasePropertiesDialog,
+    updateCreateDatabaseCharset,
+    canEditDatabaseCharsetCollation: canEditDatabaseCharsetCollation.value,
+    updateEditDatabaseCharset,
+    editDatabasePropertiesLoading,
+    editDatabaseCharset,
+    editDatabaseCollation,
+    canEditDatabaseComment: canEditDatabaseComment.value,
+    editDatabaseCommentText,
+    editDatabasePropertiesPreviewSql,
+    confirmEditDatabaseProperties,
+    showCreateNacosNamespaceDialog,
+    createNacosNamespaceId,
+    createNacosNamespaceName,
+    createNacosNamespaceDesc,
+    createNacosNamespaceLoading,
+    confirmCreateNacosNamespace,
+    showEditNacosNamespaceDialog,
+    editNacosNamespaceName,
+    editNacosNamespaceDesc,
+    editNacosNamespaceLoading,
+    confirmEditNacosNamespace,
+    showCreateSchemaDialog,
+    createSchemaName,
+    confirmCreateSchema,
+    showEditSchemaCommentDialog,
+    schemaCommentText,
+    schemaCommentLoading,
+    schemaCommentPreviewSql,
+    confirmEditSchemaComment,
+  });
+  return treeItemDialogController;
 }
 
 const availableGroups = computed(() => connectionStore.sidebarLayout.groups);
@@ -4592,9 +4987,11 @@ onBeforeUnmount(() => {
   handleMouseLeave();
   stopPasteHandlerRegistration();
   finishTableReferenceDrag();
+  stopDangerDialogRouting?.();
 });
 
 const shortcutCopyName = computed(() => settingsStore.editorSettings.shortcuts.copySidebarSelection);
+const shortcutOpenDataInNewTab = computed(() => settingsStore.editorSettings.shortcuts.openDataInNewTab);
 const shortcutEditConnection = computed(() => settingsStore.editorSettings.shortcuts.editSidebarConnection);
 const shortcutRename = "F2";
 const shortcutRefresh = "F5";
@@ -4727,7 +5124,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
     if (supportsDatabaseUserAdmin(currentDatabaseType())) {
       items.push({ label: t("contextMenu.userAdmin"), action: openUserAdmin, icon: UsersRound });
     }
-    if (supportsProcessList(currentDatabaseType())) {
+    if (node.connectionId && connectionSupportsProcessList(connectionStore.getConfig(node.connectionId))) {
       items.push({ label: t("contextMenu.processList"), action: openProcessList, icon: Activity });
     }
     if (node.connectionId && connectionSupportsServerDashboard(connectionStore.getConfig(node.connectionId))) {
@@ -5040,14 +5437,17 @@ function treeItemMenuItems(): ContextMenuItem[] {
     const destructiveActions: ContextMenuItem[] = [];
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     items.push({ label: "", separator: true });
-    items.push({ label: t("contextMenu.viewData"), action: openData, icon: TableProperties });
+    items.push({ label: t("contextMenu.viewData"), action: openDataImmediately, icon: TableProperties });
+    items.push({
+      label: t("contextMenu.openInNewDataTab"),
+      action: openDataInNewTabImmediately,
+      icon: CopyPlus,
+      shortcut: shortcutOpenDataInNewTab.value,
+    });
     if (node.type === "table") {
       items.push({
         label: t("contextMenu.viewDdl"),
-        action: () => {
-          ddlTarget.value = node;
-          showDdlDialog.value = true;
-        },
+        action: () => emit("open-ddl", node),
         icon: FileCode,
       });
     }
@@ -5056,10 +5456,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
       items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
       items.push({
         label: t("contextMenu.viewDdl"),
-        action: () => {
-          ddlTarget.value = node;
-          showDdlDialog.value = true;
-        },
+        action: () => emit("open-ddl", node),
         icon: FileCode,
       });
     }
@@ -5333,668 +5730,122 @@ function treeItemMenuItems(): ContextMenuItem[] {
     </div>
   </div>
 
-  <CustomContextMenu v-else :items="treeItemMenuItems" v-slot="contextMenuSlot">
-    <div @contextmenu="onTreeItemContextMenu($event, contextMenuSlot.onContextMenu)">
-      <LightTooltip :text="displayLabel(node)" :disabled="isTooltipDisabled()" side="right" :side-offset="8" :delay="0" :close-delay="0" :surface="detailTooltip ? 'popover' : 'foreground'">
-        <div
-          ref="rowRef"
-          class="group flex items-center gap-1.5 py-1 px-2 cursor-pointer relative outline-none"
-          style="contain: layout style"
-          :class="[
-            rowWidthClass,
-            {
-              'group/sidebar-row': true,
-              'ring-1 ring-primary/50 bg-primary/5': showDropInside,
-              'opacity-50': isDragging,
-              'tree-item-connection-tint': connectionColor,
-              'hover:bg-accent': node.type !== 'connection',
-              'hover:bg-secondary/60': node.type === 'connection',
-              rounded: !isTreeRowSelected,
-              'tree-item-active': isTreeRowSelected,
-              'tree-item-active--selection-set': usesSelectionSetHighlight && isTreeRowSelected,
-              'tree-item-highlight': highlighted,
-            },
-          ]"
-          :tabindex="isSelected || isMultiSelected ? 0 : -1"
-          :style="rowStyle"
-          @click="onClick"
-          @dblclick="onDoubleClick"
-          @keydown="onKeydown"
-          @mousedown="onRowMouseDown"
-          @mousemove="isDropTarget ? updateTarget($event, node.id, node.type) : undefined"
-          @mouseenter="handleMouseEnter"
-          @mouseleave="
-            clearTarget(node.id);
-            handleMouseLeave();
+  <div v-else @contextmenu="onTreeItemContextMenu">
+    <LightTooltip :text="displayLabel(node)" :disabled="isTooltipDisabled()" side="right" :side-offset="8" :delay="0" :close-delay="0" :surface="detailTooltip ? 'popover' : 'foreground'">
+      <div
+        ref="rowRef"
+        class="group flex items-center gap-1.5 py-1 px-2 cursor-pointer relative outline-none"
+        style="contain: layout style"
+        :class="[
+          rowWidthClass,
+          {
+            'group/sidebar-row': true,
+            'ring-1 ring-primary/50 bg-primary/5': showDropInside,
+            'opacity-50': isDragging,
+            'tree-item-connection-tint': connectionColor,
+            'hover:bg-accent': node.type !== 'connection',
+            'hover:bg-secondary/60': node.type === 'connection',
+            rounded: !isTreeRowSelected,
+            'tree-item-active': isTreeRowSelected,
+            'tree-item-active--selection-set': usesSelectionSetHighlight && isTreeRowSelected,
+            'tree-item-highlight': highlighted,
+          },
+        ]"
+        :tabindex="isSelected || isMultiSelected ? 0 : -1"
+        :style="rowStyle"
+        @click="onClick"
+        @dblclick="onDoubleClick"
+        @keydown="onKeydown"
+        @mousedown="onRowMouseDown"
+        @mousemove="isDropTarget ? updateTarget($event, node.id, node.type) : undefined"
+        @mouseenter="handleMouseEnter"
+        @mouseleave="
+          clearTarget(node.id);
+          handleMouseLeave();
+        "
+      >
+        <div v-if="showDropBefore" class="absolute right-2 top-0 h-0.5 bg-primary rounded-full pointer-events-none" :style="{ left: paddingLeft }" />
+        <div v-if="showDropAfter" class="absolute right-2 bottom-0 h-0.5 bg-primary rounded-full pointer-events-none" :style="{ left: paddingLeft }" />
+        <template v-if="canExpand">
+          <button type="button" class="-m-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground" @mousedown.stop="onToggleMouseDown" @click.stop="onToggleClick">
+            <Loader2 v-if="node.isLoading" class="w-3.5 h-3.5 animate-spin" />
+            <ChevronDown v-else-if="node.isExpanded" class="w-3.5 h-3.5" />
+            <ChevronRight v-else class="w-3.5 h-3.5" />
+          </button>
+        </template>
+        <span v-else class="w-3.5 h-3.5 shrink-0" />
+        <DatabaseIcon v-if="node.type === 'connection'" :db-type="connectionIconType(node.connectionId)" class="h-3.5 w-3.5 shrink-0" />
+        <Loader2 v-else-if="node.type === 'load-more' && node.isLoading" class="w-3.5 h-3.5 shrink-0 animate-spin text-primary" />
+        <component v-else :is="getIconInfo(node)?.icon || Database" class="w-3.5 h-3.5 shrink-0" :class="nodeIconClass" />
+        <input
+          v-if="isRenamingGroup"
+          ref="renameInputRef"
+          v-model="renameInput"
+          class="min-w-0 flex-1 truncate bg-transparent border border-primary/50 rounded px-1 outline-none"
+          @blur="finishRenameGroup"
+          @keydown.enter.prevent="finishRenameGroup"
+          @keydown.escape.prevent="isRenamingGroup = false"
+          @click.stop
+        />
+        <span v-else ref="labelRef" :class="labelWidthClass">{{ visibleLabel(node) }}</span>
+        <ProductionContextBadge v-if="showProductionBadge" compact />
+        <span
+          v-if="
+            (node.type === 'group-tables' || node.type === 'group-views' || node.type === 'group-materialized-views' || node.type === 'group-procedures' || node.type === 'group-functions' || node.type === 'group-sequences' || node.type === 'group-packages' || node.type === 'group-partitions') &&
+            node.objectCount != null
           "
+          class="text-muted-foreground text-[10px] shrink-0"
+          >{{ node.objectCount }}</span
         >
-          <div v-if="showDropBefore" class="absolute right-2 top-0 h-0.5 bg-primary rounded-full pointer-events-none" :style="{ left: paddingLeft }" />
-          <div v-if="showDropAfter" class="absolute right-2 bottom-0 h-0.5 bg-primary rounded-full pointer-events-none" :style="{ left: paddingLeft }" />
-          <template v-if="canExpand">
-            <button type="button" class="-m-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground" @mousedown.stop="onToggleMouseDown" @click.stop="onToggleClick">
-              <Loader2 v-if="node.isLoading" class="w-3.5 h-3.5 animate-spin" />
-              <ChevronDown v-else-if="node.isExpanded" class="w-3.5 h-3.5" />
-              <ChevronRight v-else class="w-3.5 h-3.5" />
-            </button>
-          </template>
-          <span v-else class="w-3.5 h-3.5 shrink-0" />
-          <DatabaseIcon v-if="node.type === 'connection'" :db-type="connectionIconType(node.connectionId)" class="h-3.5 w-3.5 shrink-0" />
-          <Loader2 v-else-if="node.type === 'load-more' && node.isLoading" class="w-3.5 h-3.5 shrink-0 animate-spin text-primary" />
-          <component v-else :is="getIconInfo(node)?.icon || Database" class="w-3.5 h-3.5 shrink-0" :class="nodeIconClass" />
-          <input
-            v-if="isRenamingGroup"
-            ref="renameInputRef"
-            v-model="renameInput"
-            class="min-w-0 flex-1 truncate bg-transparent border border-primary/50 rounded px-1 outline-none"
-            @blur="finishRenameGroup"
-            @keydown.enter.prevent="finishRenameGroup"
-            @keydown.escape.prevent="isRenamingGroup = false"
-            @click.stop
-          />
-          <span v-else ref="labelRef" :class="labelWidthClass">{{ visibleLabel(node) }}</span>
-          <ProductionContextBadge v-if="showProductionBadge" compact />
-          <span
-            v-if="
-              (node.type === 'group-tables' || node.type === 'group-views' || node.type === 'group-materialized-views' || node.type === 'group-procedures' || node.type === 'group-functions' || node.type === 'group-sequences' || node.type === 'group-packages' || node.type === 'group-partitions') &&
-              node.objectCount != null
-            "
-            class="text-muted-foreground text-[10px] shrink-0"
-            >{{ node.objectCount }}</span
-          >
-          <Badge v-if="isNodeDefaultDatabase" variant="secondary" class="h-4 px-1.5 text-[10px]">
-            {{ t("editor.defaultDatabase") }}
-          </Badge>
-          <span v-if="columnComment" class="sidebar-object-comment ml-auto max-w-[20%] shrink-0 truncate text-right" :class="{ 'sidebar-object-comment--windows': useWindowsSidebarCommentFont }">{{ columnComment }}</span>
-          <span v-if="tableComment" class="sidebar-object-comment ml-auto max-w-[20%] shrink-0 truncate text-right" :class="{ 'sidebar-object-comment--windows': useWindowsSidebarCommentFont }">{{ tableComment }}</span>
-          <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
-          <span v-if="showsDatabaseOpenIndicator" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
-          <Badge v-if="isConnectionReadonly" variant="secondary" class="h-4 px-1.5 text-[10px] gap-0.5"><Lock class="w-2.5 h-2.5" />{{ t("connection.readOnlyBadge") }}</Badge>
-          <ConnectionErrorIndicator v-if="node.type === 'connection'" :connection-id="node.connectionId" trigger-class="h-4 w-4" />
-          <Pin v-if="isPinned" class="w-3 h-3 shrink-0 text-primary fill-current" aria-hidden="true" />
-          <button
-            v-if="isConnecting"
-            type="button"
-            class="ml-auto flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-secondary/45 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            :aria-label="t('connection.cancelConnecting')"
-            :title="t('connection.cancelConnecting')"
-            @mousedown.stop
-            @click.stop="cancelConnectionAttempt"
-          >
-            <X class="h-3 w-3" />
-          </button>
-          <button
-            v-if="node.type === 'connection'"
-            type="button"
-            class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground/55 opacity-0 transition-colors transition-opacity hover:bg-secondary/45 hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover/sidebar-row:opacity-100"
-            :class="[{ 'opacity-100': isConnectionSelectionChecked || connectionStore.connectionMultiSelectActive }, isConnecting ? '' : 'ml-auto']"
-            :aria-label="isConnectionSelectionChecked ? t('connectionGroup.deselectConnection') : t('connectionGroup.selectConnection')"
-            @mousedown.stop
-            @click="toggleConnectionMultiSelection"
-          >
-            <Check v-if="isConnectionSelectionChecked" class="h-3 w-3 text-primary" />
-            <Square v-else class="h-3 w-3 stroke-[1.7]" />
-          </button>
-        </div>
-        <template v-if="detailTooltip" #content>
-          <div class="w-max min-w-40 max-w-[min(28rem,calc(100vw-24px))] rounded-md border border-border bg-popover p-2 text-popover-foreground shadow-lg">
-            <div class="space-y-1">
-              <div v-for="row in detailTooltip.rows" :key="row.label" class="grid grid-cols-[max-content_minmax(0,1fr)] gap-2 text-xs leading-5">
-                <span class="text-muted-foreground">{{ row.label }}</span>
-                <span v-if="row.multiline" class="max-h-20 overflow-hidden whitespace-pre-wrap break-words text-foreground/90">
-                  {{ row.value }}
-                </span>
-                <span v-else class="truncate font-mono text-foreground/90" :title="row.value">{{ row.value }}</span>
-              </div>
+        <Badge v-if="isNodeDefaultDatabase" variant="secondary" class="h-4 px-1.5 text-[10px]">
+          {{ t("editor.defaultDatabase") }}
+        </Badge>
+        <span v-if="columnComment" class="sidebar-object-comment ml-auto max-w-[20%] shrink-0 truncate text-right" :class="{ 'sidebar-object-comment--windows': useWindowsSidebarCommentFont }">{{ columnComment }}</span>
+        <span v-if="tableComment" class="sidebar-object-comment ml-auto max-w-[20%] shrink-0 truncate text-right" :class="{ 'sidebar-object-comment--windows': useWindowsSidebarCommentFont }">{{ tableComment }}</span>
+        <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
+        <span v-if="showsDatabaseOpenIndicator" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
+        <Badge v-if="isConnectionReadonly" variant="secondary" class="h-4 px-1.5 text-[10px] gap-0.5"><Lock class="w-2.5 h-2.5" />{{ t("connection.readOnlyBadge") }}</Badge>
+        <ConnectionErrorIndicator v-if="node.type === 'connection'" :connection-id="node.connectionId" trigger-class="h-4 w-4" />
+        <Pin v-if="isPinned" class="w-3 h-3 shrink-0 text-primary fill-current" aria-hidden="true" />
+        <button
+          v-if="isConnecting"
+          type="button"
+          class="ml-auto flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-secondary/45 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          :aria-label="t('connection.cancelConnecting')"
+          :title="t('connection.cancelConnecting')"
+          @mousedown.stop
+          @click.stop="cancelConnectionAttempt"
+        >
+          <X class="h-3 w-3" />
+        </button>
+        <button
+          v-if="node.type === 'connection'"
+          type="button"
+          class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground/55 opacity-0 transition-colors transition-opacity hover:bg-secondary/45 hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover/sidebar-row:opacity-100"
+          :class="[{ 'opacity-100': isConnectionSelectionChecked || connectionStore.connectionMultiSelectActive }, isConnecting ? '' : 'ml-auto']"
+          :aria-label="isConnectionSelectionChecked ? t('connectionGroup.deselectConnection') : t('connectionGroup.selectConnection')"
+          @mousedown.stop
+          @click="toggleConnectionMultiSelection"
+        >
+          <Check v-if="isConnectionSelectionChecked" class="h-3 w-3 text-primary" />
+          <Square v-else class="h-3 w-3 stroke-[1.7]" />
+        </button>
+      </div>
+      <template v-if="detailTooltip" #content>
+        <div class="w-max min-w-40 max-w-[min(28rem,calc(100vw-24px))] rounded-md border border-border bg-popover p-2 text-popover-foreground shadow-lg">
+          <div class="space-y-1">
+            <div v-for="row in detailTooltip.rows" :key="row.label" class="grid grid-cols-[max-content_minmax(0,1fr)] gap-2 text-xs leading-5">
+              <span class="text-muted-foreground">{{ row.label }}</span>
+              <span v-if="row.multiline" class="max-h-20 overflow-hidden whitespace-pre-wrap break-words text-foreground/90">
+                {{ row.value }}
+              </span>
+              <span v-else class="truncate font-mono text-foreground/90" :title="row.value">{{ row.value }}</span>
             </div>
           </div>
-        </template>
-      </LightTooltip>
-    </div>
-  </CustomContextMenu>
-
-  <VisibleDatabasesDialog v-if="node.type === 'connection' && node.connectionId" v-model:open="showVisibleDatabasesDialog" :connection-id="node.connectionId" :connection-name="node.label" />
-
-  <SchemaFilterDialog v-if="node.type === 'database' && node.connectionId && node.database != null" v-model:open="showVisibleSchemasDialog" :connection-id="node.connectionId" :connection-name="node.label" :database="node.database ?? ''" />
-
-  <SchemaFilterDialog v-else-if="node.type === 'connection' && node.connectionId && canConfigureVisibleSchemas" v-model:open="showVisibleSchemasDialog" :connection-id="node.connectionId" :connection-name="node.label" :database="connectionStore.getConfig(node.connectionId)?.database || ''" />
-
-  <Dialog v-model:open="showDeleteConfirm">
-    <DialogContent class="sm:max-w-[400px]">
-      <DialogHeader>
-        <DialogTitle>{{ t("contextMenu.confirmDeleteTitle") }}</DialogTitle>
-      </DialogHeader>
-      <p class="text-sm text-muted-foreground">
-        {{ connectionDeleteConfirmMessage() }}
-      </p>
-      <DialogFooter>
-        <Button variant="outline" @click="showDeleteConfirm = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button
-          variant="destructive"
-          @click="
-            showDeleteConfirm = false;
-            confirmDelete();
-          "
-          >{{ connectionDeleteMenuLabel() }}</Button
-        >
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
-
-  <Dialog v-model:open="showMoveToNewGroupDialog">
-    <DialogContent class="sm:max-w-[360px]">
-      <DialogHeader>
-        <DialogTitle>{{ t("connectionGroup.createGroup") }}</DialogTitle>
-      </DialogHeader>
-      <Input v-model="moveToNewGroupName" :placeholder="t('connectionGroup.groupNamePlaceholder')" @keydown.enter.prevent="confirmMoveToNewGroup" />
-      <DialogFooter>
-        <Button variant="outline" @click="showMoveToNewGroupDialog = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button :disabled="!moveToNewGroupName.trim()" @click="confirmMoveToNewGroup">{{ t("connectionGroup.createGroup") }}</Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
-
-  <Dialog v-model:open="showDeleteGroupConfirm">
-    <DialogContent class="sm:max-w-[400px]">
-      <DialogHeader>
-        <DialogTitle>{{ t("connectionGroup.deleteGroupConfirmTitle") }}</DialogTitle>
-      </DialogHeader>
-      <p class="text-sm text-muted-foreground">
-        {{ t("connectionGroup.deleteGroupConfirmMessage", { name: node.label }) }}
-      </p>
-      <DialogFooter>
-        <Button variant="outline" @click="showDeleteGroupConfirm = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button variant="destructive" @click="confirmDeleteGroup">{{ t("connectionGroup.deleteGroup") }}</Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
-
-  <Dialog v-model:open="showRenameObjectDialog">
-    <DialogContent class="sm:max-w-[420px]">
-      <DialogHeader>
-        <DialogTitle>{{ t("contextMenu.renameObjectTitle") }}</DialogTitle>
-      </DialogHeader>
-      <div class="grid gap-3">
-        <Input v-model="renameObjectName" :placeholder="t('contextMenu.renameObjectNamePlaceholder')" @keydown.enter.prevent="confirmRenameObject" />
-        <pre v-if="renameObjectPreviewSql" class="max-h-32 overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap" v-html="highlight(renameObjectPreviewSql)"></pre>
-        <p v-if="renameObjectError" class="text-sm text-destructive">{{ renameObjectError }}</p>
-      </div>
-      <DialogFooter>
-        <Button variant="outline" @click="showRenameObjectDialog = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button :disabled="!renameObjectName.trim() || renameObjectName.trim() === node.label" @click="confirmRenameObject">
-          {{ t("contextMenu.renameObject") }}
-        </Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
-
-  <Dialog v-model:open="showStructurePreviewDialog">
-    <DialogContent class="sm:max-w-[760px]">
-      <DialogHeader>
-        <DialogTitle>{{ structurePreviewTitle || t("contextMenu.exportStructure") }}</DialogTitle>
-      </DialogHeader>
-      <div class="grid gap-3">
-        <div v-if="isLoadingStructurePreview" class="flex items-center gap-2 text-sm text-muted-foreground">
-          <Loader2 class="h-4 w-4 animate-spin" />
-          <span>{{ t("contextMenu.exportStructureLoading") }}</span>
         </div>
-        <p v-else-if="structurePreviewError" class="text-sm text-destructive">{{ structurePreviewError }}</p>
-        <pre v-else class="max-h-[56vh] min-h-64 overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap" v-html="highlight(structurePreviewSql)"></pre>
-      </div>
-      <DialogFooter>
-        <Button variant="outline" @click="showStructurePreviewDialog = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button variant="outline" :disabled="isLoadingStructurePreview || !structurePreviewSql" @click="copyStructurePreview">
-          <Clipboard class="h-4 w-4" />
-          {{ t("contextMenu.copyStructure") }}
-        </Button>
-        <Button :disabled="isLoadingStructurePreview || !structurePreviewSql" @click="saveStructurePreview">
-          <Upload class="h-4 w-4" />
-          {{ t("contextMenu.saveStructure") }}
-        </Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
-
-  <Dialog v-model:open="showStructureDocCopyDialog">
-    <DialogContent class="sm:max-w-[760px]">
-      <DialogHeader>
-        <DialogTitle>{{ structureDocCopyTitle || t("contextMenu.copyStructureAs") }}</DialogTitle>
-      </DialogHeader>
-      <div class="grid gap-3">
-        <p class="text-sm text-muted-foreground">{{ t("contextMenu.structureDocCopyFallbackHint") }}</p>
-        <textarea readonly class="max-h-[56vh] min-h-64 resize-y overflow-auto rounded bg-muted p-3 font-mono text-xs whitespace-pre" :value="structureDocCopyText" @focus="selectTextareaContent"></textarea>
-      </div>
-      <DialogFooter>
-        <Button variant="outline" @click="showStructureDocCopyDialog = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button :disabled="!structureDocCopyText" @click="copyStructureDocText">
-          <Clipboard class="h-4 w-4" />
-          {{ t("contextMenu.copyStructure") }}
-        </Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
-
-  <DangerConfirmDialog v-model:open="showDropTableConfirm" :title="t('contextMenu.confirmDropTableTitle')" :message="t('contextMenu.confirmDropTableMessage', { name: node.label })" :sql="dropTablePreviewSql" :confirm-label="t('contextMenu.dropTable')" @confirm="confirmDropTable">
-    <template v-if="canDropTableCascade" #options>
-      <label class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
-        <input v-model="dropTableCascade" type="checkbox" class="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary" @change="refreshDropTablePreviewSql()" />
-        <span class="grid gap-0.5">
-          <span class="font-medium text-foreground">{{ t("contextMenu.dropTableCascade") }}</span>
-          <span class="text-xs leading-5 text-muted-foreground">{{ t("contextMenu.dropTableCascadeHint") }}</span>
-        </span>
-      </label>
-    </template>
-  </DangerConfirmDialog>
-
-  <DangerConfirmDialog v-model:open="showEmptyTableConfirm" :title="t('contextMenu.confirmEmptyTableTitle')" :message="t('contextMenu.confirmEmptyTableMessage', { name: node.label })" :sql="emptyTablePreviewSql" :confirm-label="t('contextMenu.emptyTable')" @confirm="confirmEmptyTable" />
-
-  <DangerConfirmDialog v-model:open="showBatchEmptyConfirm" :title="batchEmptyConfirmTitle()" :message="batchEmptyConfirmMessage()" :sql="batchEmptyPreviewSql" :confirm-label="batchEmptyConfirmLabel()" @confirm="confirmBatchEmpty" />
-
-  <DangerConfirmDialog
-    v-model:open="showTruncateTableConfirm"
-    :title="t('contextMenu.confirmTruncateTableTitle')"
-    :message="t('contextMenu.confirmTruncateTableMessage', { name: node.label })"
-    :sql="truncateTablePreviewSql"
-    :confirm-label="t('contextMenu.truncateTable')"
-    @confirm="confirmTruncateTable"
-  >
-    <template v-if="canTruncateTableCascade" #options>
-      <label class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
-        <input v-model="truncateTableCascade" type="checkbox" class="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary" @change="refreshTruncateTablePreviewSql()" />
-        <span class="grid gap-0.5">
-          <span class="font-medium text-foreground">{{ t("contextMenu.truncateTableCascade") }}</span>
-          <span class="text-xs leading-5 text-muted-foreground">{{ t("contextMenu.truncateTableCascadeHint") }}</span>
-        </span>
-      </label>
-    </template>
-  </DangerConfirmDialog>
-
-  <DangerConfirmDialog v-model:open="showDropObjectConfirm" :title="dropObjectConfirmTitle()" :message="dropObjectConfirmMessage()" :sql="dropObjectPreviewSql" :confirm-label="dropObjectMenuLabel()" @confirm="confirmDropObject" />
-
-  <DangerConfirmDialog v-model:open="showDropTableChildObjectConfirm" :title="dropTableChildObjectConfirmTitle()" :message="dropTableChildObjectConfirmMessage()" :sql="dropTableChildObjectPreviewSql" :confirm-label="dropTableChildObjectMenuLabel()" @confirm="confirmDropTableChildObject" />
-
-  <DangerConfirmDialog v-model:open="showBatchDropConfirm" :title="batchDropConfirmTitle()" :message="batchDropConfirmMessage()" :sql="batchDropPreviewSql" :confirm-label="batchDropMenuLabel()" @confirm="confirmBatchDrop">
-    <template v-if="canBatchDropCascade" #options>
-      <label class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
-        <input v-model="batchDropCascade" type="checkbox" class="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary" @change="refreshBatchDropPreviewSql()" />
-        <span class="grid gap-0.5">
-          <span class="font-medium text-foreground">{{ t("contextMenu.dropTableCascade") }}</span>
-          <span class="text-xs leading-5 text-muted-foreground">{{ t("contextMenu.dropTableCascadeHint") }}</span>
-        </span>
-      </label>
-    </template>
-  </DangerConfirmDialog>
-
-  <DangerConfirmDialog v-model:open="showBatchTruncateConfirm" :title="batchTruncateConfirmTitle()" :message="batchTruncateConfirmMessage()" :sql="batchTruncatePreviewSql" :confirm-label="batchTruncateMenuLabel()" @confirm="confirmBatchTruncate">
-    <template v-if="canBatchTruncateCascade" #options>
-      <label class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
-        <input v-model="batchTruncateCascade" type="checkbox" class="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary" @change="refreshBatchTruncatePreviewSql()" />
-        <span class="grid gap-0.5">
-          <span class="font-medium text-foreground">{{ t("contextMenu.truncateTableCascade") }}</span>
-          <span class="text-xs leading-5 text-muted-foreground">{{ t("contextMenu.truncateTableCascadeHint") }}</span>
-        </span>
-      </label>
-    </template>
-  </DangerConfirmDialog>
-
-  <ProcedureExecutionDialog
-    v-if="node.type === 'procedure' && node.connectionId && node.database"
-    v-model:open="showProcedureExecutionConfirm"
-    :connection-id="node.connectionId"
-    :database="node.database"
-    :database-type="currentDatabaseType()"
-    :schema="node.schema"
-    :routine-name="node.label"
-    @open-sql="openProcedureExecutionSql"
-    @execute="executeProcedureSql"
-  />
-
-  <Dialog v-model:open="showDuplicateDialog">
-    <DialogContent class="sm:max-w-[400px]">
-      <DialogHeader>
-        <DialogTitle>{{ t("contextMenu.duplicateNameTitle") }}</DialogTitle>
-      </DialogHeader>
-      <Input v-model="duplicateTableName" :placeholder="t('contextMenu.duplicateNamePlaceholder')" @keydown.enter.prevent="confirmDuplicateStructure" />
-      <DialogFooter>
-        <Button variant="outline" @click="showDuplicateDialog = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button :disabled="!duplicateTableName.trim()" @click="confirmDuplicateStructure">{{ t("dangerDialog.confirm") }}</Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
-
-  <Dialog v-model:open="showPasteDialog">
-    <DialogContent class="sm:max-w-[500px]">
-      <DialogHeader>
-        <DialogTitle>{{ pasteTableEntries.length > 1 ? t("contextMenu.batchPasteTitle") : t("contextMenu.pasteTableConfirmTitle") }}</DialogTitle>
-      </DialogHeader>
-      <div class="space-y-4">
-        <div class="flex gap-2">
-          <label class="flex items-center gap-1.5 text-sm cursor-pointer" :class="{ 'opacity-50 cursor-not-allowed': !pasteTableDataCopySupported }">
-            <input v-model="pasteTableMode" type="radio" value="structure-and-data" class="accent-primary" :disabled="!pasteTableDataCopySupported" />
-            {{ t("contextMenu.pasteOptionStructureAndData") }}
-          </label>
-          <label class="flex items-center gap-1.5 text-sm cursor-pointer">
-            <input v-model="pasteTableMode" type="radio" value="structure-only" class="accent-primary" />
-            {{ t("contextMenu.pasteOptionStructureOnly") }}
-          </label>
-          <label class="flex items-center gap-1.5 text-sm cursor-pointer" :class="{ 'opacity-50 cursor-not-allowed': !pasteTableDataCopySupported }">
-            <input v-model="pasteTableMode" type="radio" value="data-only" class="accent-primary" :disabled="!pasteTableDataCopySupported" />
-            {{ t("contextMenu.pasteOptionDataOnly") }}
-          </label>
-        </div>
-        <div class="space-y-2 max-h-64 overflow-y-auto">
-          <div v-for="(entry, idx) in pasteTableEntries" :key="idx" class="flex items-center gap-2">
-            <span class="text-sm text-muted-foreground truncate min-w-0 flex-shrink basis-1/3" :title="entry.sourceName">{{ entry.sourceName }}</span>
-            <span class="text-xs text-muted-foreground flex-shrink-0">&rarr;</span>
-            <Input v-model="entry.targetName" class="flex-1 h-8 text-sm" :placeholder="t('contextMenu.duplicateNamePlaceholder')" />
-          </div>
-        </div>
-      </div>
-      <DialogFooter>
-        <Button variant="outline" @click="showPasteDialog = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button :disabled="pasteTableEntries.every((e) => !e.targetName.trim())" @click="confirmPasteTable">{{ t("dangerDialog.confirm") }}</Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
-
-  <Dialog v-model:open="showCreateDatabaseDialog">
-    <DialogContent class="sm:max-w-[400px]">
-      <DialogHeader>
-        <DialogTitle>{{ t("contextMenu.createDatabase") }}</DialogTitle>
-      </DialogHeader>
-      <Input v-model="createDatabaseName" :placeholder="t('contextMenu.createDatabaseNamePlaceholder')" @keydown.enter.prevent="confirmCreateDatabase" />
-      <div v-if="canSetCreateDatabaseCharset" class="grid gap-2">
-        <div class="grid gap-1.5">
-          <label class="text-xs font-medium text-muted-foreground">{{ t("contextMenu.createDatabaseCharset") }}</label>
-          <SearchableSelect
-            :model-value="createDatabaseCharset"
-            :options="createDatabaseCharsetOptions"
-            :placeholder="t('contextMenu.createDatabaseCharsetPlaceholder')"
-            :search-placeholder="t('contextMenu.createDatabaseCharsetSearchPlaceholder')"
-            :empty-text="t('contextMenu.createDatabaseCharsetEmpty')"
-            :loading-text="t('contextMenu.createDatabaseCharsetLoading')"
-            :loading="createDatabaseCharsetLoading"
-            :normalize-custom="normalizeCreateDatabaseCharset"
-            allow-custom
-            trigger-variant="outline"
-            trigger-class="h-9 w-full max-w-none justify-between border bg-background px-3 text-sm shadow-xs hover:bg-accent"
-            content-class="w-[var(--reka-popover-trigger-width)]"
-            @update:model-value="updateCreateDatabaseCharset"
-          >
-            <template #custom-option-label="{ value }">
-              <span class="truncate">{{ t("contextMenu.createDatabaseCharsetCustomOption", { value }) }}</span>
-            </template>
-          </SearchableSelect>
-        </div>
-        <div class="grid gap-1.5">
-          <label class="text-xs font-medium text-muted-foreground">{{ t("contextMenu.createDatabaseCollation") }}</label>
-          <SearchableSelect
-            v-model="createDatabaseCollation"
-            :options="createDatabaseCollationOptionsForCharset(createDatabaseCharset, createDatabaseCollationsByCharset)"
-            :placeholder="t('contextMenu.createDatabaseCollationPlaceholder')"
-            :search-placeholder="t('contextMenu.createDatabaseCollationSearchPlaceholder')"
-            :empty-text="t('contextMenu.createDatabaseCollationEmpty')"
-            :loading-text="t('contextMenu.createDatabaseCollationLoading')"
-            :loading="createDatabaseCharsetLoading"
-            :normalize-custom="normalizeCreateDatabaseCharset"
-            allow-custom
-            trigger-variant="outline"
-            trigger-class="h-9 w-full max-w-none justify-between border bg-background px-3 text-sm shadow-xs hover:bg-accent"
-            content-class="w-[var(--reka-popover-trigger-width)]"
-          >
-            <template #custom-option-label="{ value }">
-              <span class="truncate">{{ t("contextMenu.createDatabaseCollationCustomOption", { value }) }}</span>
-            </template>
-          </SearchableSelect>
-        </div>
-      </div>
-      <DialogFooter>
-        <Button variant="outline" @click="showCreateDatabaseDialog = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button :disabled="!createDatabaseName.trim()" @click="confirmCreateDatabase">{{ t("dangerDialog.confirm") }}</Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
-
-  <Dialog v-model:open="showEditDatabasePropertiesDialog">
-    <DialogContent class="sm:max-w-[460px]">
-      <DialogHeader>
-        <DialogTitle>{{ t("contextMenu.editDatabasePropertiesTitle", { name: node.label }) }}</DialogTitle>
-      </DialogHeader>
-      <div class="grid gap-3">
-        <div v-if="canEditDatabaseCharsetCollation" class="grid gap-3">
-          <div class="grid gap-1.5">
-            <label class="text-xs font-medium text-muted-foreground">{{ t("contextMenu.createDatabaseCharset") }}</label>
-            <SearchableSelect
-              :model-value="editDatabaseCharset"
-              :options="createDatabaseCharsetOptions"
-              :placeholder="t('contextMenu.createDatabaseCharsetPlaceholder')"
-              :search-placeholder="t('contextMenu.createDatabaseCharsetSearchPlaceholder')"
-              :empty-text="t('contextMenu.createDatabaseCharsetEmpty')"
-              :loading-text="t('contextMenu.createDatabaseCharsetLoading')"
-              :loading="createDatabaseCharsetLoading"
-              :normalize-custom="normalizeCreateDatabaseCharset"
-              allow-custom
-              trigger-variant="outline"
-              trigger-class="h-9 w-full max-w-none justify-between border bg-background px-3 text-sm shadow-xs hover:bg-accent"
-              content-class="w-[var(--reka-popover-trigger-width)]"
-              @update:model-value="updateEditDatabaseCharset"
-            >
-              <template #custom-option-label="{ value }">
-                <span class="truncate">{{ t("contextMenu.createDatabaseCharsetCustomOption", { value }) }}</span>
-              </template>
-            </SearchableSelect>
-          </div>
-          <div class="grid gap-1.5">
-            <label class="text-xs font-medium text-muted-foreground">{{ t("contextMenu.createDatabaseCollation") }}</label>
-            <SearchableSelect
-              v-model="editDatabaseCollation"
-              :options="createDatabaseCollationOptionsForCharset(editDatabaseCharset, createDatabaseCollationsByCharset)"
-              :placeholder="t('contextMenu.createDatabaseCollationPlaceholder')"
-              :search-placeholder="t('contextMenu.createDatabaseCollationSearchPlaceholder')"
-              :empty-text="t('contextMenu.createDatabaseCollationEmpty')"
-              :loading-text="t('contextMenu.createDatabaseCollationLoading')"
-              :loading="createDatabaseCharsetLoading"
-              :normalize-custom="normalizeCreateDatabaseCharset"
-              allow-custom
-              trigger-variant="outline"
-              trigger-class="h-9 w-full max-w-none justify-between border bg-background px-3 text-sm shadow-xs hover:bg-accent"
-              content-class="w-[var(--reka-popover-trigger-width)]"
-            >
-              <template #custom-option-label="{ value }">
-                <span class="truncate">{{ t("contextMenu.createDatabaseCollationCustomOption", { value }) }}</span>
-              </template>
-            </SearchableSelect>
-          </div>
-        </div>
-        <div v-if="canEditDatabaseComment" class="grid gap-1.5">
-          <label class="text-xs font-medium text-muted-foreground">{{ t("contextMenu.editDatabaseComment") }}</label>
-          <textarea
-            v-model="editDatabaseCommentText"
-            class="min-h-28 w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm outline-none transition-colors focus:border-ring focus:ring-1 focus:ring-ring/40"
-            :placeholder="t('contextMenu.editDatabaseCommentPlaceholder')"
-            :disabled="editDatabasePropertiesLoading"
-            @keydown.meta.enter.prevent="confirmEditDatabaseProperties"
-            @keydown.ctrl.enter.prevent="confirmEditDatabaseProperties"
-          ></textarea>
-        </div>
-        <pre v-if="editDatabasePropertiesPreviewSql" class="max-h-32 overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap" v-html="highlight(editDatabasePropertiesPreviewSql)"></pre>
-      </div>
-      <DialogFooter>
-        <Button variant="outline" :disabled="editDatabasePropertiesLoading" @click="showEditDatabasePropertiesDialog = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button :disabled="editDatabasePropertiesLoading" @click="confirmEditDatabaseProperties">
-          {{ editDatabasePropertiesLoading ? t("contextMenu.editDatabasePropertiesSaving") : t("dangerDialog.confirm") }}
-        </Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
-
-  <Dialog v-model:open="showCreateNacosNamespaceDialog">
-    <DialogContent class="sm:max-w-[420px]">
-      <DialogHeader>
-        <DialogTitle>{{ t("nacos.createNamespace") }}</DialogTitle>
-      </DialogHeader>
-      <div class="grid gap-3">
-        <div class="grid gap-1.5">
-          <label class="text-xs font-medium text-muted-foreground">{{ t("nacos.namespaceId") }}</label>
-          <Input v-model="createNacosNamespaceId" :placeholder="t('nacos.namespaceIdPlaceholder')" @keydown.enter.prevent="confirmCreateNacosNamespace" />
-        </div>
-        <div class="grid gap-1.5">
-          <label class="text-xs font-medium text-muted-foreground">{{ t("nacos.namespaceName") }}</label>
-          <Input v-model="createNacosNamespaceName" :placeholder="t('nacos.namespaceNamePlaceholder')" @keydown.enter.prevent="confirmCreateNacosNamespace" />
-        </div>
-        <div class="grid gap-1.5">
-          <label class="text-xs font-medium text-muted-foreground">{{ t("nacos.namespaceDesc") }}</label>
-          <Input v-model="createNacosNamespaceDesc" :placeholder="t('nacos.namespaceDescPlaceholder')" @keydown.enter.prevent="confirmCreateNacosNamespace" />
-        </div>
-      </div>
-      <DialogFooter>
-        <Button variant="outline" :disabled="createNacosNamespaceLoading" @click="showCreateNacosNamespaceDialog = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button :disabled="!createNacosNamespaceName.trim() || createNacosNamespaceLoading" @click="confirmCreateNacosNamespace">
-          {{ createNacosNamespaceLoading ? t("nacos.creatingNamespace") : t("dangerDialog.confirm") }}
-        </Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
-
-  <Dialog v-model:open="showEditNacosNamespaceDialog">
-    <DialogContent class="sm:max-w-[420px]">
-      <DialogHeader>
-        <DialogTitle>{{ t("nacos.editNamespace") }}</DialogTitle>
-      </DialogHeader>
-      <div class="grid gap-3">
-        <div class="grid gap-1.5">
-          <label class="text-xs font-medium text-muted-foreground">{{ t("nacos.namespaceName") }}</label>
-          <Input v-model="editNacosNamespaceName" :placeholder="t('nacos.namespaceNamePlaceholder')" @keydown.enter.prevent="confirmEditNacosNamespace" />
-        </div>
-        <div class="grid gap-1.5">
-          <label class="text-xs font-medium text-muted-foreground">{{ t("nacos.namespaceDesc") }}</label>
-          <Input v-model="editNacosNamespaceDesc" :placeholder="t('nacos.namespaceDescPlaceholder')" @keydown.enter.prevent="confirmEditNacosNamespace" />
-        </div>
-      </div>
-      <DialogFooter>
-        <Button variant="outline" :disabled="editNacosNamespaceLoading" @click="showEditNacosNamespaceDialog = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button :disabled="!editNacosNamespaceName.trim() || editNacosNamespaceLoading" @click="confirmEditNacosNamespace">
-          {{ editNacosNamespaceLoading ? t("nacos.updatingNamespace") : t("dangerDialog.confirm") }}
-        </Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
-
-  <DangerConfirmDialog
-    v-model:open="showDropDatabaseConfirm"
-    :title="t('contextMenu.confirmDropDatabaseTitle')"
-    :message="t('contextMenu.confirmDropDatabaseMessage', { name: node.label })"
-    :sql="dropDatabasePreviewSql"
-    :confirm-label="t('contextMenu.dropDatabase')"
-    :loading="dropDatabaseLoading"
-    :close-on-confirm="false"
-    @confirm="confirmDropDatabase"
-  />
-
-  <DangerConfirmDialog
-    v-model:open="showDropMongoCollectionConfirm"
-    :title="t('contextMenu.confirmDropCollectionTitle')"
-    :message="t('contextMenu.confirmDropCollectionMessage', { name: node.label })"
-    :confirm-label="t('contextMenu.dropCollection')"
-    :loading="dropMongoCollectionLoading"
-    :close-on-confirm="false"
-    @confirm="confirmDropMongoCollection"
-  />
-
-  <DangerConfirmDialog
-    v-model:open="showDropMongoIndexConfirm"
-    :title="t('contextMenu.confirmDropIndexTitle')"
-    :message="t('contextMenu.confirmDropMongoIndexMessage', { name: mongoIndexNameForNode(node), collection: node.tableName || '' })"
-    :details="mongoIndexDropPreview(node, mongoIndexNameForNode(node))"
-    :confirm-label="t('contextMenu.dropIndex')"
-    :loading="dropMongoIndexLoading"
-    :close-on-confirm="false"
-    @confirm="confirmDropMongoIndex"
-  />
-
-  <DangerConfirmDialog
-    v-model:open="showDropAllMongoIndexesConfirm"
-    :title="t('contextMenu.dropAllIndexes')"
-    :message="t('contextMenu.confirmDropMongoAllIndexesMessage', { name: node.label })"
-    :details-text="t('contextMenu.confirmDropMongoAllIndexesDetails')"
-    :sql="mongoDropAllIndexesPreview(node)"
-    :confirm-label="t('contextMenu.dropAllIndexes')"
-    :loading="dropAllMongoIndexesLoading"
-    :close-on-confirm="false"
-    @confirm="confirmDropAllMongoIndexes"
-  />
-
-  <DangerConfirmDialog v-model:open="showFlushRedisDbConfirm" :title="t('redis.flushDb')" :message="t('redis.flushDbMessage')" :details="t('redis.flushDbDetails', { db: node.database })" :confirm-label="t('redis.flushDbConfirm')" @confirm="confirmFlushRedisDb" />
-
-  <Dialog v-model:open="showCreateSchemaDialog">
-    <DialogContent class="sm:max-w-[400px]">
-      <DialogHeader>
-        <DialogTitle>{{ t("contextMenu.createSchema") }}</DialogTitle>
-      </DialogHeader>
-      <Input v-model="createSchemaName" :placeholder="t('contextMenu.createSchemaNamePlaceholder')" @keydown.enter.prevent="confirmCreateSchema" />
-      <DialogFooter>
-        <Button variant="outline" @click="showCreateSchemaDialog = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button :disabled="!createSchemaName.trim()" @click="confirmCreateSchema">{{ t("dangerDialog.confirm") }}</Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
-
-  <Dialog v-model:open="showEditSchemaCommentDialog">
-    <DialogContent class="sm:max-w-[520px]">
-      <DialogHeader>
-        <DialogTitle>{{ t("contextMenu.editSchemaCommentTitle", { name: node.label }) }}</DialogTitle>
-      </DialogHeader>
-      <div class="grid gap-3">
-        <textarea
-          v-model="schemaCommentText"
-          class="min-h-28 w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm outline-none transition-colors focus:border-ring focus:ring-1 focus:ring-ring/40"
-          :placeholder="t('contextMenu.schemaCommentPlaceholder')"
-          :disabled="schemaCommentLoading"
-          @keydown.meta.enter.prevent="confirmEditSchemaComment"
-          @keydown.ctrl.enter.prevent="confirmEditSchemaComment"
-        ></textarea>
-        <pre v-if="schemaCommentPreviewSql" class="max-h-32 overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap" v-html="highlight(schemaCommentPreviewSql)"></pre>
-      </div>
-      <DialogFooter>
-        <Button variant="outline" :disabled="schemaCommentLoading" @click="showEditSchemaCommentDialog = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button :disabled="schemaCommentLoading" @click="confirmEditSchemaComment">
-          {{ schemaCommentLoading ? t("contextMenu.schemaCommentSaving") : t("dangerDialog.confirm") }}
-        </Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
-
-  <DangerConfirmDialog v-model:open="showDropSchemaConfirm" :title="t('contextMenu.confirmDropSchemaTitle')" :message="t('contextMenu.confirmDropSchemaMessage', { name: node.label })" :sql="dropSchemaPreviewSql" :confirm-label="t('contextMenu.dropSchema')" @confirm="confirmDropSchema" />
-
-  <DdlViewDialog
-    v-if="ddlTarget"
-    :connection-id="ddlTarget.connectionId!"
-    :database="ddlTarget.database!"
-    :schema="ddlTarget.schema"
-    :table-name="ddlTarget.label"
-    :object-type="tableDdlObjectTypeForNode(ddlTarget.type)"
-    :database-type="ddlDatabaseType"
-    :dialect="ddlDialect"
-    :format-dialect="ddlFormatDialect"
-    v-model:open="showDdlDialog"
-  />
-
-  <ObjectSourceDialog
-    v-if="objectSourceTarget && objectSourceType"
-    v-model:open="showObjectSourceDialog"
-    :connection-id="objectSourceTarget.node.connectionId!"
-    :database="objectSourceTarget.node.database!"
-    :schema="objectSourceTarget.node.schema"
-    :name="objectSourceTarget.node.objectName || objectSourceTarget.node.label"
-    :signature="objectSourceTarget.node.signature"
-    :object-type="objectSourceType"
-    :database-type="objectSourceDatabaseType"
-    :dialect="objectSourceDialect"
-    :format-dialect="objectSourceFormatDialect"
-    :initial-editing="objectSourceTarget.initialEditing"
-    @saved="refresh"
-  />
-
-  <InstallExtensionDialog ref="installExtensionDialogRef" :node="node" @close="refresh" />
+      </template>
+    </LightTooltip>
+  </div>
 </template>
 
 <style>

@@ -39,6 +39,7 @@ import { connectionRedactedNameLabel } from "@/lib/connection/connectionPresenta
 import { quickConnectionOpenTarget } from "@/lib/connection/connectionOpenTarget";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { findTreeNodeById, resolveNewQueryTarget, resolveNewQueryInitialSql } from "@/lib/sql/newQueryContext";
+import { sqlObjectNavigationSourceKind, sqlObjectNavigationTableType, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { buildExecutableObjectSourceStatements, executeObjectSourceSave } from "@/lib/table/objectSourceEditor";
 import { resolveExecutableSql, resolveExecutableSqlWithBackend, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 import { uuid } from "@/lib/common/utils";
@@ -77,6 +78,7 @@ import { assessProductionSql } from "@/lib/database/productionSafety";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { buildHistoryAiAnalysisPrompt } from "@/lib/history/historyAiAnalysis";
 import { countAvailableAgentDriverUpdates, type AgentDriverUpdateBadgeState } from "@/lib/connection/agentDriverUpdateBadge";
+import type { DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { apiUrl, webPath } from "@/lib/common/webPath";
 import { APP_FONT_SANS_CSS_VAR, DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
@@ -84,6 +86,7 @@ import { rankSavedSqlHistory } from "@/lib/savedSql/savedSqlHistory";
 import { initSavedSqlEditorPositions } from "@/lib/app/savedSqlEditorPosition";
 import { isSchemaAware, isSingleDatabase, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { detectDatabaseFileType } from "@/lib/database/databaseFileDetection";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -102,6 +105,7 @@ const UpdateDialog = defineAsyncComponent(() => import("@/components/layout/Upda
 const CloseActionPromptDialog = defineAsyncComponent(() => import("@/components/layout/CloseActionPromptDialog.vue"));
 const LoginPage = defineAsyncComponent(() => import("@/components/auth/LoginPage.vue"));
 const QuickOpenDialog = defineAsyncComponent(() => import("@/components/quick-open/QuickOpenDialog.vue"));
+const QueryEditorObjectSourceDialog = defineAsyncComponent(() => import("@/components/objects/ObjectSourceDialog.vue"));
 
 type AiAssistantHandle = {
   triggerAction: (action: AiAction, instruction?: string) => void;
@@ -133,8 +137,10 @@ const settingsPageTabOpen = ref(false);
 const settingsInitialTab = ref("appearance");
 const settingsInitialSection = ref<string | undefined>(undefined);
 const showQueryEditorDdlDialog = ref(false);
+const showQueryEditorObjectSourceDialog = ref(false);
 const driverStoreTabOpen = ref(false);
 const driverStoreActive = ref(false);
+const driverStoreActiveTab = ref<"agent" | "jdbc" | "storage" | "runtime">("agent");
 const settingsReturnSurface = ref<"query" | "driverStore" | "welcome">("welcome");
 const showDriverStore = computed(() => driverStoreTabOpen.value && driverStoreActive.value);
 const showSettingsPage = computed(() => settingsPageTabOpen.value && settingsStore.settingsPageActive);
@@ -156,7 +162,8 @@ const cursorPos = ref(0);
 const formatSqlRequest = ref<{ id: number; tabId: string } | null>(null);
 const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
 const newQueryContextSource = ref<"tab" | "sidebar">("tab");
-const queryEditorDdlTarget = ref<{ connectionId: string; database: string; schema?: string; tableName: string } | null>(null);
+const queryEditorDdlTarget = ref<{ connectionId: string; database: string; schema?: string; tableName: string; objectType?: ObjectSourceKind } | null>(null);
+const queryEditorObjectSourceTarget = ref<{ connectionId: string; database: string; schema?: string; name: string; objectType: ObjectSourceKind; initialEditing: boolean } | null>(null);
 const showSaveSqlDialog = ref(false);
 const saveSqlName = ref("");
 const saveSqlFolderId = ref("");
@@ -316,7 +323,18 @@ function closeSettingsPage() {
   driverStoreActive.value = false;
 }
 
-function openDriverStorePage() {
+const driverStoreFocus = ref<DriverStoreFocus | null>(null);
+
+function openDriverStorePage(target?: "agent" | "jdbc" | "storage" | "runtime" | DriverStoreFocus | null) {
+  if (typeof target === "string") {
+    driverStoreActiveTab.value = target;
+    driverStoreFocus.value = null;
+  } else if (target && target.target === "tab") {
+    driverStoreActiveTab.value = target.tab;
+    driverStoreFocus.value = null;
+  } else {
+    driverStoreFocus.value = target ?? null;
+  }
   driverStoreTabOpen.value = true;
   driverStoreActive.value = true;
   settingsStore.settingsPageActive = false;
@@ -325,6 +343,8 @@ function openDriverStorePage() {
 function closeDriverStorePage() {
   driverStoreTabOpen.value = false;
   driverStoreActive.value = false;
+  driverStoreActiveTab.value = "agent";
+  driverStoreFocus.value = null;
 }
 const toolbarAgentDriverUpdateCount = computed(() => (updateNotificationsEnabled.value ? agentDriverUpdateCount.value : 0));
 const toolbarHasUpdateAvailable = computed(() => updateNotificationsEnabled.value && hasUpdateAvailable.value);
@@ -336,6 +356,12 @@ const queryEditorDdlDatabaseType = computed(() => {
 const queryEditorDdlDialect = computed(() => {
   return codeMirrorSqlDialect(queryEditorDdlDatabaseType.value);
 });
+const queryEditorObjectSourceDatabaseType = computed(() => {
+  if (!queryEditorObjectSourceTarget.value?.connectionId) return undefined;
+  return effectiveDatabaseTypeForConnection(connectionStore.getConfig(queryEditorObjectSourceTarget.value.connectionId));
+});
+const queryEditorObjectSourceDialect = computed(() => codeMirrorSqlDialect(queryEditorObjectSourceDatabaseType.value));
+const queryEditorObjectSourceFormatDialect = computed(() => sqlFormatDialectForDbType(queryEditorObjectSourceDatabaseType.value));
 const connectionStats = computed(() => ({
   total: connectionStore.connections.length,
   connected: connectionStore.connectedIds.size,
@@ -1184,12 +1210,24 @@ async function openSavedSqlFromWelcome(fileId: string) {
   toast(t("welcome.fileOpened", { name: file.name }), 2000);
 }
 
-function tableTargetFromActiveTab(tableName: string) {
+function tableTargetFromActiveTab(table: string | SqlObjectNavigationTarget) {
   const tab = activeTab.value;
   if (!tab) return null;
   const connectionId = tab.connectionId;
+  if (typeof table !== "string") {
+    // Structured targets already separate qualifiers; reparsing would corrupt quoted object names that contain dots.
+    return {
+      connectionId,
+      database: table.database || tab.database,
+      schema: table.schema || tab.schema,
+      tableName: table.name,
+      tableType: table.type ? sqlObjectNavigationTableType(table) : undefined,
+    };
+  }
+
   let database = tab.database;
   let schema = tab.schema;
+  const tableName = table;
 
   const parts = tableName.split(".").filter(Boolean);
   const rawTableName = parts[parts.length - 1] || tableName;
@@ -1206,12 +1244,19 @@ function tableTargetFromActiveTab(tableName: string) {
     }
   }
 
-  return { connectionId, database, schema, tableName: rawTableName };
+  return { connectionId, database, schema, tableName: rawTableName, tableType: undefined };
 }
 
-async function onClickTable(tableName: string) {
-  const target = tableTargetFromActiveTab(tableName);
+async function onClickTable(table: SqlObjectNavigationTarget) {
+  const target = tableTargetFromActiveTab(table);
   if (!target) return;
+  const objectType = sqlObjectNavigationSourceKind(table);
+  if (objectType) {
+    // Definition navigation for views must not run the view query, which may be expensive or have side effects upstream.
+    queryEditorDdlTarget.value = { ...target, objectType };
+    showQueryEditorDdlDialog.value = true;
+    return;
+  }
   try {
     await openTableTarget(target, { tableInfoTab: "ddl" });
   } catch (e: any) {
@@ -1219,8 +1264,8 @@ async function onClickTable(tableName: string) {
   }
 }
 
-async function onViewTableData(tableName: string) {
-  const target = tableTargetFromActiveTab(tableName);
+async function onViewTableData(table: SqlObjectNavigationTarget) {
+  const target = tableTargetFromActiveTab(table);
   if (!target) return;
   try {
     await openTableTarget(target);
@@ -1229,17 +1274,39 @@ async function onViewTableData(tableName: string) {
   }
 }
 
-function onViewTableDdl(tableName: string) {
-  const target = tableTargetFromActiveTab(tableName);
+function onViewTableDdl(table: SqlObjectNavigationTarget) {
+  const target = tableTargetFromActiveTab(table);
   if (!target) return;
-  queryEditorDdlTarget.value = target;
+  queryEditorDdlTarget.value = { ...target, objectType: sqlObjectNavigationSourceKind(table) };
   showQueryEditorDdlDialog.value = true;
 }
 
-function onEditTableStructure(tableName: string) {
-  const target = tableTargetFromActiveTab(tableName);
-  if (!target) return;
+function onEditTableStructure(table: SqlObjectNavigationTarget) {
+  const target = tableTargetFromActiveTab(table);
+  // Keep view-like objects out of the table editor even if a stale menu dispatches this event.
+  if (!target || sqlObjectNavigationSourceKind(table)) return;
   queryStore.openTableStructure(target.connectionId, target.database, target.schema, target.tableName);
+}
+
+async function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditing: boolean) {
+  const target = tableTargetFromActiveTab(table);
+  const objectType = sqlObjectNavigationSourceKind(table);
+  if (!target || !objectType) return;
+  try {
+    await connectionStore.ensureConnected(target.connectionId);
+    connectionStore.activeConnectionId = target.connectionId;
+    queryEditorObjectSourceTarget.value = { connectionId: target.connectionId, database: target.database, schema: target.schema, name: target.tableName, objectType, initialEditing };
+    showQueryEditorObjectSourceDialog.value = true;
+  } catch (e: any) {
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+  }
+}
+
+function onQueryEditorObjectSourceSaved() {
+  const target = queryEditorObjectSourceTarget.value;
+  if (!target) return;
+  connectionStore.invalidateCompletionCache(target.connectionId, target.database);
+  contentAreaRef.value?.refreshQueryEditorCompletionCache();
 }
 
 async function changeActiveConnection(connectionId: string) {
@@ -1728,8 +1795,8 @@ function handleContextMenu(e: MouseEvent) {
   e.preventDefault();
 }
 
-function openDriverStoreFromEvent() {
-  openDriverStorePage();
+function openDriverStoreFromEvent(event: Event) {
+  openDriverStorePage(((event as CustomEvent).detail as DriverStoreFocus | undefined) ?? null);
 }
 
 function runUpdateNotificationChecks() {
@@ -1898,7 +1965,7 @@ onUnmounted(() => {
                 @discard-all-tab-close="handleDiscardAllPendingTabClose"
                 @cancel-tab-close="cancelPendingAppClose"
               />
-              <DriverStorePage v-if="driverStoreTabOpen" v-show="driverStoreActive" class="flex-1 min-h-0" :update-notifications-enabled="updateNotificationsEnabled" @update-count-change="updateAgentDriverUpdateCount" />
+              <DriverStorePage v-if="driverStoreTabOpen" v-show="driverStoreActive" v-model:active-tab="driverStoreActiveTab" class="flex-1 min-h-0" :update-notifications-enabled="updateNotificationsEnabled" :focus-target="driverStoreFocus" @update-count-change="updateAgentDriverUpdateCount" />
               <EditorSettingsPage
                 v-if="settingsPageTabOpen"
                 v-show="settingsStore.settingsPageActive"
@@ -1981,6 +2048,7 @@ onUnmounted(() => {
                     @view-table-data="onViewTableData"
                     @edit-table-structure="onEditTableStructure"
                     @view-table-ddl="onViewTableDdl"
+                    @open-object-source="onOpenObjectSource"
                     @open-object-table="
                       (target) =>
                         activeTab &&
@@ -2104,7 +2172,7 @@ onUnmounted(() => {
           "
           @open-driver-store="
             setConnectionDialogOpen(false);
-            openDriverStorePage();
+            openDriverStorePage($event);
           "
           @open-tunnel-profile-settings="
             setConnectionDialogOpen(false);
@@ -2184,8 +2252,23 @@ onUnmounted(() => {
         :database="queryEditorDdlTarget.database"
         :schema="queryEditorDdlTarget.schema"
         :table-name="queryEditorDdlTarget.tableName"
+        :object-type="queryEditorDdlTarget.objectType"
         :database-type="queryEditorDdlDatabaseType"
         :dialect="queryEditorDdlDialect"
+      />
+      <QueryEditorObjectSourceDialog
+        v-if="queryEditorObjectSourceTarget"
+        v-model:open="showQueryEditorObjectSourceDialog"
+        :connection-id="queryEditorObjectSourceTarget.connectionId"
+        :database="queryEditorObjectSourceTarget.database"
+        :schema="queryEditorObjectSourceTarget.schema"
+        :name="queryEditorObjectSourceTarget.name"
+        :object-type="queryEditorObjectSourceTarget.objectType"
+        :initial-editing="queryEditorObjectSourceTarget.initialEditing"
+        :database-type="queryEditorObjectSourceDatabaseType"
+        :dialect="queryEditorObjectSourceDialect"
+        :format-dialect="queryEditorObjectSourceFormatDialect"
+        @saved="onQueryEditorObjectSourceSaved"
       />
     </TooltipProvider>
   </div>

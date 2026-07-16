@@ -1,6 +1,8 @@
 use crate::models::connection::DatabaseType;
 
-use super::capabilities::{firebird_rows_clause, table_pagination_strategy, uses_fetch_first, TablePaginationStrategy};
+use super::capabilities::{
+    firebird_rows_clause, table_pagination_strategy, uses_oracle_row_id, TablePaginationStrategy,
+};
 use super::identifiers::{
     normalize_where_input, qualified_table_name, qualified_table_name_with_catalog, quote_table_identifier,
 };
@@ -50,7 +52,7 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
     // Oracle join views can raise ORA-01445 when ROWID is selected; keep the
     // synthetic ROWID fallback scoped to base-table reads.
     let include_oracle_row_id = options.include_row_id
-        && database_type == Some(DatabaseType::Oracle)
+        && uses_oracle_row_id(database_type)
         && !is_view_table_type(options.table_type.as_deref());
 
     let select_columns = if include_oracle_row_id {
@@ -72,8 +74,7 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
     } else {
         rownum_select_columns.clone()
     };
-    let table_alias =
-        if include_oracle_row_id && database_type.is_some_and(uses_fetch_first) { format!("{table} t") } else { table };
+    let table_alias = if include_oracle_row_id { format!("{table} t") } else { table };
 
     match table_pagination_strategy(database_type) {
         TablePaginationStrategy::IrisTop => {

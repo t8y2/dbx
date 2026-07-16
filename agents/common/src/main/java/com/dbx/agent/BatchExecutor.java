@@ -7,6 +7,7 @@ import java.sql.Statement;
 import java.util.Collections;
 import java.util.List;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 public final class BatchExecutor {
     private BatchExecutor() {
@@ -18,9 +19,19 @@ public final class BatchExecutor {
         String schema,
         Function<String, String> setSchemaSql
     ) {
+        return executeBatchStatements(conn, statements, schema, setSchemaSql, () -> "");
+    }
+
+    public static QueryResult executeBatchStatements(
+        Connection conn,
+        List<String> statements,
+        String schema,
+        Function<String, String> setSchemaSql,
+        Supplier<String> resetSchemaSql
+    ) {
         return unchecked(() -> {
             long start = System.currentTimeMillis();
-            applySchema(conn, schema, setSchemaSql);
+            applySchema(conn, schema, setSchemaSql, resetSchemaSql);
             long totalAffected = 0;
             int statementCount = 0;
             try (Statement stmt = conn.createStatement()) {
@@ -78,8 +89,13 @@ public final class BatchExecutor {
         }
     }
 
-    private static void applySchema(Connection conn, String schema, Function<String, String> setSchemaSql) throws Exception {
-        JdbcSchemaSwitcher.apply(conn, schema, setSchemaSql);
+    private static void applySchema(
+        Connection conn,
+        String schema,
+        Function<String, String> setSchemaSql,
+        Supplier<String> resetSchemaSql
+    ) throws Exception {
+        JdbcSchemaSwitcher.apply(conn, schema, setSchemaSql, resetSchemaSql);
     }
 
     private static <T> T unchecked(ThrowingSupplier<T> supplier) {

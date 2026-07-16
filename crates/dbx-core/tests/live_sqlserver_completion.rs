@@ -61,6 +61,7 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         read_only: false,
         is_production: false,
         production_databases: vec![],
+        database_info: None,
     }
 }
 
@@ -93,6 +94,49 @@ async fn live_sqlserver_execute_query_creates_schema() {
     assert_eq!(verify_result.rows.len(), 1);
     assert!(verify_result.rows[0][0].as_i64().is_some(), "schema_id row={:?}", verify_result.rows[0]);
     assert!(schemas.expect("list schemas").contains(&schema));
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQLSERVER_HOST/PORT/USER/PASSWORD pointing at a writable SQL Server database"]
+async fn live_sqlserver_explicit_transaction_batch_can_rollback() {
+    let database = std::env::var("DBX_LIVE_SQLSERVER_DATABASE").unwrap_or_else(|_| "tempdb".to_string());
+    let host = std::env::var("DBX_LIVE_SQLSERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("DBX_LIVE_SQLSERVER_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(1433);
+    let user = std::env::var("DBX_LIVE_SQLSERVER_USER").unwrap_or_else(|_| "sa".to_string());
+    let password = std::env::var("DBX_LIVE_SQLSERVER_PASSWORD").expect("DBX_LIVE_SQLSERVER_PASSWORD");
+    let mut client =
+        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some(&database), None, Duration::from_secs(10))
+            .await
+            .expect("connect SQL Server");
+
+    let table = format!("dbx_txn_{}", uuid::Uuid::new_v4().simple());
+    dbx_core::db::sqlserver::execute_query(
+        &mut client,
+        &format!("CREATE TABLE dbo.[{table}] (id INT PRIMARY KEY, name NVARCHAR(50)); INSERT INTO dbo.[{table}] VALUES (50, N'old');"),
+    )
+    .await
+    .expect("create transaction test table");
+
+    let execution = dbx_core::db::sqlserver::execute_batch(
+        &mut client,
+        &format!("BEGIN TRANSACTION\nUPDATE dbo.[{table}] SET name = N'changed' WHERE id = 50;"),
+    )
+    .await;
+    let transaction_count =
+        dbx_core::db::sqlserver::execute_query(&mut client, "SELECT @@TRANCOUNT AS transaction_count").await;
+    let rollback = dbx_core::db::sqlserver::execute_batch(&mut client, "ROLLBACK TRANSACTION").await;
+    let verify =
+        dbx_core::db::sqlserver::execute_query(&mut client, &format!("SELECT name FROM dbo.[{table}] WHERE id = 50"))
+            .await;
+    let cleanup = dbx_core::db::sqlserver::execute_query(&mut client, &format!("DROP TABLE dbo.[{table}]")).await;
+
+    execution.expect("execute explicit transaction batch without error 266");
+    let transaction_count = transaction_count.expect("read transaction count");
+    assert_eq!(transaction_count.rows, vec![vec![serde_json::json!(1)]]);
+    rollback.expect("rollback explicit transaction");
+    let verify = verify.expect("verify rolled-back value");
+    assert_eq!(verify.rows, vec![vec![serde_json::json!("old")]]);
+    cleanup.expect("drop transaction test table");
 }
 
 #[tokio::test]
@@ -317,6 +361,7 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
         use_agent_cursor: false,
         file_path: file_path.to_string_lossy().to_string(),
         format: "csv".to_string(),
+        include_sql_sheet: false,
         page_size: 1,
         row_limit: None,
         total_rows: None,

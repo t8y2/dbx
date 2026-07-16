@@ -4,11 +4,11 @@ Thanks for taking a look at DBX. Whether you fix a typo, improve docs, or tackle
 
 ## Where to Start
 
-1. Browse [open issues](https://github.com/t8y2/dbx/issues). Good first targets are labeled `documentation`, `good first issue`, or issues in a database you already use.
-2. Comment on the issue you want to work on. Say what you plan to do so others do not duplicate the effort. For community issues, you can also comment `/claim` when that workflow is enabled.
+1. Browse [open issues](https://github.com/t8y2/dbx/issues) and choose one with no assignee or active contributor in its comments. Do not rely only on labels; read the full report, comments, and screenshots.
+2. Comment on the issue you want to work on so others do not duplicate the effort. You can comment `/claim` to claim it.
 3. Fork the repo, create a branch, and open a PR against `main`.
 
-If you are not sure what to pick, documentation and small UX fixes are a solid first contribution. See [examples/](examples/) and the [official docs](https://dbxio.com/en/docs/what-is-dbx) for the current structure.
+If you are not sure what to pick, choose an issue with clear reproduction steps, a small scope, or a database you can verify against a real instance. Follow the [complete website tutorial](https://dbxio.com/en/docs/contributing).
 
 ## Development Setup
 
@@ -50,11 +50,15 @@ cd agents
 ./gradlew test
 ```
 
+Do not manually edit `agents/versions.json` when changing an existing agent; the release workflow automatically bumps changed modules. Only new drivers add an initial version. New Java/JDBC drivers also update `agents/settings.gradle` and the supported-agent table; native drivers register their artifacts through the agent authoring/release checklist.
+
+For a real local Java agent test, build the target `shadowJar`, back up and replace `~/.dbx/agents/drivers/<db_type>/agent.jar`, then restart DBX or reconnect the database. See the [complete website tutorial](https://dbxio.com/en/docs/contributing) for exact commands.
+
 ## Project Layout
 
 | Path | Purpose |
 | --- | --- |
-| `src/` | Vue frontend |
+| `apps/desktop/src/` | Vue frontend |
 | `src-tauri/` | Tauri desktop shell and command layer |
 | `crates/dbx-core/` | Shared Rust database logic |
 | `crates/dbx-web/` | Docker / Web HTTP backend |

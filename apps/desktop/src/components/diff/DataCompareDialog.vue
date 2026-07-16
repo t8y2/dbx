@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
+import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
@@ -913,9 +914,10 @@ watch(
               content-class="w-[var(--reka-popover-trigger-width)]"
             >
               <template #option-label="{ option, label }">
-                <div class="flex items-center gap-2">
-                  <DatabaseIcon :db-type="connectionIconType(option)" class="w-3.5 h-3.5" />
-                  {{ label }}
+                <div class="flex min-w-0 items-center gap-2">
+                  <DatabaseIcon :db-type="connectionIconType(option)" class="h-3.5 w-3.5 shrink-0" />
+                  <ConnectionGroupBadge :connection-id="option" />
+                  <span class="min-w-0 flex-1 truncate">{{ label }}</span>
                 </div>
               </template>
             </SearchableSelect>
@@ -999,9 +1001,10 @@ watch(
               content-class="w-[var(--reka-popover-trigger-width)]"
             >
               <template #option-label="{ option, label }">
-                <div class="flex items-center gap-2">
-                  <DatabaseIcon :db-type="connectionIconType(option)" class="w-3.5 h-3.5" />
-                  {{ label }}
+                <div class="flex min-w-0 items-center gap-2">
+                  <DatabaseIcon :db-type="connectionIconType(option)" class="h-3.5 w-3.5 shrink-0" />
+                  <ConnectionGroupBadge :connection-id="option" />
+                  <span class="min-w-0 flex-1 truncate">{{ label }}</span>
                 </div>
               </template>
             </SearchableSelect>

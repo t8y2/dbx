@@ -40,6 +40,7 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
             sql,
             schema,
             this::setSchemaSQL,
+            this::resetSchemaSQL,
             options.getMaxRows(),
             options.getFetchSize(),
             options.getTimeoutSecs(),
@@ -54,6 +55,7 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
             sql,
             schema,
             this::setSchemaSQL,
+            this::resetSchemaSQL,
             options,
             geometryAwareResolver()
         );
@@ -66,6 +68,7 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
             sql,
             schema,
             this::setSchemaSQL,
+            this::resetSchemaSQL,
             options,
             geometryAwareResolver()
         );
@@ -133,7 +136,7 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
     public List<DatabaseInfo> listDatabases() {
         return unchecked(() -> {
             List<DatabaseInfo> result = new ArrayList<>();
-            try (java.sql.PreparedStatement stmt = requireConnection().prepareStatement("SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname");
+            try (java.sql.PreparedStatement stmt = requireConnection().prepareStatement("SELECT datname FROM pg_catalog.pg_database WHERE datistemplate = false ORDER BY datname");
                  ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {
                     result.add(new DatabaseInfo(rs.getString("datname")));
@@ -333,15 +336,15 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
             String upperType = objectType.toUpperCase();
             String sql;
             if ("VIEW".equals(upperType) || "MATERIALIZED VIEW".equals(upperType)) {
-                sql = "SELECT pg_get_viewdef(to_regclass(?), true)";
+                sql = "SELECT pg_catalog.pg_get_viewdef(pg_catalog.to_regclass(?), true)";
             } else if ("FUNCTION".equals(upperType)) {
-                sql = "SELECT pg_get_functiondef(p.oid)\n" +
-                    "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace\n" +
+                sql = "SELECT pg_catalog.pg_get_functiondef(p.oid)\n" +
+                    "FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace\n" +
                     "WHERE n.nspname = ? AND p.proname = ? AND p.prokind = 'f'\n" +
                     "ORDER BY p.oid LIMIT 1";
             } else if ("PROCEDURE".equals(upperType)) {
-                sql = "SELECT pg_get_functiondef(p.oid)\n" +
-                    "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace\n" +
+                sql = "SELECT pg_catalog.pg_get_functiondef(p.oid)\n" +
+                    "FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace\n" +
                     "WHERE n.nspname = ? AND p.proname = ? AND p.prokind = 'p'\n" +
                     "ORDER BY p.oid LIMIT 1";
             } else {
@@ -451,13 +454,13 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
             String sql = "SELECT i.relname AS index_name, am.amname AS index_type, " +
                 "ix.indisunique AS is_unique, ix.indisprimary AS is_primary, " +
                 "array_agg(a.attname ORDER BY k.n) AS columns " +
-                "FROM pg_index ix " +
-                "JOIN pg_class t ON t.oid = ix.indrelid " +
-                "JOIN pg_class i ON i.oid = ix.indexrelid " +
-                "JOIN pg_namespace n ON n.oid = t.relnamespace " +
-                "JOIN pg_am am ON am.oid = i.relam " +
+                "FROM pg_catalog.pg_index ix " +
+                "JOIN pg_catalog.pg_class t ON t.oid = ix.indrelid " +
+                "JOIN pg_catalog.pg_class i ON i.oid = ix.indexrelid " +
+                "JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace " +
+                "JOIN pg_catalog.pg_am am ON am.oid = i.relam " +
                 "JOIN LATERAL (SELECT unnest(ix.indkey) AS attnum, generate_series(1, array_length(ix.indkey, 1)) AS n) AS k ON true " +
-                "JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum " +
+                "JOIN pg_catalog.pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum " +
                 "WHERE n.nspname = ? AND t.relname = ? " +
                 "GROUP BY i.relname, am.amname, ix.indisunique, ix.indisprimary " +
                 "ORDER BY i.relname";
@@ -563,6 +566,11 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
     @Override
     public String setSchemaSQL(String schema) {
         return "SET search_path TO " + quoteIdentifier(schema);
+    }
+
+    @Override
+    public String resetSchemaSQL() {
+        return "RESET search_path";
     }
 
     private java.sql.Connection requireConnection() {

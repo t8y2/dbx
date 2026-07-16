@@ -21,6 +21,8 @@ interface ParameterOccurrence extends SqlParameterDescriptor {
   end: number;
 }
 
+type ComplexTypeDeclarationKind = "struct" | "variant";
+
 export interface SqlParameterOptions {
   databaseType?: DatabaseType;
   // Which placeholder syntaxes are recognized. Undefined enables all of them.
@@ -82,6 +84,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
   const supportsNamedParameters = options?.databaseType !== "saphana";
   const enabledSyntaxes = options?.enabledSyntaxes ? new Set(options.enabledSyntaxes) : null;
   const isSyntaxEnabled = (syntax: SqlParameterSyntax) => !enabledSyntaxes || enabledSyntaxes.has(syntax);
+  const complexTypeFieldSeparators = supportsNamedParameters && isSyntaxEnabled("named") ? collectComplexTypeFieldSeparators(sql) : new Set<number>();
   let i = 0;
   let dollarQuoteEnd = "";
   let positionalIndex = 0;
@@ -123,7 +126,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
     }
     if (ch === ":" && supportsNamedParameters && isSyntaxEnabled("named")) {
       const name = readParameterName(sql, i + 1);
-      if (name && sql[i - 1] !== ":" && sql[i + 1] !== "=") {
+      if (name && sql[i - 1] !== ":" && sql[i + 1] !== "=" && !complexTypeFieldSeparators.has(i)) {
         occurrences.push({
           key: name,
           name,
@@ -189,6 +192,198 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
   }
 
   return occurrences;
+}
+
+// Doris-style complex types use colons between field names and types; those are not bind parameters.
+function collectComplexTypeFieldSeparators(sql: string): Set<number> {
+  const separators = new Set<number>();
+  let i = 0;
+  let dollarQuoteEnd = "";
+
+  while (i < sql.length) {
+    if (dollarQuoteEnd) {
+      const end = sql.indexOf(dollarQuoteEnd, i);
+      if (end === -1) break;
+      i = end + dollarQuoteEnd.length;
+      dollarQuoteEnd = "";
+      continue;
+    }
+
+    const ch = sql[i];
+    const next = sql[i + 1];
+    if (ch === "'" || ch === '"' || ch === "`") {
+      i = skipQuoted(sql, i, ch);
+      continue;
+    }
+    if (ch === "[") {
+      i = skipBracketIdentifier(sql, i);
+      continue;
+    }
+    if (ch === "-" && next === "-") {
+      i = skipLine(sql, i + 2);
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      i = skipBlockComment(sql, i + 2);
+      continue;
+    }
+    if (isHashLineComment(sql, i)) {
+      i = skipLine(sql, i + 1);
+      continue;
+    }
+    if (ch === "$") {
+      const marker = readDollarQuoteMarker(sql, i);
+      if (marker) {
+        dollarQuoteEnd = marker;
+        i += marker.length;
+        continue;
+      }
+    }
+    const declaration = readComplexTypeDeclaration(sql, i);
+    if (declaration) {
+      i = collectComplexTypeFieldSeparatorsInDeclaration(sql, declaration.openingBracket + 1, declaration.kind, separators) + 1;
+      continue;
+    }
+    i += 1;
+  }
+
+  return separators;
+}
+
+function collectComplexTypeFieldSeparatorsInDeclaration(sql: string, start: number, kind: ComplexTypeDeclarationKind, separators: Set<number>): number {
+  let i = start;
+  let genericDepth = 0;
+  let parenthesisDepth = 0;
+  let expectsFieldName = true;
+
+  while (i < sql.length) {
+    if (expectsFieldName && genericDepth === 0 && parenthesisDepth === 0) {
+      const fieldStart = skipSqlWhitespaceAndComments(sql, i);
+      if (fieldStart !== i) {
+        i = fieldStart;
+        continue;
+      }
+      if (isLineStatementStart(sql, i) && isSqlStatementKeyword(sql, i)) return i;
+      const fieldNameEnd = readComplexTypeFieldNameEnd(sql, i, kind);
+      if (fieldNameEnd > i) {
+        const separator = skipSqlWhitespaceAndComments(sql, fieldNameEnd);
+        if (sql[separator] === ":") {
+          separators.add(separator);
+          i = separator + 1;
+          expectsFieldName = false;
+          continue;
+        }
+        i = fieldNameEnd;
+        expectsFieldName = false;
+        continue;
+      }
+    }
+
+    const ch = sql[i];
+    const next = sql[i + 1];
+    if (ch === "'" || ch === '"' || ch === "`") {
+      i = skipQuoted(sql, i, ch);
+      continue;
+    }
+    if (ch === "[") {
+      i = skipBracketIdentifier(sql, i);
+      continue;
+    }
+    if (ch === "-" && next === "-") {
+      i = skipLine(sql, i + 2);
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      i = skipBlockComment(sql, i + 2);
+      continue;
+    }
+    if (isHashLineComment(sql, i)) {
+      i = skipLine(sql, i + 1);
+      continue;
+    }
+    const declaration = readComplexTypeDeclaration(sql, i);
+    if (declaration) {
+      i = collectComplexTypeFieldSeparatorsInDeclaration(sql, declaration.openingBracket + 1, declaration.kind, separators) + 1;
+      continue;
+    }
+    if (ch === ";" && genericDepth === 0 && parenthesisDepth === 0) return i;
+    if (ch === "<") {
+      genericDepth += 1;
+      i += 1;
+      continue;
+    }
+    if (ch === ">") {
+      if (genericDepth === 0 && parenthesisDepth === 0) return i;
+      if (genericDepth > 0) genericDepth -= 1;
+      i += 1;
+      continue;
+    }
+    if (ch === "(") {
+      parenthesisDepth += 1;
+      i += 1;
+      continue;
+    }
+    if (ch === ")") {
+      if (parenthesisDepth > 0) parenthesisDepth -= 1;
+      i += 1;
+      continue;
+    }
+    if (ch === "," && genericDepth === 0 && parenthesisDepth === 0) {
+      expectsFieldName = true;
+    }
+    i += 1;
+  }
+
+  return sql.length;
+}
+
+function readComplexTypeDeclaration(sql: string, start: number): { kind: ComplexTypeDeclarationKind; openingBracket: number } | null {
+  const kind: ComplexTypeDeclarationKind | null = matchesWord(sql, start, "struct") ? "struct" : matchesWord(sql, start, "variant") ? "variant" : null;
+  if (!kind) return null;
+
+  const openingBracket = skipSqlWhitespaceAndComments(sql, start + kind.length);
+  return sql[openingBracket] === "<" ? { kind, openingBracket } : null;
+}
+
+function readComplexTypeFieldNameEnd(sql: string, start: number, kind: ComplexTypeDeclarationKind): number {
+  if (kind === "variant") return readVariantFieldNameEnd(sql, start);
+
+  const ch = sql[start];
+  if (ch === '"' || ch === "`") return skipQuoted(sql, start, ch);
+  if (ch === "[") return skipBracketIdentifier(sql, start);
+  if (!PARAMETER_NAME_START_RE.test(ch ?? "")) return start;
+
+  let i = start + 1;
+  while (i < sql.length && PARAMETER_NAME_CHAR_RE.test(sql[i])) i += 1;
+  return i;
+}
+
+function readVariantFieldNameEnd(sql: string, start: number): number {
+  let i = start;
+  const modifier = matchesWord(sql, i, "match_name") ? "match_name" : matchesWord(sql, i, "match_name_glob") ? "match_name_glob" : "";
+  if (modifier) i = skipSqlWhitespaceAndComments(sql, i + modifier.length);
+  return sql[i] === "'" ? skipQuoted(sql, i, "'") : start;
+}
+
+function skipSqlWhitespaceAndComments(sql: string, start: number): number {
+  let i = start;
+  while (i < sql.length) {
+    while (i < sql.length && /\s/.test(sql[i])) i += 1;
+    if (sql[i] === "-" && sql[i + 1] === "-") {
+      i = skipLine(sql, i + 2);
+      continue;
+    }
+    if (sql[i] === "/" && sql[i + 1] === "*") {
+      i = skipBlockComment(sql, i + 2);
+      continue;
+    }
+    if (isHashLineComment(sql, i)) {
+      i = skipLine(sql, i + 1);
+      continue;
+    }
+    break;
+  }
+  return i;
 }
 
 function collectNativeSqlServerParameters(sql: string): { declared: Set<string>; ignoredStarts: Set<number> } {

@@ -91,7 +91,8 @@ export function hiveTablePropertiesIndicateTransactional(result: { rows: readonl
 
 export function usesSyntheticRowIdKey(databaseType: DatabaseType | undefined, primaryKeys: string[], tableType?: string): boolean {
   if (isViewTableType(tableType)) return false;
-  return primaryKeys.length === 1 && ((databaseType === "oracle" && primaryKeys[0].toUpperCase() === DBX_ROWID_COLUMN) || (databaseType === "neo4j" && primaryKeys[0] === DBX_NEO4J_ELEMENT_ID_COLUMN));
+  const syntheticKey = getDatabaseCapability(databaseType).syntheticKey;
+  return primaryKeys.length === 1 && ((syntheticKey === "oracle-rowid" && primaryKeys[0].toUpperCase() === DBX_ROWID_COLUMN) || (syntheticKey === "neo4j-element-id" && primaryKeys[0] === DBX_NEO4J_ELEMENT_ID_COLUMN));
 }
 
 export function isHiddenGridColumn(databaseType: DatabaseType | undefined, column: string, primaryKeys: string[], tableType?: string): boolean {

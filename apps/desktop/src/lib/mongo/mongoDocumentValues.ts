@@ -3,6 +3,10 @@ export type MongoInputValue = string | number | boolean | null;
 const MONGO_SHELL_DATE_PATTERN = /^(?:ISODate|new Date)\(\s*(["'])(.+)\1\s*\)$/;
 const LEGACY_MONGO_DATE_DISPLAY_PATTERN = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.(\d{1,3}))?$/;
 const MONGO_OBJECT_ID_PATTERN = /^[a-fA-F0-9]{24}$/;
+const MONGO_INTEGER_PATTERN = /^-?\d+$/;
+const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
+const MIN_BSON_INT64 = -9223372036854775808n;
+const MAX_BSON_INT64 = 9223372036854775807n;
 
 export function mongoShellDateToExtendedJson(value: unknown): unknown {
   if (typeof value !== "string") return value;
@@ -24,7 +28,14 @@ export function parseMongoDocumentInputValue(raw: MongoInputValue): unknown {
   const legacyDate = legacyMongoDateDisplayToExtendedJson(trimmed);
   if (legacyDate) return legacyDate;
 
-  if (/^-?\d+(?:\.\d+)?$/.test(trimmed)) return Number(trimmed);
+  if (MONGO_INTEGER_PATTERN.test(trimmed)) {
+    const integer = BigInt(trimmed);
+    if (integer > MAX_SAFE_BIGINT || integer < -MAX_SAFE_BIGINT) {
+      return integer >= MIN_BSON_INT64 && integer <= MAX_BSON_INT64 ? { $numberLong: trimmed } : trimmed;
+    }
+    return Number(trimmed);
+  }
+  if (/^-?\d+\.\d+$/.test(trimmed)) return Number(trimmed);
   if (trimmed.startsWith("{") || trimmed.startsWith("[") || trimmed.startsWith('"')) {
     return mongoShellDateToExtendedJson(JSON.parse(trimmed));
   }
@@ -154,4 +165,23 @@ export function formatMongoShellLiteral(value: unknown): string {
     return `{${keys.map((key) => `${JSON.stringify(key)}:${formatMongoShellLiteral(object[key])}`).join(",")}}`;
   }
   return JSON.stringify(String(value));
+}
+
+export function serializeMongoDocumentId(value: unknown): string {
+  if (typeof value === "string") return `__dbx_mongo_string_id__${JSON.stringify(value)}`;
+  if (isMongoExtendedJsonId(value)) return JSON.stringify(value);
+  return String(value);
+}
+
+export function mongoDocumentIdForGrid(value: unknown): MongoInputValue {
+  if (isMongoExtendedJsonId(value)) return String(value.$numberLong ?? value.$oid);
+  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
+  return JSON.stringify(value);
+}
+
+function isMongoExtendedJsonId(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const object = value as Record<string, unknown>;
+  const keys = Object.keys(object);
+  return keys.length === 1 && (typeof object.$numberLong === "string" || typeof object.$oid === "string");
 }

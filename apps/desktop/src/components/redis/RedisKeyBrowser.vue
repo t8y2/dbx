@@ -786,7 +786,7 @@ async function createRedisKey() {
     if (createKeyType.value === "string" || createKeyType.value === "json" || createKeyRawMode.value) {
       // Raw text/JSON mode — single value
       if (createKeyType.value === "string") {
-        await api.redisSetString(props.connectionId, props.db, keyRaw, createKeyValue.value, ttl);
+        await api.redisSetString(props.connectionId, props.db, keyRaw, createKeyValue.value, ttl ?? -1);
       } else if (createKeyType.value === "json") {
         await api.redisJsonSet(props.connectionId, props.db, keyRaw, createKeyValue.value, ttl);
       } else if (createKeyType.value === "hash") {

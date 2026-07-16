@@ -64,6 +64,8 @@ watch(
       loadSchemas().catch(() => {});
     }
   },
+  // Tree-level async hosts mount the dialog with `open` already true.
+  { immediate: true },
 );
 
 function initDraftMode() {

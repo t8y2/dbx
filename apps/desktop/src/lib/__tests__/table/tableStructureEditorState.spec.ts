@@ -16,12 +16,25 @@ import {
   isMysqlEnumDataType,
   isSqlServerIdentityCompatibleDataType,
   mysqlEnumDataType,
+  parseExtraToColumnExtra,
   rehydrateColumnDraftsFromMetadata,
+  resolveInsertColumnIndex,
   restoreDamengLengthUnitsAfterSave,
   splitDataType,
 } from "@/lib/table/tableStructureEditorState";
 
 describe("tableStructureEditorState", () => {
+  it("parses Kingbase SQLServer compatibility identity metadata", () => {
+    expect(parseExtraToColumnExtra("identity(10, 2)", "kingbase")).toEqual({
+      autoIncrement: true,
+      identity: { seed: 10, increment: 2 },
+    });
+    expect(parseExtraToColumnExtra("generated always as identity", "kingbase")).toEqual({
+      identity: { generation: "ALWAYS" },
+    });
+    expect(parseExtraToColumnExtra("identity(1,1)", "postgres")).toEqual({});
+  });
+
   it("keeps mysql unsigned attributes in the editable base type", () => {
     expect(splitDataType("int(11) unsigned")).toEqual({ baseType: "int unsigned", params: "11" });
     expect(splitDataType("bigint(20) unsigned zerofill")).toEqual({
@@ -234,6 +247,19 @@ describe("tableStructureEditorState", () => {
     expect(hasExistingColumnTypeChange([column])).toBe(true);
     column.markedForDrop = true;
     expect(hasExistingColumnTypeChange([column])).toBe(false);
+  });
+
+  it("inserts new columns after the selected row or appends when none is selected", () => {
+    const columns = [{ id: "a" }, { id: "b" }, { id: "c" }];
+
+    expect(resolveInsertColumnIndex(columns, null)).toBe(3);
+    expect(resolveInsertColumnIndex(columns, undefined)).toBe(3);
+    expect(resolveInsertColumnIndex(columns, "a")).toBe(1);
+    expect(resolveInsertColumnIndex(columns, "b")).toBe(2);
+    expect(resolveInsertColumnIndex(columns, "c")).toBe(3);
+    expect(resolveInsertColumnIndex(columns, "missing")).toBe(3);
+    expect(resolveInsertColumnIndex([], "a")).toBe(0);
+    expect(resolveInsertColumnIndex([{ id: "a", markedForDrop: true }, { id: "b" }], "a")).toBe(2);
   });
 
   it("strips SQL Server metadata parentheses from editable defaults", () => {

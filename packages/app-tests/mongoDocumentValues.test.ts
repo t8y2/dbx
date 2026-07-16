@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { applyMongoGridChangesToDocument, buildMongoCopyDocumentFromOriginal, buildMongoCopyInsertDocument, buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, parseMongoDocumentInputValue } from "../../apps/desktop/src/lib/mongo/mongoDocumentValues.ts";
+import { applyMongoGridChangesToDocument, buildMongoCopyDocumentFromOriginal, buildMongoCopyInsertDocument, buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, mongoDocumentIdForGrid, parseMongoDocumentInputValue, serializeMongoDocumentId } from "../../apps/desktop/src/lib/mongo/mongoDocumentValues.ts";
 
 test("parses Mongo shell ISODate literals as extended JSON dates", () => {
   assert.deepEqual(parseMongoDocumentInputValue('ISODate("2026-06-10T13:59:31.287Z")'), {
@@ -16,6 +16,12 @@ test("parses legacy Mongo date display values as UTC dates", () => {
     $date: "2025-08-14T02:25:43.718Z",
   });
   assert.equal(parseMongoDocumentInputValue('"2025-08-14 02:25:43.718"'), "2025-08-14 02:25:43.718");
+});
+
+test("preserves unsafe Mongo int64 input values without JavaScript rounding", () => {
+  assert.deepEqual(parseMongoDocumentInputValue("2048938405781032962"), { $numberLong: "2048938405781032962" });
+  assert.equal(parseMongoDocumentInputValue("9007199254740991"), 9007199254740991);
+  assert.equal(parseMongoDocumentInputValue("9223372036854775808"), "9223372036854775808");
 });
 
 test("builds Mongo grid updates with set and unset operators", () => {
@@ -216,6 +222,20 @@ test("formats extended JSON dates as Mongo shell ISODate literals", () => {
 
 test("formats extended JSON object ids as Mongo shell ObjectId literals", () => {
   assert.equal(formatMongoShellLiteral({ $oid: "6743e4bfa3f6f84bc3fff6c8" }), 'ObjectId("6743e4bfa3f6f84bc3fff6c8")');
+  assert.equal(formatMongoShellLiteral("6743e4bfa3f6f84bc3fff6c8"), '"6743e4bfa3f6f84bc3fff6c8"');
+});
+
+test("serializes typed Mongo document ids while keeping their grid display compact", () => {
+  const longId = { $numberLong: "2048938405781032962" };
+  const objectId = { $oid: "6743e4bfa3f6f84bc3fff6c8" };
+  assert.equal(serializeMongoDocumentId(longId), '{"$numberLong":"2048938405781032962"}');
+  assert.equal(mongoDocumentIdForGrid(longId), "2048938405781032962");
+  assert.equal(serializeMongoDocumentId(objectId), '{"$oid":"6743e4bfa3f6f84bc3fff6c8"}');
+  assert.equal(mongoDocumentIdForGrid(objectId), "6743e4bfa3f6f84bc3fff6c8");
+  assert.equal(serializeMongoDocumentId(42), "42");
+  assert.equal(serializeMongoDocumentId(42.5), "42.5");
+  assert.equal(serializeMongoDocumentId("2048938405781032962"), '__dbx_mongo_string_id__"2048938405781032962"');
+  assert.equal(serializeMongoDocumentId('{"$numberLong":"2048938405781032962"}'), '__dbx_mongo_string_id__"{\\"$numberLong\\":\\"2048938405781032962\\"}"');
 });
 
 test("formats extended JSON int64 values as Mongo shell NumberLong literals", () => {

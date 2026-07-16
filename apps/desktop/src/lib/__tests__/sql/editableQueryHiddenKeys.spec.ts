@@ -59,9 +59,53 @@ describe("editable query hidden primary keys", () => {
         sourceExpressions: { __DBX_ROWID: "ROWIDTOCHAR(ROWID)" },
       }),
     ).toEqual({
-      sql: 'SELECT *, ROWIDTOCHAR(ROWID) AS "__DBX_PK_0" FROM APP.USERS t WHERE t.ACTIVE = 1',
+      sql: 'SELECT t.*, ROWIDTOCHAR(ROWID) AS "__DBX_PK_0" FROM APP.USERS t WHERE t.ACTIVE = 1',
       projections: [{ sourceName: "__DBX_ROWID", alias: "__DBX_PK_0" }],
     });
+  });
+
+  it("qualifies a bare Oracle wildcard when appending a hidden key", () => {
+    expect(
+      buildQueryWithHiddenPrimaryKeys({
+        sql: 'SELECT /*+ FULL("Users") */ * FROM APP."Users"',
+        databaseType: "oracle",
+        primaryKeys: ["__DBX_ROWID"],
+        existingResultNames: ["ID", "NAME"],
+        sourceExpressions: { __DBX_ROWID: "ROWIDTOCHAR(ROWID)" },
+      })?.sql,
+    ).toBe('SELECT /*+ FULL("Users") */ "Users".*, ROWIDTOCHAR(ROWID) AS "__DBX_PK_0" FROM APP."Users"');
+
+    expect(
+      buildQueryWithHiddenPrimaryKeys({
+        sql: 'SELECT * FROM APP.USERS "u"',
+        databaseType: "oracle",
+        primaryKeys: ["__DBX_ROWID"],
+        existingResultNames: ["ID", "NAME"],
+        sourceExpressions: { __DBX_ROWID: "ROWIDTOCHAR(ROWID)" },
+      })?.sql,
+    ).toBe('SELECT "u".*, ROWIDTOCHAR(ROWID) AS "__DBX_PK_0" FROM APP.USERS "u"');
+  });
+
+  it("rewrites the reported Oracle queries without changing their filters", () => {
+    expect(
+      buildQueryWithHiddenPrimaryKeys({
+        sql: "select * from t_zyys_vte_yyfxbd",
+        databaseType: "oracle",
+        primaryKeys: ["__DBX_ROWID"],
+        existingResultNames: ["ID", "MBMC"],
+        sourceExpressions: { __DBX_ROWID: "ROWIDTOCHAR(ROWID)" },
+      })?.sql,
+    ).toBe('select t_zyys_vte_yyfxbd.*, ROWIDTOCHAR(ROWID) AS "__DBX_PK_0" from t_zyys_vte_yyfxbd');
+
+    expect(
+      buildQueryWithHiddenPrimaryKeys({
+        sql: "SELECT * from T_XT_MB WHERE   mbmc ='结束时'",
+        databaseType: "oracle",
+        primaryKeys: ["__DBX_ROWID"],
+        existingResultNames: ["ID", "MBMC"],
+        sourceExpressions: { __DBX_ROWID: "ROWIDTOCHAR(ROWID)" },
+      })?.sql,
+    ).toBe(`SELECT T_XT_MB.*, ROWIDTOCHAR(ROWID) AS "__DBX_PK_0" from T_XT_MB WHERE   mbmc ='结束时'`);
   });
 
   it("preserves a WHERE subquery when adding an Oracle ROWID", () => {

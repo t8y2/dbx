@@ -163,6 +163,29 @@ export interface ConnectionConfig {
   is_production?: boolean;
   /** Database-level production markers for multi-database connections. */
   production_databases?: string[];
+  /** Metadata captured from the latest successful connection test for the saved config. */
+  database_info?: DatabaseConnectionInfo;
+}
+
+export type IdentifierCase = "lower" | "upper" | "mixed";
+
+export interface DatabaseConnectionInfo {
+  productName?: string;
+  productVersion?: string;
+  currentDatabase?: string;
+  serverComment?: string;
+  serverCharset?: string;
+  serverCollation?: string;
+  unquotedIdentifierCase?: IdentifierCase;
+  quotedIdentifierCase?: IdentifierCase;
+  driverName?: string;
+  driverVersion?: string;
+  jdbcVersion?: string;
+}
+
+export interface ConnectionTestResult {
+  message: string;
+  databaseInfo?: DatabaseConnectionInfo;
 }
 
 export type TransportLayerConfig = ({ type: "ssh" } & SshTunnelConfig) | ({ type: "proxy" } & ProxyTunnelConfig) | ({ type: "http_tunnel" } & HttpTunnelConfig);
@@ -471,6 +494,8 @@ export interface QueryResult {
   columns: string[];
   /** Set for synthesized query execution failures. */
   execution_error?: true;
+  /** Zero-based index of the submitted statement that produced this result. */
+  statement_index?: number;
   /** Internal row identifiers appended to editable query results. */
   hidden_column_indexes?: number[];
   /**
@@ -490,6 +515,8 @@ export interface QueryResult {
    * preview. This is populated only for MongoDB document query results.
    */
   mongo_documents?: unknown[];
+  /** Type-preserving Extended JSON documents used when copying MongoDB values. */
+  mongo_copy_documents?: unknown[];
   affected_rows: number;
   execution_time_ms: number;
   truncated?: boolean;
@@ -512,6 +539,8 @@ export interface QueryResultRun {
   results?: QueryResult[];
   activeResultIndex?: number;
   resultBaseSql?: string;
+  /** Fingerprint of the complete editor document when this result run started. */
+  resultEditorFingerprint?: string;
   resultSortedSql?: string;
   resultSortColumn?: string;
   resultSortColumnIndex?: number;
@@ -528,6 +557,7 @@ export interface QueryResultRun {
   resultTotalRowCountLoading?: boolean;
   resultSessionId?: string;
   resultAccessedAt?: number;
+  resultEstimatedBytes?: number;
   resultCacheKey?: string;
   resultCacheState?: "memory" | "disk" | "missing";
   resultEvicted?: boolean;
@@ -733,6 +763,8 @@ export interface QueryTab {
   originalSql?: string;
   lastExecutedSql?: string;
   resultBaseSql?: string;
+  /** Fingerprint of the complete editor document when the displayed result started. */
+  resultEditorFingerprint?: string;
   resultSortedSql?: string;
   resultSortColumn?: string;
   resultSortColumnIndex?: number;
@@ -749,6 +781,7 @@ export interface QueryTab {
   resultTotalRowCountLoading?: boolean;
   resultSessionId?: string;
   resultAccessedAt?: number;
+  resultEstimatedBytes?: number;
   resultCacheKey?: string;
   resultCacheState?: "memory" | "disk" | "missing";
   pinned?: boolean;

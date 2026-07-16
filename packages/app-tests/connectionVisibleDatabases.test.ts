@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import { appendVisibleDatabaseSelection, buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, visibleDatabaseSelectionIsStale, initialVisibleDatabaseSelection } from "../../apps/desktop/src/lib/connection/connectionVisibleDatabases.ts";
-import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, filterDatabaseNamesForVisiblePicker } from "../../apps/desktop/src/lib/database/visibleDatabases.ts";
+import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForConnection, normalizeVisibleSchemaSelection } from "../../apps/desktop/src/lib/database/visibleDatabases.ts";
 import type { ConnectionConfig } from "../../apps/desktop/src/types/database.ts";
 
 function config(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
@@ -93,6 +93,14 @@ test("Turso does not offer a visible database filter for its fixed main namespac
 test("OceanBase Oracle uses schema filtering for visible object selection", () => {
   assert.equal(connectionUsesVisibleSchemaFilter(config({ db_type: "oceanbase-oracle" })), true);
   assert.equal(connectionUsesVisibleSchemaFilter(config({ db_type: "mysql", driver_profile: "oceanbase" })), false);
+});
+
+test("Vastbase schema filters preserve ordinary schemas and explicit empty selections", () => {
+  const schemas = ["public", "app"];
+  assert.deepEqual(filterSchemaNamesForConnection(schemas, config({ db_type: "vastbase", database: "vastbase" }), "vastbase"), schemas);
+  assert.deepEqual(filterSchemaNamesForConnection(schemas, config({ db_type: "vastbase", database: "vastbase", visible_schemas: { vastbase: [] } }), "vastbase"), []);
+  assert.deepEqual(normalizeVisibleSchemaSelection([], schemas), []);
+  assert.deepEqual(normalizeVisibleSchemaSelection(["app", "missing", "app", "public"], schemas), ["app", "public"]);
 });
 
 test("Dameng default SYSDBA user remains selectable", () => {

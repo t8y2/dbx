@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isLosslessJsonNumber, parseJsonPreservingLargeNumbers, safeJsonFormat } from "../safeJsonFormat";
+import { formatJsonSource, isLosslessJsonNumber, parseJsonPreservingLargeNumbers, safeJsonFormat, stringifyJsonPreservingLargeNumbers } from "../safeJsonFormat";
 
 describe("safeJsonFormat", () => {
   it("preserves large integers exceeding MAX_SAFE_INTEGER", () => {
@@ -84,5 +84,70 @@ describe("safeJsonFormat", () => {
     expect(safeJsonFormat(input, 2)).toContain("0.123456789012345678901234");
     expect(safeJsonFormat(input, 2)).toContain("1.234567890123456789e20");
     expect(safeJsonFormat(input, 2)).toContain("1e999");
+  });
+
+  it("stringifies parsed lossless numbers back to numeric JSON tokens", () => {
+    const parsed = parseJsonPreservingLargeNumbers('{"id":2018551659033767937,"stringId":"2018551659033767937"}');
+    expect(stringifyJsonPreservingLargeNumbers(parsed)).toBe('{"id":2018551659033767937,"stringId":"2018551659033767937"}');
+  });
+});
+
+describe("formatJsonSource", () => {
+  it("minifies by removing only insignificant whitespace", () => {
+    const input = `{
+      "name": "Ada",
+      "items": [1, 2, 3]
+    }`;
+    expect(formatJsonSource(input)).toBe('{"name":"Ada","items":[1,2,3]}');
+  });
+
+  it("pretty-prints with the requested indent while keeping source tokens", () => {
+    expect(formatJsonSource('{"role":"reader","role":"writer"}', 2)).toBe(`{
+  "role": "reader",
+  "role": "writer"
+}`);
+  });
+
+  it("preserves duplicate object members when minifying", () => {
+    const pretty = `{
+  "role": "reader",
+  "role": "writer"
+}`;
+    expect(formatJsonSource(pretty)).toBe('{"role":"reader","role":"writer"}');
+  });
+
+  it("preserves key order when duplicate members are mixed with other keys", () => {
+    const input = '{"a":1,"role":"reader","b":2,"role":"writer","c":3}';
+    expect(formatJsonSource(input)).toBe(input);
+    expect(formatJsonSource(input, 2)).toBe(`{
+  "a": 1,
+  "role": "reader",
+  "b": 2,
+  "role": "writer",
+  "c": 3
+}`);
+  });
+
+  it("preserves large and high-precision number literals", () => {
+    const compact = '{"id":87712409002717401,"fraction":0.123456789012345678901234,"scientific":1.234567890123456789e20}';
+    const pretty = `{
+  "id": 87712409002717401,
+  "fraction": 0.123456789012345678901234,
+  "scientific": 1.234567890123456789e20
+}`;
+
+    expect(formatJsonSource(pretty)).toBe(compact);
+    expect(formatJsonSource(compact, 2)).toBe(pretty);
+  });
+
+  it("preserves string escape sequences and does not rewrite them", () => {
+    const input = '{"path":"C:\\\\Users\\\\path","quote":"say \\"hi\\"","unicode":"\\u4e2d"}';
+    expect(formatJsonSource(input)).toBe(input);
+  });
+
+  it("rejects invalid JSON", () => {
+    expect(() => formatJsonSource('{"name": }')).toThrow(SyntaxError);
+    expect(() => formatJsonSource('{"a":1,}')).toThrow(SyntaxError);
+    expect(() => formatJsonSource('{"a":1} trailing')).toThrow(SyntaxError);
   });
 });

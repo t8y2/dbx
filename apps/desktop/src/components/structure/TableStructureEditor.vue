@@ -21,6 +21,7 @@ import { useSettingsStore, type StructureEditorDensity } from "@/stores/settings
 import { useTheme } from "@/composables/useTheme";
 import { useToast } from "@/composables/useToast";
 import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sql/sqlHighlighter";
+import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
@@ -65,6 +66,7 @@ import {
   mysqlEnumDataType,
   parseExtraToColumnExtra,
   rehydrateColumnDraftsFromMetadata,
+  resolveInsertColumnIndex,
   restoreDamengLengthUnitsAfterSave,
   splitDataType,
   toColumnNames,
@@ -99,10 +101,10 @@ onMounted(async () => {
 
 const highlightedSql = computed(() => {
   if (!pendingStatements.value.length) return "";
-  const sql = pendingStatements.value.join("\n");
+  const sql = previewSqlText.value;
   return sqlHighlighter.value?.(sql) ?? sql;
 });
-const previewSqlText = computed(() => pendingStatements.value.join("\n"));
+const previewSqlText = computed(() => joinSqlStatementsForScript(pendingStatements.value, databaseType.value));
 
 const props = defineProps<{
   connectionId: string;
@@ -547,6 +549,7 @@ const indexColWidths = ref(loadStructureIndexColumnWidths(structureDensity.value
 const resizing = ref<{ col: number; startX: number; startW: number } | null>(null);
 const columnSearchInputRef = ref<InstanceType<typeof Input>>();
 const columnSearchText = ref("");
+const selectedColumnId = ref<string | null>(null);
 const highlightedColumnId = ref<string | null>(null);
 const indexSearchInputRef = ref<InstanceType<typeof Input>>();
 const indexSearchText = ref("");
@@ -1190,6 +1193,7 @@ function resetState() {
   sqliteSchemaRevision.value = undefined;
   foreignKeys.value = [];
   triggers.value = [];
+  selectedColumnId.value = null;
   ddlContent.value = "";
   ddlFetched.value = false;
   newTableName.value = "";
@@ -1269,6 +1273,7 @@ async function loadStructure(silent = false, scope: StructureRefreshScope = FULL
       const nextColumnDrafts = createColumnDrafts(nextColumns, databaseType.value);
       const hydratedColumnDrafts = databaseType.value === "dameng" && options.damengLengthUnitsAfterSave ? restoreDamengLengthUnitsAfterSave(nextColumnDrafts, options.damengLengthUnitsAfterSave) : nextColumnDrafts;
       columns.value = applyStoredLocalColumnOrder(hydratedColumnDrafts);
+      if (!options.preserveDraft) selectedColumnId.value = null;
     }
 
     const nextTableComment = await tableCommentPromise;
@@ -1324,6 +1329,20 @@ async function refreshStructureAfterSave(scope: StructureRefreshScope, damengLen
   }
 }
 
+async function focusColumnNameInput(columnId: string) {
+  await nextTick();
+  const row = Array.from(rootRef.value?.querySelectorAll<HTMLElement>("[data-column-row-index]") ?? []).find((element) => element.dataset.columnId === columnId);
+  const input = row?.querySelector<HTMLInputElement>("[data-column-name-input]");
+  row?.scrollIntoView({ block: "nearest" });
+  input?.focus();
+  input?.select();
+}
+
+function onColumnRowActivate(column: EditableStructureColumn) {
+  if (column.markedForDrop || !columns.value.some((item) => item.id === column.id)) return;
+  selectedColumnId.value = column.id;
+}
+
 async function addColumn() {
   if (!canAddColumn.value) return;
   activeTab.value = "columns";
@@ -1342,14 +1361,11 @@ async function addColumn() {
     extra: {},
     markedForDrop: false,
   };
-  columns.value.push(column);
-  await nextTick();
-  const newRows = rootRef.value?.querySelectorAll<HTMLElement>('[data-new-column-row="true"]');
-  const row = newRows?.[newRows.length - 1];
-  const input = row?.querySelector<HTMLInputElement>("[data-column-name-input]");
-  row?.scrollIntoView({ block: "nearest" });
-  input?.focus();
-  input?.select();
+  const insertAt = resolveInsertColumnIndex(columns.value, selectedColumnId.value);
+  columns.value.splice(insertAt, 0, column);
+  selectedColumnId.value = column.id;
+  if (usesLocalTableColumnOrder.value) persistLocalColumnOrder();
+  await focusColumnNameInput(column.id);
 }
 
 function applyColumnTemplate(templateId: string) {
@@ -1363,11 +1379,15 @@ function applyColumnTemplate(templateId: string) {
     createId: uuid,
   });
   if (!templateColumns.length) return;
-  columns.value.push(...templateColumns);
+  const insertAt = resolveInsertColumnIndex(columns.value, selectedColumnId.value);
+  columns.value.splice(insertAt, 0, ...templateColumns);
+  selectedColumnId.value = templateColumns[templateColumns.length - 1]?.id ?? selectedColumnId.value;
+  if (usesLocalTableColumnOrder.value) persistLocalColumnOrder();
 }
 
 function removeNewColumn(column: EditableStructureColumn) {
   columns.value = columns.value.filter((item) => item.id !== column.id);
+  if (selectedColumnId.value === column.id) selectedColumnId.value = null;
 }
 
 type ColumnDragState = {
@@ -1740,10 +1760,12 @@ function onColumnDragEnd() {
 function columnRowClass(column: EditableStructureColumn, index: number) {
   const dragState = columnDragState.value;
   const isSearchMatch = filteredColumnRowIds.value.has(column.id);
+  const isSelected = selectedColumnId.value === column.id && !column.markedForDrop;
   return {
     "bg-destructive/5 opacity-60": column.markedForDrop,
     "structure-column-search-match": isSearchMatch,
-    "structure-column-search-current": highlightedColumnId.value === column.id,
+    // Reuse the existing search-current highlight for the active/selected row.
+    "structure-column-search-current": highlightedColumnId.value === column.id || isSelected,
     "opacity-55": dragState?.columnId === column.id,
     "bg-primary/5": dragState && (dragState.insertionIndex === index || dragState.insertionIndex === index + 1),
     "[&>td]:border-t-2 [&>td]:border-t-primary": dragState?.insertionIndex === index,
@@ -1893,6 +1915,9 @@ function columnDragInsertionIndex(index: number, event: DragEvent): number {
 function toggleDropColumn(column: EditableStructureColumn) {
   if (!canDropColumn(column)) return;
   column.markedForDrop = !column.markedForDrop;
+  if (column.markedForDrop && selectedColumnId.value === column.id) {
+    selectedColumnId.value = null;
+  }
 }
 
 function isColumnNameDisabled(column: EditableStructureColumn): boolean {
@@ -2430,11 +2455,22 @@ watch(
 );
 
 watch(activeTab, () => {
+  selectedColumnId.value = null;
   highlightedColumnId.value = null;
   highlightedIndexId.value = null;
   restoreStructureScrollPosition();
   syncDraftToParent();
 });
+
+watch(
+  columns,
+  (items) => {
+    if (selectedColumnId.value && !items.some((column) => column.id === selectedColumnId.value)) {
+      selectedColumnId.value = null;
+    }
+  },
+  { deep: false },
+);
 
 watch(secondaryMetadataLoading, (value) => {
   if (value || !deferredSqlPreviewRefresh) return;
@@ -2635,7 +2671,18 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="(column, index) in columns" :key="column.id" :class="columnRowClass(column, index)" :data-new-column-row="!column.original ? 'true' : undefined" :data-column-row-index="index" @dragover="onColumnDragOver(index, $event)" @drop="onColumnDrop(index, $event)">
+                <tr
+                  v-for="(column, index) in columns"
+                  :key="column.id"
+                  :class="columnRowClass(column, index)"
+                  :data-new-column-row="!column.original ? 'true' : undefined"
+                  :data-column-row-index="index"
+                  :data-column-id="column.id"
+                  @click="onColumnRowActivate(column)"
+                  @focusin="onColumnRowActivate(column)"
+                  @dragover="onColumnDragOver(index, $event)"
+                  @drop="onColumnDrop(index, $event)"
+                >
                   <td :class="[structureCellClass, 'text-muted-foreground']">
                     <div class="flex items-center gap-1">
                       <span>{{ index + 1 }}</span>
@@ -2964,12 +3011,12 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                         :disabled="!canDropColumn(column)"
                         :title="column.markedForDrop ? t('structureEditor.restore') : t('structureEditor.drop')"
                         :aria-label="column.markedForDrop ? t('structureEditor.restore') : t('structureEditor.drop')"
-                        @click="toggleDropColumn(column)"
+                        @click.stop="toggleDropColumn(column)"
                       >
                         <RefreshCw v-if="column.markedForDrop" :class="structureIconClass" />
                         <Trash2 v-else :class="structureIconClass" />
                       </Button>
-                      <Button v-else variant="ghost" size="icon" :class="structureActionButtonClass" :title="t('structureEditor.remove')" :aria-label="t('structureEditor.remove')" @click="removeNewColumn(column)">
+                      <Button v-else variant="ghost" size="icon" :class="structureActionButtonClass" :title="t('structureEditor.remove')" :aria-label="t('structureEditor.remove')" @click.stop="removeNewColumn(column)">
                         <X :class="structureIconClass" />
                       </Button>
                     </div>
@@ -3262,20 +3309,27 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
 </template>
 
 <style scoped>
+/* --primary is rgb/oklch; use color-mix like DataGrid, not hsl(var(--primary)). */
 .structure-column-search-match > td:first-child {
-  box-shadow: inset 3px 0 0 hsl(var(--primary) / 0.55);
+  box-shadow: inset 3px 0 0 color-mix(in oklab, var(--primary) 55%, transparent);
 }
 
 .structure-column-search-current > td {
+  background-color: color-mix(in oklab, var(--primary) 8%, transparent);
   box-shadow:
-    inset 0 1px 0 hsl(var(--primary) / 0.55),
-    inset 0 -1px 0 hsl(var(--primary) / 0.55);
+    inset 0 1px 0 color-mix(in oklab, var(--primary) 55%, transparent),
+    inset 0 -1px 0 color-mix(in oklab, var(--primary) 55%, transparent);
 }
 
 .structure-column-search-current > td:first-child {
   box-shadow:
-    inset 3px 0 0 hsl(var(--primary)),
-    inset 0 1px 0 hsl(var(--primary) / 0.55),
-    inset 0 -1px 0 hsl(var(--primary) / 0.55);
+    inset 3px 0 0 var(--primary),
+    inset 0 1px 0 color-mix(in oklab, var(--primary) 55%, transparent),
+    inset 0 -1px 0 color-mix(in oklab, var(--primary) 55%, transparent);
+}
+
+/* Inputs are bg-transparent; give them a solid surface on the selected row so fields stay readable. */
+.structure-column-search-current :is(input, button, [role="combobox"], [data-slot="select-trigger"]) {
+  background-color: var(--background);
 }
 </style>

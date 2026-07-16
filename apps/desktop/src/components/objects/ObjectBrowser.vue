@@ -14,7 +14,6 @@ import {
   CopyPlus,
   ChevronDown,
   ChevronRight,
-  Columns3Cog,
   Download,
   Eraser,
   Eye,
@@ -439,9 +438,9 @@ const selectableRows = computed(() => rows.value.filter((row) => row.type === "T
 // at once, which stalls the UI on schemas with thousands of objects.
 const OBJECT_GRID_MIN_CARD_WIDTH = 160; // former `minmax(160px, 1fr)` floor
 const OBJECT_GRID_GAP = 12; // 0.75rem, former grid gap (both axes)
-// Card height is variable: only timestamp/comment rows that actually appear in
-// the current dataset contribute. objectGridRowHeight (below) adapts accordingly
-// so the row slot is as tight as possible instead of always using the worst case.
+// Card height is dataset-stable: if any object has timestamps/comments, every card
+// reserves those slots (even when empty) so borders stay level across a row.
+// objectGridRowHeight adapts to the dataset instead of always using the worst case.
 //   Base: p-3 top+bottom(24) + icon h-11(44) + name(18) + type/bytes(18) + gap-1×2(8) = 112
 //   + optional timestamp row: text-[10px](15) + gap-1(4) = 19
 //   + optional comment row:   text-[10px](15) + gap-1(4) = 19
@@ -2626,7 +2625,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               <div class="object-browser-grid-row" :style="{ gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`, height: `${objectGridRowHeight - OBJECT_GRID_GAP}px` }">
                 <CustomContextMenu v-for="item in row.cards" :key="item.id" :items="getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu }">
                   <div
-                    class="relative flex cursor-pointer flex-col items-center gap-1 rounded-lg border bg-card p-3 text-center transition-all hover:border-primary/40 hover:shadow-sm"
+                    class="relative flex h-full min-h-0 cursor-pointer flex-col items-center gap-1 rounded-lg border bg-card p-3 text-center transition-all hover:border-primary/40 hover:shadow-sm"
                     :class="{
                       'border-primary bg-primary/5': selectedTableIds.has(item.id),
                       'border-primary/60': sourceRow?.id === item.id && !selectedTableIds.has(item.id),
@@ -2650,13 +2649,14 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                       }}</span>
                       <span v-if="item.totalBytes != null && item.totalBytes > 0" class="object-browser-stat-badge object-browser-stat-badge-bytes rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">{{ formatObjectBrowserBytes(item.totalBytes) }}</span>
                     </div>
-                    <div v-if="item.created_at?.trim() || item.updated_at?.trim()" class="flex items-center gap-1 text-[10px] text-muted-foreground/70">
+                    <!-- Always reserve timestamp/comment slots when the dataset has them so every card shares one height. -->
+                    <div v-if="hasCreatedAt || hasUpdatedAt" class="flex min-h-[15px] items-center gap-1 text-[10px] leading-[15px] text-muted-foreground/70">
                       <span v-if="item.created_at?.trim()">{{ formatObjectBrowserTimestamp(item.created_at) }}</span>
                       <span v-if="item.created_at?.trim() && item.updated_at?.trim()">·</span>
                       <span v-if="item.updated_at?.trim()">{{ formatObjectBrowserTimestamp(item.updated_at) }}</span>
                     </div>
-                    <div v-if="item.comment?.trim()" class="w-full truncate text-[10px] text-muted-foreground/60" :title="item.comment">
-                      {{ item.comment }}
+                    <div v-if="hasAnyComment" class="w-full truncate text-[10px] leading-[15px] text-muted-foreground/60" :title="item.comment?.trim() || undefined">
+                      {{ item.comment?.trim() || "\u00A0" }}
                     </div>
                   </div>
                 </CustomContextMenu>
@@ -2683,7 +2683,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               </Button>
             </div>
             <Button v-if="canOpenTableStructureEditor" variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs" :title="t('contextMenu.editStructure')" :aria-label="t('contextMenu.editStructure')" @click="openTableStructureEditor">
-              <Columns3Cog class="w-3 h-3" />
+              <PencilRuler class="w-3 h-3" />
               <span class="table-info-action-label">{{ t("contextMenu.editStructure") }}</span>
             </Button>
             <Button variant="ghost" size="icon" class="h-5 w-5" @click="closeSidePanel">
@@ -3073,7 +3073,8 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 .object-browser-grid-row {
   display: grid;
   column-gap: 12px;
-  align-items: start;
+  /* Stretch so cards with/without comment share one border height in the row. */
+  align-items: stretch;
 }
 
 .object-browser-icon-bg-table {

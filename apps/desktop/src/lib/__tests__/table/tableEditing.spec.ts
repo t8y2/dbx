@@ -38,9 +38,11 @@ function index(columns: string[], isUnique = true, filter: string | null = null)
 }
 
 describe("tableEditing", () => {
-  it("does not synthesize Oracle ROWID for views", () => {
+  it("synthesizes ROWID only for Oracle-compatible base tables", () => {
     expect(editablePrimaryKeys("oracle", [column("ID"), column("NAME")], "VIEW")).toEqual([]);
     expect(editablePrimaryKeys("oracle", [column("ID"), column("NAME")], "TABLE")).toEqual([DBX_ROWID_COLUMN]);
+    expect(editablePrimaryKeys("oceanbase-oracle", [column("ID"), column("NAME")], "TABLE")).toEqual([DBX_ROWID_COLUMN]);
+    expect(editablePrimaryKeys("oceanbase-oracle", [column("ID", true), column("NAME")], "TABLE")).toEqual(["ID"]);
   });
 
   it("treats view data tabs as readonly", () => {
@@ -50,6 +52,8 @@ describe("tableEditing", () => {
   it("does not include Oracle ROWID for view data tabs", () => {
     expect(usesSyntheticRowIdKey("oracle", [DBX_ROWID_COLUMN], "VIEW")).toBe(false);
     expect(usesSyntheticRowIdKey("oracle", [DBX_ROWID_COLUMN], "MATERIALIZED_VIEW")).toBe(false);
+    expect(usesSyntheticRowIdKey("oceanbase-oracle", [DBX_ROWID_COLUMN], "TABLE")).toBe(true);
+    expect(usesSyntheticRowIdKey("oceanbase-oracle", [DBX_ROWID_COLUMN], "VIEW")).toBe(false);
   });
 
   it("allows keyless row predicates only for databases that support them", () => {

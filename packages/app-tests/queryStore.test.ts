@@ -49,9 +49,9 @@ function oracleConn(id: string): ConnectionConfig {
   };
 }
 
-function oracleCompatibleConn(id: string, dbType: "oracle" | "dameng" | "oceanbase-oracle"): ConnectionConfig {
+function clearableQuerySchemaConn(id: string, dbType: "oracle" | "dameng" | "gaussdb" | "oceanbase-oracle"): ConnectionConfig {
   return {
-    ...oracleConn(id),
+    ...conn(id),
     db_type: dbType,
   };
 }
@@ -4238,7 +4238,7 @@ test("closing a data tab releases its tab-scoped client session", async () => {
   }
 });
 
-for (const dbType of ["oracle", "dameng", "oceanbase-oracle"] as const) {
+for (const dbType of ["oracle", "dameng", "gaussdb", "oceanbase-oracle"] as const) {
   test(`clearing a ${dbType} query schema releases its tab-scoped client session`, async () => {
     const restoreStorage = installMemoryStorage();
     setActivePinia(createPinia());
@@ -4247,7 +4247,7 @@ for (const dbType of ["oracle", "dameng", "oceanbase-oracle"] as const) {
     const originalFetch = globalThis.fetch;
     const connectionId = `${dbType}-1`;
 
-    connectionStore.addEphemeralConnection(oracleCompatibleConn(connectionId, dbType));
+    connectionStore.addEphemeralConnection(clearableQuerySchemaConn(connectionId, dbType));
     const tabId = store.createTab(connectionId, "SERVICE", "Query", "query", "REPORTING");
     const closedSessions: any[] = [];
 

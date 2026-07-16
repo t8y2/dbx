@@ -33,12 +33,14 @@ test("visible schema menu capability preserves adjacent database families", () =
   assert.equal(canConfigureVisibleSchemasForTreeNode("mysql", "database", "app"), false);
 });
 
-test("only Oracle-compatible single-database schemas can be cleared from query tabs", () => {
+test("only explicitly supported query schemas can be cleared from query tabs", () => {
   assert.equal(supportsClearableQuerySchema("oracle"), true);
   assert.equal(supportsClearableQuerySchema("dameng"), true);
+  assert.equal(supportsClearableQuerySchema("gaussdb"), true);
   assert.equal(supportsClearableQuerySchema("oceanbase-oracle"), true);
   assert.equal(supportsClearableQuerySchema("mysql"), false);
   assert.equal(supportsClearableQuerySchema("postgres"), false);
+  assert.equal(supportsClearableQuerySchema("opengauss"), false);
   assert.equal(supportsClearableQuerySchema("sqlserver"), false);
   assert.equal(supportsClearableQuerySchema("jdbc"), false);
 });

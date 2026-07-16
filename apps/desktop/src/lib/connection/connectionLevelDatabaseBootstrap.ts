@@ -182,10 +182,14 @@ function isAllowedBootstrapPrelude(statement: string): boolean {
   return !!next && isDatabaseKeyword(next[0]);
 }
 
-export function supportsConnectionLevelDatabaseBootstrap(connection: BootstrapConnection | undefined): boolean {
+export function supportsConnectionLevelSqlExecution(connection: BootstrapConnection | undefined): boolean {
   if (!connection) return false;
   if (supportsCreateDatabaseCharset(connection.db_type, connection.driver_profile)) return true;
   return !!connection.driver_profile && MYSQL_BOOTSTRAP_EXTRA_PROFILES.has(connection.driver_profile.toLowerCase());
+}
+
+export function supportsConnectionLevelDatabaseBootstrap(connection: BootstrapConnection | undefined): boolean {
+  return supportsConnectionLevelSqlExecution(connection);
 }
 
 export function canExecuteWithoutSelectedDatabase(connection: BootstrapConnection | undefined, sql: string): boolean {

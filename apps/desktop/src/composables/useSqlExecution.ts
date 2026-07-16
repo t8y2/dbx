@@ -6,7 +6,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { isSingleDatabase, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
-import { canExecuteWithoutSelectedDatabase } from "@/lib/connection/connectionLevelDatabaseBootstrap";
+import { supportsConnectionLevelSqlExecution } from "@/lib/connection/connectionLevelDatabaseBootstrap";
 import { classifySqlActivityKind } from "@/lib/history/historyActivityKind";
 import { sqlMetadataRefreshTarget } from "@/lib/sql/sqlMetadataRefresh";
 import { isMysqlExecutionErrorResult, usesMysqlProtocolDatabaseType } from "@/lib/query/queryResultError";
@@ -294,12 +294,14 @@ function supportsSqlTemplateParameters(connection: ConnectionConfig | undefined)
   return connection.db_type !== "redis" && connection.db_type !== "mongodb";
 }
 
-export function requiresDatabaseSelection(tab: QueryTab, connection: ConnectionConfig | undefined, sql = ""): boolean {
+export function requiresDatabaseSelection(tab: QueryTab, connection: ConnectionConfig | undefined, _sql = ""): boolean {
   if (tab.mode !== "query") return false;
   if (!connection) return false;
   if (tab.database) return false;
   if (tab.database === "" && usesTreeSchemaMode(connection.db_type)) return false;
   if (isSingleDatabase(connection.db_type)) return false;
-  if (canExecuteWithoutSelectedDatabase(connection, sql)) return false;
+  // MySQL-compatible servers decide per statement whether a default database is required.
+  // Keep interactive execution connection-scoped instead of rejecting valid qualified or constant queries.
+  if (supportsConnectionLevelSqlExecution(connection)) return false;
   return !["elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "zookeeper"].includes(connection.db_type);
 }

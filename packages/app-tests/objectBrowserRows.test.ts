@@ -193,7 +193,7 @@ test("object browser formats statistics for compact table cells", () => {
   assert.equal(formatObjectBrowserBytes(null), "");
 });
 
-test("object browser name sort keeps base-prefixed tables before prefixed variants", () => {
+test("object browser name sort keeps natural name order like the sidebar tree", () => {
   const rows = buildObjectBrowserRows({
     objects: [
       { name: "chat_staff", object_type: "TABLE", schema: "public" },
@@ -208,7 +208,27 @@ test("object browser name sort keeps base-prefixed tables before prefixed varian
 
   assert.deepEqual(
     sortObjectBrowserRows(rows, "name", "asc").map((row) => row.name),
-    ["staff", "staff_his", "chat_staff", "chat_staff_his"],
+    ["chat_staff", "chat_staff_his", "staff", "staff_his"],
+  );
+});
+
+test("object browser name sort does not relocate prefixed business tables by suffix", () => {
+  // Mirrors the sidebar regression test from "keep tables sorted by visible
+  // name" — both sides must list tables identically (issue #3604).
+  const rows = buildObjectBrowserRows({
+    objects: [
+      { name: "YonSuite_CurrentStock", object_type: "TABLE", schema: "dbo" },
+      { name: "CurrentStock", object_type: "TABLE", schema: "dbo" },
+      { name: "YonSuite_LocationStock", object_type: "TABLE", schema: "dbo" },
+    ],
+    database: "app",
+    fallbackSchema: "dbo",
+    needsSchema: true,
+  });
+
+  assert.deepEqual(
+    sortObjectBrowserRows(rows, "name", "asc").map((row) => row.name),
+    ["CurrentStock", "YonSuite_CurrentStock", "YonSuite_LocationStock"],
   );
 });
 

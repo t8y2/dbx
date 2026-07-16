@@ -1,5 +1,5 @@
 import type { ObjectInfo } from "@/types/database";
-import { createDatabaseObjectNameComparator, normalizeDatabaseObjectName } from "@/lib/table/tableTree";
+import { compareDatabaseObjectNames, normalizeDatabaseObjectName } from "@/lib/table/tableTree";
 import { parseSlashDelimitedRegexQuery } from "@/lib/common/searchPattern";
 
 export type ObjectBrowserRow = {
@@ -122,11 +122,12 @@ export function filterObjectBrowserRows(rows: ObjectBrowserRow[], query: string)
 
 export function sortObjectBrowserRows(rows: ObjectBrowserRow[], key: ObjectBrowserSortKey, direction: ObjectBrowserSortDirection): ObjectBrowserRow[] {
   const multiplier = direction === "asc" ? 1 : -1;
-  const compareNames = createDatabaseObjectNameComparator(rows.map((row) => row.displayName));
+  // Sort by natural visible name, matching the sidebar tree ordering
+  // (see fix "keep tables sorted by visible name" and issue #3604).
   return [...rows].sort((left, right) => {
-    const compared = key === "name" ? compareNames(left.displayName, right.displayName) : compareObjectBrowserValue(left[key], right[key], key, direction);
+    const compared = key === "name" ? compareDatabaseObjectNames(left.displayName, right.displayName) : compareObjectBrowserValue(left[key], right[key], key, direction);
     if (compared !== 0) return compared * multiplier;
-    return compareNames(left.displayName, right.displayName);
+    return compareDatabaseObjectNames(left.displayName, right.displayName);
   });
 }
 

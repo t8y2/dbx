@@ -712,6 +712,7 @@ export async function executeQuery(
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
+    executionMode?: "simple";
   },
 ): Promise<QueryResult> {
   return post("/api/query/execute", { connectionId, database, sql, schema, executionId, ...options });
@@ -732,6 +733,7 @@ export async function executeMulti(
     timeoutSecs?: number;
     useTransaction?: boolean;
     continueOnError?: boolean;
+    executionMode?: "simple";
   },
 ): Promise<QueryResult[]> {
   return post("/api/query/execute-multi", { connectionId, database, sql, schema, executionId, ...options });
@@ -1119,6 +1121,26 @@ export async function loadAiProviderConfigs(): Promise<Record<string, AiConfig>>
 
 export async function loadAiConfig(): Promise<AiConfig | null> {
   return get("/api/ai/config");
+}
+
+export async function saveAiConfigs(configs: import("@/types/ai").AiConfigItem[]): Promise<void> {
+  return post("/api/ai/configs", { configs });
+}
+
+export async function loadAiConfigs(): Promise<import("@/types/ai").AiConfigItem[]> {
+  return get("/api/ai/configs");
+}
+
+export async function setDefaultAiConfig(configId: string): Promise<void> {
+  return post("/api/ai/default-config", { configId });
+}
+
+export async function saveAiConfigItem(config: import("@/types/ai").AiConfigItem): Promise<void> {
+  return post("/api/ai/config-item", { config });
+}
+
+export async function deleteAiConfig(configId: string): Promise<void> {
+  return del(`/api/ai/config/${configId}`);
 }
 
 export async function loadDesktopSettings(): Promise<DesktopSettings> {
@@ -2109,6 +2131,10 @@ export async function mongoAggregateDocuments(connectionId: string, database: st
   return post("/api/mongo/aggregate-documents", { connectionId, database, collection, pipelineJson, maxRows, executionId });
 }
 
+export async function mongoDistinct(connectionId: string, database: string, collection: string, field: string, filter?: string, executionId?: string): Promise<MongoDocumentResult> {
+  return post("/api/mongo/distinct", { connectionId, database, collection, field, filter, executionId });
+}
+
 export async function mongoCollectionStats(connectionId: string, database: string, collection: string, scale?: number, executionId?: string): Promise<MongoCollectionStatsResult> {
   return post("/api/mongo/collection-stats", { connectionId, database, collection, scale, executionId });
 }
@@ -2121,12 +2147,12 @@ export async function mongoDropIndexes(connectionId: string, database: string, c
   return post("/api/mongo/drop-indexes", { connectionId, database, collection, indexesJson, single });
 }
 
-export async function mongoInsertDocument(connectionId: string, database: string, collection: string, docJson: string): Promise<string> {
-  return documentInsertDocument(connectionId, database, collection, docJson);
+export async function mongoInsertDocument(connectionId: string, database: string, collection: string, docJson: string, routing?: string): Promise<string> {
+  return documentInsertDocument(connectionId, database, collection, docJson, routing);
 }
 
-export async function documentInsertDocument(connectionId: string, database: string, collection: string, docJson: string): Promise<string> {
-  return post("/api/document-store/insert-document", { connectionId, database, collection, docJson });
+export async function documentInsertDocument(connectionId: string, database: string, collection: string, docJson: string, routing?: string): Promise<string> {
+  return post("/api/document-store/insert-document", { connectionId, database, collection, docJson, routing });
 }
 
 export async function mongoInsertDocuments(connectionId: string, database: string, collection: string, docsJson: string): Promise<{ affected_rows: number }> {

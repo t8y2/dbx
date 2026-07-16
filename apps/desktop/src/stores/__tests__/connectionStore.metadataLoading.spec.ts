@@ -123,6 +123,66 @@ describe("connectionStore metadata loading", () => {
     expect(schemaNode.children?.map((node) => node.label)).toEqual(["users"]);
   });
 
+  it("keeps an expanding schema attached while its parent refreshes", async () => {
+    const listSchemaInfos = vi.fn().mockResolvedValue([{ name: "core", comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listSchemaInfos,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection();
+    const schemaNode: TreeNode = {
+      id: "pg-1:app:core",
+      label: "core",
+      type: "schema",
+      connectionId: connection.id,
+      database: "app",
+      schema: "core",
+      isExpanded: true,
+      isLoading: true,
+      children: [],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [
+          {
+            id: "pg-1:app",
+            label: "app",
+            type: "database",
+            connectionId: connection.id,
+            database: "app",
+            isExpanded: true,
+            children: [schemaNode],
+          },
+        ],
+      },
+    ];
+
+    const storedSchema = store.treeNodes[0].children?.[0].children?.[0];
+    await store.loadSchemas(connection.id, "app", { force: true });
+
+    const refreshedSchema = store.treeNodes[0].children?.[0].children?.[0];
+    expect(refreshedSchema).toBe(storedSchema);
+    expect(refreshedSchema?.isExpanded).toBe(true);
+    expect(refreshedSchema?.isLoading).toBe(true);
+  });
+
   it("paginates procedure groups and appends the next page", async () => {
     const firstPage = Array.from({ length: 201 }, (_, index) => procedure(`p_${String(index + 1).padStart(4, "0")}`));
     const listObjects = vi

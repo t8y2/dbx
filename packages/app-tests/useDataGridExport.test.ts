@@ -52,10 +52,18 @@ function buildExportHarness(
   options: {
     currentResultLabel?: string;
     exportFileBaseName?: string;
+    columns?: string[];
     columnTypes?: Array<string | undefined>;
+    rows?: QueryResult["rows"];
     allExportResults?: Array<{ sheetName: string; result: QueryResult; sql?: string }>;
   } = {},
 ) {
+  const exportColumns = options.columns ?? ["id", "name"];
+  const exportRows = options.rows ?? [
+    [1, "Ada"],
+    [2, "Lin"],
+  ];
+  const rowItems = exportRows.map((data, index) => ({ id: index + 1, data, isNew: false, isDeleted: false, isDirtyCol: data.map(() => false), status: "" }));
   const exportProgressDialog = ref(false);
   const exportProgressState = ref({
     title: "",
@@ -93,11 +101,8 @@ function buildExportHarness(
   }));
 
   const composable = useDataGridExport({
-    columns: computed(() => ["id", "name"]),
-    displayItems: computed(() => [
-      { id: 1, data: [1, "Ada"], isNew: false, isDeleted: false, isDirtyCol: [false, false], status: "" },
-      { id: 2, data: [2, "Lin"], isNew: false, isDeleted: false, isDirtyCol: [false, false], status: "" },
-    ]),
+    columns: computed(() => exportColumns),
+    displayItems: computed(() => rowItems),
     sql: computed(() => "SELECT * FROM users"),
     exportSql: computed(() => "SELECT * FROM users ORDER BY id DESC"),
     tableMeta: computed(() => undefined),
@@ -114,11 +119,7 @@ function buildExportHarness(
     selectedCells: computed(() => ({ columns: [], rows: [] })),
     selectedRange: computed(() => null),
     contextCell: ref(null),
-    getRowItem: (rowId: number) =>
-      [
-        { id: 1, data: [1, "Ada"], isNew: false, isDeleted: false, isDirtyCol: [false, false], status: "" },
-        { id: 2, data: [2, "Lin"], isNew: false, isDeleted: false, isDirtyCol: [false, false], status: "" },
-      ].find((item) => item.id === rowId),
+    getRowItem: (rowId: number) => rowItems.find((item) => item.id === rowId),
     selectedRowIds: ref(new Set<number>()),
     hasRowSelection: computed(() => false),
     fullExportResult,
@@ -652,6 +653,7 @@ test("default data grid export file names use sanitized base names and compact l
 });
 
 test("full query result CSV export streams through the backend without loading all rows", async () => {
+  useSettingsStore().updateEditorSettings({ globalDateTimeExportFormat: "YYYY/M/D HH:mm:ss" });
   const { composable, fullExportResult, queryResultExportRequest, exportProgressDialog, exportProgressState } = buildExportHarness();
 
   await composable.exportCsv();
@@ -659,6 +661,7 @@ test("full query result CSV export streams through the backend without loading a
   assert.equal(fullExportResult.mock.calls.length, 0);
   assert.equal(queryResultExportRequest.mock.calls.length, 1);
   assert.equal(apiMock.startQueryResultExport.mock.calls.length, 1);
+  assert.equal(apiMock.startQueryResultExport.mock.calls[0][0].dateTimeFormat, "YYYY/M/D HH:mm:ss");
   assert.equal(apiMock.exportQueryResultCsv.mock.calls.length, 0);
   assert.equal(exportProgressDialog.value, true);
   assert.equal(exportProgressState.value.status, "Done");
@@ -773,6 +776,20 @@ test("selected query result CSV export keeps the existing in-memory path", async
   assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][2], [[1, "Ada"]]);
 });
 
+test("selected query result CSV export formats only typed temporal columns", async () => {
+  useSettingsStore().updateEditorSettings({ globalDateTimeExportFormat: "YYYY/M/D HH:mm:ss" });
+  const rawDateTime = "2024-02-25 13:02:15";
+  const { composable } = buildExportHarness({
+    columns: ["created_at", "note"],
+    columnTypes: ["timestamp", "varchar"],
+    rows: [[rawDateTime, rawDateTime]],
+  });
+
+  await composable.exportCsv([1]);
+
+  assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][2], [["2024/2/25 13:02:15", rawDateTime]]);
+});
+
 test("selected query result XLSX export uses the current source label as the sheet name", async () => {
   const { composable, queryResultExportRequest } = buildExportHarness({ currentResultLabel: "aaa.apis", columnTypes: ["bigint(20)", "varchar(64)"] });
 
@@ -883,6 +900,20 @@ test("table data export leaves row limit unset by default", async () => {
 
     assert.equal(apiMock.startTableExport.mock.calls.length, 1);
     assert.equal(apiMock.startTableExport.mock.calls[0][0].rowLimit, null);
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("table data export passes the global date time export format", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    useSettingsStore().updateEditorSettings({ globalDateTimeExportFormat: "YYYY/MM/DD HH:mm:ss" });
+    const { composable } = buildTableDataExportHarness();
+
+    await composable.exportCsv();
+
+    assert.equal(apiMock.startTableExport.mock.calls[0][0].dateTimeFormat, "YYYY/MM/DD HH:mm:ss");
   } finally {
     restoreStorage();
   }

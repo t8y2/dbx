@@ -56,6 +56,7 @@ const TableStructureEditor = defineAsyncComponent(() => import("@/components/str
 const DatabaseUserAdmin = defineAsyncComponent(() => import("@/components/admin/DatabaseUserAdmin.vue"));
 const ProcessListPanel = defineAsyncComponent(() => import("@/components/admin/ProcessListPanel.vue"));
 const MySqlDashboard = defineAsyncComponent(() => import("@/components/admin/MySqlDashboard.vue"));
+const PostgresDashboard = defineAsyncComponent(() => import("@/components/admin/PostgresDashboard.vue"));
 const DamengJobAdmin = defineAsyncComponent(() => import("@/components/admin/DamengJobAdmin.vue"));
 const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explain/ExplainPlanViewer.vue"));
 const QueryChart = defineAsyncComponent(() => import("@/components/chart/QueryChart.vue"));
@@ -71,7 +72,7 @@ import { isTableDataEditable } from "@/lib/table/tableEditing";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { dataTabExecutionDatabase } from "@/lib/table/dataTabExecutionDatabase";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
-import { codeMirrorSqlDialect, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { codeMirrorSqlDialect, codeMirrorSqlDialectForConnection, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { chartableColumnIndexes } from "@/lib/dataGrid/chartData";
 import { elasticsearchJsonResponseForResult } from "@/lib/elasticsearch/elasticsearchJsonResponse";
 import * as api from "@/lib/backend/api";
@@ -270,6 +271,7 @@ const activeTabDimension = computed(() => {
 const activeSqlFormatDialect = computed<SqlFormatDialect>(() => sqlFormatDialectForDbType(activeEffectiveDatabaseType.value));
 
 const editorDialect = computed<"mysql" | "postgres" | "sqlserver">(() => codeMirrorSqlDialect(activeEffectiveDatabaseType.value));
+const editorSyntaxDialect = computed<"mysql" | "postgres" | "sqlserver">(() => codeMirrorSqlDialectForConnection(props.activeConnection));
 
 const shortcutModifier = computed(() => (navigator.platform.toLowerCase().includes("mac") ? "Cmd" : "Ctrl"));
 
@@ -810,6 +812,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
               :schema="activeTab.schema"
               :database-type="activeEffectiveDatabaseType"
               :dialect="editorDialect"
+              :syntax-dialect="editorSyntaxDialect"
               :format-dialect="activeSqlFormatDialect"
               :format-request-id="formatSqlRequest?.tabId === activeTab.id ? formatSqlRequest.id : undefined"
               :execution-error="activeQueryError"
@@ -1472,7 +1475,6 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
           :database-type="activeEffectiveDatabaseType"
           :connection-id="activeTab.connectionId"
           :database="activeTab.database"
-          :catalog="activeTab.objectBrowser?.catalog"
           :execution-database="activeDataTabExecutionDatabase"
           :table-meta="activeDataTabTableMeta"
           :table-info-tab="activeTab.tableInfoTab"
@@ -1584,6 +1586,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
           :key="`${activeTab.id}-${activeTab.objectBrowser?.schema || ''}`"
           :connection="activeConnection"
           :database="activeTab.database"
+          :catalog="activeTab.objectBrowser?.catalog"
           :schema="activeTab.objectBrowser?.schema"
           :viewport="activeTab.objectBrowser?.viewport"
           @open-table="emit('openObjectTable', $event)"
@@ -1600,6 +1603,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
         :key="activeTab.id"
         :connection-id="activeTab.connectionId"
         :database="activeTab.database"
+        :catalog="activeTab.catalog"
         :schema="activeTab.schema"
         :table-name="activeTab.structureTableName || ''"
         :initial-tab="activeTab.structureInitialTab"
@@ -1624,6 +1628,12 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
     <template v-else-if="activeTab.mode === 'mysql-dashboard'">
       <div class="min-h-0 flex-1">
         <MySqlDashboard :key="activeTab.id" :connection-id="activeTab.connectionId" />
+      </div>
+    </template>
+
+    <template v-else-if="activeTab.mode === 'postgres-dashboard'">
+      <div class="min-h-0 flex-1">
+        <PostgresDashboard :key="activeTab.id" :connection-id="activeTab.connectionId" />
       </div>
     </template>
 

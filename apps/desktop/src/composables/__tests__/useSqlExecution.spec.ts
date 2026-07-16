@@ -66,6 +66,14 @@ describe("requiresDatabaseSelection", () => {
     expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "CREATE DATABASE app_db")).toBe(false);
   });
 
+  it("allows MySQL SHOW DATABASES to run without a selected database", () => {
+    expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "SHOW DATABASES")).toBe(false);
+  });
+
+  it("allows MySQL SHOW VARIABLES without a selected database", () => {
+    expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "SHOW VARIABLES LIKE 'version%'")).toBe(false);
+  });
+
   it("allows MySQL CREATE SCHEMA with options to run without a selected database", () => {
     expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "CREATE SCHEMA `app-db` DEFAULT CHARACTER SET utf8mb4")).toBe(false);
   });
@@ -78,16 +86,20 @@ describe("requiresDatabaseSelection", () => {
     expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "SET NAMES utf8mb4; DROP DATABASE IF EXISTS app_db; CREATE DATABASE app_db; USE app_db; INSERT INTO users VALUES (1)")).toBe(false);
   });
 
-  it("requires a database when MySQL batch statements never establish database context", () => {
-    expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "CREATE DATABASE app_db; CREATE TABLE users(id INT)")).toBe(true);
+  it("lets MySQL report statement-specific database requirements", () => {
+    expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "CREATE DATABASE app_db; CREATE TABLE users(id INT)")).toBe(false);
   });
 
-  it("requires a database when a USE statement is not a standalone database switch", () => {
-    expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "CREATE DATABASE app_db; USE app_db SELECT 1; CREATE TABLE users(id INT)")).toBe(true);
+  it("lets MySQL reject malformed database switches", () => {
+    expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "CREATE DATABASE app_db; USE app_db SELECT 1; CREATE TABLE users(id INT)")).toBe(false);
   });
 
-  it("still requires a database for ordinary MySQL queries", () => {
-    expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "SELECT * FROM users")).toBe(true);
+  it.each(["SELECT 1", "SELECT VERSION()", "SELECT * FROM mysql.user", "SELECT * FROM users"])("allows connection-level MySQL query: %s", (sql) => {
+    expect(requiresDatabaseSelection(queryTab(), connection("mysql"), sql)).toBe(false);
+  });
+
+  it("still requires a database for non-MySQL multi-database connections", () => {
+    expect(requiresDatabaseSelection(queryTab(), connection("mssql"), "SELECT * FROM dbo.users")).toBe(true);
   });
 
   it("allows HANA with default database (empty string) to execute queries", () => {

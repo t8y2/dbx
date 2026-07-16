@@ -793,9 +793,9 @@ public final class KafkaAgent {
 
     private static Object peekMessages(JsonObject params) throws Exception {
         String topic = stringOrEmpty(params, "topic");
-        int partition = intOrDefault(params, "partition", 0);
-        long offset = longOrDefault(params, "offset", 0);
-        int count = intOrDefault(params, "count", 10);
+        Integer partition = integerOrNull(params, "partition");
+        Long offset = longOrNull(params, "offset");
+        int count = Math.max(1, intOrDefault(params, "count", 10));
 
         // Build a temporary consumer for peeking (no commit)
         Properties props = new Properties();
@@ -818,50 +818,194 @@ public final class KafkaAgent {
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "none");
         props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, count);
 
-        TopicPartition tp = new TopicPartition(topic, partition);
         try (KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(props)) {
-            consumer.assign(Collections.singletonList(tp));
-            Map<TopicPartition, Long> beginningOffsets =
-                consumer.beginningOffsets(Collections.singletonList(tp), Duration.ofSeconds(5));
-            Map<TopicPartition, Long> endOffsets =
-                consumer.endOffsets(Collections.singletonList(tp), Duration.ofSeconds(5));
-            long beginningOffset = beginningOffsets.getOrDefault(tp, 0L);
-            long endOffset = endOffsets.getOrDefault(tp, beginningOffset);
-            Long seekOffset = normalizePeekOffset(offset, beginningOffset, endOffset);
-            if (seekOffset == null) {
+            List<TopicPartition> candidatePartitions = resolvePeekPartitions(consumer, topic, partition);
+            if (candidatePartitions.isEmpty()) {
                 return Collections.singletonMap("messages", Collections.emptyList());
             }
-            consumer.seek(tp, seekOffset);
 
-            List<Map<String, Object>> messages = new ArrayList<>();
-            ConsumerRecords<String, byte[]> records = consumer.poll(Duration.ofSeconds(5));
-            for (ConsumerRecord<String, byte[]> record : records) {
-                if (messages.size() >= count) break;
-                Map<String, Object> msg = new LinkedHashMap<>();
-                msg.put("topic", record.topic());
-                msg.put("partition", record.partition());
-                msg.put("offset", record.offset());
-                msg.put("timestamp", record.timestamp());
-                msg.put("key", record.key());
-                // Headers
-                Map<String, String> headers = new LinkedHashMap<>();
-                record.headers().forEach(h ->
-                    headers.put(h.key(), new String(h.value(), StandardCharsets.UTF_8)));
-                msg.put("headers", headers);
-                // Payload
-                if (record.value() != null) {
-                    msg.put("payloadBase64", Base64.getEncoder().encodeToString(record.value()));
-                    String text = tryDecodeUtf8(record.value());
-                    if (text != null) {
-                        msg.put("payloadText", text);
-                    }
-                } else {
-                    msg.put("payloadBase64", "");
+            Map<TopicPartition, Long> beginningOffsets =
+                consumer.beginningOffsets(candidatePartitions, Duration.ofSeconds(5));
+            Map<TopicPartition, Long> endOffsets =
+                consumer.endOffsets(candidatePartitions, Duration.ofSeconds(5));
+
+            List<TopicPartition> readablePartitions = new ArrayList<>();
+            Map<TopicPartition, Long> seekOffsets = new LinkedHashMap<>();
+            for (TopicPartition tp : candidatePartitions) {
+                long beginningOffset = beginningOffsets.getOrDefault(tp, 0L);
+                long endOffset = endOffsets.getOrDefault(tp, beginningOffset);
+                long requestedOffset = offset != null ? offset : beginningOffset;
+                Long seekOffset = normalizePeekOffset(requestedOffset, beginningOffset, endOffset);
+                if (seekOffset == null) {
+                    continue;
                 }
-                messages.add(msg);
+                readablePartitions.add(tp);
+                seekOffsets.put(tp, seekOffset);
+            }
+            if (readablePartitions.isEmpty()) {
+                return Collections.singletonMap("messages", Collections.emptyList());
+            }
+
+            consumer.assign(readablePartitions);
+            for (Map.Entry<TopicPartition, Long> entry : seekOffsets.entrySet()) {
+                consumer.seek(entry.getKey(), entry.getValue());
+            }
+
+            List<Map<String, Object>> messages = collectPeekedMessages(
+                timeout -> consumer.poll(timeout),
+                () -> {
+                    Map<TopicPartition, Long> positions = new LinkedHashMap<>();
+                    for (TopicPartition tp : readablePartitions) {
+                        positions.put(tp, consumer.position(tp));
+                    }
+                    return allPeekPartitionsCaughtUp(readablePartitions, positions, endOffsets);
+                },
+                count,
+                System.nanoTime() + Duration.ofSeconds(5).toNanos(),
+                Duration.ofMillis(500)
+            );
+            sortPeekedMessages(messages);
+            if (messages.size() > count) {
+                messages = new ArrayList<>(messages.subList(0, count));
             }
             return Collections.singletonMap("messages", messages);
         }
+    }
+
+    /**
+     * Poll until {@code count} messages are collected, every assigned partition has reached its
+     * end offset, or {@code deadlineNs} expires. Empty polls retry until caught-up or deadline —
+     * they must not abort early (broker / network / first-fetch latency can exceed one poll).
+     */
+    static List<Map<String, Object>> collectPeekedMessages(
+        PeekRecordPoller poller,
+        PeekCaughtUpChecker caughtUpChecker,
+        int count,
+        long deadlineNs,
+        Duration pollTimeout
+    ) {
+        List<Map<String, Object>> messages = new ArrayList<>();
+        while (messages.size() < count && System.nanoTime() < deadlineNs) {
+            long remainingNs = deadlineNs - System.nanoTime();
+            if (remainingNs <= 0) {
+                break;
+            }
+            Duration timeout = pollTimeout.toNanos() > remainingNs
+                ? Duration.ofNanos(remainingNs)
+                : pollTimeout;
+            ConsumerRecords<String, byte[]> records = poller.poll(timeout);
+            if (records.isEmpty()) {
+                if (caughtUpChecker.allPartitionsCaughtUp()) {
+                    break;
+                }
+                continue;
+            }
+            for (ConsumerRecord<String, byte[]> record : records) {
+                messages.add(peekedMessageFromRecord(record));
+                if (messages.size() >= count) {
+                    break;
+                }
+            }
+        }
+        return messages;
+    }
+
+    static boolean allPeekPartitionsCaughtUp(
+        List<TopicPartition> partitions,
+        Map<TopicPartition, Long> positions,
+        Map<TopicPartition, Long> endOffsets
+    ) {
+        for (TopicPartition tp : partitions) {
+            long endOffset = endOffsets.getOrDefault(tp, 0L);
+            long position = positions.getOrDefault(tp, 0L);
+            if (position < endOffset) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    @FunctionalInterface
+    interface PeekRecordPoller {
+        ConsumerRecords<String, byte[]> poll(Duration timeout);
+    }
+
+    @FunctionalInterface
+    interface PeekCaughtUpChecker {
+        boolean allPartitionsCaughtUp();
+    }
+
+    /** When partition is null, peek across every partition of the topic. */
+    static List<TopicPartition> resolvePeekPartitions(
+        KafkaConsumer<String, byte[]> consumer,
+        String topic,
+        Integer partition
+    ) {
+        if (partition != null) {
+            return resolvePeekPartitions(topic, partition, Collections.emptyList());
+        }
+        List<PartitionInfo> infos = consumer.partitionsFor(topic, Duration.ofSeconds(5));
+        if (infos == null || infos.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<Integer> available = infos.stream().map(PartitionInfo::partition).collect(Collectors.toList());
+        return resolvePeekPartitions(topic, null, available);
+    }
+
+    static List<TopicPartition> resolvePeekPartitions(String topic, Integer partition, List<Integer> availablePartitions) {
+        if (partition != null) {
+            return Collections.singletonList(new TopicPartition(topic, partition));
+        }
+        if (availablePartitions == null || availablePartitions.isEmpty()) {
+            return Collections.emptyList();
+        }
+        return availablePartitions.stream()
+            .sorted()
+            .map(id -> new TopicPartition(topic, id))
+            .collect(Collectors.toList());
+    }
+
+    static void sortPeekedMessages(List<Map<String, Object>> messages) {
+        messages.sort((left, right) -> {
+            long leftTs = ((Number) left.getOrDefault("timestamp", 0L)).longValue();
+            long rightTs = ((Number) right.getOrDefault("timestamp", 0L)).longValue();
+            int byTs = Long.compare(leftTs, rightTs);
+            if (byTs != 0) {
+                return byTs;
+            }
+            int leftPartition = ((Number) left.getOrDefault("partition", 0)).intValue();
+            int rightPartition = ((Number) right.getOrDefault("partition", 0)).intValue();
+            int byPartition = Integer.compare(leftPartition, rightPartition);
+            if (byPartition != 0) {
+                return byPartition;
+            }
+            long leftOffset = ((Number) left.getOrDefault("offset", 0L)).longValue();
+            long rightOffset = ((Number) right.getOrDefault("offset", 0L)).longValue();
+            return Long.compare(leftOffset, rightOffset);
+        });
+    }
+
+    private static Map<String, Object> peekedMessageFromRecord(ConsumerRecord<String, byte[]> record) {
+        Map<String, Object> msg = new LinkedHashMap<>();
+        msg.put("topic", record.topic());
+        msg.put("partition", record.partition());
+        msg.put("offset", record.offset());
+        msg.put("timestamp", record.timestamp());
+        msg.put("key", record.key());
+        Map<String, String> headers = new LinkedHashMap<>();
+        record.headers().forEach(h ->
+            headers.put(h.key(), new String(h.value(), StandardCharsets.UTF_8)));
+        msg.put("headers", headers);
+        if (record.value() != null) {
+            msg.put("payloadBase64", Base64.getEncoder().encodeToString(record.value()));
+            String text = tryDecodeUtf8(record.value());
+            if (text != null) {
+                msg.put("payloadText", text);
+            }
+        } else {
+            msg.put("payloadBase64", "");
+        }
+        return msg;
     }
 
     private static Object sendMessage(JsonObject params) throws Exception {
@@ -1229,14 +1373,24 @@ public final class KafkaAgent {
         return value == null ? fallback : value;
     }
 
-    private static int intOrDefault(JsonObject object, String key, int fallback) {
+    private static Integer integerOrNull(JsonObject object, String key) {
         JsonElement element = object.get(key);
-        return element == null || element.isJsonNull() ? fallback : element.getAsInt();
+        return element == null || element.isJsonNull() ? null : element.getAsInt();
+    }
+
+    private static Long longOrNull(JsonObject object, String key) {
+        JsonElement element = object.get(key);
+        return element == null || element.isJsonNull() ? null : element.getAsLong();
+    }
+
+    private static int intOrDefault(JsonObject object, String key, int fallback) {
+        Integer value = integerOrNull(object, key);
+        return value == null ? fallback : value;
     }
 
     private static long longOrDefault(JsonObject object, String key, long fallback) {
-        JsonElement element = object.get(key);
-        return element == null || element.isJsonNull() ? fallback : element.getAsLong();
+        Long value = longOrNull(object, key);
+        return value == null ? fallback : value;
     }
 
     private static boolean boolOrDefault(JsonObject object, String key, boolean fallback) {

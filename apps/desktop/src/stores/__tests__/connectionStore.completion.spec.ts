@@ -159,6 +159,32 @@ describe("connectionStore completion assistant", () => {
     expect(tables).toEqual([{ name: "TEST_USERS", schema: "SYSDBA", type: "table" }]);
   });
 
+  it("scopes Oracle table completion to a qualified schema case-insensitively", async () => {
+    const completionAssistantSearch = vi.fn(async (request: { schema?: string | null }) => ({
+      candidates: request.schema?.toLowerCase() === "scott" ? [{ name: "EMP", kind: "table", schema: "SCOTT", data_type: "TABLE" }] : [],
+      incomplete: false,
+      fallback_used: false,
+    }));
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      listTables: vi.fn().mockResolvedValue([]),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oracleConnection()];
+    store.connectedIds.add("oracle-1");
+
+    const tables = await store.listCompletionTables("oracle-1", "ORCL", "", 20, "scott", false, "APP");
+
+    expect(completionAssistantSearch).toHaveBeenCalledWith(expect.objectContaining({ schema: "scott", parent_schema: "scott", global_search: false, mask: "" }));
+    expect(tables).toEqual([expect.objectContaining({ name: "EMP", schema: "SCOTT", applyName: "EMP", boost: 2400 })]);
+    expect(store.lookupLocalCompletionTables("oracle-1", "ORCL", "", 20, "scott")).toEqual(tables);
+  });
+
   it("maps global Oracle tables with safe qualification and schema priority", async () => {
     const completionAssistantSearch = vi.fn().mockResolvedValue({
       candidates: [

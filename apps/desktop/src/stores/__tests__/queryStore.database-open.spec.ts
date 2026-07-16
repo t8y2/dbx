@@ -69,6 +69,19 @@ describe("queryStore database open state", () => {
     expect(store.openObjectBrowser("doris-1", "default", undefined, "iceberg_catalog")).toBe(icebergTabId);
   });
 
+  it("keeps external catalog structure editors isolated", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    const icebergTabId = store.openTableStructure("doris-1", "sales", undefined, "orders", undefined, undefined, "iceberg_catalog");
+    const hiveTabId = store.openTableStructure("doris-1", "sales", undefined, "orders", undefined, undefined, "hive_catalog");
+
+    expect(hiveTabId).not.toBe(icebergTabId);
+    expect(store.tabs.find((tab) => tab.id === icebergTabId)?.catalog).toBe("iceberg_catalog");
+    expect(store.tabs.find((tab) => tab.id === hiveTabId)?.catalog).toBe("hive_catalog");
+    expect(store.openTableStructure("doris-1", "sales", undefined, "orders", undefined, undefined, "iceberg_catalog")).toBe(icebergTabId);
+  });
+
   it("closes data and structure tabs for a dropped table object", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

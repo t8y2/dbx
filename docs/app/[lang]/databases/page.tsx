@@ -20,6 +20,8 @@ const databaseSupport = [
   { name: "Qdrant", icon: "/icons/database/qdrant.svg", tone: "#dc244c" },
   { name: "Milvus", icon: "/icons/database/milvus.png", tone: "#00a1ea" },
   { name: "Weaviate", icon: "/icons/database/weaviate.png", tone: "#00b894" },
+  { name: "ChromaDB", shortLabel: "CH", tone: "#ff7a59" },
+  { name: "Cloudflare D1", shortLabel: "D1", tone: "#f6821f" },
   { name: "MariaDB", icon: "/icons/database/mariadb.svg", tone: "#003545" },
   { name: "Doris", icon: "/icons/database/doris.svg", tone: "#5b7cfa" },
   { name: "StarRocks", icon: "/icons/database/starrocks.svg", tone: "#6750ff" },
@@ -47,6 +49,7 @@ const databaseSupport = [
   { name: "Trino", icon: "/icons/database/trino.svg", tone: "#dd00a1" },
   { name: "PrestoSQL", icon: "/icons/database/presto.svg", tone: "#5890ff" },
   { name: "Hive", icon: "/icons/database/hive.svg", tone: "#fdcb00" },
+  { name: "Apache Spark", shortLabel: "SP", tone: "#e25a1c" },
   { name: "DB2", icon: "/icons/database/db2.svg", tone: "#054ada" },
   { name: "SAP HANA", icon: "/icons/database/saphana.webp", tone: "#008fd3" },
   { name: "Teradata", icon: "/icons/database/teradata.webp", tone: "#f37440" },
@@ -57,6 +60,8 @@ const databaseSupport = [
   { name: "Neo4j", icon: "/icons/database/neo4j.svg", tone: "#018bff" },
   { name: "Cassandra", icon: "/icons/database/cassandra.svg", tone: "#1287b1" },
   { name: "Kylin", icon: "/icons/database/apache_kylin.svg", tone: "#fb8c00" },
+  { name: "Dremio", shortLabel: "DR", tone: "#30bdbe" },
+  { name: "OSCAR", shortLabel: "OS", tone: "#1b8dff" },
   { name: "InfluxDB", icon: "/icons/database/influxdb.svg", tone: "#22adf6" },
   { name: "QuestDB", icon: "/icons/database/questdb.svg", tone: "#dc2626" },
   { name: "IoTDB", icon: "/icons/database/iotdb.svg", tone: "#3cb371" },
@@ -72,6 +77,7 @@ const databaseSupport = [
   { name: "Etcd", icon: "/icons/database/etcd.svg", tone: "#419eda" },
   { name: "ZooKeeper", icon: "/icons/database/zookeeper.svg", tone: "#3b82f6" },
   { name: "Pulsar", icon: "/icons/database/pulsar.svg", tone: "#188fff" },
+  { name: "Apache Kafka", shortLabel: "KF", tone: "#231f20" },
   { name: "Nacos", icon: "/icons/database/nacos.png", tone: "#2f80ed" },
   { name: "IRIS", icon: "/icons/database/iris.png", tone: "#0085ca" },
   { name: "JDBC", icon: "/icons/database/jdbc.svg", tone: "#6ea8ff" },
@@ -150,7 +156,7 @@ export default async function DatabasesPage({ params }: { params: Promise<{ lang
                 ) : db.icon ? (
                   <img src={db.icon} alt="" width={38} height={38} className="block w-[38px] h-[38px] object-contain" />
                 ) : (
-                  <span className="grid place-items-center min-w-[46px] h-8 rounded-lg px-2 text-white text-xs font-[780]">{db.name.slice(0, 2).toUpperCase()}</span>
+                  <span className="grid place-items-center min-w-[46px] h-8 rounded-lg px-2 text-xs font-[780] text-white" style={{ backgroundColor: db.tone }}>{db.shortLabel ?? db.name.slice(0, 2).toUpperCase()}</span>
                 )}
               </div>
               <strong className={`text-sm font-[650] leading-[1.2] text-center ${isCta ? "text-landing-blue" : "text-[color-mix(in_srgb,var(--color-landing-ink)_92%,var(--color-landing-muted))]"}`}>{db.name}</strong>

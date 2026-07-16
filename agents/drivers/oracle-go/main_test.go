@@ -3,13 +3,16 @@ package main
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/url"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHandshakeResponse(t *testing.T) {
@@ -1040,4 +1043,150 @@ func contains(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+
+// -- fake drivers for timeout tests --
+
+func init() {
+	sql.Register("oracle-test-dml", &oracleDMLDriver{})
+	sql.Register("oracle-test-fast", &oracleFastDriver{})
+}
+
+// oracleDMLDriver: ExecContext blocks until ctx.Done, simulating a long-running DML.
+type oracleDMLDriver struct{}
+
+func (d *oracleDMLDriver) Open(name string) (driver.Conn, error) {
+	return &oracleDMLConn{}, nil
+}
+
+type oracleDMLConn struct{}
+
+func (c *oracleDMLConn) Prepare(query string) (driver.Stmt, error) {
+	return nil, errors.New("use ExecContext directly")
+}
+func (c *oracleDMLConn) Close() error { return nil }
+func (c *oracleDMLConn) Begin() (driver.Tx, error) { return nil, errors.New("not supported") }
+
+var _ driver.ExecerContext = (*oracleDMLConn)(nil)
+
+func (c *oracleDMLConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// oracleFastDriver: returns rows quickly for cursor survival tests.
+type oracleFastDriver struct{}
+
+func (d *oracleFastDriver) Open(name string) (driver.Conn, error) {
+	return &oracleFastConn{}, nil
+}
+
+type oracleFastConn struct{}
+
+func (c *oracleFastConn) Prepare(query string) (driver.Stmt, error) {
+	return &oracleFastStmt{}, nil
+}
+func (c *oracleFastConn) Close() error { return nil }
+func (c *oracleFastConn) Begin() (driver.Tx, error) { return nil, errors.New("not supported") }
+
+type oracleFastStmt struct{}
+
+func (s *oracleFastStmt) Close() error      { return nil }
+func (s *oracleFastStmt) NumInput() int      { return -1 }
+func (s *oracleFastStmt) Exec(args []driver.Value) (driver.Result, error) {
+	return driver.ResultNoRows, nil
+}
+func (s *oracleFastStmt) Query(args []driver.Value) (driver.Rows, error) {
+	return &oracleFastRows{}, nil
+}
+
+type oracleFastRows struct {
+	pos    int
+	closed bool
+}
+
+func (r *oracleFastRows) Columns() []string { return []string{"id"} }
+func (r *oracleFastRows) Close() error      { r.closed = true; return nil }
+func (r *oracleFastRows) Next(dest []driver.Value) error {
+	if r.pos >= 3 || r.closed {
+		return io.EOF
+	}
+	dest[0] = int64(r.pos + 1)
+	r.pos++
+	return nil
+}
+
+// -- timeout tests --
+
+func TestOracleDMLCancelInterruptsExecContext(t *testing.T) {
+	s := newServer()
+	db, err := sql.Open("oracle-test-dml", "dsn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.db = db
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, execErr := s.executeQuery(queryOptions{
+			SQL:         "UPDATE test SET x = 1",
+			TimeoutSecs: 0,
+		})
+		errCh <- execErr
+	}()
+
+	// Give the goroutine time to enter ExecContext and block.
+	time.Sleep(200 * time.Millisecond)
+
+	s.cancelActiveQuery()
+
+	select {
+	case execErr := <-errCh:
+		if execErr == nil {
+			t.Fatal("expected non-nil error after DML cancel")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("executeQuery did not return after cancelActiveQuery")
+	}
+}
+
+func TestOracleCursorSurvivesDeadlineWindow(t *testing.T) {
+	s := newServer()
+	db, err := sql.Open("oracle-test-fast", "dsn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.db = db
+
+	rows, err := s.queryRowsWithTimeout("SELECT id FROM test", nil, 1)
+	if err != nil {
+		t.Fatalf("queryRowsWithTimeout failed: %v", err)
+	}
+	defer s.closeRows(rows)
+
+	s.activeCancelMu.Lock()
+	timerStopped := s.activeTimer == nil
+	s.activeCancelMu.Unlock()
+	if !timerStopped {
+		t.Fatal("timer should be stopped after QueryContext returns")
+	}
+
+	time.Sleep(1200 * time.Millisecond)
+
+	// Read all rows to verify cursor survived the deadline window.
+	cols, _ := rows.Columns()
+	for range cols {
+		// placeholder
+	}
+	rowCount := 0
+	for rows.Next() {
+		rowCount++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("cursor was killed by deadline: %v", err)
+	}
+	if rowCount != 3 {
+		t.Fatalf("expected 3 rows, got %d", rowCount)
+	}
 }

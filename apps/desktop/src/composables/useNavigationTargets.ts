@@ -50,6 +50,18 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
   })();
   const targetTab = queryStore.tabs.find((tab) => tab.id === tabId);
   if (targetTab) targetTab.tableInfoTab = options.tableInfoTab;
+  // Stamp the new table identity synchronously so SQL rebuilds (refresh,
+  // filters, row count) never read a stale tableMeta from a reused tab or
+  // fall back to parsing the schema-qualified tab title (issue #3613).
+  queryStore.setTableMeta(tabId, {
+    schema: target.schema,
+    catalog: target.catalog,
+    database: target.database,
+    tableName: target.tableName,
+    tableType: target.tableType ?? "TABLE",
+    columns: [],
+    primaryKeys: [],
+  });
   queryStore.setExecuting(tabId, true);
 
   try {

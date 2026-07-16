@@ -104,7 +104,7 @@ import {
   usesTreeSchemaMode,
 } from "@/lib/database/databaseCapabilities";
 import { copyNameForTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/sidebar/treeNodeClick";
-import { dataTabOpenModeFromTreeClick, findExistingDataTabCandidate, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
+import { canApplyDataTabMetadata, dataTabOpenModeFromTreeClick, findExistingDataTabCandidate, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
 import { formatSqlInsert } from "@/lib/export/exportFormats";
 import { joinExportedDdls } from "@/lib/export/ddlExport";
@@ -147,9 +147,10 @@ import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { shouldMeasureSidebarLabelOverflow } from "@/lib/sidebar/sidebarLabelTooltip";
 import { selectedTreeNodesInVisibleOrder as orderSelectedTreeNodes, treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "@/lib/sidebar/sidebarTreeSelection";
 import { connectionPasteTargetGroupId, selectedConnectionClipboardTargets, selectedConnectionDeleteTargets, selectedConnectionDuplicateTargets, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
-import { supportsDatabaseUserAdmin } from "@/lib/database/databaseUserAdmin";
+import { connectionSupportsDatabaseUserAdmin } from "@/lib/database/databaseUserAdmin";
 import { connectionSupportsProcessList } from "@/lib/database/processListDrivers";
 import { connectionSupportsServerDashboard } from "@/lib/database/mysqlServerStatus";
+import { connectionSupportsServerDashboard as connectionSupportsPgServerDashboard } from "@/lib/database/postgresServerStatus";
 import { canCloseSidebarDatabaseConnection, isSidebarDatabaseOpened } from "@/lib/sidebar/sidebarDatabaseOpenState";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { batchTableEmptyFeedback, runBatchTableEmpty } from "@/lib/sidebar/batchTableEmpty";
@@ -662,6 +663,10 @@ function isTooltipDisabled(): boolean {
 async function toggle() {
   const node = props.node;
   if (node.isLoading) {
+    if (!node.isExpanded) {
+      node.isExpanded = true;
+      emit("node-toggled", node, false);
+    }
     return;
   }
   emit("search-toggle", node);
@@ -1329,13 +1334,17 @@ async function openProcessList() {
   }
 }
 
-async function openMysqlDashboard() {
+async function openServerDashboard() {
   const node = props.node;
   if (!node.connectionId) return;
   try {
     await connectionStore.ensureConnected(node.connectionId);
     connectionStore.activeConnectionId = node.connectionId;
-    queryStore.openMysqlDashboard(node.connectionId);
+    if (currentDatabaseType() === "postgres") {
+      queryStore.openPostgresDashboard(node.connectionId);
+    } else {
+      queryStore.openMysqlDashboard(node.connectionId);
+    }
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
   }
@@ -1397,17 +1406,14 @@ async function openData(node: TreeNode, request?: SidebarDataOpenRequest, openMo
   const querySchema = config ? connectionObjectTreeQuerySchema(config, node.database, tableSchema) : (tableSchema ?? "");
   const effectiveDbType = effectiveDatabaseTypeForConnection(config);
   const metadataDatabaseType = effectiveDbType || config?.db_type || "";
-  const existingDataTabCandidate = findExistingDataTabCandidate(
-    queryStore.tabs,
-    {
-      connectionId: node.connectionId,
-      database: node.database,
-      schema: tableSchema,
-      catalog: node.catalog,
-      tableName: node.label,
-    },
-    { openMode, reuseDataTab: settingsStore.editorSettings.reuseDataTab },
-  );
+  const dataTabTarget = {
+    connectionId: node.connectionId,
+    database: node.database,
+    schema: tableSchema,
+    catalog: node.catalog,
+    tableName: node.label,
+  };
+  const existingDataTabCandidate = findExistingDataTabCandidate(queryStore.tabs, dataTabTarget, { openMode, reuseDataTab: settingsStore.editorSettings.reuseDataTab });
   const existingSameTableTab = existingDataTabCandidate?.match === "same-table" ? existingDataTabCandidate.tab : undefined;
   const resetReusedDataTabState = (tab: (typeof queryStore.tabs)[number]) => {
     tab.title = node.label;
@@ -1513,11 +1519,12 @@ async function openData(node: TreeNode, request?: SidebarDataOpenRequest, openMo
 
   // Helper to check if this openData call is still active (not superseded by a newer click)
   const isActive = () => (request?.isCurrent() ?? true) && queryStore.tabs.find((t) => t.id === tabId)?.executionId === openDataId;
-  const isCurrentDataTab = () => {
-    if (!(request?.isCurrent() ?? true)) return false;
-    const current = queryStore.tabs.find((t) => t.id === tabId);
-    return current?.mode === "data" && current.connectionId === node.connectionId && current.database === node.database && current.schema === tableSchema && current.title === node.label;
-  };
+  const canApplyTableMetadata = () =>
+    canApplyDataTabMetadata(
+      queryStore.tabs.find((t) => t.id === tabId),
+      dataTabTarget,
+      request?.signal,
+    );
 
   try {
     openDataLog("info", "ensure-connected:start", { traceId, elapsed: elapsed() });
@@ -1549,7 +1556,7 @@ async function openData(node: TreeNode, request?: SidebarDataOpenRequest, openMo
           catalog: node.catalog,
           traceLogger: isDebugLoggingEnabled() ? (event) => openDataLog("debug", "metadata:trace", { sourceTraceId: traceId, ...event }) : undefined,
         });
-        if (!isCurrentDataTab()) {
+        if (!canApplyTableMetadata()) {
           openDataLog("info", "metadata:stale", {
             traceId,
             tabId,
@@ -1630,7 +1637,7 @@ async function openData(node: TreeNode, request?: SidebarDataOpenRequest, openMo
     });
     openDataLog("info", "execute:done", { traceId, tabId, elapsed: elapsed() });
     logPhase("execute-tab-sql", { tabId });
-    if (shouldRefreshTableMeta && isCurrentDataTab()) {
+    if (shouldRefreshTableMeta && canApplyTableMetadata()) {
       void refreshTableMetaInBackground();
       logPhase("metadata-started", { tabId });
     }
@@ -1795,9 +1802,9 @@ async function generateDdlTemplate() {
     const schema = node.schema || node.database;
     let ddl: string;
     if (node.type === "table") {
-      ddl = await api.getTableDdl(node.connectionId, node.database, schema, node.label);
+      ddl = await api.getTableDdl(node.connectionId, node.database, schema, node.label, undefined, node.catalog);
     } else if (node.type === "materialized_view") {
-      ddl = await api.getTableDdl(node.connectionId, node.database, schema, node.label, "MATERIALIZED_VIEW");
+      ddl = await api.getTableDdl(node.connectionId, node.database, schema, node.label, "MATERIALIZED_VIEW", node.catalog);
     } else {
       const result = await api.getObjectSource(node.connectionId, node.database, schema, node.label, "VIEW");
       ddl = await buildViewDdl({
@@ -3700,7 +3707,7 @@ async function exportStructure() {
     const parts: string[] = [];
     for (const target of targets) {
       await connectionStore.ensureConnected(target.connectionId);
-      const ddl = await api.getTableDdl(target.connectionId, target.database, target.schema || target.database, target.label, tableDdlObjectTypeForNode(target.type));
+      const ddl = await api.getTableDdl(target.connectionId, target.database, target.schema || target.database, target.label, tableDdlObjectTypeForNode(target.type), target.catalog);
       parts.push(ddl.trim());
     }
     structurePreviewSql.value = joinExportedDdls(parts);
@@ -4197,19 +4204,19 @@ function openStructureEditor() {
   const node = props.node;
   if (!node.connectionId || !node.database) return;
   if (node.type === "table") {
-    queryStore.openTableStructure(node.connectionId, node.database, node.schema, node.label);
+    queryStore.openTableStructure(node.connectionId, node.database, node.schema, node.label, undefined, undefined, node.catalog);
     return;
   }
   if (node.type === "column" && node.tableName) {
     const columnName = tableChildDropObjectName(node).trim();
     if (!columnName) return;
-    queryStore.openTableStructure(node.connectionId, node.database, node.schema, node.tableName, "columns", { kind: "column", name: columnName });
+    queryStore.openTableStructure(node.connectionId, node.database, node.schema, node.tableName, "columns", { kind: "column", name: columnName }, node.catalog);
     return;
   }
   if (node.type === "index" && node.tableName) {
     const indexName = tableChildDropObjectName(node).trim();
     if (!indexName) return;
-    queryStore.openTableStructure(node.connectionId, node.database, node.schema, node.tableName, "indexes", { kind: "index", name: indexName });
+    queryStore.openTableStructure(node.connectionId, node.database, node.schema, node.tableName, "indexes", { kind: "index", name: indexName }, node.catalog);
   }
 }
 
@@ -5121,14 +5128,14 @@ function treeItemMenuItems(): ContextMenuItem[] {
     }
     const sqlHistoryMenu = savedSqlHistorySubmenu();
     if (sqlHistoryMenu) items.push(sqlHistoryMenu);
-    if (supportsDatabaseUserAdmin(currentDatabaseType())) {
+    if (node.connectionId && connectionSupportsDatabaseUserAdmin(connectionStore.getConfig(node.connectionId))) {
       items.push({ label: t("contextMenu.userAdmin"), action: openUserAdmin, icon: UsersRound });
     }
     if (node.connectionId && connectionSupportsProcessList(connectionStore.getConfig(node.connectionId))) {
       items.push({ label: t("contextMenu.processList"), action: openProcessList, icon: Activity });
     }
-    if (node.connectionId && connectionSupportsServerDashboard(connectionStore.getConfig(node.connectionId))) {
-      items.push({ label: t("contextMenu.serverDashboard"), action: openMysqlDashboard, icon: Gauge });
+    if (node.connectionId && (connectionSupportsServerDashboard(connectionStore.getConfig(node.connectionId)) || connectionSupportsPgServerDashboard(connectionStore.getConfig(node.connectionId)))) {
+      items.push({ label: t("contextMenu.serverDashboard"), action: openServerDashboard, icon: Gauge });
     }
     if (currentDatabaseType() === "dameng") {
       items.push({ label: t("contextMenu.damengJobAdmin"), action: openDamengJobAdmin, icon: CalendarClock });

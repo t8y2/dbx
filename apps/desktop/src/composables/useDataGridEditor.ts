@@ -1093,6 +1093,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (!tableMeta.value) return null;
     return {
       databaseType: resolvedDatabaseType.value,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(connectionId.value),
       tableMeta: tableMeta.value,
       columns: result.value.columns,
       sourceColumns: sourceColumns.value,
@@ -1274,7 +1275,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       rollbackStatements: rollbackStmts,
     });
 
-    if (useTransaction.value && hasBackendSaveTarget.value) {
+    if (useTransaction.value && stmts.length > 1 && hasBackendSaveTarget.value) {
       try {
         apiResult = await api.executeInTransaction(connectionId.value!, database.value ?? "", stmts, preparedSave?.executionSchema);
       } catch (e: any) {

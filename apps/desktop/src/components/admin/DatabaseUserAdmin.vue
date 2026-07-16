@@ -14,7 +14,7 @@ import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import type { ConnectionConfig } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
-import { grantsFromQueryResult, getDatabaseUserAdminProvider, supportsDatabaseUserAdmin, type DatabaseUserIdentity, type PrivilegeScope } from "@/lib/database/databaseUserAdmin";
+import { grantsFromQueryResult, resolveDatabaseUserAdminProviderForConnection, type DatabaseUserIdentity, type PrivilegeScope } from "@/lib/database/databaseUserAdmin";
 
 const props = defineProps<{
   connection: ConnectionConfig;
@@ -54,9 +54,16 @@ const grantOption = ref(false);
 const selectedPrivileges = ref<string[]>(["SELECT"]);
 const createCanLogin = ref(true);
 
-const supported = computed(() => supportsDatabaseUserAdmin(props.connection.db_type));
-const provider = computed(() => getDatabaseUserAdminProvider(props.connection.db_type));
+const provider = computed(() => resolveDatabaseUserAdminProviderForConnection(props.connection));
+const supported = computed(() => provider.value !== null);
 const isPostgres = computed(() => provider.value?.dialect === "postgres");
+const canCreateUser = computed(() => !!provider.value?.createUserSql);
+const canAlterPassword = computed(() => !!provider.value?.alterPasswordSql);
+const canAlterLogin = computed(() => !!provider.value?.alterLoginSql);
+const canDropUser = computed(() => !!provider.value?.dropUserSql);
+const canGrantPrivileges = computed(() => !!provider.value?.grantPrivilegesSql);
+const canRevokePrivileges = computed(() => !!provider.value?.revokePrivilegesSql);
+const canEditPrivileges = computed(() => canGrantPrivileges.value || canRevokePrivileges.value);
 const selectedUser = computed(() => users.value.find((user) => userKey(user) === selectedUserKey.value));
 const filteredUsers = computed(() => {
   const query = search.value.trim().toLowerCase();
@@ -64,7 +71,7 @@ const filteredUsers = computed(() => {
   return users.value.filter((user) => userLabel(user).toLowerCase().includes(query));
 });
 const selectedPrivilegeSet = computed(() => new Set(selectedPrivileges.value));
-const availablePrivileges = computed(() => provider.value?.privilegesForScope(privilegeScope.value) ?? []);
+const availablePrivileges = computed(() => provider.value?.privilegesForScope?.(privilegeScope.value) ?? []);
 const hasPrivilegePicker = computed(() => privilegeScope.value !== "role");
 const loginDisableLabel = computed(() => (isPostgres.value ? t("userAdmin.disableLogin") : t("userAdmin.lock")));
 const loginEnableLabel = computed(() => (isPostgres.value ? t("userAdmin.enableLogin") : t("userAdmin.unlock")));
@@ -135,7 +142,7 @@ async function loadGrants() {
     const result = await api.executeQuery(props.connection.id, "", userProvider.showGrantsSql(user), undefined, undefined, {
       maxRows: 1000,
     });
-    grants.value = grantsFromQueryResult(result);
+    grants.value = (userProvider.parseGrants ?? grantsFromQueryResult)(result);
   } catch (error: any) {
     grantError.value = error?.message || String(error);
     grants.value = [];
@@ -188,10 +195,11 @@ async function applyPendingSql() {
 
 function previewCreateUser() {
   const userProvider = provider.value;
-  if (!userProvider) return;
+  const createUserSql = userProvider?.createUserSql;
+  if (!createUserSql) return;
   if (!createUser.value.trim() || !createPassword.value) return;
   previewSql(
-    userProvider.createUserSql({
+    createUserSql({
       user: createUser.value.trim(),
       host: createHost.value.trim() || "%",
       password: createPassword.value,
@@ -209,8 +217,9 @@ function previewCreateUser() {
 function previewPasswordChange() {
   const user = selectedUser.value;
   const userProvider = provider.value;
-  if (!user || !userProvider || !newPassword.value) return;
-  previewSql(userProvider.alterPasswordSql(user, newPassword.value), {
+  const alterPasswordSql = userProvider?.alterPasswordSql;
+  if (!user || !alterPasswordSql || !newPassword.value) return;
+  previewSql(alterPasswordSql(user, newPassword.value), {
     danger: true,
     afterApply: async () => {
       passwordDialogOpen.value = false;
@@ -222,23 +231,26 @@ function previewPasswordChange() {
 function previewDropUser() {
   const user = selectedUser.value;
   const userProvider = provider.value;
-  if (!user || !userProvider) return;
-  previewSql(userProvider.dropUserSql(user), { danger: true });
+  const dropUserSql = userProvider?.dropUserSql;
+  if (!user || !dropUserSql) return;
+  previewSql(dropUserSql(user), { danger: true });
 }
 
 function previewLoginChange(enabled: boolean) {
   const user = selectedUser.value;
   const userProvider = provider.value;
-  if (!user || !userProvider) return;
-  previewSql(userProvider.alterLoginSql(user, enabled), { danger: true });
+  const alterLoginSql = userProvider?.alterLoginSql;
+  if (!user || !alterLoginSql) return;
+  previewSql(alterLoginSql(user, enabled), { danger: true });
 }
 
 function previewGrant() {
   const user = selectedUser.value;
   const userProvider = provider.value;
-  if (!user || !userProvider || (privilegeScope.value === "role" && !privilegeRole.value.trim())) return;
+  const grantPrivilegesSql = userProvider?.grantPrivilegesSql;
+  if (!user || !grantPrivilegesSql || (privilegeScope.value === "role" && !privilegeRole.value.trim())) return;
   previewSql(
-    userProvider.grantPrivilegesSql({
+    grantPrivilegesSql({
       user,
       privileges: selectedPrivileges.value,
       database: privilegeDatabase.value,
@@ -253,9 +265,10 @@ function previewGrant() {
 function previewRevoke() {
   const user = selectedUser.value;
   const userProvider = provider.value;
-  if (!user || !userProvider || (privilegeScope.value === "role" && !privilegeRole.value.trim())) return;
+  const revokePrivilegesSql = userProvider?.revokePrivilegesSql;
+  if (!user || !revokePrivilegesSql || (privilegeScope.value === "role" && !privilegeRole.value.trim())) return;
   previewSql(
-    userProvider.revokePrivilegesSql({
+    revokePrivilegesSql({
       user,
       privileges: selectedPrivileges.value,
       database: privilegeDatabase.value,
@@ -270,7 +283,7 @@ function previewRevoke() {
 function resetPrivilegeDefaults(scope: PrivilegeScope) {
   const userProvider = provider.value;
   if (!userProvider) return;
-  selectedPrivileges.value = userProvider.defaultPrivilegesForScope(scope);
+  selectedPrivileges.value = userProvider.defaultPrivilegesForScope?.(scope) ?? [];
   if (userProvider.dialect === "postgres") {
     if (scope === "database") privilegeDatabase.value = props.connection.database || "postgres";
     if (scope === "schema" || scope === "table") privilegeDatabase.value = "public";
@@ -296,7 +309,7 @@ watch(
 );
 
 watch(
-  () => provider.value?.dialect,
+  () => provider.value,
   () => {
     privilegeScope.value = provider.value?.defaultScope ?? "mysql";
     resetPrivilegeDefaults(privilegeScope.value);
@@ -326,7 +339,7 @@ onMounted(loadUsers);
           <RefreshCcw v-else class="h-3.5 w-3.5" />
           {{ t("grid.refresh") }}
         </Button>
-        <Button size="sm" class="h-7 gap-1.5 px-2 text-xs" :disabled="!supported" @click="createDialogOpen = true">
+        <Button v-if="canCreateUser" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="createDialogOpen = true">
           <Plus class="h-3.5 w-3.5" />
           {{ t("userAdmin.newUser") }}
         </Button>
@@ -385,27 +398,27 @@ onMounted(loadUsers);
             </Badge>
           </div>
           <div class="ml-auto flex items-center gap-1.5">
-            <Button variant="outline" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="passwordDialogOpen = true">
+            <Button v-if="canAlterPassword" variant="outline" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="passwordDialogOpen = true">
               <KeyRound class="h-3.5 w-3.5" />
               {{ t("userAdmin.changePassword") }}
             </Button>
-            <Button variant="outline" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="previewLoginChange(false)">
+            <Button v-if="canAlterLogin" variant="outline" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="previewLoginChange(false)">
               <Lock class="h-3.5 w-3.5" />
               {{ loginDisableLabel }}
             </Button>
-            <Button variant="outline" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="previewLoginChange(true)">
+            <Button v-if="canAlterLogin" variant="outline" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="previewLoginChange(true)">
               <Unlock class="h-3.5 w-3.5" />
               {{ loginEnableLabel }}
             </Button>
-            <Button variant="destructive" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="previewDropUser">
+            <Button v-if="canDropUser" variant="destructive" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="previewDropUser">
               <Trash2 class="h-3.5 w-3.5" />
               {{ t("userAdmin.dropUser") }}
             </Button>
           </div>
         </div>
 
-        <div v-if="selectedUser" class="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_320px]">
-          <section class="flex min-h-0 flex-col border-r">
+        <div v-if="selectedUser" class="grid min-h-0 flex-1" :class="canEditPrivileges ? 'grid-cols-[minmax(0,1fr)_320px]' : 'grid-cols-1'">
+          <section class="flex min-h-0 flex-col" :class="{ 'border-r': canEditPrivileges }">
             <div class="flex h-9 shrink-0 items-center gap-2 border-b bg-muted/20 px-3 text-xs font-medium">
               <ShieldCheck class="h-3.5 w-3.5" />
               {{ t("userAdmin.grants") }}
@@ -420,7 +433,7 @@ onMounted(loadUsers);
             </div>
           </section>
 
-          <aside class="flex min-h-0 flex-col bg-muted/10">
+          <aside v-if="canEditPrivileges" class="flex min-h-0 flex-col bg-muted/10">
             <div class="border-b p-3">
               <div class="text-xs font-semibold">{{ t("userAdmin.privilegeEditor") }}</div>
               <div class="mt-1 text-[11px] leading-4 text-muted-foreground">{{ t("userAdmin.privilegeHint") }}</div>
@@ -478,10 +491,10 @@ onMounted(loadUsers);
               </label>
             </div>
             <div class="flex shrink-0 items-center justify-end gap-2 border-t p-3">
-              <Button variant="outline" size="sm" class="h-7 px-2 text-xs" @click="previewRevoke">
+              <Button v-if="canRevokePrivileges" variant="outline" size="sm" class="h-7 px-2 text-xs" @click="previewRevoke">
                 {{ t("userAdmin.revoke") }}
               </Button>
-              <Button size="sm" class="h-7 px-2 text-xs" @click="previewGrant">
+              <Button v-if="canGrantPrivileges" size="sm" class="h-7 px-2 text-xs" @click="previewGrant">
                 {{ t("userAdmin.grant") }}
               </Button>
             </div>

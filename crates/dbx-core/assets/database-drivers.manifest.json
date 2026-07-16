@@ -261,7 +261,7 @@
         "sqlFileExecution": true,
         "databaseCreate": true,
         "fieldLineage": true,
-        "sqlExplain": false,
+        "sqlExplain": true,
         "userAdmin": false,
         "driverManagement": false
       }
@@ -525,7 +525,7 @@
         "databaseCreate": true,
         "fieldLineage": false,
         "sqlExplain": false,
-        "userAdmin": false,
+        "userAdmin": true,
         "driverManagement": false
       }
     },

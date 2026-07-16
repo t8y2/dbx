@@ -49,9 +49,9 @@ function oracleConn(id: string): ConnectionConfig {
   };
 }
 
-function oracleCompatibleConn(id: string, dbType: "oracle" | "dameng" | "oceanbase-oracle"): ConnectionConfig {
+function clearableQuerySchemaConn(id: string, dbType: "oracle" | "dameng" | "gaussdb" | "oceanbase-oracle"): ConnectionConfig {
   return {
-    ...oracleConn(id),
+    ...conn(id),
     db_type: dbType,
   };
 }
@@ -62,6 +62,14 @@ function sqlServerConn(id: string): ConnectionConfig {
     db_type: "sqlserver",
     port: 1433,
     username: "sa",
+  };
+}
+
+function elasticsearchConn(id: string): ConnectionConfig {
+  return {
+    ...conn(id),
+    db_type: "elasticsearch",
+    port: 9200,
   };
 }
 
@@ -4238,7 +4246,7 @@ test("closing a data tab releases its tab-scoped client session", async () => {
   }
 });
 
-for (const dbType of ["oracle", "dameng", "oceanbase-oracle"] as const) {
+for (const dbType of ["oracle", "dameng", "gaussdb", "oceanbase-oracle"] as const) {
   test(`clearing a ${dbType} query schema releases its tab-scoped client session`, async () => {
     const restoreStorage = installMemoryStorage();
     setActivePinia(createPinia());
@@ -4247,7 +4255,7 @@ for (const dbType of ["oracle", "dameng", "oceanbase-oracle"] as const) {
     const originalFetch = globalThis.fetch;
     const connectionId = `${dbType}-1`;
 
-    connectionStore.addEphemeralConnection(oracleCompatibleConn(connectionId, dbType));
+    connectionStore.addEphemeralConnection(clearableQuerySchemaConn(connectionId, dbType));
     const tabId = store.createTab(connectionId, "SERVICE", "Query", "query", "REPORTING");
     const closedSessions: any[] = [];
 
@@ -4892,6 +4900,165 @@ test("query results keep readable table source labels with active database conte
     assert.equal(tab?.results?.[0]?.sourceStatement, "update users set active = true");
     assert.equal(tab?.results?.[1]?.sourceLabel, "db.users");
     assert.equal(tab?.results?.[1]?.sourceStatement, "select * from users");
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("Elasticsearch execute all runs each REST request separately", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const executedRequests: string[] = [];
+
+  connectionStore.addEphemeralConnection(elasticsearchConn("es-1"));
+  const tabId = store.createTab("es-1", "", "Elasticsearch query");
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/execute") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      executedRequests.push(body.sql);
+      return new Response(
+        JSON.stringify({
+          columns: ["status", "response"],
+          rows: [[200, body.sql.startsWith("HEAD") ? "null" : '{"ok":true}']],
+          affected_rows: 0,
+          execution_time_ms: 1,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  const sql = `/* 查看节点 JVM 信息 */
+GET /_nodes/stats/jvm?pretty
+
+# 判断索引是否存在
+HEAD /dbx-orders
+
+// 查询文档
+POST /dbx-orders/_search
+{"size":1}`;
+
+  try {
+    await store.executeTabSql(tabId, sql);
+    assert.deepEqual(executedRequests, ["GET /_nodes/stats/jvm?pretty", "HEAD /dbx-orders", 'POST /dbx-orders/_search\n{"size":1}']);
+
+    const tab = store.tabs.find((item) => item.id === tabId);
+    assert.deepEqual(
+      tab?.results?.map((result) => result.sourceStatement),
+      executedRequests,
+    );
+    assert.equal(tab?.activeResultIndex, 0);
+    assert.equal(tab?.result?.rows[0]?.[0], 200);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("Elasticsearch execute all stops after an HTTP error by default", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const settingsStore = useSettingsStore();
+  const originalFetch = globalThis.fetch;
+  const executedRequests: string[] = [];
+
+  settingsStore.updateEditorSettings({ continueOnErrorOnBatch: false });
+  connectionStore.addEphemeralConnection(elasticsearchConn("es-stop-on-error"));
+  const tabId = store.createTab("es-stop-on-error", "", "Elasticsearch query");
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    if (String(input) === "/api/query/execute") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      executedRequests.push(body.sql);
+      const status = body.sql.includes("missing") ? 404 : 200;
+      return new Response(JSON.stringify({ columns: ["status", "response"], rows: [[status, status === 404 ? '{"error":"missing"}' : '{"ok":true}']], affected_rows: 0, execution_time_ms: 1 }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    await store.executeTabSql(tabId, "GET /missing/_mapping\n\nGET /_cluster/health");
+    assert.deepEqual(executedRequests, ["GET /missing/_mapping"]);
+    assert.equal(store.tabs.find((item) => item.id === tabId)?.result?.rows[0]?.[0], 404);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("Elasticsearch execute all continues after an HTTP error when enabled", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const settingsStore = useSettingsStore();
+  const originalFetch = globalThis.fetch;
+  const executedRequests: string[] = [];
+
+  settingsStore.updateEditorSettings({ continueOnErrorOnBatch: true });
+  connectionStore.addEphemeralConnection(elasticsearchConn("es-continue-on-error"));
+  const tabId = store.createTab("es-continue-on-error", "", "Elasticsearch query");
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    if (String(input) === "/api/query/execute") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      executedRequests.push(body.sql);
+      const status = body.sql.includes("missing") ? 404 : 200;
+      return new Response(JSON.stringify({ columns: ["status", "response"], rows: [[status, status === 404 ? '{"error":"missing"}' : '{"ok":true}']], affected_rows: 0, execution_time_ms: 1 }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    await store.executeTabSql(tabId, "GET /missing/_mapping\n\nGET /_cluster/health");
+    assert.deepEqual(executedRequests, ["GET /missing/_mapping", "GET /_cluster/health"]);
+    const tab = store.tabs.find((item) => item.id === tabId);
+    assert.equal(tab?.results?.length, 2);
+    assert.equal(tab?.activeResultIndex, 0);
+    assert.equal(tab?.result?.rows[0]?.[0], 404);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("Elasticsearch executes a single REST request after a block comment", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const executedRequests: string[] = [];
+
+  connectionStore.addEphemeralConnection(elasticsearchConn("es-single"));
+  const tabId = store.createTab("es-single", "", "Elasticsearch query");
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    if (String(input) === "/api/query/execute") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      executedRequests.push(body.sql);
+      return new Response(
+        JSON.stringify({
+          columns: ["status", "response"],
+          rows: [[200, '{"nodes":{}}']],
+          affected_rows: 0,
+          execution_time_ms: 1,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    await store.executeTabSql(tabId, "/* 查看节点 JVM 信息 */\nGET /_nodes/stats/jvm?pretty");
+    assert.deepEqual(executedRequests, ["GET /_nodes/stats/jvm?pretty"]);
+    assert.equal(store.tabs.find((item) => item.id === tabId)?.result?.sourceStatement, "GET /_nodes/stats/jvm?pretty");
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

@@ -178,3 +178,22 @@ test("passes list and range values through the shared context filter API", async
     endValue: 20,
   });
 });
+
+test("passes the connection identifier quote to Kingbase filters", async () => {
+  installFilterFetchMock();
+  await buildDataGridContextFilterCondition({
+    databaseType: "kingbase",
+    identifierQuote: "`",
+    columnName: "file_name",
+    mode: "equals",
+    value: "34-B-0048",
+  });
+
+  assert.deepEqual(lastContextFilterOptions, {
+    databaseType: "kingbase",
+    identifierQuote: "`",
+    columnName: "file_name",
+    mode: "equals",
+    value: "34-B-0048",
+  });
+});

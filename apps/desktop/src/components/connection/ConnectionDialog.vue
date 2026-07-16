@@ -503,17 +503,17 @@ const mqTlsSkipVerify = ref(false);
 const mqPinnedVersion = ref(pinnedVersionToSelection(undefined));
 const mqTokenSigningMode = ref<MqTokenSigningMode>("none");
 const mqTokenSigningKey = ref("");
-const mqSystemOptions: Array<{ value: MqSystemKind; label: string }> = [
-  { value: "pulsar", label: "Apache Pulsar" },
-  { value: "kafka", label: "Apache Kafka" },
-];
-const mqKafkaSecurityProtocolOptions = [
-  { value: MQ_KAFKA_SECURITY_PROTOCOL_AUTO, label: "Auto" },
+const mqSystemOptions = computed(() => [
+  { value: "pulsar" as const, label: t("connection.mqSystemPulsar") },
+  { value: "kafka" as const, label: t("connection.mqSystemKafka") },
+]);
+const mqKafkaSecurityProtocolOptions = computed(() => [
+  { value: MQ_KAFKA_SECURITY_PROTOCOL_AUTO, label: t("connection.mqSecurityAuto") },
   { value: "PLAINTEXT", label: "PLAINTEXT" },
   { value: "SSL", label: "SSL" },
   { value: "SASL_PLAINTEXT", label: "SASL_PLAINTEXT" },
   { value: "SASL_SSL", label: "SASL_SSL" },
-];
+]);
 const mqKafkaSaslMechanismOptions = [
   { value: "PLAIN", label: "PLAIN" },
   { value: "SCRAM-SHA-256", label: "SCRAM-SHA-256" },
@@ -970,9 +970,9 @@ function buildMqAuth(): MqAuth {
     case "oauth2":
       return {
         kind: "oauth2",
-        issuerUrl: requireMqField(mqOauthIssuerUrl.value, "OAuth2 auth requires an issuer URL"),
-        clientId: requireMqField(mqOauthClientId.value, "OAuth2 auth requires a client ID"),
-        clientSecret: requireMqField(mqOauthClientSecret.value, "OAuth2 auth requires a client secret"),
+        issuerUrl: requireMqField(mqOauthIssuerUrl.value, t("connection.mqOauthIssuerRequired")),
+        clientId: requireMqField(mqOauthClientId.value, t("connection.mqOauthClientIdRequired")),
+        clientSecret: requireMqField(mqOauthClientSecret.value, t("connection.mqOauthClientSecretRequired")),
         audience: mqOauthAudience.value.trim() || undefined,
         scope: mqOauthScope.value.trim() || undefined,
       };
@@ -991,7 +991,7 @@ function buildMqTokenSigning() {
   if (mqTokenSigningMode.value === "none") return undefined;
   return {
     algorithm: mqTokenSigningMode.value,
-    key: requireMqField(mqTokenSigningKey.value, "Broker token signing key is required"),
+    key: requireMqField(mqTokenSigningKey.value, t("connection.mqTokenSigningKeyRequired")),
   };
 }
 
@@ -1025,7 +1025,7 @@ function buildMqAdminConfig(): MqAdminConfig {
 
   return {
     systemKind: mqSystemKind.value,
-    adminUrl: requireMqField(mqAdminUrl.value, "MQ Admin URL is required"),
+    adminUrl: requireMqField(mqAdminUrl.value, t("connection.mqAdminUrlRequired")),
     auth: buildMqAuth(),
     tlsSkipVerify: mqTlsSkipVerify.value || undefined,
     pinnedVersion: selectionToPinnedVersion(mqPinnedVersion.value),
@@ -1324,7 +1324,7 @@ function applyMqAdminUrl(config: LegacyConnectionConfig, adminUrl: string) {
   try {
     parsed = new URL(adminUrl);
   } catch {
-    throw new Error("MQ Admin URL is invalid");
+    throw new Error(t("connection.mqAdminUrlInvalid"));
   }
   const port = Number(parsed.port) || (parsed.protocol === "https:" ? 443 : 8080);
   config.host = parsed.hostname;
@@ -1334,12 +1334,12 @@ function applyMqAdminUrl(config: LegacyConnectionConfig, adminUrl: string) {
 
 function applyMqKafkaBootstrapServers(config: LegacyConnectionConfig, bootstrapServers: string, securityProtocol?: string) {
   const first = normalizeKafkaBootstrapServers(bootstrapServers).split(",")[0];
-  if (!first) throw new Error("Kafka bootstrap servers are required");
+  if (!first) throw new Error(t("connection.mqBootstrapServersRequired"));
   let parsed: URL;
   try {
     parsed = new URL(`kafka://${first}`);
   } catch {
-    throw new Error("Kafka bootstrap servers are invalid");
+    throw new Error(t("connection.mqBootstrapServersInvalid"));
   }
   config.host = parsed.hostname;
   config.port = Number(parsed.port) || 9092;
@@ -4420,7 +4420,7 @@ function openExternalUrl(url: string) {
                 <!-- Message Queue: admin URL and auth -->
                 <template v-else-if="form.db_type === 'mq'">
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label :class="connectionLabelClass">System</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.mqSystem") }}</Label>
                     <Select v-model="mqSystemKind">
                       <SelectTrigger class="col-span-3 h-9">
                         <SelectValue />
@@ -4434,11 +4434,11 @@ function openExternalUrl(url: string) {
                   </div>
                   <template v-if="mqSystemKind === 'kafka'">
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelClass">Bootstrap Servers</Label>
-                      <Input v-model="mqKafkaBootstrapServers" class="col-span-3" placeholder="127.0.0.1:9092" />
+                      <Label :class="connectionLabelClass">{{ t("connection.mqBootstrapServers") }}</Label>
+                      <Input v-model="mqKafkaBootstrapServers" class="col-span-3" :placeholder="t('connection.mqBootstrapServersPlaceholder')" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelClass">Security</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.mqSecurity") }}</Label>
                       <Select v-model="mqKafkaSecurityProtocol">
                         <SelectTrigger class="col-span-3 h-9">
                           <SelectValue />
@@ -4453,24 +4453,24 @@ function openExternalUrl(url: string) {
                   </template>
                   <template v-else>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelClass">Admin URL</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.mqAdminUrl") }}</Label>
                       <Input v-model="mqAdminUrl" class="col-span-3" placeholder="http://127.0.0.1:8080" />
                     </div>
                   </template>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label :class="connectionLabelClass">Auth</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.mqAuth") }}</Label>
                     <div class="col-span-3 flex flex-wrap gap-2">
-                      <Button size="sm" :variant="mqAuthKind === 'none' ? 'default' : 'outline'" @click="mqAuthKind = 'none'">None</Button>
-                      <Button v-if="mqSystemKind !== 'kafka'" size="sm" :variant="mqAuthKind === 'token' ? 'default' : 'outline'" @click="mqAuthKind = 'token'">Token</Button>
-                      <Button size="sm" :variant="mqAuthKind === 'basic' ? 'default' : 'outline'" @click="mqAuthKind = 'basic'">Basic</Button>
-                      <Button v-if="mqSystemKind === 'kafka'" size="sm" :variant="mqAuthKind === 'kerberos' ? 'default' : 'outline'" @click="mqAuthKind = 'kerberos'">Kerberos</Button>
-                      <Button v-if="mqSystemKind !== 'kafka'" size="sm" :variant="mqAuthKind === 'apiKey' ? 'default' : 'outline'" @click="mqAuthKind = 'apiKey'">API Key</Button>
-                      <Button v-if="mqSystemKind !== 'kafka'" size="sm" :variant="mqAuthKind === 'oauth2' ? 'default' : 'outline'" @click="mqAuthKind = 'oauth2'">OAuth2</Button>
+                      <Button size="sm" :variant="mqAuthKind === 'none' ? 'default' : 'outline'" @click="mqAuthKind = 'none'">{{ t("connection.mqAuthNone") }}</Button>
+                      <Button v-if="mqSystemKind !== 'kafka'" size="sm" :variant="mqAuthKind === 'token' ? 'default' : 'outline'" @click="mqAuthKind = 'token'">{{ t("connection.mqAuthToken") }}</Button>
+                      <Button size="sm" :variant="mqAuthKind === 'basic' ? 'default' : 'outline'" @click="mqAuthKind = 'basic'">{{ t("connection.mqAuthBasic") }}</Button>
+                      <Button v-if="mqSystemKind === 'kafka'" size="sm" :variant="mqAuthKind === 'kerberos' ? 'default' : 'outline'" @click="mqAuthKind = 'kerberos'">{{ t("connection.mqAuthKerberos") }}</Button>
+                      <Button v-if="mqSystemKind !== 'kafka'" size="sm" :variant="mqAuthKind === 'apiKey' ? 'default' : 'outline'" @click="mqAuthKind = 'apiKey'">{{ t("connection.mqAuthApiKey") }}</Button>
+                      <Button v-if="mqSystemKind !== 'kafka'" size="sm" :variant="mqAuthKind === 'oauth2' ? 'default' : 'outline'" @click="mqAuthKind = 'oauth2'">{{ t("connection.mqAuthOauth2") }}</Button>
                     </div>
                   </div>
                   <template v-if="mqAuthKind === 'token'">
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelClass">Token</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.mqToken") }}</Label>
                       <PasswordInput v-model="mqToken" class="col-span-3" />
                     </div>
                   </template>
@@ -4484,7 +4484,7 @@ function openExternalUrl(url: string) {
                       <PasswordInput v-model="mqBasicPassword" class="col-span-3" />
                     </div>
                     <div v-if="mqSystemKind === 'kafka'" class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelClass">SASL Mechanism</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.mqSaslMechanism") }}</Label>
                       <Select v-model="mqKafkaSaslMechanism">
                         <SelectTrigger class="col-span-3 h-9">
                           <SelectValue />
@@ -4544,45 +4544,45 @@ function openExternalUrl(url: string) {
                   </template>
                   <template v-else-if="mqAuthKind === 'apiKey'">
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelClass">Header</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.mqApiKeyHeader") }}</Label>
                       <Input v-model="mqApiKeyHeader" class="col-span-3" placeholder="Authorization" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelClass">Value</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.mqApiKeyValue") }}</Label>
                       <PasswordInput v-model="mqApiKeyValue" class="col-span-3" />
                     </div>
                   </template>
                   <template v-else-if="mqAuthKind === 'oauth2'">
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelClass">Issuer URL</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.mqOauthIssuerUrl") }}</Label>
                       <Input v-model="mqOauthIssuerUrl" class="col-span-3" placeholder="https://issuer.example.com/oauth/token" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelClass">Client ID</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.mqOauthClientId") }}</Label>
                       <Input v-model="mqOauthClientId" class="col-span-3" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelClass">Client Secret</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.mqOauthClientSecret") }}</Label>
                       <PasswordInput v-model="mqOauthClientSecret" class="col-span-3" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelClass">Audience</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.mqOauthAudience") }}</Label>
                       <Input v-model="mqOauthAudience" class="col-span-3" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelClass">Scope</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.mqOauthScope") }}</Label>
                       <Input v-model="mqOauthScope" class="col-span-3" />
                     </div>
                   </template>
                   <div class="grid grid-cols-4 items-center gap-4">
-                    <Label :class="connectionLabelSmallClass">TLS</Label>
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.mqTls") }}</Label>
                     <label class="col-span-3 inline-flex items-center gap-2">
                       <input type="checkbox" v-model="mqTlsSkipVerify" class="mr-0" />
-                      <span class="text-xs text-muted-foreground">Skip certificate verification</span>
+                      <span class="text-xs text-muted-foreground">{{ t("connection.mqTlsSkipVerify") }}</span>
                     </label>
                   </div>
                   <div v-if="mqSystemKind !== 'kafka'" class="grid grid-cols-4 items-center gap-4">
-                    <Label :class="connectionLabelClass">Pinned Version</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.mqPinnedVersion") }}</Label>
                     <Select v-model="mqPinnedVersion">
                       <SelectTrigger class="col-span-3 h-9">
                         <SelectValue />
@@ -4598,29 +4598,29 @@ function openExternalUrl(url: string) {
                     </Select>
                   </div>
                   <div v-if="mqSystemKind !== 'kafka'" class="grid grid-cols-4 items-center gap-4">
-                    <Label :class="connectionLabelClass">Broker Token 签发</Label>
+                    <Label :class="connectionLabelClass">{{ t("connection.mqTokenSigning") }}</Label>
                     <Select v-model="mqTokenSigningMode">
                       <SelectTrigger class="col-span-3 h-9">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="none">不配置</SelectItem>
+                        <SelectItem value="none">{{ t("connection.mqTokenSigningNone") }}</SelectItem>
                         <SelectItem value="hs256">HS256 SECRET</SelectItem>
                         <SelectItem value="rs256">RS256 PRIVATE</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
                   <div v-if="mqSystemKind !== 'kafka' && mqTokenSigningMode !== 'none'" class="grid grid-cols-4 items-start gap-4">
-                    <Label class="pt-2 text-right">签发密钥</Label>
+                    <Label class="pt-2 text-right">{{ t("connection.mqTokenSigningKey") }}</Label>
                     <textarea
                       v-model="mqTokenSigningKey"
                       class="col-span-3 min-h-24 rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                      :placeholder="mqTokenSigningMode === 'hs256' ? 'Broker SECRET' : '-----BEGIN PRIVATE KEY-----'"
+                      :placeholder="mqTokenSigningMode === 'hs256' ? t('connection.mqTokenSigningKeyPlaceholderHs256') : t('connection.mqTokenSigningKeyPlaceholderRs256')"
                     />
                   </div>
                   <div v-if="mqSystemKind !== 'kafka' && mqTokenSigningMode !== 'none'" class="grid grid-cols-4 items-start gap-4">
                     <span />
-                    <p class="col-span-3 m-0 text-xs leading-5 text-muted-foreground">按 Broker 的 jwt.broker.token.mode 选择：SECRET 使用 HS256，PRIVATE 使用 RS256。密钥会走连接 secret 存储。</p>
+                    <p class="col-span-3 m-0 text-xs leading-5 text-muted-foreground">{{ t("connection.mqTokenSigningHint") }}</p>
                   </div>
                 </template>
 

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { formatError } from "@/lib/backend/errorUtils";
 import { computed, nextTick, ref, watch } from "vue";
+import { useI18n } from "vue-i18n";
 import type { AuthAction, MqIssuedToken, MqTokenRecord, PermissionMap, PolicyScope, TopicInfo } from "@/types/mq";
 import { mqGrantPermission, mqIssueToken, mqListPermissions, mqListTokenRecords, mqRevokePermission } from "@/lib/backend/api";
 import { formatMqTokenIssueError, type MqTokenIssueErrorView } from "@/lib/mq/mqTokenErrors";
@@ -14,6 +15,7 @@ interface Props {
 }
 
 const props = defineProps<Props>();
+const { t } = useI18n();
 
 const actionOptions: AuthAction[] = ["produce", "consume", "functions", "sources", "sinks", "packages"];
 
@@ -37,7 +39,7 @@ const tokenError = ref<string>();
 const tokenIssueError = ref<MqTokenIssueErrorView>();
 const issuedToken = ref<MqIssuedToken>();
 const showTokenDialog = ref(false);
-const readOnlyMessage = "当前连接为只读模式，不能执行写操作";
+const readOnlyMessage = computed(() => t("mqPermissions.readOnly"));
 
 const scope = computed<PolicyScope | null>(() => {
   if (!props.tenant || !props.namespace) return null;
@@ -72,7 +74,7 @@ const permissionRows = computed(() => {
 
 function guardWritable() {
   if (props.readOnly) {
-    error.value = readOnlyMessage;
+    error.value = readOnlyMessage.value;
     notice.value = undefined;
     return false;
   }
@@ -94,7 +96,7 @@ async function loadPermissions() {
     // Gracefully handle Kafka brokers without an authorizer configured.
     if (msg.includes("SecurityDisabled") || msg.includes("No Authorizer") || msg.includes("authorizer")) {
       error.value = undefined;
-      notice.value = "当前 Kafka 集群未启用权限管理（Authorizer 未配置）。如需 ACL 功能，请在 Broker 配置中添加 authorizer.class.name。";
+      notice.value = t("mqPermissions.kafkaAuthorizerNotConfigured");
     } else {
       error.value = msg;
     }
@@ -110,19 +112,19 @@ async function grantPermission() {
   roleNameError.value = "";
   actionsError.value = "";
   if (!current) {
-    error.value = "请先选择命名空间或主题";
+    error.value = t("mqPermissions.selectNamespaceOrTopic");
     return;
   }
   if (!role) {
     error.value = undefined;
-    roleNameError.value = "请输入角色名";
+    roleNameError.value = t("mqPermissions.roleNameRequired");
     await nextTick();
     roleNameInput.value?.focus();
     return;
   }
   if (!selectedActions.value.length) {
     error.value = undefined;
-    actionsError.value = "请至少选择一个权限动作";
+    actionsError.value = t("mqPermissions.selectAtLeastOneAction");
     return;
   }
 
@@ -131,13 +133,13 @@ async function grantPermission() {
   notice.value = undefined;
   try {
     await mqGrantPermission(props.connectionId, current, role, [...selectedActions.value]);
-    notice.value = `已授权 ${role}`;
+    notice.value = t("mqPermissions.grantedRole", { role });
     roleName.value = "";
     await loadPermissions();
   } catch (e: unknown) {
     const msg = formatError(e);
     if (msg.includes("SecurityDisabled") || msg.includes("No Authorizer") || msg.includes("authorizer")) {
-      error.value = "当前 Kafka 集群未启用权限管理，无法执行授权操作。请在 Broker 配置中启用 Authorizer。";
+      error.value = t("mqPermissions.kafkaAuthorizerDisabled");
     } else {
       error.value = msg;
     }
@@ -150,17 +152,17 @@ async function revokePermission(role: string) {
   if (!guardWritable()) return;
   const current = scope.value;
   if (!current) {
-    error.value = "请先选择命名空间或主题";
+    error.value = t("mqPermissions.selectNamespaceOrTopic");
     return;
   }
-  if (!confirm(`确定要撤销角色 "${role}" 的权限吗？`)) return;
+  if (!confirm(t("mqPermissions.confirmRevoke", { role }))) return;
 
   loading.value = true;
   error.value = undefined;
   notice.value = undefined;
   try {
     await mqRevokePermission(props.connectionId, current, role);
-    notice.value = `已撤销 ${role}`;
+    notice.value = t("mqPermissions.revokedRole", { role });
     await loadPermissions();
   } catch (e: unknown) {
     error.value = formatError(e);
@@ -208,19 +210,19 @@ async function loadTokenRecords() {
 
 async function issueToken() {
   if (props.readOnly) {
-    tokenError.value = readOnlyMessage;
+    tokenError.value = readOnlyMessage.value;
     tokenIssueError.value = undefined;
     return;
   }
   const current = scope.value;
   if (!current) {
-    tokenError.value = "请先选择命名空间或主题";
+    tokenError.value = t("mqPermissions.selectNamespaceOrTopic");
     tokenIssueError.value = undefined;
     return;
   }
   const subject = tokenRole.value.trim();
   if (!subject) {
-    tokenError.value = "角色名不能为空";
+    tokenError.value = t("mqPermissions.roleNameEmpty");
     tokenIssueError.value = undefined;
     return;
   }
@@ -228,7 +230,7 @@ async function issueToken() {
   if (!tokenExpiresUnlimited.value) {
     const days = Number(tokenExpiresDays.value);
     if (!Number.isFinite(days) || days <= 0) {
-      tokenError.value = "有效期必须大于 0 天";
+      tokenError.value = t("mqPermissions.expiryMustBePositive");
       tokenIssueError.value = undefined;
       return;
     }
@@ -267,7 +269,7 @@ async function copyIssuedToken() {
 }
 
 function formatDate(value?: string) {
-  if (!value) return "长期";
+  if (!value) return t("mqPermissions.unlimited");
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
@@ -307,49 +309,49 @@ watch(
   <div class="permissions-panel">
     <div class="panel-toolbar">
       <div>
-        <h3>权限管理</h3>
+        <h3>{{ t("mqPermissions.title") }}</h3>
         <div v-if="scopeLabel" class="scope-label">{{ scopeLabel }}</div>
       </div>
       <button @click="loadPermissions" :disabled="loading || !scope" class="btn-sm">
-        {{ loading ? "刷新中..." : "刷新" }}
+        {{ loading ? t("mqPermissions.refreshing") : t("mqPermissions.refresh") }}
       </button>
     </div>
 
-    <div v-if="!scope" class="panel-placeholder">请先选择命名空间或主题</div>
+    <div v-if="!scope" class="panel-placeholder">{{ t("mqPermissions.selectNamespaceOrTopic") }}</div>
 
     <div v-else class="permissions-content">
-      <div v-if="readOnly" class="readonly-hint">当前连接为只读模式，授权和撤销已禁用。</div>
+      <div v-if="readOnly" class="readonly-hint">{{ t("mqPermissions.readonlyHint") }}</div>
       <div v-if="error" class="panel-error">{{ error }}</div>
       <div v-if="notice" class="panel-notice">{{ notice }}</div>
 
       <section class="grant-panel">
-        <h4>授权角色</h4>
+        <h4>{{ t("mqPermissions.grantRole") }}</h4>
         <div class="grant-row">
           <label>
-            角色名
-            <input ref="roleNameInput" v-model="roleName" type="text" placeholder="例如: app-producer" :disabled="readOnly" :class="{ invalid: roleNameError }" :aria-invalid="!!roleNameError" />
+            {{ t("mqPermissions.roleName") }}
+            <input ref="roleNameInput" v-model="roleName" type="text" :placeholder="t('mqPermissions.roleNamePlaceholder')" :disabled="readOnly" :class="{ invalid: roleNameError }" :aria-invalid="!!roleNameError" />
             <span v-if="roleNameError" class="field-error">{{ roleNameError }}</span>
           </label>
           <div class="actions-group" :class="{ invalid: actionsError }">
-            <span>权限动作</span>
+            <span>{{ t("mqPermissions.actions") }}</span>
             <label v-for="action in actionOptions" :key="action" class="checkbox-label">
               <input v-model="selectedActions" type="checkbox" :value="action" :disabled="readOnly" />
               {{ action }}
             </label>
             <span v-if="actionsError" class="field-error actions-error">{{ actionsError }}</span>
           </div>
-          <button @click="grantPermission" :disabled="loading || readOnly" class="btn-primary">授权</button>
+          <button @click="grantPermission" :disabled="loading || readOnly" class="btn-primary">{{ t("mqPermissions.grant") }}</button>
         </div>
       </section>
 
       <section class="permissions-table">
-        <h4>当前权限</h4>
+        <h4>{{ t("mqPermissions.currentPermissions") }}</h4>
         <table v-if="permissionRows.length">
           <thead>
             <tr>
-              <th>角色</th>
-              <th>动作</th>
-              <th>操作</th>
+              <th>{{ t("mqPermissions.role") }}</th>
+              <th>{{ t("mqPermissions.actions") }}</th>
+              <th>{{ t("mqPermissions.operations") }}</th>
             </tr>
           </thead>
           <tbody>
@@ -361,80 +363,80 @@ watch(
                 </span>
               </td>
               <td class="row-actions">
-                <button @click="openTokenDialog(row.role)" class="btn-sm">Token</button>
-                <button @click="revokePermission(row.role)" :disabled="readOnly" class="btn-sm btn-danger">撤销</button>
+                <button @click="openTokenDialog(row.role)" class="btn-sm">{{ t("mqPermissions.token") }}</button>
+                <button @click="revokePermission(row.role)" :disabled="readOnly" class="btn-sm btn-danger">{{ t("mqPermissions.revoke") }}</button>
               </td>
             </tr>
           </tbody>
         </table>
-        <div v-else class="empty-state">暂无权限记录</div>
+        <div v-else class="empty-state">{{ t("mqPermissions.noPermissions") }}</div>
       </section>
     </div>
 
     <div v-if="showTokenDialog" class="dialog-overlay" @click="closeTokenDialog">
       <div class="dialog" @click.stop>
         <div class="dialog-header">
-          <h3>客户端 Token: {{ tokenRole }}</h3>
+          <h3>{{ t("mqPermissions.clientTokenTitle", { role: tokenRole }) }}</h3>
           <button @click="closeTokenDialog" class="btn-close">×</button>
         </div>
         <div class="dialog-body">
           <div v-if="tokenError" class="panel-error">{{ tokenError }}</div>
-          <div v-if="tokenIssueError" class="token-config-error" role="alert">
-            <strong>{{ tokenIssueError.title }}</strong>
-            <span>{{ tokenIssueError.message }}</span>
-            <small>{{ tokenIssueError.detail }}</small>
+          <div v-if="tokenIssueError?.kind === 'missingSigningKey'" class="token-config-error" role="alert">
+            <strong>{{ t(tokenIssueError.titleKey) }}</strong>
+            <span>{{ t(tokenIssueError.messageKey) }}</span>
+            <small>{{ t(tokenIssueError.detailKey) }}</small>
           </div>
           <div v-if="issuedToken" class="issued-token-box">
-            <div class="token-warning">Token 仅显示一次，请立即复制并保存好。</div>
+            <div class="token-warning">{{ t("mqPermissions.tokenShowOnceWarning") }}</div>
             <textarea :value="issuedToken.token" readonly class="token-textarea" />
-            <button class="btn-sm" @click="copyIssuedToken">复制 Token</button>
+            <button class="btn-sm" @click="copyIssuedToken">{{ t("mqPermissions.copyToken") }}</button>
           </div>
 
           <section class="token-section">
-            <h4>签发新 Token</h4>
+            <h4>{{ t("mqPermissions.issueNewToken") }}</h4>
             <div class="token-form">
               <label>
-                角色
+                {{ t("mqPermissions.role") }}
                 <input v-model="tokenRole" type="text" />
               </label>
               <div class="expiry-control">
                 <label class="checkbox-label expiry-toggle">
                   <input v-model="tokenExpiresUnlimited" type="checkbox" />
-                  永不过期
+                  {{ t("mqPermissions.neverExpires") }}
                 </label>
                 <label :class="{ muted: tokenExpiresUnlimited }">
-                  有效期（天）
+                  {{ t("mqPermissions.expiryDays") }}
                   <input v-model.number="tokenExpiresDays" type="number" min="1" step="1" :disabled="tokenExpiresUnlimited" />
                 </label>
               </div>
               <div class="actions-group token-actions">
-                <span>权限动作</span>
+                <span>{{ t("mqPermissions.actions") }}</span>
                 <label v-for="action in actionOptions" :key="action" class="checkbox-label">
                   <input v-model="tokenActions" type="checkbox" :value="action" />
                   {{ action }}
                 </label>
               </div>
               <label>
-                备注
-                <input v-model="tokenNote" type="text" placeholder="例如: 发给 rt-erp-server" />
+                {{ t("mqPermissions.note") }}
+                <input v-model="tokenNote" type="text" :placeholder="t('mqPermissions.notePlaceholder')" />
               </label>
               <button @click="issueToken" :disabled="tokenLoading || readOnly" class="btn-primary">
-                {{ tokenLoading ? "签发中..." : "生成 Token" }}
+                {{ tokenLoading ? t("mqPermissions.issuing") : t("mqPermissions.generateToken") }}
               </button>
             </div>
-            <p class="token-message">撤销角色权限不会让已签发 JWT 立即失效；需要等待过期，或轮换 Broker 签发密钥。</p>
+            <p class="token-message">{{ t("mqPermissions.tokenRevokeHint") }}</p>
           </section>
 
           <section class="token-section">
-            <h4>签发记录</h4>
+            <h4>{{ t("mqPermissions.issueRecords") }}</h4>
             <table v-if="tokenRecords.length">
               <thead>
                 <tr>
-                  <th>时间</th>
-                  <th>算法</th>
-                  <th>过期</th>
-                  <th>指纹</th>
-                  <th>备注</th>
+                  <th>{{ t("mqPermissions.time") }}</th>
+                  <th>{{ t("mqPermissions.algorithm") }}</th>
+                  <th>{{ t("mqPermissions.expires") }}</th>
+                  <th>{{ t("mqPermissions.fingerprint") }}</th>
+                  <th>{{ t("mqPermissions.noteColumn") }}</th>
                 </tr>
               </thead>
               <tbody>
@@ -447,11 +449,11 @@ watch(
                 </tr>
               </tbody>
             </table>
-            <div v-else class="empty-state">{{ tokenLoading ? "加载中..." : "暂无签发记录" }}</div>
+            <div v-else class="empty-state">{{ tokenLoading ? t("mqPermissions.loading") : t("mqPermissions.noIssueRecords") }}</div>
           </section>
         </div>
         <div class="dialog-footer">
-          <button @click="closeTokenDialog" class="btn-secondary">关闭</button>
+          <button @click="closeTokenDialog" class="btn-secondary">{{ t("mqPermissions.close") }}</button>
         </div>
       </div>
     </div>

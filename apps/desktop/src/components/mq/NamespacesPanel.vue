@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { formatError } from "@/lib/backend/errorUtils";
 import { ref, watch } from "vue";
+import { useI18n } from "vue-i18n";
 import type { NamespaceRef, NamespaceInfo, NamespaceConfig } from "@/types/mq";
 import { mqListNamespaces, mqCreateNamespace, mqDeleteNamespace } from "@/lib/backend/api";
 
@@ -17,6 +18,8 @@ const emit = defineEmits<{
   namespaceRolesSelected: [namespace: string];
 }>();
 
+const { t } = useI18n();
+
 const namespaces = ref<NamespaceInfo[]>([]);
 const loading = ref(false);
 const error = ref<string>();
@@ -27,11 +30,9 @@ const formData = ref({
   namespace: "",
 });
 
-const readOnlyMessage = "当前连接为只读模式，不能执行写操作";
-
 function guardWritable() {
   if (props.readOnly) {
-    error.value = readOnlyMessage;
+    error.value = t("mqNamespaces.readOnly");
     return false;
   }
   return true;
@@ -64,7 +65,7 @@ function openCreateDialog() {
 async function handleCreate() {
   if (!guardWritable()) return;
   if (!formData.value.namespace.trim() || !props.tenant) {
-    error.value = "Namespace name is required";
+    error.value = t("mqNamespaces.namespaceNameRequired");
     return;
   }
   loading.value = true;
@@ -87,7 +88,7 @@ async function handleCreate() {
 
 async function handleDelete(ns: NamespaceInfo) {
   if (!guardWritable()) return;
-  if (!confirm(`确定要删除命名空间 "${ns.namespace}" 吗？此操作不可逆。`)) return;
+  if (!confirm(t("mqNamespaces.confirmDelete", { name: ns.namespace }))) return;
   if (!props.tenant) return;
   loading.value = true;
   error.value = undefined;
@@ -131,26 +132,26 @@ watch(
 <template>
   <div class="namespaces-panel">
     <div class="panel-toolbar">
-      <h3>命名空间管理</h3>
-      <button @click="openCreateDialog" :disabled="loading || readOnly || !tenant" class="btn-primary">+ 创建命名空间</button>
+      <h3>{{ t("mqNamespaces.title") }}</h3>
+      <button @click="openCreateDialog" :disabled="loading || readOnly || !tenant" class="btn-primary">+ {{ t("mqNamespaces.createNamespace") }}</button>
     </div>
 
-    <div v-if="!supportsNamespaces" class="panel-placeholder">当前消息队列系统不支持命名空间管理</div>
+    <div v-if="!supportsNamespaces" class="panel-placeholder">{{ t("mqNamespaces.notSupported") }}</div>
 
-    <div v-else-if="!tenant" class="panel-placeholder">请先选择一个租户</div>
+    <div v-else-if="!tenant" class="panel-placeholder">{{ t("mqNamespaces.selectTenantFirst") }}</div>
 
     <div v-else-if="error" class="panel-error">{{ error }}</div>
 
-    <div v-else-if="loading && !namespaces.length" class="panel-loading">加载中...</div>
+    <div v-else-if="loading && !namespaces.length" class="panel-loading">{{ t("mqNamespaces.loading") }}</div>
 
     <div v-else class="namespaces-table">
       <table>
         <thead>
           <tr>
-            <th>名称</th>
-            <th>租户</th>
-            <th>管理角色</th>
-            <th>操作</th>
+            <th>{{ t("mqNamespaces.name") }}</th>
+            <th>{{ t("mqNamespaces.tenant") }}</th>
+            <th>{{ t("mqNamespaces.adminRoles") }}</th>
+            <th>{{ t("mqNamespaces.actions") }}</th>
           </tr>
         </thead>
         <tbody>
@@ -161,11 +162,11 @@ watch(
               <span v-if="ns.adminRoles.length" class="tag-list">
                 <span v-for="role in ns.adminRoles" :key="role" class="tag">{{ role }}</span>
               </span>
-              <span v-else class="text-muted">无</span>
+              <span v-else class="text-muted">{{ t("mqNamespaces.none") }}</span>
             </td>
             <td class="actions">
-              <button @click.stop="editNamespaceRoles(ns)" class="btn-sm">编辑角色</button>
-              <button @click.stop="handleDelete(ns)" :disabled="readOnly" class="btn-sm btn-danger">删除</button>
+              <button @click.stop="editNamespaceRoles(ns)" class="btn-sm">{{ t("mqNamespaces.editRoles") }}</button>
+              <button @click.stop="handleDelete(ns)" :disabled="readOnly" class="btn-sm btn-danger">{{ t("mqNamespaces.delete") }}</button>
             </td>
           </tr>
         </tbody>
@@ -176,23 +177,23 @@ watch(
     <div v-if="showCreateDialog" class="dialog-overlay" @click="showCreateDialog = false">
       <div class="dialog" @click.stop>
         <div class="dialog-header">
-          <h3>创建命名空间</h3>
+          <h3>{{ t("mqNamespaces.createDialogTitle") }}</h3>
           <button @click="showCreateDialog = false" class="btn-close">×</button>
         </div>
         <div class="dialog-body">
           <div class="form-group">
-            <label>租户</label>
+            <label>{{ t("mqNamespaces.tenant") }}</label>
             <input type="text" :value="tenant" disabled />
           </div>
           <div class="form-group">
-            <label>命名空间名称*</label>
-            <input v-model="formData.namespace" type="text" placeholder="例如: my-namespace" :disabled="readOnly" />
+            <label>{{ t("mqNamespaces.namespaceName") }}</label>
+            <input v-model="formData.namespace" type="text" :placeholder="t('mqNamespaces.namespaceNamePlaceholder')" :disabled="readOnly" />
           </div>
           <div v-if="error" class="form-error">{{ error }}</div>
         </div>
         <div class="dialog-footer">
-          <button @click="showCreateDialog = false" class="btn-secondary">取消</button>
-          <button @click="handleCreate" :disabled="loading || readOnly" class="btn-primary">创建</button>
+          <button @click="showCreateDialog = false" class="btn-secondary">{{ t("mqNamespaces.cancel") }}</button>
+          <button @click="handleCreate" :disabled="loading || readOnly" class="btn-primary">{{ t("mqNamespaces.create") }}</button>
         </div>
       </div>
     </div>

@@ -188,6 +188,7 @@ fn build_tdengine_delete_statement(
         save_columns,
         row,
         options.table_meta.columns.as_deref().unwrap_or(&[]),
+        None,
     );
     if where_clause.is_empty() {
         return None;

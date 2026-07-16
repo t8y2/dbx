@@ -256,6 +256,52 @@ test("redis command tool executes redis commands on the selected database", asyn
   assert.match(result.content[0].text, /value-1/);
 });
 
+test("dbx_execute_query does not log SQL when debug diagnostics are disabled", async () => {
+  const original = console.error;
+  const originalDebug = process.env.DBX_SQL_DEBUG;
+  const originalMcpDebug = process.env.DBX_MCP_DEBUG_SQL;
+  const messages: unknown[][] = [];
+  delete process.env.DBX_SQL_DEBUG;
+  delete process.env.DBX_MCP_DEBUG_SQL;
+  console.error = (...args: unknown[]) => messages.push(args);
+  try {
+    const server = createDbxMcpServer(backend, { isWebMode: true });
+    const result = await (server as any)._registeredTools.dbx_execute_query.handler({
+      connection_name: "local",
+      sql: "select 'secret-123' as token",
+    });
+    assert.equal(result.isError, undefined);
+  } finally {
+    console.error = original;
+    if (originalDebug === undefined) delete process.env.DBX_SQL_DEBUG;
+    else process.env.DBX_SQL_DEBUG = originalDebug;
+    if (originalMcpDebug === undefined) delete process.env.DBX_MCP_DEBUG_SQL;
+    else process.env.DBX_MCP_DEBUG_SQL = originalMcpDebug;
+  }
+
+  assert.equal(messages.length, 0);
+});
+
+test("dbx_execute_query omits raw SQL from user-facing query errors", async () => {
+  const sensitiveSql = "select 'secret-123' as token";
+  const scopedBackend: Backend = {
+    ...backend,
+    executeQuery: async () => {
+      throw new Error("driver rejected statement");
+    },
+  };
+  const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+
+  const result = await (server as any)._registeredTools.dbx_execute_query.handler({
+    connection_name: "local",
+    sql: sensitiveSql,
+  });
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /QUERY_ERROR: driver rejected statement/);
+  assert.doesNotMatch(result.content[0].text, /secret-123|SQL:/);
+});
+
 test("redis command tool blocks write commands in read-only MCP sessions", async () => {
   let executed = false;
   const redisConnection: ConnectionConfig = { ...connection, db_type: "redis" };
@@ -807,4 +853,67 @@ test("dbx_execute_query with connection_id routes correctly on bridge-backed (SS
   assert.equal(usedConfigs[0].id, "pg-ssh");
   assert.equal(usedConfigs[0].host, "private.local");
   assert.equal(usedConfigs[0].ssh_enabled, true);
+});
+
+// --- Dialect-aware `#` comment handling ---
+
+test("dbx_execute_query splits PG `#` operator statements correctly", async () => {
+  const executed: string[] = [];
+  const scopedBackend: Backend = {
+    ...backend,
+    executeQuery: async (_config, sql) => {
+      executed.push(sql);
+      return { columns: ["value"], rows: [{ value: 1 }], row_count: 1 };
+    },
+  };
+  const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+
+  // On a postgres connection, `#` is an operator, not a comment.
+  // `SELECT 1 # 2; SELECT 3` should produce TWO executeQuery calls.
+  await (server as any)._registeredTools.dbx_execute_query.handler({
+    connection_name: "local",
+    sql: "SELECT 1 # 2; SELECT 3",
+  });
+
+  assert.deepEqual(executed, ["SELECT 1 # 2", "SELECT 3"]);
+});
+
+test("dbx_execute_query treats `#` as line comment on MySQL connections", async () => {
+  const mysqlConn: ConnectionConfig = { ...connection, id: "mysql-1", name: "mysql-local", db_type: "mysql" };
+  const executed: string[] = [];
+  const scopedBackend: Backend = {
+    ...backend,
+    loadConnections: async () => [mysqlConn],
+    findConnection: async (name) => (name === "mysql-local" ? mysqlConn : undefined),
+    executeQuery: async (_config, sql) => {
+      executed.push(sql);
+      return { columns: ["value"], rows: [{ value: 1 }], row_count: 1 };
+    },
+  };
+  const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+
+  // On a mysql connection, `#` IS a line comment.
+  // The `;` in `SELECT 1;` splits the first statement. The `# comment\nSELECT 2`
+  // is a single statement — the `#` makes everything on that line a comment,
+  // and after the newline `SELECT 2` continues (no `;` to split).
+  await (server as any)._registeredTools.dbx_execute_query.handler({
+    connection_name: "mysql-local",
+    sql: "SELECT 1; # comment\nSELECT 2",
+  });
+
+  assert.deepEqual(executed, ["SELECT 1", "# comment\nSELECT 2"]);
+});
+
+test("dbx_execute_query blocks PG injection through `#` as comment in classification", async () => {
+  // `SELECT 1 # 2; DELETE FROM t` on a postgres connection: the `#` is an operator,
+  // so classification must see the DELETE and block it as a write in read-only mode.
+  const server = createDbxMcpServer(backend, { isWebMode: true });
+
+  const result = await (server as any)._registeredTools.dbx_execute_query.handler({
+    connection_name: "local",
+    sql: "SELECT 1 # 2; DELETE FROM t",
+  });
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /SQL_BLOCKED:/);
 });

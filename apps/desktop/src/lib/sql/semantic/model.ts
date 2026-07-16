@@ -22,6 +22,10 @@ const JOIN_MODIFIERS = new Set(["left", "right", "inner", "outer", "cross", "ful
 const CLAUSE_BOUNDARIES = new Set(["where", "group", "having", "order", "limit", "offset", "union", "intersect", "except", "on", "set", "values", "returning"]);
 const FROM_CLAUSE_BOUNDARIES = new Set([...CLAUSE_BOUNDARIES, "window", "qualify", "fetch", "for", "connect", "start", "model"].filter((item) => item !== "on"));
 const ALIAS_BLACKLIST = new Set([...CLAUSE_BOUNDARIES, "join", "straight_join", "left", "right", "inner", "outer", "cross", "full", "natural", "as", "select", "from", "with"]);
+const TABLE_TARGET_MODIFIERS = new Set(["lateral", "only"]);
+const TABLE_FUNCTION_INTRODUCERS = new Set(["from", "join", "straight_join", "apply"]);
+const TOP_LEVEL_STATEMENT_WORDS = new Set(["select", "insert", "delete", "merge", "create", "alter", "drop", "truncate", "call", "exec", "execute", "grant", "revoke"]);
+const SQLSERVER_UPDATE_STATISTICS_SCOPES = new Set(["all", "index", "table"]);
 
 interface ParseState {
   dialect: SqlSemanticDialectAdapter;
@@ -81,6 +85,9 @@ function readQualifiedName(tokens: readonly SqlSemanticToken[], startIndex: numb
       break;
     }
     index += 2;
+    if (dialect.id === "sqlserver") {
+      while (tokens[index]?.text === ".") index += 1;
+    }
   }
   if (parts.length === 0) return null;
   return {
@@ -90,6 +97,74 @@ function readQualifiedName(tokens: readonly SqlSemanticToken[], startIndex: numb
     },
     nextIndex: index,
   };
+}
+
+function sqlServerMaintenanceTableTarget(tokens: readonly SqlSemanticToken[], target: number, introducer: string, dialect: SqlSemanticDialectAdapter): number {
+  if (dialect.id !== "sqlserver" || introducer !== "update") return target;
+  if (tokens[target]?.normalized === "statistics") return target + 1;
+  // ASE accepts UPDATE {ALL | INDEX | TABLE} STATISTICS; these scope words
+  // describe the maintenance operation and must never become table targets.
+  if (SQLSERVER_UPDATE_STATISTICS_SCOPES.has(tokens[target]?.normalized ?? "") && tokens[target + 1]?.normalized === "statistics") return target + 2;
+  return target;
+}
+
+function updateIntroducesMutationTarget(tokens: readonly SqlSemanticToken[], updateIndex: number): boolean {
+  const update = tokens[updateIndex];
+  if (update?.kind !== "word" || update.normalized !== "update") return false;
+  for (let index = updateIndex - 1; index >= 0; index -= 1) {
+    const item = tokens[index];
+    if (!item || item.depth !== update.depth) continue;
+    if (item.text === ";") break;
+    if (item.kind === "word" && (item.normalized === "update" || TOP_LEVEL_STATEMENT_WORDS.has(item.normalized))) return false;
+  }
+  return true;
+}
+
+function commaContinuesTableList(tokens: readonly SqlSemanticToken[], commaIndex: number): boolean {
+  const comma = tokens[commaIndex];
+  if (comma?.text !== ",") return false;
+  for (let index = commaIndex - 1; index >= 0; index -= 1) {
+    const item = tokens[index];
+    if (!item || item.depth !== comma.depth || item.kind !== "word") continue;
+    if (item.normalized === "from") return true;
+    if (item.normalized === "select" || item.normalized === "join" || TABLE_INTRODUCERS.has(item.normalized) || CLAUSE_BOUNDARIES.has(item.normalized)) return false;
+  }
+  return false;
+}
+
+/**
+ * Finds concrete table-name tokens for visual highlighting without consulting
+ * metadata. Only the final identifier in a qualified name is returned, so
+ * schemas/catalogs and aliases keep the regular identifier color.
+ */
+export function sqlSemanticTableNameSpans(sql: string, options: SqlSemanticBuildOptions = {}): SqlSemanticSpan[] {
+  const dialect = sqlSemanticDialectFor(options);
+  const tokens = significantTokens(tokenizeSqlSemantic(sql, dialect.id));
+  const spans: SqlSemanticSpan[] = [];
+  const seen = new Set<string>();
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const item = tokens[index];
+    const introduced = item?.kind === "word" && TABLE_INTRODUCERS.has(item.normalized) && (item.normalized !== "update" || updateIntroducesMutationTarget(tokens, index));
+    if (!introduced && !commaContinuesTableList(tokens, index)) continue;
+
+    let target = index + 1;
+    while (TABLE_TARGET_MODIFIERS.has(tokens[target]?.normalized ?? "")) target += 1;
+    target = sqlServerMaintenanceTableTarget(tokens, target, item?.normalized ?? "", dialect);
+    if (tokens[target]?.text === "(") continue;
+
+    const qualified = readQualifiedName(tokens, target, dialect);
+    const followedByParenthesis = qualified && tokens[qualified.nextIndex]?.text === "(";
+    if (!qualified || tokens[target]?.depth !== item?.depth || (followedByParenthesis && (!introduced || TABLE_FUNCTION_INTRODUCERS.has(item.normalized)))) continue;
+    const tablePart = qualified.name.parts[qualified.name.parts.length - 1];
+    if (!tablePart) continue;
+    const key = `${tablePart.span.start}:${tablePart.span.end}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    spans.push(tablePart.span);
+  }
+
+  return spans;
 }
 
 function sourceNameFromQualifiedName(name: SqlSemanticQualifiedName): { name: string; qualifierParts: string[] } {
@@ -379,9 +454,11 @@ function parseRowSources(state: ParseState): SqlSemanticRowSource[] {
     if (item.kind !== "word") continue;
     const normalized = item.normalized;
     if (!TABLE_INTRODUCERS.has(normalized)) continue;
+    if (normalized === "update" && !updateIntroducesMutationTarget(state.tokens, index)) continue;
     if (JOIN_MODIFIERS.has(normalized)) continue;
     let target = index + 1;
     while (JOIN_MODIFIERS.has(state.tokens[target]?.normalized ?? "")) target += 1;
+    target = sqlServerMaintenanceTableTarget(state.tokens, target, normalized, state.dialect);
     for (;;) {
       const parsed = parseRowSource(state, target, normalized, sources.length);
       if (!parsed) break;
@@ -614,7 +691,7 @@ function buildScope(statement: SqlSemanticStatement, rowSources: SqlSemanticRowS
 export function buildSqlSemanticModel(sql: string, cursor: number, options: SqlSemanticBuildOptions = {}): SqlSemanticModel {
   const safeCursor = Math.max(0, Math.min(cursor, sql.length));
   const dialect = sqlSemanticDialectFor(options);
-  const allTokens = tokenizeSqlSemantic(sql);
+  const allTokens = tokenizeSqlSemantic(sql, dialect.id);
   const statementSpan = findActiveSqlStatementSpan(sql, allTokens, safeCursor);
   const tokens = significantTokens(allTokens.filter((item) => item.span.end > statementSpan.start && item.span.start < statementSpan.end));
   const kind = statementKind(tokens);

@@ -896,6 +896,11 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
       const result = await withTimeout(mongoAggregateDocuments(config, aggregate.collection, aggregate.pipeline, resolveMaxRows(options)), resolveTimeoutMs(options));
       return mongoDocumentsToQueryResult(result.documents.slice(0, resolveMaxRows(options)), result.total);
     }
+    const distinct = parseMongoDistinctCommand(sql);
+    if (distinct) {
+      const result = await withTimeout(mongoDistinct(config, distinct.collection, distinct.field, distinct.filter), resolveTimeoutMs(options));
+      return mongoDistinctToQueryResult(distinct.field, result.documents.slice(0, resolveMaxRows(options)));
+    }
     const getIndexes = parseMongoGetIndexesCommand(sql);
     if (getIndexes) {
       const result = await withTimeout(mongoAggregateDocuments(config, getIndexes.collection, '[{"$indexStats":{}}]', resolveMaxRows(options)), resolveTimeoutMs(options));
@@ -928,7 +933,7 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
       return { columns: [], rows: [], row_count: result.affectedRows };
     }
     throw new Error(
-      'Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.version(), db.projects.countDocuments({}), db.projects.count({}), db.projects.getIndexes(), db.projects.dataSize(), db.projects.storageSize(1024), db.projects.totalIndexSize(), db.projects.stats(), db.projects.createIndex({...}), db.projects.dropIndex("name"), db.projects.dropIndexes(), db.projects.drop(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})',
+      'Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.version(), db.projects.countDocuments({}), db.projects.count({}), db.projects.distinct("status"), db.projects.getIndexes(), db.projects.dataSize(), db.projects.storageSize(1024), db.projects.totalIndexSize(), db.projects.stats(), db.projects.createIndex({...}), db.projects.dropIndex("name"), db.projects.dropIndexes(), db.projects.drop(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})',
     );
   }
   if (isDirectQueryType(config.db_type)) {
@@ -970,7 +975,7 @@ async function executeRedisCommandDirect(config: ConnectionConfig, db: number, c
   const command = argv[0].toUpperCase();
   const safety = classifyRedisCommand(command) as RedisCommandSafety;
   if (!options?.skipSafetyCheck && safety === "blocked") {
-    throw new Error(`Redis command is blocked for safety: ${command}`);
+    throw new Error("Redis command is blocked for safety. Enable dangerous commands with DBX_MCP_ALLOW_DANGEROUS_SQL=1.");
   }
 
   const { Redis } = await import("ioredis");
@@ -1231,6 +1236,26 @@ async function mongoAggregateDocuments(config: ConnectionConfig, collection: str
   });
 }
 
+async function mongoDistinct(config: ConnectionConfig, collection: string, field: string, filter?: string): Promise<MongoDocumentResult> {
+  return bridgeDataRequest<MongoDocumentResult>("/data/mongo/distinct", {
+    connection_id: config.id,
+    connection_name: config.name,
+    database: config.database || "",
+    collection,
+    field,
+    filter,
+  });
+}
+
+/** distinct returns bare values, so the single column is named after the field. */
+export function mongoDistinctToQueryResult(field: string, values: unknown[]): QueryResult {
+  return {
+    columns: [field],
+    rows: values.map((value) => ({ [field]: toCellValue(value) })),
+    row_count: values.length,
+  };
+}
+
 export function mongoCollectionStatsToQueryResult(metric: MongoCollectionStatsMetric, stats: Record<string, unknown>): QueryResult {
   if (metric === "stats") {
     const columns = ["count", "size", "avgObjSize", "storageSize", "totalIndexSize", "nindexes"];
@@ -1313,6 +1338,12 @@ interface MongoCountDocumentsCommand {
 interface MongoAggregateCommand {
   collection: string;
   pipeline: string;
+}
+
+interface MongoDistinctCommand {
+  collection: string;
+  field: string;
+  filter?: string;
 }
 
 interface MongoGetIndexesCommand {
@@ -1414,6 +1445,28 @@ export function parseMongoAggregateCommand(input: string): MongoAggregateCommand
   const pipeline = normalizeJsonArgument(args[0]);
   if (!pipeline) return null;
   return Array.isArray(JSON.parse(pipeline)) ? { collection: target.collection, pipeline } : null;
+}
+
+export function parseMongoDistinctCommand(input: string): MongoDistinctCommand | null {
+  const source = input.trim().replace(/;$/, "").trim();
+  const target = parseCollectionMethodTarget(source, "distinct");
+  if (!target) return null;
+  const args = parseMethodArgs(source, target.methodCallIndex);
+  if (!args || args.length < 1 || args.length > 2) return null;
+
+  const fieldJson = normalizeJsonArgument(args[0] ?? "");
+  if (!fieldJson) return null;
+  let field: unknown;
+  try {
+    field = JSON.parse(fieldJson);
+  } catch {
+    return null;
+  }
+  if (typeof field !== "string" || !field.trim()) return null;
+
+  if (args.length === 1) return { collection: target.collection, field };
+  const filter = normalizeJsonArgument(args[1] ?? "");
+  return filter ? { collection: target.collection, field, filter } : null;
 }
 
 export function parseMongoGetIndexesCommand(input: string): MongoGetIndexesCommand | null {

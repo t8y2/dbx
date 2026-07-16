@@ -5,6 +5,7 @@ use crate::path_utils::expand_tilde;
 
 const OCEANBASE_ORACLE_COMPATIBLE_OJDBC_VERSION_KEY: &str = "compatibleOjdbcVersion";
 const OCEANBASE_ORACLE_COMPATIBLE_OJDBC_VERSION_PARAM: &str = "compatibleOjdbcVersion=8";
+const ZOOKEEPER_MIN_CONNECTION_TIMEOUT_MS: u64 = 15_000;
 
 pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, database: &str) -> serde_json::Value {
     let agent_database = if config.db_type == DatabaseType::MongoDb {
@@ -44,7 +45,7 @@ pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, da
     };
     let (agent_host, agent_port) = if is_h2_file_connection(config) { ("", 0) } else { (host, port) };
 
-    serde_json::json!({
+    let mut params = serde_json::json!({
         "host": agent_host,
         "port": agent_port,
         "port_explicit": config.sqlserver_port_explicit(),
@@ -64,7 +65,13 @@ pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, da
         "informix_server": config.informix_server,
         "jdbc_driver_class": config.jdbc_driver_class.as_deref().unwrap_or(""),
         "jdbc_driver_paths": &config.jdbc_driver_paths,
-    })
+    });
+    if config.db_type == DatabaseType::ZooKeeper {
+        params["connection_timeout_ms"] = serde_json::json!(
+            (config.effective_connect_timeout_secs() * 1000).max(ZOOKEEPER_MIN_CONNECTION_TIMEOUT_MS)
+        );
+    }
+    params
 }
 
 fn oracle_uses_sysdba(config: &ConnectionConfig) -> bool {
@@ -718,11 +725,13 @@ mod tests {
     fn zookeeper_agent_params_preserve_configured_connect_string() {
         let mut cfg = config(DatabaseType::ZooKeeper, None);
         cfg.connection_string = Some("zk-1:2181,zk-2:2181/app".to_string());
+        cfg.connect_timeout_secs = 20;
 
         let params = agent_connect_params(&cfg, "127.0.0.1", 2181, "");
 
         assert_eq!(params["connection_string"], "zk-1:2181,zk-2:2181/app");
         assert_eq!(params["zookeeper_connect_string"], "zk-1:2181,zk-2:2181/app");
+        assert_eq!(params["connection_timeout_ms"], 20_000);
     }
 
     #[test]
@@ -733,6 +742,7 @@ mod tests {
 
         assert_eq!(params["connection_string"], "");
         assert_eq!(params["zookeeper_connect_string"], "zk.local:2281");
+        assert_eq!(params["connection_timeout_ms"], ZOOKEEPER_MIN_CONNECTION_TIMEOUT_MS);
     }
 
     #[test]

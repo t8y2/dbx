@@ -5,7 +5,7 @@ import { useI18n } from "vue-i18n";
 import type { ConnectionConfig, DatabaseType, ObjectBrowserViewport, QueryResult, QueryTab, TableInfoTab, TableStructureEditorTarget } from "@/types/database";
 import { orderPinnedFirst } from "@/lib/app/pinnedItems";
 import { canCancelQueryExecution } from "@/lib/sql/queryExecutionState";
-import { buildExplainSql, parseExplainResult, parseDamengExplainText, parseOracleExplainText, type BuildExplainSqlResult } from "@/lib/diagram/explainPlan";
+import { buildExplainSql, parseExplainResult, parseDamengExplainText, parseOracleExplainText, sqlServerExplainResult, type BuildExplainSqlResult } from "@/lib/diagram/explainPlan";
 import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQueryEditability, resolveMetadataColumnName, sourceColumnsForResult, type EditableQueryInfo, type EditableQuerySource } from "@/lib/sql/sqlAnalysis";
 import { buildQueryWithHiddenPrimaryKeys, hiddenResultColumnIndexes, type HiddenPrimaryKeyProjection } from "@/lib/sql/editableQueryHiddenKeys";
 import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY, restoreOpenTabsPayload, restoreOpenTabsState, serializeOpenTabs } from "@/lib/app/openTabsPersistence";
@@ -14,6 +14,7 @@ import {
   evaluateMongoWriteSafety,
   mongoCollectionStatsToQueryResult,
   mongoCountToQueryResult,
+  mongoDistinctToQueryResult,
   mongoCreateIndexToQueryResult,
   mongoDocumentsToQueryResult,
   mongoDroppedIndexesToQueryResult,
@@ -166,6 +167,22 @@ function annotateQueryResultSource(result: QueryResult, sourceStatement: string,
   const label = databaseType ? queryResultSourceLabel(sourceStatement, { database, databaseType }) : undefined;
   if (label) result.sourceLabel = label;
   return result;
+}
+
+const ELASTICSEARCH_REST_REQUEST = /^(?:GET|POST|PUT|DELETE|HEAD)\s+\S+/i;
+
+function elasticsearchRestRequestRanges(sql: string, databaseType?: DatabaseType) {
+  if (databaseType !== "elasticsearch") return [];
+  const requests = splitSqlStatementRanges(sql, databaseType);
+  return requests.length > 0 && requests.every((request) => ELASTICSEARCH_REST_REQUEST.test(request.sql)) ? requests : [];
+}
+
+function elasticsearchHttpErrorStatus(result: QueryResult): number | undefined {
+  const statusIndex = result.columns.findIndex((column) => column.toLowerCase() === "status");
+  if (statusIndex < 0) return undefined;
+  const value = result.rows[0]?.[statusIndex];
+  const status = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+  return Number.isInteger(status) && status >= 400 ? status : undefined;
 }
 
 function displayedQueryMetadataSql(tab: QueryTab, fallbackSql: string): string {
@@ -1156,6 +1173,31 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
+  function openPostgresDashboard(connectionId: string) {
+    const existing = tabs.value.find((tab) => tab.mode === "postgres-dashboard" && tab.connectionId === connectionId);
+    if (existing) {
+      switchTab(existing.id);
+      return existing.id;
+    }
+
+    const conn = useConnectionStore().getConfig(connectionId);
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: conn?.name ? `${conn.name} - ${t("serverDashboard.title")}` : t("serverDashboard.title"),
+      connectionId,
+      database: conn?.database || "",
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "postgres-dashboard",
+    };
+    tabs.value.push(tab);
+    activeTabId.value = id;
+    return id;
+  }
+
   function openDamengJobAdmin(connectionId: string) {
     const existing = tabs.value.find((tab) => tab.mode === "dameng-jobs" && tab.connectionId === connectionId);
     if (existing) {
@@ -1303,7 +1345,7 @@ export const useQueryStore = defineStore("query", () => {
   function openTableStructure(connectionId: string, database: string, schema?: string, tableName?: string, initialTab?: TableInfoTab, initialTarget?: TableStructureEditorTarget, catalog?: string) {
     const resolvedTableName = tableName || "";
     if (resolvedTableName) {
-      const existing = tabs.value.find((tab) => tab.mode === "structure" && tab.connectionId === connectionId && tab.database === database && (tab.structureTableName || "") === resolvedTableName);
+      const existing = tabs.value.find((tab) => tab.mode === "structure" && tab.connectionId === connectionId && tab.database === database && (tab.catalog || "") === (catalog || "") && (tab.structureTableName || "") === resolvedTableName);
       if (existing) {
         applyTableStructureInitialTab(existing, initialTab, initialTarget);
         switchTab(existing.id);
@@ -2943,6 +2985,21 @@ export const useQueryStore = defineStore("query", () => {
                 });
                 break;
               }
+              case "distinct": {
+                queryExecutionLog("info", "mongo-distinct:start", { traceId, collection: mongoCommand.collection, database: currentDatabase, field: mongoCommand.field });
+                const result = await api.mongoDistinct(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.field, mongoCommand.filter, executionId);
+                allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoDistinctToQueryResult(mongoCommand.field, result.documents, performance.now() - commandStartedAt))));
+                mongoEditTarget = undefined;
+                queryExecutionLog("info", "mongo-distinct:done", {
+                  traceId,
+                  collection: mongoCommand.collection,
+                  database: currentDatabase,
+                  field: mongoCommand.field,
+                  valueCount: result.documents.length,
+                  elapsed: elapsed(),
+                });
+                break;
+              }
               case "getIndexes": {
                 queryExecutionLog("info", "mongo-indexes:start", { traceId, collection: mongoCommand.collection, database: currentDatabase });
                 const indexes = await api.listIndexes(tab.connectionId, currentDatabase, "", mongoCommand.collection);
@@ -3112,6 +3169,59 @@ export const useQueryStore = defineStore("query", () => {
           current.resultSortedSql = options?.resultSortedSql;
           syncDisplayedResultRun(current, current.resultBaseSql ?? options?.resultBaseSql ?? sql);
           if (current.database !== currentDatabase) current.database = currentDatabase;
+        }
+        return;
+      }
+
+      const elasticsearchRequests = elasticsearchRestRequestRanges(sqlToExecute, effectiveDbType);
+      if (elasticsearchRequests.length > 0) {
+        console.info("[DBX][executeTabSql:elasticsearch-rest-batch:start]", {
+          traceId,
+          requestCount: elasticsearchRequests.length,
+          sql,
+        });
+        const allResults: QueryResult[] = [];
+        const continueOnError = settingsStore.editorSettings.continueOnErrorOnBatch;
+        for (const request of elasticsearchRequests) {
+          const current = tabs.value.find((item) => item.id === id);
+          if (current?.executionId !== executionId) break;
+          const sourceRange = options?.sourceOffset === undefined ? undefined : { from: options.sourceOffset + request.from, to: options.sourceOffset + request.to };
+          try {
+            const result = await api.executeQuery(tab.connectionId, executionDatabase, request.sql, undefined, executionId, {
+              timeoutSecs: queryTimeoutSecs,
+            });
+            allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(result, request.sql, tab.database || conn?.database, effectiveDbType, sourceRange)));
+            if (elasticsearchHttpErrorStatus(result) !== undefined && !continueOnError) break;
+          } catch (error) {
+            const latest = tabs.value.find((item) => item.id === id);
+            if (latest?.executionId !== executionId) break;
+            allResults.push(annotateQueryResultSource(toErrorResult(error), request.sql, tab.database || conn?.database, effectiveDbType, sourceRange));
+            if (!continueOnError) break;
+          }
+        }
+
+        console.info("[DBX][executeTabSql:elasticsearch-rest-batch:done]", {
+          traceId,
+          requestCount: elasticsearchRequests.length,
+          resultCount: allResults.length,
+          elapsed: elapsed(),
+        });
+        const current = tabs.value.find((item) => item.id === id);
+        if (current?.executionId === executionId && allResults.length > 0) {
+          const errorResultIndex = allResults.findIndex((result) => result.columns.includes("Error") || elasticsearchHttpErrorStatus(result) !== undefined);
+          const resultIndex = errorResultIndex >= 0 ? errorResultIndex : 0;
+          current.results = allResults.length > 1 ? allResults : undefined;
+          current.activeResultIndex = allResults.length > 1 ? resultIndex : undefined;
+          current.result = allResults[resultIndex];
+          touchResult(current);
+          current.queryAnalysis = undefined;
+          current.querySourceColumns = undefined;
+          current.queryEditabilityReason = undefined;
+          current.mongoEditTarget = undefined;
+          current.tableMeta = undefined;
+          current.resultBaseSql = options?.resultBaseSql ?? sql;
+          current.resultSortedSql = undefined;
+          syncDisplayedResultRun(current, current.resultBaseSql);
         }
         return;
       }
@@ -3548,6 +3658,86 @@ export const useQueryStore = defineStore("query", () => {
         void closeClientSessionId(tab.connectionId, tab.database, clientSessionId, { tabId: tab.id, explainExecutionId: executionId });
       }
       return { ok: true as const, sql: jsonBuilt.sql };
+    }
+
+    if (databaseType === "sqlserver") {
+      let built: BuildExplainSqlResult;
+      try {
+        built = await buildExplainSql(databaseType, sql);
+      } catch (e: any) {
+        tab.isExplaining = false;
+        tab.explainExecutionId = undefined;
+        tab.explainError = String(e?.message || e);
+        return { ok: true as const, sql: "" };
+      }
+      if (!built.ok) {
+        tab.isExplaining = false;
+        tab.explainExecutionId = undefined;
+        tab.explainError = built.reason;
+        return built;
+      }
+
+      tab.explainSql = built.sql;
+      const clientSessionId = `${tabClientSessionId(tab, "explain")}:${executionId}`;
+      tab.explainClientSessionId = clientSessionId;
+      let showplanEnabled = false;
+      try {
+        await api.executeQuery(tab.connectionId, tab.database, "SET SHOWPLAN_XML ON;", tab.schema, executionId, {
+          clientSessionId,
+          timeoutSecs: queryTimeoutSecs,
+          executionMode: "simple",
+        });
+        showplanEnabled = true;
+        if (tabs.value.find((t) => t.id === id)?.explainExecutionId !== executionId) {
+          return { ok: true as const, sql: built.sql };
+        }
+
+        const results = await api.executeMulti(tab.connectionId, tab.database, sql, tab.schema, executionId, {
+          clientSessionId,
+          timeoutSecs: queryTimeoutSecs,
+          executionMode: "simple",
+        });
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.explainExecutionId === executionId) {
+          const outcome = sqlServerExplainResult(results);
+          if (outcome.error !== undefined) {
+            current.explainPlan = undefined;
+            current.explainError = outcome.error;
+          } else if (outcome.result) {
+            current.explainPlan = parseExplainResult("sqlserver", outcome.result);
+            current.explainError = undefined;
+          } else {
+            current.explainPlan = undefined;
+            current.explainError = t("explain.empty");
+          }
+        }
+      } catch (e: any) {
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.explainExecutionId === executionId) {
+          current.explainPlan = undefined;
+          current.explainError = String(e?.message || e);
+        }
+      } finally {
+        if (showplanEnabled) {
+          try {
+            await api.executeQuery(tab.connectionId, tab.database, "SET SHOWPLAN_XML OFF;", tab.schema, undefined, {
+              clientSessionId,
+              timeoutSecs: queryTimeoutSecs > 0 ? Math.min(queryTimeoutSecs, 5) : 5,
+              executionMode: "simple",
+            });
+          } catch (error) {
+            console.warn("[DBX][sqlserver-explain:cleanup:error]", { tabId: tab.id, error });
+          }
+        }
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.explainExecutionId === executionId) {
+          current.isExplaining = false;
+          current.explainExecutionId = undefined;
+        }
+        if (current?.explainClientSessionId === clientSessionId) current.explainClientSessionId = undefined;
+        await closeClientSessionId(tab.connectionId, tab.database, clientSessionId, { tabId: tab.id, explainExecutionId: executionId });
+      }
+      return { ok: true as const, sql: built.sql };
     }
 
     const built = await buildExplainSql(databaseType, sql);
@@ -4132,6 +4322,7 @@ export const useQueryStore = defineStore("query", () => {
     openUserAdmin,
     openProcessList,
     openMysqlDashboard,
+    openPostgresDashboard,
     openDamengJobAdmin,
     openMqAdmin,
     openNacosAdmin,

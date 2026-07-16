@@ -109,6 +109,7 @@ const previewSqlText = computed(() => joinSqlStatementsForScript(pendingStatemen
 const props = defineProps<{
   connectionId: string;
   database: string;
+  catalog?: string;
   schema?: string;
   tableName: string;
   initialTab?: TableInfoTab;
@@ -153,7 +154,7 @@ async function fetchDdl() {
   if (!props.connectionId || !props.database || !props.tableName || ddlFetched.value || !tableMetadataCapabilities.value.ddl) return;
   ddlLoading.value = true;
   try {
-    const ddl = await api.getTableDdl(props.connectionId, props.database, metadataSchema.value, props.tableName);
+    const ddl = await api.getTableDdl(props.connectionId, props.database, metadataSchema.value, props.tableName, undefined, props.catalog);
     ddlContent.value = await formatSqlForDisplay(ddl, sqlFormatDialectForDbType(databaseType.value), settingsStore.editorSettings.sqlFormatter);
     ddlFetched.value = true;
   } catch (e: any) {
@@ -958,6 +959,7 @@ async function hydrateRestoredDraftFromDatabase() {
   if (!needsColumnDraftMetadataHydration() || hydratingRestoredDraft) return;
   const connectionId = props.connectionId;
   const database = props.database;
+  const catalog = props.catalog;
   const schema = metadataSchema.value;
   const tableName = props.tableName;
   if (!connectionId || !database || !tableName) return;
@@ -966,10 +968,10 @@ async function hydrateRestoredDraftFromDatabase() {
   let shouldRefreshPreview = false;
   try {
     await store.ensureConnected(connectionId);
-    let nextColumns = await api.getColumns(connectionId, database, schema, tableName);
+    let nextColumns = await api.getColumns(connectionId, database, schema, tableName, catalog);
     if (databaseType.value === "manticoresearch" && tableMetadataCapabilities.value.ddl) {
       try {
-        const ddl = await api.getTableDdl(connectionId, database, schema, tableName);
+        const ddl = await api.getTableDdl(connectionId, database, schema, tableName, undefined, catalog);
         ddlContent.value = await formatSqlForDisplay(ddl, sqlFormatDialectForDbType(databaseType.value), settingsStore.editorSettings.sqlFormatter);
         ddlFetched.value = true;
         nextColumns = applyManticoreDdlColumnExtras(nextColumns, ddl);
@@ -1220,12 +1222,12 @@ function setSecondaryMetadataLoading(scope: StructureRefreshScope, value: boolea
   if (scope.triggers && tableMetadataCapabilities.value.triggers) triggersLoading.value = value;
 }
 
-async function fetchTableCommentValue(connectionId: string, database: string, schema: string, tableName: string): Promise<string | undefined> {
+async function fetchTableCommentValue(connectionId: string, database: string, schema: string, tableName: string, catalog?: string): Promise<string | undefined> {
   try {
-    return (await api.getTableComment(connectionId, database, schema, tableName)) || "";
+    return (await api.getTableComment(connectionId, database, schema, tableName, catalog)) || "";
   } catch {
     try {
-      const tables = await api.listTables(connectionId, database, schema);
+      const tables = await api.listTables(connectionId, database, schema, undefined, undefined, undefined, undefined, catalog);
       const table = tables.find((t) => t.name.toLowerCase() === tableName.toLowerCase() && t.table_type !== "VIEW");
       return table?.comment || "";
     } catch {
@@ -1237,6 +1239,7 @@ async function fetchTableCommentValue(connectionId: string, database: string, sc
 async function loadStructure(silent = false, scope: StructureRefreshScope = FULL_STRUCTURE_REFRESH_SCOPE, showErrors = true, options: { blockSecondaryMetadata?: boolean; preserveDraft?: boolean; damengLengthUnitsAfterSave?: ReadonlyMap<string, string> } = {}) {
   const connectionId = props.connectionId;
   const database = props.database;
+  const catalog = props.catalog;
   const schema = metadataSchema.value;
   const tableName = props.tableName;
   if (!connectionId || !database || !tableName) return;
@@ -1249,17 +1252,17 @@ async function loadStructure(silent = false, scope: StructureRefreshScope = FULL
   try {
     await store.ensureConnected(connectionId);
 
-    const columnsPromise = scope.columns ? api.getColumns(connectionId, database, schema, tableName) : Promise.resolve(undefined);
-    const indexesPromise = scope.indexes ? (tableMetadataCapabilities.value.indexes ? api.listIndexes(connectionId, database, schema, tableName).catch(() => []) : Promise.resolve([])) : Promise.resolve(undefined);
-    const foreignKeysPromise = scope.foreignKeys ? (tableMetadataCapabilities.value.foreignKeys ? api.listForeignKeys(connectionId, database, schema, tableName).catch(() => []) : Promise.resolve([])) : Promise.resolve(undefined);
-    const triggersPromise = scope.triggers ? (tableMetadataCapabilities.value.triggers ? api.listTriggers(connectionId, database, schema, tableName).catch(() => []) : Promise.resolve([])) : Promise.resolve(undefined);
-    const tableCommentPromise = scope.tableComment && structureCapabilities.value.comment ? fetchTableCommentValue(connectionId, database, schema, tableName) : Promise.resolve(undefined);
+    const columnsPromise = scope.columns ? api.getColumns(connectionId, database, schema, tableName, catalog) : Promise.resolve(undefined);
+    const indexesPromise = scope.indexes ? (tableMetadataCapabilities.value.indexes ? api.listIndexes(connectionId, database, schema, tableName, catalog).catch(() => []) : Promise.resolve([])) : Promise.resolve(undefined);
+    const foreignKeysPromise = scope.foreignKeys ? (tableMetadataCapabilities.value.foreignKeys ? api.listForeignKeys(connectionId, database, schema, tableName, catalog).catch(() => []) : Promise.resolve([])) : Promise.resolve(undefined);
+    const triggersPromise = scope.triggers ? (tableMetadataCapabilities.value.triggers ? api.listTriggers(connectionId, database, schema, tableName, catalog).catch(() => []) : Promise.resolve([])) : Promise.resolve(undefined);
+    const tableCommentPromise = scope.tableComment && structureCapabilities.value.comment ? fetchTableCommentValue(connectionId, database, schema, tableName, catalog) : Promise.resolve(undefined);
 
     let nextColumns = await columnsPromise;
     if (nextColumns) {
       if (databaseType.value === "manticoresearch" && tableMetadataCapabilities.value.ddl) {
         try {
-          const ddl = await api.getTableDdl(connectionId, database, schema, tableName);
+          const ddl = await api.getTableDdl(connectionId, database, schema, tableName, undefined, catalog);
           ddlContent.value = await formatSqlForDisplay(ddl, sqlFormatDialectForDbType(databaseType.value), settingsStore.editorSettings.sqlFormatter);
           ddlFetched.value = true;
           nextColumns = applyManticoreDdlColumnExtras(nextColumns, ddl);

@@ -120,11 +120,12 @@ type connectParams struct {
 }
 
 type queryOptions struct {
-	SQL       string `json:"sql"`
-	Database  string `json:"database"`
-	Schema    string `json:"schema"`
-	MaxRows   int    `json:"maxRows"`
-	FetchSize int    `json:"fetchSize"`
+	SQL         string `json:"sql"`
+	Database    string `json:"database"`
+	Schema      string `json:"schema"`
+	MaxRows     int    `json:"maxRows"`
+	FetchSize   int    `json:"fetchSize"`
+	TimeoutSecs int    `json:"timeoutSecs"`
 }
 
 type queryResult struct {
@@ -275,6 +276,12 @@ type server struct {
 	activeCancelMu    sync.Mutex
 	activeCancel      context.CancelFunc
 	activeRows        map[*sql.Rows]context.CancelFunc
+	activeTimer       *time.Timer
+	activeTimedOut    bool
+	// killSession, if non-nil, is called to force-kill the current
+	// statement on the database server. Tests may replace it with a
+	// stub. The real implementation is set during connectWithControl.
+	killSession func()
 }
 
 type agentSession struct {
@@ -786,6 +793,11 @@ func (s *server) connectWithControl(params connectParams, cancelDB *sql.DB, owns
 	s.params = params
 	s.nodeID = databaseSession.nodeID
 	s.databaseSessionID = databaseSession.sessionID
+	s.killSession = func() {
+		if s.cancelDB != nil && s.databaseSessionID > 0 {
+			_, _ = s.cancelDB.Exec(fmt.Sprintf("CALL DBMS_DBA.KILL_SESSION_TRANS(%d, %d)", s.nodeID, s.databaseSessionID))
+		}
+	}
 	return nil
 }
 
@@ -804,6 +816,7 @@ func (s *server) disconnect() error {
 	s.ownsCancelDB = false
 	s.nodeID = 0
 	s.databaseSessionID = 0
+	s.killSession = nil
 	return err
 }
 
@@ -1769,7 +1782,7 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 			HasMore:         false,
 		}, err
 	}
-	rows, err := s.queryRows(sqlText, nil)
+	rows, err := s.queryRowsWithTimeout(sqlText, nil, opts.TimeoutSecs)
 	if err != nil {
 		return queryPageResult{}, err
 	}
@@ -1894,7 +1907,7 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 		maxRows = defaultMaxRows
 	}
 	if isQuerySQL(sqlText) {
-		result, err := s.executeSelect(sqlText, maxRows)
+		result, err := s.executeSelect(sqlText, maxRows, opts.TimeoutSecs)
 		result.ExecutionTimeMS = time.Since(start).Milliseconds()
 		return result, err
 	}
@@ -1902,7 +1915,7 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 	if err != nil {
 		return queryResult{}, err
 	}
-	ctx, cancel := s.beginActiveOperation()
+	ctx, cancel := s.beginActiveOperationWithTimeout(opts.TimeoutSecs)
 	defer s.endActiveOperation(cancel)
 	execResult, err := db.ExecContext(ctx, sqlText)
 	if err != nil {
@@ -1912,8 +1925,8 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 	return queryResult{Columns: []string{}, ColumnTypes: []string{}, Rows: [][]any{}, AffectedRows: affected, ExecutionTimeMS: time.Since(start).Milliseconds()}, nil
 }
 
-func (s *server) executeSelect(sqlText string, maxRows int) (queryResult, error) {
-	rows, err := s.queryRows(sqlText, nil)
+func (s *server) executeSelect(sqlText string, maxRows int, timeoutSecs int) (queryResult, error) {
+	rows, err := s.queryRowsWithTimeout(sqlText, nil, timeoutSecs)
 	if err != nil {
 		return queryResult{}, err
 	}
@@ -1976,18 +1989,32 @@ func (s *server) setSchema(schema string) error {
 }
 
 func (s *server) queryRows(sqlText string, args []any) (*sql.Rows, error) {
+	return s.queryRowsWithTimeout(sqlText, args, 0)
+}
+
+func (s *server) queryRowsWithTimeout(sqlText string, args []any, timeoutSecs int) (*sql.Rows, error) {
 	db, err := s.requireDB()
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := s.beginActiveOperation()
+	ctx, cancel := s.beginActiveOperationWithTimeout(timeoutSecs)
 	rows, queryErr := db.QueryContext(ctx, sqlText, args...)
 	s.activeCancelMu.Lock()
 	s.activeCancel = nil
+	if s.activeTimer != nil {
+		s.activeTimer.Stop()
+		s.activeTimer = nil
+	}
+	timedOut := s.activeTimedOut
 	if queryErr != nil {
 		cancel()
+	} else if timedOut {
+		cancel()
+		if rows != nil {
+			rows.Close()
+		}
+		queryErr = fmt.Errorf("query timed out after %ds", timeoutSecs)
 	} else {
-		// Paged queries may continue fetching after QueryContext returns.
 		s.activeRows[rows] = cancel
 	}
 	s.activeCancelMu.Unlock()
@@ -1995,9 +2022,31 @@ func (s *server) queryRows(sqlText string, args []any) (*sql.Rows, error) {
 }
 
 func (s *server) beginActiveOperation() (context.Context, context.CancelFunc) {
+	return s.beginActiveOperationWithTimeout(0)
+}
+
+func (s *server) beginActiveOperationWithTimeout(timeoutSecs int) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
+	var timer *time.Timer
+	if timeoutSecs > 0 {
+		var t *time.Timer
+		t = time.AfterFunc(time.Duration(timeoutSecs)*time.Second, func() {
+			s.activeCancelMu.Lock()
+			if s.activeTimer == t {
+				s.activeTimedOut = true
+				cancel()
+				if s.killSession != nil {
+					s.killSession()
+				}
+			}
+			s.activeCancelMu.Unlock()
+		})
+		timer = t
+	}
 	s.activeCancelMu.Lock()
 	s.activeCancel = cancel
+	s.activeTimer = timer
+	s.activeTimedOut = false
 	s.activeCancelMu.Unlock()
 	return ctx, cancel
 }
@@ -2006,6 +2055,10 @@ func (s *server) endActiveOperation(cancel context.CancelFunc) {
 	cancel()
 	s.activeCancelMu.Lock()
 	s.activeCancel = nil
+	if s.activeTimer != nil {
+		s.activeTimer.Stop()
+		s.activeTimer = nil
+	}
 	s.activeCancelMu.Unlock()
 }
 
@@ -2022,13 +2075,13 @@ func (s *server) cancelActiveQuery() {
 	for _, cancel := range cancels {
 		cancel()
 	}
-	if len(cancels) > 0 && s.cancelDB != nil && s.databaseSessionID > 0 {
+	if len(cancels) > 0 && s.killSession != nil {
 		// go-xugu-driver does not implement QueryerContext/ExecerContext and
 		// blocks in network reads, so context cancellation alone cannot interrupt
 		// an in-flight statement. Xugu's control procedure stops the target
 		// session's current transaction while preserving the connection. Runtime
 		// sessions share one control connection per database endpoint.
-		_, _ = s.cancelDB.Exec(fmt.Sprintf("CALL DBMS_DBA.KILL_SESSION_TRANS(%d, %d)", s.nodeID, s.databaseSessionID))
+		s.killSession()
 	}
 }
 

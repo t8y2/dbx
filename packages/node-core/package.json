@@ -20,6 +20,7 @@
     "./production-safety": "./dist/production-safety.js",
     "./redis-command": "./dist/redis-command.js",
     "./schema-context": "./dist/schema-context.js",
+    "./sql-diagnostics": "./dist/sql-diagnostics.js",
     "./sql-risk": "./dist/sql-risk.js",
     "./sql-safety": "./dist/sql-safety.js"
   },

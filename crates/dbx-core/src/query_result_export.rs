@@ -81,6 +81,8 @@ pub struct QueryResultExportRequest {
     pub client_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date_time_format: Option<String>,
 }
 
 fn split_excel_cell_text(value: &str) -> Vec<String> {
@@ -563,6 +565,11 @@ async fn export_query_result_core_inner(
             result.rows.truncate(this_page);
         }
         let row_count = result.rows.len();
+        let formatted_rows = crate::temporal_format::format_temporal_export_rows_with_string_types(
+            &result.rows,
+            &column_types,
+            request.date_time_format.as_deref(),
+        );
 
         if format == "csv" || format == "txt" {
             if let Some(file) = text_file.as_mut() {
@@ -570,12 +577,12 @@ async fn export_query_result_core_inner(
                     let header = format_text_export_header(&format, &columns);
                     file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
                     if row_count > 0 {
-                        let rows = format_text_export_rows(&format, &result.rows);
+                        let rows = format_text_export_rows(&format, &formatted_rows);
                         write!(file, "\n{rows}").map_err(|e| format!("Failed to write export rows: {e}"))?;
                     }
                     wrote_text_header = true;
                 } else if row_count > 0 {
-                    let rows = format_text_export_rows(&format, &result.rows);
+                    let rows = format_text_export_rows(&format, &formatted_rows);
                     write!(file, "\n{rows}").map_err(|e| format!("Failed to write export rows: {e}"))?;
                 }
             }
@@ -591,7 +598,7 @@ async fn export_query_result_core_inner(
                 )?);
             }
             if let Some(writer) = xlsx.as_mut() {
-                for row in &result.rows {
+                for row in &formatted_rows {
                     writer.write_row(row).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                 }
             }
@@ -708,6 +715,7 @@ async fn try_export_postgres_query_result_stream(
         if xlsx_hard_limit_active { row_limit.map(|limit| limit.saturating_add(1)) } else { row_limit };
     let progress_row_interval = request.page_size.max(1) as u64;
     let mut columns: Vec<String> = Vec::new();
+    let mut temporal_column_types: Vec<String> = Vec::new();
     let mut rows_exported = 0_u64;
     let mut last_progress_rows = 0_u64;
     let mut last_progress_at = Instant::now();
@@ -735,6 +743,7 @@ async fn try_export_postgres_query_result_stream(
             match item {
                 crate::db::postgres::PostgresQueryStreamItem::Columns { columns: stream_columns, column_types } => {
                     columns = stream_columns;
+                    temporal_column_types = column_types.clone();
                     if let Some(file) = text_file.as_mut() {
                         let header = format_text_export_header(format, &columns);
                         file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
@@ -753,18 +762,23 @@ async fn try_export_postgres_query_result_stream(
                     if xlsx_hard_limit_active && rows_exported as usize >= XLSX_MAX_DATA_ROWS {
                         return Err(XLSX_ROW_LIMIT_ERROR.to_string());
                     }
+                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types(
+                        &row,
+                        &temporal_column_types,
+                        request.date_time_format.as_deref(),
+                    );
                     if let Some(file) = text_file.as_mut() {
-                        let rows = format_text_export_rows(format, std::slice::from_ref(&row));
+                        let rows = format_text_export_rows(format, std::slice::from_ref(&formatted));
                         write!(file, "\n{rows}").map_err(|e| format!("Failed to write export rows: {e}"))?;
                     } else if let Some(writer) = xlsx.as_mut() {
-                        writer.write_row(&row).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
+                        writer.write_row(&formatted).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                     } else {
                         let xlsx_file =
                             File::create(&request.file_path).map_err(|e| format!("Failed to create XLSX file: {e}"))?;
                         xlsx =
                             Some(start_query_result_xlsx_workbook(BufWriter::new(xlsx_file), request, &columns, &[])?);
                         if let Some(writer) = xlsx.as_mut() {
-                            writer.write_row(&row).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
+                            writer.write_row(&formatted).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                         }
                     }
                     rows_exported += 1;
@@ -870,6 +884,7 @@ async fn try_export_mysql_query_result_stream(
         if xlsx_hard_limit_active { row_limit.map(|limit| limit.saturating_add(1)) } else { row_limit };
     let progress_row_interval = request.page_size.max(1) as u64;
     let mut columns: Vec<String> = Vec::new();
+    let mut temporal_column_types: Vec<String> = Vec::new();
     let mut rows_exported = 0_u64;
     let mut last_progress_rows = 0_u64;
     let mut last_progress_at = Instant::now();
@@ -946,6 +961,7 @@ async fn try_export_mysql_query_result_stream(
             match item {
                 crate::db::mysql::MySqlQueryStreamItem::Columns { columns: stream_columns, column_types } => {
                     columns = stream_columns;
+                    temporal_column_types = column_types.clone();
                     if let Some(file) = text_file.as_mut() {
                         let header = format_text_export_header(format, &columns);
                         file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
@@ -964,18 +980,23 @@ async fn try_export_mysql_query_result_stream(
                     if xlsx_hard_limit_active && rows_exported as usize >= XLSX_MAX_DATA_ROWS {
                         return Err(XLSX_ROW_LIMIT_ERROR.to_string());
                     }
+                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types(
+                        &row,
+                        &temporal_column_types,
+                        request.date_time_format.as_deref(),
+                    );
                     if let Some(file) = text_file.as_mut() {
-                        let rows = format_text_export_rows(format, std::slice::from_ref(&row));
+                        let rows = format_text_export_rows(format, std::slice::from_ref(&formatted));
                         write!(file, "\n{rows}").map_err(|e| format!("Failed to write export rows: {e}"))?;
                     } else if let Some(writer) = xlsx.as_mut() {
-                        writer.write_row(&row).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
+                        writer.write_row(&formatted).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                     } else {
                         let xlsx_file =
                             File::create(&request.file_path).map_err(|e| format!("Failed to create XLSX file: {e}"))?;
                         xlsx =
                             Some(start_query_result_xlsx_workbook(BufWriter::new(xlsx_file), request, &columns, &[])?);
                         if let Some(writer) = xlsx.as_mut() {
-                            writer.write_row(&row).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
+                            writer.write_row(&formatted).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                         }
                     }
                     rows_exported += 1;
@@ -1115,6 +1136,7 @@ async fn try_export_clickhouse_query_result_stream(
         if xlsx_hard_limit_active { row_limit.map(|limit| limit.saturating_add(1)) } else { row_limit };
     let progress_row_interval = request.page_size.max(1) as u64;
     let mut columns: Vec<String> = Vec::new();
+    let mut temporal_column_types: Vec<String> = Vec::new();
     let mut rows_exported = 0_u64;
     let mut last_progress_rows = 0_u64;
     let mut last_progress_at = Instant::now();
@@ -1142,6 +1164,7 @@ async fn try_export_clickhouse_query_result_stream(
                     column_types,
                 } => {
                     columns = stream_columns;
+                    temporal_column_types = column_types.clone();
                     if let Some(file) = text_file.as_mut() {
                         let header = format_text_export_header(format, &columns);
                         file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
@@ -1160,18 +1183,23 @@ async fn try_export_clickhouse_query_result_stream(
                     if xlsx_hard_limit_active && rows_exported as usize >= XLSX_MAX_DATA_ROWS {
                         return Err(XLSX_ROW_LIMIT_ERROR.to_string());
                     }
+                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types(
+                        &row,
+                        &temporal_column_types,
+                        request.date_time_format.as_deref(),
+                    );
                     if let Some(file) = text_file.as_mut() {
-                        let rows = format_text_export_rows(format, std::slice::from_ref(&row));
+                        let rows = format_text_export_rows(format, std::slice::from_ref(&formatted));
                         write!(file, "\n{rows}").map_err(|e| format!("Failed to write export rows: {e}"))?;
                     } else if let Some(writer) = xlsx.as_mut() {
-                        writer.write_row(&row).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
+                        writer.write_row(&formatted).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                     } else {
                         let xlsx_file =
                             File::create(&request.file_path).map_err(|e| format!("Failed to create XLSX file: {e}"))?;
                         xlsx =
                             Some(start_query_result_xlsx_workbook(BufWriter::new(xlsx_file), request, &columns, &[])?);
                         if let Some(writer) = xlsx.as_mut() {
-                            writer.write_row(&row).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
+                            writer.write_row(&formatted).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                         }
                     }
                     rows_exported += 1;
@@ -1267,6 +1295,7 @@ async fn try_export_sqlserver_query_result_stream(
     let stream_row_limit =
         if xlsx_hard_limit_active { row_limit.map(|limit| limit.saturating_add(1)) } else { row_limit };
     let mut columns: Vec<String> = Vec::new();
+    let mut temporal_column_types: Vec<String> = Vec::new();
     let mut rows_exported = 0_u64;
     let mut last_progress_rows = 0_u64;
     let mut last_progress_at = Instant::now();
@@ -1299,8 +1328,9 @@ async fn try_export_sqlserver_query_result_stream(
         cancel_token.clone(),
         |item| {
             match item {
-                crate::db::sqlserver::SqlServerStreamItem::Columns(stream_columns) => {
+                crate::db::sqlserver::SqlServerStreamItem::Columns { columns: stream_columns, column_types } => {
                     columns = stream_columns.to_vec();
+                    temporal_column_types = column_types.to_vec();
                     if let Some(file) = text_file.as_mut() {
                         let header = format_text_export_header(format, &columns);
                         file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
@@ -1315,18 +1345,23 @@ async fn try_export_sqlserver_query_result_stream(
                     if xlsx_hard_limit_active && rows_exported as usize >= XLSX_MAX_DATA_ROWS {
                         return Err(XLSX_ROW_LIMIT_ERROR.to_string());
                     }
+                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types(
+                        row,
+                        &temporal_column_types,
+                        request.date_time_format.as_deref(),
+                    );
                     if let Some(file) = text_file.as_mut() {
-                        let rows = format_text_export_rows(format, &[row.to_vec()]);
+                        let rows = format_text_export_rows(format, std::slice::from_ref(&formatted));
                         write!(file, "\n{rows}").map_err(|e| format!("Failed to write export rows: {e}"))?;
                     } else if let Some(writer) = xlsx.as_mut() {
-                        writer.write_row(row).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
+                        writer.write_row(&formatted).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                     } else {
                         let xlsx_file =
                             File::create(&request.file_path).map_err(|e| format!("Failed to create XLSX file: {e}"))?;
                         xlsx =
                             Some(start_query_result_xlsx_workbook(BufWriter::new(xlsx_file), request, &columns, &[])?);
                         if let Some(writer) = xlsx.as_mut() {
-                            writer.write_row(row).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
+                            writer.write_row(&formatted).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                         }
                     }
                     rows_exported += 1;
@@ -1394,6 +1429,7 @@ mod tests {
             keyset_optimization_enabled: true,
             client_session_id: None,
             execution_id: None,
+            date_time_format: None,
         }
     }
 

@@ -18,18 +18,23 @@ pub async fn stop_daemons(manager: &AgentManager) {
     manager.daemons.lock().await.clear();
     let runtimes = std::mem::take(&mut *manager.connection_runtimes.lock().await);
     for runtime in runtimes.into_values().filter_map(|cell| cell.get().cloned()) {
-        runtime.kill();
+        runtime.kill_and_wait().await;
     }
 }
 
 pub async fn stop_daemon_by_key(manager: &AgentManager, agent_key: &str) {
     manager.daemons.lock().await.remove(agent_key);
-    let mut runtimes = manager.connection_runtimes.lock().await;
-    let matching = runtimes.keys().filter(|key| key.starts_with(&format!("{agent_key}|"))).cloned().collect::<Vec<_>>();
-    for key in matching {
-        if let Some(runtime) = runtimes.remove(&key).and_then(|cell| cell.get().cloned()) {
-            runtime.kill();
-        }
+    let runtimes = {
+        let mut runtimes = manager.connection_runtimes.lock().await;
+        let matching =
+            runtimes.keys().filter(|key| key.starts_with(&format!("{agent_key}|"))).cloned().collect::<Vec<_>>();
+        matching
+            .into_iter()
+            .filter_map(|key| runtimes.remove(&key).and_then(|cell| cell.get().cloned()))
+            .collect::<Vec<_>>()
+    };
+    for runtime in runtimes {
+        runtime.kill_and_wait().await;
     }
 }
 
@@ -398,6 +403,22 @@ for line in sys.stdin:
         assert_eq!(runtime.active_session_count(), 1);
         AgentRuntimeClient::decrement_session_count(&runtime);
         runtime.kill();
+        let _ = std::fs::remove_file(script_path);
+    }
+
+    #[tokio::test]
+    async fn stopping_driver_runtime_removes_and_terminates_shared_process() {
+        let (manager, cell, runtime, script_path) = test_shared_runtime("stop-driver-runtime").await;
+        let runtime_key = "dameng|test";
+        manager.connection_runtimes.lock().await.insert(runtime_key.to_string(), cell);
+
+        stop_daemon_by_key(&manager, "dameng").await;
+
+        assert!(!manager.connection_runtimes.lock().await.contains_key(runtime_key));
+        assert!(runtime.is_failed());
+        let call_result =
+            runtime.call::<serde_json::Value>("ping", serde_json::json!({}), Some(Duration::from_secs(1)), None).await;
+        assert_eq!(call_result.unwrap_err(), "Agent runtime is unavailable");
         let _ = std::fs::remove_file(script_path);
     }
 }

@@ -18,7 +18,7 @@ import type {
   TunnelProfile,
   VectorCollectionMeta,
 } from "@/types/database";
-import { applyPinnedTreeNodeState, inheritNaturalTreeNodeOrder, migrateLegacyPinnedTreeNodeIds, syncPinnedTreeNodeStateInPlace, treeNodePinKey } from "@/lib/app/pinnedItems";
+import { inheritNaturalTreeNodeOrder, migrateLegacyPinnedTreeNodeIds, syncPinnedTreeNodeStateInPlace, treeNodePinKey } from "@/lib/app/pinnedItems";
 import {
   reconcileLayout,
   buildTreeNodesFromLayout,
@@ -75,7 +75,7 @@ import { hasTreeNodeDatabaseContext, normalizeCataloglessDatabaseNodes, treeNode
 import { decodeSchemaTreeCache, encodeSchemaTreeCache } from "@/lib/metadata/schemaTreeCache";
 import { sortSidebarTreeChildrenForParent } from "@/lib/sidebar/sidebarNodeOrdering";
 import { prunePinnedTreeNodeIdsForConnection } from "@/lib/app/pinnedTreeNodeIds";
-import { supportsDatabaseUserAdmin } from "@/lib/database/databaseUserAdmin";
+import { connectionSupportsDatabaseUserAdmin } from "@/lib/database/databaseUserAdmin";
 import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { encodeSqlServerLinkedSchema, parseSqlServerLinkedSchema } from "@/lib/database/sqlServerLinkedServers";
@@ -989,7 +989,17 @@ export const useConnectionStore = defineStore("connection", () => {
       const oldMap = new Map(parent.children.map((c) => [c.id, c] as const));
       children = children.map((child) => {
         const old = oldMap.get(child.id);
-        if (old && old.isExpanded && old.children && old.children.length > 0) {
+        if (old?.isLoading) {
+          const isExpanded = old.isExpanded;
+          const isLoading = old.isLoading;
+          const oldChildren = old.children;
+          Object.assign(old, child);
+          old.isExpanded = isExpanded;
+          old.isLoading = isLoading;
+          old.children = oldChildren;
+          return old;
+        }
+        if (old?.isExpanded) {
           return { ...child, isExpanded: true, children: old.children };
         }
         return child;
@@ -1000,7 +1010,8 @@ export const useConnectionStore = defineStore("connection", () => {
       pinnedTreeNodeIds.value = migratedPins.ids;
       persistPinnedTreeNodeIds();
     }
-    parent.children = markRawLeafTreeNodes(applyPinnedTreeNodeState(children, migratedPins.ids));
+    syncPinnedTreeNodeStateInPlace(children, migratedPins.ids);
+    parent.children = markRawLeafTreeNodes(children);
     loadedTreeNodeChildrenIds.value.add(parent.id);
   }
 
@@ -1016,7 +1027,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function buildUserAdminNode(connectionId: string, existingConnectionNode?: TreeNode): TreeNode | undefined {
     const config = getConfig(connectionId);
-    if (!supportsDatabaseUserAdmin(effectiveDatabaseTypeForConnection(config))) return undefined;
+    if (!connectionSupportsDatabaseUserAdmin(config)) return undefined;
     const existing = existingConnectionNode?.children?.find((child) => child.type === "user-admin");
     return {
       id: `${connectionId}:__user_admin`,
@@ -1073,7 +1084,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function objectGroupCacheKey(node: TreeNode): string {
-    return schemaCacheKey(node.connectionId || "", node.database || "", node.schema || "", node.type, "objects-v4");
+    return schemaCacheKey(node.connectionId || "", node.database || "", node.schema || "", node.type, "objects-v5");
   }
 
   function metadataListDriverProfile(connectionId?: string): string | undefined {
@@ -3125,7 +3136,7 @@ export const useConnectionStore = defineStore("connection", () => {
           await ensureConnected(connectionId);
           if (useCachedChildren(node, options)) return;
           const simpleObjectDisplay = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
-          const cacheKey = schemaCacheKey(connectionId, database, schema || "", simpleObjectDisplay ? "objects-simple-v4" : "objects-grouped-v4");
+          const cacheKey = schemaCacheKey(connectionId, database, schema || "", simpleObjectDisplay ? "objects-simple-v5" : "objects-grouped-v5");
           const searchFilter = activeTreeLoadSearchFilter(options);
           const isSidebarTableSearch = !!options?.sidebarTableSearchParentId;
           if (!options?.force && !searchFilter) {
@@ -3383,7 +3394,7 @@ export const useConnectionStore = defineStore("connection", () => {
             if (!canApplyTreeMetadataResult(parent)) return;
             parent.objectCount = mergedChildren.length;
             setChildren(parent, nextChildren);
-            await savePersistedTreeChildren(schemaCacheKey(parentConnectionId, parentDatabase, parent.schema || "", "objects-simple-v4"), nextChildren);
+            await savePersistedTreeChildren(schemaCacheKey(parentConnectionId, parentDatabase, parent.schema || "", "objects-simple-v5"), nextChildren);
             parent.isExpanded = true;
             return;
           }
@@ -4006,7 +4017,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function completionScopeKey(connectionId: string, database: string, schema?: string): string {
-    return `${connectionId}:${database}:${schema ?? ""}`;
+    return `${connectionId}:${database}:${schema?.toLowerCase() ?? ""}`;
   }
 
   function completionColumnsKey(connectionId: string, database: string, table: string, schema?: string): string {
@@ -4133,7 +4144,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function listCompletionAssistantTables(connectionId: string, database: string, filter: string, limit?: number, schema?: string, globalSearch = false, currentSchema?: string): Promise<SqlCompletionTable[]> {
     const oracleAssistant = getConfig(connectionId)?.db_type === "oracle";
-    const preferredSchema = oracleAssistant ? completionPreferredSchema(connectionId, currentSchema) : schema?.trim() || undefined;
+    const preferredSchema = oracleAssistant ? completionPreferredSchema(connectionId, globalSearch ? currentSchema : (schema ?? currentSchema)) : schema?.trim() || undefined;
     const objectKinds: CompletionAssistantObjectKind[] = ["table", "view"];
     const response = await completionAssistantSearch({
       connection_id: connectionId,

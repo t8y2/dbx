@@ -15,7 +15,7 @@ export interface SqlTextRange {
 const NON_SQL_EXECUTION_TARGET_TYPES: ReadonlySet<DatabaseType> = new Set(["mongodb", "elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "neo4j"]);
 
 export function supportsExecutionTargetPicker(databaseType?: DatabaseType): boolean {
-  return !!databaseType && (databaseType === "redis" || !NON_SQL_EXECUTION_TARGET_TYPES.has(databaseType));
+  return !!databaseType && (databaseType === "redis" || databaseType === "elasticsearch" || !NON_SQL_EXECUTION_TARGET_TYPES.has(databaseType));
 }
 
 export function hasMultipleExecutionTargets(sql: string, databaseType?: DatabaseType): boolean {
@@ -34,6 +34,150 @@ interface RawStatement {
   to: number;
   /** The statement text, sliced from the source document. */
   sql: string;
+}
+
+interface ElasticsearchRequestLine {
+  from: number;
+  to: number;
+  text: string;
+}
+
+interface ElasticsearchRequestLineCandidate {
+  lineIndex: number;
+  from: number;
+}
+
+export interface ElasticsearchRestRequestTarget {
+  method: "GET" | "POST" | "PUT" | "DELETE" | "HEAD";
+  path: string;
+}
+
+const ELASTICSEARCH_REST_REQUEST_LINE = /^\s*(?:GET|POST|PUT|DELETE|HEAD)\s+\S+/i;
+
+function leadingElasticsearchPreambleEnd(value: string): number {
+  let offset = 0;
+  while (offset < value.length) {
+    while (offset < value.length && /\s/.test(value[offset] ?? "")) offset += 1;
+    if (offset >= value.length) return offset;
+
+    if (value[offset] === "#" || value.startsWith("//", offset)) {
+      const newline = value.indexOf("\n", offset);
+      offset = newline < 0 ? value.length : newline + 1;
+      continue;
+    }
+
+    if (value.startsWith("/*", offset)) {
+      const close = value.indexOf("*/", offset + 2);
+      offset = close < 0 ? value.length : close + 2;
+      continue;
+    }
+
+    break;
+  }
+  return offset;
+}
+
+export function stripLeadingElasticsearchComments(value: string): string {
+  return value.slice(leadingElasticsearchPreambleEnd(value)).trimStart();
+}
+
+function isElasticsearchRequestPreamble(value: string): boolean {
+  return leadingElasticsearchPreambleEnd(value) === value.length;
+}
+
+function elasticsearchRequestLines(sql: string): ElasticsearchRequestLine[] {
+  const lines: ElasticsearchRequestLine[] = [];
+  let from = 0;
+  while (from <= sql.length) {
+    const newline = sql.indexOf("\n", from);
+    const to = newline >= 0 ? newline : sql.length;
+    lines.push({ from, to, text: sql.slice(from, to) });
+    if (newline < 0) break;
+    from = newline + 1;
+  }
+  return lines;
+}
+
+function elasticsearchRequestLineCandidates(lines: ElasticsearchRequestLine[]): ElasticsearchRequestLineCandidate[] {
+  const candidates: ElasticsearchRequestLineCandidate[] = [];
+  let inBlockComment = false;
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex];
+    let offset = 0;
+
+    while (offset < line.text.length) {
+      if (inBlockComment) {
+        const close = line.text.indexOf("*/", offset);
+        if (close < 0) break;
+        inBlockComment = false;
+        offset = close + 2;
+        continue;
+      }
+
+      while (offset < line.text.length && /\s/.test(line.text[offset] ?? "")) offset += 1;
+      if (offset >= line.text.length) break;
+      if (line.text.startsWith("/*", offset)) {
+        inBlockComment = true;
+        offset += 2;
+        continue;
+      }
+      if (line.text[offset] === "#" || line.text.startsWith("//", offset)) break;
+      if (ELASTICSEARCH_REST_REQUEST_LINE.test(line.text.slice(offset))) {
+        candidates.push({ lineIndex, from: line.from + offset });
+      }
+      break;
+    }
+  }
+
+  return candidates;
+}
+
+export function parseElasticsearchRestRequestTarget(value: string): ElasticsearchRestRequestTarget | null {
+  const requestLine = stripLeadingElasticsearchComments(value).split("\n", 1)[0]?.trim() ?? "";
+  const match = requestLine.match(/^(GET|POST|PUT|DELETE|HEAD)\s+(\S+)/i);
+  if (!match) return null;
+  return {
+    method: match[1].toUpperCase() as ElasticsearchRestRequestTarget["method"],
+    path: match[2].startsWith("/") ? match[2] : `/${match[2]}`,
+  };
+}
+
+export function isElasticsearchRestRequestText(value: string): boolean {
+  return parseElasticsearchRestRequestTarget(value) !== null;
+}
+
+function splitElasticsearchRestRequestRanges(sql: string): RawStatement[] | undefined {
+  const lines = elasticsearchRequestLines(sql);
+  const candidates = elasticsearchRequestLineCandidates(lines);
+  const firstRequestIndex = candidates.findIndex((candidate) => isElasticsearchRequestPreamble(sql.slice(0, candidate.from)));
+  if (firstRequestIndex < 0) return undefined;
+  const requests = candidates.slice(firstRequestIndex);
+
+  const hitFroms = requests.map((request, requestIndex) => {
+    const previousRequestLine = requestIndex > 0 ? requests[requestIndex - 1].lineIndex : -1;
+    let hitFrom = request.from;
+    for (let preambleLine = previousRequestLine + 1; preambleLine < request.lineIndex; preambleLine += 1) {
+      const candidateFrom = lines[preambleLine].from;
+      if (isElasticsearchRequestPreamble(sql.slice(candidateFrom, request.from))) {
+        hitFrom = candidateFrom;
+        break;
+      }
+    }
+    return hitFrom;
+  });
+
+  return requests.map((request, requestIndex) => {
+    const from = request.from;
+    const rawTo = requestIndex + 1 < requests.length ? hitFroms[requestIndex + 1] : sql.length;
+    const to = trimRangeEnd(sql, from, rawTo);
+    return {
+      hitFrom: hitFroms[requestIndex],
+      from,
+      to,
+      sql: sql.slice(from, to),
+    };
+  });
 }
 
 type QuoteState = "none" | "single" | "double" | "backtick" | "bracket" | "dollar";
@@ -126,6 +270,11 @@ const SAP_HANA_SCRIPT_BLOCK_TERMINATORS = new Set(["IF", "FOR", "WHILE"]);
  * whitespace are excluded so editor highlights stay tight).
  */
 export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType): RawStatement[] {
+  if (databaseType === "elasticsearch") {
+    const requests = splitElasticsearchRestRequestRanges(sql);
+    if (requests) return requests;
+  }
+
   const statements: RawStatement[] = [];
   const len = sql.length;
   const supportsDelimiterCommands = databaseType === "mysql";
@@ -401,7 +550,7 @@ export function statementRangeAtCursor(sql: string, cursorPos: number, databaseT
     // Cursor in indentation or inter-statement whitespace immediately before
     // the statement should still target that statement, while the returned
     // execution range remains tight around the SQL text itself.
-    if (pos >= statement.hitFrom && pos < statement.from && sql.slice(pos, statement.from).trim() === "") {
+    if (pos >= statement.hitFrom && pos < statement.from && (sql.slice(pos, statement.from).trim() === "" || (databaseType === "elasticsearch" && isElasticsearchRequestPreamble(sql.slice(statement.hitFrom, statement.from))))) {
       const previous = statements[index - 1];
       if (previous && isCursorInSameLineDelimiterGap(sql, previous.to, pos)) {
         const previousSoftRanges = splitStatementRangeAtSoftStarts(sql, previous, databaseType);

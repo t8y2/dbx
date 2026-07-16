@@ -17,6 +17,27 @@ test("formats unix timestamps in seconds, milliseconds, and auto mode", () => {
   assert.equal(applyColumnFormatter("1715758200", { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DD HH:mm:ssZ" }), "2024-05-15 15:30:00+08:00");
 });
 
+test("uses the global datetime formatter only for temporal columns without a column override", () => {
+  const global = { pattern: "YYYY/MM/DD HH:mm:ss", columnType: "TIMESTAMP(6)" };
+
+  assert.deepEqual(resolveColumnFormatter(undefined, {}, global), { kind: "datetime", unit: "auto", pattern: "YYYY/MM/DD HH:mm:ss" });
+  assert.equal(resolveColumnFormatter(undefined, {}, { ...global, columnType: "VARCHAR2(100)" }), undefined);
+  assert.deepEqual(resolveColumnFormatter({ kind: "mask", prefix: 2, suffix: 2 }, {}, global), { kind: "mask", prefix: 2, suffix: 2 });
+  assert.deepEqual(resolveColumnFormatter(undefined, {}, { ...global, columnType: "DateTime64(3)" }), { kind: "datetime", unit: "auto", pattern: global.pattern });
+  assert.deepEqual(resolveColumnFormatter(undefined, {}, { ...global, columnType: "datetimeoffsetn" }), { kind: "datetime", unit: "auto", pattern: global.pattern });
+});
+
+test("formats only typed temporal cells for export", async () => {
+  const { formatTemporalRowsForExport } = await import("../../apps/desktop/src/lib/dataGrid/columnFormatter.ts");
+  const rows = formatTemporalRowsForExport([[1, "2024-02-25T05:02:15Z", "2024-02-25T05:02:15Z", "2024-02-25T05:02:15.123456+08:00", "2024-02-25 13:02:15.987654"]], ["NUMBER", "TIMESTAMP", "VARCHAR2", "TIMESTAMP WITH TIME ZONE", "TIMESTAMP(6)"], "YYYY/MM/DD HH:mm:ss.SSSZ");
+
+  assert.deepEqual(rows, [[1, "2024/02/25 05:02:15.000+00:00", "2024-02-25T05:02:15Z", "2024/02/25 05:02:15.123+08:00", "2024/02/25 13:02:15.987+08:00"]]);
+});
+
+test("formats Oracle timestamp fractional precision in the data grid", () => {
+  assert.equal(applyColumnFormatter("2024-02-25 13:02:15.123456", { kind: "datetime", unit: "auto", pattern: "YYYY/MM/DD HH:mm:ss.SSS" }), "2024/02/25 13:02:15.123");
+});
+
 test("does not treat compact date strings as unix timestamps", () => {
   dayjs.extend(utc);
   dayjs.extend(timezone);

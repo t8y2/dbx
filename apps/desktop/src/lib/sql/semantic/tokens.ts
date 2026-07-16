@@ -29,7 +29,7 @@ function readQuoted(input: string, start: number, open: string, close: string): 
   return input.length;
 }
 
-export function tokenizeSqlSemantic(input: string): SqlSemanticToken[] {
+export function tokenizeSqlSemantic(input: string, dialectId = "mysql"): SqlSemanticToken[] {
   const tokens: SqlSemanticToken[] = [];
   let index = 0;
   let depth = 0;
@@ -51,7 +51,7 @@ export function tokenizeSqlSemantic(input: string): SqlSemanticToken[] {
       continue;
     }
 
-    if (ch === "#") {
+    if (ch === "#" && dialectId === "mysql") {
       index += 1;
       while (index < input.length && input[index] !== "\n" && input[index] !== "\r") index += 1;
       tokens.push(token("comment", input.slice(start, index), start, index, depth));

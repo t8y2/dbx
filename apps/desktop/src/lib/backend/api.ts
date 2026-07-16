@@ -2,6 +2,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import type * as TauriModule from "@/lib/backend/tauri";
 import { appendDebugLog } from "@/lib/backend/debugLog";
 import { useSettingsStore } from "@/stores/settingsStore";
+import type { AiConfigItem } from "@/types/ai";
 
 // ---------------------------------------------------------------------------
 // Lazy backend resolution (avoids top-level await)
@@ -238,6 +239,11 @@ export const aiTestConnection = forward("aiTestConnection");
 export const aiListModels = forward("aiListModels");
 export const saveAiConfig = forward("saveAiConfig");
 export const loadAiConfig = forward("loadAiConfig");
+export const saveAiConfigs = forward("saveAiConfigs");
+export const loadAiConfigs = forward("loadAiConfigs");
+export const setDefaultAiConfig = forward("setDefaultAiConfig");
+export const saveAiConfigItem = forward("saveAiConfigItem");
+export const deleteAiConfig = forward("deleteAiConfig");
 export const saveAiProviderConfig = forward("saveAiProviderConfig");
 export const loadAiProviderConfigs = forward("loadAiProviderConfigs");
 export const loadDesktopSettings = forward("loadDesktopSettings");
@@ -441,6 +447,7 @@ export const mongoFindOne = forward("mongoFindOne");
 export const mongoCountDocuments = forward("mongoCountDocuments");
 export const mongoServerVersion = forward("mongoServerVersion");
 export const mongoAggregateDocuments = forward("mongoAggregateDocuments");
+export const mongoDistinct = forward("mongoDistinct");
 export const mongoCollectionStats = forward("mongoCollectionStats");
 export const mongoCreateIndex = forward("mongoCreateIndex");
 export const mongoDropIndexes = forward("mongoDropIndexes");
@@ -486,6 +493,8 @@ export const loadSidebarLayout = forward("loadSidebarLayout");
 // ---------------------------------------------------------------------------
 // Re-export all types from tauri.ts (shared between both backends)
 // ---------------------------------------------------------------------------
+
+export type { AiConfigItem };
 
 export type {
   AppSupportInfo,

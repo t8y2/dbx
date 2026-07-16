@@ -9,5 +9,6 @@ export * from "./paths.js";
 export * from "./production-safety.js";
 export * from "./redis-command.js";
 export * from "./schema-context.js";
+export * from "./sql-diagnostics.js";
 export * from "./sql-risk.js";
 export * from "./sql-safety.js";

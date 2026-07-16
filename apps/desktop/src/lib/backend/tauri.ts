@@ -42,6 +42,7 @@ import { isTauriCommandUnavailable, normalizeConnectionTestResult } from "@/lib/
 import type { CollectionInfo } from "@/types/database";
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
 import type { AiConfig, AiTestConnectionResult } from "@/stores/settingsStore";
+import type { AiConfigItem } from "@/types/ai";
 import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import type {
@@ -413,6 +414,26 @@ export async function aiCancelStream(sessionId: string): Promise<boolean> {
   return invoke("ai_cancel_stream", { sessionId });
 }
 
+export async function saveAiConfigs(configs: AiConfigItem[]): Promise<void> {
+  return invoke("save_ai_configs", { configs });
+}
+
+export async function loadAiConfigs(): Promise<AiConfigItem[]> {
+  return invoke("load_ai_configs");
+}
+
+export async function setDefaultAiConfig(configId: string): Promise<void> {
+  return invoke("set_default_ai_config", { configId });
+}
+
+export async function saveAiConfigItem(config: AiConfigItem): Promise<void> {
+  return invoke("save_ai_config_item", { config });
+}
+
+export async function deleteAiConfig(configId: string): Promise<void> {
+  return invoke("delete_ai_config", { configId });
+}
+
 export async function loadAiConfig(): Promise<AiConfig | null> {
   return invoke("load_ai_config");
 }
@@ -780,6 +801,7 @@ export async function executeQuery(
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
+    executionMode?: "simple";
   },
 ): Promise<QueryResult> {
   return invoke("execute_query", { connectionId, database, sql, schema, executionId, ...options });
@@ -800,6 +822,7 @@ export async function executeMulti(
     timeoutSecs?: number;
     useTransaction?: boolean;
     continueOnError?: boolean;
+    executionMode?: "simple";
   },
 ): Promise<QueryResult[]> {
   return invoke("execute_multi", { connectionId, database, sql, schema, executionId, ...options });
@@ -1884,6 +1907,10 @@ export async function mongoAggregateDocuments(connectionId: string, database: st
   return invoke("mongo_aggregate_documents", { connectionId, database, collection, pipelineJson, maxRows, executionId });
 }
 
+export async function mongoDistinct(connectionId: string, database: string, collection: string, field: string, filter?: string, executionId?: string): Promise<MongoDocumentResult> {
+  return invoke("mongo_distinct", { connectionId, database, collection, field, filter, executionId });
+}
+
 export async function mongoCollectionStats(connectionId: string, database: string, collection: string, scale?: number, executionId?: string): Promise<MongoCollectionStatsResult> {
   return invoke("mongo_collection_stats", { connectionId, database, collection, scale, executionId });
 }
@@ -1896,12 +1923,12 @@ export async function mongoDropIndexes(connectionId: string, database: string, c
   return invoke("mongo_drop_indexes", { connectionId, database, collection, indexesJson, single });
 }
 
-export async function mongoInsertDocument(connectionId: string, database: string, collection: string, docJson: string): Promise<string> {
-  return documentInsertDocument(connectionId, database, collection, docJson);
+export async function mongoInsertDocument(connectionId: string, database: string, collection: string, docJson: string, routing?: string): Promise<string> {
+  return documentInsertDocument(connectionId, database, collection, docJson, routing);
 }
 
-export async function documentInsertDocument(connectionId: string, database: string, collection: string, docJson: string): Promise<string> {
-  return invoke("document_insert_document", { connectionId, database, collection, docJson });
+export async function documentInsertDocument(connectionId: string, database: string, collection: string, docJson: string, routing?: string): Promise<string> {
+  return invoke("document_insert_document", { connectionId, database, collection, docJson, routing });
 }
 
 export async function mongoInsertDocuments(connectionId: string, database: string, collection: string, docsJson: string): Promise<{ affected_rows: number }> {
@@ -2201,6 +2228,7 @@ export interface TableImportRequest {
   mode: TableImportMode;
   createTable?: boolean;
   batchSize: number;
+  dateTimeFormat?: string;
 }
 
 export interface TableImportSummary {
@@ -2291,6 +2319,7 @@ export interface TableExportRequest {
   skipCount?: boolean;
   batchSize?: number;
   rowLimit?: number | null;
+  dateTimeFormat?: string;
 }
 
 export interface TableCsvExportOptions {
@@ -2332,6 +2361,7 @@ export interface QueryResultExportRequest {
   keysetOptimizationEnabled: boolean;
   clientSessionId?: string;
   executionId?: string;
+  dateTimeFormat?: string;
 }
 
 export async function startTableExport(request: TableExportRequest, onProgress: (progress: TableExportProgress) => void): Promise<TableExportProgress> {

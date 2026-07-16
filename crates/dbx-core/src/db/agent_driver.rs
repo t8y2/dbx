@@ -230,6 +230,23 @@ impl AgentRuntimeClient {
         }
         fail_pending_requests(&self.pending, "Agent runtime terminated".to_string());
     }
+
+    pub async fn kill_and_wait(&self) {
+        self.failed.store(true, Ordering::Release);
+        fail_pending_requests(&self.pending, "Agent runtime terminated".to_string());
+        let child = self.child.clone();
+        match tokio::task::spawn_blocking(move || {
+            let mut child = child.lock().map_err(|_| "Shared agent process lock poisoned".to_string())?;
+            let _ = child.kill();
+            child.wait().map(|_| ()).map_err(|err| format!("Failed to wait for shared agent runtime: {err}"))
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => log::warn!("{err}"),
+            Err(err) => log::warn!("Failed to join shared agent shutdown task: {err}"),
+        }
+    }
 }
 
 fn decode_agent_response<T: DeserializeOwned>(response: Value) -> Result<T, String> {
@@ -501,6 +518,8 @@ pub struct AgentTableReadStartParams {
     pub max_rows: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fetch_size: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1807,6 +1826,20 @@ fn format_agent_startup_error(base: &str, child: &mut Child, stderr_tail: &Arc<M
 }
 
 impl AgentDriverClient {
+    #[cfg(test)]
+    pub(crate) fn test_stub() -> Self {
+        Self {
+            child: None,
+            stdin: None,
+            stdout: None,
+            stderr_tail: Arc::new(Mutex::new(StderrTail::default())),
+            handshake: None,
+            next_id: 0,
+            shared_runtime: None,
+            agent_session_id: None,
+        }
+    }
+
     fn format_agent_process_error(&mut self, base: &str) -> String {
         // Runtime RPC errors are common SQL/driver paths. Do not wait for the
         // child to exit unless startup diagnostics already expect the process to die.
@@ -2328,6 +2361,7 @@ for line in sys.stdin:
             page_size: 500,
             max_rows: 1000,
             fetch_size: Some(500),
+            timeout_secs: None,
         })
         .unwrap();
         assert_eq!(
@@ -2348,6 +2382,44 @@ for line in sys.stdin:
 
         let close = serde_json::to_value(AgentTableReadCloseParams { session_id: "table-1".to_string() }).unwrap();
         assert_eq!(close, serde_json::json!({ "sessionId": "table-1" }));
+    }
+
+    #[test]
+    fn serializes_table_read_timeout_secs() {
+        let with_timeout = serde_json::to_value(AgentTableReadStartParams {
+            sql: "SELECT 1".to_string(),
+            database: None,
+            schema: None,
+            page_size: 100,
+            max_rows: 1000,
+            fetch_size: None,
+            timeout_secs: Some(30),
+        })
+        .unwrap();
+        assert_eq!(
+            with_timeout,
+            serde_json::json!({
+                "sql": "SELECT 1",
+                "pageSize": 100,
+                "maxRows": 1000,
+                "timeoutSecs": 30,
+            })
+        );
+
+        let without_timeout = serde_json::to_value(AgentTableReadStartParams {
+            sql: "SELECT 1".to_string(),
+            database: None,
+            schema: None,
+            page_size: 100,
+            max_rows: 1000,
+            fetch_size: None,
+            timeout_secs: None,
+        })
+        .unwrap();
+        assert!(
+            !without_timeout.as_object().unwrap().contains_key("timeoutSecs"),
+            "timeoutSecs key should be absent when None"
+        );
     }
 
     #[test]

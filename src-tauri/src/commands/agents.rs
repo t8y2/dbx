@@ -198,7 +198,7 @@ fn emit_agent_progress(app: &tauri::AppHandle, event: AgentProgressEvent) {
 }
 
 async fn ensure_no_agent_update_blockers(state: &AppState, db_types: &[String]) -> Result<(), String> {
-    let blockers = agent_update_blockers(state, db_types).await;
+    let blockers = update_blockers_from_keys(state.prepare_agent_driver_updates(db_types).await, db_types);
     if blockers.is_empty() {
         return Ok(());
     }
@@ -207,11 +207,17 @@ async fn ensure_no_agent_update_blockers(state: &AppState, db_types: &[String]) 
 }
 
 async fn agent_update_blockers(state: &AppState, db_types: &[String]) -> Vec<AgentUpdateBlocker> {
+    update_blockers_from_keys(state.active_agent_connection_driver_keys().await, db_types)
+}
+
+fn update_blockers_from_keys(
+    active_keys: std::collections::HashSet<String>,
+    db_types: &[String],
+) -> Vec<AgentUpdateBlocker> {
     let candidate_keys: std::collections::HashSet<&str> = db_types.iter().map(String::as_str).collect();
     if candidate_keys.is_empty() {
         return Vec::new();
     }
-    let active_keys = state.active_agent_driver_keys().await;
     let mut blockers = active_keys
         .into_iter()
         .filter(|key| candidate_keys.contains(key.as_str()))

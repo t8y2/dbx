@@ -30,6 +30,7 @@ pub struct ParsedImportFile {
     pub rows: Vec<Vec<serde_json::Value>>,
     pub total_rows: usize,
     pub effective_encoding: Option<TableImportTextEncoding>,
+    cell_text_values: HashMap<(usize, usize), String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -669,7 +670,13 @@ fn parse_csv_reader<R: IoRead>(
     if total_rows == 0 {
         return Err("Import file has no data rows in the selected row range".to_string());
     }
-    Ok(ParsedImportFile { columns, rows, total_rows, effective_encoding: Some(effective_encoding) })
+    Ok(ParsedImportFile {
+        columns,
+        rows,
+        total_rows,
+        effective_encoding: Some(effective_encoding),
+        cell_text_values: HashMap::new(),
+    })
 }
 
 pub fn parse_csv_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImportFile, String> {
@@ -741,7 +748,13 @@ pub fn parse_json_bytes_with_options(
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        return Ok(ParsedImportFile { columns, rows, total_rows: items.len(), effective_encoding: None });
+        return Ok(ParsedImportFile {
+            columns,
+            rows,
+            total_rows: items.len(),
+            effective_encoding: None,
+            cell_text_values: HashMap::new(),
+        });
     }
 
     if all_arrays {
@@ -760,7 +773,13 @@ pub fn parse_json_bytes_with_options(
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        return Ok(ParsedImportFile { columns, rows, total_rows: items.len(), effective_encoding: None });
+        return Ok(ParsedImportFile {
+            columns,
+            rows,
+            total_rows: items.len(),
+            effective_encoding: None,
+            cell_text_values: HashMap::new(),
+        });
     }
 
     Err("JSON rows must all be objects or all be arrays; mixed row shapes are not supported".to_string())
@@ -776,6 +795,12 @@ enum XlsxTemporalKind {
     Time,
     DateTime,
     Duration,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct XlsxCellStyle {
+    temporal_kind: Option<XlsxTemporalKind>,
+    fixed_fraction_digits: Option<usize>,
 }
 
 fn format_chrono_duration_hms(duration: chrono::Duration, wrap_to_day: bool) -> String {
@@ -852,6 +877,23 @@ fn xlsx_cell_value_with_temporal_kind(cell: &Data, temporal_kind: Option<XlsxTem
     }
 }
 
+fn xlsx_cell_text_value(cell: &Data, style: Option<XlsxCellStyle>) -> Option<String> {
+    if style.and_then(|style| style.temporal_kind).is_some() {
+        return None;
+    }
+    match cell {
+        Data::Float(value) if value.is_finite() => Some(match style.and_then(|style| style.fixed_fraction_digits) {
+            Some(digits) => format!("{value:.digits$}"),
+            None => value.to_string(),
+        }),
+        Data::Int(value) => Some(match style.and_then(|style| style.fixed_fraction_digits) {
+            Some(digits) => format!("{value}.{}", "0".repeat(digits)),
+            None => value.to_string(),
+        }),
+        _ => None,
+    }
+}
+
 pub fn xlsx_cell_value(cell: &Data) -> serde_json::Value {
     xlsx_cell_value_with_temporal_kind(cell, None)
 }
@@ -903,6 +945,29 @@ fn xlsx_builtin_temporal_kind(num_fmt_id: u16) -> Option<XlsxTemporalKind> {
     }
 }
 
+fn xlsx_builtin_number_format_code(num_fmt_id: u16) -> Option<&'static str> {
+    match num_fmt_id {
+        1 => Some("0"),
+        2 => Some("0.00"),
+        3 => Some("#,##0"),
+        4 => Some("#,##0.00"),
+        _ => None,
+    }
+}
+
+fn xlsx_fixed_fraction_digits(format_code: &str) -> Option<usize> {
+    let first_section = format_code.split(';').next()?.trim();
+    let (integer, fraction) = first_section.split_once('.')?;
+    if integer.is_empty()
+        || !integer.chars().all(|ch| matches!(ch, '0' | '#' | '?'))
+        || fraction.is_empty()
+        || !fraction.chars().all(|ch| ch == '0')
+    {
+        return None;
+    }
+    Some(fraction.len())
+}
+
 fn xlsx_temporal_kind_from_format_code(format_code: &str) -> Option<XlsxTemporalKind> {
     let mut normalized = String::new();
     let mut chars = format_code.chars().peekable();
@@ -950,12 +1015,12 @@ fn xlsx_temporal_kind_from_format_code(format_code: &str) -> Option<XlsxTemporal
     }
 }
 
-fn parse_xlsx_style_temporal_kinds(styles_xml: &str) -> Vec<Option<XlsxTemporalKind>> {
+fn parse_xlsx_styles(styles_xml: &str) -> Vec<XlsxCellStyle> {
     let mut reader = XmlReader::from_str(styles_xml);
     reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
-    let mut custom_formats = HashMap::<u16, XlsxTemporalKind>::new();
-    let mut style_kinds = Vec::new();
+    let mut custom_formats = HashMap::<u16, String>::new();
+    let mut styles = Vec::new();
     let mut in_cell_xfs = false;
 
     loop {
@@ -966,9 +1031,7 @@ fn parse_xlsx_style_temporal_kinds(styles_xml: &str) -> Vec<Option<XlsxTemporalK
                 let id = xml_attr_value(&reader, &element, b"numFmtId").and_then(|value| value.parse::<u16>().ok());
                 let format_code = xml_attr_value(&reader, &element, b"formatCode");
                 if let (Some(id), Some(format_code)) = (id, format_code) {
-                    if let Some(kind) = xlsx_temporal_kind_from_format_code(&format_code) {
-                        custom_formats.insert(id, kind);
-                    }
+                    custom_formats.insert(id, format_code);
                 }
             }
             Ok(Event::Start(element)) if xml_local_name_eq(element.name().as_ref(), b"cellXfs") => {
@@ -980,10 +1043,25 @@ fn parse_xlsx_style_temporal_kinds(styles_xml: &str) -> Vec<Option<XlsxTemporalK
             Ok(Event::Start(element)) | Ok(Event::Empty(element))
                 if in_cell_xfs && xml_local_name_eq(element.name().as_ref(), b"xf") =>
             {
-                let kind = xml_attr_value(&reader, &element, b"numFmtId")
-                    .and_then(|value| value.parse::<u16>().ok())
-                    .and_then(|id| custom_formats.get(&id).copied().or_else(|| xlsx_builtin_temporal_kind(id)));
-                style_kinds.push(kind);
+                let num_fmt_id =
+                    xml_attr_value(&reader, &element, b"numFmtId").and_then(|value| value.parse::<u16>().ok());
+                let format_code = num_fmt_id.and_then(|id| {
+                    custom_formats.get(&id).map(String::as_str).or_else(|| xlsx_builtin_number_format_code(id))
+                });
+                let temporal_kind = num_fmt_id.and_then(|id| {
+                    custom_formats
+                        .get(&id)
+                        .and_then(|code| xlsx_temporal_kind_from_format_code(code))
+                        .or_else(|| xlsx_builtin_temporal_kind(id))
+                });
+                styles.push(XlsxCellStyle {
+                    temporal_kind,
+                    fixed_fraction_digits: if temporal_kind.is_none() {
+                        format_code.and_then(xlsx_fixed_fraction_digits)
+                    } else {
+                        None
+                    },
+                });
             }
             Ok(Event::Eof) | Err(_) => break,
             _ => {}
@@ -991,7 +1069,7 @@ fn parse_xlsx_style_temporal_kinds(styles_xml: &str) -> Vec<Option<XlsxTemporalK
         buf.clear();
     }
 
-    style_kinds
+    styles
 }
 
 fn xlsx_workbook_sheet_refs(workbook_xml: &str) -> Vec<(String, Option<String>)> {
@@ -1091,14 +1169,11 @@ fn xlsx_cell_ref_position(reference: &str) -> Option<(usize, usize)> {
     (saw_column && saw_row).then_some((row, column))
 }
 
-fn parse_xlsx_sheet_temporal_kinds(
-    sheet_xml: &str,
-    style_kinds: &[Option<XlsxTemporalKind>],
-) -> HashMap<(usize, usize), XlsxTemporalKind> {
+fn parse_xlsx_sheet_cell_styles(sheet_xml: &str, styles: &[XlsxCellStyle]) -> HashMap<(usize, usize), XlsxCellStyle> {
     let mut reader = XmlReader::from_str(sheet_xml);
     reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
-    let mut kinds = HashMap::new();
+    let mut cell_styles = HashMap::new();
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(element)) | Ok(Event::Empty(element))
@@ -1110,14 +1185,14 @@ fn parse_xlsx_sheet_temporal_kinds(
                     buf.clear();
                     continue;
                 };
-                let Some(kind) = style_kinds.get(style_id).copied().flatten() else {
+                let Some(style) = styles.get(style_id).copied() else {
                     buf.clear();
                     continue;
                 };
                 if let Some(position) =
                     xml_attr_value(&reader, &element, b"r").and_then(|reference| xlsx_cell_ref_position(&reference))
                 {
-                    kinds.insert(position, kind);
+                    cell_styles.insert(position, style);
                 }
             }
             Ok(Event::Eof) | Err(_) => break,
@@ -1125,7 +1200,7 @@ fn parse_xlsx_sheet_temporal_kinds(
         }
         buf.clear();
     }
-    kinds
+    cell_styles
 }
 
 fn read_xlsx_zip_text(zip: &mut zip::ZipArchive<File>, path: &str) -> Result<String, String> {
@@ -1135,12 +1210,12 @@ fn read_xlsx_zip_text(zip: &mut zip::ZipArchive<File>, path: &str) -> Result<Str
     Ok(content)
 }
 
-fn xlsx_temporal_cell_kinds(path: &str, sheet_name: &str) -> Result<HashMap<(usize, usize), XlsxTemporalKind>, String> {
+fn xlsx_cell_styles(path: &str, sheet_name: &str) -> Result<HashMap<(usize, usize), XlsxCellStyle>, String> {
     let file = File::open(path).map_err(|err| err.to_string())?;
     let mut zip = zip::ZipArchive::new(file).map_err(|err| err.to_string())?;
     let styles_xml = read_xlsx_zip_text(&mut zip, "xl/styles.xml").unwrap_or_default();
-    let style_kinds = parse_xlsx_style_temporal_kinds(&styles_xml);
-    if style_kinds.is_empty() {
+    let styles = parse_xlsx_styles(&styles_xml);
+    if styles.is_empty() {
         return Ok(HashMap::new());
     }
 
@@ -1150,7 +1225,7 @@ fn xlsx_temporal_cell_kinds(path: &str, sheet_name: &str) -> Result<HashMap<(usi
         return Ok(HashMap::new());
     };
     let sheet_xml = read_xlsx_zip_text(&mut zip, &sheet_path)?;
-    Ok(parse_xlsx_sheet_temporal_kinds(&sheet_xml, &style_kinds))
+    Ok(parse_xlsx_sheet_cell_styles(&sheet_xml, &styles))
 }
 
 pub fn parse_xlsx_file_with_options(
@@ -1170,13 +1245,14 @@ pub fn parse_xlsx_file_with_options(
     } else {
         sheet_names.first().cloned().ok_or_else(|| "Workbook has no sheets".to_string())?
     };
-    let temporal_cell_kinds = xlsx_temporal_cell_kinds(path, &sheet_name).unwrap_or_default();
+    let cell_styles = xlsx_cell_styles(path, &sheet_name).unwrap_or_default();
     let range = workbook.worksheet_range(&sheet_name).map_err(|e| e.to_string())?;
     let (range_start_row, range_start_column) =
         range.start().map(|(row, column)| (row as usize, column as usize)).unwrap_or_default();
     let row_range = effective_import_row_range(options)?;
     let mut columns = Vec::new();
     let mut rows = Vec::new();
+    let mut cell_text_values = HashMap::new();
     let mut total_rows = 0;
     for (index, source_row) in range.rows().enumerate() {
         let row_number = index + 1;
@@ -1188,7 +1264,10 @@ pub fn parse_xlsx_file_with_options(
                     // Calamine rows are relative to the used range, while XLSX style coordinates are worksheet-absolute.
                     let cell_position = (range_start_row + row_number, range_start_column + index + 1);
                     normalize_header(
-                        &xlsx_cell_label_with_temporal_kind(cell, temporal_cell_kinds.get(&cell_position).copied()),
+                        &xlsx_cell_label_with_temporal_kind(
+                            cell,
+                            cell_styles.get(&cell_position).and_then(|style| style.temporal_kind),
+                        ),
                         index,
                     )
                 })
@@ -1208,17 +1287,21 @@ pub fn parse_xlsx_file_with_options(
         if rows.len() >= preview_limit {
             continue;
         }
+        let parsed_row_index = rows.len();
         let mut row = Vec::with_capacity(columns.len());
         for index in 0..columns.len() {
             let cell_position = (range_start_row + row_number, range_start_column + index + 1);
-            row.push(
-                source_row
-                    .get(index)
-                    .map(|cell| {
-                        xlsx_cell_value_with_temporal_kind(cell, temporal_cell_kinds.get(&cell_position).copied())
-                    })
-                    .unwrap_or(serde_json::Value::Null),
-            );
+            let style = cell_styles.get(&cell_position).copied();
+            let value = source_row
+                .get(index)
+                .map(|cell| {
+                    if let Some(text) = xlsx_cell_text_value(cell, style) {
+                        cell_text_values.insert((parsed_row_index, index), text);
+                    }
+                    xlsx_cell_value_with_temporal_kind(cell, style.and_then(|style| style.temporal_kind))
+                })
+                .unwrap_or(serde_json::Value::Null);
+            row.push(value);
         }
         rows.push(row);
     }
@@ -1228,7 +1311,7 @@ pub fn parse_xlsx_file_with_options(
     if total_rows == 0 {
         return Err("Import file has no data rows in the selected row range".to_string());
     }
-    Ok(ParsedImportFile { columns, rows, total_rows, effective_encoding: None })
+    Ok(ParsedImportFile { columns, rows, total_rows, effective_encoding: None, cell_text_values })
 }
 
 pub fn parse_xlsx_file(path: &str, preview_limit: usize) -> Result<ParsedImportFile, String> {
@@ -1393,8 +1476,9 @@ fn build_import_insert_batch_from_rows_with_format(
                 .enumerate()
                 .map(|(target_index, (source_index, _))| {
                     let value = row.get(*source_index).cloned().unwrap_or(serde_json::Value::Null);
-                    normalize_import_temporal_value(
+                    normalize_import_value(
                         &value,
+                        None,
                         column_types.get(target_index).and_then(|data_type| data_type.as_deref()),
                         db_type,
                         date_time_format,
@@ -1424,6 +1508,46 @@ fn normalize_import_temporal_value(
         if oracle_date_time { Some("datetime") } else { data_type },
         date_time_format,
     )
+}
+
+fn is_textual_import_target_type(data_type: &str) -> bool {
+    let lower = data_type.trim().to_ascii_lowercase();
+    let base = lower.split(['(', ':', ' ']).next().unwrap_or("").trim();
+    matches!(
+        base,
+        "char"
+            | "character"
+            | "varchar"
+            | "varchar2"
+            | "nvarchar"
+            | "nvarchar2"
+            | "nchar"
+            | "string"
+            | "text"
+            | "tinytext"
+            | "mediumtext"
+            | "longtext"
+            | "ntext"
+            | "clob"
+            | "nclob"
+            | "enum"
+            | "set"
+    ) || lower.starts_with("character varying")
+}
+
+fn normalize_import_value(
+    value: &serde_json::Value,
+    cell_text_value: Option<&str>,
+    data_type: Option<&str>,
+    db_type: &DatabaseType,
+    date_time_format: Option<&str>,
+) -> serde_json::Value {
+    let value = if data_type.is_some_and(is_textual_import_target_type) {
+        cell_text_value.map(|text| serde_json::Value::String(text.to_string())).unwrap_or_else(|| value.clone())
+    } else {
+        value.clone()
+    };
+    normalize_import_temporal_value(&value, data_type, db_type, date_time_format)
 }
 
 pub fn build_import_insert_batches(
@@ -1458,17 +1582,6 @@ fn build_import_insert_batches_with_format(
     batch_size: usize,
     date_time_format: Option<&str>,
 ) -> Result<Vec<ImportSqlBatch>, String> {
-    if *db_type == DatabaseType::CloudflareD1 {
-        return crate::db::cloudflare_d1::build_import_insert_batches(
-            &data.rows,
-            &data.columns,
-            mappings,
-            target_column_types,
-            table,
-            schema,
-            batch_size.clamp(1, 100),
-        );
-    }
     let mapped = mapping_indexes(data, mappings)?;
     let columns = mapped.iter().map(|(_, target)| target.clone()).collect::<Vec<_>>();
     let column_types = columns
@@ -1480,22 +1593,54 @@ fn build_import_insert_batches_with_format(
                 .map(|(_, data_type)| data_type.clone())
         })
         .collect::<Vec<_>>();
+    if *db_type == DatabaseType::CloudflareD1 {
+        let mut rows = data.rows.clone();
+        for ((row_index, source_index), text) in &data.cell_text_values {
+            let Some(target_index) =
+                mapped.iter().position(|(mapped_source_index, _)| mapped_source_index == source_index)
+            else {
+                continue;
+            };
+            if !column_types
+                .get(target_index)
+                .and_then(|data_type| data_type.as_deref())
+                .is_some_and(is_textual_import_target_type)
+            {
+                continue;
+            }
+            if let Some(value) = rows.get_mut(*row_index).and_then(|row| row.get_mut(*source_index)) {
+                *value = serde_json::Value::String(text.clone());
+            }
+        }
+        return crate::db::cloudflare_d1::build_import_insert_batches(
+            &rows,
+            &data.columns,
+            mappings,
+            target_column_types,
+            table,
+            schema,
+            batch_size.clamp(1, 100),
+        );
+    }
     // Drivers without multi-row VALUES support still benefit from the agent
     // batching the generated single-row statements during execution.
     let batch_size = if supports_multi_row_insert_values(db_type) { batch_size.max(1) } else { 1 };
     let mut batches = Vec::new();
 
-    for chunk in data.rows.chunks(batch_size) {
+    for (chunk_index, chunk) in data.rows.chunks(batch_size).enumerate() {
+        let row_offset = chunk_index * batch_size;
         let rows = chunk
             .iter()
-            .map(|row| {
+            .enumerate()
+            .map(|(row_index, row)| {
                 mapped
                     .iter()
                     .enumerate()
                     .map(|(target_index, (source_index, _))| {
                         let value = row.get(*source_index).cloned().unwrap_or(serde_json::Value::Null);
-                        normalize_import_temporal_value(
+                        normalize_import_value(
                             &value,
+                            data.cell_text_values.get(&(row_offset + row_index, *source_index)).map(String::as_str),
                             column_types.get(target_index).and_then(|data_type| data_type.as_deref()),
                             db_type,
                             date_time_format,
@@ -2317,12 +2462,13 @@ mod tests {
         zip.write_all(content.as_bytes()).unwrap();
     }
 
-    fn build_temporal_test_xlsx(date1904: bool, cells: &[(&str, usize, f64)]) -> Vec<u8> {
+    fn build_styled_test_xlsx<S: AsRef<str>>(date1904: bool, cells: &[(S, usize, f64)]) -> Vec<u8> {
         let cursor = Cursor::new(Vec::new());
         let mut zip = zip::ZipWriter::new(cursor);
         let workbook_pr = if date1904 { r#"<workbookPr date1904="1"/>"# } else { "" };
         let mut rows = std::collections::BTreeMap::<usize, String>::new();
         for (reference, style_id, value) in cells {
+            let reference = reference.as_ref();
             let (row, _) = xlsx_cell_ref_position(reference).expect("valid XLSX cell reference");
             rows.entry(row).or_default().push_str(&format!(r#"<c r="{reference}" s="{style_id}"><v>{value}</v></c>"#));
         }
@@ -2374,22 +2520,26 @@ mod tests {
             "xl/styles.xml",
             r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <numFmts count="4">
+  <numFmts count="6">
     <numFmt numFmtId="164" formatCode="yyyy-mm-dd"/>
     <numFmt numFmtId="165" formatCode="yyyy-mm-dd hh:mm:ss"/>
     <numFmt numFmtId="166" formatCode="hh:mm:ss"/>
     <numFmt numFmtId="167" formatCode="[h]:mm:ss"/>
+    <numFmt numFmtId="168" formatCode="0.0"/>
+    <numFmt numFmtId="169" formatCode="0.00"/>
   </numFmts>
   <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
   <fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
   <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
   <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-  <cellXfs count="5">
+  <cellXfs count="7">
     <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
     <xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
     <xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
     <xf numFmtId="166" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
     <xf numFmtId="167" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+    <xf numFmtId="168" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+    <xf numFmtId="169" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
   </cellXfs>
   <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
 </styleSheet>"#,
@@ -2724,11 +2874,110 @@ mod tests {
     }
 
     #[test]
+    fn keeps_excel_numeric_and_text_cell_types_distinct() {
+        let integer_valued_float = xlsx_cell_value(&Data::Float(10_401_029_008.0));
+        assert_eq!(integer_valued_float, serde_json::json!(10_401_029_008.0));
+        assert_eq!(infer_value_type(&integer_valued_float), Some(ImportInferredType::Decimal));
+        assert_eq!(xlsx_cell_value(&Data::Float(10_401_029_008.5)), serde_json::json!(10_401_029_008.5));
+        assert_eq!(xlsx_cell_value(&Data::Float(9_007_199_254_740_992.0)), serde_json::json!(9_007_199_254_740_992.0));
+        for text in ["10.0", "00123", "1e3", "10401029008.0"] {
+            assert_eq!(xlsx_cell_value(&Data::String(text.to_string())), serde_json::json!(text));
+        }
+    }
+
+    #[test]
+    fn recognizes_only_fixed_fraction_excel_formats() {
+        assert_eq!(xlsx_fixed_fraction_digits("0.0"), Some(1));
+        assert_eq!(xlsx_fixed_fraction_digits("0.00"), Some(2));
+        assert_eq!(xlsx_fixed_fraction_digits("0.##"), None);
+        assert_eq!(xlsx_fixed_fraction_digits("0.##0"), None);
+        assert_eq!(xlsx_fixed_fraction_digits("#,##0.00"), None);
+    }
+
+    #[test]
+    fn mysql_varchar_import_uses_excel_numeric_display_text() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-number-format-{}.xlsx", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            build_styled_test_xlsx(false, &[("A1", 0, 10_401_029_008.0), ("A2", 5, 10.0), ("A3", 6, 10.0)]),
+        )
+        .unwrap();
+        let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
+        let mut data = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
+        data.rows.extend([
+            vec![serde_json::json!("10.0")],
+            vec![serde_json::json!("00123")],
+            vec![serde_json::json!("1e3")],
+            vec![serde_json::json!("10401029008.0")],
+        ]);
+        data.total_rows = data.rows.len();
+        let mappings = vec![TableImportColumnMapping {
+            source_column: "column_1".to_string(),
+            target_column: "code".to_string(),
+            target_data_type: None,
+        }];
+
+        let batches = build_import_insert_batches(
+            &data,
+            &mappings,
+            &[("code".to_string(), "varchar(32)".to_string())],
+            "issue_3683",
+            "",
+            &DatabaseType::Mysql,
+            500,
+        )
+        .unwrap();
+
+        assert_eq!(
+            batches[0].sql,
+            "INSERT INTO `issue_3683` (`code`) VALUES\n('10401029008'),\n('10.0'),\n('10.00'),\n('10.0'),\n('00123'),\n('1e3'),\n('10401029008.0')"
+        );
+        assert!(data.rows[..3].iter().all(|row| row[0].as_f64().is_some()));
+
+        let numeric_batches = build_import_insert_batches(
+            &data,
+            &mappings,
+            &[("code".to_string(), "double".to_string())],
+            "issue_3683_numeric",
+            "",
+            &DatabaseType::Mysql,
+            500,
+        )
+        .unwrap();
+        assert!(numeric_batches[0].sql.contains("(10401029008.0),\n(10.0),\n(10.0)"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn excel_integer_sample_keeps_decimal_create_table_inference() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-inference-{}.xlsx", uuid::Uuid::new_v4()));
+        let cells = (1..=101)
+            .map(|row| (format!("A{row}"), 0, if row == 101 { 100.5 } else { row as f64 }))
+            .collect::<Vec<_>>();
+        std::fs::write(&path, build_styled_test_xlsx(false, &cells)).unwrap();
+        let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
+        let data =
+            parse_xlsx_file_with_options(&path.to_string_lossy(), &options, CREATE_TABLE_INFERENCE_ROWS).unwrap();
+        let mappings = vec![TableImportColumnMapping {
+            source_column: "column_1".to_string(),
+            target_column: "amount".to_string(),
+            target_data_type: None,
+        }];
+
+        let plan = build_import_create_table_plan(&data, &mappings, "measurements", "", &DatabaseType::Mysql).unwrap();
+
+        assert_eq!(data.total_rows, 101);
+        assert_eq!(data.rows.len(), CREATE_TABLE_INFERENCE_ROWS);
+        assert_eq!(plan.columns[0].data_type, "DOUBLE");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn parses_excel_temporal_styles_before_type_inference() {
         let path = std::env::temp_dir().join(format!("dbx-table-import-temporal-{}.xlsx", uuid::Uuid::new_v4()));
         std::fs::write(
             &path,
-            build_temporal_test_xlsx(false, &[("A1", 1, 45996.0), ("B1", 2, 45996.0), ("C1", 3, 0.5), ("D1", 4, 1.5)]),
+            build_styled_test_xlsx(false, &[("A1", 1, 45996.0), ("B1", 2, 45996.0), ("C1", 3, 0.5), ("D1", 4, 1.5)]),
         )
         .unwrap();
         let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
@@ -2755,7 +3004,7 @@ mod tests {
     #[test]
     fn parses_excel_temporal_styles_with_1904_date_system() {
         let path = std::env::temp_dir().join(format!("dbx-table-import-temporal-1904-{}.xlsx", uuid::Uuid::new_v4()));
-        std::fs::write(&path, build_temporal_test_xlsx(true, &[("A1", 1, 1.0)])).unwrap();
+        std::fs::write(&path, build_styled_test_xlsx(true, &[("A1", 1, 1.0)])).unwrap();
         let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
 
         let parsed = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
@@ -2768,7 +3017,7 @@ mod tests {
     #[test]
     fn parses_excel_temporal_styles_from_non_a1_used_range() {
         let path = std::env::temp_dir().join(format!("dbx-table-import-temporal-offset-{}.xlsx", uuid::Uuid::new_v4()));
-        std::fs::write(&path, build_temporal_test_xlsx(false, &[("C3", 1, 45996.0), ("D3", 2, 45996.0)])).unwrap();
+        std::fs::write(&path, build_styled_test_xlsx(false, &[("C3", 1, 45996.0), ("D3", 2, 45996.0)])).unwrap();
         let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
 
         let parsed = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
@@ -2842,6 +3091,7 @@ mod tests {
             ],
             total_rows: 2,
             effective_encoding: None,
+            cell_text_values: HashMap::new(),
         };
         let mappings = data
             .columns
@@ -2880,6 +3130,7 @@ mod tests {
             rows: vec![vec![serde_json::json!(1)]],
             total_rows: 1,
             effective_encoding: None,
+            cell_text_values: HashMap::new(),
         };
         let mappings = vec![TableImportColumnMapping {
             source_column: "id".to_string(),
@@ -2899,6 +3150,7 @@ mod tests {
             rows: vec![vec![serde_json::json!("long text")]],
             total_rows: 1,
             effective_encoding: None,
+            cell_text_values: HashMap::new(),
         };
         let mappings = vec![TableImportColumnMapping {
             source_column: "notes".to_string(),
@@ -2918,6 +3170,7 @@ mod tests {
             rows: vec![vec![serde_json::json!("1001"), serde_json::json!("12.5")]],
             total_rows: 1,
             effective_encoding: None,
+            cell_text_values: HashMap::new(),
         };
         let mappings = vec![
             TableImportColumnMapping {
@@ -2951,6 +3204,7 @@ mod tests {
             rows: vec![vec![serde_json::json!("Ada")]],
             total_rows: 1,
             effective_encoding: None,
+            cell_text_values: HashMap::new(),
         };
         let mappings = vec![TableImportColumnMapping {
             source_column: "name".to_string(),
@@ -2986,6 +3240,7 @@ mod tests {
             ],
             total_rows: 3,
             effective_encoding: None,
+            cell_text_values: HashMap::new(),
         };
 
         let batches =
@@ -3015,6 +3270,7 @@ mod tests {
             rows: vec![vec![serde_json::json!(1)], vec![serde_json::json!(2)]],
             total_rows: 2,
             effective_encoding: None,
+            cell_text_values: HashMap::new(),
         };
 
         let batches =
@@ -3129,6 +3385,7 @@ mod tests {
             ],
             total_rows: 3,
             effective_encoding: None,
+            cell_text_values: HashMap::new(),
         };
 
         let batches =
@@ -3175,6 +3432,7 @@ mod tests {
             ]],
             total_rows: 1,
             effective_encoding: None,
+            cell_text_values: HashMap::new(),
         };
 
         let batches = build_import_insert_batches(
@@ -3209,6 +3467,7 @@ mod tests {
             rows: vec![vec![serde_json::json!("2024/2/25 13:02:15")]],
             total_rows: 1,
             effective_encoding: None,
+            cell_text_values: HashMap::new(),
         };
 
         let batches = build_import_insert_batches(
@@ -3288,6 +3547,7 @@ mod tests {
             rows: vec![vec![serde_json::json!("Tiếng Việt")]],
             total_rows: 1,
             effective_encoding: None,
+            cell_text_values: HashMap::new(),
         };
 
         let batches = build_import_insert_batches(

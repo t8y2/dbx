@@ -642,7 +642,7 @@ const CUSTOM_FORMATTER_NEW = "__new";
 const formatterKind = ref<FormatterDraftKind>("datetime");
 const formatterDateUnit = ref<DateTimeFormatterUnit>("auto");
 const formatterDatetimePattern = ref<string>("YYYY-MM-DD HH:mm:ss");
-const formatterDateTimezone = ref<string | undefined>(dayjs.tz.guess());
+const formatterDateTimezone = ref<string>(dayjs.tz.guess());
 // @ts-ignore
 const timezoneOptions = Intl.supportedValuesOf("timeZone");
 const formatterJsonPath = ref("$.user.name");
@@ -1013,7 +1013,7 @@ function loadFormatterDraft(formatter: ColumnFormatterConfig | undefined) {
   if (draft.kind === "datetime") {
     formatterDateUnit.value = draft.unit;
     formatterDatetimePattern.value = draft.pattern;
-    formatterDateTimezone.value = draft.timezone;
+    formatterDateTimezone.value = draft.timezone || dayjs.tz.guess();
   } else if (draft.kind === "json-path") {
     formatterJsonPath.value = draft.path;
   } else if (draft.kind === "mask") {

@@ -81,11 +81,8 @@ function createCustomTheme(EditorView: typeof import("@codemirror/view").EditorV
       c.variable = colors.field;
       c.property = colors.field;
     }
-    if (colors.table) {
-      // 表名通常被识别为 propertyName，如果单独设置了表名颜色则覆盖
-      c.property = colors.table;
-    }
   }
+  const tableColor = colors?.table || c.property;
 
   const theme = EditorView.theme(
     {
@@ -93,7 +90,7 @@ function createCustomTheme(EditorView: typeof import("@codemirror/view").EditorV
         backgroundColor: c.background,
         color: c.foreground,
         [EDITOR_SELECTION_BACKGROUND_CSS_VAR]: c.selection,
-        [SQL_TABLE_COLOR_CSS_VAR]: c.property,
+        [SQL_TABLE_COLOR_CSS_VAR]: tableColor,
       },
       ".cm-content": {
         caretColor: c.cursor,
@@ -222,6 +219,7 @@ type IdeEditorThemeColors = {
   operator: string;
   punctuation: string;
   property: string;
+  table: string;
   builtin: string;
   meta: string;
   invalid: string;
@@ -257,6 +255,7 @@ const IDE_EDITOR_THEMES = {
     operator: "#080808",
     punctuation: "#080808",
     property: "#871094",
+    table: "#871094",
     builtin: "#0033b3",
     meta: "#9e880d",
     invalid: "#f50000",
@@ -290,6 +289,7 @@ const IDE_EDITOR_THEMES = {
     operator: "#cc7832",
     punctuation: "#a9b7c6",
     property: "#9876aa",
+    table: "#9876aa",
     builtin: "#cc7832",
     meta: "#bbb529",
     invalid: "#ff0000",
@@ -320,6 +320,7 @@ const IDE_EDITOR_THEMES = {
     operator: "#080808",
     punctuation: "#080808",
     property: "#871094",
+    table: "#871094",
     builtin: "#0033b3",
     meta: "#9e880d",
     invalid: "#f50000",
@@ -353,6 +354,7 @@ const IDE_EDITOR_THEMES = {
     operator: "#bcbec4",
     punctuation: "#bcbec4",
     property: "#c77dbb",
+    table: "#c77dbb",
     builtin: "#cf8e6d",
     meta: "#b3ae60",
     invalid: "#f75464",
@@ -383,6 +385,7 @@ const IDE_EDITOR_THEMES = {
     operator: "#b3003f",
     punctuation: "#141414eb",
     property: "#1f8a65",
+    table: "#1f8a65",
     builtin: "#206595",
     meta: "#1f8a65",
     invalid: "#cf2d56",
@@ -412,7 +415,8 @@ const IDE_EDITOR_THEMES = {
     function: "#efb080",
     operator: "#d6d6dd",
     punctuation: "#d6d6dd",
-    property: "#aaa0fa",
+    property: "#82d2ce",
+    table: "#aaa0fa",
     builtin: "#a8cc7c",
     meta: "#a8cc7c",
     invalid: "#e34671",
@@ -442,7 +446,8 @@ const IDE_EDITOR_THEMES = {
     function: "#b86b3c",
     operator: "#6b5544",
     punctuation: "#6b5544",
-    property: "#7a5aa8",
+    property: "#9a4f2e",
+    table: "#7a5aa8",
     builtin: "#4f7d5d",
     meta: "#8f6b2e",
     invalid: "#c3493d",
@@ -472,7 +477,8 @@ const IDE_EDITOR_THEMES = {
     function: "#d69a6b",
     operator: "#e0d0c0",
     punctuation: "#c9b9a7",
-    property: "#a08fcd",
+    property: "#d28a5f",
+    table: "#a08fcd",
     builtin: "#74b195",
     meta: "#d4ae63",
     invalid: "#e2675f",
@@ -489,7 +495,7 @@ function createIdeEditorTheme(EditorView: typeof import("@codemirror/view").Edit
         backgroundColor: c.background,
         color: c.foreground,
         [EDITOR_SELECTION_BACKGROUND_CSS_VAR]: c.selection,
-        [SQL_TABLE_COLOR_CSS_VAR]: c.property,
+        [SQL_TABLE_COLOR_CSS_VAR]: c.table,
       },
       ".cm-scroller": {
         backgroundColor: c.background,

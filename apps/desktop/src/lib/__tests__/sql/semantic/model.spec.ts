@@ -289,6 +289,33 @@ describe("sqlSemanticModel baseline fixtures", () => {
     }
   });
 
+  it("does not treat MERGE branch UPDATE as a table introducer", () => {
+    const sql = "MERGE INTO target_table t USING source_table s ON t.id = s.id WHEN MATCHED THEN UPDATE SET t.name = s.name;";
+    const spans = sqlSemanticTableNameSpans(sql, { dialect: "sqlserver" });
+    const model = buildSqlSemanticModel(sql, sql.length - 1, { dialect: "sqlserver" });
+
+    expect(spans.map((span) => sql.slice(span.start, span.end))).toEqual(["target_table", "source_table"]);
+    expect(model.rowSources.some((source) => source.name.toLowerCase() === "set")).toBe(false);
+  });
+
+  it("does not treat MySQL upsert UPDATE as a table introducer", () => {
+    const sql = "INSERT INTO users (id, name) VALUES (1, 'A') ON DUPLICATE KEY UPDATE name = VALUES(name);";
+    const spans = sqlSemanticTableNameSpans(sql, { dialect: "mysql" });
+    const model = buildSqlSemanticModel(sql, sql.length - 1, { dialect: "mysql" });
+
+    expect(spans.map((span) => sql.slice(span.start, span.end))).toEqual(["users"]);
+    expect(model.rowSources.some((source) => source.name === "name")).toBe(false);
+  });
+
+  it("keeps CTE UPDATE mutation targets", () => {
+    const sql = "WITH candidates AS (SELECT id FROM staging) UPDATE users SET active = 1 WHERE id IN (SELECT id FROM candidates);";
+    const spans = sqlSemanticTableNameSpans(sql, { dialect: "sqlserver" });
+    const model = buildSqlSemanticModel(sql, sql.length - 1, { dialect: "sqlserver" });
+
+    expect(spans.map((span) => sql.slice(span.start, span.end))).toEqual(["staging", "users", "candidates"]);
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ name: "users", kind: "mutation_target" })]));
+  });
+
   it("recognizes SQL Server local, global, and tempdb-qualified temporary tables", () => {
     const sql = "SELECT * FROM #temp; SELECT * FROM ##global_temp; SELECT * FROM tempdb..#temp";
     const spans = sqlSemanticTableNameSpans(sql, { dialect: "sqlserver" });

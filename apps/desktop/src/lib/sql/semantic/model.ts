@@ -24,6 +24,7 @@ const FROM_CLAUSE_BOUNDARIES = new Set([...CLAUSE_BOUNDARIES, "window", "qualify
 const ALIAS_BLACKLIST = new Set([...CLAUSE_BOUNDARIES, "join", "straight_join", "left", "right", "inner", "outer", "cross", "full", "natural", "as", "select", "from", "with"]);
 const TABLE_TARGET_MODIFIERS = new Set(["lateral", "only"]);
 const TABLE_FUNCTION_INTRODUCERS = new Set(["from", "join", "straight_join", "apply"]);
+const TOP_LEVEL_STATEMENT_WORDS = new Set(["select", "insert", "delete", "merge", "create", "alter", "drop", "truncate", "call", "exec", "execute", "grant", "revoke"]);
 
 interface ParseState {
   dialect: SqlSemanticDialectAdapter;
@@ -104,6 +105,18 @@ function sqlServerMaintenanceTableTarget(tokens: readonly SqlSemanticToken[], ta
   return target;
 }
 
+function updateIntroducesMutationTarget(tokens: readonly SqlSemanticToken[], updateIndex: number): boolean {
+  const update = tokens[updateIndex];
+  if (update?.kind !== "word" || update.normalized !== "update") return false;
+  for (let index = updateIndex - 1; index >= 0; index -= 1) {
+    const item = tokens[index];
+    if (!item || item.depth !== update.depth) continue;
+    if (item.text === ";") break;
+    if (item.kind === "word" && (item.normalized === "update" || TOP_LEVEL_STATEMENT_WORDS.has(item.normalized))) return false;
+  }
+  return true;
+}
+
 function commaContinuesTableList(tokens: readonly SqlSemanticToken[], commaIndex: number): boolean {
   const comma = tokens[commaIndex];
   if (comma?.text !== ",") return false;
@@ -129,7 +142,7 @@ export function sqlSemanticTableNameSpans(sql: string, options: SqlSemanticBuild
 
   for (let index = 0; index < tokens.length; index += 1) {
     const item = tokens[index];
-    const introduced = item?.kind === "word" && TABLE_INTRODUCERS.has(item.normalized);
+    const introduced = item?.kind === "word" && TABLE_INTRODUCERS.has(item.normalized) && (item.normalized !== "update" || updateIntroducesMutationTarget(tokens, index));
     if (!introduced && !commaContinuesTableList(tokens, index)) continue;
 
     let target = index + 1;
@@ -438,6 +451,7 @@ function parseRowSources(state: ParseState): SqlSemanticRowSource[] {
     if (item.kind !== "word") continue;
     const normalized = item.normalized;
     if (!TABLE_INTRODUCERS.has(normalized)) continue;
+    if (normalized === "update" && !updateIntroducesMutationTarget(state.tokens, index)) continue;
     if (JOIN_MODIFIERS.has(normalized)) continue;
     let target = index + 1;
     while (JOIN_MODIFIERS.has(state.tokens[target]?.normalized ?? "")) target += 1;

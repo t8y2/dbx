@@ -439,7 +439,8 @@ function headerColumnType(column: string, actualColIdx: number): string {
 }
 
 const reserveColumnTypeLine = computed(() => reserveDataGridHeaderLine(showColumnTypesInHeader.value, props.result.columns, (column, index) => headerColumnType(column, index)));
-const reserveColumnCommentLine = computed(() => reserveDataGridHeaderLine(showColumnCommentsInHeader.value, props.tableMeta?.columns ?? [], (column) => column.comment));
+// Match the rendered header columns so comments from unprojected metadata cannot add an empty row.
+const reserveColumnCommentLine = computed(() => reserveDataGridHeaderLine(showColumnCommentsInHeader.value, props.result.columns, (column) => headerColumnComment(column)));
 
 function shortTypeName(t: string): string {
   const s = t.toLowerCase();

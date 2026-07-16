@@ -21,4 +21,16 @@ describe("reserveDataGridHeaderLine", () => {
     expect(reserved).toBe(true);
     expect(visited).toEqual([0, 1, 2]);
   });
+
+  it("does not reserve a comment line for a comment on an unprojected column", () => {
+    const comments = new Map([["internal_id", "Not selected"]]);
+
+    expect(reserveDataGridHeaderLine(true, ["id", "name"], (column) => comments.get(column))).toBe(false);
+  });
+
+  it("reserves a comment line when a projected column has a comment", () => {
+    const comments = new Map([["name", "Display name"]]);
+
+    expect(reserveDataGridHeaderLine(true, ["id", "name"], (column) => comments.get(column))).toBe(true);
+  });
 });

@@ -44,7 +44,7 @@ const overlayRef = ref<HTMLTextAreaElement>();
 const controlRef = ref<HTMLDivElement>();
 const dropdownRef = ref<HTMLDivElement>();
 const expanded = ref(false);
-const expandedRect = ref({ left: 0, top: 0, width: 0 });
+const expandedRect = ref({ left: 0, top: 0, width: 0, controlsTop: 0, inputTop: 0, prefix: 0, suffix: 28 });
 const expandedHeight = ref(56);
 const suggestionPosition = ref({ left: 0, top: 0, width: 180 });
 const historyPreview = ref<{ value: string; left: number; top: number; maxWidth: number; arrowTop: number; side: "left" | "right" } | null>(null);
@@ -71,6 +71,10 @@ const suggestionStyle = computed<CSSProperties>(() => ({
   width: `${suggestionPosition.value.width}px`,
 }));
 const overlayStyle = computed<CSSProperties>(() => ({
+  "--data-grid-condition-controls-top": `${expandedRect.value.controlsTop}px`,
+  "--data-grid-condition-input-top": `${expandedRect.value.inputTop}px`,
+  "--data-grid-condition-prefix-indent": `${expandedRect.value.prefix}px`,
+  "--data-grid-condition-suffix-width": `${expandedRect.value.suffix}px`,
   left: `${expandedRect.value.left}px`,
   top: `${expandedRect.value.top}px`,
   width: `${expandedRect.value.width}px`,
@@ -109,6 +113,23 @@ function measureExpandedHeight(input: HTMLTextAreaElement) {
   return Math.min(Math.max(56, lineHeight * 2.5, contentHeight), Math.min(260, availableHeight));
 }
 
+function measureExpandedRect(input: HTMLTextAreaElement) {
+  const inputRect = input.getBoundingClientRect();
+  const control = controlRef.value;
+  const controlRect = control?.getBoundingClientRect() ?? inputRect;
+  const controlsRect = control?.firstElementChild?.getBoundingClientRect() ?? controlRect;
+  const horizontalInset = 8;
+  return {
+    left: controlRect.left - horizontalInset,
+    top: controlRect.top,
+    width: controlRect.width + horizontalInset * 2,
+    controlsTop: Math.max(0, controlsRect.top - controlRect.top),
+    inputTop: Math.max(0, inputRect.top - controlRect.top),
+    prefix: Math.max(0, inputRect.left - controlRect.left),
+    suffix: Math.max(28, controlRect.right - inputRect.right),
+  };
+}
+
 function updateSuggestionPosition() {
   void nextTick(() => {
     const target = activeEditor.value;
@@ -128,7 +149,7 @@ function resizeEditor(forceExpand = false) {
     const focused = document.activeElement === input || document.activeElement === overlayRef.value;
     const nextExpanded = focused && shouldExpand(input) && (forceExpand || expanded.value);
     if (nextExpanded) {
-      expandedRect.value = input.getBoundingClientRect();
+      expandedRect.value = measureExpandedRect(input);
       expandedHeight.value = measureExpandedHeight(input);
     }
     expanded.value = nextExpanded;

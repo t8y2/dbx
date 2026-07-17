@@ -118,7 +118,7 @@ onUnmounted(onResizeEnd);
         <PopoverTrigger as-child>
           <button
             type="button"
-            class="relative flex h-5 w-5 shrink-0 items-center justify-center rounded border text-[11px] font-medium transition-colors"
+            class="relative flex h-5 w-5 -translate-x-1 shrink-0 items-center justify-center rounded border text-[11px] font-medium transition-colors"
             :class="filterButtonActive ? 'border-primary/40 bg-primary/10 text-primary hover:bg-primary/15' : 'border-border/70 text-muted-foreground hover:bg-accent hover:text-foreground'"
             :disabled="!canUseWhereSearch"
             @click="emit('ensureRule')"

@@ -19,6 +19,8 @@ export interface SqlParameterDescriptor {
 interface ParameterOccurrence extends SqlParameterDescriptor {
   start: number;
   end: number;
+  quotedBy?: "'" | '"' | "`" | "]";
+  quotedBackslashEscapes?: boolean;
 }
 
 type ComplexTypeDeclarationKind = "struct" | "variant";
@@ -27,12 +29,27 @@ export interface SqlParameterOptions {
   databaseType?: DatabaseType;
   // Which placeholder syntaxes are recognized. Undefined enables all of them.
   enabledSyntaxes?: readonly SqlParameterSyntax[];
+  // Opt in to scheduler-style ${name}/#{name} interpolation inside quoted SQL text.
+  replaceInsideQuotes?: boolean;
+  // Match MySQL-family ANSI_QUOTES when classifying double-quoted regions.
+  ansiQuotes?: boolean;
+  // Match MySQL-family NO_BACKSLASH_ESCAPES when scanning and interpolating strings.
+  noBackslashEscapes?: boolean;
 }
 
 const PARAMETER_NAME_RE = /^[\p{L}_][\p{L}\p{N}_]*$/u;
 const PARAMETER_NAME_START_RE = /[\p{L}_]/u;
 const PARAMETER_NAME_CHAR_RE = /[\p{L}\p{N}_]/u;
 const SQL_SERVER_TEMP_TABLE_CONTEXT_KEYWORDS = new Set(["table", "from", "join", "into", "update", "truncate"]);
+const MYSQL_FAMILY_SQL_MODE_DATABASE_TYPES: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks"]);
+
+export function supportsNoBackslashEscapesMode(databaseType: DatabaseType | undefined): boolean {
+  return !!databaseType && MYSQL_FAMILY_SQL_MODE_DATABASE_TYPES.has(databaseType);
+}
+
+export function supportsAnsiQuotesMode(databaseType: DatabaseType | undefined): boolean {
+  return !!databaseType && MYSQL_FAMILY_SQL_MODE_DATABASE_TYPES.has(databaseType);
+}
 
 export function extractSqlParameters(sql: string, options?: SqlParameterOptions): string[] {
   return extractSqlParameterDescriptors(sql, options).map((descriptor) => descriptor.key);
@@ -62,7 +79,8 @@ export function substituteSqlParameters(sql: string, values: Record<string, SqlP
   let cursor = 0;
   for (const occurrence of occurrences) {
     result += sql.slice(cursor, occurrence.start);
-    result += sqlParameterLiteral(values[occurrence.key] ?? { kind: "string", value: "" });
+    const input = values[occurrence.key] ?? { kind: "string", value: "" };
+    result += occurrence.quotedBy ? sqlParameterTextInsideQuote(input, occurrence.quotedBy, occurrence.quotedBackslashEscapes ?? false) : sqlParameterLiteral(input);
     cursor = occurrence.end;
   }
   result += sql.slice(cursor);
@@ -80,11 +98,11 @@ export function sqlParameterLiteral(input: SqlParameterInput): string {
 
 function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions): ParameterOccurrence[] {
   const occurrences: ParameterOccurrence[] = [];
-  const nativeSqlServerParameters = collectNativeSqlServerParameters(sql);
+  const nativeSqlServerParameters = collectNativeSqlServerParameters(sql, options);
   const supportsNamedParameters = options?.databaseType !== "saphana";
   const enabledSyntaxes = options?.enabledSyntaxes ? new Set(options.enabledSyntaxes) : null;
   const isSyntaxEnabled = (syntax: SqlParameterSyntax) => !enabledSyntaxes || enabledSyntaxes.has(syntax);
-  const complexTypeFieldSeparators = supportsNamedParameters && isSyntaxEnabled("named") ? collectComplexTypeFieldSeparators(sql) : new Set<number>();
+  const complexTypeFieldSeparators = supportsNamedParameters && isSyntaxEnabled("named") ? collectComplexTypeFieldSeparators(sql, options) : new Set<number>();
   let i = 0;
   let dollarQuoteEnd = "";
   let positionalIndex = 0;
@@ -102,11 +120,16 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
     const next = sql[i + 1];
 
     if (ch === "'" || ch === '"' || ch === "`") {
-      i = skipQuoted(sql, i, ch);
+      const quotedBackslashEscapes = sqlQuoteEscapesInsertedBackslashes(ch, options);
+      const quoteEnd = skipQuoted(sql, i, ch, options);
+      if (options?.replaceInsideQuotes) collectQuotedBracedParameterOccurrences(sql, i, quoteEnd, ch, quotedBackslashEscapes, occurrences, isSyntaxEnabled);
+      i = quoteEnd;
       continue;
     }
     if (ch === "[") {
-      i = skipBracketIdentifier(sql, i);
+      const quoteEnd = skipBracketIdentifier(sql, i);
+      if (options?.replaceInsideQuotes) collectQuotedBracedParameterOccurrences(sql, i, quoteEnd, "]", false, occurrences, isSyntaxEnabled);
+      i = quoteEnd;
       continue;
     }
     if (ch === "-" && next === "-") {
@@ -194,8 +217,35 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
   return occurrences;
 }
 
+function collectQuotedBracedParameterOccurrences(sql: string, quoteStart: number, quoteEnd: number, quotedBy: NonNullable<ParameterOccurrence["quotedBy"]>, quotedBackslashEscapes: boolean, occurrences: ParameterOccurrence[], isSyntaxEnabled: (syntax: SqlParameterSyntax) => boolean) {
+  const contentEnd = sql[quoteEnd - 1] === quotedBy ? quoteEnd - 1 : quoteEnd;
+  let i = quoteStart + 1;
+
+  while (i < contentEnd) {
+    const ch = sql[i];
+    const syntax: SqlParameterSyntax | undefined = ch === "$" && sql[i + 1] === "{" ? "shell" : ch === "#" && sql[i + 1] === "{" ? "mybatis" : undefined;
+    if (!syntax || !isSyntaxEnabled(syntax)) {
+      i += 1;
+      continue;
+    }
+
+    const end = sql.indexOf("}", i + 2);
+    if (end === -1 || end >= contentEnd) {
+      // No later braced placeholder can close within this quoted range either.
+      break;
+    }
+    const name = sql.slice(i + 2, end).trim();
+    if (!PARAMETER_NAME_RE.test(name)) {
+      i = end + 1;
+      continue;
+    }
+    occurrences.push({ key: name, name, syntax, token: sql.slice(i, end + 1), start: i, end: end + 1, quotedBy, quotedBackslashEscapes });
+    i = end + 1;
+  }
+}
+
 // Doris-style complex types use colons between field names and types; those are not bind parameters.
-function collectComplexTypeFieldSeparators(sql: string): Set<number> {
+function collectComplexTypeFieldSeparators(sql: string, options?: SqlParameterOptions): Set<number> {
   const separators = new Set<number>();
   let i = 0;
   let dollarQuoteEnd = "";
@@ -212,7 +262,7 @@ function collectComplexTypeFieldSeparators(sql: string): Set<number> {
     const ch = sql[i];
     const next = sql[i + 1];
     if (ch === "'" || ch === '"' || ch === "`") {
-      i = skipQuoted(sql, i, ch);
+      i = skipQuoted(sql, i, ch, options);
       continue;
     }
     if (ch === "[") {
@@ -241,7 +291,7 @@ function collectComplexTypeFieldSeparators(sql: string): Set<number> {
     }
     const declaration = readComplexTypeDeclaration(sql, i);
     if (declaration) {
-      i = collectComplexTypeFieldSeparatorsInDeclaration(sql, declaration.openingBracket + 1, declaration.kind, separators) + 1;
+      i = collectComplexTypeFieldSeparatorsInDeclaration(sql, declaration.openingBracket + 1, declaration.kind, separators, options) + 1;
       continue;
     }
     i += 1;
@@ -250,7 +300,7 @@ function collectComplexTypeFieldSeparators(sql: string): Set<number> {
   return separators;
 }
 
-function collectComplexTypeFieldSeparatorsInDeclaration(sql: string, start: number, kind: ComplexTypeDeclarationKind, separators: Set<number>): number {
+function collectComplexTypeFieldSeparatorsInDeclaration(sql: string, start: number, kind: ComplexTypeDeclarationKind, separators: Set<number>, options?: SqlParameterOptions): number {
   let i = start;
   let genericDepth = 0;
   let parenthesisDepth = 0;
@@ -264,7 +314,7 @@ function collectComplexTypeFieldSeparatorsInDeclaration(sql: string, start: numb
         continue;
       }
       if (isLineStatementStart(sql, i) && isSqlStatementKeyword(sql, i)) return i;
-      const fieldNameEnd = readComplexTypeFieldNameEnd(sql, i, kind);
+      const fieldNameEnd = readComplexTypeFieldNameEnd(sql, i, kind, options);
       if (fieldNameEnd > i) {
         const separator = skipSqlWhitespaceAndComments(sql, fieldNameEnd);
         if (sql[separator] === ":") {
@@ -282,7 +332,7 @@ function collectComplexTypeFieldSeparatorsInDeclaration(sql: string, start: numb
     const ch = sql[i];
     const next = sql[i + 1];
     if (ch === "'" || ch === '"' || ch === "`") {
-      i = skipQuoted(sql, i, ch);
+      i = skipQuoted(sql, i, ch, options);
       continue;
     }
     if (ch === "[") {
@@ -303,7 +353,7 @@ function collectComplexTypeFieldSeparatorsInDeclaration(sql: string, start: numb
     }
     const declaration = readComplexTypeDeclaration(sql, i);
     if (declaration) {
-      i = collectComplexTypeFieldSeparatorsInDeclaration(sql, declaration.openingBracket + 1, declaration.kind, separators) + 1;
+      i = collectComplexTypeFieldSeparatorsInDeclaration(sql, declaration.openingBracket + 1, declaration.kind, separators, options) + 1;
       continue;
     }
     if (ch === ";" && genericDepth === 0 && parenthesisDepth === 0) return i;
@@ -345,11 +395,11 @@ function readComplexTypeDeclaration(sql: string, start: number): { kind: Complex
   return sql[openingBracket] === "<" ? { kind, openingBracket } : null;
 }
 
-function readComplexTypeFieldNameEnd(sql: string, start: number, kind: ComplexTypeDeclarationKind): number {
-  if (kind === "variant") return readVariantFieldNameEnd(sql, start);
+function readComplexTypeFieldNameEnd(sql: string, start: number, kind: ComplexTypeDeclarationKind, options?: SqlParameterOptions): number {
+  if (kind === "variant") return readVariantFieldNameEnd(sql, start, options);
 
   const ch = sql[start];
-  if (ch === '"' || ch === "`") return skipQuoted(sql, start, ch);
+  if (ch === '"' || ch === "`") return skipQuoted(sql, start, ch, options);
   if (ch === "[") return skipBracketIdentifier(sql, start);
   if (!PARAMETER_NAME_START_RE.test(ch ?? "")) return start;
 
@@ -358,11 +408,11 @@ function readComplexTypeFieldNameEnd(sql: string, start: number, kind: ComplexTy
   return i;
 }
 
-function readVariantFieldNameEnd(sql: string, start: number): number {
+function readVariantFieldNameEnd(sql: string, start: number, options?: SqlParameterOptions): number {
   let i = start;
   const modifier = matchesWord(sql, i, "match_name") ? "match_name" : matchesWord(sql, i, "match_name_glob") ? "match_name_glob" : "";
   if (modifier) i = skipSqlWhitespaceAndComments(sql, i + modifier.length);
-  return sql[i] === "'" ? skipQuoted(sql, i, "'") : start;
+  return sql[i] === "'" ? skipQuoted(sql, i, "'", options) : start;
 }
 
 function skipSqlWhitespaceAndComments(sql: string, start: number): number {
@@ -386,7 +436,7 @@ function skipSqlWhitespaceAndComments(sql: string, start: number): number {
   return i;
 }
 
-function collectNativeSqlServerParameters(sql: string): { declared: Set<string>; ignoredStarts: Set<number> } {
+function collectNativeSqlServerParameters(sql: string, options?: SqlParameterOptions): { declared: Set<string>; ignoredStarts: Set<number> } {
   const declared = new Set<string>();
   const ignoredStarts = new Set<number>();
   let i = 0;
@@ -404,7 +454,7 @@ function collectNativeSqlServerParameters(sql: string): { declared: Set<string>;
     const ch = sql[i];
     const next = sql[i + 1];
     if (ch === "'" || ch === '"' || ch === "`") {
-      i = skipQuoted(sql, i, ch);
+      i = skipQuoted(sql, i, ch, options);
       continue;
     }
     if (ch === "[") {
@@ -432,23 +482,23 @@ function collectNativeSqlServerParameters(sql: string): { declared: Set<string>;
       continue;
     }
     if (matchesWord(sql, i, "declare")) {
-      i = collectDeclareStatementVariables(sql, i + "declare".length, declared);
+      i = collectDeclareStatementVariables(sql, i + "declare".length, declared, options);
       continue;
     }
     if (matchesWord(sql, i, "set")) {
-      i = collectSetStatementVariables(sql, i + "set".length, declared);
+      i = collectSetStatementVariables(sql, i + "set".length, declared, options);
       continue;
     }
     if (matchesWord(sql, i, "select")) {
-      i = collectSelectAssignmentVariables(sql, i + "select".length, declared);
+      i = collectSelectAssignmentVariables(sql, i + "select".length, declared, options);
       continue;
     }
     if ((matchesWord(sql, i, "create") || matchesWord(sql, i, "alter")) && isRoutineDefinitionStart(sql, i)) {
-      i = collectRoutineDefinitionVariables(sql, i, declared);
+      i = collectRoutineDefinitionVariables(sql, i, declared, options);
       continue;
     }
     if (matchesWord(sql, i, "exec") || matchesWord(sql, i, "execute")) {
-      i = collectExecNamedArgumentStarts(sql, i + (matchesWord(sql, i, "exec") ? "exec".length : "execute".length), ignoredStarts);
+      i = collectExecNamedArgumentStarts(sql, i + (matchesWord(sql, i, "exec") ? "exec".length : "execute".length), ignoredStarts, options);
       continue;
     }
     i += 1;
@@ -457,7 +507,7 @@ function collectNativeSqlServerParameters(sql: string): { declared: Set<string>;
   return { declared, ignoredStarts };
 }
 
-function collectDeclareStatementVariables(sql: string, start: number, declared: Set<string>): number {
+function collectDeclareStatementVariables(sql: string, start: number, declared: Set<string>, options?: SqlParameterOptions): number {
   let i = start;
   while (i < sql.length) {
     const ch = sql[i];
@@ -465,7 +515,7 @@ function collectDeclareStatementVariables(sql: string, start: number, declared: 
     if (ch === ";") return i + 1;
     if (isLineStatementStart(sql, i) && isSqlStatementKeyword(sql, i)) return i;
     if (ch === "'" || ch === '"' || ch === "`") {
-      i = skipQuoted(sql, i, ch);
+      i = skipQuoted(sql, i, ch, options);
       continue;
     }
     if (ch === "[") {
@@ -497,7 +547,7 @@ function collectDeclareStatementVariables(sql: string, start: number, declared: 
   return i;
 }
 
-function collectSetStatementVariables(sql: string, start: number, declared: Set<string>): number {
+function collectSetStatementVariables(sql: string, start: number, declared: Set<string>, options?: SqlParameterOptions): number {
   let i = start;
   while (i < sql.length) {
     const ch = sql[i];
@@ -505,7 +555,7 @@ function collectSetStatementVariables(sql: string, start: number, declared: Set<
     if (ch === ";") return i + 1;
     if (isLineStatementStart(sql, i) && isSqlStatementKeyword(sql, i)) return i;
     if (ch === "'" || ch === '"' || ch === "`") {
-      i = skipQuoted(sql, i, ch);
+      i = skipQuoted(sql, i, ch, options);
       continue;
     }
     if (ch === "[") {
@@ -537,7 +587,7 @@ function collectSetStatementVariables(sql: string, start: number, declared: Set<
   return i;
 }
 
-function collectSelectAssignmentVariables(sql: string, start: number, declared: Set<string>): number {
+function collectSelectAssignmentVariables(sql: string, start: number, declared: Set<string>, options?: SqlParameterOptions): number {
   let i = start;
   while (i < sql.length) {
     const ch = sql[i];
@@ -546,7 +596,7 @@ function collectSelectAssignmentVariables(sql: string, start: number, declared: 
     if (isLineStatementStart(sql, i) && isSqlStatementKeyword(sql, i)) return i;
     if (matchesWord(sql, i, "from")) return i;
     if (ch === "'" || ch === '"' || ch === "`") {
-      i = skipQuoted(sql, i, ch);
+      i = skipQuoted(sql, i, ch, options);
       continue;
     }
     if (ch === "[") {
@@ -578,7 +628,7 @@ function collectSelectAssignmentVariables(sql: string, start: number, declared: 
   return i;
 }
 
-function collectRoutineDefinitionVariables(sql: string, start: number, declared: Set<string>): number {
+function collectRoutineDefinitionVariables(sql: string, start: number, declared: Set<string>, options?: SqlParameterOptions): number {
   let i = start;
   while (i < sql.length) {
     const ch = sql[i];
@@ -586,7 +636,7 @@ function collectRoutineDefinitionVariables(sql: string, start: number, declared:
     if (ch === ";") return i + 1;
     if (matchesWord(sql, i, "as") || matchesWord(sql, i, "returns")) return i;
     if (ch === "'" || ch === '"' || ch === "`") {
-      i = skipQuoted(sql, i, ch);
+      i = skipQuoted(sql, i, ch, options);
       continue;
     }
     if (ch === "[") {
@@ -618,7 +668,7 @@ function collectRoutineDefinitionVariables(sql: string, start: number, declared:
   return i;
 }
 
-function collectExecNamedArgumentStarts(sql: string, start: number, ignoredStarts: Set<number>): number {
+function collectExecNamedArgumentStarts(sql: string, start: number, ignoredStarts: Set<number>, options?: SqlParameterOptions): number {
   let i = start;
   while (i < sql.length) {
     const ch = sql[i];
@@ -626,7 +676,7 @@ function collectExecNamedArgumentStarts(sql: string, start: number, ignoredStart
     if (ch === ";") return i + 1;
     if (isLineStatementStart(sql, i) && isSqlStatementKeyword(sql, i)) return i;
     if (ch === "'" || ch === '"' || ch === "`") {
-      i = skipQuoted(sql, i, ch);
+      i = skipQuoted(sql, i, ch, options);
       continue;
     }
     if (ch === "[") {
@@ -722,10 +772,23 @@ function readParameterName(sql: string, start: number): string {
   return sql.slice(start, i);
 }
 
-function skipQuoted(sql: string, start: number, quote: string): number {
+function sqlQuoteEscapesInsertedBackslashes(quote: string, options?: SqlParameterOptions): boolean {
+  if (!supportsNoBackslashEscapesMode(options?.databaseType) || options?.noBackslashEscapes) return false;
+  return quote === "'" || (quote === '"' && !options?.ansiQuotes);
+}
+
+function sqlQuoteUsesBackslashEscapes(quote: string, options?: SqlParameterOptions): boolean {
+  if (supportsNoBackslashEscapesMode(options?.databaseType)) return sqlQuoteEscapesInsertedBackslashes(quote, options);
+  // Preserve the existing conservative scanner for other/unknown dialects;
+  // interpolation escaping remains limited to confirmed MySQL-family semantics.
+  return quote === "'";
+}
+
+function skipQuoted(sql: string, start: number, quote: string, options?: SqlParameterOptions): number {
+  const backslashEscapes = sqlQuoteUsesBackslashEscapes(quote, options);
   let i = start + 1;
   while (i < sql.length) {
-    if (sql[i] === "\\" && quote === "'" && i + 1 < sql.length) {
+    if (sql[i] === "\\" && backslashEscapes && i + 1 < sql.length) {
       i += 2;
       continue;
     }
@@ -798,6 +861,14 @@ function readDollarQuoteMarker(sql: string, start: number): string {
 
 function quoteSqlString(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
+}
+
+function sqlParameterTextInsideQuote(input: SqlParameterInput, quotedBy: NonNullable<ParameterOccurrence["quotedBy"]>, backslashEscapes: boolean): string {
+  const value = input.kind === "null" ? "NULL" : input.value;
+  // Use the same quote-mode decision as the scanner so substitution cannot
+  // reinterpret a delimiter or backslash differently from occurrence discovery.
+  const backslashEscaped = backslashEscapes ? value.replaceAll("\\", "\\\\") : value;
+  return backslashEscaped.replaceAll(quotedBy, quotedBy + quotedBy);
 }
 
 function normalizeBooleanLiteral(value: string): string {

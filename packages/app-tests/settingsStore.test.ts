@@ -482,6 +482,14 @@ test("defaults SQL formatter settings", () => {
   assert.deepEqual(normalizeEditorSettings({}).sqlFormatter, DEFAULT_EDITOR_SETTINGS.sqlFormatter);
 });
 
+test("normalizes quoted SQL placeholder interpolation as a sparse opt-in", () => {
+  assert.deepEqual(DEFAULT_EDITOR_SETTINGS.sqlVariableSyntaxOverrides, {});
+  assert.deepEqual(normalizeEditorSettings({ sqlVariableSyntaxOverrides: { mysql: { shell: false } } } as any).sqlVariableSyntaxOverrides, { mysql: { shell: false } });
+  assert.deepEqual(normalizeEditorSettings({ sqlVariableSyntaxOverrides: { mysql: { replaceInsideQuotes: true, ansiQuotes: true, noBackslashEscapes: true }, postgres: { replaceInsideQuotes: false, ansiQuotes: true, noBackslashEscapes: true } } } as any).sqlVariableSyntaxOverrides, {
+    mysql: { replaceInsideQuotes: true, ansiQuotes: true, noBackslashEscapes: true },
+  });
+});
+
 test("normalizes saved SQL formatter settings", () => {
   assert.deepEqual(
     normalizeEditorSettings({

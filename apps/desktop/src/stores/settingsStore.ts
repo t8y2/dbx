@@ -953,7 +953,8 @@ export const useSettingsStore = defineStore("settings", () => {
     // If the active config was deleted, fall back to the default
     if (activeModel.value && !aiConfigs.value.find((c) => c.id === activeModel.value!.configId)) {
       if (aiConfigs.value.length > 0) {
-        activeModel.value = { configId: aiConfigs.value[0].id, modelId: aiConfigs.value[0].model };
+        const defaultConfig = aiConfigs.value.find((c) => c.isDefault) || aiConfigs.value[0];
+        activeModel.value = { configId: defaultConfig.id, modelId: defaultConfig.model };
       } else {
         activeModel.value = null;
       }
@@ -1023,6 +1024,10 @@ export const useSettingsStore = defineStore("settings", () => {
     aiConfigs.value.forEach((c) => {
       c.isDefault = c.id === id;
     });
+    const config = aiConfigs.value.find((c) => c.id === id);
+    if (config) {
+      activeModel.value = { configId: config.id, modelId: config.model };
+    }
   }
 
   function updateActiveModel(model: { configId: string; modelId: string }) {

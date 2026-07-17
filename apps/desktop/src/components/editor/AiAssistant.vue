@@ -1614,10 +1614,6 @@ async function deleteConversation(id: string) {
 function startNewChat() {
   clearMessages();
   showConversationList.value = false;
-  const defaultConfig = settings.aiConfigs.find((c) => c.isDefault) || settings.aiConfigs[0];
-  if (defaultConfig) {
-    settings.updateActiveModel({ configId: defaultConfig.id, modelId: defaultConfig.model });
-  }
 }
 
 onMounted(async () => {

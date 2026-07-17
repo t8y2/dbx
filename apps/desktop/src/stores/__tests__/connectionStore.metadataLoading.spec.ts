@@ -176,6 +176,78 @@ describe("connectionStore metadata loading", () => {
     expect(store.treeNodes[0]?.children?.[0]?.children?.map((node) => node.label)).toEqual(["public"]);
   });
 
+  it("clears a failed metadata warning when the driver hint finishes during retry", async () => {
+    let resolveAgents!: (drivers: Array<{ db_type: string; installed: boolean; update_available: boolean }>) => void;
+    let resolveSchemas!: (schemas: Array<{ name: string; comment: null }>) => void;
+    const listInstalledAgents = vi.fn(
+      () =>
+        new Promise<Array<{ db_type: string; installed: boolean; update_available: boolean }>>((resolve) => {
+          resolveAgents = resolve;
+        }),
+    );
+    const listSchemaInfos = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("connection slots exhausted"))
+      .mockImplementationOnce(
+        () =>
+          new Promise<Array<{ name: string; comment: null }>>((resolve) => {
+            resolveSchemas = resolve;
+          }),
+      );
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listInstalledAgents,
+      listSchemaInfos,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = { ...postgresConnection(), db_type: "oracle" } as ConnectionConfig;
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [
+          {
+            id: `${connection.id}:app`,
+            label: "app",
+            type: "database",
+            connectionId: connection.id,
+            database: "app",
+            isExpanded: false,
+            children: [],
+          },
+        ],
+      },
+    ];
+
+    await expect(store.loadSchemas(connection.id, "app", { force: true })).rejects.toThrow("connection slots exhausted");
+    expect(store.connectionErrors[connection.id]).toBe("connection slots exhausted");
+
+    const retry = store.loadSchemas(connection.id, "app", { force: true });
+    await vi.waitFor(() => expect(listSchemaInfos).toHaveBeenCalledTimes(2));
+
+    resolveAgents([{ db_type: "oracle", installed: true, update_available: true }]);
+    await vi.waitFor(() => expect(store.connectionErrors[connection.id]).toContain("built-in driver update"));
+
+    resolveSchemas([{ name: "public", comment: null }]);
+    await retry;
+
+    expect(store.connectionErrors[connection.id]).toBeUndefined();
+  });
+
   it("does not clear a newer error when an older metadata request succeeds", async () => {
     let resolveSchemas!: (schemas: Array<{ name: string; comment: null }>) => void;
     const listSchemaInfos = vi.fn(

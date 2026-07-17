@@ -71,6 +71,14 @@ test("DataGrid exposes persistent result toolbar slots", () => {
   assert.match(dataGrid, /hasResultToolbarLeadingSlot\.value \|\|[\s\S]*hasResultToolbarActionsSlot\.value/);
 });
 
+test("table-data toolbar refresh keeps page size independent from SQL editor settings", () => {
+  const dataGrid = source(dataGridPath);
+
+  assert.match(dataGrid, /props\.context === "table-data" \? \(props\.pageLimit \?\? tableOpenPageLimit\(\)\) : settingsStore\.editorSettings\.pageSize/);
+  assert.match(dataGrid, /if \(props\.context === "table-data"\) return;[\s\S]*pageSize\.value = normalizeResultPageSize\(value, pageSize\.value\)/);
+  assert.match(dataGrid, /emit\("reload", props\.sql, searchText\.value, currentWhereInput\(\), currentOrderBy\(\), pageSize\.value, \(currentPage\.value - 1\) \* pageSize\.value, "refresh"\)/);
+});
+
 test("standalone result views use the same compact toolbar breakpoint", () => {
   const contentArea = source(contentAreaPath);
   const dataGrid = source(dataGridPath);

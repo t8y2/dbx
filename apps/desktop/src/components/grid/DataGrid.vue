@@ -69,6 +69,7 @@ import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/
 import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
 import type { BuildSingleColumnAlterSqlOptions } from "@/lib/table/tableStructureEditorSql";
 import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
+import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { uuid } from "@/lib/common/utils";
 import { generateCellValues, type CellValueGenerationKind } from "@/lib/dataGrid/cellValueGeneration";
 import { compactHeaderColumnType, resolveHeaderColumnType } from "@/lib/dataGrid/dataGridColumnType";
@@ -2251,7 +2252,7 @@ watch(
 );
 
 // --- Pagination ---
-const pageSize = ref(normalizeResultPageSize(settingsStore.editorSettings.pageSize));
+const pageSize = ref(normalizeResultPageSize(props.context === "table-data" ? (props.pageLimit ?? tableOpenPageLimit()) : settingsStore.editorSettings.pageSize));
 const currentPage = ref(1);
 const pageSizeOptions = computed(() => resultPageSizeMenuOptions(pageSize.value));
 const customPageSizeInput = ref(String(pageSize.value));
@@ -2270,6 +2271,8 @@ watch(pageSize, (value) => {
 watch(
   () => settingsStore.editorSettings.pageSize,
   (value) => {
+    // Table-data segments keep their own pagination state instead of following SQL result settings.
+    if (props.context === "table-data") return;
     pageSize.value = normalizeResultPageSize(value, pageSize.value);
   },
 );

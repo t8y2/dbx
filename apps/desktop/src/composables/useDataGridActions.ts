@@ -2,8 +2,8 @@ import { type ComputedRef } from "vue";
 import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
-import { useSettingsStore } from "@/stores/settingsStore";
 import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
+import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import * as api from "@/lib/backend/api";
@@ -36,7 +36,6 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
   const { toast } = useToast();
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
-  const settingsStore = useSettingsStore();
 
   function quoteIdent(tab: QueryTab, name: string): string {
     const config = connectionStore.getConfig(tab.connectionId);
@@ -60,7 +59,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       columns: tableMeta?.columns.map((column) => column.name),
       primaryKeys,
       includeRowId: useRowId,
-      limit: options.limit ?? settingsStore.editorSettings.pageSize,
+      limit: options.limit ?? tab.resultPageLimit ?? tableOpenPageLimit(),
       ...options,
     });
   }
@@ -120,7 +119,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const elapsed = () => `${Math.round(performance.now() - startedAt)}ms`;
     if (tab.mode === "data" && tableMetaForDataTab(tab)) {
       tab.whereInput = whereInput ?? "";
-      const pageLimit = limit ?? settingsStore.editorSettings.pageSize;
+      const pageLimit = limit ?? tab.resultPageLimit ?? tableOpenPageLimit();
       const pageOffset = offset ?? 0;
       console.info("[DBX][reloadData:start]", {
         traceId,

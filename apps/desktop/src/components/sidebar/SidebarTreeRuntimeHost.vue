@@ -445,7 +445,22 @@ function hasNodeDatabaseContext(node: TreeNode): node is TreeNode & { connection
   return !!node.connectionId && hasTreeNodeDatabaseContext(node);
 }
 
-const groupTypes: Set<TreeNodeType> = new Set(["group-columns", "group-indexes", "group-fkeys", "group-triggers", "group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-sequences", "group-packages", "group-types", "group-partitions", "group-extensions"]);
+const groupTypes: Set<TreeNodeType> = new Set([
+  "group-columns",
+  "group-indexes",
+  "group-fkeys",
+  "group-triggers",
+  "group-tables",
+  "group-views",
+  "group-materialized-views",
+  "group-procedures",
+  "group-functions",
+  "group-sequences",
+  "group-packages",
+  "group-types",
+  "group-partitions",
+  "group-extensions",
+]);
 
 function isGroupLabel(node: TreeNode): boolean {
   return groupTypes.has(node.type);

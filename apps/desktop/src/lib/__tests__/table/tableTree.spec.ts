@@ -40,11 +40,7 @@ describe("programmable database objects", () => {
     const nodes = buildSimpleObjectTreeNodes({ ...context, schema: "APP", objects });
 
     expect(nodes).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ type: "trigger", objectName: "TRG_AUDIT", valid: false }),
-        expect.objectContaining({ type: "type", objectName: "ADDRESS_T", valid: true }),
-        expect.objectContaining({ type: "type-body", objectName: "ADDRESS_T", valid: true }),
-      ]),
+      expect.arrayContaining([expect.objectContaining({ type: "trigger", objectName: "TRG_AUDIT", valid: false }), expect.objectContaining({ type: "type", objectName: "ADDRESS_T", valid: true }), expect.objectContaining({ type: "type-body", objectName: "ADDRESS_T", valid: true })]),
     );
   });
 });

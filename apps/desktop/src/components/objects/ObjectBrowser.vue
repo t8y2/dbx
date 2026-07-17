@@ -2164,16 +2164,16 @@ function filterLabel(filter: ObjectFilter) {
           : filter === "procedures"
             ? "objects.procedures"
             : filter === "functions"
-            ? "objects.functions"
+              ? "objects.functions"
               : filter === "triggers"
                 ? "tree.triggers"
-              : filter === "sequences"
-                ? "objects.sequences"
-                : filter === "packages"
-                  ? "objects.packages"
-                  : filter === "types"
-                    ? "tree.types"
-                  : "objects.all";
+                : filter === "sequences"
+                  ? "objects.sequences"
+                  : filter === "packages"
+                    ? "objects.packages"
+                    : filter === "types"
+                      ? "tree.types"
+                      : "objects.all";
   return `${t(key)} ${filterCount(filter)}`;
 }
 

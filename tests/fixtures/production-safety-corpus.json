@@ -1,0 +1,312 @@
+[
+  {
+    "name": "mysql qualified delete targets production database",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "DELETE FROM prod_app.users WHERE id = 1",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "mysql use switch carries production target to unqualified mutation",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "USE `prod_app`; DELETE FROM users WHERE id = 1",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "mysql executable comment can contain a production delete",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "/*! DELETE FROM prod_app.users WHERE id = 1 */",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "mysql qualified procedure call targets production database",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "CALL prod_app.purge_users()",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "mysql qualified grant targets production database",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "GRANT ALL ON prod_app.* TO 'u'@'%'",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "mysql unqualified procedure call is ambiguous with production markers",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "CALL purge_users()",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "mysql global privilege statement is ambiguous with production markers",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "GRANT PROCESS ON *.* TO 'u'@'%'",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "mysql non-production procedure target does not trip production marker",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "CALL staging.purge_users()",
+    "active": false,
+    "isMutation": true,
+    "databases": []
+  },
+  {
+    "name": "mysql non-production privilege target does not trip production marker",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "GRANT ALL ON staging.* TO 'u'@'%'",
+    "active": false,
+    "isMutation": true,
+    "databases": []
+  },
+  {
+    "name": "mysql unqualified table DML resolves to the selected non-production database",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "UPDATE users SET active = 1 WHERE id = 1",
+    "active": false,
+    "isMutation": true,
+    "databases": []
+  },
+  {
+    "name": "mysql repeated unqualified table DML resolves per statement",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "UPDATE users SET active = 1 WHERE id = 1; DELETE FROM users WHERE id = 2",
+    "active": false,
+    "isMutation": true,
+    "databases": []
+  },
+  {
+    "name": "mysql unknown mutation without a resolved target is conservatively confirmed",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "MAINTAIN UNKNOWN THING",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "mysql transaction statement does not target a production database",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "BEGIN",
+    "active": false,
+    "isMutation": true,
+    "databases": []
+  },
+  {
+    "name": "mysql qualified rename table source and destination target production database",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "RENAME TABLE prod_app.old_name TO prod_app.new_name",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "mysql rename table into production database is detected",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "RENAME TABLE staging.old_name TO prod_app.new_name",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "mysql resolved non-production rename table target stays non-production",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "RENAME TABLE staging.old_name TO staging.new_name",
+    "active": false,
+    "isMutation": true,
+    "databases": []
+  },
+  {
+    "name": "mysql multi-target rename conservatively protects unresolved production target",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "RENAME TABLE staging.a TO staging.b, prod_app.c TO prod_app.d",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "mysql multi-target drop conservatively protects unresolved production target",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "DROP TABLE staging.a, prod_app.b",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "mysql qualified truncate table targets production database",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "TRUNCATE TABLE prod_app.users",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "mysql resolved non-production truncate table target stays non-production",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "TRUNCATE TABLE staging.users",
+    "active": false,
+    "isMutation": true,
+    "databases": []
+  },
+  {
+    "name": "mysql optimize table targets production database",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "OPTIMIZE TABLE prod_app.users",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "mysql analyze table targets production database",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "ANALYZE TABLE prod_app.users",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "mysql repair table targets production database",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "REPAIR TABLE prod_app.users",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "mysql check table resolves to selected non-production database",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "CHECK TABLE users",
+    "active": false,
+    "isMutation": true,
+    "databases": []
+  },
+  {
+    "name": "mysql read-only production reference before staging write stays non-production",
+    "dialect": "mysql",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "SELECT * FROM prod_app.orders; DELETE FROM staging.users WHERE id = 1",
+    "active": false,
+    "isMutation": true,
+    "databases": []
+  },
+  {
+    "name": "mysql quoted unicode database target is preserved",
+    "dialect": "mysql",
+    "productionDatabases": ["生产库"],
+    "activeDatabase": "staging",
+    "sql": "DELETE FROM `生产库`.users WHERE id = 1",
+    "active": true,
+    "isMutation": true,
+    "databases": ["生产库"]
+  },
+  {
+    "name": "mysql quoted database containing spaces is preserved in privilege target",
+    "dialect": "mysql",
+    "productionDatabases": ["prod app"],
+    "activeDatabase": "staging",
+    "sql": "GRANT ALL ON `prod app`.* TO 'u'@'%'",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod app"]
+  },
+  {
+    "name": "mysql quoted routine target with unicode database is preserved",
+    "dialect": "mysql",
+    "productionDatabases": ["生产库"],
+    "activeDatabase": "staging",
+    "sql": "CALL `生产库`.`purge users`()",
+    "active": true,
+    "isMutation": true,
+    "databases": ["生产库"]
+  },
+  {
+    "name": "mysql quoted database containing dot is not split as a qualifier",
+    "dialect": "mysql",
+    "productionDatabases": ["prod.app"],
+    "activeDatabase": "staging",
+    "sql": "DROP DATABASE IF EXISTS `prod.app`",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod.app"]
+  },
+  {
+    "name": "sqlserver three-part table name resolves production database",
+    "dialect": "sqlserver",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "DELETE FROM prod_app.dbo.users WHERE id = 1",
+    "active": true,
+    "isMutation": true,
+    "databases": ["prod_app"]
+  },
+  {
+    "name": "sqlserver two-part table name is schema-qualified, not database-qualified",
+    "dialect": "sqlserver",
+    "productionDatabases": ["prod_app"],
+    "activeDatabase": "staging",
+    "sql": "DELETE FROM prod_app.users WHERE id = 1",
+    "active": false,
+    "isMutation": true,
+    "databases": []
+  }
+]

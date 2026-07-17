@@ -3,12 +3,14 @@ use crate::models::connection::DatabaseType;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StructureDialect {
     Mysql,
+    Doris,
     Postgres,
     Sqlite,
     #[cfg(feature = "duckdb-bundled")]
     DuckDb,
     SqlServer,
     Oracle,
+    Dameng,
     H2,
     ClickHouse,
     ManticoreSearch,
@@ -34,6 +36,7 @@ pub(super) struct TableStructureCapabilities {
     pub(super) index_filter: bool,
     pub(super) index_comment: bool,
     pub(super) alter_primary_key: bool,
+    pub(super) foreign_key: bool,
 }
 
 impl Default for TableStructureCapabilities {
@@ -54,6 +57,7 @@ impl Default for TableStructureCapabilities {
             index_filter: false,
             index_comment: false,
             alter_primary_key: false,
+            foreign_key: false,
         }
     }
 }
@@ -63,7 +67,6 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
     match database_type {
         Some(
             DatabaseType::Mysql
-            | DatabaseType::Doris
             | DatabaseType::StarRocks
             | DatabaseType::Goldendb
             | DatabaseType::Sundb
@@ -82,6 +85,16 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             index_type: true,
             index_comment: true,
             alter_primary_key: true,
+            foreign_key: true,
+            ..base
+        },
+        Some(DatabaseType::Doris) => TableStructureCapabilities {
+            dialect: StructureDialect::Doris,
+            add_column: true,
+            drop_column: true,
+            rename_column: true,
+            alter_existing_column: true,
+            comment: true,
             ..base
         },
         Some(DatabaseType::Gbase) => TableStructureCapabilities {
@@ -89,6 +102,7 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             add_column: true,
             drop_column: true,
             rename_column: true,
+            reorder_column: true,
             ..base
         },
         Some(
@@ -115,6 +129,7 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             index_filter: true,
             index_comment: true,
             alter_primary_key: true,
+            foreign_key: true,
             ..base
         },
         Some(DatabaseType::Questdb) => TableStructureCapabilities {
@@ -133,6 +148,7 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             index_filter: false,
             index_comment: false,
             alter_primary_key: false,
+            foreign_key: false,
         },
         Some(DatabaseType::Redshift | DatabaseType::Vertica) => TableStructureCapabilities {
             dialect: StructureDialect::Postgres,
@@ -181,9 +197,21 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             index_comment: true,
             ..base
         },
+        Some(DatabaseType::Dameng) => TableStructureCapabilities {
+            dialect: StructureDialect::Dameng,
+            add_column: true,
+            drop_column: true,
+            rename_column: true,
+            alter_existing_column: true,
+            comment: true,
+            create_index: true,
+            drop_index: true,
+            rebuild_index: true,
+            index_type: true,
+            ..base
+        },
         Some(
             DatabaseType::Oracle
-            | DatabaseType::Dameng
             | DatabaseType::OceanbaseOracle
             | DatabaseType::Iris
             | DatabaseType::Yashandb
@@ -245,7 +273,7 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
 }
 
 pub(super) fn is_oracle_like(dialect: StructureDialect) -> bool {
-    dialect == StructureDialect::Oracle
+    matches!(dialect, StructureDialect::Oracle | StructureDialect::Dameng)
 }
 
 pub(super) fn database_label(database_type: Option<DatabaseType>) -> String {
@@ -262,12 +290,14 @@ pub(super) fn database_label(database_type: Option<DatabaseType>) -> String {
 pub(super) fn dialect_label(dialect: StructureDialect) -> String {
     match dialect {
         StructureDialect::Mysql => "mysql",
+        StructureDialect::Doris => "doris",
         StructureDialect::Postgres => "postgres",
         StructureDialect::Sqlite => "sqlite",
         #[cfg(feature = "duckdb-bundled")]
         StructureDialect::DuckDb => "duckdb",
         StructureDialect::SqlServer => "sqlserver",
         StructureDialect::Oracle => "oracle",
+        StructureDialect::Dameng => "dameng",
         StructureDialect::H2 => "h2",
         StructureDialect::ClickHouse => "clickhouse",
         StructureDialect::ManticoreSearch => "manticoresearch",
@@ -281,12 +311,14 @@ pub(super) fn dialect_label(dialect: StructureDialect) -> String {
 pub(super) fn database_type_for_dialect(dialect: StructureDialect) -> Option<DatabaseType> {
     match dialect {
         StructureDialect::Mysql => Some(DatabaseType::Mysql),
+        StructureDialect::Doris => Some(DatabaseType::Doris),
         StructureDialect::Postgres => Some(DatabaseType::Postgres),
         StructureDialect::Sqlite => Some(DatabaseType::Sqlite),
         #[cfg(feature = "duckdb-bundled")]
         StructureDialect::DuckDb => Some(DatabaseType::DuckDb),
         StructureDialect::SqlServer => Some(DatabaseType::SqlServer),
         StructureDialect::Oracle => Some(DatabaseType::Oracle),
+        StructureDialect::Dameng => Some(DatabaseType::Dameng),
         StructureDialect::H2 => Some(DatabaseType::H2),
         StructureDialect::ClickHouse => Some(DatabaseType::ClickHouse),
         StructureDialect::ManticoreSearch => Some(DatabaseType::ManticoreSearch),

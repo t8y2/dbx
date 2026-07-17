@@ -8,6 +8,7 @@ const pageIcons: Record<string, keyof typeof icons> = {
   "what-is-dbx": "BookOpen",
   changelog: "History",
   "getting-started": "Rocket",
+  "1panel": "PanelsTopLeft",
   databases: "Database",
   "query-editor": "SquareTerminal",
   "data-grid": "Table2",
@@ -26,11 +27,15 @@ const pageIcons: Record<string, keyof typeof icons> = {
   "ai-assistant": "Bot",
   cli: "Terminal",
   mcp: "Cable",
+  "web-api": "Webhook",
+  contributing: "GitPullRequest",
   plugins: "Plug",
   "driver-management": "Package",
+  "sql-formatter": "AlignLeft",
   "keyboard-shortcuts": "Keyboard",
   "connection-import": "Import",
   "config-export": "FileUp",
+  "cloud-sync": "CloudUpload",
   "ssh-tunnel": "ShieldCheck",
 };
 

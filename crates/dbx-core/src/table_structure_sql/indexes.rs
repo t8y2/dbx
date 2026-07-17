@@ -2,6 +2,7 @@ use super::comments::build_sqlserver_index_comment_sql;
 use super::dialect::{capabilities_for, database_label, database_type_for_dialect, dialect_label, StructureDialect};
 use super::types::{EditableStructureIndex, TableStructureSqlOptions};
 use super::util::{clean, qualified_table, quote_ident, quote_string};
+use crate::models::connection::DatabaseType;
 
 pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut Vec<String>) -> Vec<String> {
     let capabilities = capabilities_for(options.database_type);
@@ -23,7 +24,13 @@ pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut
                 warnings.push(format!("Primary index \"{}\" cannot be dropped from this editor.", original.name));
                 continue;
             }
-            statements.push(build_drop_index_sql(dialect, &table, options.schema.as_deref(), &original.name));
+            statements.push(build_drop_index_sql(
+                options.database_type,
+                dialect,
+                &table,
+                options.schema.as_deref(),
+                &original.name,
+            ));
             continue;
         }
 
@@ -40,7 +47,13 @@ pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut
                 warnings.push(format!("Primary index \"{}\" cannot be edited from this editor.", original.name));
                 continue;
             }
-            statements.push(build_drop_index_sql(dialect, &table, options.schema.as_deref(), &original.name));
+            statements.push(build_drop_index_sql(
+                options.database_type,
+                dialect,
+                &table,
+                options.schema.as_deref(),
+                &original.name,
+            ));
             statements.extend(build_create_index_statements(
                 dialect,
                 &table,
@@ -104,16 +117,22 @@ pub(super) fn mysql_index_parts(index_type: &str) -> (String, String) {
 }
 
 pub(super) fn build_drop_index_sql(
+    database_type: Option<DatabaseType>,
     dialect: StructureDialect,
     table: &str,
     schema: Option<&str>,
     index_name: &str,
 ) -> String {
+    if database_type == Some(DatabaseType::Iris) {
+        return format!("DROP INDEX {} ON TABLE {table};", quote_ident(dialect, index_name));
+    }
     if matches!(dialect, StructureDialect::Mysql | StructureDialect::SqlServer) {
         return format!("DROP INDEX {} ON {table};", quote_ident(dialect, index_name));
     }
-    if matches!(dialect, StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::Informix)
-        && schema.is_some_and(|schema| !schema.trim().is_empty())
+    if matches!(
+        dialect,
+        StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::Dameng | StructureDialect::Informix
+    ) && schema.is_some_and(|schema| !schema.trim().is_empty())
     {
         return format!("DROP INDEX {}.{};", quote_ident(dialect, schema.unwrap()), quote_ident(dialect, index_name));
     }
@@ -151,7 +170,9 @@ pub(super) fn build_create_index_statements(
                 type_prefix = prefix;
                 using_clause = using;
             }
-            StructureDialect::Oracle if idx_type == "BITMAP" => type_prefix = "BITMAP ".to_string(),
+            StructureDialect::Oracle | StructureDialect::Dameng if idx_type == "BITMAP" => {
+                type_prefix = "BITMAP ".to_string()
+            }
             _ => {}
         }
     }

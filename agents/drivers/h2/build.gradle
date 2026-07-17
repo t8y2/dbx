@@ -1,0 +1,10 @@
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation 'com.h2database:h2:2.3.232'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': 'H2', 'Main-Class': 'com.dbx.agent.h2.H2Agent')
+    }
+}

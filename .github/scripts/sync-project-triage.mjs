@@ -290,6 +290,12 @@ async function syncIssue(projectConfig, number) {
   );
 
   if (!projectItem) {
+    // 只有被 assign 的 issue 才进入 project 看板；未分配的留在 issue 列表，
+    // 等 assigned 事件触发后再纳入。已在 project 里的 issue 仍随 label/assign 变化同步。
+    if (issue.assignees.nodes.length === 0) {
+      console.log(`Issue #${issue.number} has no assignee, skip adding to project`);
+      return;
+    }
     const itemId = await addItemToProject(projectConfig.id, issue.id);
     projectItem = {
       id: itemId,

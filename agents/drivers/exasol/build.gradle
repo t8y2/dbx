@@ -1,0 +1,10 @@
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation 'com.exasol:exasol-jdbc:26.2.7'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': 'Exasol', 'Main-Class': 'com.dbx.agent.exasol.ExasolAgent')
+    }
+}

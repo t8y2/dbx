@@ -1,0 +1,10 @@
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation 'com.teradata.jdbc:terajdbc:20.00.00.56'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': 'Teradata', 'Main-Class': 'com.dbx.agent.teradata.TeradataAgent')
+    }
+}

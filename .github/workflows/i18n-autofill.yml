@@ -1,0 +1,156 @@
+name: I18n Autofill
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "apps/desktop/src/i18n/locales/**"
+      - ".github/scripts/i18n-autofill.mjs"
+      - ".github/workflows/i18n-autofill.yml"
+
+permissions:
+  contents: write
+  issues: write
+  # 需要 write 才能通过 gh pr comment (addComment) 在 PR 上发评论；
+  # 之前是 read，导致 autofill 成功 push 了翻译 commit 却无法发评论告知作者
+  pull-requests: write
+
+concurrency:
+  group: i18n-autofill-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  autofill:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout trusted base script
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+
+      - name: Copy trusted script
+        run: cp .github/scripts/i18n-autofill.mjs "$RUNNER_TEMP/i18n-autofill.mjs"
+
+      - name: Checkout pull request branch
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          token: ${{ secrets.I18N_BOT_TOKEN || secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Fetch base branch
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git remote add base "https://github.com/${{ github.repository }}.git"
+          git fetch --no-tags --depth=1 base "${BASE_REF}"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+
+      - name: Autofill missing i18n entries
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DEEPSEEK_MODEL: ${{ vars.DEEPSEEK_MODEL || 'deepseek-v4-pro' }}
+          I18N_BASE_REF: base/${{ github.event.pull_request.base.ref }}
+          I18N_SUMMARY_FILE: ${{ runner.temp }}/i18n-summary.json
+        run: node "$RUNNER_TEMP/i18n-autofill.mjs" --write
+
+      - name: Commit and push translation patch
+        id: patch
+        env:
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          if git diff --quiet -- apps/desktop/src/i18n/locales; then
+            echo "No i18n autofill changes to commit"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git config user.name "dbx-i18n-bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add apps/desktop/src/i18n/locales
+          git commit -m "chore(i18n): autofill new translations"
+          if git push origin "HEAD:${PR_HEAD_REF}"; then
+            echo "push_failed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "push_failed=true" >> "$GITHUB_OUTPUT"
+            git diff HEAD~1 HEAD -- apps/desktop/src/i18n/locales > "$RUNNER_TEMP/i18n-autofill.patch"
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Comment autofill result
+        if: steps.patch.outputs.changed == 'true' && steps.patch.outputs.push_failed != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.I18N_BOT_TOKEN || secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          SUMMARY_FILE: ${{ runner.temp }}/i18n-summary.json
+          BODY_FILE: ${{ runner.temp }}/i18n-autofill-comment.md
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+
+          const summary = JSON.parse(fs.readFileSync(process.env.SUMMARY_FILE, "utf8"));
+          const keyCount = summary.newKeys.length;
+          const localeRows = summary.updatedLocales
+            .map(({ locale, count }) => `| \`${locale}\` | ${count} |`)
+            .join("\n");
+          const body = [
+            "### 🌐 I18n autofill completed",
+            "",
+            `✅ Added translations for **${keyCount}** new \`${summary.sourceLocale}\` i18n ${keyCount === 1 ? "key" : "keys"}.`,
+            "",
+            "| Locale | Added entries |",
+            "| --- | ---: |",
+            localeRows,
+          ].join("\n");
+
+          fs.writeFileSync(process.env.BODY_FILE, `${body}\n`);
+          NODE
+
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$BODY_FILE"
+
+      - name: Comment push failure
+        if: steps.patch.outputs.changed == 'true' && steps.patch.outputs.push_failed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.I18N_BOT_TOKEN || secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          SUMMARY_FILE: ${{ runner.temp }}/i18n-summary.json
+          PATCH_FILE: ${{ runner.temp }}/i18n-autofill.patch
+          BODY_FILE: ${{ runner.temp }}/i18n-autofill-push-failed.md
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+
+          const summary = JSON.parse(fs.readFileSync(process.env.SUMMARY_FILE, "utf8"));
+          const patch = fs.readFileSync(process.env.PATCH_FILE, "utf8");
+          const keyCount = summary.newKeys.length;
+          const localeRows = summary.updatedLocales
+            .map(({ locale, count }) => `| \`${locale}\` | ${count} |`)
+            .join("\n");
+          const patchPreview = patch.length > 60000
+            ? `${patch.slice(0, 60000)}\n\n[Patch truncated in comment. Please check the workflow artifact/log for the full diff.]`
+            : patch;
+          const body = [
+            "### ⚠️ I18n autofill needs manual apply",
+            "",
+            `I generated translations for **${keyCount}** new \`${summary.sourceLocale}\` i18n ${keyCount === 1 ? "key" : "keys"}, but could not push a patch to this PR branch.`,
+            "",
+            "| Locale | Missing entries |",
+            "| --- | ---: |",
+            localeRows,
+            "",
+            "#### Patch preview",
+            "```diff",
+            patchPreview,
+            "```",
+          ].join("\n");
+
+          fs.writeFileSync(process.env.BODY_FILE, `${body}\n`);
+          NODE
+
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$BODY_FILE"

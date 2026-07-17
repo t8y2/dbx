@@ -13,7 +13,7 @@ jobs:
     env:
       REPO_OWNER: t8y2
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Submit to 1Panel App Store
         env:

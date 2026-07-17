@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::models::connection::DatabaseType;
-use crate::sql_dialect::{qualified_table_name, quote_table_identifier, uses_fetch_first};
+use crate::sql_dialect::{
+    firebird_rows_clause, pagination_strategy, qualified_table_name, quote_table_identifier, PaginationContext,
+    TablePaginationStrategy,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DatabaseSearchColumn {
@@ -107,15 +110,25 @@ pub fn build_database_search_sql(options: DatabaseSearchSqlOptions) -> Option<Da
     let searchable_columns =
         text_columns.iter().chain(numeric_columns.iter()).map(|column| column.name.clone()).collect();
 
-    let sql = if options.database_type == Some(DatabaseType::SqlServer) {
-        format!("SELECT TOP {limit} * FROM {table} WHERE ({where_clause})")
-    } else if options.database_type.is_some_and(uses_fetch_first) {
-        format!("SELECT * FROM {table} WHERE ({where_clause}) FETCH FIRST {limit} ROWS ONLY")
-    } else if options.database_type == Some(DatabaseType::Jdbc) {
-        // JDBC connections rely on Statement.setMaxRows() for row limiting.
-        format!("SELECT * FROM {table} WHERE ({where_clause});")
-    } else {
-        format!("SELECT * FROM {table} WHERE ({where_clause}) LIMIT {limit};")
+    let sql = match pagination_strategy(options.database_type, PaginationContext::BoundedRead) {
+        TablePaginationStrategy::SqlServerTop => format!("SELECT TOP {limit} * FROM {table} WHERE ({where_clause})"),
+        TablePaginationStrategy::IrisTop => format!("SELECT TOP {limit} * FROM {table} WHERE ({where_clause})"),
+        TablePaginationStrategy::InformixFirst => format!("SELECT FIRST {limit} * FROM {table} WHERE ({where_clause})"),
+        TablePaginationStrategy::FirebirdRows => {
+            let rows = firebird_rows_clause(limit, 0);
+            format!("SELECT * FROM {table} WHERE ({where_clause}) {rows}")
+        }
+        TablePaginationStrategy::Db2FetchFirst | TablePaginationStrategy::FetchFirst => {
+            format!("SELECT * FROM {table} WHERE ({where_clause}) FETCH FIRST {limit} ROWS ONLY")
+        }
+        TablePaginationStrategy::Rownum => {
+            format!("SELECT * FROM (SELECT * FROM {table} WHERE ({where_clause})) WHERE ROWNUM <= {limit}")
+        }
+        TablePaginationStrategy::AgentMaxRows => format!("SELECT * FROM {table} WHERE ({where_clause});"),
+        TablePaginationStrategy::QuestDbLimit | TablePaginationStrategy::LimitOffset => {
+            format!("SELECT * FROM {table} WHERE ({where_clause}) LIMIT {limit};")
+        }
+        TablePaginationStrategy::Unbounded => format!("SELECT * FROM {table} WHERE ({where_clause})"),
     };
 
     Some(DatabaseSearchSql { sql, searchable_columns })
@@ -220,7 +233,9 @@ fn text_cast_expression(database_type: Option<DatabaseType>, identifier: &str) -
     match database_type {
         Some(DatabaseType::Mysql) => format!("LOWER(CAST({identifier} AS CHAR))"),
         Some(DatabaseType::SqlServer) => format!("LOWER(CAST({identifier} AS NVARCHAR(MAX)))"),
-        Some(DatabaseType::Oracle) => format!("LOWER(CAST({identifier} AS VARCHAR2(4000)))"),
+        Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle) => {
+            format!("LOWER(CAST({identifier} AS VARCHAR2(4000)))")
+        }
         Some(DatabaseType::ClickHouse) => format!("lower(toString({identifier}))"),
         _ => format!("LOWER(CAST({identifier} AS TEXT))"),
     }
@@ -293,6 +308,25 @@ mod tests {
         assert_eq!(query.searchable_columns, vec!["note", "id"]);
         assert!(query.sql.contains("\"id\" = 42"));
         assert!(query.sql.contains("FROM \"public\".\"orders\""));
+    }
+
+    #[test]
+    fn builds_oceanbase_oracle_search_query_with_rownum_limit() {
+        let query = build_database_search_sql(DatabaseSearchSqlOptions {
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            schema: Some("APP".to_string()),
+            table_name: "USERS".to_string(),
+            columns: vec![col("NAME", "varchar2", false)],
+            term: "alice".to_string(),
+            limit: Some(20),
+        })
+        .unwrap();
+
+        assert_eq!(query.searchable_columns, vec!["NAME"]);
+        assert_eq!(
+            query.sql,
+            "SELECT * FROM (SELECT * FROM \"APP\".\"USERS\" WHERE (LOWER(CAST(\"NAME\" AS VARCHAR2(4000))) LIKE '%alice%' ESCAPE '~')) WHERE ROWNUM <= 20"
+        );
     }
 
     #[test]

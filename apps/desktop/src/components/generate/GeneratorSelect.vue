@@ -4,7 +4,7 @@ import { useI18n } from "vue-i18n";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
 import { ChevronRight, Check } from "@lucide/vue";
-import { GeneratorHierarchy, getGeneratorCategoryAndLabel, type GeneratorNode } from "@/lib/dataGenerate";
+import { GeneratorHierarchy, getGeneratorCategoryAndLabel, type GeneratorNode } from "@/lib/dataGrid/dataGenerate";
 
 const { t } = useI18n();
 const modelValue = defineModel<string | undefined>({ required: false });

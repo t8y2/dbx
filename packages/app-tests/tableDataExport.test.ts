@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { fetchTableDataForExport, TABLE_DATA_EXPORT_PAGE_SIZE } from "../../apps/desktop/src/lib/tableDataExport.ts";
+import { fetchTableDataForExport, TABLE_DATA_EXPORT_PAGE_SIZE } from "../../apps/desktop/src/lib/table/tableDataExport.ts";
 import type { QueryResult } from "../../apps/desktop/src/types/database.ts";
 
 function result(rows: QueryResult["rows"]): QueryResult {

@@ -1,0 +1,13 @@
+dependencies {
+    implementation 'com.google.code.gson:gson:2.12.1'
+    implementation 'org.apache.curator:curator-framework:5.9.0'
+    runtimeOnly 'org.slf4j:slf4j-simple:1.7.36'
+    testImplementation 'org.apache.curator:curator-test:5.9.0'
+}
+
+tasks.named('shadowJar') {
+    mergeServiceFiles()
+    manifest {
+        attributes('Agent-Label': 'Apache ZooKeeper', 'Main-Class': 'com.dbx.agent.zookeeper.ZooKeeperAgent')
+    }
+}

@@ -1,0 +1,54 @@
+plugins {
+    id 'com.gradleup.shadow' version '9.0.0-beta12' apply false
+}
+
+def java8Projects = ['common', 'test-support'] as Set
+def infrastructureProjects = ['common', 'test-support'] as Set
+def legacyStandaloneProjects = ['mongodb', 'kafka'] as Set
+def agentProjects = subprojects.findAll { !infrastructureProjects.contains(it.name) }
+def jdbcAgentProjects = agentProjects.findAll { !legacyStandaloneProjects.contains(it.name) }
+
+allprojects {
+    repositories {
+        mavenCentral()
+    }
+}
+
+subprojects {
+    if (name == 'test-support') {
+        apply plugin: 'java-library'
+    } else {
+        apply plugin: 'java'
+    }
+
+    java {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(java8Projects.contains(name) ? 8 : 21)
+        }
+    }
+
+    dependencies {
+        testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+        testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.11.4'
+    }
+
+    tasks.withType(Test).configureEach {
+        useJUnitPlatform()
+    }
+}
+
+configure(agentProjects) {
+    apply plugin: 'com.gradleup.shadow'
+
+    tasks.named('shadowJar') {
+        archiveBaseName = "dbx-agent-${project.name}"
+        archiveClassifier = ''
+    }
+}
+
+configure(jdbcAgentProjects) {
+    dependencies {
+        implementation project(':common')
+        testImplementation project(':test-support')
+    }
+}

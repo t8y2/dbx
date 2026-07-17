@@ -1,0 +1,10 @@
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation 'com.vertica.jdbc:vertica-jdbc:25.3.0-0'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': 'Vertica', 'Main-Class': 'com.dbx.agent.vertica.VerticaAgent')
+    }
+}

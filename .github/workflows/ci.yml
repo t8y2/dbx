@@ -10,17 +10,22 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  RUSTFLAGS: -C debuginfo=line-tables-only
+
 jobs:
   frontend:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22.13.0
           cache: pnpm
@@ -42,16 +47,17 @@ jobs:
       - name: Node package publish dry run
         run: pnpm publish:dry-run
 
-  rust:
+  rust-fmt-clippy:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-22.04
+    env:
+      # sccache cannot reuse Cargo incremental artifacts, so avoid generating them in CI.
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/.ghcup || true
-          docker system prune -af || true
-          df -h
+      - uses: actions/checkout@v5
 
       - name: Install system dependencies
         run: |
@@ -61,13 +67,20 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: "v0.10.0"
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
           workspaces: "./ -> target"
-          shared-key: ci-x86_64-unknown-linux-gnu
+          shared-key: ci-rust-fmt-clippy-x86_64-unknown-linux-gnu
+          # Preserve completed dependency builds when a later lint step fails.
+          cache-on-failure: true
 
       - name: Cargo fmt check
         run: cargo fmt --check
@@ -75,18 +88,79 @@ jobs:
       - name: Cargo clippy
         run: cargo clippy --workspace --locked --all-targets
 
+      - name: Show sccache stats
+        if: always()
+        continue-on-error: true
+        run: ${SCCACHE_PATH} --show-stats
+
+  rust-test:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-22.04
+    env:
+      # sccache cannot reuse Cargo incremental artifacts, so avoid generating them in CI.
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: "v0.10.0"
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./ -> target"
+          shared-key: ci-rust-test-x86_64-unknown-linux-gnu
+          # Preserve completed dependency builds when a later test step fails.
+          cache-on-failure: true
+
       - name: Cargo test
         run: cargo test --workspace --locked
 
-  jdbc:
+      - name: Show sccache stats
+        if: always()
+        continue-on-error: true
+        run: ${SCCACHE_PATH} --show-stats
+
+  rust:
+    needs: [changes, rust-fmt-clippy, rust-test]
+    if: always() && needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - name: Check Rust jobs
+        run: |
+          if [ "${{ needs.rust-fmt-clippy.result }}" != "success" ]; then
+            echo "rust-fmt-clippy result: ${{ needs.rust-fmt-clippy.result }}"
+            exit 1
+          fi
+          if [ "${{ needs.rust-test.result }}" != "success" ]; then
+            echo "rust-test result: ${{ needs.rust-test.result }}"
+            exit 1
+          fi
+
+  jdbc:
+    needs: changes
+    if: needs.changes.outputs.jdbc == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -103,3 +177,94 @@ jobs:
 
       - name: JDBC plugin package check
         run: ./plugins/jdbc/package.sh
+
+  changes:
+    runs-on: ubuntu-22.04
+    outputs:
+      frontend: ${{ steps.filter.outputs.frontend }}
+      rust: ${{ steps.filter.outputs.rust }}
+      jdbc: ${{ steps.filter.outputs.jdbc }}
+      agents: ${{ steps.filter.outputs.agents }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed areas
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            frontend:
+              - 'apps/desktop/**'
+              - 'packages/**'
+              - 'pnpm-lock.yaml'
+              - 'package.json'
+              - '.oxfmtrc.json'
+              - 'scripts/run-check.mjs'
+              - '.github/workflows/ci.yml'
+            rust:
+              - 'crates/**'
+              - 'src-tauri/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain*'
+              - '.github/workflows/ci.yml'
+            jdbc:
+              - 'plugins/jdbc/**'
+            agents:
+              - 'agents/**'
+
+  agents:
+    needs: changes
+    if: needs.changes.outputs.agents == 'true'
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: agents
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: |
+            8
+            21
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Agent script tests
+        run: python3 -m unittest discover -s scripts -p '*_test.py'
+
+      - name: Agent validation
+        run: python3 scripts/validate_agents.py
+
+      - name: Oracle native agent tests
+        run: go test ./...
+        working-directory: agents/drivers/oracle-go
+
+      - name: Xugu native agent tests
+        run: GONOSUMDB=gitee.com/XuguDB/go-xugu-driver go test ./...
+        working-directory: agents/drivers/xugu
+
+      - name: Oracle native agent build
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-oracle-linux-x64 .
+        working-directory: agents/drivers/oracle-go
+
+      - name: Xugu native agent build
+        run: GONOSUMDB=gitee.com/XuguDB/go-xugu-driver CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-xugu-linux-x64 .
+        working-directory: agents/drivers/xugu
+
+      - name: Java agent tests and packages
+        run: ./gradlew test shadowJar --continue
+
+      - name: Agent jar validation
+        run: python3 scripts/validate_agent_jars.py

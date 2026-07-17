@@ -4,6 +4,7 @@ use dbx_core::database_capabilities::{
 };
 use dbx_core::models::connection::DatabaseType;
 use serde::Deserialize;
+use std::collections::HashSet;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -81,7 +82,6 @@ impl DriverProductCapabilities {
 #[serde(rename_all = "camelCase")]
 struct DriverProfileEntry {
     profile: String,
-    label: String,
     agent_key: String,
 }
 
@@ -112,9 +112,25 @@ fn maps_agent_database_types_to_driver_keys() {
     assert_eq!(agent_key(&DatabaseType::Oracle, None), Some("oracle"));
     assert_eq!(agent_key(&DatabaseType::Databend, None), Some("databend"));
     assert_eq!(agent_key(&DatabaseType::InfluxDb, None), Some("influxdb"));
+    assert_eq!(agent_key(&DatabaseType::ZooKeeper, None), Some("zookeeper"));
     assert_eq!(agent_key(&DatabaseType::Oracle, Some("oracle-legacy")), Some("oracle"));
     assert_eq!(agent_key(&DatabaseType::Oracle, Some("oracle-10g")), Some("oracle"));
+    assert_eq!(agent_key(&DatabaseType::SqlServer, Some("sqlserver-legacy")), Some("sqlserver-legacy"));
+    assert_eq!(agent_key(&DatabaseType::SqlServer, None), None);
     assert_eq!(agent_key(&DatabaseType::Postgres, None), None);
+}
+
+#[test]
+fn driver_store_entries_do_not_repeat_agent_keys() {
+    let entries: Vec<_> = agent_catalog::driver_store_entries().collect();
+    let mut seen = HashSet::new();
+    let duplicate_keys: Vec<_> = entries.iter().map(|(key, _)| *key).filter(|key| !seen.insert(*key)).collect();
+
+    assert!(duplicate_keys.is_empty(), "driver store agent keys should be unique: {duplicate_keys:?}");
+    assert_eq!(entries.iter().filter(|(key, _)| *key == "gbase8a").count(), 1);
+    assert_eq!(entries.iter().filter(|(key, _)| *key == "gbase8s").count(), 1);
+    assert_eq!(entries.iter().filter(|(key, _)| *key == "sqlserver-legacy").count(), 1);
+    assert_eq!(agent_catalog::label_for_key("sqlserver-legacy"), Some("SQL Server legacy compatibility component"));
 }
 
 #[test]
@@ -136,6 +152,7 @@ fn classifies_agent_database_types() {
     assert!(is_agent_type(&DatabaseType::Access));
     assert!(is_agent_type(&DatabaseType::Databend));
     assert!(is_agent_type(&DatabaseType::InfluxDb));
+    assert!(is_agent_type(&DatabaseType::ZooKeeper));
     assert!(!is_agent_type(&DatabaseType::Mysql));
     assert!(!is_agent_type(&DatabaseType::Jdbc));
     assert!(!is_agent_type(&DatabaseType::Gaussdb));
@@ -188,6 +205,8 @@ fn skips_tcp_probe_for_local_file_plugin_and_agent_types() {
     assert!(skips_tcp_probe(&DatabaseType::Gbase));
     assert!(skips_tcp_probe(&DatabaseType::Databend));
     assert!(skips_tcp_probe(&DatabaseType::InfluxDb));
+    assert!(skips_tcp_probe(&DatabaseType::MessageQueue));
+    assert!(skips_tcp_probe(&DatabaseType::ZooKeeper));
     assert!(!skips_tcp_probe(&DatabaseType::Postgres));
     assert!(!skips_tcp_probe(&DatabaseType::Mysql));
     assert!(!skips_tcp_probe(&DatabaseType::Gaussdb));
@@ -202,6 +221,10 @@ fn driver_manifest_matches_core_database_capabilities() {
     let support_levels = ["connect", "browse", "understand", "operate"];
 
     for driver in &manifest.drivers {
+        // MQ is a message queue, not a database — skip database capability checks
+        if driver.db_type == DatabaseType::MessageQueue {
+            continue;
+        }
         assert!(
             support_levels.contains(&driver.support_level.as_str()),
             "invalid support level for {:?}",
@@ -293,4 +316,29 @@ fn driver_manifest_declares_expected_product_capabilities() {
     assert_eq!(redis.support_level, "connect");
     assert!(!redis.capabilities.object_browser);
     assert!(!redis.capabilities.sql_file_execution);
+
+    let zookeeper = find_driver(DatabaseType::ZooKeeper);
+    assert_eq!(zookeeper.label, "Apache ZooKeeper");
+    assert_eq!(zookeeper.runtime_mode, "agent");
+    assert_eq!(zookeeper.agent_key.as_deref(), Some("zookeeper"));
+    assert_eq!(zookeeper.support_level, "connect");
+    assert!(zookeeper.capabilities.query_execution);
+    assert!(zookeeper.capabilities.driver_management);
+    assert!(!zookeeper.capabilities.metadata_browse);
+
+    let starrocks = find_driver(DatabaseType::StarRocks);
+    assert!(starrocks.capabilities.user_admin);
+}
+
+#[test]
+fn kingbase_declares_data_transfer_support() {
+    let manifest = driver_manifest();
+    let kingbase = manifest
+        .drivers
+        .iter()
+        .find(|driver| driver.db_type == DatabaseType::Kingbase)
+        .expect("Kingbase manifest entry");
+
+    assert!(kingbase.capabilities.table_import);
+    assert!(kingbase.capabilities.data_transfer);
 }

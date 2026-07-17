@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { matchSidebarLabel } from "../../apps/desktop/src/lib/sidebarSearch.ts";
+import { matchSidebarLabel } from "../../apps/desktop/src/lib/sidebar/sidebarSearch.ts";
 
 test("matches exact and prefix labels first", () => {
   assert.equal(matchSidebarLabel("orders", "orders")?.kind, "exact");

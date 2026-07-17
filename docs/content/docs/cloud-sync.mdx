@@ -1,0 +1,122 @@
+---
+title: Cloud Sync and Backup
+description: Sync DBX connections, settings, and saved SQL with WebDAV, GitHub Gist, or Gitee snippets.
+---
+
+<Callout type="info">
+DBX can package connections, application settings, and saved SQL into a snapshot, upload it to WebDAV or a private code snippet, and restore it on another device.
+</Callout>
+
+Choose a provider under **Settings → Sync**:
+
+- **WebDAV**: Best when you already use a NAS, Nextcloud, or another WebDAV service. Supports scheduled uploads.
+- **GitHub / Gitee snippets**: Stores the snapshot in a private Gist or code snippet without requiring your own server. Uploads and downloads are currently manual.
+
+## What Is Synchronized
+
+| Item | Default behavior |
+| --- | --- |
+| Database connections and non-secret options | Synchronized |
+| Sidebar layout and pinned nodes | Synchronized |
+| Saved SQL library | Synchronized |
+| Desktop and editor settings | Synchronized |
+| Database, SSH, proxy, HTTP tunnel, connection string, and AI API secrets | Excluded by default; can be encrypted and synchronized |
+| JDBC drivers, plugins, and local files | Not synchronized |
+
+<Callout type="warn">
+Downloading replaces local connection metadata and saved SQL with the remote snapshot. Verify the snippet ID or WebDAV path before restoring.
+</Callout>
+
+## GitHub Gist
+
+### Create an Access Token
+
+A GitHub **fine-grained personal access token** is recommended:
+
+[Open the GitHub fine-grained token creation page](https://github.com/settings/personal-access-tokens/new)
+
+<Steps>
+  <Step>### Open token settings Sign in to GitHub and open **Settings → Developer settings → Personal access tokens → Fine-grained tokens**.</Step>
+  <Step>### Create a token Select **Generate new token**, then set a name and expiration.</Step>
+  <Step>### Grant permission Under **Account permissions**, set **Gists** to **Read and write**. Repository permissions are not required.</Step>
+  <Step>### Save the token Copy the token immediately. GitHub only displays the complete token once.</Step>
+</Steps>
+
+A classic token also works, but grant only the `gist` scope.
+
+### First Upload
+
+<Steps>
+  <Step>### Select GitHub Open **Settings → Sync → GitHub / Gitee** and select **GitHub Gist**.</Step>
+  <Step>### Enter the token Paste the access token. Enabling **Store encrypted on this device** is recommended.</Step>
+  <Step>### Create the Gist Leave **Snippet ID** empty and select **Upload**. DBX creates a private Gist and stores the returned ID.</Step>
+</Steps>
+
+DBX stores the snapshot as `dbx-sync.json`. Later uploads update the same Gist, and GitHub keeps its revision history.
+
+### Restore on Another Device
+
+1. Open the private Gist and copy its ID from the URL. The URL normally looks like `https://gist.github.com/<actual-username>/<gist-id>`, where the final segment is the ID. You can also open `https://gist.github.com/<gist-id>` and let GitHub redirect to the URL containing the actual username.
+2. Enter the same GitHub token and Gist ID on the new device.
+3. Select **Test** to verify access.
+4. Select **Download** and confirm the restore.
+
+## Gitee Snippets
+
+### Create a Personal Access Token
+
+[Open the Gitee personal access token page](https://gitee.com/profile/personal_access_tokens)
+
+<Steps>
+  <Step>### Open token settings Sign in to Gitee and open **Settings → Personal Access Tokens**.</Step>
+  <Step>### Create a token Select **Generate new token** and enter a description.</Step>
+  <Step>### Grant permission Select only the code snippet (`gists`) permission. If permissions are grouped, choose the smallest permission that allows reading and writing snippets.</Step>
+  <Step>### Save the token Copy the generated token immediately and store it in a password manager.</Step>
+</Steps>
+
+### Upload and Restore
+
+1. Select **Gitee Snippet** under **Settings → Sync → GitHub / Gitee**.
+2. Enter the personal access token. Leave the snippet ID empty on the first upload; DBX creates a private snippet and stores its ID.
+3. To restore elsewhere, enter the same snippet ID and select **Download**.
+
+Gitee snippets also use a `dbx-sync.json` file.
+
+## Synchronizing Secrets
+
+Snapshots exclude credentials by default. To restore passwords on another device:
+
+1. Enable **Synchronize encrypted secrets**.
+2. Enter a separate **sync passphrase**.
+3. Upload the snapshot.
+4. Enter the same passphrase when downloading on another device.
+
+DBX derives the encryption key with **Argon2id** and encrypts secrets using **AES-256-GCM**. Provider access tokens are encrypted with a device-local key and are never written to `dbx-sync.json`.
+
+<Callout type="warn">
+The sync passphrase cannot be recovered. Without it, DBX can still restore non-secret connection settings and saved SQL, but not the encrypted secrets.
+</Callout>
+
+## WebDAV
+
+Enter the WebDAV endpoint, username, application password, and remote snapshot path. The default path is `DBX/sync/snapshot.json`.
+
+WebDAV supports scheduled uploads while DBX is running. Downloads always require confirmation to prevent accidental replacement of local data.
+
+## Troubleshooting
+
+### HTTP 401 or 403
+
+The token is invalid, expired, or missing snippet read/write permission. Create a new least-privilege token and test again.
+
+### HTTP 404
+
+The snippet ID is incorrect, or the current token cannot access the private snippet.
+
+### Where is the ID after the first upload?
+
+DBX stores it automatically. You can also find it in the URL of the GitHub Gist or Gitee snippet page.
+
+### Can multiple devices synchronize automatically?
+
+Snippet synchronization currently uses manual upload and download and does not merge concurrent changes. Download the latest snapshot before uploading to avoid replacing changes from another device.

@@ -1,0 +1,9 @@
+dependencies {
+    implementation 'com.databend:databend-jdbc:0.4.6'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': 'Databend', 'Main-Class': 'com.dbx.agent.databend.DatabendAgent')
+    }
+}

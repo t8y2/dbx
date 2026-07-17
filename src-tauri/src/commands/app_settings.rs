@@ -4,16 +4,20 @@ use std::{
 };
 
 use dbx_core::storage::DesktopSettings;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager, State, Window};
 
 use super::connection::AppState;
-use crate::{apply_debug_log_level, apply_desktop_settings};
+use crate::{
+    apply_debug_log_level, apply_desktop_settings, hide_main_window_for_close, request_app_close, CloseBehaviorState,
+};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DriverStoreMigrationResult {
     pub driver_store_dir: Option<String>,
     pub plugin_store_dir: Option<String>,
     pub agent_store_dir: Option<String>,
+    pub plugins_dir: String,
+    pub agents_dir: String,
     pub migrated_plugins: bool,
     pub migrated_agents: bool,
 }
@@ -30,10 +34,34 @@ pub async fn save_desktop_settings(
     settings: DesktopSettings,
 ) -> Result<(), String> {
     state.storage.save_desktop_settings(&settings).await?;
+    state.apply_duckdb_worker_process_isolation(settings.duckdb_worker_process_isolation).await;
     apply_debug_log_level(settings.debug_logging_enabled);
     if let Err(err) = apply_desktop_settings(&app, &settings) {
         eprintln!("Failed to apply desktop settings: {err}");
     }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn complete_app_close(app: AppHandle, window: Window, action: String) -> Result<(), String> {
+    match action.as_str() {
+        "quit" => {
+            if let Some(state) = app.try_state::<CloseBehaviorState>() {
+                state.allow_next_exit();
+            }
+            app.exit(0);
+        }
+        "hide" => {
+            hide_main_window_for_close(&app, &window);
+        }
+        _ => return Err(format!("unsupported close action: {action}")),
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn request_app_close_from_window_controls(app: AppHandle) -> Result<(), String> {
+    request_app_close(&app, "settings");
     Ok(())
 }
 
@@ -45,6 +73,41 @@ pub async fn load_pinned_tree_node_ids(state: State<'_, Arc<AppState>>) -> Resul
 #[tauri::command]
 pub async fn save_pinned_tree_node_ids(state: State<'_, Arc<AppState>>, ids: Vec<String>) -> Result<(), String> {
     state.storage.save_pinned_tree_node_ids(&ids).await
+}
+
+#[tauri::command]
+pub async fn load_editor_settings(state: State<'_, Arc<AppState>>) -> Result<Option<serde_json::Value>, String> {
+    state.storage.load_editor_settings().await
+}
+
+#[tauri::command]
+pub async fn save_editor_settings(state: State<'_, Arc<AppState>>, settings: serde_json::Value) -> Result<(), String> {
+    state.storage.save_editor_settings(&settings).await
+}
+
+#[tauri::command]
+pub async fn load_open_tabs_state(state: State<'_, Arc<AppState>>) -> Result<Option<serde_json::Value>, String> {
+    state.storage.load_open_tabs_state().await
+}
+
+#[tauri::command]
+pub async fn save_open_tabs_state(state: State<'_, Arc<AppState>>, payload: serde_json::Value) -> Result<(), String> {
+    state.storage.save_open_tabs_state(&payload).await
+}
+
+#[tauri::command]
+pub async fn load_saved_sql_editor_positions(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<serde_json::Value>, String> {
+    state.storage.load_saved_sql_editor_positions().await
+}
+
+#[tauri::command]
+pub async fn save_saved_sql_editor_positions(
+    state: State<'_, Arc<AppState>>,
+    positions: serde_json::Value,
+) -> Result<(), String> {
+    state.storage.save_saved_sql_editor_positions(&positions).await
 }
 
 #[tauri::command]
@@ -103,7 +166,13 @@ pub async fn set_driver_store_dir(
     settings.agent_store_dir = None;
     state.storage.save_desktop_settings(&settings).await?;
 
-    Ok(driver_store_migration_result(settings, migrated_plugins, migrated_agents))
+    Ok(driver_store_migration_result(
+        settings,
+        &target_plugins_dir,
+        &target_agents_dir,
+        migrated_plugins,
+        migrated_agents,
+    ))
 }
 
 #[tauri::command]
@@ -127,7 +196,7 @@ pub async fn set_plugin_store_dir(
     settings.plugin_store_dir = new_dir;
     state.storage.save_desktop_settings(&settings).await?;
 
-    Ok(driver_store_migration_result(settings, migrated_plugins, false))
+    Ok(driver_store_migration_result(settings, &target_plugins_dir, &current_agents_dir, migrated_plugins, false))
 }
 
 #[tauri::command]
@@ -152,7 +221,7 @@ pub async fn set_agent_store_dir(
     settings.agent_store_dir = new_dir;
     state.storage.save_desktop_settings(&settings).await?;
 
-    Ok(driver_store_migration_result(settings, false, migrated_agents))
+    Ok(driver_store_migration_result(settings, &current_plugins_dir, &target_agents_dir, false, migrated_agents))
 }
 
 fn normalize_store_dir(dir: Option<String>) -> Option<String> {
@@ -168,17 +237,42 @@ fn default_store_dirs(app: &AppHandle) -> Result<(PathBuf, PathBuf), String> {
 
 fn default_plugin_store_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let default_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    Ok(crate::data_dir::resolve_data_dir(default_data_dir).join("plugins"))
+    Ok(crate::data_dir::resolve_data_dir_with_mode(default_data_dir).data_dir.join("plugins"))
 }
 
 fn default_agent_store_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let default_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let data_dir = crate::data_dir::resolve_data_dir(default_data_dir);
-    Ok(if crate::data_dir::uses_custom_data_dir() {
-        data_dir.join("agents")
+    let data_dir_resolution = crate::data_dir::resolve_data_dir_with_mode(default_data_dir);
+    Ok(if data_dir_resolution.uses_custom_data_dir() {
+        data_dir_resolution.data_dir.join("agents")
     } else {
         dbx_core::connection::default_agent_dir()
     })
+}
+
+pub(crate) fn resolve_driver_store_dirs_from_settings(
+    settings: &DesktopSettings,
+    data_dir: &Path,
+    default_agent_dir: Option<PathBuf>,
+) -> (PathBuf, Option<PathBuf>) {
+    let legacy_driver_base =
+        settings.driver_store_dir.as_ref().filter(|value| !value.trim().is_empty()).map(PathBuf::from);
+    let plugin_dir = settings
+        .plugin_store_dir
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| legacy_driver_base.as_ref().map(|base| base.join("plugins")))
+        .unwrap_or_else(|| data_dir.join("plugins"));
+    let agent_dir = settings
+        .agent_store_dir
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| legacy_driver_base.as_ref().map(|base| base.join("agents")))
+        .or(default_agent_dir);
+
+    (plugin_dir, agent_dir)
 }
 
 fn convert_legacy_driver_store(settings: &mut DesktopSettings, current_plugins_dir: &Path, current_agents_dir: &Path) {
@@ -196,6 +290,8 @@ fn convert_legacy_driver_store(settings: &mut DesktopSettings, current_plugins_d
 
 fn driver_store_migration_result(
     settings: DesktopSettings,
+    plugins_dir: &Path,
+    agents_dir: &Path,
     migrated_plugins: bool,
     migrated_agents: bool,
 ) -> DriverStoreMigrationResult {
@@ -203,6 +299,8 @@ fn driver_store_migration_result(
         driver_store_dir: settings.driver_store_dir,
         plugin_store_dir: settings.plugin_store_dir,
         agent_store_dir: settings.agent_store_dir,
+        plugins_dir: plugins_dir.to_string_lossy().to_string(),
+        agents_dir: agents_dir.to_string_lossy().to_string(),
         migrated_plugins,
         migrated_agents,
     }
@@ -351,4 +449,78 @@ fn load_native_debug_logs_from_dir(log_dir: PathBuf) -> Result<String, String> {
         output.push('\n');
     }
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{driver_store_migration_result, resolve_driver_store_dirs_from_settings, DesktopSettings};
+    use std::path::PathBuf;
+
+    #[test]
+    fn plugin_store_result_uses_selected_directory_without_agent_prefix() {
+        let settings = DesktopSettings {
+            plugin_store_dir: Some(path("D:/develop/DBX")),
+            agent_store_dir: Some(path("D:/develop/DBX/agents")),
+            ..Default::default()
+        };
+        let plugins_dir = PathBuf::from(path("D:/develop/DBX"));
+        let agents_dir = PathBuf::from(path("D:/develop/DBX/agents"));
+
+        let result = driver_store_migration_result(settings, &plugins_dir, &agents_dir, true, false);
+
+        assert_eq!(result.plugin_store_dir.as_deref(), Some(path("D:/develop/DBX").as_str()));
+        assert_eq!(result.plugins_dir, path("D:/develop/DBX"));
+        assert_eq!(result.agents_dir, path("D:/develop/DBX/agents"));
+        assert!(!result.plugins_dir.contains(&path("agents/com.dbx.app/plugins")));
+    }
+
+    #[test]
+    fn legacy_driver_store_result_keeps_plugins_and_agents_as_siblings() {
+        let settings = DesktopSettings { driver_store_dir: Some(path("D:/develop/DBX")), ..Default::default() };
+        let plugins_dir = PathBuf::from(path("D:/develop/DBX/plugins"));
+        let agents_dir = PathBuf::from(path("D:/develop/DBX/agents"));
+
+        let result = driver_store_migration_result(settings, &plugins_dir, &agents_dir, true, true);
+
+        assert_eq!(result.driver_store_dir.as_deref(), Some(path("D:/develop/DBX").as_str()));
+        assert_eq!(result.plugins_dir, path("D:/develop/DBX/plugins"));
+        assert_eq!(result.agents_dir, path("D:/develop/DBX/agents"));
+    }
+
+    #[test]
+    fn resolves_separate_plugin_store_dir_as_exact_selected_dir() {
+        let settings = DesktopSettings {
+            driver_store_dir: Some(path("D:/legacy-base")),
+            plugin_store_dir: Some(path("D:/develop/DBX")),
+            agent_store_dir: Some(path("D:/develop/DBX/agents")),
+            ..Default::default()
+        };
+
+        let (plugins_dir, agents_dir) = resolve_driver_store_dirs_from_settings(
+            &settings,
+            &PathBuf::from(path("C:/Users/lenovo/AppData/Roaming/com.dbx.app")),
+            Some(PathBuf::from(path("C:/Users/lenovo/.dbx/agents"))),
+        );
+
+        assert_eq!(plugins_dir, PathBuf::from(path("D:/develop/DBX")));
+        assert_eq!(agents_dir, Some(PathBuf::from(path("D:/develop/DBX/agents"))));
+    }
+
+    #[test]
+    fn resolves_legacy_driver_store_dir_to_sibling_plugins_and_agents() {
+        let settings = DesktopSettings { driver_store_dir: Some(path("D:/develop/DBX")), ..Default::default() };
+
+        let (plugins_dir, agents_dir) = resolve_driver_store_dirs_from_settings(
+            &settings,
+            &PathBuf::from(path("C:/Users/lenovo/AppData/Roaming/com.dbx.app")),
+            Some(PathBuf::from(path("C:/Users/lenovo/.dbx/agents"))),
+        );
+
+        assert_eq!(plugins_dir, PathBuf::from(path("D:/develop/DBX/plugins")));
+        assert_eq!(agents_dir, Some(PathBuf::from(path("D:/develop/DBX/agents"))));
+    }
+
+    fn path(value: &str) -> String {
+        value.replace('/', std::path::MAIN_SEPARATOR_STR)
+    }
 }

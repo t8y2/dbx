@@ -1,6 +1,6 @@
 import { createI18n } from "vue-i18n";
 import en from "./locales/en";
-import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/safeStorage";
+import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 
 export type Locale = "en" | "es" | "it" | "ja" | "pt-BR" | "zh-CN" | "zh-TW";
 type LocaleMessages = Record<string, unknown>;

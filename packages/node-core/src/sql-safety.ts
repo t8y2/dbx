@@ -1,7 +1,11 @@
+import { classifySqlStatementRisk, splitSqlStatementsForSafety, sqlSafetyText, type SqlTextOptions } from "./sql-risk.js";
+
 export interface SqlSafetyOptions {
   allowWrites?: boolean;
   allowDangerous?: boolean;
   allowMultipleStatements?: boolean;
+  /** Whether `#` starts a line comment (MySQL family only). Default: false. */
+  hashLineComments?: boolean;
 }
 
 export interface SqlSafetyDecision {
@@ -9,8 +13,7 @@ export interface SqlSafetyDecision {
   reason?: string;
 }
 
-const READ_KEYWORDS = new Set(["select", "with", "show", "describe", "desc", "explain"]);
-const DANGEROUS_KEYWORDS = new Set(["drop", "truncate", "alter"]);
+const DANGEROUS_RISKS = new Set(["ddl", "transaction", "unknown"]);
 
 function parseBooleanEnv(value: string | undefined): boolean | undefined {
   if (value === undefined) return undefined;
@@ -21,7 +24,7 @@ function parseBooleanEnv(value: string | undefined): boolean | undefined {
 }
 
 export function evaluateSqlSafety(sql: string, options: SqlSafetyOptions = {}): SqlSafetyDecision {
-  const statements = splitSqlStatements(sql);
+  const statements = splitSqlStatementsForSafety(sql, options);
   if (statements.length === 0) return { allowed: false, reason: "SQL is empty." };
   if (statements.length > 1 && !options.allowMultipleStatements) {
     return { allowed: false, reason: "Only one SQL statement is allowed per query." };
@@ -42,17 +45,15 @@ export function evaluateSqlSafety(sql: string, options: SqlSafetyOptions = {}): 
 }
 
 function evaluateSingleSqlStatementSafety(sql: string, options: SqlSafetyOptions = {}): SqlSafetyDecision {
-  const normalized = stripSqlCommentsAndStrings(sql).trim();
-  const firstKeyword = normalized.match(/^[a-zA-Z_]+/)?.[0]?.toLowerCase();
+  const assessment = classifySqlStatementRisk(sql);
+  const firstKeyword = assessment.firstKeyword;
   if (!firstKeyword) return { allowed: false, reason: "SQL statement is not recognized." };
 
-  const tokens: string[] = normalized.toLowerCase().match(/[a-z_]+/g) ?? [];
-  const dangerous = tokens.find((token) => DANGEROUS_KEYWORDS.has(token));
-  if (dangerous && !options.allowDangerous) {
-    return { allowed: false, reason: `Dangerous SQL keyword "${dangerous.toUpperCase()}" is blocked.` };
+  if (DANGEROUS_RISKS.has(assessment.risk) && !options.allowDangerous) {
+    return { allowed: false, reason: `Dangerous SQL or unrecognized SQL statement "${firstKeyword.toUpperCase()}" is blocked.` };
   }
 
-  if (!options.allowWrites && !READ_KEYWORDS.has(firstKeyword)) {
+  if (!options.allowWrites && assessment.risk !== "read") {
     return {
       allowed: false,
       reason: "MCP SQL execution is read-only for this session. Set DBX_MCP_ALLOW_WRITES=1 to allow write statements.",
@@ -60,6 +61,7 @@ function evaluateSingleSqlStatementSafety(sql: string, options: SqlSafetyOptions
   }
 
   if (options.allowWrites && !options.allowDangerous) {
+    const tokens: string[] = sqlSafetyText(sql, options).toLowerCase().match(/[a-z_]+/g) ?? [];
     if (firstKeyword === "update" && !tokens.includes("where")) {
       return { allowed: false, reason: "UPDATE statements must include a WHERE clause." };
     }
@@ -80,64 +82,108 @@ export function sqlSafetyFromEnv(env: NodeJS.ProcessEnv = process.env): SqlSafet
   };
 }
 
-export function splitSqlStatements(sql: string): string[] {
+export function splitSqlStatements(sql: string, options?: SqlTextOptions): string[] {
   const statements: string[] = [];
-  let current = "";
-  let quote: "'" | '"' | "`" | null = null;
-  let inLineComment = false;
-  let inBlockComment = false;
+  let statementStart = 0;
+  let index = 0;
+  let state: "none" | "single" | "double" | "backtick" | "bracket" | "lineComment" | "blockComment" | "dollar" = "none";
+  let dollarTag = "";
+  const hashLineComments = options?.hashLineComments === true;
 
-  for (let i = 0; i < sql.length; i++) {
-    const char = sql[i];
-    const next = sql[i + 1];
+  const pushStatement = (end: number) => {
+    const statement = sql.slice(statementStart, end).trim();
+    if (statement) statements.push(statement);
+  };
 
-    if (inLineComment) {
-      current += char;
-      if (char === "\n") inLineComment = false;
+  while (index < sql.length) {
+    const char = sql[index] ?? "";
+    const next = sql[index + 1] ?? "";
+
+    if (state === "lineComment") {
+      if (char === "\n" || char === "\r") state = "none";
+      index += 1;
       continue;
     }
-    if (inBlockComment) {
-      current += char;
+    if (state === "blockComment") {
       if (char === "*" && next === "/") {
-        current += next;
-        i++;
-        inBlockComment = false;
+        state = "none";
+        index += 2;
+      } else {
+        index += 1;
       }
       continue;
     }
-    if (quote) {
-      current += char;
+    if (state === "dollar") {
+      if (sql.startsWith(dollarTag, index)) {
+        index += dollarTag.length;
+        state = "none";
+      } else {
+        index += 1;
+      }
+      continue;
+    }
+    if (state === "single" || state === "double" || state === "backtick") {
+      const quote = state === "single" ? "'" : state === "double" ? '"' : "`";
       if (char === quote) {
         if (next === quote) {
-          current += next;
-          i++;
-        } else {
-          quote = null;
+          index += 2;
+          continue;
         }
+        state = "none";
+      } else if (char === "\\" && next) {
+        // Preserve dialects that accept backslash escapes without letting an escaped quote end the literal.
+        index += 2;
+        continue;
       }
+      index += 1;
+      continue;
+    }
+    if (state === "bracket") {
+      if (char === "]") {
+        if (next === "]") {
+          index += 2;
+          continue;
+        }
+        state = "none";
+      }
+      index += 1;
       continue;
     }
 
-    if (char === "-" && next === "-") inLineComment = true;
-    if (char === "/" && next === "*") inBlockComment = true;
-    if (char === "'" || char === '"' || char === "`") quote = char;
-
-    if (char === ";") {
-      if (current.trim()) statements.push(current.trim());
-      current = "";
-    } else {
-      current += char;
+    if (char === "-" && next === "-") {
+      state = "lineComment";
+      index += 2;
+      continue;
     }
+    if (hashLineComments && char === "#") {
+      state = "lineComment";
+      index += 1;
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      state = "blockComment";
+      index += 2;
+      continue;
+    }
+    if (char === "'") state = "single";
+    else if (char === '"') state = "double";
+    else if (char === "`") state = "backtick";
+    else if (char === "[") state = "bracket";
+    else if (char === "$") {
+      const match = /^\$[A-Za-z_0-9]*\$/.exec(sql.slice(index));
+      if (match) {
+        dollarTag = match[0];
+        state = "dollar";
+        index += dollarTag.length;
+        continue;
+      }
+    } else if (char === ";") {
+      pushStatement(index);
+      statementStart = index + 1;
+    }
+    index += 1;
   }
-  if (current.trim()) statements.push(current.trim());
-  return statements;
-}
 
-function stripSqlCommentsAndStrings(sql: string): string {
-  return sql
-    .replace(/--.*$/gm, " ")
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/'([^']|'')*'/g, "''")
-    .replace(/"([^"]|"")*"/g, '""')
-    .replace(/`([^`]|``)*`/g, "``");
+  pushStatement(sql.length);
+  return statements;
 }

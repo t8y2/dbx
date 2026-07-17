@@ -1,0 +1,12 @@
+dependencies {
+    implementation files('libs/oscarJDBC8.jar')
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes(
+            'Agent-Label': '\u795e\u901a OSCAR',
+            'Main-Class': 'com.dbx.agent.oscar.OscarAgent'
+        )
+    }
+}

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
-import { buildSchemaContext, createBackend, DIRECT_QUERY_TYPES, BRIDGE_REQUIRED_TYPES, evaluateSqlSafety, formatSchemaContext, getDbxDiagnostics, isMainModule, postBridge, type Backend, type DbxDiagnostics, type SqlSafetyOptions } from "@dbx-app/node-core";
+import { buildSchemaContext, createBackend, DIRECT_QUERY_TYPES, BRIDGE_REQUIRED_TYPES, evaluateSqlSafety, formatSchemaContext, getDbxDiagnostics, isMainModule, postBridge, supportsHashLineComments, type Backend, type DbxDiagnostics, type SqlSafetyOptions } from "@dbx-app/node-core";
 import { connectionSummary, csvTable, errorPayload, formatCell, formatErrorMessage, mdTable } from "./cli-format.js";
 
 export interface CliResult {
@@ -165,6 +165,7 @@ export async function runCli(argv: string[], options: RunOptions = {}): Promise<
       }
       const sqlArg = usesDefaultConnection ? args[1] : args[2];
       const sql = flags.file ? await readFile(flags.file, "utf-8") : required(sqlArg, "SQL string or --file is required.");
+      const config = await findConnectionOrThrow(backend, connectionName);
       const envSafety = sqlSafetyFromCliEnv(env);
       if (flags.allowDangerous && !flags.allowWrites && !envSafety.allowWrites) {
         throw new CliError("INVALID_OPTION", "--allow-dangerous-sql requires --allow-writes.");
@@ -172,10 +173,10 @@ export async function runCli(argv: string[], options: RunOptions = {}): Promise<
       const safetyOptions: SqlSafetyOptions = {
         allowWrites: flags.allowWrites || envSafety.allowWrites,
         allowDangerous: flags.allowDangerous || envSafety.allowDangerous,
+        hashLineComments: supportsHashLineComments(config.db_type),
       };
       const safety = evaluateSqlSafety(sql, safetyOptions);
       if (!safety.allowed) return fail("SQL_BLOCKED", safety.reason ?? "SQL blocked.", flags.json);
-      const config = await findConnectionOrThrow(backend, connectionName);
       const result = await backend.executeQuery(config, sql, { maxRows: flags.maxRows, timeoutMs: flags.timeoutMs });
       if (flags.format === "json") {
         return okJson({ connection: connectionName, columns: result.columns, rows: result.rows, row_count: result.row_count });

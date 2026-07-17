@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import type { AiContext } from "../../apps/desktop/src/lib/ai.ts";
+import type { AiContext } from "../../apps/desktop/src/lib/ai/ai.ts";
 
 class MemoryStorage {
   private values = new Map<string, string>();
@@ -30,10 +30,11 @@ Object.defineProperty(globalThis, "localStorage", {
   configurable: true,
 });
 
-const { buildSystemPrompt } = await import("../../apps/desktop/src/lib/ai.ts");
+const { buildSystemPrompt, isVectorDbType, buildUserPrompt } = await import("../../apps/desktop/src/lib/ai/ai.ts");
 
 function context(overrides: Partial<AiContext> = {}): AiContext {
   return {
+    connectionId: "conn-1",
     connectionName: "prod-analytics",
     databaseType: "postgres",
     database: "app",
@@ -52,6 +53,7 @@ function context(overrides: Partial<AiContext> = {}): AiContext {
         foreignKeys: [{ column: "user_id", ref_table: "users", ref_column: "id" }],
       },
     ],
+    sqlFiles: [],
     truncated: false,
     ...overrides,
   };
@@ -97,4 +99,124 @@ test("prompt enforces database dialect and single executable statement safety", 
   assert.match(prompt, /分页、日期函数、字符串拼接/);
   assert.match(prompt, /不要生成多语句 SQL/);
   assert.match(prompt, /不要在同一个回答里混合 SELECT 和写操作/);
+});
+
+test("prompt includes referenced SQL library files as additional context", () => {
+  const prompt = buildSystemPrompt(
+    "generate",
+    context({
+      sqlFiles: [
+        {
+          id: "sql-1",
+          name: "monthly-orders.sql",
+          sql: "select date_trunc('month', created_at) as month, count(*) from public.orders group by 1",
+        },
+      ],
+    }),
+    "ask",
+  );
+
+  assert.match(prompt, /SQL 库文件是额外上下文/);
+  assert.match(prompt, /Referenced SQL library files:/);
+  assert.match(prompt, /File: monthly-orders\.sql/);
+  assert.match(prompt, /date_trunc\('month', created_at\)/);
+});
+
+// Vector database tests
+
+function vectorContext(overrides: Partial<AiContext> = {}): AiContext {
+  return {
+    connectionId: "conn-1",
+    connectionName: "my-qdrant",
+    databaseType: "qdrant",
+    database: "default",
+    currentSql: "articles",
+    tables: [
+      {
+        name: "articles",
+        tableType: "COLLECTION",
+        comment: "384d vector",
+        columns: [],
+      },
+    ],
+    sqlFiles: [],
+    truncated: false,
+    ...overrides,
+  };
+}
+
+test("isVectorDbType returns true for vector databases", () => {
+  assert.equal(isVectorDbType("qdrant"), true);
+  assert.equal(isVectorDbType("milvus"), true);
+  assert.equal(isVectorDbType("weaviate"), true);
+  assert.equal(isVectorDbType("chromadb"), true);
+});
+
+test("isVectorDbType returns false for SQL databases", () => {
+  assert.equal(isVectorDbType("mysql"), false);
+  assert.equal(isVectorDbType("postgres"), false);
+  assert.equal(isVectorDbType("sqlserver"), false);
+});
+
+test("vector system prompt does not contain SQL references", () => {
+  const prompt = buildSystemPrompt("generate", vectorContext(), "ask");
+
+  assert.doesNotMatch(prompt, /```sql/);
+  assert.doesNotMatch(prompt, /execute_query/);
+  assert.match(prompt, /collection/);
+  assert.match(prompt, /REST API/);
+});
+
+test("vector agent mode lists vector tools", () => {
+  const prompt = buildSystemPrompt("generate", vectorContext(), "agent");
+
+  assert.match(prompt, /list_collections/);
+  assert.match(prompt, /browse_collection/);
+  assert.doesNotMatch(prompt, /execute_query/);
+  assert.doesNotMatch(prompt, /list_tables/);
+});
+
+test("vector focused table prompt warns about unknown collections", () => {
+  const prompt = buildSystemPrompt("generate", vectorContext({ schemaScope: "focused_table" }), "agent");
+
+  assert.match(prompt, /不是完整的集合列表/);
+  assert.match(prompt, /当前打开的集合/);
+  assert.match(prompt, /list_collections/);
+});
+
+test("vector ask mode mentions REST API format", () => {
+  const prompt = buildSystemPrompt("generate", vectorContext(), "ask");
+
+  assert.match(prompt, /REST API/);
+  assert.match(prompt, /Qdrant/);
+  assert.match(prompt, /list_collections/);
+  assert.match(prompt, /do not browse collection data|不要浏览集合数据/);
+  assert.doesNotMatch(prompt, /```sql/);
+  assert.doesNotMatch(prompt, /execute_query/);
+});
+
+test("vector system prompt preserves last error and result preview", () => {
+  const prompt = buildSystemPrompt(
+    "generate",
+    vectorContext({
+      lastError: "Qdrant error",
+      lastResultPreview: "id | payload\n1 | {}",
+    }),
+    "ask",
+  );
+
+  assert.match(prompt, /Last error:\nQdrant error/);
+  assert.match(prompt, /Last result preview:\nid \| payload/);
+});
+
+test("buildUserPrompt skips action instruction for vector databases", () => {
+  const vectorCtx = vectorContext();
+  const sqlCtx = context();
+
+  const vectorPrompt = buildUserPrompt("generate", vectorCtx, "show me articles", true);
+  assert.equal(vectorPrompt, "show me articles");
+
+  const sqlPrompt = buildUserPrompt("generate", sqlCtx, "show me users", true);
+  assert.match(sqlPrompt, /Action: generate/);
+  assert.match(sqlPrompt, /生成 SQL/);
 });

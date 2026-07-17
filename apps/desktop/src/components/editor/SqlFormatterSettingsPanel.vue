@@ -8,7 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/composables/useToast";
-import { copyToClipboard } from "@/lib/clipboard";
+import { copyToClipboard } from "@/lib/common/clipboard";
 import {
   DEFAULT_SQL_FORMATTER_SETTINGS,
   SQL_FORMATTER_CONFIG_FORMATTER,
@@ -26,7 +26,7 @@ import {
   type SqlFormatterParamTypes,
   type SqlFormatterSettings,
   type SqlFormatterTabWidth,
-} from "@/lib/sqlFormatterConfig";
+} from "@/lib/sql/sqlFormatterConfig";
 
 type EditorViewInstance = import("@codemirror/view").EditorView;
 type CodeMirrorModules = {
@@ -478,11 +478,11 @@ onBeforeUnmount(() => {
     <div class="flex flex-wrap items-center gap-2">
       <input ref="fileInputRef" type="file" accept="application/json,.json" class="hidden" @change="onImportFile" />
       <Button type="button" variant="outline" size="sm" @click="importConfig">
-        <Upload class="mr-2 h-4 w-4" />
+        <Download class="mr-2 h-4 w-4" />
         {{ t("settings.sqlFormatterImport") }}
       </Button>
       <Button type="button" variant="outline" size="sm" @click="exportConfig">
-        <Download class="mr-2 h-4 w-4" />
+        <Upload class="mr-2 h-4 w-4" />
         {{ t("settings.sqlFormatterExport") }}
       </Button>
       <Button type="button" variant="outline" size="sm" @click="restoreDefaults">

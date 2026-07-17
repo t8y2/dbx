@@ -1,14 +1,24 @@
-import { ref, type Ref, type ComputedRef } from "vue";
+import { ref, watch, type Ref, type ComputedRef } from "vue";
 import { useI18n } from "vue-i18n";
 import { useQueryStore } from "@/stores/queryStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
-import { classifySqlActivityKind } from "@/lib/historyActivityKind";
-import { sqlMetadataRefreshTarget } from "@/lib/sqlMetadataRefresh";
-import { classifyRedisCommandSafety, firstRedisCommandToken } from "@/lib/redisCommandSafety";
-import type { ConnectionConfig, QueryTab } from "@/types/database";
+import { isSingleDatabase, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
+import { supportsConnectionLevelSqlExecution } from "@/lib/connection/connectionLevelDatabaseBootstrap";
+import { classifySqlActivityKind } from "@/lib/history/historyActivityKind";
+import { sqlMetadataRefreshTarget } from "@/lib/sql/sqlMetadataRefresh";
+import { isMysqlExecutionErrorResult, usesMysqlProtocolDatabaseType } from "@/lib/query/queryResultError";
+import { classifyRedisCommandSafety, firstRedisCommandToken } from "@/lib/redis/redisCommandSafety";
+import { isSqlExecutionSnapshot, resolveExecutableSql, type SqlExecutionOverride, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
+import { isElasticsearchRestRequestText, parseElasticsearchRestRequestTarget, splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
+import { extractSqlParameterDescriptors, type SqlParameterDescriptor, type SqlParameterSyntax } from "@/lib/sql/sqlParameters";
+import { expandSqlVariables } from "@/lib/sql/sqlVariables";
+import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
+import { assessProductionSql } from "@/lib/database/productionSafety";
+import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
+import type { ConnectionConfig, DatabaseType, QueryTab } from "@/types/database";
 
 const DANGER_RE = /^\s*(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
 
@@ -19,7 +29,23 @@ export function stripSqlComments(sql: string): string {
     .replace(/#.*$/gm, " ");
 }
 
-export function isDangerousSql(sql: string): boolean {
+const ELASTICSEARCH_TRANSIENT_DELETE_PATHS = [/^\/_search\/scroll\/?$/i, /^\/_pit\/?$/i, /^\/_async_search\/[^/?]+\/?$/i];
+const ELASTICSEARCH_DESTRUCTIVE_POST_PATHS = [/(?:^|\/)_(?:delete_by_query|update_by_query|bulk)(?:\/|$)/i, /^\/_reindex(?:\/|$)/i, /^\/_aliases(?:\/|$)/i, /\/_restore(?:\/|$)/i];
+
+function isDangerousElasticsearchRequest(method: "GET" | "POST" | "PUT" | "DELETE" | "HEAD", path: string): boolean {
+  const pathname = path.split("?", 1)[0].replace(/\/+$/, "") || "/";
+  if (method === "DELETE") return !ELASTICSEARCH_TRANSIENT_DELETE_PATHS.some((pattern) => pattern.test(pathname));
+  if (method === "PUT") return true;
+  return method === "POST" && ELASTICSEARCH_DESTRUCTIVE_POST_PATHS.some((pattern) => pattern.test(pathname));
+}
+
+export function isDangerousSql(sql: string, databaseType?: DatabaseType): boolean {
+  if (databaseType === "elasticsearch") {
+    const requests = splitSqlStatementRanges(sql, databaseType)
+      .map((statement) => parseElasticsearchRestRequestTarget(statement.sql))
+      .filter((request): request is NonNullable<typeof request> => request !== null);
+    if (requests.length > 0) return requests.some((request) => isDangerousElasticsearchRequest(request.method, request.path));
+  }
   const cleaned = stripSqlComments(sql);
   return cleaned.split(";").some((stmt) => DANGER_RE.test(stmt));
 }
@@ -33,19 +59,31 @@ function primarySqlOperation(sql: string): string {
   return statement?.match(/^([a-z]+)/i)?.[1]?.toUpperCase() || "SQL";
 }
 
+function firstQueryExecutionError(tab: Pick<QueryTab, "result" | "results">, databaseType: DatabaseType | undefined) {
+  const activeResult = tab.result;
+  if (activeResult && isMysqlExecutionErrorResult(activeResult, databaseType)) return activeResult;
+  if (!usesMysqlProtocolDatabaseType(databaseType) && activeResult?.columns.includes("Error")) return activeResult;
+  if (!usesMysqlProtocolDatabaseType(databaseType)) return undefined;
+
+  const results = tab.results?.length ? tab.results : tab.result ? [tab.result] : [];
+  return results.find((result) => isMysqlExecutionErrorResult(result, databaseType));
+}
+
 export function useSqlExecution(deps: {
   activeTab: ComputedRef<QueryTab | undefined>;
   activeConnection: ComputedRef<ConnectionConfig | undefined>;
   executableSql: ComputedRef<string>;
-  resolveExecutableSql?: () => Promise<string>;
+  resolveExecutableSql?: (snapshot?: SqlExecutionSnapshot) => Promise<string>;
   activeOutputView: Ref<"result" | "summary" | "explain" | "chart">;
   blockDangerousRedisCommands?: Ref<boolean>;
+  onMissingDatabase?: () => void;
 }) {
   const { t } = useI18n();
   const queryStore = useQueryStore();
   const historyStore = useHistoryStore();
   const connectionStore = useConnectionStore();
   const settingsStore = useSettingsStore();
+  const productionSafetyStore = useProductionSafetyStore();
   const { toast } = useToast();
 
   const dangerSql = ref("");
@@ -53,15 +91,39 @@ export function useSqlExecution(deps: {
   const showDangerDialog = ref(false);
   const suppressDangerConfirm = ref(false);
   const explainMode = ref<"explain" | "autotrace">("explain");
+  const showSqlParameterDialog = ref(false);
+  const sqlParameterSourceSql = ref("");
+  const sqlParameterNames = ref<SqlParameterDescriptor[]>([]);
+  const sqlParameterDatabaseType = ref<DatabaseType | undefined>();
+  const sqlParameterEnabledSyntaxes = ref<SqlParameterSyntax[]>([]);
+  const pendingSourceOffset = ref<number | undefined>();
 
-  async function resolvedExecutableSql(): Promise<string> {
-    return deps.resolveExecutableSql ? await deps.resolveExecutableSql() : deps.executableSql.value;
+  async function resolvedExecutableSql(source?: SqlExecutionOverride): Promise<{ sql: string; sourceOffset?: number }> {
+    const atSetEnabled = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, deps.activeConnection.value?.db_type).atSet;
+    const expand = (sql: string) => (atSetEnabled ? expandSqlVariables(sql).sql : sql);
+    if (typeof source === "string") return { sql: expand(source) };
+
+    const resolved = deps.resolveExecutableSql ? await deps.resolveExecutableSql(source) : isSqlExecutionSnapshot(source) ? resolveExecutableSql(source.fullSql, source.selectedSql, { cursorPos: source.cursorPos }) : deps.executableSql.value;
+    const sql = expand(resolved);
+    if (!isSqlExecutionSnapshot(source) || !source.selectedSql.trim() || sql !== resolved) return { sql };
+
+    const leadingWhitespace = source.selectedSql.length - source.selectedSql.trimStart().length;
+    return { sql, sourceOffset: source.selectionFrom + leadingWhitespace };
   }
 
-  async function tryExecute(sqlOverride?: string) {
+  async function tryExecute(sqlOverride?: SqlExecutionOverride) {
     const tab = deps.activeTab.value;
-    const sql = sqlOverride ?? (await resolvedExecutableSql());
+    const { sql, sourceOffset } = await resolvedExecutableSql(sqlOverride);
     if (!tab || !sql.trim()) return;
+    if (requiresDatabaseSelection(tab, deps.activeConnection.value, sql)) {
+      deps.onMissingDatabase?.();
+      return;
+    }
+    if (supportsSqlTemplateParameters(deps.activeConnection.value, sql) && prepareSqlParameterDialog(sql, sourceOffset)) return;
+    await continueExecute(sql, sourceOffset);
+  }
+
+  async function continueExecute(sql: string, sourceOffset?: number) {
     // Redis: block dangerous commands when toggle is on (check each line for multi-line input)
     if (deps.activeConnection.value?.db_type === "redis" && deps.blockDangerousRedisCommands?.value !== false) {
       const commands = sql
@@ -76,30 +138,69 @@ export function useSqlExecution(deps: {
         }
       }
     }
-    if (isDangerousSql(sql) && settingsStore.editorSettings.confirmDangerousSqlExecution) {
+    const productionAssessment = assessProductionSql(sql, deps.activeConnection.value, deps.activeTab.value?.database);
+    if (productionAssessment.active && productionAssessment.isMutation) {
+      // Production writes always need a new explicit decision; editor preferences cannot suppress this gate.
+      const confirmed = await productionSafetyStore.requestConfirmation({
+        sql,
+        connectionName: deps.activeConnection.value?.name,
+        database: deps.activeTab.value?.database,
+        productionDatabases: productionAssessment.databases,
+        source: t("production.sourceSqlEditor"),
+      });
+      if (confirmed) await doExecute(sql, sourceOffset);
+      return;
+    }
+    if (isDangerousSql(sql, deps.activeConnection.value?.db_type) && settingsStore.editorSettings.confirmDangerousSqlExecution) {
       dangerSql.value = sql;
       pendingDangerSql.value = sql;
+      pendingSourceOffset.value = sourceOffset;
       suppressDangerConfirm.value = false;
       showDangerDialog.value = true;
     } else {
-      doExecute(sql);
+      await doExecute(sql, sourceOffset);
     }
   }
 
-  async function doExecute(sql?: string) {
-    sql ??= await resolvedExecutableSql();
+  function prepareSqlParameterDialog(sql: string, sourceOffset?: number): boolean {
+    const databaseType = deps.activeConnection.value?.db_type;
+    const toggles = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, databaseType);
+    const enabledSyntaxes = enabledSqlParameterSyntaxes(toggles);
+    const parameters = extractSqlParameterDescriptors(sql, { databaseType, enabledSyntaxes });
+    if (!parameters.length) return false;
+    sqlParameterSourceSql.value = sql;
+    sqlParameterNames.value = parameters;
+    sqlParameterDatabaseType.value = databaseType;
+    sqlParameterEnabledSyntaxes.value = enabledSyntaxes;
+    pendingSourceOffset.value = sourceOffset;
+    showSqlParameterDialog.value = true;
+    return true;
+  }
+
+  async function doExecute(sql?: string, sourceOffset?: number) {
+    if (sql === undefined) ({ sql, sourceOffset } = await resolvedExecutableSql());
     const tab = deps.activeTab.value;
     if (!tab || !sql.trim()) return;
+    const executionConnection = connectionStore.getConfig(tab.connectionId) ?? deps.activeConnection.value;
+    const executionDatabaseType = executionConnection?.db_type;
+    if (requiresDatabaseSelection(tab, executionConnection, sql)) {
+      deps.onMissingDatabase?.();
+      return;
+    }
     deps.activeOutputView.value = "result";
-    const connName = connectionStore.getConfig(tab.connectionId)?.name || "";
+    const connName = executionConnection?.name || "";
     const start = Date.now();
-    const isRedis = deps.activeConnection.value?.db_type === "redis";
-    await queryStore.executeCurrentSql(sql, isRedis ? { skipRedisSafetyCheck: deps.blockDangerousRedisCommands?.value === false } : undefined);
+    const isRedis = executionDatabaseType === "redis";
+    await queryStore.executeCurrentSql(sql, {
+      ...(isRedis ? { skipRedisSafetyCheck: deps.blockDangerousRedisCommands?.value === false } : {}),
+      ...(sourceOffset !== undefined ? { sourceOffset } : {}),
+    });
     if (tab.result && !tab.result.columns.length && !tab.results?.some((result) => result.columns.length > 0)) {
       deps.activeOutputView.value = "summary";
     }
     const elapsed = Date.now() - start;
-    const success = !tab.result?.columns.includes("Error");
+    const failure = firstQueryExecutionError(tab, executionDatabaseType);
+    const success = !failure;
     historyStore.add({
       connection_id: tab.connectionId,
       connection_name: connName,
@@ -107,7 +208,7 @@ export function useSqlExecution(deps: {
       sql,
       execution_time_ms: elapsed,
       success,
-      error: success ? undefined : String(tab.result?.rows?.[0]?.[0] ?? ""),
+      error: failure ? String(failure.rows?.[0]?.[0] ?? "") : undefined,
       activity_kind: classifySqlActivityKind(sql),
       operation: primarySqlOperation(sql),
       affected_rows: success ? tab.result?.affected_rows : undefined,
@@ -135,9 +236,9 @@ export function useSqlExecution(deps: {
     return t("explain.emptySql");
   }
 
-  async function tryExplain(sqlOverride?: string) {
+  async function tryExplain(sqlOverride?: SqlExecutionOverride) {
     const tab = deps.activeTab.value;
-    const sql = sqlOverride ?? (await resolvedExecutableSql());
+    const { sql } = await resolvedExecutableSql(sqlOverride);
     if (!tab || !sql.trim()) {
       toast(t("explain.emptySql"));
       return;
@@ -155,14 +256,35 @@ export function useSqlExecution(deps: {
   }
 
   async function onDangerConfirm() {
-    const sql = pendingDangerSql.value || (await resolvedExecutableSql());
+    const resolved = pendingDangerSql.value ? { sql: pendingDangerSql.value, sourceOffset: pendingSourceOffset.value } : await resolvedExecutableSql();
     if (suppressDangerConfirm.value) {
       settingsStore.updateEditorSettings({ confirmDangerousSqlExecution: false });
     }
     suppressDangerConfirm.value = false;
     pendingDangerSql.value = "";
-    await doExecute(sql);
+    pendingSourceOffset.value = undefined;
+    await doExecute(resolved.sql, resolved.sourceOffset);
   }
+
+  async function onSqlParametersConfirm(sql: string) {
+    showSqlParameterDialog.value = false;
+    sqlParameterSourceSql.value = "";
+    sqlParameterNames.value = [];
+    sqlParameterDatabaseType.value = undefined;
+    sqlParameterEnabledSyntaxes.value = [];
+    const sourceOffset = pendingSourceOffset.value;
+    pendingSourceOffset.value = undefined;
+    await continueExecute(sql, sourceOffset);
+  }
+
+  watch(showSqlParameterDialog, (open) => {
+    if (open) return;
+    sqlParameterSourceSql.value = "";
+    sqlParameterNames.value = [];
+    sqlParameterDatabaseType.value = undefined;
+    sqlParameterEnabledSyntaxes.value = [];
+    pendingSourceOffset.value = undefined;
+  });
 
   return {
     dangerSql,
@@ -174,6 +296,30 @@ export function useSqlExecution(deps: {
     cancelActiveExecution,
     tryExplain,
     onDangerConfirm,
+    showSqlParameterDialog,
+    sqlParameterSourceSql,
+    sqlParameterNames,
+    sqlParameterDatabaseType,
+    sqlParameterEnabledSyntaxes,
+    onSqlParametersConfirm,
     explainMode,
   };
+}
+
+export function supportsSqlTemplateParameters(connection: Pick<ConnectionConfig, "db_type"> | undefined, sql = ""): boolean {
+  if (!connection) return false;
+  if (connection.db_type === "elasticsearch") return !isElasticsearchRestRequestText(sql);
+  return connection.db_type !== "redis" && connection.db_type !== "mongodb";
+}
+
+export function requiresDatabaseSelection(tab: QueryTab, connection: ConnectionConfig | undefined, _sql = ""): boolean {
+  if (tab.mode !== "query") return false;
+  if (!connection) return false;
+  if (tab.database) return false;
+  if (tab.database === "" && usesTreeSchemaMode(connection.db_type)) return false;
+  if (isSingleDatabase(connection.db_type)) return false;
+  // MySQL-compatible servers decide per statement whether a default database is required.
+  // Keep interactive execution connection-scoped instead of rejecting valid qualified or constant queries.
+  if (supportsConnectionLevelSqlExecution(connection)) return false;
+  return !["elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "zookeeper"].includes(connection.db_type);
 }

@@ -1,20 +1,12 @@
 import { useI18n } from "vue-i18n";
-import { uuid } from "@/lib/utils";
-import { isTauriRuntime } from "@/lib/tauriRuntime";
+import { uuid } from "@/lib/common/utils";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
-import * as api from "@/lib/api";
+import * as api from "@/lib/backend/api";
 import type { ConnectionConfig } from "@/types/database";
-
-const DB_EXTENSIONS = [".db", ".db3", ".sqlite", ".sqlite3", ".duckdb"];
-
-function getDbType(path: string): "sqlite" | "duckdb" | null {
-  const lower = path.toLowerCase();
-  if (lower.endsWith(".duckdb")) return "duckdb";
-  if (DB_EXTENSIONS.some((ext) => lower.endsWith(ext))) return "sqlite";
-  return null;
-}
+import { detectDatabaseFileType } from "@/lib/database/databaseFileDetection";
 
 function isSqlFilePath(path: string): boolean {
   return /\.sql$/i.test(path);
@@ -30,12 +22,16 @@ export function useFileDrop() {
   const queryStore = useQueryStore();
   const { toast } = useToast();
 
-  async function openDroppedSqlFile(name: string, content: string) {
+  async function openDroppedSqlFile(name: string, content: string, path?: string) {
     const connectionId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
     const connection = connectionId ? connectionStore.getConfig(connectionId) : undefined;
     const database = connection?.database || "";
-    const tabId = queryStore.createTab(connectionId, database, name, "query");
-    queryStore.updateSql(tabId, content);
+    if (path) {
+      queryStore.openExternalSqlFile(connectionId, database, path, content);
+    } else {
+      const tabId = queryStore.createTab(connectionId, database, name, "query");
+      queryStore.updateSql(tabId, content);
+    }
     toast(t("welcome.fileOpened", { name }));
   }
 
@@ -74,14 +70,14 @@ export function useFileDrop() {
           if (isSqlFilePath(path)) {
             try {
               const content = await api.readExternalSqlFile(path);
-              await openDroppedSqlFile(name, content);
+              await openDroppedSqlFile(name, content, path);
             } catch (e: any) {
               toast(t("toolbar.sqlOpenFailed", { message: e?.message || String(e) }), 5000);
             }
             continue;
           }
 
-          const dbType = getDbType(path);
+          const dbType = await detectDatabaseFileType(path);
           if (!dbType) continue;
           const config: ConnectionConfig = {
             id: uuid(),

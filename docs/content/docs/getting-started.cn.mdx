@@ -46,11 +46,31 @@ description: 安装 DBX、创建第一个连接，并了解桌面版、Docker �
 
   </Tab>
   <Tab value="Linux">
-    从 [GitHub Releases](https://github.com/t8y2/dbx/releases) 下载对应安装包：
+    使用 Flatpak 从 [FlatPark](https://flatpark.org/apps/com.dbxio.dbx/) 安装（适用于任意发行版）：
+
+    ```bash
+    flatpak remote-add --if-not-exists flatpark https://dl.flatpark.org/flatpark.flatpakrepo
+    flatpak install flatpark com.dbxio.dbx
+    ```
+
+    之后可用以下命令更新：
+
+    ```bash
+    flatpak update com.dbxio.dbx
+    ```
+
+    银河麒麟 V10、统信 UOS 等系统推荐通过[星火应用商店](https://spk-resolv.spark-app.store/?spk=spk://store/development/dbx)安装，并选择 **APM 版本**。AmberPM 提供兼容运行环境，可减少发行版依赖差异导致的安装或启动问题，后续也可直接在星火应用商店客户端中获取更新。
+
+    <Callout type="warn">
+      APM 版本在兼容环境中运行 DBX。如果为 Agent/JDBC 驱动选择宿主机 Java，需要在路径前添加 `/host`，例如将 `/usr/bin/java` 填写为 `/host/usr/bin/java`。
+    </Callout>
+
+    也可以从 [GitHub Releases](https://github.com/t8y2/dbx/releases) 下载对应安装包：
 
     | 格式 | 适用场景 |
     |---|---|
     | `.deb` | Debian、Ubuntu 及兼容发行版 |
+    | `.rpm` | Fedora、 CentOS、 SUSE 及兼容发行版 |
     | `.AppImage` | 通用 Linux 桌面环境 |
 
     如果使用 `.AppImage`，首次运行前可能需要添加执行权限：
@@ -65,20 +85,30 @@ description: 安装 DBX、创建第一个连接，并了解桌面版、Docker �
 
     ```bash
     docker run -d \
+      --pull=always \
       --name dbx \
       -p 4224:4224 \
       -v dbx-data:/app/data \
-      t8y2/dbx
+      t8y2/dbx:latest
     ```
+
+    `latest` 标签会拉取当前发布版本。这里使用跨平台的 `dbx-data` 命名卷；中国大陆用户可改用 `docker.cnb.cool/dbxio.com/dbx:latest`，以获得更快的拉取速度。
 
     启动后访问 `http://localhost:4224`。
 
-    Docker Compose：
+    `deploy/docker-compose.yml` 用于构建当前源码。若要部署已发布镜像，请使用 `deploy/docker-compose.release.yml`：
+
+    ```bash
+    docker compose -f deploy/docker-compose.release.yml up -d
+    ```
 
     ```yaml
     services:
       dbx:
-        image: t8y2/dbx
+        image: t8y2/dbx:latest
+        # 中国大陆用户可改用 CNB 镜像，以加快拉取速度：
+        # image: docker.cnb.cool/dbxio.com/dbx:latest
+        pull_policy: always
         ports:
           - "4224:4224"
         volumes:
@@ -97,7 +127,7 @@ description: 安装 DBX、创建第一个连接，并了解桌面版、Docker �
 | 模式         | 适合场景                                               | 后端路径                      | 存储位置                       |
 | ------------ | ------------------------------------------------------ | ----------------------------- | ------------------------------ |
 | 桌面版       | 本机日常工作、本地文件、原生窗口、从 MCP 打开 DBX 界面 | Tauri 命令调用 Rust core      | 本机应用数据目录               |
-| Docker / Web | 服务器自托管、浏览器访问                               | HTTP 路由调用同一套 Rust core | Docker volume 或服务器数据目录 |
+| Docker / Web | 服务器自托管、浏览器访问                               | HTTP 路由调用同一套 Rust core | Docker 卷或服务器数据目录     |
 
 <Callout type="info">核心数据库能力保持一致，但通过 MCP 打开桌面窗口等集成需要 DBX 桌面版正在运行。</Callout>
 
@@ -131,7 +161,7 @@ description: 安装 DBX、创建第一个连接，并了解桌面版、Docker �
   <Step>
     ### 配置网络选项
 
-    如果数据库在内网或跳板机后面，可以启用 [SSH 隧道](/cn/docs/ssh-tunnel)。如果网络环境要求 SOCKS5 或 HTTP 代理，可以在代理页签中配置。
+    如果数据库在内网、跳板机后面、只能通过 Web 网关访问，或网络要求 SOCKS5/HTTP 代理，可以配置 [隧道/代理](/cn/docs/ssh-tunnel)。
 
   </Step>
   <Step>
@@ -173,16 +203,21 @@ description: 安装 DBX、创建第一个连接，并了解桌面版、Docker �
 | 认证失败           | 用户名、密码、认证方式、SSL 要求、账号是否允许远程登录         |
 | 能连接但看不到表   | 默认数据库、Schema、权限、元数据读取权限、可见数据库过滤       |
 | 文件数据库打不开   | 文件路径、文件权限、Docker volume 挂载、文件扩展名是否支持     |
-| 内网数据库无法访问 | 配置 SSH 隧道、代理、VPN，或让 Docker 部署机器能访问目标数据库 |
+| 内网数据库无法访问 | 配置隧道/代理、VPN，或让 Docker 部署机器能访问目标数据库 |
 
 ## 从源码运行
 
 当你想参与开发或本地调试 DBX 时，可以从源码运行。
 
+<Callout type="info">
+  第一次参与开发请阅读[从源码编译与参与贡献](/cn/docs/contributing)。教程包含各系统环境安装、Fork、Issue 认领、测试和提交 PR 的完整步骤。
+</Callout>
+
 ### 环境要求
 
-- [Node.js](https://nodejs.org/) >= 18
-- [pnpm](https://pnpm.io/)
+- [Node.js](https://nodejs.org/) >= 22.13.0
+- [pnpm](https://pnpm.io/) 10.27.0
+- Make
 - [Rust](https://www.rust-lang.org/tools/install) >= 1.77
 
 ### 系统依赖
@@ -198,21 +233,22 @@ description: 安装 DBX、创建第一个连接，并了解桌面版、Docker �
 ```bash
 git clone https://github.com/t8y2/dbx.git
 cd dbx
-pnpm install
-pnpm dev:tauri
+make
 ```
+
+`make` 会在需要时安装根目录依赖，并启动本地 Tauri 桌面端开发环境。
 
 Web 版本：
 
 ```bash
-pnpm dev:web
-pnpm dev:backend
+make dev-web
+make dev-backend
 ```
 
 ### 构建桌面安装包
 
 ```bash
-pnpm tauri build
+make package
 ```
 
 桌面安装包会输出到 `src-tauri/target/release/bundle/`。

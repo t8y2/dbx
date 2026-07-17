@@ -1,0 +1,11 @@
+dependencies {
+    implementation 'com.google.code.gson:gson:2.12.1'
+    implementation 'io.etcd:jetcd-core:0.8.6'
+}
+
+tasks.named('shadowJar') {
+    mergeServiceFiles()
+    manifest {
+        attributes('Agent-Label': 'etcd', 'Main-Class': 'com.dbx.agent.etcd.EtcdAgent')
+    }
+}

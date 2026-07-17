@@ -1,0 +1,9 @@
+dependencies {
+    implementation 'com.intersystems:intersystems-jdbc:3.10.5'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': 'IRIS', 'Main-Class': 'com.dbx.agent.iris.IrisAgent')
+    }
+}

@@ -14,12 +14,67 @@ fn extracts_tables_aliases_and_qualified_columns() {
 }
 
 #[test]
+fn extracts_nested_query_scopes_for_correlated_subqueries() {
+    let sql = "select aa.house_id from mds_base_house aa where exists (select 1 from mds_base_owner where HOUSE_ID = aa.HOUSE_ID)";
+    let analysis = analyze_sql_references(sql, Some("mysql")).unwrap();
+
+    let tables: Vec<_> =
+        analysis.tables.iter().map(|table| (table.name.as_str(), table.alias.as_deref(), table.scope_id)).collect();
+    assert_eq!(tables, vec![("mds_base_house", Some("aa"), 0), ("mds_base_owner", None, 1)]);
+
+    let scopes: Vec<_> = analysis.scopes.iter().map(|scope| (scope.id, scope.parent_id)).collect();
+    assert_eq!(scopes, vec![(0, None), (1, Some(0))]);
+
+    let columns: Vec<_> = analysis
+        .columns
+        .iter()
+        .map(|column| (column.qualifier.as_deref(), column.name.as_str(), column.scope_id))
+        .collect();
+    assert_eq!(columns, vec![(Some("aa"), "house_id", 0), (None, "HOUSE_ID", 1), (Some("aa"), "HOUSE_ID", 1)]);
+}
+
+#[test]
 fn extracts_unqualified_columns_from_single_table_select() {
     let analysis = analyze_sql_references("select missing, id from users", Some("postgres")).unwrap();
 
     let columns: Vec<_> =
         analysis.columns.iter().map(|column| (column.qualifier.as_deref(), column.name.as_str())).collect();
     assert_eq!(columns, vec![(None, "missing"), (None, "id")]);
+}
+
+#[test]
+fn extracts_mysql_quoted_table_references() {
+    let analysis = analyze_sql_references("SELECT * FROM `t_19991` LIMIT 100", Some("mysql")).unwrap();
+
+    assert_eq!(analysis.tables.len(), 1);
+    assert_eq!(analysis.tables[0].name, "t_19991");
+    assert_eq!(analysis.tables[0].schema, None);
+    assert_eq!(analysis.tables[0].span.start_line, 1);
+    assert_eq!(analysis.tables[0].span.start_column, 15);
+    assert_eq!(analysis.tables[0].span.end_line, 1);
+    assert_eq!(analysis.tables[0].span.end_column, 24);
+}
+
+#[test]
+fn extracts_mysql_single_quoted_table_references() {
+    let analysis = analyze_sql_references("SELECT * FROM 't_10001' LIMIT 100", Some("mysql")).unwrap();
+
+    assert_eq!(analysis.tables.len(), 1);
+    assert_eq!(analysis.tables[0].name, "t_10001");
+    assert_eq!(analysis.tables[0].schema, None);
+}
+
+#[test]
+fn postgres_default_privileges_statements_do_not_raise_syntax_errors() {
+    let sql = "\
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+GRANT SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER ON TABLES TO app_user;";
+
+    let analysis = analyze_sql_references(sql, Some("postgres"))
+        .unwrap_or_else(|error| panic!("PostgreSQL ALTER DEFAULT PRIVILEGES should analyze: {error}"));
+
+    assert!(analysis.tables.is_empty());
+    assert!(analysis.columns.is_empty());
 }
 
 #[test]
@@ -42,5 +97,18 @@ fn duckdb_parser_gap_queries_do_not_raise_syntax_errors() {
         let analysis = analyze_sql_references(sql, Some("duckdb")).expect("duckdb parser gap query should analyze");
         assert!(analysis.tables.is_empty());
         assert!(analysis.columns.is_empty());
+    }
+}
+
+#[test]
+fn clickhouse_strictness_first_left_joins_do_not_raise_syntax_errors() {
+    for strictness in ["ANY", "ALL", "SEMI", "ANTI"] {
+        let sql = format!("SELECT a.id FROM events a {strictness} LEFT JOIN wallets b ON a.wallet_id = b.id");
+        let analysis = analyze_sql_references(&sql, Some("clickhouse"))
+            .unwrap_or_else(|error| panic!("ClickHouse {strictness} LEFT JOIN should analyze: {error}"));
+
+        let tables: Vec<_> =
+            analysis.tables.iter().map(|table| (table.name.as_str(), table.alias.as_deref())).collect();
+        assert_eq!(tables, vec![("events", Some("a")), ("wallets", Some("b"))]);
     }
 }

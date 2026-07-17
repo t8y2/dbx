@@ -1,57 +1,53 @@
-const R2_CDN_BASE = "https://dl.dbxio.com";
-
-function filenameFromUrl(url: string): string {
-  return url.split("/").pop() ?? url;
-}
-
-function githubUrlToR2Url(url: string, category: "jre" | "driver"): string {
-  const filename = filenameFromUrl(url);
-  return `${R2_CDN_BASE}/agents/${category}/${filename}`;
-}
+import driverVersions from "../../agents/versions.json";
 
 export interface ArtifactInfo {
   url: string;
   size: number;
 }
 
-export interface JreInfo {
-  version: string;
-  platforms: Record<string, ArtifactInfo>;
+export type DownloadSource = "github" | "cnb" | "atomgit" | "official";
+
+export interface DownloadLink {
+  source: DownloadSource;
+  url: string;
 }
 
-export interface DriverInfo {
-  version: string;
-  label: string;
-  min_app_version: string;
-  jar: ArtifactInfo;
-  jre: string;
+export interface GitHubReleaseAsset {
+  name: string;
+  size: number;
+  browser_download_url: string;
 }
 
-export interface AgentRegistry {
-  jre?: JreInfo;
-  jres?: Record<string, JreInfo>;
-  drivers: Record<string, DriverInfo>;
+interface GitHubRelease {
+  assets?: GitHubReleaseAsset[];
 }
 
-const AGENT_REGISTRY_R2_URL = "https://dl.dbxio.com/agents/agent-registry.json";
-const AGENT_REGISTRY_GITHUB_URL = "https://github.com/t8y2/dbx-agents/releases/latest/download/agent-registry.json";
+interface AgentRegistryArtifact {
+  url: string;
+  size: number;
+}
 
-export async function fetchAgentRegistry(): Promise<AgentRegistry | null> {
-  const urls = [AGENT_REGISTRY_R2_URL, AGENT_REGISTRY_GITHUB_URL];
-  for (const url of urls) {
-    try {
-      const res = await fetch(url, {
-        cache: "no-store",
-        headers: { Accept: "application/json" },
-      });
-      if (res.ok) {
-        return (await res.json()) as AgentRegistry;
-      }
-    } catch {
-      continue;
-    }
-  }
-  return null;
+interface AgentRegistryDriver {
+  jar?: AgentRegistryArtifact;
+  native?: Record<string, AgentRegistryArtifact>;
+}
+
+interface AgentRegistry {
+  jres?: Record<string, { platforms?: Record<string, AgentRegistryArtifact> }>;
+  drivers?: Record<string, AgentRegistryDriver>;
+}
+
+interface AtomGitRelease {
+  tag_name?: string;
+  assets?: Array<{ name?: string; type?: string }>;
+}
+
+export interface OfflineBundleEntry {
+  platformKey: string;
+  platformLabel: string;
+  filename: string;
+  size: number;
+  url: string;
 }
 
 export interface JreDisplayEntry {
@@ -60,7 +56,6 @@ export interface JreDisplayEntry {
   info: ArtifactInfo;
   jreVersion: string;
   jreKey: string;
-  r2Url: string;
 }
 
 export interface DriverDisplayEntry {
@@ -70,63 +65,306 @@ export interface DriverDisplayEntry {
   minAppVersion: string;
   jar: ArtifactInfo;
   jre: string;
-  r2Url: string;
 }
 
-export function buildJreEntries(registry: AgentRegistry): JreDisplayEntry[] {
-  const entries: JreDisplayEntry[] = [];
-  const platformLabels: Record<string, string> = {
-    "macos-aarch64": "macOS (Apple Silicon)",
-    "macos-x64": "macOS (Intel)",
-    "linux-aarch64": "Linux (ARM64)",
-    "linux-x64": "Linux (x64)",
-    "windows-aarch64": "Windows (ARM64)",
-    "windows-x64": "Windows (x64)",
+export interface NativeAgentDisplayEntry {
+  key: string;
+  label: string;
+  version: string;
+  platformKey: string;
+  platformLabel: string;
+  filename: string;
+  info: ArtifactInfo;
+}
+
+export interface JdbcPluginDownloadEntry {
+  label: string;
+  filename: string;
+  url: string;
+}
+
+export interface AgentDownloadCatalog {
+  jdbcPlugin: JdbcPluginDownloadEntry;
+  bundles: OfflineBundleEntry[];
+  drivers: DriverDisplayEntry[];
+  jres: JreDisplayEntry[];
+  nativeAgents: NativeAgentDisplayEntry[];
+}
+
+const AGENTS_LATEST_RELEASE_API_URL = "https://api.github.com/repos/t8y2/dbx/releases/tags/agents-latest";
+const CNB_AGENT_REGISTRY_URL = "https://cnb.cool/dbxio.com/dbx/-/releases/download/agents-latest/agent-registry.json";
+const ATOMGIT_LATEST_RELEASE_API_URL = "https://api.atomgit.com/api/v5/repos/t8y2/dbx/releases/agents-latest";
+const JDBC_PLUGIN_DOWNLOAD_URL = "https://dl.dbxio.com/releases/latest/dbx-jdbc-plugin-latest.zip";
+const GITHUB_RELEASE_DOWNLOAD_PREFIX = "https://github.com/t8y2/dbx/releases/download/";
+const CNB_RELEASE_DOWNLOAD_PREFIX = "https://cnb.cool/dbxio.com/dbx/-/releases/download/";
+const ATOMGIT_RELEASE_DOWNLOAD_PREFIX = "https://atomgit.com/t8y2/dbx/releases/download/";
+const MIN_APP_VERSION = "0.6.0";
+const driverVersionMap = driverVersions as Record<string, string>;
+const nativeDriverKeys = new Set(["oracle", "xugu"]);
+
+const platformLabels: Record<string, string> = {
+  "macos-aarch64": "macOS (Apple Silicon)",
+  "macos-x64": "macOS (Intel)",
+  "linux-aarch64": "Linux (ARM64)",
+  "linux-x64": "Linux (x64)",
+  "windows-aarch64": "Windows (ARM64)",
+  "windows-x64": "Windows (x64)",
+};
+
+const driverLabels: Record<string, string> = {
+  access: "Microsoft Access",
+  bigquery: "BigQuery",
+  cassandra: "Cassandra",
+  dameng: "Dameng",
+  databend: "Databend",
+  databricks: "Databricks",
+  db2: "DB2",
+  etcd: "etcd",
+  exasol: "Exasol",
+  firebird: "Firebird",
+  gbase8a: "GBase 8a",
+  gbase8s: "GBase 8s",
+  goldendb: "GoldenDB",
+  h2: "H2",
+  highgo: "HighGo",
+  hive: "Hive",
+  informix: "Informix",
+  iotdb: "Apache IoTDB",
+  iris: "InterSystems IRIS",
+  kingbase: "KingBase",
+  kylin: "Apache Kylin",
+  mongodb: "MongoDB (Legacy)",
+  neo4j: "Neo4j",
+  "oceanbase-oracle": "OceanBase Oracle Mode",
+  oracle: "Oracle",
+  saphana: "SAP HANA",
+  snowflake: "Snowflake",
+  sundb: "SunDB",
+  tdengine: "TDengine",
+  teradata: "Teradata",
+  trino: "Trino",
+  vastbase: "Vastbase",
+  vertica: "Vertica",
+  xugu: "虚谷 XuguDB",
+  yashandb: "YashanDB",
+  zookeeper: "ZooKeeper",
+};
+
+const currentDriverKeys = Object.keys(driverVersionMap).sort((a, b) => labelForDriver(a).localeCompare(labelForDriver(b)));
+const currentJavaDriverKeys = currentDriverKeys.filter((key) => !nativeDriverKeys.has(key));
+
+const jreVersions: Record<string, string> = {
+  "21": "21",
+};
+
+function labelForDriver(key: string): string {
+  return driverLabels[key] ?? key.replace(/-/g, " ");
+}
+
+function assetInfo(asset: GitHubReleaseAsset): ArtifactInfo {
+  return {
+    url: asset.browser_download_url,
+    size: asset.size,
+  };
+}
+
+function releaseAssetName(url: string, fallback: string): string {
+  try {
+    return decodeURIComponent(new URL(url).pathname.split("/").pop() || fallback);
+  } catch {
+    return fallback;
+  }
+}
+
+function githubReleaseAsset(name: string, size: number, tag = "agents-latest"): GitHubReleaseAsset {
+  return {
+    name,
+    size,
+    browser_download_url: `${GITHUB_RELEASE_DOWNLOAD_PREFIX}${tag}/${name}`,
+  };
+}
+
+function registryReleaseAssets(registry: AgentRegistry): GitHubReleaseAsset[] {
+  const assets = new Map<string, GitHubReleaseAsset>();
+  const addArtifact = (artifact: AgentRegistryArtifact | undefined, fallbackName: string) => {
+    if (!artifact?.url) return;
+    const name = releaseAssetName(artifact.url, fallbackName);
+    assets.set(name, { name, size: artifact.size || 0, browser_download_url: artifact.url });
   };
 
-  const jres = registry.jres ?? {};
-  for (const [key, jreInfo] of Object.entries(jres)) {
-    for (const [platformKey, artifact] of Object.entries(jreInfo.platforms)) {
-      entries.push({
-        platformKey,
-        platformLabel: platformLabels[platformKey] ?? platformKey,
-        info: artifact,
-        jreVersion: jreInfo.version,
-        jreKey: key,
-        r2Url: githubUrlToR2Url(artifact.url, "jre"),
-      });
+  for (const [jreKey, jre] of Object.entries(registry.jres ?? {})) {
+    for (const [platformKey, artifact] of Object.entries(jre.platforms ?? {})) {
+      addArtifact(artifact, `dbx-jre-${jreKey}-${platformKey}.tar.gz`);
     }
   }
 
-  if (entries.length === 0 && registry.jre) {
-    for (const [platformKey, artifact] of Object.entries(registry.jre.platforms)) {
-      entries.push({
-        platformKey,
-        platformLabel: platformLabels[platformKey] ?? platformKey,
-        info: artifact,
-        jreVersion: registry.jre.version,
-        jreKey: "21",
-        r2Url: githubUrlToR2Url(artifact.url, "jre"),
-      });
+  for (const [driverKey, driver] of Object.entries(registry.drivers ?? {})) {
+    addArtifact(driver.jar, `dbx-agent-${driverKey}.jar`);
+    for (const [platformKey, artifact] of Object.entries(driver.native ?? {})) {
+      addArtifact(artifact, `dbx-agent-${driverKey}-${platformKey}`);
     }
   }
 
-  return entries;
+  for (const platformKey of Object.keys(registry.jres?.["21"]?.platforms ?? {})) {
+    const name = `dbx-agents-offline-${platformKey}.zip`;
+    assets.set(name, githubReleaseAsset(name, 0));
+  }
+
+  return Array.from(assets.values());
 }
 
-export function buildDriverEntries(registry: AgentRegistry): DriverDisplayEntry[] {
-  return Object.entries(registry.drivers).map(([key, info]) => ({
-    key,
-    label: info.label,
-    version: info.version,
-    minAppVersion: info.min_app_version,
-    jar: info.jar,
-    jre: info.jre,
-    r2Url: githubUrlToR2Url(info.jar.url, "driver"),
-  }));
+function atomGitReleaseAssets(release: AtomGitRelease): GitHubReleaseAsset[] {
+  const tag = release.tag_name || "agents-latest";
+  return (release.assets ?? [])
+    .filter((asset): asset is { name: string; type?: string } => Boolean(asset.name) && asset.type !== "source")
+    .map((asset) => githubReleaseAsset(asset.name, 0, tag));
+}
+
+function hasDownloadAssets(catalog: AgentDownloadCatalog): boolean {
+  return catalog.bundles.length > 0 || catalog.drivers.length > 0 || catalog.jres.length > 0 || catalog.nativeAgents.length > 0;
+}
+
+async function fetchJson<T>(url: string, headers?: HeadersInit): Promise<T> {
+  const response = await fetch(url, { cache: "no-store", headers });
+  if (!response.ok) throw new Error(`Download catalog request failed with ${response.status}`);
+  return response.json() as Promise<T>;
+}
+
+export function downloadLinksFor(url: string): DownloadLink[] {
+  const releasePath = url.startsWith(GITHUB_RELEASE_DOWNLOAD_PREFIX) ? url.slice(GITHUB_RELEASE_DOWNLOAD_PREFIX.length) : null;
+  if (!releasePath) return [{ source: "official", url }];
+
+  return [
+    { source: "github", url },
+    { source: "cnb", url: `${CNB_RELEASE_DOWNLOAD_PREFIX}${releasePath}` },
+    { source: "atomgit", url: `${ATOMGIT_RELEASE_DOWNLOAD_PREFIX}${releasePath}` },
+  ];
+}
+
+function assetMap(assets: GitHubReleaseAsset[]): Map<string, GitHubReleaseAsset> {
+  return new Map(assets.map((asset) => [asset.name, asset]));
+}
+
+export async function fetchAgentDownloadCatalog(): Promise<AgentDownloadCatalog | null> {
+  const loaders: Array<() => Promise<GitHubReleaseAsset[]>> = [
+    async () => (await fetchJson<GitHubRelease>(AGENTS_LATEST_RELEASE_API_URL, { Accept: "application/vnd.github+json" })).assets ?? [],
+    async () => registryReleaseAssets(await fetchJson<AgentRegistry>(CNB_AGENT_REGISTRY_URL)),
+    async () => atomGitReleaseAssets(await fetchJson<AtomGitRelease>(ATOMGIT_LATEST_RELEASE_API_URL, { Accept: "application/json" })),
+  ];
+
+  for (const loadAssets of loaders) {
+    try {
+      const catalog = buildAgentDownloadCatalog(await loadAssets());
+      if (hasDownloadAssets(catalog)) return catalog;
+    } catch {
+      // Try the next synchronized release source.
+    }
+  }
+
+  return null;
+}
+
+export function buildAgentDownloadCatalog(assets: GitHubReleaseAsset[]): AgentDownloadCatalog {
+  return {
+    jdbcPlugin: buildJdbcPluginDownloadEntry(),
+    bundles: buildOfflineBundleEntries(assets),
+    drivers: buildDriverEntries(assets),
+    jres: buildJreEntries(assets),
+    nativeAgents: buildNativeAgentEntries(assets),
+  };
+}
+
+export function buildJdbcPluginDownloadEntry(): JdbcPluginDownloadEntry {
+  return {
+    label: "DBX JDBC Plugin",
+    filename: "dbx-jdbc-plugin-latest.zip",
+    url: JDBC_PLUGIN_DOWNLOAD_URL,
+  };
+}
+
+export function buildJreEntries(assets: GitHubReleaseAsset[]): JreDisplayEntry[] {
+  return assets
+    .map((asset) => {
+      const match = /^dbx-jre-(\d+)-(.+)\.tar\.gz$/.exec(asset.name);
+      if (!match) return null;
+
+      const [, jreKey, platformKey] = match;
+      if (!jreVersions[jreKey]) return null;
+
+      return {
+        platformKey,
+        platformLabel: platformLabels[platformKey] ?? platformKey,
+        info: assetInfo(asset),
+        jreVersion: jreVersions[jreKey],
+        jreKey,
+      };
+    })
+    .filter((entry): entry is JreDisplayEntry => entry !== null)
+    .sort((a, b) => a.platformLabel.localeCompare(b.platformLabel));
+}
+
+export function buildDriverEntries(assets: GitHubReleaseAsset[]): DriverDisplayEntry[] {
+  const byName = assetMap(assets);
+
+  return currentJavaDriverKeys
+    .map((key) => {
+      const asset = byName.get(`dbx-agent-${key}.jar`);
+      if (!asset) return null;
+
+      return {
+        key,
+        label: labelForDriver(key),
+        version: driverVersionMap[key] ?? "",
+        minAppVersion: MIN_APP_VERSION,
+        jar: assetInfo(asset),
+        jre: "21",
+      };
+    })
+    .filter((entry): entry is DriverDisplayEntry => entry !== null);
+}
+
+export function buildNativeAgentEntries(assets: GitHubReleaseAsset[]): NativeAgentDisplayEntry[] {
+  const entries: NativeAgentDisplayEntry[] = [];
+
+  for (const asset of assets) {
+    const match = /^dbx-agent-(oracle|xugu)-(.+?)(?:\.exe)?$/.exec(asset.name);
+    if (!match) continue;
+
+    const [, key, platformKey] = match;
+    entries.push({
+      key,
+      label: labelForDriver(key),
+      version: driverVersionMap[key] ?? "",
+      platformKey,
+      platformLabel: platformLabels[platformKey] ?? platformKey,
+      filename: asset.name,
+      info: assetInfo(asset),
+    });
+  }
+
+  return entries.sort((a, b) => a.label.localeCompare(b.label) || a.platformLabel.localeCompare(b.platformLabel));
+}
+
+export function buildOfflineBundleEntries(assets: GitHubReleaseAsset[]): OfflineBundleEntry[] {
+  return assets
+    .map((asset) => {
+      const match = /^dbx-agents-offline-(.+)\.zip$/.exec(asset.name);
+      if (!match) return null;
+      const platformKey = match[1];
+      return {
+        platformKey,
+        platformLabel: platformLabels[platformKey] ?? platformKey,
+        filename: asset.name,
+        size: asset.size,
+        url: asset.browser_download_url,
+      };
+    })
+    .filter((entry): entry is OfflineBundleEntry => entry !== null)
+    .sort((a, b) => a.platformLabel.localeCompare(b.platformLabel));
 }
 
 export function formatSize(bytes: number): string {
+  if (bytes <= 0) return "—";
   if (bytes >= 1024 * 1024 * 1024) {
     return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
   }

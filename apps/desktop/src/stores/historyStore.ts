@@ -1,8 +1,8 @@
 import { defineStore } from "pinia";
-import { uuid } from "@/lib/utils";
+import { uuid } from "@/lib/common/utils";
 import { ref } from "vue";
-import * as api from "@/lib/api";
-import type { HistoryEntry } from "@/lib/api";
+import * as api from "@/lib/backend/api";
+import type { HistoryEntry } from "@/lib/backend/api";
 
 export const useHistoryStore = defineStore("history", () => {
   const entries = ref<HistoryEntry[]>([]);

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { performance } from "node:perf_hooks";
+import { delimiter, join } from "node:path";
 
 const tasks = [
   {
@@ -26,9 +27,10 @@ const tasks = [
 
 function runTask(task) {
   const startedAt = performance.now();
-  const child = spawn(task.command, task.args, {
+  const command = commandSpec(task);
+  const child = spawn(command.program, command.args, {
     cwd: process.cwd(),
-    env: process.env,
+    env: commandEnv(),
     stdio: ["ignore", "pipe", "pipe"],
   });
   const stdout = [];
@@ -58,6 +60,19 @@ function runTask(task) {
       });
     });
   });
+}
+
+function commandSpec(task) {
+  if (process.platform !== "win32") return { program: task.command, args: task.args };
+  const command = join(process.cwd(), "node_modules", ".bin", `${task.command}.CMD`);
+  return { program: "cmd.exe", args: ["/d", "/c", "call", command, ...task.args] };
+}
+
+function commandEnv() {
+  return {
+    ...process.env,
+    PATH: [join(process.cwd(), "node_modules", ".bin"), process.env.PATH].filter(Boolean).join(delimiter),
+  };
 }
 
 function outputFailureExcerpt(output) {

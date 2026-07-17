@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use dbx_core::db::sqlite::path_has_sqlite_header;
 use dbx_core::path_utils::expand_tilde;
 
 /// Reveal a file in the platform's file manager.
@@ -15,7 +16,7 @@ use dbx_core::path_utils::expand_tilde;
 pub fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
+        dbx_core::process::new_std_command("open")
             .arg("-R")
             .arg(path)
             .spawn()
@@ -29,7 +30,7 @@ pub fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
         // after the comma. `Command::arg` does not invoke a shell, so the path
         // is forwarded as-is — spaces and non-ASCII characters survive.
         let arg = format!("/select,{}", path.display());
-        std::process::Command::new("explorer")
+        dbx_core::process::new_std_command("explorer")
             .arg(arg)
             .spawn()
             .map(|_| ())
@@ -39,7 +40,7 @@ pub fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     {
         let target: PathBuf = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| path.to_path_buf());
-        std::process::Command::new("xdg-open")
+        dbx_core::process::new_std_command("xdg-open")
             .arg(&target)
             .spawn()
             .map(|_| ())
@@ -73,6 +74,49 @@ fn validate_path(raw: &str) -> Result<PathBuf, String> {
 pub async fn reveal_path_in_file_manager(path: String) -> Result<(), String> {
     let resolved = validate_path(&path)?;
     reveal_in_file_manager(&resolved)
+}
+
+#[tauri::command]
+pub async fn is_sqlite_database_file(path: String) -> Result<bool, String> {
+    let resolved = validate_path(&path)?;
+    path_has_sqlite_header(&resolved)
+}
+
+fn validate_database_backup_file(raw: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("backup file path is empty".to_string());
+    }
+
+    let expanded = expand_tilde(trimmed);
+    let path = PathBuf::from(&expanded);
+    if !path.is_absolute() {
+        return Err(format!("backup file path is not absolute: {expanded}"));
+    }
+    if path.extension().and_then(|extension| extension.to_str()).map(|extension| extension.eq_ignore_ascii_case("sql"))
+        != Some(true)
+    {
+        return Err(format!("backup file must use the .sql extension: {expanded}"));
+    }
+    let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    if !file_name.starts_with("dbx-backup__") {
+        return Err(format!("backup file name is not managed by DBX: {expanded}"));
+    }
+    Ok(path)
+}
+
+#[tauri::command]
+pub async fn delete_database_backup_files(paths: Vec<String>) -> Result<usize, String> {
+    let resolved = paths.iter().map(|path| validate_database_backup_file(path)).collect::<Result<Vec<_>, _>>()?;
+    let mut deleted = 0;
+    for path in resolved {
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => deleted += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("failed to delete backup file {}: {error}", path.display())),
+        }
+    }
+    Ok(deleted)
 }
 
 #[cfg(test)]
@@ -118,6 +162,37 @@ mod tests {
         let dir_str = dir.to_string_lossy().to_string();
         let resolved = validate_path(&dir_str).expect("temp dir should validate");
         assert_eq!(resolved, dir);
+    }
+
+    #[test]
+    fn database_backup_file_requires_absolute_sql_path() {
+        assert!(validate_database_backup_file("relative/backup.sql").is_err());
+        let invalid_extension = if cfg!(windows) { "C:/tmp/backup.txt" } else { "/tmp/backup.txt" };
+        assert!(validate_database_backup_file(invalid_extension).is_err());
+        let unmanaged = if cfg!(windows) { "C:/tmp/backup.sql" } else { "/tmp/backup.sql" };
+        assert!(validate_database_backup_file(unmanaged).is_err());
+        let valid = if cfg!(windows) { "C:/tmp/dbx-backup__nightly.SQL" } else { "/tmp/dbx-backup__nightly.SQL" };
+        assert!(validate_database_backup_file(valid).is_ok());
+    }
+
+    #[test]
+    fn sqlite_header_is_detected() {
+        let path = std::env::temp_dir().join(format!("dbx-sqlite-header-{}.conf", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"SQLite format 3\0extra").unwrap();
+
+        assert!(path_has_sqlite_header(&path).unwrap());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn non_sqlite_header_is_rejected() {
+        let path = std::env::temp_dir().join(format!("dbx-sqlite-header-{}.conf", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"not sqlite").unwrap();
+
+        assert!(!path_has_sqlite_header(&path).unwrap());
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

@@ -1,9 +1,9 @@
 import { ref } from "vue";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { filterDatabaseNamesForConnection } from "@/lib/visibleDatabases";
-import { usesTreeSchemaMode } from "@/lib/databaseCapabilities";
+import { filterDatabaseNamesForConnection } from "@/lib/database/visibleDatabases";
+import { usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
 import type { ConnectionConfig } from "@/types/database";
-import * as api from "@/lib/api";
+import * as api from "@/lib/backend/api";
 
 export function databaseOptionsForConnection(databaseNames: string[], connection: Pick<ConnectionConfig, "db_type" | "visible_databases"> | undefined): string[] {
   const names = filterDatabaseNamesForConnection(databaseNames, connection);

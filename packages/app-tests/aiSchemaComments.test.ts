@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
-import { buildSystemPrompt, type AiContext } from "../../apps/desktop/src/lib/ai.ts";
+import { buildSystemPrompt, type AiContext } from "../../apps/desktop/src/lib/ai/ai.ts";
 
 const BASE_CONTEXT: AiContext = {
+  connectionId: "conn-1",
   connectionName: "local",
   databaseType: "mysql",
   database: "app",
@@ -35,6 +36,7 @@ const BASE_CONTEXT: AiContext = {
       ],
     },
   ],
+  sqlFiles: [],
   truncated: false,
 };
 

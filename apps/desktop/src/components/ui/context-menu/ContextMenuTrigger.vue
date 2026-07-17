@@ -3,7 +3,7 @@ import type { ContextMenuTriggerProps } from "reka-ui";
 import type { HTMLAttributes } from "vue";
 import { reactiveOmit } from "@vueuse/core";
 import { ContextMenuTrigger, useForwardProps } from "reka-ui";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/common/utils";
 
 const props = defineProps<ContextMenuTriggerProps & { class?: HTMLAttributes["class"] }>();
 

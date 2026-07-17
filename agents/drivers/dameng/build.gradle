@@ -1,0 +1,13 @@
+dependencies {
+    // Local override: place a newer DmJdbcDriver*.jar in libs/ for versions
+    // not yet published to Maven Central (the fileTree takes priority over Maven).
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    // DmJdbcDriver8 supports JDK 8+ (compatible with JRE 21 used by DAMENG agent).
+    implementation 'com.dameng:DmJdbcDriver8:8.1.5.45'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': '达梦 DM8', 'Main-Class': 'com.dbx.agent.dameng.DamengAgent')
+    }
+}

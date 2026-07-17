@@ -5,6 +5,7 @@
     "what-is-dbx",
     "changelog",
     "getting-started",
+    "1panel",
     "databases",
     "---核心功能---",
     "query-editor",
@@ -26,6 +27,9 @@
     "ai-assistant",
     "cli",
     "mcp",
+    "web-api",
+    "---社区---",
+    "contributing",
     "---设置---",
     "plugins",
     "driver-management",
@@ -33,6 +37,7 @@
     "keyboard-shortcuts",
     "connection-import",
     "config-export",
+    "cloud-sync",
     "ssh-tunnel"
   ]
 }

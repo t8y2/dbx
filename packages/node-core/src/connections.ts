@@ -19,15 +19,20 @@ export interface ConnectionConfig {
   keepalive_interval_secs?: number;
   ssl: boolean;
   ca_cert_path?: string;
+  client_cert_path?: string;
+  client_key_path?: string;
   oracle_connection_type?: "service_name" | "sid";
-  redis_connection_mode?: "standalone" | "sentinel";
+  redis_connection_mode?: "standalone" | "sentinel" | "cluster";
   redis_sentinel_master?: string;
   redis_sentinel_nodes?: string;
   redis_sentinel_username?: string;
   redis_sentinel_password?: string;
   redis_sentinel_tls?: boolean;
+  redis_cluster_nodes?: string;
   redis_key_separator?: string;
   read_only?: boolean;
+  is_production?: boolean;
+  production_databases?: string[];
 }
 
 export type TransportLayerConfig = ({ type: "ssh" } & SshTunnelConfig) | ({ type: "proxy" } & ProxyTunnelConfig);
@@ -45,6 +50,7 @@ export interface SshTunnelConfig {
   connect_timeout_secs?: number;
   expose_lan?: boolean;
   use_ssh_agent?: boolean;
+  ssh_agent_sock_path?: string;
 }
 
 export interface ProxyTunnelConfig {
@@ -275,6 +281,11 @@ export async function findConnection(name: string): Promise<ConnectionConfig | u
   return connections.find((c) => c.name.toLowerCase() === name.toLowerCase());
 }
 
+export async function findConnectionById(id: string): Promise<ConnectionConfig | undefined> {
+  const connections = await loadConnections();
+  return connections.find((c) => c.id === id);
+}
+
 export async function addConnection(config: Omit<ConnectionConfig, "id">): Promise<ConnectionConfig> {
   const id = randomUUID();
   const db = openDb();
@@ -350,4 +361,16 @@ export async function removeConnection(name: string): Promise<boolean> {
   db.close();
 
   return true;
+}
+
+export async function removeConnectionById(id: string): Promise<boolean> {
+  const db = openDb();
+  const remove = db.transaction(() => {
+    const result = db.prepare("DELETE FROM connections WHERE id = ?").run(id);
+    db.prepare("DELETE FROM connection_secrets WHERE connection_id = ?").run(id);
+    return result.changes > 0;
+  });
+  const deleted = remove();
+  db.close();
+  return deleted;
 }

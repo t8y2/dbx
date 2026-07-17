@@ -3,7 +3,7 @@ import type { SelectGroupProps } from "reka-ui";
 import type { HTMLAttributes } from "vue";
 import { reactiveOmit } from "@vueuse/core";
 import { SelectGroup } from "reka-ui";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/common/utils";
 
 const props = defineProps<SelectGroupProps & { class?: HTMLAttributes["class"] }>();
 

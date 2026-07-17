@@ -2,12 +2,13 @@
 import { ref } from "vue";
 import type { HTMLAttributes } from "vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/common/utils";
 
 const props = withDefaults(
   defineProps<{
     text: string;
     class?: HTMLAttributes["class"];
+    tooltipClass?: HTMLAttributes["class"];
     side?: "top" | "right" | "bottom" | "left";
     sideOffset?: number;
     delay?: number;
@@ -35,5 +36,8 @@ function isTooltipDisabled(): boolean {
     <span ref="textRef" :class="cn('truncate', props.class)">
       <slot>{{ text }}</slot>
     </span>
+    <template v-if="tooltipClass" #content>
+      <span :class="cn('block max-w-xs px-3 py-1.5', tooltipClass)">{{ text }}</span>
+    </template>
   </LightTooltip>
 </template>

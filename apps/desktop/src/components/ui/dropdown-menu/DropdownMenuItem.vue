@@ -3,8 +3,8 @@ import type { DropdownMenuItemProps } from "reka-ui";
 import type { HTMLAttributes } from "vue";
 import { reactiveOmit } from "@vueuse/core";
 import { DropdownMenuItem, useForwardProps } from "reka-ui";
-import { shouldSuppressRepeatedActivation, suppressEvent, type ActionActivationGuard } from "@/lib/actionActivation";
-import { cn } from "@/lib/utils";
+import { shouldSuppressRepeatedActivation, suppressEvent, type ActionActivationGuard } from "@/lib/connection/actionActivation";
+import { cn } from "@/lib/common/utils";
 
 const props = withDefaults(
   defineProps<

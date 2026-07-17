@@ -1,0 +1,9 @@
+dependencies {
+    implementation 'com.yashandb:yashandb-jdbc:1.9.27'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': '崖山 YashanDB', 'Main-Class': 'com.dbx.agent.yashandb.YashandbAgent')
+    }
+}

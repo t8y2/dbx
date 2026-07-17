@@ -1,0 +1,28 @@
+name: Docker Hub Description
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "deploy/dockerhub/README.md"
+      - ".github/workflows/dockerhub-description.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Update Docker Hub overview
+        uses: peter-evans/dockerhub-description@v5
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ secrets.DOCKERHUB_USERNAME }}/dbx
+          short-description: Lightweight self-hosted database client supporting 60+ databases
+          readme-filepath: ./deploy/dockerhub/README.md

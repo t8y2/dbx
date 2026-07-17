@@ -32,6 +32,7 @@ const dataComparePrefillSchema = ref("");
 const dataComparePrefillTable = ref("");
 const sqlFilePrefillConnectionId = ref("");
 const sqlFilePrefillDatabase = ref("");
+const sqlFilePrefillFilePath = ref("");
 const diagramPrefillConnectionId = ref("");
 const diagramPrefillDatabase = ref("");
 const diagramPrefillSchema = ref("");
@@ -57,6 +58,7 @@ const databaseExportPrefillDatabase = ref("");
 const databaseExportPrefillSchema = ref("");
 const databaseExportPrefillTable = ref("");
 const databaseExportPrefillTables = ref<string[]>([]);
+const databaseExportAllDatabases = ref(false);
 
 let watchersRegistered = false;
 
@@ -114,11 +116,21 @@ export function useDialogSources() {
         if (v) {
           sqlFilePrefillConnectionId.value = v.connectionId;
           sqlFilePrefillDatabase.value = v.database;
+          sqlFilePrefillFilePath.value = v.filePath ?? "";
           showSqlFileDialog.value = true;
           connectionStore.sqlFileSource = null;
         }
       },
     );
+
+    // Clear the pre-filled file path once the dialog closes so a later open
+    // via the toolbar (which doesn't go through sqlFileSource) doesn't re-load
+    // the previously previewed file. prefillConnectionId/database are harmless
+    // when stale (they only preselect dropdowns), but a stale path triggers an
+    // async file read + preview render — a visible side effect.
+    watch(showSqlFileDialog, (open) => {
+      if (!open) sqlFilePrefillFilePath.value = "";
+    });
 
     watch(
       () => connectionStore.diagramSource,
@@ -141,7 +153,7 @@ export function useDialogSources() {
           tableImportPrefillConnectionId.value = v.connectionId;
           tableImportPrefillDatabase.value = v.database;
           tableImportPrefillSchema.value = v.schema ?? "";
-          tableImportPrefillTable.value = v.tableName;
+          tableImportPrefillTable.value = v.tableName ?? "";
           showTableImportDialog.value = true;
           connectionStore.tableImportSource = null;
         }
@@ -199,6 +211,7 @@ export function useDialogSources() {
           databaseExportPrefillSchema.value = v.schema ?? "";
           databaseExportPrefillTable.value = v.tableName ?? "";
           databaseExportPrefillTables.value = v.tableNames ?? [];
+          databaseExportAllDatabases.value = v.allDatabases ?? false;
           showDatabaseExportDialog.value = true;
           connectionStore.databaseExportSource = null;
         }
@@ -303,6 +316,7 @@ export function useDialogSources() {
     dataComparePrefillTable,
     sqlFilePrefillConnectionId,
     sqlFilePrefillDatabase,
+    sqlFilePrefillFilePath,
     diagramPrefillConnectionId,
     diagramPrefillDatabase,
     diagramPrefillSchema,
@@ -328,6 +342,7 @@ export function useDialogSources() {
     databaseExportPrefillSchema,
     databaseExportPrefillTable,
     databaseExportPrefillTables,
+    databaseExportAllDatabases,
     onExportClick,
     onExportConfirm,
     onImportClick,

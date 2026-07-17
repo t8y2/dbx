@@ -1,0 +1,10 @@
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation 'cn.com.vastdata:vastbase-jdbc:2.11v'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': 'Vastbase', 'Main-Class': 'com.dbx.agent.vastbase.VastbaseAgent')
+    }
+}

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { TREE_SCHEMA_DEFAULT_DATABASE_SELECT_VALUE, decodeSelectableDatabaseValue, encodeSelectableDatabaseValue, formatDatabaseLabel, isDefaultDatabase, resolveDefaultDatabase } from "../../apps/desktop/src/lib/defaultDatabase.ts";
+import { TREE_SCHEMA_DEFAULT_DATABASE_SELECT_VALUE, decodeSelectableDatabaseValue, encodeSelectableDatabaseValue, formatDatabaseLabel, isDefaultDatabase, resolveDefaultDatabase } from "../../apps/desktop/src/lib/database/defaultDatabase.ts";
 
 test("优先使用连接上已保存的默认数据库", () => {
   assert.equal(resolveDefaultDatabase({ database: "analytics" }, ["app", "analytics"]), "analytics");
@@ -12,6 +12,12 @@ test("默认数据库为空时回退到首个可选数据库", () => {
 
 test("没有默认数据库且无候选项时返回空字符串", () => {
   assert.equal(resolveDefaultDatabase({ database: undefined }, []), "");
+});
+
+test("Cloudflare D1 使用 SQLite main 命名空间而不是连接凭据中的 Database ID", () => {
+  assert.equal(resolveDefaultDatabase({ db_type: "cloudflare-d1", database: "d1-database-uuid" }, []), "main");
+  assert.equal(isDefaultDatabase({ db_type: "cloudflare-d1", database: "d1-database-uuid" }, "main"), true);
+  assert.equal(isDefaultDatabase({ db_type: "cloudflare-d1", database: "d1-database-uuid" }, "d1-database-uuid"), false);
 });
 
 test("判断当前数据库是否为默认数据库", () => {

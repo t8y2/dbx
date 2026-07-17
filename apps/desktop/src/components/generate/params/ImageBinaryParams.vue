@@ -3,7 +3,7 @@ import { computed } from "vue";
 import { useI18n } from "vue-i18n";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import type { GeneratorParams } from "@/lib/dataGenerate";
+import type { GeneratorParams } from "@/lib/dataGrid/dataGenerate";
 
 const props = defineProps<{ params: GeneratorParams }>();
 

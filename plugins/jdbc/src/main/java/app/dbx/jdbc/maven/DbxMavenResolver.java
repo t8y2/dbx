@@ -39,13 +39,22 @@ public final class DbxMavenResolver {
             ResolveResult result = resolve(options);
             JSON.writeValue(System.out, result);
             System.out.println();
-        } catch (Exception err) {
+        } catch (Throwable err) {
+            // Resolver dependencies may fail with linkage errors when a runtime image is missing a required module.
             Map<String, String> error = new LinkedHashMap<>();
-            error.put("error", err.getMessage() == null ? err.getClass().getSimpleName() : err.getMessage());
+            error.put("error", throwableMessage(err));
             JSON.writeValue(System.err, error);
             System.err.println();
             System.exit(1);
         }
+    }
+
+    private static String throwableMessage(Throwable error) {
+        Throwable cause = error;
+        while (cause.getCause() != null && cause.getCause() != cause) {
+            cause = cause.getCause();
+        }
+        return cause.getMessage() == null ? cause.toString() : cause.getMessage();
     }
 
     private static ResolveResult resolve(ResolverOptions options) throws Exception {

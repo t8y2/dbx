@@ -1,0 +1,11 @@
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation 'org.apache.hive:hive-jdbc:4.0.1:standalone'
+    implementation 'org.slf4j:slf4j-nop:1.7.30'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': 'Apache Hive', 'Main-Class': 'com.dbx.agent.hive.HiveAgent')
+    }
+}

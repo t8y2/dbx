@@ -62,6 +62,14 @@ test("Manticore Search is direct-query capable", () => {
   assert.equal(DIRECT_QUERY_TYPES.includes("manticoresearch" as any), true);
 });
 
+test("GaussDB family requires the DBX Desktop bridge for MCP", () => {
+  for (const dbType of ["gaussdb", "opengauss"] as const) {
+    assert.equal(isDirectQueryType(dbType), false);
+    assert.equal(DIRECT_QUERY_TYPES.includes(dbType as any), false);
+    assert.equal(BRIDGE_REQUIRED_TYPES.includes(dbType as any), true);
+  }
+});
+
 test("driver manifest declares support levels and product capabilities", () => {
   const manifest = loadManifest();
 

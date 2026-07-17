@@ -139,6 +139,7 @@ impl PulsarApiProfile {
                 // Token signing is NOT a broker REST capability — see chapter 11.
                 supports_token_management: false,
                 supports_raw_admin_api: true,
+                supports_send_message: false,
             },
         }
     }

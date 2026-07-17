@@ -1,0 +1,40 @@
+name: Sync CNB Release Assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to sync"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CNB_REPOSITORY: "dbxio.com/dbx"
+
+jobs:
+  sync-release-to-cnb:
+    name: Sync release to CNB
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync release assets to CNB
+        env:
+          TAG_NAME: ${{ inputs.tag }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_USERNAME: ${{ github.repository_owner }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CNB_USERNAME: cnb
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          wget -q https://cnb.cool/znb/mpgrm/-/releases/download/v0.1.0/mpgrm_linux_amd64.tar.gz
+          tar -xf mpgrm_linux_amd64.tar.gz
+          chmod +x mpgrm
+
+          ./mpgrm releases sync \
+            --repo "https://github.com/${GITHUB_REPOSITORY}.git" \
+            --target-repo "https://cnb.cool/${CNB_REPOSITORY}.git" \
+            --tags "${TAG_NAME}"

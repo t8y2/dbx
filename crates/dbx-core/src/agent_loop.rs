@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use futures::future::join_all;
 use futures::FutureExt;
@@ -8,18 +8,55 @@ use tokio::sync::Notify;
 
 use crate::agent_events::{AgentEvent, ToolCall, ToolDefinition, ToolResult};
 use crate::agent_tools;
-use crate::ai::{self, AiCompletionRequest, AiConfig, AiMessage, AiProvider, AiStreamChunk};
+use crate::ai::{self, AiCompletionRequest, AiConfig, AiMessage, AiProvider, AiStreamChunk, AiTaskContract};
+use crate::ai_cli_agent::CliAgentCommandSpec;
 use crate::connection::AppState;
 use crate::models::connection::DatabaseType;
 use crate::token_usage::TokenUsage;
-use tokio::sync::Mutex;
 
 /// Maximum number of agent loop turns to prevent infinite loops.
-const MAX_AGENT_TURNS: u32 = 10;
+const MAX_AGENT_TURNS: u32 = 30;
 const MAX_TOOL_RESULT_CONTEXT_CHARS: usize = 12_000;
 const TOOL_RESULT_HEAD_CHARS: usize = 4_000;
 const TOOL_RESULT_TAIL_CHARS: usize = 4_000;
 const TOOL_RESULT_SAMPLE_ITEMS: usize = 5;
+const MAX_CONTRACT_REPAIR_ATTEMPTS: u32 = 2;
+
+fn take_text(m: &std::sync::Mutex<String>) -> String {
+    m.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Convert a streaming AI chunk into agent events for the frontend.
+/// Pure function — no side effects, easily testable.
+fn chunk_to_events(chunk: &AiStreamChunk) -> Vec<AgentEvent> {
+    let mut events = Vec::new();
+    if !chunk.delta.is_empty() {
+        events.push(AgentEvent::TextDelta { delta: chunk.delta.clone() });
+    }
+    if let Some(ref reasoning) = chunk.reasoning_delta {
+        events.push(AgentEvent::ReasoningDelta { delta: reasoning.clone() });
+    }
+    events
+}
+
+enum LoopExit {
+    Completed,
+    Cancelled,
+    Interrupted(String),
+    Exhausted,
+}
+
+impl LoopExit {
+    fn should_break_turns(&self) -> bool {
+        matches!(self, LoopExit::Cancelled | LoopExit::Interrupted(_))
+    }
+}
+
+enum CompactResult {
+    Skipped,
+    Compacted,
+    Cancelled,
+}
 
 /// Context for an agent loop run.
 pub struct AgentLoopContext {
@@ -27,6 +64,8 @@ pub struct AgentLoopContext {
     pub connection_id: String,
     pub database: String,
     pub db_type: DatabaseType,
+    pub cli_mcp_server_command: Option<CliAgentCommandSpec>,
+    pub sql_permissions: agent_tools::AgentSqlPermissions,
 }
 
 /// Check if the provider supports function calling / tool use.
@@ -56,9 +95,43 @@ pub async fn run_agent_loop(
     on_event: impl Fn(AgentEvent) + Send + Sync + Clone + 'static,
     cancelled: &Notify,
     max_tokens: Option<u32>,
-    temperature: Option<f32>,
+    task_contract: Option<&AiTaskContract>,
     is_agent_mode: bool,
 ) -> Result<String, String> {
+    let contract_system_prompt = augment_system_prompt_with_task_contract(system_prompt, task_contract, is_agent_mode);
+    let system_prompt = contract_system_prompt.as_str();
+
+    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli) {
+        let connection_name = {
+            let configs = agent_ctx.state.configs.read().await;
+            configs
+                .get(&agent_ctx.connection_id)
+                .map(|config| config.name.clone())
+                .unwrap_or_else(|| agent_ctx.connection_id.clone())
+        };
+        let options = crate::ai_cli_agent::CliAgentRunOptions {
+            connection_id: agent_ctx.connection_id.clone(),
+            connection_name,
+            database: agent_ctx.database.clone(),
+            agent_mode: is_agent_mode,
+            allow_writes: agent_ctx.sql_permissions.allow_writes,
+            allow_dangerous: agent_ctx.sql_permissions.allow_dangerous,
+            mcp_server_command: agent_ctx.cli_mcp_server_command.clone(),
+        };
+        if matches!(config.provider, AiProvider::ClaudeCodeCli) {
+            let prompt = crate::ai_claude_code_cli::build_claude_code_prompt(
+                system_prompt,
+                messages,
+                agent_ctx.sql_permissions.allow_writes,
+            );
+            return crate::ai_claude_code_cli::run_claude_code_agent(config, &prompt, options, cancelled, on_event)
+                .await;
+        }
+        let prompt =
+            crate::ai_codex_cli::build_codex_prompt(system_prompt, messages, agent_ctx.sql_permissions.allow_writes);
+        return crate::ai_codex_cli::run_codex_agent(config, &prompt, options, cancelled, on_event).await;
+    }
+
     // Auto-degrade: providers without function calling fall back to text-only completion.
     if !provider_supports_function_calling(config) {
         return run_agent_loop_text_only(
@@ -69,24 +142,47 @@ pub async fn run_agent_loop(
             on_event,
             cancelled,
             max_tokens,
-            temperature,
+            task_contract,
         )
         .await;
     }
-    let tools = if is_agent_mode { agent_tools::all_tools(agent_ctx.db_type) } else { agent_tools::read_only_tools() };
+    let tools = if is_agent_mode {
+        agent_tools::all_tools(agent_ctx.db_type, agent_ctx.sql_permissions)
+    } else {
+        agent_tools::read_only_tools(agent_ctx.db_type)
+    };
+    let task_contract = task_contract.cloned();
     let mut conversation_messages: Vec<AiMessage> = messages.to_vec();
     let mut final_text = String::new();
+    let mut loop_exit = LoopExit::Exhausted;
     let mut total_usage = TokenUsage::default();
+    let mut contract_repair_attempts = 0;
 
     for turn in 0..MAX_AGENT_TURNS {
         // Check for cancellation before each turn
         if cancelled.notified().now_or_never().is_some() {
-            on_event(AgentEvent::Error { message: "Agent loop cancelled".to_string() });
+            loop_exit = LoopExit::Cancelled;
             break;
         }
 
         // Check and maybe compact context
-        maybe_compact(config, system_prompt, &tools, &mut conversation_messages, max_tokens, &on_event, false).await;
+        if matches!(
+            maybe_compact(
+                config,
+                system_prompt,
+                &tools,
+                &mut conversation_messages,
+                max_tokens,
+                &on_event,
+                cancelled,
+                false,
+            )
+            .await,
+            CompactResult::Cancelled
+        ) {
+            loop_exit = LoopExit::Cancelled;
+            break;
+        }
 
         on_event(AgentEvent::TurnStart { turn });
 
@@ -96,8 +192,14 @@ pub async fn run_agent_loop(
         for attempt in 0..2 {
             // Build the LLM request with tools. Rebuild after retry compaction so the request
             // reflects the latest conversation_messages.
-            let request =
-                build_tool_request(config, system_prompt, &conversation_messages, &tools, max_tokens, temperature);
+            let request = build_tool_request(
+                config,
+                system_prompt,
+                &conversation_messages,
+                &tools,
+                max_tokens,
+                task_contract.clone(),
+            );
 
             // Stream the LLM response, collecting text and tool_calls.
             let accumulated_text = Arc::new(Mutex::new(String::new()));
@@ -111,20 +213,19 @@ pub async fn run_agent_loop(
             let on_chunk = move |chunk: AiStreamChunk| {
                 if !chunk.delta.is_empty() {
                     emitted.store(true, Ordering::Relaxed);
-                    if let Ok(mut text) = acc.try_lock() {
-                        text.push_str(&chunk.delta);
-                    }
-                    on_event2(AgentEvent::TextDelta { delta: chunk.delta.clone() });
+                    acc.lock().unwrap_or_else(|e| e.into_inner()).push_str(&chunk.delta);
                 }
-                if let Some(ref reasoning) = chunk.reasoning_delta {
+                if chunk.reasoning_delta.is_some() {
                     emitted.store(true, Ordering::Relaxed);
-                    on_event2(AgentEvent::ReasoningDelta { delta: reasoning.clone() });
+                }
+                for event in chunk_to_events(&chunk) {
+                    on_event2(event);
                 }
             };
 
             match stream_with_tools(config, &request, &session_id, &tools, cancelled, on_chunk).await {
                 Ok((tool_calls, usage)) => {
-                    let accumulated_text = accumulated_text.lock().await.clone();
+                    let accumulated_text = take_text(&accumulated_text);
                     stream_result = Some((tool_calls, usage, accumulated_text));
                     break;
                 }
@@ -139,16 +240,41 @@ pub async fn run_agent_loop(
                         &mut conversation_messages,
                         max_tokens,
                         &on_event,
+                        cancelled,
                         true,
                     )
                     .await;
-                    if compacted.is_some() {
-                        continue;
+                    match compacted {
+                        CompactResult::Compacted => continue,
+                        CompactResult::Cancelled => {
+                            loop_exit = LoopExit::Cancelled;
+                            break;
+                        }
+                        CompactResult::Skipped => {
+                            final_text = take_text(&accumulated_text);
+                            loop_exit =
+                                LoopExit::Interrupted(last_stream_error.take().unwrap_or_else(|| {
+                                    "LLM request failed after context compaction retry".to_string()
+                                }));
+                        }
                     }
                     break;
                 }
-                Err(err) => return Err(err),
+                Err(err) if err == ai::AGENT_CANCELLED_ERROR => {
+                    final_text = take_text(&accumulated_text);
+                    loop_exit = LoopExit::Cancelled;
+                    break;
+                }
+                Err(err) => {
+                    final_text = take_text(&accumulated_text);
+                    loop_exit = LoopExit::Interrupted(err);
+                    break;
+                }
             }
+        }
+
+        if loop_exit.should_break_turns() {
+            break;
         }
 
         let Some((collected_tool_calls, turn_usage, accumulated_text)) = stream_result else {
@@ -175,8 +301,37 @@ pub async fn run_agent_loop(
         });
 
         if collected_tool_calls.is_empty() {
-            // No tool calls -- we're done
+            match validate_final_answer(task_contract.as_ref(), &accumulated_text) {
+                FinalAnswerCheck::Satisfied => {
+                    final_text = accumulated_text;
+                    loop_exit = LoopExit::Completed;
+                    break;
+                }
+                FinalAnswerCheck::NeedsRepair(reason) if contract_repair_attempts < MAX_CONTRACT_REPAIR_ATTEMPTS => {
+                    contract_repair_attempts += 1;
+                    conversation_messages.push(AiMessage {
+                        role: "user".to_string(),
+                        content: build_contract_repair_prompt(task_contract.as_ref(), is_agent_mode, &reason),
+                        tool_call_id: None,
+                        tool_calls: Vec::new(),
+                    });
+                    continue;
+                }
+                FinalAnswerCheck::NeedsRepair(reason) => {
+                    let message = append_contract_failure_note(accumulated_text, &reason);
+                    on_event(AgentEvent::TextDelta { delta: message.clone() });
+                    final_text = message;
+                    loop_exit = LoopExit::Completed;
+                    break;
+                }
+            }
+        }
+
+        // Honor a cancellation that arrived after the stream finished but before we
+        // run the requested tools; otherwise a long execute_query would keep running.
+        if cancelled.notified().now_or_never().is_some() {
             final_text = accumulated_text;
+            loop_exit = LoopExit::Cancelled;
             break;
         }
 
@@ -195,6 +350,7 @@ pub async fn run_agent_loop(
         let conn2 = agent_ctx.connection_id.clone();
         let db2 = agent_ctx.database.clone();
         let db_type = agent_ctx.db_type;
+        let sql_permissions = agent_ctx.sql_permissions;
 
         // Split by index into parallel and sequential groups using tool metadata
         let tool_parallel_map: std::collections::HashMap<&str, bool> =
@@ -213,7 +369,7 @@ pub async fn run_agent_loop(
                 let state = Arc::clone(&state2);
                 let conn = conn2.clone();
                 let db = db2.clone();
-                async move { agent_tools::execute_tool(&tc, &state, &conn, &db, &db_type).await }
+                async move { agent_tools::execute_tool(&tc, &state, &conn, &db, &db_type, sql_permissions).await }
             })
             .collect();
         let parallel_results = join_all(parallel_futures).await;
@@ -222,7 +378,8 @@ pub async fn run_agent_loop(
         let mut sequential_results = Vec::with_capacity(sequential_indices.len());
         for &i in &sequential_indices {
             let tc = make_tc(&collected_tool_calls[i]);
-            sequential_results.push(agent_tools::execute_tool(&tc, &state2, &conn2, &db2, &db_type).await);
+            sequential_results
+                .push(agent_tools::execute_tool(&tc, &state2, &conn2, &db2, &db_type, sql_permissions).await);
         }
 
         // Merge results back into original order
@@ -248,13 +405,44 @@ pub async fn run_agent_loop(
             });
             conversation_messages.push(AiMessage {
                 role: "tool".to_string(),
-                content: compact_tool_result_for_context(&tc.name, &result.content),
+                content: tool_result_for_followup_context(&tc.name, &result.content),
                 tool_call_id: Some(tc.id.clone()),
                 tool_calls: Vec::new(),
             });
         }
+    }
 
-        final_text = accumulated_text;
+    match loop_exit {
+        LoopExit::Completed => {}
+        LoopExit::Cancelled => {
+            let message = if final_text.trim().is_empty() {
+                "Agent run was cancelled before producing output.".to_string()
+            } else {
+                "\n\nAgent run was cancelled. Partial output above was preserved.".to_string()
+            };
+            on_event(AgentEvent::TextDelta { delta: message.clone() });
+            final_text.push_str(&message);
+        }
+        LoopExit::Interrupted(error) => {
+            let message = if final_text.trim().is_empty() {
+                format!("Agent stream stopped before completion: {error}.")
+            } else {
+                format!("\n\nAgent stream stopped before completion: {error}. Partial output above was preserved.")
+            };
+            on_event(AgentEvent::TextDelta { delta: message.clone() });
+            final_text.push_str(&message);
+        }
+        LoopExit::Exhausted => {
+            let message = if final_text.trim().is_empty() {
+                format!("Agent reached the {MAX_AGENT_TURNS}-turn safety limit before producing output. Send Continue to let the agent keep working.")
+            } else {
+                format!(
+                    "\n\nAgent reached the {MAX_AGENT_TURNS}-turn safety limit before a final answer. The partial output above was preserved; send Continue to let the agent keep working."
+                )
+            };
+            on_event(AgentEvent::TextDelta { delta: message.clone() });
+            final_text.push_str(&message);
+        }
     }
 
     on_event(AgentEvent::AgentEnd {
@@ -271,7 +459,7 @@ fn build_tool_request(
     messages: &[AiMessage],
     _tools: &[ToolDefinition], // Tools are injected in ai::stream_with_tools, not via AiCompletionRequest.
     max_tokens: Option<u32>,
-    temperature: Option<f32>,
+    task_contract: Option<AiTaskContract>,
 ) -> AiCompletionRequest {
     // Note: tools are passed via the body, not via AiCompletionRequest.
     // The actual injection happens in stream_with_tools.
@@ -279,15 +467,178 @@ fn build_tool_request(
         config: config.clone(),
         system_prompt: system_prompt.to_string(),
         messages: messages.to_vec(),
+        task_contract,
         max_tokens: max_tokens.or(Some(4096)),
-        temperature: temperature.or(Some(0.2)),
     }
+}
+
+fn augment_system_prompt_with_task_contract(
+    system_prompt: &str,
+    task_contract: Option<&AiTaskContract>,
+    is_agent_mode: bool,
+) -> String {
+    let Some(contract) = task_contract else {
+        return system_prompt.to_string();
+    };
+
+    let action = contract.action.as_deref().unwrap_or("unknown");
+    let mode = contract.mode.as_deref().unwrap_or(if is_agent_mode { "agent" } else { "ask" });
+    let user_request = contract.user_request.as_deref().unwrap_or("(not provided)");
+    let mode_rule = if action_requires_sql_deliverable(action) {
+        "This is a SQL-producing action: produce the final SQL in a fenced ```sql code block. Use tools only as intermediate evidence for schema/dialect; do not stop at a tool-result summary. In Agent mode, execute a query only when the original request explicitly asks for real data/results, not when it merely asks to generate SQL."
+    } else {
+        match action.to_ascii_lowercase().as_str() {
+            "general" => "This is a general Q&A mode. Answer the user's question directly and naturally using your knowledge and any available database context. Adapt to the user's intent.",
+            "query" => "This is a data-query task: call execute_query to obtain real results, then answer based on the actual data. Do not stop after merely outputting SQL text.",
+            "exploreschema" => "This is a schema-inspection task: use list_tables/get_columns to obtain authoritative structure, then summarize. Do not execute data queries unless the user explicitly asks for data.",
+            "executeandexplain" => "This is an execute-and-explain task: call execute_query to run the current SQL, then explain the real results.",
+            _ if is_agent_mode => "For data-query intents, obtain real results with execute_query when safe; otherwise state the blocker.",
+            _ => "In Ask mode, produce SQL/explanation only and do not claim execution.",
+        }
+    };
+
+    format!(
+        "{system_prompt}\n\n[TASK CONTRACT]\n\
+Original user request: {user_request}\n\
+Action: {action}\n\
+Mode: {mode}\n\
+Tool results are intermediate evidence. Continue the original task after every tool call; never treat a tool-result summary as the final answer unless the user explicitly requested that summary.\n\
+{mode_rule}\n\
+If the final deliverable cannot be produced safely, state the exact missing information and ask one concise clarification question."
+    )
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum FinalAnswerCheck {
+    Satisfied,
+    NeedsRepair(String),
+}
+
+fn validate_final_answer(task_contract: Option<&AiTaskContract>, text: &str) -> FinalAnswerCheck {
+    let Some(contract) = task_contract else {
+        return FinalAnswerCheck::Satisfied;
+    };
+
+    let action = contract.action.as_deref().unwrap_or_default();
+    if action_requires_sql_deliverable(action)
+        && !contains_sql_deliverable(text)
+        && !looks_like_blocker_or_clarification(text)
+    {
+        return FinalAnswerCheck::NeedsRepair(
+            "SQL-producing actions require a final SQL code block, or a concise blocker/clarification when SQL cannot be produced safely.".to_string(),
+        );
+    }
+
+    FinalAnswerCheck::Satisfied
+}
+
+fn build_contract_repair_prompt(task_contract: Option<&AiTaskContract>, is_agent_mode: bool, reason: &str) -> String {
+    let action = task_contract.and_then(|c| c.action.as_deref()).unwrap_or("unknown");
+    let mode = task_contract.and_then(|c| c.mode.as_deref()).unwrap_or(if is_agent_mode { "agent" } else { "ask" });
+    let user_request = task_contract.and_then(|c| c.user_request.as_deref()).unwrap_or("(not provided)");
+    let mode_rule = if action_requires_sql_deliverable(action) {
+        "For this SQL-producing action, produce SQL in a fenced ```sql code block. Tool results are evidence only; do not answer by summarizing schema/tool output. Execute a query only when the original request explicitly asks for real data/results."
+    } else {
+        match action.to_ascii_lowercase().as_str() {
+            "general" => "For this general Q&A, answer the user's question directly and naturally.",
+            "query" => "For this data-query task, call execute_query and answer based on real data; do not stop at SQL text or a schema summary.",
+            "exploreschema" => "For this schema-inspection task, summarize real structure from list_tables/get_columns; do not invent columns.",
+            "executeandexplain" => "For this execute-and-explain task, run the current SQL via execute_query and explain the real results.",
+            _ if is_agent_mode => "If the original request asks for real data and it can be answered safely, call execute_query before the final answer.",
+            _ => "In Ask mode, generate SQL and concise explanation only; do not claim the SQL was executed.",
+        }
+    };
+
+    format!(
+        "[SYSTEM-GENERATED TASK CONTRACT CHECK]\n\
+Your previous response did not satisfy the current task contract.\n\
+Issue: {reason}\n\
+Original user request: {user_request}\n\
+Action: {action}\n\
+Mode: {mode}\n\n\
+Tool results in the conversation are intermediate evidence only. Continue the original user task; do not summarize tool results unless the user explicitly requested a summary.\n\
+{mode_rule}\n\
+Produce a final answer that satisfies the action contract now. If required tables/columns are missing or ambiguous, state exactly what is missing and ask one concise clarification question."
+    )
+}
+
+fn action_requires_sql_deliverable(action: &str) -> bool {
+    matches!(action.to_ascii_lowercase().as_str(), "generate" | "optimize" | "fix" | "convert" | "sampledata")
+}
+
+fn append_contract_failure_note(text: String, reason: &str) -> String {
+    if text.trim().is_empty() {
+        return format!("Unable to produce a contract-compliant final answer: {reason}");
+    }
+
+    format!("{text}\n\nTask contract warning: {reason}")
+}
+
+fn contains_sql_deliverable(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let mut rest = lower.as_str();
+
+    while let Some(fence_start) = rest.find("```") {
+        let after_open = &rest[fence_start + 3..];
+        let Some(info_end) = after_open.find('\n') else {
+            return false;
+        };
+        let info = after_open[..info_end].trim();
+        let after_info = &after_open[info_end + 1..];
+        let Some(fence_end) = after_info.find("```") else {
+            return false;
+        };
+        let body = &after_info[..fence_end];
+
+        if (info.is_empty() || info.starts_with("sql")) && contains_sql_keyword(body) {
+            return true;
+        }
+
+        rest = &after_info[fence_end + 3..];
+    }
+
+    false
+}
+
+fn contains_sql_keyword(lower_text: &str) -> bool {
+    lower_text.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_').any(|token| {
+        matches!(
+            token,
+            "select" | "with" | "show" | "describe" | "explain" | "insert" | "update" | "delete" | "create" | "alter"
+        )
+    })
+}
+
+fn looks_like_blocker_or_clarification(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let markers = [
+        "missing",
+        "not enough",
+        "cannot determine",
+        "can't determine",
+        "unable to determine",
+        "which column",
+        "please clarify",
+        "need to know",
+        "缺少",
+        "不足",
+        "无法确定",
+        "不能确定",
+        "没有找到",
+        "未找到",
+        "请确认",
+        "请提供",
+        "需要明确",
+        "哪个字段",
+    ];
+    markers.iter().any(|marker| lower.contains(marker))
 }
 
 /// Stream an LLM response with tool support, parsing tool_calls from SSE deltas.
 ///
-/// True streaming: text, reasoning, and tool call arguments are all emitted
-/// incrementally as they arrive from the provider.
+/// Reasoning and tool call arguments are emitted incrementally as they arrive.
+/// Assistant text is buffered until it satisfies the task contract so an
+/// intermediate tool-result summary is not shown as the final answer.
 async fn stream_with_tools(
     config: &AiConfig,
     request: &AiCompletionRequest,
@@ -298,7 +649,7 @@ async fn stream_with_tools(
 ) -> Result<(Vec<ToolCall>, Option<TokenUsage>), String> {
     // Return early if the user cancelled before the LLM call started.
     if cancelled.notified().now_or_never().is_some() {
-        return Err("Agent loop cancelled".to_string());
+        return Err(ai::AGENT_CANCELLED_ERROR.to_string());
     }
 
     ai::stream_with_tools(config, request, session_id, tools, cancelled, on_chunk).await
@@ -332,28 +683,68 @@ async fn run_agent_loop_text_only(
     messages: &[AiMessage],
     agent_ctx: &AgentLoopContext,
     on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
-    _cancelled: &Notify,
+    cancelled: &Notify,
     max_tokens: Option<u32>,
-    temperature: Option<f32>,
+    task_contract: Option<&AiTaskContract>,
 ) -> Result<String, String> {
     // Build a schema-enriched system prompt so the LLM can answer schema questions
     // even without tool access.
     let enriched_prompt = build_schema_prompt(agent_ctx, system_prompt).await;
 
-    let request = AiCompletionRequest {
+    // Honor a cancellation requested while loading schema context.
+    if cancelled.notified().now_or_never().is_some() {
+        on_event(AgentEvent::AgentEnd { input_tokens: None, output_tokens: None });
+        return Ok("Agent run was cancelled before producing output.".to_string());
+    }
+
+    let mut request = AiCompletionRequest {
         config: config.clone(),
         system_prompt: enriched_prompt,
         messages: messages.to_vec(),
+        task_contract: task_contract.cloned(),
         max_tokens: max_tokens.or(Some(4096)),
-        temperature: temperature.or(Some(0.2)),
     };
 
-    // Use a non-streaming completion as the simplest fallback.
-    let result = ai::complete(&request).await?;
+    for attempt in 0..=MAX_CONTRACT_REPAIR_ATTEMPTS {
+        // Use non-streaming completions so contract repair can suppress incomplete drafts.
+        // Race the (non-cancellable) HTTP call against cancellation so Stop still works.
+        let result = tokio::select! {
+            result = ai::complete(&request) => result?,
+            _ = cancelled.notified() => {
+                on_event(AgentEvent::AgentEnd { input_tokens: None, output_tokens: None });
+                return Ok("Agent run was cancelled before producing output.".to_string());
+            }
+        };
+        match validate_final_answer(task_contract, &result) {
+            FinalAnswerCheck::Satisfied => {
+                on_event(AgentEvent::TextDelta { delta: result.clone() });
+                on_event(AgentEvent::AgentEnd { input_tokens: None, output_tokens: None });
+                return Ok(result);
+            }
+            FinalAnswerCheck::NeedsRepair(reason) if attempt < MAX_CONTRACT_REPAIR_ATTEMPTS => {
+                request.messages.push(AiMessage {
+                    role: "assistant".to_string(),
+                    content: result,
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                });
+                request.messages.push(AiMessage {
+                    role: "user".to_string(),
+                    content: build_contract_repair_prompt(task_contract, false, &reason),
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                });
+            }
+            FinalAnswerCheck::NeedsRepair(reason) => {
+                let message = append_contract_failure_note(result, &reason);
+                on_event(AgentEvent::TextDelta { delta: message.clone() });
+                on_event(AgentEvent::AgentEnd { input_tokens: None, output_tokens: None });
+                return Ok(message);
+            }
+        }
+    }
 
-    on_event(AgentEvent::TextDelta { delta: result.clone() });
-    on_event(AgentEvent::AgentEnd { input_tokens: None, output_tokens: None });
-    Ok(result)
+    Err("Text-only agent fallback failed to produce a final answer".to_string())
 }
 
 /// Build a system prompt enriched with database schema information
@@ -369,6 +760,7 @@ async fn build_schema_prompt(agent_ctx: &AgentLoopContext, system_prompt: &str) 
         "",
         None,
         Some(50), // smaller limit for prompt injection
+        None,
         None,
     )
     .await;
@@ -493,18 +885,19 @@ async fn maybe_compact(
     messages: &mut Vec<AiMessage>,
     max_tokens: Option<u32>,
     on_event: &(impl Fn(AgentEvent) + Send + Sync),
+    cancelled: &Notify,
     force: bool,
-) -> Option<u32> {
+) -> CompactResult {
     let window = config.context_window.unwrap_or_else(|| context_window_for_model(&config.model));
     let budget = prompt_budget(window, max_tokens);
     let estimated_before = estimate_current_prompt_tokens(system_prompt, tools, messages);
 
     if !force && estimated_before <= budget {
-        return None;
+        return CompactResult::Skipped;
     }
 
     if messages.len() <= 2 {
-        return None;
+        return CompactResult::Skipped;
     }
 
     // Find cut point: keep a dynamic budget of recent messages and summarize older context.
@@ -530,7 +923,7 @@ async fn maybe_compact(
     // Always keep messages[0] (the original user question) verbatim outside the summary.
     // Only summarize messages[1..cut].
     if cut <= 1 {
-        return None;
+        return CompactResult::Skipped;
     }
     let summary_start = 1usize;
 
@@ -547,13 +940,19 @@ async fn maybe_compact(
             tool_call_id: None,
             tool_calls: Vec::new(),
         }],
+        task_contract: None,
         max_tokens: Some(1024),
-        temperature: Some(0.1),
     };
 
-    let summary = match ai::complete(&summary_request).await {
-        Ok(s) => s,
-        Err(_) => fallback_summary(messages, cut),
+    let summary = match cancelled.notified().now_or_never() {
+        Some(_) => return CompactResult::Cancelled,
+        None => match tokio::select! {
+            result = ai::complete(&summary_request) => result,
+            _ = cancelled.notified() => return CompactResult::Cancelled,
+        } {
+            Ok(s) => s,
+            Err(_) => fallback_summary(messages, cut),
+        },
     };
 
     let summary = if validate_summary(&summary) { summary } else { fallback_summary(messages, cut) };
@@ -584,7 +983,17 @@ async fn maybe_compact(
         estimated_before,
         estimated_after,
     });
-    Some(summary_tokens)
+    CompactResult::Compacted
+}
+
+fn tool_result_for_followup_context(tool_name: &str, content: &str) -> String {
+    let result = compact_tool_result_for_context(tool_name, content);
+    format!(
+        "[TOOL RESULT - INTERMEDIATE EVIDENCE]\n\
+Tool: {tool_name}\n\
+Use this result to continue the original user task. Do not summarize this tool result as the final answer unless the user explicitly asked for a tool-result or schema summary.\n\n\
+{result}"
+    )
 }
 
 fn compact_tool_result_for_context(tool_name: &str, content: &str) -> String {
@@ -756,4 +1165,236 @@ fn summarize_message_content(content: &str) -> String {
     let tail_chars = content.chars().rev().take(1500).collect::<Vec<_>>();
     let tail = tail_chars.into_iter().rev().collect::<String>();
     format!("{head}\n\n...[middle omitted for summary input]...\n\n{tail}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn generate_contract(user_request: &str, mode: &str) -> AiTaskContract {
+        AiTaskContract {
+            action: Some("generate".to_string()),
+            mode: Some(mode.to_string()),
+            user_request: Some(user_request.to_string()),
+        }
+    }
+
+    #[test]
+    fn generate_contract_rejects_schema_summary_without_sql() {
+        let contract = generate_contract("帮我生成统计 2026年1月2日新注册会员数量的 sql", "ask");
+        let answer = "The tb_customer table contains comprehensive customer information with key columns:\n\nCore Identity\n- c_no: customer id\nContact Information\n- c_tele: mobile";
+
+        let check = validate_final_answer(Some(&contract), answer);
+
+        assert!(matches!(check, FinalAnswerCheck::NeedsRepair(_)));
+    }
+
+    #[test]
+    fn generate_contract_accepts_sql_code_block() {
+        let contract = generate_contract("帮我生成统计新注册会员数量的 sql", "ask");
+        let answer = "```sql\nSELECT COUNT(*) AS member_count FROM tb_customer WHERE created_at >= '2026-01-02' AND created_at < '2026-01-03';\n```";
+
+        let check = validate_final_answer(Some(&contract), answer);
+
+        assert_eq!(check, FinalAnswerCheck::Satisfied);
+    }
+
+    #[test]
+    fn generate_contract_rejects_unfenced_sql_mention() {
+        let contract = generate_contract("帮我生成统计新注册会员数量的 sql", "ask");
+        let answer = "You can use SQL to query the table, for example SELECT COUNT(*) FROM tb_customer.";
+
+        let check = validate_final_answer(Some(&contract), answer);
+
+        assert!(matches!(check, FinalAnswerCheck::NeedsRepair(_)));
+    }
+
+    #[test]
+    fn generate_contract_accepts_missing_column_blocker() {
+        let contract = generate_contract("帮我生成统计新注册会员数量的 sql", "ask");
+        let answer = "没有找到明确表示会员注册时间的字段，请确认应该使用哪个字段作为注册时间。";
+
+        let check = validate_final_answer(Some(&contract), answer);
+
+        assert_eq!(check, FinalAnswerCheck::Satisfied);
+    }
+
+    #[test]
+    fn agent_generate_sql_accepts_sql_without_execute_query() {
+        let contract = generate_contract("统计 2026年1月2日新注册会员数量", "agent");
+        let answer = "```sql\nSELECT COUNT(*) FROM tb_customer;\n```";
+
+        let check = validate_final_answer(Some(&contract), answer);
+
+        assert_eq!(check, FinalAnswerCheck::Satisfied);
+    }
+
+    #[test]
+    fn agent_generate_sql_prompt_does_not_force_execution() {
+        let contract = generate_contract("帮我生成统计 2026年1月2日新注册会员数量的 sql", "agent");
+
+        let prompt = augment_system_prompt_with_task_contract("base", Some(&contract), true);
+
+        assert!(prompt.contains("SQL-producing action"));
+        assert!(prompt.contains("execute a query only when the original request explicitly asks for real data/results"));
+    }
+
+    #[test]
+    fn wraps_tool_results_as_intermediate_evidence() {
+        let wrapped = tool_result_for_followup_context("get_columns", "Columns of tb_customer:\n  - c_no: VARCHAR");
+
+        assert!(wrapped.contains("INTERMEDIATE EVIDENCE"));
+        assert!(wrapped.contains("continue the original user task"));
+        assert!(wrapped.contains("Columns of tb_customer"));
+    }
+
+    // --- chunk_to_events tests ---
+
+    #[test]
+    fn chunk_to_events_emits_text_delta_for_text() {
+        let chunk = AiStreamChunk {
+            session_id: "test".to_string(),
+            delta: "hello".to_string(),
+            reasoning_delta: None,
+            done: false,
+        };
+        let events = chunk_to_events(&chunk);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], AgentEvent::TextDelta { delta } if delta == "hello"));
+    }
+
+    #[test]
+    fn chunk_to_events_emits_reasoning_delta_for_reasoning() {
+        let chunk = AiStreamChunk {
+            session_id: "test".to_string(),
+            delta: String::new(),
+            reasoning_delta: Some("thinking...".to_string()),
+            done: false,
+        };
+        let events = chunk_to_events(&chunk);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], AgentEvent::ReasoningDelta { delta } if delta == "thinking..."));
+    }
+
+    #[test]
+    fn chunk_to_events_emits_both_for_mixed_chunk() {
+        let chunk = AiStreamChunk {
+            session_id: "test".to_string(),
+            delta: "answer".to_string(),
+            reasoning_delta: Some("thinking...".to_string()),
+            done: false,
+        };
+        let events = chunk_to_events(&chunk);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], AgentEvent::TextDelta { delta } if delta == "answer"));
+        assert!(matches!(&events[1], AgentEvent::ReasoningDelta { delta } if delta == "thinking..."));
+    }
+
+    #[test]
+    fn chunk_to_events_returns_empty_for_empty_chunk() {
+        let chunk =
+            AiStreamChunk { session_id: "test".to_string(), delta: String::new(), reasoning_delta: None, done: false };
+        let events = chunk_to_events(&chunk);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn chunk_to_events_reasoning_only_no_text() {
+        let chunk = AiStreamChunk {
+            session_id: "test".to_string(),
+            delta: String::new(),
+            reasoning_delta: Some("reasoning".to_string()),
+            done: false,
+        };
+        let events = chunk_to_events(&chunk);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], AgentEvent::ReasoningDelta { .. }));
+    }
+
+    #[test]
+    fn chunk_to_events_text_only_no_reasoning() {
+        let chunk = AiStreamChunk {
+            session_id: "test".to_string(),
+            delta: "text only".to_string(),
+            reasoning_delta: None,
+            done: false,
+        };
+        let events = chunk_to_events(&chunk);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], AgentEvent::TextDelta { .. }));
+    }
+
+    // --- Agent task-action contract tests (query / exploreSchema / executeAndExplain) ---
+
+    fn contract_for(action: &str, user_request: &str, mode: &str) -> AiTaskContract {
+        AiTaskContract {
+            action: Some(action.to_string()),
+            mode: Some(mode.to_string()),
+            user_request: Some(user_request.to_string()),
+        }
+    }
+
+    #[test]
+    fn query_action_contract_requires_execute_query() {
+        let contract = contract_for("query", "统计今天订单数", "agent");
+        let prompt = augment_system_prompt_with_task_contract("base", Some(&contract), true);
+
+        assert!(prompt.contains("data-query task"), "prompt should mark this as a data-query task");
+        assert!(prompt.contains("call execute_query"), "prompt should instruct the LLM to call execute_query");
+        assert!(!prompt.contains("SQL-producing action"), "query must not be treated as a SQL-producing action");
+    }
+
+    #[test]
+    fn explore_schema_contract_uses_metadata_tools_not_execute_query() {
+        let contract = contract_for("exploreSchema", "看一下 orders 表的结构", "agent");
+        let prompt = augment_system_prompt_with_task_contract("base", Some(&contract), true);
+
+        assert!(prompt.contains("schema-inspection task"));
+        assert!(prompt.contains("list_tables/get_columns"));
+        assert!(prompt.contains("Do not execute data queries"));
+    }
+
+    #[test]
+    fn execute_and_explain_contract_runs_current_sql() {
+        let contract = contract_for("executeAndExplain", "执行并解释当前 SQL", "agent");
+        let prompt = augment_system_prompt_with_task_contract("base", Some(&contract), true);
+
+        assert!(prompt.contains("execute-and-explain task"));
+        assert!(prompt.contains("run the current SQL"));
+    }
+
+    #[test]
+    fn task_actions_do_not_require_sql_deliverable() {
+        // query / exploreSchema / executeAndExplain are task-oriented, not SQL-producing:
+        // a final answer without a fenced SQL block must still satisfy the contract.
+        let answer_without_sql = "今天共有 42 笔订单。";
+        for action in ["query", "exploreSchema", "executeAndExplain"] {
+            let contract = contract_for(action, "统计今天订单数", "agent");
+            assert_eq!(
+                validate_final_answer(Some(&contract), answer_without_sql),
+                FinalAnswerCheck::Satisfied,
+                "action {action} should not require a SQL deliverable",
+            );
+        }
+    }
+
+    #[test]
+    fn query_action_repair_prompt_targets_execute_query() {
+        let contract = contract_for("query", "统计今天订单数", "agent");
+        let repair = build_contract_repair_prompt(Some(&contract), true, "previous answer did not execute");
+
+        assert!(repair.contains("data-query task"));
+        assert!(repair.contains("call execute_query"));
+    }
+
+    #[test]
+    fn general_action_skips_sql_validation() {
+        let contract = AiTaskContract {
+            action: Some("general".to_string()),
+            mode: Some("ask".to_string()),
+            user_request: Some("你好".to_string()),
+        };
+        let answer = "你好！我是 DBX 的数据库助手。有什么可以帮你的吗？";
+        assert_eq!(validate_final_answer(Some(&contract), answer), FinalAnswerCheck::Satisfied);
+    }
 }

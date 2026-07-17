@@ -151,13 +151,16 @@ mod tests {
             driver_profile: None,
             driver_label: None,
             url_params: None,
+            agent_java_options: Vec::new(),
             host: "127.0.0.1".to_string(),
             port: 5432,
             username: "user".to_string(),
             password: "secret".to_string(),
             database: Some("demo".to_string()),
             visible_databases: None,
+            visible_schemas: None,
             attached_databases: Vec::new(),
+            init_script: None,
             color: None,
             transport_layers: Vec::new(),
             connect_timeout_secs: 5,
@@ -181,11 +184,14 @@ mod tests {
             redis_key_separator: default_redis_key_separator(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
-            external_config: None,
+            informix_server: String::new(),            external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
             read_only: false,
+            is_production: false,
+            production_databases: vec![],
+            database_info: None,
         }
     }
 
@@ -201,6 +207,7 @@ mod tests {
             numeric_precision: None,
             numeric_scale: None,
             character_maximum_length: None,
+        ..Default::default()
         }
     }
 
@@ -228,6 +235,7 @@ mod tests {
                 name: "orders".to_string(),
                 object_type: "BASE TABLE".to_string(),
                 schema: None,
+                signature: None,
                 comment: None,
                 created_at: None,
                 updated_at: None,
@@ -236,8 +244,9 @@ mod tests {
             },
             db::ObjectInfo {
                 name: "active_orders".to_string(),
-                object_type: "MATERIALIZED VIEW".to_string(),
+                object_type: "MATERIALIZED_VIEW".to_string(),
                 schema: None,
+                signature: None,
                 comment: None,
                 created_at: None,
                 updated_at: None,
@@ -248,6 +257,7 @@ mod tests {
                 name: "payroll".to_string(),
                 object_type: "PACKAGE BODY".to_string(),
                 schema: None,
+                signature: None,
                 comment: None,
                 created_at: None,
                 updated_at: None,
@@ -298,6 +308,7 @@ mod tests {
                 name: "ORDERS".to_string(),
                 object_type: "TABLE".to_string(),
                 schema: Some("HR".to_string()),
+                signature: None,
                 comment: None,
                 created_at: None,
                 updated_at: None,
@@ -308,6 +319,7 @@ mod tests {
                 name: "bin$deleted".to_string(),
                 object_type: "TABLE".to_string(),
                 schema: Some("HR".to_string()),
+                signature: None,
                 comment: None,
                 created_at: None,
                 updated_at: None,

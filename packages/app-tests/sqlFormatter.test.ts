@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { afterEach, test, vi } from "vitest";
-import { formatSqlText, MAX_SQL_FORMAT_CHARS } from "../../apps/desktop/src/lib/sqlFormatter.ts";
+import { formatSqlText, MAX_SQL_FORMAT_CHARS } from "../../apps/desktop/src/lib/sql/sqlFormatter.ts";
 
 afterEach(() => {
   vi.doUnmock("sql-formatter");
@@ -12,7 +12,7 @@ test("rejects very large SQL before importing formatter", async () => {
     throw new Error("formatter should not load");
   });
 
-  const { formatSqlText: isolatedFormatSqlText, MAX_SQL_FORMAT_CHARS: isolatedMaxSqlFormatChars } = await import("../../apps/desktop/src/lib/sqlFormatter.ts");
+  const { formatSqlText: isolatedFormatSqlText, MAX_SQL_FORMAT_CHARS: isolatedMaxSqlFormatChars } = await import("../../apps/desktop/src/lib/sql/sqlFormatter.ts");
 
   await assert.rejects(() => isolatedFormatSqlText("x".repeat(isolatedMaxSqlFormatChars + 1), "generic"), /too large/i);
 });

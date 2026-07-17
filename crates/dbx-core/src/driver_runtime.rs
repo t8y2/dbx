@@ -23,6 +23,10 @@ pub struct DriverRuntimeInfo {
     pub can_stop: bool,
     pub can_restart: bool,
     pub control_unavailable_reason: Option<String>,
+    #[serde(default)]
+    pub protocol_mode: Option<String>,
+    #[serde(default)]
+    pub active_sessions: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -48,6 +52,8 @@ struct RuntimeSeed {
     can_stop: bool,
     can_restart: bool,
     control_unavailable_reason: Option<String>,
+    protocol_mode: Option<String>,
+    active_sessions: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -65,16 +71,27 @@ pub async fn collect_driver_runtime_summary(state: &AppState) -> DriverRuntimeSu
 }
 
 pub async fn stop_driver_runtime(state: &AppState, runtime_id: &str) -> Result<(), String> {
-    let agent_key =
-        runtime_id.strip_prefix("agent:").ok_or_else(|| "Only agent daemon runtimes can be stopped".to_string())?;
+    let agent_key = runtime_agent_key(runtime_id).ok_or_else(|| "Only agent runtimes can be stopped".to_string())?;
     state.agent_manager.stop_daemon_by_key(agent_key).await;
     Ok(())
 }
 
 pub async fn restart_driver_runtime(state: &AppState, runtime_id: &str) -> Result<(), String> {
-    let agent_key =
-        runtime_id.strip_prefix("agent:").ok_or_else(|| "Only agent daemon runtimes can be restarted".to_string())?;
-    state.agent_manager.restart_daemon_by_key(agent_key).await
+    let agent_key = runtime_agent_key(runtime_id).ok_or_else(|| "Only agent runtimes can be restarted".to_string())?;
+    if runtime_id.starts_with("agent-runtime:") {
+        // Shared connection runtimes are recreated lazily with their exact launch
+        // fingerprint; eagerly spawning the generic daemon could use incompatible options.
+        state.agent_manager.stop_daemon_by_key(agent_key).await;
+        Ok(())
+    } else {
+        state.agent_manager.restart_daemon_by_key(agent_key).await
+    }
+}
+
+fn runtime_agent_key(runtime_id: &str) -> Option<&str> {
+    runtime_id.strip_prefix("agent:").or_else(|| {
+        runtime_id.strip_prefix("agent-runtime:").and_then(|value| value.rsplit_once(':').map(|(key, _)| key))
+    })
 }
 
 async fn collect_runtime_seeds(state: &AppState) -> Vec<RuntimeSeed> {
@@ -97,6 +114,8 @@ async fn collect_runtime_seeds(state: &AppState) -> Vec<RuntimeSeed> {
                 can_stop: false,
                 can_restart: state.agent_manager.is_driver_installed(key),
                 control_unavailable_reason: None,
+                protocol_mode: None,
+                active_sessions: None,
             },
         );
     }
@@ -120,6 +139,8 @@ async fn collect_runtime_seeds(state: &AppState) -> Vec<RuntimeSeed> {
                     can_stop: true,
                     can_restart: true,
                     control_unavailable_reason: None,
+                    protocol_mode: Some("legacy".to_string()),
+                    active_sessions: None,
                 },
             );
         }
@@ -140,21 +161,31 @@ async fn collect_runtime_seeds(state: &AppState) -> Vec<RuntimeSeed> {
                 .unwrap_or("agent");
                 let client = client.lock().await;
                 let last_error = non_empty(client.stderr_tail_snapshot());
+                let protocol_mode = client.protocol_mode();
+                let runtime_id = if protocol_mode == "multi_session" {
+                    format!("agent-runtime:{key}:{}", client.pid())
+                } else {
+                    format!("agent-connection:{pool_key}")
+                };
                 seeds.insert(
-                    format!("agent-connection:{pool_key}"),
+                    runtime_id.clone(),
                     RuntimeSeed {
-                        id: format!("agent-connection:{pool_key}"),
+                        id: runtime_id,
                         driver_key: key.to_string(),
                         label: agent_catalog::label_for_key(key).unwrap_or(key).to_string(),
                         kind: "agent".to_string(),
-                        source: "connection".to_string(),
+                        source: if protocol_mode == "multi_session" { "shared-runtime" } else { "connection" }
+                            .to_string(),
                         status: "running".to_string(),
                         pid: Some(client.pid()),
                         version: agent_state.installed_drivers.get(key).map(|driver| driver.version.clone()),
                         last_error,
-                        can_stop: false,
-                        can_restart: false,
-                        control_unavailable_reason: Some("connection-owned".to_string()),
+                        can_stop: protocol_mode == "multi_session",
+                        can_restart: protocol_mode == "multi_session",
+                        control_unavailable_reason: (protocol_mode != "multi_session")
+                            .then(|| "connection-owned".to_string()),
+                        protocol_mode: Some(protocol_mode.to_string()),
+                        active_sessions: Some(client.active_session_count()),
                     },
                 );
             }
@@ -174,6 +205,8 @@ async fn collect_runtime_seeds(state: &AppState) -> Vec<RuntimeSeed> {
                         can_stop: false,
                         can_restart: false,
                         control_unavailable_reason: Some("connection-owned".to_string()),
+                        protocol_mode: None,
+                        active_sessions: None,
                     },
                 );
             }
@@ -182,14 +215,30 @@ async fn collect_runtime_seeds(state: &AppState) -> Vec<RuntimeSeed> {
     }
 
     let mut output = seeds.into_values().collect::<Vec<_>>();
-    output.sort_by(|left, right| {
-        left.kind
-            .cmp(&right.kind)
-            .then(left.label.cmp(&right.label))
-            .then(left.source.cmp(&right.source))
-            .then(left.id.cmp(&right.id))
-    });
+    sort_runtime_seeds(&mut output);
     output
+}
+
+fn sort_runtime_seeds(runtimes: &mut [RuntimeSeed]) {
+    runtimes.sort_by(|left, right| {
+        // Active runtimes are the primary operational focus; preserve the
+        // existing deterministic order within active and inactive groups.
+        runtime_activity_rank(&left.status).cmp(&runtime_activity_rank(&right.status)).then(
+            left.kind
+                .cmp(&right.kind)
+                .then(left.label.cmp(&right.label))
+                .then(left.source.cmp(&right.source))
+                .then(left.id.cmp(&right.id)),
+        )
+    });
+}
+
+fn runtime_activity_rank(status: &str) -> u8 {
+    if status == "running" {
+        0
+    } else {
+        1
+    }
 }
 
 async fn collect_process_stats(pids: HashSet<u32>) -> HashMap<u32, ProcessStats> {
@@ -248,6 +297,8 @@ fn build_summary(seeds: Vec<RuntimeSeed>, stats: &HashMap<u32, ProcessStats>) ->
                 can_stop: seed.can_stop,
                 can_restart: seed.can_restart,
                 control_unavailable_reason: seed.control_unavailable_reason,
+                protocol_mode: seed.protocol_mode,
+                active_sessions: seed.active_sessions,
             }
         })
         .collect::<Vec<_>>();
@@ -274,7 +325,7 @@ fn non_empty(value: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_summary, ProcessStats, RuntimeSeed};
+    use super::{build_summary, runtime_agent_key, sort_runtime_seeds, ProcessStats, RuntimeSeed};
     use std::collections::HashMap;
 
     fn seed(id: &str, status: &str, pid: Option<u32>) -> RuntimeSeed {
@@ -291,6 +342,8 @@ mod tests {
             can_stop: true,
             can_restart: true,
             control_unavailable_reason: None,
+            protocol_mode: None,
+            active_sessions: None,
         }
     }
 
@@ -305,5 +358,21 @@ mod tests {
         assert_eq!(summary.total_memory_bytes, 1024);
         assert_eq!(summary.health, "healthy");
         assert_eq!(summary.runtimes[0].memory_bytes, Some(1024));
+    }
+
+    #[test]
+    fn parses_legacy_and_shared_agent_runtime_ids() {
+        assert_eq!(runtime_agent_key("agent:oracle"), Some("oracle"));
+        assert_eq!(runtime_agent_key("agent-runtime:oracle:123"), Some("oracle"));
+        assert_eq!(runtime_agent_key("plugin-connection:test"), None);
+    }
+
+    #[test]
+    fn running_runtimes_sort_before_stopped_runtimes() {
+        let mut runtimes = vec![seed("h2", "stopped", None), seed("oracle", "running", Some(42))];
+
+        sort_runtime_seeds(&mut runtimes);
+
+        assert_eq!(runtimes.iter().map(|runtime| runtime.id.as_str()).collect::<Vec<_>>(), vec!["oracle", "h2"]);
     }
 }

@@ -1,0 +1,12 @@
+dependencies {
+    implementation 'com.gbasedbt:jdbc:3.6.3.2'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes(
+            'Agent-Label': 'GBase 8s',
+            'Main-Class': 'com.dbx.agent.gbase8s.Gbase8sAgent'
+        )
+    }
+}

@@ -1,12 +1,35 @@
 name: "💡 Feature Request / 功能建议"
 description: Propose a new feature, interaction improvement, or enhancement. / 提议新功能、交互改进或现有功能增强。
-title: "[💡 Feature] "
+title: "[Feature] "
 labels: ["enhancement"]
 body:
   - type: markdown
     attributes:
       value: |
-        好的建议最好说明使用场景和期望效果。请尽量避免只写“支持 X”。
+        好的建议最好说明使用场景、数据库类型和期望效果。请尽量避免只写“支持 X”。
+        DBX 版本、运行环境、操作系统和系统架构可在应用内通过“设置 → 关于我们 → 复制支持信息”一键复制。
+
+  - type: input
+    id: database
+    attributes:
+      label: 数据库类型和版本
+      description: 如果是通用功能，请填写“通用”。如果只影响特定数据源，请注明数据库类型、版本或发行版。
+      placeholder: "例如：PostgreSQL 16.2 / MySQL 8.0 / Redis 7.2 / 通用"
+    validations:
+      required: true
+
+  - type: textarea
+    id: support-info
+    attributes:
+      label: 支持信息
+      description: 打开 DBX 的“设置 → 关于我们”，点击“复制支持信息”，然后粘贴到这里。如无法打开应用，请说明原因。
+      placeholder: |
+        DBX 版本：v0.5.52
+        运行环境：桌面端
+        操作系统：macOS 26.4
+        系统架构：aarch64
+    validations:
+      required: true
 
   - type: textarea
     id: problem
@@ -43,4 +66,4 @@ body:
     id: extra
     attributes:
       label: 补充信息
-      description: 参考截图、相关数据库类型、替代方案等。
+      description: 参考截图、替代方案、特殊环境等。

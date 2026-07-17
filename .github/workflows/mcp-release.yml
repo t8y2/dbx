@@ -11,6 +11,10 @@ permissions:
   contents: write
   id-token: write
 
+concurrency:
+  group: dbx-release-main
+  cancel-in-progress: false
+
 jobs:
   prepare:
     name: Prepare package release
@@ -20,7 +24,7 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -28,7 +32,7 @@ jobs:
         uses: pnpm/action-setup@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22.13.0
           registry-url: https://registry.npmjs.org
@@ -113,16 +117,7 @@ jobs:
             git commit -m "chore(packages): release ${VERSION} [skip node-packages-release]"
           fi
 
-      - name: Create package release tag
-        run: |
-          TAG="${{ steps.version.outputs.tag }}"
-          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
-            echo "Tag ${TAG} already exists."
-          else
-            git tag "${TAG}"
-          fi
-
-      - name: Push package release commit and tag
+      - name: Rebase package release commit and push
         env:
           RELEASE_TOKEN: ${{ secrets.MCP_RELEASE_TOKEN }}
         run: |
@@ -130,8 +125,23 @@ jobs:
           if [ -n "${RELEASE_TOKEN}" ]; then
             git remote set-url origin "https://x-access-token:${RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           fi
+          git fetch origin main --no-tags
+          git rebase origin/main
+          REMOTE_TAG_SHA="$(git ls-remote --tags origin "refs/tags/${TAG}" | awk '{print $1}')"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if [ -n "${REMOTE_TAG_SHA}" ]; then
+            if [ "${REMOTE_TAG_SHA}" != "${HEAD_SHA}" ]; then
+              echo "::error::Remote tag ${TAG} already exists at ${REMOTE_TAG_SHA}, expected ${HEAD_SHA}."
+              exit 1
+            fi
+            echo "Remote tag ${TAG} already points at ${HEAD_SHA}."
+          else
+            git tag -f "${TAG}" "${HEAD_SHA}"
+          fi
           git push origin HEAD:main
-          git push origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          if [ -z "${REMOTE_TAG_SHA}" ]; then
+            git push origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          fi
 
   publish-node-core:
     name: Publish node-core
@@ -141,7 +151,7 @@ jobs:
       published-or-existing: ${{ steps.publish.outputs.published_or_existing }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
@@ -149,7 +159,7 @@ jobs:
         uses: pnpm/action-setup@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22.13.0
           registry-url: https://registry.npmjs.org
@@ -192,7 +202,7 @@ jobs:
             filter: "@dbx-app/mcp-server"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
@@ -200,7 +210,7 @@ jobs:
         uses: pnpm/action-setup@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22.13.0
           registry-url: https://registry.npmjs.org

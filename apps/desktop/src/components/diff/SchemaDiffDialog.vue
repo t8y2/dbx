@@ -6,7 +6,8 @@ import { Button } from "@/components/ui/button";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import { GitCompareArrows, ArrowLeft, Play, Loader2, Maximize2, Minimize2, AlertTriangle, CircleCheck } from "@lucide/vue";
-import * as api from "@/lib/api";
+import * as api from "@/lib/backend/api";
+import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { useSchemaDiffConfig } from "@/composables/useSchemaDiffConfig";
 import SchemaDiffConfigStep from "@/components/diff/SchemaDiffConfigStep.vue";
 import SchemaDiffObjectTree from "@/components/diff/SchemaDiffObjectTree.vue";
@@ -14,11 +15,13 @@ import SchemaDiffDdlPanel from "@/components/diff/SchemaDiffDdlPanel.vue";
 import SchemaDiffDeployStep from "@/components/diff/SchemaDiffDeployStep.vue";
 import SchemaDiffOptionsPanel from "@/components/diff/SchemaDiffOptionsPanel.vue";
 
-import { getSchemaDiffOptionsForDbType } from "@/lib/schemaDiffOptions";
-import { getDefaultOptionsForDbType } from "@/types/schemaDiff";
+import { getSchemaDiffOptionsForDbType } from "@/lib/schema/schemaDiffOptions";
+import { createConcurrencyLimiter, mapWithConcurrency, schemaDiffMetadataConcurrency } from "@/lib/schema/schemaDiffMetadataLoad";
+import { normalizeSchemaDiffCompareOptions } from "@/types/schemaDiff";
 import type { SchemaDiffCompareOptions, SchemaDiffConfig } from "@/types/schemaDiff";
-import type { ObjectSourceKind } from "@/types/database";
-import { convertToSchemaDiffObjects, groupDiffObjects, type OperationGroup, type SchemaDiffObject, type DiffOperationType, type DiffObjectKind, type SchemaDiffPreparation } from "@/lib/schemaDiff";
+import type { ObjectSourceKind, TableInfo } from "@/types/database";
+import { buildDeploySqlForObjects, convertToSchemaDiffObjects, groupDiffObjects, schemaDiffDeployTargetSchema, type OperationGroup, type SchemaDiffObject, type DiffOperationType, type DiffObjectKind, type SchemaDiffPreparation, type TableSchemaDetail } from "@/lib/schema/schemaDiff";
+import { compileSchemaDiffTableFilter, filterSchemaDiffTables } from "@/lib/schema/schemaDiffTableFilter";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 
@@ -180,6 +183,7 @@ onBeforeUnmount(() => {
 
 // Config management
 const { configs, activeConfigId, activeConfig, recentConfigs, ensureDefaultConfig, updateActiveConfigConnection, updateActiveConfigOptions, saveToHistory, deleteFromHistory } = useSchemaDiffConfig();
+const schemaDiffPanelOptions = computed(() => normalizeSchemaDiffCompareOptions(activeConfig.value?.options, getDbType()));
 
 const selectedObject = computed(() => {
   if (!selectedObjectId.value) return null;
@@ -259,8 +263,52 @@ function handleSwap() {
 
 function handleOptionsUpdate(options: SchemaDiffCompareOptions) {
   if (activeConfig.value) {
-    updateActiveConfigOptions(options);
+    updateActiveConfigOptions(normalizeSchemaDiffCompareOptions(options, getDbType()));
   }
+}
+
+/** Map a JDBC table_type to an ObjectSourceKind for getTableDdl routing.
+ *  Views and materialized views need the object_type parameter so the
+ *  backend can call DBMS_METADATA.GET_DDL with the correct type. */
+function isViewOrMaterializedView(tableType: string): ObjectSourceKind | undefined {
+  switch (tableType.toUpperCase().replace(/\s+/g, "_")) {
+    case "VIEW":
+      return "VIEW";
+    case "MATERIALIZED_VIEW":
+      return "MATERIALIZED_VIEW";
+    default:
+      return undefined;
+  }
+}
+
+interface SchemaDetailLoadContext {
+  connectionId: string;
+  database: string;
+  schema: string;
+  dbType: string;
+  options: SchemaDiffCompareOptions;
+}
+
+function shouldLoadIndexes(options: SchemaDiffCompareOptions): boolean {
+  return options.indexes || options.primaryKeys || options.uniqueKeys;
+}
+
+async function loadSchemaDetails(tables: TableInfo[], context: SchemaDetailLoadContext): Promise<TableSchemaDetail[]> {
+  const concurrency = schemaDiffMetadataConcurrency(context.dbType, tables.length);
+  const runMetadataQuery = createConcurrencyLimiter(concurrency);
+
+  return mapWithConcurrency(tables, concurrency, async (table) => {
+    const objectType = isViewOrMaterializedView(table.table_type);
+    const [columns, indexes, foreignKeys, triggers, ddl] = await Promise.all([
+      runMetadataQuery(() => api.getColumns(context.connectionId, context.database, context.schema, table.name)),
+      shouldLoadIndexes(context.options) ? runMetadataQuery(() => api.listIndexes(context.connectionId, context.database, context.schema, table.name)) : Promise.resolve([]),
+      context.options.foreignKeys ? runMetadataQuery(() => api.listForeignKeys(context.connectionId, context.database, context.schema, table.name)) : Promise.resolve([]),
+      context.options.triggers ? runMetadataQuery(() => api.listTriggers(context.connectionId, context.database, context.schema, table.name)) : Promise.resolve([]),
+      runMetadataQuery(() => api.getTableDdl(context.connectionId, context.database, context.schema, table.name, objectType)),
+    ]);
+
+    return { name: table.name, columns, indexes, foreignKeys, triggers, ddl };
+  });
 }
 
 async function handleCompare() {
@@ -268,42 +316,36 @@ async function handleCompare() {
   step.value = "compare";
 
   try {
+    const sourceConfig = store.getConfig(sourceConnectionId.value);
+    const targetConfig = store.getConfig(targetConnectionId.value);
+    const dbType = targetConfig?.db_type || "mysql";
+    const sourceDbType = sourceConfig?.db_type || dbType;
+    const opts = normalizeSchemaDiffCompareOptions(activeConfig.value?.options, dbType);
+    const tableFilter = compileSchemaDiffTableFilter(opts);
+
     await store.ensureConnected(sourceConnectionId.value);
     await store.ensureConnected(targetConnectionId.value);
 
     const [srcTables, tgtTables] = await Promise.all([api.listTables(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value), api.listTables(targetConnectionId.value, targetDatabase.value, targetSchema.value)]);
+    const { sourceTables, targetTables } = filterSchemaDiffTables(srcTables, tgtTables, tableFilter);
 
-    // Load schema details in parallel
-    const sourceDetails = await Promise.all(
-      srcTables.map(async (table) => {
-        const [columns, indexes, foreignKeys, triggers, ddl] = await Promise.all([
-          api.getColumns(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, table.name),
-          api.listIndexes(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, table.name),
-          api.listForeignKeys(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, table.name),
-          api.listTriggers(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, table.name),
-          api.getTableDdl(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, table.name),
-        ]);
-        return { name: table.name, columns, indexes, foreignKeys, triggers, ddl };
-      }),
-    );
+    const sourceDetails = await loadSchemaDetails(sourceTables, {
+      connectionId: sourceConnectionId.value,
+      database: sourceDatabase.value,
+      schema: sourceSchema.value,
+      dbType: sourceDbType,
+      options: opts,
+    });
 
-    const targetDetails = await Promise.all(
-      tgtTables.map(async (table) => {
-        const [columns, indexes, foreignKeys, triggers, ddl] = await Promise.all([
-          api.getColumns(targetConnectionId.value, targetDatabase.value, targetSchema.value, table.name),
-          api.listIndexes(targetConnectionId.value, targetDatabase.value, targetSchema.value, table.name),
-          api.listForeignKeys(targetConnectionId.value, targetDatabase.value, targetSchema.value, table.name),
-          api.listTriggers(targetConnectionId.value, targetDatabase.value, targetSchema.value, table.name),
-          api.getTableDdl(targetConnectionId.value, targetDatabase.value, targetSchema.value, table.name),
-        ]);
-        return { name: table.name, columns, indexes, foreignKeys, triggers, ddl };
-      }),
-    );
+    const targetDetails = await loadSchemaDetails(targetTables, {
+      connectionId: targetConnectionId.value,
+      database: targetDatabase.value,
+      schema: targetSchema.value,
+      dbType,
+      options: opts,
+    });
 
-    const targetConfig = store.getConfig(targetConnectionId.value);
-    const dbType = targetConfig?.db_type || "mysql";
     const isPostgresLike = dbType === "postgres" || dbType === "opengauss";
-    const opts = activeConfig.value?.options;
 
     // Fetch new object types for PostgreSQL-like databases
     const promises: Promise<any>[] = [];
@@ -336,8 +378,8 @@ async function handleCompare() {
     const tgtOwners = opts?.owners && isPostgresLike ? results[idx++] : [];
 
     const result = await api.prepareSchemaDiff({
-      sourceTables: srcTables,
-      targetTables: tgtTables,
+      sourceTables,
+      targetTables,
       sourceDetails,
       targetDetails,
       sourceFunctions: srcFunctions,
@@ -349,9 +391,10 @@ async function handleCompare() {
       sourceOwners: srcOwners,
       targetOwners: tgtOwners,
       databaseType: dbType,
-      targetSchema: targetSchema.value,
+      targetSchema: schemaDiffDeployTargetSchema(dbType, targetDatabase.value, targetSchema.value),
       ignoreComments: ignoreComments.value,
       cascadeDelete: opts?.cascadeDelete ?? false,
+      compareColumnOrder: opts.compareColumnOrder,
     });
 
     // Convert to unified objects
@@ -443,54 +486,7 @@ function handleToggleObjectSelection(objectId: string, selected: boolean) {
 }
 
 function regenerateDeploySql() {
-  // Only select top-level objects (exclude children)
-  const selected = diffObjects.value.filter((o) => {
-    const isTopLevel = !o.id.startsWith("col-") && !o.id.startsWith("idx-") && !o.id.startsWith("fk-") && !o.id.startsWith("trg-");
-    return o.selected && o.operationType !== "none" && isTopLevel;
-  });
-
-  if (selected.length === 0) {
-    deploySql.value = "-- No objects selected";
-    return;
-  }
-
-  const lines: string[] = [];
-
-  for (const obj of selected) {
-    if (obj.operationType === "create") {
-      if (obj.sourceDdl) {
-        lines.push(`-- Create ${obj.objectKind}: ${obj.name}`);
-        lines.push(obj.sourceDdl);
-        lines.push("");
-      }
-    } else if (obj.operationType === "delete") {
-      lines.push(`-- Drop ${obj.objectKind}: ${obj.name}`);
-      const dropSql = generateDropSql(obj);
-      lines.push(dropSql);
-      lines.push("");
-    } else if (obj.operationType === "modify") {
-      if (obj.sourceDdl) {
-        lines.push(`-- Modify ${obj.objectKind}: ${obj.name}`);
-        lines.push(obj.sourceDdl);
-        lines.push("");
-      }
-    }
-  }
-
-  deploySql.value = lines.join("\n") || "-- No DDL available for selected objects";
-}
-
-function generateDropSql(obj: SchemaDiffObject): string {
-  const typeMap: Record<string, string> = {
-    table: "TABLE",
-    view: "VIEW",
-    function: "FUNCTION",
-    sequence: "SEQUENCE",
-    rule: "RULE",
-    owner: "OWNED BY",
-  };
-  const sqlType = typeMap[obj.objectKind] || obj.objectKind.toUpperCase();
-  return `DROP ${sqlType} IF EXISTS ${obj.name};`;
+  deploySql.value = buildDeploySqlForObjects(diffObjects.value);
 }
 
 async function handleExecuteScript() {
@@ -501,7 +497,14 @@ async function handleExecuteScript() {
 
   executing.value = true;
   try {
-    await api.executeScript(targetConnectionId.value, targetDatabase.value, deploySql.value, targetSchema.value);
+    const result = await executeWithProductionSqlGuard({
+      connection: store.getConfig(targetConnectionId.value),
+      database: targetDatabase.value,
+      sql: deploySql.value,
+      source: t("production.sourceSchemaDiff"),
+      execute: () => api.executeScript(targetConnectionId.value, targetDatabase.value, deploySql.value, targetSchema.value),
+    });
+    if (!result) return;
     toast(t("diff.executeSuccess"), 3000);
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
@@ -626,7 +629,14 @@ async function onConfirmDeploy() {
   showConfirmDialog.value = false;
   executing.value = true;
   try {
-    const result = await api.executeScript(targetConnectionId.value, targetDatabase.value, deploySql.value, targetSchema.value);
+    const result = await executeWithProductionSqlGuard({
+      connection: store.getConfig(targetConnectionId.value),
+      database: targetDatabase.value,
+      sql: deploySql.value,
+      source: t("production.sourceSchemaDiff"),
+      execute: () => api.executeScript(targetConnectionId.value, targetDatabase.value, deploySql.value, targetSchema.value),
+    });
+    if (!result) return;
     deployResult.value = {
       success: true,
       message: t("diff.deploySuccess"),
@@ -853,12 +863,12 @@ const targetConnectionInfo = computed(() => {
 
       <!-- Options Panel Overlay -->
       <div v-if="showOptionsPanel" class="absolute inset-0 bg-background/80 backdrop-blur-sm z-50 flex items-center justify-center" @click.self="showOptionsPanel = false">
-        <div class="bg-card border rounded-lg shadow-lg w-[500px] max-h-[80vh] overflow-auto p-4">
+        <div class="bg-card border rounded-lg shadow-lg w-[760px] max-w-[calc(100vw-2rem)] max-h-[80vh] overflow-auto p-4">
           <div class="flex items-center justify-between mb-4">
             <h3 class="text-sm font-medium">{{ t("schemaDiff.optionsTitle") }}</h3>
             <Button variant="ghost" size="sm" @click="showOptionsPanel = false">✕</Button>
           </div>
-          <SchemaDiffOptionsPanel :options="activeConfig?.options ?? getDefaultOptionsForDbType(getDbType())" :option-tree="optionTree" @update:options="handleOptionsUpdate" @close="showOptionsPanel = false" />
+          <SchemaDiffOptionsPanel :options="schemaDiffPanelOptions" :option-tree="optionTree" @update:options="handleOptionsUpdate" @close="showOptionsPanel = false" />
         </div>
       </div>
     </DialogContent>

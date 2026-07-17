@@ -63,6 +63,7 @@ ${StrLoc}
 !define UNINSTALLERSIGNCOMMAND "{{uninstaller_sign_cmd}}"
 !define ESTIMATEDSIZE "{{estimated_size}}"
 !define STARTMENUFOLDER "{{start_menu_folder}}"
+!searchreplace WEBVIEW2LOADERSRCPATH "${MAINBINARYSRCPATH}" "\${MAINBINARYNAME}.exe" "\WebView2Loader.dll"
 
 Var PassiveMode
 Var UpdateMode
@@ -643,6 +644,8 @@ Section Install
 
   ; Copy main executable
   File "${MAINBINARYSRCPATH}"
+  ; MSVC links WebView2Loader statically, while GNU builds may emit a DLL next to the binary.
+  File /nonfatal /a "/oname=WebView2Loader.dll" "${WEBVIEW2LOADERSRCPATH}"
 
   ; Copy resources
   {{#each resources_dirs}}
@@ -781,6 +784,7 @@ Section Uninstall
   ; Delete the app directory and its content from disk
   ; Copy main executable
   Delete "$INSTDIR\${MAINBINARYNAME}.exe"
+  Delete "$INSTDIR\WebView2Loader.dll"
 
   ; Delete resources
   {{#each resources}}

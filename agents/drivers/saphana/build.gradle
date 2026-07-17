@@ -1,0 +1,10 @@
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation 'com.sap.cloud.db.jdbc:ngdbc:2.28.7'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': 'SAP HANA', 'Main-Class': 'com.dbx.agent.saphana.SapHanaAgent')
+    }
+}

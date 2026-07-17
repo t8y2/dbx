@@ -1,0 +1,638 @@
+name: Agents Release
+
+on:
+  push:
+    tags: ["agents-v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dbx-release-main
+  cancel-in-progress: false
+
+jobs:
+  bump-versions:
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.bump.outputs.versions }}
+      prev_versions: ${{ steps.bump.outputs.prev_versions }}
+      prev_tag: ${{ steps.bump.outputs.prev_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Detect changes and bump versions
+        id: bump
+        shell: bash
+        run: |
+          LEGACY_REPO="https://github.com/t8y2/dbx-agents.git"
+          LEGACY_BASE_TAG="v0.2.33"
+          PREV_TAG=$(git tag --sort=-creatordate | grep '^agents-v' | sed -n '2p')
+          SKIP_BUMP=false
+          MIGRATED_FIRST_RELEASE=false
+          PREV_VERSIONS_FILE=""
+
+          if [ -z "$PREV_TAG" ]; then
+            echo "No previous agents-v tag found; treating this as the first migrated agents release"
+            PREV_TAG=$(git rev-list --max-parents=0 HEAD)
+
+            TMP_LEGACY="$(mktemp -d)"
+            git clone --depth 1 --branch "$LEGACY_BASE_TAG" "$LEGACY_REPO" "$TMP_LEGACY"
+            PREV_VERSIONS_FILE="$(mktemp)"
+            cp "$TMP_LEGACY/versions.json" "$PREV_VERSIONS_FILE"
+            rm -rf "$TMP_LEGACY"
+
+            SKIP_BUMP=true
+            MIGRATED_FIRST_RELEASE=true
+          fi
+          echo "Comparing $PREV_TAG..HEAD"
+
+          ARGS=(--prev-tag "$PREV_TAG" --migrated-first-release "$MIGRATED_FIRST_RELEASE" --write)
+          if [ "$SKIP_BUMP" = "true" ]; then
+            ARGS+=(--skip-bump)
+          fi
+          if [ -n "$PREV_VERSIONS_FILE" ]; then
+            ARGS+=(--prev-versions-file "$PREV_VERSIONS_FILE")
+          fi
+
+          node .github/scripts/bump-agent-versions.mjs "${ARGS[@]}"
+
+          if ! git diff --quiet -- agents/versions.json; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add agents/versions.json
+            git commit -m "chore: bump module versions [skip ci]"
+            git fetch origin main --no-tags
+            git rebase origin/main
+            git push origin HEAD:main
+          fi
+
+  build-agents:
+    needs: [bump-versions]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: |
+            8
+            21
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew shadowJar --parallel
+        working-directory: agents
+      - run: python3 scripts/validate_agent_jars.py
+        working-directory: agents
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-jars
+          path: "agents/drivers/*/build/libs/dbx-agent-*.jar"
+
+  build-oracle-native:
+    needs: [bump-versions]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+      - name: Test Oracle native agent
+        working-directory: agents/drivers/oracle-go
+        run: go test ./...
+      - name: Cross-compile Oracle native agent
+        shell: bash
+        run: |
+          mkdir -p release-native
+          cd agents/drivers/oracle-go
+          declare -A TARGETS=(
+            ["macos-aarch64"]="darwin/arm64"
+            ["macos-x64"]="darwin/amd64"
+            ["linux-aarch64"]="linux/arm64"
+            ["linux-x64"]="linux/amd64"
+            ["windows-aarch64"]="windows/arm64"
+            ["windows-x64"]="windows/amd64"
+          )
+          for platform in "${!TARGETS[@]}"; do
+            IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
+            output="../../../release-native/dbx-agent-oracle-${platform}"
+            if [[ "$goos" == "windows" ]]; then
+              output="${output}.exe"
+            fi
+            echo "Building $platform ($goos/$goarch)"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
+          done
+          ls -lh ../../../release-native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oracle-native
+          path: "release-native/dbx-agent-oracle-*"
+
+  build-xugu-native:
+    needs: [bump-versions]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+      - name: Test Xugu native agent
+        working-directory: agents/drivers/xugu
+        run: GONOSUMDB=gitee.com/XuguDB/go-xugu-driver go test ./...
+      - name: Cross-compile Xugu native agent
+        shell: bash
+        run: |
+          mkdir -p release-native
+          cd agents/drivers/xugu
+          declare -A TARGETS=(
+            ["macos-aarch64"]="darwin/arm64"
+            ["macos-x64"]="darwin/amd64"
+            ["linux-aarch64"]="linux/arm64"
+            ["linux-x64"]="linux/amd64"
+            ["windows-aarch64"]="windows/arm64"
+            ["windows-x64"]="windows/amd64"
+          )
+          for platform in "${!TARGETS[@]}"; do
+            IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
+            output="../../../release-native/dbx-agent-xugu-${platform}"
+            if [[ "$goos" == "windows" ]]; then
+              output="${output}.exe"
+            fi
+            echo "Building $platform ($goos/$goarch)"
+            GONOSUMDB=gitee.com/XuguDB/go-xugu-driver CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
+          done
+          ls -lh ../../../release-native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xugu-native
+          path: "release-native/dbx-agent-xugu-*"
+
+  build-jre:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - jre-key: "21"
+            java-version: "21"
+            modules: "java.base,java.sql,java.sql.rowset,java.naming,java.management,java.desktop,java.security.jgss,java.security.sasl,jdk.security.auth,jdk.security.jgss,jdk.charsets,jdk.unsupported,java.scripting,java.compiler"
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java-version }}
+      - name: Build JRE for all platforms
+        shell: bash
+        run: |
+          MODULES="${{ matrix.modules }}"
+          JLINK_OPTS="--strip-debug --no-header-files --no-man-pages --compress=zip-6"
+          JRE_KEY="${{ matrix.jre-key }}"
+
+          jlink --add-modules $MODULES $JLINK_OPTS --output dbx-jre
+          tar czf dbx-jre-${JRE_KEY}-linux-x64.tar.gz dbx-jre
+          rm -rf dbx-jre
+
+          ADOPTIUM="https://api.adoptium.net/v3/binary/latest/${{ matrix.java-version }}/ga"
+          declare -A PLATFORMS=(
+            ["macos-aarch64"]="mac/aarch64"
+            ["macos-x64"]="mac/x64"
+            ["linux-aarch64"]="linux/aarch64"
+            ["windows-x64"]="windows/x64"
+          )
+          for platform in "${!PLATFORMS[@]}"; do
+            os_arch="${PLATFORMS[$platform]}"
+            echo "=== Downloading JDK for $platform ($os_arch) ==="
+            if [[ "$platform" == windows-* ]]; then
+              curl -L -o jdk-$platform.zip "$ADOPTIUM/$os_arch/jdk/hotspot/normal/eclipse?project=jdk"
+              mkdir -p jdk-$platform
+              unzip -q jdk-$platform.zip -d jdk-$platform-tmp
+              mv jdk-$platform-tmp/*/* jdk-$platform/ || mv jdk-$platform-tmp/* jdk-$platform/
+              rm -rf jdk-$platform-tmp jdk-$platform.zip
+            else
+              curl -L -o jdk-$platform.tar.gz "$ADOPTIUM/$os_arch/jdk/hotspot/normal/eclipse?project=jdk"
+              mkdir -p jdk-$platform
+              tar xzf jdk-$platform.tar.gz -C jdk-$platform --strip-components=1
+              rm -f jdk-$platform.tar.gz
+            fi
+            JAVA_HOME_CROSS="jdk-$platform"
+            if [ -d "$JAVA_HOME_CROSS/Contents/Home/jmods" ]; then
+              JMODS="$JAVA_HOME_CROSS/Contents/Home/jmods"
+            else
+              JMODS="$JAVA_HOME_CROSS/jmods"
+            fi
+            LLVM_OBJCOPY=$(ls /usr/bin/llvm-objcopy-* 2>/dev/null | sort -V | tail -1)
+            if [ -z "$LLVM_OBJCOPY" ]; then LLVM_OBJCOPY=$(which llvm-objcopy 2>/dev/null || true); fi
+            CROSS_OPTS=""
+            if [ -n "$LLVM_OBJCOPY" ]; then
+              CROSS_OPTS="--strip-native-debug-symbols=objcopy=$LLVM_OBJCOPY"
+            else
+              CROSS_OPTS="--disable-plugin strip-native-debug-symbols"
+            fi
+            jlink --module-path "$JMODS" --add-modules $MODULES $JLINK_OPTS $CROSS_OPTS --output dbx-jre
+            tar czf dbx-jre-${JRE_KEY}-$platform.tar.gz dbx-jre
+            rm -rf dbx-jre jdk-$platform
+          done
+
+          ls -lh dbx-jre-*.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jre-${{ matrix.jre-key }}
+          path: "dbx-jre-*.tar.gz"
+
+  release:
+    needs: [bump-versions, build-agents, build-oracle-native, build-xugu-native, build-jre]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release
+          find artifacts/agent-jars -name '*.jar' -exec cp {} release/ \;
+          find artifacts/oracle-native -type f -name 'dbx-agent-oracle-*' -exec cp {} release/ \;
+          find artifacts/xugu-native -type f -name 'dbx-agent-xugu-*' -exec cp {} release/ \;
+          find artifacts -name 'dbx-jre-*.tar.gz' -exec cp {} release/ \;
+          ls -lh release/
+
+      - name: Generate agent-registry.json
+        env:
+          MODULE_VERSIONS: ${{ needs.bump-versions.outputs.versions }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          REPO="${GITHUB_REPOSITORY}"
+          RELEASE_VERSION="${TAG#agents-v}"
+
+          get_module_version() {
+            local name="$1"
+            echo "$MODULE_VERSIONS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('$name','${RELEASE_VERSION}'))"
+          }
+
+          generate_jar_entry() {
+            local name="$1" label="$2" file="$3" jre_key="$4" version="$5" external_driver="$6" native_json="$7"
+            local sha256=$(sha256sum "$file" | cut -d' ' -f1)
+            local size=$(stat -c%s "$file")
+            local url="https://github.com/${REPO}/releases/download/${TAG}/$(basename $file)"
+            local native_line=""
+            if [ -n "$native_json" ]; then
+              native_line="                \"native\": {${native_json}
+                },"
+            fi
+            cat <<ENTRY
+              "${name}": {
+                "version": "${version}",
+                "label": "${label}",
+                "min_app_version": "0.6.0",
+                "jre": "${jre_key}",
+                "external_driver_required": ${external_driver},
+                ${native_line}
+                "jar": { "url": "${url}", "sha256": "${sha256}", "size": ${size} }
+              }
+          ENTRY
+          }
+
+          generate_native_entry() {
+            local name="$1" label="$2" jre_key="$3" version="$4" native_json="$5"
+            local legacy_jar_url="https://github.com/${REPO}/releases/download/${TAG}/dbx-agent-${name}-legacy-placeholder.jar"
+            cat <<ENTRY
+              "${name}": {
+                "version": "${version}",
+                "label": "${label}",
+                "min_app_version": "0.6.0",
+                "jre": "${jre_key}",
+                "external_driver_required": false,
+                "native": {${native_json}
+                },
+                "jar": { "url": "${legacy_jar_url}", "sha256": "", "size": 0 }
+              }
+          ENTRY
+          }
+
+          native_only_label() {
+            local name="$1"
+            case "$name" in
+              xugu) echo "虚谷 XuguDB" ;;
+              *) echo "$name" ;;
+            esac
+          }
+
+          generate_jre_platforms() {
+            local jre_key="$1"
+            local PLATFORMS=""
+            for f in release/dbx-jre-${jre_key}-*.tar.gz; do
+              [ ! -f "$f" ] && continue
+              p=$(basename "$f" .tar.gz | sed "s/dbx-jre-${jre_key}-//")
+              sha256=$(sha256sum "$f" | cut -d' ' -f1)
+              size=$(stat -c%s "$f")
+              url="https://github.com/${REPO}/releases/download/${TAG}/$(basename $f)"
+              [ -n "$PLATFORMS" ] && PLATFORMS="${PLATFORMS},"$'\n'
+              PLATFORMS="${PLATFORMS}              \"${p}\": { \"url\": \"${url}\", \"sha256\": \"${sha256}\", \"size\": ${size} }"
+            done
+            echo "$PLATFORMS"
+          }
+
+          generate_native_platforms() {
+            local name="$1"
+            local PLATFORMS=""
+            for f in release/dbx-agent-${name}-*; do
+              [ ! -f "$f" ] && continue
+              [[ "$f" != *.jar ]] || continue
+              p=$(basename "$f" | sed "s/dbx-agent-${name}-//; s/\\.exe$//")
+              sha256=$(sha256sum "$f" | cut -d' ' -f1)
+              size=$(stat -c%s "$f")
+              url="https://github.com/${REPO}/releases/download/${TAG}/$(basename $f)"
+              [ -n "$PLATFORMS" ] && PLATFORMS="${PLATFORMS},"$'\n'
+              PLATFORMS="${PLATFORMS}"$'\n'"                  \"${p}\": { \"url\": \"${url}\", \"sha256\": \"${sha256}\", \"size\": ${size} }"
+            done
+            echo "$PLATFORMS"
+          }
+
+          detect_jre_key() {
+            local name="$1"
+            case "$name" in
+              *) echo "21" ;;
+            esac
+          }
+
+          JRE21_PLATFORMS=$(generate_jre_platforms "21")
+
+          DRIVERS=""
+          for f in release/dbx-agent-*.jar; do
+            name=$(basename "$f" .jar | sed 's/dbx-agent-//')
+            label=$(unzip -p "$f" META-INF/MANIFEST.MF | awk -F': ' 'BEGIN{IGNORECASE=1} /^Agent-Label:/ {sub(/\r$/, "", $2); print $2; exit}' || echo "$name")
+            [ -z "$label" ] && label="$name"
+            external_driver=$(unzip -p "$f" META-INF/MANIFEST.MF | awk -F': ' 'BEGIN{IGNORECASE=1} /^Agent-External-Driver:/ {sub(/\r$/, "", $2); print tolower($2); exit}' || true)
+            [ "$external_driver" = "true" ] || external_driver="false"
+            jre_key=$(detect_jre_key "$name")
+            version=$(get_module_version "$name")
+            native_json=$(generate_native_platforms "$name")
+            [ -n "$DRIVERS" ] && DRIVERS="${DRIVERS},"$'\n'
+            DRIVERS="${DRIVERS}$(generate_jar_entry "$name" "$label" "$f" "$jre_key" "$version" "$external_driver" "$native_json")"
+          done
+          for name in oracle xugu; do
+            [ -f "release/dbx-agent-${name}.jar" ] && continue
+            native_json=$(generate_native_platforms "$name")
+            [ -z "$native_json" ] && continue
+            label=$(native_only_label "$name")
+            jre_key=$(detect_jre_key "$name")
+            version=$(get_module_version "$name")
+            [ -n "$DRIVERS" ] && DRIVERS="${DRIVERS},"$'\n'
+            DRIVERS="${DRIVERS}$(generate_native_entry "$name" "$label" "$jre_key" "$version" "$native_json")"
+          done
+
+          cat > release/agent-registry.json <<EOF
+          {
+            "jres": {
+              "21": {
+                "version": "21.0.12+kerberos.1",
+                "platforms": {
+          ${JRE21_PLATFORMS}
+                }
+              }
+            },
+            "drivers": {
+          ${DRIVERS}
+            }
+          }
+          EOF
+
+          python3 -m json.tool release/agent-registry.json > /dev/null
+          echo "=== agent-registry.json ==="
+          cat release/agent-registry.json
+
+      - name: Build offline ZIP bundles
+        run: bash agents/scripts/build_offline_zip.sh release
+
+      - name: Generate release notes
+        env:
+          MODULE_VERSIONS: ${{ needs.bump-versions.outputs.versions }}
+          PREV_VERSIONS: ${{ needs.bump-versions.outputs.prev_versions }}
+          PREV_TAG: ${{ needs.bump-versions.outputs.prev_tag }}
+        run: |
+          NOTES=""
+          DRIVER_NAMES=()
+          for f in release/dbx-agent-*.jar; do
+            DRIVER_NAMES+=("$(basename "$f" .jar | sed 's/dbx-agent-//')")
+          done
+          for name in oracle xugu; do
+            [ -f "release/dbx-agent-${name}.jar" ] && continue
+            compgen -G "release/dbx-agent-${name}-*" > /dev/null && DRIVER_NAMES+=("$name")
+          done
+
+          native_only_label() {
+            local name="$1"
+            case "$name" in
+              oracle) echo "Oracle" ;;
+              xugu) echo "虚谷 XuguDB" ;;
+              *) echo "$name" ;;
+            esac
+          }
+
+          for name in "${DRIVER_NAMES[@]}"; do
+            old_ver=$(echo "$PREV_VERSIONS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('$name',''))")
+            new_ver=$(echo "$MODULE_VERSIONS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('$name',''))")
+            [ "$old_ver" = "$new_ver" ] && continue
+
+            jar_file="release/dbx-agent-${name}.jar"
+            if [ -f "$jar_file" ]; then
+              label=$(unzip -p "$jar_file" META-INF/MANIFEST.MF | awk -F': ' 'BEGIN{IGNORECASE=1} /^Agent-Label:/ {sub(/\r$/, "", $2); print $2; exit}' || echo "$name")
+              [ -z "$label" ] && label="$name"
+            else
+              label=$(native_only_label "$name")
+            fi
+
+            NOTES="${NOTES}### ${label} (${old_ver} → ${new_ver})"$'\n'
+            if [ "$name" = "oracle" ]; then
+              LOG_PATH="agents/drivers/oracle-go/"
+            elif [ -d "agents/drivers/$name" ]; then
+              LOG_PATH="agents/drivers/$name/"
+            else
+              LOG_PATH="agents/$name/"
+            fi
+            LOG_PATHS=("$LOG_PATH")
+            while IFS= read -r line; do
+              [ -n "$line" ] && NOTES="${NOTES}- ${line}"$'\n'
+            done < <(git log --oneline "$PREV_TAG"..HEAD -- "${LOG_PATHS[@]}" | sed 's/^[0-9a-f]* //')
+
+            # include common changes if any
+            while IFS= read -r line; do
+              [ -n "$line" ] && NOTES="${NOTES}- ${line}"$'\n'
+            done < <(git log --oneline "$PREV_TAG"..HEAD -- agents/common/ | sed 's/^[0-9a-f]* //')
+            NOTES="${NOTES}"$'\n'
+          done
+
+          if [ -z "$NOTES" ]; then
+            NOTES="Routine rebuild, no agent-specific changes."$'\n'
+          fi
+
+          printf "## 更新内容\n\n%s" "$NOTES" > RELEASE_NOTES.md
+          echo "=== Release Notes ==="
+          cat RELEASE_NOTES.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          body_path: RELEASE_NOTES.md
+          make_latest: false
+
+      - name: Update agents-latest GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git tag -f agents-latest "$GITHUB_SHA"
+          git push origin refs/tags/agents-latest --force
+
+          if gh release view agents-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload agents-latest release/* --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit agents-latest \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Agents latest" \
+              --notes "Moving release for the latest DBX agent registry, driver artifacts, managed JRE archives, and offline bundles." \
+              --latest=false
+          else
+            gh release create agents-latest release/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Agents latest" \
+              --notes "Moving release for the latest DBX agent registry, driver artifacts, managed JRE archives, and offline bundles." \
+              --latest=false
+          fi
+
+      - name: Upload to R2
+        env:
+          MODULE_VERSIONS: ${{ needs.bump-versions.outputs.versions }}
+          PREV_VERSIONS: ${{ needs.bump-versions.outputs.prev_versions }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: "https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
+          R2_BUCKET: "s3://${{ secrets.R2_BUCKET_NAME }}"
+        run: |
+          # Always upload agent-registry.json
+          aws s3 cp release/agent-registry.json \
+            "$R2_BUCKET/agents/agent-registry.json" \
+            --endpoint-url "$R2_ENDPOINT"
+          echo "Uploaded agent-registry.json"
+
+          # Upload only changed driver JARs
+          UPLOADED=0
+          SKIPPED=0
+          for f in release/dbx-agent-*.jar; do
+            [ ! -f "$f" ] && continue
+            name=$(basename "$f" .jar | sed 's/dbx-agent-//')
+            old_ver=$(echo "$PREV_VERSIONS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('$name',''))" 2>/dev/null)
+            new_ver=$(echo "$MODULE_VERSIONS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('$name',''))" 2>/dev/null)
+            if [ "$old_ver" = "$new_ver" ] && [ -n "$old_ver" ]; then
+              echo "Skip $(basename $f) (unchanged $old_ver)"
+              SKIPPED=$((SKIPPED + 1))
+              continue
+            fi
+            aws s3 cp "$f" \
+              "$R2_BUCKET/agents/drivers/$(basename $f)" \
+              --endpoint-url "$R2_ENDPOINT"
+            echo "Uploaded $(basename $f) ($old_ver → $new_ver)"
+            UPLOADED=$((UPLOADED + 1))
+          done
+          echo "Drivers: $UPLOADED uploaded, $SKIPPED skipped"
+
+          for f in release/dbx-agent-*; do
+            [ -f "$f" ] || continue
+            [[ "$f" != *.jar ]] || continue
+            aws s3 cp "$f" \
+              "$R2_BUCKET/agents/drivers/$(basename $f)" \
+              --endpoint-url "$R2_ENDPOINT"
+            echo "Uploaded $(basename $f)"
+          done
+
+          # Upload JRE — always overwrite to ensure latest modules
+          for f in release/dbx-jre-*.tar.gz; do
+            [ ! -f "$f" ] && continue
+            key="agents/jre/$(basename $f)"
+            aws s3 cp "$f" "$R2_BUCKET/$key" --endpoint-url "$R2_ENDPOINT"
+            echo "Uploaded $(basename $f)"
+          done
+
+  sync-release-to-cnb:
+    name: Sync agents releases to CNB
+    needs: release
+    if: ${{ always() && needs.release.result == 'success' }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ["${{ github.ref_name }}", "agents-latest"]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Download GitHub release assets
+        env:
+          TAG_NAME: ${{ matrix.tag }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/github-release" "$RUNNER_TEMP/release-assets"
+          gh release view "$TAG_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json tagName,name,body,targetCommitish,isPrerelease,isDraft,assets \
+            > "$RUNNER_TEMP/github-release/release.json"
+          gh release download "$TAG_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/release-assets" \
+            --clobber
+
+      - name: Sync release assets to CNB
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CNB_UPLOAD_CONCURRENCY: "3"
+          OVERWRITE_EXISTING: ${{ matrix.tag == 'agents-latest' }}
+        run: |
+          set -euo pipefail
+          args=(
+            --github-release "$RUNNER_TEMP/github-release/release.json"
+            --assets-dir "$RUNNER_TEMP/release-assets"
+          )
+          # agents-latest is mutable, so its stable asset names must replace the previous release contents.
+          if [[ "$OVERWRITE_EXISTING" == "true" ]]; then
+            args+=(--overwrite-existing)
+          fi
+          node .github/scripts/sync-cnb-release.mjs "${args[@]}"
+
+  sync-release-to-atomgit:
+    name: Sync agents releases to AtomGit
+    needs: release
+    if: ${{ always() && needs.release.result == 'success' }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ["${{ github.ref_name }}", "agents-latest"]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Sync release assets to AtomGit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ matrix.tag }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          ATOMGIT_TOKEN: ${{ secrets.ATOMGIT_TOKEN }}
+          ATOMGIT_REPOSITORY: t8y2/dbx
+        run: |
+          set -euo pipefail
+          git fetch origin "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}" --force
+          git remote add atomgit "https://t8y2:${ATOMGIT_TOKEN}@atomgit.com/t8y2/dbx.git"
+          git push atomgit "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}" --force
+          mkdir -p "$RUNNER_TEMP/github-release" "$RUNNER_TEMP/release-assets"
+          gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" \
+            --json tagName,name,body,targetCommitish,isPrerelease,isDraft,assets \
+            > "$RUNNER_TEMP/github-release/release.json"
+          gh release download "$TAG_NAME" --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/release-assets" --clobber
+          node .github/scripts/sync-atomgit-release.mjs \
+            --github-release "$RUNNER_TEMP/github-release/release.json" \
+            --assets-dir "$RUNNER_TEMP/release-assets" \
+            ${{ matrix.tag == 'agents-latest' && '--replace-assets' || '' }}

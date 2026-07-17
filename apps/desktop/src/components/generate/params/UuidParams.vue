@@ -2,7 +2,7 @@
 import { computed, ref } from "vue";
 import { Button } from "@/components/ui/button";
 import { RefreshCw } from "@lucide/vue";
-import type { GeneratorParams } from "@/lib/dataGenerate";
+import type { GeneratorParams } from "@/lib/dataGrid/dataGenerate";
 
 const props = defineProps<{ params: GeneratorParams }>();
 

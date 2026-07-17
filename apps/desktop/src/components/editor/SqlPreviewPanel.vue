@@ -1,23 +1,27 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
-import { AlignLeft, Copy, ChevronDown } from "@lucide/vue";
+import { AlignLeft, Copy, ChevronDown, Undo2, Redo2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { useTheme } from "@/composables/useTheme";
 import { useToast } from "@/composables/useToast";
-import { copyToClipboard } from "@/lib/clipboard";
-import { formatSqlText, type SqlFormatDialect } from "@/lib/sqlFormatter";
+import { copyToClipboard } from "@/lib/common/clipboard";
+import { formatSqlText, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import type { Highlighter } from "shiki";
 
 const props = defineProps<{
   sql: string;
   sqlFormatDialect?: SqlFormatDialect;
   loading?: boolean;
+  canUndo?: boolean;
+  canRedo?: boolean;
 }>();
 
 const emit = defineEmits<{
   close: [];
+  undo: [];
+  redo: [];
 }>();
 
 const { t } = useI18n();
@@ -145,7 +149,7 @@ onBeforeUnmount(() => {
       <span class="flex-1 min-w-0" />
       <Tooltip>
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6" :class="isFormatted ? 'text-amber-600 bg-amber-500/10' : 'text-amber-600/60 hover:text-amber-700 hover:bg-amber-500/10'" :disabled="formatting || !hasSql" @click="toggleFormat">
+          <Button variant="ghost" size="icon" class="h-6 w-6" :class="isFormatted ? 'text-amber-600 bg-amber-500/10' : 'text-amber-600/60 hover:text-amber-700 hover:bg-amber-500/10'" :disabled="formatting || !hasSql" :aria-label="t('toolbar.formatSql')" @click="toggleFormat">
             <AlignLeft class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
@@ -153,7 +157,23 @@ onBeforeUnmount(() => {
       </Tooltip>
       <Tooltip>
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground/60 hover:text-foreground hover:bg-accent" :disabled="!hasSql" @click="handleCopy">
+          <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground/60 hover:text-foreground hover:bg-accent" :disabled="!canUndo" :aria-label="t('grid.undoChange')" @click="emit('undo')">
+            <Undo2 class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ t("grid.undoChange") }}</TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground/60 hover:text-foreground hover:bg-accent" :disabled="!canRedo" :aria-label="t('grid.redoChange')" @click="emit('redo')">
+            <Redo2 class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ t("grid.redoChange") }}</TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground/60 hover:text-foreground hover:bg-accent" :disabled="!hasSql" :aria-label="t('grid.copy')" @click="handleCopy">
             <Copy class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
@@ -161,7 +181,7 @@ onBeforeUnmount(() => {
       </Tooltip>
       <Tooltip>
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground/60 hover:text-foreground hover:bg-accent" @click="emit('close')">
+          <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground/60 hover:text-foreground hover:bg-accent" :aria-label="t('toolbar.hidePreviewSql')" @click="emit('close')">
             <ChevronDown class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
@@ -178,14 +198,14 @@ onBeforeUnmount(() => {
 
       <!-- Empty -->
       <div v-else-if="!hasSql" class="flex items-center justify-center h-full text-xs text-muted-foreground">
-        {{ t("editor.pressToExecute", { mod: "Cmd/Ctrl" }) }}
+        {{ t("grid.previewSqlEmpty") }}
       </div>
 
       <!-- Shiki highlighted SQL -->
-      <div v-else-if="highlightedHtml" class="p-3 text-xs leading-relaxed [&_pre]:!bg-transparent [&_pre]:!p-0 [&_code]:!font-mono [&_code]:text-xs" v-html="highlightedHtml" />
+      <div v-else-if="highlightedHtml" data-native-clipboard class="p-3 text-xs leading-relaxed [&_pre]:!bg-transparent [&_pre]:!p-0 [&_code]:!font-mono [&_code]:text-xs" v-html="highlightedHtml" />
 
       <!-- Plain text fallback -->
-      <pre v-else class="p-3 text-xs font-mono whitespace-pre-wrap select-text">{{ displaySql }}</pre>
+      <pre v-else data-native-clipboard class="p-3 text-xs font-mono whitespace-pre-wrap select-text">{{ displaySql }}</pre>
     </div>
   </div>
 </template>

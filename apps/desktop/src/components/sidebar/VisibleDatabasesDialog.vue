@@ -6,8 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { canSaveVisibleDatabaseSelection, filterDatabaseNamesForConnection, isSystemDatabaseName, normalizeVisibleDatabaseSelection } from "@/lib/visibleDatabases";
-import * as api from "@/lib/api";
+import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, isSystemDatabaseName, normalizeVisibleDatabaseSelection } from "@/lib/database/visibleDatabases";
+import * as api from "@/lib/backend/api";
 
 const props = defineProps<{
   open: boolean;
@@ -22,7 +22,9 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
 
-const databaseNames = ref<string[]>([]);
+type FilterMode = "database" | "schema";
+
+const objectNames = ref<string[]>([]);
 const selectedNames = ref<Set<string>>(new Set());
 const searchText = ref("");
 const showSystemDatabases = ref(false);
@@ -30,19 +32,34 @@ const isLoading = ref(false);
 const errorMessage = ref("");
 
 const connection = computed(() => connectionStore.getConfig(props.connectionId));
-const listedDatabaseNames = computed(() => {
-  if (showSystemDatabases.value) return databaseNames.value;
-  return filterDatabaseNamesForConnection(databaseNames.value, connection.value);
+const filterMode = computed<FilterMode>(() => (connectionUsesVisibleSchemaFilter(connection.value) ? "schema" : "database"));
+const databaseKey = computed(() => connection.value?.database || "");
+const isSchemaFilterMode = computed(() => filterMode.value === "schema");
+const titleKey = computed(() => (isSchemaFilterMode.value ? "visibleSchemas.title" : "visibleDatabases.title"));
+const descriptionKey = computed(() => (isSchemaFilterMode.value ? "visibleSchemas.description" : "visibleDatabases.description"));
+const searchPlaceholderKey = computed(() => (isSchemaFilterMode.value ? "visibleSchemas.searchPlaceholder" : "visibleDatabases.searchPlaceholder"));
+const emptySelectionKey = computed(() => (isSchemaFilterMode.value ? "visibleSchemas.emptySelection" : "visibleDatabases.emptySelection"));
+const loadFailedKey = computed(() => (isSchemaFilterMode.value ? "visibleSchemas.loadFailed" : "visibleDatabases.loadFailed"));
+const listedObjectNames = computed(() => {
+  if (isSchemaFilterMode.value) return objectNames.value;
+  if (showSystemDatabases.value) return objectNames.value;
+  return filterDatabaseNamesForVisiblePicker(objectNames.value, connection.value);
 });
-const filteredDatabaseNames = computed(() => {
+const filteredObjectNames = computed(() => {
   const query = searchText.value.trim().toLowerCase();
-  if (!query) return listedDatabaseNames.value;
-  return listedDatabaseNames.value.filter((name) => name.toLowerCase().includes(query));
+  if (!query) return listedObjectNames.value;
+  return listedObjectNames.value.filter((name) => name.toLowerCase().includes(query));
 });
 const selectedCount = computed(() => selectedNames.value.size);
-const totalCount = computed(() => listedDatabaseNames.value.length);
+const totalCount = computed(() => listedObjectNames.value.length);
 const canSaveSelection = computed(() => canSaveVisibleDatabaseSelection([...selectedNames.value]));
-const hasSystemDatabases = computed(() => databaseNames.value.some((database) => isSystemDatabaseName(connection.value?.db_type, database)));
+const hasSystemDatabases = computed(() => !isSchemaFilterMode.value && objectNames.value.some((database) => isSystemDatabaseName(connection.value?.db_type, database)));
+const showAllDisabled = computed(() => {
+  if (isSchemaFilterMode.value) {
+    return !connection.value?.visible_schemas?.[databaseKey.value];
+  }
+  return !Array.isArray(connection.value?.visible_databases);
+});
 
 watch(
   () => props.open,
@@ -50,6 +67,8 @@ watch(
     if (!open) return;
     loadDatabases().catch(() => {});
   },
+  // Tree-level async hosts mount the dialog with `open` already true.
+  { immediate: true },
 );
 
 watch(showSystemDatabases, (show) => {
@@ -62,14 +81,14 @@ async function loadDatabases() {
   errorMessage.value = "";
   searchText.value = "";
   try {
-    const names = await loadDatabaseNames();
-    databaseNames.value = names;
-    const configured = connection.value?.visible_databases;
-    const initialSelection = Array.isArray(configured) ? normalizeVisibleDatabaseSelection(configured, names) : filterDatabaseNamesForConnection(names, connection.value);
+    const names = await loadObjectNames();
+    objectNames.value = names;
+    const configured = isSchemaFilterMode.value ? connection.value?.visible_schemas?.[databaseKey.value] : connection.value?.visible_databases;
+    const initialSelection = Array.isArray(configured) ? normalizeVisibleDatabaseSelection(configured, names) : listedObjectNames.value;
     selectedNames.value = new Set(initialSelection);
-    showSystemDatabases.value = initialSelection.some((database) => isSystemDatabaseName(connection.value?.db_type, database));
+    showSystemDatabases.value = !isSchemaFilterMode.value && initialSelection.some((database) => isSystemDatabaseName(connection.value?.db_type, database));
   } catch (e: any) {
-    databaseNames.value = [];
+    objectNames.value = [];
     selectedNames.value = new Set();
     showSystemDatabases.value = false;
     errorMessage.value = String(e?.message || e);
@@ -78,11 +97,11 @@ async function loadDatabases() {
   }
 }
 
-async function loadDatabaseNames(): Promise<string[]> {
+async function loadObjectNames(): Promise<string[]> {
   const config = connection.value;
-  if (config?.db_type === "oracle" || config?.db_type === "dameng") {
+  if (isSchemaFilterMode.value) {
     await connectionStore.ensureConnected(props.connectionId);
-    return api.listSchemas(props.connectionId, config.database || "");
+    return api.listSchemas(props.connectionId, config?.database || "");
   }
   await connectionStore.ensureConnected(props.connectionId);
   if (config?.db_type === "redis") {
@@ -94,21 +113,21 @@ async function loadDatabaseNames(): Promise<string[]> {
   return (await api.listDatabases(props.connectionId)).map((database) => database.name);
 }
 
-function toggleDatabase(database: string) {
+function toggleObject(name: string) {
   const next = new Set(selectedNames.value);
-  if (next.has(database)) next.delete(database);
-  else next.add(database);
+  if (next.has(name)) next.delete(name);
+  else next.add(name);
   selectedNames.value = next;
 }
 
 const isSearching = computed(() => searchText.value.trim().length > 0);
 
 function selectAll() {
-  selectedNames.value = new Set(listedDatabaseNames.value);
+  selectedNames.value = new Set(listedObjectNames.value);
 }
 
 function selectFiltered() {
-  selectedNames.value = new Set(filteredDatabaseNames.value);
+  selectedNames.value = new Set(filteredObjectNames.value);
 }
 
 function clearSelection() {
@@ -116,13 +135,21 @@ function clearSelection() {
 }
 
 async function showAllDatabases() {
-  await connectionStore.clearVisibleDatabases(props.connectionId);
+  if (isSchemaFilterMode.value) {
+    await connectionStore.clearVisibleSchemas(props.connectionId, databaseKey.value);
+  } else {
+    await connectionStore.clearVisibleDatabases(props.connectionId);
+  }
   emit("update:open", false);
 }
 
 async function saveSelection() {
   if (!canSaveSelection.value) return;
-  await connectionStore.setVisibleDatabases(props.connectionId, [...selectedNames.value]);
+  if (isSchemaFilterMode.value) {
+    await connectionStore.setVisibleSchemas(props.connectionId, databaseKey.value, normalizeVisibleDatabaseSelection([...selectedNames.value], objectNames.value));
+  } else {
+    await connectionStore.setVisibleDatabases(props.connectionId, [...selectedNames.value]);
+  }
   emit("update:open", false);
 }
 </script>
@@ -131,15 +158,15 @@ async function saveSelection() {
   <Dialog :open="open" @update:open="(value: boolean) => emit('update:open', value)">
     <DialogContent class="sm:max-w-[460px]">
       <DialogHeader>
-        <DialogTitle>{{ t("visibleDatabases.title") }}</DialogTitle>
+        <DialogTitle>{{ t(titleKey) }}</DialogTitle>
         <p class="text-sm text-muted-foreground">
-          {{ t("visibleDatabases.description", { connection: connectionName }) }}
+          {{ t(descriptionKey, { connection: connectionName }) }}
         </p>
       </DialogHeader>
 
       <div class="flex items-center gap-2 rounded-md border bg-background px-2">
         <Search class="h-4 w-4 shrink-0 text-muted-foreground" />
-        <Input v-model="searchText" :placeholder="t('visibleDatabases.searchPlaceholder')" class="h-8 border-0 px-0 shadow-none focus-visible:ring-0" :disabled="isLoading || !!errorMessage" />
+        <Input v-model="searchText" :placeholder="t(searchPlaceholderKey)" class="h-8 border-0 px-0 shadow-none focus-visible:ring-0" :disabled="isLoading || !!errorMessage" />
       </div>
 
       <div class="flex items-center justify-between text-xs text-muted-foreground">
@@ -154,13 +181,13 @@ async function saveSelection() {
           <button class="hover:text-foreground disabled:opacity-50" :disabled="isLoading" @click="clearSelection">
             {{ t("visibleDatabases.clear") }}
           </button>
-          <button class="hover:text-foreground disabled:opacity-50" :disabled="isLoading || !Array.isArray(connection?.visible_databases)" @click="showAllDatabases">
+          <button class="hover:text-foreground disabled:opacity-50" :disabled="isLoading || showAllDisabled" @click="showAllDatabases">
             {{ t("visibleDatabases.showAll") }}
           </button>
         </div>
       </div>
       <p v-if="!isLoading && !errorMessage && !canSaveSelection" class="text-xs text-destructive">
-        {{ t("visibleDatabases.emptySelection") }}
+        {{ t(emptySelectionKey) }}
       </p>
 
       <label v-if="hasSystemDatabases" class="flex h-8 items-center gap-2 rounded-md px-1 text-xs text-muted-foreground">
@@ -174,22 +201,22 @@ async function saveSelection() {
           {{ t("common.loading") }}
         </div>
         <div v-else-if="errorMessage" class="p-3 text-sm text-destructive">
-          {{ t("visibleDatabases.loadFailed", { message: errorMessage }) }}
+          {{ t(loadFailedKey, { message: errorMessage }) }}
         </div>
-        <div v-else-if="!filteredDatabaseNames.length" class="p-3 text-sm text-muted-foreground">
+        <div v-else-if="!filteredObjectNames.length" class="p-3 text-sm text-muted-foreground">
           {{ t("grid.noSearchResults") }}
         </div>
         <template v-else>
           <button
-            v-for="database in filteredDatabaseNames"
-            :key="database"
+            v-for="name in filteredObjectNames"
+            :key="name"
             type="button"
             class="flex h-8 w-full min-w-0 items-center gap-2 rounded-sm px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none"
-            @click="toggleDatabase(database)"
+            @click="toggleObject(name)"
           >
-            <CheckSquare v-if="selectedNames.has(database)" class="h-4 w-4 shrink-0 text-primary" />
+            <CheckSquare v-if="selectedNames.has(name)" class="h-4 w-4 shrink-0 text-primary" />
             <Square v-else class="h-4 w-4 shrink-0 text-muted-foreground" />
-            <span class="truncate">{{ database }}</span>
+            <span class="truncate">{{ name }}</span>
           </button>
         </template>
       </div>

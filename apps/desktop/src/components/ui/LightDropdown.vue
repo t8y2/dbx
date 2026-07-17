@@ -23,6 +23,7 @@ const props = withDefaults(
     triggerTitle?: string;
     triggerIcon?: Component;
     triggerLabel?: string;
+    disabled?: boolean;
     showTriggerLabel?: boolean;
     showChevron?: boolean;
     checkPosition?: "left" | "right" | "none";
@@ -42,10 +43,11 @@ const props = withDefaults(
   {
     ariaLabel: undefined,
     contentClass: "",
-    triggerClass: "flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground",
+    triggerClass: "flex items-center gap-1 rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground",
     triggerTitle: undefined,
     triggerIcon: undefined,
     triggerLabel: undefined,
+    disabled: false,
     showTriggerLabel: true,
     showChevron: true,
     checkPosition: "left",
@@ -115,6 +117,7 @@ function fitPositionToViewport() {
 }
 
 function openMenu() {
+  if (props.disabled) return;
   updatePosition();
   open.value = true;
   nextTick(fitPositionToViewport);
@@ -160,13 +163,13 @@ onBeforeUnmount(close);
 </script>
 
 <template>
-  <button ref="triggerRef" type="button" :class="triggerClass" :title="triggerTitle ?? selectedItem?.title" :aria-label="ariaLabel" :aria-expanded="open" @click="toggle">
+  <button ref="triggerRef" type="button" :class="triggerClass" :title="triggerTitle ?? selectedItem?.title" :aria-label="ariaLabel" :aria-expanded="open" :disabled="disabled" @click="toggle">
     <component :is="triggerIcon" v-if="triggerIcon" :class="triggerIconClass" />
     <span v-if="showTriggerLabel">{{ triggerLabel ?? selectedItem?.label }}</span>
     <ChevronDown v-if="showChevron" class="h-3 w-3 opacity-50" />
   </button>
   <Teleport to="body">
-    <div v-if="open" ref="menuRef" class="fixed z-50 min-w-32 rounded-lg p-1 cn-menu-translucent text-popover-foreground" :class="contentClass" :style="menuStyle" role="menu">
+    <div v-if="open" ref="menuRef" class="fixed z-50 min-w-32 rounded-[6px] p-1 cn-menu-translucent text-popover-foreground" :class="contentClass" :style="menuStyle" role="menu">
       <div v-if="label" :class="labelClass">{{ label }}</div>
       <div v-if="label" class="bg-border -mx-1 my-1 h-px" />
       <template v-for="item in items" :key="item.value">

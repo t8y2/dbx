@@ -1,0 +1,10 @@
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation 'org.apache.kylin:kylin-jdbc:5.0.0'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': 'Apache Kylin', 'Main-Class': 'com.dbx.agent.kylin.KylinAgent')
+    }
+}

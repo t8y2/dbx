@@ -22,6 +22,7 @@ pub(in crate::schema) async fn list_databases(
 
 pub(in crate::schema) async fn list_schemas(pool: &PoolKind) -> Result<Vec<String>, String> {
     match pool {
+        PoolKind::Mysql(p, mode) if *mode == MysqlMode::OceanBaseOracle => db::ob_oracle::list_schemas(p).await,
         PoolKind::Postgres(p) => db::postgres::list_schemas(p).await,
         _ => Ok(vec![]),
     }
@@ -58,6 +59,9 @@ pub(in crate::schema) async fn list_tables(
         PoolKind::Elasticsearch(client) => {
             db::elasticsearch_driver::list_indices(client).await.map(|names| collection_names_to_tables(names, "INDEX"))
         }
+        PoolKind::VectorDb(client) => {
+            db::vector_driver::list_collections(client).await.map(|infos| collection_names_to_tables(infos.into_iter().map(|i| i.name).collect(), "COLLECTION"))
+        }
         _ => Ok(vec![]),
     }
 }
@@ -78,7 +82,9 @@ pub(in crate::schema) async fn list_objects(
         PoolKind::Mysql(p, _) if config.is_some_and(is_doris_family_config) => {
             db::mysql::list_table_objects_show(p, database).await.map(Some)
         }
-        PoolKind::Mysql(p, _) => db::mysql::list_objects(p, database).await.map(Some),
+        PoolKind::Mysql(p, _) => db::mysql::list_objects(p, database, None, None, None)
+            .await
+            .map(|result| Some(result.objects)),
         PoolKind::Postgres(p) if config.is_some_and(is_questdb_config) => {
             db::questdb::list_objects(p, schema).await.map(Some)
         }
@@ -122,7 +128,7 @@ pub(in crate::schema) async fn get_columns(
         }
         PoolKind::Mysql(p, _) if config.is_some_and(is_doris_family_config) => {
             let metadata_database = mysql_show_metadata_database_for_config(config, database);
-            db::mysql::get_columns_show(p, metadata_database, table).await
+            db::mysql::get_columns(p, metadata_database, table).await
         }
         PoolKind::Mysql(p, mode) if *mode == MysqlMode::OceanBaseOracle => {
             db::ob_oracle::get_columns(p, database, table).await
@@ -136,6 +142,7 @@ pub(in crate::schema) async fn get_columns(
         PoolKind::Rqlite(client) => db::rqlite_driver::get_columns(client, schema, table).await,
         PoolKind::Turso(client) => db::turso_driver::get_columns(client, schema, table).await,
         PoolKind::Elasticsearch(client) => db::elasticsearch_driver::get_columns(client, table).await,
+        PoolKind::VectorDb(_) => Ok(vec![]),
         _ => Ok(vec![]),
     }
 }
@@ -150,6 +157,9 @@ pub(in crate::schema) async fn list_indexes(
     match pool {
         PoolKind::Mysql(p, mode) if *mode == MysqlMode::OceanBaseOracle => {
             db::ob_oracle::list_indexes(p, schema, table).await
+        }
+        PoolKind::Mysql(p, _) if config.is_some_and(is_doris_family_config) => {
+            db::mysql::list_doris_family_indexes(p, database, table).await
         }
         PoolKind::Mysql(p, _) => db::mysql::list_indexes(p, schema, table).await,
         PoolKind::Postgres(p) if config.is_some_and(is_questdb_config) => {
@@ -210,7 +220,7 @@ pub(in crate::schema) async fn table_ddl(
     table: &str,
 ) -> Result<String, String> {
     match pool {
-        PoolKind::Mysql(p, _) => super::super::mysql_ddl(p, table).await,
+        PoolKind::Mysql(p, _) => super::super::mysql_ddl(p, schema, table).await,
         PoolKind::Postgres(p) if config.is_some_and(is_opengauss_family_config) => {
             match super::super::opengauss_table_ddl(p, schema, table).await {
                 Ok(ddl) => Ok(ddl),
@@ -239,7 +249,14 @@ pub(in crate::schema) async fn object_source(
     object_type: &db::ObjectSourceKind,
 ) -> Result<Option<String>, String> {
     match pool {
-        PoolKind::Mysql(pool, _) => super::super::mysql_object_source(pool, name, object_type).await.map(Some),
+        PoolKind::Mysql(pool, _) => super::super::mysql_object_source(
+            pool,
+            super::super::mysql_table_metadata_catalog(database, schema),
+            name,
+            object_type,
+        )
+        .await
+        .map(Some),
         PoolKind::Postgres(pool) => {
             super::super::postgres_object_source(pool, schema, name, object_type).await.map(Some)
         }

@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { SIDEBAR_TREE_ROW_HEIGHT, SIDEBAR_TREE_PRERENDER_COUNT, SIDEBAR_TREE_SCROLL_BUFFER, flattenTree, scrollTopForExpandedTreeNode, shouldAutoScrollExpandedTreeNode, shouldVirtualizeFlatTree } from "../../apps/desktop/src/composables/useFlatTree.ts";
+import { SIDEBAR_TREE_ROW_HEIGHT, SIDEBAR_TREE_PRERENDER_COUNT, SIDEBAR_TREE_SCROLL_BUFFER, flattenTree, shouldVirtualizeFlatTree } from "../../apps/desktop/src/composables/useFlatTree.ts";
 import type { TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 test("flattenTree preserves depth and node type for virtualized sidebar rows", () => {
@@ -36,6 +36,21 @@ test("flattenTree preserves depth and node type for virtualized sidebar rows", (
   );
 });
 
+test("connection groups use per-node pool types to avoid recycled row state", () => {
+  const nodes: TreeNode[] = [
+    { id: "g1", label: "Group 1", type: "connection-group", isExpanded: false },
+    { id: "g2", label: "Group 2", type: "connection-group", isExpanded: false },
+    { id: "c1", label: "Connection", type: "connection", isExpanded: false },
+  ];
+
+  const flat = flattenTree(nodes);
+
+  assert.equal(flat[0].type, "connection-group");
+  assert.equal(flat[1].type, "connection-group");
+  assert.notEqual(flat[0].poolType, flat[1].poolType);
+  assert.equal(flat[2].poolType, "connection");
+});
+
 test("shouldVirtualizeFlatTree virtualizes every non-empty sidebar tree", () => {
   assert.equal(shouldVirtualizeFlatTree(0), false);
   assert.equal(shouldVirtualizeFlatTree(1), true);
@@ -50,35 +65,4 @@ test("sidebar virtual tree keeps enough buffered rows for fast scrolling", () =>
 
 test("sidebar virtual tree prerenders enough rows for the first frame", () => {
   assert.ok(SIDEBAR_TREE_PRERENDER_COUNT >= 40);
-});
-
-test("sidebar keeps root connection expansion from changing scroll position", () => {
-  assert.equal(shouldAutoScrollExpandedTreeNode("connection"), false);
-  assert.equal(shouldAutoScrollExpandedTreeNode("connection-group"), false);
-  assert.equal(shouldAutoScrollExpandedTreeNode("database"), true);
-  assert.equal(shouldAutoScrollExpandedTreeNode("group-columns"), true);
-});
-
-test("expanded sidebar nodes scroll enough to reveal inserted rows", () => {
-  assert.equal(
-    scrollTopForExpandedTreeNode({
-      expandedIndex: 20,
-      insertedRowCount: 2,
-      currentScrollTop: 15 * SIDEBAR_TREE_ROW_HEIGHT,
-      viewportHeight: 6 * SIDEBAR_TREE_ROW_HEIGHT,
-    }),
-    17 * SIDEBAR_TREE_ROW_HEIGHT,
-  );
-});
-
-test("expanded sidebar nodes keep scroll position when children are already visible", () => {
-  assert.equal(
-    scrollTopForExpandedTreeNode({
-      expandedIndex: 4,
-      insertedRowCount: 2,
-      currentScrollTop: 0,
-      viewportHeight: 8 * SIDEBAR_TREE_ROW_HEIGHT,
-    }),
-    0,
-  );
 });

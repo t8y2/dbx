@@ -1,3 +1,5 @@
+export type SchemaDiffTableFilterPriority = "include" | "exclude";
+
 export interface SchemaDiffCompareOptions {
   tables: boolean;
   primaryKeys: boolean;
@@ -14,6 +16,10 @@ export interface SchemaDiffCompareOptions {
   owners: boolean;
   cascadeDelete: boolean;
   sequenceLastValues: boolean;
+  compareColumnOrder: boolean;
+  tableIncludePattern: string;
+  tableExcludePattern: string;
+  tableFilterPriority: SchemaDiffTableFilterPriority;
 }
 
 export interface SchemaDiffConfig {
@@ -31,11 +37,15 @@ export interface SchemaDiffConfig {
 }
 
 export interface SchemaDiffOptionItem {
-  id: keyof SchemaDiffCompareOptions;
+  id: BooleanSchemaDiffCompareOptionKey;
   labelKey: string;
   defaultChecked: boolean;
   children?: SchemaDiffOptionItem[];
 }
+
+export type BooleanSchemaDiffCompareOptionKey = {
+  [K in keyof SchemaDiffCompareOptions]: SchemaDiffCompareOptions[K] extends boolean ? K : never;
+}[keyof SchemaDiffCompareOptions];
 
 export type SchemaDiffOptionsMap = Partial<Record<string, SchemaDiffOptionItem[]>>;
 
@@ -55,6 +65,10 @@ export const DEFAULT_POSTGRES_OPTIONS: SchemaDiffCompareOptions = {
   owners: true,
   cascadeDelete: false,
   sequenceLastValues: true,
+  compareColumnOrder: false,
+  tableIncludePattern: "",
+  tableExcludePattern: "",
+  tableFilterPriority: "exclude",
 };
 
 export const DEFAULT_MYSQL_OPTIONS: SchemaDiffCompareOptions = {
@@ -73,6 +87,10 @@ export const DEFAULT_MYSQL_OPTIONS: SchemaDiffCompareOptions = {
   owners: false,
   cascadeDelete: false,
   sequenceLastValues: false,
+  compareColumnOrder: false,
+  tableIncludePattern: "",
+  tableExcludePattern: "",
+  tableFilterPriority: "exclude",
 };
 
 export function getDefaultOptionsForDbType(dbType: string): SchemaDiffCompareOptions {
@@ -80,6 +98,13 @@ export function getDefaultOptionsForDbType(dbType: string): SchemaDiffCompareOpt
     return { ...DEFAULT_POSTGRES_OPTIONS };
   }
   return { ...DEFAULT_MYSQL_OPTIONS };
+}
+
+export function normalizeSchemaDiffCompareOptions(options: Partial<SchemaDiffCompareOptions> | null | undefined, dbType = "postgres"): SchemaDiffCompareOptions {
+  return {
+    ...getDefaultOptionsForDbType(dbType),
+    ...options,
+  };
 }
 
 export function createEmptyConfig(id: string, name: string): SchemaDiffConfig {

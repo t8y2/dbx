@@ -1,0 +1,13 @@
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes(
+            'Agent-Label': 'SunDB',
+            'Agent-External-Driver': 'true',
+            'Main-Class': 'com.dbx.agent.sundb.SundbAgent'
+        )
+    }
+}

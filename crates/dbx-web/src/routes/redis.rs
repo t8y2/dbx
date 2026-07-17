@@ -48,6 +48,7 @@ pub struct RedisScanBatchRequest {
     pub count: usize,
     #[serde(default = "default_max_iterations")]
     pub max_iterations: usize,
+    pub include_types: Option<bool>,
 }
 
 fn default_max_iterations() -> usize {
@@ -72,6 +73,18 @@ pub struct RedisKeyRequest {
     pub connection_id: String,
     pub db: u32,
     pub key_raw: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisLoadMoreRequest {
+    pub connection_id: String,
+    pub db: u32,
+    pub key_raw: String,
+    pub key_type: String,
+    pub cursor: u64,
+    pub count: usize,
+    pub filter: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -181,6 +194,21 @@ pub struct RedisPubSubPublishRequest {
     pub message: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlowlogGetRequest {
+    pub connection_id: String,
+    pub count: usize,
+    pub node_host: Option<String>,
+    pub node_port: Option<u16>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterNodesRequest {
+    pub connection_id: String,
+}
+
 pub async fn list_databases(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisConnectionRequest>,
@@ -219,6 +247,7 @@ pub async fn scan_keys_batch(
         &req.pattern,
         req.count,
         req.max_iterations,
+        req.include_types.unwrap_or(true),
     )
     .await
     .map_err(AppError)?;
@@ -251,6 +280,25 @@ pub async fn get_value(
     let result = dbx_core::redis_ops::redis_get_value_in_db_core(&state.app, &req.connection_id, req.db, &req.key_raw)
         .await
         .map_err(AppError)?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
+}
+
+pub async fn load_more(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<RedisLoadMoreRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result = dbx_core::redis_ops::redis_load_more_in_db_core(
+        &state.app,
+        &req.connection_id,
+        req.db,
+        &req.key_raw,
+        &req.key_type,
+        req.cursor,
+        req.count,
+        req.filter.as_deref(),
+    )
+    .await
+    .map_err(AppError)?;
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
 }
 
@@ -506,4 +554,29 @@ pub async fn publish_message(
             .await
             .map_err(AppError)?;
     Ok(Json(serde_json::json!({ "subscribers": count })))
+}
+
+pub async fn slowlog_get(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<SlowlogGetRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result = dbx_core::redis_ops::redis_slowlog_get_core(
+        &state.app,
+        &req.connection_id,
+        req.count,
+        req.node_host,
+        req.node_port,
+    )
+    .await
+    .map_err(AppError)?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
+}
+
+pub async fn cluster_master_nodes(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<ClusterNodesRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result =
+        dbx_core::redis_ops::redis_cluster_master_nodes_core(&state.app, &req.connection_id).await.map_err(AppError)?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
 }

@@ -45,14 +45,14 @@ async function getGitHubStarLabel() {
 function metrics(starLabel: string) {
   return {
     en: [
-      { value: "~15 MB", label: "desktop installer" },
-      { value: "50+", label: "database engines" },
+      { value: "~20 MB", label: "desktop installer" },
+      { value: "60+", label: "database engines" },
       { value: "2 modes", label: "desktop and Docker" },
       { value: starLabel, label: "GitHub stars, fully open-source" },
     ],
     cn: [
-      { value: "~15 MB", label: "桌面安装包" },
-      { value: "50+", label: "数据库引擎" },
+      { value: "~20 MB", label: "桌面安装包" },
+      { value: "60+", label: "数据库引擎" },
       { value: "2 种模式", label: "桌面与 Docker" },
       { value: starLabel, label: "GitHub Star，完全开源" },
     ],
@@ -70,9 +70,15 @@ const databaseSupport = [
   { name: "MongoDB", icon: "/icons/database/mongodb.svg", tone: "#47a248" },
   { name: "Oracle", icon: "/icons/database/oracle.svg", tone: "#f80000" },
   { name: "Elasticsearch", icon: "/icons/database/elasticsearch.svg", tone: "#00bfb3" },
+  { name: "Qdrant", icon: "/icons/database/qdrant.svg", tone: "#dc244c" },
+  { name: "Milvus", icon: "/icons/database/milvus.png", tone: "#00a1ea" },
+  { name: "Weaviate", icon: "/icons/database/weaviate.png", tone: "#00b894" },
+  { name: "ChromaDB", shortLabel: "CH", tone: "#ff7a59" },
+  { name: "Cloudflare D1", shortLabel: "D1", tone: "#f6821f" },
+  { name: "MariaDB", icon: "/icons/database/mariadb.svg", tone: "#003545" },
   { name: "Doris", icon: "/icons/database/doris.svg", tone: "#5b7cfa" },
   { name: "StarRocks", icon: "/icons/database/starrocks.svg", tone: "#6750ff" },
-  { name: "Manticore Search", icon: "/icons/database/manticoresearch.png", tone: "#b8e646" },
+  { name: "Manticore", icon: "/icons/database/manticoresearch.png", tone: "#b8e646" },
   { name: "Redshift", icon: "/icons/database/redshift.svg", tone: "#8c4fff" },
   { name: "Dameng", icon: "/icons/database/dm.svg", tone: "#3857ff" },
   { name: "GaussDB", icon: "/icons/database/gaussdb.svg", tone: "#ff5a3d" },
@@ -81,6 +87,9 @@ const databaseSupport = [
   { name: "HighGo", icon: "/icons/database/highgo.png", tone: "#005bac" },
   { name: "TiDB", icon: "/icons/database/tidb.svg", tone: "#e60012" },
   { name: "OceanBase", icon: "/icons/database/oceanbase.svg", tone: "#2285ff" },
+  { name: "TDSQL", icon: "/icons/database/tdsql.webp", tone: "#0080ff" },
+  { name: "PolarDB", icon: "/icons/database/polardb.webp", tone: "#1890ff" },
+  { name: "GreatSQL", icon: "/icons/database/greatsql.webp", tone: "#0066b3" },
   { name: "SelectDB", icon: "/icons/database/selectdb.svg", tone: "#22c1c3" },
   { name: "TDengine", icon: "/icons/database/tdengine.svg", tone: "#2f6fff" },
   { name: "CockroachDB", icon: "/icons/database/cockroachdb.svg", tone: "#6933ff" },
@@ -91,7 +100,9 @@ const databaseSupport = [
   { name: "Snowflake", icon: "/icons/database/snowflake.svg", tone: "#29b5e8" },
   { name: "BigQuery", icon: "/icons/database/bigquery.svg", tone: "#4285f4" },
   { name: "Trino", icon: "/icons/database/trino.svg", tone: "#dd00a1" },
+  { name: "PrestoSQL", icon: "/icons/database/presto.svg", tone: "#5890ff" },
   { name: "Hive", icon: "/icons/database/hive.svg", tone: "#fdcb00" },
+  { name: "Apache Spark", shortLabel: "SP", tone: "#e25a1c" },
   { name: "DB2", icon: "/icons/database/db2.svg", tone: "#054ada" },
   { name: "SAP HANA", icon: "/icons/database/saphana.webp", tone: "#008fd3" },
   { name: "Teradata", icon: "/icons/database/teradata.webp", tone: "#f37440" },
@@ -102,8 +113,10 @@ const databaseSupport = [
   { name: "Neo4j", icon: "/icons/database/neo4j.svg", tone: "#018bff" },
   { name: "Cassandra", icon: "/icons/database/cassandra.svg", tone: "#1287b1" },
   { name: "Kylin", icon: "/icons/database/apache_kylin.svg", tone: "#fb8c00" },
+  { name: "Dremio", shortLabel: "DR", tone: "#30bdbe" },
+  { name: "OSCAR", shortLabel: "OS", tone: "#1b8dff" },
   { name: "InfluxDB", icon: "/icons/database/influxdb.svg", tone: "#22adf6" },
-  { name: "QuestDB", icon: "/icons/database/questdb.svg", tone: "#dc2626" },  
+  { name: "QuestDB", icon: "/icons/database/questdb.svg", tone: "#dc2626" },
   { name: "IoTDB", icon: "/icons/database/iotdb.svg", tone: "#3cb371" },
   { name: "KWDB", icon: "/icons/database/kwdb.svg", tone: "#6366f1" },
   { name: "Vastbase", icon: "/icons/database/vastbase.png", tone: "#2563eb" },
@@ -114,7 +127,11 @@ const databaseSupport = [
   { name: "GBase", icon: "/icons/database/gbase.webp", tone: "#06b6d4" },
   { name: "Access", icon: "/icons/database/access.png", tone: "#a53346" },
   { name: "H2", icon: "/icons/database/h2.svg", tone: "#f7a81b" },
-  { name: "etcd", icon: "/icons/database/etcd.svg", tone: "#419eda" },
+  { name: "Etcd", icon: "/icons/database/etcd.svg", tone: "#419eda" },
+  { name: "ZooKeeper", icon: "/icons/database/zookeeper.svg", tone: "#3b82f6" },
+  { name: "Pulsar", icon: "/icons/database/pulsar.svg", tone: "#188fff" },
+  { name: "Apache Kafka", shortLabel: "KF", tone: "#231f20" },
+  { name: "Nacos", icon: "/icons/database/nacos.png", tone: "#2f80ed" },
   { name: "IRIS", icon: "/icons/database/iris.png", tone: "#0085ca" },
   { name: "JDBC", icon: "/icons/database/jdbc.svg", tone: "#6ea8ff" },
   { name: "Your DB?", icon: "/icons/database/jdbc.svg", tone: "#6ea8ff", href: "https://github.com/t8y2/dbx/discussions", cta: true },
@@ -203,6 +220,12 @@ const testimonials = {
       quote: "DBX keeps query work, schema checks, and Redis inspection in one small app. It feels focused instead of overloaded.",
     },
     {
+      name: "eryajf",
+      role: "Database management",
+      avatar: "/avatars/eryajf.jpg",
+      quote: "Try it once and you can feel it: DBX is the database management client that ends the competition.",
+    },
+    {
       name: "@vbvb",
       role: "Daily reporting",
       avatar: "/avatars/vbvb.png",
@@ -277,6 +300,12 @@ const testimonials = {
       quote: "DBX 把查询、结构检查和 Redis 查看放在一个轻量工具里，日常数据库工作不会被复杂界面打断。",
     },
     {
+      name: "二丫讲梵",
+      role: "数据库管理",
+      avatar: "/avatars/eryajf.jpg",
+      quote: "只需体验一次你就能感受到，DBX是一个杀死数据库管理客户端比赛的软件",
+    },
+    {
       name: "Husky明夋",
       role: "报表与数据核对",
       avatar: "/avatars/husky.jpg",
@@ -347,7 +376,7 @@ const testimonials = {
 
 const i18nText = {
   en: {
-    heroTitle: "15 MB to manage 50+ databases!",
+    heroTitle: "20 MB to manage 60+ databases!",
     heroSubtitle: "DBX brings connections, SQL editing, data grids, schema tools, AI assistance, and self-hosted access into one lightweight product.",
     download: "Download DBX",
     downloadName: "Download DBX",
@@ -369,7 +398,7 @@ const i18nText = {
     docker: "Docker setup",
   },
   cn: {
-    heroTitle: "15MB，管理50+种数据库！",
+    heroTitle: "20MB，管理60+种数据库！",
     heroSubtitle: "DBX 将连接管理、SQL 编辑、数据表格、结构工具、AI 助手和自托管访问放进一个轻量产品里。",
     download: "下载 DBX",
     downloadName: "下载 DBX",
@@ -396,11 +425,11 @@ import { buildMetadata } from "@/lib/metadata";
 
 const landingMeta = {
   en: {
-    title: "DBX - 15 MB to manage 50+ databases!",
+    title: "DBX - 20 MB to manage 60+ databases!",
     description: "DBX brings connections, SQL editing, data grids, schema tools, AI assistance, and self-hosted access into one lightweight product.",
   },
   cn: {
-    title: "DBX - 15MB，管理50+种数据库！",
+    title: "DBX - 20MB，管理60+种数据库！",
     description: "DBX 将连接管理、SQL 编辑、数据表格、结构工具、AI 助手和自托管访问放进一个轻量产品里。",
   },
 };
@@ -526,7 +555,7 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
                 ) : db.icon ? (
                   <img src={db.icon} alt="" width={38} height={38} className="block w-[38px] h-[38px] object-contain" />
                 ) : (
-                  <span className="grid place-items-center min-w-[46px] h-8 rounded-lg px-2 text-white text-xs font-[780]">{db.name.slice(0, 2).toUpperCase()}</span>
+                  <span className="grid place-items-center min-w-[46px] h-8 rounded-lg px-2 text-xs font-[780] text-white" style={{ backgroundColor: db.tone }}>{db.shortLabel ?? db.name.slice(0, 2).toUpperCase()}</span>
                 )}
               </div>
               <strong className={`text-sm font-[650] leading-[1.2] text-center ${isCta ? "text-landing-blue" : "text-[color-mix(in_srgb,var(--color-landing-ink)_92%,var(--color-landing-muted))]"}`}>{db.name}</strong>

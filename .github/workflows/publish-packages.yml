@@ -272,6 +272,67 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
+      - name: Keep latest five versioned releases in R2
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          CURRENT_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t keep_tags < <(
+            gh release list \
+              --repo "${GITHUB_REPOSITORY}" \
+              --limit 100 \
+              --json tagName,isDraft,publishedAt \
+              | jq -r '[.[] | select(.isDraft == false and (.tagName | test("^v[0-9]+[.][0-9]+[.][0-9]+([.-][0-9A-Za-z.-]+)?$")))] | sort_by(.publishedAt) | reverse | .[:5] | .[].tagName'
+          )
+
+          # Skip cleanup if release metadata is incomplete so publishing can never delete the wrong versions.
+          if [ "${#keep_tags[@]}" -lt 5 ]; then
+            echo "::warning::Found only ${#keep_tags[@]} published releases; skipping R2 cleanup."
+            exit 0
+          fi
+
+          is_kept_release() {
+            local candidate="$1"
+            printf '%s\n' "${keep_tags[@]}" | grep -Fxq -- "${candidate}"
+          }
+
+          if ! is_kept_release "${CURRENT_TAG}"; then
+            echo "::warning::Current release ${CURRENT_TAG} is not among the latest five releases; skipping R2 cleanup."
+            exit 0
+          fi
+
+          echo "Keeping R2 releases: ${keep_tags[*]}"
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          mapfile -t stored_tags < <(
+            aws s3api list-objects-v2 \
+              --bucket "${R2_BUCKET_NAME}" \
+              --prefix "releases/" \
+              --delimiter "/" \
+              --endpoint-url "${endpoint}" \
+              --query 'CommonPrefixes[].Prefix' \
+              --output text \
+              | tr '\t' '\n' \
+              | sed -nE 's#^releases/(v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?)/$#\1#p'
+          )
+
+          for tag in "${stored_tags[@]}"; do
+            if is_kept_release "${tag}"; then
+              continue
+            fi
+
+            echo "Removing old R2 release: ${tag}"
+            aws s3 rm "s3://${R2_BUCKET_NAME}/releases/${tag}/" \
+              --recursive \
+              --endpoint-url "${endpoint}"
+          done
+
       - name: Purge Cloudflare cache
         run: |
           set -euo pipefail
@@ -304,6 +365,9 @@ jobs:
     needs: [publish, upload-r2]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
       - name: Promote prerelease to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -314,6 +378,24 @@ jobs:
             --prerelease=false \
             --latest
           echo "::notice::Release ${TAG} promoted from prerelease to latest release"
+
+      - name: Promote CNB prerelease to release
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/github-release"
+          gh release view "$TAG" \
+            --repo "${{ github.repository }}" \
+            --json tagName,name,body,targetCommitish,isPrerelease,isDraft \
+            > "$RUNNER_TEMP/github-release/release.json"
+
+          # Sync metadata only so promoting a release never re-uploads large CNB assets.
+          node .github/scripts/sync-cnb-release.mjs \
+            --github-release "$RUNNER_TEMP/github-release/release.json" \
+            --metadata-only
 
   notify-qq:
     name: QQ Notify

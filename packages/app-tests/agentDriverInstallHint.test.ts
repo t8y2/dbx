@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { showAgentDriverInstallHint } from "../../apps/desktop/src/lib/agentDriverInstallHint.ts";
+import { agentDriverInstallKey, appendAgentDriverUpdateHint, hasAgentDriverUpdate, showAgentDriverInstallHint } from "../../apps/desktop/src/lib/connection/agentDriverInstallHint.ts";
 
 test("hides the agent driver install hint when the selected driver is installed", () => {
   assert.equal(showAgentDriverInstallHint("informix", [{ db_type: "informix", installed: true }]), false);
@@ -23,46 +23,31 @@ test("does not show agent driver install hints for built-in database types", () 
 });
 
 test("uses the unified Oracle driver for legacy Oracle profiles", () => {
-  assert.equal(
-    showAgentDriverInstallHint(
-      "oracle",
-      [
-        { db_type: "oracle", installed: false },
-        { db_type: "oracle-legacy", installed: false },
-        { db_type: "oracle-10g", installed: true },
-      ],
-      "oracle-10g",
-    ),
-    true,
-  );
-  assert.equal(
-    showAgentDriverInstallHint(
-      "oracle",
-      [
-        { db_type: "oracle", installed: true },
-        { db_type: "oracle-legacy", installed: false },
-        { db_type: "oracle-10g", installed: false },
-      ],
-      "oracle",
-    ),
-    false,
-  );
-  assert.equal(
-    showAgentDriverInstallHint(
-      "oracle",
-      [
-        { db_type: "oracle", installed: true },
-        { db_type: "oracle-legacy", installed: true },
-        { db_type: "oracle-10g", installed: false },
-      ],
-      "oracle-legacy",
-    ),
-    false,
-  );
+  assert.equal(showAgentDriverInstallHint("oracle", [{ db_type: "oracle", installed: false }], "oracle-10g"), true);
+  assert.equal(showAgentDriverInstallHint("oracle", [{ db_type: "oracle", installed: true }], "oracle"), false);
+  assert.equal(showAgentDriverInstallHint("oracle", [{ db_type: "oracle", installed: true }], "oracle-legacy"), false);
   assert.equal(showAgentDriverInstallHint("oracle", [{ db_type: "oracle", installed: false }], "oracle"), true);
 });
 
-test("uses selected non-Oracle agent driver profiles for install hints", () => {
+test("uses the GBase 8a agent for generic, missing, and explicit 8a profiles", () => {
+  const drivers = [
+    { db_type: "gbase8a", installed: true },
+    { db_type: "gbase8s", installed: false },
+  ];
+
+  assert.equal(showAgentDriverInstallHint("gbase", drivers), false);
+  assert.equal(showAgentDriverInstallHint("gbase", drivers, "gbase"), false);
+  assert.equal(showAgentDriverInstallHint("gbase", drivers, "gbase8a"), false);
+});
+
+test("maps GBase profiles to their matching agent driver keys", () => {
+  assert.equal(agentDriverInstallKey("gbase"), "gbase8a");
+  assert.equal(agentDriverInstallKey("gbase", "gbase"), "gbase8a");
+  assert.equal(agentDriverInstallKey("gbase", "gbase8a"), "gbase8a");
+  assert.equal(agentDriverInstallKey("gbase", "gbase8s"), "gbase8s");
+});
+
+test("uses the selected GBase 8s agent for install hints", () => {
   assert.equal(
     showAgentDriverInstallHint(
       "gbase",
@@ -85,4 +70,32 @@ test("uses selected non-Oracle agent driver profiles for install hints", () => {
     ),
     false,
   );
+});
+
+test("detects available updates for the selected agent driver", () => {
+  assert.equal(hasAgentDriverUpdate("dameng", [{ db_type: "dameng", installed: true, update_available: true }], "dm"), true);
+  assert.equal(hasAgentDriverUpdate("dameng", [{ db_type: "dameng", installed: true, update_available: false }], "dm"), false);
+  assert.equal(hasAgentDriverUpdate("mysql", [{ db_type: "mysql", installed: true, update_available: true }]), false);
+});
+
+test("uses unified Oracle and selected profile keys for update hints", () => {
+  assert.equal(hasAgentDriverUpdate("oracle", [{ db_type: "oracle", installed: true, update_available: true }], "oracle-10g"), true);
+  assert.equal(
+    hasAgentDriverUpdate(
+      "gbase",
+      [
+        { db_type: "gbase", installed: true, update_available: false },
+        { db_type: "gbase8s", installed: true, update_available: true },
+      ],
+      "gbase8s",
+    ),
+    true,
+  );
+});
+
+test("appends agent driver update hints once", () => {
+  const hint = "Driver update available.";
+  assert.equal(appendAgentDriverUpdateHint("Original error", hint), "Original error\n\nDriver update available.");
+  assert.equal(appendAgentDriverUpdateHint("Original error\n\nDriver update available.", hint), "Original error\n\nDriver update available.");
+  assert.equal(appendAgentDriverUpdateHint("", hint), hint);
 });

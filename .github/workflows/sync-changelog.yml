@@ -11,9 +11,9 @@ jobs:
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
 
@@ -31,6 +31,11 @@ jobs:
             --content-type application/json
           if [ -f releases-en.json ]; then
             aws s3 cp releases-en.json "s3://${R2_BUCKET_NAME}/changelog/releases-en.json" \
+              --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+              --content-type application/json
+          fi
+          if [ -f latest-en.json ]; then
+            aws s3 cp latest-en.json "s3://${R2_BUCKET_NAME}/changelog/latest-en.json" \
               --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
               --content-type application/json
           fi

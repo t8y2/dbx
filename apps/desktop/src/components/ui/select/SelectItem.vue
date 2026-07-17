@@ -5,7 +5,7 @@ import type { HTMLAttributes } from "vue";
 import { reactiveOmit } from "@vueuse/core";
 import { CheckIcon } from "@lucide/vue";
 import { SelectItem, SelectItemIndicator, SelectItemText, useForwardProps } from "reka-ui";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/common/utils";
 
 const props = defineProps<SelectItemProps & { class?: HTMLAttributes["class"] }>();
 

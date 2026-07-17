@@ -1,0 +1,12 @@
+dependencies {
+    implementation files('libs/gbase-connector-java-9.5.0.10-build1-bin.jar')
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes(
+            'Agent-Label': 'GBase 8a',
+            'Main-Class': 'com.dbx.agent.gbase8a.Gbase8aAgent'
+        )
+    }
+}

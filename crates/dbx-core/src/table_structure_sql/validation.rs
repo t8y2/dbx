@@ -1,3 +1,5 @@
+use super::column_format::has_dameng_identity;
+use super::dialect::{capabilities_for, StructureDialect};
 use super::indexes::has_existing_index_change;
 use super::types::{EditableStructureColumn, TableStructureSqlOptions};
 use super::util::clean;
@@ -6,6 +8,7 @@ pub(super) fn validate_draft(options: &TableStructureSqlOptions) -> Vec<String> 
     let mut warnings = Vec::new();
     let active_columns: Vec<_> = options.columns.iter().filter(|column| !column.marked_for_drop).collect();
     validate_columns(&active_columns, &mut warnings);
+    validate_dameng_identity(options, &active_columns, &mut warnings);
     for index in options
         .indexes
         .iter()
@@ -22,6 +25,28 @@ pub(super) fn validate_draft(options: &TableStructureSqlOptions) -> Vec<String> 
         }
     }
     warnings
+}
+
+pub(super) fn validate_dameng_identity(
+    options: &TableStructureSqlOptions,
+    columns: &[&EditableStructureColumn],
+    warnings: &mut Vec<String>,
+) {
+    if capabilities_for(options.database_type).dialect != StructureDialect::Dameng {
+        return;
+    }
+
+    let identity_columns: Vec<_> = columns.iter().filter(|column| has_dameng_identity(column)).collect();
+    if identity_columns.len() > 1 {
+        warnings.push("Dameng tables can have only one identity column.".to_string());
+    }
+    for column in identity_columns {
+        if column.extra.as_ref().and_then(|extra| extra.identity.as_ref()).and_then(|identity| identity.increment)
+            == Some(0)
+        {
+            warnings.push(format!("Dameng identity column \"{}\" increment cannot be 0.", column.name));
+        }
+    }
 }
 
 pub(super) fn validate_columns(columns: &[&EditableStructureColumn], warnings: &mut Vec<String>) {

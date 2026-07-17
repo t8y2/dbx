@@ -21,6 +21,10 @@ function normalizeVersion(version: string) {
 }
 
 export async function fetchLatestReleaseInfo(): Promise<LatestReleaseInfo | null> {
+  if (typeof window !== "undefined") {
+    return fetchGitHubLatestReleaseInfo();
+  }
+
   try {
     const release = await requestJson<LatestReleaseInfo>(createUncachedUrl(LATEST_RELEASE_URL, browserCacheBuster()), releaseMetadataRequestInit());
     return release.version ? { ...release, version: normalizeVersion(release.version) } : null;

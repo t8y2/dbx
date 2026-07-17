@@ -1,0 +1,12 @@
+dependencies {
+    implementation 'com.google.code.gson:gson:2.12.1'
+    implementation 'org.apache.kafka:kafka-clients:3.9.0'
+    runtimeOnly 'org.slf4j:slf4j-simple:1.7.36'
+}
+
+tasks.named('shadowJar') {
+    mergeServiceFiles()
+    manifest {
+        attributes('Agent-Label': 'Apache Kafka', 'Main-Class': 'com.dbx.agent.kafka.KafkaAgent')
+    }
+}

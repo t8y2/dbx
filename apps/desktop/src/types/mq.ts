@@ -20,6 +20,7 @@ export interface MqCapabilities {
   supportsGeoReplication: boolean;
   supportsTokenManagement: boolean;
   supportsRawAdminApi: boolean;
+  supportsSendMessage?: boolean;
 }
 
 export interface MqClusterInfo {
@@ -189,6 +190,22 @@ export interface BacklogStats {
   backlogSize: number;
 }
 
+export interface ClusterInfo {
+  clusterId?: string;
+  brokerCount: number;
+  controllerId?: number;
+  controllerHost?: string;
+  brokers: BrokerNode[];
+  raw?: Record<string, unknown>;
+}
+
+export interface BrokerNode {
+  id: number;
+  host: string;
+  port: number;
+  rack?: string;
+}
+
 export interface PeekedMessage {
   position: number;
   messageId?: string;
@@ -199,6 +216,11 @@ export interface PeekedMessage {
   headers: Record<string, string>;
   payloadBase64: string;
   payloadText?: string;
+}
+
+export interface PeekMessagesOptions {
+  partition?: number;
+  offset?: number;
 }
 
 // Policy scope
@@ -248,4 +270,21 @@ export interface MqRawResponse {
   status: number;
   body: unknown;
   text?: string;
+}
+
+// Send message (produce)
+export interface SendMessageRequest {
+  topic: string;
+  key?: string;
+  payloadBase64: string;
+  payloadText?: string;
+  headers: Record<string, string>;
+  partition?: number;
+}
+
+export interface SendMessageResponse {
+  topic: string;
+  partition: number;
+  offset: number;
+  timestamp?: string;
 }

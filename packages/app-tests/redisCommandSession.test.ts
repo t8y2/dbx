@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { isRedisClearScreenCommand, nextRedisCommandDb, redisKeyTextToRaw } from "../../apps/desktop/src/lib/redisCommandSession.ts";
+import { isRedisClearScreenCommand, nextRedisCommandDb, redisKeyTextToRaw } from "../../apps/desktop/src/lib/redis/redisCommandSession.ts";
 
 test("keeps Redis command session database after SELECT succeeds", () => {
   assert.equal(nextRedisCommandDb(3, "SELECT 0", "OK"), 0);

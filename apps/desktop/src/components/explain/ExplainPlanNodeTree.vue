@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import { ChevronRight, ChevronDown } from "@lucide/vue";
-import type { ExplainPlanNode } from "@/lib/explainPlan";
+import type { ExplainPlanNode } from "@/lib/diagram/explainPlan";
 
 const props = defineProps<{
   node: ExplainPlanNode;

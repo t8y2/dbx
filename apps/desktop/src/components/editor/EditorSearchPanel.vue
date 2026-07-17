@@ -3,11 +3,13 @@ import { ref, nextTick, onBeforeUnmount, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { EditorView } from "@codemirror/view";
 import { EditorSelection } from "@codemirror/state";
-import { SearchQuery, setSearchQuery, openSearchPanel as cmOpenSearchPanel, findNext as cmFindNext, findPrevious as cmFindPrevious, replaceNext as cmReplaceNext, replaceAll as cmReplaceAll } from "@codemirror/search";
+import { setSearchQuery, openSearchPanel as cmOpenSearchPanel, findNext as cmFindNext, findPrevious as cmFindPrevious, replaceNext as cmReplaceNext, replaceAll as cmReplaceAll } from "@codemirror/search";
 import { ChevronUp, ChevronDown, ChevronRight, X } from "@lucide/vue";
+import { createEditorSearchQuery } from "@/lib/editor/editorSearchQuery";
 
 const props = defineProps<{
   view: EditorView | null;
+  tone?: "app" | "editor";
 }>();
 
 const { t } = useI18n();
@@ -25,17 +27,25 @@ const replaceInputRef = ref<HTMLInputElement>();
 const matchCountLimited = ref(false);
 
 const SEARCH_UPDATE_DELAY_MS = 120;
+const DOCUMENT_SEARCH_UPDATE_DELAY_MS = 500;
 const MATCH_COUNT_LIMIT = 1000;
 
 let searchUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+let documentSearchUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearDocumentSearchUpdate() {
+  if (!documentSearchUpdateTimer) return;
+  clearTimeout(documentSearchUpdateTimer);
+  documentSearchUpdateTimer = null;
+}
 
 function dispatchSearchQuery() {
   const v = props.view;
   if (!v) return;
-  const q = new SearchQuery({
+  const q = createEditorSearchQuery({
     search: searchText.value,
     caseSensitive: caseSensitive.value,
-    regexp: useRegex.value,
+    useRegex: useRegex.value,
     replace: replaceText.value,
   });
   v.dispatch({ effects: setSearchQuery.of(q) });
@@ -47,7 +57,7 @@ function clearSearchQuery() {
   const selection = v.state.selection.main;
   v.dispatch({
     selection: EditorSelection.single(selection.head),
-    effects: setSearchQuery.of(new SearchQuery({ search: "" })),
+    effects: setSearchQuery.of(createEditorSearchQuery({ search: "", caseSensitive: false, useRegex: false })),
   });
   matchCount.value = 0;
   currentMatchIndex.value = 0;
@@ -63,10 +73,10 @@ function updateMatchInfo(autoSelect = false) {
     return;
   }
   try {
-    const q = new SearchQuery({
+    const q = createEditorSearchQuery({
       search: searchText.value,
       caseSensitive: caseSensitive.value,
-      regexp: useRegex.value,
+      useRegex: useRegex.value,
     });
     if (!q.valid) {
       matchCount.value = 0;
@@ -100,6 +110,7 @@ function updateMatchInfo(autoSelect = false) {
 }
 
 function scheduleSearchUpdate(autoSelect = false) {
+  clearDocumentSearchUpdate();
   if (searchUpdateTimer) {
     clearTimeout(searchUpdateTimer);
     searchUpdateTimer = null;
@@ -113,6 +124,15 @@ function scheduleSearchUpdate(autoSelect = false) {
     searchUpdateTimer = null;
     updateMatchInfo(autoSelect);
   }, SEARCH_UPDATE_DELAY_MS);
+}
+
+function scheduleDocumentSearchUpdate() {
+  if (!searchVisible.value || !searchText.value) return;
+  clearDocumentSearchUpdate();
+  documentSearchUpdateTimer = setTimeout(() => {
+    documentSearchUpdateTimer = null;
+    updateMatchInfo();
+  }, DOCUMENT_SEARCH_UPDATE_DELAY_MS);
 }
 
 function openSearch(): boolean {
@@ -145,6 +165,7 @@ function closeSearch() {
   const wasVisible = searchVisible.value;
   searchVisible.value = false;
   showReplace.value = false;
+  clearDocumentSearchUpdate();
   const v = props.view;
   if (v) {
     clearSearchQuery();
@@ -203,67 +224,236 @@ watch(replaceText, () => {
 });
 
 onBeforeUnmount(() => {
+  clearDocumentSearchUpdate();
   if (searchUpdateTimer) {
     clearTimeout(searchUpdateTimer);
     searchUpdateTimer = null;
   }
 });
 
-defineExpose({ openSearch, openReplace, closeSearch });
+defineExpose({ openSearch, openReplace, closeSearch, scheduleDocumentSearchUpdate });
 </script>
 
 <template>
   <Transition enter-active-class="transition-[transform,opacity] duration-150" leave-active-class="transition-[transform,opacity] duration-100" enter-from-class="opacity-0 -translate-y-1" leave-to-class="opacity-0 -translate-y-1">
-    <div v-if="searchVisible" class="absolute top-1 right-4 z-[9999] isolate flex flex-col gap-1 rounded-md border bg-popover p-1.5 text-popover-foreground shadow-lg">
-      <div class="flex items-center gap-0.5">
-        <button class="w-5 h-5 flex items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground" :title="showReplace ? t('editor.search.collapseReplace') : t('editor.search.expandReplace')" @click="showReplace = !showReplace">
-          <ChevronRight class="w-3 h-3 transition-transform" :class="showReplace && 'rotate-90'" />
+    <div v-if="searchVisible" class="editor-search-panel absolute right-4 top-3 z-[9999] isolate flex flex-col gap-1 rounded-lg border border-border bg-popover p-1.5 text-popover-foreground shadow-xl ring-1 ring-border/60" :class="{ 'editor-search-panel--editor': tone === 'editor' }">
+      <div class="flex items-center gap-1">
+        <button class="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" :title="showReplace ? t('editor.search.collapseReplace') : t('editor.search.expandReplace')" @click="showReplace = !showReplace">
+          <ChevronRight class="h-4 w-4 transition-transform" :class="showReplace && 'rotate-90'" />
         </button>
-        <input
-          ref="searchInputRef"
-          v-model="searchText"
-          autocapitalize="off"
-          autocorrect="off"
-          spellcheck="false"
-          class="w-48 h-6 text-xs bg-input border rounded px-2 outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground"
-          :placeholder="t('editor.search.find')"
-          @keydown="onSearchKeydown"
-        />
-        <button class="w-6 h-6 flex items-center justify-center rounded text-xs font-mono hover:bg-accent" :class="caseSensitive ? 'bg-accent text-accent-foreground' : 'text-muted-foreground'" :title="t('editor.search.caseSensitive')" @click="caseSensitive = !caseSensitive">Aa</button>
-        <button class="w-6 h-6 flex items-center justify-center rounded text-xs font-mono hover:bg-accent" :class="useRegex ? 'bg-accent text-accent-foreground' : 'text-muted-foreground'" :title="t('editor.search.regex')" @click="useRegex = !useRegex">.*</button>
-        <span class="text-xs text-muted-foreground min-w-[3rem] text-center shrink-0">
+        <div class="flex h-8 w-64 items-center rounded-md border border-input bg-background focus-within:border-ring focus-within:ring-1 focus-within:ring-ring">
+          <input
+            ref="searchInputRef"
+            v-model="searchText"
+            autocapitalize="off"
+            autocorrect="off"
+            spellcheck="false"
+            class="h-full min-w-0 flex-1 bg-transparent px-2 text-sm text-foreground outline-none placeholder:text-muted-foreground"
+            :placeholder="t('editor.search.find')"
+            @keydown="onSearchKeydown"
+          />
+          <button
+            class="flex h-6 min-w-7 items-center justify-center rounded px-1.5 text-xs font-medium transition-colors hover:bg-accent hover:text-foreground"
+            :class="caseSensitive ? 'bg-accent text-foreground' : 'text-muted-foreground'"
+            :title="t('editor.search.caseSensitive')"
+            @click="caseSensitive = !caseSensitive"
+          >
+            Aa
+          </button>
+          <button
+            class="mr-1 flex h-6 min-w-7 items-center justify-center rounded px-1.5 font-mono text-xs transition-colors hover:bg-accent hover:text-foreground"
+            :class="useRegex ? 'bg-accent text-foreground' : 'text-muted-foreground'"
+            :title="t('editor.search.regex')"
+            @click="useRegex = !useRegex"
+          >
+            .*
+          </button>
+        </div>
+        <span class="min-w-[3.4rem] shrink-0 text-center text-xs" :class="searchText && matchCount === 0 ? 'text-destructive' : 'text-muted-foreground'">
           {{ searchText && matchCount > 0 ? `${currentMatchIndex}/${matchCount}${matchCountLimited ? "+" : ""}` : t("editor.search.noResults") }}
         </span>
-        <button class="w-5 h-5 flex items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('editor.search.prevMatch')" @click="prevMatch">
-          <ChevronUp class="w-3.5 h-3.5" />
+        <button class="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" :title="t('editor.search.prevMatch')" @click="prevMatch">
+          <ChevronUp class="h-4 w-4" />
         </button>
-        <button class="w-5 h-5 flex items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('editor.search.nextMatch')" @click="nextMatch">
-          <ChevronDown class="w-3.5 h-3.5" />
+        <button class="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" :title="t('editor.search.nextMatch')" @click="nextMatch">
+          <ChevronDown class="h-4 w-4" />
         </button>
-        <button class="w-5 h-5 flex items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('editor.search.close')" @click="closeSearch">
-          <X class="w-3.5 h-3.5" />
+        <button class="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" :title="t('editor.search.close')" @click="closeSearch">
+          <X class="h-4 w-4" />
         </button>
       </div>
-      <div v-if="showReplace" class="flex items-center gap-0.5">
-        <div class="w-5 h-5 shrink-0" />
-        <input
-          ref="replaceInputRef"
-          v-model="replaceText"
-          autocapitalize="off"
-          autocorrect="off"
-          spellcheck="false"
-          class="w-48 h-6 text-xs bg-input border rounded px-2 outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground"
-          :placeholder="t('editor.search.replace')"
-          @keydown.enter.prevent="doReplace"
-          @keydown.escape.prevent="closeSearch"
-        />
-        <button class="h-6 px-1.5 flex items-center justify-center rounded text-xs text-muted-foreground hover:bg-accent hover:text-foreground border" :title="t('editor.search.replace')" @click="doReplace">
+      <div v-if="showReplace" class="flex items-center gap-1">
+        <div class="h-7 w-7 shrink-0" />
+        <div class="flex h-8 w-64 items-center rounded-md border border-input bg-background focus-within:border-ring focus-within:ring-1 focus-within:ring-ring">
+          <input
+            ref="replaceInputRef"
+            v-model="replaceText"
+            autocapitalize="off"
+            autocorrect="off"
+            spellcheck="false"
+            class="h-full min-w-0 flex-1 bg-transparent px-2 text-sm text-foreground outline-none placeholder:text-muted-foreground"
+            :placeholder="t('editor.search.replace')"
+            @keydown.enter.prevent="doReplace"
+            @keydown.escape.prevent="closeSearch"
+          />
+        </div>
+        <button class="flex h-7 items-center justify-center rounded-md border border-border px-2 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" :title="t('editor.search.replace')" @click="doReplace">
           {{ t("editor.search.replace") }}
         </button>
-        <button class="h-6 px-1.5 flex items-center justify-center rounded text-xs text-muted-foreground hover:bg-accent hover:text-foreground border" :title="t('editor.search.replaceAll')" @click="doReplaceAll">
+        <button class="flex h-7 items-center justify-center rounded-md border border-border px-2 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" :title="t('editor.search.replaceAll')" @click="doReplaceAll">
           {{ t("editor.search.replaceAll") }}
         </button>
       </div>
     </div>
   </Transition>
 </template>
+
+<style scoped>
+.editor-search-panel {
+  max-width: min(calc(100vw - 2rem), 620px);
+}
+
+.editor-search-panel--editor {
+  background: #f6f7f9;
+  border-color: #d8dce3;
+  border-radius: 6px;
+  box-shadow:
+    0 8px 22px rgb(15 23 42 / 0.14),
+    0 1px 0 rgb(255 255 255 / 0.78) inset;
+  color: #20242a;
+  gap: 3px;
+  max-width: min(calc(100vw - 2rem), 500px);
+  padding: 4px 6px;
+  right: 0.75rem;
+  top: 0.75rem;
+}
+
+.editor-search-panel--editor :deep(.h-8) {
+  height: 27px;
+}
+
+.editor-search-panel--editor :deep(.h-7) {
+  height: 27px;
+}
+
+.editor-search-panel--editor :deep(.w-7) {
+  width: 27px;
+}
+
+.editor-search-panel--editor :deep(.w-64) {
+  width: 230px;
+}
+
+.editor-search-panel--editor :deep(button) {
+  font-size: 12px;
+}
+
+.editor-search-panel--editor :deep(button.px-2) {
+  padding-left: 7px;
+  padding-right: 7px;
+}
+
+.editor-search-panel--editor :deep(.min-w-\[3\.4rem\]) {
+  min-width: 3.25rem;
+}
+
+.editor-search-panel--editor :deep(.border-input) {
+  background: #ffffff;
+  border-color: #c7ccd5;
+  border-radius: 5px;
+  box-shadow: 0 1px 0 rgb(15 23 42 / 0.03) inset;
+}
+
+.editor-search-panel--editor :deep(.focus-within\:border-ring:focus-within) {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 1px #3b82f6;
+}
+
+.editor-search-panel--editor :deep(input) {
+  color: #20242a;
+  font-size: 12px;
+}
+
+.editor-search-panel--editor :deep(input::placeholder) {
+  color: #7a828e;
+}
+
+.editor-search-panel--editor :deep(.text-muted-foreground) {
+  color: #6e7681;
+}
+
+.editor-search-panel--editor :deep(.text-destructive) {
+  color: #c2410c;
+}
+
+.editor-search-panel--editor :deep(.hover\:bg-accent:hover),
+.editor-search-panel--editor :deep(.bg-accent) {
+  background: #e6e9ef;
+}
+
+.editor-search-panel--editor :deep(.hover\:text-foreground:hover),
+.editor-search-panel--editor :deep(.text-foreground) {
+  color: #1f2329;
+}
+
+.editor-search-panel--editor :deep(button.border-border) {
+  border-color: #d0d5dd;
+}
+
+:global(.dark) .editor-search-panel--editor {
+  background: #20252d;
+  border-color: #2c333d;
+  box-shadow:
+    0 8px 24px rgb(0 0 0 / 0.28),
+    0 1px 0 rgb(255 255 255 / 0.04) inset;
+  color: #d4d7dc;
+}
+
+:global(.dark) .editor-search-panel--editor :deep(.border-input) {
+  background: #191d25;
+  border-color: #2f3742;
+  box-shadow: none;
+}
+
+:global(.dark) .editor-search-panel--editor :deep(.focus-within\:border-ring:focus-within) {
+  border-color: #4d8dff;
+  box-shadow: 0 0 0 1px #4d8dff;
+}
+
+:global(.dark) .editor-search-panel--editor :deep(input) {
+  color: #d7dae0;
+}
+
+:global(.dark) .editor-search-panel--editor :deep(input::placeholder) {
+  color: #858c97;
+}
+
+:global(.dark) .editor-search-panel--editor :deep(.text-muted-foreground) {
+  color: #9aa2ad;
+}
+
+:global(.dark) .editor-search-panel--editor :deep(.text-destructive) {
+  color: #f59e7a;
+}
+
+:global(.dark) .editor-search-panel--editor :deep(.hover\:bg-accent:hover),
+:global(.dark) .editor-search-panel--editor :deep(.bg-accent) {
+  background: #303844;
+}
+
+:global(.dark) .editor-search-panel--editor :deep(.hover\:text-foreground:hover),
+:global(.dark) .editor-search-panel--editor :deep(.text-foreground) {
+  color: #f2f4f8;
+}
+
+:global(.dark) .editor-search-panel--editor :deep(button.border-border) {
+  border-color: #38414d;
+}
+
+@media (max-width: 720px) {
+  .editor-search-panel {
+    left: 0.75rem;
+    right: 0.75rem;
+  }
+}
+</style>

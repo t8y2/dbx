@@ -57,6 +57,10 @@ Execute arbitrary Redis commands directly from the UI:
 - Type commands in Redis CLI syntax
 - Results are displayed in a structured table
 - Useful for `INFO`, `CONFIG GET`, `CLIENT LIST`, and other admin commands
+- **Command history navigation**: Use arrow keys (↑/↓) to navigate through previously executed commands
+- **Text selection and copy**: Select and copy command output directly from the terminal
+
+The command history is preserved per connection and helps you quickly rerun frequently used commands without retyping them.
 
 ## Flush Database
 
@@ -71,3 +75,14 @@ Enable key statistics tracking in Settings to monitor:
 - Idle time
 
 This data helps identify large or infrequently used keys that may need attention.
+
+## Slowlog Panel
+
+The **Slowlog** panel helps identify slow Redis commands:
+
+- View recent slow commands with execution time
+- Analyze query patterns that may need optimization
+- Useful for performance tuning and debugging production issues
+- Access slowlog from the Redis connection's tools menu
+
+Slowlog entries show the command, execution time, and timestamp, helping you identify performance bottlenecks in your Redis workload.

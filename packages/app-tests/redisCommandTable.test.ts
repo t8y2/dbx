@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { isRedisMutatingCommand, resolveRedisCommandSpec } from "../../apps/desktop/src/lib/redisCommandTable.ts";
+import { isRedisMutatingCommand, resolveRedisCommandSpec } from "../../apps/desktop/src/lib/redis/redisCommandTable.ts";
 
 test("write commands are flagged as mutating", () => {
   assert.equal(isRedisMutatingCommand("SET foo bar"), true);
@@ -53,8 +53,16 @@ test("unknown / empty commands are treated as non-mutating (no cache thrash)", (
 test("resolveRedisCommandSpec resolves subcommand then main", () => {
   const sub = resolveRedisCommandSpec(["XGROUP", "CREATE"]);
   assert.ok(sub);
-  assert.equal(sub?.safety, "confirm");
+  assert.equal(sub?.safety, "write");
   const main = resolveRedisCommandSpec(["GET"]);
   assert.ok(main);
   assert.equal(main?.group, "string");
+});
+
+test("normal writes do not require confirmation but destructive commands do", () => {
+  assert.equal(resolveRedisCommandSpec(["SET"])?.safety, "write");
+  assert.equal(resolveRedisCommandSpec(["HSET"])?.safety, "write");
+  assert.equal(resolveRedisCommandSpec(["LPUSH"])?.safety, "write");
+  assert.equal(resolveRedisCommandSpec(["DEL"])?.safety, "confirm");
+  assert.equal(resolveRedisCommandSpec(["FLUSHDB"])?.safety, "confirm");
 });

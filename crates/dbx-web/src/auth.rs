@@ -33,6 +33,34 @@ pub struct AuthCheckResponse {
 const MAX_ATTEMPTS: u32 = 5;
 const LOCKOUT_SECS: u64 = 60;
 
+fn session_cookie_path(state: &WebState) -> &str {
+    state.public_base_path.as_str()
+}
+
+fn api_path_suffix<'a>(path: &'a str, public_base_path: &str) -> Option<&'a str> {
+    if let Some(suffix) = path.strip_prefix("/api/") {
+        return Some(suffix);
+    }
+    let base = public_base_path.trim_end_matches('/');
+    if base.is_empty() || base == "/" {
+        return None;
+    }
+    path.strip_prefix(base)?.strip_prefix("/api/")
+}
+
+fn middleware_api_path_suffix<'a>(path: &'a str, public_base_path: &str) -> Option<&'a str> {
+    if let Some(suffix) = api_path_suffix(path, public_base_path) {
+        return Some(suffix);
+    }
+
+    let base = public_base_path.trim_end_matches('/');
+    if !base.is_empty() && base != "/" && path.strip_prefix(base).is_some() {
+        return None;
+    }
+
+    path.strip_prefix('/').filter(|suffix| !suffix.is_empty())
+}
+
 pub async fn login(State(state): State<Arc<WebState>>, Json(body): Json<LoginRequest>) -> Result<Response, StatusCode> {
     let hash_guard = state.password_hash.read().await;
     let hash_str = match hash_guard.as_deref() {
@@ -80,7 +108,7 @@ pub async fn login(State(state): State<Arc<WebState>>, Json(body): Json<LoginReq
     let token = uuid::Uuid::new_v4().to_string();
     state.sessions.write().await.insert(token.clone());
 
-    let cookie = format!("dbx_session={token}; Path=/; HttpOnly; SameSite=Lax");
+    let cookie = format!("dbx_session={token}; Path={}; HttpOnly; SameSite=Lax", session_cookie_path(&state));
     Ok((StatusCode::OK, [("set-cookie", cookie.as_str())], Json(serde_json::json!({"ok": true}))).into_response())
 }
 
@@ -114,7 +142,7 @@ pub async fn setup(State(state): State<Arc<WebState>>, Json(body): Json<LoginReq
     let token = uuid::Uuid::new_v4().to_string();
     state.sessions.write().await.insert(token.clone());
 
-    let cookie = format!("dbx_session={token}; Path=/; HttpOnly; SameSite=Lax");
+    let cookie = format!("dbx_session={token}; Path={}; HttpOnly; SameSite=Lax", session_cookie_path(&state));
     Ok((StatusCode::OK, [("set-cookie", cookie.as_str())], Json(serde_json::json!({"ok": true}))).into_response())
 }
 
@@ -169,8 +197,8 @@ pub async fn logout(State(state): State<Arc<WebState>>, req: Request<axum::body:
     if let Some(token) = extract_session_token(&req) {
         state.sessions.write().await.remove(&token);
     }
-    let cookie = "dbx_session=; Path=/; HttpOnly; Max-Age=0";
-    (StatusCode::OK, [("set-cookie", cookie)], Json(serde_json::json!({"ok": true}))).into_response()
+    let cookie = format!("dbx_session=; Path={}; HttpOnly; Max-Age=0", session_cookie_path(&state));
+    (StatusCode::OK, [("set-cookie", cookie.as_str())], Json(serde_json::json!({"ok": true}))).into_response()
 }
 
 fn extract_session_token<B>(req: &Request<B>) -> Option<String> {
@@ -191,20 +219,23 @@ pub async fn auth_middleware(
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    // No password set — allow everything
+    // Auth endpoints are always accessible.
+    let api_suffix = middleware_api_path_suffix(req.uri().path(), &state.public_base_path);
+    if api_suffix.is_some_and(|suffix| suffix.starts_with("auth/")) {
+        return next.run(req).await;
+    }
+
+    // Non-API requests (static files) are always accessible.
+    if api_suffix.is_none() {
+        return next.run(req).await;
+    }
+
+    if state.password_disabled {
+        return next.run(req).await;
+    }
+
     if state.password_hash.read().await.is_none() {
-        return next.run(req).await;
-    }
-
-    // Auth endpoints are always accessible
-    let path = req.uri().path();
-    if path.starts_with("/api/auth/") {
-        return next.run(req).await;
-    }
-
-    // Non-API requests (static files) are always accessible
-    if !path.starts_with("/api/") {
-        return next.run(req).await;
+        return StatusCode::UNAUTHORIZED.into_response();
     }
 
     // Check session token
@@ -215,4 +246,32 @@ pub async fn auth_middleware(
     }
 
     StatusCode::UNAUTHORIZED.into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{api_path_suffix, middleware_api_path_suffix};
+
+    #[test]
+    fn api_path_suffix_handles_root_api_paths() {
+        assert_eq!(api_path_suffix("/api/auth/check", "/"), Some("auth/check"));
+        assert_eq!(api_path_suffix("/api/query/execute", "/"), Some("query/execute"));
+        assert_eq!(api_path_suffix("/dbx/api/auth/check", "/"), None);
+    }
+
+    #[test]
+    fn api_path_suffix_handles_mounted_api_paths() {
+        assert_eq!(api_path_suffix("/dbx/api/auth/check", "/dbx"), Some("auth/check"));
+        assert_eq!(api_path_suffix("/tools/dbx/api/query/execute", "/tools/dbx"), Some("query/execute"));
+        assert_eq!(api_path_suffix("/dbx/login", "/dbx"), None);
+    }
+
+    #[test]
+    fn middleware_api_path_suffix_handles_nested_router_paths() {
+        assert_eq!(middleware_api_path_suffix("/auth/check", "/"), Some("auth/check"));
+        assert_eq!(middleware_api_path_suffix("/connection/list", "/"), Some("connection/list"));
+        assert_eq!(middleware_api_path_suffix("/api/connection/list", "/"), Some("connection/list"));
+        assert_eq!(middleware_api_path_suffix("/dbx/api/connection/list", "/dbx"), Some("connection/list"));
+        assert_eq!(middleware_api_path_suffix("/dbx/login", "/dbx"), None);
+    }
 }

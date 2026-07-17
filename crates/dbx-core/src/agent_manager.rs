@@ -1,10 +1,12 @@
 use std::ffi::OsStr;
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::db::agent_driver::{AgentDriverClient, AgentLaunchSpec, AgentMethod};
+use crate::db::agent_driver::{AgentDriverClient, AgentLaunchSpec, AgentMethod, AgentRuntimeClient};
 use crate::models::connection::DatabaseType;
 
 pub const DEFAULT_JRE_KEY: &str = "21";
@@ -13,6 +15,23 @@ pub const DOWNLOAD_CACHE_MAX_AGE_DAYS: u64 = 7;
 
 fn default_jre_key() -> String {
     DEFAULT_JRE_KEY.to_string()
+}
+
+fn is_valid_jar_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    let Some(file) = File::open(path).ok() else {
+        return false;
+    };
+    let Some(mut archive) = zip::ZipArchive::new(file).ok() else {
+        return false;
+    };
+    let Some(mut manifest) = archive.by_name("META-INF/MANIFEST.MF").ok() else {
+        return false;
+    };
+    let mut manifest_text = String::new();
+    manifest.read_to_string(&mut manifest_text).is_ok() && manifest_text.contains("Main-Class:")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -215,8 +234,7 @@ mod tests {
         assert_eq!(AgentManager::db_type_to_agent_key(&DatabaseType::Oracle, None), Some("oracle"));
         assert_eq!(AgentManager::db_type_to_agent_key(&DatabaseType::Gbase, Some("gbase8s")), Some("gbase8s"));
         assert_eq!(AgentManager::db_type_to_agent_key(&DatabaseType::Gbase, None), Some("gbase8a"));
-        manager.stop_daemon_by_key("oracle-legacy").await;
-        manager.stop_daemon_by_key("oracle-10g").await;
+        manager.stop_daemon_by_key("oracle").await;
         manager.stop_daemon_by_key("gbase8s").await;
     }
 
@@ -348,6 +366,7 @@ pub struct AgentDriverInfo {
     pub installed: bool,
     pub installed_version: Option<String>,
     pub update_available: bool,
+    pub requires_java_runtime: bool,
     pub jre: String,
     pub jre_installed: bool,
 }
@@ -375,6 +394,9 @@ pub struct AgentManager {
     base_dir: PathBuf,
     app_version: String,
     pub(crate) daemons: Mutex<std::collections::HashMap<String, AgentDriverClient>>,
+    pub(crate) connection_runtimes: Mutex<
+        std::collections::HashMap<String, std::sync::Arc<tokio::sync::OnceCell<std::sync::Arc<AgentRuntimeClient>>>>,
+    >,
 }
 
 impl Default for AgentManager {
@@ -395,8 +417,12 @@ impl AgentManager {
     }
 
     pub fn new_with_base_dir_and_app_version(base_dir: PathBuf, app_version: impl Into<String>) -> Self {
-        let mgr =
-            Self { base_dir, app_version: app_version.into(), daemons: Mutex::new(std::collections::HashMap::new()) };
+        let mgr = Self {
+            base_dir,
+            app_version: app_version.into(),
+            daemons: Mutex::new(std::collections::HashMap::new()),
+            connection_runtimes: Mutex::new(std::collections::HashMap::new()),
+        };
         mgr.migrate_legacy_jre();
         mgr.cleanup_pending_jre_dirs();
         mgr.cleanup_orphan_jre_dirs();
@@ -486,7 +512,7 @@ impl AgentManager {
         if flat.exists() {
             return flat;
         }
-        // macOS Adoptium JRE 8 uses Contents/Home/ layout
+        // Some macOS runtimes are unpacked with a Contents/Home/ layout.
         let macos = dir.join("Contents").join("Home").join("bin").join(java_name);
         if macos.exists() {
             return macos;
@@ -539,13 +565,17 @@ impl AgentManager {
     }
 
     pub fn is_driver_installed(&self, db_type: &str) -> bool {
-        self.driver_jar_path(db_type).exists()
+        self.is_driver_jar_valid(db_type)
             || self.driver_native_path(db_type).exists()
             || self.driver_launch_config_path(db_type).exists()
     }
 
+    pub fn is_driver_jar_valid(&self, db_type: &str) -> bool {
+        is_valid_jar_file(&self.driver_jar_path(db_type))
+    }
+
     pub fn driver_requires_java_runtime(&self, db_type: &str) -> bool {
-        self.driver_jar_path(db_type).exists()
+        self.is_driver_jar_valid(db_type)
             && !self.driver_native_path(db_type).exists()
             && !self.driver_launch_config_path(db_type).exists()
     }
@@ -555,6 +585,16 @@ impl AgentManager {
         state: &AgentState,
         driver_key: &str,
         jre_key: &str,
+    ) -> Result<AgentLaunchSpec, String> {
+        self.resolve_agent_launch_spec_with_extra_args(state, driver_key, jre_key, &[])
+    }
+
+    pub fn resolve_agent_launch_spec_with_extra_args(
+        &self,
+        state: &AgentState,
+        driver_key: &str,
+        jre_key: &str,
+        extra_java_args: &[String],
     ) -> Result<AgentLaunchSpec, String> {
         let driver_dir = self.driver_dir(driver_key);
         let config_path = self.driver_launch_config_path(driver_key);
@@ -570,7 +610,12 @@ impl AgentManager {
         let jar_path = self.driver_jar_path(driver_key);
         if jar_path.exists() {
             let java = self.resolve_java_runtime(state, jre_key)?;
-            return Ok(AgentLaunchSpec::java_jar(java, jar_path));
+            if !is_valid_jar_file(&jar_path) {
+                return Err(format!(
+                    "{driver_key} driver jar is invalid or corrupt. Please reinstall it from the Driver Manager."
+                ));
+            }
+            return Ok(AgentLaunchSpec::java_jar_with_extra_args(java, jar_path, extra_java_args));
         }
 
         Err(format!("{driver_key} driver is not installed. Please install it from the Driver Manager."))
@@ -722,7 +767,13 @@ impl AgentManager {
     }
 
     pub async fn active_daemon_keys(&self) -> Vec<String> {
-        self.daemons.lock().await.keys().cloned().collect()
+        let mut keys = self.daemons.lock().await.keys().cloned().collect::<std::collections::HashSet<_>>();
+        for runtime_key in self.connection_runtimes.lock().await.keys() {
+            if let Some((agent_key, _)) = runtime_key.split_once('|') {
+                keys.insert(agent_key.to_string());
+            }
+        }
+        keys.into_iter().collect()
     }
 
     pub fn db_type_to_agent_key(db_type: &DatabaseType, driver_profile: Option<&str>) -> Option<&'static str> {
@@ -738,7 +789,37 @@ impl AgentManager {
         db_type: &DatabaseType,
         driver_profile: Option<&str>,
     ) -> Result<AgentDriverClient, String> {
-        crate::agent_runtime::spawn_connection_client(self, db_type, driver_profile).await
+        self.spawn_with_extra_java_args(db_type, driver_profile, &[]).await
+    }
+
+    pub async fn spawn_with_extra_java_args(
+        &self,
+        db_type: &DatabaseType,
+        driver_profile: Option<&str>,
+        extra_java_args: &[String],
+    ) -> Result<AgentDriverClient, String> {
+        crate::agent_runtime::spawn_connection_client(self, db_type, driver_profile, extra_java_args).await
+    }
+
+    pub async fn spawn_shared_connection_client(
+        &self,
+        db_type: &DatabaseType,
+        driver_profile: Option<&str>,
+        extra_java_args: &[String],
+        agent_session_id: String,
+        connect_params: serde_json::Value,
+        connect_timeout: std::time::Duration,
+    ) -> Result<AgentDriverClient, String> {
+        crate::agent_runtime::spawn_shared_connection_client(
+            self,
+            db_type,
+            driver_profile,
+            extra_java_args,
+            agent_session_id,
+            connect_params,
+            connect_timeout,
+        )
+        .await
     }
 
     pub async fn call_daemon<T: serde::de::DeserializeOwned + Send + 'static>(

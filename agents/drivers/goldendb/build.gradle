@@ -1,0 +1,10 @@
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation 'com.mysql:mysql-connector-j:9.2.0'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': 'GoldenDB', 'Main-Class': 'com.dbx.agent.goldendb.GoldendbAgent')
+    }
+}

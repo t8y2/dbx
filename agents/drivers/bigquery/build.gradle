@@ -1,0 +1,13 @@
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes(
+            'Agent-Label': 'Google BigQuery',
+            'Agent-External-Driver': 'true',
+            'Main-Class': 'com.dbx.agent.bigquery.BigQueryAgent'
+        )
+    }
+}

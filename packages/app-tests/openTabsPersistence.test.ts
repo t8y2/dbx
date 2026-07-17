@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { restoreOpenTabsState, serializeOpenTabs } from "../../apps/desktop/src/lib/openTabsPersistence.ts";
+import { restoreOpenTabsState, serializeOpenTabs } from "../../apps/desktop/src/lib/app/openTabsPersistence.ts";
 import type { QueryTab } from "../../apps/desktop/src/types/database.ts";
 
 function queryTab(overrides: Partial<QueryTab> = {}): QueryTab {
@@ -32,6 +32,7 @@ test("serializes unsaved query tabs with editor context", () => {
       schema: "public",
       sql: "select * from users",
       savedSqlId: undefined,
+      externalSqlPath: undefined,
       pinned: true,
       mode: "query",
       objectBrowser: undefined,
@@ -107,6 +108,21 @@ test("serializes MQ tabs with selected tenant context", () => {
   ]);
 
   assert.equal(saved[0]?.mqTenant, "public");
+});
+
+test("serializes Nacos admin tabs", () => {
+  const saved = serializeOpenTabs([
+    queryTab({
+      mode: "nacos",
+      database: "",
+      nacosNamespace: "dev",
+      nacosNamespaceName: "Development",
+    }),
+  ]);
+
+  assert.equal(saved[0]?.mode, "nacos");
+  assert.equal(saved[0]?.nacosNamespace, "dev");
+  assert.equal(saved[0]?.nacosNamespaceName, "Development");
 });
 
 test("serializes evicted result cache handles", () => {
@@ -228,13 +244,25 @@ test("restores unsaved query tabs and active tab after restart", () => {
   const restored = restoreOpenTabsState(raw, "tab-2");
 
   assert.deepEqual(
-    restored.tabs.map((tab) => ({ id: tab.id, sql: tab.sql, isExecuting: tab.isExecuting })),
+    restored.tabs.map((tab) => ({ id: tab.id, sql: tab.sql, originalSql: tab.originalSql, isExecuting: tab.isExecuting })),
     [
-      { id: "tab-1", sql: "select 1", isExecuting: false },
-      { id: "tab-2", sql: "select 2", isExecuting: false },
+      { id: "tab-1", sql: "select 1", originalSql: "", isExecuting: false },
+      { id: "tab-2", sql: "select 2", originalSql: "", isExecuting: false },
     ],
   );
   assert.equal(restored.activeTabId, "tab-2");
+});
+
+test("restores only pinned tabs when requested", () => {
+  const raw = JSON.stringify([queryTab({ id: "tab-1", pinned: true }), queryTab({ id: "tab-2", pinned: false }), queryTab({ id: "tab-3", pinned: true })]);
+
+  const restored = restoreOpenTabsState(raw, "tab-2", { filter: "pinned" });
+
+  assert.deepEqual(
+    restored.tabs.map((tab) => tab.id),
+    ["tab-1", "tab-3"],
+  );
+  assert.equal(restored.activeTabId, "tab-1");
 });
 
 test("restores object source save context", () => {
@@ -326,6 +354,24 @@ test("restores MQ tabs with selected tenant context", () => {
   const restored = restoreOpenTabsState(raw, "tab-1");
 
   assert.equal(restored.tabs[0]?.mqTenant, "public");
+});
+
+test("restores GridFS manager tabs with their mode intact", () => {
+  const raw = JSON.stringify([
+    queryTab({
+      id: "gridfs",
+      title: "GridFS",
+      mode: "mongo-gridfs" as QueryTab["mode"],
+      sql: "",
+      database: "amazon",
+    }),
+  ]);
+
+  const restored = restoreOpenTabsState(raw, "gridfs");
+
+  assert.equal(restored.tabs[0]?.mode, "mongo-gridfs");
+  assert.equal(restored.tabs[0]?.title, "GridFS");
+  assert.equal(restored.activeTabId, "gridfs");
 });
 
 test("query-only restore keeps legacy query tabs without a mode", () => {

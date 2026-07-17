@@ -1,0 +1,64 @@
+plugins {
+    id 'java'
+    id 'com.gradleup.shadow'
+}
+
+configure([project(':common'), project(':test-support')]) {
+    if (name == 'test-support') {
+        apply plugin: 'java-library'
+    } else {
+        apply plugin: 'java'
+    }
+
+    java {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(8)
+        }
+    }
+
+    dependencies {
+        testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+        testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.11.4'
+    }
+
+    tasks.withType(Test).configureEach {
+        useJUnitPlatform()
+    }
+}
+
+dependencies {
+    implementation project(':common')
+
+    // Bundled driver example:
+    // implementation 'com.example:example-jdbc:1.2.3'
+
+    // External driver example:
+    // implementation fileTree(dir: 'libs', include: ['*.jar'])
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.11.4'
+    testImplementation project(':test-support')
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+tasks.named('shadowJar') {
+    archiveBaseName = 'dbx-agent-template'
+    archiveClassifier = ''
+    manifest {
+        attributes(
+            'Agent-Label': 'Template DB',
+            // Add this only when users must provide the JDBC driver jar:
+            // 'Agent-External-Driver': 'true',
+            'Main-Class': 'com.dbx.agent.template.TemplateAgent'
+        )
+    }
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}

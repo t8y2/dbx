@@ -1,0 +1,10 @@
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation 'org.neo4j:neo4j-jdbc-full-bundle:6.10.0'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': 'Neo4j', 'Main-Class': 'com.dbx.agent.neo4j.Neo4jAgent')
+    }
+}

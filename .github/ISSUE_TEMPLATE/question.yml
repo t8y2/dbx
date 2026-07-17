@@ -1,8 +1,30 @@
 name: "❓ Question / 问题咨询"
 description: Usage questions, configuration issues, or feedback you're not sure is a bug. / 使用疑问、配置问题或不确定是否为 bug 的反馈。
-title: "[❓ Question] "
+title: "[Question] "
 labels: ["question"]
 body:
+  - type: input
+    id: database
+    attributes:
+      label: 数据库类型和版本
+      description: 如果问题与数据库无关，请填写“无关”。否则请注明数据库类型、版本或发行版。
+      placeholder: "例如：PostgreSQL 16.2 / MySQL 8.0 / Redis 7.2 / 无关"
+    validations:
+      required: true
+
+  - type: textarea
+    id: support-info
+    attributes:
+      label: 支持信息
+      description: 打开 DBX 的“设置 → 关于我们”，点击“复制支持信息”，然后粘贴到这里。如无法打开应用，请说明原因。
+      placeholder: |
+        DBX 版本：v0.5.52
+        运行环境：桌面端
+        操作系统：macOS 26.4
+        系统架构：aarch64
+    validations:
+      required: true
+
   - type: textarea
     id: goal
     attributes:
@@ -16,8 +38,7 @@ body:
     id: context
     attributes:
       label: 环境信息
-      description: 数据库类型和版本、操作系统、DBX 版本等。
+      description: 连接方式、特殊环境、已尝试的排查方式等。
       placeholder: |
-        DBX 版本：
-        操作系统：
-        数据库：
+        连接方式：
+        补充环境：

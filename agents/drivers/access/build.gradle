@@ -1,0 +1,10 @@
+dependencies {
+    implementation 'io.github.spannm:ucanaccess:5.1.5'
+    implementation 'io.github.spannm:jackcess-encrypt:5.1.0'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': 'Microsoft Access', 'Main-Class': 'com.dbx.agent.access.AccessAgent')
+    }
+}

@@ -1,0 +1,10 @@
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation 'org.firebirdsql.jdbc:jaybird:6.0.5'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': 'Firebird', 'Main-Class': 'com.dbx.agent.firebird.FirebirdAgent')
+    }
+}

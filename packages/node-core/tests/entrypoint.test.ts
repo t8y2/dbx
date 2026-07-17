@@ -25,7 +25,12 @@ test("matches a module invoked through an npm-style symlink", async () => {
     const bin = join(dir, "dbx");
     await mkdir(join(dir, "dist"));
     await writeFile(entry, "", "utf-8");
-    await symlink(entry, bin);
+    try {
+      await symlink(entry, bin);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+      return;
+    }
 
     assert.equal(isMainModule(pathToFileURL(entry).href, bin), true);
   } finally {

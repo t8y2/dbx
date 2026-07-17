@@ -1,7 +1,31 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "vitest";
-import { applyManticoreDdlColumnExtras, buildStructureTargetLabel, canEditManticoreColumnProperties, combineDataTypeForDatabase, createColumnDrafts, createIndexDrafts, generateIndexName, generateUniqueIndexName, getColumnEditorControls, getDataTypeOptions, isProtectedManticoreIdColumn, normalizeDataTypeParams, parseExtraToColumnExtra, toColumnNames } from "../../apps/desktop/src/lib/tableStructureEditorState.ts";
-import type { ColumnInfo, IndexInfo } from "../../apps/desktop/src/types/database.ts";
+import {
+  applyManticoreDdlColumnExtras,
+  buildStructureTargetLabel,
+  canEditManticoreColumnProperties,
+  combineDataTypeForDatabase,
+  createColumnDrafts,
+  createIndexDrafts,
+  dataTypeLengthInputValue,
+  generateIndexName,
+  generateUniqueIndexName,
+  getColumnEditorControls,
+  getDataTypeOptions,
+  isProtectedManticoreIdColumn,
+  isDamengIdentityCompatibleDataType,
+  isMysqlEnumDataType,
+  isSqlServerIdentityCompatibleDataType,
+  mysqlEnumDataType,
+  normalizeDataTypeParams,
+  parseExtraToColumnExtra,
+  rehydrateColumnDraftsFromMetadata,
+  resolveInsertColumnIndex,
+  toColumnNames,
+} from "../../apps/desktop/src/lib/table/tableStructureEditorState.ts";
+import { firstStructureMetadataTab, isStructureMetadataTabSupported } from "../../apps/desktop/src/lib/table/tableMetadataCapabilities.ts";
+import type { ColumnInfo, IndexInfo, TableInfoTab } from "../../apps/desktop/src/types/database.ts";
 
 const columns: ColumnInfo[] = [
   {
@@ -28,6 +52,19 @@ const indexes: IndexInfo[] = [
   { name: "PRIMARY", columns: ["id"], is_unique: true, is_primary: true },
   { name: "idx_name", columns: ["name"], is_unique: false, is_primary: false },
 ];
+
+test("resolves insert index after the selected column for all databases", () => {
+  const items = [{ id: "a" }, { id: "b" }, { id: "c" }];
+
+  assert.equal(resolveInsertColumnIndex(items, null), 3);
+  assert.equal(resolveInsertColumnIndex(items, undefined), 3);
+  assert.equal(resolveInsertColumnIndex(items, "a"), 1);
+  assert.equal(resolveInsertColumnIndex(items, "b"), 2);
+  assert.equal(resolveInsertColumnIndex(items, "c"), 3);
+  assert.equal(resolveInsertColumnIndex(items, "missing"), 3);
+  assert.equal(resolveInsertColumnIndex([], "a"), 0);
+  assert.equal(resolveInsertColumnIndex([{ id: "a", markedForDrop: true }, { id: "b" }], "a"), 2);
+});
 
 test("creates editable column drafts from column metadata", () => {
   const drafts = createColumnDrafts(columns, "mysql");
@@ -75,6 +112,115 @@ test("creates editable column drafts from column metadata", () => {
       },
     ],
   );
+});
+
+test("rehydrates restored existing column drafts from live metadata", () => {
+  const drafts = rehydrateColumnDraftsFromMetadata(
+    [
+      {
+        id: "existing:id",
+        name: "id",
+        dataType: "varchar(10)",
+        isNullable: true,
+        defaultValue: "",
+        comment: "",
+        isPrimaryKey: false,
+        extra: {},
+        markedForDrop: false,
+      },
+      {
+        id: "existing:data",
+        name: "data",
+        dataType: "timestamp",
+        isNullable: true,
+        defaultValue: "",
+        comment: "",
+        isPrimaryKey: false,
+        extra: {},
+        markedForDrop: false,
+      },
+      {
+        id: "new:note",
+        name: "note",
+        dataType: "varchar2(100)",
+        isNullable: true,
+        defaultValue: "",
+        comment: "",
+        isPrimaryKey: false,
+        extra: {},
+        markedForDrop: false,
+      },
+    ],
+    [
+      {
+        name: "id",
+        data_type: "varchar(10)",
+        is_nullable: true,
+        column_default: null,
+        is_primary_key: false,
+        extra: null,
+        comment: null,
+      },
+      {
+        name: "data",
+        data_type: "timestamp",
+        is_nullable: true,
+        column_default: null,
+        is_primary_key: false,
+        extra: null,
+        comment: null,
+      },
+    ],
+    "oracle",
+  );
+
+  assert.equal(drafts[0].original?.name, "id");
+  assert.equal(drafts[0].originalPosition, 0);
+  assert.equal(drafts[1].original?.name, "data");
+  assert.equal(drafts[1].originalPosition, 1);
+  assert.equal(drafts[2].original, undefined);
+});
+
+test("normalizes PostgreSQL string default casts in editable column drafts", () => {
+  const drafts = createColumnDrafts(
+    [
+      {
+        name: "category",
+        data_type: "character varying",
+        is_nullable: true,
+        column_default: "''::character varying",
+        is_primary_key: false,
+        extra: null,
+        comment: null,
+      },
+      {
+        name: "status",
+        data_type: "user_status",
+        is_nullable: true,
+        column_default: "'active'::public.user_status",
+        is_primary_key: false,
+        extra: null,
+        comment: null,
+      },
+      {
+        name: "stock",
+        data_type: "integer",
+        is_nullable: true,
+        column_default: "0",
+        is_primary_key: false,
+        extra: null,
+        comment: null,
+      },
+    ],
+    "postgres",
+  );
+
+  assert.equal(drafts[0].defaultValue, "''");
+  assert.equal(drafts[0].original?.column_default, "''");
+  assert.equal(drafts[1].defaultValue, "'active'::public.user_status");
+  assert.equal(drafts[1].original?.column_default, "'active'::public.user_status");
+  assert.equal(drafts[2].defaultValue, "0");
+  assert.equal(drafts[2].original?.column_default, "0");
 });
 
 test("applies manticore column properties from ddl", () => {
@@ -141,6 +287,71 @@ test("parses SQL Server identity extra string to ColumnExtra", () => {
     autoIncrement: true,
     identity: { seed: 100, increment: 5 },
   });
+});
+
+test("parses Dameng identity extra string to ColumnExtra", () => {
+  assert.deepEqual(parseExtraToColumnExtra("identity", "dameng"), {
+    autoIncrement: true,
+  });
+  assert.deepEqual(parseExtraToColumnExtra("IDENTITY(100, 5)", "dameng"), {
+    autoIncrement: true,
+    identity: { seed: 100, increment: 5 },
+  });
+});
+
+test("recognizes SQL Server identity-compatible data types", () => {
+  assert.equal(isSqlServerIdentityCompatibleDataType("tinyint"), true);
+  assert.equal(isSqlServerIdentityCompatibleDataType("smallint"), true);
+  assert.equal(isSqlServerIdentityCompatibleDataType("int"), true);
+  assert.equal(isSqlServerIdentityCompatibleDataType("integer"), true);
+  assert.equal(isSqlServerIdentityCompatibleDataType("bigint"), true);
+  assert.equal(isSqlServerIdentityCompatibleDataType("decimal(18,0)"), true);
+  assert.equal(isSqlServerIdentityCompatibleDataType("numeric(10)"), true);
+  assert.equal(isSqlServerIdentityCompatibleDataType("varchar(255)"), false);
+  assert.equal(isSqlServerIdentityCompatibleDataType("numeric(18,2)"), false);
+});
+
+test("recognizes Dameng identity-compatible data types", () => {
+  assert.equal(isDamengIdentityCompatibleDataType("int"), true);
+  assert.equal(isDamengIdentityCompatibleDataType("integer"), true);
+  assert.equal(isDamengIdentityCompatibleDataType("bigint"), true);
+  assert.equal(isDamengIdentityCompatibleDataType("number(18, 0)"), true);
+  assert.equal(isDamengIdentityCompatibleDataType("decimal(10)"), true);
+  assert.equal(isDamengIdentityCompatibleDataType("varchar(255)"), false);
+  assert.equal(isDamengIdentityCompatibleDataType("number(18, 2)"), false);
+});
+
+test("does not add MySQL-style display widths to SQL Server integer types", () => {
+  assert.equal(combineDataTypeForDatabase("sqlserver", "int", "11"), "int");
+  assert.equal(combineDataTypeForDatabase("sqlserver", "integer", "11"), "integer");
+  assert.equal(combineDataTypeForDatabase("sqlserver", "bigint", "20"), "bigint");
+  assert.equal(dataTypeLengthInputValue("sqlserver", "int(11)"), "");
+  assert.equal(combineDataTypeForDatabase("sqlserver", "decimal", "10,0"), "decimal(10,0)");
+  assert.equal(combineDataTypeForDatabase("sqlserver", "varchar", "255"), "varchar(255)");
+  assert.equal(combineDataTypeForDatabase("sqlserver", "float", "53"), "float(53)");
+});
+
+test("hydrates and serializes MySQL enum values for structure editing", () => {
+  const [draft] = createColumnDrafts(
+    [
+      {
+        name: "status",
+        data_type: "enum",
+        enum_values: ["", "pending", "it's", "path\\name"],
+        is_nullable: false,
+        column_default: "'pending'",
+        is_primary_key: false,
+        extra: null,
+      },
+    ],
+    "mysql",
+  );
+
+  assert.deepEqual(draft?.enumValues, ["", "pending", "it's", "path\\name"]);
+  assert.equal(draft?.dataType, "enum('','pending','it''s','path\\\\name')");
+  assert.equal(draft?.original?.data_type, draft?.dataType);
+  assert.equal(isMysqlEnumDataType("mysql", draft?.dataType ?? ""), true);
+  assert.equal(mysqlEnumDataType(["a'b", "a\\b"]), "enum('a''b','a\\\\b')");
 });
 
 test("parses Manticore Search text properties to ColumnExtra", () => {
@@ -223,6 +434,14 @@ test("returns data type options for compatible table structure editors", () => {
   assert.equal(getDataTypeOptions("sqlserver").includes("nvarchar"), true);
 });
 
+test("returns Xugu data type options", () => {
+  const options = getDataTypeOptions("xugu");
+  assert.equal(options.includes("INTEGER"), true);
+  assert.equal(options.includes("VARCHAR"), true);
+  assert.equal(options.includes("NUMERIC"), true);
+  assert.equal(options.includes("INT"), true);
+});
+
 test("returns Manticore Search data type options", () => {
   assert.deepEqual(getDataTypeOptions("manticoresearch"), ["text", "string", "int", "bit", "bigint", "bool", "timestamp", "float", "json", "float_vector", "multi", "mva"]);
 });
@@ -249,4 +468,49 @@ test("allows Manticore Search column properties only before the column exists", 
   assert.equal(canEditManticoreColumnProperties("manticoresearch", false), true);
   assert.equal(canEditManticoreColumnProperties("manticoresearch", true), false);
   assert.equal(canEditManticoreColumnProperties("mysql", false), false);
+});
+
+const fullCapabilities = { columns: true, indexes: true, foreignKeys: true, triggers: true, ddl: true };
+const noDdlCapabilities = { columns: true, indexes: true, foreignKeys: true, triggers: true, ddl: false };
+const ddlOnlyCapabilities = { columns: false, indexes: false, foreignKeys: false, triggers: false, ddl: true };
+
+test("defaults to columns tab for edit mode with full capabilities", () => {
+  assert.equal(firstStructureMetadataTab(fullCapabilities, false), "columns");
+});
+
+test("defaults to columns tab for create mode", () => {
+  assert.equal(firstStructureMetadataTab(fullCapabilities, true), "columns");
+});
+
+test("falls back to columns tab when DDL is not available in edit mode", () => {
+  assert.equal(firstStructureMetadataTab(noDdlCapabilities, false), "columns");
+});
+
+test("falls back to DDL when no editable metadata tab is available", () => {
+  assert.equal(firstStructureMetadataTab(ddlOnlyCapabilities, false), "ddl");
+});
+
+test("preserves a restored structure draft tab without an explicit initial tab", () => {
+  const source = readFileSync("apps/desktop/src/components/structure/TableStructureEditor.vue", "utf8");
+  const restoredDraftBlock = source.match(/if \(props\.draft\?\.initialized\) \{[\s\S]*?\n  \} else if/);
+
+  assert.ok(restoredDraftBlock);
+  assert.match(restoredDraftBlock[0], /restoreDraft\(props\.draft\);[\s\S]*applyInitialStructureTab\(false\);/);
+});
+
+test("supports DDL tab in edit mode", () => {
+  assert.equal(isStructureMetadataTabSupported("ddl", fullCapabilities, false), true);
+});
+
+test("does not support DDL tab in create mode", () => {
+  assert.equal(isStructureMetadataTabSupported("ddl", fullCapabilities, true), false);
+});
+
+test("does not support DDL tab when capability is disabled", () => {
+  assert.equal(isStructureMetadataTabSupported("ddl", noDdlCapabilities, false), false);
+});
+
+test("supports columns tab in both modes", () => {
+  assert.equal(isStructureMetadataTabSupported("columns", fullCapabilities, false), true);
+  assert.equal(isStructureMetadataTabSupported("columns", fullCapabilities, true), true);
 });

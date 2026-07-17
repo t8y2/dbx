@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { closeAllTabsState, closeOtherTabsState } from "../../apps/desktop/src/lib/tabCloseActions.ts";
+import { closeAllTabsState, closeOtherTabsState } from "../../apps/desktop/src/lib/tabs/tabCloseActions.ts";
 
 test("close other tabs keeps the target tab and makes it active", () => {
   const tabs = [{ id: "a" }, { id: "b" }, { id: "c" }];

@@ -1,0 +1,10 @@
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation 'com.ibm.db2:jcc:11.5.9.0'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': 'IBM DB2', 'Main-Class': 'com.dbx.agent.db2.Db2Agent')
+    }
+}

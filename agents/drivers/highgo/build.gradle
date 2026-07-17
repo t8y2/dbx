@@ -1,0 +1,16 @@
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation 'com.highgo:HgdbJdbc:6.2.4'
+    // PostGIS JDBC is optional: EwkbWktDecoder reflectively probes for
+    // org.postgis.PGgeometry / net.postgis.jdbc.PGgeometry and falls back to
+    // its own EWKB parser when the class is absent. compileOnly keeps the
+    // shadowJar small while still letting users drop the jar into their
+    // user-driver path if they prefer the upstream parser.
+    compileOnly 'net.postgis:postgis-jdbc:2024.1.0'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': '瀚高 HighGo', 'Main-Class': 'com.dbx.agent.highgo.HighgoAgent')
+    }
+}

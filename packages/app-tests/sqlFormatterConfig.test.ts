@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, parseSqlFormatterConfig, serializeSqlFormatterConfig, sqlFormatterOptions, syncSqlFormatterConfigDraft } from "../../apps/desktop/src/lib/sqlFormatterConfig.ts";
+import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, parseSqlFormatterConfig, serializeSqlFormatterConfig, sqlFormatterOptions, syncSqlFormatterConfigDraft } from "../../apps/desktop/src/lib/sql/sqlFormatterConfig.ts";
 
 const defaultOptionSettings = DEFAULT_SQL_FORMATTER_SETTINGS;
 
@@ -249,6 +249,9 @@ test("maps DBX formatter settings to sql-formatter options", () => {
       linesBetweenQueries: 1,
       denseOperators: false,
       newlineBeforeSemicolon: true,
+      paramTypes: {
+        custom: [{ regex: String.raw`\$\{[^}]+\}` }, { regex: String.raw`#\{[^}]+\}` }],
+      },
     },
   );
 
@@ -270,7 +273,10 @@ test("maps DBX formatter settings to sql-formatter options", () => {
       linesBetweenQueries: 1,
       denseOperators: false,
       newlineBeforeSemicolon: false,
-      paramTypes: { positional: true },
+      paramTypes: {
+        positional: true,
+        custom: [{ regex: String.raw`\$\{[^}]+\}` }, { regex: String.raw`#\{[^}]+\}` }],
+      },
     },
   );
 });

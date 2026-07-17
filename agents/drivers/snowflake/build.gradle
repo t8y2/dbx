@@ -1,0 +1,10 @@
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation 'net.snowflake:snowflake-jdbc:3.22.0'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': 'Snowflake', 'Main-Class': 'com.dbx.agent.snowflake.SnowflakeAgent')
+    }
+}

@@ -52,6 +52,7 @@ pub async fn preview_sql_file(
             "filePath": file_path.to_string_lossy(),
             "sizeBytes": size_bytes,
             "preview": preview,
+            "canExecuteWithoutSelectedDatabase": dbx_core::sql_file_import::mysql_like_sql_file_can_execute_without_selected_database(&content),
         })));
     }
 

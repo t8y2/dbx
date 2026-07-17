@@ -36,10 +36,28 @@ const { t } = useI18n();
       {{ t(labelKey) }}
       <span v-if="elapsedSeconds !== undefined" class="ml-1 tabular-nums text-muted-foreground/80">· {{ elapsedSeconds }}s</span>
     </div>
-    <Button v-if="showCancel" variant="destructive" size="sm" class="h-7 gap-1.5" :disabled="cancelDisabled" @click="emit('cancel')">
+    <Button v-if="showCancel" variant="destructive" size="sm" class="query-loading-cancel-button h-7 gap-1.5" :disabled="cancelDisabled" @click="emit('cancel')">
       <Loader2 v-if="cancelling" class="h-3.5 w-3.5 animate-spin" />
       <Square v-else class="h-3.5 w-3.5 fill-current" />
       {{ t(cancelLabelKey) }}
     </Button>
   </div>
 </template>
+
+<style>
+.query-loading-cancel-button {
+  border: 1px solid rgba(220, 38, 38, 0.22) !important;
+  background-color: rgba(220, 38, 38, 0.08) !important;
+  color: rgb(185, 28, 28) !important;
+}
+
+.query-loading-cancel-button:hover {
+  background-color: rgba(220, 38, 38, 0.14) !important;
+}
+
+.dark .query-loading-cancel-button {
+  border-color: rgba(248, 113, 113, 0.28) !important;
+  background-color: rgba(248, 113, 113, 0.12) !important;
+  color: rgb(248, 113, 113) !important;
+}
+</style>

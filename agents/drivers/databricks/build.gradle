@@ -1,0 +1,10 @@
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation 'com.databricks:databricks-jdbc:3.3.3'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': 'Databricks SQL', 'Main-Class': 'com.dbx.agent.databricks.DatabricksAgent')
+    }
+}

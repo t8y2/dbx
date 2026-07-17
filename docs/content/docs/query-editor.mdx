@@ -47,6 +47,12 @@ After execution, the result area shows returned rows, duration, affected row cou
 
 DBX also tracks query sessions so long-running result sets can be closed when you leave them, and active queries can be cancelled from the UI when the database driver supports cancellation.
 
+### SQL Execution Target Picker
+
+For queries that contain a single statement, DBX can execute it directly without showing a target picker. When your SQL contains multiple statements, DBX displays an execution target picker with a preview decoration to help you choose which statement to run.
+
+Enable or disable the execution target picker in Settings under **Show execution target picker**. When disabled, DBX executes the entire editor content without prompting.
+
 ## Execution Scope
 
 | Scope             | How It Is Chosen                            | Use Case                                          |
@@ -84,6 +90,7 @@ DBX records executed SQL so you can reuse it later:
 - Clicking a history item loads it back into the editor
 - Useful for investigation queries, reports, and repair statements
 - History entries preserve enough context to identify manual queries and AI-assisted work
+- **Execution time range filter**: Filter history entries by date range to find queries executed within a specific time period
 
 <Callout type="warn">Query history may include business fields, table names, or filter values. Be mindful of sensitive information on shared machines or demo environments.</Callout>
 

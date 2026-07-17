@@ -1,0 +1,10 @@
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation 'io.trino:trino-jdbc:471'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': 'Trino (Presto)', 'Main-Class': 'com.dbx.agent.trino.TrinoAgent')
+    }
+}

@@ -5,14 +5,16 @@ import {
   DBX_ROWID_COLUMN,
   DBX_TDENGINE_TBNAME_COLUMN,
   canEditExistingTableRows,
+  canInsertTableRows,
   editablePrimaryKeys,
+  hasCompleteTdengineRowIdentity,
   hiveTablePropertiesIndicateTransactional,
   isHiddenGridColumn,
   isTdengineExistingRowReadonlyColumn,
   isTableDataEditable,
   supportsDataGridTransaction,
   usesSyntheticRowIdKey,
-} from "../../apps/desktop/src/lib/tableEditing.ts";
+} from "../../apps/desktop/src/lib/table/tableEditing.ts";
 import type { ColumnInfo } from "../../apps/desktop/src/types/database.ts";
 
 function column(name: string, isPrimaryKey = false): ColumnInfo {
@@ -28,6 +30,7 @@ function column(name: string, isPrimaryKey = false): ColumnInfo {
 
 test("uses ROWID as Oracle editable key when a table has no primary key", () => {
   assert.deepEqual(editablePrimaryKeys("oracle", [column("ID"), column("CITY")]), [DBX_ROWID_COLUMN]);
+  assert.deepEqual(editablePrimaryKeys("oceanbase-oracle", [column("ID"), column("CITY")]), [DBX_ROWID_COLUMN]);
 });
 
 test("keeps declared primary keys ahead of Oracle ROWID fallback", () => {
@@ -38,8 +41,12 @@ test("does not synthesize ROWID for non-Oracle keyless tables", () => {
   assert.deepEqual(editablePrimaryKeys("mysql", [column("ID"), column("CITY")]), []);
 });
 
-test("uses tbname and timestamp as TDengine editable keys", () => {
-  assert.deepEqual(editablePrimaryKeys("tdengine", [column("ts", true), column("current")]), [DBX_TDENGINE_TBNAME_COLUMN, "ts"]);
+test("uses table-specific TDengine editable keys", () => {
+  const columns = [column("ts", true), column("seq", true), column("current")];
+  assert.deepEqual(editablePrimaryKeys("tdengine", columns, "STABLE"), [DBX_TDENGINE_TBNAME_COLUMN, "ts", "seq"]);
+  assert.deepEqual(editablePrimaryKeys("tdengine", columns, "TABLE"), ["ts", "seq"]);
+  assert.equal(hasCompleteTdengineRowIdentity("tdengine", [DBX_TDENGINE_TBNAME_COLUMN, "ts", "seq"], ["tbname", "ts", "seq", "current"]), true);
+  assert.equal(hasCompleteTdengineRowIdentity("tdengine", [DBX_TDENGINE_TBNAME_COLUMN, "ts", "seq"], ["tbname", "ts", "current"]), false);
 });
 
 test("allows updateable SQL table data editing even without declared primary keys", () => {
@@ -67,6 +74,15 @@ test("does not use transactional grid saves for non-transactional engines", () =
   assert.equal(supportsDataGridTransaction("postgres"), true);
 });
 
+test("detects whether table data supports inserted rows", () => {
+  assert.equal(canInsertTableRows("postgres"), true);
+  assert.equal(canInsertTableRows("mysql"), true);
+  assert.equal(canInsertTableRows("hive"), true);
+  assert.equal(canInsertTableRows("jdbc"), false);
+  assert.equal(canInsertTableRows("clickhouse"), true);
+  assert.equal(canInsertTableRows("influxdb"), false);
+});
+
 test("allows existing row edits according to database-specific key requirements", () => {
   assert.equal(canEditExistingTableRows("access", undefined, []), true);
   assert.equal(canEditExistingTableRows("access", undefined, ["ID"]), true);
@@ -87,7 +103,8 @@ test("allows existing row edits according to database-specific key requirements"
   assert.equal(canEditExistingTableRows("duckdb", undefined, ["id"]), true);
   assert.equal(canEditExistingTableRows("informix", undefined, []), true);
   assert.equal(canEditExistingTableRows("informix", undefined, ["id"]), true);
-  assert.equal(canEditExistingTableRows("tdengine", undefined, ["ts"]), false);
+  assert.equal(canEditExistingTableRows("tdengine", undefined, []), false);
+  assert.equal(canEditExistingTableRows("tdengine", undefined, ["ts"]), true);
   assert.equal(canEditExistingTableRows("tdengine", undefined, [DBX_TDENGINE_TBNAME_COLUMN, "ts"]), true);
   assert.equal(canEditExistingTableRows("postgres", undefined), true);
 });
@@ -116,6 +133,7 @@ test("uses elementId as Neo4j editable key when labels have no primary key", () 
 test("keeps TDengine existing row identity and tag columns read-only", () => {
   assert.equal(isTdengineExistingRowReadonlyColumn("tdengine", DBX_TDENGINE_TBNAME_COLUMN, [column("ts", true)]), true);
   assert.equal(isTdengineExistingRowReadonlyColumn("tdengine", "ts", [column("ts", true)]), true);
+  assert.equal(isTdengineExistingRowReadonlyColumn("tdengine", "seq", [column("ts", true), column("seq", true)]), true);
   assert.equal(isTdengineExistingRowReadonlyColumn("tdengine", "location", [column("location")]), false);
   assert.equal(isTdengineExistingRowReadonlyColumn("mysql", "ts", [column("ts", true)]), false);
   assert.equal(isTdengineExistingRowReadonlyColumn("tdengine", "location", [{ ...column("location"), extra: "TAG", comment: "TAG" }]), true);
@@ -124,6 +142,9 @@ test("keeps TDengine existing row identity and tag columns read-only", () => {
 test("detects the synthetic Oracle ROWID key case", () => {
   assert.equal(usesSyntheticRowIdKey("oracle", [DBX_ROWID_COLUMN]), true);
   assert.equal(usesSyntheticRowIdKey("oracle", [DBX_ROWID_COLUMN.toLowerCase()]), true);
+  assert.equal(usesSyntheticRowIdKey("oceanbase-oracle", [DBX_ROWID_COLUMN]), true);
+  assert.equal(usesSyntheticRowIdKey("oracle", [DBX_ROWID_COLUMN], "VIEW"), false);
+  assert.equal(usesSyntheticRowIdKey("oracle", [DBX_ROWID_COLUMN], "MATERIALIZED_VIEW"), false);
   assert.equal(usesSyntheticRowIdKey("postgres", [DBX_ROWID_COLUMN]), false);
   assert.equal(usesSyntheticRowIdKey("oracle", ["ID"]), false);
   assert.equal(usesSyntheticRowIdKey("neo4j", [DBX_NEO4J_ELEMENT_ID_COLUMN]), true);
@@ -131,6 +152,8 @@ test("detects the synthetic Oracle ROWID key case", () => {
 
 test("hides only the synthetic Oracle ROWID grid column", () => {
   assert.equal(isHiddenGridColumn("oracle", DBX_ROWID_COLUMN, [DBX_ROWID_COLUMN]), true);
+  assert.equal(isHiddenGridColumn("oceanbase-oracle", DBX_ROWID_COLUMN, [DBX_ROWID_COLUMN]), true);
+  assert.equal(isHiddenGridColumn("oracle", DBX_ROWID_COLUMN, [DBX_ROWID_COLUMN], "VIEW"), false);
   assert.equal(isHiddenGridColumn("oracle", "ROWID", [DBX_ROWID_COLUMN]), false);
   assert.equal(isHiddenGridColumn("mysql", DBX_ROWID_COLUMN, [DBX_ROWID_COLUMN]), false);
   assert.equal(isHiddenGridColumn("neo4j", DBX_NEO4J_ELEMENT_ID_COLUMN, [DBX_NEO4J_ELEMENT_ID_COLUMN]), true);

@@ -1,0 +1,10 @@
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation 'com.ing.data:cassandra-jdbc-wrapper:4.12.0'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': 'Apache Cassandra', 'Main-Class': 'com.dbx.agent.cassandra.CassandraAgent')
+    }
+}

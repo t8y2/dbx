@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { findDatabaseTreeNode } from "../../apps/desktop/src/lib/treeRefreshTarget.ts";
+import { findDatabaseTreeNode } from "../../apps/desktop/src/lib/sidebar/treeRefreshTarget.ts";
 import type { TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 test("finds database refresh targets inside grouped sidebar trees", () => {

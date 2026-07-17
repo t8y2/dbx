@@ -8,16 +8,18 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
-import * as api from "@/lib/api";
-import { DIAGRAM_SQL_TYPES, isSchemaAware as isSchemaAwareDatabase } from "@/lib/databaseCapabilities";
+import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
+import * as api from "@/lib/backend/api";
+import { DIAGRAM_SQL_TYPES, isSchemaAware as isSchemaAwareDatabase } from "@/lib/database/databaseCapabilities";
 import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
-import { buildDiagramRelationships, filterDiagramTables, layoutDiagramTables, type DiagramPosition, type DiagramRelationship, type DiagramTable } from "@/lib/erDiagram";
-import { buildEngineeringDiagram } from "@/lib/engineeringDiagram";
-import { buildEngineeringDiagramSvg, buildTableDiagramSvg, diagramSvgFileName } from "@/lib/diagramSvgExport";
-import { clampDiagramZoom, zoomFromGestureScale, zoomFromWheelDelta } from "@/lib/diagramZoom";
-import { Download, KeyRound, Link2, Loader2, Maximize2, Network, RefreshCw, Search, Table2, ZoomIn, ZoomOut } from "@lucide/vue";
+import { buildDiagramJoinSql, buildDiagramRelationships, filterDiagramTables, layoutDiagramTables, normalizeCustomDiagramRelationship, type CustomDiagramRelationship, type DiagramPosition, type DiagramRelationship, type DiagramTable } from "@/lib/diagram/erDiagram";
+import { buildEngineeringDiagram } from "@/lib/diagram/engineeringDiagram";
+import { buildEngineeringDiagramSvg, buildTableDiagramSvg, diagramSvgFileName } from "@/lib/export/diagramSvgExport";
+import { clampDiagramZoom, zoomFromGestureScale, zoomFromWheelDelta } from "@/lib/diagram/diagramZoom";
+import { Copy, Download, KeyRound, Link2, Loader2, Maximize2, Network, Plus, RefreshCw, Search, Table2, Trash2, X, ZoomIn, ZoomOut } from "@lucide/vue";
 import { useToast } from "@/composables/useToast";
-import { isTauriRuntime } from "@/lib/tauriRuntime";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { copyToClipboard } from "@/lib/common/clipboard";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -29,6 +31,18 @@ const props = defineProps<{
   prefillDatabase?: string;
   prefillSchema?: string;
   focusTableName?: string;
+}>();
+
+const emit = defineEmits<{
+  "open-target": [
+    value: {
+      connectionId: string;
+      database: string;
+      schema?: string;
+      tableName: string;
+      tableType?: string;
+    },
+  ];
 }>();
 
 const CARD_WIDTH = 270;
@@ -46,6 +60,7 @@ const schema = ref("");
 const databases = ref<string[]>([]);
 const schemas = ref<string[]>([]);
 const tables = ref<DiagramTable[]>([]);
+const customRelationships = ref<CustomDiagramRelationship[]>([]);
 const tableSearch = ref("");
 const loadingDatabases = ref(false);
 const loadingSchemas = ref(false);
@@ -57,6 +72,7 @@ const positions = ref<Record<string, DiagramPosition>>({});
 const showAllTables = ref(false);
 const diagramViewport = ref<HTMLDivElement | null>(null);
 const diagramMode = ref<"table" | "engineering">("table");
+const showRelationshipPanel = ref(false);
 const zoom = ref(1);
 const gestureStartZoom = ref(1);
 const dragging = ref<{
@@ -66,6 +82,14 @@ const dragging = ref<{
   originX: number;
   originY: number;
 } | null>(null);
+const relationshipDraft = ref({
+  name: "",
+  sourceTable: "",
+  sourceColumn: "",
+  targetTable: "",
+  targetColumn: "",
+  cardinality: "one-to-many" as "one-to-one" | "one-to-many" | "many-to-one",
+});
 
 const sqlConnections = computed(() => store.connections.filter((connection) => DIAGRAM_SQL_TYPES.has(connection.db_type)));
 
@@ -73,7 +97,9 @@ const selectedConnection = computed(() => (connectionId.value ? store.getConfig(
 
 const isSchemaAware = computed(() => isSchemaAwareDatabase(selectedConnection.value?.db_type));
 
-const allRelationships = computed(() => buildDiagramRelationships(tables.value));
+const tableMap = computed(() => new Map(tables.value.map((table) => [table.name, table])));
+
+const allRelationships = computed(() => buildDiagramRelationships(tables.value, customRelationships.value));
 
 const relatedTableNames = computed(() => {
   const focus = props.focusTableName;
@@ -97,11 +123,19 @@ const visibleTables = computed(() => {
 
 const visibleTableMap = computed(() => new Map(visibleTables.value.map((table) => [table.name, table])));
 
-const visibleRelationships = computed(() => buildDiagramRelationships(visibleTables.value));
+const visibleRelationships = computed(() => buildDiagramRelationships(visibleTables.value, customRelationships.value));
 
 const diagramReady = computed(() => !!connectionId.value && !!database.value && (!isSchemaAware.value || !!schema.value));
 
 const loadingText = computed(() => (totalTableCount.value > 0 ? t("diagram.loadingProgress", { loaded: loadedTableCount.value, total: totalTableCount.value }) : t("diagram.loading")));
+
+const sourceColumns = computed(() => tableMap.value.get(relationshipDraft.value.sourceTable)?.columns ?? []);
+
+const targetColumns = computed(() => tableMap.value.get(relationshipDraft.value.targetTable)?.columns ?? []);
+
+const generatedJoinSql = computed(() => buildDiagramJoinSql(visibleRelationships.value));
+
+const customRelationshipCount = computed(() => customRelationships.value.length);
 
 function connectionIconType(id: string) {
   const config = store.getConfig(id);
@@ -154,8 +188,141 @@ function isForeignKeyColumn(table: DiagramTable, columnName: string): boolean {
   return table.foreignKeys.some((fk) => fk.column === columnName);
 }
 
+function isRelationshipColumn(table: DiagramTable, columnName: string): boolean {
+  return visibleRelationships.value.some((relationship) => (relationship.sourceTable === table.name && relationship.sourceColumn === columnName) || (relationship.targetTable === table.name && relationship.targetColumn === columnName));
+}
+
 function relationshipTitle(relationship: DiagramRelationship): string {
-  return `${relationship.sourceTable}.${relationship.sourceColumn} -> ${relationship.targetTable}.${relationship.targetColumn}`;
+  return `${relationship.sourceTable}.${relationship.sourceColumn} (${relationship.sourceCardinality}:${relationship.targetCardinality}) -> ${relationship.targetTable}.${relationship.targetColumn}`;
+}
+
+function openTableData(tableName: string) {
+  if (!connectionId.value || !database.value || !tableName) return;
+  emit("open-target", {
+    connectionId: connectionId.value,
+    database: database.value,
+    schema: isSchemaAware.value ? schema.value || undefined : undefined,
+    tableName,
+    tableType: "TABLE",
+  });
+}
+
+function relationshipStorageKey(): string {
+  if (!connectionId.value || !database.value) return "";
+  return ["dbx", "diagram", "relationships", "v1", connectionId.value, database.value, schema.value || ""].join(":");
+}
+
+function isStoredRelationship(value: unknown): value is CustomDiagramRelationship {
+  const relationship = value as Partial<CustomDiagramRelationship>;
+  return (
+    typeof relationship?.id === "string" &&
+    typeof relationship.name === "string" &&
+    typeof relationship.sourceTable === "string" &&
+    typeof relationship.sourceColumn === "string" &&
+    typeof relationship.targetTable === "string" &&
+    typeof relationship.targetColumn === "string" &&
+    (relationship.sourceCardinality === "1" || relationship.sourceCardinality === "N") &&
+    (relationship.targetCardinality === "1" || relationship.targetCardinality === "N")
+  );
+}
+
+function loadCustomRelationships() {
+  const key = relationshipStorageKey();
+  if (!key || typeof localStorage === "undefined") {
+    customRelationships.value = [];
+    return;
+  }
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) || "[]");
+    customRelationships.value = Array.isArray(parsed) ? parsed.filter(isStoredRelationship) : [];
+  } catch {
+    customRelationships.value = [];
+  }
+}
+
+function saveCustomRelationships() {
+  const key = relationshipStorageKey();
+  if (!key || typeof localStorage === "undefined") return;
+  localStorage.setItem(key, JSON.stringify(customRelationships.value));
+}
+
+function defaultRelationshipName(relationship: Omit<CustomDiagramRelationship, "id" | "name">): string {
+  return `${relationship.sourceTable}_${relationship.sourceColumn}_${relationship.targetTable}_${relationship.targetColumn}`;
+}
+
+function relationshipCardinality(): Pick<CustomDiagramRelationship, "sourceCardinality" | "targetCardinality"> {
+  if (relationshipDraft.value.cardinality === "one-to-one") return { sourceCardinality: "1", targetCardinality: "1" };
+  if (relationshipDraft.value.cardinality === "many-to-one") return { sourceCardinality: "N", targetCardinality: "1" };
+  return { sourceCardinality: "1", targetCardinality: "N" };
+}
+
+function updateRelationshipDraftDefaults() {
+  const availableTables = tables.value.filter((table) => table.columns.length > 0);
+  if (availableTables.length === 0) return;
+
+  if (!tableMap.value.has(relationshipDraft.value.sourceTable)) {
+    relationshipDraft.value.sourceTable = availableTables[0].name;
+  }
+  if (!tableMap.value.has(relationshipDraft.value.targetTable)) {
+    relationshipDraft.value.targetTable = availableTables[1]?.name ?? availableTables[0].name;
+  }
+  if (!sourceColumns.value.some((column) => column.name === relationshipDraft.value.sourceColumn)) {
+    relationshipDraft.value.sourceColumn = sourceColumns.value[0]?.name ?? "";
+  }
+  if (!targetColumns.value.some((column) => column.name === relationshipDraft.value.targetColumn)) {
+    relationshipDraft.value.targetColumn = targetColumns.value[0]?.name ?? "";
+  }
+}
+
+function addCustomRelationship() {
+  updateRelationshipDraftDefaults();
+  const { sourceTable, sourceColumn, targetTable, targetColumn } = relationshipDraft.value;
+  if (!sourceTable || !sourceColumn || !targetTable || !targetColumn) {
+    toast(t("diagram.relationshipIncomplete"), 3000);
+    return;
+  }
+  if (sourceTable === targetTable && sourceColumn === targetColumn) {
+    toast(t("diagram.relationshipSelfInvalid"), 3000);
+    return;
+  }
+
+  const cardinality = relationshipCardinality();
+  const relationship = normalizeCustomDiagramRelationship({
+    name: relationshipDraft.value.name.trim() || defaultRelationshipName({ sourceTable, sourceColumn, targetTable, targetColumn, ...cardinality }),
+    sourceTable,
+    sourceColumn,
+    targetTable,
+    targetColumn,
+    ...cardinality,
+  });
+
+  if (customRelationships.value.some((item) => item.id === relationship.id)) {
+    toast(t("diagram.relationshipExists"), 3000);
+    return;
+  }
+
+  customRelationships.value = [...customRelationships.value, relationship];
+  relationshipDraft.value.name = "";
+  saveCustomRelationships();
+  toast(t("diagram.relationshipAdded"), 2000);
+}
+
+function removeCustomRelationship(id: string) {
+  customRelationships.value = customRelationships.value.filter((relationship) => relationship.id !== id);
+  saveCustomRelationships();
+}
+
+async function copyJoinSql() {
+  if (!generatedJoinSql.value.trim()) {
+    toast(t("diagram.noJoinSql"), 3000);
+    return;
+  }
+  try {
+    await copyToClipboard(generatedJoinSql.value);
+    toast(t("grid.copied"));
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
 }
 
 function columnAnchorY(tableName: string, columnName: string): number {
@@ -347,6 +514,7 @@ async function setConnection(id: string) {
   database.value = "";
   schema.value = "";
   tables.value = [];
+  customRelationships.value = [];
   positions.value = {};
   await loadDatabases(id);
   if (databases.value.length === 1) {
@@ -357,6 +525,7 @@ async function setConnection(id: string) {
 async function setDatabase(value: string) {
   database.value = value;
   tables.value = [];
+  customRelationships.value = [];
   positions.value = {};
   await loadSchemas();
   if (diagramReady.value) await loadDiagram();
@@ -365,6 +534,7 @@ async function setDatabase(value: string) {
 async function setSchema(value: string) {
   schema.value = value;
   tables.value = [];
+  customRelationships.value = [];
   positions.value = {};
   if (diagramReady.value) await loadDiagram();
 }
@@ -393,7 +563,7 @@ async function loadDiagram() {
     await store.ensureConnected(connectionId.value);
     const querySchema = schema.value || database.value;
     const tableInfos = await api.listTables(connectionId.value, database.value, querySchema);
-    const baseTables = tableInfos.filter((table) => table.table_type !== "VIEW" && table.table_type !== "MATERIALIZED VIEW").sort((a, b) => a.name.localeCompare(b.name));
+    const baseTables = tableInfos.filter((table) => table.table_type !== "VIEW" && table.table_type !== "MATERIALIZED_VIEW").sort((a, b) => a.name.localeCompare(b.name));
     totalTableCount.value = baseTables.length;
 
     const loadedTables: DiagramTable[] = [];
@@ -405,6 +575,8 @@ async function loadDiagram() {
     }
 
     tables.value = loadedTables;
+    loadCustomRelationships();
+    updateRelationshipDraftDefaults();
     showAllTables.value = false;
     await nextTick();
     resetLayout();
@@ -425,8 +597,10 @@ async function initialize() {
   databases.value = [];
   schemas.value = [];
   tables.value = [];
+  customRelationships.value = [];
   tableSearch.value = "";
   showAllTables.value = false;
+  showRelationshipPanel.value = false;
   diagramMode.value = "table";
   zoom.value = 1;
   positions.value = {};
@@ -599,6 +773,24 @@ watch(
   },
 );
 
+watch(
+  () => relationshipDraft.value.sourceTable,
+  () => {
+    if (!sourceColumns.value.some((column) => column.name === relationshipDraft.value.sourceColumn)) {
+      relationshipDraft.value.sourceColumn = sourceColumns.value[0]?.name ?? "";
+    }
+  },
+);
+
+watch(
+  () => relationshipDraft.value.targetTable,
+  () => {
+    if (!targetColumns.value.some((column) => column.name === relationshipDraft.value.targetColumn)) {
+      relationshipDraft.value.targetColumn = targetColumns.value[0]?.name ?? "";
+    }
+  },
+);
+
 onUnmounted(stopDrag);
 </script>
 
@@ -623,9 +815,10 @@ onUnmounted(stopDrag);
           </SelectTrigger>
           <SelectContent>
             <SelectItem v-for="connection in sqlConnections" :key="connection.id" :value="connection.id">
-              <div class="flex items-center gap-2">
-                <DatabaseIcon :db-type="connection.driver_profile || connection.db_type" class="w-3.5 h-3.5" />
-                {{ connection.name }}
+              <div class="flex min-w-0 items-center gap-2">
+                <DatabaseIcon :db-type="connection.driver_profile || connection.db_type" class="w-3.5 h-3.5 shrink-0" />
+                <ConnectionGroupBadge :connection-id="connection.id" />
+                <span class="min-w-0 flex-1 truncate">{{ connection.name }}</span>
               </div>
             </SelectItem>
           </SelectContent>
@@ -665,6 +858,16 @@ onUnmounted(stopDrag);
           </Button>
         </div>
 
+        <Button variant="outline" size="sm" class="h-8 px-2 text-xs" :disabled="tables.length === 0" :title="t('diagram.modelRelationships')" @click="showRelationshipPanel = !showRelationshipPanel">
+          <Link2 class="mr-1 h-3.5 w-3.5" />
+          {{ t("diagram.modelRelationships") }}
+        </Button>
+
+        <Button variant="outline" size="sm" class="h-8 px-2 text-xs" :disabled="!generatedJoinSql.trim()" :title="t('diagram.copyJoinSql')" @click="copyJoinSql">
+          <Copy class="mr-1 h-3.5 w-3.5" />
+          {{ t("diagram.copyJoinSql") }}
+        </Button>
+
         <Button v-if="focusTableName && tables.length > 0" variant="outline" size="sm" class="h-8 px-2 text-xs" @click="showAllTables = !showAllTables">
           {{ showAllTables ? t("diagram.relatedTables") : t("diagram.allTables") }}
         </Button>
@@ -674,6 +877,9 @@ onUnmounted(stopDrag);
         </Badge>
         <Badge variant="secondary" class="h-6 shrink-0">
           {{ t("diagram.relationshipsCount", { count: visibleRelationships.length }) }}
+        </Badge>
+        <Badge v-if="customRelationshipCount > 0" variant="outline" class="h-6 shrink-0">
+          {{ t("diagram.customRelationshipsCount", { count: customRelationshipCount }) }}
         </Badge>
 
         <Button variant="ghost" size="icon" class="h-8 w-8" :disabled="loadingDiagram || visibleTables.length === 0" :title="t('diagram.exportSvg')" @click="exportSvg">
@@ -694,155 +900,248 @@ onUnmounted(stopDrag);
         </Button>
       </div>
 
-      <div class="flex-1 min-h-0 bg-muted/20">
-        <div v-if="loadingDiagram" class="h-full flex items-center justify-center text-sm text-muted-foreground">
-          <Loader2 class="mr-2 h-4 w-4 animate-spin" />
-          {{ loadingText }}
+      <div class="flex min-h-0 flex-1 flex-col bg-muted/20">
+        <div v-if="showRelationshipPanel && tables.length > 0" class="shrink-0 border-b bg-background/95 px-3 py-2">
+          <div class="flex flex-wrap items-end gap-2">
+            <div class="w-44">
+              <div class="mb-1 text-[11px] font-medium text-muted-foreground">{{ t("diagram.relationshipName") }}</div>
+              <Input v-model="relationshipDraft.name" class="h-8 text-xs" :placeholder="t('diagram.relationshipNamePlaceholder')" />
+            </div>
+
+            <div class="w-44">
+              <div class="mb-1 text-[11px] font-medium text-muted-foreground">{{ t("diagram.sourceTable") }}</div>
+              <Select v-model="relationshipDraft.sourceTable">
+                <SelectTrigger class="h-8 text-xs">
+                  <SelectValue :placeholder="t('diagram.sourceTable')" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="table in tables" :key="`source-${table.name}`" :value="table.name" :disabled="table.columns.length === 0">{{ table.name }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div class="w-44">
+              <div class="mb-1 text-[11px] font-medium text-muted-foreground">{{ t("diagram.sourceColumn") }}</div>
+              <Select v-model="relationshipDraft.sourceColumn">
+                <SelectTrigger class="h-8 text-xs">
+                  <SelectValue :placeholder="t('diagram.sourceColumn')" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="column in sourceColumns" :key="`source-column-${column.name}`" :value="column.name">{{ column.name }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div class="w-32">
+              <div class="mb-1 text-[11px] font-medium text-muted-foreground">{{ t("diagram.cardinality") }}</div>
+              <Select v-model="relationshipDraft.cardinality">
+                <SelectTrigger class="h-8 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="one-to-many">{{ t("diagram.cardinalityOneToMany") }}</SelectItem>
+                  <SelectItem value="many-to-one">{{ t("diagram.cardinalityManyToOne") }}</SelectItem>
+                  <SelectItem value="one-to-one">{{ t("diagram.cardinalityOneToOne") }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div class="w-44">
+              <div class="mb-1 text-[11px] font-medium text-muted-foreground">{{ t("diagram.targetTable") }}</div>
+              <Select v-model="relationshipDraft.targetTable">
+                <SelectTrigger class="h-8 text-xs">
+                  <SelectValue :placeholder="t('diagram.targetTable')" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="table in tables" :key="`target-${table.name}`" :value="table.name" :disabled="table.columns.length === 0">{{ table.name }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div class="w-44">
+              <div class="mb-1 text-[11px] font-medium text-muted-foreground">{{ t("diagram.targetColumn") }}</div>
+              <Select v-model="relationshipDraft.targetColumn">
+                <SelectTrigger class="h-8 text-xs">
+                  <SelectValue :placeholder="t('diagram.targetColumn')" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="column in targetColumns" :key="`target-column-${column.name}`" :value="column.name">{{ column.name }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <Button variant="default" size="sm" class="h-8 px-2 text-xs" @click="addCustomRelationship">
+              <Plus class="mr-1 h-3.5 w-3.5" />
+              {{ t("diagram.addRelationship") }}
+            </Button>
+            <Button variant="ghost" size="icon" class="h-8 w-8" :title="t('common.close')" @click="showRelationshipPanel = false">
+              <X class="h-4 w-4" />
+            </Button>
+          </div>
+
+          <div v-if="customRelationships.length > 0" class="mt-2 flex flex-wrap gap-1.5">
+            <Badge v-for="relationship in customRelationships" :key="relationship.id" variant="secondary" class="gap-1 pr-1">
+              <span class="max-w-80 truncate">{{ relationship.sourceTable }}.{{ relationship.sourceColumn }} {{ relationship.sourceCardinality }}:{{ relationship.targetCardinality }} {{ relationship.targetTable }}.{{ relationship.targetColumn }}</span>
+              <button type="button" class="rounded-sm p-0.5 hover:bg-background/80" :title="t('diagram.removeRelationship')" @click="removeCustomRelationship(relationship.id)">
+                <Trash2 class="h-3 w-3" />
+              </button>
+            </Badge>
+          </div>
         </div>
-        <div v-else-if="!diagramReady" class="h-full flex items-center justify-center text-sm text-muted-foreground">
-          {{ t("diagram.selectTarget") }}
-        </div>
-        <div v-else-if="tables.length === 0" class="h-full flex items-center justify-center text-sm text-muted-foreground">
-          {{ t("diagram.empty") }}
-        </div>
-        <div v-else-if="visibleTables.length === 0" class="h-full flex items-center justify-center text-sm text-muted-foreground">
-          {{ t("diagram.noMatches") }}
-        </div>
-        <div v-else ref="diagramViewport" class="h-full overflow-auto" @wheel="onDiagramWheel" @gesturestart="onDiagramGestureStart" @gesturechange="onDiagramGestureChange">
-          <div
-            class="relative"
-            :style="{
-              width: `${activeCanvasSize.width * zoom}px`,
-              height: `${activeCanvasSize.height * zoom}px`,
-            }"
-          >
+
+        <div class="min-h-0 flex-1">
+          <div v-if="loadingDiagram" class="h-full flex items-center justify-center text-sm text-muted-foreground">
+            <Loader2 class="mr-2 h-4 w-4 animate-spin" />
+            {{ loadingText }}
+          </div>
+          <div v-else-if="!diagramReady" class="h-full flex items-center justify-center text-sm text-muted-foreground">
+            {{ t("diagram.selectTarget") }}
+          </div>
+          <div v-else-if="tables.length === 0" class="h-full flex items-center justify-center text-sm text-muted-foreground">
+            {{ t("diagram.empty") }}
+          </div>
+          <div v-else-if="visibleTables.length === 0" class="h-full flex items-center justify-center text-sm text-muted-foreground">
+            {{ t("diagram.noMatches") }}
+          </div>
+          <div v-else ref="diagramViewport" class="h-full overflow-auto" @wheel="onDiagramWheel" @gesturestart="onDiagramGestureStart" @gesturechange="onDiagramGestureChange">
             <div
-              class="absolute left-0 top-0 origin-top-left"
+              class="relative"
               :style="{
-                width: `${activeCanvasSize.width}px`,
-                height: `${activeCanvasSize.height}px`,
-                transform: `scale(${zoom})`,
+                width: `${activeCanvasSize.width * zoom}px`,
+                height: `${activeCanvasSize.height * zoom}px`,
               }"
             >
-              <template v-if="diagramMode === 'table'">
-                <svg class="absolute inset-0 h-full w-full overflow-visible pointer-events-none">
-                  <defs>
-                    <marker id="diagram-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
-                      <path d="M 0 0 L 8 4 L 0 8 z" class="fill-primary/70" />
-                    </marker>
-                  </defs>
-                  <path v-for="relationship in visibleRelationships" :key="relationship.id" :d="relationshipPath(relationship)" class="fill-none stroke-primary/55" stroke-width="1.6" marker-end="url(#diagram-arrow)">
-                    <title>{{ relationshipTitle(relationship) }}</title>
-                  </path>
-                </svg>
+              <div
+                class="absolute left-0 top-0 origin-top-left"
+                :style="{
+                  width: `${activeCanvasSize.width}px`,
+                  height: `${activeCanvasSize.height}px`,
+                  transform: `scale(${zoom})`,
+                }"
+              >
+                <template v-if="diagramMode === 'table'">
+                  <svg class="absolute inset-0 h-full w-full overflow-visible pointer-events-none">
+                    <defs>
+                      <marker id="diagram-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+                        <path d="M 0 0 L 8 4 L 0 8 z" class="fill-primary/70" />
+                      </marker>
+                    </defs>
+                    <path v-for="relationship in visibleRelationships" :key="relationship.id" :d="relationshipPath(relationship)" class="fill-none stroke-primary/55" stroke-width="1.6" marker-end="url(#diagram-arrow)">
+                      <title>{{ relationshipTitle(relationship) }}</title>
+                    </path>
+                  </svg>
 
-                <div
-                  v-for="table in visibleTables"
-                  :key="table.name"
-                  class="absolute overflow-hidden rounded-md border bg-background shadow-sm"
-                  :class="table.name === focusTableName ? 'border-primary ring-1 ring-primary/30' : 'border-border'"
-                  :style="{
-                    width: `${CARD_WIDTH}px`,
-                    transform: `translate(${positions[table.name]?.x ?? 0}px, ${positions[table.name]?.y ?? 0}px)`,
-                  }"
-                >
-                  <div class="flex h-11 cursor-grab items-center gap-2 border-b bg-muted/40 px-3 active:cursor-grabbing" @mousedown="startDrag(table.name, $event)">
-                    <Table2 class="h-4 w-4 shrink-0 text-muted-foreground" />
-                    <span class="min-w-0 flex-1 truncate text-sm font-medium">{{ table.name }}</span>
-                    <Badge variant="outline" class="h-5 px-1.5 text-[10px]">{{ table.columns.length }}</Badge>
-                  </div>
-                  <div>
-                    <div v-for="column in visibleColumns(table)" :key="column.name" class="flex h-6 items-center gap-1.5 border-b border-border/40 px-3 text-xs last:border-b-0">
-                      <KeyRound v-if="column.is_primary_key" class="h-3 w-3 shrink-0 text-amber-500" />
-                      <Link2 v-else-if="isForeignKeyColumn(table, column.name)" class="h-3 w-3 shrink-0 text-primary" />
-                      <span v-else class="h-3 w-3 shrink-0" />
-                      <span class="min-w-0 flex-1 truncate font-mono">{{ column.name }}</span>
-                      <span class="max-w-24 truncate text-[10px] text-muted-foreground">{{ column.data_type }}</span>
+                  <div
+                    v-for="table in visibleTables"
+                    :key="table.name"
+                    class="absolute overflow-hidden rounded-md border bg-background shadow-sm"
+                    :class="table.name === focusTableName ? 'border-primary ring-1 ring-primary/30' : 'border-border'"
+                    :style="{
+                      width: `${CARD_WIDTH}px`,
+                      transform: `translate(${positions[table.name]?.x ?? 0}px, ${positions[table.name]?.y ?? 0}px)`,
+                    }"
+                    @dblclick.stop="openTableData(table.name)"
+                  >
+                    <div class="flex h-11 cursor-grab items-center gap-2 border-b bg-muted/40 px-3 active:cursor-grabbing" @mousedown="startDrag(table.name, $event)">
+                      <Table2 class="h-4 w-4 shrink-0 text-muted-foreground" />
+                      <span class="min-w-0 flex-1 truncate text-sm font-medium">{{ table.name }}</span>
+                      <Badge variant="outline" class="h-5 px-1.5 text-[10px]">{{ table.columns.length }}</Badge>
                     </div>
-                    <div v-if="hiddenColumnCount(table) > 0" class="h-6 px-3 text-xs leading-6 text-muted-foreground">
-                      {{ t("diagram.moreColumns", { count: hiddenColumnCount(table) }) }}
+                    <div>
+                      <div v-for="column in visibleColumns(table)" :key="column.name" class="flex h-6 items-center gap-1.5 border-b border-border/40 px-3 text-xs last:border-b-0">
+                        <KeyRound v-if="column.is_primary_key" class="h-3 w-3 shrink-0 text-amber-500" />
+                        <Link2 v-else-if="isForeignKeyColumn(table, column.name)" class="h-3 w-3 shrink-0 text-primary" />
+                        <Link2 v-else-if="isRelationshipColumn(table, column.name)" class="h-3 w-3 shrink-0 text-muted-foreground" />
+                        <span v-else class="h-3 w-3 shrink-0" />
+                        <span class="min-w-0 flex-1 truncate font-mono">{{ column.name }}</span>
+                        <span class="max-w-24 truncate text-[10px] text-muted-foreground">{{ column.data_type }}</span>
+                      </div>
+                      <div v-if="hiddenColumnCount(table) > 0" class="h-6 px-3 text-xs leading-6 text-muted-foreground">
+                        {{ t("diagram.moreColumns", { count: hiddenColumnCount(table) }) }}
+                      </div>
                     </div>
                   </div>
-                </div>
-              </template>
+                </template>
 
-              <template v-else>
-                <svg class="absolute inset-0 h-full w-full overflow-visible pointer-events-none">
-                  <g class="stroke-foreground/70">
-                    <line
-                      v-for="attribute in engineeringDiagram.attributes"
-                      :key="attribute.id"
-                      :x1="engineeringEntityCenter(attribute.tableName).x"
-                      :y1="engineeringEntityCenter(attribute.tableName).y"
-                      :x2="engineeringAttributeCenter(attribute).x"
-                      :y2="engineeringAttributeCenter(attribute).y"
-                      stroke-width="1.2"
-                    />
-                    <template v-for="relationship in engineeringDiagram.relationships" :key="relationship.id">
-                      <line :x1="engineeringEntityCenter(relationship.sourceTable).x" :y1="engineeringEntityCenter(relationship.sourceTable).y" :x2="engineeringRelationshipCenter(relationship).x" :y2="engineeringRelationshipCenter(relationship).y" stroke-width="1.4" />
-                      <line :x1="engineeringRelationshipCenter(relationship).x" :y1="engineeringRelationshipCenter(relationship).y" :x2="engineeringEntityCenter(relationship.targetTable).x" :y2="engineeringEntityCenter(relationship.targetTable).y" stroke-width="1.4" />
-                      <text
-                        class="fill-foreground text-[13px] font-semibold"
-                        :x="engineeringCardinalityPoint(engineeringRelationshipCenter(relationship), engineeringEntityCenter(relationship.sourceTable)).x"
-                        :y="engineeringCardinalityPoint(engineeringRelationshipCenter(relationship), engineeringEntityCenter(relationship.sourceTable)).y"
-                      >
-                        {{ relationship.sourceCardinality }}
-                      </text>
-                      <text
-                        class="fill-foreground text-[13px] font-semibold"
-                        :x="engineeringCardinalityPoint(engineeringRelationshipCenter(relationship), engineeringEntityCenter(relationship.targetTable)).x"
-                        :y="engineeringCardinalityPoint(engineeringRelationshipCenter(relationship), engineeringEntityCenter(relationship.targetTable)).y"
-                      >
-                        {{ relationship.targetCardinality }}
-                      </text>
-                    </template>
-                  </g>
-                </svg>
+                <template v-else>
+                  <svg class="absolute inset-0 h-full w-full overflow-visible pointer-events-none">
+                    <g class="stroke-foreground/70">
+                      <line
+                        v-for="attribute in engineeringDiagram.attributes"
+                        :key="attribute.id"
+                        :x1="engineeringEntityCenter(attribute.tableName).x"
+                        :y1="engineeringEntityCenter(attribute.tableName).y"
+                        :x2="engineeringAttributeCenter(attribute).x"
+                        :y2="engineeringAttributeCenter(attribute).y"
+                        stroke-width="1.2"
+                      />
+                      <template v-for="relationship in engineeringDiagram.relationships" :key="relationship.id">
+                        <line :x1="engineeringEntityCenter(relationship.sourceTable).x" :y1="engineeringEntityCenter(relationship.sourceTable).y" :x2="engineeringRelationshipCenter(relationship).x" :y2="engineeringRelationshipCenter(relationship).y" stroke-width="1.4" />
+                        <line :x1="engineeringRelationshipCenter(relationship).x" :y1="engineeringRelationshipCenter(relationship).y" :x2="engineeringEntityCenter(relationship.targetTable).x" :y2="engineeringEntityCenter(relationship.targetTable).y" stroke-width="1.4" />
+                        <text
+                          class="fill-foreground text-[13px] font-semibold"
+                          :x="engineeringCardinalityPoint(engineeringRelationshipCenter(relationship), engineeringEntityCenter(relationship.sourceTable)).x"
+                          :y="engineeringCardinalityPoint(engineeringRelationshipCenter(relationship), engineeringEntityCenter(relationship.sourceTable)).y"
+                        >
+                          {{ relationship.sourceCardinality }}
+                        </text>
+                        <text
+                          class="fill-foreground text-[13px] font-semibold"
+                          :x="engineeringCardinalityPoint(engineeringRelationshipCenter(relationship), engineeringEntityCenter(relationship.targetTable)).x"
+                          :y="engineeringCardinalityPoint(engineeringRelationshipCenter(relationship), engineeringEntityCenter(relationship.targetTable)).y"
+                        >
+                          {{ relationship.targetCardinality }}
+                        </text>
+                      </template>
+                    </g>
+                  </svg>
 
-                <div
-                  v-for="attribute in engineeringDiagram.attributes"
-                  :key="attribute.id"
-                  class="absolute flex items-center justify-center rounded-full border border-green-600/55 bg-green-100/80 px-3 text-center text-xs text-green-950 shadow-sm dark:bg-green-950/35 dark:text-green-100"
-                  :class="attribute.primaryKey ? 'font-semibold underline underline-offset-2' : ''"
-                  :title="`${attribute.tableName}.${attribute.columnName}: ${attribute.dataType}`"
-                  :style="{
-                    width: `${attribute.width}px`,
-                    height: `${attribute.height}px`,
-                    transform: `translate(${attribute.x}px, ${attribute.y}px)`,
-                  }"
-                >
-                  <span class="truncate">{{ attribute.label }}</span>
-                </div>
+                  <div
+                    v-for="attribute in engineeringDiagram.attributes"
+                    :key="attribute.id"
+                    class="absolute flex items-center justify-center rounded-full border border-green-600/55 bg-green-100/80 px-3 text-center text-xs text-green-950 shadow-sm dark:bg-green-950/35 dark:text-green-100"
+                    :class="attribute.primaryKey ? 'font-semibold underline underline-offset-2' : ''"
+                    :title="`${attribute.tableName}.${attribute.columnName}: ${attribute.dataType}`"
+                    :style="{
+                      width: `${attribute.width}px`,
+                      height: `${attribute.height}px`,
+                      transform: `translate(${attribute.x}px, ${attribute.y}px)`,
+                    }"
+                  >
+                    <span class="truncate">{{ attribute.label }}</span>
+                  </div>
 
-                <div
-                  v-for="relationship in engineeringDiagram.relationships"
-                  :key="relationship.id"
-                  class="absolute flex items-center justify-center text-center text-xs font-medium text-red-950 dark:text-red-100"
-                  :style="{
-                    width: `${relationship.width}px`,
-                    height: `${relationship.height}px`,
-                    transform: `translate(${relationship.x}px, ${relationship.y}px)`,
-                  }"
-                  :title="`${relationship.sourceTable} -> ${relationship.targetTable}`"
-                >
-                  <div class="absolute inset-0 border border-red-500/70 bg-red-100/80 dark:bg-red-950/35" style="clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%)" />
-                  <span class="relative max-w-[70px] truncate">{{ relationship.label }}</span>
-                </div>
+                  <div
+                    v-for="relationship in engineeringDiagram.relationships"
+                    :key="relationship.id"
+                    class="absolute flex items-center justify-center text-center text-xs font-medium text-red-950 dark:text-red-100"
+                    :style="{
+                      width: `${relationship.width}px`,
+                      height: `${relationship.height}px`,
+                      transform: `translate(${relationship.x}px, ${relationship.y}px)`,
+                    }"
+                    :title="`${relationship.sourceTable} -> ${relationship.targetTable}`"
+                  >
+                    <div class="absolute inset-0 border border-red-500/70 bg-red-100/80 dark:bg-red-950/35" style="clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%)" />
+                    <span class="relative max-w-[70px] truncate">{{ relationship.label }}</span>
+                  </div>
 
-                <div
-                  v-for="entity in engineeringDiagram.entities"
-                  :key="entity.id"
-                  class="absolute flex items-center justify-center border border-blue-500/70 bg-blue-100/80 px-3 text-center text-sm font-semibold text-blue-950 shadow-sm dark:bg-blue-950/35 dark:text-blue-100"
-                  :class="entity.name === focusTableName ? 'ring-2 ring-primary/40' : ''"
-                  :style="{
-                    width: `${entity.width}px`,
-                    height: `${entity.height}px`,
-                    transform: `translate(${entity.x}px, ${entity.y}px)`,
-                  }"
-                >
-                  <span class="truncate">{{ entity.name }}</span>
-                </div>
-              </template>
+                  <div
+                    v-for="entity in engineeringDiagram.entities"
+                    :key="entity.id"
+                    class="absolute flex cursor-pointer items-center justify-center border border-blue-500/70 bg-blue-100/80 px-3 text-center text-sm font-semibold text-blue-950 shadow-sm dark:bg-blue-950/35 dark:text-blue-100"
+                    :class="entity.name === focusTableName ? 'ring-2 ring-primary/40' : ''"
+                    :style="{
+                      width: `${entity.width}px`,
+                      height: `${entity.height}px`,
+                      transform: `translate(${entity.x}px, ${entity.y}px)`,
+                    }"
+                    @dblclick.stop="openTableData(entity.name)"
+                  >
+                    <span class="truncate">{{ entity.name }}</span>
+                  </div>
+                </template>
+              </div>
             </div>
           </div>
         </div>

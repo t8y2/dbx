@@ -3,8 +3,8 @@ import type { ContextMenuItemEmits, ContextMenuItemProps } from "reka-ui";
 import type { HTMLAttributes } from "vue";
 import { reactiveOmit } from "@vueuse/core";
 import { ContextMenuItem, useForwardPropsEmits } from "reka-ui";
-import { shouldSuppressRepeatedActivation, suppressEvent, type ActionActivationGuard } from "@/lib/actionActivation";
-import { cn } from "@/lib/utils";
+import { shouldSuppressRepeatedActivation, suppressEvent, type ActionActivationGuard } from "@/lib/connection/actionActivation";
+import { cn } from "@/lib/common/utils";
 
 const props = withDefaults(
   defineProps<
@@ -42,7 +42,7 @@ function guardRepeatedClick(event: MouseEvent) {
     @click.capture="guardRepeatedClick"
     :class="
       cn(
-        'focus:bg-accent focus:text-accent-foreground data-[variant=destructive]:text-destructive data-[variant=destructive]:focus:bg-destructive/10 dark:data-[variant=destructive]:focus:bg-destructive/20 data-[variant=destructive]:focus:text-destructive data-[variant=destructive]:*:[svg]:text-destructive focus:*:[svg]:text-accent-foreground gap-2 rounded-md px-2 py-1 text-[13px] data-inset:pl-7 [&_svg:not([class*=size-])]:size-4 group/context-menu-item relative flex cursor-default items-center outline-hidden select-none data-disabled:pointer-events-none data-disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0',
+        'focus:bg-accent focus:text-accent-foreground data-[variant=destructive]:text-destructive data-[variant=destructive]:focus:bg-destructive/10 dark:data-[variant=destructive]:focus:bg-destructive/20 data-[variant=destructive]:focus:text-destructive data-[variant=destructive]:*:[svg]:text-destructive focus:*:[svg]:text-accent-foreground gap-2 rounded-sm px-2 py-1 text-[13px] data-inset:pl-7 [&_svg:not([class*=size-])]:size-4 group/context-menu-item relative flex cursor-default items-center outline-hidden select-none data-disabled:pointer-events-none data-disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0',
         props.class,
       )
     "

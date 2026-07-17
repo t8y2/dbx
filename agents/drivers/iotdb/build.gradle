@@ -1,0 +1,10 @@
+dependencies {
+    implementation 'org.apache.iotdb:iotdb-jdbc:2.0.8'
+    implementation 'org.slf4j:slf4j-nop:2.0.16'
+}
+
+tasks.named('jar') {
+    manifest {
+        attributes('Agent-Label': 'Apache IoTDB', 'Main-Class': 'com.dbx.agent.iotdb.IoTDBAgent')
+    }
+}

@@ -1,0 +1,8 @@
+**/libs/*.jar
+!drivers/oscar/libs/oscarJDBC8.jar
+gradle.properties
+build/
+*/bin/
+.gradle/
+.DS_Store
+openspec

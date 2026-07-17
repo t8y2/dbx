@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
 
+env:
+  CNB_REPOSITORY: "dbxio.com/dbx"
+  CNB_USERNAME: "cnb"
+  CNB_REGISTRY: "docker.cnb.cool"
+
 jobs:
   bump-jdbc-plugin-version:
     runs-on: ubuntu-latest
@@ -17,7 +22,7 @@ jobs:
       new_version: ${{ steps.bump.outputs.new_version }}
       prev_tag: ${{ steps.prev-tag.outputs.prev_tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -44,9 +49,21 @@ jobs:
         if: steps.bump.outputs.changed == 'true'
         shell: bash
         run: |
+          TMP_DIR="$(mktemp -d)"
+          cp plugins/jdbc/pom.xml "$TMP_DIR/pom.xml"
+          cp plugins/jdbc/manifest.json "$TMP_DIR/manifest.json"
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git switch -C jdbc-plugin-version-bump origin/main
+          cp "$TMP_DIR/pom.xml" plugins/jdbc/pom.xml
+          cp "$TMP_DIR/manifest.json" plugins/jdbc/manifest.json
           git add plugins/jdbc/pom.xml plugins/jdbc/manifest.json
+          if git diff --cached --quiet; then
+            echo "JDBC plugin version ${{ steps.bump.outputs.new_version }} is already on main."
+            exit 0
+          fi
           git commit -m "chore(jdbc): bump plugin version [skip ci]"
           git push origin HEAD:main
 
@@ -72,10 +89,10 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22
 
@@ -206,6 +223,37 @@ jobs:
           Compress-Archive -Path (Join-Path $portableDir "*") -DestinationPath $zipName -Force
           gh release upload "${env:GITHUB_REF_NAME}" $zipName --repo "${env:GITHUB_REPOSITORY}" --clobber
 
+      - name: Upload Windows WebView2 offline installer
+        if: matrix.arch == 'x64' || matrix.arch == 'arm64'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
+          $arch = "${{ matrix.arch }}"
+          $bundleDir = "target/${{ matrix.target }}/release/bundle/nsis"
+          $offlineName = "DBX_${version}_${arch}-webview2-offline-setup.exe"
+          $before = @{}
+
+          if (Test-Path $bundleDir) {
+            Get-ChildItem $bundleDir -Filter "*.exe" | ForEach-Object { $before[$_.FullName] = $_.LastWriteTimeUtc }
+          }
+
+          pnpm tauri bundle --bundles nsis --target ${{ matrix.target }} --config src-tauri/tauri.webview2-offline.conf.json
+
+          $installer = Get-ChildItem $bundleDir -Filter "*.exe" |
+            Where-Object { !$before.ContainsKey($_.FullName) -or $_.LastWriteTimeUtc -gt $before[$_.FullName] } |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+
+          if (!$installer) {
+            Write-Error "Missing WebView2 offline installer in ${bundleDir}"
+            exit 1
+          }
+
+          Copy-Item $installer.FullName $offlineName -Force
+          gh release upload "${env:GITHUB_REF_NAME}" $offlineName --repo "${env:GITHUB_REPOSITORY}" --clobber
+
   cleanup-release-signatures:
     needs: build
     runs-on: ubuntu-latest
@@ -238,12 +286,12 @@ jobs:
     needs: [cleanup-release-signatures, bump-jdbc-plugin-version]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -302,6 +350,89 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release edit ${{ github.ref_name }} --repo ${{ github.repository }} --draft=false --prerelease
 
+  sync-release-to-cnb:
+    name: Sync release to CNB
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Download GitHub release assets
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/github-release" "$RUNNER_TEMP/release-assets"
+          gh release view "$TAG_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json tagName,name,body,targetCommitish,isPrerelease,isDraft,assets \
+            > "$RUNNER_TEMP/github-release/release.json"
+          gh release download "$TAG_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/release-assets" \
+            --clobber
+
+      - name: Sync release assets to CNB
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CNB_UPLOAD_CONCURRENCY: "3"
+        run: |
+          node .github/scripts/sync-cnb-release.mjs \
+            --github-release "$RUNNER_TEMP/github-release/release.json" \
+            --assets-dir "$RUNNER_TEMP/release-assets"
+
+  sync-release-to-atomgit:
+    name: Sync release to AtomGit
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Ensure AtomGit tag exists
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          ATOMGIT_TOKEN: ${{ secrets.ATOMGIT_TOKEN }}
+        run: |
+          set -euo pipefail
+          git fetch origin "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}" --force
+          git remote add atomgit "https://t8y2:${ATOMGIT_TOKEN}@atomgit.com/t8y2/dbx.git"
+          git push atomgit "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}" --force
+
+      - name: Download GitHub release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/github-release" "$RUNNER_TEMP/release-assets"
+          gh release view "$TAG_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json tagName,name,body,targetCommitish,isPrerelease,isDraft,assets \
+            > "$RUNNER_TEMP/github-release/release.json"
+          gh release download "$TAG_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/release-assets" \
+            --clobber
+
+      - name: Sync release assets to AtomGit
+        env:
+          ATOMGIT_TOKEN: ${{ secrets.ATOMGIT_TOKEN }}
+          ATOMGIT_REPOSITORY: "t8y2/dbx"
+          # AtomGit throttles concurrent large-asset uploads, which can expire their temporary upload URLs.
+          ATOMGIT_UPLOAD_CONCURRENCY: "1"
+        run: |
+          set -euo pipefail
+          node .github/scripts/sync-atomgit-release.mjs \
+            --github-release "$RUNNER_TEMP/github-release/release.json" \
+            --assets-dir "$RUNNER_TEMP/release-assets"
+
   docker:
     runs-on: ubuntu-latest
     strategy:
@@ -309,7 +440,7 @@ jobs:
       matrix:
         platform: [linux/amd64, linux/arm64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -323,8 +454,15 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push by digest
-        id: build
+      - name: Login to CNB Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.CNB_REGISTRY }}
+          username: cnb
+          password: ${{ secrets.CNB_TOKEN }}
+
+      - name: Build and push Docker Hub by digest
+        id: build-dockerhub
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -334,17 +472,37 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,scope=${{ matrix.platform }},mode=max
 
-      - name: Export digest
-        run: |
-          mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
-
-      - name: Upload digest
-        uses: actions/upload-artifact@v4
+      - name: Build and push CNB by digest
+        id: build-cnb
+        uses: docker/build-push-action@v6
         with:
-          name: digests-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
-          path: /tmp/digests/*
+          context: .
+          file: deploy/Dockerfile
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.platform }}
+
+      - name: Export digests
+        run: |
+          mkdir -p /tmp/digests/dockerhub /tmp/digests/cnb
+          dockerhub_digest="${{ steps.build-dockerhub.outputs.digest }}"
+          cnb_digest="${{ steps.build-cnb.outputs.digest }}"
+          touch "/tmp/digests/dockerhub/${dockerhub_digest#sha256:}"
+          touch "/tmp/digests/cnb/${cnb_digest#sha256:}"
+
+      - name: Upload Docker Hub digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: dockerhub-digests-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          path: /tmp/digests/dockerhub/*
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload CNB digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: cnb-digests-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          path: /tmp/digests/cnb/*
           if-no-files-found: error
           retention-days: 1
 
@@ -352,11 +510,18 @@ jobs:
     needs: docker
     runs-on: ubuntu-latest
     steps:
-      - name: Download digests
-        uses: actions/download-artifact@v4
+      - name: Download Docker Hub digests
+        uses: actions/download-artifact@v8
         with:
-          path: /tmp/digests
-          pattern: digests-*
+          path: /tmp/digests/dockerhub
+          pattern: dockerhub-digests-*
+          merge-multiple: true
+
+      - name: Download CNB digests
+        uses: actions/download-artifact@v8
+        with:
+          path: /tmp/digests/cnb
+          pattern: cnb-digests-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
@@ -368,14 +533,25 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Login to CNB Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.CNB_REGISTRY }}
+          username: cnb
+          password: ${{ secrets.CNB_TOKEN }}
+
       - name: Extract version from tag
         id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Create manifest list and push
-        working-directory: /tmp/digests
         run: |
           docker buildx imagetools create \
             -t ${{ secrets.DOCKERHUB_USERNAME }}/dbx:${{ steps.version.outputs.version }} \
             -t ${{ secrets.DOCKERHUB_USERNAME }}/dbx:latest \
-            $(printf '${{ secrets.DOCKERHUB_USERNAME }}/dbx@sha256:%s ' *)
+            $(cd /tmp/digests/dockerhub && printf '${{ secrets.DOCKERHUB_USERNAME }}/dbx@sha256:%s ' *)
+
+          docker buildx imagetools create \
+            -t ${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}:${{ steps.version.outputs.version }} \
+            -t ${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}:latest \
+            $(cd /tmp/digests/cnb && printf '${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}@sha256:%s ' *)

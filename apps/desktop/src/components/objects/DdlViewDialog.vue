@@ -5,23 +5,32 @@ import { Clipboard, Loader2, RefreshCw } from "@lucide/vue";
 import { useToast } from "@/composables/useToast";
 import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { loadEditorTheme, editorFontTheme } from "@/lib/editorThemes";
-import { copyToClipboard } from "@/lib/clipboard";
-import * as api from "@/lib/api";
+import { loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
+import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
+import { copyToClipboard } from "@/lib/common/clipboard";
+import { formatSqlForDisplay, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import * as api from "@/lib/backend/api";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import type { EditorView } from "@codemirror/view";
+import type { DatabaseType, ObjectSourceKind } from "@/types/database";
 
 const props = withDefaults(
   defineProps<{
     open: boolean;
     connectionId: string;
     database: string;
+    catalog?: string;
     schema?: string;
     tableName: string;
-    /** SQL dialect for syntax highlighting. Non-PG/non-MSSQL databases fall back to MySQL (same as QueryEditor's source viewer). */
+    objectType?: ObjectSourceKind;
+    /** Effective database type selects database-specific syntax rules; older callers can still rely on the dialect fallback. */
+    databaseType?: DatabaseType;
+    /** SQL dialect fallback for syntax highlighting when the effective database type is unavailable. */
     dialect: "mysql" | "postgres" | "sqlserver";
+    /** SQL formatter dialect. Kept separate from the syntax-highlighting dialect because several PG-compatible DBs highlight as MySQL. */
+    formatDialect?: SqlFormatDialect;
   }>(),
   {},
 );
@@ -32,7 +41,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const { toast } = useToast();
-const { isDark } = useTheme();
+const { isDark, themePalette } = useTheme();
 const settingsStore = useSettingsStore();
 
 const ddlContent = ref("");
@@ -52,8 +61,8 @@ watch(
     ddlLoading.value = true;
     try {
       const schema = props.schema || props.database;
-      const ddl = await api.getTableDdl(props.connectionId, props.database, schema, props.tableName);
-      ddlContent.value = ddl;
+      const ddl = await api.getTableDdl(props.connectionId, props.database, schema, props.tableName, props.objectType, props.catalog);
+      ddlContent.value = await formatSqlForDisplay(ddl, props.formatDialect ?? props.dialect, settingsStore.editorSettings.sqlFormatter);
     } catch (e: any) {
       ddlError.value = e?.message || String(e);
     } finally {
@@ -80,10 +89,9 @@ async function initDdlEditor(content: string) {
   const appAppearance = isDark.value ? "dark" : "light";
   const fontSize = settingsStore.editorSettings.fontSize;
   const fontFamily = settingsStore.editorSettings.fontFamily;
-  const themeExt = await loadEditorTheme(editorTheme, appAppearance);
+  const themeExt = await loadEditorTheme(editorTheme, appAppearance, undefined, themePalette.value);
   const fontExt = editorFontTheme(EditorView, fontSize, fontFamily, { fixedHeight: true, scrollable: true });
-  const baseDialect = props.dialect === "postgres" ? langSql.PostgreSQL : props.dialect === "sqlserver" ? langSql.MSSQL : langSql.MySQL;
-  const dialect = langSql.SQLDialect.define({ ...baseDialect.spec });
+  const dialect = createDbxCodeMirrorSqlDialect(langSql, props.dialect, props.databaseType);
   const state = EditorState.create({
     doc: content,
     extensions: [
@@ -108,6 +116,15 @@ async function initDdlEditor(content: string) {
       // which is visible below the content when the DDL is short.
       EditorView.theme({
         "&.cm-focused": { outline: "none" },
+        ".cm-content": {
+          cursor: "text",
+          userSelect: "text",
+          WebkitUserSelect: "text",
+        },
+        ".cm-line": {
+          userSelect: "text",
+          WebkitUserSelect: "text",
+        },
       }),
       EditorState.readOnly.of(true),
     ],
@@ -159,9 +176,9 @@ function retry() {
   ddlContent.value = "";
   const schema = props.schema || props.database;
   api
-    .getTableDdl(props.connectionId, props.database, schema, props.tableName)
-    .then((ddl) => {
-      ddlContent.value = ddl;
+    .getTableDdl(props.connectionId, props.database, schema, props.tableName, props.objectType)
+    .then(async (ddl) => {
+      ddlContent.value = await formatSqlForDisplay(ddl, props.formatDialect ?? props.dialect, settingsStore.editorSettings.sqlFormatter);
     })
     .catch((e: any) => {
       ddlError.value = e?.message || String(e);
@@ -194,7 +211,7 @@ function onClose() {
             {{ t("common.retry") }}
           </Button>
         </div>
-        <div v-else class="relative min-h-80 max-h-[60vh] overflow-hidden rounded border">
+        <div v-else class="ddl-view-editor relative min-h-80 max-h-[60vh] overflow-hidden rounded border">
           <div ref="ddlEditorContainer" class="h-full" />
           <EditorSearchPanel v-if="ddlEditorView" ref="ddlSearchPanelRef" :view="ddlEditorView" />
         </div>
@@ -209,3 +226,21 @@ function onClose() {
     </DialogContent>
   </Dialog>
 </template>
+
+<style scoped>
+.ddl-view-editor :deep(.cm-content),
+.ddl-view-editor :deep(.cm-line) {
+  cursor: text;
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
+.ddl-view-editor :deep(.cm-selectionBackground),
+.ddl-view-editor :deep(.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground) {
+  background: var(--dbx-editor-selection-background, rgba(59, 130, 246, 0.35)) !important;
+}
+
+.ddl-view-editor :deep(.cm-content ::selection) {
+  background: var(--dbx-editor-selection-background, rgba(59, 130, 246, 0.35)) !important;
+}
+</style>

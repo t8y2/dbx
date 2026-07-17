@@ -11,6 +11,7 @@ pub const TRANSPORT_LAYER_SECRET_PREFIX: &str = "transport_layers.";
 pub const PROXY_PASSWORD_KEY: &str = "proxy_password";
 pub const REDIS_SENTINEL_PASSWORD_KEY: &str = "redis_sentinel_password";
 pub const CONNECTION_STRING_KEY: &str = "connection_string";
+pub const INIT_SCRIPT_KEY: &str = "init_script";
 pub const MQ_AUTH_SECRET_PREFIX: &str = "mq.auth.";
 pub const MQ_AUTH_TOKEN_KEY: &str = "mq.auth.token";
 pub const MQ_AUTH_PASSWORD_KEY: &str = "mq.auth.password";
@@ -18,6 +19,8 @@ pub const MQ_AUTH_API_KEY_VALUE_KEY: &str = "mq.auth.api_key_value";
 pub const MQ_AUTH_CLIENT_SECRET_KEY: &str = "mq.auth.client_secret";
 pub const MQ_TOKEN_SIGNING_SECRET_PREFIX: &str = "mq.token_signing.";
 pub const MQ_TOKEN_SIGNING_KEY: &str = "mq.token_signing.key";
+pub const NACOS_AUTH_SECRET_PREFIX: &str = "nacos.auth.";
+pub const NACOS_AUTH_PASSWORD_KEY: &str = "nacos.auth.password";
 
 pub trait ConnectionSecretStore {
     fn set_secret(&self, connection_id: &str, key: &str, secret: &str) -> Result<(), String>;
@@ -102,6 +105,7 @@ pub fn save_connections_to_file(
         }
         persist_secret(store, &config.id, REDIS_SENTINEL_PASSWORD_KEY, &config.redis_sentinel_password)?;
         persist_optional_secret(store, &config.id, CONNECTION_STRING_KEY, config.connection_string.as_deref())?;
+        persist_optional_secret(store, &config.id, INIT_SCRIPT_KEY, config.init_script.as_deref())?;
         persist_mq_auth_secrets(store, config)?;
         persist_mq_token_signing_secret(store, config)?;
 
@@ -158,6 +162,18 @@ pub fn load_connections_from_file(
                 }
             }
         }
+
+        match config.init_script.as_deref().filter(|secret| !secret.is_empty()) {
+            Some(secret) => {
+                store.set_secret(&config.id, INIT_SCRIPT_KEY, secret)?;
+                needs_rewrite = true;
+            }
+            None => {
+                if let Some(secret) = store.get_secret(&config.id, INIT_SCRIPT_KEY)? {
+                    config.init_script = Some(secret);
+                }
+            }
+        }
         hydrate_mq_auth_secrets(store, config, &mut needs_rewrite)?;
         hydrate_mq_token_signing_secret(store, config, &mut needs_rewrite)?;
     }
@@ -187,6 +203,9 @@ fn persist_transport_layer_secrets(
         }
         TransportLayerConfig::Proxy(proxy) => {
             persist_secret(store, connection_id, &transport_layer_proxy_password_key(index, layer), &proxy.password)?;
+        }
+        TransportLayerConfig::HttpTunnel(http) => {
+            persist_secret(store, connection_id, &transport_layer_http_tunnel_token_key(index, layer), &http.token)?;
         }
     }
     Ok(())
@@ -241,6 +260,17 @@ fn hydrate_transport_layer_secrets(
                     }
                 } else {
                     store.set_secret(&config.id, &password_key, &proxy.password)?;
+                    *needs_rewrite = true;
+                }
+            }
+            TransportLayerConfig::HttpTunnel(http) => {
+                let token_key = transport_layer_http_tunnel_token_key(index, &layer_for_key);
+                if http.token.is_empty() {
+                    if let Some(secret) = store.get_secret(&config.id, &token_key)? {
+                        http.token = secret;
+                    }
+                } else {
+                    store.set_secret(&config.id, &token_key, &http.token)?;
                     *needs_rewrite = true;
                 }
             }
@@ -321,6 +351,7 @@ fn delete_removed_connection_secrets(
         delete_secret_prefix(store, &config.id, SSH_TUNNEL_SECRET_PREFIX)?;
         delete_secret_prefix(store, &config.id, TRANSPORT_LAYER_SECRET_PREFIX)?;
         store.delete_secret(&config.id, CONNECTION_STRING_KEY)?;
+        store.delete_secret(&config.id, INIT_SCRIPT_KEY)?;
         delete_secret_prefix(store, &config.id, MQ_AUTH_SECRET_PREFIX)?;
         delete_secret_prefix(store, &config.id, MQ_TOKEN_SIGNING_SECRET_PREFIX)?;
     }
@@ -584,6 +615,10 @@ fn transport_layer_proxy_password_key(index: usize, layer: &TransportLayerConfig
     format!("{}{}.proxy_password", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
 }
 
+fn transport_layer_http_tunnel_token_key(index: usize, layer: &TransportLayerConfig) -> String {
+    format!("{}{}.http_tunnel_token", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
+}
+
 fn read_connections(path: &Path) -> Result<Vec<ConnectionConfig>, String> {
     let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     serde_json::from_str(&json).map_err(|e| e.to_string())
@@ -610,10 +645,14 @@ fn sanitize_connections(configs: &[ConnectionConfig]) -> Vec<ConnectionConfig> {
                     TransportLayerConfig::Proxy(proxy) => {
                         proxy.password.clear();
                     }
+                    TransportLayerConfig::HttpTunnel(http) => {
+                        http.token.clear();
+                    }
                 }
             }
             config.redis_sentinel_password.clear();
             config.connection_string = None;
+            config.init_script = None;
             scrub_mq_auth_secrets(&mut config);
             scrub_mq_token_signing_secret(&mut config);
             config
@@ -629,10 +668,12 @@ pub fn secret_account(connection_id: &str, key: &str) -> String {
 mod tests {
     use super::{
         load_connections_from_file, save_connections_to_file, ConnectionSecretStore, CONNECTION_STRING_KEY,
-        MAIN_PASSWORD_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, REDIS_SENTINEL_PASSWORD_KEY,
-        SSH_PASSWORD_KEY,
+        INIT_SCRIPT_KEY, MAIN_PASSWORD_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY,
+        REDIS_SENTINEL_PASSWORD_KEY, SSH_PASSWORD_KEY,
     };
-    use crate::models::connection::{ConnectionConfig, DatabaseType, SshTunnelConfig, TransportLayerConfig};
+    use crate::models::connection::{
+        ConnectionConfig, DatabaseType, HttpTunnelConfig, SshTunnelConfig, TransportLayerConfig,
+    };
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::path::Path;
@@ -699,13 +740,16 @@ mod tests {
             driver_profile: None,
             driver_label: None,
             url_params: None,
+            agent_java_options: Vec::new(),
             host: "localhost".to_string(),
             port: 5432,
             username: "postgres".to_string(),
             password: password.to_string(),
             database: Some("postgres".to_string()),
             visible_databases: None,
+            visible_schemas: None,
             attached_databases: Vec::new(),
+            init_script: None,
             color: None,
             transport_layers: Vec::new(),
             connect_timeout_secs: crate::models::connection::default_connect_timeout_secs(),
@@ -727,18 +771,24 @@ mod tests {
             redis_sentinel_tls: false,
             redis_cluster_nodes: String::new(),
             redis_key_separator: crate::models::connection::default_redis_key_separator(),
+            redis_scan_page_size: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
+            informix_server: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
             read_only: false,
+            is_production: false,
+            production_databases: vec![],
+            database_info: None,
         }
     }
 
     fn ssh_hop(id: &str, password: &str, passphrase: &str) -> SshTunnelConfig {
         SshTunnelConfig {
+            profile_id: String::new(),
             id: id.to_string(),
             name: String::new(),
             enabled: true,
@@ -751,7 +801,21 @@ mod tests {
             connect_timeout_secs: 5,
             expose_lan: false,
             use_ssh_agent: false,
+            ssh_agent_sock_path: String::new(),
+            auth_method: "key".to_string(),
         }
+    }
+
+    fn http_tunnel(id: &str, token: &str) -> TransportLayerConfig {
+        TransportLayerConfig::HttpTunnel(HttpTunnelConfig {
+            profile_id: String::new(),
+            id: id.to_string(),
+            name: String::new(),
+            enabled: true,
+            url: "https://dbx.example.com/dbx_tunnel.php".to_string(),
+            token: token.to_string(),
+            connect_timeout_secs: 10,
+        })
     }
 
     fn read_configs(path: &Path) -> Vec<ConnectionConfig> {
@@ -781,7 +845,7 @@ mod tests {
                 assert_eq!(ssh.password, "");
                 assert_eq!(ssh.key_passphrase, "");
             }
-            TransportLayerConfig::Proxy(_) => panic!("expected ssh layer"),
+            _ => panic!("expected ssh layer"),
         }
         assert_eq!(persisted[0].redis_sentinel_password, "");
     }
@@ -808,9 +872,35 @@ mod tests {
                 assert_eq!(ssh.password, "hop-secret");
                 assert_eq!(ssh.key_passphrase, "hop-key");
             }
-            TransportLayerConfig::Proxy(_) => panic!("expected ssh layer"),
+            _ => panic!("expected ssh layer"),
         }
         assert_eq!(loaded[0].redis_sentinel_password, "sentinel-secret");
+    }
+
+    #[test]
+    fn save_and_load_connections_move_http_tunnel_token_to_secret_store() {
+        let path = temp_connections_file("http-tunnel-token");
+        let store = MemorySecretStore::default();
+        let mut config = connection("main", "", "");
+        config.transport_layers = vec![http_tunnel("http", "tunnel-secret")];
+
+        save_connections_to_file(&path, &[config], &store).unwrap();
+
+        assert_eq!(
+            store.get_existing("main", "transport_layers.http.http_tunnel_token").as_deref(),
+            Some("tunnel-secret")
+        );
+        let persisted = read_configs(&path);
+        match &persisted[0].transport_layers[0] {
+            TransportLayerConfig::HttpTunnel(http) => assert_eq!(http.token, ""),
+            _ => panic!("expected http tunnel layer"),
+        }
+
+        let loaded = load_connections_from_file(&path, &store).unwrap();
+        match &loaded[0].transport_layers[0] {
+            TransportLayerConfig::HttpTunnel(http) => assert_eq!(http.token, "tunnel-secret"),
+            _ => panic!("expected http tunnel layer"),
+        }
     }
 
     #[test]
@@ -839,7 +929,7 @@ mod tests {
         assert_eq!(loaded[0].password, "plain-db");
         match &loaded[0].transport_layers[0] {
             TransportLayerConfig::Ssh(ssh) => assert_eq!(ssh.password, "plain-ssh"),
-            TransportLayerConfig::Proxy(_) => panic!("expected ssh layer"),
+            _ => panic!("expected ssh layer"),
         }
         assert_eq!(store.get_existing("legacy", MAIN_PASSWORD_KEY).as_deref(), Some("plain-db"));
         assert_eq!(store.get_existing("legacy", "transport_layers.legacy.ssh_password").as_deref(), Some("plain-ssh"));
@@ -847,7 +937,7 @@ mod tests {
         assert_eq!(persisted[0].password, "");
         match &persisted[0].transport_layers[0] {
             TransportLayerConfig::Ssh(ssh) => assert_eq!(ssh.password, ""),
-            TransportLayerConfig::Proxy(_) => panic!("expected ssh layer"),
+            _ => panic!("expected ssh layer"),
         }
     }
 
@@ -887,6 +977,28 @@ mod tests {
 
         let loaded = load_connections_from_file(&path, &store).unwrap();
         assert_eq!(loaded[0].connection_string.as_deref(), Some("mongodb://user:secret@localhost/app"));
+    }
+
+    #[test]
+    fn save_connections_moves_init_script_to_secret_store_and_restores_it() {
+        let path = temp_connections_file("init-script");
+        let store = MemorySecretStore::default();
+        let mut config = connection("duck", "", "");
+        config.db_type = DatabaseType::DuckDb;
+        config.init_script = Some("CREATE SECRET (TYPE quack, TOKEN 'token-value');".to_string());
+
+        save_connections_to_file(&path, &[config], &store).unwrap();
+
+        assert_eq!(
+            store.get_existing("duck", INIT_SCRIPT_KEY).as_deref(),
+            Some("CREATE SECRET (TYPE quack, TOKEN 'token-value');")
+        );
+        let persisted = read_configs(&path);
+        assert_eq!(persisted[0].init_script, None);
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("token-value"));
+
+        let loaded = load_connections_from_file(&path, &store).unwrap();
+        assert_eq!(loaded[0].init_script.as_deref(), Some("CREATE SECRET (TYPE quack, TOKEN 'token-value');"));
     }
 
     #[test]

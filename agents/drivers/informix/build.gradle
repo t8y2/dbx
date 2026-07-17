@@ -1,0 +1,10 @@
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation 'com.ibm.informix:jdbc:4.50.10'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': 'IBM Informix', 'Main-Class': 'com.dbx.agent.informix.InformixAgent')
+    }
+}

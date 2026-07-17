@@ -1,0 +1,11 @@
+dependencies {
+    implementation project(':common')
+    implementation 'org.mongodb:mongodb-driver-sync:3.12.14'
+    implementation 'com.google.code.gson:gson:2.11.0'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': 'MongoDB (Legacy)', 'Main-Class': 'com.dbx.agent.mongodb.MongoAgent')
+    }
+}

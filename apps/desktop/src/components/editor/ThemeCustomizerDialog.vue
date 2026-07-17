@@ -551,7 +551,7 @@ function handleImport() {
             </TabsContent>
 
             <TabsContent value="json" class="space-y-4 flex-1 min-h-0 flex flex-col">
-              <textarea v-model="jsonText" @blur="handleJsonChange" class="flex-1 w-full rounded-lg border bg-black/50 p-4 font-mono text-sm min-h-[360px]" spellcheck="false" />
+              <textarea v-model="jsonText" @blur="handleJsonChange" class="flex-1 w-full rounded-[6px] border bg-black/50 p-4 font-mono text-sm min-h-[360px]" spellcheck="false" />
               <div class="flex gap-2">
                 <Button variant="outline" size="sm" @click="handleImport">{{ t("settings.customThemePasteImport") }}</Button>
                 <Button variant="outline" size="sm" @click="handleExport">{{ t("settings.customThemeExportJson") }}</Button>

@@ -4,7 +4,7 @@ import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { RefreshCw } from "@lucide/vue";
-import type { GeneratorParams } from "@/lib/dataGenerate";
+import type { GeneratorParams } from "@/lib/dataGrid/dataGenerate";
 import CommonOptions from "./CommonOptions.vue";
 
 const props = defineProps<{ params: GeneratorParams }>();

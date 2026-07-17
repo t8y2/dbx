@@ -16,6 +16,7 @@
     "core:window:allow-close",
     "core:window:allow-start-dragging",
     "core:webview:allow-set-webview-zoom",
+    "clipboard-manager:allow-read-text",
     "clipboard-manager:allow-write-text",
     "dialog:default",
     "dialog:allow-save",

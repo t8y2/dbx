@@ -10,7 +10,7 @@ import {
   serializeTableReferencePayload,
   setActiveTableReferencePayload,
   tableReferenceInsertText,
-} from "../../apps/desktop/src/lib/queryEditorTableDrop.ts";
+} from "../../apps/desktop/src/lib/editor/queryEditorTableDrop.ts";
 
 test("creates table drag payload only when table context is complete", () => {
   assert.equal(createTableReferencePayload({ connectionId: "c1", database: "db" }), null);

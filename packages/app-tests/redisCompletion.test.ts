@@ -6,7 +6,7 @@ import {
   getRedisCompletionResultValidFor,
   shouldAutoOpenRedisCompletion,
   takesKeyArgument,
-} from "../../apps/desktop/src/lib/redisCompletion.ts";
+} from "../../apps/desktop/src/lib/redis/redisCompletion.ts";
 
 function labels(items: { label: string }[]): string[] {
   return items.map((item) => item.label);

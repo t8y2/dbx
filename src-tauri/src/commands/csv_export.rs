@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::commands::connection::AppState;
-use dbx_core::csv_export::{export_table_data_csv_core, format_csv, TableCsvExportOptions};
+use dbx_core::csv_export::{export_table_data_csv_core, format_query_result_csv, TableCsvExportOptions};
 use serde::Deserialize;
 use serde_json::Value;
 use tauri::State;
@@ -17,7 +17,7 @@ pub struct QueryResultCsvExportRequest {
 #[tauri::command]
 pub async fn export_query_result_csv(request: QueryResultCsvExportRequest) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let csv = format_csv(&request.columns, &request.rows);
+        let csv = format_query_result_csv(&request.columns, &request.rows);
         std::fs::write(&request.file_path, format!("\u{FEFF}{csv}")).map_err(|err| err.to_string())
     })
     .await

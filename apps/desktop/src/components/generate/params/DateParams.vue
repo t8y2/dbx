@@ -4,7 +4,7 @@ import { useI18n } from "vue-i18n";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { RefreshCw } from "@lucide/vue";
-import type { GeneratorParams } from "@/lib/dataGenerate";
+import type { GeneratorParams } from "@/lib/dataGrid/dataGenerate";
 
 const props = defineProps<{ params: GeneratorParams }>();
 
@@ -56,7 +56,7 @@ function refresh() {
             }
           "
           type="date"
-          class="h-7 w-full min-w-0 rounded-lg border bg-transparent px-2.5 py-1 text-xs outline-none transition-colors dark:bg-input/30 border-input focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-3"
+          class="h-7 w-full min-w-0 rounded-[6px] border bg-transparent px-2.5 py-1 text-xs outline-none transition-colors dark:bg-input/30 border-input focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-3"
         />
       </div>
       <div class="grid grid-cols-[80px_1fr] items-center gap-2 text-xs mt-2">
@@ -71,7 +71,7 @@ function refresh() {
             }
           "
           type="date"
-          class="h-7 w-full min-w-0 rounded-lg border bg-transparent px-2.5 py-1 text-xs outline-none transition-colors dark:bg-input/30 border-input focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-3"
+          class="h-7 w-full min-w-0 rounded-[6px] border bg-transparent px-2.5 py-1 text-xs outline-none transition-colors dark:bg-input/30 border-input focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-3"
         />
       </div>
     </div>

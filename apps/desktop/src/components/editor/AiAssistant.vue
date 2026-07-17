@@ -1,50 +1,120 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, type Component } from "vue";
-import { uuid } from "@/lib/utils";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch, type Component } from "vue";
+import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
-import { ArrowUp, ArrowRightLeft, AlertTriangle, Bot, Check, ChevronRight, CircleSlash, Copy, Database, GitBranch, HelpCircle, History, Loader2, MessageSquarePlus, Replace, Server, ShieldCheck, Table2, Play, Square, Trash2, Terminal, Wand2, Wrench, X, Zap, TestTube } from "@lucide/vue";
+import {
+  ArrowDown,
+  ArrowUp,
+  ArrowRightLeft,
+  AlertTriangle,
+  Bot,
+  Check,
+  ChevronRight,
+  CircleSlash,
+  Copy,
+  Database,
+  FileCode,
+  FlaskConical,
+  GitBranch,
+  HelpCircle,
+  History,
+  Loader2,
+  MessageSquarePlus,
+  Pencil,
+  Replace,
+  Server,
+  ShieldCheck,
+  Table2,
+  Play,
+  Square,
+  Trash2,
+  Terminal,
+  Wand2,
+  Wrench,
+  X,
+  Zap,
+  TestTube,
+  Search,
+} from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useTheme } from "@/composables/useTheme";
-import { useSettingsStore } from "@/stores/settingsStore";
+import { useSettingsStore, AI_PROVIDER_PRESETS, normalizeAiConfig } from "@/stores/settingsStore";
+import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { connectionIconType } from "@/lib/connectionPresentation";
+import { useSavedSqlStore } from "@/stores/savedSqlStore";
+import { connectionIconType } from "@/lib/connection/connectionPresentation";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
+import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
-import { buildAiContext, runAgentStream, type AiAction } from "@/lib/ai";
-import type { AgentEvent } from "@/lib/tauri";
-import { buildAiAgentPlan } from "@/lib/aiAgentPlan";
-import { buildAiAgentStepItems, type AiAgentStepItem, type AiAgentStepTone } from "@/lib/aiAgentStepPresentation";
-import { createAiShikiCodeHighlighter, type AiCodeHighlighter } from "@/lib/aiCodeHighlighter";
-import { createAiMessageRenderer } from "@/lib/aiMessageRender";
-import { Marked } from "marked";
-import { aiCancelStream, saveAiConversation, loadAiConversations, deleteAiConversation, listSchemas, listTables, type AiConversation } from "@/lib/api";
-import type { AiMessage } from "@/lib/api";
-import type { ConnectionConfig, QueryTab, TableInfo } from "@/types/database";
+import { useNavigationTargets } from "@/composables/useNavigationTargets";
+import { buildAiContext, runAgentStream, isVectorDbType, isValidActionForMode, defaultActionForMode, type AiAction, type AiAssistantMode, type AiSqlFileContext } from "@/lib/ai/ai";
+import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
+import { normalizeClaudeCodeReasoningLevel } from "@/lib/ai/aiModelEffort";
+
+import type { AgentEvent } from "@/lib/backend/tauri";
+import { buildAiAgentPlan } from "@/lib/ai/aiAgentPlan";
+import { extractFirstSqlCodeBlock } from "@/lib/ai/aiSqlExecutionPolicy";
+import { productionContextForDatabase } from "@/lib/database/productionSafety";
+import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
+import { buildAiAgentStepItems, toolCallStepKey, upsertAgentStep, type AiAgentStepItem, type AiAgentStepTone } from "@/lib/ai/aiAgentStepPresentation";
+import { createAiShikiCodeHighlighter, type AiCodeHighlighter } from "@/lib/ai/aiCodeHighlighter";
+import { createAiMessageRenderer } from "@/lib/ai/aiMessageRender";
+import { formatAiInlineMarkdown, handleAiMarkdownLinkClick } from "@/lib/ai/aiMarkdown";
+import { aiCancelStream, saveAiConversation, loadAiConversations, deleteAiConversation, listSchemas, listTables, type AiConversation } from "@/lib/backend/api";
+import type { AiMessage } from "@/lib/backend/api";
+import type { ConnectionConfig, QueryTab, SavedSqlFile, TableInfo } from "@/types/database";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
-import { decodeSelectableDatabaseValue, encodeSelectableDatabaseValue, formatDatabaseLabel, resolveDefaultDatabase } from "@/lib/defaultDatabase";
-import { isSchemaAware } from "@/lib/databaseCapabilities";
+import { decodeSelectableDatabaseValue, encodeSelectableDatabaseValue, formatDatabaseLabel, resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
+import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import ExplainPlanViewer from "@/components/explain/ExplainPlanViewer.vue";
-import { parseExplainResult, type ParsedExplainPlan } from "@/lib/explainPlan";
-import { copyToClipboard } from "@/lib/clipboard";
-import { formatAiTableMention, parseAiTableMentions, type AiTableMention } from "@/lib/aiTableMentions";
-import { isAiPromptImeCompositionEvent, shouldSubmitAiPromptOnKeydown } from "@/lib/aiPromptKeyboard";
+import { parseExplainResult, parseOracleExplainText, type ParsedExplainPlan } from "@/lib/diagram/explainPlan";
+import { copyToClipboard } from "@/lib/common/clipboard";
+import { AI_TABLE_MENTION_CANDIDATE_LIMIT, AI_TABLE_MENTION_SCHEMA_LIMIT, filterAiTableMentionCandidates, formatAiTableMention, parseAiTableMentions, type AiTableMention } from "@/lib/ai/aiTableMentions";
+import { isAiPromptImeCompositionEvent, shouldSubmitAiPromptOnKeydown } from "@/lib/ai/aiPromptKeyboard";
+import { looksLikeActionProposal, containsChinese } from "@/lib/ai/aiProposalDetect";
+import { visibleToActualIndex } from "@/lib/ai/aiMessageEdit";
+import { shouldShowReasoningCharCount, reasoningCharCountClass } from "@/lib/ai/aiReasoningPresentation";
 
 const { t } = useI18n();
 const settings = useSettingsStore();
 const connectionStore = useConnectionStore();
+const savedSqlStore = useSavedSqlStore();
 const queryStore = useQueryStore();
+const { openTableTarget } = useNavigationTargets({
+  showFieldLineageDialog: ref(false),
+  showDatabaseSearchDialog: ref(false),
+  showDiagramDialog: ref(false),
+});
 const { toast } = useToast();
 const { isDark } = useTheme();
+
+type AiMessageMention =
+  | {
+      kind: "table";
+      raw: string;
+      connectionId: string;
+      database: string;
+      schema?: string;
+      table: string;
+    }
+  | {
+      kind: "sqlFile";
+      raw: string;
+      connectionId: string;
+      id: string;
+      name: string;
+    };
 
 interface ChatMessage {
   role: "user" | "assistant";
   content: string;
+  mentions?: AiMessageMention[];
   reasoning?: string;
   isThinking?: boolean;
   agentSteps?: AiAgentStepItem[];
@@ -60,6 +130,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   replaceSql: [sql: string];
   executeSql: [sql: string];
+  tempRunSql: [sql: string];
   requestAutoExecuteSql: [sql: string];
   openExplainPlan: [sql: string];
   close: [];
@@ -69,37 +140,200 @@ const prompt = ref("");
 const messages = ref<ChatMessage[]>([]);
 const isGenerating = ref(false);
 const scrollRef = ref<InstanceType<typeof ScrollArea> | null>(null);
-const activeAction = ref<AiAction>("generate");
+const activeAction = ref<AiAction>("general");
 const assistantMode = ref<"ask" | "agent">("ask");
 const currentSessionId = ref("");
 const conversationId = ref("");
 const conversations = ref<AiConversation[]>([]);
 const showConversationList = ref(false);
 const promptTextareaRef = ref<HTMLTextAreaElement | null>(null);
+const shouldAutoScroll = ref(true);
+const userPausedAutoScroll = ref(false);
+const showScrollToBottom = ref(false);
 const promptCompositionActive = ref(false);
 const shikiCodeHighlighter = ref<AiCodeHighlighter>();
 const agentTokens = ref<{ input: number; output: number } | null>(null);
+const promptHistory = ref<string[]>([]);
+const historyIndex = ref(-1);
+const draftBeforeHistory = ref("");
+
+const editingMessageIndex = ref<number | null>(null);
+const editingContent = ref("");
+const editingMentions = ref<AiPromptMentionChip[]>([]);
+const editCompositionActive = ref(false);
+const MESSAGE_SCROLL_RESUME_THRESHOLD_PX = 16;
+const MESSAGE_SCROLL_BUTTON_SHOW_THRESHOLD_PX = 120;
+const MESSAGE_SCROLL_BUTTON_HIDE_THRESHOLD_PX = 48;
+let messageScrollViewport: HTMLElement | null = null;
+let messageTouchStartY: number | null = null;
+let lastMessageScrollTop = 0;
+let assistantDeltaFrame: number | null = null;
+let pendingAssistantDelta = "";
+let pendingAssistantReasoning = "";
+let pendingAssistantIndex = -1;
+
+function startEditMessage(visibleIndex: number) {
+  if (isGenerating.value) return;
+  editingMessageIndex.value = visibleIndex;
+  const msg = visibleMessages.value[visibleIndex];
+  editingContent.value = msg.content;
+  editingMentions.value = promptMentionChipsFromMessage(msg);
+  nextTick(() => {
+    const el = document.querySelector<HTMLTextAreaElement>("[data-edit-textarea]");
+    if (el) {
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+    }
+  });
+}
+
+function cancelEdit() {
+  editingMessageIndex.value = null;
+  editingContent.value = "";
+  editingMentions.value = [];
+}
+
+function submitEdit(visibleIndex: number) {
+  const content = editingContent.value.trim();
+  if (!content && !editingMentions.value.length) return;
+  const actualIndex = visibleToActualIndex(messages.value, visibleIndex);
+  if (actualIndex < 0) return;
+  if (!props.connection || !props.tab) return;
+  if (!settings.isConfigured) {
+    toast(t("ai.noConfig"));
+    return;
+  }
+  messages.value = messages.value.slice(0, actualIndex);
+  editingMessageIndex.value = null;
+  editingContent.value = "";
+  selectedMentions.value = editingMentions.value.filter((mention): mention is AiTableMention & { kind: "table" } => mention.kind === "table").map(({ raw, schema, table }) => ({ raw, schema, table }));
+  selectedSqlFileMentions.value = editingMentions.value.filter((mention): mention is AiSqlFileMention => mention.kind === "sqlFile");
+  editingMentions.value = [];
+  prompt.value = content;
+  send();
+}
+
+function onEditKeydown(event: KeyboardEvent, visibleIndex: number) {
+  if (isAiPromptImeCompositionEvent(event, editCompositionActive.value)) return;
+  if (event.key === "Escape") {
+    cancelEdit();
+    return;
+  }
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    submitEdit(visibleIndex);
+  }
+}
+
+// Inline model selector
+const providerSelectorOpen = ref(false);
+const modelSearchQuery = ref("");
+
+// Configured providers for quick switching - get from aiConfigs
+const configuredProviders = computed(() => {
+  const providers = orderAiConfigsForDisplay(
+    settings.aiConfigs.filter((c) => {
+      // Check directly if config has required fields
+      const preset = AI_PROVIDER_PRESETS[c.provider];
+      if (c.provider === "codex-cli" || c.provider === "claude-code-cli") return true;
+      return !!c.endpoint?.trim() && !!c.model?.trim() && (!preset.requiresApiKey || !!c.apiKey?.trim());
+    }),
+  );
+  // Apply search filter - hide providers with no matching models
+  if (modelSearchQuery.value.trim()) {
+    const query = modelSearchQuery.value.trim().toLowerCase();
+    return providers.filter((c) => {
+      const models = getModelsForConfig(c.id);
+      return models.some((model) => model.toLowerCase().includes(query));
+    });
+  }
+  return providers;
+});
+
+const activeFullConfig = computed(() => {
+  if (!settings.activeModel) return null;
+  const item = settings.aiConfigs.find((c) => c.id === settings.activeModel!.configId);
+  if (!item) return null;
+  const modelId = settings.activeModel.modelId;
+  const config = normalizeAiConfig({ ...item, model: modelId });
+  if (config.provider === "claude-code-cli") {
+    config.reasoningLevel = normalizeClaudeCodeReasoningLevel(
+      config.reasoningLevel,
+      item.models?.find((model) => model.name === modelId),
+    );
+  }
+  return config;
+});
+
+function getModelsForConfig(configId: string): string[] {
+  const config = settings.aiConfigs.find((c) => c.id === configId);
+  if (!config) return [];
+  const models = config.models?.map((m) => m.name) || [];
+  // Always include the current model
+  if (config.model && !models.includes(config.model)) {
+    return [config.model, ...models];
+  }
+  return models;
+}
+
+function getConfigModelOptionIds(configId: string): string[] {
+  const config = settings.aiConfigs.find((c) => c.id === configId);
+  if (!config) return [];
+  let models = getModelsForConfig(configId);
+  // Apply search filter
+  if (modelSearchQuery.value.trim()) {
+    const query = modelSearchQuery.value.trim().toLowerCase();
+    models = models.filter((model) => model.toLowerCase().includes(query));
+  }
+  return models;
+}
+
+function handleModelSelect(configId: string, modelId: string) {
+  const config = settings.aiConfigs.find((c) => c.id === configId);
+  if (!config) return;
+  settings.updateActiveModel({ configId, modelId });
+  providerSelectorOpen.value = false;
+}
 
 /** Deferred context compaction info; applied after stream ends to avoid shifting assistantIdx. */
 const pendingCompaction = ref<{ summary: string; compactedMessages: number } | null>(null);
 
-// 新增：输入框拖拽调整相关常量
-const AI_TEXTAREA_MIN_ROWS = 3;
-const AI_TEXTAREA_MAX_ROWS = 8;
-const AI_TEXTAREA_LINE_HEIGHT_PX = 20;
-const AI_TEXTAREA_ROWS_STORAGE_KEY = "dbx-ai-textarea-rows";
+const AI_TEXTAREA_MIN_HEIGHT_PX = 64;
+const AI_TEXTAREA_MAX_PANEL_RATIO = 0.5;
+const AI_TEXTAREA_HEIGHT_STORAGE_KEY = "dbx-ai-textarea-height";
 
-// 新增：输入框拖拽调整相关状态
-const textareaRows = ref<number>(AI_TEXTAREA_MIN_ROWS);
+const textareaHeight = ref<number>(AI_TEXTAREA_MIN_HEIGHT_PX);
+const assistantRootRef = ref<HTMLElement | null>(null);
+const promptPanelRef = ref<HTMLElement | null>(null);
 const isResizing = ref<boolean>(false);
 let resizeStartY = 0;
-let resizeStartRows = 0;
+let resizeStartHeight = 0;
+let promptPanelResizeObserver: ResizeObserver | undefined;
 
-interface AiMentionCandidate {
+interface AiTableMentionCandidate {
+  kind: "table";
   schema?: string;
   name: string;
   tableType: string;
 }
+
+interface AiSqlFileMentionCandidate {
+  kind: "sqlFile";
+  id: string;
+  name: string;
+  folderPath?: string;
+}
+
+type AiMentionCandidate = AiTableMentionCandidate | AiSqlFileMentionCandidate;
+
+interface AiSqlFileMention {
+  kind: "sqlFile";
+  raw: string;
+  id: string;
+  name: string;
+}
+
+type AiPromptMentionChip = (AiTableMention & { kind: "table" }) | AiSqlFileMention;
 
 const mentionOpen = ref(false);
 const mentionLoading = ref(false);
@@ -108,11 +342,35 @@ const mentionStart = ref(0);
 const mentionSelectedIndex = ref(0);
 const mentionCandidates = ref<AiMentionCandidate[]>([]);
 const mentionCache = ref<Record<string, AiMentionCandidate[]>>({});
+const mentionListRef = ref<HTMLElement | null>(null);
 const selectedMentions = ref<AiTableMention[]>([]);
+const selectedSqlFileMentions = ref<AiSqlFileMention[]>([]);
 let mentionTimer: ReturnType<typeof setTimeout> | undefined;
 let mentionRequestId = 0;
 
-const actionButtons: { action: AiAction; icon: Component; key: string }[] = [
+// Slash command menu
+const commandOpen = ref(false);
+const commandSelectedIndex = ref(0);
+const commandStart = ref(0);
+
+const filteredCommands = computed(() => {
+  const query = prompt.value.slice(commandStart.value + 1).toLowerCase();
+  return actionButtons.value.filter((cmd) => cmd.action.toLowerCase().includes(query) || t(cmd.key).toLowerCase().includes(query));
+});
+
+const AI_SQL_FILE_MENTION_CANDIDATE_LIMIT = 50;
+const AI_SQL_FILE_CONTEXT_MAX_CHARS = 12_000;
+
+interface AiActionButton {
+  action: AiAction;
+  icon: Component;
+  /** i18n key for the menu label. */
+  key: string;
+}
+
+/** Ask-mode actions: SQL-producing, never auto-run. */
+const askActionButtons: AiActionButton[] = [
+  { action: "general", icon: MessageSquarePlus, key: "ai.actions.general" },
   { action: "generate", icon: Wand2, key: "ai.actions.generate" },
   { action: "explain", icon: HelpCircle, key: "ai.actions.explain" },
   { action: "optimize", icon: Zap, key: "ai.actions.optimize" },
@@ -120,6 +378,52 @@ const actionButtons: { action: AiAction; icon: Component; key: string }[] = [
   { action: "convert", icon: ArrowRightLeft, key: "ai.actions.convert" },
   { action: "sampleData", icon: TestTube, key: "ai.actions.sampleData" },
 ];
+
+/** Agent-mode actions: task-oriented, drive tool use and real results. */
+const agentActionButtons: AiActionButton[] = [
+  { action: "general", icon: MessageSquarePlus, key: "ai.actions.general" },
+  { action: "query", icon: Search, key: "ai.actions.query" },
+  { action: "exploreSchema", icon: Table2, key: "ai.actions.exploreSchema" },
+  { action: "executeAndExplain", icon: Play, key: "ai.actions.executeAndExplain" },
+  // `generate` is shared with Ask so users can still request SQL-only output without execution.
+  { action: "generate", icon: Wand2, key: "ai.actions.generateNoExec" },
+];
+
+const actionButtons = computed<AiActionButton[]>(() => (assistantMode.value === "agent" ? agentActionButtons : askActionButtons));
+
+// Vector DBs hide the action menu and only expose collection tools.
+// Keep their action at `generate` so the task contract doesn't tell the LLM to call execute_query.
+function resolveDefaultAction(mode: AiAssistantMode): AiAction {
+  if (props.connection && isVectorDbType(props.connection.db_type)) return "generate";
+  return defaultActionForMode(mode);
+}
+
+// Switching mode is a deliberate context change: land on that mode's default action so the
+// menu and behavior match the new intent. The shared `general` action is the default.
+//
+// `triggerAction` may set the action itself after programmatically switching mode (e.g. "Fix
+// with AI" invoked from Agent mode); `suppressModeActionReset` tells this watch to skip the
+// default reset so the menu keeps reflecting the action actually being run.
+let suppressModeActionReset = false;
+watch(assistantMode, (mode) => {
+  if (suppressModeActionReset) {
+    suppressModeActionReset = false;
+    return;
+  }
+  activeAction.value = resolveDefaultAction(mode);
+});
+
+watch(
+  () => props.connection?.db_type,
+  () => {
+    // Vector DBs hide the action picker, so keep the hidden action aligned with
+    // the collection-oriented prompt contract on initial render and connection changes.
+    if (props.connection && isVectorDbType(props.connection.db_type)) {
+      activeAction.value = "generate";
+    }
+  },
+  { immediate: true },
+);
 
 function selectAction(action: AiAction) {
   activeAction.value = action;
@@ -144,27 +448,86 @@ function messagesForAgentHistory(historyMessages: ChatMessage[]): AiMessage[] {
     }
   }
   if (latestSummaryIndex < 0) {
-    return historyMessages.map((m) => ({ role: m.role, content: m.content }));
+    return historyMessages.map((m) => ({ role: m.role, content: messageContentForModel(m) }));
   }
   const compactedHistory = historyMessages.slice(latestSummaryIndex);
   const firstMsg = historyMessages[0];
   if (firstMsg && firstMsg.role === "user" && firstMsg.kind !== "contextSummary") {
-    return [{ role: "user" as const, content: firstMsg.content }, ...compactedHistory.map((m) => ({ role: m.role, content: m.content }))];
+    return [{ role: "user" as const, content: messageContentForModel(firstMsg) }, ...compactedHistory.map((m) => ({ role: m.role, content: messageContentForModel(m) }))];
   }
-  return compactedHistory.map((m) => ({ role: m.role, content: m.content }));
+  return compactedHistory.map((m) => ({ role: m.role, content: messageContentForModel(m) }));
 }
 
 const chatTitle = computed(() => {
   const first = messages.value.find((m) => m.role === "user" && m.kind !== "contextSummary");
-  return first ? first.content.slice(0, 30) : t("ai.newChat");
+  return first ? messageTitle(first).slice(0, 30) : t("ai.newChat");
 });
 
-const promptMentionChips = computed(() => selectedMentions.value);
+const promptMentionChips = computed<AiPromptMentionChip[]>(() => [...selectedMentions.value.map((mention) => ({ ...mention, kind: "table" as const })), ...selectedSqlFileMentions.value]);
+
+function messageMentionLabels(message: ChatMessage): string[] {
+  return promptMentionChipsFromMessage(message).map((mention) => mention.raw);
+}
+
+function messageContentForModel(message: ChatMessage): string {
+  if (message.kind === "contextSummary") return message.content;
+  return [...messageMentionLabels(message), message.content].filter(Boolean).join(" ");
+}
+
+function messageTitle(message: ChatMessage): string {
+  return [promptMentionChipsFromMessage(message).map(mentionDisplayName).join(" "), message.content].filter(Boolean).join(" ") || t("ai.newChat");
+}
 
 const isWaitingForFirstDelta = computed(() => {
   const last = messages.value[messages.value.length - 1];
   return isGenerating.value && last?.role === "assistant" && !last.content && !last.reasoning;
 });
+
+/**
+ * The last assistant message whose final line looks like an action
+ * proposal question. Used to render an inline "Yes / No" confirmation bar
+ * so the user can answer without typing. `null` while the assistant is
+ * still generating or when no such message exists.
+ */
+const proposalConfirmMessage = computed<ChatMessage | null>(() => {
+  if (isGenerating.value) return null;
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const msg = messages.value[i];
+    if (msg.kind === "contextSummary") continue;
+    if (msg.role !== "assistant") return null;
+    if (!msg.content) return null;
+    return looksLikeActionProposal(msg.content) ? msg : null;
+  }
+  return null;
+});
+
+let allowWriteSqlForNextRun = false;
+
+const productionContext = computed(() => productionContextForDatabase(props.connection, props.tab?.database));
+
+function proposalContainsWriteSql(content: string) {
+  return /\b(insert|update|delete|replace|merge|create|alter|drop|truncate|rename|grant|revoke)\b/i.test(content);
+}
+
+function sendProposalReply(positive: boolean) {
+  // Disable while a stream is in flight or no proposal is currently active.
+  if (isGenerating.value) return;
+  const target = proposalConfirmMessage.value;
+  if (!target) return;
+  if (positive && productionContext.value.active && proposalContainsWriteSql(target.content)) {
+    const sql = extractFirstSqlCodeBlock(target.content);
+    if (sql) emit("replaceSql", sql);
+    toast(t("production.aiReviewRequired"), 5000);
+    return;
+  }
+  const isZh = containsChinese(target.content || "");
+  const replyZh = positive ? "请执行上面你刚提议的操作，不要再反问确认。" : "不用执行上面提到的操作，继续当前对话。";
+  const replyEn = positive ? "Execute the action you just proposed above; do not ask for confirmation again." : "Do not execute the action mentioned above; continue the current conversation.";
+  prompt.value = isZh ? replyZh : replyEn;
+  allowWriteSqlForNextRun = positive && assistantMode.value === "agent" && proposalContainsWriteSql(target.content);
+  // Use the existing send pipeline so the message is added to history, persisted, etc.
+  send();
+}
 
 const activePlaceholder = computed(() => `${t(`ai.placeholders.${activeAction.value}`)} ${t("ai.tableMentionPlaceholderHint")}`);
 const activeModeHint = computed(() => t(`ai.modeHints.${assistantMode.value}`));
@@ -183,13 +546,18 @@ const assistantModeItems = computed(() => [
   },
 ]);
 const actionMenuItems = computed(() =>
-  actionButtons.map((button) => ({
+  actionButtons.value.map((button) => ({
     value: button.action,
     label: t(button.key),
     icon: button.icon,
   })),
 );
 const aiCodeAppearance = computed(() => (isDark.value ? "dark" : "light"));
+
+const showActionButtons = computed(() => {
+  if (!props.connection) return true;
+  return !isVectorDbType(props.connection.db_type);
+});
 
 const { databaseOptions: allDbOptions, loadDatabaseOptions } = useDatabaseOptions();
 
@@ -256,22 +624,44 @@ function changeDatabase(value: string) {
   queryStore.updateDatabase(tab.id, decodeSelectableDatabaseValue(connection.db_type, value));
 }
 
+function flushAssistantDeltas() {
+  assistantDeltaFrame = null;
+  const msg = messages.value[pendingAssistantIndex];
+  if (!msg) return;
+  if (pendingAssistantReasoning) {
+    msg.reasoning = (msg.reasoning || "") + pendingAssistantReasoning;
+    msg.isThinking = true;
+  }
+  if (pendingAssistantDelta) {
+    msg.isThinking = false;
+    msg.content += pendingAssistantDelta;
+  }
+  pendingAssistantDelta = "";
+  pendingAssistantReasoning = "";
+  scrollToBottom();
+}
+
+function scheduleAssistantDeltaFlush(assistantIdx: number) {
+  pendingAssistantIndex = assistantIdx;
+  if (assistantDeltaFrame !== null) return;
+  // Providers can emit many tiny chunks. Render once per animation frame so
+  // Markdown parsing, highlighting, and layout do not run for every token.
+  assistantDeltaFrame = requestAnimationFrame(flushAssistantDeltas);
+}
+
 function appendAssistantDelta(assistantIdx: number, delta: string) {
   const msg = messages.value[assistantIdx];
   if (msg.isThinking) msg.isThinking = false;
-  msg.content += delta;
-  scrollToBottom();
+  pendingAssistantDelta += delta;
+  scheduleAssistantDeltaFlush(assistantIdx);
 }
 
 function appendAssistantReasoning(assistantIdx: number, delta: string) {
-  const msg = messages.value[assistantIdx];
-  if (!msg.reasoning) msg.reasoning = "";
-  msg.reasoning += delta;
-  msg.isThinking = true;
-  scrollToBottom();
+  pendingAssistantReasoning += delta;
+  scheduleAssistantDeltaFlush(assistantIdx);
 }
 
-const expandedReasoning = ref<Set<number>>(new Set());
+const reasoningExpanded = ref(false);
 const expandedSteps = ref<Set<string>>(new Set());
 
 function toggleStep(key: string) {
@@ -289,17 +679,18 @@ function agentStepIcon(tone: AiAgentStepTone) {
 }
 
 function agentStepClass(tone: AiAgentStepTone): string {
+  const base = "transition-colors duration-200 ease-out motion-safe:transition-colors motion-reduce:transition-none";
   switch (tone) {
     case "success":
-      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
+      return `border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 ${base}`;
     case "active":
-      return "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300";
+      return `border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300 ${base}`;
     case "warning":
-      return "border-amber-500/35 bg-amber-500/10 text-amber-700 dark:text-amber-300";
+      return `border-amber-500/35 bg-amber-500/10 text-amber-700 dark:text-amber-300 ${base}`;
     case "danger":
-      return "border-red-500/35 bg-red-500/10 text-red-700 dark:text-red-300";
+      return `border-red-500/35 bg-red-500/10 text-red-700 dark:text-red-300 ${base}`;
     default:
-      return "border-border bg-background/60 text-muted-foreground";
+      return `border-border bg-background/60 text-muted-foreground ${base}`;
   }
 }
 
@@ -307,9 +698,19 @@ function agentStepClass(tone: AiAgentStepTone): string {
 function extractToolResultContent(result: unknown): string | undefined {
   if (!result) return undefined;
   if (typeof result === "string") return result;
+  if (Array.isArray(result)) return result.map(extractToolResultContent).filter(Boolean).join("\n");
   if (typeof result === "object" && result !== null && "content" in result) {
     const content = (result as Record<string, unknown>).content;
+    if (Array.isArray(content)) return content.map(extractToolResultContent).filter(Boolean).join("\n");
     return typeof content === "string" ? content : JSON.stringify(content);
+  }
+  if (typeof result === "object" && result !== null && "text" in result) {
+    const text = (result as Record<string, unknown>).text;
+    if (typeof text === "string") return text;
+  }
+  if (typeof result === "object" && result !== null && "message" in result) {
+    const message = (result as Record<string, unknown>).message;
+    if (typeof message === "string") return message;
   }
   return JSON.stringify(result);
 }
@@ -323,6 +724,9 @@ function extractExplainData(result: unknown): unknown | undefined {
 
 /** Parse explain_data (a serialized QueryResult) into ParsedExplainPlan */
 function parseExplainFromData(explainData: unknown, dbType: string): ParsedExplainPlan | undefined {
+  if (dbType === "oracle" && typeof explainData === "string") {
+    return parseOracleExplainText(explainData);
+  }
   if (!explainData || typeof explainData !== "object") return undefined;
   const supportedTypes = ["mysql", "postgres", "dameng", "questdb"] as const;
   if (!supportedTypes.includes(dbType as (typeof supportedTypes)[number])) return undefined;
@@ -346,47 +750,192 @@ function agentEventToStep(event: AgentEvent, index: number): AiAgentStepItem | u
 
   if (event.type !== "tool_call_start" && event.type !== "tool_call_end") return undefined;
 
-  const isExecuteQuery = event.tool_name === "execute_query";
-  const labelKey = event.type === "tool_call_start" ? "ai.agentSteps.callingTool" : isExecuteQuery ? (event.is_error ? "ai.agentSteps.executeBlocked" : "ai.agentSteps.executeSafe") : event.is_error ? "ai.agentSteps.toolError" : "ai.agentSteps.toolDone";
-  const tone = (event.type === "tool_call_start" ? "active" : event.is_error ? "danger" : "success") as AiAgentStepTone;
+  // Use a stable key based on tool_call_id so start and end events map to the same card.
+  const toolKey = toolCallStepKey(event.tool_call_id, index, event.type);
+
+  if (event.type === "tool_call_start") {
+    return {
+      key: toolKey,
+      labelKey: "ai.agentSteps.callingTool",
+      tone: "active",
+      toolName: event.tool_name,
+      toolArgs: event.args as Record<string, unknown>,
+    };
+  }
+
+  // tool_call_end: produce a final step; toolArgs will be merged from the start step by upsert if missing.
+  const isExecuteQuery = event.tool_name === "execute_query" || event.tool_name === "dbx_execute_query";
+  const labelKey = isExecuteQuery ? (event.is_error ? "ai.agentSteps.executeBlocked" : "ai.agentSteps.executeSafe") : event.is_error ? "ai.agentSteps.toolError" : "ai.agentSteps.toolDone";
+  const tone: AiAgentStepTone = event.is_error ? "danger" : "success";
 
   return {
-    key: `${event.tool_call_id || ""}-${event.type}`,
+    key: toolKey,
     labelKey,
     tone,
-    titleKey: undefined,
-    titleParams: { tool: event.tool_name || "" },
     toolName: event.tool_name,
-    toolArgs: event.type === "tool_call_start" ? (event.args as Record<string, unknown>) : undefined,
-    toolResult: event.type === "tool_call_end" && !event.is_error ? extractToolResultContent(event.result) : undefined,
-    explainData: event.type === "tool_call_end" ? extractExplainData(event.result) : undefined,
-    isError: event.type === "tool_call_end" ? event.is_error : undefined,
+    toolResult: extractToolResultContent(event.result),
+    explainData: extractExplainData(event.result),
+    isError: event.is_error,
   };
 }
 
-function toggleReasoning(index: number) {
-  const next = new Set(expandedReasoning.value);
-  if (next.has(index)) {
-    next.delete(index);
-  } else {
-    next.add(index);
-  }
-  expandedReasoning.value = next;
+function toggleReasoning() {
+  reasoningExpanded.value = !reasoningExpanded.value;
 }
 
-function scrollToBottom() {
+function getMessageScrollViewport(): HTMLElement | null {
+  const root = scrollRef.value?.$el as HTMLElement | undefined;
+  return root?.querySelector('[data-slot="scroll-area-viewport"]') as HTMLElement | null;
+}
+
+function messageBottomDistance(el: HTMLElement) {
+  return Math.max(0, el.scrollHeight - el.scrollTop - el.clientHeight);
+}
+
+function isAtMessageBottom(el: HTMLElement) {
+  return messageBottomDistance(el) <= MESSAGE_SCROLL_RESUME_THRESHOLD_PX;
+}
+
+function messageCanScroll(el: HTMLElement) {
+  return el.scrollHeight > el.clientHeight + MESSAGE_SCROLL_RESUME_THRESHOLD_PX;
+}
+
+function shouldShowMessageScrollButton(el: HTMLElement) {
+  if (!messageCanScroll(el)) return false;
+  const distance = messageBottomDistance(el);
+  return distance > (showScrollToBottom.value ? MESSAGE_SCROLL_BUTTON_HIDE_THRESHOLD_PX : MESSAGE_SCROLL_BUTTON_SHOW_THRESHOLD_PX);
+}
+
+function updateMessageScrollButtonVisibility() {
+  const el = getMessageScrollViewport();
+  showScrollToBottom.value = !!el && shouldShowMessageScrollButton(el);
+}
+
+function pauseMessageAutoScroll() {
+  userPausedAutoScroll.value = true;
+  shouldAutoScroll.value = false;
+  updateMessageScrollButtonVisibility();
+}
+
+function updateMessageScrollState() {
+  const el = getMessageScrollViewport();
+  if (!el) {
+    showScrollToBottom.value = false;
+    return;
+  }
+  if (isAtMessageBottom(el)) {
+    userPausedAutoScroll.value = false;
+    shouldAutoScroll.value = true;
+    showScrollToBottom.value = false;
+    return;
+  }
+  if (userPausedAutoScroll.value) {
+    shouldAutoScroll.value = false;
+    showScrollToBottom.value = shouldShowMessageScrollButton(el);
+    return;
+  }
+  shouldAutoScroll.value = false;
+  showScrollToBottom.value = shouldShowMessageScrollButton(el);
+}
+
+function handleMessageScroll() {
+  const el = getMessageScrollViewport();
+  if (!el) return;
+  if (el.scrollTop < lastMessageScrollTop - 2) {
+    userPausedAutoScroll.value = true;
+  }
+  lastMessageScrollTop = el.scrollTop;
+  updateMessageScrollState();
+}
+
+function handleMessageWheel(event: WheelEvent) {
+  if (event.deltaY < 0) pauseMessageAutoScroll();
+}
+
+function handleMessageTouchStart(event: TouchEvent) {
+  messageTouchStartY = event.touches[0]?.clientY ?? null;
+}
+
+function handleMessageTouchMove(event: TouchEvent) {
+  if (messageTouchStartY == null) return;
+  const currentY = event.touches[0]?.clientY ?? messageTouchStartY;
+  if (currentY - messageTouchStartY > 4) pauseMessageAutoScroll();
+}
+
+function handleMessageKeydown(event: KeyboardEvent) {
+  if (["ArrowUp", "PageUp", "Home"].includes(event.key)) pauseMessageAutoScroll();
+}
+
+function detachMessageScrollListener() {
+  if (!messageScrollViewport) return;
+  messageScrollViewport.removeEventListener("scroll", handleMessageScroll);
+  messageScrollViewport.removeEventListener("wheel", handleMessageWheel);
+  messageScrollViewport.removeEventListener("touchstart", handleMessageTouchStart);
+  messageScrollViewport.removeEventListener("touchmove", handleMessageTouchMove);
+  messageScrollViewport.removeEventListener("keydown", handleMessageKeydown);
+  messageScrollViewport = null;
+}
+
+function attachMessageScrollListener() {
   nextTick(() => {
-    const root = scrollRef.value?.$el as HTMLElement | undefined;
-    const el = root?.querySelector('[data-slot="scroll-area-viewport"]') as HTMLElement | null;
+    const el = getMessageScrollViewport();
+    if (el === messageScrollViewport) return;
+    detachMessageScrollListener();
+    messageScrollViewport = el;
+    if (!el) return;
+    el.addEventListener("scroll", handleMessageScroll, { passive: true });
+    el.addEventListener("wheel", handleMessageWheel, { passive: true });
+    el.addEventListener("touchstart", handleMessageTouchStart, { passive: true });
+    el.addEventListener("touchmove", handleMessageTouchMove, { passive: true });
+    el.addEventListener("keydown", handleMessageKeydown);
+    lastMessageScrollTop = el.scrollTop;
+    updateMessageScrollState();
+  });
+}
+
+function scrollToBottom(options: { force?: boolean } = {}) {
+  if (options.force) {
+    userPausedAutoScroll.value = false;
+    shouldAutoScroll.value = true;
+  }
+  if (!options.force && (userPausedAutoScroll.value || !shouldAutoScroll.value)) {
+    updateMessageScrollButtonVisibility();
+    return;
+  }
+  nextTick(() => {
+    const el = getMessageScrollViewport();
     if (!el) return;
     requestAnimationFrame(() => {
+      if (!options.force && (userPausedAutoScroll.value || !shouldAutoScroll.value)) {
+        updateMessageScrollButtonVisibility();
+        return;
+      }
       el.scrollTop = el.scrollHeight;
+      lastMessageScrollTop = el.scrollTop;
+      userPausedAutoScroll.value = false;
+      shouldAutoScroll.value = true;
+      showScrollToBottom.value = false;
     });
   });
 }
 
+watch(
+  () => messages.value.length,
+  (length) => {
+    if (length) {
+      attachMessageScrollListener();
+      return;
+    }
+    detachMessageScrollListener();
+    userPausedAutoScroll.value = false;
+    shouldAutoScroll.value = true;
+    showScrollToBottom.value = false;
+  },
+  { flush: "post" },
+);
+
 function mentionCacheKey(connectionId: string, database: string, query: string) {
-  return `${connectionId}:${database}:${query.toLowerCase()}`;
+  return `${connectionId}:${database}:${savedSqlStore.version}:${query.toLowerCase()}`;
 }
 
 function mentionSchemaOrder(schemas: string[]): string[] {
@@ -432,40 +981,49 @@ async function loadMentionCandidates(query: string) {
   mentionLoading.value = true;
   mentionError.value = "";
   const { schemaPrefix, tableFilter } = normalizeMentionQuery(query);
+  let sqlFileCandidates: AiSqlFileMentionCandidate[] = [];
 
   try {
+    sqlFileCandidates = await loadSqlFileMentionCandidates(query);
     await connectionStore.ensureConnected(props.tab.connectionId);
-    let candidates: AiMentionCandidate[] = [];
+    let tableCandidates: AiMentionCandidate[] = [];
     if (isSchemaAware(props.connection.db_type)) {
       const schemas = mentionSchemaOrder(await listSchemas(props.tab.connectionId, props.tab.database));
       const filteredSchemas = schemaPrefix ? schemas.filter((schema) => schema.toLowerCase().includes(schemaPrefix.toLowerCase())) : schemas;
       const results = await Promise.all(
-        filteredSchemas.slice(0, 8).map(async (schema) => {
-          const tables = await listTables(props.tab!.connectionId, props.tab!.database, schema, tableFilter || undefined, 20);
-          return filterMentionCandidates(
+        filteredSchemas.slice(0, AI_TABLE_MENTION_SCHEMA_LIMIT).map(async (schema) => {
+          const tables = await listTables(props.tab!.connectionId, props.tab!.database, schema, tableFilter || undefined, AI_TABLE_MENTION_CANDIDATE_LIMIT);
+          return filterAiTableMentionCandidates(
             tables.map((table) => mentionCandidateFromTable(table, schema)),
             tableFilter,
-            20,
+            AI_TABLE_MENTION_CANDIDATE_LIMIT,
           );
         }),
       );
-      candidates = results.flat();
+      tableCandidates = filterAiTableMentionCandidates(results.flat(), "", AI_TABLE_MENTION_CANDIDATE_LIMIT);
     } else {
       const schema = props.tab.database || props.connection.database || "main";
-      const tables = await listTables(props.tab.connectionId, props.tab.database, schema, tableFilter || undefined, 40);
-      candidates = filterMentionCandidates(
+      const tables = await listTables(props.tab.connectionId, props.tab.database, schema, tableFilter || undefined, AI_TABLE_MENTION_CANDIDATE_LIMIT);
+      tableCandidates = filterAiTableMentionCandidates(
         tables.map((table) => mentionCandidateFromTable(table)),
         tableFilter,
-        40,
+        AI_TABLE_MENTION_CANDIDATE_LIMIT,
       );
     }
 
     if (requestId !== mentionRequestId) return;
-    mentionCache.value[key] = candidates.slice(0, 40);
+    mentionCache.value[key] = [...tableCandidates, ...sqlFileCandidates];
     mentionCandidates.value = mentionCache.value[key];
-    mentionSelectedIndex.value = 0;
+    setMentionSelectedIndex(0);
   } catch (e: unknown) {
     if (requestId !== mentionRequestId) return;
+    if (sqlFileCandidates.length) {
+      mentionCache.value[key] = sqlFileCandidates;
+      mentionCandidates.value = sqlFileCandidates;
+      mentionError.value = "";
+      setMentionSelectedIndex(0);
+      return;
+    }
     const message = e instanceof Error ? e.message : String(e);
     mentionError.value = translateBackendError(t, message);
     mentionCandidates.value = [];
@@ -474,24 +1032,140 @@ async function loadMentionCandidates(query: string) {
   }
 }
 
-function mentionCandidateFromTable(table: TableInfo, schema?: string): AiMentionCandidate {
-  return { schema, name: table.name, tableType: table.table_type };
+async function loadSqlFileMentionCandidates(query: string): Promise<AiSqlFileMentionCandidate[]> {
+  const connectionId = props.tab?.connectionId;
+  if (!connectionId) return [];
+  await savedSqlStore.initFromStorage();
+  const normalizedQuery = normalizeSqlFileMentionQuery(query);
+  return savedSqlStore.allFiles
+    .filter((file) => file.connectionId === connectionId)
+    .map((file) => ({ file, folderPath: savedSqlFolderPath(file) }))
+    .filter(({ file, folderPath }) => sqlFileMatchesQuery(file, folderPath, normalizedQuery))
+    .slice(0, AI_SQL_FILE_MENTION_CANDIDATE_LIMIT)
+    .map(({ file, folderPath }) => ({
+      kind: "sqlFile",
+      id: file.id,
+      name: file.name,
+      folderPath,
+    }));
 }
 
-function mentionDisplayName(mention: AiTableMention) {
+function normalizeSqlFileMentionQuery(query: string) {
+  return query.replace(/^["`{]+|["`}]+$/g, "").toLowerCase();
+}
+
+function sqlFileMatchesQuery(file: SavedSqlFile, folderPath: string | undefined, query: string) {
+  if (!query) return true;
+  return [file.name, folderPath || ""].some((value) => value.toLowerCase().includes(query));
+}
+
+function savedSqlFolderPath(file: SavedSqlFile): string | undefined {
+  if (!file.folderId) return undefined;
+  const foldersById = new Map(savedSqlStore.allFolders.map((folder) => [folder.id, folder]));
+  const names: string[] = [];
+  let current = foldersById.get(file.folderId);
+  while (current) {
+    names.unshift(current.name);
+    current = current.parentFolderId ? foldersById.get(current.parentFolderId) : undefined;
+  }
+  return names.length ? names.join(" / ") : undefined;
+}
+
+function mentionCandidateFromTable(table: TableInfo, schema?: string): AiTableMentionCandidate {
+  return { kind: "table", schema, name: table.name, tableType: table.table_type };
+}
+
+function mentionCandidateName(candidate: AiMentionCandidate) {
+  if (candidate.kind === "sqlFile") return candidate.name;
+  return [candidate.schema, candidate.name].filter(Boolean).join(".");
+}
+
+function mentionDisplayName(mention: AiPromptMentionChip) {
+  if (mention.kind === "sqlFile") return mention.name;
   return [mention.schema, mention.table].filter(Boolean).join(".");
 }
 
-function removeMentionChip(mention: AiTableMention) {
-  selectedMentions.value = selectedMentions.value.filter((item) => item.raw !== mention.raw);
+function promptMentionChipsFromMessage(message: ChatMessage): AiPromptMentionChip[] {
+  return (message.mentions || []).map((mention) => {
+    if (mention.kind === "sqlFile") return { kind: "sqlFile", raw: mention.raw, id: mention.id, name: mention.name };
+    return { kind: "table", raw: mention.raw, schema: mention.schema, table: mention.table };
+  });
+}
+
+function removeMentionChip(mention: AiPromptMentionChip) {
+  if (mention.kind === "sqlFile") {
+    selectedSqlFileMentions.value = selectedSqlFileMentions.value.filter((item) => item.id !== mention.id);
+  } else {
+    selectedMentions.value = selectedMentions.value.filter((item) => item.raw !== mention.raw);
+  }
   nextTick(() => promptTextareaRef.value?.focus());
 }
 
+function removeEditingMentionChip(index: number) {
+  editingMentions.value = editingMentions.value.filter((_, itemIndex) => itemIndex !== index);
+  nextTick(() => {
+    const el = document.querySelector<HTMLTextAreaElement>("[data-edit-textarea]");
+    el?.focus();
+  });
+}
+
 function addSelectedMention(candidate: AiMentionCandidate) {
+  if (candidate.kind === "sqlFile") {
+    const raw = `@{${candidate.name}}`;
+    if (selectedSqlFileMentions.value.some((mention) => mention.id === candidate.id)) return;
+    selectedSqlFileMentions.value.push({ kind: "sqlFile", raw, id: candidate.id, name: candidate.name });
+    return;
+  }
   const raw = formatAiTableMention(candidate.schema, candidate.name);
   const key = `${candidate.schema || ""}.${candidate.name}`.toLowerCase();
   if (selectedMentions.value.some((mention) => `${mention.schema || ""}.${mention.table}`.toLowerCase() === key)) return;
   selectedMentions.value.push({ raw, schema: candidate.schema, table: candidate.name });
+}
+
+function formatMentionCandidateType(candidate: AiMentionCandidate) {
+  if (candidate.kind === "sqlFile") return candidate.folderPath || "SQL";
+  return formatMentionTableType(candidate.tableType);
+}
+
+function selectedMessageMentions(tableMentions: AiTableMention[], sqlFileMentions: AiSqlFileMention[]): AiMessageMention[] {
+  const connectionId = props.tab?.connectionId || props.connection?.id || "";
+  const database = props.tab?.database || props.connection?.database || "";
+  return [
+    ...tableMentions.map((mention) => ({
+      kind: "table" as const,
+      raw: mention.raw,
+      connectionId,
+      database,
+      schema: mention.schema,
+      table: mention.table,
+    })),
+    ...sqlFileMentions.map((mention) => ({
+      kind: "sqlFile" as const,
+      raw: mention.raw,
+      connectionId,
+      id: mention.id,
+      name: mention.name,
+    })),
+  ];
+}
+
+async function openMessageMention(mention: AiMessageMention) {
+  try {
+    if (mention.kind === "sqlFile") {
+      const file = await savedSqlStore.ensureFileContent(mention.id);
+      if (file) queryStore.openSavedSql(file);
+      return;
+    }
+    await openTableTarget({
+      connectionId: mention.connectionId || props.tab?.connectionId || props.connection?.id || "",
+      database: mention.database || props.tab?.database || props.connection?.database || "",
+      schema: mention.schema,
+      tableName: mention.table,
+    });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    toast(translateBackendError(t, message), 5000);
+  }
 }
 
 function formatMentionTableType(tableType: string) {
@@ -502,15 +1176,54 @@ function formatMentionTableType(tableType: string) {
   return t("ai.tableMentionTypes.table");
 }
 
-function filterMentionCandidates(candidates: AiMentionCandidate[], tableFilter: string, limit: number): AiMentionCandidate[] {
-  const normalizedFilter = tableFilter.toLowerCase();
-  return candidates.filter((candidate) => !normalizedFilter || candidate.name.toLowerCase().includes(normalizedFilter)).slice(0, limit);
+function setMentionSelectedIndex(index: number, keepVisible = true) {
+  mentionSelectedIndex.value = Math.max(0, Math.min(index, Math.max(mentionCandidates.value.length - 1, 0)));
+  if (keepVisible) scrollMentionSelectedIntoView();
+}
+
+function scrollMentionSelectedIntoView() {
+  nextTick(() => {
+    const list = mentionListRef.value;
+    if (!list) return;
+    const item = list.querySelector<HTMLElement>(`[data-mention-index="${mentionSelectedIndex.value}"]`);
+    if (!item) return;
+
+    const listRect = list.getBoundingClientRect();
+    const itemRect = item.getBoundingClientRect();
+    const itemTop = itemRect.top - listRect.top + list.scrollTop;
+    const itemBottom = itemTop + itemRect.height;
+    const visibleTop = list.scrollTop;
+    const visibleBottom = visibleTop + list.clientHeight;
+
+    if (itemTop < visibleTop) {
+      list.scrollTop = itemTop;
+    } else if (itemBottom > visibleBottom) {
+      list.scrollTop = itemBottom - list.clientHeight;
+    }
+  });
 }
 
 function refreshMentionState() {
   clearTimeout(mentionTimer);
+
+  // 优先检测斜杠命令（仅在输入内容为空时触发）
+  const textarea = promptTextareaRef.value;
+  const cursor = textarea?.selectionStart ?? prompt.value.length;
+  const beforeCursor = prompt.value.slice(0, cursor);
+  const slashMatch = /^\/([^\s]*)$/.exec(beforeCursor.trimStart());
+
+  if (slashMatch) {
+    mentionOpen.value = false;
+    commandOpen.value = true;
+    commandStart.value = beforeCursor.length - slashMatch[1].length - 1;
+    commandSelectedIndex.value = 0;
+    return;
+  }
+
+  commandOpen.value = false;
+
   const mention = activeMentionAtCursor();
-  if (!mention || !props.connection || !props.tab?.database || isGenerating.value) {
+  if (!mention || !props.connection || !props.tab?.database) {
     mentionOpen.value = false;
     return;
   }
@@ -520,6 +1233,26 @@ function refreshMentionState() {
   mentionTimer = setTimeout(() => {
     loadMentionCandidates(mention.query).catch(() => {});
   }, 120);
+}
+
+function onPromptKeyup(event: KeyboardEvent) {
+  if (["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(event.key)) return;
+  refreshMentionState();
+}
+
+function selectCommand(command: AiActionButton) {
+  const before = prompt.value.slice(0, commandStart.value);
+  const after = prompt.value.slice(promptTextareaRef.value?.selectionStart ?? prompt.value.length);
+  prompt.value = `${before}${after}`.replace(/\s{2,}/g, " ").trim();
+  commandOpen.value = false;
+  activeAction.value = command.action;
+  nextTick(() => {
+    const textarea = promptTextareaRef.value;
+    if (textarea) {
+      textarea.selectionStart = textarea.selectionEnd = before.length;
+      textarea.focus();
+    }
+  });
 }
 
 function insertMention(candidate: AiMentionCandidate) {
@@ -540,15 +1273,39 @@ function insertMention(candidate: AiMentionCandidate) {
 function onPromptKeydown(event: KeyboardEvent) {
   if (isAiPromptImeCompositionEvent(event, promptCompositionActive.value)) return;
 
-  if (mentionOpen.value) {
+  // 斜杠命令菜单键盘导航
+  if (commandOpen.value) {
     if (event.key === "ArrowDown") {
       event.preventDefault();
-      mentionSelectedIndex.value = Math.min(mentionSelectedIndex.value + 1, Math.max(mentionCandidates.value.length - 1, 0));
+      commandSelectedIndex.value = Math.min(commandSelectedIndex.value + 1, filteredCommands.value.length - 1);
       return;
     }
     if (event.key === "ArrowUp") {
       event.preventDefault();
-      mentionSelectedIndex.value = Math.max(mentionSelectedIndex.value - 1, 0);
+      commandSelectedIndex.value = Math.max(commandSelectedIndex.value - 1, 0);
+      return;
+    }
+    if ((event.key === "Enter" || event.key === "Tab") && filteredCommands.value[commandSelectedIndex.value]) {
+      event.preventDefault();
+      selectCommand(filteredCommands.value[commandSelectedIndex.value]);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      commandOpen.value = false;
+      return;
+    }
+  }
+
+  if (mentionOpen.value) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setMentionSelectedIndex(mentionSelectedIndex.value + 1);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setMentionSelectedIndex(mentionSelectedIndex.value - 1);
       return;
     }
     if ((event.key === "Enter" || event.key === "Tab") && mentionCandidates.value[mentionSelectedIndex.value]) {
@@ -563,32 +1320,100 @@ function onPromptKeydown(event: KeyboardEvent) {
     }
   }
 
+  // Prompt history navigation (↑/↓ when not in @mention dropdown)
+  if (event.key === "ArrowUp" && promptHistory.value.length > 0) {
+    const textarea = promptTextareaRef.value;
+    // Only enter history when cursor is on the first line
+    if (textarea && textarea.selectionStart === 0 && textarea.selectionEnd === 0) {
+      event.preventDefault();
+      if (historyIndex.value === -1) {
+        draftBeforeHistory.value = prompt.value;
+      }
+      const nextIndex = historyIndex.value + 1;
+      if (nextIndex < promptHistory.value.length) {
+        historyIndex.value = nextIndex;
+        prompt.value = promptHistory.value[nextIndex];
+        nextTick(() => {
+          textarea.selectionStart = textarea.selectionEnd = prompt.value.length;
+        });
+      }
+      return;
+    }
+  }
+  if (event.key === "ArrowDown" && historyIndex.value >= 0) {
+    event.preventDefault();
+    const nextIndex = historyIndex.value - 1;
+    if (nextIndex >= 0) {
+      historyIndex.value = nextIndex;
+      prompt.value = promptHistory.value[nextIndex];
+    } else {
+      historyIndex.value = -1;
+      prompt.value = draftBeforeHistory.value;
+    }
+    nextTick(() => {
+      const textarea = promptTextareaRef.value;
+      if (textarea) textarea.selectionStart = textarea.selectionEnd = prompt.value.length;
+    });
+    return;
+  }
+
   if (shouldSubmitAiPromptOnKeydown(event, promptCompositionActive.value)) {
     event.preventDefault();
     send();
   }
 }
 
+async function loadReferencedSqlFiles(mentions: AiSqlFileMention[]): Promise<AiSqlFileContext[]> {
+  if (!mentions.length) return [];
+  const results: AiSqlFileContext[] = [];
+  for (const mention of mentions) {
+    const file = await savedSqlStore.ensureFileContent(mention.id).catch(() => undefined);
+    if (!file) continue;
+    const sql = file.sql || "";
+    const truncated = sql.length > AI_SQL_FILE_CONTEXT_MAX_CHARS;
+    results.push({
+      id: file.id,
+      name: file.name,
+      sql: truncated ? `${sql.slice(0, AI_SQL_FILE_CONTEXT_MAX_CHARS)}\n-- ... truncated ...` : sql,
+      truncated,
+    });
+  }
+  return results;
+}
+
 async function send() {
   const text = prompt.value.trim();
-  if ((!text && !selectedMentions.value.length) || isGenerating.value) return;
+  if ((!text && !selectedMentions.value.length && !selectedSqlFileMentions.value.length) || isGenerating.value) return;
 
   if (!props.connection || !props.tab) return;
-  if (!settings.isConfigured()) {
+  if (!settings.isConfigured) {
     toast(t("ai.noConfig"));
     return;
   }
 
-  const mentionedTables = [...selectedMentions.value, ...parseAiTableMentions(text)];
-  const displayText = [selectedMentions.value.map((mention) => mention.raw).join(" "), text].filter(Boolean).join(" ");
+  const selectedTableMentions = [...selectedMentions.value];
+  const selectedSqlFiles = [...selectedSqlFileMentions.value];
+  const mentionedTables = [...selectedTableMentions, ...parseAiTableMentions(text)];
+  const modelInstruction = [selectedTableMentions.map((mention) => mention.raw).join(" "), selectedSqlFiles.map((mention) => mention.raw).join(" "), text].filter(Boolean).join(" ");
 
-  messages.value.push({ role: "user", content: displayText });
+  messages.value.push({ role: "user", content: text, mentions: selectedMessageMentions(selectedTableMentions, selectedSqlFiles) });
+  // Save to prompt history (deduplicate consecutive duplicates)
+  if (text && promptHistory.value[0] !== text) {
+    promptHistory.value.unshift(text);
+    if (promptHistory.value.length > 100) promptHistory.value.length = 100;
+  }
+  historyIndex.value = -1;
+  draftBeforeHistory.value = "";
   prompt.value = "";
   selectedMentions.value = [];
-  scrollToBottom();
+  selectedSqlFileMentions.value = [];
+  scrollToBottom({ force: true });
 
   const requestedAction = activeAction.value;
   const requestedMode = assistantMode.value;
+  // Agent confirmation cannot grant autonomous writes while the active database is production.
+  const allowWriteSql = requestedMode === "agent" && allowWriteSqlForNextRun && !productionContext.value.active;
+  allowWriteSqlForNextRun = false;
   isGenerating.value = true;
   messages.value.push({ role: "assistant", content: "" });
   const assistantIdx = messages.value.length - 1;
@@ -597,17 +1422,20 @@ async function send() {
   const agentEvents: AgentEvent[] = [];
   agentTokens.value = null;
   try {
+    const sqlFiles = await loadReferencedSqlFiles(selectedSqlFiles);
     const context = await buildAiContext(props.tab, props.connection, {
       mentionedTables,
+      sqlFiles,
     });
     const history: AiMessage[] = messagesForAgentHistory(messages.value.slice(0, -2));
     await runAgentStream(
       {
-        config: settings.aiConfig,
-        action: activeAction.value,
+        config: activeFullConfig.value!,
+        action: requestedAction,
         mode: requestedMode,
-        instruction: displayText,
+        instruction: modelInstruction,
         context,
+        allowWriteSql,
       },
       history,
       (event: AgentEvent) => {
@@ -628,7 +1456,7 @@ async function send() {
           if (msg) {
             if (!msg.agentSteps) msg.agentSteps = [];
             const step = agentEventToStep(event, agentEvents.length - 1);
-            if (step) msg.agentSteps.push(step);
+            if (step) upsertAgentStep(msg.agentSteps, step);
           }
           pendingCompaction.value = { summary: event.summary, compactedMessages: event.compacted_messages };
         }
@@ -638,7 +1466,7 @@ async function send() {
           if (msg) {
             if (!msg.agentSteps) msg.agentSteps = [];
             const step = agentEventToStep(event, agentEvents.length - 1);
-            if (step) msg.agentSteps.push(step);
+            if (step) upsertAgentStep(msg.agentSteps, step);
           }
         }
         scrollToBottom();
@@ -649,26 +1477,33 @@ async function send() {
     const message = e instanceof Error ? e.message : String(e);
     messages.value[assistantIdx].content = `Error: ${message}`;
   } finally {
+    if (assistantDeltaFrame !== null) cancelAnimationFrame(assistantDeltaFrame);
+    flushAssistantDeltas();
     const msg = messages.value[assistantIdx];
     if (msg) msg.isThinking = false;
     isGenerating.value = false;
-    // Render agent tool call steps from agent events
+    // Render agent tool call steps from agent events (fallback when no real-time steps)
     if (msg && agentEvents.length > 0 && !msg.agentSteps?.length) {
-      msg.agentSteps = agentEvents.map((e, index) => agentEventToStep(e, index)).filter((step): step is AiAgentStepItem => Boolean(step));
+      const steps: AiAgentStepItem[] = [];
+      agentEvents.forEach((e, index) => {
+        const step = agentEventToStep(e, index);
+        if (step) upsertAgentStep(steps, step);
+      });
+      if (steps.length) msg.agentSteps = steps;
     }
     // Fallback: use aiAgentPlan for backward compatibility
     if (msg && !msg.agentSteps?.length) {
       const agentPlan = buildAiAgentPlan({
         mode: requestedMode,
         action: requestedAction,
-        instruction: displayText,
+        instruction: modelInstruction,
         assistantContent: msg?.content || "",
         connection: props.connection,
+        database: props.tab?.database,
       });
       if (msg && requestedMode === "agent") msg.agentSteps = buildAiAgentStepItems(agentPlan);
       if (agentPlan.handoffSql) emit("requestAutoExecuteSql", agentPlan.handoffSql);
     }
-    activeAction.value = "generate";
     currentSessionId.value = "";
     // Apply deferred context compaction after streaming so assistantIdx stays stable.
     // Visible chat history is kept for the user; future LLM history starts from this hidden summary.
@@ -700,8 +1535,11 @@ function applySql(code: string) {
 }
 
 function executeSql(code: string) {
-  emit("replaceSql", code);
   emit("executeSql", code);
+}
+
+function tempRunSql(code: string) {
+  emit("tempRunSql", code);
 }
 
 const copiedIndex = ref("");
@@ -722,6 +1560,8 @@ async function copyCode(code: string, key: string) {
 function clearMessages() {
   messages.value = [];
   conversationId.value = "";
+  historyIndex.value = -1;
+  draftBeforeHistory.value = "";
 }
 
 async function persistConversation() {
@@ -730,12 +1570,13 @@ async function persistConversation() {
   const first = messages.value.find((m) => m.role === "user" && m.kind !== "contextSummary");
   await saveAiConversation({
     id: conversationId.value,
-    title: first ? first.content.slice(0, 50) : "Untitled",
+    title: first ? messageTitle(first).slice(0, 50) : "Untitled",
     connectionName: props.connection.name,
     database: props.tab?.database || "",
     messages: messages.value.map((m) => ({
       role: m.role,
       content: m.content,
+      ...(m.mentions?.length ? { mentions: m.mentions } : {}),
       ...(m.reasoning ? { reasoning: m.reasoning } : {}),
       ...(m.kind ? { kind: m.kind } : {}),
     })),
@@ -754,13 +1595,14 @@ function selectConversation(conv: AiConversation) {
   messages.value = conv.messages.map((m) => ({
     role: m.role as "user" | "assistant",
     content: m.content,
+    mentions: Array.isArray(m.mentions) ? (m.mentions as AiMessageMention[]) : undefined,
     reasoning: m.reasoning,
     kind: m.kind,
   }));
   agentTokens.value = null;
   pendingCompaction.value = null;
   showConversationList.value = false;
-  scrollToBottom();
+  scrollToBottom({ force: true });
 }
 
 async function deleteConversation(id: string) {
@@ -772,30 +1614,54 @@ async function deleteConversation(id: string) {
 function startNewChat() {
   clearMessages();
   showConversationList.value = false;
+  const defaultConfig = settings.aiConfigs.find((c) => c.isDefault) || settings.aiConfigs[0];
+  if (defaultConfig) {
+    settings.updateActiveModel({ configId: defaultConfig.id, modelId: defaultConfig.model });
+  }
 }
 
 onMounted(async () => {
-  // 新增：恢复用户偏好的输入框行数
-  const savedRows = localStorage.getItem(AI_TEXTAREA_ROWS_STORAGE_KEY);
-  if (savedRows) {
-    const rows = parseInt(savedRows, 10);
-    if (!isNaN(rows) && rows >= AI_TEXTAREA_MIN_ROWS && rows <= AI_TEXTAREA_MAX_ROWS) {
-      textareaRows.value = rows;
+  const savedHeight = localStorage.getItem(AI_TEXTAREA_HEIGHT_STORAGE_KEY);
+  if (savedHeight) {
+    const height = parseInt(savedHeight, 10);
+    if (!isNaN(height)) {
+      textareaHeight.value = clampTextareaHeight(height);
     }
   }
 
-  // 现有代码
   conversations.value = await loadAiConversations().catch(() => []);
   shikiCodeHighlighter.value = await createAiShikiCodeHighlighter({
     appearance: () => aiCodeAppearance.value,
   }).catch(() => undefined);
+
+  window.addEventListener("resize", handlePanelResize);
+  if (typeof ResizeObserver !== "undefined" && assistantRootRef.value) {
+    promptPanelResizeObserver = new ResizeObserver(handlePanelResize);
+    promptPanelResizeObserver.observe(assistantRootRef.value);
+  }
 });
+
+function maxTextareaHeight() {
+  const panelHeight = assistantRootRef.value?.clientHeight || window.innerHeight || 0;
+  const promptPanelHeight = promptPanelRef.value?.offsetHeight || 0;
+  const currentTextareaHeight = promptTextareaRef.value?.offsetHeight || textareaHeight.value;
+  const promptPanelChromeHeight = Math.max(0, promptPanelHeight - currentTextareaHeight);
+  return Math.max(AI_TEXTAREA_MIN_HEIGHT_PX, Math.floor(panelHeight * AI_TEXTAREA_MAX_PANEL_RATIO - promptPanelChromeHeight));
+}
+
+function clampTextareaHeight(height: number) {
+  return Math.max(AI_TEXTAREA_MIN_HEIGHT_PX, Math.min(maxTextareaHeight(), Math.round(height)));
+}
+
+function handlePanelResize() {
+  textareaHeight.value = clampTextareaHeight(textareaHeight.value);
+}
 
 function startResize(event: MouseEvent) {
   event.preventDefault();
   isResizing.value = true;
   resizeStartY = event.clientY;
-  resizeStartRows = textareaRows.value;
+  resizeStartHeight = textareaHeight.value;
 
   document.addEventListener("mousemove", handleResize);
   document.addEventListener("mouseup", stopResize);
@@ -808,10 +1674,7 @@ function handleResize(event: MouseEvent) {
   if (!isResizing.value) return;
 
   const deltaY = resizeStartY - event.clientY;
-  const deltaRows = Math.round(deltaY / AI_TEXTAREA_LINE_HEIGHT_PX);
-
-  const newRows = Math.max(AI_TEXTAREA_MIN_ROWS, Math.min(AI_TEXTAREA_MAX_ROWS, resizeStartRows + deltaRows));
-  textareaRows.value = newRows;
+  textareaHeight.value = clampTextareaHeight(resizeStartHeight + deltaY);
 }
 
 function stopResize() {
@@ -825,58 +1688,76 @@ function stopResize() {
   document.body.style.userSelect = "";
   document.body.style.cursor = "";
 
-  localStorage.setItem(AI_TEXTAREA_ROWS_STORAGE_KEY, textareaRows.value.toString());
+  localStorage.setItem(AI_TEXTAREA_HEIGHT_STORAGE_KEY, clampTextareaHeight(textareaHeight.value).toString());
 }
 
 onUnmounted(() => {
+  if (assistantDeltaFrame !== null) cancelAnimationFrame(assistantDeltaFrame);
   clearTimeout(mentionTimer);
   cancelStream();
+  detachMessageScrollListener();
   // 清理拖拽事件监听，防止内存泄漏
   document.removeEventListener("mousemove", handleResize);
   document.removeEventListener("mouseup", stopResize);
   // 若卸载时仍在拖拽，复位 body 样式，避免全局残留
   document.body.style.userSelect = "";
   document.body.style.cursor = "";
+  window.removeEventListener("resize", handlePanelResize);
+  promptPanelResizeObserver?.disconnect();
 });
 
 function triggerAction(action: AiAction, instruction?: string) {
+  // External Ask-style entry points (Fix with AI, Explain history) produce/analyze SQL text.
+  // If the assistant is currently in Agent mode where those actions aren't offered, switch to
+  // Ask mode so the action is valid and the menu reflects what actually runs.
+  if (!isValidActionForMode(action, assistantMode.value)) {
+    // Suppress the mode-switch watch so it doesn't overwrite `action` (set below) with the
+    // Ask default — the menu must reflect the action actually being run.
+    suppressModeActionReset = true;
+    assistantMode.value = "ask";
+  }
   activeAction.value = action;
   if (instruction) prompt.value = instruction;
   send();
 }
 
-defineExpose({ triggerAction });
-
-const markedInstance = new Marked({
-  breaks: true,
-  gfm: true,
-  renderer: {
-    code({ text }: { text: string }) {
-      return `<code class="rounded bg-muted px-1.5 py-0.5 text-[11px] font-mono">${text}</code>`;
-    },
-  },
-});
-
-function formatInlineText(text: string): string {
-  return markedInstance.parse(text) as string;
+function setPrompt(text: string) {
+  prompt.value = text;
+  nextTick(() => promptTextareaRef.value?.focus());
 }
+
+defineExpose({ triggerAction, setPrompt });
 
 const messageRenderer = computed(() => {
   const appearance = aiCodeAppearance.value;
   const highlightCode = shikiCodeHighlighter.value;
   return createAiMessageRenderer({
-    markdown: formatInlineText,
+    markdown: formatAiInlineMarkdown,
     highlightCode: highlightCode ? (content, lang) => highlightCode(content, lang, appearance) : undefined,
   });
 });
+
+function onMarkdownClick(event: MouseEvent) {
+  handleAiMarkdownLinkClick(event, openExternalUrl);
+}
+
+async function openExternalUrl(url: string) {
+  try {
+    const { open } = await import("@tauri-apps/plugin-shell");
+    await open(url);
+  } catch {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+}
 </script>
 
 <template>
-  <div class="flex h-full min-h-0 flex-col overflow-hidden">
+  <div ref="assistantRootRef" class="flex h-full min-h-0 flex-col overflow-hidden">
     <div class="flex items-center gap-2 border-b px-3 shrink-0" :class="settings.editorSettings.appLayout === 'classic' ? 'h-9' : 'h-10'">
       <span class="flex flex-1 self-stretch items-center truncate text-xs font-medium" data-tauri-drag-region>
         {{ chatTitle }}
       </span>
+      <ProductionContextBadge v-if="productionContext.active" compact />
       <Button variant="ghost" size="icon" class="h-6 w-6" @click="startNewChat" :title="t('ai.newChat')">
         <MessageSquarePlus class="h-3.5 w-3.5" />
       </Button>
@@ -918,102 +1799,188 @@ const messageRenderer = computed(() => {
       <Bot class="h-10 w-10 mb-3 opacity-30" />
       <p class="text-sm">{{ t("ai.welcome") }}</p>
     </div>
-    <ScrollArea v-else ref="scrollRef" class="min-h-0 flex-1 overflow-hidden">
-      <div class="flex flex-col gap-3 p-3">
-        <template v-for="(msg, i) in visibleMessages" :key="i">
-          <div v-if="msg.role === 'user'" class="flex justify-end">
-            <div class="max-w-[85%] rounded-lg bg-primary px-3 py-2 text-xs text-primary-foreground">
-              {{ msg.content }}
-            </div>
-          </div>
-
-          <div v-else-if="msg.content || msg.reasoning || msg.isThinking" class="flex">
-            <div class="max-w-[95%] rounded-lg bg-muted px-3 py-2 text-xs leading-relaxed">
-              <div v-if="msg.reasoning || msg.isThinking" class="mb-2">
-                <button class="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors" @click="toggleReasoning(i)">
-                  <ChevronRight class="h-3 w-3 transition-transform duration-200" :class="{ 'rotate-90': expandedReasoning.has(i) || msg.isThinking }" />
-                  <Loader2 v-if="msg.isThinking" class="h-3 w-3 animate-spin" />
-                  <span>{{ t("ai.reasoningProcess") }}</span>
-                </button>
-                <div
-                  class="overflow-hidden transition-[max-height,opacity] duration-200 ease-in-out"
-                  :style="{
-                    maxHeight: expandedReasoning.has(i) || msg.isThinking ? '20000px' : '0px',
-                    opacity: expandedReasoning.has(i) || msg.isThinking ? '1' : '0',
-                  }"
-                >
-                  <div class="mt-1.5 pl-4 border-l-2 border-muted-foreground/20 text-[11px] text-muted-foreground whitespace-pre-wrap">
-                    {{ msg.reasoning }}
+    <div v-else class="relative min-h-0 flex-1">
+      <ScrollArea ref="scrollRef" class="ai-message-scroll h-full overflow-hidden">
+        <div class="flex flex-col gap-3 p-3">
+          <template v-for="(msg, i) in visibleMessages" :key="i">
+            <div v-if="msg.role === 'user'" class="group flex justify-end">
+              <div class="relative min-w-0 max-w-[85%]" :class="{ 'w-[85%]': editingMessageIndex === i }">
+                <template v-if="editingMessageIndex === i">
+                  <div v-if="editingMentions.length" class="mb-1.5 flex flex-wrap justify-end gap-1">
+                    <button
+                      v-for="(mention, mentionIndex) in editingMentions"
+                      :key="`${mention.kind}:${mention.raw}:${mentionIndex}`"
+                      type="button"
+                      class="group inline-flex max-w-full items-center gap-1 rounded border border-border/80 bg-muted/70 px-1.5 py-0.5 text-[11px] text-foreground/90 hover:bg-muted"
+                      :title="mentionDisplayName(mention)"
+                      @click="removeEditingMentionChip(mentionIndex)"
+                    >
+                      <FileCode v-if="mention.kind === 'sqlFile'" class="h-3 w-3 shrink-0 text-primary" />
+                      <Table2 v-else class="h-3 w-3 shrink-0 text-primary" />
+                      <span class="truncate">{{ mentionDisplayName(mention) }}</span>
+                      <X class="h-3 w-3 shrink-0 text-muted-foreground group-hover:text-foreground" />
+                    </button>
                   </div>
-                </div>
+                  <textarea
+                    data-edit-textarea
+                    v-model="editingContent"
+                    rows="3"
+                    class="w-full resize-none rounded-lg border bg-background px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-primary"
+                    @keydown="onEditKeydown($event, i)"
+                    @compositionstart="editCompositionActive = true"
+                    @compositionend="editCompositionActive = false"
+                  />
+                  <div class="mt-1.5 flex justify-end gap-1.5">
+                    <Button size="sm" variant="ghost" class="h-6 px-2 text-[11px]" @click="cancelEdit">{{ t("ai.editCancel") }}</Button>
+                    <Button size="sm" class="h-6 px-2 text-[11px]" @click="submitEdit(i)">{{ t("ai.editResend") }}</Button>
+                  </div>
+                </template>
+                <template v-else>
+                  <div class="min-w-0">
+                    <!-- Keep the hover action out of normal flow so message wrapping stays stable. -->
+                    <button
+                      v-if="!isGenerating"
+                      class="pointer-events-none absolute right-full top-1 mr-1 flex h-5 w-5 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground focus:pointer-events-auto focus:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100"
+                      :title="t('ai.editMessage')"
+                      @click="startEditMessage(i)"
+                    >
+                      <Pencil class="h-3 w-3" />
+                    </button>
+                    <div class="min-w-0 rounded-lg bg-primary px-3 py-2 text-xs text-primary-foreground">
+                      <div v-if="msg.mentions?.length" class="mb-1.5 flex flex-wrap justify-end gap-1">
+                        <button
+                          v-for="mention in msg.mentions"
+                          :key="`${mention.kind}:${mention.raw}`"
+                          type="button"
+                          class="inline-flex max-w-full items-center gap-1 rounded border border-primary-foreground/25 bg-primary-foreground/15 px-1.5 py-0.5 text-[11px] text-primary-foreground hover:bg-primary-foreground/25"
+                          :title="mention.kind === 'sqlFile' ? mention.name : [mention.schema, mention.table].filter(Boolean).join('.')"
+                          @click.stop="openMessageMention(mention)"
+                        >
+                          <FileCode v-if="mention.kind === 'sqlFile'" class="h-3 w-3 shrink-0" />
+                          <Table2 v-else class="h-3 w-3 shrink-0" />
+                          <span class="truncate">{{ mention.kind === "sqlFile" ? mention.name : [mention.schema, mention.table].filter(Boolean).join(".") }}</span>
+                        </button>
+                      </div>
+                      <div v-if="msg.content" class="whitespace-pre-wrap">{{ msg.content }}</div>
+                    </div>
+                  </div>
+                </template>
               </div>
-              <div v-if="msg.agentSteps?.length" class="mb-2 space-y-1">
-                <div v-for="step in msg.agentSteps" :key="step.key" class="rounded border text-[10px]" :class="agentStepClass(step.tone)">
-                  <button class="flex w-full items-center gap-1 px-2 py-1.5 text-left" @click="step.toolResult || step.toolArgs?.sql ? toggleStep(step.key) : undefined">
-                    <component :is="agentStepIcon(step.tone)" class="h-3 w-3 shrink-0" />
-                    <span class="font-medium">{{ t(step.labelKey) }}</span>
-                    <span v-if="step.toolName" class="text-muted-foreground">: {{ step.toolName }}</span>
-                    <ChevronRight v-if="step.toolResult || step.toolArgs?.sql" class="ml-auto h-3 w-3 shrink-0 transition-transform duration-150" :class="{ 'rotate-90': expandedSteps.has(step.key) }" />
+            </div>
+
+            <div v-else-if="msg.content || msg.reasoning || msg.isThinking" class="flex">
+              <div class="max-w-[95%] min-w-0 rounded-lg bg-muted px-3 py-2 text-xs leading-relaxed">
+                <div v-if="msg.reasoning || msg.isThinking" class="mb-2">
+                  <button class="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors" @click="toggleReasoning()">
+                    <ChevronRight class="h-3 w-3 transition-transform duration-200" :class="{ 'rotate-90': reasoningExpanded }" />
+                    <Loader2 v-if="msg.isThinking" class="h-3 w-3 animate-spin" />
+                    <span>{{ t("ai.reasoningProcess") }}</span>
+                    <span v-if="shouldShowReasoningCharCount(msg.reasoning, reasoningExpanded)" :class="reasoningCharCountClass(!!msg.isThinking)">{{ msg.reasoning?.length ?? 0 }} {{ t("ai.chars") }}</span>
                   </button>
-                  <div v-if="expandedSteps.has(step.key)" class="border-t border-current/10 px-2 pb-2 pt-1">
-                    <div v-if="step.toolArgs?.sql" class="mb-1 rounded bg-background/50 px-2 py-1 font-mono text-[10px] text-foreground/80 whitespace-pre-wrap">{{ step.toolArgs.sql }}</div>
-                    <Button v-if="step.toolName === 'explain_query' && step.toolArgs?.sql" size="sm" variant="outline" class="mb-1 h-6 gap-1 text-[10px]" @click="emit('openExplainPlan', step.toolArgs.sql as string)">
-                      <GitBranch class="h-3 w-3" />
-                      {{ t("explain.title") }}
-                    </Button>
-                    <div v-if="step.toolName === 'explain_query' && step.explainData && connection?.db_type" class="mb-1">
-                      <ExplainPlanViewer :plan="parseExplainFromData(step.explainData, connection.db_type)" class="max-h-64" />
+                  <div
+                    class="overflow-hidden transition-[max-height,opacity] duration-200 ease-in-out"
+                    :style="{
+                      maxHeight: reasoningExpanded ? '20000px' : '0px',
+                      opacity: reasoningExpanded ? '1' : '0',
+                    }"
+                  >
+                    <div class="mt-1.5 pl-4 border-l-2 border-muted-foreground/20 text-[11px] text-muted-foreground whitespace-pre-wrap">
+                      {{ msg.reasoning }}
                     </div>
-                    <div v-else-if="step.isError && step.toolResult" class="text-[10px] text-red-600 dark:text-red-400">{{ step.toolResult }}</div>
-                    <div v-else-if="step.toolResult" class="max-h-48 overflow-auto text-[10px] text-muted-foreground whitespace-pre-wrap">{{ step.toolResult }}</div>
                   </div>
+                </div>
+                <div v-if="msg.agentSteps?.length" class="mb-2 space-y-1">
+                  <div v-for="step in msg.agentSteps" :key="step.key" class="rounded border text-[10px]" :class="agentStepClass(step.tone)">
+                    <button class="flex w-full items-center gap-1 px-2 py-1.5 text-left" @click="step.toolResult || step.toolArgs?.sql ? toggleStep(step.key) : undefined">
+                      <component :is="agentStepIcon(step.tone)" class="h-3 w-3 shrink-0" />
+                      <span class="font-medium">{{ t(step.labelKey) }}</span>
+                      <span v-if="step.toolName" class="text-muted-foreground">: {{ step.toolName }}</span>
+                      <ChevronRight v-if="step.toolResult || step.toolArgs?.sql" class="ml-auto h-3 w-3 shrink-0 transition-transform duration-150" :class="{ 'rotate-90': expandedSteps.has(step.key) }" />
+                    </button>
+                    <div v-if="expandedSteps.has(step.key)" class="border-t border-current/10 px-2 pb-2 pt-1">
+                      <div v-if="step.toolArgs?.sql" class="mb-1 rounded bg-background/50 px-2 py-1 font-mono text-[10px] text-foreground/80 whitespace-pre-wrap">{{ step.toolArgs.sql }}</div>
+                      <Button v-if="step.toolName === 'explain_query' && step.toolArgs?.sql" size="sm" variant="outline" class="mb-1 h-6 gap-1 text-[10px]" @click="emit('openExplainPlan', step.toolArgs.sql as string)">
+                        <GitBranch class="h-3 w-3" />
+                        {{ t("explain.title") }}
+                      </Button>
+                      <div v-if="step.toolName === 'explain_query' && step.explainData && connection?.db_type" class="mb-1">
+                        <ExplainPlanViewer :plan="parseExplainFromData(step.explainData, connection.db_type)" class="max-h-64" />
+                      </div>
+                      <div v-else-if="step.isError && step.toolResult" class="text-[10px] text-red-600 dark:text-red-400">{{ step.toolResult }}</div>
+                      <div v-else-if="step.toolResult" class="max-h-48 overflow-auto text-[10px] text-muted-foreground whitespace-pre-wrap">{{ step.toolResult }}</div>
+                    </div>
+                  </div>
+                </div>
+                <div v-if="isGenerating && msg === messages[messages.length - 1]" class="whitespace-pre-wrap break-words leading-relaxed">{{ msg.content }}</div>
+                <template v-else v-for="(seg, j) in messageRenderer.render(msg.content)" :key="j">
+                  <div v-if="seg.type === 'text'" class="ai-markdown whitespace-normal" @click.capture="onMarkdownClick">
+                    <div v-html="seg.html" />
+                  </div>
+                  <div v-else class="my-2 overflow-hidden rounded-md border border-zinc-200 bg-zinc-50 dark:border-zinc-700/50 dark:bg-zinc-900">
+                    <div class="flex items-center border-b border-zinc-200 px-3 py-1.5 text-[10px] font-medium text-zinc-600 dark:border-zinc-700/50 dark:text-zinc-400">
+                      <component :is="seg.isSql ? Database : Terminal" class="h-3 w-3 mr-1.5" />
+                      <span>{{ seg.lang }}</span>
+                      <span class="flex-1" />
+                      <div class="flex items-center gap-1.5">
+                        <button v-if="seg.isSql" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.tempRunSql')" @click="tempRunSql(seg.content)">
+                          <FlaskConical class="h-3.5 w-3.5" />
+                        </button>
+                        <button v-if="seg.isSql" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.executeSql')" @click="executeSql(seg.content)">
+                          <Play class="h-3.5 w-3.5" />
+                        </button>
+                        <button v-if="seg.isSql" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.apply')" @click="applySql(seg.content)">
+                          <Replace class="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+                          :title="copiedIndex === `${i}-${j}` ? t('ai.copied') : t(seg.isSql ? 'ai.copySql' : 'ai.copyCode')"
+                          @click="copyCode(seg.content, `${i}-${j}`)"
+                        >
+                          <Check v-if="copiedIndex === `${i}-${j}`" class="h-3.5 w-3.5 text-green-400" />
+                          <Copy v-else class="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                    <pre class="ai-code-block whitespace-pre-wrap break-words p-3 text-xs leading-relaxed text-zinc-900 dark:text-zinc-100"><code v-html="seg.html"></code></pre>
+                  </div>
+                </template>
+                <div v-if="msg === proposalConfirmMessage" class="mt-2 flex gap-2" :title="t('ai.proposalConfirmTitle')">
+                  <Button size="sm" variant="default" class="h-7 gap-1 text-[11px]" @click="sendProposalReply(true)">
+                    <Check class="h-3 w-3" />
+                    {{ t("ai.proposalConfirmYes") }}
+                  </Button>
+                  <Button size="sm" variant="outline" class="h-7 gap-1 text-[11px]" @click="sendProposalReply(false)">
+                    <X class="h-3 w-3" />
+                    {{ t("ai.proposalConfirmNo") }}
+                  </Button>
                 </div>
               </div>
-              <template v-for="(seg, j) in messageRenderer.render(msg.content)" :key="j">
-                <div v-if="seg.type === 'text'" class="ai-markdown whitespace-normal">
-                  <div v-html="seg.html" />
-                </div>
-                <div v-else class="my-2 overflow-hidden rounded-md border border-zinc-200 bg-zinc-50 dark:border-zinc-700/50 dark:bg-zinc-900">
-                  <div class="flex items-center border-b border-zinc-200 px-3 py-1.5 text-[10px] font-medium text-zinc-600 dark:border-zinc-700/50 dark:text-zinc-400">
-                    <component :is="seg.isSql ? Database : Terminal" class="h-3 w-3 mr-1.5" />
-                    <span>{{ seg.lang }}</span>
-                    <span class="flex-1" />
-                    <div class="flex items-center gap-1.5">
-                      <button v-if="seg.isSql" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.executeSql')" @click="executeSql(seg.content)">
-                        <Play class="h-3.5 w-3.5" />
-                      </button>
-                      <button v-if="seg.isSql" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.apply')" @click="applySql(seg.content)">
-                        <Replace class="h-3.5 w-3.5" />
-                      </button>
-                      <button
-                        class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
-                        :title="copiedIndex === `${i}-${j}` ? t('ai.copied') : t(seg.isSql ? 'ai.copySql' : 'ai.copyCode')"
-                        @click="copyCode(seg.content, `${i}-${j}`)"
-                      >
-                        <Check v-if="copiedIndex === `${i}-${j}`" class="h-3.5 w-3.5 text-green-400" />
-                        <Copy v-else class="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                  <pre class="ai-code-block whitespace-pre-wrap break-words p-3 text-xs leading-relaxed text-zinc-900 dark:text-zinc-100"><code v-html="seg.html"></code></pre>
-                </div>
-              </template>
             </div>
-          </div>
-        </template>
+          </template>
 
-        <div v-if="isWaitingForFirstDelta" class="flex items-center gap-2 text-xs text-muted-foreground">
-          <Loader2 class="h-3.5 w-3.5 animate-spin" />
-          <span>{{ t("ai.thinking") }}</span>
+          <div v-if="isWaitingForFirstDelta" class="flex items-center gap-2 text-xs text-muted-foreground">
+            <Loader2 class="h-3.5 w-3.5 animate-spin" />
+            <span>{{ t("ai.thinking") }}</span>
+          </div>
+          <div v-if="agentTokens && !isGenerating" class="flex items-center gap-1 text-[10px] text-muted-foreground px-2 pb-1">
+            <span>&#8593;{{ agentTokens.input.toLocaleString() }} &#8595;{{ agentTokens.output.toLocaleString() }} tokens</span>
+          </div>
         </div>
-        <div v-if="agentTokens && !isGenerating" class="flex items-center gap-1 text-[10px] text-muted-foreground px-2 pb-1">
-          <span>&#8593;{{ agentTokens.input.toLocaleString() }} &#8595;{{ agentTokens.output.toLocaleString() }} tokens</span>
-        </div>
-      </div>
-    </ScrollArea>
+      </ScrollArea>
+      <button
+        v-if="showScrollToBottom"
+        type="button"
+        class="absolute bottom-3 right-3 z-10 inline-flex h-8 w-8 items-center justify-center rounded-full border bg-background/95 text-foreground shadow-md backdrop-blur hover:bg-muted"
+        :title="t('ai.scrollToBottom')"
+        @click="scrollToBottom({ force: true })"
+      >
+        <ArrowDown class="h-4 w-4" />
+        <span class="sr-only">{{ t("ai.scrollToBottom") }}</span>
+      </button>
+    </div>
 
     <div class="p-2">
-      <div class="relative rounded-lg border bg-background">
+      <div ref="promptPanelRef" class="relative rounded-[6px] border bg-background">
         <div class="resize-handle" @mousedown="startResize"></div>
         <div class="px-2 pb-2 pt-1">
           <div v-if="connectionStore.connections.length" class="flex items-center gap-1 mb-1 text-xs text-foreground/80">
@@ -1034,6 +2001,7 @@ const messageRenderer = computed(() => {
                 <SelectItem v-for="conn in connectionStore.connections" :key="conn.id" :value="conn.id">
                   <div class="flex min-w-0 items-center gap-2">
                     <DatabaseIcon :db-type="connectionIconType(conn)" class="h-3.5 w-3.5 shrink-0" />
+                    <ConnectionGroupBadge :connection-id="conn.id" />
                     <span class="truncate">{{ conn.name }}</span>
                   </div>
                 </SelectItem>
@@ -1075,21 +2043,40 @@ const messageRenderer = computed(() => {
             <div v-else-if="!mentionCandidates.length" class="px-2 py-2 text-xs text-muted-foreground">
               {{ t("ai.tableMentionEmpty") }}
             </div>
-            <div v-else class="max-h-56 overflow-auto p-1">
+            <div v-else ref="mentionListRef" class="max-h-56 overflow-auto p-1">
               <button
                 v-for="(candidate, index) in mentionCandidates"
-                :key="`${candidate.schema || ''}.${candidate.name}`"
+                :key="candidate.kind === 'sqlFile' ? `sql-file:${candidate.id}` : `table:${candidate.schema || ''}.${candidate.name}`"
                 type="button"
+                :data-mention-index="index"
                 class="flex w-full min-w-0 items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-muted"
                 :class="{ 'bg-muted': index === mentionSelectedIndex }"
                 @mousedown.prevent="insertMention(candidate)"
-                @mouseenter="mentionSelectedIndex = index"
+                @mouseenter="setMentionSelectedIndex(index, false)"
               >
-                <Table2 class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <FileCode v-if="candidate.kind === 'sqlFile'" class="h-3.5 w-3.5 shrink-0 text-primary" />
+                <Table2 v-else class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                 <span class="min-w-0 flex-1 truncate">
-                  <template v-if="candidate.schema">{{ candidate.schema }}.</template>{{ candidate.name }}
+                  {{ mentionCandidateName(candidate) }}
                 </span>
-                <span class="shrink-0 text-[10px] text-muted-foreground">{{ formatMentionTableType(candidate.tableType) }}</span>
+                <span class="max-w-[45%] shrink-0 truncate text-[10px] text-muted-foreground">{{ formatMentionCandidateType(candidate) }}</span>
+              </button>
+            </div>
+          </div>
+          <div v-if="commandOpen && filteredCommands.length" class="absolute bottom-full left-2 right-2 z-20 mb-1 max-h-56 overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-md">
+            <div class="max-h-56 overflow-auto p-1">
+              <button
+                v-for="(cmd, index) in filteredCommands"
+                :key="cmd.action"
+                type="button"
+                class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-muted"
+                :class="{ 'bg-muted': index === commandSelectedIndex }"
+                @mousedown.prevent="selectCommand(cmd)"
+                @mouseenter="commandSelectedIndex = index"
+              >
+                <component :is="cmd.icon" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <span class="font-medium">/{{ cmd.action }}</span>
+                <span class="ml-auto text-[11px] text-muted-foreground">{{ t(cmd.key) }}</span>
               </button>
             </div>
           </div>
@@ -1102,7 +2089,8 @@ const messageRenderer = computed(() => {
               :title="mentionDisplayName(mention)"
               @click="removeMentionChip(mention)"
             >
-              <Table2 class="h-3 w-3 shrink-0 text-primary" />
+              <FileCode v-if="mention.kind === 'sqlFile'" class="h-3 w-3 shrink-0 text-primary" />
+              <Table2 v-else class="h-3 w-3 shrink-0 text-primary" />
               <span class="truncate">{{ mentionDisplayName(mention) }}</span>
               <X class="h-3 w-3 shrink-0 text-muted-foreground group-hover:text-foreground" />
             </button>
@@ -1110,25 +2098,101 @@ const messageRenderer = computed(() => {
           <textarea
             ref="promptTextareaRef"
             v-model="prompt"
-            :rows="textareaRows"
+            :style="{ height: `${textareaHeight}px`, maxHeight: `${maxTextareaHeight()}px` }"
             class="w-full resize-none bg-transparent text-xs outline-none placeholder:text-muted-foreground mb-1"
             :placeholder="activePlaceholder"
-            :disabled="isGenerating"
             @input="refreshMentionState"
             @click="refreshMentionState"
-            @keyup="refreshMentionState"
+            @keyup="onPromptKeyup"
             @compositionstart="promptCompositionActive = true"
             @compositionend="promptCompositionActive = false"
             @keydown="onPromptKeydown"
           />
-          <div class="flex items-center gap-1.5">
-            <LightDropdown v-model="assistantMode" :items="assistantModeItems" :aria-label="activeModeHint" item-class="text-xs px-2" />
-            <LightDropdown :model-value="activeAction" :items="actionMenuItems" content-class="w-max min-w-0" item-class="text-xs px-2" @update:model-value="(value) => selectAction(value as AiAction)" />
-            <span class="flex-1" />
+          <div class="flex min-w-0 flex-nowrap items-center gap-1.5 overflow-hidden">
+            <LightDropdown
+              v-model="assistantMode"
+              :items="assistantModeItems"
+              :aria-label="activeModeHint"
+              trigger-class="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+              item-class="text-xs px-2"
+            />
+            <LightDropdown
+              v-if="showActionButtons"
+              :model-value="activeAction"
+              :items="actionMenuItems"
+              content-class="w-max min-w-0"
+              trigger-class="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+              item-class="text-xs px-2"
+              @update:model-value="(value) => selectAction(value as AiAction)"
+            />
+            <span class="min-w-0 flex-1" />
+            <template v-if="settings.aiConfigs.length > 0">
+              <!-- Combined provider + model selector -->
+              <Popover v-model:open="providerSelectorOpen">
+                <PopoverTrigger as-child>
+                  <button type="button" class="min-w-0 flex shrink items-center gap-1.5 max-w-[220px] rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground">
+                    <AiProviderLogo
+                      :provider="activeFullConfig?.provider ?? 'claude'"
+                      :label="AI_PROVIDER_PRESETS[activeFullConfig?.provider ?? 'claude']?.label ?? activeFullConfig?.provider ?? 'claude'"
+                      :icon-slug="AI_PROVIDER_PRESETS[activeFullConfig?.provider ?? 'claude']?.iconSlug"
+                      class="h-3 w-3 shrink-0"
+                    />
+                    <span class="min-w-0 truncate">{{ activeFullConfig?.model || t("ai.selectModel") }}</span>
+                    <svg class="h-3 w-3 shrink-0 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6" /></svg>
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent
+                  align="end"
+                  class="w-80 gap-0 p-1.5"
+                  @open-auto-focus.prevent
+                  @update:open="
+                    (open: boolean) => {
+                      if (!open) modelSearchQuery = '';
+                    }
+                  "
+                >
+                  <!-- Search input -->
+                  <div class="relative px-1 pb-1">
+                    <Search class="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                    <input v-model="modelSearchQuery" type="text" :placeholder="t('ai.searchModels')" class="w-full rounded-sm border bg-background py-1.5 pl-7 pr-2 text-xs outline-none focus:ring-1 focus:ring-primary" @click.stop />
+                  </div>
+                  <!-- All configured providers with their models -->
+                  <div class="max-h-80 overflow-auto">
+                    <template v-for="config in configuredProviders" :key="config.id">
+                      <!-- Provider header -->
+                      <div class="flex items-center gap-2 rounded-sm px-2 py-1.5 text-xs" :class="config.id === settings.activeModel?.configId ? 'bg-accent text-accent-foreground' : 'text-foreground'">
+                        <AiProviderLogo :provider="config.provider" :label="AI_PROVIDER_PRESETS[config.provider]?.label ?? config.provider" :icon-slug="AI_PROVIDER_PRESETS[config.provider]?.iconSlug" class="h-3.5 w-3.5 shrink-0" />
+                        <span class="font-medium">{{ config.name }}</span>
+                        <span v-if="config.isDefault" class="ml-auto text-[10px] text-muted-foreground">{{ t("ai.default") }}</span>
+                      </div>
+                      <!-- No models hint -->
+                      <div v-if="!getConfigModelOptionIds(config.id).length" class="px-2 py-2 text-xs text-muted-foreground">
+                        {{ t("ai.noModel") }}
+                      </div>
+                      <!-- Model list -->
+                      <template v-else>
+                        <button
+                          v-for="modelId in getConfigModelOptionIds(config.id)"
+                          :key="modelId"
+                          type="button"
+                          class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                          :class="modelId === settings.activeModel?.modelId && config.id === settings.activeModel?.configId ? 'bg-accent text-accent-foreground' : ''"
+                          @click="handleModelSelect(config.id, modelId)"
+                        >
+                          <span class="min-w-0 flex-1 truncate">{{ modelId }}</span>
+                          <Check v-if="modelId === settings.activeModel?.modelId && config.id === settings.activeModel?.configId" class="h-3.5 w-3.5 shrink-0 text-primary" />
+                        </button>
+                      </template>
+                      <div class="my-1 border-t" />
+                    </template>
+                  </div>
+                </PopoverContent>
+              </Popover>
+            </template>
             <button v-if="isGenerating" class="h-7 w-7 shrink-0 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center" :title="t('ai.stopGenerating')" @click="cancelStream">
               <Square class="h-3.5 w-3.5" />
             </button>
-            <button v-else class="h-7 w-7 shrink-0 rounded-full bg-foreground text-background flex items-center justify-center disabled:opacity-30" :disabled="!prompt.trim() || !props.tab?.database" @click="send">
+            <button v-else class="h-7 w-7 shrink-0 rounded-full bg-foreground text-background flex items-center justify-center disabled:opacity-30" :disabled="(!prompt.trim() && !selectedMentions.length && !selectedSqlFileMentions.length) || !props.tab?.database" @click="send">
               <ArrowUp class="h-4 w-4" />
             </button>
           </div>
@@ -1204,21 +2268,43 @@ const messageRenderer = computed(() => {
 }
 .ai-markdown :deep(table) {
   border-collapse: collapse;
+  margin: 0;
+  width: max-content;
+  min-width: 100%;
+}
+.ai-markdown :deep(.ai-markdown-table-wrap) {
+  overflow-x: auto;
+  max-height: 320px;
+  overflow-y: auto;
+  max-width: 100%;
   margin: 0.3em 0;
-  width: 100%;
+  border-radius: 0.375rem;
+  border: 1px solid hsl(var(--border));
+}
+.ai-markdown :deep(.ai-markdown-table-wrap table) {
+  border: none;
+  margin: 0;
 }
 .ai-markdown :deep(th),
 .ai-markdown :deep(td) {
   border: 1px solid hsl(var(--border));
   padding: 0.25em 0.5em;
   text-align: left;
+  white-space: nowrap;
 }
 .ai-markdown :deep(th) {
   font-weight: 600;
   background: hsl(var(--muted));
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 .ai-code-block :deep(.line) {
   min-height: 1lh;
+}
+
+.ai-message-scroll :deep([data-slot="scroll-area-viewport"]) {
+  overflow-anchor: none;
 }
 
 .resize-handle {

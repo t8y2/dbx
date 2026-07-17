@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { buildSqlCompletionItems, recordCompletionSelection } from "../../apps/desktop/src/lib/sqlCompletion.ts";
+import { buildSqlCompletionItems, buildSqlCompletionItemsFromContext, getSqlCompletionContext, recordCompletionSelection } from "../../apps/desktop/src/lib/sql/sqlCompletion.ts";
+import { sqlCompletionContextFromSemantic } from "../../apps/desktop/src/lib/sql/semantic/completion.ts";
+import { buildSqlSemanticModel } from "../../apps/desktop/src/lib/sql/semantic/model.ts";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
 import type { ConnectionConfig, TableInfo } from "../../apps/desktop/src/types/database.ts";
 
@@ -68,6 +70,36 @@ test("large table catalogs produce bounded SQL completion items", () => {
   const tableItems = items.filter((item) => item.type === "table");
   assert.equal(tableItems.length, 200);
   assert.equal(tableItems[0].label, "customer_event_0000");
+});
+
+test("semantic completion parses only the active large-script statement within bounds", () => {
+  const inactiveStatements = Array.from({ length: 400 }, (_, index) => `SELECT * FROM archived_${index} WHERE id = ${index};`).join("\n");
+  const activeStatement = "SELECT * FROM active_orders ao JOIN active_users au ON au.id = ao.user_id WHERE au.na";
+  const sql = `${inactiveStatements}\n${activeStatement}`;
+  const cursor = sql.length;
+  const tables = Array.from({ length: 2500 }, (_, index) => ({
+    name: `active_${String(index).padStart(4, "0")}`,
+    schema: "public",
+    type: "table" as const,
+  }));
+  const columnsByTable = new Map([
+    ["active_users", ["id", "name", "email"].map((name) => ({ name, table: "active_users" }))],
+    ["active_orders", ["id", "user_id", "total"].map((name) => ({ name, table: "active_orders" }))],
+  ]);
+
+  const startedAt = performance.now();
+  const model = buildSqlSemanticModel(sql, cursor, { databaseType: "postgres" });
+  const elapsedMs = performance.now() - startedAt;
+  const context = sqlCompletionContextFromSemantic(model, getSqlCompletionContext(sql, cursor));
+  const items = buildSqlCompletionItemsFromContext(context, { tables, columnsByTable, dialect: "postgres" });
+
+  assert.equal(model.statement.text, activeStatement);
+  assert.ok(elapsedMs < 200, `semantic model build took ${elapsedMs.toFixed(1)}ms`);
+  assert.ok(items.length <= 200);
+  assert.deepEqual(
+    items.filter((item) => item.type === "column").map((item) => item.label),
+    ["name"],
+  );
 });
 
 test("recently selected completion items receive a ranking boost", () => {

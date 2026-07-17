@@ -8,6 +8,7 @@ node_modules/
 openspec/
 .mcp.json
 AGENTS.md
+CLAUDE.md
 
 # Build output
 dist/
@@ -51,11 +52,10 @@ tmp/
 # Logs
 *.log
 
-# Agent JDBC driver JARs
-agents/*/libs/*.jar
 
 # Generated changelog data
 releases-*.json
+latest-en.json
 
 test.pdb
 portable/

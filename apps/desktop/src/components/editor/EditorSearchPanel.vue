@@ -5,7 +5,7 @@ import type { EditorView } from "@codemirror/view";
 import { EditorSelection } from "@codemirror/state";
 import { setSearchQuery, openSearchPanel as cmOpenSearchPanel, findNext as cmFindNext, findPrevious as cmFindPrevious, replaceNext as cmReplaceNext, replaceAll as cmReplaceAll } from "@codemirror/search";
 import { ChevronUp, ChevronDown, ChevronRight, X } from "@lucide/vue";
-import { createEditorSearchQuery } from "@/lib/editor/editorSearchQuery";
+import { collectEditorSearchMatches, createEditorSearchQuery, replaceEditorSearchMatches } from "@/lib/editor/editorSearchQuery";
 
 const props = defineProps<{
   view: EditorView | null;
@@ -98,7 +98,7 @@ function computeReplacementForMatch(v: EditorView, matchFrom: number, matchTo: n
 /**
  * Collect all search matches within the scoped range.
  */
-function collectScopedMatches(v: EditorView) {
+function collectScopedMatches(v: EditorView, limit = MATCH_COUNT_LIMIT) {
   if (searchScopeFrom == null || searchScopeTo == null) return null;
   const q = createEditorSearchQuery({
     search: searchText.value,
@@ -106,17 +106,7 @@ function collectScopedMatches(v: EditorView) {
     useRegex: useRegex.value,
   });
   if (!q.valid) return null;
-  const matches: { from: number; to: number }[] = [];
-  const iter = q.getCursor(v.state);
-  let r = iter.next();
-  while (!r.done) {
-    if (r.value.from >= searchScopeFrom && r.value.to <= searchScopeTo) {
-      matches.push({ from: r.value.from, to: r.value.to });
-    }
-    if (matches.length >= MATCH_COUNT_LIMIT) break;
-    r = iter.next();
-  }
-  return matches;
+  return collectEditorSearchMatches(q, v.state, searchScopeFrom, searchScopeTo, limit);
 }
 
 /**
@@ -372,15 +362,9 @@ function doReplaceAll() {
 
   if (searchScopeFrom != null && searchScopeTo != null) {
     // Scoped replace all: collect matches and replace
-    const matches = collectScopedMatches(v);
+    const matches = collectScopedMatches(v, Number.POSITIVE_INFINITY);
     if (!matches || matches.length === 0) return;
-    // Build changes
-    const changes: { from: number; to: number; insert: string }[] = [];
-    for (const m of matches) {
-      const insertText = computeReplacementForMatch(v, m.from, m.to);
-      changes.push({ from: m.from, to: m.to, insert: insertText });
-    }
-    v.dispatch({ changes });
+    replaceEditorSearchMatches(v, matches, (match) => computeReplacementForMatch(v, match.from, match.to));
   } else {
     cmReplaceAll(v);
   }

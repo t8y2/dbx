@@ -16,6 +16,7 @@ import { executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, 
 import { currentStatementFrameRangeTo, visualSqlColumnsWithInlineHints } from "@/lib/sql/currentStatementFrame";
 import { expandToSqlStatementWindow, parseInsertValueHints } from "@/lib/sql/insertValueHints";
 import { formatSqlText, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import { blankLineDeletionChanges, replaceSelectedEditorText } from "@/lib/editor/queryEditorTextEdits";
 import { buildSqlInConditionFromPasteSource, insertTextForSqlInCondition } from "@/lib/sql/sqlInListPaste";
 import { resolveSqlSingleQuoteKeyAction } from "@/lib/sql/sqlQuoteCaret";
 import { formatMongoShellText } from "@/lib/mongo/mongoFormatter";
@@ -209,6 +210,7 @@ const delimitedListOpen = ref(false);
 const delimitedListSelectedText = ref("");
 
 function openDelimitedListDialog() {
+  if (props.readOnly) return;
   if (!selectedSql.value.trim()) {
     toast(t("editor.delimitedList.selectFirst"), 3000);
     return;
@@ -220,14 +222,8 @@ function openDelimitedListDialog() {
 
 function applyDelimitedListResult(result: string) {
   const currentView = view.value;
-  if (!currentView) return;
-  const selection = currentView.state.selection.main;
-  if (selection.empty) return;
-  currentView.dispatch({
-    changes: { from: selection.from, to: selection.to, insert: result },
-    selection: { anchor: selection.from + result.length },
-    scrollIntoView: true,
-  });
+  if (!currentView || props.readOnly) return;
+  if (!replaceSelectedEditorText(currentView, result)) return;
   focusEditor();
 }
 
@@ -962,22 +958,11 @@ function deleteEmptyLines() {
 
   const state = currentView.state;
   const selection = state.selection.main;
-  const hasSelection = !selection.empty;
-
-  const from = hasSelection ? selection.from : 0;
-  const to = hasSelection ? selection.to : state.doc.length;
-  const text = state.sliceDoc(from, to);
-
-  // Split into lines, filter out empty/whitespace-only lines, rejoin
-  const lines = text.split("\n");
-  const filtered = lines.filter((line) => line.trim().length > 0);
-  const result = filtered.join("\n");
-
-  if (result === text) return; // no change
+  const changes = blankLineDeletionChanges(state.doc, selection);
+  if (changes.length === 0) return;
 
   currentView.dispatch({
-    changes: { from, to, insert: result },
-    selection: { anchor: from + result.length },
+    changes,
     scrollIntoView: true,
   });
   focusEditor();
@@ -1133,7 +1118,7 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
     {
       label: t("editor.contextMenu.delimitedList"),
       action: openDelimitedListDialog,
-      disabled: !canCopySelectedSql.value,
+      disabled: props.readOnly || !canCopySelectedSql.value,
       icon: List,
     },
     { label: "", separator: true },

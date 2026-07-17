@@ -77,7 +77,7 @@ export default defineConfig(async () => ({
       : undefined,
     proxy: {
       "/api": {
-        target: "http://localhost:4224",
+        target: process.env.DBX_BACKEND_URL || "http://localhost:4224",
         changeOrigin: true,
         ws: true,
       },

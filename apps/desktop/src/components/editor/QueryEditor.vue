@@ -1694,6 +1694,26 @@ onMounted(async () => {
       codeMirrorTheme.of(theme),
       closeBrackets(),
       bracketMatching(),
+      // Fix: intercept quote characters to prevent closeBrackets from
+      // producing triple quotes ('''). When the cursor is immediately
+      // before an auto-inserted closing quote, just skip past it.
+      Prec.highest(
+        EditorView.inputHandler.of((view: EditorViewType, _from: number, _to: number, text: string) => {
+          if (text !== "'" && text !== '"' && text !== "`") return false;
+          const pos = view.state.selection.main.head;
+          const nextChar = view.state.doc.sliceString(pos, pos + 1);
+          if (nextChar !== text) return false;
+          // Only skip when the character ahead matches and it was auto-inserted
+          // (i.e. the doc has a matching pair at this position).
+          const prevChar = pos > 0 ? view.state.doc.sliceString(pos - 1, pos) : "";
+          if (prevChar === text) return false; // already inside a quoted region
+          view.dispatch({
+            selection: { anchor: pos + 1 },
+            scrollIntoView: true,
+          });
+          return true;
+        }),
+      ),
       hoverTooltip((currentView, pos) => resolveSqlHoverTooltip(currentView, pos)),
       buildSqlSignatureExtension(),
       diagnosticComp.of(buildSqlDiagnosticExtension()),

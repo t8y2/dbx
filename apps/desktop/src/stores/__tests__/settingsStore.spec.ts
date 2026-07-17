@@ -79,6 +79,20 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ dataGridSearchMode: "invalid" as any }).dataGridSearchMode).toBe("filter");
   });
 
+  it("defaults persistent data grid view options off and preserves enabled values", () => {
+    const defaults = normalizeEditorSettings({});
+    expect(defaults.dataGridMultiRowTranspose).toBe(false);
+    expect(defaults.dataGridHideNullColumns).toBe(false);
+
+    const enabled = normalizeEditorSettings({ dataGridMultiRowTranspose: true, dataGridHideNullColumns: true });
+    expect(enabled.dataGridMultiRowTranspose).toBe(true);
+    expect(enabled.dataGridHideNullColumns).toBe(true);
+
+    const invalid = normalizeEditorSettings({ dataGridMultiRowTranspose: "true" as any, dataGridHideNullColumns: 1 as any });
+    expect(invalid.dataGridMultiRowTranspose).toBe(false);
+    expect(invalid.dataGridHideNullColumns).toBe(false);
+  });
+
   it("shows cell detail metadata by default and preserves collapsed state", () => {
     expect(normalizeEditorSettings({}).cellDetailMetadataCollapsed).toBe(false);
     expect(normalizeEditorSettings({ cellDetailMetadataCollapsed: true }).cellDetailMetadataCollapsed).toBe(true);

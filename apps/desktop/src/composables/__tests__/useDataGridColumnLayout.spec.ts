@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { effectScope, ref } from "vue";
+import { effectScope, nextTick, ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { dataGridColumnOffsets, dataGridHorizontalColumnWindow, useDataGridColumnLayout, useDataGridColumnLayoutState } from "@/composables/useDataGridColumnLayout";
 
@@ -48,6 +48,55 @@ describe("useDataGridColumnLayout", () => {
     expect(state.visibleColumnIndexes.value).toEqual([0, 1, 2]);
     state.persistColumnOrder([1, 0, 2]);
     expect(state.orderedDisplayableColumnIndexes.value).toEqual([1, 0, 2]);
+    scope.stop();
+  });
+
+  it("reapplies a persisted null-column preference without losing manual visibility state", async () => {
+    const scope = effectScope();
+    const hideNullColumns = ref(true);
+    const allNullColumnIndexes = ref([2]);
+    const state = scope.run(() =>
+      useDataGridColumnLayoutState({
+        columns: ref(["id", "name", "empty"]),
+        sourceColumns: ref(undefined),
+        commentByColumn: ref(new Map()),
+        displayableColumnIndexes: ref([0, 1, 2]),
+        allNullColumnIndexes,
+        columnOrderKeys: ref(["id\0\0", "name\0\0", "empty\0\0"]),
+        layoutScopeKey: ref("persisted-null-layout"),
+        tableScopeKey: ref(""),
+        hideNullColumns,
+        onHideNullColumnsChange: (value) => {
+          hideNullColumns.value = value;
+        },
+      }),
+    )!;
+
+    expect(state.nullColumnsHidden.value).toBe(true);
+    expect(state.visibleColumnIndexes.value).toEqual([0, 1]);
+
+    state.toggleColumnVisibility(1);
+    hideNullColumns.value = false;
+    await nextTick();
+    expect(state.visibleColumnIndexes.value).toEqual([0, 2]);
+
+    hideNullColumns.value = true;
+    await nextTick();
+    expect(state.visibleColumnIndexes.value).toEqual([0]);
+
+    allNullColumnIndexes.value = [];
+    await nextTick();
+    expect(state.nullColumnsHidden.value).toBe(true);
+    expect(state.visibleColumnIndexes.value).toEqual([0, 2]);
+
+    allNullColumnIndexes.value = [2];
+    await nextTick();
+    state.resetColumnVisibility();
+    expect(state.visibleColumnIndexes.value).toEqual([0, 1]);
+
+    state.toggleAllNullColumns();
+    expect(hideNullColumns.value).toBe(false);
+    expect(state.visibleColumnIndexes.value).toEqual([0, 1, 2]);
     scope.stop();
   });
 

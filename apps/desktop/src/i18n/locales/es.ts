@@ -1777,6 +1777,7 @@ export default withEnglishFallback({
     loadMore: "Cargar más...",
     objectBrowser: "Explorar en el navegador de objetos ({count})",
     extensions: "Extensiones",
+    types: "tipo",
   },
   userAdmin: {
     title: "Usuarios y Privilegios",
@@ -1963,6 +1964,9 @@ export default withEnglishFallback({
     sortAsc: "ascendente",
     sortDesc: "descendente",
     sortBy: "ordenar por",
+    trigger: "disparador",
+    typeDefinition: "definición de tipo",
+    typeBody: "cuerpo de tipo",
   },
   structureEditor: {
     mysqlDataTypeHelp: {

@@ -1777,6 +1777,7 @@ export default withEnglishFallback({
     loadMore: "載入更多...",
     objectBrowser: "在物件瀏覽器中檢視 ({count})",
     extensions: "擴展",
+    types: "類型",
   },
   objects: {
     all: "全部",
@@ -1833,6 +1834,9 @@ export default withEnglishFallback({
     sortAsc: "升序",
     sortDesc: "降序",
     sortBy: "排序方式",
+    trigger: "觸發器",
+    typeDefinition: "類型",
+    typeBody: "類型體",
   },
   structureEditor: {
     mysqlDataTypeHelp: {

@@ -1862,7 +1862,6 @@ export const useQueryStore = defineStore("query", () => {
     const tableMeta = tableMetaForDataTab(tab);
     if (!tableMeta?.tableName) return false;
 
-    const settingsStore = useSettingsStore();
     const connStore = useConnectionStore();
     const conn = connStore.getConfig(tab.connectionId);
     const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
@@ -1870,7 +1869,7 @@ export const useQueryStore = defineStore("query", () => {
     const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : tableMeta.primaryKeys;
     const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableDataIdentifier(effectiveDbType, tab.resultSortColumn, identifierQuote)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
     const orderBy = tab.orderByInput?.trim() || sortOrder;
-    const limit = tab.resultPageLimit ?? settingsStore.editorSettings.pageSize ?? tableOpenPageLimit();
+    const limit = tab.resultPageLimit ?? tableOpenPageLimit();
     const offset = tab.resultPageOffset ?? 0;
     const refreshPreparationId = uuid();
 

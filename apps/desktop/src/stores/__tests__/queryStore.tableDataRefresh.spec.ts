@@ -28,7 +28,7 @@ vi.mock("@/stores/connectionStore", () => ({
 
 vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({
-    editorSettings: { pageSize: 100 },
+    editorSettings: { pageSize: 1000 },
   }),
 }));
 
@@ -160,6 +160,30 @@ describe("queryStore table data refresh", () => {
     expect(mocks.executeMulti).toHaveBeenCalledTimes(1);
     expect(store.tabs.find((tab) => tab.id === firstTabId)?.result?.rows).toEqual([]);
     expect(store.tabs.find((tab) => tab.id === secondTabId)?.result).toBeUndefined();
+  });
+
+  it("uses the table-open default when a refreshed data tab has no saved pagination", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "users", "data", "public");
+    store.setTableMeta(tabId, {
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+
+    await expect(store.refreshDataTab(tabId)).resolves.toBe(true);
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(
+      expect.objectContaining({
+        limit: 100,
+        offset: 0,
+      }),
+    );
+    expect(mocks.executeMulti).toHaveBeenCalledTimes(1);
+    expect(store.tabs.find((tab) => tab.id === tabId)?.resultPageLimit).toBe(100);
   });
 
   it("rejects a repeated refresh while SQL construction is in progress", async () => {

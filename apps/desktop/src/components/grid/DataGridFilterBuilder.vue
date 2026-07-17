@@ -9,16 +9,19 @@ import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
 import type { DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 
 const { t } = useI18n();
-const props = defineProps<{
-  rules: DataGridStructuredFilterRule[];
-  columns: string[];
-  filteredColumns: string[];
-  modeOptions: Array<{ value: DataGridContextFilterMode; labelKey: string }>;
-  columnSearch: string;
-  disabled?: boolean;
-  showHeader?: boolean;
-  showFooter?: boolean;
-}>();
+const props = withDefaults(
+  defineProps<{
+    rules: DataGridStructuredFilterRule[];
+    columns: string[];
+    filteredColumns: string[];
+    modeOptions: Array<{ value: DataGridContextFilterMode; labelKey: string }>;
+    columnSearch: string;
+    disabled?: boolean;
+    showHeader?: boolean;
+    showFooter?: boolean;
+  }>(),
+  { showHeader: true, showFooter: true },
+);
 const emit = defineEmits<{
   add: [];
   apply: [];

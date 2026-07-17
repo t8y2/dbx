@@ -39,7 +39,6 @@ const props = defineProps<{
   modeOptions: Array<{ value: DataGridContextFilterMode; labelKey: string }>;
   columnSearch: string;
   applyWhere: (value?: string) => void | boolean | Promise<void | boolean>;
-  clearWhere: () => void | Promise<void>;
   applyOrderBy: (value?: string) => void | boolean | Promise<void | boolean>;
   clearOrderBy: () => void | Promise<void>;
 }>();
@@ -108,6 +107,10 @@ function updateRule(id: string, patch: Partial<DataGridStructuredFilterRule>) {
   emit("updateRule", id, patch);
 }
 
+function clearWhere() {
+  emit("clearFilters");
+}
+
 onUnmounted(onResizeEnd);
 </script>
 
@@ -162,7 +165,6 @@ onUnmounted(onResizeEnd);
             :column-search="columnSearch"
             :disabled="!canUseWhereSearch"
             :show-header="false"
-            :show-footer="false"
             @add="emit('addRule')"
             @apply="emit('applyFilters')"
             @reset="emit('resetFilters')"

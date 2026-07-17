@@ -14,7 +14,6 @@ import {
   CopyPlus,
   ChevronDown,
   ChevronRight,
-  Columns3Cog,
   Download,
   Eraser,
   Eye,
@@ -95,8 +94,10 @@ import {
   type ObjectBrowserSortKey,
 } from "@/lib/table/objectBrowserRows";
 import { resolveRowClickAction, shouldDeferSingleClick, type ObjectBrowserRowAction } from "@/lib/table/objectBrowserRowAction";
+import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
 import { createSidePanelRequestGuard } from "@/lib/table/sidePanelRequestGuard";
 import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
+import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
 
 type ObjectFilter = "all" | "tables" | "views" | "materializedViews" | "procedures" | "functions" | "sequences" | "packages";
 type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
@@ -777,11 +778,7 @@ const tableInfoTabListStyle = computed(() => ({
   gridTemplateColumns: `repeat(${tableInfoTabs.value.length}, minmax(0, 1fr))`,
 }));
 
-const filteredTableColumns = computed(() => {
-  if (!tableInfoSearchQuery.value) return tableColumns.value;
-  const q = tableInfoSearchQuery.value.toLowerCase();
-  return tableColumns.value.filter((c) => c.name.toLowerCase().includes(q) || c.data_type.toLowerCase().includes(q));
-});
+const filteredTableColumns = computed(() => filterObjectBrowserTableColumns(tableColumns.value, tableInfoSearchQuery.value));
 
 const filteredTableIndexes = computed(() => {
   if (!tableInfoSearchQuery.value) return tableIndexes.value;
@@ -2684,7 +2681,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               </Button>
             </div>
             <Button v-if="canOpenTableStructureEditor" variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs" :title="t('contextMenu.editStructure')" :aria-label="t('contextMenu.editStructure')" @click="openTableStructureEditor">
-              <Columns3Cog class="w-3 h-3" />
+              <PencilRuler class="w-3 h-3" />
               <span class="table-info-action-label">{{ t("contextMenu.editStructure") }}</span>
             </Button>
             <Button variant="ghost" size="icon" class="h-5 w-5" @click="closeSidePanel">
@@ -2727,6 +2724,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                   <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.columnName") }}</th>
                   <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.columnType") }}</th>
                   <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.tableInfoNullable") }}</th>
+                  <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("structureEditor.defaultValue") }}</th>
                 </tr>
               </thead>
               <tbody>
@@ -2743,6 +2741,9 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                   </td>
                   <td class="px-3 py-2 font-mono text-[11px] text-muted-foreground">{{ column.data_type }}</td>
                   <td class="px-3 py-2">{{ column.is_nullable ? "YES" : "NO" }}</td>
+                  <td data-table-info-column-default class="max-w-56 px-3 py-2 font-mono text-[11px]" :class="{ 'text-muted-foreground/70': column.column_default == null }" :title="column.column_default ?? undefined">
+                    <span class="block max-w-56 truncate">{{ tableColumnDefaultDisplayValue(column.column_default) }}</span>
+                  </td>
                 </tr>
               </tbody>
             </table>

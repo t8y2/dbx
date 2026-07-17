@@ -1,6 +1,6 @@
 use mongodb::{
     bson::{doc, oid::ObjectId, Bson, DateTime, Document},
-    options::{ClientOptions, GridFsBucketOptions, IndexOptions},
+    options::{ClientOptions, GridFsBucketOptions, IndexOptions, UpdateModifications},
     Client, Database, IndexModel,
 };
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,10 @@ use std::{collections::HashSet, time::Duration};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MongoDocumentResult {
     pub documents: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_documents: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extended_documents: Option<Vec<serde_json::Value>>,
     pub total: u64,
 }
 
@@ -584,12 +588,14 @@ pub async fn find_documents(
     let mut cursor = find.await.map_err(|e| e.to_string())?;
 
     let mut documents = Vec::new();
+    let mut extended_documents = Vec::new();
     while cursor.advance().await.map_err(|e| e.to_string())? {
         let doc = cursor.deserialize_current().map_err(|e| e.to_string())?;
-        documents.push(bson_to_json(&Bson::Document(doc)));
+        documents.push(bson_to_json(&Bson::Document(doc.clone())));
+        extended_documents.push(Bson::Document(doc).into_relaxed_extjson());
     }
 
-    Ok(MongoDocumentResult { documents, total })
+    Ok(MongoDocumentResult { documents, raw_documents: None, extended_documents: Some(extended_documents), total })
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -725,7 +731,7 @@ pub async fn find_documents_extended_json(
         documents.push(Bson::Document(doc).into_relaxed_extjson());
     }
 
-    Ok(MongoDocumentResult { documents, total })
+    Ok(MongoDocumentResult { extended_documents: Some(documents.clone()), documents, raw_documents: None, total })
 }
 
 pub async fn aggregate_documents(
@@ -747,15 +753,50 @@ pub async fn aggregate_documents(
     let max_rows = max_rows.unwrap_or(100);
     let fetch_limit = max_rows.saturating_add(1);
     let mut documents = Vec::new();
+    let mut extended_documents = Vec::new();
     while documents.len() < fetch_limit && cursor.advance().await.map_err(|e| e.to_string())? {
         let doc = cursor.deserialize_current().map_err(|e| e.to_string())?;
-        documents.push(bson_to_json(&Bson::Document(doc)));
+        documents.push(bson_to_json(&Bson::Document(doc.clone())));
+        extended_documents.push(Bson::Document(doc).into_relaxed_extjson());
     }
     let total = documents.len() as u64;
     if documents.len() > max_rows {
         documents.truncate(max_rows);
+        extended_documents.truncate(max_rows);
     }
-    Ok(MongoDocumentResult { documents, total })
+    Ok(MongoDocumentResult { documents, raw_documents: None, extended_documents: Some(extended_documents), total })
+}
+
+/// Distinct values of a field, matching the mongo shell's `db.coll.distinct(field, filter)`:
+/// array fields contribute their elements rather than the whole array, and the server may
+/// answer from an index with a DISTINCT_SCAN. Values are returned in the `documents` slot as
+/// bare scalars, which `mongoDocumentsToQueryResult` already renders as a single column.
+pub async fn distinct(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    field: &str,
+    filter: Option<&str>,
+) -> Result<MongoDocumentResult, String> {
+    if field.trim().is_empty() {
+        return Err("Distinct field name is required".to_string());
+    }
+
+    let filter_doc: Document = match filter {
+        Some(f) if !f.trim().is_empty() => {
+            let json: serde_json::Value = serde_json::from_str(f).map_err(|e| format!("Invalid filter JSON: {e}"))?;
+            json_filter_to_document(&json)?
+        }
+        _ => doc! {},
+    };
+
+    let col = client.database(database).collection::<Document>(collection);
+    let values = col.distinct(field, filter_doc).await.map_err(|e| e.to_string())?;
+    let documents = values.iter().map(bson_to_json).collect::<Vec<_>>();
+    let extended_documents = values.into_iter().map(|value| value.into_relaxed_extjson()).collect::<Vec<_>>();
+    let total = documents.len() as u64;
+
+    Ok(MongoDocumentResult { documents, raw_documents: None, extended_documents: Some(extended_documents), total })
 }
 
 pub async fn create_index(
@@ -958,7 +999,7 @@ pub async fn update_document(
                 return Ok(result.modified_count);
             }
         }
-        return Ok(0);
+        return Err(no_matching_document_error(id));
     }
 
     for filter in document_id_filters(id) {
@@ -971,7 +1012,12 @@ pub async fn update_document(
             return Ok(result.modified_count);
         }
     }
-    Ok(0)
+    Err(no_matching_document_error(id))
+}
+
+fn no_matching_document_error(id: &str) -> String {
+    let display = decode_string_document_id(id).unwrap_or_else(|| id.to_string());
+    format!("No document matched _id {display}. It may have been deleted or its _id changed since the query ran.")
 }
 
 fn is_update_operator_document(doc: &Document) -> bool {
@@ -992,7 +1038,7 @@ pub async fn update_documents(
     let update_value: serde_json::Value =
         serde_json::from_str(update_json).map_err(|e| format!("Invalid update JSON: {e}"))?;
     let filter = json_filter_to_document(&filter_value).map_err(|e| format!("Invalid filter: {e}"))?;
-    let update = json_object_to_document(&update_value).map_err(|e| format!("Invalid update: {e}"))?;
+    let update = json_update_to_modifications(&update_value).map_err(|e| format!("Invalid update: {e}"))?;
     let array_filters = parse_update_array_filters(options_json)?;
     let col = client.database(database).collection::<Document>(collection);
     let result = if many {
@@ -1111,8 +1157,18 @@ fn find_and_modify_array_filters(
 
 fn single_document_result(document: Option<Document>) -> MongoDocumentResult {
     match document {
-        Some(document) => MongoDocumentResult { documents: vec![bson_to_json(&Bson::Document(document))], total: 1 },
-        None => MongoDocumentResult { documents: Vec::new(), total: 0 },
+        Some(document) => MongoDocumentResult {
+            documents: vec![bson_to_json(&Bson::Document(document.clone()))],
+            raw_documents: None,
+            extended_documents: Some(vec![Bson::Document(document).into_relaxed_extjson()]),
+            total: 1,
+        },
+        None => MongoDocumentResult {
+            documents: Vec::new(),
+            raw_documents: None,
+            extended_documents: Some(Vec::new()),
+            total: 0,
+        },
     }
 }
 
@@ -1129,7 +1185,7 @@ pub async fn find_one_and_update(
     let update_value: serde_json::Value =
         serde_json::from_str(update_json).map_err(|e| format!("Invalid update JSON: {e}"))?;
     let filter = json_filter_to_document(&filter_value).map_err(|e| format!("Invalid filter: {e}"))?;
-    let update = json_object_to_document(&update_value).map_err(|e| format!("Invalid update: {e}"))?;
+    let update = json_update_to_modifications(&update_value).map_err(|e| format!("Invalid update: {e}"))?;
     let options: MongoFindOneAndUpdateOptions = parse_find_and_modify_options(options_json, "findOneAndUpdate")?;
     let col = client.database(database).collection::<Document>(collection);
     let mut action = col.find_one_and_update(filter, update);
@@ -1221,15 +1277,36 @@ pub async fn delete_document(client: &Client, database: &str, collection: &str, 
 
 fn document_id_filters(id: &str) -> Vec<Document> {
     if let Some(string_id) = decode_string_document_id(id) {
+        // The marker is emitted for an explicitly typed BSON string; do not reinterpret it as ObjectId.
         return vec![doc! { "_id": Bson::String(string_id) }];
     }
     if let Some(filter) = extended_json_document_id_filter(id) {
         return vec![filter];
     }
+    if let Some(numeric) = numeric_document_id(id) {
+        return vec![doc! { "_id": numeric }, doc! { "_id": Bson::String(id.to_string()) }];
+    }
+    object_id_then_string_filters(id)
+}
+
+fn object_id_then_string_filters(id: &str) -> Vec<Document> {
     let string_filter = doc! { "_id": Bson::String(id.to_string()) };
     match ObjectId::parse_str(id) {
         Ok(oid) => vec![doc! { "_id": Bson::ObjectId(oid) }, string_filter],
         Err(_) => vec![string_filter],
+    }
+}
+
+fn numeric_document_id(id: &str) -> Option<Bson> {
+    if id.trim() != id || id.is_empty() {
+        return None;
+    }
+    if let Ok(value) = id.parse::<i64>() {
+        return Some(Bson::Int64(value));
+    }
+    match id.parse::<f64>() {
+        Ok(value) if value.is_finite() => Some(Bson::Double(value)),
+        _ => None,
     }
 }
 
@@ -1296,8 +1373,10 @@ fn bson_to_json(bson: &Bson) -> serde_json::Value {
 
 fn bson_document_field_to_json(key: &str, bson: &Bson) -> serde_json::Value {
     if key == "_id" {
-        if let Bson::Int64(value) = bson {
-            return serde_json::json!({ "$numberLong": value.to_string() });
+        match bson {
+            Bson::Int64(value) => return serde_json::json!({ "$numberLong": value.to_string() }),
+            Bson::ObjectId(value) => return serde_json::json!({ "$oid": value.to_hex() }),
+            _ => {}
         }
     }
     bson_to_json(bson)
@@ -1309,6 +1388,22 @@ pub fn json_object_to_document(value: &serde_json::Value) -> Result<Document, St
     match json_value_to_bson(value) {
         Bson::Document(doc) => Ok(doc),
         other => Err(format!("Expected a JSON object, got {other:?}")),
+    }
+}
+
+fn json_update_to_modifications(value: &serde_json::Value) -> Result<UpdateModifications, String> {
+    match json_value_to_bson(value) {
+        Bson::Document(document) => Ok(UpdateModifications::Document(document)),
+        Bson::Array(stages) => stages
+            .into_iter()
+            .enumerate()
+            .map(|(index, stage)| match stage {
+                Bson::Document(document) => Ok(document),
+                other => Err(format!("Update pipeline stage {} must be a JSON object, got {other:?}", index + 1)),
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(UpdateModifications::Pipeline),
+        other => Err(format!("Expected a JSON object or pipeline array, got {other:?}")),
     }
 }
 
@@ -1582,6 +1677,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn update_modifications_accept_document_and_pipeline() {
+        let document = json_update_to_modifications(&serde_json::json!({ "$set": { "status": "done" } })).unwrap();
+        match document {
+            mongodb::options::UpdateModifications::Document(document) => {
+                assert_eq!(document, doc! { "$set": { "status": "done" } });
+            }
+            other => panic!("expected document update, got {other:?}"),
+        }
+
+        let owner_id = ObjectId::parse_str("507f1f77bcf86cd799439011").unwrap();
+        let pipeline = json_update_to_modifications(&serde_json::json!([
+            { "$set": { "update_date": { "$add": ["$update_date", 1000] } } },
+            { "$set": { "owner_id": { "$oid": owner_id.to_hex() } } }
+        ]))
+        .unwrap();
+        match pipeline {
+            mongodb::options::UpdateModifications::Pipeline(stages) => {
+                assert_eq!(
+                    stages,
+                    vec![
+                        doc! { "$set": { "update_date": { "$add": ["$update_date", 1000_i64] } } },
+                        doc! { "$set": { "owner_id": owner_id } },
+                    ]
+                );
+            }
+            other => panic!("expected pipeline update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_modifications_reject_invalid_shapes() {
+        let stage_error =
+            json_update_to_modifications(&serde_json::json!([{ "$set": { "status": "done" } }, "invalid"]))
+                .unwrap_err();
+        assert!(stage_error.contains("stage 2"));
+
+        let value_error = json_update_to_modifications(&serde_json::json!("invalid")).unwrap_err();
+        assert!(value_error.contains("object or pipeline array"));
+    }
+
+    #[test]
     fn update_options_parse_array_filters() {
         let filters = parse_update_array_filters(Some(r#"{"arrayFilters":[{"item.id":322678},{"item.active":true}]}"#))
             .unwrap()
@@ -1685,6 +1821,35 @@ mod tests {
     }
 
     #[test]
+    fn document_id_filters_keep_explicit_hex_string_ids_as_strings() {
+        let hex = "507f1f77bcf86cd799439011";
+        let id = format!("__dbx_mongo_string_id__{}", serde_json::to_string(hex).unwrap());
+        let filters = document_id_filters(&id);
+
+        assert_eq!(filters.len(), 1);
+        assert!(matches!(filters[0].get("_id"), Some(Bson::String(value)) if value == hex));
+    }
+
+    #[test]
+    fn document_id_filters_keep_explicit_object_ids_as_object_ids() {
+        let filters = document_id_filters(r#"{"$oid":"507f1f77bcf86cd799439011"}"#);
+
+        assert_eq!(filters.len(), 1);
+        assert!(
+            matches!(filters[0].get("_id"), Some(Bson::ObjectId(oid)) if oid.to_hex() == "507f1f77bcf86cd799439011")
+        );
+    }
+
+    #[test]
+    fn document_id_filters_match_numeric_ids_before_string() {
+        let filters = document_id_filters("42");
+
+        assert_eq!(filters.len(), 2);
+        assert!(matches!(filters[0].get("_id"), Some(Bson::Int64(42))));
+        assert!(matches!(filters[1].get("_id"), Some(Bson::String(value)) if value == "42"));
+    }
+
+    #[test]
     fn json_filter_to_document_preserves_extended_json_int64_values() {
         let filter = serde_json::json!({ "snowflake": { "$numberLong": "2048938405781032962" } });
         let document = json_filter_to_document(&filter).unwrap();
@@ -1765,6 +1930,20 @@ mod tests {
     }
 
     #[test]
+    fn mongo_document_result_keeps_extended_json_types_for_copying() {
+        let date = DateTime::parse_rfc3339_str("2025-05-06T08:35:32Z").unwrap();
+        let result = single_document_result(Some(doc! {
+            "lastUpdatedDate": date,
+            "dateText": "ISODate(\"2025-05-06T08:35:32Z\")",
+        }));
+
+        assert_eq!(result.documents[0]["lastUpdatedDate"], serde_json::json!("ISODate(\"2025-05-06T08:35:32Z\")"));
+        let extended = result.extended_documents.expect("extended documents");
+        assert_eq!(extended[0]["lastUpdatedDate"], serde_json::json!({ "$date": "2025-05-06T08:35:32Z" }));
+        assert_eq!(extended[0]["dateText"], serde_json::json!("ISODate(\"2025-05-06T08:35:32Z\")"));
+    }
+
+    #[test]
     fn bson_to_json_preserves_unsafe_int64_for_js() {
         let value = bson_to_json(&Bson::Int64(2_326_645_729_978_441_729));
 
@@ -1780,6 +1959,16 @@ mod tests {
 
         assert_eq!(value["_id"], serde_json::json!({ "$numberLong": "2048938405781032962" }));
         assert_eq!(value["snowflake"], serde_json::json!("2048938405781032962"));
+    }
+
+    #[test]
+    fn bson_to_json_preserves_object_id_type_for_updates() {
+        let oid = ObjectId::parse_str("507f1f77bcf86cd799439011").unwrap();
+        let value = bson_to_json(&Bson::Document(doc! {
+            "_id": Bson::ObjectId(oid),
+        }));
+
+        assert_eq!(value["_id"], serde_json::json!({ "$oid": "507f1f77bcf86cd799439011" }));
     }
 
     #[test]

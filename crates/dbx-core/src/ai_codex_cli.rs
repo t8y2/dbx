@@ -463,7 +463,7 @@ fn parse_codex_models(stdout: &str) -> Option<Vec<AiModelInfo>> {
     let data = serde_json::from_str::<Value>(&stdout[json_start..]).ok()?;
     let models = data.get("models").and_then(Value::as_array)?;
 
-    let mut result = vec![AiModelInfo { id: "default".to_string(), display_name: Some("Default".to_string()) }];
+    let mut result = vec![AiModelInfo::new("default", Some("Default".to_string()))];
     for model in models {
         let Some(id) = model
             .get("slug")
@@ -483,7 +483,7 @@ fn parse_codex_models(stdout: &str) -> Option<Vec<AiModelInfo>> {
             .map(str::trim)
             .filter(|name| !name.is_empty())
             .map(ToString::to_string);
-        result.push(AiModelInfo { id: id.to_string(), display_name });
+        result.push(AiModelInfo::new(id, display_name));
     }
 
     (result.len() > 1).then_some(result)
@@ -568,6 +568,7 @@ pub async fn run_codex_agent(
         CliAgentProcessSpec {
             command,
             env,
+            current_dir: None,
             stdin: Some(prompt.to_string()),
             dialect: CliAgentJsonlDialect::CodexExec,
             classify_spawn_error: classify_codex_spawn_error,
@@ -605,6 +606,7 @@ mod tests {
             auth_method: AiAuthMethod::Bearer,
             endpoint: String::new(),
             model: model.to_string(),
+            models: Vec::new(),
             api_style: AiApiStyle::Completions,
             proxy_enabled: false,
             proxy_url: String::new(),
@@ -613,6 +615,8 @@ mod tests {
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
+            claude_code_cli_path: None,
+            claude_code_cli_env: Default::default(),
         }
     }
 

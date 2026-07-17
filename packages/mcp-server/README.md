@@ -124,6 +124,10 @@ DBX_MCP_ALLOW_DANGEROUS_SQL=1
 
 Redis connections use `dbx_execute_redis_command` instead of `dbx_execute_query`. Redis write commands honor `DBX_MCP_ALLOW_WRITES`; dangerous Redis commands such as `KEYS`, `FLUSHALL`, and `EVAL` require `DBX_MCP_ALLOW_DANGEROUS_SQL=1`.
 
+## SQL Diagnostics Privacy
+
+SQL statements are not included in normal MCP errors and are not logged by default. To enable temporary diagnostics, set `DBX_MCP_DEBUG_SQL=1` (or `DBX_SQL_DEBUG=1`). Diagnostic statements redact quoted literals and common secret assignments, and are truncated to 512 characters. Do not enable this setting unless the resulting diagnostic metadata is appropriate for the environment.
+
 ## How It Works
 
 ```

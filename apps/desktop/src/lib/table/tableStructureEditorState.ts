@@ -638,11 +638,30 @@ function columnDefaultForEditor(column: ColumnInfo, databaseType?: DatabaseType)
   return defaultValue;
 }
 
+const CHARACTER_LENGTH_METADATA_TYPES = new Set(["binary", "char", "character", "character varying", "nchar", "nvarchar", "nvarchar2", "varbinary", "varchar", "varchar2"]);
+const NUMERIC_PRECISION_METADATA_TYPES = new Set(["decimal", "number", "numeric"]);
+
+function columnDataTypeForEditor(column: ColumnInfo, databaseType?: DatabaseType): string {
+  const parsed = splitDataType(column.data_type);
+  if (parsed.params) return column.data_type;
+
+  const baseType = parsed.baseType.trim().replace(/\s+/g, " ");
+  const normalized = baseType.toLowerCase();
+  if (CHARACTER_LENGTH_METADATA_TYPES.has(normalized) && Number.isInteger(column.character_maximum_length) && Number(column.character_maximum_length) > 0) {
+    return combineDataTypeForDatabase(databaseType, baseType, String(column.character_maximum_length));
+  }
+  if (NUMERIC_PRECISION_METADATA_TYPES.has(normalized) && Number.isInteger(column.numeric_precision) && Number(column.numeric_precision) > 0) {
+    const scale = Number.isInteger(column.numeric_scale) && Number(column.numeric_scale) >= 0 ? `,${column.numeric_scale}` : "";
+    return combineDataTypeForDatabase(databaseType, baseType, `${column.numeric_precision}${scale}`);
+  }
+  return column.data_type;
+}
+
 export function createColumnDrafts(columns: ColumnInfo[], databaseType?: DatabaseType): EditableStructureColumn[] {
   return columns.map((column, index) => {
     const defaultValue = columnDefaultForEditor(column, databaseType);
     const enumValues = isMysqlEnumDataType(databaseType, column.data_type) ? [...(column.enum_values ?? [])] : undefined;
-    const dataType = enumValues?.length ? mysqlEnumDataType(enumValues) : column.data_type;
+    const dataType = enumValues?.length ? mysqlEnumDataType(enumValues) : columnDataTypeForEditor(column, databaseType);
     return {
       id: `existing:${column.name}`,
       name: column.name,
@@ -1064,6 +1083,14 @@ export function defaultNewColumnDataType(dbType: DatabaseType | undefined, dataT
     return combineDataTypeForDatabase(dbType, baseType, getDefaultLengthForType(dbType, baseType));
   }
   return dbType === "sqlite" ? "text" : "varchar(255)";
+}
+
+/** Index at which to insert a new column (after the selected row, or append when none). */
+export function resolveInsertColumnIndex(columns: readonly { id: string; markedForDrop?: boolean }[], selectedColumnId: string | null | undefined): number {
+  if (!selectedColumnId) return columns.length;
+  // Dropped rows are not valid insertion anchors.
+  const index = columns.findIndex((column) => column.id === selectedColumnId && !column.markedForDrop);
+  return index >= 0 ? index + 1 : columns.length;
 }
 
 function isMysqlDeprecatedDefaultParameterType(baseType: string): boolean {

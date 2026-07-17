@@ -5,6 +5,8 @@ import { formatMongoShellLiteral } from "@/lib/mongo/mongoDocumentValues";
 
 export type DocumentStoreKind = "mongodb" | "elasticsearch";
 export type DocumentFilterMode = "equals" | "not-equals" | "like" | "not-like" | "greater-than" | "less-than" | "is-null" | "is-not-null";
+export type ElasticsearchBoolClause = "filter" | "must" | "should" | "must_not";
+export type ElasticsearchQueryType = "term" | "terms" | "match" | "match_phrase" | "wildcard" | "range_gt" | "range_gte" | "range_lt" | "range_lte" | "exists";
 
 export type DocumentFilterRule = {
   id: string;
@@ -12,6 +14,8 @@ export type DocumentFilterRule = {
   mode: DocumentFilterMode;
   rawValue: string;
   conjunction: "AND" | "OR";
+  elasticsearchClause?: ElasticsearchBoolClause;
+  elasticsearchQueryType?: ElasticsearchQueryType;
 };
 
 export type DocumentStoreQueryPreviewOptions = {
@@ -41,6 +45,22 @@ export const documentFilterModeOptions: Array<{ value: DocumentFilterMode; label
   { value: "is-null", labelKey: "grid.filterBuilderIsNull" },
   { value: "is-not-null", labelKey: "grid.filterBuilderIsNotNull" },
 ];
+
+export const elasticsearchBoolClauseOptions: ElasticsearchBoolClause[] = ["filter", "must", "should", "must_not"];
+
+const ELASTICSEARCH_TEXT_QUERY_TYPES: ElasticsearchQueryType[] = ["match", "match_phrase", "term", "wildcard", "exists"];
+const ELASTICSEARCH_KEYWORD_QUERY_TYPES: ElasticsearchQueryType[] = ["term", "terms", "wildcard", "exists"];
+const ELASTICSEARCH_RANGE_QUERY_TYPES: ElasticsearchQueryType[] = ["term", "terms", "range_gt", "range_gte", "range_lt", "range_lte", "exists"];
+const ELASTICSEARCH_BOOLEAN_QUERY_TYPES: ElasticsearchQueryType[] = ["term", "exists"];
+
+export function elasticsearchQueryTypeOptions(fieldType?: string): ElasticsearchQueryType[] {
+  const normalized = fieldType?.trim().toLowerCase() ?? "";
+  if (normalized === "text" || normalized === "search_as_you_type") return ELASTICSEARCH_TEXT_QUERY_TYPES;
+  if (normalized === "keyword" || normalized === "constant_keyword" || normalized === "wildcard") return ELASTICSEARCH_KEYWORD_QUERY_TYPES;
+  if (/^(?:byte|short|integer|long|unsigned_long|half_float|float|double|scaled_float|date|date_nanos|ip)$/.test(normalized)) return ELASTICSEARCH_RANGE_QUERY_TYPES;
+  if (normalized === "boolean") return ELASTICSEARCH_BOOLEAN_QUERY_TYPES;
+  return ["term", "terms", "match", "match_phrase", "wildcard", "range_gt", "range_gte", "range_lt", "range_lte", "exists"];
+}
 
 const mongoDocumentProvider: DocumentStoreProvider = {
   kind: "mongodb",
@@ -90,11 +110,75 @@ export function defaultDocumentFilterRule(id: string, fieldName = ""): DocumentF
     mode: "equals",
     rawValue: "",
     conjunction: "AND",
+    elasticsearchClause: "filter",
+    elasticsearchQueryType: "term",
   };
 }
 
 export function documentFilterModeNeedsValue(mode: DocumentFilterMode): boolean {
   return mode !== "is-null" && mode !== "is-not-null";
+}
+
+export function elasticsearchQueryTypeNeedsValue(queryType: ElasticsearchQueryType | undefined): boolean {
+  return queryType !== "exists";
+}
+
+export function buildElasticsearchQueryFromRules(rules: readonly DocumentFilterRule[]): Record<string, unknown> | null {
+  const boolQuery: Partial<Record<ElasticsearchBoolClause, Record<string, unknown>[]>> & { minimum_should_match?: number } = {};
+
+  for (const rule of rules) {
+    const query = buildElasticsearchRuleQuery(rule);
+    if (!query) continue;
+    const clause = rule.elasticsearchClause ?? "filter";
+    (boolQuery[clause] ??= []).push(query);
+  }
+
+  if (Object.keys(boolQuery).length === 0) return null;
+  if (boolQuery.should?.length) boolQuery.minimum_should_match = 1;
+  return { bool: boolQuery };
+}
+
+function buildElasticsearchRuleQuery(rule: DocumentFilterRule): Record<string, unknown> | null {
+  const field = rule.fieldName.trim();
+  const queryType = rule.elasticsearchQueryType ?? "term";
+  if (!field || (elasticsearchQueryTypeNeedsValue(queryType) && !rule.rawValue.trim())) return null;
+
+  if (queryType === "exists") return { exists: { field } };
+  const value = parseDocumentFilterValue(rule.rawValue, { kind: "elasticsearch" });
+  switch (queryType) {
+    case "term":
+      return { term: { [field]: value } };
+    case "terms": {
+      const values = Array.isArray(value)
+        ? value
+        : rule.rawValue
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean)
+            .map((item) => parseDocumentFilterValue(item, { kind: "elasticsearch" }));
+      return values.length ? { terms: { [field]: values } } : null;
+    }
+    case "match":
+      return { match: { [field]: value } };
+    case "match_phrase":
+      return { match_phrase: { [field]: value } };
+    case "wildcard":
+      // Keep the compact form compatible with every supported Elasticsearch 7.x release.
+      // `case_insensitive` was only added in Elasticsearch 7.10.
+      return { wildcard: { [field]: String(value) } };
+    case "range_gt":
+      return { range: { [field]: { gt: value } } };
+    case "range_gte":
+      return { range: { [field]: { gte: value } } };
+    case "range_lt":
+      return { range: { [field]: { lt: value } } };
+    case "range_lte":
+      return { range: { [field]: { lte: value } } };
+  }
+}
+
+export function elasticsearchStructuredFilter(query: Record<string, unknown> | null): Record<string, unknown> | null {
+  return query ? { $esQuery: query } : null;
 }
 
 type DocumentFilterParseOptions = {
@@ -298,6 +382,9 @@ function translateDocumentFilterToElasticsearchQuery(filter: Record<string, unkn
     } else if (key === "$or") {
       const should = translateLogicalArrayToElasticsearch("$or", value);
       if (should.length > 0) filters.push({ bool: { should, minimum_should_match: 1 } });
+    } else if (key === "$esQuery") {
+      if (!isPlainRecord(value)) throw new Error("$esQuery must be an object");
+      filters.push(value);
     } else {
       filters.push(translateFieldFilterToElasticsearchQuery(key, value));
     }

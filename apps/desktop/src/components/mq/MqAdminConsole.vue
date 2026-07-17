@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { formatError } from "@/lib/backend/errorUtils";
 import { ref, computed, onMounted, watch } from "vue";
+import { useI18n } from "vue-i18n";
 import type { MqClusterInfo, TopicInfo } from "@/types/mq";
 import { mqTestConnection } from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -27,6 +28,7 @@ interface Props {
 }
 
 const props = defineProps<Props>();
+const { t } = useI18n();
 const connectionStore = useConnectionStore();
 
 // State
@@ -203,31 +205,31 @@ onMounted(async () => {
       <div class="mq-breadcrumb">
         <span v-if="clusterInfo" class="cluster-info"> {{ clusterInfo.systemKind.toUpperCase() }} {{ clusterInfo.serverVersion || "" }} </span>
         <span v-if="selectedTenant" class="breadcrumb-separator">›</span>
-        <button v-if="selectedTenant" class="breadcrumb-button" @click="goToTenantLevel" title="查看租户">{{ selectedTenant }}</button>
+        <button v-if="selectedTenant" class="breadcrumb-button" @click="goToTenantLevel" :title="t('mqAdmin.viewTenant')">{{ selectedTenant }}</button>
         <span v-if="selectedNamespace" class="breadcrumb-separator">›</span>
-        <button v-if="selectedNamespace" class="breadcrumb-button" @click="goToNamespaceLevel" title="查看命名空间">{{ selectedNamespace }}</button>
+        <button v-if="selectedNamespace" class="breadcrumb-button" @click="goToNamespaceLevel" :title="t('mqAdmin.viewNamespace')">{{ selectedNamespace }}</button>
         <span v-if="selectedTopic" class="breadcrumb-separator">›</span>
-        <button v-if="selectedTopic" class="breadcrumb-button" @click="goToTopicLevel" title="查看主题">{{ selectedTopic.shortName }}</button>
+        <button v-if="selectedTopic" class="breadcrumb-button" @click="goToTopicLevel" :title="t('mqAdmin.viewTopic')">{{ selectedTopic.shortName }}</button>
       </div>
       <div class="toolbar-status">
-        <span v-if="readOnly" class="readonly-badge">只读</span>
+        <span v-if="readOnly" class="readonly-badge">{{ t("mqAdmin.readOnly") }}</span>
         <span v-if="error" class="toolbar-error">{{ error }}</span>
       </div>
     </div>
 
     <!-- Tab Bar -->
     <div class="mq-tabs">
-      <button v-if="canManageTenants" :class="{ active: activeTab === 'tenants' }" @click="setActiveTab('tenants')">租户</button>
-      <button v-if="canManageNamespaces" :class="{ active: activeTab === 'namespaces' }" @click="setActiveTab('namespaces')">命名空间</button>
-      <button :class="{ active: activeTab === 'topics' }" @click="setActiveTab('topics')">主题</button>
-      <button v-if="canManageSubscriptions" :class="{ active: activeTab === 'subscriptions' }" @click="setActiveTab('subscriptions')">订阅</button>
-      <button :class="{ active: activeTab === 'monitoring' }" @click="setActiveTab('monitoring')">监控</button>
-      <button :class="{ active: activeTab === 'clients' }" @click="setActiveTab('clients')">客户端</button>
-      <button v-if="canSendMessage" :class="{ active: activeTab === 'messages' }" @click="setActiveTab('messages')">消息</button>
-      <button :class="{ active: activeTab === 'broker' }" @click="setActiveTab('broker')">Broker</button>
-      <button v-if="canManagePolicies" :class="{ active: activeTab === 'policies' }" @click="setActiveTab('policies')">策略</button>
-      <button v-if="canManagePermissions" :class="{ active: activeTab === 'permissions' }" @click="setActiveTab('permissions')">权限</button>
-      <button v-if="canUseRawApi" :class="{ active: activeTab === 'raw' }" @click="setActiveTab('raw')">Raw API</button>
+      <button v-if="canManageTenants" :class="{ active: activeTab === 'tenants' }" @click="setActiveTab('tenants')">{{ t("mqAdmin.tabTenants") }}</button>
+      <button v-if="canManageNamespaces" :class="{ active: activeTab === 'namespaces' }" @click="setActiveTab('namespaces')">{{ t("mqAdmin.tabNamespaces") }}</button>
+      <button :class="{ active: activeTab === 'topics' }" @click="setActiveTab('topics')">{{ t("mqAdmin.tabTopics") }}</button>
+      <button v-if="canManageSubscriptions" :class="{ active: activeTab === 'subscriptions' }" @click="setActiveTab('subscriptions')">{{ t("mqAdmin.tabSubscriptions") }}</button>
+      <button :class="{ active: activeTab === 'monitoring' }" @click="setActiveTab('monitoring')">{{ t("mqAdmin.tabMonitoring") }}</button>
+      <button :class="{ active: activeTab === 'clients' }" @click="setActiveTab('clients')">{{ t("mqAdmin.tabClients") }}</button>
+      <button v-if="canSendMessage" :class="{ active: activeTab === 'messages' }" @click="setActiveTab('messages')">{{ t("mqAdmin.tabMessages") }}</button>
+      <button :class="{ active: activeTab === 'broker' }" @click="setActiveTab('broker')">{{ t("mqAdmin.tabBroker") }}</button>
+      <button v-if="canManagePolicies" :class="{ active: activeTab === 'policies' }" @click="setActiveTab('policies')">{{ t("mqAdmin.tabPolicies") }}</button>
+      <button v-if="canManagePermissions" :class="{ active: activeTab === 'permissions' }" @click="setActiveTab('permissions')">{{ t("mqAdmin.tabPermissions") }}</button>
+      <button v-if="canUseRawApi" :class="{ active: activeTab === 'raw' }" @click="setActiveTab('raw')">{{ t("mqAdmin.tabRawApi") }}</button>
     </div>
 
     <!-- Main Content Area -->

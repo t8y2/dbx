@@ -9,6 +9,25 @@ export interface SqlRiskAssessment extends SqlRiskStatementAssessment {
   statements: SqlRiskStatementAssessment[];
 }
 
+/** Options for SQL text utilities that parse comments and literals. */
+export interface SqlTextOptions {
+  /** Whether `#` starts a line comment. Only MySQL-family databases support this.
+   *  Default: false (fail-safe — `#` is treated as an operator, which may over-block
+   *  MySQL classification but never under-blocks PostgreSQL). */
+  hashLineComments?: boolean;
+}
+
+/** Database types whose SQL dialect uses `#` for line comments (MySQL family). */
+const MYSQL_HASH_COMMENT_DB_TYPES = new Set(["mysql", "doris", "starrocks", "manticoresearch", "goldendb"]);
+
+/** Determine whether the given database type supports `#` line comments.
+ *  Mirrors the Rust `is_mysql_compatible_database` dialect set:
+ *  Mysql, Doris, StarRocks, ManticoreSearch, Goldendb. */
+export function supportsHashLineComments(dbType?: string): boolean {
+  if (!dbType) return false;
+  return MYSQL_HASH_COMMENT_DB_TYPES.has(dbType);
+}
+
 interface SqlRiskToken {
   text: string;
   normalized: string;
@@ -23,15 +42,15 @@ const PRIMARY_STATEMENT_KEYWORDS = new Set([...READ_KEYWORDS, ...WRITE_KEYWORDS,
 const SAFE_READ_PRAGMA_NAMES = new Set(["table_info", "table_xinfo", "index_list", "index_info", "foreign_key_list", "database_list", "compile_options", "data_version"]);
 const RISK_ORDER: Record<SqlRiskLevel, number> = { read: 0, write: 1, ddl: 2, transaction: 3, unknown: 4 };
 
-export function splitSqlStatementsForSafety(sql: string): string[] {
-  return sqlSafetyText(sql)
+export function splitSqlStatementsForSafety(sql: string, options?: SqlTextOptions): string[] {
+  return sqlSafetyText(sql, options)
     .split(";")
     .map((statement) => statement.trim())
     .filter(Boolean);
 }
 
-export function classifySqlRisk(sql: string): SqlRiskAssessment {
-  const statements = splitSqlStatementsForSafety(sql).map(classifySqlStatementRisk);
+export function classifySqlRisk(sql: string, options?: SqlTextOptions): SqlRiskAssessment {
+  const statements = splitSqlStatementsForSafety(sql, options).map(classifySqlStatementRisk);
   if (!statements.length) return { risk: "unknown", statements: [] };
   const highest = statements.reduce<SqlRiskStatementAssessment>((current, statement) => (RISK_ORDER[statement.risk] > RISK_ORDER[current.risk] ? statement : current), { risk: "read" });
   return { ...highest, statements };
@@ -45,9 +64,10 @@ export function isSqlRiskMutation(risk: SqlRiskLevel): boolean {
   return risk !== "read";
 }
 
-export function sqlSafetyText(sql: string): string {
+export function sqlSafetyText(sql: string, options?: SqlTextOptions): string {
   let output = "";
   let index = 0;
+  const hashLineComments = options?.hashLineComments === true;
   while (index < sql.length) {
     const char = sql[index] ?? "";
     const next = sql[index + 1] ?? "";
@@ -57,7 +77,7 @@ export function sqlSafetyText(sql: string): string {
       output += " ";
       continue;
     }
-    if (char === "#") {
+    if (hashLineComments && char === "#") {
       index += 1;
       while (index < sql.length && sql[index] !== "\n" && sql[index] !== "\r") index += 1;
       output += " ";
@@ -69,7 +89,7 @@ export function sqlSafetyText(sql: string): string {
       const executablePrefixLength = mysqlExecutableCommentPrefixLength(sql, index);
       if (executablePrefixLength > 0) {
         const bodyStart = skipExecutableCommentVersion(sql, index + executablePrefixLength);
-        output += ` ${sqlSafetyText(sql.slice(bodyStart, close))} `;
+        output += ` ${sqlSafetyText(sql.slice(bodyStart, close), options)} `;
       } else {
         output += " ";
       }

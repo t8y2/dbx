@@ -21,6 +21,15 @@ describe("sqlSemanticTokens", () => {
     expect(isSuppressedSqlSemanticContext(tokens, "select * from users".length)).toBe(false);
   });
 
+  it("treats hash prefixes as identifiers for SQL Server but comments for MySQL", () => {
+    const sqlServerSql = "SELECT * FROM #temp; SELECT * FROM ##global_temp; SELECT * FROM tempdb..#temp";
+    const sqlServerTokens = tokenizeSqlSemantic(sqlServerSql, "sqlserver");
+
+    expect(sqlServerTokens.filter((token) => token.kind === "word" && token.text.startsWith("#")).map((token) => token.text)).toEqual(["#temp", "##global_temp", "#temp"]);
+    expect(sqlServerTokens.some((token) => token.kind === "comment")).toBe(false);
+    expect(tokenizeSqlSemantic("SELECT 1 # comment", "mysql").some((token) => token.kind === "comment" && token.text === "# comment")).toBe(true);
+  });
+
   it("finds active statement spans across semicolon-separated scripts", () => {
     const sql = "select * from users;\nselect * from orders where id = 1;";
     const cursor = sql.indexOf("orders");

@@ -3,11 +3,13 @@ import { readFileSync } from "node:fs";
 import { test } from "vitest";
 
 const treeItem = readFileSync("apps/desktop/src/components/sidebar/TreeItem.vue", "utf8");
+const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
 const connectionTree = readFileSync("apps/desktop/src/components/sidebar/ConnectionTree.vue", "utf8");
 
 test("sidebar rows retain database-specific node affordances", () => {
   for (const nodeType of ["connection", "database", "schema", "table", "column", "mongo-db", "mongo-collection", "redis-db", "nacos-namespace", "mq-tenant"]) {
-    assert.ok(treeItem.includes(`node.type === "${nodeType}"`) || treeItem.includes(`node.type === '${nodeType}'`), nodeType);
+    const sources = `${treeItem}\n${runtimeHost}`;
+    assert.ok(sources.includes(`node.type === "${nodeType}"`) || sources.includes(`node.type === '${nodeType}'`), nodeType);
   }
   assert.match(treeItem, /@dblclick="onDoubleClick"/);
   assert.match(treeItem, /@keydown="onKeydown"/);

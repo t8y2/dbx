@@ -66,6 +66,7 @@ function codeMirrorBaseDialect(langSql: CodeMirrorSqlLanguageModule, dialectName
     if (SQLITE_CODEMIRROR_DATABASE_TYPES.has(databaseType)) return langSql.SQLite;
     if (databaseType === "sqlserver") return langSql.MSSQL;
     if (databaseType === "cassandra") return langSql.Cassandra;
+    if (databaseType === "jdbc" && dialectName === "sqlserver") return langSql.MSSQL;
     return langSql.StandardSQL;
   }
   return dialectName === "postgres" ? langSql.PostgreSQL : dialectName === "sqlserver" ? langSql.MSSQL : langSql.MySQL;

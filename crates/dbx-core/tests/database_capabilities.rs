@@ -325,6 +325,9 @@ fn driver_manifest_declares_expected_product_capabilities() {
     assert!(zookeeper.capabilities.query_execution);
     assert!(zookeeper.capabilities.driver_management);
     assert!(!zookeeper.capabilities.metadata_browse);
+
+    let starrocks = find_driver(DatabaseType::StarRocks);
+    assert!(starrocks.capabilities.user_admin);
 }
 
 #[test]

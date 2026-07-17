@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { beforeEach, test, vi } from "vitest";
 import { computed, ref } from "vue";
+import { createPinia, setActivePinia } from "pinia";
 import { useDataGridExport } from "../../apps/desktop/src/composables/useDataGridExport.ts";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import * as api from "@/lib/backend/api";
@@ -21,11 +22,13 @@ vi.mock("@/lib/backend/api", () => ({
 
 const draftRowId = Number.MIN_SAFE_INTEGER;
 
-function createExportContext(options: {
-  contextRowId?: number;
-  selectedRowIds?: Set<number>;
-  fullExportResult?: () => Promise<{ columns: string[]; rows: Array<Array<string | number | boolean | null>>; affected_rows: number; execution_time_ms: number }>;
-} = {}) {
+function createExportContext(
+  options: {
+    contextRowId?: number;
+    selectedRowIds?: Set<number>;
+    fullExportResult?: () => Promise<{ columns: string[]; rows: Array<Array<string | number | boolean | null>>; affected_rows: number; execution_time_ms: number }>;
+  } = {},
+) {
   const contextRowId = options.contextRowId ?? draftRowId;
   const selectedRowIds = ref(options.selectedRowIds ?? new Set<number>());
   const rows = [
@@ -75,6 +78,7 @@ function createExportContext(options: {
 }
 
 beforeEach(() => {
+  setActivePinia(createPinia());
   globalThis.window = {
     setTimeout,
     clearTimeout,

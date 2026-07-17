@@ -201,8 +201,11 @@ async fn fetch_latest_mcp_version() -> Result<String, String> {
     Ok(package.version)
 }
 
-pub(crate) async fn resolve_mcp_server_command() -> Option<(String, Vec<String>)> {
-    tauri::async_runtime::spawn_blocking(resolve_mcp_server_command_sync).await.ok().flatten()
+pub(crate) async fn resolve_mcp_server_command() -> Result<(String, Vec<String>), String> {
+    let command = tauri::async_runtime::spawn_blocking(resolve_mcp_server_command_sync)
+        .await
+        .map_err(|err| format!("Failed to resolve DBX MCP Server runtime: {err}"))?;
+    require_managed_mcp_command(command)
 }
 
 fn resolve_mcp_server_command_sync() -> Option<(String, Vec<String>)> {
@@ -223,6 +226,15 @@ fn resolve_managed_mcp_command(
         log::warn!("Ignoring unbound MCP package shim at {}", shim.display());
     }
     None
+}
+
+fn require_managed_mcp_command(command: Option<(String, Vec<String>)>) -> Result<(String, Vec<String>), String> {
+    command.ok_or_else(|| {
+        format!(
+            "DBX MCP Server is unavailable: no compatible Node.js ({}) installation containing {} was found. Install MCP Server from DBX settings and try again.",
+            MCP_MIN_NODE_VERSION_REQUIREMENT, MCP_PACKAGE_NAME
+        )
+    })
 }
 
 fn resolve_node_runtime() -> Option<NodeRuntime> {
@@ -799,8 +811,9 @@ mod tests {
     use super::{bash_login_script, canonical_runtime_path, NodeRuntimeCandidate};
     use super::{
         is_mcp_compatible_node_version, mcp_command_for_runtime, normalized_reported_path, npm_cli_candidates,
-        parse_node_version, prefer_runtime, prefixed_output_path, resolve_managed_mcp_command,
-        stdout_after_shell_marker, NodeRuntime, NodeVersion, SHELL_COMMAND_MARKER,
+        parse_node_version, prefer_runtime, prefixed_output_path, require_managed_mcp_command,
+        resolve_managed_mcp_command, stdout_after_shell_marker, NodeRuntime, NodeVersion,
+        MCP_MIN_NODE_VERSION_REQUIREMENT, MCP_PACKAGE_NAME, SHELL_COMMAND_MARKER,
     };
     #[cfg(not(windows))]
     use super::{shell_command_script, shell_quote};
@@ -942,6 +955,15 @@ mod tests {
             resolve_managed_mcp_command(Some(&incompatible), || Some(PathBuf::from("/path/bin/dbx-mcp-server")));
 
         assert!(command.is_none());
+    }
+
+    #[test]
+    fn desktop_launch_requires_a_managed_mcp_command() {
+        let error = require_managed_mcp_command(None).unwrap_err();
+
+        assert!(error.contains(MCP_MIN_NODE_VERSION_REQUIREMENT));
+        assert!(error.contains(MCP_PACKAGE_NAME));
+        assert!(error.contains("DBX settings"));
     }
 
     #[test]

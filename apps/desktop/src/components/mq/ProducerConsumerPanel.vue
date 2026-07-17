@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { formatError } from "@/lib/backend/errorUtils";
 import { computed, ref, watch } from "vue";
+import { useI18n } from "vue-i18n";
 import type { ConsumerInfo, ProducerInfo, SubscriptionInfo, TopicInfo, TopicRef, TopicStats } from "@/types/mq";
 import { mqGetTopicStats, mqListConsumers, mqListProducers, mqListSubscriptions, mqUnloadTopic } from "@/lib/backend/api";
 
@@ -15,6 +16,7 @@ interface Props {
 }
 
 const props = defineProps<Props>();
+const { t } = useI18n();
 
 interface PartitionClientRow {
   name: string;
@@ -76,7 +78,7 @@ const displayedConsumers = computed(() => {
   if (selectedPartition.value) return selectedPartitionSubscription.value?.consumers ?? [];
   return aggregateConsumers.value;
 });
-const selectedScopeLabel = computed(() => selectedPartition.value?.shortName ?? "聚合 topic");
+const selectedScopeLabel = computed(() => selectedPartition.value?.shortName ?? t("mqClients.aggregateTopic"));
 
 async function loadRuntimeClients() {
   const loadSeq = ++runtimeLoadSeq;
@@ -128,7 +130,7 @@ async function loadRuntimeClients() {
 async function unloadTopic() {
   const current = topicRef.value;
   if (!current || props.readOnly || unloading.value) return;
-  if (!confirm("确认卸载当前主题？活跃生产者和消费者会重新连接。")) return;
+  if (!confirm(t("mqClients.confirmUnload"))) return;
 
   unloading.value = true;
   error.value = undefined;
@@ -143,7 +145,7 @@ async function unloadTopic() {
 }
 
 function formatRate(value: number): string {
-  return `${value.toFixed(2)} msg/s`;
+  return t("mqClients.rateValue", { value: value.toFixed(2) });
 }
 
 function formatBytes(value: number): string {
@@ -416,36 +418,36 @@ watch(
 <template>
   <div class="producer-consumer-panel">
     <div class="panel-toolbar">
-      <h3>生产者 / 消费者</h3>
+      <h3>{{ t("mqClients.title") }}</h3>
       <div class="toolbar-actions">
         <button v-if="!isKafkaCluster" class="btn-sm danger" :disabled="readOnly || !topic || unloading" @click="unloadTopic">
-          {{ unloading ? "卸载中..." : "卸载主题" }}
+          {{ unloading ? t("mqClients.unloading") : t("mqClients.unloadTopic") }}
         </button>
         <button class="btn-sm" :disabled="loading || !topic" @click="loadRuntimeClients">
-          {{ loading ? "刷新中..." : "刷新" }}
+          {{ loading ? t("mqClients.refreshing") : t("mqClients.refresh") }}
         </button>
       </div>
     </div>
 
-    <div v-if="!topic" class="panel-placeholder">请先选择一个 topic</div>
+    <div v-if="!topic" class="panel-placeholder">{{ t("mqClients.selectTopicFirst") }}</div>
     <div v-else-if="error" class="panel-error">{{ error }}</div>
 
     <div v-else class="runtime-content">
       <section v-if="isKafkaStats" class="runtime-section">
         <div class="section-heading">
-          <h4>Kafka 分区状态</h4>
-          <span>{{ kafkaPartitionRows.length }} 个分区</span>
+          <h4>{{ t("mqClients.kafkaPartitionStatus") }}</h4>
+          <span>{{ t("mqClients.partitionCount", { count: kafkaPartitionRows.length }) }}</span>
         </div>
         <table class="runtime-table partition-table">
           <thead>
             <tr>
-              <th>分区</th>
-              <th>起始 offset</th>
-              <th>最新 offset</th>
-              <th>消息数</th>
-              <th>Leader</th>
-              <th>Replicas</th>
-              <th>ISR</th>
+              <th>{{ t("mqClients.partition") }}</th>
+              <th>{{ t("mqClients.beginOffset") }}</th>
+              <th>{{ t("mqClients.latestOffset") }}</th>
+              <th>{{ t("mqClients.messageCount") }}</th>
+              <th>{{ t("mqClients.leader") }}</th>
+              <th>{{ t("mqClients.replicas") }}</th>
+              <th>{{ t("mqClients.isr") }}</th>
             </tr>
           </thead>
           <tbody>
@@ -464,18 +466,18 @@ watch(
 
       <section v-else-if="partitionRows.length" class="runtime-section">
         <div class="section-heading">
-          <h4>分区客户端</h4>
-          <span>{{ partitionRows.length }} 个分区</span>
+          <h4>{{ t("mqClients.partitionClients") }}</h4>
+          <span>{{ t("mqClients.partitionCount", { count: partitionRows.length }) }}</span>
         </div>
         <table class="runtime-table partition-table">
           <thead>
             <tr>
-              <th>分区</th>
-              <th>入站速率</th>
-              <th>出站速率</th>
-              <th>生产者</th>
-              <th>订阅</th>
-              <th>消费者</th>
+              <th>{{ t("mqClients.partition") }}</th>
+              <th>{{ t("mqClients.inboundRate") }}</th>
+              <th>{{ t("mqClients.outboundRate") }}</th>
+              <th>{{ t("mqClients.producers") }}</th>
+              <th>{{ t("mqClients.subscriptions") }}</th>
+              <th>{{ t("mqClients.consumers") }}</th>
             </tr>
           </thead>
           <tbody>
@@ -493,22 +495,22 @@ watch(
 
       <section class="runtime-section">
         <div class="section-heading">
-          <h4>活跃生产者</h4>
+          <h4>{{ t("mqClients.activeProducers") }}</h4>
           <div class="heading-meta">
             <span v-if="selectedPartition" class="scope-chip">{{ selectedScopeLabel }}</span>
             <span>{{ displayedProducers.length }}</span>
           </div>
         </div>
-        <div v-if="!displayedProducers.length && !loading" class="empty-state">当前没有活跃生产者</div>
+        <div v-if="!displayedProducers.length && !loading" class="empty-state">{{ t("mqClients.noActiveProducers") }}</div>
         <table v-else class="runtime-table">
           <thead>
             <tr>
-              <th>名称</th>
-              <th>ID</th>
-              <th>地址</th>
-              <th>版本</th>
-              <th>速率</th>
-              <th>吞吐</th>
+              <th>{{ t("mqClients.name") }}</th>
+              <th>{{ t("mqClients.id") }}</th>
+              <th>{{ t("mqClients.address") }}</th>
+              <th>{{ t("mqClients.version") }}</th>
+              <th>{{ t("mqClients.rate") }}</th>
+              <th>{{ t("mqClients.throughput") }}</th>
             </tr>
           </thead>
           <tbody>
@@ -526,7 +528,7 @@ watch(
 
       <section class="runtime-section">
         <div class="section-heading">
-          <h4>活跃消费者</h4>
+          <h4>{{ t("mqClients.activeConsumers") }}</h4>
           <div class="subscription-selector">
             <span v-if="selectedPartition" class="scope-chip">{{ selectedScopeLabel }}</span>
             <span>{{ displayedConsumers.length }}</span>
@@ -538,19 +540,19 @@ watch(
             </select>
           </div>
         </div>
-        <div v-if="!subscriptionOptions.length && !loading" class="empty-state">当前 topic 没有订阅</div>
+        <div v-if="!subscriptionOptions.length && !loading" class="empty-state">{{ t("mqClients.noSubscriptions") }}</div>
         <div v-else-if="!displayedConsumers.length && !loading" class="empty-state">
-          {{ selectedPartition ? "当前分区订阅没有活跃消费者" : "当前订阅没有活跃消费者" }}
+          {{ selectedPartition ? t("mqClients.noConsumersOnPartition") : t("mqClients.noConsumersOnSubscription") }}
         </div>
         <table v-else class="runtime-table">
           <thead>
             <tr>
-              <th>名称</th>
-              <th>地址</th>
-              <th>版本</th>
-              <th>速率</th>
-              <th>吞吐</th>
-              <th>Permits</th>
+              <th>{{ t("mqClients.name") }}</th>
+              <th>{{ t("mqClients.address") }}</th>
+              <th>{{ t("mqClients.version") }}</th>
+              <th>{{ t("mqClients.rate") }}</th>
+              <th>{{ t("mqClients.throughput") }}</th>
+              <th>{{ t("mqClients.permits") }}</th>
             </tr>
           </thead>
           <tbody>

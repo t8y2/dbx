@@ -1,5 +1,6 @@
 import type { ConnectionConfig, DatabaseType, QueryResult } from "@/types/database";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { computeRate, formatBytes, formatBytesPerSec, formatNumber, formatRate, formatUptime, statusEntries, statusNumber, type StatusEntry, type StatusMap, type StatusSample } from "@/lib/database/serverMetrics";
 
 /**
  * MySQL server-monitoring helpers. Pure and framework-free so the rate math and
@@ -9,7 +10,11 @@ import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
  * Data comes from `SHOW GLOBAL STATUS` (cumulative counters, two columns
  * Variable_name/Value) and a one-shot `SHOW GLOBAL VARIABLES` (config such as
  * max_connections/version), both run through the generic query bridge.
+ *
+ * Sample/rate math and formatting are engine-agnostic and live in
+ * `./serverMetrics`; re-exported here so existing callers keep one import path.
  */
+export { computeRate, formatBytes, formatBytesPerSec, formatNumber, formatRate, formatUptime, statusEntries, statusNumber, type StatusEntry, type StatusMap, type StatusSample };
 
 export const GLOBAL_STATUS_SQL = "SHOW GLOBAL STATUS";
 export const GLOBAL_VARIABLES_SQL = "SHOW GLOBAL VARIABLES";
@@ -29,20 +34,6 @@ export const MAX_SAMPLES = 60;
  */
 const SERVER_DASHBOARD_DB_TYPES = new Set<DatabaseType>(["mysql"]);
 
-export type StatusMap = Record<string, string>;
-
-export interface StatusSample {
-  /** Capture time in epoch milliseconds (captured by the caller). */
-  at: number;
-  status: StatusMap;
-}
-
-/** A key/value row for the raw status table. */
-export interface StatusEntry {
-  name: string;
-  value: string;
-}
-
 /** Parse a two-column `SHOW GLOBAL STATUS` / `SHOW GLOBAL VARIABLES` result. */
 export function parseStatusResult(result: QueryResult | null | undefined): StatusMap {
   const map: StatusMap = {};
@@ -57,27 +48,6 @@ export function parseStatusResult(result: QueryResult | null | undefined): Statu
     map[String(name)] = row[valueCol] === null || row[valueCol] === undefined ? "" : String(row[valueCol]);
   }
   return map;
-}
-
-/** Read a status value as a number, defaulting to 0 when absent/non-numeric. */
-export function statusNumber(status: StatusMap, key: string): number {
-  const raw = status[key];
-  if (raw === undefined) return 0;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-/**
- * Per-second rate of a cumulative counter between two samples. Guards against a
- * counter reset (server restart / FLUSH STATUS) by treating a decrease as no
- * measurable rate, and against a zero/negative time delta.
- */
-export function computeRate(prev: StatusSample, curr: StatusSample, key: string): number {
-  const dtSeconds = (curr.at - prev.at) / 1000;
-  if (dtSeconds <= 0) return 0;
-  const delta = statusNumber(curr.status, key) - statusNumber(prev.status, key);
-  if (delta < 0) return 0;
-  return delta / dtSeconds;
 }
 
 /** QPS between two samples, preferring `Queries` and falling back to `Questions`. */
@@ -97,44 +67,6 @@ export function innodbBufferHitRatio(status: StatusMap): number | null {
   const ratio = (1 - reads / requests) * 100;
   if (!Number.isFinite(ratio)) return null;
   return Math.max(0, Math.min(100, ratio));
-}
-
-/** Flatten a status map into sorted key/value rows for the raw table. */
-export function statusEntries(status: StatusMap): StatusEntry[] {
-  return Object.keys(status)
-    .sort((a, b) => a.localeCompare(b))
-    .map((name) => ({ name, value: status[name] }));
-}
-
-export function formatNumber(value: number): string {
-  return Math.round(value).toLocaleString("en-US");
-}
-
-const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB"];
-
-export function formatBytes(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return "0 B";
-  const exponent = Math.min(Math.floor(Math.log(value) / Math.log(1024)), BYTE_UNITS.length - 1);
-  const scaled = value / 1024 ** exponent;
-  return `${scaled.toFixed(exponent === 0 ? 0 : 1)} ${BYTE_UNITS[exponent]}`;
-}
-
-export function formatBytesPerSec(value: number): string {
-  return `${formatBytes(value)}/s`;
-}
-
-/** Format an uptime in seconds as a compact `Nd Nh Nm` / `Nh Nm` / `Nm Ns` string. */
-export function formatUptime(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds <= 0) return "0s";
-  const total = Math.floor(seconds);
-  const days = Math.floor(total / 86400);
-  const hours = Math.floor((total % 86400) / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  const secs = total % 60;
-  if (days > 0) return `${days}d ${hours}h ${minutes}m`;
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  if (minutes > 0) return `${minutes}m ${secs}s`;
-  return `${secs}s`;
 }
 
 /** Whether the given database type exposes the server dashboard (MySQL family). */

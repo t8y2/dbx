@@ -44,7 +44,7 @@ test("secondary write entrypoints use the shared production SQL guard", () => {
       sourceKey: "production.sourceExtension",
     },
     {
-      path: "apps/desktop/src/components/sidebar/TreeItem.vue",
+      path: "apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue",
       executor: "api.executeQuery",
       sourceKey: "production.sourceSidebar",
     },

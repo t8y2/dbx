@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
+#[cfg(feature = "duckdb-bundled")]
 use tokio::task::JoinHandle;
 
 use mysql_async::prelude::Queryable;
@@ -22,13 +23,14 @@ use crate::db::http_tunnel::HttpTunnelManager;
 use crate::db::proxy_tunnel::ProxyTunnelManager;
 use crate::db::ssh_tunnel::TunnelManager;
 use crate::models::connection::{
-    parse_jdbc_host_port, parse_mongo_first_host, rewrite_jdbc_url_host, ConnectionConfig, DatabaseType,
-    TransportLayerConfig,
+    database_info_from_protocol_value, parse_jdbc_host_port, parse_mongo_first_host, rewrite_jdbc_url_host,
+    ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType, TransportLayerConfig,
 };
 use crate::path_utils::expand_tilde;
 use crate::plugins::{PluginDriverSession, PluginRegistry, PluginRuntimeEnv};
 use crate::query_cancel::RunningQueries;
 use crate::storage::{normalize_duckdb_worker_max_processes, Storage, DUCKDB_WORKER_MAX_PROCESSES_DEFAULT};
+use crate::task_supervisor::TaskSupervisor;
 
 pub const JDBC_PLUGIN_NOT_INSTALLED: &str =
     "JDBC plugin is not installed. Install the optional JDBC plugin to use this connection.";
@@ -110,6 +112,12 @@ pub enum PoolKind {
     Nacos,
 }
 
+enum ConnectionDatabaseInfoSource {
+    Agent(Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>),
+    ExternalDriver { config: Arc<ConnectionConfig>, session: Arc<PluginDriverSession> },
+    NativeMysql(db::mysql::MySqlPool),
+}
+
 /// Held connection for a manual transaction session
 pub enum TxnConnection {
     Postgres(Box<deadpool_postgres::Object>),
@@ -169,7 +177,7 @@ macro_rules! agent_connection_pool_database_type {
 
 pub struct AppState {
     pub connections: Arc<RwLock<HashMap<String, PoolKind>>>,
-    keepalive_tasks: Arc<RwLock<HashMap<String, JoinHandle<()>>>>,
+    task_supervisor: TaskSupervisor,
     pool_activity: Arc<RwLock<HashMap<String, PoolActivity>>>,
     connection_attempts: RwLock<HashMap<String, ConnectionAttemptState>>,
     pub configs: RwLock<HashMap<String, ConnectionConfig>>,
@@ -213,6 +221,7 @@ pub struct PoolActivityTouch {
     pool_key: String,
     connections: Arc<RwLock<HashMap<String, PoolKind>>>,
     pool_activity: Arc<RwLock<HashMap<String, PoolActivity>>>,
+    task_supervisor: TaskSupervisor,
 }
 
 impl Drop for PoolActivityTouch {
@@ -220,10 +229,7 @@ impl Drop for PoolActivityTouch {
         let pool_key = self.pool_key.clone();
         let connections = self.connections.clone();
         let pool_activity = self.pool_activity.clone();
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        handle.spawn(async move {
+        self.task_supervisor.spawn_replace(format!("pool-activity:{pool_key}"), move |_| async move {
             if !connections.read().await.contains_key(&pool_key) {
                 return;
             }
@@ -563,7 +569,7 @@ impl AppState {
     ) -> Self {
         Self {
             connections: Arc::new(RwLock::new(HashMap::new())),
-            keepalive_tasks: Arc::new(RwLock::new(HashMap::new())),
+            task_supervisor: TaskSupervisor::new(),
             pool_activity: Arc::new(RwLock::new(HashMap::new())),
             connection_attempts: RwLock::new(HashMap::new()),
             configs: RwLock::new(HashMap::new()),
@@ -654,9 +660,18 @@ impl AppState {
     }
 
     pub async fn test_external_driver(&self, driver_id: &str, config: &ConnectionConfig) -> Result<String, String> {
+        self.test_external_driver_with_info(driver_id, config).await.map(|result| result.message)
+    }
+
+    pub async fn test_external_driver_with_info(
+        &self,
+        driver_id: &str,
+        config: &ConnectionConfig,
+    ) -> Result<ConnectionTestResult, String> {
         let params = serde_json::json!({ "connection": config });
         let env = self.external_driver_runtime_env(driver_id)?;
-        self.plugins
+        let response = self
+            .plugins
             .invoke_driver_with_env_and_timeout::<serde_json::Value>(
                 driver_id,
                 "testConnection",
@@ -665,7 +680,8 @@ impl AppState {
                 Some(external_driver_connect_timeout(config)),
             )
             .await?;
-        Ok("Connection successful".to_string())
+        Ok(ConnectionTestResult::success("Connection successful")
+            .with_database_info(database_info_from_protocol_value(&response)))
     }
 
     pub async fn external_driver_pool(&self, driver_id: &str, config: &ConnectionConfig) -> Result<PoolKind, String> {
@@ -685,6 +701,18 @@ impl AppState {
         port: u16,
         connect_timeout: Duration,
     ) -> Result<String, String> {
+        self.test_sqlserver_connection_with_legacy_fallback_with_info(config, host, port, connect_timeout)
+            .await
+            .map(|result| result.message)
+    }
+
+    pub async fn test_sqlserver_connection_with_legacy_fallback_with_info(
+        &self,
+        config: &ConnectionConfig,
+        host: &str,
+        port: u16,
+        connect_timeout: Duration,
+    ) -> Result<ConnectionTestResult, String> {
         match db::sqlserver::connect_with_port_explicit(
             host,
             port,
@@ -696,7 +724,7 @@ impl AppState {
         )
         .await
         {
-            Ok(_) => Ok("Connection successful".to_string()),
+            Ok(_) => Ok(ConnectionTestResult::success("Connection successful")),
             Err(native_error)
                 if db::sqlserver::sqlserver_legacy_compatibility_enabled(config.url_params.as_deref()) =>
             {
@@ -708,7 +736,7 @@ impl AppState {
                     .spawn(&legacy_config.db_type, legacy_config.driver_profile.as_deref())
                     .await
                     .map_err(|err| sqlserver_legacy_agent_error(&native_error, &err))?;
-                client
+                let response = client
                     .call_method_with_timeout::<serde_json::Value>(
                         AgentMethod::TestConnection,
                         connect_params,
@@ -717,7 +745,8 @@ impl AppState {
                     .await
                     .map_err(|err| sqlserver_legacy_agent_error(&native_error, &err))?;
                 client.disconnect().await.ok();
-                Ok("Connection successful (via SQL Server legacy compatibility driver)".to_string())
+                Ok(ConnectionTestResult::success("Connection successful (via SQL Server legacy compatibility driver)")
+                    .with_database_info(database_info_from_protocol_value(&response)))
             }
             Err(err) => Err(err),
         }
@@ -897,13 +926,15 @@ impl AppState {
         let interval = Duration::from_secs(interval_secs.max(1));
         let timeout = Duration::from_secs(config.effective_connect_timeout_secs().max(1));
         let connections = self.connections.clone();
-        let keepalive_tasks = self.keepalive_tasks.clone();
         let pool_activity = self.pool_activity.clone();
         let cancel_contexts = self.postgres_cancel_contexts.clone();
         let running_queries = self.running_queries.clone();
-        let handle = tokio::spawn(async move {
+        self.task_supervisor.spawn_replace(format!("keepalive:{pool_key}"), move |shutdown| async move {
             loop {
-                tokio::time::sleep(interval).await;
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = tokio::time::sleep(interval) => {}
+                }
 
                 if running_queries.is_pool_active(&key) {
                     continue;
@@ -915,7 +946,6 @@ impl AppState {
                         Ok(Ok(())) => {}
                         Ok(Err(err)) => {
                             log::warn!("Connection keepalive failed for '{key}': {err}; invalidating pool");
-                            keepalive_tasks.write().await.remove(&key);
                             pool_activity.write().await.remove(&key);
                             cancel_contexts.write().await.remove(&key);
                             let removed = connections.write().await.remove(&key);
@@ -929,7 +959,6 @@ impl AppState {
                                 "Connection keepalive timed out for '{key}' after {}s; invalidating pool",
                                 timeout.as_secs()
                             );
-                            keepalive_tasks.write().await.remove(&key);
                             pool_activity.write().await.remove(&key);
                             cancel_contexts.write().await.remove(&key);
                             let removed = connections.write().await.remove(&key);
@@ -942,26 +971,15 @@ impl AppState {
                 }
             }
         });
-        let previous = self.keepalive_tasks.write().await.insert(pool_key.to_string(), handle);
-        if let Some(previous) = previous {
-            previous.abort();
-        }
     }
 
     async fn stop_keepalive_task(&self, pool_key: &str) {
-        let task = self.keepalive_tasks.write().await.remove(pool_key);
-        if let Some(task) = task {
-            task.abort();
-        }
+        self.task_supervisor.stop(&format!("keepalive:{pool_key}"));
     }
 
     async fn stop_keepalive_tasks(&self, pool_keys: &[String]) {
-        let mut tasks = self.keepalive_tasks.write().await;
-        for pool_key in pool_keys {
-            if let Some(task) = tasks.remove(pool_key) {
-                task.abort();
-            }
-        }
+        let keys: Vec<String> = pool_keys.iter().map(|pool_key| format!("keepalive:{pool_key}")).collect();
+        self.task_supervisor.stop_many(keys.iter().map(String::as_str));
     }
 
     pub async fn touch_pool_activity(&self, pool_key: &str) {
@@ -978,7 +996,18 @@ impl AppState {
             pool_key: pool_key.to_string(),
             connections: self.connections.clone(),
             pool_activity: self.pool_activity.clone(),
+            task_supervisor: self.task_supervisor.clone(),
         }
+    }
+
+    pub async fn shutdown_background_tasks(&self, deadline: Duration) {
+        self.running_queries.cancel_all();
+        self.task_supervisor.shutdown(deadline).await;
+    }
+
+    #[cfg(test)]
+    pub fn supervised_task_count(&self) -> usize {
+        self.task_supervisor.active_count()
     }
 
     pub async fn get_or_create_pool(&self, connection_id: &str, database: Option<&str>) -> Result<String, String> {
@@ -2178,16 +2207,18 @@ impl AppState {
     #[cfg(feature = "duckdb-bundled")]
     pub fn spawn_duckdb_pool_cleanup(&self, pool_key: String, con: DuckDbHandle) {
         let connections = self.connections.clone();
-        let keepalive_tasks = self.keepalive_tasks.clone();
+        let supervisor = self.task_supervisor.clone();
         let pool_activity = self.pool_activity.clone();
         let postgres_cancel_contexts = self.postgres_cancel_contexts.clone();
-        tokio::spawn(async move {
+        let task_key = format!("duckdb-cleanup:{pool_key}");
+        supervisor.clone().spawn_replace(task_key, move |shutdown| async move {
             while Arc::strong_count(&con) > 2 {
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::select! {
+                    _ = shutdown.cancelled() => return,
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                }
             }
-            if let Some(handle) = keepalive_tasks.write().await.remove(&pool_key) {
-                handle.abort();
-            }
+            supervisor.stop(&format!("keepalive:{pool_key}"));
             pool_activity.write().await.remove(&pool_key);
             postgres_cancel_contexts.write().await.remove(&pool_key);
             let removed = {
@@ -2212,20 +2243,28 @@ impl AppState {
         &self,
         pool_key: String,
         con: DuckDbHandle,
-        task: JoinHandle<Result<db::QueryResult, String>>,
+        mut task: JoinHandle<Result<db::QueryResult, String>>,
     ) {
         let connections = self.connections.clone();
-        let keepalive_tasks = self.keepalive_tasks.clone();
+        let supervisor = self.task_supervisor.clone();
         let pool_activity = self.pool_activity.clone();
         let postgres_cancel_contexts = self.postgres_cancel_contexts.clone();
-        tokio::spawn(async move {
-            let _ = task.await;
+        let task_key = format!("duckdb-draining:{pool_key}");
+        supervisor.clone().spawn_replace(task_key, move |shutdown| async move {
+            tokio::select! {
+                _ = shutdown.cancelled() => {
+                    task.abort();
+                    return;
+                }
+                _ = &mut task => {}
+            }
             while Arc::strong_count(&con) > 2 {
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::select! {
+                    _ = shutdown.cancelled() => return,
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                }
             }
-            if let Some(handle) = keepalive_tasks.write().await.remove(&pool_key) {
-                handle.abort();
-            }
+            supervisor.stop(&format!("keepalive:{pool_key}"));
             pool_activity.write().await.remove(&pool_key);
             postgres_cancel_contexts.write().await.remove(&pool_key);
             let removed = {
@@ -2287,7 +2326,7 @@ impl AppState {
         Ok(closed)
     }
 
-    pub async fn active_agent_driver_keys(&self) -> HashSet<String> {
+    pub async fn active_agent_connection_driver_keys(&self) -> HashSet<String> {
         let configs = self.configs.read().await;
         let connections = self.connections.read().await;
         let mut keys = HashSet::new();
@@ -2307,14 +2346,31 @@ impl AppState {
             }
         }
 
-        drop(connections);
-        drop(configs);
+        keys
+    }
 
-        for key in self.agent_manager.active_daemon_keys().await {
-            keys.insert(key);
+    pub async fn prepare_agent_driver_updates(&self, driver_keys: &[String]) -> HashSet<String> {
+        let candidates = driver_keys.iter().cloned().collect::<HashSet<_>>();
+        if candidates.is_empty() {
+            return HashSet::new();
         }
 
-        keys
+        let blockers = self
+            .active_agent_connection_driver_keys()
+            .await
+            .into_iter()
+            .filter(|key| candidates.contains(key))
+            .collect::<HashSet<_>>();
+        if !blockers.is_empty() {
+            return blockers;
+        }
+
+        for key in &candidates {
+            self.agent_manager.stop_daemon_by_key(key).await;
+        }
+
+        // A connection may have started while idle runtimes were stopping.
+        self.active_agent_connection_driver_keys().await.into_iter().filter(|key| candidates.contains(key)).collect()
     }
 
     pub async fn connection_identifier_quote(
@@ -2344,6 +2400,68 @@ impl AppState {
         let mut agent = client.lock().await;
         let info = agent.connection_info(Some(db::connection_timeout())).await?;
         Ok(Some(info.identifier_quote))
+    }
+
+    pub async fn connection_database_info(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+    ) -> Result<Option<DatabaseConnectionInfo>, String> {
+        let config = self
+            .configs
+            .read()
+            .await
+            .get(connection_id)
+            .cloned()
+            .ok_or_else(|| format!("Connection config not found: {connection_id}"))?;
+        let pool_key = self.get_or_create_pool(connection_id, database).await?;
+        let source = {
+            let connections = self.connections.read().await;
+            match connections.get(&pool_key) {
+                Some(PoolKind::Agent(client)) => Some(ConnectionDatabaseInfoSource::Agent(client.clone())),
+                Some(PoolKind::ExternalDriver { config, session, .. }) => {
+                    Some(ConnectionDatabaseInfoSource::ExternalDriver {
+                        config: config.clone(),
+                        session: session.clone(),
+                    })
+                }
+                Some(PoolKind::Mysql(pool, _)) => Some(ConnectionDatabaseInfoSource::NativeMysql(pool.clone())),
+                _ => None,
+            }
+        };
+
+        match source {
+            Some(ConnectionDatabaseInfoSource::Agent(client)) => {
+                let mut agent = client.lock().await;
+                Ok(agent.connection_info(Some(db::connection_timeout())).await?.database_info)
+            }
+            Some(ConnectionDatabaseInfoSource::ExternalDriver { config, session }) => {
+                let response = session
+                    .invoke_with_timeout::<serde_json::Value>(
+                        "connectionInfo",
+                        serde_json::json!({ "connection": config.as_ref() }),
+                        Some(db::connection_timeout()),
+                    )
+                    .await?;
+                Ok(database_info_from_protocol_value(&response))
+            }
+            Some(ConnectionDatabaseInfoSource::NativeMysql(pool)) => {
+                db::mysql::database_connection_info(&pool, db::mysql::protocol_product_name(&config)).await.map(Some)
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub async fn save_connection_database_info(
+        &self,
+        connection_id: &str,
+        database_info: Option<DatabaseConnectionInfo>,
+    ) -> Result<(), String> {
+        self.storage.save_connection_database_info(connection_id, database_info.clone()).await?;
+        if let Some(config) = self.configs.write().await.get_mut(connection_id) {
+            config.database_info = database_info;
+        }
+        Ok(())
     }
 
     pub async fn reset_connection_transport(&self, connection_id: &str) {
@@ -3103,7 +3221,7 @@ fn base_pool_key_for(
     if is_single_connection_pool {
         connection_id.to_string()
     } else {
-        match database.map(str::trim).filter(|db| !db.is_empty()) {
+        match database.filter(|db| !db.trim().is_empty()) {
             Some(db) => format!("{connection_id}:{db}"),
             None => connection_id.to_string(),
         }
@@ -3194,26 +3312,6 @@ fn native_postgres_url_config(config: &ConnectionConfig) -> Option<ConnectionCon
             Some(normalized)
         }
         _ => None,
-    }
-}
-
-#[cfg(feature = "duckdb-bundled")]
-fn duckdb_paths_match(left: &str, right: &str) -> bool {
-    let left = expand_tilde(left);
-    let right = expand_tilde(right);
-
-    if db::duckdb_driver::is_memory_database_path(&left) || db::duckdb_driver::is_memory_database_path(&right) {
-        return left.trim().eq_ignore_ascii_case(right.trim());
-    }
-
-    if let (Ok(left_path), Ok(right_path)) = (std::fs::canonicalize(&left), std::fs::canonicalize(&right)) {
-        return left_path == right_path;
-    }
-
-    if cfg!(windows) {
-        left.eq_ignore_ascii_case(&right)
-    } else {
-        left == right
     }
 }
 
@@ -3382,6 +3480,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            database_info: None,
         }
     }
 
@@ -3764,6 +3863,79 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
         (AppState::new(storage), dir)
+    }
+
+    fn agent_pool_stub() -> PoolKind {
+        PoolKind::Agent(std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::db::agent_driver::AgentDriverClient::test_stub(),
+        )))
+    }
+
+    #[tokio::test]
+    async fn agent_update_blockers_only_include_open_connections() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "dameng-conn".to_string();
+        config.db_type = DatabaseType::Dameng;
+        state.configs.write().await.insert(config.id.clone(), config);
+        state
+            .agent_manager
+            .daemons
+            .lock()
+            .await
+            .insert("oracle".to_string(), crate::db::agent_driver::AgentDriverClient::test_stub());
+        state.connections.write().await.insert("dameng-conn".to_string(), agent_pool_stub());
+
+        assert_eq!(
+            state.active_agent_connection_driver_keys().await,
+            std::collections::HashSet::from(["dameng".to_string()])
+        );
+
+        state.connections.write().await.remove("dameng-conn");
+        assert!(state.active_agent_connection_driver_keys().await.is_empty());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn preparing_agent_update_stops_idle_runtime() {
+        let (state, dir) = test_app_state().await;
+        state
+            .agent_manager
+            .daemons
+            .lock()
+            .await
+            .insert("dameng".to_string(), crate::db::agent_driver::AgentDriverClient::test_stub());
+
+        let blockers = state.prepare_agent_driver_updates(&["dameng".to_string()]).await;
+
+        assert!(blockers.is_empty());
+        assert!(state.agent_manager.active_daemon_keys().await.is_empty());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn preparing_agent_update_keeps_runtime_when_connection_is_open() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "dameng-conn".to_string();
+        config.db_type = DatabaseType::Dameng;
+        state.configs.write().await.insert(config.id.clone(), config);
+        state.connections.write().await.insert("dameng-conn".to_string(), agent_pool_stub());
+        state
+            .agent_manager
+            .daemons
+            .lock()
+            .await
+            .insert("dameng".to_string(), crate::db::agent_driver::AgentDriverClient::test_stub());
+
+        let blockers = state.prepare_agent_driver_updates(&["dameng".to_string()]).await;
+
+        assert_eq!(blockers, std::collections::HashSet::from(["dameng".to_string()]));
+        assert_eq!(state.agent_manager.active_daemon_keys().await, vec!["dameng".to_string()]);
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn touch_executable(path: &std::path::Path) {
@@ -4225,6 +4397,22 @@ mod tests {
     }
 
     #[test]
+    fn database_scoped_pool_keys_preserve_identifier_whitespace() {
+        assert_eq!(
+            super::base_pool_key_for(Some(DatabaseType::Mysql), "mysql-conn", Some(" analytics"), false),
+            "mysql-conn: analytics"
+        );
+        assert_eq!(
+            super::base_pool_key_for(Some(DatabaseType::Mysql), "mysql-conn", Some("analytics"), false),
+            "mysql-conn:analytics"
+        );
+        assert_eq!(
+            super::base_pool_key_for(Some(DatabaseType::Postgres), "pg-conn", Some("analytics "), false),
+            "pg-conn:analytics "
+        );
+    }
+
+    #[test]
     fn non_agent_single_connection_types_still_share_pool_keys() {
         assert_eq!(
             super::base_pool_key_for(Some(DatabaseType::Sqlite), "sqlite-conn", Some("main"), false),
@@ -4563,7 +4751,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
         assert!(state.connections.read().await.contains_key(pool_key));
-        assert!(!state.keepalive_tasks.read().await.contains_key(pool_key));
+        assert_eq!(state.supervised_task_count(), 0);
 
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -171,36 +171,48 @@ public final class Gbase8aAgent extends ConfiguredJdbcAgent {
     }
 
     @Override
+    public String getTableDdl(String schema, String table) {
+        try {
+            String ddl = showCreateDefinition("TABLE", schema, table);
+            if (!ddl.isEmpty()) {
+                return ddl;
+            }
+        } catch (RuntimeException ignored) {
+            // Keep metadata-based DDL available for servers that restrict SHOW CREATE TABLE.
+        }
+        return super.getTableDdl(schema, table);
+    }
+
+    @Override
     public ObjectSource getObjectSource(String schema, String name, String objectType) {
+        String normalizedType = objectType.toUpperCase(Locale.ROOT);
+        if (!List.of("VIEW", "PROCEDURE", "FUNCTION").contains(normalizedType)) {
+            throw new IllegalArgumentException("Unsupported object type: " + objectType);
+        }
+        return new ObjectSource(name, normalizedType, schema, showCreateDefinition(normalizedType, schema, name));
+    }
+
+    private String showCreateDefinition(String objectType, String schema, String name) {
         return unchecked(() -> {
-            String normalizedType = objectType.toUpperCase(Locale.ROOT);
-            String sql = switch (normalizedType) {
-                case "VIEW" -> "SHOW CREATE VIEW ";
-                case "PROCEDURE" -> "SHOW CREATE PROCEDURE ";
-                case "FUNCTION" -> "SHOW CREATE FUNCTION ";
-                default -> throw new IllegalArgumentException("Unsupported object type: " + objectType);
-            };
             String qualifiedName = hasSchema(schema)
                 ? JdbcIdentifiers.INSTANCE.backtick(schema) + "." + JdbcIdentifiers.INSTANCE.backtick(name)
                 : JdbcIdentifiers.INSTANCE.backtick(name);
-
-            String source = "";
             try (Statement stmt = requireConnection().createStatement();
-                 ResultSet rs = stmt.executeQuery(sql + qualifiedName)) {
-                if (rs.next()) {
-                    // SHOW CREATE result layouts vary by GBase driver version, so locate the definition column by label.
-                    ResultSetMetaData metadata = rs.getMetaData();
-                    for (int index = 1; index <= metadata.getColumnCount(); index++) {
-                        String label = metadata.getColumnLabel(index);
-                        if (label != null && label.toUpperCase(Locale.ROOT).startsWith("CREATE ")) {
-                            String value = rs.getString(index);
-                            source = value == null ? "" : value;
-                            break;
-                        }
+                 ResultSet rs = stmt.executeQuery("SHOW CREATE " + objectType + " " + qualifiedName)) {
+                if (!rs.next()) {
+                    return "";
+                }
+                // SHOW CREATE result layouts vary by GBase driver version, so locate the definition column by label.
+                ResultSetMetaData metadata = rs.getMetaData();
+                for (int index = 1; index <= metadata.getColumnCount(); index++) {
+                    String label = metadata.getColumnLabel(index);
+                    if (label != null && label.toUpperCase(Locale.ROOT).startsWith("CREATE ")) {
+                        String value = rs.getString(index);
+                        return value == null ? "" : value;
                     }
                 }
+                return "";
             }
-            return new ObjectSource(name, normalizedType, schema, source);
         });
     }
 

@@ -1,6 +1,6 @@
 {
   "name": "@dbx-app/node-core",
-  "version": "0.4.29",
+  "version": "0.4.30",
   "description": "Shared Node.js database and DBX connection utilities for DBX CLI and MCP server",
   "license": "Apache-2.0",
   "files": [
@@ -20,6 +20,7 @@
     "./production-safety": "./dist/production-safety.js",
     "./redis-command": "./dist/redis-command.js",
     "./schema-context": "./dist/schema-context.js",
+    "./sql-diagnostics": "./dist/sql-diagnostics.js",
     "./sql-risk": "./dist/sql-risk.js",
     "./sql-safety": "./dist/sql-safety.js"
   },

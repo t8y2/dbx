@@ -16,15 +16,15 @@ export interface ExplainPlanNode {
 }
 
 export interface ParsedExplainPlan {
-  databaseType: "mysql" | "postgres" | "dameng" | "questdb" | "oracle";
+  databaseType: "mysql" | "postgres" | "dameng" | "questdb" | "oracle" | "sqlserver";
   raw: unknown;
   nodes: ExplainPlanNode[];
 }
 
 export type BuildExplainSqlResult = { ok: true; sql: string } | { ok: false; reason: "unsupported" | "empty" | "unsafe" };
 
-const SUPPORTED_EXPLAIN_TYPES = new Set<DatabaseType>(["mysql", "postgres", "dameng", "questdb", "oracle"]);
-export function supportsExplainPlan(databaseType?: DatabaseType): databaseType is "mysql" | "postgres" | "dameng" | "questdb" | "oracle" {
+const SUPPORTED_EXPLAIN_TYPES = new Set<DatabaseType>(["mysql", "postgres", "dameng", "questdb", "oracle", "sqlserver"]);
+export function supportsExplainPlan(databaseType?: DatabaseType): databaseType is "mysql" | "postgres" | "dameng" | "questdb" | "oracle" | "sqlserver" {
   return !!databaseType && supportsDatabaseFeature(databaseType, "sqlExplain") && SUPPORTED_EXPLAIN_TYPES.has(databaseType);
 }
 
@@ -32,11 +32,13 @@ export function buildExplainSql(databaseType: DatabaseType | undefined, sql: str
   return api.buildExplainSql({ databaseType, sql, format }) as Promise<BuildExplainSqlResult>;
 }
 
-export function parseExplainResult(databaseType: "mysql" | "postgres" | "dameng" | "questdb", result: QueryResult): ParsedExplainPlan {
+export function parseExplainResult(databaseType: "mysql" | "postgres" | "dameng" | "questdb" | "sqlserver", result: QueryResult): ParsedExplainPlan {
   if (databaseType === "dameng") {
     return parseDamengExplain(result);
   } else if (databaseType === "questdb") {
     return parseQuestdbExplain(result);
+  } else if (databaseType === "sqlserver") {
+    return parseSqlServerExplain(result);
   }
   const raw = parseExplainCell(result.rows[0]?.[0]);
   const nodes = databaseType === "postgres" ? parsePostgresExplain(raw) : parseMysqlExplain(raw);
@@ -371,6 +373,138 @@ export function flattenExplainPlanNodes(nodes: ExplainPlanNode[]): ExplainPlanNo
   }
   nodes.forEach((node) => visit(node));
   return rows;
+}
+
+export function sqlServerExplainResult(results: QueryResult[]): { result?: QueryResult; error?: string } {
+  const errorResult = results.find((result) => result.columns.length === 1 && result.columns[0] === "Error" && result.rows.length > 0);
+  if (errorResult) return { error: String(errorResult.rows[0]?.[0] ?? "") };
+
+  const result = results.find((candidate) => firstSqlServerShowplanXml(candidate) !== undefined);
+  return result ? { result } : { error: "SQL Server did not return ShowPlan XML" };
+}
+
+function parseSqlServerExplain(result: QueryResult): ParsedExplainPlan {
+  const raw = firstSqlServerShowplanXml(result);
+  if (!raw) throw new Error("SQL Server did not return ShowPlan XML");
+  if (typeof DOMParser === "undefined") throw new Error("XML parser is unavailable");
+
+  const parserIssues: string[] = [];
+  type XmlParserConstructor = new (options?: {
+    errorHandler?: {
+      warning: (message: string) => void;
+      error: (message: string) => void;
+      fatalError: (message: string) => void;
+    };
+  }) => DOMParser;
+  const Parser = DOMParser as unknown as XmlParserConstructor;
+  const recordParserIssue = (message: string) => parserIssues.push(message);
+  const document = new Parser({
+    errorHandler: {
+      warning: recordParserIssue,
+      error: recordParserIssue,
+      fatalError: recordParserIssue,
+    },
+  }).parseFromString(raw, "application/xml");
+  if (parserIssues.length > 0 || xmlElements(document, "parsererror").length > 0 || !document.documentElement) {
+    throw new Error("Invalid SQL Server ShowPlan XML");
+  }
+
+  const rootName = document.documentElement.localName || document.documentElement.nodeName.split(":").pop();
+  if (rootName !== "ShowPlanXML") throw new Error("Invalid SQL Server ShowPlan XML root element");
+
+  const relOps = xmlElements(document, "RelOp");
+  if (relOps.length === 0) throw new Error("SQL Server ShowPlan XML contains no RelOp nodes");
+  const roots = relOps.filter((element) => !hasRelOpAncestor(element));
+  if (roots.length === 0) throw new Error("SQL Server ShowPlan XML contains no root RelOp node");
+  return {
+    databaseType: "sqlserver",
+    raw,
+    nodes: roots.map(parseSqlServerRelOp),
+  };
+}
+
+function firstSqlServerShowplanXml(result: QueryResult): string | undefined {
+  for (const row of result.rows) {
+    for (const cell of row) {
+      if (typeof cell === "string" && cell.includes("<ShowPlanXML")) return cell;
+    }
+  }
+  return undefined;
+}
+
+function parseSqlServerRelOp(element: Element): ExplainPlanNode {
+  const nodeType = element.getAttribute("PhysicalOp") || element.getAttribute("LogicalOp") || "Plan";
+  const logicalOp = element.getAttribute("LogicalOp") || undefined;
+  const object = planRegionElements(element, "Object")[0];
+  const schema = sqlServerIdentifier(object?.getAttribute("Schema"));
+  const table = sqlServerIdentifier(object?.getAttribute("Table"));
+  const relation = table ? [schema, table].filter(Boolean).join(".") : undefined;
+  const index = sqlServerIdentifier(object?.getAttribute("Index"));
+  const expressions = [
+    ...new Set(
+      planRegionElements(element, "ScalarOperator")
+        .map((operator) => operator.getAttribute("ScalarString")?.trim())
+        .filter((value): value is string => !!value),
+    ),
+  ];
+  const details = [
+    logicalOp && logicalOp !== nodeType ? `Logical: ${logicalOp}` : "",
+    element.getAttribute("EstimatedRowsRead") ? `Estimated Rows Read: ${element.getAttribute("EstimatedRowsRead")}` : "",
+    element.getAttribute("EstimateIO") ? `Estimated I/O: ${element.getAttribute("EstimateIO")}` : "",
+    element.getAttribute("EstimateCPU") ? `Estimated CPU: ${element.getAttribute("EstimateCPU")}` : "",
+    ...expressions.slice(0, 3).map((expression) => `Expression: ${expression}`),
+  ].filter(Boolean);
+
+  return {
+    id: element.getAttribute("NodeId") || "0",
+    title: relation ? `${nodeType} on ${relation}` : nodeType,
+    nodeType,
+    relation,
+    index,
+    cost: element.getAttribute("EstimatedTotalSubtreeCost") || undefined,
+    rows: element.getAttribute("EstimateRows") || undefined,
+    width: element.getAttribute("AvgRowSize") || undefined,
+    details,
+    children: planRegionElements(element, "RelOp").map(parseSqlServerRelOp),
+  };
+}
+
+function planRegionElements(root: Element, localName: string): Element[] {
+  const matches: Element[] = [];
+  const visit = (element: Element) => {
+    for (const child of elementChildren(element)) {
+      if (child.localName === "RelOp") {
+        if (localName === "RelOp") matches.push(child);
+        continue;
+      }
+      if (child.localName === localName) matches.push(child);
+      visit(child);
+    }
+  };
+  visit(root);
+  return matches;
+}
+
+function xmlElements(root: Document | Element, localName: string): Element[] {
+  return Array.from(root.getElementsByTagNameNS("*", localName));
+}
+
+function hasRelOpAncestor(element: Element): boolean {
+  let parent = element.parentNode;
+  while (parent) {
+    if (parent.nodeType === 1 && (parent as Element).localName === "RelOp") return true;
+    parent = parent.parentNode;
+  }
+  return false;
+}
+
+function elementChildren(element: Element): Element[] {
+  return Array.from(element.childNodes).filter((node): node is Element => node.nodeType === 1);
+}
+
+function sqlServerIdentifier(value: string | null | undefined): string | undefined {
+  if (!value) return undefined;
+  return value.startsWith("[") && value.endsWith("]") ? value.slice(1, -1).replaceAll("]]", "]") : value;
 }
 
 function parseExplainCell(value: unknown): unknown {

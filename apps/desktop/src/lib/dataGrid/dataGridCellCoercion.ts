@@ -6,12 +6,13 @@ export interface CoerceDataGridCellValueOptions {
   oldValue: GridCellValue | undefined;
   databaseType: DatabaseType | undefined;
   columnInfo: Pick<ColumnInfo, "data_type"> | undefined;
+  preserveEmptyString?: boolean;
 }
 
 export function coerceDataGridCellValue(options: CoerceDataGridCellValueOptions): GridCellValue {
   const { value, oldValue } = options;
   if (value.toUpperCase() === "NULL") return null;
-  if (value === "" && oldValue === null) return null;
+  if (value === "" && oldValue === null && !options.preserveEmptyString) return null;
   const postgresArrayValue = coercePostgresArrayValue(options);
   if (postgresArrayValue !== undefined) return postgresArrayValue;
   if (typeof oldValue === "number") {

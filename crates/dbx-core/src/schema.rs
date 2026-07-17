@@ -2501,6 +2501,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            database_info: None,
         }
     }
 
@@ -4347,6 +4348,9 @@ pub async fn get_columns_core(
             PoolKind::CloudflareD1(client) => db::cloudflare_d1_driver::get_columns(client, schema, table)
                 .await
                 .map(deduplicate_column_infos),
+            PoolKind::Elasticsearch(client) => {
+                db::elasticsearch_driver::get_columns(client, table).await.map(deduplicate_column_infos)
+            }
             _ => Ok(vec![]),
         }
     })

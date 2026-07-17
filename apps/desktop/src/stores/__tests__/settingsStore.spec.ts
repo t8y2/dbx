@@ -127,3 +127,24 @@ describe("normalizeEditorSettings - continueOnErrorOnBatch", () => {
     expect(normalizeEditorSettings({ continueOnErrorOnBatch: 1 } as any).continueOnErrorOnBatch).toBe(false);
   });
 });
+
+describe("normalizeEditorSettings - tabLayout", () => {
+  it("defaults tabLayout to scroll", () => {
+    expect(normalizeEditorSettings({}).tabLayout).toBe("scroll");
+  });
+
+  it("preserves explicit scroll mode", () => {
+    expect(normalizeEditorSettings({ tabLayout: "scroll" }).tabLayout).toBe("scroll");
+  });
+
+  it("preserves explicit wrap mode", () => {
+    expect(normalizeEditorSettings({ tabLayout: "wrap" }).tabLayout).toBe("wrap");
+  });
+
+  it("falls back to scroll for invalid values", () => {
+    expect(normalizeEditorSettings({ tabLayout: "invalid" } as any).tabLayout).toBe("scroll");
+    expect(normalizeEditorSettings({ tabLayout: undefined } as any).tabLayout).toBe("scroll");
+    expect(normalizeEditorSettings({ tabLayout: null } as any).tabLayout).toBe("scroll");
+    expect(normalizeEditorSettings({ tabLayout: 123 } as any).tabLayout).toBe("scroll");
+  });
+});

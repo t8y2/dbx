@@ -44,7 +44,7 @@ export function hiddenResultColumnIndexes(columns: string[], projections: Hidden
 
 function appendSelectProjections(sql: string, expressions: string[], databaseType: DatabaseType): string | undefined {
   if (expressions.length === 0) return sql;
-  const tokens = tokenizeSqlSemantic(sql);
+  const tokens = tokenizeSqlSemantic(sql, sqlSemanticDialectFor({ databaseType }).id);
   const selectIndex = tokens.findIndex((token) => token.kind === "word" && token.depth === 0 && token.normalized === "select");
   if (selectIndex < 0) return undefined;
   const fromIndex = tokens.findIndex((token, index) => index > selectIndex && token.kind === "word" && token.depth === 0 && token.normalized === "from");

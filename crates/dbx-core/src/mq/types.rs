@@ -440,7 +440,9 @@ pub struct PeekedMessage {
 }
 
 /// Optional hints for reading messages. Pulsar ignores these today; Kafka uses
-/// them to select a partition and starting offset for a non-committing peek.
+/// them to optionally narrow a non-committing peek to one partition / offset.
+/// When omitted, Kafka peeks across all partitions from each partition's earliest
+/// readable offset (still capped by `count`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeekMessagesOptions {

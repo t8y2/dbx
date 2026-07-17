@@ -81,6 +81,31 @@ test("standalone result views use the same compact toolbar breakpoint", () => {
   assert.match(dataGrid, /dataGridTopbarWidth\.value < DATA_GRID_COMPACT_TOPBAR_WIDTH/);
 });
 
+test("embedded and standalone result toolbars share the same fixed height", () => {
+  const contentArea = source(contentAreaPath);
+  const dataGrid = source(dataGridPath);
+  const standaloneClasses = contentArea.match(/ref="standaloneResultToolbarRef" class="([^"]+)"/)?.[1].split(/\s+/) ?? [];
+  const embeddedClasses = dataGrid.match(/ref="dataGridTopbarRef"[^>]+class="([^"]+)"/)?.[1].split(/\s+/) ?? [];
+
+  assert.ok(standaloneClasses.includes("h-8"));
+  assert.ok(embeddedClasses.includes("h-8"));
+  assert.ok(standaloneClasses.includes("items-center"));
+  assert.ok(embeddedClasses.includes("items-center"));
+  assert.ok(!standaloneClasses.includes("h-7"));
+  assert.ok(!embeddedClasses.includes("h-7"));
+  assert.ok(!standaloneClasses.includes("min-h-7"));
+  assert.ok(!embeddedClasses.includes("min-h-7"));
+});
+
+test("embedded result toolbar cannot scroll vertically", () => {
+  const dataGrid = source(dataGridPath);
+  const scrollClasses = dataGrid.match(/class="data-grid-topbar-scroll ([^"]+)"/)?.[1].split(/\s+/) ?? [];
+
+  assert.ok(scrollClasses.includes("overflow-clip"));
+  assert.ok(!scrollClasses.some((className) => className.startsWith("overflow-x-")));
+  assert.ok(!scrollClasses.some((className) => className.startsWith("overflow-y-")));
+});
+
 test("DataGrid marks toolbar refresh separately from current-result reloads", () => {
   const dataGrid = source(dataGridPath);
 
@@ -91,8 +116,5 @@ test("DataGrid marks toolbar refresh separately from current-result reloads", ()
 test("Elasticsearch JSON refresh preserves multi-result query groups", () => {
   const contentArea = source(contentAreaPath);
 
-  assert.match(
-    contentArea,
-    /if \(activeElasticsearchJsonResponse\.value\) \{[\s\S]*?emit\("reload", activeResultSql\.value, undefined, undefined, undefined, undefined, undefined, "refresh"\);/,
-  );
+  assert.match(contentArea, /if \(activeElasticsearchJsonResponse\.value\) \{[\s\S]*?emit\("reload", activeResultSql\.value, undefined, undefined, undefined, undefined, undefined, "refresh"\);/);
 });

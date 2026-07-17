@@ -612,6 +612,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec!["prod_app".to_string()],
+            database_info: None,
         }
     }
 

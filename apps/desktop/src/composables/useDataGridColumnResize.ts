@@ -16,10 +16,12 @@ export interface UseDataGridColumnResizeOptions {
   columnIndexes: ComputedRef<number[]>;
   density: Ref<ColumnWidthDensity>;
   compactColumnHeaderActions: ComputedRef<boolean>;
+  measureHeaderText?: (text: string) => number | undefined;
+  headerMeasurementKey?: Ref<unknown>;
 }
 
 export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions) {
-  const { columns, sourceRows, columnIndexes, density, compactColumnHeaderActions } = options;
+  const { columns, sourceRows, columnIndexes, density, compactColumnHeaderActions, measureHeaderText } = options;
 
   const columnWidths = ref<number[]>([]);
   let isResizing = false;
@@ -55,6 +57,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
           sampleValues: sampleColumnValues(colIdx),
           density: density.value,
           compactColumnHeaderActions: compactColumnHeaderActions.value,
+          headerTextWidth: measureHeaderText?.(colName),
         });
       });
     }
@@ -114,6 +117,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
       density: density.value,
       compactColumnHeaderActions: compactColumnHeaderActions.value,
       includeValues: true,
+      headerTextWidth: measureHeaderText?.(colName),
     });
   }
 
@@ -139,7 +143,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     () => columnIndexes.value.join("\0"),
     () => initColumnWidths(),
   );
-  watch([density, compactColumnHeaderActions], () => initColumnWidths(true));
+  watch([density, compactColumnHeaderActions, () => options.headerMeasurementKey?.value], () => initColumnWidths(true));
 
   return {
     columnWidths,

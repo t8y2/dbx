@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import { evaluateSqlSafety, splitSqlStatements, sqlSafetyFromEnv } from "../src/sql-safety.js";
+import { supportsHashLineComments } from "../src/sql-risk.js";
 
 test("allows read-only SQL by default", () => {
   const decision = evaluateSqlSafety("select * from users limit 5");
@@ -109,4 +110,78 @@ test("sqlSafetyFromEnv supports explicitly disabling writes", () => {
 
   assert.equal(options.allowWrites, false);
   assert.equal(options.allowDangerous, false);
+});
+
+// --- Dialect-aware `#` comment handling ---
+
+test("supportsHashLineComments matches Rust mysql-compatible dialect set", () => {
+  for (const dbType of ["mysql", "doris", "starrocks", "manticoresearch", "goldendb"]) {
+    assert.equal(supportsHashLineComments(dbType), true, dbType);
+  }
+  for (const dbType of ["postgres", "sqlite", "sqlserver", "oracle", "duckdb", "bigquery", "redshift", ""]) {
+    assert.equal(supportsHashLineComments(dbType), false, dbType);
+  }
+  assert.equal(supportsHashLineComments(undefined), false);
+});
+
+test("splitSqlStatements splits PG `#` operator correctly (hashLineComments omitted/default)", () => {
+  assert.deepEqual(splitSqlStatements("SELECT a # b; SELECT 2"), ["SELECT a # b", "SELECT 2"]);
+});
+
+test("splitSqlStatements splits PG `#` operator correctly (hashLineComments: false)", () => {
+  assert.deepEqual(splitSqlStatements("SELECT a # b; SELECT 2", { hashLineComments: false }), [
+    "SELECT a # b",
+    "SELECT 2",
+  ]);
+});
+
+test("splitSqlStatements treats `#` as comment with hashLineComments: true (MySQL)", () => {
+  // With hashLineComments: true, the `;` inside the `#` comment must NOT split.
+  // The comment text is preserved in the output (splitter only delimits on `;`, it doesn't strip).
+  assert.deepEqual(
+    splitSqlStatements("SELECT 1; # trailing ; comment\nSELECT 2", { hashLineComments: true }),
+    ["SELECT 1", "# trailing ; comment\nSELECT 2"],
+  );
+});
+
+test("splitSqlStatements preserves JSONB operator text verbatim", () => {
+  const result = splitSqlStatements("SELECT data #>> '{a,b}' FROM t");
+  assert.equal(result.length, 1);
+  assert.equal(result[0], "SELECT data #>> '{a,b}' FROM t");
+});
+
+test("splitSqlStatements handles `#` as operator mid-statement (PG)", () => {
+  assert.deepEqual(splitSqlStatements("SELECT 1 # 2; DELETE FROM t"), [
+    "SELECT 1 # 2",
+    "DELETE FROM t",
+  ]);
+});
+
+test("evaluateSqlSafety blocks PG injection that bypasses # as comment (regression)", () => {
+  // Before fix: # would strip "2; DELETE FROM t" as comment, classify as read-only.
+  // After fix: # is treated as an operator, so DELETE FROM t is seen as a second write statement.
+  const decision = evaluateSqlSafety("SELECT 1 # 2; DELETE FROM t", {
+    allowWrites: false,
+    allowMultipleStatements: true,
+  });
+  assert.equal(decision.allowed, false);
+  assert.match(decision.reason ?? "", /read-only/i);
+});
+
+test("evaluateSqlSafety allows MySQL `#` comment with hashLineComments: true", () => {
+  const decision = evaluateSqlSafety("SELECT 1 # delete note", {
+    allowWrites: false,
+    allowMultipleStatements: true,
+    hashLineComments: true,
+  });
+  assert.equal(decision.allowed, true);
+});
+
+test("evaluateSqlSafety with hashLineComments: false still sees DELETE after `#` operator", () => {
+  const decision = evaluateSqlSafety("SELECT 1 # 2; DELETE FROM t", {
+    allowWrites: false,
+    allowMultipleStatements: true,
+    hashLineComments: false,
+  });
+  assert.equal(decision.allowed, false);
 });

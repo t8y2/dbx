@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { formatError } from "@/lib/backend/errorUtils";
 import { computed, ref, watch } from "vue";
+import { useI18n } from "vue-i18n";
 import type { BacklogQuota, DispatchRate, PolicyScope, PublishRate, RetentionPolicy, SubscribeRate, TopicInfo } from "@/types/mq";
 import { mqGetEffectivePolicies, mqSetBacklogQuota, mqSetDispatchRate, mqSetPublishRate, mqSetRetention, mqSetSubscribeRate } from "@/lib/backend/api";
 import { defaultMqPolicyForms, policyFormsFromEffectivePolicies } from "@/lib/mq/mqPolicyForms";
@@ -18,12 +19,13 @@ interface Props {
 }
 
 const props = defineProps<Props>();
+const { t } = useI18n();
 
 const policies = ref<unknown>();
 const loading = ref(false);
 const error = ref<string>();
 const notice = ref<string>();
-const readOnlyMessage = "当前连接为只读模式，不能执行写操作";
+const readOnlyMessage = computed(() => t("mqPolicies.readOnly"));
 const defaultForms = defaultMqPolicyForms();
 
 const publishForm = ref<PublishRate>({ ...defaultForms.publishForm });
@@ -55,7 +57,7 @@ const scope = computed<PolicyScope | null>(() => {
   };
 });
 
-const scopePlaceholderMessage = computed(() => (props.isKafkaCluster ? "请先选择主题" : "请选择命名空间或主题"));
+const scopePlaceholderMessage = computed(() => (props.isKafkaCluster ? t("mqPolicies.selectTopicFirst") : t("mqPolicies.selectNamespaceOrTopic")));
 
 const scopeLabel = computed(() => {
   const current = scope.value;
@@ -70,7 +72,7 @@ const formattedPolicies = computed(() => JSON.stringify(policies.value ?? {}, nu
 
 function guardWritable() {
   if (props.readOnly) {
-    error.value = readOnlyMessage;
+    error.value = readOnlyMessage.value;
     notice.value = undefined;
     return false;
   }
@@ -110,7 +112,7 @@ async function applyPolicy(kind: string, action: (current: PolicyScope) => Promi
   notice.value = undefined;
   try {
     await action(current);
-    notice.value = `${kind}已保存`;
+    notice.value = t("mqPolicies.savedNotice", { policy: kind });
     await loadPolicies();
   } catch (e: unknown) {
     error.value = formatError(e);
@@ -120,23 +122,23 @@ async function applyPolicy(kind: string, action: (current: PolicyScope) => Promi
 }
 
 function savePublishRate() {
-  return applyPolicy("发布限速", (scope) => mqSetPublishRate(props.connectionId, scope, { ...publishForm.value }));
+  return applyPolicy(t("mqPolicies.publishRate"), (scope) => mqSetPublishRate(props.connectionId, scope, { ...publishForm.value }));
 }
 
 function saveDispatchRate() {
-  return applyPolicy("派发限速", (scope) => mqSetDispatchRate(props.connectionId, scope, { ...dispatchForm.value }));
+  return applyPolicy(t("mqPolicies.dispatchRate"), (scope) => mqSetDispatchRate(props.connectionId, scope, { ...dispatchForm.value }));
 }
 
 function saveSubscribeRate() {
-  return applyPolicy("订阅限速", (scope) => mqSetSubscribeRate(props.connectionId, scope, { ...subscribeForm.value }));
+  return applyPolicy(t("mqPolicies.subscribeRate"), (scope) => mqSetSubscribeRate(props.connectionId, scope, { ...subscribeForm.value }));
 }
 
 function saveBacklogQuota() {
-  return applyPolicy("积压配额", (scope) => mqSetBacklogQuota(props.connectionId, scope, { ...backlogForm.value }));
+  return applyPolicy(t("mqPolicies.backlogQuota"), (scope) => mqSetBacklogQuota(props.connectionId, scope, { ...backlogForm.value }));
 }
 
 function saveRetention() {
-  return applyPolicy("保留策略", (scope) => mqSetRetention(props.connectionId, scope, { ...retentionForm.value }));
+  return applyPolicy(t("mqPolicies.retention"), (scope) => mqSetRetention(props.connectionId, scope, { ...retentionForm.value }));
 }
 
 function currentPolicyForms() {
@@ -170,106 +172,106 @@ watch(
   <div class="policies-panel">
     <div class="panel-toolbar">
       <div>
-        <h3>策略管理</h3>
+        <h3>{{ t("mqPolicies.title") }}</h3>
         <div v-if="scopeLabel" class="scope-label">{{ scopeLabel }}</div>
       </div>
       <button @click="loadPolicies" :disabled="loading || !scope" class="btn-sm">
-        {{ loading ? "刷新中..." : "刷新" }}
+        {{ loading ? t("mqPolicies.refreshing") : t("mqPolicies.refresh") }}
       </button>
     </div>
 
     <div v-if="!scope" class="panel-placeholder">{{ scopePlaceholderMessage }}</div>
 
     <div v-else class="policies-content">
-      <div v-if="readOnly" class="readonly-hint">当前连接为只读模式，策略编辑已禁用。</div>
+      <div v-if="readOnly" class="readonly-hint">{{ t("mqPolicies.readonlyHint") }}</div>
       <div v-if="error" class="panel-error">{{ error }}</div>
       <div v-if="notice" class="panel-notice">{{ notice }}</div>
 
       <div class="policy-grid">
         <section v-if="supportsRateLimits !== false" class="policy-section">
-          <h4>发布限速</h4>
+          <h4>{{ t("mqPolicies.publishRate") }}</h4>
           <label>
-            消息数 / 秒
+            {{ t("mqPolicies.msgsPerSecond") }}
             <input v-model.number="publishForm.publishThrottlingRateInMsg" type="number" :disabled="readOnly" />
           </label>
           <label>
-            字节数 / 秒
+            {{ t("mqPolicies.bytesPerSecond") }}
             <input v-model.number="publishForm.publishThrottlingRateInByte" type="number" :disabled="readOnly" />
           </label>
-          <button @click="savePublishRate" :disabled="loading || readOnly" class="btn-primary">保存</button>
+          <button @click="savePublishRate" :disabled="loading || readOnly" class="btn-primary">{{ t("mqPolicies.save") }}</button>
         </section>
 
         <section v-if="supportsRateLimits !== false" class="policy-section">
-          <h4>派发限速</h4>
+          <h4>{{ t("mqPolicies.dispatchRate") }}</h4>
           <label>
-            消息数 / 周期
+            {{ t("mqPolicies.msgsPerPeriod") }}
             <input v-model.number="dispatchForm.dispatchThrottlingRateInMsg" type="number" :disabled="readOnly" />
           </label>
           <label>
-            字节数 / 周期
+            {{ t("mqPolicies.bytesPerPeriod") }}
             <input v-model.number="dispatchForm.dispatchThrottlingRateInByte" type="number" :disabled="readOnly" />
           </label>
           <label>
-            周期（秒）
+            {{ t("mqPolicies.periodSeconds") }}
             <input v-model.number="dispatchForm.ratePeriodInSecond" type="number" min="1" :disabled="readOnly" />
           </label>
-          <button @click="saveDispatchRate" :disabled="loading || readOnly" class="btn-primary">保存</button>
+          <button @click="saveDispatchRate" :disabled="loading || readOnly" class="btn-primary">{{ t("mqPolicies.save") }}</button>
         </section>
 
         <section v-if="supportsRateLimits !== false" class="policy-section">
-          <h4>订阅限速</h4>
+          <h4>{{ t("mqPolicies.subscribeRate") }}</h4>
           <label>
-            每消费者消息数 / 周期
+            {{ t("mqPolicies.msgsPerConsumerPerPeriod") }}
             <input v-model.number="subscribeForm.subscribeThrottlingRatePerConsumer" type="number" :disabled="readOnly" />
           </label>
           <label>
-            周期（秒）
+            {{ t("mqPolicies.periodSeconds") }}
             <input v-model.number="subscribeForm.ratePeriodInSecond" type="number" min="1" :disabled="readOnly" />
           </label>
-          <button @click="saveSubscribeRate" :disabled="loading || readOnly" class="btn-primary">保存</button>
+          <button @click="saveSubscribeRate" :disabled="loading || readOnly" class="btn-primary">{{ t("mqPolicies.save") }}</button>
         </section>
 
         <section v-if="supportsBacklogQuota !== false" class="policy-section">
-          <h4>积压配额</h4>
+          <h4>{{ t("mqPolicies.backlogQuota") }}</h4>
           <label>
-            大小限制（字节）
+            {{ t("mqPolicies.sizeLimitBytes") }}
             <input v-model.number="backlogForm.limitSize" type="number" :disabled="readOnly" />
           </label>
           <label>
-            时间限制（秒）
+            {{ t("mqPolicies.timeLimitSeconds") }}
             <input v-model.number="backlogForm.limitTime" type="number" :disabled="readOnly" />
           </label>
           <label>
-            策略
+            {{ t("mqPolicies.policy") }}
             <select v-model="backlogForm.policy" :disabled="readOnly">
-              <option value="producer_request_hold">producer_request_hold</option>
-              <option value="producer_exception">producer_exception</option>
-              <option value="consumer_backlog_eviction">consumer_backlog_eviction</option>
+              <option value="producer_request_hold">{{ t("mqPolicies.backlogPolicyProducerRequestHold") }}</option>
+              <option value="producer_exception">{{ t("mqPolicies.backlogPolicyProducerException") }}</option>
+              <option value="consumer_backlog_eviction">{{ t("mqPolicies.backlogPolicyConsumerBacklogEviction") }}</option>
             </select>
           </label>
           <label>
-            类型
+            {{ t("mqPolicies.type") }}
             <input v-model="backlogForm.quotaType" type="text" :disabled="readOnly" />
           </label>
-          <button @click="saveBacklogQuota" :disabled="loading || readOnly" class="btn-primary">保存</button>
+          <button @click="saveBacklogQuota" :disabled="loading || readOnly" class="btn-primary">{{ t("mqPolicies.save") }}</button>
         </section>
 
         <section v-if="supportsRetention !== false" class="policy-section">
-          <h4>消息保留</h4>
+          <h4>{{ t("mqPolicies.retention") }}</h4>
           <label>
-            保留时间（分钟）
+            {{ t("mqPolicies.retentionTimeMinutes") }}
             <input v-model.number="retentionForm.retentionTimeInMinutes" type="number" :disabled="readOnly" />
           </label>
           <label>
-            保留大小（MB）
+            {{ t("mqPolicies.retentionSizeMb") }}
             <input v-model.number="retentionForm.retentionSizeInMb" type="number" :disabled="readOnly" />
           </label>
-          <button @click="saveRetention" :disabled="loading || readOnly" class="btn-primary">保存</button>
+          <button @click="saveRetention" :disabled="loading || readOnly" class="btn-primary">{{ t("mqPolicies.save") }}</button>
         </section>
       </div>
 
       <section class="json-section">
-        <h4>当前有效策略</h4>
+        <h4>{{ t("mqPolicies.effectivePolicies") }}</h4>
         <pre>{{ formattedPolicies }}</pre>
       </section>
     </div>

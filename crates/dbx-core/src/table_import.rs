@@ -200,6 +200,8 @@ pub struct TableImportRequest {
     #[serde(default)]
     pub create_table: bool,
     pub batch_size: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date_time_format: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1335,6 +1337,29 @@ pub fn build_import_insert_batch_from_rows(
     schema: &str,
     db_type: &DatabaseType,
 ) -> Result<Option<ImportSqlBatch>, String> {
+    build_import_insert_batch_from_rows_with_format(
+        rows,
+        columns,
+        mappings,
+        target_column_types,
+        table,
+        schema,
+        db_type,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_import_insert_batch_from_rows_with_format(
+    rows: &[Vec<serde_json::Value>],
+    columns: &[String],
+    mappings: &[TableImportColumnMapping],
+    target_column_types: &[(String, String)],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    date_time_format: Option<&str>,
+) -> Result<Option<ImportSqlBatch>, String> {
     if rows.is_empty() {
         return Ok(None);
     }
@@ -1365,7 +1390,16 @@ pub fn build_import_insert_batch_from_rows(
         .map(|row| {
             mapped
                 .iter()
-                .map(|(source_index, _)| row.get(*source_index).cloned().unwrap_or(serde_json::Value::Null))
+                .enumerate()
+                .map(|(target_index, (source_index, _))| {
+                    let value = row.get(*source_index).cloned().unwrap_or(serde_json::Value::Null);
+                    normalize_import_temporal_value(
+                        &value,
+                        column_types.get(target_index).and_then(|data_type| data_type.as_deref()),
+                        db_type,
+                        date_time_format,
+                    )
+                })
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
@@ -1377,6 +1411,21 @@ fn supports_multi_row_insert_values(db_type: &DatabaseType) -> bool {
     !matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Iris)
 }
 
+fn normalize_import_temporal_value(
+    value: &serde_json::Value,
+    data_type: Option<&str>,
+    db_type: &DatabaseType,
+    date_time_format: Option<&str>,
+) -> serde_json::Value {
+    let oracle_date_time = matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
+        && data_type.is_some_and(|data_type| data_type.trim().eq_ignore_ascii_case("date"));
+    crate::temporal_format::normalize_temporal_import_value(
+        value,
+        if oracle_date_time { Some("datetime") } else { data_type },
+        date_time_format,
+    )
+}
+
 pub fn build_import_insert_batches(
     data: &ParsedImportFile,
     mappings: &[TableImportColumnMapping],
@@ -1385,6 +1434,29 @@ pub fn build_import_insert_batches(
     schema: &str,
     db_type: &DatabaseType,
     batch_size: usize,
+) -> Result<Vec<ImportSqlBatch>, String> {
+    build_import_insert_batches_with_format(
+        data,
+        mappings,
+        target_column_types,
+        table,
+        schema,
+        db_type,
+        batch_size,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_import_insert_batches_with_format(
+    data: &ParsedImportFile,
+    mappings: &[TableImportColumnMapping],
+    target_column_types: &[(String, String)],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    batch_size: usize,
+    date_time_format: Option<&str>,
 ) -> Result<Vec<ImportSqlBatch>, String> {
     if *db_type == DatabaseType::CloudflareD1 {
         return crate::db::cloudflare_d1::build_import_insert_batches(
@@ -1419,7 +1491,16 @@ pub fn build_import_insert_batches(
             .map(|row| {
                 mapped
                     .iter()
-                    .map(|(source_index, _)| row.get(*source_index).cloned().unwrap_or(serde_json::Value::Null))
+                    .enumerate()
+                    .map(|(target_index, (source_index, _))| {
+                        let value = row.get(*source_index).cloned().unwrap_or(serde_json::Value::Null);
+                        normalize_import_temporal_value(
+                            &value,
+                            column_types.get(target_index).and_then(|data_type| data_type.as_deref()),
+                            db_type,
+                            date_time_format,
+                        )
+                    })
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
@@ -2036,7 +2117,7 @@ where
             pending_rows.push(delimited_record_to_row(&record, columns.len(), config));
 
             if pending_rows.len() >= effective_batch_size {
-                let batch = match build_import_insert_batch_from_rows(
+                let batch = match build_import_insert_batch_from_rows_with_format(
                     &pending_rows,
                     &columns,
                     &request.mappings,
@@ -2044,6 +2125,7 @@ where
                     &request.table,
                     &request.schema,
                     db_type,
+                    request.date_time_format.as_deref(),
                 ) {
                     Ok(Some(batch)) => batch,
                     Ok(None) => {
@@ -2086,7 +2168,7 @@ where
                 });
                 return Err("Import cancelled".to_string());
             }
-            let batch = match build_import_insert_batch_from_rows(
+            let batch = match build_import_insert_batch_from_rows_with_format(
                 &pending_rows,
                 &columns,
                 &request.mappings,
@@ -2094,6 +2176,7 @@ where
                 &request.table,
                 &request.schema,
                 db_type,
+                request.date_time_format.as_deref(),
             ) {
                 Ok(Some(batch)) => batch,
                 Ok(None) => ImportSqlBatch { sql: String::new(), row_count: 0 },
@@ -2163,7 +2246,7 @@ where
         target_column_types = created_column_types.clone().unwrap_or_default();
     }
 
-    let batches = match build_import_insert_batches(
+    let batches = match build_import_insert_batches_with_format(
         &parsed,
         &request.mappings,
         &target_column_types,
@@ -2171,6 +2254,7 @@ where
         &request.schema,
         db_type,
         batch_size,
+        request.date_time_format.as_deref(),
     ) {
         Ok(batches) => batches,
         Err(error) => {
@@ -3113,6 +3197,85 @@ mod tests {
             sql: "INSERT INTO `policies` (`insurance_start_time`, `raw_text`) VALUES\n('2026-05-12 00:00:00', '2026-05-12T00:00:00+00:00')".to_string(),
             row_count: 1,
         }]);
+    }
+
+    #[test]
+    fn import_insert_batches_normalize_oracle_unpadded_slash_dates() {
+        let mappings = vec![TableImportColumnMapping {
+            source_column: "created_at".to_string(),
+            target_column: "created_at".to_string(),
+            target_data_type: None,
+        }];
+        let data = ParsedImportFile {
+            columns: vec!["created_at".to_string()],
+            rows: vec![vec![serde_json::json!("2024/2/25 13:02:15")]],
+            total_rows: 1,
+            effective_encoding: None,
+        };
+
+        let batches = build_import_insert_batches(
+            &data,
+            &mappings,
+            &[("created_at".to_string(), "DATE".to_string())],
+            "events",
+            "APP",
+            &DatabaseType::Oracle,
+            500,
+        )
+        .unwrap();
+
+        assert_eq!(
+            batches[0].sql,
+            "INSERT INTO \"APP\".\"events\" (\"created_at\") VALUES\n(TO_DATE('2024-02-25 13:02:15', 'YYYY-MM-DD HH24:MI:SS'))"
+        );
+    }
+
+    #[test]
+    fn import_insert_batch_normalizes_oracle_date_and_timestamp_columns() {
+        let mappings = vec![
+            TableImportColumnMapping {
+                source_column: "event_id".to_string(),
+                target_column: "EVENT_ID".to_string(),
+                target_data_type: None,
+            },
+            TableImportColumnMapping {
+                source_column: "created_at".to_string(),
+                target_column: "CREATED_AT".to_string(),
+                target_data_type: None,
+            },
+            TableImportColumnMapping {
+                source_column: "updated_at".to_string(),
+                target_column: "UPDATED_AT".to_string(),
+                target_data_type: None,
+            },
+        ];
+        let rows = vec![vec![
+            serde_json::json!(1),
+            serde_json::json!("2024/2/25 13:02:15"),
+            serde_json::json!("2024/2/25 14:03:16"),
+        ]];
+
+        let batch = build_import_insert_batch_from_rows_with_format(
+            &rows,
+            &["event_id".to_string(), "created_at".to_string(), "updated_at".to_string()],
+            &mappings,
+            &[
+                ("EVENT_ID".to_string(), "NUMBER".to_string()),
+                ("CREATED_AT".to_string(), "DATE".to_string()),
+                ("UPDATED_AT".to_string(), "TIMESTAMP(6)".to_string()),
+            ],
+            "EVENTS",
+            "APP",
+            &DatabaseType::Oracle,
+            Some("YYYY/M/D HH:mm:ss"),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            batch.sql,
+            "INSERT INTO \"APP\".\"EVENTS\" (\"EVENT_ID\", \"CREATED_AT\", \"UPDATED_AT\") VALUES\n(1, TO_DATE('2024-02-25 13:02:15', 'YYYY-MM-DD HH24:MI:SS'), TO_TIMESTAMP('2024-02-25 14:03:16', 'YYYY-MM-DD HH24:MI:SS'))"
+        );
     }
 
     #[test]

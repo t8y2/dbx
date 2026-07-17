@@ -47,6 +47,35 @@ export function safeJsonFormat(text: string, indent?: number): string {
 }
 
 /**
+ * Stringifies values produced by {@link parseJsonPreservingLargeNumbers}
+ * without routing their numeric literals through JavaScript Number.
+ */
+export function stringifyJsonPreservingLargeNumbers(value: unknown, indent?: number): string {
+  let placeholderPrefix = "__DBX_LOSSLESS_NUMBER_";
+  const ordinaryJson = JSON.stringify(value);
+  while (ordinaryJson?.includes(placeholderPrefix)) placeholderPrefix += "_";
+
+  const numbers = new Map<string, string>();
+  const result = JSON.stringify(
+    value,
+    (_key, item) => {
+      if (!isLosslessJsonNumber(item)) return item;
+      const placeholder = `${placeholderPrefix}${numbers.size}__`;
+      numbers.set(placeholder, item.raw);
+      return placeholder;
+    },
+    indent ?? undefined,
+  );
+
+  if (result === undefined) throw new TypeError("Value is not JSON serializable");
+  let restored = result;
+  for (const [placeholder, raw] of numbers) {
+    restored = restored.replaceAll(JSON.stringify(placeholder), raw);
+  }
+  return restored;
+}
+
+/**
  * Validate JSON and re-emit source tokens while only changing insignificant
  * whitespace. Unlike {@link safeJsonFormat}, this keeps duplicate object
  * members, key order, string escapes, and number spellings intact.

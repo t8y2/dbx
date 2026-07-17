@@ -1,5 +1,7 @@
 import type {
   ConnectionConfig,
+  ConnectionTestResult,
+  DatabaseConnectionInfo,
   DatabaseInfo,
   SchemaInfo,
   LinkedServerInfo,
@@ -84,6 +86,7 @@ import type {
   TableImportRequest,
   TableImportSummary,
   TableImportProgress,
+  DatabaseBackupSnapshot,
   DatabaseExportRequest,
   ExportProgress,
   TableExportRequest,
@@ -150,6 +153,7 @@ import type {
   NacosServiceQuery,
 } from "@/types/nacos";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { normalizeConnectionTestResult } from "@/lib/connection/connectionDatabaseInfo";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -209,8 +213,30 @@ export async function testConnection(config: ConnectionConfig): Promise<string> 
   return post("/api/connection/test", { config });
 }
 
+export async function testConnectionWithInfo(config: ConnectionConfig): Promise<ConnectionTestResult> {
+  const response = await fetch(apiUrl("/api/connection/test-info"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ config }),
+  });
+  if (response.status === 404) {
+    return normalizeConnectionTestResult(await testConnection(config), config);
+  }
+  if (!response.ok) throw new Error(await response.text());
+  return normalizeConnectionTestResult(await response.json(), config);
+}
+
 export async function connectDb(config: ConnectionConfig, clientAttempt?: number): Promise<string> {
   return post("/api/connection/connect", { config, clientAttempt });
+}
+
+export async function connectionDatabaseInfo(connectionId: string, database?: string): Promise<DatabaseConnectionInfo | undefined> {
+  const info = await post<DatabaseConnectionInfo | null>("/api/connection/database-info", { connectionId, database });
+  return info ?? undefined;
+}
+
+export async function saveConnectionDatabaseInfo(connectionId: string, databaseInfo: DatabaseConnectionInfo): Promise<void> {
+  return post("/api/connection/database-info/save", { connectionId, databaseInfo });
 }
 
 export async function connectionFinalProxyPort(config: ConnectionConfig): Promise<number> {
@@ -501,6 +527,10 @@ export async function revealPathInFileManager(_path: string): Promise<void> {
   throw new Error("Reveal in file manager is only available in the desktop app.");
 }
 
+export async function deleteDatabaseBackupFiles(_paths: string[]): Promise<number> {
+  throw new Error("Database backup file management is only available in the desktop app.");
+}
+
 export async function isSqliteDatabaseFile(_path: string): Promise<boolean> {
   return false;
 }
@@ -687,6 +717,7 @@ export async function executeQuery(
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
+    executionMode?: "simple";
   },
 ): Promise<QueryResult> {
   return post("/api/query/execute", { connectionId, database, sql, schema, executionId, ...options });
@@ -707,6 +738,7 @@ export async function executeMulti(
     timeoutSecs?: number;
     useTransaction?: boolean;
     continueOnError?: boolean;
+    executionMode?: "simple";
   },
 ): Promise<QueryResult[]> {
   return post("/api/query/execute-multi", { connectionId, database, sql, schema, executionId, ...options });
@@ -1096,6 +1128,26 @@ export async function loadAiConfig(): Promise<AiConfig | null> {
   return get("/api/ai/config");
 }
 
+export async function saveAiConfigs(configs: import("@/types/ai").AiConfigItem[]): Promise<void> {
+  return post("/api/ai/configs", { configs });
+}
+
+export async function loadAiConfigs(): Promise<import("@/types/ai").AiConfigItem[]> {
+  return get("/api/ai/configs");
+}
+
+export async function setDefaultAiConfig(configId: string): Promise<void> {
+  return post("/api/ai/default-config", { configId });
+}
+
+export async function saveAiConfigItem(config: import("@/types/ai").AiConfigItem): Promise<void> {
+  return post("/api/ai/config-item", { config });
+}
+
+export async function deleteAiConfig(configId: string): Promise<void> {
+  return del(`/api/ai/config/${configId}`);
+}
+
 export async function loadDesktopSettings(): Promise<DesktopSettings> {
   try {
     const raw = safeLocalStorageGet(DESKTOP_SETTINGS_STORAGE_KEY);
@@ -1378,6 +1430,10 @@ export async function writeExternalSqlFile(_path: string, _content: string): Pro
   throw new Error("Saving external SQL file paths is only available in the desktop app");
 }
 
+export async function saveExternalSqlFile(_defaultFileName: string, _content: string): Promise<string | null> {
+  throw new Error("Saving SQL files locally is only available in the desktop app");
+}
+
 export interface SqlFileEntry {
   name: string;
   path: string;
@@ -1513,6 +1569,10 @@ export async function cancelTableImport(importId: string): Promise<boolean> {
 // ---------------------------------------------------------------------------
 // Database Export
 // ---------------------------------------------------------------------------
+
+export async function beginDatabaseBackupSnapshot(_connectionId: string, _database: string): Promise<DatabaseBackupSnapshot> {
+  throw new Error("Consistent database backup snapshots are only available in the desktop app.");
+}
 
 export async function exportDatabaseSql(request: DatabaseExportRequest, onProgress: (progress: ExportProgress) => void): Promise<void> {
   // 1. POST to start the export
@@ -2084,6 +2144,10 @@ export async function mongoAggregateDocuments(connectionId: string, database: st
   return post("/api/mongo/aggregate-documents", { connectionId, database, collection, pipelineJson, maxRows, executionId });
 }
 
+export async function mongoDistinct(connectionId: string, database: string, collection: string, field: string, filter?: string, executionId?: string): Promise<MongoDocumentResult> {
+  return post("/api/mongo/distinct", { connectionId, database, collection, field, filter, executionId });
+}
+
 export async function mongoCollectionStats(connectionId: string, database: string, collection: string, scale?: number, executionId?: string): Promise<MongoCollectionStatsResult> {
   return post("/api/mongo/collection-stats", { connectionId, database, collection, scale, executionId });
 }
@@ -2096,12 +2160,12 @@ export async function mongoDropIndexes(connectionId: string, database: string, c
   return post("/api/mongo/drop-indexes", { connectionId, database, collection, indexesJson, single });
 }
 
-export async function mongoInsertDocument(connectionId: string, database: string, collection: string, docJson: string): Promise<string> {
-  return documentInsertDocument(connectionId, database, collection, docJson);
+export async function mongoInsertDocument(connectionId: string, database: string, collection: string, docJson: string, routing?: string): Promise<string> {
+  return documentInsertDocument(connectionId, database, collection, docJson, routing);
 }
 
-export async function documentInsertDocument(connectionId: string, database: string, collection: string, docJson: string): Promise<string> {
-  return post("/api/document-store/insert-document", { connectionId, database, collection, docJson });
+export async function documentInsertDocument(connectionId: string, database: string, collection: string, docJson: string, routing?: string): Promise<string> {
+  return post("/api/document-store/insert-document", { connectionId, database, collection, docJson, routing });
 }
 
 export async function mongoInsertDocuments(connectionId: string, database: string, collection: string, docsJson: string): Promise<{ affected_rows: number }> {

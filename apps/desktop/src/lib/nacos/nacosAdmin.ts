@@ -85,7 +85,7 @@ export function resolveNacosConfigCopyText(selectionText: string, editorText: st
 export function sanitizeNacosConfigFileNameSegment(value: string): string {
   const sanitized = value
     .trim()
-    .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
+    .replace(/[<>:"/\\|?*\p{Cc}]/gu, "_")
     .replace(/\s+/g, " ")
     .replace(/^[._\s-]+/, "")
     .replace(/\.+$/, "");

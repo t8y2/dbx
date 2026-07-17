@@ -1,9 +1,11 @@
-import { classifySqlStatementRisk, splitSqlStatementsForSafety, sqlSafetyText } from "./sql-risk.js";
+import { classifySqlStatementRisk, splitSqlStatementsForSafety, sqlSafetyText, type SqlTextOptions } from "./sql-risk.js";
 
 export interface SqlSafetyOptions {
   allowWrites?: boolean;
   allowDangerous?: boolean;
   allowMultipleStatements?: boolean;
+  /** Whether `#` starts a line comment (MySQL family only). Default: false. */
+  hashLineComments?: boolean;
 }
 
 export interface SqlSafetyDecision {
@@ -22,7 +24,7 @@ function parseBooleanEnv(value: string | undefined): boolean | undefined {
 }
 
 export function evaluateSqlSafety(sql: string, options: SqlSafetyOptions = {}): SqlSafetyDecision {
-  const statements = splitSqlStatementsForSafety(sql);
+  const statements = splitSqlStatementsForSafety(sql, options);
   if (statements.length === 0) return { allowed: false, reason: "SQL is empty." };
   if (statements.length > 1 && !options.allowMultipleStatements) {
     return { allowed: false, reason: "Only one SQL statement is allowed per query." };
@@ -59,7 +61,7 @@ function evaluateSingleSqlStatementSafety(sql: string, options: SqlSafetyOptions
   }
 
   if (options.allowWrites && !options.allowDangerous) {
-    const tokens: string[] = sqlSafetyText(sql).toLowerCase().match(/[a-z_]+/g) ?? [];
+    const tokens: string[] = sqlSafetyText(sql, options).toLowerCase().match(/[a-z_]+/g) ?? [];
     if (firstKeyword === "update" && !tokens.includes("where")) {
       return { allowed: false, reason: "UPDATE statements must include a WHERE clause." };
     }
@@ -80,12 +82,13 @@ export function sqlSafetyFromEnv(env: NodeJS.ProcessEnv = process.env): SqlSafet
   };
 }
 
-export function splitSqlStatements(sql: string): string[] {
+export function splitSqlStatements(sql: string, options?: SqlTextOptions): string[] {
   const statements: string[] = [];
   let statementStart = 0;
   let index = 0;
   let state: "none" | "single" | "double" | "backtick" | "bracket" | "lineComment" | "blockComment" | "dollar" = "none";
   let dollarTag = "";
+  const hashLineComments = options?.hashLineComments === true;
 
   const pushStatement = (end: number) => {
     const statement = sql.slice(statementStart, end).trim();
@@ -152,7 +155,7 @@ export function splitSqlStatements(sql: string): string[] {
       index += 2;
       continue;
     }
-    if (char === "#") {
+    if (hashLineComments && char === "#") {
       state = "lineComment";
       index += 1;
       continue;

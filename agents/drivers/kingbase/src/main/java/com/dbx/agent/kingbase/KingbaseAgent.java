@@ -79,7 +79,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
 
     private static boolean mysqlSqlModeExists(Connection connection) {
         try (Statement stmt = connection.createStatement();
-             ResultSet rs = stmt.executeQuery("SELECT 1 FROM sys_settings WHERE LOWER(name) = 'sql_mode'")) {
+             ResultSet rs = stmt.executeQuery("SELECT 1 FROM sys_catalog.sys_settings WHERE LOWER(name) = 'sql_mode'")) {
             return rs.next();
         } catch (Exception ignored) {
             return false;
@@ -100,19 +100,23 @@ public final class KingbaseAgent extends PostgresLikeAgent {
     public List<DatabaseInfo> listDatabases() {
         if (postgresCatalogMode) return super.listDatabases();
         return unchecked(() -> {
-            if (isMysqlCompatMode()) {
-                List<DatabaseInfo> result = queryDatabases("SELECT current_database() AS database_name");
-                if (!result.isEmpty()) return result;
-            }
             for (String sql : List.of(
-                "SELECT datname AS database_name FROM sys_catalog.sys_database WHERE datistemplate = false ORDER BY datname",
-                "SELECT datname AS database_name FROM pg_database WHERE datistemplate = false ORDER BY datname"
+                "SELECT datname AS database_name FROM sys_catalog.sys_database WHERE datistemplate = false AND datallowconn = true ORDER BY datname",
+                "SELECT datname AS database_name FROM pg_catalog.pg_database WHERE datistemplate = false AND datallowconn = true ORDER BY datname"
             )) {
                 try {
                     List<DatabaseInfo> result = queryDatabases(sql);
                     if (!result.isEmpty()) return result;
                 } catch (Exception ignored) {
                     // Kingbase catalog names differ across compatibility modes and versions.
+                }
+            }
+            if (isMysqlCompatMode()) {
+                try {
+                    List<DatabaseInfo> result = queryDatabases("SELECT current_database() AS database_name");
+                    if (!result.isEmpty()) return result;
+                } catch (Exception ignored) {
+                    // Keep the configured database as the final fallback if current_database() is unavailable.
                 }
             }
             return Collections.singletonList(new DatabaseInfo(getConfiguredDatabase()));
@@ -143,7 +147,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
                     "AND UPPER(schema_name) NOT LIKE 'XLOG%' " +
                     "ORDER BY schema_name"
                 : "SELECT nspname AS schema_name " +
-                    "FROM sys_namespace " +
+                    "FROM sys_catalog.sys_namespace " +
                     "WHERE nspname NOT LIKE 'sys_temp_%' " +
                     "AND nspname NOT LIKE 'sys_toast_temp_%' " +
                     "ORDER BY nspname";
@@ -161,7 +165,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
     public List<TableInfo> listTables(String schema) {
         if (postgresCatalogMode) return super.listTables(schema);
         if (isMysqlCompatMode()) {
-            return listTables(schema, "table_type IN ('BASE TABLE', 'VIEW')");
+            return queryMysqlCompatTables(schema, MetadataListConstraints.NONE);
         }
         return queryRegularTables(schema, MetadataListConstraints.NONE);
     }
@@ -218,17 +222,26 @@ public final class KingbaseAgent extends PostgresLikeAgent {
         return unchecked(() -> {
             List<TableInfo> result = new ArrayList<>();
             List<Object> args = new ArrayList<>();
-            StringBuilder sql = new StringBuilder("SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = ?");
-            args.add(effectiveSchema(schema));
+            StringBuilder sql = new StringBuilder("SELECT t.table_name, t.table_type, ")
+                .append(KINGBASE_DESCRIPTION).append(" AS table_comment ")
+                .append("FROM information_schema.tables t ")
+                .append("LEFT JOIN sys_catalog.sys_namespace n ON ").append(KINGBASE_SCHEMA_NAME)
+                .append(" = CAST(t.table_schema AS varchar(256)) ")
+                .append("LEFT JOIN sys_catalog.sys_class c ON ").append(KINGBASE_REL_NAMESPACE)
+                .append(" = ").append(KINGBASE_NAMESPACE_OID)
+                .append(" AND ").append(KINGBASE_REL_NAME).append(" = CAST(t.table_name AS varchar(256)) ")
+                .append("LEFT JOIN sys_catalog.sys_description d ON CAST(d.objoid AS varchar(64)) = ")
+                .append(KINGBASE_REL_OID).append(" AND d.objsubid = 0 ")
+                .append("WHERE t.table_schema = ").append(sqlString(effectiveSchema(schema)));
             appendMysqlCompatTableTypePredicate(sql, args, constraints);
-            MetadataSqlSupport.appendNameFilter(sql, args, "table_name", constraints);
-            sql.append(" ORDER BY table_name");
+            MetadataSqlSupport.appendNameFilter(sql, args, "t.table_name", constraints);
+            sql.append(" ORDER BY t.table_name");
             MetadataSqlSupport.appendLiteralLimitOffset(sql, constraints);
             try (PreparedStatement stmt = requireConnected().prepareStatement(sql.toString())) {
                 MetadataSqlSupport.bind(stmt, args);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
-                        result.add(new TableInfo(rs.getString(1), normalizeTableType(rs.getString(2))));
+                        result.add(new TableInfo(rs.getString(1), normalizeTableType(rs.getString(2)), rs.getString(3)));
                     }
                 }
             }
@@ -633,10 +646,9 @@ public final class KingbaseAgent extends PostgresLikeAgent {
     @Override
     public String setSchemaSQL(String schema) {
         if (postgresCatalogMode) return super.setSchemaSQL(schema);
-        // Kingbase searches sys_catalog implicitly before user schemas unless it
-        // is listed explicitly. Put it after the selected schema so business
-        // tables named like system tables (for example sys_config) win.
-        return "SET search_path TO " + JdbcIdentifiers.INSTANCE.doubleQuote(effectiveSchema(schema)) + ", sys_catalog";
+        // Keep sys_catalog's implicit priority for functions, types, and
+        // operators. User table references are schema-qualified before execution.
+        return "SET search_path TO " + JdbcIdentifiers.INSTANCE.doubleQuote(effectiveSchema(schema));
     }
 
     @Override
@@ -693,23 +705,6 @@ public final class KingbaseAgent extends PostgresLikeAgent {
                 }
             }
             return primaryKeys;
-        });
-    }
-
-    private List<TableInfo> listTables(String schema, String tableTypePredicate) {
-        return unchecked(() -> {
-            List<TableInfo> result = new ArrayList<>();
-            String sql = "SELECT table_name, table_type " +
-                "FROM information_schema.tables " +
-                "WHERE table_schema = " + sqlString(effectiveSchema(schema)) + " AND " + tableTypePredicate + " " +
-                "ORDER BY table_name";
-            try (Statement stmt = requireConnected().createStatement();
-                 ResultSet rs = stmt.executeQuery(sql)) {
-                    while (rs.next()) {
-                        result.add(new TableInfo(rs.getString(1), normalizeTableType(rs.getString(2))));
-                    }
-            }
-            return result;
         });
     }
 

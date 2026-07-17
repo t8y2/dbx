@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { formatError } from "@/lib/backend/errorUtils";
 import { computed, ref } from "vue";
+import { useI18n } from "vue-i18n";
 import type { MqRawResponse, TopicInfo } from "@/types/mq";
 import { mqRawRequest } from "@/lib/backend/api";
 import { safeJsonFormat } from "@/lib/common/safeJsonFormat";
@@ -14,6 +15,7 @@ interface Props {
 }
 
 const props = defineProps<Props>();
+const { t } = useI18n();
 
 const methods = ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"];
 type RawApiPreset = {
@@ -34,7 +36,7 @@ const response = ref<MqRawResponse>();
 const loading = ref(false);
 const error = ref<string>();
 const presetsCollapsed = ref(true);
-const readOnlyMessage = "当前连接为只读模式，不能执行写操作";
+const readOnlyMessage = computed(() => t("mqRaw.readOnly"));
 
 const isReadMethod = computed(() => method.value === "GET" || method.value === "HEAD" || method.value === "OPTIONS");
 const requestDisabled = computed(() => loading.value || (props.readOnly && !isReadMethod.value));
@@ -59,56 +61,56 @@ const presets = computed<RawApiPreset[]>(() => {
   const topic = topicPath.value;
   return [
     {
-      label: "Broker 版本",
-      description: "查看 broker 暴露的版本字符串",
+      label: t("mqRaw.presetBrokerVersion"),
+      description: t("mqRaw.presetBrokerVersionDesc"),
       method: "GET",
       path: "/admin/v2/brokers/version",
     },
     {
-      label: "集群列表",
-      description: "列出 Pulsar 已配置的 clusters",
+      label: t("mqRaw.presetClusters"),
+      description: t("mqRaw.presetClustersDesc"),
       method: "GET",
       path: "/admin/v2/clusters",
     },
     {
-      label: "租户详情",
-      description: "查看 adminRoles / allowedClusters",
+      label: t("mqRaw.presetTenant"),
+      description: t("mqRaw.presetTenantDesc"),
       method: "GET",
       path: tenant ?? "/admin/v2/tenants/{tenant}",
       unavailable: !tenant,
     },
     {
-      label: "命名空间策略",
-      description: "查看 namespace policies 原始结构",
+      label: t("mqRaw.presetNamespacePolicies"),
+      description: t("mqRaw.presetNamespacePoliciesDesc"),
       method: "GET",
       path: namespace ?? "/admin/v2/namespaces/{tenant}/{namespace}",
       unavailable: !namespace,
     },
     {
-      label: "Bundle 列表",
-      description: "查看 namespace bundle 分布",
+      label: t("mqRaw.presetBundles"),
+      description: t("mqRaw.presetBundlesDesc"),
       method: "GET",
       path: namespace ? `${namespace}/bundles` : "/admin/v2/namespaces/{tenant}/{namespace}/bundles",
       unavailable: !namespace,
     },
     {
-      label: "Topic 内部状态",
-      description: "查看 ledger / cursor / backlog 细节",
+      label: t("mqRaw.presetTopicInternalStats"),
+      description: t("mqRaw.presetTopicInternalStatsDesc"),
       method: "GET",
       path: topic ? `${topic}/internalStats` : "/admin/v2/persistent/{tenant}/{namespace}/{topic}/internalStats",
       unavailable: !topic,
     },
     {
-      label: "分区明细指标",
-      description: "按分区返回速率、生产者和消费者指标",
+      label: t("mqRaw.presetPartitionedStats"),
+      description: t("mqRaw.presetPartitionedStatsDesc"),
       method: "GET",
       path: topic ? `${topic}/partitioned-stats` : "/admin/v2/persistent/{tenant}/{namespace}/{topic}/partitioned-stats",
       query: { perPartition: "true" },
       unavailable: !topic,
     },
     {
-      label: "Schema 最新版本",
-      description: "查看 topic 当前 schema 定义",
+      label: t("mqRaw.presetSchema"),
+      description: t("mqRaw.presetSchemaDesc"),
       method: "GET",
       path: props.tenant && props.namespace && props.topic ? `/admin/v2/schemas/${pathSegment(props.tenant)}/${pathSegment(props.namespace)}/${pathSegment(props.topic.shortName)}/schema` : "/admin/v2/schemas/{tenant}/{namespace}/{topic}/schema",
       unavailable: !topic,
@@ -160,7 +162,7 @@ function formatJsonBody() {
     bodyText.value = safeJsonFormat(text, 2);
     error.value = undefined;
   } catch (e: unknown) {
-    error.value = `JSON Body 格式错误: ${formatError(e)}`;
+    error.value = t("mqRaw.jsonBodyInvalid", { error: formatError(e) });
   }
 }
 
@@ -179,11 +181,11 @@ async function executeRequest() {
   response.value = undefined;
 
   if (props.readOnly && !isReadMethod.value) {
-    error.value = readOnlyMessage;
+    error.value = readOnlyMessage.value;
     return;
   }
   if (!path.value.trim()) {
-    error.value = "请输入请求路径";
+    error.value = t("mqRaw.pathRequired");
     return;
   }
 
@@ -206,21 +208,21 @@ async function executeRequest() {
 <template>
   <div class="raw-api-panel">
     <div class="panel-toolbar">
-      <h3>Raw API</h3>
+      <h3>{{ t("mqRaw.title") }}</h3>
       <button @click="executeRequest" :disabled="requestDisabled" class="btn-primary">
-        {{ loading ? "请求中..." : "发送请求" }}
+        {{ loading ? t("mqRaw.sending") : t("mqRaw.sendRequest") }}
       </button>
     </div>
 
     <div class="raw-content">
-      <div v-if="readOnly" class="readonly-hint">当前连接为只读模式，仅允许 GET、HEAD 和 OPTIONS 请求。</div>
+      <div v-if="readOnly" class="readonly-hint">{{ t("mqRaw.readOnlyHint") }}</div>
       <div v-if="error" class="panel-error">{{ error }}</div>
 
       <section class="preset-panel" :class="{ collapsed: presetsCollapsed }">
         <button type="button" class="preset-header" @click="presetsCollapsed = !presetsCollapsed">
-          <h4>常用端点</h4>
-          <span>按当前选择填充请求</span>
-          <span class="preset-toggle">{{ presetsCollapsed ? "展开" : "收起" }}</span>
+          <h4>{{ t("mqRaw.commonEndpoints") }}</h4>
+          <span>{{ t("mqRaw.fillFromSelection") }}</span>
+          <span class="preset-toggle">{{ presetsCollapsed ? t("mqRaw.expand") : t("mqRaw.collapse") }}</span>
         </button>
         <div v-if="!presetsCollapsed" class="preset-grid">
           <button v-for="preset in presets" :key="preset.label" type="button" class="preset-button" :disabled="preset.unavailable" @click="applyPreset(preset)">
@@ -236,39 +238,39 @@ async function executeRequest() {
       <section class="request-panel">
         <div class="request-line">
           <label>
-            方法
+            {{ t("mqRaw.method") }}
             <select v-model="method">
               <option v-for="item in methods" :key="item" :value="item">{{ item }}</option>
             </select>
           </label>
           <label class="path-field">
-            路径
-            <input v-model="path" type="text" placeholder="/admin/v2/..." />
+            {{ t("mqRaw.path") }}
+            <input v-model="path" type="text" :placeholder="t('mqRaw.pathPlaceholder')" />
           </label>
         </div>
 
         <label>
-          查询参数
-          <textarea v-model="queryText" rows="4" placeholder="key=value，每行一个"></textarea>
+          {{ t("mqRaw.queryParams") }}
+          <textarea v-model="queryText" rows="4" :placeholder="t('mqRaw.queryPlaceholder')"></textarea>
         </label>
 
         <label>
           <span class="field-header">
-            <span>JSON Body</span>
-            <button type="button" class="btn-secondary compact" :disabled="isReadMethod || !bodyText.trim()" @click="formatJsonBody">格式化</button>
+            <span>{{ t("mqRaw.jsonBody") }}</span>
+            <button type="button" class="btn-secondary compact" :disabled="isReadMethod || !bodyText.trim()" @click="formatJsonBody">{{ t("mqRaw.format") }}</button>
           </span>
-          <textarea v-model="bodyText" class="json-body-textarea" :rows="bodyTextareaRows" placeholder='例如: {"key":"value"}' :disabled="isReadMethod"></textarea>
+          <textarea v-model="bodyText" class="json-body-textarea" :rows="bodyTextareaRows" :placeholder="t('mqRaw.bodyPlaceholder')" :disabled="isReadMethod"></textarea>
         </label>
       </section>
 
       <section class="response-panel">
-        <h4>响应</h4>
+        <h4>{{ t("mqRaw.response") }}</h4>
         <div v-if="response" class="response-meta">
           <span>HTTP {{ response.status }}</span>
-          <span v-if="response.text">文本响应</span>
+          <span v-if="response.text">{{ t("mqRaw.textResponse") }}</span>
         </div>
         <pre v-if="response">{{ response.text || formattedBody }}</pre>
-        <div v-else class="empty-state">尚未发送请求</div>
+        <div v-else class="empty-state">{{ t("mqRaw.noRequestYet") }}</div>
       </section>
     </div>
   </div>

@@ -365,6 +365,9 @@ jobs:
     needs: [publish, upload-r2]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
       - name: Promote prerelease to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -375,6 +378,24 @@ jobs:
             --prerelease=false \
             --latest
           echo "::notice::Release ${TAG} promoted from prerelease to latest release"
+
+      - name: Promote CNB prerelease to release
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/github-release"
+          gh release view "$TAG" \
+            --repo "${{ github.repository }}" \
+            --json tagName,name,body,targetCommitish,isPrerelease,isDraft \
+            > "$RUNNER_TEMP/github-release/release.json"
+
+          # Sync metadata only so promoting a release never re-uploads large CNB assets.
+          node .github/scripts/sync-cnb-release.mjs \
+            --github-release "$RUNNER_TEMP/github-release/release.json" \
+            --metadata-only
 
   notify-qq:
     name: QQ Notify

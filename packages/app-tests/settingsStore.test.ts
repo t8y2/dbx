@@ -342,6 +342,19 @@ test("defaults column formatters to an empty record", () => {
   assert.deepEqual(normalizeEditorSettings({}).columnFormatters, {});
 });
 
+test("normalizes global datetime display and transfer formats", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.globalDateTimeDisplayFormat, "");
+  const settings = normalizeEditorSettings({
+    globalDateTimeDisplayFormat: " YYYY/MM/DD HH:mm:ss ",
+    globalDateTimeExportFormat: "YYYY-M-D H:m:s",
+    globalDateTimeImportFormat: 123,
+  } as any);
+
+  assert.equal(settings.globalDateTimeDisplayFormat, "YYYY/MM/DD HH:mm:ss");
+  assert.equal(settings.globalDateTimeExportFormat, "YYYY-M-D H:m:s");
+  assert.equal(settings.globalDateTimeImportFormat, "");
+});
+
 test("keeps only valid saved column formatter configs", () => {
   const settings = normalizeEditorSettings({
     columnFormatters: {
@@ -360,7 +373,7 @@ test("keeps only valid saved column formatter configs", () => {
   } as any);
 
   assert.deepEqual(settings.columnFormatters, {
-    "conn::db::public::users::created_at": { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DD HH:mm:ss" },
+    "conn::db::public::users::created_at": { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DD HH:mm:ss", timezone: undefined },
     "conn::db::public::users::name": { kind: "mask", prefix: 2, suffix: 2 },
     "conn::db::public::users::payload": { kind: "json-path", path: "$.user.name" },
     "conn::db::public::users::status": { kind: "custom-ref", formatterId: "fmt_1" },
@@ -382,6 +395,10 @@ test("AI provider presets include common hosted and local providers", () => {
   assert.equal(AI_PROVIDER_PRESETS.openai.authMethod, "bearer");
   assert.equal(AI_PROVIDER_PRESETS.openai.iconSlug, "openai");
   assert.equal(AI_PROVIDER_PRESETS.deepseek.iconSlug, "deepseek");
+  assert.equal(AI_PROVIDER_PRESETS["claude-code-cli"].model, "default");
+  assert.equal(AI_PROVIDER_PRESETS["claude-code-cli"].iconSlug, "claudecode");
+  assert.equal(AI_PROVIDER_PRESETS["claude-code-cli"].requiresApiKey, false);
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("claude-code-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("codex-cli"));
 });
 
 test("normalizes legacy AI config and fills provider defaults", () => {
@@ -405,6 +422,32 @@ test("normalizes legacy AI config and fills provider defaults", () => {
 
   const claudeToken = normalizeAiConfig({ provider: "claude", apiKey: "token", authMethod: "bearer" } as any);
   assert.equal(claudeToken.authMethod, "bearer");
+
+  const claudeCode = normalizeAiConfig({
+    provider: "claude-code-cli",
+    claudeCodeCliPath: " /opt/homebrew/bin/claude ",
+    claudeCodeCliEnv: { HTTPS_PROXY: "http://proxy:9800" },
+    reasoningLevel: "xhigh",
+    models: [
+      {
+        name: "claude-sonnet-4-6",
+        label: "Sonnet 4.6",
+        supportedEffortLevels: ["low", "high", "xhigh"],
+      },
+    ],
+  } as any);
+  assert.equal(claudeCode.claudeCodeCliPath, "/opt/homebrew/bin/claude");
+  assert.deepEqual(claudeCode.claudeCodeCliEnv, { HTTPS_PROXY: "http://proxy:9800" });
+  assert.equal(claudeCode.reasoningLevel, "xhigh");
+  assert.deepEqual(claudeCode.models, [
+    {
+      name: "claude-sonnet-4-6",
+      label: "Sonnet 4.6",
+      supportedEffortLevels: ["low", "high", "xhigh"],
+    },
+  ]);
+  assert.equal(normalizeAiConfig({ provider: "claude-code-cli", reasoningLevel: "max" } as any).reasoningLevel, "max");
+  assert.equal(normalizeAiConfig({ provider: "claude-code-cli", reasoningLevel: "future" } as any).reasoningLevel, "default");
 });
 
 test("infers legacy AI provider from saved endpoint and model", () => {

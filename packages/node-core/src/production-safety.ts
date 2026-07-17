@@ -1,5 +1,5 @@
 import type { ConnectionConfig } from "./connections.js";
-import { classifySqlRisk, isSqlRiskMutation } from "./sql-risk.js";
+import { classifySqlRisk, isSqlRiskMutation, supportsHashLineComments } from "./sql-risk.js";
 
 export interface ProductionSqlAssessment {
   active: boolean;
@@ -93,7 +93,8 @@ export function isProductionDatabase(config: ConnectionConfig | undefined, datab
 export function assessProductionSql(sql: string, config: ConnectionConfig | undefined, activeDatabase?: string): ProductionSqlAssessment {
   const targetText = sqlTargetSafetyText(sql);
   const statements = splitTargetStatements(targetText.text);
-  const isMutation = isSqlRiskMutation(classifySqlRisk(sql).risk);
+  const hashLineComments = supportsHashLineComments(config?.db_type);
+  const isMutation = isSqlRiskMutation(classifySqlRisk(sql, { hashLineComments }).risk);
   if (!isMutation || !config) return { active: isProductionDatabase(config, activeDatabase), isMutation, databases: [] };
   if (config.is_production) return { active: true, isMutation, databases: [] };
   if (isProductionDatabase(config, activeDatabase)) return { active: true, isMutation, databases: activeDatabase ? [activeDatabase] : [] };
@@ -101,12 +102,12 @@ export function assessProductionSql(sql: string, config: ConnectionConfig | unde
   const marked = new Set((config.production_databases ?? []).map(normalizeProductionDatabase).filter(Boolean));
   if (!marked.size) return { active: false, isMutation, databases: [] };
 
-  const targets = referencedDatabases(statements, config.db_type, activeDatabase, targetText.quotedIdentifiers);
+  const targets = referencedDatabases(statements, config.db_type, hashLineComments, activeDatabase, targetText.quotedIdentifiers);
   const databases = targets.databases.filter((database) => marked.has(normalizeProductionDatabase(database)));
   return { active: databases.length > 0 || targets.uncertain, isMutation, databases: databases.length > 0 ? databases : targets.uncertain ? [...marked] : [] };
 }
 
-function referencedDatabases(statements: string[], dbType: string, activeDatabase: string | undefined, quotedIdentifiers: Map<string, string>): ReferencedDatabaseAssessment {
+function referencedDatabases(statements: string[], dbType: string, hashLineComments: boolean, activeDatabase: string | undefined, quotedIdentifiers: Map<string, string>): ReferencedDatabaseAssessment {
   const databases = new Set<string>();
   let uncertain = false;
   let useDatabase = "";
@@ -114,7 +115,7 @@ function referencedDatabases(statements: string[], dbType: string, activeDatabas
 
   for (const statement of statements) {
     const statementDatabases = new Set<string>();
-    const statementAssessment = classifySqlRisk(statement);
+    const statementAssessment = classifySqlRisk(statement, { hashLineComments });
     const statementIsMutation = isSqlRiskMutation(statementAssessment.risk);
     const useMatch = statement.match(USE_RE);
     if (useMatch?.[1]) {

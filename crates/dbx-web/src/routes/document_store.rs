@@ -76,6 +76,7 @@ pub struct DocumentInsertRequest {
     pub database: String,
     pub collection: String,
     pub doc_json: String,
+    pub routing: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -196,6 +197,7 @@ pub async fn insert_document(
         &req.database,
         &req.collection,
         &req.doc_json,
+        req.routing.as_deref(),
     )
     .await
     .map_err(AppError)?;

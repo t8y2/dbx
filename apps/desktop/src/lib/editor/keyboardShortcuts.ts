@@ -1,4 +1,4 @@
-import { parseShortcutParts } from "@/lib/editor/shortcutDisplay";
+import { isMacShortcutPlatform, parseShortcutParts } from "@/lib/editor/shortcutDisplay";
 import { normalizeShortcutSettings, type ShortcutActionId, type ShortcutSettings } from "@/lib/editor/shortcutRegistry";
 
 export interface ShortcutLikeEvent {
@@ -39,6 +39,29 @@ export function eventToShortcut(event: ShortcutLikeEvent): string | null {
   if (event.altKey) parts.push("Alt");
   parts.push(key);
   return parts.join("+");
+}
+
+export function eventToModifierOnlyShortcut(event: ShortcutLikeEvent, platform = globalThis.navigator?.platform || ""): string | null {
+  if (event.isComposing) return null;
+  if (event.key === "Alt") return "Alt";
+  if (event.key === "Shift") return "Shift";
+  if (event.key === "Meta") return isMacShortcutPlatform(platform) ? "Mod" : "Meta";
+  if (event.key === "Control") return isMacShortcutPlatform(platform) ? "Ctrl" : "Mod";
+  return null;
+}
+
+export function matchesModifierOnlyShortcut(event: Omit<ShortcutLikeEvent, "key">, shortcut: string): boolean {
+  if (event.isComposing || !shortcut) return false;
+  const meta = !!event.metaKey;
+  const ctrl = !!event.ctrlKey;
+  const alt = !!event.altKey;
+  const shift = !!event.shiftKey;
+  if (shortcut === "Mod") return meta !== ctrl && !alt && !shift;
+  if (shortcut === "Meta") return meta && !ctrl && !alt && !shift;
+  if (shortcut === "Ctrl") return ctrl && !meta && !alt && !shift;
+  if (shortcut === "Alt") return alt && !meta && !ctrl && !shift;
+  if (shortcut === "Shift") return shift && !meta && !ctrl && !alt;
+  return false;
 }
 
 export function matchesShortcut(event: ShortcutLikeEvent, shortcut: string): boolean {

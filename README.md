@@ -380,6 +380,15 @@ The installer will be in `src-tauri/target/release/bundle/`.
 <a href="https://docs.qq.com/doc/DVVhMY0h1ekJqc0tz" target="_blank"><img src="https://img.shields.io/badge/微信群-Join-07C160?logo=wechat&logoColor=white" alt="WeChat Group" /></a>
 [![LINUX DO](https://img.shields.io/badge/LINUX%20DO-Community-blue)](https://linux.do)
 
+## Support DBX
+
+DBX is free and open source, but ongoing maintenance, database compatibility testing, infrastructure, and release work require sustained time and resources.
+
+- [Support DBX](https://my.feishu.cn/wiki/WMTkwdATDiiu4rk14JMcoyhTnoh) — voluntary donations via WeChat or Alipay
+- [Sponsors & Partners](https://my.feishu.cn/wiki/CgOWwwTzzify79k9Oq8cXpUNn6e) — sponsorship, infrastructure, tools, and community collaboration
+
+Support does not affect access to DBX or guarantee feature prioritization. With mutual confirmation, sponsors and partners may be listed on the sponsors page.
+
 ## FAQ
 
 <details>

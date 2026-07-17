@@ -172,6 +172,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            database_info: None,
         }
     }
 

@@ -24,6 +24,7 @@ type TemplateElement = {
     name?: string;
     arg?: { content?: string };
     exp?: { content?: string };
+    value?: { content?: string };
   }>;
 };
 
@@ -34,6 +35,10 @@ type TemplateNode = {
 
 function directiveExpression(element: TemplateElement, name: string, arg?: string): string | undefined {
   return element.props.find((prop) => prop.type === 7 && prop.name === name && (arg == null || prop.arg?.content === arg))?.exp?.content;
+}
+
+function staticAttribute(element: TemplateElement, name: string): string | undefined {
+  return element.props.find((prop) => prop.type === 6 && prop.name === name)?.value?.content;
 }
 
 function templateElements(node: TemplateNode): TemplateElement[] {
@@ -102,6 +107,20 @@ function calledName(call: ts.CallExpression): string | undefined {
 }
 
 describe("native RedisJSON editor", () => {
+  it("opens full member values in a centered dialog instead of an app-height side sheet", () => {
+    const memberDialog = findTemplateElement((element) => element.tag === "Dialog" && directiveExpression(element, "bind", "open") === "showMemberDetail");
+    const memberDetailTags = templateElements(memberDialog).map((element) => element.tag);
+    const memberDetailFooter = templateElements(memberDialog).find((element) => element.tag === "DialogFooter");
+
+    expect(memberDetailTags).toContain("DialogContent");
+    expect(memberDetailTags).toContain("DialogHeader");
+    expect(memberDetailTags).toContain("DialogFooter");
+    expect(memberDetailTags).not.toContain("SheetContent");
+    expect(staticAttribute(memberDetailFooter!, "class")).toContain("mx-0 mb-0");
+    expect(viewerSource).not.toContain("memberDetailSheetWidth");
+    expect(viewerSource).not.toContain("startResizeMemberSheet");
+  });
+
   it("uses the same foldable source editor as JSON strings and hash fields", () => {
     const stringEditor = findTemplateElement((element) => element.tag === "RedisJsonEditor" && directiveExpression(element, "if") === "stringValueView === 'json' && stringValueDetail.json");
     const nativeJsonBranch = findTemplateElement((element) => directiveExpression(element, "else-if") === "redisKind === 'json'");

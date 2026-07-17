@@ -134,7 +134,9 @@ pub(super) fn validate_tdengine_existing_rows(options: &DataGridSaveStatementOpt
             column.as_deref().is_some_and(|column| column.eq_ignore_ascii_case(DBX_TDENGINE_TBNAME_COLUMN))
         }))
         || primary_keys.is_empty()
-        || primary_keys.iter().any(|primary_key| find_column_index(&save_columns, primary_key).is_none())
+        || primary_keys
+            .iter()
+            .any(|primary_key| find_column_index(options.database_type, &save_columns, primary_key).is_none())
     {
         return Some(tdengine_row_identity_error());
     }
@@ -157,7 +159,7 @@ pub(super) fn validate_tdengine_existing_rows(options: &DataGridSaveStatementOpt
         };
         if (requires_tbname && tdengine_tbname_value(&save_columns, row).is_none_or(|tbname| tbname.trim().is_empty()))
             || primary_keys.iter().any(|primary_key| {
-                find_column_index(&save_columns, primary_key)
+                find_column_index(options.database_type, &save_columns, primary_key)
                     .and_then(|index| row.get(index))
                     .is_none_or(Value::is_null)
             })
@@ -186,6 +188,7 @@ fn build_tdengine_delete_statement(
         save_columns,
         row,
         options.table_meta.columns.as_deref().unwrap_or(&[]),
+        None,
     );
     if where_clause.is_empty() {
         return None;

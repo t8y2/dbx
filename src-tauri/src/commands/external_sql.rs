@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use dbx_core::sql::decode_sql_file_bytes;
+use tauri_plugin_dialog::DialogExt;
 
 #[tauri::command]
 pub fn pending_open_sql_files(state: tauri::State<'_, ExternalSqlOpenState>) -> Vec<String> {
@@ -19,6 +20,27 @@ pub async fn read_external_sql_file(path: String) -> Result<String, String> {
 #[tauri::command]
 pub async fn write_external_sql_file(path: String, content: String) -> Result<(), String> {
     write_external_sql_file_content_async(PathBuf::from(path), content).await
+}
+
+#[tauri::command]
+pub async fn save_external_sql_file(
+    window: tauri::Window,
+    default_file_name: String,
+    content: String,
+) -> Result<Option<String>, String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    window.dialog().file().set_file_name(default_file_name).add_filter("SQL", &["sql"]).save_file(move |file_path| {
+        let _ = sender.send(file_path);
+    });
+    let path = receiver
+        .await
+        .map_err(|_| "SQL save dialog closed unexpectedly".to_string())?
+        .map(|file_path| file_path.into_path().map_err(|error| format!("Failed to resolve SQL file path: {error}")))
+        .transpose()?;
+
+    // Keep the native dialog result as a PathBuf until after the write so
+    // Windows Unicode paths do not cross an extra frontend IPC boundary.
+    save_external_sql_file_content_async(path, content).await
 }
 
 #[derive(Default)]
@@ -97,6 +119,26 @@ async fn write_external_sql_file_content_async(path: PathBuf, content: String) -
         return Err("Only .sql files can be saved this way".to_string());
     }
     tokio::fs::write(&path, content).await.map_err(|e| format!("Failed to save SQL file: {e}"))
+}
+
+async fn save_external_sql_file_content_async(
+    path: Option<PathBuf>,
+    content: String,
+) -> Result<Option<String>, String> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    write_external_sql_file_content_async(path.clone(), content).await?;
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+
+#[cfg(test)]
+fn save_external_sql_file_content(path: Option<&Path>, content: &str) -> Result<Option<String>, String> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    write_external_sql_file_content(path, content)?;
+    Ok(Some(path.to_string_lossy().into_owned()))
 }
 
 fn dedupe_paths(paths: Vec<String>) -> Vec<String> {
@@ -179,6 +221,45 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert!(result.is_ok());
         assert_eq!(content, "select 2;");
+    }
+
+    #[test]
+    fn saves_external_sql_file_with_unicode_name() {
+        let path = std::env::temp_dir().join(format!("查询-{}.sql", uuid::Uuid::new_v4()));
+
+        let result = save_external_sql_file_content(Some(&path), "select 3;");
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(result.unwrap(), Some(path.to_string_lossy().into_owned()));
+        assert_eq!(content, "select 3;");
+    }
+
+    #[test]
+    fn saves_external_sql_file_with_ascii_name() {
+        let path = std::env::temp_dir().join(format!("query-{}.sql", uuid::Uuid::new_v4()));
+
+        let result = save_external_sql_file_content(Some(&path), "select 4;");
+
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(result.unwrap(), Some(path.to_string_lossy().into_owned()));
+    }
+
+    #[test]
+    fn cancelling_external_sql_file_save_does_not_write() {
+        let result = save_external_sql_file_content(None, "select 5;");
+
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[test]
+    fn reports_external_sql_file_write_failure() {
+        let directory = std::env::temp_dir().join(format!("dbx-missing-parent-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("query.sql");
+
+        let result = save_external_sql_file_content(Some(&path), "select 6;");
+
+        assert!(result.unwrap_err().contains("Failed to save SQL file"));
     }
 
     #[test]

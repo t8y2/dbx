@@ -235,12 +235,14 @@ public final class DbxJdbcPlugin {
 
     private static JsonNode handle(String method, JsonNode params, JsonNode connection) throws Exception {
         return switch (method) {
-            case "testConnection", "connect" -> {
+            case "testConnection" -> connectionTestResult(openConnection(connection));
+            case "connect" -> {
                 openConnection(connection);
                 ObjectNode result = MAPPER.createObjectNode();
                 result.put("ok", true);
                 yield result;
             }
+            case "connectionInfo" -> databaseInfoResult(openConnection(connection));
             case "executeQuery" -> executeQuery(
                 connection,
                 requireText(params, "sql"),
@@ -309,6 +311,98 @@ public final class DbxJdbcPlugin {
             );
             default -> throw new IllegalArgumentException("Unsupported JDBC plugin method: " + method);
         };
+    }
+
+    private static ObjectNode connectionTestResult(Connection connection) {
+        ObjectNode result = MAPPER.createObjectNode();
+        result.put("ok", true);
+        ObjectNode databaseInfo = databaseInfo(connection);
+        if (!databaseInfo.isEmpty()) {
+            result.set("databaseInfo", databaseInfo);
+        }
+        return result;
+    }
+
+    private static ObjectNode databaseInfoResult(Connection connection) {
+        ObjectNode result = MAPPER.createObjectNode();
+        ObjectNode databaseInfo = databaseInfo(connection);
+        if (!databaseInfo.isEmpty()) {
+            result.set("databaseInfo", databaseInfo);
+        }
+        return result;
+    }
+
+    private static ObjectNode databaseInfo(Connection connection) {
+        try {
+            DatabaseMetaData metadata = connection.getMetaData();
+            return metadata == null ? MAPPER.createObjectNode() : databaseInfo(metadata);
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            return MAPPER.createObjectNode();
+        }
+    }
+
+    private static ObjectNode databaseInfo(DatabaseMetaData metadata) {
+        ObjectNode info = MAPPER.createObjectNode();
+        putMetadataText(info, "productName", metadata::getDatabaseProductName);
+        putMetadataText(info, "productVersion", metadata::getDatabaseProductVersion);
+        putIdentifierCase(
+            info,
+            "unquotedIdentifierCase",
+            metadata::storesLowerCaseIdentifiers,
+            metadata::storesUpperCaseIdentifiers,
+            metadata::storesMixedCaseIdentifiers
+        );
+        putIdentifierCase(
+            info,
+            "quotedIdentifierCase",
+            metadata::storesLowerCaseQuotedIdentifiers,
+            metadata::storesUpperCaseQuotedIdentifiers,
+            metadata::storesMixedCaseQuotedIdentifiers
+        );
+        putMetadataText(info, "driverName", metadata::getDriverName);
+        putMetadataText(info, "driverVersion", metadata::getDriverVersion);
+
+        Integer jdbcMajor = readMetadata(metadata::getJDBCMajorVersion);
+        Integer jdbcMinor = readMetadata(metadata::getJDBCMinorVersion);
+        if (jdbcMajor != null && jdbcMinor != null && jdbcMajor >= 0 && jdbcMinor >= 0) {
+            info.put("jdbcVersion", jdbcMajor + "." + jdbcMinor);
+        }
+        return info;
+    }
+
+    private static void putMetadataText(ObjectNode target, String key, SqlSupplier<String> supplier) {
+        String value = readMetadata(supplier);
+        if (value != null && !value.trim().isEmpty()) {
+            target.put(key, value.trim());
+        }
+    }
+
+    private static void putIdentifierCase(
+        ObjectNode target,
+        String key,
+        SqlSupplier<Boolean> lower,
+        SqlSupplier<Boolean> upper,
+        SqlSupplier<Boolean> mixed
+    ) {
+        if (Boolean.TRUE.equals(readMetadata(lower))) {
+            target.put(key, "lower");
+        } else if (Boolean.TRUE.equals(readMetadata(upper))) {
+            target.put(key, "upper");
+        } else if (Boolean.TRUE.equals(readMetadata(mixed))) {
+            target.put(key, "mixed");
+        }
+    }
+
+    private static <T> T readMetadata(SqlSupplier<T> supplier) {
+        try {
+            return supplier.get();
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            return null;
+        }
+    }
+
+    private interface SqlSupplier<T> {
+        T get() throws SQLException;
     }
 
     private static void registerDrivers(JsonNode connection) throws Exception {

@@ -1,21 +1,29 @@
 import { computed, nextTick, ref } from "vue";
-import { describe, expect, it, vi } from "vitest";
-import { DATA_GRID_COL_AUTO_FIT_MAX_WIDTH, DATA_GRID_COL_MAX_WIDTH, DATA_GRID_COL_MIN_WIDTH } from "@/lib/dataGrid/dataGridColumnWidth";
+import { describe, expect, it } from "vitest";
+import { DATA_GRID_COL_AUTO_FIT_MAX_WIDTH, DATA_GRID_COL_MIN_WIDTH } from "@/lib/dataGrid/dataGridColumnWidth";
 import { DATA_GRID_ROW_NUM_WIDTH, resizeDataGridColumnWidth, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
 
-function createResizeState(options: { columns: string[]; rows: Array<Array<string | number | boolean | null>>; columnIndexes?: number[]; density?: "compact" | "standard" | "comfortable"; compactColumnHeaderActions?: boolean }) {
+function createResizeState(options: { columns: string[]; rows: Array<Array<string | number | boolean | null>>; columnIndexes?: number[]; density?: "compact" | "standard" | "comfortable"; compactColumnHeaderActions?: boolean; headerTextWidth?: number }) {
   const compact = ref(options.compactColumnHeaderActions ?? true);
+  const headerTextWidth = ref(options.headerTextWidth);
+  const headerMeasurementKey = ref(0);
   const state = useDataGridColumnResize({
     columns: computed(() => options.columns),
     sourceRows: computed(() => options.rows),
     columnIndexes: computed(() => options.columnIndexes ?? options.columns.map((_, index) => index)),
     density: ref(options.density ?? "standard"),
     compactColumnHeaderActions: computed(() => compact.value),
+    measureHeaderText: () => headerTextWidth.value,
+    headerMeasurementKey,
   });
   return {
     ...state,
     setCompact(v: boolean) {
       compact.value = v;
+    },
+    setHeaderTextWidth(width: number) {
+      headerTextWidth.value = width;
+      headerMeasurementKey.value += 1;
     },
   };
 }
@@ -109,7 +117,25 @@ describe("useDataGridColumnResize", () => {
     expect(widthNonCompact).toBeGreaterThan(widthCompact);
   });
 
-  it("compact mode bases width on field name only, capping long names", () => {
+  it("recalculates column widths when rendered header font metrics change", async () => {
+    const state = createResizeState({
+      columns: ["AMOUNT"],
+      rows: [[1]],
+      density: "comfortable",
+      compactColumnHeaderActions: true,
+      headerTextWidth: 54,
+    });
+
+    state.initColumnWidths();
+    expect(state.columnWidths.value[0]).toBe(113);
+
+    state.setHeaderTextWidth(70);
+    await nextTick();
+
+    expect(state.columnWidths.value[0]).toBe(129);
+  });
+
+  it("compact mode keeps normal field names complete and caps pathological names", () => {
     // 短字段名：列宽=字段名宽度，值不参与撑宽
     const short = createResizeState({
       columns: ["id"],
@@ -132,16 +158,16 @@ describe("useDataGridColumnResize", () => {
     // 9×7+45=108
     expect(mid.columnWidths.value[0]).toBe(108);
 
-    // 过长字段名：截断到边界
-    const capped = createResizeState({
-      columns: ["x".repeat(70)],
+    // 异常超长字段名：使用独立表头上限，避免单列撑爆表格
+    const longName = createResizeState({
+      columns: ["x".repeat(100)],
       rows: [["a"]],
       density: "compact",
       compactColumnHeaderActions: true,
     });
-    capped.initColumnWidths();
-    // 70×7+45=535 > maxWidth 480 → 480
-    expect(capped.columnWidths.value[0]).toBe(480);
+    longName.initColumnWidths();
+    // 100×7+45=745，表头自动宽度限制为 500
+    expect(longName.columnWidths.value[0]).toBe(500);
   });
 
   it("comfortable mode uses percentile to ignore outlier values", () => {

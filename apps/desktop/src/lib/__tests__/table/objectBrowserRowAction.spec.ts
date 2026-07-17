@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { doubleClickRowAction, resolveRowClickAction, shouldDeferSingleClick, singleClickRowAction, type ObjectBrowserRowAction } from "@/lib/table/objectBrowserRowAction";
+import { doubleClickRowAction, resolveRowClickAction, shouldDeferSingleClick, singleClickRowAction } from "@/lib/table/objectBrowserRowAction";
 import type { ObjectBrowserRow } from "@/lib/table/objectBrowserRows";
 
 function row(type: ObjectBrowserRow["type"], name = "test"): ObjectBrowserRow {

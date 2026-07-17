@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { formatJsonSource, isLosslessJsonNumber, parseJsonPreservingLargeNumbers, safeJsonFormat } from "../safeJsonFormat";
+import { formatJsonSource, isLosslessJsonNumber, parseJsonPreservingLargeNumbers, safeJsonFormat, stringifyJsonPreservingLargeNumbers } from "../safeJsonFormat";
 
 describe("safeJsonFormat", () => {
   it("preserves large integers exceeding MAX_SAFE_INTEGER", () => {
@@ -84,6 +84,11 @@ describe("safeJsonFormat", () => {
     expect(safeJsonFormat(input, 2)).toContain("0.123456789012345678901234");
     expect(safeJsonFormat(input, 2)).toContain("1.234567890123456789e20");
     expect(safeJsonFormat(input, 2)).toContain("1e999");
+  });
+
+  it("stringifies parsed lossless numbers back to numeric JSON tokens", () => {
+    const parsed = parseJsonPreservingLargeNumbers('{"id":2018551659033767937,"stringId":"2018551659033767937"}');
+    expect(stringifyJsonPreservingLargeNumbers(parsed)).toBe('{"id":2018551659033767937,"stringId":"2018551659033767937"}');
   });
 });
 

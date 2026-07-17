@@ -6,10 +6,12 @@ import {
   evaluateMongoWriteSafety,
   inferMongoColumns,
   mongoCollectionStatsToQueryResult,
+  mongoDistinctToQueryResult,
   mongoDocumentsToQueryResult,
   parseMongoAggregateCommand,
   parseMongoCollectionStatsCommand,
   parseMongoCountDocumentsCommand,
+  parseMongoDistinctCommand,
   parseMongoFindCommand,
   parseMongoGetIndexesCommand,
   parseMongoVersionCommand,
@@ -267,6 +269,21 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
       const result = (await res.json()) as { documents: unknown[]; total: number };
       return mongoDocumentsToQueryResult(result.documents.slice(0, options?.maxRows ?? result.documents.length), result.total);
     }
+    const distinct = parseMongoDistinctCommand(sql);
+    if (distinct) {
+      const res = await apiFetch("/api/mongo/distinct", {
+        method: "POST",
+        body: JSON.stringify({
+          connectionId: config.id,
+          database: config.database || "",
+          collection: distinct.collection,
+          field: distinct.field,
+          filter: distinct.filter,
+        }),
+      });
+      const result = (await res.json()) as { documents: unknown[]; total: number };
+      return mongoDistinctToQueryResult(distinct.field, result.documents.slice(0, options?.maxRows ?? result.documents.length));
+    }
     const getIndexes = parseMongoGetIndexesCommand(sql);
     if (getIndexes) {
       const res = await apiFetch("/api/mongo/aggregate-documents", {
@@ -310,7 +327,7 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
       return { columns: [], rows: [], row_count: result.affectedRows };
     }
     throw new Error(
-      'Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.version(), db.projects.countDocuments({}), db.projects.count({}), db.projects.getIndexes(), db.projects.dataSize(), db.projects.storageSize(1024), db.projects.totalIndexSize(), db.projects.stats(), db.projects.createIndex({...}), db.projects.dropIndex("name"), db.projects.dropIndexes(), db.projects.drop(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})',
+      'Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.version(), db.projects.countDocuments({}), db.projects.count({}), db.projects.distinct("status"), db.projects.getIndexes(), db.projects.dataSize(), db.projects.storageSize(1024), db.projects.totalIndexSize(), db.projects.stats(), db.projects.createIndex({...}), db.projects.dropIndex("name"), db.projects.dropIndexes(), db.projects.drop(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})',
     );
   }
   const res = await apiFetch("/api/query/execute", {

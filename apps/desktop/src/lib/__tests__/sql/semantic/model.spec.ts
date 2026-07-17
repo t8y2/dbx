@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { sqlSemanticCompletionScope, sqlSemanticLocalColumnsByTable, sqlSemanticProjectionAliasColumns } from "@/lib/sql/semantic/completion";
 import { SQL_SEMANTIC_BASELINE_FIXTURES, sqlFixtureCursor } from "@/lib/sql/semantic/fixtures";
-import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
+import { buildSqlSemanticModel, sqlSemanticTableNameSpans } from "@/lib/sql/semantic/model";
 
 describe("sqlSemanticModel baseline fixtures", () => {
   for (const fixture of SQL_SEMANTIC_BASELINE_FIXTURES) {
@@ -70,6 +70,108 @@ describe("sqlSemanticModel baseline fixtures", () => {
     expect(model.cursorIntent.kind).toBe("table");
     expect(model.cursorIntent.prefix).toBe("ord");
     expect(scope.kind).toBe("table");
+  });
+
+  it("extracts aliases from completed comma-separated table lists", () => {
+    const { sql, cursor } = sqlFixtureCursor("SELECT * FROM table_a a, table_b b WHERE a.id = b.|");
+    const model = buildSqlSemanticModel(sql, cursor);
+
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ name: "table_a", alias: "a" }), expect.objectContaining({ name: "table_b", alias: "b" })]));
+    expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "alias_column", qualifierParts: ["b"] }));
+  });
+
+  it("consumes correlation column lists before parsing later comma-separated sources", () => {
+    const { sql, cursor } = sqlFixtureCursor("SELECT * FROM table_a a(id), table_b b, table_c c WHERE c.|");
+    const model = buildSqlSemanticModel(sql, cursor, { databaseType: "postgres" });
+
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ name: "table_a", alias: "a", columns: undefined, columnAliases: ["id"] }), expect.objectContaining({ name: "table_b", alias: "b" }), expect.objectContaining({ name: "table_c", alias: "c" })]));
+    expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "alias_column", qualifierParts: ["c"] }));
+  });
+
+  it("parses generic PostgreSQL table functions and their correlation columns", () => {
+    const { sql, cursor } = sqlFixtureCursor("SELECT * FROM generate_series(1, 3) g(value) WHERE g.|");
+    const model = buildSqlSemanticModel(sql, cursor, { databaseType: "postgres" });
+
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "table_function", name: "g", alias: "g", columns: ["value"] })]));
+    expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "alias_column", qualifierParts: ["g"] }));
+  });
+
+  it("consumes LATERAL functions before parsing later comma-separated sources", () => {
+    const { sql, cursor } = sqlFixtureCursor("SELECT * FROM users u, LATERAL generate_series(1, 3) g(value), orders o WHERE o.|");
+    const model = buildSqlSemanticModel(sql, cursor, { databaseType: "postgres" });
+
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ name: "users", alias: "u" }), expect.objectContaining({ kind: "table_function", name: "g", alias: "g", columns: ["value"] }), expect.objectContaining({ name: "orders", alias: "o" })]));
+    expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "alias_column", qualifierParts: ["o"] }));
+  });
+
+  it("consumes WITH ORDINALITY before function aliases and later sources", () => {
+    const { sql, cursor } = sqlFixtureCursor("SELECT * FROM generate_series(1, 3) WITH ORDINALITY AS g(value, ord), orders o WHERE o.|");
+    const model = buildSqlSemanticModel(sql, cursor, { databaseType: "postgres" });
+
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "table_function", name: "g", alias: "g", columns: ["value", "ord"] }), expect.objectContaining({ name: "orders", alias: "o" })]));
+    expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "alias_column", qualifierParts: ["o"] }));
+  });
+
+  it("parses comma-separated sources after a complete joined table", () => {
+    const { sql, cursor } = sqlFixtureCursor("SELECT * FROM users u JOIN orders o ON o.user_id = u.id, audit_log a WHERE a.|");
+    const model = buildSqlSemanticModel(sql, cursor, { databaseType: "postgres" });
+
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ name: "users", alias: "u" }), expect.objectContaining({ name: "orders", alias: "o" }), expect.objectContaining({ name: "audit_log", alias: "a" })]));
+    expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "alias_column", qualifierParts: ["a"] }));
+  });
+
+  it("does not parse commas in later SELECT clauses as row sources", () => {
+    const { sql, cursor } = sqlFixtureCursor("SELECT * FROM users u WINDOW w1 AS (PARTITION BY u.id), w2 AS (PARTITION BY u.id)|");
+    const model = buildSqlSemanticModel(sql, cursor, { databaseType: "postgres" });
+
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ name: "users", alias: "u" })]));
+    expect(model.rowSources.some((source) => source.name === "w2")).toBe(false);
+  });
+
+  it("keeps LATERAL subqueries available as row sources", () => {
+    const { sql, cursor } = sqlFixtureCursor("SELECT * FROM users u, LATERAL (SELECT u.id AS user_id) s WHERE s.|");
+    const model = buildSqlSemanticModel(sql, cursor, { databaseType: "postgres" });
+
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "subquery", name: "s", alias: "s", columns: ["user_id"] })]));
+    expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "alias_column", qualifierParts: ["s"] }));
+  });
+
+  it("does not classify SQL Server table hints as generic table functions", () => {
+    const { sql, cursor } = sqlFixtureCursor("SELECT * FROM users (NOLOCK) WHERE users.|");
+    const model = buildSqlSemanticModel(sql, cursor, { databaseType: "sqlserver" });
+
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "table", name: "users" })]));
+    expect(model.rowSources.some((source) => source.kind === "table_function")).toBe(false);
+  });
+
+  it("keeps aliased SQL Server table hints separate from correlation columns", () => {
+    const { sql, cursor } = sqlFixtureCursor("SELECT * FROM users u (NOLOCK), orders o WHERE u.|");
+    const model = buildSqlSemanticModel(sql, cursor, { databaseType: "sqlserver" });
+
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "table", name: "users", alias: "u", columns: undefined, columnAliases: undefined }), expect.objectContaining({ kind: "table", name: "orders", alias: "o" })]));
+    expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "alias_column", qualifierParts: ["u"] }));
+  });
+
+  it("consumes SQL Server WITH table hints without treating WITH as an alias", () => {
+    const { sql, cursor } = sqlFixtureCursor("SELECT * FROM users WITH (NOLOCK), orders o WHERE users.|");
+    const model = buildSqlSemanticModel(sql, cursor, { databaseType: "sqlserver" });
+
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "table", name: "users", alias: undefined, columns: undefined }), expect.objectContaining({ kind: "table", name: "orders", alias: "o" })]));
+  });
+
+  it("keeps partial PostgreSQL correlation names separate from the source schema", () => {
+    const { sql, cursor } = sqlFixtureCursor("SELECT * FROM users u(user_id) WHERE u.|");
+    const model = buildSqlSemanticModel(sql, cursor, { databaseType: "postgres" });
+
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "table", name: "users", alias: "u", columns: undefined, columnAliases: ["user_id"], metadataTarget: { table: "users" } })]));
+  });
+
+  it("treats LATERAL as a regular SQL Server table name", () => {
+    const { sql, cursor } = sqlFixtureCursor("SELECT * FROM lateral l WHERE l.|");
+    const model = buildSqlSemanticModel(sql, cursor, { databaseType: "sqlserver" });
+
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "table", name: "lateral", alias: "l" })]));
+    expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "alias_column", qualifierParts: ["l"] }));
   });
 
   it("classifies alias-qualified star with replacement range", () => {
@@ -152,5 +254,79 @@ describe("sqlSemanticModel baseline fixtures", () => {
 
     expect(sqlSemanticCompletionScope(buildSqlSemanticModel(sqlite.sql, sqlite.cursor, { databaseType: "sqlite" })).useRemoteMetadata).toBe(true);
     expect(buildSqlSemanticModel(duckdb.sql, duckdb.cursor, { databaseType: "duckdb" }).rowSources[0]).toEqual(expect.objectContaining({ kind: "table_function", name: "csv", alias: "csv" }));
+  });
+
+  it("returns only concrete table-name spans for semantic highlighting", () => {
+    const sql = "SELECT customer_id FROM dbo.wfAdmin AS wa WHERE wa.customer_id > 0";
+    const spans = sqlSemanticTableNameSpans(sql, { dialect: "sqlserver" });
+
+    expect(spans.map((span) => sql.slice(span.start, span.end))).toEqual(["wfAdmin"]);
+  });
+
+  it("finds table names across statements, subqueries, and comma table lists", () => {
+    const sql = "SELECT * FROM users u, orders o; SELECT * FROM (SELECT * FROM audit_log) a JOIN dbo.events e ON e.id = a.id";
+    const spans = sqlSemanticTableNameSpans(sql, { dialect: "sqlserver" });
+
+    expect(spans.map((span) => sql.slice(span.start, span.end))).toEqual(["users", "orders", "audit_log", "events"]);
+  });
+
+  it("highlights mutation targets but ignores strings, comments, and table functions", () => {
+    const sql = "UPDATE users SET name = 'FROM fake'; INSERT INTO audit_log(id) VALUES (1); -- FROM ignored\nSELECT * FROM read_csv('events.csv') e";
+    const spans = sqlSemanticTableNameSpans(sql);
+
+    expect(spans.map((span) => sql.slice(span.start, span.end))).toEqual(["users", "audit_log"]);
+  });
+
+  it("skips ASE maintenance keywords before update table targets", () => {
+    const statements = [
+      { sql: "UPDATE STATISTICS wfAdmin", table: "wfAdmin" },
+      { sql: "UPDATE INDEX STATISTICS wfAdmin ix_name", table: "wfAdmin" },
+      { sql: "UPDATE TABLE STATISTICS dbo.wfAdmin", table: "wfAdmin" },
+      { sql: "UPDATE ALL STATISTICS [dbo].[wfAdmin]", table: "wfAdmin" },
+    ];
+
+    for (const { sql, table } of statements) {
+      const spans = sqlSemanticTableNameSpans(sql, { dialect: "sqlserver" });
+      const model = buildSqlSemanticModel(sql, sql.length, { dialect: "sqlserver" });
+      expect(spans.map((span) => sql.slice(span.start, span.end))).toEqual([sql.includes("[wfAdmin]") ? "[wfAdmin]" : table]);
+      expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ name: table, kind: "mutation_target" })]));
+      expect(model.rowSources.some((source) => ["ALL", "INDEX", "TABLE", "STATISTICS"].includes(source.name.toUpperCase()))).toBe(false);
+    }
+  });
+
+  it("does not treat MERGE branch UPDATE as a table introducer", () => {
+    const sql = "MERGE INTO target_table t USING source_table s ON t.id = s.id WHEN MATCHED THEN UPDATE SET t.name = s.name;";
+    const spans = sqlSemanticTableNameSpans(sql, { dialect: "sqlserver" });
+    const model = buildSqlSemanticModel(sql, sql.length - 1, { dialect: "sqlserver" });
+
+    expect(spans.map((span) => sql.slice(span.start, span.end))).toEqual(["target_table", "source_table"]);
+    expect(model.rowSources.some((source) => source.name.toLowerCase() === "set")).toBe(false);
+  });
+
+  it("does not treat MySQL upsert UPDATE as a table introducer", () => {
+    const sql = "INSERT INTO users (id, name) VALUES (1, 'A') ON DUPLICATE KEY UPDATE name = VALUES(name);";
+    const spans = sqlSemanticTableNameSpans(sql, { dialect: "mysql" });
+    const model = buildSqlSemanticModel(sql, sql.length - 1, { dialect: "mysql" });
+
+    expect(spans.map((span) => sql.slice(span.start, span.end))).toEqual(["users"]);
+    expect(model.rowSources.some((source) => source.name === "name")).toBe(false);
+  });
+
+  it("keeps CTE UPDATE mutation targets", () => {
+    const sql = "WITH candidates AS (SELECT id FROM staging) UPDATE users SET active = 1 WHERE id IN (SELECT id FROM candidates);";
+    const spans = sqlSemanticTableNameSpans(sql, { dialect: "sqlserver" });
+    const model = buildSqlSemanticModel(sql, sql.length - 1, { dialect: "sqlserver" });
+
+    expect(spans.map((span) => sql.slice(span.start, span.end))).toEqual(["staging", "users", "candidates"]);
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ name: "users", kind: "mutation_target" })]));
+  });
+
+  it("recognizes SQL Server local, global, and tempdb-qualified temporary tables", () => {
+    const sql = "SELECT * FROM #temp; SELECT * FROM ##global_temp; SELECT * FROM tempdb..#temp";
+    const spans = sqlSemanticTableNameSpans(sql, { dialect: "sqlserver" });
+    const model = buildSqlSemanticModel(sql, sql.length, { dialect: "sqlserver" });
+
+    expect(spans.map((span) => sql.slice(span.start, span.end))).toEqual(["#temp", "##global_temp", "#temp"]);
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ name: "#temp", kind: "table" })]));
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dataGridCellDisplayText } from "@/lib/dataGrid/dataGridCellCoercion";
+import { coerceDataGridCellValue, dataGridCellDisplayText } from "@/lib/dataGrid/dataGridCellCoercion";
 
 describe("dataGridCellDisplayText", () => {
   it("formats Oracle DATE values without RFC3339 separators", () => {
@@ -30,5 +30,19 @@ describe("dataGridCellDisplayText", () => {
         columnInfo: { data_type: "VARCHAR2(64)" },
       }),
     ).toBeUndefined();
+  });
+});
+
+describe("coerceDataGridCellValue", () => {
+  it("preserves an explicitly generated empty string for a null cell", () => {
+    const options = {
+      value: "",
+      oldValue: null,
+      databaseType: "mysql" as const,
+      columnInfo: { data_type: "varchar(255)" },
+    };
+
+    expect(coerceDataGridCellValue(options)).toBeNull();
+    expect(coerceDataGridCellValue({ ...options, preserveEmptyString: true })).toBe("");
   });
 });

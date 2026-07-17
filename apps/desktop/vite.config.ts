@@ -73,6 +73,8 @@ export default defineConfig(async () => ({
   build: {
     outDir: "../../dist",
     emptyOutDir: true,
+    // Large generated syntax grammars are already isolated and loaded on demand.
+    chunkSizeWarningLimit: 800,
     rollupOptions: {
       output: {
         manualChunks: chunkNameForModule,

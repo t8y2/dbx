@@ -10,7 +10,7 @@ use commands::connection::AppState;
 use dbx_core::storage::{maybe_import_user_data_db, DesktopIconTheme, DesktopSettings, Storage};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 #[cfg(target_os = "macos")]
 use tauri::menu::Menu;
 #[cfg(target_os = "macos")]
@@ -1031,6 +1031,11 @@ pub fn run() {
             commands::ai::save_ai_conversation,
             commands::ai::load_ai_conversations,
             commands::ai::delete_ai_conversation,
+            commands::ai_multi_config::save_ai_configs,
+            commands::ai_multi_config::load_ai_configs,
+            commands::ai_multi_config::set_default_ai_config,
+            commands::ai_multi_config::save_ai_config_item,
+            commands::ai_multi_config::delete_ai_config,
             commands::app_settings::load_desktop_settings,
             commands::app_settings::save_desktop_settings,
             commands::app_settings::complete_app_close,
@@ -1066,6 +1071,7 @@ pub fn run() {
             commands::cloud_sync::snippet_sync_upload,
             commands::cloud_sync::snippet_sync_download,
             commands::connection::test_connection,
+            commands::connection::test_connection_with_info,
             commands::connection::connect_db,
             commands::connection::connection_final_proxy_port,
             commands::connection::disconnect_db,
@@ -1073,6 +1079,8 @@ pub fn run() {
             commands::connection::refresh_connections,
             commands::connection::check_connection_health,
             commands::connection::connection_identifier_quote,
+            commands::connection::connection_database_info,
+            commands::connection::save_connection_database_info,
             commands::connection::save_connections,
             commands::connection::load_connections,
             commands::connection::save_sidebar_layout,
@@ -1126,6 +1134,9 @@ pub fn run() {
             commands::schema_cache::delete_schema_cache_prefix,
             commands::tab_runtime_cache::save_tab_runtime_cache,
             commands::tab_runtime_cache::load_tab_runtime_cache,
+            commands::tab_runtime_cache::list_tab_runtime_cache_metadata,
+            commands::tab_runtime_cache::prune_tab_runtime_cache,
+            commands::tab_runtime_cache::delete_tab_runtime_cache_owner,
             commands::tab_runtime_cache::delete_tab_runtime_cache,
             commands::query::execute_query,
             commands::query::execute_multi,
@@ -1198,6 +1209,7 @@ pub fn run() {
             commands::external_sql::pending_open_sql_files,
             commands::external_sql::read_external_sql_file,
             commands::external_sql::write_external_sql_file,
+            commands::external_sql::save_external_sql_file,
             commands::list_sql_files::list_sql_files_in_folder,
             commands::external_db::pending_open_db_files,
             commands::keychain::read_keychain_password,
@@ -1268,6 +1280,7 @@ pub fn run() {
             commands::saved_sql::sync_saved_sql_directory,
             commands::fs_open::reveal_path_in_file_manager,
             commands::fs_open::is_sqlite_database_file,
+            commands::fs_open::delete_database_backup_files,
             commands::sqlite_backup::backup_sqlite_database,
             commands::mongo_cmd::mongo_list_databases,
             commands::mongo_cmd::mongo_list_collections,
@@ -1291,6 +1304,7 @@ pub fn run() {
             commands::mongo_cmd::mongo_server_version,
             commands::mongo_cmd::mongo_collection_stats,
             commands::mongo_cmd::mongo_aggregate_documents,
+            commands::mongo_cmd::mongo_distinct,
             commands::mongo_cmd::mongo_create_index,
             commands::mongo_cmd::mongo_drop_indexes,
             commands::document_cmd::document_insert_document,
@@ -1402,6 +1416,7 @@ pub fn run() {
             commands::transfer::start_transfer,
             commands::transfer::preview_transfer_ownership,
             commands::transfer::cancel_transfer,
+            commands::database_export::begin_database_backup_snapshot,
             commands::database_export::export_database_sql,
             commands::database_export::cancel_database_export,
             commands::table_export::start_table_export,
@@ -1454,6 +1469,8 @@ pub fn run() {
                 if should_confirm_app_exit_request(std::env::consts::OS, *code, confirmed_exit) {
                     api.prevent_exit();
                     request_app_close(app_handle, "quit");
+                } else if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
+                    tauri::async_runtime::block_on(state.shutdown_background_tasks(Duration::from_secs(3)));
                 }
             }
 

@@ -1,5 +1,5 @@
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
-use reqwest::Client as HttpClient;
+use reqwest::{Client as HttpClient, Method};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashSet;
@@ -84,6 +84,11 @@ impl EsClient {
 
     fn delete(&self, path: &str) -> reqwest::RequestBuilder {
         let req = self.http.delete(format!("{}{}", self.base_url, path));
+        self.with_auth(req)
+    }
+
+    fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
+        let req = self.http.request(method, format!("{}{}", self.base_url, path));
         self.with_auth(req)
     }
 
@@ -198,6 +203,16 @@ fn elasticsearch_query_value(value: &str) -> String {
 
 fn elasticsearch_document_path(index: &str, id: &str, routing: Option<&str>) -> String {
     let base = format!("/{}/_doc/{}", elasticsearch_path_segment(index), elasticsearch_path_segment(id));
+    elasticsearch_path_with_routing_refresh(base, routing)
+}
+
+/// Auto-id index path: `POST /{index}/_doc` with optional custom routing.
+fn elasticsearch_auto_id_document_path(index: &str, routing: Option<&str>) -> String {
+    let base = format!("/{}/_doc", elasticsearch_path_segment(index));
+    elasticsearch_path_with_routing_refresh(base, routing)
+}
+
+fn elasticsearch_path_with_routing_refresh(base: String, routing: Option<&str>) -> String {
     if let Some(routing) = routing.map(str::trim).filter(|value| !value.is_empty()) {
         format!("{base}?routing={}&refresh=true", elasticsearch_query_value(routing))
     } else {
@@ -408,6 +423,10 @@ pub async fn find_documents(
 
     let result: SearchResponse = resp.json().await.map_err(|e| format!("Elasticsearch parse error: {e}"))?;
 
+    search_response_to_document_result(result)
+}
+
+fn search_response_to_document_result(result: SearchResponse) -> Result<MongoDocumentResult, String> {
     let documents: Vec<serde_json::Value> = result
         .hits
         .hits
@@ -425,7 +444,21 @@ pub async fn find_documents(
         })
         .collect();
 
-    Ok(MongoDocumentResult { documents, total: result.hits.total.value() })
+    // Keep the exact JSON numeric tokens alongside the compatibility value tree.
+    // Desktop IPC and browser JSON parsing otherwise coerce ES long values through
+    // JavaScript Number before the document editor can serialize them again.
+    let raw_documents = documents
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Elasticsearch document serialization failed: {e}"))?;
+
+    Ok(MongoDocumentResult {
+        documents,
+        raw_documents: Some(raw_documents),
+        extended_documents: None,
+        total: result.hits.total.value(),
+    })
 }
 
 fn build_find_documents_body(
@@ -472,6 +505,12 @@ fn translate_document_filter_value(value: &serde_json::Value) -> Result<Option<s
                 if !should.is_empty() {
                     must.push(serde_json::json!({ "bool": { "should": should, "minimum_should_match": 1 } }));
                 }
+            }
+            "$esQuery" => {
+                if !value.is_object() {
+                    return Err("$esQuery must be an object".to_string());
+                }
+                must.push(value.clone());
             }
             key if key.starts_with('$') => {
                 return Err(format!("Unsupported Elasticsearch filter operator: {key}"));
@@ -642,10 +681,16 @@ fn elasticsearch_sort_from_document_sort(sort: Option<&str>) -> Result<serde_jso
     Ok(serde_json::Value::Array(items))
 }
 
-pub async fn insert_document(client: &EsClient, index: &str, doc_json: &str) -> Result<String, String> {
-    let doc = elasticsearch_document_body_from_json(doc_json)?;
+pub async fn insert_document(
+    client: &EsClient,
+    index: &str,
+    doc_json: &str,
+    routing: Option<&str>,
+) -> Result<String, String> {
+    // Prefer explicit routing arg; fall back to body metadata for backward compatibility.
+    let (doc, routing) = elasticsearch_document_body_and_routing_from_json(doc_json, routing)?;
 
-    let path = elasticsearch_index_path(index, "_doc?refresh=true");
+    let path = elasticsearch_auto_id_document_path(index, routing.as_deref());
     let resp = client.post(&path).json(&doc).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
 
     if !resp.status().is_success() {
@@ -675,10 +720,6 @@ pub async fn update_document(
     }
 
     Ok(1)
-}
-
-fn elasticsearch_document_body_from_json(doc_json: &str) -> Result<serde_json::Value, String> {
-    elasticsearch_document_body_and_routing_from_json(doc_json, None).map(|(doc, _)| doc)
 }
 
 fn elasticsearch_document_body_and_routing_from_json(
@@ -719,9 +760,152 @@ pub async fn delete_document(client: &EsClient, index: &str, id: &str, routing: 
     Ok(1)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ElasticsearchRestBodyKind {
+    Json,
+    Ndjson,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ElasticsearchRestRequest {
+    method: Method,
+    path: String,
+    body: Option<String>,
+    body_kind: ElasticsearchRestBodyKind,
+}
+
+fn strip_leading_elasticsearch_comments(input: &str) -> &str {
+    let mut rest = input;
+    loop {
+        rest = rest.trim_start();
+        if let Some(comment) = rest.strip_prefix('#').or_else(|| rest.strip_prefix("//")) {
+            rest = comment.split_once('\n').map_or("", |(_, remaining)| remaining);
+            continue;
+        }
+        if let Some(comment) = rest.strip_prefix("/*") {
+            rest = comment.split_once("*/").map_or("", |(_, remaining)| remaining);
+            continue;
+        }
+        return rest.trim();
+    }
+}
+
+fn is_elasticsearch_ndjson_path(path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path).trim_end_matches('/');
+    path == "/_bulk"
+        || path.ends_with("/_bulk")
+        || path == "/_msearch"
+        || path.ends_with("/_msearch")
+        || path == "/_msearch/template"
+        || path.ends_with("/_msearch/template")
+}
+
+fn normalize_elasticsearch_rest_path(path: &str) -> String {
+    let (path_part, query) = path.split_once('?').map_or((path, None), |(path, query)| (path, Some(query)));
+    let mut normalized = String::with_capacity(path.len());
+    let mut chars = path_part.chars().peekable();
+    let mut in_date_math = false;
+
+    while let Some(ch) = chars.next() {
+        if ch == '%' {
+            let mut lookahead = chars.clone();
+            if let (Some(first), Some(second)) = (lookahead.next(), lookahead.next()) {
+                if first.is_ascii_hexdigit() && second.is_ascii_hexdigit() {
+                    normalized.push(ch);
+                    normalized.push(chars.next().unwrap());
+                    normalized.push(chars.next().unwrap());
+                    continue;
+                }
+            }
+        }
+
+        if ch == '<' {
+            in_date_math = true;
+        }
+        let encoded = if in_date_math {
+            match ch {
+                '<' => Some("%3C"),
+                '>' => Some("%3E"),
+                '/' => Some("%2F"),
+                '{' => Some("%7B"),
+                '}' => Some("%7D"),
+                '|' => Some("%7C"),
+                '+' => Some("%2B"),
+                ':' => Some("%3A"),
+                ',' => Some("%2C"),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(encoded) = encoded {
+            normalized.push_str(encoded);
+        } else {
+            normalized.push(ch);
+        }
+        if ch == '>' {
+            in_date_math = false;
+        }
+    }
+
+    if let Some(query) = query {
+        normalized.push('?');
+        normalized.push_str(query);
+    }
+    normalized
+}
+
+fn parse_elasticsearch_rest_request(input: &str) -> Result<ElasticsearchRestRequest, String> {
+    let input = strip_leading_elasticsearch_comments(input);
+    if input.is_empty() {
+        return Err("Invalid query: expected METHOD /path".to_string());
+    }
+
+    let (request_line, body) = input.split_once('\n').map_or((input, None), |(line, body)| {
+        let body = body.trim();
+        (line, (!body.is_empty()).then(|| body.to_string()))
+    });
+    let (method, path) =
+        request_line.trim().split_once(char::is_whitespace).ok_or("Invalid query: expected METHOD /path")?;
+    let method = method.to_ascii_uppercase();
+    let method = Method::from_bytes(method.as_bytes())
+        .map_err(|_| format!("Unsupported HTTP method: {method}. Use GET, POST, PUT, DELETE, or HEAD."))?;
+    if !matches!(method, Method::GET | Method::POST | Method::PUT | Method::DELETE | Method::HEAD) {
+        return Err(format!("Unsupported HTTP method: {}. Use GET, POST, PUT, DELETE, or HEAD.", method.as_str()));
+    }
+
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("Invalid query: expected METHOD /path".to_string());
+    }
+    let path = if path.starts_with('/') { path.to_string() } else { format!("/{path}") };
+    let path = normalize_elasticsearch_rest_path(&path);
+    let body_kind = if is_elasticsearch_ndjson_path(&path) {
+        ElasticsearchRestBodyKind::Ndjson
+    } else {
+        ElasticsearchRestBodyKind::Json
+    };
+
+    Ok(ElasticsearchRestRequest { method, path, body, body_kind })
+}
+
+fn validate_elasticsearch_ndjson(body: &str) -> Result<String, String> {
+    for (index, line) in body.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        serde_json::from_str::<serde_json::Value>(line)
+            .map_err(|error| format!("Invalid NDJSON body at line {}: {error}", index + 1))?;
+    }
+    let mut normalized = body.trim_end().to_string();
+    normalized.push('\n');
+    Ok(normalized)
+}
+
 pub async fn execute_rest_query(client: &EsClient, input: &str) -> Result<crate::types::QueryResult, String> {
     let start = std::time::Instant::now();
-    let input = input.trim();
+    let input = strip_leading_elasticsearch_comments(input);
 
     if let Some(search_query) = parse_select_star_search_query(input) {
         return execute_search_query(client, search_query, start).await;
@@ -749,59 +933,21 @@ pub async fn execute_rest_query(client: &EsClient, input: &str) -> Result<crate:
         return execute_sql_query(client, input, start).await;
     }
 
-    let (method, rest) = input.split_once(char::is_whitespace).ok_or("Invalid query: expected METHOD /path")?;
-    let method = method.to_uppercase();
-
-    let (path, body) = if let Some(pos) = rest.find('\n') {
-        let p = rest[..pos].trim();
-        let b = rest[pos + 1..].trim();
-        (p, if b.is_empty() { None } else { Some(b) })
-    } else {
-        (rest.trim(), None)
-    };
-
-    let path = if path.starts_with('/') { path.to_string() } else { format!("/{path}") };
-
-    let resp = match method.as_str() {
-        "GET" => {
-            let req = client.get(&path);
-            if let Some(b) = body {
-                let json: serde_json::Value = serde_json::from_str(b).map_err(|e| format!("Invalid JSON body: {e}"))?;
-                req.json(&json).send().await
-            } else {
-                req.send().await
+    let request = parse_elasticsearch_rest_request(input)?;
+    let mut builder = client.request(request.method, &request.path);
+    if let Some(body) = request.body {
+        builder = match request.body_kind {
+            ElasticsearchRestBodyKind::Json => {
+                let json: serde_json::Value =
+                    serde_json::from_str(&body).map_err(|e| format!("Invalid JSON body: {e}"))?;
+                builder.json(&json)
             }
-        }
-        "POST" => {
-            let req = client.post(&path);
-            if let Some(b) = body {
-                let json: serde_json::Value = serde_json::from_str(b).map_err(|e| format!("Invalid JSON body: {e}"))?;
-                req.json(&json).send().await
-            } else {
-                req.send().await
-            }
-        }
-        "PUT" => {
-            let req = client.put(&path);
-            if let Some(b) = body {
-                let json: serde_json::Value = serde_json::from_str(b).map_err(|e| format!("Invalid JSON body: {e}"))?;
-                req.json(&json).send().await
-            } else {
-                req.send().await
-            }
-        }
-        "DELETE" => {
-            let req = client.delete(&path);
-            if let Some(b) = body {
-                let json: serde_json::Value = serde_json::from_str(b).map_err(|e| format!("Invalid JSON body: {e}"))?;
-                req.json(&json).send().await
-            } else {
-                req.send().await
-            }
-        }
-        _ => return Err(format!("Unsupported HTTP method: {method}. Use GET, POST, PUT, or DELETE.")),
+            ElasticsearchRestBodyKind::Ndjson => builder
+                .header(reqwest::header::CONTENT_TYPE, "application/x-ndjson")
+                .body(validate_elasticsearch_ndjson(&body)?),
+        };
     }
-    .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    let resp = builder.send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
 
     let status = resp.status().as_u16();
     let body = resp.text().await.map_err(|e| format!("Elasticsearch response read failed: {e}"))?;
@@ -972,6 +1118,10 @@ fn parse_elasticsearch_rest_response(
 ) -> Result<crate::types::QueryResult, String> {
     if body_text.trim().is_empty() {
         return Ok(json_response_result(status, &serde_json::Value::Null, start));
+    }
+
+    if status >= 400 {
+        return Ok(raw_json_response_result(status, body_text, start));
     }
 
     if serde_json::from_str::<serde_json::Value>(body_text).is_ok() {
@@ -1542,6 +1692,66 @@ mod tests {
     }
 
     #[test]
+    fn parses_rest_request_after_comments_and_preserves_query_parameters() {
+        let request = super::parse_elasticsearch_rest_request(
+            "# JVM statistics\n// available on Elasticsearch 7+\nGET /_nodes/stats/jvm?pretty",
+        )
+        .unwrap();
+
+        assert_eq!(request.method, reqwest::Method::GET);
+        assert_eq!(request.path, "/_nodes/stats/jvm?pretty");
+        assert_eq!(request.body, None);
+        assert_eq!(request.body_kind, super::ElasticsearchRestBodyKind::Json);
+    }
+
+    #[test]
+    fn parses_rest_request_after_multiline_block_comment() {
+        let request = super::parse_elasticsearch_rest_request(
+            "/* node statistics\n   safe on supported clusters */\nGET /_nodes/stats/jvm?pretty",
+        )
+        .unwrap();
+
+        assert_eq!(request.method, reqwest::Method::GET);
+        assert_eq!(request.path, "/_nodes/stats/jvm?pretty");
+    }
+
+    #[test]
+    fn parses_lowercase_rest_method() {
+        let request = super::parse_elasticsearch_rest_request("get /_cluster/health").unwrap();
+
+        assert_eq!(request.method, reqwest::Method::GET);
+        assert_eq!(request.path, "/_cluster/health");
+    }
+
+    #[test]
+    fn encodes_raw_date_math_paths_without_double_encoding() {
+        let raw = super::parse_elasticsearch_rest_request("GET /<logs-{now/d}>/_search?pretty").unwrap();
+        assert_eq!(raw.path, "/%3Clogs-%7Bnow%2Fd%7D%3E/_search?pretty");
+
+        let encoded = super::parse_elasticsearch_rest_request("GET /%3Clogs-%7Bnow%2Fd%7D%3E/_search?pretty").unwrap();
+        assert_eq!(encoded.path, "/%3Clogs-%7Bnow%2Fd%7D%3E/_search?pretty");
+    }
+
+    #[test]
+    fn detects_ndjson_endpoints_with_index_and_query_parameters() {
+        let request = super::parse_elasticsearch_rest_request(
+            "POST /orders/_bulk?refresh=true\n{\"index\":{\"_id\":\"1\"}}\n{\"name\":\"Notebook\"}",
+        )
+        .unwrap();
+
+        assert_eq!(request.method, reqwest::Method::POST);
+        assert_eq!(request.body_kind, super::ElasticsearchRestBodyKind::Ndjson);
+        assert!(request.body.is_some());
+    }
+
+    #[test]
+    fn normalizes_ndjson_with_a_required_trailing_newline() {
+        let body = "{\"index\":{}}\n{\"name\":\"Notebook\"}";
+        assert_eq!(super::validate_elasticsearch_ndjson(body).unwrap(), format!("{body}\n"));
+        assert!(super::validate_elasticsearch_ndjson("{\"index\":{}}\nnot-json").is_err());
+    }
+
+    #[test]
     fn url_params_can_disable_elasticsearch_tls_verification() {
         assert!(elasticsearch_accept_invalid_certs(false, Some("sslmode=disable")));
         assert!(elasticsearch_accept_invalid_certs(false, Some("?tlsVerify=false")));
@@ -1610,6 +1820,28 @@ mod tests {
     }
 
     #[test]
+    fn builds_elasticsearch_auto_id_document_path_with_routing() {
+        assert_eq!(
+            super::elasticsearch_auto_id_document_path("orders/2026", Some("tenant/a&b")),
+            "/orders%2F2026/_doc?routing=tenant%2Fa%26b&refresh=true"
+        );
+        assert_eq!(super::elasticsearch_auto_id_document_path("orders", None), "/orders/_doc?refresh=true");
+    }
+
+    #[test]
+    fn insert_document_body_extracts_routing_without_embedding_it() {
+        let (doc, routing) =
+            super::elasticsearch_document_body_and_routing_from_json(r#"{"_routing":"tenant-1","name":"Alice"}"#, None)
+                .expect("parse insert body");
+        assert_eq!(routing.as_deref(), Some("tenant-1"));
+        assert_eq!(doc, serde_json::json!({"name":"Alice"}));
+        assert_eq!(
+            super::elasticsearch_auto_id_document_path("orders", routing.as_deref()),
+            "/orders/_doc?routing=tenant-1&refresh=true"
+        );
+    }
+
+    #[test]
     fn elasticsearch_sql_detection_does_not_treat_rest_methods_as_sql() {
         assert!(super::is_elasticsearch_sql_query("SELECT * FROM index_task_v1"));
         assert!(super::is_elasticsearch_sql_query(" select count(*) from index_task_v1"));
@@ -1629,6 +1861,38 @@ mod tests {
                 "size": 10,
                 "query": { "term": { "city": "长治" } },
                 "sort": [{ "created_at": { "order": "desc" } }]
+            })
+        );
+    }
+
+    #[test]
+    fn builds_elasticsearch_find_body_with_native_query_builder_filter() {
+        let body = build_find_documents_body(
+            0,
+            25,
+            Some(
+                r#"{
+                    "$esQuery": {
+                        "bool": {
+                            "must": [{"match": {"customer_name": "Customer"}}],
+                            "filter": [{"range": {"amount": {"gte": 500}}}],
+                            "must_not": [{"term": {"status": "cancelled"}}]
+                        }
+                    }
+                }"#,
+            ),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            body["query"],
+            json!({
+                "bool": {
+                    "must": [{"match": {"customer_name": "Customer"}}],
+                    "filter": [{"range": {"amount": {"gte": 500}}}],
+                    "must_not": [{"term": {"status": "cancelled"}}]
+                }
             })
         );
     }
@@ -1744,6 +2008,21 @@ mod tests {
     }
 
     #[test]
+    fn preserves_long_literals_in_document_transport_json() {
+        let response: SearchResponse = serde_json::from_str(
+            r#"{"hits":{"total":{"value":1,"relation":"eq"},"hits":[{"_id":"doc-1","_source":{"id":2018551659033767937,"string_id":"2018551659033767937","legacy":{"$numberLong":"2018551659033767937"}}}]}}"#,
+        )
+        .unwrap();
+
+        let result = super::search_response_to_document_result(response).unwrap();
+
+        assert_eq!(
+            result.raw_documents.as_deref(),
+            Some(&[r#"{"id":2018551659033767937,"string_id":"2018551659033767937","legacy":{"$numberLong":"2018551659033767937"},"_id":"doc-1"}"#.to_string()][..])
+        );
+    }
+
+    #[test]
     fn parses_search_response_rows_with_routing_metadata() {
         let result = super::parse_elasticsearch_response(
             200,
@@ -1829,6 +2108,16 @@ mod tests {
     }
 
     #[test]
+    fn preserves_http_status_for_plain_text_rest_errors() {
+        let result =
+            super::parse_elasticsearch_rest_response(503, "service temporarily unavailable", std::time::Instant::now())
+                .unwrap();
+
+        assert_eq!(result.columns, vec!["status", "response"]);
+        assert_eq!(result.rows, vec![vec![json!(503), json!("service temporarily unavailable")]]);
+    }
+
+    #[test]
     fn keeps_mapping_rest_response_numeric_literals_lossless() {
         let body = r#"{
   "products": {
@@ -1906,6 +2195,81 @@ mod tests {
         assert_eq!(result.columns, vec!["status", "response"]);
         assert_eq!(result.rows[0][0], json!(200));
         assert_eq!(result.rows[0][1].as_str(), Some(response_body));
+    }
+
+    #[tokio::test]
+    async fn execute_rest_head_request_returns_http_status() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("HEAD /orders "));
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result = super::execute_rest_query(&client, "HEAD /orders").await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result.columns, vec!["status", "response"]);
+        assert_eq!(result.rows[0][0], json!(200));
+        assert_eq!(result.rows[0][1], json!("null"));
+    }
+
+    #[tokio::test]
+    async fn execute_rest_query_sends_encoded_date_math_path() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("GET /%3Clogs-%7Bnow%2Fd%7D%3E/_search?pretty "), "{request}");
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        super::execute_rest_query(&client, "GET /<logs-{now/d}>/_search?pretty").await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn execute_rest_msearch_sends_ndjson_content_type_and_trailing_newline() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            let (headers, body) = request.split_once("\r\n\r\n").unwrap();
+            assert!(headers.starts_with("POST /_msearch "));
+            assert!(headers.lines().any(|line| line.eq_ignore_ascii_case("content-type: application/x-ndjson")));
+            assert_eq!(body, "{\"index\":\"orders\"}\n{\"size\":0}\n");
+
+            let response_body = r#"{"responses":[]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result = super::execute_rest_query(
+            &client,
+            "// run two searches\nPOST /_msearch\n{\"index\":\"orders\"}\n{\"size\":0}",
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result.rows[0][0], json!(200));
     }
 
     #[tokio::test]
@@ -2057,8 +2421,11 @@ mod tests {
 
     #[test]
     fn document_body_removes_elasticsearch_id_metadata() {
-        let doc = super::elasticsearch_document_body_from_json(r#"{"_id":"abc","_routing":"tenant-1","name":"Alice"}"#)
-            .unwrap();
+        let (doc, _) = super::elasticsearch_document_body_and_routing_from_json(
+            r#"{"_id":"abc","_routing":"tenant-1","name":"Alice"}"#,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(doc, json!({ "name": "Alice" }));
     }
@@ -2089,7 +2456,8 @@ mod tests {
 
     #[test]
     fn document_body_preserves_user_field_order() {
-        let doc = super::elasticsearch_document_body_from_json(r#"{"z":1,"_id":"abc","a":2}"#).unwrap();
+        let (doc, _) =
+            super::elasticsearch_document_body_and_routing_from_json(r#"{"z":1,"_id":"abc","a":2}"#, None).unwrap();
 
         assert_eq!(serde_json::to_string(&doc).unwrap(), r#"{"z":1,"a":2}"#);
     }

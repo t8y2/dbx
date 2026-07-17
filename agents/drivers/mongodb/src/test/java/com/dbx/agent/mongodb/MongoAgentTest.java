@@ -12,15 +12,22 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mongodb.MongoClientSettings;
+import com.mongodb.client.MongoClient;
+import com.mongodb.client.MongoCollection;
+import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.UpdateOptions;
+import com.mongodb.client.result.UpdateResult;
 import java.io.FileInputStream;
+import java.lang.reflect.Proxy;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.PrivateKey;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.Date;
+import java.util.List;
 import org.bson.Document;
 import org.bson.types.ObjectId;
 import org.junit.jupiter.api.BeforeAll;
@@ -253,6 +260,38 @@ class MongoAgentTest {
         assertEquals(10, json.get("id").getAsInt());
         assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
         assertFalse(json.getAsJsonObject("error").get("message").getAsString().contains("Unknown method"));
+    }
+
+    @Test
+    void updateDocumentsRpcUsesDocumentOverloads() {
+        List<String> calls = new ArrayList<>();
+        MongoClient client = recordingMongoClient(calls);
+
+        assertRpcModifiedCount(client, 20, "{\"$set\":{\"status\":\"done\"}}", false);
+        assertRpcModifiedCount(client, 21, "{\"$unset\":{\"legacy\":1}}", true);
+
+        assertEquals(List.of("updateOne:document", "updateMany:document"), calls);
+    }
+
+    @Test
+    void updateDocumentsRpcUsesPipelineOverloads() {
+        List<String> calls = new ArrayList<>();
+        MongoClient client = recordingMongoClient(calls);
+
+        assertRpcModifiedCount(client, 22, "[{\"$set\":{\"status\":\"$source\"}}]", false);
+        assertRpcModifiedCount(client, 23, "[{\"$unset\":\"legacy\"}]", true);
+
+        assertEquals(List.of("updateOne:pipeline", "updateMany:pipeline"), calls);
+    }
+
+    @Test
+    void updatePipelineRejectsNonDocumentStages() {
+        IllegalArgumentException error = assertThrows(
+            IllegalArgumentException.class,
+            () -> MongoAgent.updatePipelineForWrite("[{\"$set\":{\"a\":1}}, 2]")
+        );
+
+        assertEquals("Each update pipeline stage must be an object", error.getMessage());
     }
 
     @Test
@@ -550,6 +589,63 @@ class MongoAgentTest {
     }
 
     // ─── helpers ───
+
+    private static void assertRpcModifiedCount(MongoClient client, int id, String updateJson, boolean many) {
+        JsonObject params = new JsonObject();
+        params.addProperty("database", "app");
+        params.addProperty("collection", "orders");
+        params.addProperty("filter_json", "{}");
+        params.addProperty("update_json", updateJson);
+        params.addProperty("many", many);
+
+        JsonObject request = new JsonObject();
+        request.addProperty("jsonrpc", "2.0");
+        request.addProperty("id", id);
+        request.addProperty("method", "update_documents");
+        request.add("params", params);
+
+        JsonObject response = JsonParser.parseString(MongoAgent.handleRequest(request.toString(), client)).getAsJsonObject();
+        assertFalse(response.has("error"), response.toString());
+        assertEquals(1, response.getAsJsonObject("result").get("modified_count").getAsLong());
+    }
+
+    @SuppressWarnings("unchecked")
+    private static MongoClient recordingMongoClient(List<String> calls) {
+        MongoCollection<Document> collection = (MongoCollection<Document>) Proxy.newProxyInstance(
+            MongoCollection.class.getClassLoader(),
+            new Class<?>[] {MongoCollection.class},
+            (proxy, method, args) -> {
+                if ("updateOne".equals(method.getName()) || "updateMany".equals(method.getName())) {
+                    calls.add(method.getName() + ":" + (args[1] instanceof List<?> ? "pipeline" : "document"));
+                    return UpdateResult.acknowledged(1, 1L, null);
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        MongoDatabase database = (MongoDatabase) Proxy.newProxyInstance(
+            MongoDatabase.class.getClassLoader(),
+            new Class<?>[] {MongoDatabase.class},
+            (proxy, method, args) -> {
+                if ("getCollection".equals(method.getName())) {
+                    return collection;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        return (MongoClient) Proxy.newProxyInstance(
+            MongoClient.class.getClassLoader(),
+            new Class<?>[] {MongoClient.class},
+            (proxy, method, args) -> {
+                if ("getDatabase".equals(method.getName())) {
+                    return database;
+                }
+                if ("close".equals(method.getName())) {
+                    return null;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+    }
 
     private static JsonObject minimalConnection() {
         JsonObject conn = new JsonObject();

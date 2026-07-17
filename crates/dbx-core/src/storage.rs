@@ -1,12 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use log::warn;
 use rusqlite::{params, params_from_iter, Connection, DatabaseName, OpenFlags, OptionalExtension, ToSql};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::ai::{AiChatMessage, AiConfig, AiConversation, AiProvider};
+use crate::ai::{AiChatMessage, AiConfig, AiConfigItem, AiConversation, AiProvider};
 use crate::connection_secrets::{
     MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_SECRET_PREFIX,
     MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, MQ_TOKEN_SIGNING_SECRET_PREFIX, NACOS_AUTH_PASSWORD_KEY,
@@ -14,7 +15,7 @@ use crate::connection_secrets::{
 };
 use crate::db::sqlite::{connect_path_create_if_missing, SqliteHandle};
 use crate::history::{HistoryEntry, MAX_HISTORY};
-use crate::models::connection::{ConnectionConfig, DatabaseType, TransportLayerConfig};
+use crate::models::connection::{ConnectionConfig, DatabaseConnectionInfo, DatabaseType, TransportLayerConfig};
 use crate::saved_sql::{SavedSqlFile, SavedSqlFolder, SavedSqlLibrary};
 
 const SSH_TUNNEL_SECRET_PREFIX: &str = "ssh_tunnels.";
@@ -102,6 +103,7 @@ pub struct Storage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TabRuntimeCacheEntry {
     pub key: String,
     pub payload: Vec<u8>,
@@ -109,6 +111,32 @@ pub struct TabRuntimeCacheEntry {
     pub column_count: i64,
     pub byte_size: i64,
     pub updated_at: String,
+    pub created_at: i64,
+    pub last_accessed_at: i64,
+    pub owner_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TabRuntimeCacheMetadata {
+    pub key: String,
+    pub row_count: i64,
+    pub column_count: i64,
+    pub byte_size: i64,
+    pub updated_at: String,
+    pub created_at: i64,
+    pub last_accessed_at: i64,
+    pub owner_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TabRuntimeCachePruneResult {
+    pub deleted_entries: usize,
+    pub deleted_bytes: i64,
+    pub orphan_deletions: usize,
+    pub remaining_entries: usize,
+    pub remaining_bytes: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,7 +288,10 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         row_count INTEGER NOT NULL DEFAULT 0,
         column_count INTEGER NOT NULL DEFAULT 0,
         byte_size INTEGER NOT NULL DEFAULT 0,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT 0,
+        last_accessed_at INTEGER NOT NULL DEFAULT 0,
+        owner_id TEXT
     )",
     "CREATE TABLE IF NOT EXISTS mq_token_records (
         id TEXT PRIMARY KEY,
@@ -301,6 +332,14 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         created_at TEXT NOT NULL DEFAULT '',
         updated_at TEXT NOT NULL DEFAULT ''
     )",
+    "CREATE TABLE IF NOT EXISTS ai_configs (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        model TEXT NOT NULL DEFAULT '',
+        models TEXT NOT NULL DEFAULT '[]',
+        config_json TEXT NOT NULL,
+        is_default INTEGER NOT NULL DEFAULT 0
+    )",
 ];
 
 impl Storage {
@@ -319,6 +358,8 @@ impl Storage {
             }
             ensure_history_columns_sync(conn)?;
             ensure_saved_sql_columns_sync(conn)?;
+            ensure_tab_runtime_cache_columns_sync(conn)?;
+            ensure_ai_configs_columns_sync(conn)?;
             Ok(())
         })
     }
@@ -432,6 +473,44 @@ fn ensure_saved_sql_columns_sync(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+fn ensure_tab_runtime_cache_columns_sync(conn: &Connection) -> Result<(), String> {
+    const COLUMNS: &[(&str, &str)] = &[
+        ("created_at", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_accessed_at", "INTEGER NOT NULL DEFAULT 0"),
+        ("owner_id", "TEXT"),
+    ];
+    ensure_table_columns(conn, "tab_runtime_cache", COLUMNS)?;
+    let now = unix_timestamp_millis();
+    // Legacy rows must receive a grace period instead of being treated as ancient crash leftovers.
+    conn.execute("UPDATE tab_runtime_cache SET created_at = ?1 WHERE created_at = 0", [now])
+        .map_err(|e| e.to_string())?;
+    conn.execute("UPDATE tab_runtime_cache SET last_accessed_at = created_at WHERE last_accessed_at = 0", [])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn unix_timestamp_millis() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().min(i64::MAX as u128) as i64
+}
+
+fn ensure_ai_configs_columns_sync(conn: &Connection) -> Result<(), String> {
+    const COLUMNS: &[(&str, &str)] = &[
+        ("model", "TEXT NOT NULL DEFAULT ''"),
+        ("models", "TEXT NOT NULL DEFAULT '[]'"),
+        ("is_default", "INTEGER NOT NULL DEFAULT 0"),
+    ];
+
+    ensure_table_columns(conn, "ai_configs", COLUMNS)?;
+
+    // Create partial unique index (if not exists)
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_configs_default ON ai_configs(is_default) WHERE is_default = 1",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
 fn ensure_table_columns(conn: &Connection, table_name: &str, columns: &[(&str, &str)]) -> Result<(), String> {
     let mut stmt =
         conn.prepare(&format!("SELECT name FROM pragma_table_info('{table_name}')")).map_err(|e| e.to_string())?;
@@ -760,6 +839,136 @@ impl Storage {
                 }
             }
             Ok(map)
+        })
+        .await
+    }
+
+    pub async fn save_ai_configs(&self, configs: &[AiConfigItem]) -> Result<(), String> {
+        let configs = configs.to_vec();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM ai_configs", []).map_err(|e| e.to_string())?;
+            for config in &configs {
+                let json = serde_json::to_string(&config.config).map_err(|e| e.to_string())?;
+                let models_json = serde_json::to_string(&config.config.models).map_err(|e| e.to_string())?;
+                tx.execute(
+                    "INSERT OR REPLACE INTO ai_configs (id, name, model, models, config_json, is_default) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![config.id, config.name, config.config.model, models_json, json, config.is_default as i32],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            // Clear old single-config tables — migration is complete, avoids re-migration on empty ai_configs
+            tx.execute("DELETE FROM ai_config", []).map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM ai_provider_configs", []).map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn load_ai_configs(&self) -> Result<Vec<AiConfigItem>, String> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT id, name, model, models, config_json, is_default FROM ai_configs")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, bool>(5)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            let mut configs = Vec::new();
+            for row in rows {
+                let (id, name, model_col, models_json_col, json, is_default_col) = row.map_err(|e| e.to_string())?;
+                match serde_json::from_str::<AiConfig>(&json) {
+                    Ok(mut config) => {
+                        // 优先使用列值，如果列值为空则从 config_json 回退读取
+                        if model_col.is_empty() {
+                            // config.model 已经从 json 解析出来了
+                        } else {
+                            config.model = model_col;
+                        }
+                        if models_json_col.is_empty() || models_json_col == "[]" {
+                            // config.models 已经从 json 解析出来了
+                        } else {
+                            config.models = serde_json::from_str(&models_json_col).unwrap_or_default();
+                        }
+                        let is_default = is_default_col;
+                        configs.push(AiConfigItem { id, name, is_default, config });
+                    }
+                    Err(e) => {
+                        warn!("Failed to deserialize AI config item '{}': {}", id, e);
+                    }
+                }
+            }
+            Ok(configs)
+        })
+        .await
+    }
+
+    pub async fn set_default_ai_config(&self, config_id: &str) -> Result<(), String> {
+        let config_id = config_id.to_string();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            tx.execute("UPDATE ai_configs SET is_default = 0 WHERE is_default = 1", []).map_err(|e| e.to_string())?;
+            tx.execute("UPDATE ai_configs SET is_default = 1 WHERE id = ?1", params![config_id])
+                .map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn save_ai_config_item(&self, config: &AiConfigItem) -> Result<(), String> {
+        let config = config.clone();
+        self.with_conn(move |conn| {
+            let json = serde_json::to_string(&config.config).map_err(|e| e.to_string())?;
+            let models_json = serde_json::to_string(&config.config.models).map_err(|e| e.to_string())?;
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+            // 如果设该配置为默认，先清除其他默认，避免与 idx_ai_configs_default 冲突
+            if config.is_default {
+                tx.execute(
+                    "UPDATE ai_configs SET is_default = 0 WHERE is_default = 1 AND id != ?1",
+                    params![config.id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+
+            tx.execute(
+                "INSERT INTO ai_configs (id, name, model, models, config_json, is_default)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(id) DO UPDATE SET name = excluded.name, model = excluded.model,
+                 models = excluded.models, config_json = excluded.config_json, is_default = excluded.is_default",
+                params![config.id, config.name, config.config.model, models_json, json, config.is_default as i32],
+            )
+            .map_err(|e| {
+                let msg = e.to_string();
+                // SQLite UNIQUE constraint error contains the table and column name
+                if msg.contains("UNIQUE constraint failed") && msg.contains("ai_configs.name") {
+                    format!("ai.configNameExists:{}", config.name)
+                } else {
+                    msg
+                }
+            })?;
+
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn delete_ai_config(&self, config_id: &str) -> Result<(), String> {
+        let config_id = config_id.to_string();
+        self.with_conn(move |conn| {
+            conn.execute("DELETE FROM ai_configs WHERE id = ?1", params![config_id]).map_err(|e| e.to_string())?;
+            Ok(())
         })
         .await
     }
@@ -1386,6 +1595,30 @@ impl Storage {
             }
 
             tx.commit().map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn save_connection_database_info(
+        &self,
+        connection_id: &str,
+        database_info: Option<DatabaseConnectionInfo>,
+    ) -> Result<(), String> {
+        let connection_id = connection_id.to_string();
+        self.with_conn(move |conn| {
+            let json = conn
+                .query_row("SELECT config_json FROM connections WHERE id = ?1", [&connection_id], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("Connection config not found: {connection_id}"))?;
+            let mut config: ConnectionConfig = serde_json::from_str(&json).map_err(|error| error.to_string())?;
+            config.database_info = database_info;
+            let json = serde_json::to_string(&config).map_err(|error| error.to_string())?;
+            conn.execute("UPDATE connections SET config_json = ?1 WHERE id = ?2", params![json, connection_id])
+                .map(|_| ())
+                .map_err(|error| error.to_string())
         })
         .await
     }
@@ -2058,18 +2291,21 @@ impl Storage {
         payload: Vec<u8>,
         row_count: i64,
         column_count: i64,
+        owner_id: Option<String>,
     ) -> Result<(), String> {
         let key = key.to_string();
         let byte_size = payload.len() as i64;
+        let now = unix_timestamp_millis();
         self.with_conn(move |conn| {
             conn.execute(
                 "INSERT INTO tab_runtime_cache \
-                 (cache_key, payload, row_count, column_count, byte_size, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, datetime('now')) \
+                 (cache_key, payload, row_count, column_count, byte_size, updated_at, created_at, last_accessed_at, owner_id) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'), ?6, ?6, ?7) \
                  ON CONFLICT(cache_key) DO UPDATE SET \
                  payload = excluded.payload, row_count = excluded.row_count, column_count = excluded.column_count, \
-                 byte_size = excluded.byte_size, updated_at = excluded.updated_at",
-                params![key, payload, row_count, column_count, byte_size],
+                 byte_size = excluded.byte_size, updated_at = excluded.updated_at, \
+                 last_accessed_at = excluded.last_accessed_at, owner_id = excluded.owner_id",
+                params![key, payload, row_count, column_count, byte_size, now, owner_id],
             )
             .map(|_| ())
             .map_err(|e| e.to_string())
@@ -2079,11 +2315,13 @@ impl Storage {
 
     pub async fn load_tab_runtime_cache(&self, key: &str) -> Result<Option<TabRuntimeCacheEntry>, String> {
         let key = key.to_string();
+        let now = unix_timestamp_millis();
         self.with_conn(move |conn| {
-            conn.query_row(
-                "SELECT cache_key, payload, row_count, column_count, byte_size, updated_at \
+            let entry = conn
+                .query_row(
+                "SELECT cache_key, payload, row_count, column_count, byte_size, updated_at, created_at, last_accessed_at, owner_id \
                  FROM tab_runtime_cache WHERE cache_key = ?1",
-                [key],
+                [&key],
                 |row| {
                     Ok(TabRuntimeCacheEntry {
                         key: row.get(0)?,
@@ -2092,11 +2330,134 @@ impl Storage {
                         column_count: row.get(3)?,
                         byte_size: row.get(4)?,
                         updated_at: row.get(5)?,
+                        created_at: row.get(6)?,
+                        last_accessed_at: now,
+                        owner_id: row.get(8)?,
                     })
                 },
             )
             .optional()
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+            if entry.is_some() {
+                conn.execute(
+                    "UPDATE tab_runtime_cache SET last_accessed_at = ?2 WHERE cache_key = ?1",
+                    params![key, now],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            Ok(entry)
+        })
+        .await
+    }
+
+    pub async fn list_tab_runtime_cache_metadata(&self) -> Result<Vec<TabRuntimeCacheMetadata>, String> {
+        self.with_conn(move |conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT cache_key, row_count, column_count, byte_size, updated_at, created_at, last_accessed_at, owner_id \
+                     FROM tab_runtime_cache ORDER BY last_accessed_at ASC, cache_key ASC",
+                )
+                .map_err(|e| e.to_string())?;
+            let metadata = statement
+                .query_map([], |row| {
+                    Ok(TabRuntimeCacheMetadata {
+                        key: row.get(0)?,
+                        row_count: row.get(1)?,
+                        column_count: row.get(2)?,
+                        byte_size: row.get(3)?,
+                        updated_at: row.get(4)?,
+                        created_at: row.get(5)?,
+                        last_accessed_at: row.get(6)?,
+                        owner_id: row.get(7)?,
+                    })
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            Ok(metadata)
+        })
+        .await
+    }
+
+    pub async fn prune_tab_runtime_cache(
+        &self,
+        live_keys: Vec<String>,
+        max_bytes: i64,
+        orphan_grace_ms: i64,
+        max_age_ms: Option<i64>,
+    ) -> Result<TabRuntimeCachePruneResult, String> {
+        let now = unix_timestamp_millis();
+        self.with_conn(move |conn| {
+            let live_keys: HashSet<String> = live_keys.into_iter().collect();
+            let mut statement = conn
+                .prepare(
+                    "SELECT cache_key, byte_size, created_at, last_accessed_at \
+                     FROM tab_runtime_cache ORDER BY last_accessed_at ASC, cache_key ASC",
+                )
+                .map_err(|e| e.to_string())?;
+            let entries = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?))
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            drop(statement);
+
+            let mut total_bytes = entries.iter().map(|(_, bytes, _, _)| *bytes).sum::<i64>();
+            let mut deleted = HashSet::new();
+            let mut orphan_deletions = 0usize;
+            for (key, bytes, created_at, last_accessed_at) in &entries {
+                if live_keys.contains(key) {
+                    continue;
+                }
+                let orphan_expired = now.saturating_sub(*created_at) >= orphan_grace_ms.max(0);
+                let age_expired =
+                    max_age_ms.is_some_and(|max_age| now.saturating_sub(*last_accessed_at) >= max_age.max(0));
+                if orphan_expired || age_expired {
+                    deleted.insert(key.clone());
+                    total_bytes = total_bytes.saturating_sub(*bytes);
+                    if orphan_expired {
+                        orphan_deletions += 1;
+                    }
+                }
+            }
+
+            for (key, bytes, _, _) in &entries {
+                if total_bytes <= max_bytes.max(0) {
+                    break;
+                }
+                if live_keys.contains(key) || deleted.contains(key) {
+                    continue;
+                }
+                deleted.insert(key.clone());
+                total_bytes = total_bytes.saturating_sub(*bytes);
+            }
+
+            let deleted_bytes =
+                entries.iter().filter(|(key, _, _, _)| deleted.contains(key)).map(|(_, bytes, _, _)| *bytes).sum();
+            let transaction = conn.transaction().map_err(|e| e.to_string())?;
+            for key in &deleted {
+                transaction
+                    .execute("DELETE FROM tab_runtime_cache WHERE cache_key = ?1", [key])
+                    .map_err(|e| e.to_string())?;
+            }
+            transaction.commit().map_err(|e| e.to_string())?;
+            Ok(TabRuntimeCachePruneResult {
+                deleted_entries: deleted.len(),
+                deleted_bytes,
+                orphan_deletions,
+                remaining_entries: entries.len().saturating_sub(deleted.len()),
+                remaining_bytes: total_bytes,
+            })
+        })
+        .await
+    }
+
+    pub async fn delete_tab_runtime_cache_owner(&self, owner_id: &str) -> Result<usize, String> {
+        let owner_id = owner_id.to_string();
+        self.with_conn(move |conn| {
+            conn.execute("DELETE FROM tab_runtime_cache WHERE owner_id = ?1", [owner_id]).map_err(|e| e.to_string())
         })
         .await
     }
@@ -2507,8 +2868,11 @@ mod tests {
     use crate::connection_secrets::{
         MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
     };
-    use crate::models::connection::{ConnectionConfig, DatabaseType, SshTunnelConfig, TransportLayerConfig};
+    use crate::models::connection::{
+        ConnectionConfig, DatabaseConnectionInfo, DatabaseType, SshTunnelConfig, TransportLayerConfig,
+    };
     use crate::saved_sql::SavedSqlFile;
+    use rusqlite::Connection;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_db_path(name: &str) -> std::path::PathBuf {
@@ -2637,6 +3001,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            database_info: None,
         }
     }
 
@@ -2698,6 +3063,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            database_info: None,
         }
     }
 
@@ -2822,6 +3188,38 @@ mod tests {
 
         assert_eq!(result, DataDbImportResult::SkippedInvalidSource);
         assert!(!target_dir.join("dbx.db").exists());
+    }
+
+    #[tokio::test]
+    async fn save_connections_preserves_database_info() {
+        let path = temp_db_path("database-info");
+        let storage = Storage::open(&path).await.unwrap();
+        let mut config = mq_connection("database-info", "mq-secret");
+        config.database_info = Some(DatabaseConnectionInfo {
+            product_name: Some("MySQL".to_string()),
+            product_version: Some("8.4.0".to_string()),
+            current_database: Some("app".to_string()),
+            ..DatabaseConnectionInfo::default()
+        });
+
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+
+        let raw_json = raw_connection_json(&storage, "database-info").await;
+        assert!(raw_json.contains("8.4.0"));
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(loaded[0].database_info, config.database_info);
+
+        let updated_info = DatabaseConnectionInfo {
+            product_name: Some("MySQL".to_string()),
+            product_version: Some("8.4.1".to_string()),
+            ..DatabaseConnectionInfo::default()
+        };
+        storage.save_connection_database_info("database-info", Some(updated_info.clone())).await.unwrap();
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(loaded[0].database_info, Some(updated_info));
+        assert_eq!(mq_token(&loaded[0]), Some("mq-secret"));
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]
@@ -3196,7 +3594,10 @@ mod tests {
         let path = temp_db_path("tab-runtime-cache");
         let storage = Storage::open(&path).await.unwrap();
 
-        storage.save_tab_runtime_cache("tab:1:result", vec![1, 2, 3, 4], 10, 3).await.unwrap();
+        storage
+            .save_tab_runtime_cache("tab:1:result", vec![1, 2, 3, 4], 10, 3, Some("connection-1".to_string()))
+            .await
+            .unwrap();
         let entry = storage.load_tab_runtime_cache("tab:1:result").await.unwrap().unwrap();
 
         assert_eq!(entry.key, "tab:1:result");
@@ -3204,9 +3605,84 @@ mod tests {
         assert_eq!(entry.row_count, 10);
         assert_eq!(entry.column_count, 3);
         assert_eq!(entry.byte_size, 4);
+        assert_eq!(entry.owner_id.as_deref(), Some("connection-1"));
+        assert!(entry.created_at > 0);
+        assert!(entry.last_accessed_at >= entry.created_at);
 
         storage.delete_tab_runtime_cache("tab:1:result").await.unwrap();
         assert_eq!(storage.load_tab_runtime_cache("tab:1:result").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn tab_runtime_cache_pruning_retains_live_entries_and_enforces_byte_budget() {
+        let path = temp_db_path("tab-runtime-cache-prune");
+        let storage = Storage::open(&path).await.unwrap();
+        for (key, size) in [("live", 6usize), ("old", 5), ("new", 4)] {
+            storage.save_tab_runtime_cache(key, vec![1; size], 1, 1, Some("connection-1".to_string())).await.unwrap();
+        }
+        storage
+            .with_conn(|conn| {
+                conn.execute("UPDATE tab_runtime_cache SET last_accessed_at = 1 WHERE cache_key = 'old'", [])
+                    .map_err(|e| e.to_string())?;
+                conn.execute("UPDATE tab_runtime_cache SET last_accessed_at = 2 WHERE cache_key = 'new'", [])
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let result = storage.prune_tab_runtime_cache(vec!["live".to_string()], 10, i64::MAX, None).await.unwrap();
+
+        assert_eq!(result.deleted_entries, 1);
+        assert!(storage.load_tab_runtime_cache("live").await.unwrap().is_some());
+        assert!(storage.load_tab_runtime_cache("old").await.unwrap().is_none());
+        assert!(storage.load_tab_runtime_cache("new").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn tab_runtime_cache_pruning_respects_orphan_grace_period() {
+        let path = temp_db_path("tab-runtime-cache-orphan-grace");
+        let storage = Storage::open(&path).await.unwrap();
+        storage.save_tab_runtime_cache("fresh", vec![1], 1, 1, None).await.unwrap();
+        storage.save_tab_runtime_cache("crash-leftover", vec![2], 1, 1, None).await.unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute("UPDATE tab_runtime_cache SET created_at = 1 WHERE cache_key = 'crash-leftover'", [])
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap();
+
+        let result = storage.prune_tab_runtime_cache(Vec::new(), 1024, 60_000, None).await.unwrap();
+
+        assert_eq!(result.orphan_deletions, 1);
+        assert!(storage.load_tab_runtime_cache("fresh").await.unwrap().is_some());
+        assert!(storage.load_tab_runtime_cache("crash-leftover").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn tab_runtime_cache_migrates_legacy_schema_without_dropping_entries() {
+        let path = temp_db_path("tab-runtime-cache-legacy-schema");
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute(
+                    "CREATE TABLE tab_runtime_cache (cache_key TEXT PRIMARY KEY, payload BLOB NOT NULL, row_count INTEGER NOT NULL DEFAULT 0, column_count INTEGER NOT NULL DEFAULT 0, byte_size INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)",
+                    [],
+                )
+                .unwrap();
+            connection
+                .execute("INSERT INTO tab_runtime_cache VALUES ('legacy', X'0102', 1, 1, 2, '2026-01-01')", [])
+                .unwrap();
+        }
+
+        let storage = Storage::open(&path).await.unwrap();
+        let entry = storage.load_tab_runtime_cache("legacy").await.unwrap().unwrap();
+
+        assert_eq!(entry.payload, vec![1, 2]);
+        assert!(entry.created_at > 0);
+        assert!(entry.last_accessed_at >= entry.created_at);
     }
 
     #[tokio::test]
@@ -3272,5 +3748,214 @@ mod tests {
         assert_eq!(loaded.name, "renamed.sql");
         assert_eq!(loaded.open_count, 1);
         assert_eq!(loaded.sql, "SELECT 1;");
+    }
+
+    // ---- AI Config tests ----
+
+    use crate::ai::{
+        AiApiStyle, AiAuthMethod, AiConfig, AiConfigItem, AiEffortLevel, AiModelListItem, AiProvider, AiReasoningLevel,
+    };
+
+    fn make_ai_config(name: &str, is_default: bool) -> AiConfigItem {
+        AiConfigItem {
+            id: format!("cfg-{name}"),
+            name: name.to_string(),
+            is_default,
+            config: AiConfig {
+                provider: AiProvider::Openai,
+                api_key: "sk-test".to_string(),
+                auth_method: AiAuthMethod::ApiKey,
+                endpoint: "https://api.openai.com/v1".to_string(),
+                model: "gpt-4o".to_string(),
+                models: Vec::new(),
+                api_style: AiApiStyle::Completions,
+                proxy_enabled: false,
+                proxy_url: String::new(),
+                enable_thinking: true,
+                reasoning_level: AiReasoningLevel::Default,
+                context_window: None,
+                codex_cli_path: None,
+                codex_cli_env: std::collections::HashMap::new(),
+                claude_code_cli_path: None,
+                claude_code_cli_env: std::collections::HashMap::new(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn ai_config_save_load_roundtrip() {
+        let db = temp_db_path("ai-roundtrip");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let mut cfg = make_ai_config("test-config", true);
+        cfg.config.provider = AiProvider::ClaudeCodeCli;
+        cfg.config.model = "claude-sonnet-4-6".to_string();
+        cfg.config.reasoning_level = AiReasoningLevel::Xhigh;
+        cfg.config.models = vec![AiModelListItem {
+            name: "claude-sonnet-4-6".to_string(),
+            label: Some("Sonnet 4.6".to_string()),
+            supported_effort_levels: vec![AiEffortLevel::Low, AiEffortLevel::High, AiEffortLevel::Xhigh],
+        }];
+        storage.save_ai_config_item(&cfg).await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "cfg-test-config");
+        assert_eq!(loaded[0].name, "test-config");
+        assert!(loaded[0].is_default);
+        assert_eq!(loaded[0].config.model, "claude-sonnet-4-6");
+        assert_eq!(loaded[0].config.reasoning_level, AiReasoningLevel::Xhigh);
+        assert_eq!(loaded[0].config.models.len(), 1);
+        assert_eq!(loaded[0].config.models[0].name, "claude-sonnet-4-6");
+        assert_eq!(
+            loaded[0].config.models[0].supported_effort_levels,
+            vec![AiEffortLevel::Low, AiEffortLevel::High, AiEffortLevel::Xhigh]
+        );
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn ai_config_only_one_default() {
+        let db = temp_db_path("ai-one-default");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let cfg1 = make_ai_config("config-a", true);
+        let cfg2 = make_ai_config("config-b", true);
+        storage.save_ai_config_item(&cfg1).await.unwrap();
+
+        // Second default config should succeed and cascade-clear the first
+        storage.save_ai_config_item(&cfg2).await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        let defaults: Vec<_> = loaded.iter().filter(|c| c.is_default).collect();
+        assert_eq!(defaults.len(), 1);
+        assert_eq!(defaults[0].id, "cfg-config-b");
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn ai_config_update_existing_to_default() {
+        let db = temp_db_path("ai-update-default");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let cfg1 = make_ai_config("config-a", true);
+        let cfg2 = make_ai_config("config-b", false);
+        storage.save_ai_config_item(&cfg1).await.unwrap();
+        storage.save_ai_config_item(&cfg2).await.unwrap();
+        assert_eq!(storage.load_ai_configs().await.unwrap().iter().filter(|c| c.is_default).count(), 1);
+
+        // Update cfg-b to be default via save_ai_config_item — should succeed and clear cfg-a
+        let cfg2 = make_ai_config("config-b", true);
+        storage.save_ai_config_item(&cfg2).await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        let defaults: Vec<_> = loaded.iter().filter(|c| c.is_default).collect();
+        assert_eq!(defaults.len(), 1);
+        assert_eq!(defaults[0].id, "cfg-config-b");
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn ai_config_duplicate_name_error() {
+        let db = temp_db_path("ai-dup-name");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let cfg1 = make_ai_config("same-name", false);
+        storage.save_ai_config_item(&cfg1).await.unwrap();
+
+        // Different id, same name → should fail with name conflict
+        let mut cfg2 = make_ai_config("same-name", false);
+        cfg2.id = "cfg-other".to_string();
+        let err = storage.save_ai_config_item(&cfg2).await.unwrap_err();
+        assert!(err.contains("ai.configNameExists"), "Expected name conflict error, got: {err}");
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn ai_config_set_default_switches() {
+        let db = temp_db_path("ai-set-default");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let cfg1 = make_ai_config("first", true);
+        let cfg2 = make_ai_config("second", false);
+        storage.save_ai_config_item(&cfg1).await.unwrap();
+        storage.save_ai_config_item(&cfg2).await.unwrap();
+
+        // Switch default to second
+        storage.set_default_ai_config("cfg-second").await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        let first = loaded.iter().find(|c| c.id == "cfg-first").unwrap();
+        let second = loaded.iter().find(|c| c.id == "cfg-second").unwrap();
+        assert!(!first.is_default);
+        assert!(second.is_default);
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn ai_config_delete_default_no_cascade() {
+        let db = temp_db_path("ai-delete-default");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let cfg1 = make_ai_config("default-one", true);
+        let cfg2 = make_ai_config("other", false);
+        storage.save_ai_config_item(&cfg1).await.unwrap();
+        storage.save_ai_config_item(&cfg2).await.unwrap();
+
+        // Delete the default config
+        storage.delete_ai_config("cfg-default-one").await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        // Remaining config should NOT be auto-promoted to default
+        assert!(!loaded[0].is_default);
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn ai_config_save_configs_batch() {
+        let db = temp_db_path("ai-batch");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let configs =
+            vec![make_ai_config("batch-a", true), make_ai_config("batch-b", false), make_ai_config("batch-c", false)];
+        storage.save_ai_configs(&configs).await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert_eq!(loaded.len(), 3);
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn ai_config_save_configs_clears_old_tables() {
+        let db = temp_db_path("ai-clear-old");
+        let storage = Storage::open(&db).await.unwrap();
+
+        // Pre-populate old tables as if migration hasn't run yet
+        storage.save_ai_config(&make_ai_config("legacy-active", false).config).await.unwrap();
+        storage.save_ai_provider_config("openai", &make_ai_config("legacy-openai", false).config).await.unwrap();
+
+        // save_ai_configs should clear old tables
+        let configs = vec![make_ai_config("new-a", true)];
+        storage.save_ai_configs(&configs).await.unwrap();
+
+        // New table has the saved config
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "new-a");
+
+        // Old tables are cleared — prevents re-migration on restart
+        assert!(storage.load_ai_config().await.unwrap().is_none(), "ai_config should be deleted");
+        let old_providers = storage.load_ai_provider_configs().await.unwrap();
+        assert!(old_providers.is_empty(), "ai_provider_configs should be deleted");
+
+        std::fs::remove_file(&db).ok();
     }
 }

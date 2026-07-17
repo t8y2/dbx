@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::io::Write;
-use tokio::sync::RwLock;
+use std::sync::RwLock;
 
 use crate::connection::task_client_session_id;
 use crate::models::connection::DatabaseType;
@@ -36,7 +36,18 @@ pub struct DatabaseExportRequest {
     pub include_objects: bool,
     #[serde(default)]
     pub drop_table_if_exists: bool,
+    #[serde(default)]
+    pub fail_on_error: bool,
+    #[serde(default)]
+    pub snapshot_session_id: Option<String>,
     pub batch_size: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseBackupSnapshot {
+    pub session_id: String,
+    pub schemas: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,6 +182,9 @@ fn format_export_sql_literal_for_database(value: &Value, database_type: Option<D
         return number.to_string();
     }
     if let Some(value) = value.as_bool() {
+        if database_type == Some(DatabaseType::Dameng) {
+            return if value { "1" } else { "0" }.to_string();
+        }
         return if value { "TRUE" } else { "FALSE" }.to_string();
     }
     if let Some(arr) = value.as_array() {
@@ -878,6 +892,7 @@ async fn list_postgres_export_sequences(
     schema: &str,
     selected_tables: &[String],
     include_objects: bool,
+    fail_on_error: bool,
 ) -> Result<Vec<PostgresExportSequence>, String> {
     let pool = {
         let connections = state.connections.read().await;
@@ -943,7 +958,7 @@ async fn list_postgres_export_sequences(
         return Ok(sequences);
     }
 
-    if let Ok(rows) = client
+    let last_values = client
         .query(
             "SELECT c.relname, pg_sequence_last_value(c.oid)::text \
              FROM pg_class c \
@@ -951,36 +966,139 @@ async fn list_postgres_export_sequences(
              WHERE c.relkind = 'S' AND n.nspname = $1",
             &[&schema],
         )
-        .await
-    {
-        for row in rows {
-            let name: String = row.get(0);
-            let last_value: Option<String> = row.get(1);
-            if let Some(sequence) = sequences.iter_mut().find(|sequence| sequence.name == name) {
-                sequence.last_value = last_value;
+        .await;
+    match last_values {
+        Ok(rows) => {
+            for row in rows {
+                let name: String = row.get(0);
+                let last_value: Option<String> = row.get(1);
+                if let Some(sequence) = sequences.iter_mut().find(|sequence| sequence.name == name) {
+                    sequence.last_value = last_value;
+                }
             }
         }
+        Err(error) if fail_on_error => return Err(error.to_string()),
+        Err(_) => {}
     }
 
     Ok(sequences)
 }
 
+pub fn is_export_cancelled_now(export_id: &str) -> bool {
+    EXPORT_CANCELLED.read().map(|cancelled| cancelled.contains(export_id)).unwrap_or(false)
+}
+
 pub async fn is_export_cancelled(export_id: &str) -> bool {
-    EXPORT_CANCELLED.read().await.contains(export_id)
+    is_export_cancelled_now(export_id)
 }
 
 pub async fn set_export_cancelled(export_id: &str) {
-    EXPORT_CANCELLED.write().await.insert(export_id.to_string());
+    if let Ok(mut cancelled) = EXPORT_CANCELLED.write() {
+        cancelled.insert(export_id.to_string());
+    }
 }
 
 pub async fn clear_export_cancelled(export_id: &str) {
-    EXPORT_CANCELLED.write().await.remove(export_id);
+    if let Ok(mut cancelled) = EXPORT_CANCELLED.write() {
+        cancelled.remove(export_id);
+    }
+}
+
+pub async fn begin_database_backup_snapshot_core(
+    state: &crate::connection::AppState,
+    connection_id: &str,
+    database: &str,
+) -> Result<DatabaseBackupSnapshot, String> {
+    let db_type = state
+        .configs
+        .read()
+        .await
+        .get(connection_id)
+        .map(|config| config.db_type)
+        .ok_or_else(|| format!("Connection config not found: {connection_id}"))?;
+    if !matches!(db_type, DatabaseType::Mysql | DatabaseType::Postgres) {
+        return Err("Consistent database backup snapshots are only supported for MySQL and PostgreSQL".to_string());
+    }
+
+    let session_id = crate::query::begin_database_backup_snapshot(state, connection_id, database).await?;
+    let schemas = if matches!(db_type, DatabaseType::Postgres) {
+        const POSTGRES_BACKUP_SCHEMAS_SQL: &str = "SELECT n.nspname FROM pg_catalog.pg_namespace n \
+             WHERE n.nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast') \
+             AND n.nspname NOT LIKE 'pg_toast_temp_%' \
+             AND n.nspname NOT LIKE 'pg_temp_%' ORDER BY n.nspname";
+        let results = crate::query::execute_in_manual_transaction(
+            state,
+            &session_id,
+            POSTGRES_BACKUP_SCHEMAS_SQL,
+            database,
+            None,
+            Some(10_000),
+        )
+        .await?;
+        results
+            .into_iter()
+            .next()
+            .map(|result| {
+                result
+                    .rows
+                    .into_iter()
+                    .filter_map(|row| row.into_iter().next())
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        vec![database.to_string()]
+    };
+    if schemas.is_empty() {
+        let _ = crate::query::rollback_manual_transaction(state, &session_id).await;
+        return Err(format!("No schemas are available in database {database}"));
+    }
+    Ok(DatabaseBackupSnapshot { session_id, schemas })
+}
+
+fn record_export_error(file: &mut std::fs::File, fail_on_error: bool, message: String) -> Result<(), String> {
+    if fail_on_error {
+        Err(message)
+    } else {
+        writeln!(file, "-- ERROR {message}").map_err(|error| format!("Failed to write file: {error}"))
+    }
+}
+
+fn database_export_select_sql(columns: &[String], table: &str, schema: &str, db_type: &DatabaseType) -> String {
+    let columns = columns.iter().map(|column| quote_identifier(column, db_type)).collect::<Vec<_>>().join(", ");
+    let table = crate::transfer::qualified_table(table, schema, db_type);
+    format!("SELECT {columns} FROM {table}")
+}
+
+fn write_database_export_rows(
+    file: &mut std::fs::File,
+    rows: &[Vec<Value>],
+    columns: &[String],
+    column_types: &[Option<String>],
+    column_extras: &[Option<String>],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+) -> Result<(), String> {
+    let mut insert_sql = crate::transfer::generate_insert_typed(columns, column_types, rows, table, schema, db_type);
+    if *db_type == DatabaseType::Dameng && selected_columns_include_identity_extras(columns, column_extras) {
+        insert_sql = wrap_dameng_identity_insert_sql(&insert_sql, table, schema);
+    }
+    if insert_sql.is_empty() {
+        return Ok(());
+    }
+    if insert_sql.trim_end().ends_with(';') {
+        writeln!(file, "{}\n", insert_sql).map_err(|error| format!("Failed to write file: {error}"))
+    } else {
+        writeln!(file, "{};\n", insert_sql).map_err(|error| format!("Failed to write file: {error}"))
+    }
 }
 
 pub async fn export_database_sql_core(
     state: &crate::connection::AppState,
     request: &DatabaseExportRequest,
-    on_progress: impl Fn(ExportProgress),
+    on_progress: impl Fn(ExportProgress) + Sync,
 ) -> Result<(), String> {
     // 1. Get database type
     let db_type = state
@@ -1036,13 +1154,13 @@ pub async fn export_database_sql_core(
             &request.schema,
             &request.selected_tables,
             request.include_objects,
+            request.fail_on_error,
         )
         .await
         {
             Ok(sequences) => sequences,
             Err(e) => {
-                writeln!(file, "-- ERROR exporting sequences: {e}")
-                    .map_err(|e| format!("Failed to write file: {e}"))?;
+                record_export_error(&mut file, request.fail_on_error, format!("exporting sequences: {e}"))?;
                 Vec::new()
             }
         }
@@ -1054,7 +1172,7 @@ pub async fn export_database_sql_core(
     // exported before referencing (child) tables.
     if tables.len() > 1 {
         let table_names: Vec<String> = tables.iter().map(|t| t.name.clone()).collect();
-        if let Ok(sorted_names) = crate::transfer::sort_tables_by_fk_dependency(
+        match crate::transfer::sort_tables_by_fk_dependency(
             state,
             &request.connection_id,
             &request.database,
@@ -1064,7 +1182,13 @@ pub async fn export_database_sql_core(
         )
         .await
         {
-            tables.sort_by_key(|t| sorted_names.iter().position(|n| n == &t.name).unwrap_or(usize::MAX));
+            Ok(sorted_names) => {
+                tables.sort_by_key(|t| sorted_names.iter().position(|n| n == &t.name).unwrap_or(usize::MAX));
+            }
+            Err(error) if request.fail_on_error => {
+                return Err(format!("Failed to resolve table dependency order: {error}"));
+            }
+            Err(_) => {}
         }
     }
 
@@ -1076,7 +1200,7 @@ pub async fn export_database_sql_core(
     let mut functions: Vec<String> = Vec::new();
 
     if request.include_objects && request.selected_tables.is_empty() {
-        if let Ok(objects) = crate::schema::list_objects_core(
+        match crate::schema::list_objects_core(
             state,
             &request.connection_id,
             &request.database,
@@ -1088,14 +1212,18 @@ pub async fn export_database_sql_core(
         )
         .await
         {
-            for obj in &objects {
-                let ot = obj.object_type.to_uppercase();
-                if ot.contains("PROCEDURE") {
-                    procedures.push(obj.name.clone());
-                } else if ot.contains("FUNCTION") {
-                    functions.push(obj.name.clone());
+            Ok(objects) => {
+                for obj in &objects {
+                    let ot = obj.object_type.to_uppercase();
+                    if ot.contains("PROCEDURE") {
+                        procedures.push(obj.name.clone());
+                    } else if ot.contains("FUNCTION") {
+                        functions.push(obj.name.clone());
+                    }
                 }
             }
+            Err(error) if request.fail_on_error => return Err(format!("Failed to list database objects: {error}")),
+            Err(_) => {}
         }
         total_objects += procedures.len() + functions.len();
     }
@@ -1196,8 +1324,11 @@ pub async fn export_database_sql_core(
                     writeln!(file, "{};\n", ddl).map_err(|e| format!("Failed to write file: {e}"))?;
                 }
                 Err(e) => {
-                    writeln!(file, "-- ERROR exporting table {table_name}: {e}")
-                        .map_err(|e| format!("Failed to write file: {e}"))?;
+                    record_export_error(
+                        &mut file,
+                        request.fail_on_error,
+                        format!("exporting table structure {table_name}: {e}"),
+                    )?;
                 }
             }
         }
@@ -1216,8 +1347,11 @@ pub async fn export_database_sql_core(
             {
                 Ok(cols) => cols,
                 Err(e) => {
-                    writeln!(file, "-- ERROR exporting table {table_name}: {e}")
-                        .map_err(|e| format!("Failed to write file: {e}"))?;
+                    record_export_error(
+                        &mut file,
+                        request.fail_on_error,
+                        format!("exporting columns for table {table_name}: {e}"),
+                    )?;
                     object_index += 1;
                     continue;
                 }
@@ -1227,24 +1361,115 @@ pub async fn export_database_sql_core(
             let col_extras = columns.iter().map(|c| c.extra.clone()).collect::<Vec<_>>();
 
             if !col_names.is_empty() {
-                // Get row count
-                let count_query = crate::transfer::count_sql(table_name, &request.schema, &db_type);
-                let total_rows = match crate::transfer::execute_read_on_pool(state, &pool_key, &count_query).await {
-                    Ok(result) => result.rows.first().and_then(|r| r.first()).and_then(|v| match v {
-                        serde_json::Value::Number(n) => n.as_u64(),
-                        serde_json::Value::String(s) => s.parse::<u64>().ok(),
-                        _ => None,
-                    }),
-                    Err(_) => None,
-                };
+                if let Some(snapshot_session_id) = request.snapshot_session_id.as_deref() {
+                    let sql = database_export_select_sql(&col_names, table_name, &request.schema, &db_type);
+                    let mut rows_exported = 0_u64;
+                    crate::query::stream_rows_in_manual_transaction(
+                        state,
+                        snapshot_session_id,
+                        &sql,
+                        batch_size,
+                        |rows| {
+                            if is_export_cancelled_now(&request.export_id) {
+                                return Err("Export cancelled".to_string());
+                            }
+                            write_database_export_rows(
+                                &mut file,
+                                &rows,
+                                &col_names,
+                                &col_types,
+                                &col_extras,
+                                table_name,
+                                &request.schema,
+                                &db_type,
+                            )?;
+                            rows_exported += rows.len() as u64;
+                            on_progress(ExportProgress {
+                                export_id: request.export_id.clone(),
+                                current_object: table_name.clone(),
+                                object_index,
+                                total_objects,
+                                rows_exported,
+                                total_rows: None,
+                                status: ExportStatus::Running,
+                                error: None,
+                            });
+                            Ok(())
+                        },
+                    )
+                    .await?;
+                } else {
+                    let count_query = crate::transfer::count_sql(table_name, &request.schema, &db_type);
+                    let total_rows = match crate::transfer::execute_read_on_pool(state, &pool_key, &count_query).await {
+                        Ok(result) => {
+                            let count = result.rows.first().and_then(|row| row.first()).and_then(|value| match value {
+                                serde_json::Value::Number(number) => number.as_u64(),
+                                serde_json::Value::String(text) => text.parse::<u64>().ok(),
+                                _ => None,
+                            });
+                            if request.fail_on_error && count.is_none() {
+                                return Err(format!("Failed to read row count for table {table_name}"));
+                            }
+                            count
+                        }
+                        Err(error) if request.fail_on_error => {
+                            return Err(format!("Failed to read row count for table {table_name}: {error}"));
+                        }
+                        Err(_) => None,
+                    };
+                    let mut offset = 0_u64;
+                    let mut rows_exported = 0_u64;
 
-                // Loop batches
-                let mut offset: u64 = 0;
-                let mut rows_exported: u64 = 0;
+                    loop {
+                        if is_export_cancelled(&request.export_id).await {
+                            on_progress(ExportProgress {
+                                export_id: request.export_id.clone(),
+                                current_object: table_name.clone(),
+                                object_index,
+                                total_objects,
+                                rows_exported,
+                                total_rows,
+                                status: ExportStatus::Cancelled,
+                                error: None,
+                            });
+                            return Ok(());
+                        }
 
-                loop {
-                    // Check cancellation between batches
-                    if is_export_cancelled(&request.export_id).await {
+                        let sql = crate::transfer::pagination_sql(
+                            &col_names,
+                            table_name,
+                            &request.schema,
+                            &db_type,
+                            offset,
+                            batch_size,
+                        );
+                        let result = match crate::transfer::execute_read_on_pool(state, &pool_key, &sql).await {
+                            Ok(result) => result,
+                            Err(error) => {
+                                record_export_error(
+                                    &mut file,
+                                    request.fail_on_error,
+                                    format!("exporting data for table {table_name}: {error}"),
+                                )?;
+                                break;
+                            }
+                        };
+                        let row_count = result.rows.len();
+                        if row_count == 0 {
+                            break;
+                        }
+                        write_database_export_rows(
+                            &mut file,
+                            &result.rows,
+                            &col_names,
+                            &col_types,
+                            &col_extras,
+                            table_name,
+                            &request.schema,
+                            &db_type,
+                        )?;
+                        rows_exported += row_count as u64;
+                        offset += row_count as u64;
                         on_progress(ExportProgress {
                             export_id: request.export_id.clone(),
                             current_object: table_name.clone(),
@@ -1252,73 +1477,12 @@ pub async fn export_database_sql_core(
                             total_objects,
                             rows_exported,
                             total_rows,
-                            status: ExportStatus::Cancelled,
+                            status: ExportStatus::Running,
                             error: None,
                         });
-                        return Ok(());
-                    }
-
-                    let sql = crate::transfer::pagination_sql(
-                        &col_names,
-                        table_name,
-                        &request.schema,
-                        &db_type,
-                        offset,
-                        batch_size,
-                    );
-
-                    let result = match crate::transfer::execute_read_on_pool(state, &pool_key, &sql).await {
-                        Ok(r) => r,
-                        Err(e) => {
-                            writeln!(file, "-- ERROR exporting data for table {table_name}: {e}")
-                                .map_err(|e| format!("Failed to write file: {e}"))?;
+                        if row_count < batch_size {
                             break;
                         }
-                    };
-
-                    let row_count = result.rows.len();
-                    if row_count == 0 {
-                        break;
-                    }
-
-                    let mut insert_sql = crate::transfer::generate_insert_typed(
-                        &col_names,
-                        &col_types,
-                        &result.rows,
-                        table_name,
-                        &request.schema,
-                        &db_type,
-                    );
-                    if db_type == DatabaseType::Dameng
-                        && selected_columns_include_identity_extras(&col_names, &col_extras)
-                    {
-                        insert_sql = wrap_dameng_identity_insert_sql(&insert_sql, table_name, &request.schema);
-                    }
-
-                    if !insert_sql.is_empty() {
-                        if insert_sql.trim_end().ends_with(';') {
-                            writeln!(file, "{}\n", insert_sql).map_err(|e| format!("Failed to write file: {e}"))?;
-                        } else {
-                            writeln!(file, "{};\n", insert_sql).map_err(|e| format!("Failed to write file: {e}"))?;
-                        }
-                    }
-
-                    rows_exported += row_count as u64;
-                    offset += row_count as u64;
-
-                    on_progress(ExportProgress {
-                        export_id: request.export_id.clone(),
-                        current_object: table_name.clone(),
-                        object_index,
-                        total_objects,
-                        rows_exported,
-                        total_rows,
-                        status: ExportStatus::Running,
-                        error: None,
-                    });
-
-                    if row_count < batch_size {
-                        break;
                     }
                 }
             }
@@ -1379,8 +1543,7 @@ pub async fn export_database_sql_core(
                     }
                 }
                 Err(e) => {
-                    writeln!(file, "-- ERROR exporting view {view_name}: {e}")
-                        .map_err(|e| format!("Failed to write file: {e}"))?;
+                    record_export_error(&mut file, request.fail_on_error, format!("exporting view {view_name}: {e}"))?;
                 }
             }
 
@@ -1426,8 +1589,11 @@ pub async fn export_database_sql_core(
                     }
                 }
                 Err(e) => {
-                    writeln!(file, "-- ERROR exporting procedure {proc_name}: {e}")
-                        .map_err(|e| format!("Failed to write file: {e}"))?;
+                    record_export_error(
+                        &mut file,
+                        request.fail_on_error,
+                        format!("exporting procedure {proc_name}: {e}"),
+                    )?;
                 }
             }
 
@@ -1473,8 +1639,11 @@ pub async fn export_database_sql_core(
                     }
                 }
                 Err(e) => {
-                    writeln!(file, "-- ERROR exporting function {func_name}: {e}")
-                        .map_err(|e| format!("Failed to write file: {e}"))?;
+                    record_export_error(
+                        &mut file,
+                        request.fail_on_error,
+                        format!("exporting function {func_name}: {e}"),
+                    )?;
                 }
             }
 
@@ -1523,8 +1692,8 @@ mod tests {
         build_database_sql_export, build_export_insert_statements, drop_table_if_exists_sql,
         filter_selected_table_infos, format_export_sql_literal, generate_postgres_sequence_create_ddl,
         generate_postgres_sequence_owner_ddl, generate_postgres_sequence_setval_sql, normalize_export_table_ddl,
-        BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, ExportedTableSql, PostgresExportSequence,
-        DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
+        record_export_error, BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, ExportedTableSql,
+        PostgresExportSequence, DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
     };
     use crate::models::connection::DatabaseType;
     use crate::types::TableInfo;
@@ -1844,6 +2013,27 @@ mod tests {
     }
 
     #[test]
+    fn dameng_bit_columns_export_as_numeric_literals() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Dameng),
+            schema: Some("DBX_TEST".to_string()),
+            table_name: Some("FLAGS".to_string()),
+            qualified_table_name: None,
+            columns: vec!["ENABLED".to_string(), "DELETED".to_string(), "OPTIONAL".to_string()],
+            column_types: vec![Some("BIT".to_string()), Some("bit".to_string()), Some("BIT".to_string())],
+            column_extras: Vec::new(),
+            rows: vec![vec![json!(true), json!(false), Value::Null]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec!["INSERT INTO \"DBX_TEST\".\"FLAGS\" (\"ENABLED\", \"DELETED\", \"OPTIONAL\") VALUES (1, 0, NULL);"]
+        );
+    }
+
+    #[test]
     fn mysql_export_uses_typed_literals_for_numeric_and_blob_columns() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Mysql),
@@ -2118,5 +2308,18 @@ mod tests {
                 "SELECT setval('\"public\".\"permissions_id_seq\"', GREATEST(COALESCE(MAX(\"id\"), 42), 42), true) FROM \"public\".\"permissions\""
             )
         );
+    }
+
+    #[test]
+    fn strict_exports_return_object_errors_instead_of_writing_error_comments() {
+        let path = std::env::temp_dir().join(format!("dbx-strict-export-{}.sql", uuid::Uuid::new_v4()));
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        let result = record_export_error(&mut file, true, "exporting table users: permission denied".to_string());
+        drop(file);
+
+        assert_eq!(result.unwrap_err(), "exporting table users: permission denied");
+        assert!(std::fs::read_to_string(&path).unwrap().is_empty());
+        let _ = std::fs::remove_file(path);
     }
 }

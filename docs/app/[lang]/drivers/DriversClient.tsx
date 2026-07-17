@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import { LandingNav } from "@/components/landing/LandingNav";
-import { fetchAgentDownloadCatalog, formatSize, type AgentDownloadCatalog, type JreDisplayEntry, type NativeAgentDisplayEntry, type OfflineBundleEntry } from "@/lib/agentRegistry";
+import { downloadLinksFor, fetchAgentDownloadCatalog, formatSize, type AgentDownloadCatalog, type DownloadSource, type JreDisplayEntry, type NativeAgentDisplayEntry, type OfflineBundleEntry } from "@/lib/agentRegistry";
 import { AlertTriangle, Archive, Cpu, Database, Download, Loader2, Plug, Search, Terminal, X } from "lucide-react";
 
 const i18n = {
@@ -37,6 +37,14 @@ const i18n = {
     showing: "Showing",
     of: "of",
     clearSearch: "Clear search",
+    mirrorHint: "CNB and AtomGit mirrors are available for GitHub release assets on mainland China networks.",
+    downloadSources: "Download source",
+    sources: {
+      github: "GitHub",
+      cnb: "CNB",
+      atomgit: "AtomGit",
+      official: "Official",
+    },
     downloadHint: "For air-gapped environments: download the bundle for your platform on an internet-connected machine, then transfer it to the offline machine and import it in DBX from Settings > Driver Manager. Use the driver and JRE tabs only when you need individual artifacts.",
   },
   cn: {
@@ -69,6 +77,14 @@ const i18n = {
     showing: "显示",
     of: "/",
     clearSearch: "清空搜索",
+    mirrorHint: "中国大陆网络可选择 CNB 或 AtomGit 镜像下载，GitHub Release 资源保持同步。",
+    downloadSources: "下载来源",
+    sources: {
+      github: "GitHub",
+      cnb: "CNB",
+      atomgit: "AtomGit",
+      official: "官方下载",
+    },
     downloadHint: "内网环境使用说明：在有网的电脑上下载对应平台的整包，然后传输到内网机器，在 DBX 的“设置 > 驱动管理”中导入。只有需要单个产物时再使用驱动和 JRE 标签页。",
   },
 };
@@ -93,6 +109,27 @@ type NativeAgentGroup = {
   version: string;
   options: NativeAgentDisplayEntry[];
 };
+
+type DriverTranslations = (typeof i18n)["en"];
+
+function DownloadLinks({ url, t }: { url: string; t: DriverTranslations }) {
+  return (
+    <div className="flex shrink-0 flex-nowrap justify-end gap-1.5 max-[760px]:flex-wrap max-[760px]:justify-start">
+      {downloadLinksFor(url).map((link) => (
+        <a
+          key={link.source}
+          href={link.url}
+          download
+          className={`landing-nav-link inline-flex h-8 items-center gap-1 whitespace-nowrap rounded-[6px] border px-2 text-xs font-medium transition-colors hover:border-landing-blue ${link.source === "cnb" || link.source === "atomgit" ? "border-landing-blue/45 bg-landing-blue/10 text-landing-sky" : "border-landing-line"}`}
+          aria-label={`${t.download}: ${t.sources[link.source as DownloadSource]}`}
+        >
+          <Download size={13} />
+          {t.sources[link.source as DownloadSource]}
+        </a>
+      ))}
+    </div>
+  );
+}
 
 function matchesSearch(values: Array<string | number | undefined>, query: string): boolean {
   if (!query) return true;
@@ -227,6 +264,10 @@ export function DriversClient() {
 
         {catalog && !loading && (
           <>
+            <div className="mb-3 flex items-center gap-2 rounded-[7px] border border-landing-blue/30 bg-landing-blue/10 px-3 py-2 text-xs leading-[1.55] text-landing-sky">
+              <Download size={14} className="shrink-0" />
+              <span>{t.mirrorHint}</span>
+            </div>
             <div className="landing-glass-card mb-12 overflow-hidden rounded-[10px]">
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-landing-line bg-landing-panel/70 p-3">
                 <div className="inline-flex shrink-0 rounded-[8px] border border-landing-line bg-black/10 p-1 max-[760px]:grid max-[760px]:w-full max-[760px]:grid-cols-2">
@@ -284,13 +325,13 @@ export function DriversClient() {
               {activeTab === "jdbcPlugin" && (
                 <>
                   <p className="border-b border-landing-line px-5 py-3 text-sm text-landing-muted whitespace-nowrap max-[760px]:whitespace-normal max-[760px]:px-4">{t.jdbcPluginDesc}</p>
-                  <table className="w-full table-auto border-collapse text-sm max-[760px]:block">
+                  <table className="w-full table-fixed border-collapse text-sm max-[760px]:block">
                     <thead className="bg-landing-panel text-xs font-medium text-landing-muted max-[760px]:hidden">
                       <tr className="border-b border-landing-line">
-                        <th className="px-5 py-2.5 text-left font-medium">{t.jdbcPluginFile}</th>
+                        <th className="w-[22%] px-5 py-2.5 text-left font-medium">{t.jdbcPluginFile}</th>
                         <th className="px-5 py-2.5 text-left font-medium">{t.filename}</th>
                         <th className="px-5 py-2.5 text-left font-medium">{t.installMethod}</th>
-                        <th className="w-24 px-5 py-2.5" />
+                        <th className="w-[340px] px-5 py-2.5 text-right font-medium">{t.downloadSources}</th>
                       </tr>
                     </thead>
                     <tbody className="max-[760px]:block">
@@ -303,13 +344,10 @@ export function DriversClient() {
                             </div>
                             <p className="mt-1 hidden text-xs leading-[1.55] text-landing-muted max-[760px]:block">{t.jdbcPluginInstallHint}</p>
                           </td>
-                          <td className="px-5 py-3 font-mono text-[11px] text-landing-muted max-[760px]:hidden">{plugin.filename}</td>
+                          <td className="px-5 py-3 font-mono text-[11px] text-landing-muted max-[760px]:hidden"><span className="block truncate" title={plugin.filename}>{plugin.filename}</span></td>
                           <td className="px-5 py-3 text-xs text-landing-muted max-[760px]:hidden">{t.jdbcPluginInstallHint}</td>
-                          <td className="px-5 py-3 text-right max-[760px]:px-0">
-                            <a href={plugin.url} download className="landing-nav-link inline-flex h-8 items-center gap-1 whitespace-nowrap rounded-[6px] border border-landing-line px-2.5 text-xs font-medium transition-colors hover:border-landing-blue">
-                              <Download size={13} />
-                              {t.download}
-                            </a>
+                          <td className="px-5 py-3 text-right max-[760px]:col-span-2 max-[760px]:px-0 max-[760px]:pt-0">
+                            <DownloadLinks url={plugin.url} t={t} />
                           </td>
                         </tr>
                       ))}
@@ -322,13 +360,13 @@ export function DriversClient() {
               {activeTab === "bundles" && (
                 <>
                   <p className="border-b border-landing-line px-5 py-3 text-sm text-landing-muted whitespace-nowrap max-[760px]:whitespace-normal max-[760px]:px-4">{t.bundlesDesc}</p>
-                  <table className="w-full table-auto border-collapse text-sm max-[760px]:block">
+                  <table className="w-full table-fixed border-collapse text-sm max-[760px]:block">
                     <thead className="bg-landing-panel text-xs font-medium text-landing-muted max-[760px]:hidden">
                       <tr className="border-b border-landing-line">
-                        <th className="px-5 py-2.5 text-left font-medium">{t.platform}</th>
+                        <th className="w-[22%] px-5 py-2.5 text-left font-medium">{t.platform}</th>
                         <th className="px-5 py-2.5 text-left font-medium">{t.filename}</th>
-                        <th className="px-5 py-2.5 text-right font-medium">{t.size}</th>
-                        <th className="w-24 px-5 py-2.5" />
+                        <th className="w-[116px] px-5 py-2.5 text-right font-medium">{t.size}</th>
+                        <th className="w-[340px] px-5 py-2.5 text-right font-medium">{t.downloadSources}</th>
                       </tr>
                     </thead>
                     <tbody className="max-[760px]:block">
@@ -340,13 +378,10 @@ export function DriversClient() {
                               <span className="hidden shrink-0 rounded-[5px] border border-landing-blue/35 bg-landing-blue/10 px-1.5 py-0.5 font-mono text-[11px] text-landing-sky max-[760px]:inline">ZIP</span>
                             </div>
                           </td>
-                          <td className="px-5 py-3 font-mono text-[11px] text-landing-muted max-[760px]:hidden">{bundle.filename}</td>
-                          <td className="px-5 py-3 text-right text-xs text-landing-muted max-[760px]:hidden">{formatSize(bundle.size)}</td>
-                          <td className="px-5 py-3 text-right max-[760px]:px-0">
-                            <a href={bundle.url} download className="landing-nav-link inline-flex h-8 items-center gap-1 whitespace-nowrap rounded-[6px] border border-landing-line px-2.5 text-xs font-medium transition-colors hover:border-landing-blue">
-                              <Download size={13} />
-                              {t.download}
-                            </a>
+                          <td className="px-5 py-3 font-mono text-[11px] text-landing-muted max-[760px]:hidden"><span className="block truncate" title={bundle.filename}>{bundle.filename}</span></td>
+                          <td className="whitespace-nowrap px-5 py-3 text-right text-xs text-landing-muted max-[760px]:hidden">{formatSize(bundle.size)}</td>
+                          <td className="px-5 py-3 text-right max-[760px]:col-span-2 max-[760px]:px-0 max-[760px]:pt-0">
+                            <DownloadLinks url={bundle.url} t={t} />
                           </td>
                         </tr>
                       ))}
@@ -359,15 +394,15 @@ export function DriversClient() {
               {activeTab === "drivers" && (
                 <>
                   <p className="border-b border-landing-line px-5 py-3 text-sm text-landing-muted whitespace-nowrap max-[760px]:whitespace-normal max-[760px]:px-4">{t.driversDesc}</p>
-                  <table className="w-full table-auto border-collapse text-sm max-[760px]:block">
+                  <table className="w-full table-fixed border-collapse text-sm max-[760px]:block">
                     <thead className="bg-landing-panel text-xs font-medium text-landing-muted max-[760px]:hidden">
                       <tr className="border-b border-landing-line">
-                        <th className="px-5 py-2.5 text-left font-medium">Driver</th>
-                        <th className="px-5 py-2.5 text-left font-medium">Key</th>
+                        <th className="w-[18%] px-5 py-2.5 text-left font-medium">Driver</th>
+                        <th className="w-[14%] px-5 py-2.5 text-left font-medium">Key</th>
                         <th className="px-5 py-2.5 text-left font-medium">{t.version}</th>
                         <th className="px-5 py-2.5 text-left font-medium">{t.requiresJre}</th>
-                        <th className="px-5 py-2.5 text-right font-medium">{t.size}</th>
-                        <th className="w-24 px-5 py-2.5" />
+                        <th className="w-[116px] px-5 py-2.5 text-right font-medium">{t.size}</th>
+                        <th className="w-[340px] px-5 py-2.5 text-right font-medium">{t.downloadSources}</th>
                       </tr>
                     </thead>
                     <tbody className="max-[760px]:block">
@@ -384,12 +419,9 @@ export function DriversClient() {
                           </td>
                           <td className="px-5 py-3 text-xs text-landing-muted max-[760px]:hidden">{d.version}</td>
                           <td className="px-5 py-3 text-xs text-landing-muted max-[760px]:hidden">{d.jre}</td>
-                          <td className="px-5 py-3 text-right text-xs text-landing-muted max-[760px]:hidden">{formatSize(d.jar.size)}</td>
-                          <td className="px-5 py-3 text-right max-[760px]:px-0">
-                            <a href={d.jar.url} download className="landing-nav-link inline-flex h-8 items-center gap-1 whitespace-nowrap rounded-[6px] border border-landing-line px-2.5 text-xs font-medium transition-colors hover:border-landing-blue">
-                              <Download size={13} />
-                              {t.download}
-                            </a>
+                          <td className="whitespace-nowrap px-5 py-3 text-right text-xs text-landing-muted max-[760px]:hidden">{formatSize(d.jar.size)}</td>
+                          <td className="px-5 py-3 text-right max-[760px]:col-span-2 max-[760px]:px-0 max-[760px]:pt-0">
+                            <DownloadLinks url={d.jar.url} t={t} />
                           </td>
                         </tr>
                       ))}
@@ -402,14 +434,14 @@ export function DriversClient() {
               {activeTab === "native" && (
                 <>
                   <p className="border-b border-landing-line px-5 py-3 text-sm text-landing-muted whitespace-nowrap max-[760px]:whitespace-normal max-[760px]:px-4">{t.nativeAgentsDesc}</p>
-                  <table className="w-full table-auto border-collapse text-sm max-[760px]:block">
+                  <table className="w-full table-fixed border-collapse text-sm max-[760px]:block">
                     <thead className="bg-landing-panel text-xs font-medium text-landing-muted max-[760px]:hidden">
                       <tr className="border-b border-landing-line">
-                        <th className="px-5 py-2.5 text-left font-medium">Agent</th>
+                        <th className="w-[22%] px-5 py-2.5 text-left font-medium">Agent</th>
                         <th className="px-5 py-2.5 text-left font-medium">{t.platform}</th>
                         <th className="px-5 py-2.5 text-left font-medium">{t.version}</th>
-                        <th className="px-5 py-2.5 text-right font-medium">{t.size}</th>
-                        <th className="w-24 px-5 py-2.5" />
+                        <th className="w-[116px] px-5 py-2.5 text-right font-medium">{t.size}</th>
+                        <th className="w-[340px] px-5 py-2.5 text-right font-medium">{t.downloadSources}</th>
                       </tr>
                     </thead>
                     <tbody className="max-[760px]:block">
@@ -439,12 +471,9 @@ export function DriversClient() {
                               </select>
                             </td>
                             <td className="px-5 py-3 text-xs text-landing-muted max-[760px]:hidden">{group.version}</td>
-                            <td className="px-5 py-3 text-right text-xs text-landing-muted max-[760px]:hidden">{formatSize(selectedAgent.info.size)}</td>
-                            <td className="px-5 py-3 text-right max-[760px]:px-0">
-                              <a href={selectedAgent.info.url} download className="landing-nav-link inline-flex h-8 items-center gap-1 whitespace-nowrap rounded-[6px] border border-landing-line px-2.5 text-xs font-medium transition-colors hover:border-landing-blue">
-                                <Download size={13} />
-                                {t.download}
-                              </a>
+                            <td className="whitespace-nowrap px-5 py-3 text-right text-xs text-landing-muted max-[760px]:hidden">{formatSize(selectedAgent.info.size)}</td>
+                            <td className="px-5 py-3 text-right max-[760px]:col-span-2 max-[760px]:px-0 max-[760px]:pt-0">
+                              <DownloadLinks url={selectedAgent.info.url} t={t} />
                             </td>
                           </tr>
                         );
@@ -458,14 +487,14 @@ export function DriversClient() {
               {activeTab === "jre" && (
                 <>
                   <p className="border-b border-landing-line px-5 py-3 text-sm text-landing-muted whitespace-nowrap max-[760px]:whitespace-normal max-[760px]:px-4">{t.jreDesc}</p>
-                  <table className="w-full table-auto border-collapse text-sm max-[760px]:block">
+                  <table className="w-full table-fixed border-collapse text-sm max-[760px]:block">
                     <thead className="bg-landing-panel text-xs font-medium text-landing-muted max-[760px]:hidden">
                       <tr className="border-b border-landing-line">
-                        <th className="px-5 py-2.5 text-left font-medium">{t.platform}</th>
+                        <th className="w-[24%] px-5 py-2.5 text-left font-medium">{t.platform}</th>
                         <th className="px-5 py-2.5 text-left font-medium">JRE</th>
                         <th className="px-5 py-2.5 text-left font-medium">{t.version}</th>
-                        <th className="px-5 py-2.5 text-right font-medium">{t.size}</th>
-                        <th className="w-24 px-5 py-2.5" />
+                        <th className="w-[116px] px-5 py-2.5 text-right font-medium">{t.size}</th>
+                        <th className="w-[340px] px-5 py-2.5 text-right font-medium">{t.downloadSources}</th>
                       </tr>
                     </thead>
                     <tbody className="max-[760px]:block">
@@ -483,12 +512,9 @@ export function DriversClient() {
                               <span className="inline-flex rounded-[5px] border border-landing-green/35 bg-landing-green/10 px-1.5 py-0.5 font-mono text-[11px] text-landing-green">JRE {j.jreKey}</span>
                             </td>
                             <td className="px-5 py-3 text-xs text-landing-muted max-[760px]:hidden">{j.jreVersion}</td>
-                            <td className="px-5 py-3 text-right text-xs text-landing-muted max-[760px]:hidden">{formatSize(j.info.size)}</td>
-                            <td className="px-5 py-3 text-right max-[760px]:px-0">
-                              <a href={j.info.url} download className="landing-nav-link inline-flex h-8 items-center gap-1 whitespace-nowrap rounded-[6px] border border-landing-line px-2.5 text-xs font-medium transition-colors hover:border-landing-blue">
-                                <Download size={13} />
-                                {t.download}
-                              </a>
+                            <td className="whitespace-nowrap px-5 py-3 text-right text-xs text-landing-muted max-[760px]:hidden">{formatSize(j.info.size)}</td>
+                            <td className="px-5 py-3 text-right max-[760px]:col-span-2 max-[760px]:px-0 max-[760px]:pt-0">
+                              <DownloadLinks url={j.info.url} t={t} />
                             </td>
                           </tr>
                         );

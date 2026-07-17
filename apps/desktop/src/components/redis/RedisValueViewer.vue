@@ -3,12 +3,12 @@ import { computed, ref, nextTick, onBeforeUnmount, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { onClickOutside } from "@vueuse/core";
 import { DynamicScroller, DynamicScrollerItem, RecycleScroller } from "vue-virtual-scroller";
-import { Copy, Eye, Terminal, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, ArrowUp, ArrowDown, ArrowUpDown, Search, Clock } from "@lucide/vue";
+import { Copy, ClipboardCopy, Eye, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, ArrowUp, ArrowDown, ArrowUpDown, Search, Clock } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
-import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import JsonTree from "@/components/common/JsonTree.vue";
 import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
@@ -24,7 +24,6 @@ import { computeAutoRefreshTick, computeDisplayTtl, shouldStopAutoRefresh } from
 import {
   canRenderRedisValueFormat,
   canEditRedisMemberDetail,
-  clampRedisMemberDetailSheetWidth,
   formatRedisMemberDetail,
   getRedisMemberSelectionKey,
   isRedisBlob,
@@ -92,8 +91,6 @@ const selectedMemberContext = ref<RedisMemberContext | null>(null);
 const isEditingMember = ref(false);
 const savingMember = ref(false);
 const memberEditValue = ref("");
-const memberDetailSheetWidth = ref(420);
-const isResizingMemberSheet = ref(false);
 const hashTableRef = ref<HTMLElement | null>(null);
 const hashFieldWidth = ref(280);
 const isResizingHashColumns = ref(false);
@@ -309,8 +306,6 @@ const zsetRows = computed<RedisCollectionRow<RedisZsetItem>[]>(() =>
 
 let hashSearchTimer: ReturnType<typeof setTimeout> | null = null;
 let hashSearchRequestId = 0;
-let memberSheetResizeStartX = 0;
-let memberSheetResizeStartWidth = 0;
 let hashResizeStartX = 0;
 let hashResizeStartWidth = 0;
 let zsetResizeStartX = 0;
@@ -844,26 +839,6 @@ function finishMemberDetailClose() {
   isEditingMember.value = false;
 }
 
-function stopResizeMemberSheet() {
-  isResizingMemberSheet.value = false;
-  window.removeEventListener("pointermove", resizeMemberSheet);
-  window.removeEventListener("pointerup", stopResizeMemberSheet);
-}
-
-function resizeMemberSheet(event: PointerEvent) {
-  if (!isResizingMemberSheet.value) return;
-  const delta = memberSheetResizeStartX - event.clientX;
-  memberDetailSheetWidth.value = clampRedisMemberDetailSheetWidth(memberSheetResizeStartWidth + delta, window.innerWidth);
-}
-
-function startResizeMemberSheet(event: PointerEvent) {
-  isResizingMemberSheet.value = true;
-  memberSheetResizeStartX = event.clientX;
-  memberSheetResizeStartWidth = memberDetailSheetWidth.value;
-  window.addEventListener("pointermove", resizeMemberSheet);
-  window.addEventListener("pointerup", stopResizeMemberSheet);
-}
-
 function clampHashFieldWidth(width: number) {
   const containerWidth = hashTableRef.value?.clientWidth ?? 900;
   const min = 120;
@@ -1244,7 +1219,6 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   stopAutoRefresh();
-  stopResizeMemberSheet();
   stopResizeHashColumns();
   stopResizeZsetColumns();
   if (hashSearchTimer) clearTimeout(hashSearchTimer);
@@ -1263,8 +1237,8 @@ onBeforeUnmount(() => {
         <div class="flex h-9 items-center gap-2 px-4">
           <span class="dbx-editor-font-family min-w-0 flex-1 truncate text-sm font-semibold">{{ formatValue(data.key_display) }}</span>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 animate-none" :disabled="hasUnsavedRedisDraft" @click="load"><RefreshCw class="h-3.5 w-3.5 animate-none" /></Button>
-          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" @click="copyValue"><Copy class="h-3.5 w-3.5" /></Button>
-          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('redis.copyInsertStatement')" @click="copyInsertStatement"><Terminal class="h-3.5 w-3.5" /></Button>
+          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('grid.copyValue')" :aria-label="t('grid.copyValue')" @click="copyValue"><Copy class="h-3.5 w-3.5" /></Button>
+          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('redis.copyInsertStatement')" :aria-label="t('redis.copyInsertStatement')" @click="copyInsertStatement"><ClipboardCopy class="h-3.5 w-3.5" /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 text-destructive" @click="requestDeleteKey"><Trash2 class="h-3.5 w-3.5" /></Button>
         </div>
 
@@ -1616,23 +1590,14 @@ onBeforeUnmount(() => {
 
     <DangerConfirmDialog v-model:open="showDeleteConfirm" :message="t('dangerDialog.deleteMessage')" :details="deleteDetails" :confirm-label="t('dangerDialog.deleteConfirm')" @confirm="confirmDelete" />
 
-    <Sheet :open="showMemberDetail" @update:open="handleMemberDetailOpenChange">
-      <SheetContent
-        side="right"
-        class="gap-0 p-0 sm:max-w-[calc(100vw-2rem)]"
-        :class="{ 'select-none': isResizingMemberSheet }"
-        :style="[editorFontFamilyStyle, { width: `${memberDetailSheetWidth}px`, maxWidth: 'calc(100vw - 2rem)' }]"
-        @close-auto-focus="finishMemberDetailClose"
-        @pointer-down-outside.prevent
-        @interact-outside.prevent
-      >
-        <div class="absolute inset-y-0 left-0 z-10 w-2 -translate-x-1 cursor-col-resize border-l border-transparent hover:border-primary/60" @pointerdown.prevent="startResizeMemberSheet" />
-        <SheetHeader class="border-b px-5 py-4 pr-12">
-          <SheetTitle class="flex items-center gap-2">
+    <Dialog :open="showMemberDetail" @update:open="handleMemberDetailOpenChange">
+      <DialogContent class="flex h-[min(760px,85vh)] w-[calc(100vw-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[960px]" :style="editorFontFamilyStyle" @close-auto-focus="finishMemberDetailClose" @pointer-down-outside.prevent @interact-outside.prevent>
+        <DialogHeader class="border-b px-5 py-4 pr-12">
+          <DialogTitle class="flex items-center gap-2">
             <span class="truncate">{{ selectedMemberTitle ? formatValue(selectedMemberTitle) : t("redis.memberDetail") }}</span>
             <Badge variant="outline" class="shrink-0 text-xs">{{ redisFormatLabel(memberValueView, selectedMemberDetail.rawLabel) }}</Badge>
-          </SheetTitle>
-        </SheetHeader>
+          </DialogTitle>
+        </DialogHeader>
         <template v-if="isEditingMember">
           <textarea v-model="memberEditValue" class="dbx-editor-font-family min-h-0 flex-1 resize-none bg-background p-5 text-[13px] leading-6 outline-none" :readonly="savingMember" spellcheck="false" />
         </template>
@@ -1677,7 +1642,7 @@ onBeforeUnmount(() => {
           <pre v-else-if="memberValueView === 'base64'" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-5 text-[13px] leading-6 whitespace-pre-wrap break-all">{{ selectedMemberDetail.base64Text }}</pre>
           <pre v-else class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-5 text-[13px] leading-6" :class="detailTextClass(memberValueView)">{{ detailTextForFormat(selectedMemberDetail, memberValueView) }}</pre>
         </template>
-        <SheetFooter class="shrink-0 border-t px-5 py-3">
+        <DialogFooter class="mx-0 mb-0 shrink-0 border-t px-5 py-3">
           <template v-if="isEditingMember">
             <Button variant="ghost" :disabled="savingMember" @click="cancelEditMember">
               {{ t("grid.discard") }}
@@ -1706,8 +1671,8 @@ onBeforeUnmount(() => {
             <Copy class="h-4 w-4" />
             {{ t("redis.copyMember") }}
           </Button>
-        </SheetFooter>
-      </SheetContent>
-    </Sheet>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>

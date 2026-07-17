@@ -82,6 +82,43 @@ pub async fn is_sqlite_database_file(path: String) -> Result<bool, String> {
     path_has_sqlite_header(&resolved)
 }
 
+fn validate_database_backup_file(raw: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("backup file path is empty".to_string());
+    }
+
+    let expanded = expand_tilde(trimmed);
+    let path = PathBuf::from(&expanded);
+    if !path.is_absolute() {
+        return Err(format!("backup file path is not absolute: {expanded}"));
+    }
+    if path.extension().and_then(|extension| extension.to_str()).map(|extension| extension.eq_ignore_ascii_case("sql"))
+        != Some(true)
+    {
+        return Err(format!("backup file must use the .sql extension: {expanded}"));
+    }
+    let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    if !file_name.starts_with("dbx-backup__") {
+        return Err(format!("backup file name is not managed by DBX: {expanded}"));
+    }
+    Ok(path)
+}
+
+#[tauri::command]
+pub async fn delete_database_backup_files(paths: Vec<String>) -> Result<usize, String> {
+    let resolved = paths.iter().map(|path| validate_database_backup_file(path)).collect::<Result<Vec<_>, _>>()?;
+    let mut deleted = 0;
+    for path in resolved {
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => deleted += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("failed to delete backup file {}: {error}", path.display())),
+        }
+    }
+    Ok(deleted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,6 +162,17 @@ mod tests {
         let dir_str = dir.to_string_lossy().to_string();
         let resolved = validate_path(&dir_str).expect("temp dir should validate");
         assert_eq!(resolved, dir);
+    }
+
+    #[test]
+    fn database_backup_file_requires_absolute_sql_path() {
+        assert!(validate_database_backup_file("relative/backup.sql").is_err());
+        let invalid_extension = if cfg!(windows) { "C:/tmp/backup.txt" } else { "/tmp/backup.txt" };
+        assert!(validate_database_backup_file(invalid_extension).is_err());
+        let unmanaged = if cfg!(windows) { "C:/tmp/backup.sql" } else { "/tmp/backup.sql" };
+        assert!(validate_database_backup_file(unmanaged).is_err());
+        let valid = if cfg!(windows) { "C:/tmp/dbx-backup__nightly.SQL" } else { "/tmp/dbx-backup__nightly.SQL" };
+        assert!(validate_database_backup_file(valid).is_ok());
     }
 
     #[test]

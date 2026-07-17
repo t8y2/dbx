@@ -380,6 +380,15 @@ make package
 <a href="https://docs.qq.com/doc/DVVhMY0h1ekJqc0tz" target="_blank"><img src="https://img.shields.io/badge/微信交流群-点击加入-07C160?logo=wechat&logoColor=white" alt="微信交流群" /></a>
 [![LINUX DO](https://img.shields.io/badge/LINUX%20DO-社区-blue)](https://linux.do)
 
+## 赞助与捐助
+
+DBX 是免费开源项目，但持续维护、数据库兼容性测试、基础设施建设和版本发布都需要长期投入时间与资源。
+
+- [支持 DBX](https://my.feishu.cn/wiki/WMTkwdATDiiu4rk14JMcoyhTnoh) —— 通过微信或支付宝自愿捐助
+- [赞助商与合作伙伴](https://my.feishu.cn/wiki/CgOWwwTzzify79k9Oq8cXpUNn6e) —— 支持基础设施、开发工具、服务或社区合作
+
+捐助和赞助不会影响任何人使用 DBX，也不代表购买功能排期。经双方确认后，赞助商和合作伙伴可在赞助页面展示。
+
 ## 常见问题
 
 <details>

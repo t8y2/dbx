@@ -52,6 +52,7 @@ const tabDrag = useTabDrag((draggedId, targetId, position) => {
 const editingTabId = ref<string | null>(null);
 const editingTitle = ref("");
 const isClassicLayout = computed(() => settingsStore.editorSettings.appLayout === "classic");
+const isWrapLayout = computed(() => settingsStore.editorSettings.tabLayout === "wrap");
 const fixedTabs = computed(() => queryStore.tabs.filter((tab) => tab.pinned));
 const regularTabs = computed(() => queryStore.tabs.filter((tab) => !tab.pinned));
 const hasFixedTabs = computed(() => fixedTabs.value.length > 0);
@@ -342,12 +343,14 @@ watch(
   () => queryStore.activeTabId,
   () => {
     nextTick(() => {
-      for (const container of [tabsContainerRef.value, fixedTabsContainerRef.value]) {
-        if (!container) continue;
-        const activeEl = container.querySelector('[data-active-tab="true"]');
-        if (activeEl) {
-          activeEl.scrollIntoView({ behavior: tabScrollBehavior.value, block: "nearest", inline: activeTabScrollInline(container, queryStore.activeTabId) });
-          break;
+      if (!isWrapLayout.value) {
+        for (const container of [tabsContainerRef.value, fixedTabsContainerRef.value]) {
+          if (!container) continue;
+          const activeEl = container.querySelector('[data-active-tab="true"]');
+          if (activeEl) {
+            activeEl.scrollIntoView({ behavior: tabScrollBehavior.value, block: "nearest", inline: activeTabScrollInline(container, queryStore.activeTabId) });
+            break;
+          }
         }
       }
       updateAllScrollButtons();
@@ -361,6 +364,7 @@ watch(
   (show) => {
     if (!show) return;
     nextTick(() => {
+      if (isWrapLayout.value) return;
       const container = tabsContainerRef.value;
       if (!container) return;
       const el = container.querySelector("[data-driver-store-tab]");
@@ -377,6 +381,7 @@ watch(
   (show) => {
     if (!show) return;
     nextTick(() => {
+      if (isWrapLayout.value) return;
       const container = tabsContainerRef.value;
       if (!container) return;
       const el = container.querySelector("[data-settings-page-tab]");
@@ -434,9 +439,9 @@ function tabDatabaseIconType(tab: QueryTab) {
   return connection.driver_profile || connection.db_type;
 }
 
-const showRegularTabScrollbar = computed(() => hasTabOverflow.value);
-const showFixedTabScrollbar = computed(() => hasFixedTabOverflow.value);
-const showRegularTabOverflowControls = computed(() => regularTabs.value.length > 0 && hasTabOverflow.value);
+const showRegularTabScrollbar = computed(() => hasTabOverflow.value && !isWrapLayout.value);
+const showFixedTabScrollbar = computed(() => hasFixedTabOverflow.value && !isWrapLayout.value);
+const showRegularTabOverflowControls = computed(() => regularTabs.value.length > 0 && hasTabOverflow.value && !isWrapLayout.value);
 const regularTabOverflowOpen = ref(false);
 const fixedTabOverflowOpen = ref(false);
 const tabBarClass = computed(() => [isClassicLayout.value ? "bg-muted" : "border-b bg-background", hasFixedTabs.value ? "flex-col" : "", isClassicLayout.value && hasFixedTabs.value ? "border-b" : ""]);
@@ -451,7 +456,7 @@ function tabMenuIcon(tab: QueryTab) {
   if (tab.mode === "structure") return PencilRuler;
   if (tab.mode === "dameng-jobs") return CalendarClock;
   if (tab.mode === "processlist") return Activity;
-  if (tab.mode === "mysql-dashboard") return Gauge;
+  if (tab.mode === "mysql-dashboard" || tab.mode === "postgres-dashboard") return Gauge;
   return Code2;
 }
 
@@ -504,8 +509,8 @@ const fixedTabScrollbarThumbStyle = computed<CSSProperties>(() => ({
   width: `${fixedScrollThumbWidthPercent.value}%`,
 }));
 
-const tabTailDragRegionClass = computed(() => (showRegularTabOverflowControls.value ? "w-0 flex-none self-stretch" : "min-w-8 flex-1 self-stretch"));
-const fixedTabTailDragRegionClass = computed(() => (showFixedTabScrollbar.value ? "w-0 flex-none self-stretch" : "min-w-8 flex-1 self-stretch"));
+const tabTailDragRegionClass = computed(() => (showRegularTabOverflowControls.value || isWrapLayout.value ? "w-0 flex-none self-stretch" : "min-w-8 flex-1 self-stretch"));
+const fixedTabTailDragRegionClass = computed(() => (showFixedTabScrollbar.value || isWrapLayout.value ? "w-0 flex-none self-stretch" : "min-w-8 flex-1 self-stretch"));
 
 const tabOverflowControlClass = computed(() =>
   isClassicLayout.value
@@ -551,7 +556,14 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
         <div v-if="showRegularTabScrollbar" class="app-tab-scrollbar" :class="{ 'app-tab-scrollbar--dragging': isScrollbarDragging }" @pointerdown="startScrollbarDrag">
           <div class="app-tab-scrollbar__thumb" :style="tabScrollbarThumbStyle" />
         </div>
-        <div ref="tabsContainerRef" class="app-tab-scroll flex w-full min-w-0 flex-1 items-center overflow-x-auto" :class="isClassicLayout ? 'h-full' : 'h-full gap-1.5 py-1.5'" :style="tabsContainerStyle" @scroll="updateScrollButtons" @wheel="onTabsWheel">
+        <div
+          ref="tabsContainerRef"
+          class="app-tab-scroll flex w-full min-w-0 flex-1 items-center overflow-x-auto"
+          :class="[isClassicLayout ? 'h-full' : 'h-full gap-1.5 py-1.5', isWrapLayout ? 'wrap-mode' : '', isWrapLayout && isClassicLayout ? 'classic-wrap' : '']"
+          :style="tabsContainerStyle"
+          @scroll="updateScrollButtons"
+          @wheel="onTabsWheel"
+        >
           <CustomContextMenu v-for="tab in regularTabs" :key="tab.id" :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">
             <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
               <Tooltip>
@@ -587,7 +599,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                       <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />
                       <CalendarClock v-else-if="tab.mode === 'dameng-jobs'" class="h-3.5 w-3.5" />
                       <Activity v-else-if="tab.mode === 'processlist'" class="h-3.5 w-3.5" />
-                      <Gauge v-else-if="tab.mode === 'mysql-dashboard'" class="h-3.5 w-3.5" />
+                      <Gauge v-else-if="tab.mode === 'mysql-dashboard' || tab.mode === 'postgres-dashboard'" class="h-3.5 w-3.5" />
                       <Code2 v-else class="h-3.5 w-3.5" />
                     </span>
                     <input
@@ -735,7 +747,14 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
         <div v-if="showFixedTabScrollbar" class="app-tab-scrollbar app-tab-scrollbar--bottom" :class="{ 'app-tab-scrollbar--dragging': isFixedScrollbarDragging }" @pointerdown="startFixedScrollbarDrag">
           <div class="app-tab-scrollbar__thumb" :style="fixedTabScrollbarThumbStyle" />
         </div>
-        <div ref="fixedTabsContainerRef" class="app-tab-scroll flex w-full min-w-0 flex-1 items-center overflow-x-auto" :class="isClassicLayout ? 'h-full' : 'h-full gap-1.5 py-1'" :style="tabsContainerStyle" @scroll="updateFixedScrollButtons" @wheel="onFixedTabsWheel">
+        <div
+          ref="fixedTabsContainerRef"
+          class="app-tab-scroll flex w-full min-w-0 flex-1 items-center overflow-x-auto"
+          :class="[isClassicLayout ? 'h-full' : 'h-full gap-1.5 py-1', isWrapLayout ? 'wrap-mode' : '', isWrapLayout && isClassicLayout ? 'classic-wrap' : '']"
+          :style="tabsContainerStyle"
+          @scroll="updateFixedScrollButtons"
+          @wheel="onFixedTabsWheel"
+        >
           <CustomContextMenu v-for="tab in fixedTabs" :key="tab.id" :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">
             <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
               <Tooltip>
@@ -771,7 +790,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                       <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />
                       <CalendarClock v-else-if="tab.mode === 'dameng-jobs'" class="h-3.5 w-3.5" />
                       <Activity v-else-if="tab.mode === 'processlist'" class="h-3.5 w-3.5" />
-                      <Gauge v-else-if="tab.mode === 'mysql-dashboard'" class="h-3.5 w-3.5" />
+                      <Gauge v-else-if="tab.mode === 'mysql-dashboard' || tab.mode === 'postgres-dashboard'" class="h-3.5 w-3.5" />
                       <Code2 v-else class="h-3.5 w-3.5" />
                     </span>
                     <input
@@ -916,6 +935,45 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
 </template>
 
 <style scoped>
+/* 多行平铺模式：覆盖滚动相关样式，让标签换行展示 */
+.app-tab-scroll.wrap-mode {
+  height: auto !important;
+  overflow: visible !important;
+  overflow-x: visible !important;
+  overflow-y: visible !important;
+  flex-wrap: wrap;
+}
+
+/* 父级 strip 容器在包含 wrap-mode 时也需要解除高度约束和裁剪 */
+.app-tab-strip:has(.wrap-mode) {
+  height: auto !important;
+  overflow: visible !important;
+}
+
+/* 标签栏行容器（直接子 div）在包含 wrap-mode 时解除固定高度和裁剪 */
+.app-tab-bar > div:has(.wrap-mode) {
+  height: auto !important;
+  overflow: visible !important;
+}
+
+/* 标签栏本身也解除裁剪，让换行内容自然撑高 */
+.app-tab-bar:has(.wrap-mode) {
+  overflow: visible !important;
+}
+
+/* 经典布局 + 多行模式：优化多行标签显示 */
+.app-tab-scroll.classic-wrap {
+  row-gap: 0.25rem;
+  padding-top: 0.25rem;
+  padding-bottom: 0.25rem;
+  align-items: flex-start;
+}
+
+/* 经典布局下 h-full 在 height:auto 容器中失效，改为固定高度 */
+.app-tab-scroll.classic-wrap > div {
+  height: 2rem;
+}
+
 .dirty-tab-marker {
   display: inline-flex;
   width: 0.5rem;

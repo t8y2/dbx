@@ -18,11 +18,62 @@ import {
   mysqlEnumDataType,
   parseExtraToColumnExtra,
   rehydrateColumnDraftsFromMetadata,
+  resolveInsertColumnIndex,
   restoreDamengLengthUnitsAfterSave,
   splitDataType,
 } from "@/lib/table/tableStructureEditorState";
 
 describe("tableStructureEditorState", () => {
+  it("hydrates Kingbase type parameters returned separately from the data type", () => {
+    const columns = createColumnDrafts(
+      [
+        {
+          name: "display_name",
+          data_type: "varchar",
+          is_nullable: true,
+          column_default: null,
+          is_primary_key: false,
+          extra: null,
+          character_maximum_length: 255,
+        },
+        {
+          name: "amount",
+          data_type: "numeric",
+          is_nullable: false,
+          column_default: null,
+          is_primary_key: false,
+          extra: null,
+          numeric_precision: 12,
+          numeric_scale: 2,
+        },
+        {
+          name: "attempts",
+          data_type: "integer",
+          is_nullable: false,
+          column_default: null,
+          is_primary_key: false,
+          extra: null,
+          numeric_precision: 32,
+          numeric_scale: 0,
+        },
+        {
+          name: "code",
+          data_type: "character varying(64)",
+          is_nullable: true,
+          column_default: null,
+          is_primary_key: false,
+          extra: null,
+          character_maximum_length: 64,
+        },
+      ],
+      "kingbase",
+    );
+
+    expect(columns.map((column) => column.dataType)).toEqual(["varchar(255)", "numeric(12,2)", "integer", "character varying(64)"]);
+    expect(columns.map((column) => column.original?.data_type)).toEqual(["varchar(255)", "numeric(12,2)", "integer", "character varying(64)"]);
+    expect(dataTypeLengthInputValue("kingbase", columns[0]?.dataType ?? "")).toBe("255");
+  });
+
   it("parses Kingbase SQLServer compatibility identity metadata", () => {
     expect(parseExtraToColumnExtra("identity(10, 2)", "kingbase")).toEqual({
       autoIncrement: true,
@@ -246,6 +297,19 @@ describe("tableStructureEditorState", () => {
     expect(hasExistingColumnTypeChange([column])).toBe(true);
     column.markedForDrop = true;
     expect(hasExistingColumnTypeChange([column])).toBe(false);
+  });
+
+  it("inserts new columns after the selected row or appends when none is selected", () => {
+    const columns = [{ id: "a" }, { id: "b" }, { id: "c" }];
+
+    expect(resolveInsertColumnIndex(columns, null)).toBe(3);
+    expect(resolveInsertColumnIndex(columns, undefined)).toBe(3);
+    expect(resolveInsertColumnIndex(columns, "a")).toBe(1);
+    expect(resolveInsertColumnIndex(columns, "b")).toBe(2);
+    expect(resolveInsertColumnIndex(columns, "c")).toBe(3);
+    expect(resolveInsertColumnIndex(columns, "missing")).toBe(3);
+    expect(resolveInsertColumnIndex([], "a")).toBe(0);
+    expect(resolveInsertColumnIndex([{ id: "a", markedForDrop: true }, { id: "b" }], "a")).toBe(2);
   });
 
   it("strips SQL Server metadata parentheses from editable defaults", () => {

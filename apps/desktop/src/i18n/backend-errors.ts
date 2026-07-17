@@ -7,11 +7,13 @@ const patterns: [RegExp, string][] = [
   [/^Custom Java runtime path is empty\. Please choose a Java executable\.$/, "connection.customJavaPathEmpty"],
   [/^Agent requires Java 21, but DBX started it with an older Java runtime\. Use DBX managed JRE 21 or select a Java 21 executable in Driver Manager\./, "connection.agentJavaTooOld"],
   [/^JDBC plugin is not installed\. Install the optional JDBC plugin to use this connection\.$/, "connection.jdbcPluginNotInstalled"],
+  [/^ai\.configNameExists:(.+)$/, "ai.configNameExists"],
 ];
 
 const paramNames: Record<string, string> = {
   "connection.driverNotInstalled": "driver",
   "connection.jreNotInstalled": "jre",
+  "ai.configNameExists": "name",
 };
 
 export function translateBackendError(t: ComposerTranslation, message: string): string {

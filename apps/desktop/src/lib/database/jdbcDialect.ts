@@ -1,7 +1,7 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { isSchemaAware, usesDatabaseObjectTreeMode, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 
-type JdbcDialectConnection = Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths">>;
+type JdbcDialectConnection = Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile" | "driver_label" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info">>;
 
 const DATABASE_AS_EXECUTION_SCHEMA_TYPES = new Set<DatabaseType>(["hive", "spark"]);
 
@@ -22,6 +22,11 @@ const JDBC_DIALECT_MATCHERS: Array<{ type: DatabaseType; patterns: RegExp[] }> =
   { type: "informix", patterns: [/jdbc:informix/i, /informix/i] },
   { type: "iris", patterns: [/jdbc:(?:iris|cache):/i, /com\.intersystems\.jdbc\.(?:IRIS|Cache)Driver/i, /intersystems-jdbc/i] },
 ];
+
+// ASE uses Transact-SQL, but treating it as SQL Server globally would also
+// enable SQL Server metadata, pagination, and identifier rules. Keep this
+// narrower matcher exclusively for editor syntax parsing.
+const JDBC_ASE_PROFILE_PATTERNS = [/(?:^|[\s_-])ase(?:$|[\s_-])/i, /\bsap[\s_-]+ase\b/i, /\badaptive server enterprise\b/i];
 
 export function inferJdbcDialect(connection?: JdbcDialectConnection): DatabaseType | undefined {
   if (!connection || connection.db_type !== "jdbc") return undefined;
@@ -104,6 +109,14 @@ export function codeMirrorSqlDialect(dbType: DatabaseType | undefined): "mysql" 
   if (dbType === "postgres" || dbType === "gaussdb" || dbType === "kwdb" || dbType === "opengauss") return "postgres";
   if (dbType === "sqlserver") return "sqlserver";
   return "mysql";
+}
+
+export function codeMirrorSqlDialectForConnection(connection?: JdbcDialectConnection): "mysql" | "postgres" | "sqlserver" {
+  if (connection?.db_type === "jdbc") {
+    const explicitIdentity = [connection.driver_profile, connection.driver_label, connection.database_info?.productName].filter(Boolean).join("\n");
+    if (JDBC_ASE_PROFILE_PATTERNS.some((pattern) => pattern.test(explicitIdentity))) return "sqlserver";
+  }
+  return codeMirrorSqlDialect(effectiveDatabaseTypeForConnection(connection));
 }
 
 function isGbase8sProfile(driverProfile?: string): boolean {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TreeNode } from "@/types/database";
-import { createSidebarActionRequest, createSidebarActionTarget, findSidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
+import { createSidebarActionRequest, createSidebarActionTarget, findSidebarActionTarget, releaseRemovedSidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
 
 function tableNode(): TreeNode {
   return {
@@ -50,6 +50,21 @@ describe("sidebar action targets", () => {
     const target = createSidebarActionTarget(tableNode());
 
     expect(findSidebarActionTarget([], target)).toBeNull();
+  });
+
+  it("releases a removed active node's child tree", () => {
+    const node = tableNode();
+    const released = releaseRemovedSidebarActionTarget(node, [node.id]);
+
+    expect(released).not.toBe(node);
+    expect(released.children).toBeUndefined();
+    expect(released.hiddenChildren).toBeUndefined();
+  });
+
+  it("keeps an active node that was not removed", () => {
+    const node = tableNode();
+
+    expect(releaseRemovedSidebarActionTarget(node, ["other-node"])).toBe(node);
   });
 
   it("resolves targets stored only in hidden children", () => {

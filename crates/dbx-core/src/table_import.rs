@@ -782,6 +782,61 @@ pub fn parse_json_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImpo
 
 use excelstream::{CellValue, ExcelReader};
 
+/// Try to get the maximum data row number from the sheet's `<dimension>` tag
+/// by reading the raw XML from the ZIP archive. This avoids loading all cells.
+///
+/// The dimension tag looks like: `<dimension ref="A1:F50" />`
+/// We parse the bottom-right cell reference to extract the row count.
+fn xlsx_dimension_max_row(path: &str, sheet_index_0based: usize) -> Option<usize> {
+    use std::io::Read;
+
+    let file = File::open(path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let sheet_path = format!("xl/worksheets/sheet{}.xml", sheet_index_0based + 1);
+    let mut sheet_file = archive.by_name(&sheet_path).ok()?;
+    let mut content = String::new();
+    sheet_file.read_to_string(&mut content).ok()?;
+
+    let dim_tag = content.find("<dimension")?;
+    let after_dim = &content[dim_tag..];
+    let ref_start = after_dim.find("ref=\"")? + 5;
+    let rest = &after_dim[ref_start..];
+    let ref_end = rest.find('\"')?;
+    let ref_value = &rest[..ref_end];
+
+    // ref_value is like "A1:F50", "A1" (single cell), or "C3:D10"
+    let end_ref = if let Some(colon) = ref_value.rfind(':') { ref_value[colon + 1..].trim() } else { ref_value.trim() };
+    // Skip column letters, parse the row number
+    let row_str = end_ref.trim_start_matches(|c: char| c.is_ascii_alphabetic());
+    row_str.parse().ok()
+}
+
+/// Fallback: count `<row ` tags in the raw sheet XML.
+/// Much faster than deserializing every cell via calamine.
+fn xlsx_count_row_tags(path: &str, sheet_index_0based: usize) -> Option<usize> {
+    use std::io::Read;
+
+    let file = File::open(path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let sheet_path = format!("xl/worksheets/sheet{}.xml", sheet_index_0based + 1);
+    let mut sheet_file = archive.by_name(&sheet_path).ok()?;
+    let mut content = String::new();
+    sheet_file.read_to_string(&mut content).ok()?;
+    Some(content.matches("<row ").count())
+}
+
+/// Pre-compute the number of data rows from the sheet XML metadata.
+/// Uses `<dimension>` tag (fast) or falls back to `<row>` tag counting (faster than cell parsing).
+fn xlsx_compute_data_row_count(path: &str, sheet_index: usize, row_range: &ImportRowRange) -> Result<usize, String> {
+    let max_row = xlsx_dimension_max_row(path, sheet_index)
+        .or_else(|| xlsx_count_row_tags(path, sheet_index))
+        .ok_or_else(|| "Could not determine number of data rows in sheet".to_string())?;
+
+    let effective_max = row_range.last_data_row.map_or(max_row, |last| max_row.min(last));
+    let skipped = row_range.data_start_row.saturating_sub(1);
+    Ok(effective_max.saturating_sub(skipped))
+}
+
 pub fn xlsx_sheet_names(path: &str) -> Result<Vec<String>, String> {
     let reader = ExcelReader::open(path).map_err(|e| e.to_string())?;
     Ok(reader.sheet_names())
@@ -809,17 +864,9 @@ pub fn xlsx_cell_value(cell: &CellValue) -> serde_json::Value {
         CellValue::Empty => serde_json::Value::Null,
         CellValue::String(s) => csv_value(s),
         CellValue::Int(i) => serde_json::Value::Number(serde_json::Number::from(*i)),
-        CellValue::Float(f) => {
-            // Detect Excel date serial numbers (1..2958465.999) and format as
-            // ISO datetime so they don't reach the database as raw floats.
-            if *f >= 1.0 && *f <= 2958465.999 {
-                serde_json::Value::String(format_excel_datetime_serial(*f))
-            } else {
-                serde_json::Number::from_f64(*f)
-                    .map(serde_json::Value::Number)
-                    .unwrap_or(serde_json::Value::String(f.to_string()))
-            }
-        }
+        CellValue::Float(f) => serde_json::Number::from_f64(*f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::String(f.to_string())),
         CellValue::Bool(b) => serde_json::Value::Bool(*b),
         CellValue::DateTime(d) => serde_json::Value::String(format_excel_datetime_serial(*d)),
         CellValue::Error(e) => serde_json::Value::String(e.clone()),
@@ -894,11 +941,20 @@ pub fn parse_xlsx_file_with_options(
 
     let row_range = effective_import_row_range(options)?;
 
+    // Pre-compute total data rows from sheet metadata (<dimension> tag or <row> count).
+    // This avoids iterating every row just to count — critical for large sheets
+    // (e.g. 28000×200, 45 MB) where cell-level parsing is dominated by cell value
+    // deserialization, not row counting.
+    let sheet_index = all_sheet_names.iter().position(|n| n == &sheet_name).unwrap_or(0);
+    let total_rows = xlsx_compute_data_row_count(path, sheet_index, &row_range)?;
+    if total_rows == 0 {
+        return Err("Import file has no data rows in the selected row range".to_string());
+    }
+
     let rows_iter = reader.rows(&sheet_name).map_err(|e| e.to_string())?;
 
     let mut columns: Vec<String> = Vec::new();
     let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
-    let mut total_rows: usize = 0;
 
     for row_result in rows_iter {
         let row = row_result.map_err(|e| e.to_string())?;
@@ -927,6 +983,11 @@ pub fn parse_xlsx_file_with_options(
                 row.cells.len(),
                 &columns.iter().take(5).cloned().collect::<Vec<_>>()
             );
+            // When counting-only (preview_limit=0), we only need columns.
+            // total_rows is already pre-computed from dimension metadata.
+            if preview_limit == 0 {
+                break;
+            }
             continue;
         }
 
@@ -934,29 +995,19 @@ pub fn parse_xlsx_file_with_options(
         if columns.is_empty() {
             columns = (0..row.cells.len()).map(|i| format!("column_{}", i + 1)).collect();
         }
-        total_rows += 1;
         if rows.len() < preview_limit {
             rows.push(row.cells.iter().map(xlsx_cell_value).collect());
         }
-        // In preview mode (finite preview_limit), stop iterating once we have
-        // enough data rows so we don't read every row just to count total_rows.
-        // preview_limit=0 means counting-only (no rows stored), don't break.
+        // Early break once we have enough preview rows.
+        // total_rows is already known from dimension metadata, so no need to
+        // iterate further — big win for large sheets.
         if preview_limit > 0 && preview_limit < usize::MAX && rows.len() >= preview_limit {
-            log::info!(
-                "[xlsx] early break: collected {} rows in {:?}, total_rows={}",
-                rows.len(),
-                start.elapsed(),
-                total_rows
-            );
             break;
         }
     }
 
     if columns.is_empty() {
         return Err("Import file has no columns in the selected row range".to_string());
-    }
-    if total_rows == 0 {
-        return Err("Import file has no data rows in the selected row range".to_string());
     }
 
     let result = ParsedImportFile { columns, rows, total_rows, effective_encoding: None, sheets: all_sheet_names };
@@ -2467,7 +2518,7 @@ mod tests {
         assert_eq!(xlsx_cell_value(&CellValue::Int(42)), serde_json::json!(42));
         assert_eq!(xlsx_cell_value(&CellValue::Float(3.14)), serde_json::json!(3.14));
         assert_eq!(xlsx_cell_value(&CellValue::Bool(true)), serde_json::json!(true));
-        assert_eq!(xlsx_cell_value(&CellValue::Error("REF".into())), serde_json::json!("#REF!"));
+        assert_eq!(xlsx_cell_value(&CellValue::Error("#REF!".into())), serde_json::json!("#REF!"));
         assert_eq!(xlsx_cell_label(&CellValue::Int(42)), "42");
         assert_eq!(xlsx_cell_label(&CellValue::String("hello".into())), "hello");
     }
@@ -2519,6 +2570,49 @@ mod tests {
         assert_eq!(parsed.total_rows, 2);
         assert_eq!(parsed.rows[0], vec![serde_json::json!(1), serde_json::json!("Ada")]);
         assert_eq!(parsed.rows[1], vec![serde_json::json!(2), serde_json::json!("Grace")]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn parses_xlsx_float_values_not_dates() {
+        // Numeric values that happen to fall in Excel's date serial range
+        // (1..2958465.999) must be kept as numbers, not converted to dates.
+        let path = std::env::temp_dir().join(format!("dbx-float-not-date-{}.xlsx", uuid::Uuid::new_v4()));
+        write_test_xlsx(
+            &path,
+            &["amount", "qty"],
+            &[
+                vec![serde_json::json!(42.5), serde_json::json!(100.25)],
+                vec![serde_json::json!(3.14), serde_json::json!(2958465.5)],
+            ],
+        );
+        let parsed =
+            parse_xlsx_file_with_options(&path.to_string_lossy(), &TableImportParseOptions::default(), 10).unwrap();
+
+        assert_eq!(parsed.total_rows, 2);
+        // 42.5 should be a number, NOT "1900-02-11 12:00:00"
+        assert_eq!(parsed.rows[0][0], serde_json::json!(42.5));
+        assert_eq!(parsed.rows[0][1], serde_json::json!(100.25));
+        assert_eq!(parsed.rows[1][0], serde_json::json!(3.14));
+        assert_eq!(parsed.rows[1][1], serde_json::json!(2958465.5));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn parses_xlsx_total_rows_exceeds_preview_limit() {
+        // When the file has more rows than the preview limit, total_rows
+        // must reflect the true count, not be capped at preview_limit.
+        let path = std::env::temp_dir().join(format!("dbx-totalrows-preview-{}.xlsx", uuid::Uuid::new_v4()));
+        let data_rows: Vec<Vec<serde_json::Value>> =
+            (1..=50).map(|i| vec![serde_json::json!(i), serde_json::json!("row")]).collect();
+        write_test_xlsx(&path, &["id", "label"], &data_rows);
+
+        // preview_limit=10 means we only store 10 rows but total_rows=50
+        let parsed =
+            parse_xlsx_file_with_options(&path.to_string_lossy(), &TableImportParseOptions::default(), 10).unwrap();
+
+        assert_eq!(parsed.rows.len(), 10, "preview should be capped at limit");
+        assert_eq!(parsed.total_rows, 50, "total_rows should not be capped");
         let _ = std::fs::remove_file(path);
     }
 

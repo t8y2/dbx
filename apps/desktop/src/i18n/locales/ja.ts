@@ -604,6 +604,9 @@ export default withEnglishFallback({
       uppercaseSelection: "大文字に変換",
       lowercaseSelection: "小文字に変換",
       selectAll: "すべて選択",
+      delimitedList: "区切り文字付きリストに変換",
+      findReplace: "検索/置換",
+      deleteEmptyLines: "空行を削除",
     },
     search: {
       find: "検索",
@@ -617,6 +620,7 @@ export default withEnglishFallback({
       nextMatch: "次へ (Enter)",
       close: "閉じる (Esc)",
       noResults: "結果なし",
+      inSelection: "選択範囲内",
     },
     executionPicker: {
       title: "Execution Target",
@@ -628,6 +632,19 @@ export default withEnglishFallback({
     selectDatabaseRequired: "先にデータベースを選択してください",
     statementExecutionSucceeded: "{count} 件のステートメントが成功しました",
     statementExecutionFailed: "{count} 件のステートメントが失敗しました",
+    delimitedList: {
+      title: "区切り文字付きリストに変換",
+      columnDelimiter: "列区切り文字",
+      resultDelimiter: "結果区切り文字",
+      quoteChar: "文字列引用符",
+      wrapColumn: "列で折り返し",
+      prefixText: "先頭テキスト",
+      suffixText: "末尾テキスト",
+      preview: "プレビュー",
+      emptyPreview: "プレビューする内容がありません",
+      confirm: "確定",
+      selectFirst: "リストテキストを選択してください",
+    },
   },
   tabs: {
     sql: "SQL",

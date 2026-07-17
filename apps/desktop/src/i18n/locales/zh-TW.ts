@@ -606,6 +606,9 @@ export default withEnglishFallback({
       uppercaseSelection: "轉為大寫",
       lowercaseSelection: "轉為小寫",
       selectAll: "全選",
+      delimitedList: "轉換為帶分隔符的清單",
+      findReplace: "查找/取代",
+      deleteEmptyLines: "刪除空行",
     },
     search: {
       find: "尋找",
@@ -619,6 +622,7 @@ export default withEnglishFallback({
       nextMatch: "下一個 (Enter)",
       close: "關閉 (Esc)",
       noResults: "無結果",
+      inSelection: "選取區內",
     },
     executionPicker: {
       title: "執行目標",
@@ -629,6 +633,19 @@ export default withEnglishFallback({
     },
     statementExecutionSucceeded: "{count} 條陳述式成功",
     statementExecutionFailed: "{count} 條陳述式失敗",
+    delimitedList: {
+      title: "轉換為帶分隔符的清單",
+      columnDelimiter: "欄分隔符",
+      resultDelimiter: "結果分隔符",
+      quoteChar: "字串引號字元",
+      wrapColumn: "在欄位處換行",
+      prefixText: "前置文字",
+      suffixText: "尾部文字",
+      preview: "預覽",
+      emptyPreview: "無可預覽內容",
+      confirm: "確定",
+      selectFirst: "請選擇清單文字",
+    },
   },
   tabs: {
     sql: "SQL",

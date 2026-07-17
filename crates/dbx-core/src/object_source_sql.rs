@@ -129,6 +129,10 @@ pub fn build_executable_object_source_statements(input: EditableObjectSourceSqlI
         return Ok(vec![replace_sqlserver_create_with_alter(source)]);
     }
 
+    if input.database_type == DatabaseType::DuckDb && input.object_type == ObjectSourceKind::View {
+        return Ok(vec![executable_duckdb_view_ddl(input.schema.as_deref(), &input.name, source)]);
+    }
+
     if matches!(
         input.database_type,
         DatabaseType::Postgres
@@ -813,6 +817,16 @@ fn build_sqlserver_alter_view_sql(schema: Option<&str>, name: &str, source: &str
     format!("ALTER VIEW {} AS\n{}", sqlserver_qualified_name(schema, name), ensure_semicolon(source))
 }
 
+fn executable_duckdb_view_ddl(schema: Option<&str>, name: &str, source: &str) -> String {
+    let existing_view_statement =
+        Regex::new(r"(?i)^CREATE\s+(?:OR\s+REPLACE\s+)?VIEW(?:\s+IF\s+NOT\s+EXISTS)?\s+").unwrap();
+    if existing_view_statement.is_match(source) {
+        return ensure_semicolon(&existing_view_statement.replace(source, "CREATE OR REPLACE VIEW "));
+    }
+
+    format!("CREATE OR REPLACE VIEW {} AS\n{}", postgres_qualified_name(schema, name), ensure_semicolon(source))
+}
+
 fn parse_object_source_kind(value: &str) -> Option<ObjectSourceKind> {
     if value.eq_ignore_ascii_case("VIEW") {
         Some(ObjectSourceKind::View)
@@ -975,6 +989,36 @@ mod tests {
         .unwrap();
 
         assert_eq!(sql, "ALTER VIEW [dbo].[new_view] AS\nSELECT\n  *\nFROM AppInfo;");
+    }
+
+    #[test]
+    fn duckdb_view_create_source_saves_as_create_or_replace_view() {
+        let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::DuckDb,
+            object_type: ObjectSourceKind::View,
+            schema: Some("main".to_string()),
+            name: "active_orders".to_string(),
+            source: "CREATE VIEW active_orders AS SELECT id FROM orders WHERE active".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(sql, "CREATE OR REPLACE VIEW active_orders AS SELECT id FROM orders WHERE active;");
+    }
+
+    #[test]
+    fn duckdb_view_body_saves_as_qualified_create_or_replace_view() {
+        let sql = build_editable_object_source(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::DuckDb,
+            object_type: ObjectSourceKind::View,
+            schema: Some("reporting".to_string()),
+            name: "active orders".to_string(),
+            source: "SELECT id FROM orders WHERE active".to_string(),
+        });
+
+        assert_eq!(
+            sql,
+            "CREATE OR REPLACE VIEW \"reporting\".\"active orders\" AS\nSELECT id FROM orders WHERE active;"
+        );
     }
 
     #[test]

@@ -142,6 +142,32 @@ pub fn duckdb_list_schemas_with_attached(
     Ok(schemas)
 }
 
+#[cfg(feature = "duckdb-bundled")]
+pub fn duckdb_object_source_with_attached(
+    con: &duckdb::Connection,
+    database: &str,
+    schema: &str,
+    name: &str,
+    object_type: &db::ObjectSourceKind,
+    attached_names: &[String],
+) -> Result<String, String> {
+    if !matches!(object_type, db::ObjectSourceKind::View) {
+        return Err("DuckDB object source only supports views".to_string());
+    }
+
+    let database = duckdb_catalog_name(con, database, attached_names)?;
+    let mut stmt = con
+        .prepare("SELECT sql FROM duckdb_views() WHERE database_name = ? AND schema_name = ? AND view_name = ?")
+        .map_err(|e| e.to_string())?;
+    let mut rows =
+        stmt.query_map((database.as_str(), schema, name), |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+
+    match rows.next() {
+        Some(row) => row.map_err(|e| e.to_string()),
+        None => Err(format!("DuckDB view source not found: {database}.{schema}.{name}")),
+    }
+}
+
 /// Identifies quack catalogs by the storage-extension `type` that
 /// `duckdb_databases()` reports, rather than by the attach aliases parsed from
 /// the init script: `ATTACH 'quack:host:port'` without an `AS` alias gets a
@@ -2430,7 +2456,7 @@ mod tests {
     #[cfg(feature = "duckdb-bundled")]
     use super::{
         duckdb_attach_database, duckdb_completion_assistant_search, duckdb_list_databases,
-        duckdb_query_tables_in_database,
+        duckdb_object_source_with_attached, duckdb_query_tables_in_database,
     };
     use crate::models::connection::{ConnectionConfig, DatabaseType};
     use std::collections::HashMap;
@@ -2953,6 +2979,83 @@ mod tests {
         let name = columns.iter().find(|column| column.name == "name").unwrap();
 
         assert_eq!(name.comment.as_deref(), Some("Display name"));
+    }
+
+    #[cfg(feature = "duckdb-bundled")]
+    #[test]
+    fn duckdb_object_source_filters_by_schema_and_view_name() {
+        let con = duckdb::Connection::open_in_memory().unwrap();
+        con.execute_batch(
+            "CREATE SCHEMA reporting; \
+             CREATE VIEW main.active_orders AS SELECT 'main' AS origin; \
+             CREATE VIEW reporting.active_orders AS SELECT 'reporting' AS origin;",
+        )
+        .unwrap();
+
+        let main_source =
+            duckdb_object_source_with_attached(&con, "main", "main", "active_orders", &db::ObjectSourceKind::View, &[])
+                .unwrap();
+        let reporting_source = duckdb_object_source_with_attached(
+            &con,
+            "main",
+            "reporting",
+            "active_orders",
+            &db::ObjectSourceKind::View,
+            &[],
+        )
+        .unwrap();
+
+        assert!(main_source.contains("'main'"));
+        assert!(reporting_source.contains("'reporting'"));
+    }
+
+    #[cfg(feature = "duckdb-bundled")]
+    #[test]
+    fn duckdb_object_source_rejects_unsupported_or_missing_objects() {
+        let con = duckdb::Connection::open_in_memory().unwrap();
+
+        let unsupported = duckdb_object_source_with_attached(
+            &con,
+            "main",
+            "main",
+            "calculate_total",
+            &db::ObjectSourceKind::Function,
+            &[],
+        )
+        .unwrap_err();
+        let missing =
+            duckdb_object_source_with_attached(&con, "main", "main", "missing_view", &db::ObjectSourceKind::View, &[])
+                .unwrap_err();
+
+        assert_eq!(unsupported, "DuckDB object source only supports views");
+        assert!(missing.contains("DuckDB view source not found"));
+    }
+
+    #[cfg(feature = "duckdb-bundled")]
+    #[test]
+    fn duckdb_catalog_view_source_can_replace_existing_view() {
+        let con = duckdb::Connection::open_in_memory().unwrap();
+        con.execute_batch("CREATE VIEW active_orders AS SELECT 1 AS value;").unwrap();
+        let source =
+            duckdb_object_source_with_attached(&con, "main", "main", "active_orders", &db::ObjectSourceKind::View, &[])
+                .unwrap();
+        let edited_source = source.replace("SELECT 1", "SELECT 2");
+        assert_ne!(edited_source, source);
+
+        let statements = crate::object_source_sql::build_executable_object_source_statements(
+            crate::object_source_sql::EditableObjectSourceSqlInput {
+                database_type: DatabaseType::DuckDb,
+                object_type: db::ObjectSourceKind::View,
+                schema: Some("main".to_string()),
+                name: "active_orders".to_string(),
+                source: edited_source,
+            },
+        )
+        .unwrap();
+        con.execute_batch(&statements.join("\n")).unwrap();
+
+        let value = con.query_row("SELECT value FROM active_orders", [], |row| row.get::<_, i32>(0)).unwrap();
+        assert_eq!(value, 2);
     }
 
     #[cfg(feature = "duckdb-bundled")]
@@ -5194,6 +5297,8 @@ async fn get_object_source_once(
 ) -> Result<db::ObjectSource, String> {
     let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
     let db_config = connection_config(state, connection_id).await;
+    #[cfg(feature = "duckdb-bundled")]
+    let duckdb_attached_names = duckdb_attached_database_names(state, connection_id).await;
     let source = {
         let connections = state.connections.read().await;
         if let Some(PoolKind::ExternalDriver { config, session, .. }) = connections.get(&pool_key) {
@@ -5262,6 +5367,28 @@ async fn get_object_source_once(
                 PoolKind::Sqlite(pool) => first_string_cell(
                     db::sqlite::execute_query(pool, &sqlite_object_source_sql(name, &object_type)).await?,
                 )?,
+                #[cfg(feature = "duckdb-bundled")]
+                PoolKind::DuckDb(con) => {
+                    let con = con.lock().map_err(|e| e.to_string())?;
+                    duckdb_object_source_with_attached(
+                        &con,
+                        database,
+                        schema,
+                        name,
+                        &object_type,
+                        &duckdb_attached_names,
+                    )?
+                }
+                #[cfg(feature = "duckdb-bundled")]
+                PoolKind::DuckDbWorker(client) => {
+                    let client = client.clone();
+                    let database = database.to_string();
+                    let schema = schema.to_string();
+                    let name = name.to_string();
+                    let object_type = object_type.clone();
+                    drop(connections);
+                    client.get_object_source(database, schema, name, object_type).await?
+                }
                 PoolKind::Rqlite(client) => {
                     return db::rqlite_driver::object_source(client, name, &object_type).await;
                 }

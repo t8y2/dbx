@@ -3,6 +3,7 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::models::connection::AttachedDatabaseConfig;
+use crate::types::ObjectSourceKind;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DuckDbWorkerRequest {
@@ -34,6 +35,7 @@ pub enum DuckDbWorkerMethod {
     ListSchemas,
     ListTables,
     ListColumns,
+    GetObjectSource,
     AttachDatabase,
     Cancel,
     Shutdown,
@@ -135,6 +137,15 @@ pub struct DuckDbWorkerColumnParams {
     pub table: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DuckDbWorkerObjectSourceParams {
+    pub database: String,
+    pub schema: String,
+    pub name: String,
+    pub object_type: ObjectSourceKind,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,5 +188,28 @@ mod tests {
 
         assert!(!parsed.ok);
         assert_eq!(parsed.error.expect("error").code, "duckdb_open_failed");
+    }
+
+    #[test]
+    fn protocol_round_trips_object_source_request() {
+        let request = DuckDbWorkerRequest::new(
+            "req-3",
+            DuckDbWorkerMethod::GetObjectSource,
+            DuckDbWorkerObjectSourceParams {
+                database: "main".to_string(),
+                schema: "main".to_string(),
+                name: "active_orders".to_string(),
+                object_type: ObjectSourceKind::View,
+            },
+        )
+        .expect("serialize request");
+
+        let json = serde_json::to_string(&request).expect("request json");
+        let parsed: DuckDbWorkerRequest = serde_json::from_str(&json).expect("parse request");
+        let params: DuckDbWorkerObjectSourceParams = parsed.parse_params().expect("parse params");
+
+        assert_eq!(parsed.method, DuckDbWorkerMethod::GetObjectSource);
+        assert_eq!(params.name, "active_orders");
+        assert_eq!(params.object_type, ObjectSourceKind::View);
     }
 }

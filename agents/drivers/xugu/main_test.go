@@ -532,7 +532,22 @@ func TestXuguListObjectsQueryRejectsUnsupportedObjectTypes(t *testing.T) {
 		t.Fatalf("unsupported object type should produce empty-result predicate:\n%s", query.SQL)
 	}
 
-	wantArgs := []any{"APP", "APP", 10, 0}
+	wantArgs := []any{"APP", "APP", "APP", "APP", "APP", "APP", "APP", "APP", "APP", 10, 0}
+	assertArgs(t, query.Args, wantArgs)
+}
+
+func TestXuguListObjectsQueryIncludesProgrammableObjects(t *testing.T) {
+	query := xuguListObjectsQuery("APP", metadataListConstraints{
+		ObjectTypes: []string{"procedure", "function", "package", "package-body", "trigger", "sequence", "type", "type-body"},
+	})
+
+	for _, want := range []string{"ALL_PROCEDURES", "p.VALID", "ALL_PACKAGES", "p.BODY IS NOT NULL", "ALL_TRIGGERS", "ALL_SEQUENCES", "ALL_TYPES", "u.BODY IS NOT NULL", "OBJECT_NAME, OBJECT_TYPE, COMMENTS, VALID", "OBJECT_TYPE IN (?,?,?,?,?,?,?,?)"} {
+		if !strings.Contains(query.SQL, want) {
+			t.Fatalf("expected SQL to contain %q:\n%s", want, query.SQL)
+		}
+	}
+
+	wantArgs := []any{"APP", "APP", "APP", "APP", "APP", "APP", "APP", "APP", "APP", "FUNCTION", "PACKAGE", "PACKAGE_BODY", "PROCEDURE", "SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"}
 	assertArgs(t, query.Args, wantArgs)
 }
 

@@ -239,6 +239,7 @@ const usageSummary = computed(() => {
   ];
 });
 const canClearDownloadCache = computed(() => !clearingDownloadCache.value && installing.value === null && !upgradingAll.value && reinstallingJre.value === null && downloadCacheBytes.value > 0);
+const downloadSourceBusy = computed(() => refreshing.value || installing.value !== null || upgradingAll.value || queuedDriverInstalls.value.length > 0 || reinstallingJre.value !== null);
 const jreUsageByKey = computed(() => {
   const map = new Map<string, number>();
   for (const item of driverStoreUsage.value?.jres || []) {
@@ -328,6 +329,13 @@ async function forceRefresh() {
   } finally {
     refreshing.value = false;
   }
+}
+
+function setUpdateDownloadSource(value: unknown) {
+  if (value !== "official" && value !== "cnb" && value !== "atomgit") return;
+  if (value === settingsStore.editorSettings.updateDownloadSource) return;
+  settingsStore.updateEditorSettings({ updateDownloadSource: value });
+  void forceRefresh().catch(() => undefined);
 }
 
 async function loadJavaRuntimeConfig() {
@@ -1143,7 +1151,20 @@ watch(driverStoreTab, (tab) => {
                 {{ t("driverStore.storageTab") }}
               </TabsTrigger>
             </TabsList>
-            <div v-if="driverStoreTab !== 'storage'" class="flex items-center gap-2">
+            <div v-if="driverStoreTab !== 'storage'" class="flex flex-wrap items-center gap-2">
+              <div v-if="driverStoreTab === 'agent' && !isWeb" class="flex items-center gap-1.5">
+                <span class="text-xs text-muted-foreground">{{ t("settings.updateDownloadSource") }}</span>
+                <Select :model-value="settingsStore.editorSettings.updateDownloadSource" :disabled="downloadSourceBusy" @update:model-value="setUpdateDownloadSource">
+                  <SelectTrigger class="h-7 w-[160px] rounded-[6px] text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="official">{{ t("settings.updateDownloadSourceOfficial") }}</SelectItem>
+                    <SelectItem value="cnb">{{ t("settings.updateDownloadSourceCnb") }}</SelectItem>
+                    <SelectItem value="atomgit">{{ t("settings.updateDownloadSourceAtomgit") }}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
               <Button variant="ghost" size="sm" class="h-7 rounded-[6px] text-xs gap-1 text-muted-foreground" :disabled="importingZip" @click="importOfflineZip">
                 <FileUp class="h-3.5 w-3.5" />
                 {{ importingZip ? t("driverStore.importing") : t("driverStore.importOfflinePackage") }}

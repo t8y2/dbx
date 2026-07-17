@@ -2179,7 +2179,7 @@ onBeforeUnmount(() => {
 });
 
 watch(
-  () => [props.connection.id, props.database, props.schema] as const,
+  [() => props.connection.id, () => props.database, () => props.schema],
   async () => {
     selectedSchema.value = props.schema;
     userHasSelectedFilter.value = false;

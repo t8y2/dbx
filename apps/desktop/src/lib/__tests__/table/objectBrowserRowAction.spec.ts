@@ -39,6 +39,10 @@ describe("singleClickRowAction", () => {
     expect(singleClickRowAction(row("PACKAGE_BODY", "pkg_body_test"))).toBe("open-source");
   });
 
+  it.each(["TRIGGER", "TYPE", "TYPE_BODY"] as const)("returns open-source for %s", (type) => {
+    expect(singleClickRowAction(row(type, "programmable_test"))).toBe("open-source");
+  });
+
   it("returns none for null/undefined", () => {
     expect(singleClickRowAction(null)).toBe("none");
     expect(singleClickRowAction(undefined)).toBe("none");

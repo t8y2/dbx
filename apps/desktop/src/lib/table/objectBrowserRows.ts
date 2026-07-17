@@ -7,7 +7,8 @@ export type ObjectBrowserRow = {
   name: string;
   displayName: string;
   schema?: string;
-  type: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY";
+  type: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
+  valid?: boolean | null;
   signature?: string | null;
   comment?: string | null;
   created_at?: string | null;
@@ -27,7 +28,10 @@ export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type
   const value = type.toUpperCase();
   const normalized = value.replace(/[\s-]+/g, "_");
   if (normalized.includes("PACKAGE_BODY")) return "PACKAGE_BODY";
+  if (normalized.includes("TYPE_BODY")) return "TYPE_BODY";
   if (normalized.includes("PACKAGE")) return "PACKAGE";
+  if (normalized.includes("TRIGGER")) return "TRIGGER";
+  if (normalized.includes("TYPE")) return "TYPE";
   if (normalized.includes("MATERIALIZED_VIEW")) return "MATERIALIZED_VIEW";
   if (value.includes("VIEW")) return "VIEW";
   if (value.includes("SEQ")) return "SEQUENCE";
@@ -57,6 +61,7 @@ export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; databas
         displayName,
         schema,
         type,
+        valid: object.valid,
         signature,
         comment: object.comment,
         created_at: object.created_at,

@@ -261,6 +261,10 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Package, colorClass: "text-cyan-500" };
     case "package-body":
       return { icon: FileCode, colorClass: "text-cyan-400" };
+    case "type":
+      return { icon: Braces, colorClass: "text-violet-500" };
+    case "type-body":
+      return { icon: FileCode, colorClass: "text-violet-400" };
     case "group-tables":
       return { icon: Table, colorClass: "text-green-500" };
     case "group-views":
@@ -275,6 +279,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: ListTree, colorClass: "text-emerald-500" };
     case "group-packages":
       return { icon: Package, colorClass: "text-cyan-500" };
+    case "group-types":
+      return { icon: Braces, colorClass: "text-violet-500" };
     case "group-partitions":
       return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-green-400" };
     case "group-extensions":
@@ -288,7 +294,7 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
   }
 }
 
-const groupTypes: Set<TreeNodeType> = new Set(["group-columns", "group-indexes", "group-fkeys", "group-triggers", "group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-sequences", "group-packages", "group-partitions", "group-extensions"]);
+const groupTypes: Set<TreeNodeType> = new Set(["group-columns", "group-indexes", "group-fkeys", "group-triggers", "group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-sequences", "group-packages", "group-types", "group-partitions", "group-extensions"]);
 
 function isGroupLabel(node: TreeNode): boolean {
   return groupTypes.has(node.type);
@@ -304,10 +310,11 @@ function displayLabel(node: TreeNode): string {
 }
 
 function visibleLabel(node: TreeNode): string {
+  const withValidity = (label: string) => (node.valid === false ? `${label} · INVALID` : label);
   if (node.type === "table" || node.type === "view" || node.type === "materialized_view" || node.type === "mongo-collection" || node.type === "vector-collection" || node.type === "elasticsearch-index") {
-    return sidebarDisplayTableName(node.label, settingsStore.editorSettings.sidebarHiddenTablePrefixes);
+    return withValidity(sidebarDisplayTableName(node.label, settingsStore.editorSettings.sidebarHiddenTablePrefixes));
   }
-  return displayLabel(node);
+  return withValidity(displayLabel(node));
 }
 
 type DetailTooltipRow = {

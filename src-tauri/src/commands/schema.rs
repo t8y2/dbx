@@ -211,6 +211,7 @@ pub async fn list_objects(
                 name: table.name,
                 object_type: table.table_type,
                 schema: Some(database.clone()),
+                valid: None,
                 signature: None,
                 comment: table.comment,
                 created_at: None,

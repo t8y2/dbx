@@ -1700,7 +1700,13 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 		}
 		builder.WriteString(line)
 	}
-	return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": builder.String()}, rows.Err()
+	result := map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": builder.String()}
+	normalizedType := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(objectType), "_", " "))
+	if normalizedType == "TYPE" || normalizedType == "TYPE BODY" {
+		// XuguDB exposes type metadata but not a reconstructable type DDL.
+		result["editable"] = false
+	}
+	return result, rows.Err()
 }
 
 func (s *server) getTableDDL(schema, table string) (string, error) {
@@ -2168,12 +2174,22 @@ SELECT TO_CHAR(p.DEFINE)
 FROM SYS_PROCEDURES p
 JOIN SYS_SCHEMAS s ON s.DB_ID = p.DB_ID AND s.SCHEMA_ID = p.SCHEMA_ID
 WHERE UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(p.PROC_NAME) = UPPER(?)`, []any{schema, name}, nil
-	case "PACKAGE", "PACKAGE BODY":
+	case "PACKAGE":
 		return `
-SELECT COALESCE(TO_CHAR(k.SPEC), '') || COALESCE(TO_CHAR(k.BODY), '')
+SELECT COALESCE(TO_CHAR(k.SPEC), '')
 FROM SYS_PACKAGES k
 JOIN SYS_SCHEMAS s ON s.DB_ID = k.DB_ID AND s.SCHEMA_ID = k.SCHEMA_ID
 WHERE UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(k.PACK_NAME) = UPPER(?)`, []any{schema, name}, nil
+	case "PACKAGE BODY", "PACKAGE_BODY":
+		return `
+SELECT COALESCE(TO_CHAR(k.BODY), '')
+FROM SYS_PACKAGES k
+JOIN SYS_SCHEMAS s ON s.DB_ID = k.DB_ID AND s.SCHEMA_ID = k.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(k.PACK_NAME) = UPPER(?)`, []any{schema, name}, nil
+	case "TYPE", "TYPE BODY", "TYPE_BODY":
+		return `
+SELECT '-- XuguDB does not expose reconstructable DDL for this TYPE object.'
+FROM DUAL`, nil, nil
 	default:
 		return "", nil, fmt.Errorf("object source is not supported for %s", objectType)
 	}

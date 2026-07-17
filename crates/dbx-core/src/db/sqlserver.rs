@@ -1330,6 +1330,7 @@ pub async fn list_objects(client: &mut SqlServerClient, schema: &str) -> Result<
             name: row.get::<&str, _>(0).unwrap_or("").to_string(),
             object_type: row.get::<&str, _>(1).unwrap_or("TABLE").to_string(),
             schema: Some(schema.to_string()),
+            valid: None,
             signature: None,
             comment: row.get::<&str, _>(4).filter(|s: &&str| !s.is_empty()).map(|s: &str| s.to_string()),
             created_at: row.get::<chrono::NaiveDateTime, _>(2).map(|value| value.to_string()),

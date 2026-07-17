@@ -2219,6 +2219,7 @@ async fn external_driver_presto_like_objects(
             name: table.name,
             object_type: table.table_type,
             schema: Some(schema.to_string()),
+            valid: None,
             signature: None,
             comment: table.comment,
             created_at: None,
@@ -2601,6 +2602,7 @@ mod tests {
             name: name.to_string(),
             object_type: object_type.to_string(),
             schema: Some("app".to_string()),
+            valid: None,
             signature: None,
             comment: None,
             created_at: None,
@@ -3318,6 +3320,7 @@ mod tests {
                 name: "ORDERS".to_string(),
                 object_type: "TABLE".to_string(),
                 schema: Some("DBX_TEST".to_string()),
+                valid: None,
                 signature: None,
                 comment: None,
                 created_at: None,
@@ -3329,6 +3332,7 @@ mod tests {
                 name: "ORDERS_VIEW".to_string(),
                 object_type: "VIEW".to_string(),
                 schema: Some("DBX_TEST".to_string()),
+                valid: None,
                 signature: None,
                 comment: None,
                 created_at: None,
@@ -3340,6 +3344,7 @@ mod tests {
                 name: "REFRESH_ORDERS".to_string(),
                 object_type: "PROCEDURE".to_string(),
                 schema: Some("DBX_TEST".to_string()),
+                valid: None,
                 signature: None,
                 comment: None,
                 created_at: None,
@@ -3763,6 +3768,7 @@ async fn list_objects_once(
                         name: table.name,
                         object_type: table.table_type,
                         schema: None,
+                        valid: None,
                         signature: None,
                         comment: table.comment,
                         created_at: None,
@@ -3940,6 +3946,7 @@ async fn list_objects_once(
                         name: table.name,
                         object_type: table.table_type,
                         schema: if schema.is_empty() { None } else { Some(schema.to_string()) },
+                        valid: None,
                         signature: None,
                         comment: table.comment,
                         created_at: None,
@@ -4920,9 +4927,12 @@ fn sqlite_object_type(kind: &db::ObjectSourceKind) -> &'static str {
         db::ObjectSourceKind::View | db::ObjectSourceKind::MaterializedView => "view",
         db::ObjectSourceKind::Procedure
         | db::ObjectSourceKind::Function
+        | db::ObjectSourceKind::Trigger
         | db::ObjectSourceKind::Sequence
         | db::ObjectSourceKind::Package
-        | db::ObjectSourceKind::PackageBody => "routine",
+        | db::ObjectSourceKind::PackageBody
+        | db::ObjectSourceKind::Type
+        | db::ObjectSourceKind::TypeBody => "routine",
     }
 }
 
@@ -4931,9 +4941,12 @@ fn sqlserver_object_type_filter(kind: &db::ObjectSourceKind) -> &'static str {
         db::ObjectSourceKind::View => "'V'",
         db::ObjectSourceKind::Procedure => "'P'",
         db::ObjectSourceKind::Function => "'FN','IF','TF','FS','FT'",
+        db::ObjectSourceKind::Trigger => "'TR'",
         db::ObjectSourceKind::Sequence
         | db::ObjectSourceKind::Package
         | db::ObjectSourceKind::PackageBody
+        | db::ObjectSourceKind::Type
+        | db::ObjectSourceKind::TypeBody
         | db::ObjectSourceKind::MaterializedView => "''",
     }
 }
@@ -5055,7 +5068,11 @@ fn postgres_object_source_sql_inner(
                 sql_string(name)
             )
         }
-        db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody => "SELECT NULL WHERE FALSE".to_string(),
+        db::ObjectSourceKind::Trigger
+        | db::ObjectSourceKind::Package
+        | db::ObjectSourceKind::PackageBody
+        | db::ObjectSourceKind::Type
+        | db::ObjectSourceKind::TypeBody => "SELECT NULL WHERE FALSE".to_string(),
     }
 }
 
@@ -5065,9 +5082,12 @@ pub fn oracle_object_source_sql(schema: &str, name: &str, kind: &db::ObjectSourc
         db::ObjectSourceKind::MaterializedView => "MATERIALIZED_VIEW",
         db::ObjectSourceKind::Procedure => "PROCEDURE",
         db::ObjectSourceKind::Function => "FUNCTION",
+        db::ObjectSourceKind::Trigger => "TRIGGER",
         db::ObjectSourceKind::Sequence => "SEQUENCE",
         db::ObjectSourceKind::Package => "PACKAGE",
         db::ObjectSourceKind::PackageBody => "PACKAGE_BODY",
+        db::ObjectSourceKind::Type => "TYPE",
+        db::ObjectSourceKind::TypeBody => "TYPE_BODY",
     };
     if schema.trim().is_empty() {
         format!("SELECT DBMS_METADATA.GET_DDL({}, {}) FROM DUAL", sql_string(object_type), sql_string(name))
@@ -5095,9 +5115,12 @@ pub fn mysql_object_source_sql(database: &str, name: &str, kind: &db::ObjectSour
         db::ObjectSourceKind::View => format!("SHOW CREATE VIEW {qualified_name}"),
         db::ObjectSourceKind::Procedure => format!("SHOW CREATE PROCEDURE {qualified_name}"),
         db::ObjectSourceKind::Function => format!("SHOW CREATE FUNCTION {qualified_name}"),
-        db::ObjectSourceKind::Sequence
+        db::ObjectSourceKind::Trigger
+        | db::ObjectSourceKind::Sequence
         | db::ObjectSourceKind::Package
         | db::ObjectSourceKind::PackageBody
+        | db::ObjectSourceKind::Type
+        | db::ObjectSourceKind::TypeBody
         | db::ObjectSourceKind::MaterializedView => String::new(),
     }
 }
@@ -5313,6 +5336,7 @@ async fn oracle_agent_list_objects(
                 name,
                 object_type,
                 schema,
+                valid: None,
                 signature: None,
                 comment: None,
                 created_at: None,

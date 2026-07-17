@@ -556,6 +556,26 @@ func TestXuguListObjectsQueryIncludesProgrammableObjects(t *testing.T) {
 	assertArgs(t, query.Args, wantArgs)
 }
 
+func TestXuguObjectSourceQuerySupportsSharedObjectKinds(t *testing.T) {
+	for _, objectType := range []string{"TRIGGER", "PACKAGE_BODY", "TYPE", "TYPE_BODY"} {
+		query, _, err := objectSourceQuery("APP", "demo", objectType)
+		if err != nil {
+			t.Fatalf("%s should support object source lookup: %v", objectType, err)
+		}
+		if strings.TrimSpace(query) == "" {
+			t.Fatalf("%s should produce source SQL", objectType)
+		}
+	}
+
+	packageBodyQuery, _, err := objectSourceQuery("APP", "demo", "PACKAGE_BODY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(packageBodyQuery, "TO_CHAR(k.BODY)") || strings.Contains(packageBodyQuery, "k.SPEC") {
+		t.Fatalf("package body query must request only the body: %s", packageBodyQuery)
+	}
+}
+
 func TestMetadataListConstraintsFromParams(t *testing.T) {
 	params := map[string]json.RawMessage{
 		"filter":       json.RawMessage(`"tab"`),
@@ -663,7 +683,6 @@ func contains(values []string, target string) bool {
 	return false
 }
 
-
 // -- fake drivers for timeout tests --
 
 func init() {
@@ -690,13 +709,13 @@ type xuguBlockingConn struct{}
 func (c *xuguBlockingConn) Prepare(query string) (driver.Stmt, error) {
 	return &xuguBlockingStmt{}, nil
 }
-func (c *xuguBlockingConn) Close() error { return nil }
+func (c *xuguBlockingConn) Close() error              { return nil }
 func (c *xuguBlockingConn) Begin() (driver.Tx, error) { return nil, errors.New("not supported") }
 
 type xuguBlockingStmt struct{}
 
-func (s *xuguBlockingStmt) Close() error      { return nil }
-func (s *xuguBlockingStmt) NumInput() int      { return -1 }
+func (s *xuguBlockingStmt) Close() error  { return nil }
+func (s *xuguBlockingStmt) NumInput() int { return -1 }
 func (s *xuguBlockingStmt) Exec(args []driver.Value) (driver.Result, error) {
 	<-xuguBlockingUnblock
 	return nil, errors.New("killed")
@@ -717,13 +736,13 @@ type xuguFastConn struct{}
 func (c *xuguFastConn) Prepare(query string) (driver.Stmt, error) {
 	return &xuguFastStmt{}, nil
 }
-func (c *xuguFastConn) Close() error { return nil }
+func (c *xuguFastConn) Close() error              { return nil }
 func (c *xuguFastConn) Begin() (driver.Tx, error) { return nil, errors.New("not supported") }
 
 type xuguFastStmt struct{}
 
-func (s *xuguFastStmt) Close() error      { return nil }
-func (s *xuguFastStmt) NumInput() int      { return -1 }
+func (s *xuguFastStmt) Close() error  { return nil }
+func (s *xuguFastStmt) NumInput() int { return -1 }
 func (s *xuguFastStmt) Exec(args []driver.Value) (driver.Result, error) {
 	return driver.ResultNoRows, nil
 }

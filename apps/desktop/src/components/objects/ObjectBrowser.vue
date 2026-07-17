@@ -99,7 +99,7 @@ import { createSidePanelRequestGuard } from "@/lib/table/sidePanelRequestGuard";
 import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
 
-type ObjectFilter = "all" | "tables" | "views" | "materializedViews" | "procedures" | "functions" | "sequences" | "packages";
+type ObjectFilter = "all" | "tables" | "views" | "materializedViews" | "procedures" | "functions" | "triggers" | "sequences" | "packages" | "types";
 type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
 
 const props = defineProps<{
@@ -236,8 +236,10 @@ const viewCount = computed(() => rows.value.filter((row) => row.type === "VIEW")
 const materializedViewCount = computed(() => rows.value.filter((row) => row.type === "MATERIALIZED_VIEW").length);
 const procedureCount = computed(() => rows.value.filter((row) => row.type === "PROCEDURE").length);
 const functionCount = computed(() => rows.value.filter((row) => row.type === "FUNCTION").length);
+const triggerCount = computed(() => rows.value.filter((row) => row.type === "TRIGGER").length);
 const sequenceCount = computed(() => rows.value.filter((row) => row.type === "SEQUENCE").length);
 const packageCount = computed(() => rows.value.filter((row) => row.type === "PACKAGE" || row.type === "PACKAGE_BODY").length);
+const typeCount = computed(() => rows.value.filter((row) => row.type === "TYPE" || row.type === "TYPE_BODY").length);
 const canOpenStructureEditor = computed(() => supportsTableStructureEditing(tableStructureDatabaseType.value));
 const canOpenDiagram = computed(() => !!props.database && supportsSchemaDiagram(effectiveDatabaseType.value));
 const canOpenTableImport = computed(() => !!props.database && supportsTableImport(effectiveDatabaseType.value));
@@ -253,8 +255,10 @@ const objectFilters = computed<ObjectFilter[]>(() =>
       ["materializedViews", materializedViewCount.value],
       ["procedures", procedureCount.value],
       ["functions", functionCount.value],
+      ["triggers", triggerCount.value],
       ["sequences", sequenceCount.value],
       ["packages", packageCount.value],
+      ["types", typeCount.value],
     ] as Array<[ObjectFilter, number]>
   )
     .filter(([filter, count]) => filter === "all" || count > 0)
@@ -526,8 +530,10 @@ function iconFor(row: ObjectBrowserRow) {
   if (row.type === "VIEW" || row.type === "MATERIALIZED_VIEW") return Eye;
   if (row.type === "PROCEDURE") return ScrollText;
   if (row.type === "FUNCTION") return Braces;
+  if (row.type === "TRIGGER") return RotateCcw;
   if (row.type === "SEQUENCE") return ListTree;
   if (row.type === "PACKAGE" || row.type === "PACKAGE_BODY") return Package;
+  if (row.type === "TYPE" || row.type === "TYPE_BODY") return Braces;
   return Table2;
 }
 
@@ -536,9 +542,12 @@ function typeLabel(type: ObjectBrowserRow["type"]) {
   if (type === "VIEW") return t("objects.view");
   if (type === "PROCEDURE") return t("objects.procedure");
   if (type === "FUNCTION") return t("objects.function");
+  if (type === "TRIGGER") return t("objects.trigger");
   if (type === "SEQUENCE") return t("objects.sequence");
   if (type === "PACKAGE") return t("objects.package");
   if (type === "PACKAGE_BODY") return t("objects.packageBody");
+  if (type === "TYPE") return t("objects.typeDefinition");
+  if (type === "TYPE_BODY") return t("objects.typeBody");
   return t("objects.table");
 }
 
@@ -635,8 +644,10 @@ function rowMatchesObjectFilter(row: ObjectBrowserRow) {
   if (objectFilter.value === "materializedViews") return row.type === "MATERIALIZED_VIEW";
   if (objectFilter.value === "procedures") return row.type === "PROCEDURE";
   if (objectFilter.value === "functions") return row.type === "FUNCTION";
+  if (objectFilter.value === "triggers") return row.type === "TRIGGER";
   if (objectFilter.value === "sequences") return row.type === "SEQUENCE";
   if (objectFilter.value === "packages") return row.type === "PACKAGE" || row.type === "PACKAGE_BODY";
+  if (objectFilter.value === "types") return row.type === "TYPE" || row.type === "TYPE_BODY";
   return true;
 }
 
@@ -673,8 +684,10 @@ function iconClass(type: ObjectBrowserRow["type"]) {
   if (type === "VIEW" || type === "MATERIALIZED_VIEW") return "text-purple-500";
   if (type === "PROCEDURE") return "text-blue-500";
   if (type === "FUNCTION") return "text-amber-500";
+  if (type === "TRIGGER") return "text-rose-500";
   if (type === "SEQUENCE") return "text-emerald-500";
   if (type === "PACKAGE" || type === "PACKAGE_BODY") return "text-cyan-500";
+  if (type === "TYPE" || type === "TYPE_BODY") return "text-violet-500";
   return "text-green-500";
 }
 
@@ -682,8 +695,10 @@ function iconBgClass(type: ObjectBrowserRow["type"]) {
   if (type === "VIEW" || type === "MATERIALIZED_VIEW") return "object-browser-icon-bg object-browser-icon-bg-view";
   if (type === "PROCEDURE") return "object-browser-icon-bg object-browser-icon-bg-procedure";
   if (type === "FUNCTION") return "object-browser-icon-bg object-browser-icon-bg-function";
+  if (type === "TRIGGER") return "object-browser-icon-bg object-browser-icon-bg-procedure";
   if (type === "SEQUENCE") return "object-browser-icon-bg object-browser-icon-bg-sequence";
   if (type === "PACKAGE" || type === "PACKAGE_BODY") return "object-browser-icon-bg object-browser-icon-bg-package";
+  if (type === "TYPE" || type === "TYPE_BODY") return "object-browser-icon-bg object-browser-icon-bg-function";
   return "object-browser-icon-bg object-browser-icon-bg-table";
 }
 
@@ -1013,14 +1028,16 @@ async function openSource(row: ObjectBrowserRow) {
   try {
     const result = await api.getObjectSource(connectionId, database, schema, row.name, row.type as ObjectSourceKind);
     if (sidePanelGuard.isStale(epoch)) return;
-    sourceCanEdit.value = result.editable !== false && row.type !== "SEQUENCE";
-    const editable = await api.buildEditableObjectSource({
-      databaseType: effectiveDatabaseType.value,
-      objectType: row.type as ObjectSourceKind,
-      schema,
-      name: row.name,
-      source: result.source,
-    });
+    sourceCanEdit.value = result.editable !== false && !["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"].includes(row.type);
+    const editable = sourceCanEdit.value
+      ? await api.buildEditableObjectSource({
+          databaseType: effectiveDatabaseType.value,
+          objectType: row.type as ObjectSourceKind,
+          schema,
+          name: row.name,
+          source: result.source,
+        })
+      : result.source;
     if (sidePanelGuard.isStale(epoch)) return;
     // Viewing database source must preserve its original whitespace and comments;
     // formatting remains an explicit editor action instead of altering it on open.
@@ -2129,8 +2146,10 @@ function filterCount(filter: ObjectFilter) {
   if (filter === "materializedViews") return materializedViewCount.value;
   if (filter === "procedures") return procedureCount.value;
   if (filter === "functions") return functionCount.value;
+  if (filter === "triggers") return triggerCount.value;
   if (filter === "sequences") return sequenceCount.value;
   if (filter === "packages") return packageCount.value;
+  if (filter === "types") return typeCount.value;
   return rows.value.length;
 }
 
@@ -2145,11 +2164,15 @@ function filterLabel(filter: ObjectFilter) {
           : filter === "procedures"
             ? "objects.procedures"
             : filter === "functions"
-              ? "objects.functions"
+            ? "objects.functions"
+              : filter === "triggers"
+                ? "tree.triggers"
               : filter === "sequences"
                 ? "objects.sequences"
                 : filter === "packages"
                   ? "objects.packages"
+                  : filter === "types"
+                    ? "tree.types"
                   : "objects.all";
   return `${t(key)} ${filterCount(filter)}`;
 }

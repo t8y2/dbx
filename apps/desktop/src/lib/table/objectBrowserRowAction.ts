@@ -5,7 +5,7 @@ export type ObjectBrowserRowAction = "table-info" | "open-table" | "open-source"
 /**
  * Determine the action for a single click on an object browser row.
  * - TABLE → table-info (show table properties panel)
- * - VIEW/MATERIALIZED_VIEW/PROCEDURE/FUNCTION/SEQUENCE/PACKAGE/PACKAGE_BODY → open-source
+ * - VIEW/MATERIALIZED_VIEW/PROCEDURE/FUNCTION/TRIGGER/SEQUENCE/PACKAGE/PACKAGE_BODY/TYPE/TYPE_BODY → open-source
  * - otherwise → none
  */
 export function singleClickRowAction(row: ObjectBrowserRow | null | undefined): ObjectBrowserRowAction {
@@ -18,7 +18,7 @@ export function singleClickRowAction(row: ObjectBrowserRow | null | undefined): 
 /**
  * Determine the action for a double click on an object browser row.
  * - TABLE → open-table (open table data tab)
- * - VIEW/MATERIALIZED_VIEW/PROCEDURE/FUNCTION/SEQUENCE/PACKAGE/PACKAGE_BODY → open-source
+ * - VIEW/MATERIALIZED_VIEW/PROCEDURE/FUNCTION/TRIGGER/SEQUENCE/PACKAGE/PACKAGE_BODY/TYPE/TYPE_BODY → open-source
  * - otherwise → none
  */
 export function doubleClickRowAction(row: ObjectBrowserRow | null | undefined): ObjectBrowserRowAction {
@@ -63,5 +63,5 @@ export function shouldDeferSingleClick(row: ObjectBrowserRow | null | undefined,
 }
 
 function canOpenSource(row: ObjectBrowserRow): boolean {
-  return row.type === "VIEW" || row.type === "MATERIALIZED_VIEW" || row.type === "PROCEDURE" || row.type === "FUNCTION" || row.type === "SEQUENCE" || row.type === "PACKAGE" || row.type === "PACKAGE_BODY";
+  return row.type === "VIEW" || row.type === "MATERIALIZED_VIEW" || row.type === "PROCEDURE" || row.type === "FUNCTION" || row.type === "TRIGGER" || row.type === "SEQUENCE" || row.type === "PACKAGE" || row.type === "PACKAGE_BODY" || row.type === "TYPE" || row.type === "TYPE_BODY";
 }

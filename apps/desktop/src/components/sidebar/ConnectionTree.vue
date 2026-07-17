@@ -154,9 +154,9 @@ watch(deferredSearchQuery, (newQuery, oldQuery) => {
     .catch(() => {});
 });
 
-const searchableObjectGroupTypes = new Set<TreeNodeType>(["group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-sequences", "group-packages"]);
+const searchableObjectGroupTypes = new Set<TreeNodeType>(["group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-sequences", "group-packages", "group-types"]);
 const simpleObjectParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema"]);
-const simpleObjectChildTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "sequence", "package", "package-body", "load-more"]);
+const simpleObjectChildTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "trigger", "sequence", "package", "package-body", "type", "type-body", "load-more"]);
 
 function isSimpleObjectSearchParent(node: TreeNode): boolean {
   return settingsStore.editorSettings.sidebarObjectDisplay === "simple" && simpleObjectParentTypes.has(node.type) && node.isExpanded === true && (!!node.children?.some((child) => simpleObjectChildTypes.has(child.type)) || !!store.sidebarTableSearchQueries[node.id]?.trim());

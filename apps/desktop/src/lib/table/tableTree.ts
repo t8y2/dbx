@@ -504,7 +504,7 @@ export function buildSimpleObjectTreeNodes({ nodeId, connectionId, database, sch
 
   for (const obj of objects) {
     const objectType = normalizeObjectType(obj.object_type);
-    if (!["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "PACKAGE", "PACKAGE_BODY"].includes(objectType)) {
+    if (!["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"].includes(objectType)) {
       continue;
     }
 
@@ -540,6 +540,7 @@ export function buildSimpleObjectTreeNodes({ nodeId, connectionId, database, sch
         objectName: name,
         signature: signature || undefined,
         comment: obj.comment,
+        valid: obj.valid ?? undefined,
         connectionId,
         database,
         schema: childSchema,
@@ -557,9 +558,12 @@ function simpleObjectNodeType(objectType: DatabaseObjectTreeKind): TreeNodeType 
   if (objectType === "MATERIALIZED_VIEW") return "materialized_view";
   if (objectType === "PROCEDURE") return "procedure";
   if (objectType === "FUNCTION") return "function";
+  if (objectType === "TRIGGER") return "trigger";
   if (objectType === "SEQUENCE") return "sequence";
   if (objectType === "PACKAGE_BODY") return "package-body";
   if (objectType === "PACKAGE") return "package";
+  if (objectType === "TYPE_BODY") return "type-body";
+  if (objectType === "TYPE") return "type";
   return "table";
 }
 
@@ -598,6 +602,13 @@ const groupDefs: Array<{
     childType: "function",
   },
   {
+    key: "__triggers",
+    label: "tree.triggers",
+    objectTypes: ["TRIGGER"],
+    nodeType: "group-triggers",
+    childType: "trigger",
+  },
+  {
     key: "__sequences",
     label: "tree.sequences",
     objectTypes: ["SEQUENCE"],
@@ -611,9 +622,16 @@ const groupDefs: Array<{
     nodeType: "group-packages",
     childType: (objectType) => (objectType === "PACKAGE_BODY" ? "package-body" : "package"),
   },
+  {
+    key: "__types",
+    label: "tree.types",
+    objectTypes: ["TYPE", "TYPE_BODY"],
+    nodeType: "group-types",
+    childType: (objectType) => (objectType === "TYPE_BODY" ? "type-body" : "type"),
+  },
 ];
 
-const objectGroupNodeTypes = new Set<TreeNodeType>(["group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-sequences", "group-packages"]);
+const objectGroupNodeTypes = new Set<TreeNodeType>(["group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-sequences", "group-packages", "group-types"]);
 
 export function buildObjectGroupPlaceholderNodes({ nodeId, connectionId, database, schema, objectTypes }: { nodeId: string; connectionId: string; database: string; schema?: string; objectTypes: DatabaseObjectTreeKind[] }): TreeNode[] {
   const supported = new Set(objectTypes);
@@ -676,12 +694,13 @@ export function buildGroupedObjectTreeNodes({ nodeId, connectionId, database, sc
           const childSchema = obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema;
           const objectType = normalizeObjectType(obj.object_type);
           const childType = typeof def.childType === "function" ? def.childType(objectType) : def.childType;
-          const objectTypeSuffix = objectType === "PACKAGE" || objectType === "PACKAGE_BODY" ? `:${objectType}` : "";
+          const objectTypeSuffix = objectType === "PACKAGE" || objectType === "PACKAGE_BODY" || objectType === "TYPE" || objectType === "TYPE_BODY" ? `:${objectType}` : "";
           return {
             id: `${nodeId}:${def.key}:${childSchema ? `${childSchema}:` : ""}${obj.name}${objectTypeSuffix}`,
             label: obj.name,
             type: childType,
             comment: obj.comment,
+            valid: obj.valid ?? undefined,
             connectionId,
             database,
             schema: childSchema,

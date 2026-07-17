@@ -320,9 +320,12 @@ fn object_type_keyword(object_type: &ObjectSourceKind) -> &'static str {
         ObjectSourceKind::MaterializedView => "MATERIALIZED_VIEW",
         ObjectSourceKind::Procedure => "PROCEDURE",
         ObjectSourceKind::Function => "FUNCTION",
+        ObjectSourceKind::Trigger => "TRIGGER",
         ObjectSourceKind::Sequence => "SEQUENCE",
         ObjectSourceKind::Package => "PACKAGE",
         ObjectSourceKind::PackageBody => "PACKAGE BODY",
+        ObjectSourceKind::Type => "TYPE",
+        ObjectSourceKind::TypeBody => "TYPE BODY",
     }
 }
 
@@ -819,12 +822,18 @@ fn parse_object_source_kind(value: &str) -> Option<ObjectSourceKind> {
         Some(ObjectSourceKind::Procedure)
     } else if value.eq_ignore_ascii_case("FUNCTION") {
         Some(ObjectSourceKind::Function)
+    } else if value.eq_ignore_ascii_case("TRIGGER") {
+        Some(ObjectSourceKind::Trigger)
     } else if value.eq_ignore_ascii_case("SEQUENCE") {
         Some(ObjectSourceKind::Sequence)
     } else if value.eq_ignore_ascii_case("PACKAGE") {
         Some(ObjectSourceKind::Package)
     } else if value.eq_ignore_ascii_case("PACKAGE BODY") || value.eq_ignore_ascii_case("PACKAGE_BODY") {
         Some(ObjectSourceKind::PackageBody)
+    } else if value.eq_ignore_ascii_case("TYPE") {
+        Some(ObjectSourceKind::Type)
+    } else if value.eq_ignore_ascii_case("TYPE BODY") || value.eq_ignore_ascii_case("TYPE_BODY") {
+        Some(ObjectSourceKind::TypeBody)
     } else {
         None
     }
@@ -1249,6 +1258,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(sql, "CREATE OR REPLACE PACKAGE BODY PAYROLL AS\nEND PAYROLL;");
+    }
+
+    #[test]
+    fn parses_programmable_metadata_object_kinds() {
+        assert_eq!(parse_object_source_kind("TRIGGER"), Some(ObjectSourceKind::Trigger));
+        assert_eq!(parse_object_source_kind("TYPE"), Some(ObjectSourceKind::Type));
+        assert_eq!(parse_object_source_kind("TYPE_BODY"), Some(ObjectSourceKind::TypeBody));
+        assert_eq!(parse_object_source_kind("PACKAGE BODY"), Some(ObjectSourceKind::PackageBody));
     }
 
     #[test]

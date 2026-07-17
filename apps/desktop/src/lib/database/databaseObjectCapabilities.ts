@@ -1,6 +1,6 @@
 import type { DatabaseType } from "@/types/database";
 
-export type SidebarObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY";
+export type SidebarObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
 
 export interface DatabaseObjectCapabilities {
   sidebarObjects: SidebarObjectKind[];
@@ -15,6 +15,7 @@ const ROUTINE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUN
 const POSTGRES_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE"];
 const POSTGRES_LIKE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION"];
 const ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY"];
+const XUGU_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"];
 
 const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   // postgres
@@ -31,6 +32,7 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   ["oracle", ORACLE_OBJECTS],
   ["dameng", ORACLE_OBJECTS],
   ["oceanbase-oracle", ORACLE_OBJECTS],
+  ["xugu", XUGU_OBJECTS],
   // table and view
   ["sqlite", TABLE_VIEW_OBJECTS],
   ["rqlite", TABLE_VIEW_OBJECTS],
@@ -74,7 +76,10 @@ export function normalizeSidebarObjectKind(type: string): SidebarObjectKind {
   const value = type.toUpperCase();
   const normalized = value.replace(/[\s-]+/g, "_");
   if (normalized.includes("PACKAGE_BODY")) return "PACKAGE_BODY";
+  if (normalized.includes("TYPE_BODY")) return "TYPE_BODY";
   if (normalized.includes("PACKAGE")) return "PACKAGE";
+  if (normalized.includes("TRIGGER")) return "TRIGGER";
+  if (normalized.includes("TYPE")) return "TYPE";
   if (normalized.includes("MATERIALIZED_VIEW")) return "MATERIALIZED_VIEW";
   if (value.includes("VIEW")) return "VIEW";
   if (value.includes("SEQ")) return "SEQUENCE";

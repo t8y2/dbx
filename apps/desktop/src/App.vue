@@ -1575,14 +1575,17 @@ async function handleQuickOpenSelect(item: any) {
       tableName: item.objectName || item.tableName,
       tableType: item.type === "view" ? "VIEW" : item.type === "materialized_view" ? "MATERIALIZED_VIEW" : "TABLE",
     });
-  } else if (item.type === "procedure" || item.type === "function" || item.type === "sequence" || item.type === "package" || item.type === "package-body") {
+  } else if (item.type === "procedure" || item.type === "function" || item.type === "trigger" || item.type === "sequence" || item.type === "package" || item.type === "package-body" || item.type === "type" || item.type === "type-body") {
     // Open the object source in a source tab
     const objectTypeMap: Record<string, ObjectSourceKind> = {
       procedure: "PROCEDURE",
       function: "FUNCTION",
+      trigger: "TRIGGER",
       sequence: "SEQUENCE",
       package: "PACKAGE",
       "package-body": "PACKAGE_BODY",
+      type: "TYPE",
+      "type-body": "TYPE_BODY",
     };
 
     const objectType = objectTypeMap[item.type];
@@ -1593,7 +1596,7 @@ async function handleQuickOpenSelect(item: any) {
       const result = await api.getObjectSource(item.connectionId, item.database, schema, item.objectName || item.tableName, objectType);
       const tabId = queryStore.createTab(item.connectionId, item.database, `Source - ${item.objectName || item.tableName}`);
       queryStore.updateSql(tabId, result.source);
-      if (item.type !== "sequence") {
+      if (item.type !== "sequence" && item.type !== "trigger" && item.type !== "type" && item.type !== "type-body") {
         queryStore.setObjectSource(tabId, {
           schema,
           name: item.objectName || item.tableName,

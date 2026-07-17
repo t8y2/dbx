@@ -445,7 +445,7 @@ function hasNodeDatabaseContext(node: TreeNode): node is TreeNode & { connection
   return !!node.connectionId && hasTreeNodeDatabaseContext(node);
 }
 
-const groupTypes: Set<TreeNodeType> = new Set(["group-columns", "group-indexes", "group-fkeys", "group-triggers", "group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-sequences", "group-packages", "group-partitions", "group-extensions"]);
+const groupTypes: Set<TreeNodeType> = new Set(["group-columns", "group-indexes", "group-fkeys", "group-triggers", "group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-sequences", "group-packages", "group-types", "group-partitions", "group-extensions"]);
 
 function isGroupLabel(node: TreeNode): boolean {
   return groupTypes.has(node.type);
@@ -642,7 +642,7 @@ function runRowClickAction(clickDetail: number) {
     scheduleOpenData(node);
   } else if (isDocumentBrowserTreeNode(node.type)) {
     openMongoTreeData(node);
-  } else if (node.type === "procedure" || node.type === "function" || node.type === "sequence" || node.type === "package" || node.type === "package-body") {
+  } else if (node.type === "procedure" || node.type === "function" || node.type === "trigger" || node.type === "sequence" || node.type === "package" || node.type === "package-body" || node.type === "type" || node.type === "type-body") {
     openObjectSourceDialog(false);
   } else if (action === "toggle") {
     toggle();
@@ -2833,7 +2833,7 @@ const canOpenFieldLineage = computed(() => {
 
 const hasTypeMenu = computed(() => {
   const t = activeNode.value.type;
-  return t === "connection" || t === "database" || t === "schema" || t === "table" || t === "view" || t === "column" || t === "procedure" || t === "function" || t === "package" || t === "package-body" || isGroupLabel(activeNode.value);
+  return t === "connection" || t === "database" || t === "schema" || t === "table" || t === "view" || t === "column" || t === "procedure" || t === "function" || t === "trigger" || t === "package" || t === "package-body" || t === "type" || t === "type-body" || isGroupLabel(activeNode.value);
 });
 
 const isSelected = computed(() => connectionStore.selectedTreeNodeId === activeNode.value.id);
@@ -3871,7 +3871,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     return true;
   }
 
-  if (node.type === "index" || node.type === "fkey" || node.type === "trigger") {
+  if (node.type === "index" || node.type === "fkey" || (node.type === "trigger" && !!node.tableName)) {
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     if (node.type === "index" && canOpenStructureEditor.value) {
       items.push({ label: "", separator: true });
@@ -3931,7 +3931,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     return true;
   }
 
-  if (node.type === "package" || node.type === "package-body") {
+  if (node.type === "trigger" || node.type === "package" || node.type === "package-body" || node.type === "type" || node.type === "type-body") {
     items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });

@@ -574,6 +574,22 @@ func TestXuguObjectSourceQuerySupportsSharedObjectKinds(t *testing.T) {
 	if !strings.Contains(packageBodyQuery, "TO_CHAR(k.BODY)") || strings.Contains(packageBodyQuery, "k.SPEC") {
 		t.Fatalf("package body query must request only the body: %s", packageBodyQuery)
 	}
+
+	typeSpecQuery, _, err := objectSourceQuery("APP", "demo", "TYPE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(typeSpecQuery, "ALL_TYPES") || !strings.Contains(typeSpecQuery, "TO_CHAR(u.SPEC)") {
+		t.Fatalf("type query must return catalog SPEC content: %s", typeSpecQuery)
+	}
+
+	typeBodyQuery, _, err := objectSourceQuery("APP", "demo", "TYPE_BODY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(typeBodyQuery, "ALL_TYPES") || !strings.Contains(typeBodyQuery, "TO_CHAR(u.BODY)") || !strings.Contains(typeBodyQuery, "u.BODY IS NOT NULL") {
+		t.Fatalf("type body query must return catalog BODY content: %s", typeBodyQuery)
+	}
 }
 
 func TestMetadataListConstraintsFromParams(t *testing.T) {

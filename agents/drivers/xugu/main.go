@@ -1703,7 +1703,7 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 	result := map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": builder.String()}
 	normalizedType := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(objectType), "_", " "))
 	if normalizedType == "TYPE" || normalizedType == "TYPE BODY" {
-		// XuguDB exposes type metadata but not a reconstructable type DDL.
+		// Type source is exposed as catalog SPEC/BODY text, but cannot be safely edited as DDL.
 		result["editable"] = false
 	}
 	return result, rows.Err()
@@ -2186,10 +2186,19 @@ SELECT COALESCE(TO_CHAR(k.BODY), '')
 FROM SYS_PACKAGES k
 JOIN SYS_SCHEMAS s ON s.DB_ID = k.DB_ID AND s.SCHEMA_ID = k.SCHEMA_ID
 WHERE UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(k.PACK_NAME) = UPPER(?)`, []any{schema, name}, nil
-	case "TYPE", "TYPE BODY", "TYPE_BODY":
+	case "TYPE":
 		return `
-SELECT '-- XuguDB does not expose reconstructable DDL for this TYPE object.'
-FROM DUAL`, nil, nil
+SELECT COALESCE(TO_CHAR(u.SPEC), '')
+FROM ALL_TYPES u
+JOIN ALL_SCHEMAS s ON s.DB_ID = u.DB_ID AND s.SCHEMA_ID = u.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(u.TYPE_NAME) = UPPER(?)`, []any{schema, name}, nil
+	case "TYPE BODY", "TYPE_BODY":
+		return `
+SELECT COALESCE(TO_CHAR(u.BODY), '')
+FROM ALL_TYPES u
+JOIN ALL_SCHEMAS s ON s.DB_ID = u.DB_ID AND s.SCHEMA_ID = u.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(u.TYPE_NAME) = UPPER(?)
+  AND u.BODY IS NOT NULL`, []any{schema, name}, nil
 	default:
 		return "", nil, fmt.Errorf("object source is not supported for %s", objectType)
 	}

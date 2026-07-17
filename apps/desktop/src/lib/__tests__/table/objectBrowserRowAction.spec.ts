@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { doubleClickRowAction, resolveRowClickAction, shouldDeferSingleClick, singleClickRowAction } from "@/lib/table/objectBrowserRowAction";
+import { doubleClickRowAction, isSourceOnlyObjectBrowserRow, resolveRowClickAction, shouldDeferSingleClick, singleClickRowAction } from "@/lib/table/objectBrowserRowAction";
 import type { ObjectBrowserRow } from "@/lib/table/objectBrowserRows";
 
 function row(type: ObjectBrowserRow["type"], name = "test"): ObjectBrowserRow {
@@ -64,6 +64,17 @@ describe("doubleClickRowAction", () => {
 
   it("returns none for null/undefined", () => {
     expect(doubleClickRowAction(null)).toBe("none");
+  });
+});
+
+describe("isSourceOnlyObjectBrowserRow", () => {
+  it.each(["TRIGGER", "TYPE", "TYPE_BODY"] as const)("marks %s as source-only", (type) => {
+    expect(isSourceOnlyObjectBrowserRow(row(type))).toBe(true);
+  });
+
+  it("keeps procedure and function mutation menus separate", () => {
+    expect(isSourceOnlyObjectBrowserRow(row("PROCEDURE"))).toBe(false);
+    expect(isSourceOnlyObjectBrowserRow(row("FUNCTION"))).toBe(false);
   });
 });
 

@@ -62,6 +62,14 @@ export function shouldDeferSingleClick(row: ObjectBrowserRow | null | undefined,
   return single !== double && action === single;
 }
 
+/**
+ * Objects with source metadata but no supported object-browser mutation API.
+ * Their menu intentionally exposes only source viewing and copying.
+ */
+export function isSourceOnlyObjectBrowserRow(row: ObjectBrowserRow): boolean {
+  return row.type === "TRIGGER" || row.type === "SEQUENCE" || row.type === "PACKAGE" || row.type === "PACKAGE_BODY" || row.type === "TYPE" || row.type === "TYPE_BODY";
+}
+
 function canOpenSource(row: ObjectBrowserRow): boolean {
   return row.type === "VIEW" || row.type === "MATERIALIZED_VIEW" || row.type === "PROCEDURE" || row.type === "FUNCTION" || row.type === "TRIGGER" || row.type === "SEQUENCE" || row.type === "PACKAGE" || row.type === "PACKAGE_BODY" || row.type === "TYPE" || row.type === "TYPE_BODY";
 }

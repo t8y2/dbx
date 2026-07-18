@@ -54,13 +54,19 @@ export function treeItemPaddingLeft(depth: number): string {
   return `${depth * 16 + 8}px`;
 }
 
-export function usesFullWidthTreeLabel(type: TreeNodeType, allowHorizontalScroll: boolean): boolean {
-  return allowHorizontalScroll && fullWidthLabelTypes.has(type);
+export const trailingCommentGapPx = 8;
+
+export function trailingCommentAvailableWidth(containerWidth: number, leadingWidth: number): number {
+  return Math.max(0, Math.floor(containerWidth - leadingWidth - trailingCommentGapPx));
+}
+
+export function usesFullWidthTreeLabel(type: TreeNodeType, allowHorizontalScroll: boolean, hasTrailingComment = false): boolean {
+  return allowHorizontalScroll && !hasTrailingComment && fullWidthLabelTypes.has(type);
 }
 
 export function treeLabelWidthClass({ fullWidth, hasTrailingComment }: { fullWidth: boolean; hasTrailingComment: boolean }): string {
   if (fullWidth) return "shrink-0 whitespace-nowrap";
-  return hasTrailingComment ? "min-w-0 flex-1 truncate" : "min-w-0 truncate";
+  return hasTrailingComment ? "min-w-0 flex-auto overflow-hidden whitespace-nowrap" : "min-w-0 truncate";
 }
 
 export function canTreeNodeExpand(type: TreeNodeType): boolean {

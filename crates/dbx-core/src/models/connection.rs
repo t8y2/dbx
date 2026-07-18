@@ -2097,7 +2097,7 @@ mod tests {
 
         config.db_type = DatabaseType::Postgres;
         assert_eq!(config.effective_database(), Some(" analytics "));
-        assert_eq!(config.connection_url(), "postgres://root:secret@10.1.2.3:2883/%20analytics%20");
+        assert_eq!(config.connection_url(), "postgres://root:secret@10.1.2.3:2883/%20analytics%20?sslmode=disable");
     }
 
     #[test]
@@ -2789,7 +2789,7 @@ mod tests {
         config.db_type = DatabaseType::Postgres;
         config.driver_profile = Some("cockroachdb".to_string());
 
-        assert_eq!(config.connection_url(), "postgres://root:secret@10.1.2.3:2883/defaultdb");
+        assert_eq!(config.connection_url(), "postgres://root:secret@10.1.2.3:2883/defaultdb?sslmode=disable");
     }
 
     #[test]

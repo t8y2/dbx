@@ -4285,7 +4285,7 @@ mod tests {
 
         assert_eq!(
             connection_url_for_endpoint(&config, &config.host, config.port),
-            "postgres://gaussdb:secret@127.0.0.1:3306/postgres"
+            "postgres://gaussdb:secret@127.0.0.1:3306/postgres?sslmode=disable"
         );
     }
 

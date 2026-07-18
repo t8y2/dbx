@@ -862,7 +862,20 @@ fn xlsx_cell_value_with_temporal_kind(cell: &Data, temporal_kind: Option<XlsxTem
 fn xlsx_numeric_display_text(value: f64, style: Option<&XlsxCellStyle>) -> String {
     style
         .and_then(|style| style.number_format.as_deref())
-        .and_then(|format_code| ssfmt::format_default(value, format_code).ok())
+        .and_then(|format_code| {
+            let format = ssfmt::NumberFormat::parse(format_code).ok()?;
+            let mut options = ssfmt::FormatOptions::default();
+            let lcid = format.sections().iter().flat_map(|section| &section.parts).find_map(|part| match part {
+                ssfmt::ast::FormatPart::Locale(locale) => locale.lcid,
+                _ => None,
+            });
+            // ssfmt 0.1 only provides en-US locale data; preserve the German separators explicitly.
+            if lcid == Some(0x0407) {
+                options.locale.decimal_separator = ',';
+                options.locale.thousands_separator = '.';
+            }
+            Some(format.format(value, &options))
+        })
         .unwrap_or_else(|| value.to_string())
 }
 
@@ -1491,7 +1504,22 @@ fn normalize_import_temporal_value(
 }
 
 fn is_textual_import_target_type(data_type: &str) -> bool {
-    let lower = data_type.trim().to_ascii_lowercase();
+    let mut lower = data_type.trim().trim_matches('"').to_ascii_lowercase();
+    loop {
+        let unwrapped = ["nullable", "lowcardinality"].iter().find_map(|wrapper| {
+            lower
+                .strip_prefix(&format!("{wrapper}("))
+                .and_then(|inner| inner.strip_suffix(')'))
+                .map(|inner| inner.trim().to_string())
+        });
+        match unwrapped {
+            Some(inner) => lower = inner,
+            None => break,
+        }
+    }
+    if lower == "long raw" || lower.starts_with("long raw(") {
+        return false;
+    }
     let base = lower.split(['(', ':', ' ']).next().unwrap_or("").trim();
     matches!(
         base,
@@ -1503,6 +1531,9 @@ fn is_textual_import_target_type(data_type: &str) -> bool {
             | "nvarchar2"
             | "nchar"
             | "string"
+            | "fixedstring"
+            | "sysname"
+            | "long"
             | "text"
             | "tinytext"
             | "mediumtext"
@@ -2883,7 +2914,8 @@ mod tests {
         assert_eq!(display(1234.5, "#,##0.00"), "1,234.50");
         assert_eq!(display(1234.0, "0.00E+00"), "1.23E+03");
         assert_eq!(display(0.125, "0.0%"), "12.5%");
-        assert_eq!(display(1234.5, "[$€-407]#,##0.00"), "€1,234.50");
+        assert_eq!(display(1234.5, "[$€-407]#,##0.00"), "€1.234,50");
+        assert_eq!(display(1234.5, "[$-407]#,##0.00"), "1.234,50");
         assert_eq!(display(1234.5, "[$-409]#,##0.00"), "1,234.50");
         assert_eq!(display(12.5, "["), "12.5");
     }
@@ -2921,12 +2953,29 @@ mod tests {
                 serde_json::json!("1,234.50"),
                 serde_json::json!("1.23E+03"),
                 serde_json::json!("12.5%"),
-                serde_json::json!("€1,234.50"),
+                serde_json::json!("€1.234,50"),
                 serde_json::json!("1,234.50"),
                 serde_json::json!(10.0),
             ]
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn recognizes_supported_textual_import_target_types() {
+        for data_type in [
+            "FixedString(32)",
+            "Nullable(FixedString(32))",
+            "LowCardinality(String)",
+            "sysname",
+            "LONG",
+            "LONG VARCHAR",
+        ] {
+            assert!(is_textual_import_target_type(data_type), "{data_type}");
+        }
+        for data_type in ["LONG RAW", "BIGINT", "Nullable(Float64)"] {
+            assert!(!is_textual_import_target_type(data_type), "{data_type}");
+        }
     }
 
     #[test]
@@ -2950,6 +2999,39 @@ mod tests {
         );
 
         assert_eq!(selected, HashSet::from(["code_source".to_string()]));
+    }
+
+    #[test]
+    fn clickhouse_fixed_string_import_uses_excel_numeric_display_text() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-fixed-string-{}.xlsx", uuid::Uuid::new_v4()));
+        std::fs::write(&path, build_styled_test_xlsx(false, &[("A1", 5, 10.0)])).unwrap();
+        let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
+        let mappings = vec![TableImportColumnMapping {
+            source_column: "column_1".to_string(),
+            target_column: "code".to_string(),
+            target_data_type: None,
+        }];
+        let target_column_types = [("code".to_string(), "FixedString(16)".to_string())];
+        let text_source_columns = textual_source_columns_for_import(&mappings, &target_column_types);
+
+        let data =
+            parse_xlsx_file_with_options_and_text_columns(&path.to_string_lossy(), &options, 10, &text_source_columns)
+                .unwrap();
+        let batches = build_import_insert_batches(
+            &data,
+            &mappings,
+            &target_column_types,
+            "issue_3683_fixed_string",
+            "",
+            &DatabaseType::ClickHouse,
+            500,
+        )
+        .unwrap();
+
+        assert_eq!(text_source_columns, HashSet::from(["column_1".to_string()]));
+        assert_eq!(data.rows, vec![vec![serde_json::json!("10.0")]]);
+        assert_eq!(batches[0].sql, "INSERT INTO `issue_3683_fixed_string` (`code`) VALUES\n('10.0')");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

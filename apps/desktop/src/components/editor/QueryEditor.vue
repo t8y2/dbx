@@ -15,6 +15,7 @@ import { buildExecutionCandidates, hasMultipleExecutionTargets, supportsExecutio
 import { executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, executableStatementRangeStartingAt as executableStatementRangeStartingAtLine, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
 import { currentStatementFrameRangeTo, visualSqlColumnsWithInlineHints } from "@/lib/sql/currentStatementFrame";
 import { expandToSqlStatementWindow, parseInsertValueHints } from "@/lib/sql/insertValueHints";
+import { insertValueHintColumnNames } from "@/lib/sql/insertValueHintColumns";
 import { formatSqlText, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { blankLineDeletionChanges, replaceSelectedEditorText } from "@/lib/editor/queryEditorTextEdits";
 import { buildSqlInConditionFromPasteSource, insertTextForSqlInCondition } from "@/lib/sql/sqlInListPaste";
@@ -67,6 +68,7 @@ import { sqlSemanticTableNameSpansForSyntaxTree } from "@/lib/editor/codemirrorS
 import { startsQueryEditorRectangularSelection } from "@/lib/editor/queryEditorPointerSelection";
 import type { StatementExecutionMarker } from "@/lib/tabs/tabPresentation";
 import { isSchemaAware, isSingleDatabase, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
+import { metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
 import { usesLocalOnlyEditorCompletionMetadata, usesOnDemandOnlyEditorColumnMetadata } from "@/lib/metadata/completionMetadataPolicy";
 import { queryContextObjectActions, queryContextObjectRoute, queryTableCandidateAtSqlPosition, resolveQueryContextCandidateDatabase, resolveQueryContextObjectTarget, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
 import * as api from "@/lib/backend/api";
@@ -328,6 +330,7 @@ let cachedTables: SqlCompletionTable[] = [];
 let cachedCompletionObjects: SqlCompletionObject[] = [];
 // Persistent column cache keyed by "schema.table" or "table"
 const cachedColumnsByTable = new Map<string, SqlCompletionColumn[]>();
+const cachedInsertValueHintColumnsByTable = new Map<string, string[]>();
 const cachedForeignKeysByTable = new Map<string, SqlCompletionForeignKey[]>();
 const loadedColumnsByTable = new Set<string>();
 
@@ -1331,6 +1334,7 @@ function insertHintMetadataTarget(table: { name: string; schema?: string | null;
 
 function getInsertValueHintTableColumns(table: string, schema?: string, database?: string): string[] | undefined {
   const cacheKey = insertHintCacheKey({ name: table, schema, database });
+  if (props.databaseType === "sqlserver") return cachedInsertValueHintColumnsByTable.get(cacheKey);
   const cached = cachedColumnsByTable.get(cacheKey);
   if (!cached) return undefined;
   return cached.map((column) => column.name);
@@ -1340,14 +1344,25 @@ function requestInsertValueHintTableColumns(table: string, schema?: string, data
   if (!props.connectionId || props.database == null) return;
   if (props.databaseType === "redis" || props.databaseType === "mongodb" || props.databaseType === "elasticsearch") return;
   const cacheKey = insertHintCacheKey({ name: table, schema, database });
-  if (cachedColumnsByTable.has(cacheKey) || pendingInsertValueHintColumnLoads.has(cacheKey)) return;
+  const hasCachedColumns = props.databaseType === "sqlserver" ? cachedInsertValueHintColumnsByTable.has(cacheKey) : cachedColumnsByTable.has(cacheKey);
+  if (hasCachedColumns || pendingInsertValueHintColumnLoads.has(cacheKey)) return;
   const target = insertHintMetadataTarget({ name: table, schema, database });
   if (!target) return;
   pendingInsertValueHintColumnLoads.add(cacheKey);
-  void connectionStore
-    .listCompletionColumns(props.connectionId, target.database, table, target.schema)
-    .then((columns) => {
-      cachedColumnsByTable.set(cacheKey, columns);
+  const connectionId = props.connectionId;
+  const databaseType = props.databaseType;
+  const loadColumns = async () => {
+    if (databaseType === "sqlserver") {
+      const querySchema = metadataSchemaForConnection(connectionStore.getConfig(connectionId), target.database, target.schema);
+      const columns = await api.getColumns(connectionId, target.database, querySchema, table);
+      cachedInsertValueHintColumnsByTable.set(cacheKey, insertValueHintColumnNames(databaseType, columns));
+      return;
+    }
+    const columns = await connectionStore.listCompletionColumns(connectionId, target.database, table, target.schema);
+    cachedColumnsByTable.set(cacheKey, columns);
+  };
+  void loadColumns()
+    .then(() => {
       loadedColumnsByTable.add(cacheKey.toLowerCase());
       if (view.value) requestInsertValueHintsRefresh(view.value);
     })
@@ -2879,6 +2894,7 @@ function refreshCompletionCache() {
   cachedTables = [];
   cachedCompletionObjects = [];
   cachedColumnsByTable.clear();
+  cachedInsertValueHintColumnsByTable.clear();
   loadedColumnsByTable.clear();
   cachedForeignKeysByTable.clear();
 }

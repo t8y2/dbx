@@ -295,6 +295,26 @@ test("parseMongoWriteCommand accepts supported write commands", () => {
   });
 });
 
+test("parseMongoWriteCommand accepts legacy insert commands", () => {
+  assert.deepEqual(parseMongoWriteCommand('db.getCollection("accounting_reconciliations").insert({"accountId":999,"status":"done"});'), {
+    kind: "insert",
+    collection: "accounting_reconciliations",
+    docsJson: '{"accountId":999,"status":"done"}',
+  });
+  assert.deepEqual(parseMongoWriteCommand('db.projects.insert([{"name":"first"},{"name":"second"}])'), {
+    kind: "insert",
+    collection: "projects",
+    docsJson: '[{"name":"first"},{"name":"second"}]',
+  });
+  assert.deepEqual(parseMongoWriteCommand('db.projects.insertMany([{"name":"first"},{"name":"second"}])'), {
+    kind: "insert",
+    collection: "projects",
+    docsJson: '[{"name":"first"},{"name":"second"}]',
+  });
+  assert.equal(parseMongoWriteCommand('db.projects.insert({"name":"demo"},{"writeConcern":{"w":1}})'), null);
+  assert.equal(parseMongoWriteCommand("db.projects.insert()"), null);
+});
+
 test("parseMongoWriteCommand rejects invalid dropIndex and dropIndexes commands", () => {
   assert.equal(parseMongoWriteCommand("db.projects.dropIndex()"), null);
   assert.equal(parseMongoWriteCommand('db.projects.dropIndex("*")'), null);

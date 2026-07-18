@@ -421,6 +421,16 @@ export function parseMongoWriteCommand(input: string): MongoWriteCommand | null 
     return Array.isArray(JSON.parse(docs)) ? { kind: "insert", collection: insertMany.collection, docsJson: docs } : null;
   }
 
+  const insert = parseCollectionMethodTarget(source, "insert");
+  if (insert) {
+    const args = parseMethodArgs(source, insert.methodCallIndex);
+    if (!args || args.length !== 1 || !args[0]?.trim()) return null;
+    const docs = normalizeJsonArgument(args[0]);
+    if (!docs) return null;
+    const value = JSON.parse(docs);
+    return value !== null && typeof value === "object" ? { kind: "insert", collection: insert.collection, docsJson: docs } : null;
+  }
+
   for (const method of ["updateOne", "updateMany"] as const) {
     const target = parseCollectionMethodTarget(source, method);
     if (!target) continue;

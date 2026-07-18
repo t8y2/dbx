@@ -288,6 +288,33 @@ test("parseMongoWriteCommand accepts unquoted insert and update commands", () =>
   });
 });
 
+test("parseMongoWriteCommand accepts legacy insert commands", () => {
+  assert.deepEqual(
+    parseMongoWriteCommand(`db.getCollection("accounting_reconciliations").insert({
+      "accountId": 999,
+      "status": "done"
+    });`),
+    {
+      kind: "insert",
+      collection: "accounting_reconciliations",
+      docsJson: '{\n      "accountId": 999,\n      "status": "done"\n    }',
+    },
+  );
+  assert.deepEqual(parseMongoWriteCommand("db.products.insert([{name: 'first'}, {name: 'second'}])"), {
+    kind: "insert",
+    collection: "products",
+    docsJson: '[{"name": "first"}, {"name": "second"}]',
+  });
+  assert.deepEqual(parseMongoWriteCommand("db.products.insertMany([{name: 'first'}, {name: 'second'}])"), {
+    kind: "insert",
+    collection: "products",
+    docsJson: '[{"name": "first"}, {"name": "second"}]',
+  });
+  assert.equal(parseMongoWriteCommand("db.products.insert({name: 'demo'}, {writeConcern: {w: 1}})"), null);
+  assert.equal(parseMongoWriteCommand("db.products.insert()"), null);
+  assert.equal(parseMongoWriteCommand("db.products.insert('demo')"), null);
+});
+
 test("parseMongoWriteCommand accepts updateMany arrayFilters options", () => {
   assert.deepEqual(
     parseMongoWriteCommand(`db.issue_3231.updateMany(

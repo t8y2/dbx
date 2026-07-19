@@ -7,11 +7,8 @@ describe("sidebar tree item layout", () => {
     expect(usesFullWidthTreeLabel("table", true, true)).toBe(false);
   });
 
-  it("clips a table name without adding an ellipsis when a comment is visible", () => {
-    const className = treeLabelWidthClass({ fullWidth: false, hasTrailingComment: true });
-
-    expect(className).toBe("min-w-0 flex-auto overflow-hidden whitespace-nowrap");
-    expect(className).not.toContain("truncate");
+  it("lets a table name consume the available row width before truncating", () => {
+    expect(treeLabelWidthClass({ fullWidth: false, hasTrailingComment: true })).toBe("min-w-0 flex-1 truncate");
   });
 
   it("gives the comment only the width left after the full table name and gap", () => {

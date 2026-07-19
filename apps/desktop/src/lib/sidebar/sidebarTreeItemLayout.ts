@@ -66,7 +66,7 @@ export function usesFullWidthTreeLabel(type: TreeNodeType, allowHorizontalScroll
 
 export function treeLabelWidthClass({ fullWidth, hasTrailingComment }: { fullWidth: boolean; hasTrailingComment: boolean }): string {
   if (fullWidth) return "shrink-0 whitespace-nowrap";
-  return hasTrailingComment ? "min-w-0 flex-auto overflow-hidden whitespace-nowrap" : "min-w-0 truncate";
+  return hasTrailingComment ? "min-w-0 flex-1 truncate" : "min-w-0 truncate";
 }
 
 export function canTreeNodeExpand(type: TreeNodeType): boolean {

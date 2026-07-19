@@ -183,7 +183,7 @@ export function sqlCompletionContextFromSemantic(model: SqlSemanticModel, base: 
   const mutationSchema = mutationTarget?.qualifierParts[mutationTarget.qualifierParts.length - 1];
   const suggestTables = scope.kind === "table" || scope.kind === "schema" || scope.kind === "catalog";
   const suggestColumns = scope.kind === "columns";
-  const suggestRoutines = scope.kind === "routine";
+  const suggestRoutines = scope.kind === "routine" || (suggestColumns && base.suggestRoutines && !base.exclusiveColumnSuggestions);
   const projectionAliases = sqlSemanticProjectionAliasColumns(model).map((column) => column.name);
 
   return {
@@ -198,7 +198,7 @@ export function sqlCompletionContextFromSemantic(model: SqlSemanticModel, base: 
     suggestJoinConditions: model.cursorIntent.kind === "join_condition",
     exclusiveTableSuggestions: suggestTables,
     exclusiveColumnSuggestions: model.cursorIntent.kind === "alias_column" || model.cursorIntent.kind === "insert_column" || model.cursorIntent.kind === "update_column",
-    exclusiveRoutineSuggestions: suggestRoutines,
+    exclusiveRoutineSuggestions: scope.kind === "routine",
     prioritizeSelectAliases: base.prioritizeSelectAliases || projectionAliases.length > 0,
     selectAliases: projectionAliases.length > 0 ? projectionAliases : base.selectAliases,
     referencedTables: referencedTables.length > 0 ? referencedTables : base.referencedTables,

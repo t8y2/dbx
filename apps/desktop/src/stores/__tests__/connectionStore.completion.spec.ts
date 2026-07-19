@@ -37,6 +37,18 @@ function oracleConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function sqlServerConnection(): ConnectionConfig {
+  return {
+    ...postgresConnection(),
+    id: "sqlserver-1",
+    name: "SQL Server",
+    db_type: "sqlserver",
+    port: 1433,
+    username: "sa",
+    database: "app",
+  } as ConnectionConfig;
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((res) => {
@@ -242,7 +254,90 @@ describe("connectionStore completion assistant", () => {
     const objects = await store.listCompletionObjects("oracle-1", "ORCL", "CALC", 20, "HR", "PAYROLL", false, "APP");
 
     expect(completionAssistantSearch).toHaveBeenCalledWith(expect.objectContaining({ object_kinds: ["routine"], mask: "CALC", schema: "APP", parent_schema: "HR", parent_name: "PAYROLL", global_search: false }));
-    expect(objects).toEqual([expect.objectContaining({ name: "CALCULATE_BONUS", schema: "HR", type: "function", parentSchema: "HR", parentName: "PAYROLL", applyName: "HR.CALCULATE_BONUS", boost: 0 })]);
+    expect(objects).toEqual([expect.objectContaining({ name: "CALCULATE_BONUS", schema: "HR", type: "function", parentSchema: "HR", parentName: "PAYROLL", dataType: undefined, applyName: "HR.CALCULATE_BONUS", boost: 0 })]);
+  });
+
+  it("loads PostgreSQL routines by prefix and preserves return metadata", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [{ name: "st_area", kind: "function", schema: "public", data_type: "double precision", comment: "Returns an area" }],
+      incomplete: false,
+      fallback_used: false,
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      listCompletionObjects: vi.fn().mockResolvedValue([]),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection()];
+    store.connectedIds.add("pg-1");
+
+    const objects = await store.listCompletionObjects("pg-1", "app", "st_", 20, "public", undefined, false, "public", ["function"]);
+
+    expect(completionAssistantSearch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        object_kinds: ["function"],
+        mask: "st_",
+        schema: "public",
+        parent_schema: "public",
+        match_mode: "prefix",
+      }),
+    );
+    expect(objects).toEqual([
+      expect.objectContaining({
+        name: "st_area",
+        schema: "public",
+        type: "function",
+        dataType: "double precision",
+        comment: "Returns an area",
+        applyName: "st_area",
+        boost: 1000,
+      }),
+    ]);
+  });
+
+  it("searches default SQL Server schemas without treating the username as a schema", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [{ name: "st_area", kind: "function", schema: "dbo", data_type: "float" }],
+      incomplete: false,
+      fallback_used: false,
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      listCompletionObjects: vi.fn().mockResolvedValue([]),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [sqlServerConnection()];
+    store.connectedIds.add("sqlserver-1");
+
+    const objects = await store.listCompletionObjects("sqlserver-1", "app", "st_", 20);
+
+    expect(completionAssistantSearch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        schema: null,
+        parent_schema: null,
+        mask: "st_",
+      }),
+    );
+    expect(objects).toEqual([
+      expect.objectContaining({
+        name: "st_area",
+        schema: "dbo",
+        type: "function",
+        dataType: "float",
+        applyName: "dbo.st_area",
+        boost: 1000,
+      }),
+    ]);
   });
 
   it("limits concurrent completion column metadata requests per connection database", async () => {

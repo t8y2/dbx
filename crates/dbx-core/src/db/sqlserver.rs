@@ -1267,10 +1267,15 @@ fn sqlserver_completion_assistant_sql(request: &crate::types::CompletionAssistan
         }
         let object_like = sqlserver_completion_object_search_clause(request, &like_pattern);
         let object_visibility = sqlserver_visible_object_predicate();
+        let data_type = if object_kinds.iter().any(crate::types::CompletionAssistantObjectKind::is_routine_like) {
+            "CASE WHEN o.type IN ('IF','TF','FT') THEN 'table' ELSE (SELECT TOP (1) TYPE_NAME(p.user_type_id) FROM sys.parameters p WHERE p.object_id = o.object_id AND p.parameter_id = 0) END"
+        } else {
+            "CAST(NULL AS NVARCHAR(128))"
+        };
         queries.push(format!(
             "SELECT TOP ({limit}) o.name, s.name AS schema_name, \
              CASE o.type WHEN 'U' THEN 'TABLE' WHEN 'V' THEN 'VIEW' WHEN 'P' THEN 'PROCEDURE' WHEN 'FN' THEN 'FUNCTION' WHEN 'IF' THEN 'FUNCTION' WHEN 'TF' THEN 'FUNCTION' WHEN 'FS' THEN 'FUNCTION' WHEN 'FT' THEN 'FUNCTION' ELSE o.type_desc END AS object_type, \
-             CAST(NULL AS NVARCHAR(128)) AS parent_schema, CAST(NULL AS NVARCHAR(128)) AS parent_name, ep.value AS object_comment, CAST(NULL AS NVARCHAR(128)) AS data_type \
+             CAST(NULL AS NVARCHAR(128)) AS parent_schema, CAST(NULL AS NVARCHAR(128)) AS parent_name, ep.value AS object_comment, {data_type} AS data_type \
              FROM sys.objects o \
              JOIN sys.schemas s ON s.schema_id = o.schema_id \
              OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep \
@@ -2560,6 +2565,31 @@ mod tests {
         assert!(sql.contains("o.name = 'Users'"));
         assert!(sql.contains("LOWER(c.name) LIKE LOWER('%id%') ESCAPE '\\'"));
         assert!(sql.contains("CAST(NULL AS NVARCHAR(MAX)) AS object_comment"));
+    }
+
+    #[test]
+    fn sqlserver_completion_assistant_returns_function_result_types() {
+        let request = CompletionAssistantRequest {
+            connection_id: "c1".to_string(),
+            database: "app".to_string(),
+            schema: Some("dbo".to_string()),
+            object_kinds: vec![CompletionAssistantObjectKind::Routine],
+            mask: "fn_".to_string(),
+            case_sensitive: false,
+            global_search: false,
+            max_results: Some(50),
+            search_in_comments: false,
+            search_in_definitions: false,
+            parent_schema: Some("dbo".to_string()),
+            parent_name: None,
+            match_mode: Some(CompletionAssistantMatchMode::Prefix),
+        };
+
+        let sql = sqlserver_completion_assistant_sql(&request, 50);
+
+        assert!(sql.contains("WHEN o.type IN ('IF','TF','FT') THEN 'table'"));
+        assert!(sql.contains("p.parameter_id = 0"));
+        assert!(sql.contains("TYPE_NAME(p.user_type_id)"));
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc as StdArc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
-use tiberius::{AuthMethod, Client, ColumnData, Config, FromSql, QueryItem, QueryStream, SqlBrowser};
+use tiberius::{AuthMethod, Client, ColumnData, ColumnType, Config, FromSql, QueryItem, QueryStream, SqlBrowser};
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use tokio_util::sync::CancellationToken;
@@ -194,11 +194,14 @@ fn columns_from_metadata(metadata: &tiberius::ResultMetadata) -> Vec<String> {
     metadata.columns().iter().map(|c| c.name().to_string()).collect()
 }
 
-/// Map a tiberius column to a user-facing type name for the result-grid header.
-/// Uses the TDS column-type debug name lowercased; good enough for display, with
-/// no risk of mismatching the enum variants across tiberius versions.
 fn sqlserver_column_type_name(column: &tiberius::Column) -> String {
-    format!("{:?}", column.column_type()).to_lowercase()
+    match column.column_type() {
+        ColumnType::BigVarChar => "varchar".to_string(),
+        ColumnType::BigChar => "char".to_string(),
+        ColumnType::BigVarBin => "varbinary".to_string(),
+        ColumnType::BigBinary => "binary".to_string(),
+        column_type => format!("{column_type:?}").to_lowercase(),
+    }
 }
 
 fn column_types_from_metadata(metadata: &tiberius::ResultMetadata) -> Vec<String> {
@@ -2096,7 +2099,7 @@ mod tests {
     };
     use chrono::NaiveDate;
     use std::{borrow::Cow, time::Instant};
-    use tiberius::{ColumnData, IntoSql};
+    use tiberius::{Column, ColumnData, ColumnType, IntoSql};
 
     #[tokio::test]
     async fn sqlserver_ignores_non_info_tiberius_events() {
@@ -2164,6 +2167,19 @@ mod tests {
             sqlserver_cell_to_json(&cell),
             serde_json::Value::String("<ShowPlanXML><RelOp NodeId=\"0\" /></ShowPlanXML>".to_string())
         );
+    }
+
+    #[test]
+    fn sqlserver_uses_sql_type_names_for_tds_big_types() {
+        for (column_type, expected) in [
+            (ColumnType::BigVarChar, "varchar"),
+            (ColumnType::BigChar, "char"),
+            (ColumnType::BigVarBin, "varbinary"),
+            (ColumnType::BigBinary, "binary"),
+        ] {
+            let column = Column::new("value".to_string(), column_type);
+            assert_eq!(super::sqlserver_column_type_name(&column), expected);
+        }
     }
 
     #[test]

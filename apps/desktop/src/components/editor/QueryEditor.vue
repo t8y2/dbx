@@ -3130,7 +3130,7 @@ onMounted(async () => {
 
   buildSqlSignatureExtension = () =>
     showTooltip.compute(["doc", "selection"], (currentState) => {
-      const signature = getSqlFunctionSignatureHelp(currentState.doc.toString(), currentState.selection.main.head);
+      const signature = getSqlFunctionSignatureHelp(currentState.doc.toString(), currentState.selection.main.head, props.databaseType);
       if (!signature) return null;
       return {
         pos: currentState.selection.main.head,

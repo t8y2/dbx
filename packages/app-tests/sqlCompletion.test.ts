@@ -1782,6 +1782,27 @@ test("returns cast signature with AS syntax", () => {
   });
 });
 
+test("uses dialect-specific argument order for CONVERT completion and signature help", () => {
+  const sql = "select conv";
+  const sqlServerItems = buildSqlCompletionItems(sql, sql.length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "sqlserver",
+  });
+  const mysqlItems = buildSqlCompletionItems(sql, sql.length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+
+  assert.equal(sqlServerItems.find((item) => item.label === "CONVERT")?.apply, "CONVERT(${type}, ${expression})");
+  assert.equal(mysqlItems.find((item) => item.label === "CONVERT")?.apply, "CONVERT(${expression}, ${type})");
+
+  const functionSql = "select convert(";
+  assert.deepEqual(getSqlFunctionSignatureHelp(functionSql, functionSql.length, "sqlserver")?.parameters, ["type", "expression"]);
+  assert.deepEqual(getSqlFunctionSignatureHelp(functionSql, functionSql.length, "mysql")?.parameters, ["expression", "type"]);
+});
+
 test("returns null signature help outside function calls", () => {
   assert.equal(getSqlFunctionSignatureHelp("select created_at from users", "select created_at".length), null);
 });

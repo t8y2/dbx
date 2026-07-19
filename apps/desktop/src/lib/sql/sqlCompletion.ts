@@ -954,6 +954,7 @@ const POSTGRES_FUNCTION_SIGNATURES = new Map<string, string[]>([
 ]);
 
 const MYSQL_FUNCTION_SIGNATURES = new Map<string, string[]>([
+  ["CONVERT", ["expression", "type"]],
   ["DATE_FORMAT", ["date", "format"]],
   ["FROM_UNIXTIME", ["unix_timestamp"]],
   ["UNIX_TIMESTAMP", []],
@@ -975,6 +976,7 @@ const SQLITE_FUNCTION_SIGNATURES = new Map<string, string[]>([
 const CLOUDFLARE_D1_FUNCTION_SIGNATURES = new Map(Array.from(SQLITE_FUNCTION_SIGNATURES.entries()).filter(([name]) => name !== "NOW"));
 
 const SQLSERVER_FUNCTION_SIGNATURES = new Map<string, string[]>([
+  ["CONVERT", ["type", "expression"]],
   ["TRY_CAST", ["expression AS type"]],
   ["TRY_CONVERT", ["type", "expression"]],
   ["JSON_VALUE", ["expression", "path"]],
@@ -1619,7 +1621,7 @@ export function getSqlCompletionResultValidFor(sql: string, cursor: number): Reg
   return undefined;
 }
 
-export function getSqlFunctionSignatureHelp(sql: string, cursor: number): SqlFunctionSignatureHelp | null {
+export function getSqlFunctionSignatureHelp(sql: string, cursor: number, databaseType?: DatabaseType): SqlFunctionSignatureHelp | null {
   const beforeCursor = sql.slice(0, cursor);
   const openParenIndex = findActiveFunctionOpenParen(beforeCursor);
   if (openParenIndex == null) return null;
@@ -1628,7 +1630,7 @@ export function getSqlFunctionSignatureHelp(sql: string, cursor: number): SqlFun
   const name = /([A-Za-z_][\w$]*)$/.exec(beforeParen)?.[1]?.toUpperCase();
   if (!name) return null;
 
-  const parameters = SQL_FUNCTION_SIGNATURES.get(name);
+  const parameters = (databaseType ? DATABASE_FUNCTION_SIGNATURES[databaseType]?.get(name) : undefined) ?? SQL_FUNCTION_SIGNATURES.get(name);
   if (!parameters) return null;
 
   const activeParameter = countTopLevelCommas(beforeCursor.slice(openParenIndex + 1));

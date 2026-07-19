@@ -17,6 +17,7 @@ import type {
   ObjectSource,
   ObjectSourceKind,
   ColumnInfo,
+  SqlServerColumnMetadata,
   IndexInfo,
   ForeignKeyInfo,
   TriggerInfo,
@@ -787,6 +788,10 @@ export async function listSchemaInfos(connectionId: string, database: string): P
 
 export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<ColumnInfo[]> {
   return invoke("get_columns", { connectionId, database, schema, table, catalog });
+}
+
+export async function getSqlServerColumnMetadata(connectionId: string, database: string, schema: string, table: string): Promise<SqlServerColumnMetadata[]> {
+  return invoke("get_sqlserver_column_metadata", { connectionId, database, schema, table });
 }
 
 export async function listDataTypes(connectionId: string, database: string): Promise<string[]> {

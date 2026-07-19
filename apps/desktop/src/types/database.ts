@@ -425,6 +425,13 @@ export interface ColumnInfo {
   collation?: string | null;
 }
 
+export interface SqlServerColumnMetadata extends ColumnInfo {
+  is_identity: boolean;
+  is_computed: boolean;
+  is_hidden: boolean;
+  generated_always_type: number;
+}
+
 export interface IndexInfo {
   name: string;
   columns: string[];

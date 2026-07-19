@@ -1354,7 +1354,7 @@ function requestInsertValueHintTableColumns(table: string, schema?: string, data
   const loadColumns = async () => {
     if (databaseType === "sqlserver") {
       const querySchema = metadataSchemaForConnection(connectionStore.getConfig(connectionId), target.database, target.schema);
-      const columns = await api.getColumns(connectionId, target.database, querySchema, table);
+      const columns = await api.getSqlServerColumnMetadata(connectionId, target.database, querySchema, table);
       cachedInsertValueHintColumnsByTable.set(cacheKey, insertValueHintColumnNames(databaseType, columns));
       return;
     }

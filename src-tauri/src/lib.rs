@@ -1117,6 +1117,7 @@ pub fn run() {
             commands::schema::list_schema_infos,
             commands::schema::list_data_types,
             commands::schema::get_columns,
+            commands::schema::get_sqlserver_column_metadata,
             commands::schema::list_indexes,
             commands::schema::list_foreign_keys,
             commands::schema::list_triggers,

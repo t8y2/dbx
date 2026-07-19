@@ -8,7 +8,7 @@ use futures::{FutureExt, TryStreamExt};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::time::{Duration, Instant};
-use tiberius::{AuthMethod, Client, ColumnData, Config, FromSql, QueryItem, QueryStream, SqlBrowser};
+use tiberius::{AuthMethod, Client, ColumnData, Config, FromSql, QueryItem, QueryStream, Row, SqlBrowser};
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use tokio_util::sync::CancellationToken;
@@ -28,6 +28,16 @@ const SQLSERVER_LEGACY_ENCRYPTION_FALLBACKS: [(&str, tiberius::EncryptionLevel);
     ("login-only encryption", SQLSERVER_LEGACY_ENCRYPTION_LEVEL),
     ("no-encryption compatibility fallback", SQLSERVER_UNSUPPORTED_ENCRYPTION_LEVEL),
 ];
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SqlServerColumnMetadata {
+    #[serde(flatten)]
+    pub column: ColumnInfo,
+    pub is_identity: bool,
+    pub is_computed: bool,
+    pub is_hidden: bool,
+    pub generated_always_type: i32,
+}
 
 #[derive(Debug, PartialEq, Eq)]
 struct SqlServerEndpoint<'a> {
@@ -1415,88 +1425,104 @@ pub async fn list_object_statistics(
 }
 
 pub async fn get_columns(client: &mut SqlServerClient, schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
+    Ok(get_column_metadata(client, schema, table).await?.into_iter().map(|metadata| metadata.column).collect())
+}
+
+pub async fn get_column_metadata(
+    client: &mut SqlServerClient,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<SqlServerColumnMetadata>, String> {
     let sql = sqlserver_columns_sql(schema, table);
     let stream = client.query(&*sql, &[]).await.map_err(|e| e.to_string())?;
     let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
-    Ok(rows
-        .iter()
-        .map(|row| {
-            let base = row.get::<&str, _>(1).unwrap_or("").to_string();
-            let max_len = row
-                .try_get::<i32, _>(7)
-                .ok()
-                .flatten()
-                .or_else(|| row.try_get::<i16, _>(7).ok().flatten().map(|v| v as i32))
-                .or_else(|| row.try_get::<u8, _>(7).ok().flatten().map(|v| v as i32));
-            let dt_prec = row
-                .try_get::<i32, _>(8)
-                .ok()
-                .flatten()
-                .or_else(|| row.try_get::<i16, _>(8).ok().flatten().map(|v| v as i32))
-                .or_else(|| row.try_get::<u8, _>(8).ok().flatten().map(|v| v as i32));
-            let num_prec = row
-                .try_get::<i32, _>(5)
-                .ok()
-                .flatten()
-                .or_else(|| row.try_get::<i16, _>(5).ok().flatten().map(|v| v as i32))
-                .or_else(|| row.try_get::<u8, _>(5).ok().flatten().map(|v| v as i32));
-            let num_scale = row
-                .try_get::<i32, _>(6)
-                .ok()
-                .flatten()
-                .or_else(|| row.try_get::<i16, _>(6).ok().flatten().map(|v| v as i32))
-                .or_else(|| row.try_get::<u8, _>(6).ok().flatten().map(|v| v as i32));
-            let data_type = match base.to_lowercase().as_str() {
-                "varchar" => match max_len {
-                    Some(-1) => "varchar(max)".to_string(),
-                    Some(n) => format!("varchar({n})"),
-                    None => "varchar".to_string(),
-                },
-                "nvarchar" => match max_len {
-                    Some(-1) => "nvarchar(max)".to_string(),
-                    Some(n) => format!("nvarchar({n})"),
-                    None => "nvarchar".to_string(),
-                },
-                "varbinary" => match max_len {
-                    Some(-1) => "varbinary(max)".to_string(),
-                    Some(n) if n > 0 => format!("varbinary({n})"),
-                    _ => "varbinary".to_string(),
-                },
-                "char" | "nchar" | "binary" => match max_len {
-                    Some(n) if n > 0 => format!("{base}({n})"),
-                    _ => base,
-                },
-                "decimal" | "numeric" => match (num_prec, num_scale) {
-                    (Some(p), Some(s)) => format!("{base}({p},{s})"),
-                    _ => base,
-                },
-                "datetime2" | "datetimeoffset" | "time" => match dt_prec {
-                    Some(p) => format!("{base}({p})"),
-                    _ => base,
-                },
-                _ => base,
-            };
-            ColumnInfo {
-                name: row.get::<&str, _>(0).unwrap_or("").to_string(),
-                data_type,
-                is_nullable: row.get::<&str, _>(2).unwrap_or("NO") == "YES",
-                column_default: row.get::<&str, _>(3).map(|s| s.to_string()),
-                is_primary_key: row.get::<i32, _>(4).unwrap_or(0) == 1,
-                extra: row.get::<&str, _>(9).filter(|s: &&str| !s.is_empty()).map(|s: &str| s.to_string()),
-                comment: row.get::<&str, _>(10).filter(|s: &&str| !s.is_empty()).map(|s: &str| s.to_string()),
-                numeric_precision: num_prec,
-                numeric_scale: num_scale,
-                character_maximum_length: max_len,
-                enum_values: None,
-                ..Default::default()
-            }
-        })
-        .collect())
+    Ok(rows.iter().map(sqlserver_column_metadata_from_row).collect())
+}
+
+fn sqlserver_column_metadata_from_row(row: &Row) -> SqlServerColumnMetadata {
+    let base = row.get::<&str, _>(1).unwrap_or("").to_string();
+    let max_len = row
+        .try_get::<i32, _>(7)
+        .ok()
+        .flatten()
+        .or_else(|| row.try_get::<i16, _>(7).ok().flatten().map(|v| v as i32))
+        .or_else(|| row.try_get::<u8, _>(7).ok().flatten().map(|v| v as i32));
+    let dt_prec = row
+        .try_get::<i32, _>(8)
+        .ok()
+        .flatten()
+        .or_else(|| row.try_get::<i16, _>(8).ok().flatten().map(|v| v as i32))
+        .or_else(|| row.try_get::<u8, _>(8).ok().flatten().map(|v| v as i32));
+    let num_prec = row
+        .try_get::<i32, _>(5)
+        .ok()
+        .flatten()
+        .or_else(|| row.try_get::<i16, _>(5).ok().flatten().map(|v| v as i32))
+        .or_else(|| row.try_get::<u8, _>(5).ok().flatten().map(|v| v as i32));
+    let num_scale = row
+        .try_get::<i32, _>(6)
+        .ok()
+        .flatten()
+        .or_else(|| row.try_get::<i16, _>(6).ok().flatten().map(|v| v as i32))
+        .or_else(|| row.try_get::<u8, _>(6).ok().flatten().map(|v| v as i32));
+    let data_type = match base.to_lowercase().as_str() {
+        "varchar" => match max_len {
+            Some(-1) => "varchar(max)".to_string(),
+            Some(n) => format!("varchar({n})"),
+            None => "varchar".to_string(),
+        },
+        "nvarchar" => match max_len {
+            Some(-1) => "nvarchar(max)".to_string(),
+            Some(n) => format!("nvarchar({n})"),
+            None => "nvarchar".to_string(),
+        },
+        "varbinary" => match max_len {
+            Some(-1) => "varbinary(max)".to_string(),
+            Some(n) if n > 0 => format!("varbinary({n})"),
+            _ => "varbinary".to_string(),
+        },
+        "char" | "nchar" | "binary" => match max_len {
+            Some(n) if n > 0 => format!("{base}({n})"),
+            _ => base,
+        },
+        "decimal" | "numeric" => match (num_prec, num_scale) {
+            (Some(p), Some(s)) => format!("{base}({p},{s})"),
+            _ => base,
+        },
+        "datetime2" | "datetimeoffset" | "time" => match dt_prec {
+            Some(p) => format!("{base}({p})"),
+            _ => base,
+        },
+        _ => base,
+    };
+    let column = ColumnInfo {
+        name: row.get::<&str, _>(0).unwrap_or("").to_string(),
+        data_type,
+        is_nullable: row.get::<&str, _>(2).unwrap_or("NO") == "YES",
+        column_default: row.get::<&str, _>(3).map(|s| s.to_string()),
+        is_primary_key: row.get::<i32, _>(4).unwrap_or(0) == 1,
+        extra: row.get::<&str, _>(9).filter(|s: &&str| !s.is_empty()).map(|s: &str| s.to_string()),
+        comment: row.get::<&str, _>(10).filter(|s: &&str| !s.is_empty()).map(|s: &str| s.to_string()),
+        numeric_precision: num_prec,
+        numeric_scale: num_scale,
+        character_maximum_length: max_len,
+        enum_values: None,
+        ..Default::default()
+    };
+    SqlServerColumnMetadata {
+        column,
+        is_identity: row.get::<i32, _>(11).unwrap_or(0) == 1,
+        is_computed: row.get::<i32, _>(12).unwrap_or(0) == 1,
+        is_hidden: row.get::<i32, _>(13).unwrap_or(0) == 1,
+        generated_always_type: row.get::<i32, _>(14).unwrap_or(0),
+    }
 }
 
 fn sqlserver_columns_sql(schema: &str, table: &str) -> String {
     let s = schema.replace('\'', "''");
     let t = table.replace('\'', "''");
+    // COLUMNPROPERTY keeps hidden/generated flags separate and returns NULL on
+    // SQL Server versions that do not expose a newer property.
     format!(
         "SELECT c.name AS COLUMN_NAME, \
          ty.name AS DATA_TYPE, \
@@ -1516,7 +1542,11 @@ fn sqlserver_columns_sql(schema: &str, table: &str) -> String {
            WHEN ic.column_id IS NOT NULL THEN 'identity(' + CONVERT(VARCHAR(38), ic.seed_value) + ',' + CONVERT(VARCHAR(38), ic.increment_value) + ')' \
            ELSE NULL \
          END AS COLUMN_EXTRA, \
-         ep.value AS COLUMN_COMMENT \
+         ep.value AS COLUMN_COMMENT, \
+         CONVERT(INT, COLUMNPROPERTY(c.object_id, c.name, 'IsIdentity')) AS IS_IDENTITY, \
+         CONVERT(INT, COLUMNPROPERTY(c.object_id, c.name, 'IsComputed')) AS IS_COMPUTED, \
+         CONVERT(INT, COLUMNPROPERTY(c.object_id, c.name, 'IsHidden')) AS IS_HIDDEN, \
+         CONVERT(INT, COLUMNPROPERTY(c.object_id, c.name, 'GeneratedAlwaysType')) AS GENERATED_ALWAYS_TYPE \
          FROM sys.objects o \
          JOIN sys.schemas s ON s.schema_id = o.schema_id \
          JOIN sys.columns c ON c.object_id = o.object_id \
@@ -2250,6 +2280,16 @@ mod tests {
         assert!(sql.contains("ep.minor_id = c.column_id"));
         assert!(sql.contains("MS_Description"));
         assert!(sql.contains("c.is_computed = 1 THEN 'computed'"));
+    }
+
+    #[test]
+    fn sqlserver_columns_sql_exposes_structured_generation_flags() {
+        let sql = sqlserver_columns_sql("dbo", "orders");
+
+        assert!(sql.contains("COLUMNPROPERTY(c.object_id, c.name, 'IsIdentity')"));
+        assert!(sql.contains("COLUMNPROPERTY(c.object_id, c.name, 'IsComputed')"));
+        assert!(sql.contains("COLUMNPROPERTY(c.object_id, c.name, 'IsHidden')"));
+        assert!(sql.contains("COLUMNPROPERTY(c.object_id, c.name, 'GeneratedAlwaysType')"));
     }
 
     #[test]

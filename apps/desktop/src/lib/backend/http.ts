@@ -14,6 +14,7 @@ import type {
   ObjectSource,
   ObjectSourceKind,
   ColumnInfo,
+  SqlServerColumnMetadata,
   IndexInfo,
   ForeignKeyInfo,
   TriggerInfo,
@@ -638,6 +639,10 @@ export async function getObjectSource(connectionId: string, database: string, sc
 
 export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<ColumnInfo[]> {
   return get(`/api/schema/columns?${qs({ connection_id: connectionId, database, schema, table, catalog })}`);
+}
+
+export async function getSqlServerColumnMetadata(connectionId: string, database: string, schema: string, table: string): Promise<SqlServerColumnMetadata[]> {
+  return get(`/api/schema/sqlserver/column-metadata?${qs({ connection_id: connectionId, database, schema, table })}`);
 }
 
 export async function listDataTypes(connectionId: string, database: string): Promise<string[]> {

@@ -4467,6 +4467,22 @@ pub async fn get_columns_core(
     .await
 }
 
+pub async fn get_sqlserver_column_metadata_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<db::sqlserver::SqlServerColumnMetadata>, String> {
+    retry_metadata_connection(state, connection_id, Some(database), || async {
+        let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+        let connections = state.connections.read().await;
+        try_sqlserver!(connections, &pool_key, get_column_metadata, schema, table);
+        Err("SQL Server column metadata requires a native SQL Server connection".to_string())
+    })
+    .await
+}
+
 fn deduplicate_column_infos(columns: Vec<db::ColumnInfo>) -> Vec<db::ColumnInfo> {
     let mut result: Vec<db::ColumnInfo> = Vec::with_capacity(columns.len());
     for column in columns {

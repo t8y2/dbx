@@ -1,6 +1,6 @@
 {
   "name": "@dbx-app/cli",
-  "version": "0.4.29",
+  "version": "0.4.37",
   "description": "Command line interface for DBX database connections, schema, and safe queries",
   "keywords": [
     "ai-agent",
@@ -21,27 +21,27 @@
     "directory": "packages/cli"
   },
   "bin": {
-    "dbx": "dist/cli.js"
+    "dbx": "bin/dbx.js"
   },
   "files": [
-    "dist"
+    "bin"
   ],
   "type": "module",
   "scripts": {
-    "start": "tsx src/cli.ts",
-    "test": "pnpm --filter @dbx-app/node-core build && vitest run --config vitest.config.ts",
-    "build": "pnpm --filter @dbx-app/node-core build && tsc",
-    "prepublishOnly": "tsc"
+    "start": "cargo run -p dbx-cli --no-default-features --",
+    "test": "cargo test -p dbx-cli --no-default-features",
+    "build": "cargo build -p dbx-cli --release --no-default-features",
+    "prepublishOnly": "node --check bin/dbx.js"
   },
-  "dependencies": {
-    "@dbx-app/node-core": "workspace:^"
-  },
-  "devDependencies": {
-    "@types/node": "^22.15.21",
-    "tsx": "^4.19.4",
-    "typescript": "^5.8.3"
+  "optionalDependencies": {
+    "@dbx-app/cli-darwin-arm64": "0.4.37",
+    "@dbx-app/cli-darwin-x64": "0.4.37",
+    "@dbx-app/cli-linux-arm64-gnu": "0.4.37",
+    "@dbx-app/cli-linux-x64-gnu": "0.4.37",
+    "@dbx-app/cli-win32-arm64": "0.4.37",
+    "@dbx-app/cli-win32-x64": "0.4.37"
   },
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=18.18.0"
   }
 }

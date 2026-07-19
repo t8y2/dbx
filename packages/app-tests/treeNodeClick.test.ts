@@ -14,9 +14,14 @@ test("double click navigation mode selects rows on single click", () => {
   assert.equal(treeNodeRowAction("saved-sql-file", false, "double"), "none");
 });
 
-test("double click navigation mode opens actionable rows on double click", () => {
-  assert.equal(treeNodeRowDoubleClickAction("table", true, "double"), "open-data");
+test("table rows refresh on double click in both navigation modes", () => {
+  assert.equal(treeNodeRowDoubleClickAction("table", true, "single"), "refresh-data");
+  assert.equal(treeNodeRowDoubleClickAction("table", true, "double"), "refresh-data");
+});
+
+test("double click navigation mode opens other actionable rows on double click", () => {
   assert.equal(treeNodeRowDoubleClickAction("view", true, "double"), "open-data");
+  assert.equal(treeNodeRowDoubleClickAction("materialized_view", true, "double"), "open-data");
   assert.equal(treeNodeRowDoubleClickAction("procedure", false, "double"), "open-source");
   assert.equal(treeNodeRowDoubleClickAction("saved-sql-file", false, "double"), "open-saved-sql");
 });
@@ -96,7 +101,8 @@ test("double click navigation mode opens object browser and expands expandable d
 
 test("double click does not open object browser for non-browsable rows", () => {
   assert.equal(treeNodeRowDoubleClickAction("database", false), "none");
-  assert.equal(treeNodeRowDoubleClickAction("table", true), "none");
+  assert.equal(treeNodeRowDoubleClickAction("view", true), "none");
+  assert.equal(treeNodeRowDoubleClickAction("materialized_view", true), "none");
   assert.equal(treeNodeRowDoubleClickAction("column", true), "none");
 });
 

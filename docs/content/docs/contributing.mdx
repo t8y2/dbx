@@ -182,6 +182,19 @@ A successful run opens the DBX desktop window without a compiler error in the te
 
 If port `1420` is already in use, stop the previous DBX/Vite development process and restart.
 
+## Local database test environments
+
+Changes to a database driver, connection flow, metadata query, or database-specific UI should be checked against a real instance when possible. The repository provides pinned local Docker Compose recipes for this purpose:
+
+```bash
+make db-list
+make db DB=mysql@8.4
+make db-verify DB=mysql@8.4
+make db-down DB=mysql@8.4
+```
+
+The service ports listen on `127.0.0.1` by default. Set `DB_BIND_ADDRESS=0.0.0.0`, choose a strong `DB_PASSWORD`, and use firewall controls before exposing a host to a shared network. See the [Database Test Lab](/en/docs/database-lab) for all supported recipes, overrides, and reset safety requirements.
+
 ## 5. Understand the Repository Layout
 
 | Path | What to change there |

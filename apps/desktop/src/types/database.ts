@@ -163,6 +163,29 @@ export interface ConnectionConfig {
   is_production?: boolean;
   /** Database-level production markers for multi-database connections. */
   production_databases?: string[];
+  /** Metadata captured from the latest successful connection test for the saved config. */
+  database_info?: DatabaseConnectionInfo;
+}
+
+export type IdentifierCase = "lower" | "upper" | "mixed";
+
+export interface DatabaseConnectionInfo {
+  productName?: string;
+  productVersion?: string;
+  currentDatabase?: string;
+  serverComment?: string;
+  serverCharset?: string;
+  serverCollation?: string;
+  unquotedIdentifierCase?: IdentifierCase;
+  quotedIdentifierCase?: IdentifierCase;
+  driverName?: string;
+  driverVersion?: string;
+  jdbcVersion?: string;
+}
+
+export interface ConnectionTestResult {
+  message: string;
+  databaseInfo?: DatabaseConnectionInfo;
 }
 
 export type TransportLayerConfig = ({ type: "ssh" } & SshTunnelConfig) | ({ type: "proxy" } & ProxyTunnelConfig) | ({ type: "http_tunnel" } & HttpTunnelConfig);
@@ -354,12 +377,13 @@ export interface TableInfo {
   parent_name?: string | null;
 }
 
-export type DatabaseObjectType = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY";
+export type DatabaseObjectType = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
 
 export interface ObjectInfo {
   name: string;
   object_type: DatabaseObjectType | string;
   schema?: string | null;
+  valid?: boolean | null;
   signature?: string | null;
   comment?: string | null;
   created_at?: string | null;
@@ -375,7 +399,7 @@ export interface ObjectStatistics {
   total_bytes?: number | null;
 }
 
-export type ObjectSourceKind = "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY";
+export type ObjectSourceKind = "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
 
 export interface ObjectSource {
   name: string;
@@ -471,6 +495,8 @@ export interface QueryResult {
   columns: string[];
   /** Set for synthesized query execution failures. */
   execution_error?: true;
+  /** Zero-based index of the submitted statement that produced this result. */
+  statement_index?: number;
   /** Internal row identifiers appended to editable query results. */
   hidden_column_indexes?: number[];
   /**
@@ -490,6 +516,8 @@ export interface QueryResult {
    * preview. This is populated only for MongoDB document query results.
    */
   mongo_documents?: unknown[];
+  /** Type-preserving Extended JSON documents used when copying MongoDB values. */
+  mongo_copy_documents?: unknown[];
   affected_rows: number;
   execution_time_ms: number;
   truncated?: boolean;
@@ -512,6 +540,8 @@ export interface QueryResultRun {
   results?: QueryResult[];
   activeResultIndex?: number;
   resultBaseSql?: string;
+  /** Fingerprint of the complete editor document when this result run started. */
+  resultEditorFingerprint?: string;
   resultSortedSql?: string;
   resultSortColumn?: string;
   resultSortColumnIndex?: number;
@@ -528,6 +558,7 @@ export interface QueryResultRun {
   resultTotalRowCountLoading?: boolean;
   resultSessionId?: string;
   resultAccessedAt?: number;
+  resultEstimatedBytes?: number;
   resultCacheKey?: string;
   resultCacheState?: "memory" | "disk" | "missing";
   resultEvicted?: boolean;
@@ -586,6 +617,8 @@ export type TreeNodeType =
   | "materialized_view"
   | "procedure"
   | "function"
+  | "type"
+  | "type-body"
   | "sequence"
   | "package"
   | "package-body"
@@ -598,6 +631,7 @@ export type TreeNodeType =
   | "group-materialized-views"
   | "group-procedures"
   | "group-functions"
+  | "group-types"
   | "group-sequences"
   | "group-packages"
   | "group-partitions"
@@ -667,6 +701,7 @@ export interface TreeNode {
   signature?: string;
   tableType?: string;
   comment?: string | null;
+  valid?: boolean | null;
   objectCount?: number;
   loadedKeyCount?: number;
   totalKeyCount?: number;
@@ -733,6 +768,8 @@ export interface QueryTab {
   originalSql?: string;
   lastExecutedSql?: string;
   resultBaseSql?: string;
+  /** Fingerprint of the complete editor document when the displayed result started. */
+  resultEditorFingerprint?: string;
   resultSortedSql?: string;
   resultSortColumn?: string;
   resultSortColumnIndex?: number;
@@ -749,6 +786,7 @@ export interface QueryTab {
   resultTotalRowCountLoading?: boolean;
   resultSessionId?: string;
   resultAccessedAt?: number;
+  resultEstimatedBytes?: number;
   resultCacheKey?: string;
   resultCacheState?: "memory" | "disk" | "missing";
   pinned?: boolean;
@@ -780,9 +818,9 @@ export interface QueryTab {
   executionId?: string;
   isExplaining?: boolean;
   explainExecutionId?: string;
-  /** Per-run connection session for sequential MySQL explain formats. */
+  /** Per-run connection session for explain flows that require session state. */
   explainClientSessionId?: string;
-  mode: "data" | "query" | "redis" | "redis-dashboard" | "mongo" | "mongo-gridfs" | "mongo-bucket" | "vector" | "etcd" | "zookeeper" | "mq" | "nacos" | "objects" | "structure" | "users" | "dameng-jobs" | "processlist" | "mysql-dashboard";
+  mode: "data" | "query" | "redis" | "redis-dashboard" | "mongo" | "mongo-gridfs" | "mongo-bucket" | "vector" | "etcd" | "zookeeper" | "mq" | "nacos" | "objects" | "structure" | "users" | "dameng-jobs" | "processlist" | "mysql-dashboard" | "postgres-dashboard";
   mqTenant?: string;
   mqInitialTab?: "topics";
   nacosNamespace?: string;
@@ -813,6 +851,11 @@ export interface QueryTab {
     primaryKeys: string[];
   };
   tableMetaUpdatedAt?: number;
+  /** 冷缓存打开表数据时元数据仍在途：行标识未知，编辑/保存必须等待其落地 */
+  tableMetaPending?: boolean;
+  /** 取消请求单调计数：isCancelling 是瞬态的（取消失败/查询先完成会被清），
+   * 需要跨越 executeTabSql 生命周期判断"执行期间用户是否请求过停止"时比对它 */
+  cancelRequestCount?: number;
   tableInfoTab?: TableInfoTab;
   queryAnalysis?: {
     catalog?: string;

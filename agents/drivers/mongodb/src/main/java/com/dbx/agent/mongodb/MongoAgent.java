@@ -3,6 +3,7 @@ package com.dbx.agent.mongodb;
 import com.dbx.agent.AgentProtocol;
 import com.dbx.agent.IndexInfo;
 import com.google.gson.Gson;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
@@ -13,7 +14,9 @@ import com.mongodb.MongoClientSettings;
 import com.mongodb.ServerAddress;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
+import com.mongodb.client.MongoCollection;
 import com.mongodb.client.model.UpdateOptions;
+import com.mongodb.client.result.UpdateResult;
 import java.io.BufferedReader;
 import java.io.FileInputStream;
 import java.io.InputStream;
@@ -711,11 +714,24 @@ public final class MongoAgent {
 
         var col = c.getDatabase(database).getCollection(collection);
         Document filter = documentForWrite(filterJson);
-        Document update = documentForWrite(updateJson);
-        requireBulkUpdateOperatorDocument(update);
         UpdateOptions options = updateOptionsForWrite(optionsJson);
-        var result = many ? col.updateMany(filter, update, options) : col.updateOne(filter, update, options);
+        var result = isUpdatePipelineJson(updateJson)
+            ? updateDocumentsWithPipeline(col, filter, updatePipelineForWrite(updateJson), options, many)
+            : updateDocumentsWithDocument(col, filter, documentForWrite(updateJson), options, many);
         return Collections.singletonMap("modified_count", result.getModifiedCount());
+    }
+
+    private static UpdateResult updateDocumentsWithDocument(
+        MongoCollection<Document> col, Document filter, Document update,
+        UpdateOptions options, boolean many) {
+        requireBulkUpdateOperatorDocument(update);
+        return many ? col.updateMany(filter, update, options) : col.updateOne(filter, update, options);
+    }
+
+    private static UpdateResult updateDocumentsWithPipeline(
+        MongoCollection<Document> col, Document filter, List<Document> pipeline,
+        UpdateOptions options, boolean many) {
+        return many ? col.updateMany(filter, pipeline, options) : col.updateOne(filter, pipeline, options);
     }
 
     static UpdateOptions updateOptionsForWrite(String optionsJson) {
@@ -750,6 +766,27 @@ public final class MongoAgent {
         Document doc = Document.parse(docJson);
         convertMongoShellDates(doc);
         return doc;
+    }
+
+    private static boolean isUpdatePipelineJson(String updateJson) {
+        return updateJson.trim().startsWith("[");
+    }
+
+    static List<Document> updatePipelineForWrite(String updateJson) {
+        JsonElement parsed = JsonParser.parseString(updateJson);
+        if (!parsed.isJsonArray()) {
+            throw new IllegalArgumentException("Update pipeline must be an array");
+        }
+        JsonArray stages = parsed.getAsJsonArray();
+        List<Document> pipeline = new ArrayList<>(stages.size());
+        for (JsonElement stage : stages) {
+            if (!stage.isJsonObject()) {
+                // The Java driver pipeline overload accepts BSON stages, not scalar array entries.
+                throw new IllegalArgumentException("Each update pipeline stage must be an object");
+            }
+            pipeline.add(documentForWrite(stage.toString()));
+        }
+        return pipeline;
     }
 
     private static Document replacementDocument(Document doc) {
@@ -869,10 +906,9 @@ public final class MongoAgent {
             return converted;
         }
         if (value instanceof String text) {
+            // Plain JSON strings must retain their BSON type; only explicit shell date syntax
+            // is converted here. Extended JSON $date values are decoded by Document.parse.
             Date date = parseMongoShellDate(text);
-            if (date == null) {
-                date = parseLegacyDateDisplay(text);
-            }
             return date == null ? value : date;
         }
         return value;
@@ -896,28 +932,6 @@ public final class MongoAgent {
         try {
             Instant instant = Instant.parse(inner.substring(1, inner.length() - 1));
             return Date.from(instant);
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    static Date parseLegacyDateDisplay(String value) {
-        String trimmed = value.trim();
-        if (!trimmed.matches("\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?")) {
-            return null;
-        }
-        String normalized = trimmed.replace(' ', 'T');
-        int dot = normalized.indexOf('.');
-        if (dot < 0) {
-            normalized = normalized + ".000";
-        } else {
-            int millisStart = dot + 1;
-            int millisEnd = normalized.length();
-            normalized = normalized.substring(0, millisStart)
-                + String.format("%-3s", normalized.substring(millisStart, millisEnd)).replace(' ', '0');
-        }
-        try {
-            return Date.from(Instant.parse(normalized + "Z"));
         } catch (Exception e) {
             return null;
         }
@@ -980,28 +994,41 @@ public final class MongoAgent {
     }
 
     static String handleRequest(String line) {
-        JsonObject req = JsonParser.parseString(line).getAsJsonObject();
-        JsonElement id = req.get("id");
-        String method = req.get("method").getAsString();
-        JsonObject params = req.has("params") && req.get("params").isJsonObject()
-            ? req.getAsJsonObject("params")
-            : new JsonObject();
+        return handleRequest(line, null);
+    }
 
-        JsonObject response = new JsonObject();
-        response.addProperty("jsonrpc", "2.0");
-        response.add("id", id);
-
-        try {
-            Object result = dispatch(method, params);
-            response.add("result", GSON.toJsonTree(result));
-        } catch (Exception e) {
-            JsonObject error = new JsonObject();
-            error.addProperty("code", -1);
-            error.addProperty("message", e.getMessage() == null ? "Unknown error" : e.getMessage());
-            response.add("error", error);
+    static String handleRequest(String line, MongoClient client) {
+        if (client != null) {
+            CURRENT_CLIENT.set(client);
         }
+        try {
+            JsonObject req = JsonParser.parseString(line).getAsJsonObject();
+            JsonElement id = req.get("id");
+            String method = req.get("method").getAsString();
+            JsonObject params = req.has("params") && req.get("params").isJsonObject()
+                ? req.getAsJsonObject("params")
+                : new JsonObject();
 
-        return GSON.toJson(response);
+            JsonObject response = new JsonObject();
+            response.addProperty("jsonrpc", "2.0");
+            response.add("id", id);
+
+            try {
+                Object result = dispatch(method, params);
+                response.add("result", GSON.toJsonTree(result));
+            } catch (Exception e) {
+                JsonObject error = new JsonObject();
+                error.addProperty("code", -1);
+                error.addProperty("message", e.getMessage() == null ? "Unknown error" : e.getMessage());
+                response.add("error", error);
+            }
+
+            return GSON.toJson(response);
+        } finally {
+            if (client != null) {
+                CURRENT_CLIENT.remove();
+            }
+        }
     }
 
     public static void main(String[] args) throws Exception {

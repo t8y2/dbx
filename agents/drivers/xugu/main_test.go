@@ -2,12 +2,17 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestHandshakeResponse(t *testing.T) {
@@ -532,8 +537,59 @@ func TestXuguListObjectsQueryRejectsUnsupportedObjectTypes(t *testing.T) {
 		t.Fatalf("unsupported object type should produce empty-result predicate:\n%s", query.SQL)
 	}
 
-	wantArgs := []any{"APP", "APP", 10, 0}
+	wantArgs := []any{"APP", "APP", "APP", "APP", "APP", "APP", "APP", "APP", "APP", 10, 0}
 	assertArgs(t, query.Args, wantArgs)
+}
+
+func TestXuguListObjectsQueryIncludesProgrammableObjects(t *testing.T) {
+	query := xuguListObjectsQuery("APP", metadataListConstraints{
+		ObjectTypes: []string{"procedure", "function", "package", "package-body", "trigger", "sequence", "type", "type-body"},
+	})
+
+	for _, want := range []string{"ALL_PROCEDURES", "p.VALID", "ALL_PACKAGES", "p.BODY IS NOT NULL", "ALL_TRIGGERS", "ALL_SEQUENCES", "ALL_TYPES", "u.BODY IS NOT NULL", "OBJECT_NAME, OBJECT_TYPE, COMMENTS, VALID", "OBJECT_TYPE IN (?,?,?,?,?,?,?,?)"} {
+		if !strings.Contains(query.SQL, want) {
+			t.Fatalf("expected SQL to contain %q:\n%s", want, query.SQL)
+		}
+	}
+
+	wantArgs := []any{"APP", "APP", "APP", "APP", "APP", "APP", "APP", "APP", "APP", "FUNCTION", "PACKAGE", "PACKAGE_BODY", "PROCEDURE", "SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"}
+	assertArgs(t, query.Args, wantArgs)
+}
+
+func TestXuguObjectSourceQuerySupportsSharedObjectKinds(t *testing.T) {
+	for _, objectType := range []string{"TRIGGER", "PACKAGE_BODY", "TYPE", "TYPE_BODY"} {
+		query, _, err := objectSourceQuery("APP", "demo", objectType)
+		if err != nil {
+			t.Fatalf("%s should support object source lookup: %v", objectType, err)
+		}
+		if strings.TrimSpace(query) == "" {
+			t.Fatalf("%s should produce source SQL", objectType)
+		}
+	}
+
+	packageBodyQuery, _, err := objectSourceQuery("APP", "demo", "PACKAGE_BODY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(packageBodyQuery, "TO_CHAR(k.BODY)") || strings.Contains(packageBodyQuery, "k.SPEC") {
+		t.Fatalf("package body query must request only the body: %s", packageBodyQuery)
+	}
+
+	typeSpecQuery, _, err := objectSourceQuery("APP", "demo", "TYPE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(typeSpecQuery, "ALL_TYPES") || !strings.Contains(typeSpecQuery, "TO_CHAR(u.SPEC)") {
+		t.Fatalf("type query must return catalog SPEC content: %s", typeSpecQuery)
+	}
+
+	typeBodyQuery, _, err := objectSourceQuery("APP", "demo", "TYPE_BODY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(typeBodyQuery, "ALL_TYPES") || !strings.Contains(typeBodyQuery, "TO_CHAR(u.BODY)") || !strings.Contains(typeBodyQuery, "u.BODY IS NOT NULL") {
+		t.Fatalf("type body query must return catalog BODY content: %s", typeBodyQuery)
+	}
 }
 
 func TestMetadataListConstraintsFromParams(t *testing.T) {
@@ -641,4 +697,257 @@ func contains(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+// -- fake drivers for timeout tests --
+
+func init() {
+	sql.Register("xugu-test-blocking", &xuguBlockingDriver{})
+	sql.Register("xugu-test-fast", &xuguFastDriver{})
+}
+
+var xuguBlockingUnblock chan struct{}
+
+// resetXuguBlockingDriver creates a fresh unblock channel for the blocking
+// driver. Call before each test that uses "xugu-test-blocking".
+func resetXuguBlockingDriver() {
+	xuguBlockingUnblock = make(chan struct{})
+}
+
+type xuguBlockingDriver struct{}
+
+func (d *xuguBlockingDriver) Open(name string) (driver.Conn, error) {
+	return &xuguBlockingConn{}, nil
+}
+
+type xuguBlockingConn struct{}
+
+func (c *xuguBlockingConn) Prepare(query string) (driver.Stmt, error) {
+	return &xuguBlockingStmt{}, nil
+}
+func (c *xuguBlockingConn) Close() error              { return nil }
+func (c *xuguBlockingConn) Begin() (driver.Tx, error) { return nil, errors.New("not supported") }
+
+type xuguBlockingStmt struct{}
+
+func (s *xuguBlockingStmt) Close() error  { return nil }
+func (s *xuguBlockingStmt) NumInput() int { return -1 }
+func (s *xuguBlockingStmt) Exec(args []driver.Value) (driver.Result, error) {
+	<-xuguBlockingUnblock
+	return nil, errors.New("killed")
+}
+func (s *xuguBlockingStmt) Query(args []driver.Value) (driver.Rows, error) {
+	<-xuguBlockingUnblock
+	return nil, errors.New("killed")
+}
+
+type xuguFastDriver struct{}
+
+func (d *xuguFastDriver) Open(name string) (driver.Conn, error) {
+	return &xuguFastConn{}, nil
+}
+
+type xuguFastConn struct{}
+
+func (c *xuguFastConn) Prepare(query string) (driver.Stmt, error) {
+	return &xuguFastStmt{}, nil
+}
+func (c *xuguFastConn) Close() error              { return nil }
+func (c *xuguFastConn) Begin() (driver.Tx, error) { return nil, errors.New("not supported") }
+
+type xuguFastStmt struct{}
+
+func (s *xuguFastStmt) Close() error  { return nil }
+func (s *xuguFastStmt) NumInput() int { return -1 }
+func (s *xuguFastStmt) Exec(args []driver.Value) (driver.Result, error) {
+	return driver.ResultNoRows, nil
+}
+func (s *xuguFastStmt) Query(args []driver.Value) (driver.Rows, error) {
+	return &xuguFastRows{}, nil
+}
+
+type xuguFastRows struct {
+	pos    int
+	closed bool
+}
+
+func (r *xuguFastRows) Columns() []string { return []string{"id"} }
+func (r *xuguFastRows) Close() error      { r.closed = true; return nil }
+func (r *xuguFastRows) Next(dest []driver.Value) error {
+	if r.pos >= 3 || r.closed {
+		return io.EOF
+	}
+	dest[0] = int64(r.pos + 1)
+	r.pos++
+	return nil
+}
+
+// -- timeout tests --
+
+func TestXuguWatchdogFiresKillAndCancel(t *testing.T) {
+	s := newServer()
+	killCh := make(chan struct{})
+	s.killSession = func() { close(killCh) }
+
+	ctx, cancel := s.beginActiveOperationWithTimeout(0)
+	cancel() // clean up the initial call
+
+	ctx, cancel = s.beginActiveOperationWithTimeout(1)
+	defer func() {
+		s.activeCancelMu.Lock()
+		if s.activeTimer != nil {
+			s.activeTimer.Stop()
+		}
+		s.activeCancelMu.Unlock()
+		cancel()
+	}()
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchdog timer did not fire within 2 seconds")
+	}
+
+	select {
+	case <-killCh:
+	default:
+		t.Fatal("killSession was not called when watchdog fired")
+	}
+}
+
+func TestXuguNoWatchdogWhenTimeoutZero(t *testing.T) {
+	s := newServer()
+	var killed bool
+	var killMu sync.Mutex
+	s.killSession = func() {
+		killMu.Lock()
+		killed = true
+		killMu.Unlock()
+	}
+
+	ctx, cancel := s.beginActiveOperationWithTimeout(0)
+	defer cancel()
+
+	s.activeCancelMu.Lock()
+	hasTimer := s.activeTimer != nil
+	timedOut := s.activeTimedOut
+	s.activeCancelMu.Unlock()
+
+	if hasTimer {
+		t.Fatal("timer should not be created when timeoutSecs=0")
+	}
+	if timedOut {
+		t.Fatal("activeTimedOut should be false when timeoutSecs=0")
+	}
+
+	select {
+	case <-ctx.Done():
+		t.Fatal("context should not be cancelled when timeoutSecs=0")
+	default:
+	}
+
+	killMu.Lock()
+	if killed {
+		t.Fatal("killSession should not be called when timeoutSecs=0")
+	}
+	killMu.Unlock()
+}
+
+func TestXuguCursorSurvivesDeadlineWindow(t *testing.T) {
+	s := newServer()
+	var killed bool
+	var killMu sync.Mutex
+	s.killSession = func() {
+		killMu.Lock()
+		killed = true
+		killMu.Unlock()
+	}
+
+	db, err := sql.Open("xugu-test-fast", "dsn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.db = db
+	s.cancelDB = db
+
+	rows, err := s.queryRowsWithTimeout("SELECT id FROM test", nil, 1)
+	if err != nil {
+		t.Fatalf("queryRowsWithTimeout failed: %v", err)
+	}
+	defer s.closeRows(rows)
+
+	s.activeCancelMu.Lock()
+	timerStopped := s.activeTimer == nil
+	s.activeCancelMu.Unlock()
+	if !timerStopped {
+		t.Fatal("timer should be stopped after QueryContext returns")
+	}
+
+	time.Sleep(1200 * time.Millisecond)
+
+	// Read all rows to verify cursor survived the deadline window.
+	cols, _ := rows.Columns()
+	values := make([]any, len(cols))
+	for i := range values {
+		values[i] = new(any)
+	}
+	rowCount := 0
+	for rows.Next() {
+		rowCount++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("cursor was killed by deadline: %v", err)
+	}
+	if rowCount != 3 {
+		t.Fatalf("expected 3 rows, got %d", rowCount)
+	}
+
+	killMu.Lock()
+	if killed {
+		t.Fatal("killSession should not be called when query completes normally")
+	}
+	killMu.Unlock()
+}
+
+func TestXuguWatchdogCallsKillOnBlockingQuery(t *testing.T) {
+	resetXuguBlockingDriver()
+
+	s := newServer()
+	killCh := make(chan struct{})
+	s.killSession = func() { close(killCh) }
+
+	db, err := sql.Open("xugu-test-blocking", "dsn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.db = db
+	s.cancelDB = db
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := s.queryRowsWithTimeout("SELECT 1", nil, 1)
+		errCh <- err
+	}()
+
+	select {
+	case <-killCh:
+		// kill was called as expected
+	case <-time.After(3 * time.Second):
+		t.Fatal("killSession was not called within timeout window")
+	}
+
+	// Unblock the fake driver so queryRowsWithTimeout can return.
+	close(xuguBlockingUnblock)
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("expected non-nil error after kill")
+		}
+		if !strings.Contains(err.Error(), "killed") && !strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("expected killed or timeout error, got: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("query did not return after unblocking driver")
+	}
 }

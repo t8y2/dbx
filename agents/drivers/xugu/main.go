@@ -120,11 +120,12 @@ type connectParams struct {
 }
 
 type queryOptions struct {
-	SQL       string `json:"sql"`
-	Database  string `json:"database"`
-	Schema    string `json:"schema"`
-	MaxRows   int    `json:"maxRows"`
-	FetchSize int    `json:"fetchSize"`
+	SQL         string `json:"sql"`
+	Database    string `json:"database"`
+	Schema      string `json:"schema"`
+	MaxRows     int    `json:"maxRows"`
+	FetchSize   int    `json:"fetchSize"`
+	TimeoutSecs int    `json:"timeoutSecs"`
 }
 
 type queryResult struct {
@@ -200,6 +201,7 @@ type objectInfo struct {
 	ObjectType string  `json:"object_type"`
 	Schema     string  `json:"schema"`
 	Comment    *string `json:"comment"`
+	Valid      *bool   `json:"valid,omitempty"`
 }
 
 type metadataListConstraints struct {
@@ -275,6 +277,12 @@ type server struct {
 	activeCancelMu    sync.Mutex
 	activeCancel      context.CancelFunc
 	activeRows        map[*sql.Rows]context.CancelFunc
+	activeTimer       *time.Timer
+	activeTimedOut    bool
+	// killSession, if non-nil, is called to force-kill the current
+	// statement on the database server. Tests may replace it with a
+	// stub. The real implementation is set during connectWithControl.
+	killSession func()
 }
 
 type agentSession struct {
@@ -786,6 +794,11 @@ func (s *server) connectWithControl(params connectParams, cancelDB *sql.DB, owns
 	s.params = params
 	s.nodeID = databaseSession.nodeID
 	s.databaseSessionID = databaseSession.sessionID
+	s.killSession = func() {
+		if s.cancelDB != nil && s.databaseSessionID > 0 {
+			_, _ = s.cancelDB.Exec(fmt.Sprintf("CALL DBMS_DBA.KILL_SESSION_TRANS(%d, %d)", s.nodeID, s.databaseSessionID))
+		}
+	}
 	return nil
 }
 
@@ -804,6 +817,7 @@ func (s *server) disconnect() error {
 	s.ownsCancelDB = false
 	s.nodeID = 0
 	s.databaseSessionID = 0
+	s.killSession = nil
 	return err
 }
 
@@ -1245,9 +1259,14 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 	var result []objectInfo
 	for rows.Next() {
 		var item objectInfo
+		var valid any
 		item.Schema = schema
-		if err := rows.Scan(&item.Name, &item.ObjectType, &item.Comment); err != nil {
+		if err := rows.Scan(&item.Name, &item.ObjectType, &item.Comment, &valid); err != nil {
 			return nil, err
+		}
+		if valid != nil {
+			value := truthy(valid)
+			item.Valid = &value
 		}
 		result = append(result, item)
 	}
@@ -1298,19 +1317,58 @@ WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)`,
 func xuguListObjectsQuery(schema string, constraints metadataListConstraints) xuguMetadataListQuery {
 	return xuguConstrainedMetadataListQuery(
 		`
-SELECT t.TABLE_NAME AS OBJECT_NAME, 'TABLE' AS OBJECT_TYPE, t.COMMENTS
+SELECT t.TABLE_NAME AS OBJECT_NAME, 'TABLE' AS OBJECT_TYPE, t.COMMENTS, NULL AS VALID
 FROM ALL_TABLES t
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
 WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
 UNION ALL
-SELECT v.VIEW_NAME AS OBJECT_NAME, 'VIEW' AS OBJECT_TYPE, v.COMMENTS
+SELECT v.VIEW_NAME AS OBJECT_NAME, 'VIEW' AS OBJECT_TYPE, v.COMMENTS, NULL AS VALID
 FROM ALL_VIEWS v
 JOIN ALL_SCHEMAS s ON s.DB_ID = v.DB_ID AND s.SCHEMA_ID = v.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)`,
-		"OBJECT_NAME, OBJECT_TYPE, COMMENTS",
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+UNION ALL
+SELECT p.PROC_NAME AS OBJECT_NAME,
+       CASE WHEN p.RET_TYPE IS NULL THEN 'PROCEDURE' ELSE 'FUNCTION' END AS OBJECT_TYPE,
+       p.COMMENTS, p.VALID
+FROM ALL_PROCEDURES p
+JOIN ALL_SCHEMAS s ON s.DB_ID = p.DB_ID AND s.SCHEMA_ID = p.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+UNION ALL
+SELECT p.PACK_NAME AS OBJECT_NAME, 'PACKAGE' AS OBJECT_TYPE, p.COMMENTS, p.VALID
+FROM ALL_PACKAGES p
+JOIN ALL_SCHEMAS s ON s.DB_ID = p.DB_ID AND s.SCHEMA_ID = p.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+UNION ALL
+SELECT p.PACK_NAME AS OBJECT_NAME, 'PACKAGE_BODY' AS OBJECT_TYPE, p.COMMENTS, p.ALL_OK
+FROM ALL_PACKAGES p
+JOIN ALL_SCHEMAS s ON s.DB_ID = p.DB_ID AND s.SCHEMA_ID = p.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+  AND p.BODY IS NOT NULL
+UNION ALL
+SELECT tr.TRIG_NAME AS OBJECT_NAME, 'TRIGGER' AS OBJECT_TYPE, tr.COMMENTS, tr.VALID
+FROM ALL_TRIGGERS tr
+JOIN ALL_SCHEMAS s ON s.DB_ID = tr.DB_ID AND s.SCHEMA_ID = tr.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+UNION ALL
+SELECT q.SEQ_NAME AS OBJECT_NAME, 'SEQUENCE' AS OBJECT_TYPE, NULL AS COMMENTS, NULL AS VALID
+FROM ALL_SEQUENCES q
+JOIN ALL_SCHEMAS s ON s.DB_ID = q.DB_ID AND s.SCHEMA_ID = q.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+UNION ALL
+SELECT u.TYPE_NAME AS OBJECT_NAME, 'TYPE' AS OBJECT_TYPE, u.COMMENTS, u.VALID
+FROM ALL_TYPES u
+JOIN ALL_SCHEMAS s ON s.DB_ID = u.DB_ID AND s.SCHEMA_ID = u.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+UNION ALL
+SELECT u.TYPE_NAME AS OBJECT_NAME, 'TYPE_BODY' AS OBJECT_TYPE, u.COMMENTS, u.VALID
+FROM ALL_TYPES u
+JOIN ALL_SCHEMAS s ON s.DB_ID = u.DB_ID AND s.SCHEMA_ID = u.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+  AND u.BODY IS NOT NULL`,
+		"OBJECT_NAME, OBJECT_TYPE, COMMENTS, VALID",
 		"OBJECT_NAME",
 		"OBJECT_TYPE",
-		[]any{schema, schema},
+		[]any{schema, schema, schema, schema, schema, schema, schema, schema, schema},
 		constraints,
 	)
 }
@@ -1375,6 +1433,8 @@ func normalizedXuguObjectTypes(values []string) []string {
 			normalized = "TABLE"
 		case "VIEW":
 			normalized = "VIEW"
+		case "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY":
+			// Already normalized.
 		default:
 			continue
 		}
@@ -1640,7 +1700,13 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 		}
 		builder.WriteString(line)
 	}
-	return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": builder.String()}, rows.Err()
+	result := map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": builder.String()}
+	normalizedType := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(objectType), "_", " "))
+	if normalizedType == "TYPE" || normalizedType == "TYPE BODY" {
+		// Type source is exposed as catalog SPEC/BODY text, but cannot be safely edited as DDL.
+		result["editable"] = false
+	}
+	return result, rows.Err()
 }
 
 func (s *server) getTableDDL(schema, table string) (string, error) {
@@ -1769,7 +1835,7 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 			HasMore:         false,
 		}, err
 	}
-	rows, err := s.queryRows(sqlText, nil)
+	rows, err := s.queryRowsWithTimeout(sqlText, nil, opts.TimeoutSecs)
 	if err != nil {
 		return queryPageResult{}, err
 	}
@@ -1894,7 +1960,7 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 		maxRows = defaultMaxRows
 	}
 	if isQuerySQL(sqlText) {
-		result, err := s.executeSelect(sqlText, maxRows)
+		result, err := s.executeSelect(sqlText, maxRows, opts.TimeoutSecs)
 		result.ExecutionTimeMS = time.Since(start).Milliseconds()
 		return result, err
 	}
@@ -1902,7 +1968,7 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 	if err != nil {
 		return queryResult{}, err
 	}
-	ctx, cancel := s.beginActiveOperation()
+	ctx, cancel := s.beginActiveOperationWithTimeout(opts.TimeoutSecs)
 	defer s.endActiveOperation(cancel)
 	execResult, err := db.ExecContext(ctx, sqlText)
 	if err != nil {
@@ -1912,8 +1978,8 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 	return queryResult{Columns: []string{}, ColumnTypes: []string{}, Rows: [][]any{}, AffectedRows: affected, ExecutionTimeMS: time.Since(start).Milliseconds()}, nil
 }
 
-func (s *server) executeSelect(sqlText string, maxRows int) (queryResult, error) {
-	rows, err := s.queryRows(sqlText, nil)
+func (s *server) executeSelect(sqlText string, maxRows int, timeoutSecs int) (queryResult, error) {
+	rows, err := s.queryRowsWithTimeout(sqlText, nil, timeoutSecs)
 	if err != nil {
 		return queryResult{}, err
 	}
@@ -1976,18 +2042,32 @@ func (s *server) setSchema(schema string) error {
 }
 
 func (s *server) queryRows(sqlText string, args []any) (*sql.Rows, error) {
+	return s.queryRowsWithTimeout(sqlText, args, 0)
+}
+
+func (s *server) queryRowsWithTimeout(sqlText string, args []any, timeoutSecs int) (*sql.Rows, error) {
 	db, err := s.requireDB()
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := s.beginActiveOperation()
+	ctx, cancel := s.beginActiveOperationWithTimeout(timeoutSecs)
 	rows, queryErr := db.QueryContext(ctx, sqlText, args...)
 	s.activeCancelMu.Lock()
 	s.activeCancel = nil
+	if s.activeTimer != nil {
+		s.activeTimer.Stop()
+		s.activeTimer = nil
+	}
+	timedOut := s.activeTimedOut
 	if queryErr != nil {
 		cancel()
+	} else if timedOut {
+		cancel()
+		if rows != nil {
+			rows.Close()
+		}
+		queryErr = fmt.Errorf("query timed out after %ds", timeoutSecs)
 	} else {
-		// Paged queries may continue fetching after QueryContext returns.
 		s.activeRows[rows] = cancel
 	}
 	s.activeCancelMu.Unlock()
@@ -1995,9 +2075,31 @@ func (s *server) queryRows(sqlText string, args []any) (*sql.Rows, error) {
 }
 
 func (s *server) beginActiveOperation() (context.Context, context.CancelFunc) {
+	return s.beginActiveOperationWithTimeout(0)
+}
+
+func (s *server) beginActiveOperationWithTimeout(timeoutSecs int) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
+	var timer *time.Timer
+	if timeoutSecs > 0 {
+		var t *time.Timer
+		t = time.AfterFunc(time.Duration(timeoutSecs)*time.Second, func() {
+			s.activeCancelMu.Lock()
+			if s.activeTimer == t {
+				s.activeTimedOut = true
+				cancel()
+				if s.killSession != nil {
+					s.killSession()
+				}
+			}
+			s.activeCancelMu.Unlock()
+		})
+		timer = t
+	}
 	s.activeCancelMu.Lock()
 	s.activeCancel = cancel
+	s.activeTimer = timer
+	s.activeTimedOut = false
 	s.activeCancelMu.Unlock()
 	return ctx, cancel
 }
@@ -2006,6 +2108,10 @@ func (s *server) endActiveOperation(cancel context.CancelFunc) {
 	cancel()
 	s.activeCancelMu.Lock()
 	s.activeCancel = nil
+	if s.activeTimer != nil {
+		s.activeTimer.Stop()
+		s.activeTimer = nil
+	}
 	s.activeCancelMu.Unlock()
 }
 
@@ -2022,13 +2128,13 @@ func (s *server) cancelActiveQuery() {
 	for _, cancel := range cancels {
 		cancel()
 	}
-	if len(cancels) > 0 && s.cancelDB != nil && s.databaseSessionID > 0 {
+	if len(cancels) > 0 && s.killSession != nil {
 		// go-xugu-driver does not implement QueryerContext/ExecerContext and
 		// blocks in network reads, so context cancellation alone cannot interrupt
 		// an in-flight statement. Xugu's control procedure stops the target
 		// session's current transaction while preserving the connection. Runtime
 		// sessions share one control connection per database endpoint.
-		_, _ = s.cancelDB.Exec(fmt.Sprintf("CALL DBMS_DBA.KILL_SESSION_TRANS(%d, %d)", s.nodeID, s.databaseSessionID))
+		s.killSession()
 	}
 }
 
@@ -2068,12 +2174,31 @@ SELECT TO_CHAR(p.DEFINE)
 FROM SYS_PROCEDURES p
 JOIN SYS_SCHEMAS s ON s.DB_ID = p.DB_ID AND s.SCHEMA_ID = p.SCHEMA_ID
 WHERE UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(p.PROC_NAME) = UPPER(?)`, []any{schema, name}, nil
-	case "PACKAGE", "PACKAGE BODY":
+	case "PACKAGE":
 		return `
-SELECT COALESCE(TO_CHAR(k.SPEC), '') || COALESCE(TO_CHAR(k.BODY), '')
+SELECT COALESCE(TO_CHAR(k.SPEC), '')
 FROM SYS_PACKAGES k
 JOIN SYS_SCHEMAS s ON s.DB_ID = k.DB_ID AND s.SCHEMA_ID = k.SCHEMA_ID
 WHERE UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(k.PACK_NAME) = UPPER(?)`, []any{schema, name}, nil
+	case "PACKAGE BODY", "PACKAGE_BODY":
+		return `
+SELECT COALESCE(TO_CHAR(k.BODY), '')
+FROM SYS_PACKAGES k
+JOIN SYS_SCHEMAS s ON s.DB_ID = k.DB_ID AND s.SCHEMA_ID = k.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(k.PACK_NAME) = UPPER(?)`, []any{schema, name}, nil
+	case "TYPE":
+		return `
+SELECT COALESCE(TO_CHAR(u.SPEC), '')
+FROM ALL_TYPES u
+JOIN ALL_SCHEMAS s ON s.DB_ID = u.DB_ID AND s.SCHEMA_ID = u.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(u.TYPE_NAME) = UPPER(?)`, []any{schema, name}, nil
+	case "TYPE BODY", "TYPE_BODY":
+		return `
+SELECT COALESCE(TO_CHAR(u.BODY), '')
+FROM ALL_TYPES u
+JOIN ALL_SCHEMAS s ON s.DB_ID = u.DB_ID AND s.SCHEMA_ID = u.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(u.TYPE_NAME) = UPPER(?)
+  AND u.BODY IS NOT NULL`, []any{schema, name}, nil
 	default:
 		return "", nil, fmt.Errorf("object source is not supported for %s", objectType)
 	}

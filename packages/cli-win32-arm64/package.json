@@ -1,0 +1,23 @@
+{
+  "name": "@dbx-app/cli-win32-arm64",
+  "version": "0.4.37",
+  "description": "Precompiled DBX CLI binary for Windows arm64",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/t8y2/dbx",
+    "directory": "packages/cli-win32-arm64"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "bin": {
+    "dbx-native": "bin/dbx.exe"
+  },
+  "files": [
+    "bin"
+  ]
+}

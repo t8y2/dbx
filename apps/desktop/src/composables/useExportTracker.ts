@@ -34,6 +34,7 @@ export interface ExportTask {
 
 const taskMap = reactive<Map<string, ExportTask>>(new Map());
 const activeTransferRuns = new Set<string>();
+const taskCancelHandlers = new Map<string, () => void | Promise<void>>();
 
 function normalizeExportStatus(status: string): BackgroundTaskStatus {
   if (status === "Writing" || status === "Done" || status === "Error" || status === "Cancelled") return status;
@@ -283,20 +284,33 @@ export function useExportTracker() {
 
   function removeTask(exportId: string) {
     taskMap.delete(exportId);
+    taskCancelHandlers.delete(exportId);
   }
 
   function clearFinished() {
     for (const [id, task] of taskMap) {
       if (task.status === "Done" || task.status === "Error" || task.status === "Cancelled") {
         taskMap.delete(id);
+        taskCancelHandlers.delete(id);
       }
     }
+  }
+
+  function registerTaskCancelHandler(exportId: string, handler: () => void | Promise<void>) {
+    taskCancelHandlers.set(exportId, handler);
+  }
+
+  function unregisterTaskCancelHandler(exportId: string) {
+    taskCancelHandlers.delete(exportId);
   }
 
   async function cancelTask(exportId: string) {
     const task = taskMap.get(exportId);
     try {
-      if (task?.kind === "database-export") {
+      const customHandler = taskCancelHandlers.get(exportId);
+      if (customHandler) {
+        await customHandler();
+      } else if (task?.kind === "database-export") {
         await api.cancelDatabaseExport(exportId);
       } else if (task?.kind === "sql-file") {
         await api.cancelSqlFileExecution(exportId);
@@ -323,6 +337,8 @@ export function useExportTracker() {
     updateDatabaseExportTask,
     updateSqlFileTask,
     updateDataTransferTask,
+    registerTaskCancelHandler,
+    unregisterTaskCancelHandler,
     removeTask,
     clearFinished,
     cancelTask,

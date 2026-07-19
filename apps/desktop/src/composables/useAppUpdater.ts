@@ -17,7 +17,8 @@ export function canDownloadAndInstallUpdate(info: api.UpdateInfo | null, isDeskt
 }
 
 export function normalizeUpdateDownloadSource(value: unknown): SettingsUpdateDownloadSource {
-  if (value === "atomgit") return "atomgit";
+  // Old persisted AtomGit preferences should retain their mainland mirror behavior.
+  if (value === "atomgit") return "cnb";
   return value === "cnb" ? "cnb" : "official";
 }
 
@@ -30,9 +31,6 @@ export function resolveUpdateReleaseUrl(info: api.UpdateInfo | null, source: unk
   const normalizedSource = normalizeUpdateDownloadSource(source);
   if (normalizedSource === "cnb" && info?.latest_version) {
     return `https://cnb.cool/dbxio.com/dbx/-/releases/tag/${tagVersion(info.latest_version)}`;
-  }
-  if (normalizedSource === "atomgit" && info?.latest_version) {
-    return `https://atomgit.com/t8y2/dbx/releases/${tagVersion(info.latest_version)}`;
   }
   return info?.release_url || fallbackUrl;
 }

@@ -51,25 +51,49 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
-    void schemaSwitchPlacesSysCatalogAfterSelectedSchema() {
+    void schemaSwitchKeepsSystemCatalogImplicitlyFirst() {
         KingbaseAgent agent = new KingbaseAgent();
 
-        Assertions.assertEquals("SET search_path TO \"app\", sys_catalog", agent.setSchemaSQL("app"));
-        Assertions.assertEquals("SET search_path TO \"app\"\"prod\", sys_catalog", agent.setSchemaSQL("app\"prod"));
+        Assertions.assertEquals("SET search_path TO \"app\"", agent.setSchemaSQL("app"));
+        Assertions.assertEquals("SET search_path TO \"app\"\"prod\"", agent.setSchemaSQL("app\"prod"));
     }
 
     @Test
-    void mysqlCompatListDatabasesUsesCurrentDatabase() {
+    void mysqlCompatListDatabasesUsesKingbaseCatalog() {
         List<String> sql = new ArrayList<>();
         KingbaseAgent agent = new KingbaseAgent();
         agent.setMysqlCompatMode(true);
         TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
             new String[]{"database_name"},
-            new Object[][]{{"TEST"}}
+            new Object[][]{{"app"}, {"analytics"}}
         )));
 
+        List<DatabaseInfo> databases = agent.listDatabases();
+
+        Assertions.assertEquals(2, databases.size());
+        Assertions.assertEquals("app", databases.get(0).getName());
+        Assertions.assertEquals("analytics", databases.get(1).getName());
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_database"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("datallowconn = true"), sql.get(0));
+    }
+
+    @Test
+    void mysqlCompatListDatabasesFallsBackToCurrentDatabase() {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        agent.setMysqlCompatMode(true);
+        TestSupport.setPrivateConnection(agent, preparedConnectionWithFailures(
+            sql,
+            List.of("sys_catalog.sys_database", "FROM pg_catalog.pg_database"),
+            resultSet(new String[]{"database_name"}, new Object[][]{{"TEST"}})
+        ));
+
         Assertions.assertEquals("TEST", agent.listDatabases().get(0).getName());
-        Assertions.assertEquals("SELECT current_database() AS database_name", sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_database"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("datallowconn = true"), sql.get(0));
+        Assertions.assertTrue(sql.get(1).contains("FROM pg_catalog.pg_database"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("datallowconn = true"), sql.get(1));
+        Assertions.assertEquals("SELECT current_database() AS database_name", sql.get(2));
     }
 
     @Test
@@ -86,6 +110,7 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         Assertions.assertEquals("app", databases.get(0).getName());
         Assertions.assertEquals("analytics", databases.get(1).getName());
         Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_database"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("datallowconn = true"), sql.get(0));
     }
 
     @Test
@@ -102,7 +127,8 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         Assertions.assertEquals(1, databases.size());
         Assertions.assertEquals("test", databases.get(0).getName());
         Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_database"), sql.get(0));
-        Assertions.assertTrue(sql.get(1).contains("FROM pg_database"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("FROM pg_catalog.pg_database"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("datallowconn = true"), sql.get(1));
     }
 
     @Test
@@ -115,7 +141,7 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         )));
 
         Assertions.assertEquals(Arrays.asList("public", "sys_catalog"), agent.listSchemas());
-        Assertions.assertTrue(sql.get(0).contains("FROM sys_namespace"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_namespace"), sql.get(0));
         Assertions.assertFalse(sql.get(0).contains("SYS%"), sql.get(0));
     }
 
@@ -138,13 +164,14 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         Assertions.assertEquals("SELECT 1 FROM pg_catalog.pg_namespace WHERE 1 = 0", sql.get(1));
         Assertions.assertTrue(sql.get(2).contains("FROM pg_catalog.pg_namespace"), sql.get(2));
         Assertions.assertEquals("SET search_path TO \"app\"", agent.setSchemaSQL("app"));
+        Assertions.assertEquals("RESET search_path", agent.resetSchemaSQL());
     }
 
     @Test
-    void detectsMysqlCompatModeFromServerSqlMode() throws Exception {
+    void detectsMysqlCompatModeFromServerDatabaseMode() throws Exception {
         List<String> sql = new ArrayList<>();
         KingbaseAgent agent = new KingbaseAgent();
-        Connection connection = mysqlCompatConnection(sql);
+        Connection connection = compatibilityModeConnection(sql, "mysql", true);
 
         Method afterConnect = KingbaseAgent.class.getDeclaredMethod("afterConnect", ConnectParams.class, Connection.class);
         afterConnect.setAccessible(true);
@@ -153,14 +180,45 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         Assertions.assertTrue(agent.isMysqlCompatMode());
         Assertions.assertEquals("`", agent.getIdentifierQuote());
         Assertions.assertEquals("SELECT 1 FROM sys_catalog.sys_namespace WHERE 1 = 0", sql.get(0));
-        Assertions.assertEquals("SELECT 1 FROM sys_settings WHERE LOWER(name) = 'sql_mode'", sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("LOWER(name) = 'database_mode'"), sql.get(1));
+        Assertions.assertEquals(2, sql.size());
+    }
+
+    @Test
+    void legacyKingbaseFallsBackToSqlModeDetection() throws Exception {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        Connection connection = compatibilityModeConnection(sql, null, true);
+
+        Method afterConnect = KingbaseAgent.class.getDeclaredMethod("afterConnect", ConnectParams.class, Connection.class);
+        afterConnect.setAccessible(true);
+        afterConnect.invoke(agent, new ConnectParams(), connection);
+
+        Assertions.assertTrue(agent.isMysqlCompatMode());
+        Assertions.assertTrue(sql.get(1).contains("LOWER(name) = 'database_mode'"), sql.get(1));
+        Assertions.assertTrue(sql.get(2).contains("LOWER(name) = 'sql_mode'"), sql.get(2));
+    }
+
+    @Test
+    void oracleDatabaseModeIsNotMisdetectedFromSqlMode() throws Exception {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        Connection connection = compatibilityModeConnection(sql, "oracle", true);
+
+        Method afterConnect = KingbaseAgent.class.getDeclaredMethod("afterConnect", ConnectParams.class, Connection.class);
+        afterConnect.setAccessible(true);
+        afterConnect.invoke(agent, new ConnectParams(), connection);
+
+        Assertions.assertFalse(agent.isMysqlCompatMode());
+        Assertions.assertTrue(sql.get(1).contains("LOWER(name) = 'database_mode'"), sql.get(1));
+        Assertions.assertFalse(sql.stream().anyMatch(query -> query.contains("LOWER(name) = 'sql_mode'")), sql.toString());
     }
 
     @Test
     void detectsSqlServerIdentityCatalogMode() throws Exception {
         List<String> sql = new ArrayList<>();
         KingbaseAgent agent = new KingbaseAgent();
-        Connection connection = sqlServerCompatConnection(sql);
+        Connection connection = compatibilityModeConnection(sql, "sqlserver", true);
 
         Method afterConnect = KingbaseAgent.class.getDeclaredMethod("afterConnect", ConnectParams.class, Connection.class);
         afterConnect.setAccessible(true);
@@ -168,23 +226,93 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
 
         Assertions.assertTrue(isSqlServerIdentityCatalogMode(agent));
         Assertions.assertEquals("SELECT 1 FROM sys_catalog.sys_namespace WHERE 1 = 0", sql.get(0));
-        Assertions.assertEquals("SELECT 1 FROM sys_settings WHERE LOWER(name) = 'sql_mode'", sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("LOWER(name) = 'database_mode'"), sql.get(1));
         Assertions.assertEquals("SELECT 1 FROM sys.identity_columns WHERE 1 = 0", sql.get(2));
     }
 
     @Test
-    void mysqlCompatListTablesUsesInformationSchema() {
+    void mysqlCompatListTablesUsesInformationSchemaAndPreservesComments() {
         List<String> sql = new ArrayList<>();
         KingbaseAgent agent = new KingbaseAgent();
         agent.setMysqlCompatMode(true);
         TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
-            new String[]{"table_name", "table_type"},
-            new Object[][]{{"test_timestamps", "BASE TABLE"}}
+            new String[]{"table_name", "table_type", "table_comment"},
+            new Object[][]{{"test_timestamps", "BASE TABLE", "timestamp samples"}}
         )));
 
-        Assertions.assertEquals("test_timestamps", agent.listTables("PUBLIC").get(0).getName());
-        Assertions.assertTrue(sql.get(0).contains("FROM information_schema.tables"));
+        TableInfo table = agent.listTables("PUBLIC").get(0);
+
+        Assertions.assertEquals("test_timestamps", table.getName());
+        Assertions.assertEquals("timestamp samples", table.getComment());
+        Assertions.assertTrue(sql.get(0).contains("FROM information_schema.tables"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("LEFT JOIN sys_catalog.sys_description"), sql.get(0));
         Assertions.assertFalse(sql.get(0).contains("SHOW"));
+    }
+
+    @Test
+    void mysqlCompatListTablesFallsBackFromSysFreespacePermissionError() {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        agent.setMysqlCompatMode(true);
+        TestSupport.setPrivateConnection(agent, preparedConnectionWithMetadataFailure(
+            sql,
+            "permission denied for function sys_freespace",
+            "42501",
+            resultSet(
+                new String[]{"table_name", "table_type", "table_comment"},
+                new Object[][]{{"orders", "TABLE", "customer orders"}}
+            )
+        ));
+
+        TableInfo table = agent.listTables("sales").get(0);
+
+        Assertions.assertEquals("orders", table.getName());
+        Assertions.assertEquals("customer orders", table.getComment());
+        Assertions.assertEquals(2, sql.size());
+        Assertions.assertTrue(sql.get(0).contains("FROM information_schema.tables"), sql.get(0));
+        Assertions.assertTrue(sql.get(1).contains("FROM sys_catalog.sys_class"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("CAST(c.relkind AS varchar(16)) IN ('r', 'p')"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("c.oid >= 16384"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("HAS_TABLE_PRIVILEGE"), sql.get(1));
+        Assertions.assertFalse(sql.get(1).contains("information_schema.tables"), sql.get(1));
+    }
+
+    @Test
+    void mysqlCompatListTablesDoesNotHideUnrelatedPermissionErrors() {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        agent.setMysqlCompatMode(true);
+        TestSupport.setPrivateConnection(agent, preparedConnectionWithMetadataFailure(
+            sql,
+            "permission denied for relation tables",
+            "42501",
+            resultSet(new String[]{"table_name", "table_type", "table_comment"}, new Object[][]{})
+        ));
+
+        Assertions.assertThrows(RuntimeException.class, () -> agent.listTables("sales"));
+        Assertions.assertEquals(1, sql.size());
+    }
+
+    @Test
+    void constrainedMysqlCompatTableMetadataPreservesCommentsAndPaging() {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        agent.setMysqlCompatMode(true);
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"table_name", "table_type", "table_comment"},
+            new Object[][]{{"orders", "BASE TABLE", "customer orders"}}
+        )));
+
+        List<TableInfo> tables = agent.listTables(
+            "sales",
+            new MetadataListConstraints("ord", 20, 40, List.of("TABLE"))
+        );
+
+        Assertions.assertEquals("customer orders", tables.get(0).getComment());
+        Assertions.assertTrue(sql.get(0).contains("UPPER(t.table_name) LIKE ? ESCAPE '\\\\'"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("LEFT JOIN sys_catalog.sys_description"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("information_schema.tables"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).endsWith("LIMIT 20 OFFSET 40"), sql.get(0));
     }
 
     @Test
@@ -355,7 +483,7 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         KingbaseAgent agent = new KingbaseAgent();
         agent.setMysqlCompatMode(true);
         TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
-            new String[]{"table_name", "table_type"},
+            new String[]{"table_name", "table_type", "table_comment"},
             new Object[][]{}
         )));
 
@@ -363,7 +491,7 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
 
         Assertions.assertTrue(sql.get(0).contains("FROM information_schema.tables"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("table_type IN (?)"), sql.get(0));
-        Assertions.assertTrue(sql.get(0).contains("UPPER(table_name) LIKE ? ESCAPE '\\\\'"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("UPPER(t.table_name) LIKE ? ESCAPE '\\\\'"), sql.get(0));
         Assertions.assertTrue(sql.get(0).endsWith("LIMIT 20 OFFSET 40"), sql.get(0));
     }
 
@@ -514,6 +642,23 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
+    void ddlOmitsUnknownCharacterLengthSentinel() {
+        ColumnInfo unlimited = new ColumnInfo("display_name", "varchar", true, null, false, null, null, null, null, -1);
+
+        String ddl = DdlBuilder.buildTableDdl(
+            "public",
+            "accounts",
+            Collections.singletonList(unlimited),
+            Collections.emptyList(),
+            Collections.emptyList(),
+            true
+        );
+
+        Assertions.assertTrue(ddl.contains("`display_name` varchar"), ddl);
+        Assertions.assertFalse(ddl.contains("varchar(-1)"), ddl);
+    }
+
+    @Test
     void regularListIndexesIncludesPrimaryUniqueAndSecondaryIndexes() {
         List<String> sql = new ArrayList<>();
         KingbaseAgent agent = new KingbaseAgent();
@@ -602,14 +747,50 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     private static Connection preparedConnectionWithFailure(List<String> sql, String failingSqlFragment, ResultSet fallback) {
+        return preparedConnectionWithFailures(sql, List.of(failingSqlFragment), fallback);
+    }
+
+    private static Connection preparedConnectionWithMetadataFailure(
+        List<String> sql,
+        String message,
+        String sqlState,
+        ResultSet fallback
+    ) {
         return proxy(Connection.class, (method, args) -> {
             if ("prepareStatement".equals(method.getName())) {
                 String preparedSql = String.valueOf(args[0]);
                 sql.add(preparedSql);
                 return proxy(PreparedStatement.class, (statementMethod, statementArgs) -> {
                     if ("executeQuery".equals(statementMethod.getName())) {
-                        if (preparedSql.contains(failingSqlFragment)) {
-                            throw new SQLException("relation does not exist: " + failingSqlFragment);
+                        if (preparedSql.contains("information_schema.tables")) {
+                            throw new SQLException(message, sqlState);
+                        }
+                        return fallback;
+                    }
+                    if ("close".equals(statementMethod.getName())) {
+                        return null;
+                    }
+                    return defaultValue(statementMethod.getReturnType());
+                });
+            }
+            if ("isClosed".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Connection preparedConnectionWithFailures(List<String> sql, List<String> failingSqlFragments, ResultSet fallback) {
+        return proxy(Connection.class, (method, args) -> {
+            if ("prepareStatement".equals(method.getName())) {
+                String preparedSql = String.valueOf(args[0]);
+                sql.add(preparedSql);
+                return proxy(PreparedStatement.class, (statementMethod, statementArgs) -> {
+                    if ("executeQuery".equals(statementMethod.getName())) {
+                        for (String failingSqlFragment : failingSqlFragments) {
+                            if (preparedSql.contains(failingSqlFragment)) {
+                                throw new SQLException("relation does not exist: " + failingSqlFragment);
+                            }
                         }
                         return fallback;
                     }
@@ -654,33 +835,25 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         });
     }
 
-    private static Connection mysqlCompatConnection(List<String> sql) {
+    private static Connection compatibilityModeConnection(
+        List<String> sql,
+        String databaseMode,
+        boolean sqlModeExists
+    ) {
         return proxy(Connection.class, (method, args) -> {
             if ("createStatement".equals(method.getName())) {
                 return proxy(Statement.class, (statementMethod, statementArgs) -> {
                     if ("executeQuery".equals(statementMethod.getName())) {
                         String query = String.valueOf(statementArgs[0]);
                         sql.add(query);
-                        if (query.contains("sys_settings")) {
+                        if (query.contains("LOWER(name) = 'database_mode'")) {
+                            return databaseMode == null
+                                ? resultSet(new String[]{"setting"}, new Object[][]{})
+                                : resultSet(new String[]{"setting"}, new Object[][]{{databaseMode}});
+                        }
+                        if (query.contains("LOWER(name) = 'sql_mode'") && sqlModeExists) {
                             return resultSet(new String[]{"probe"}, new Object[][]{{1}});
                         }
-                        return resultSet(new String[]{"probe"}, new Object[][]{});
-                    }
-                    return defaultValue(statementMethod.getReturnType());
-                });
-            }
-            if ("isClosed".equals(method.getName())) return false;
-            return defaultValue(method.getReturnType());
-        });
-    }
-
-    private static Connection sqlServerCompatConnection(List<String> sql) {
-        return proxy(Connection.class, (method, args) -> {
-            if ("createStatement".equals(method.getName())) {
-                return proxy(Statement.class, (statementMethod, statementArgs) -> {
-                    if ("executeQuery".equals(statementMethod.getName())) {
-                        String query = String.valueOf(statementArgs[0]);
-                        sql.add(query);
                         return resultSet(new String[]{"probe"}, new Object[][]{});
                     }
                     return defaultValue(statementMethod.getReturnType());

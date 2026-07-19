@@ -1,20 +1,17 @@
 ---
 title: MCP 集成
-description: 通过 MCP 协议让 Claude Code、Cursor 等 AI 编程助手直接查询你的数据库。
+description: 通过 Model Context Protocol 让 AI 编程助手查询你的数据库。
 ---
 
-<Callout type="info">一行配置，让 AI 编程助手直接查询你的数据库。支持 Claude Code、Cursor、Windsurf、VS Code Copilot。</Callout>
+<Callout type="info">把 AI 助手连接到 DBX，即可查看数据库结构、查询数据，并在 DBX 中打开结果。</Callout>
 
 ## 什么是 MCP？
 
-MCP（Model Context Protocol）是一个开放协议，让 AI 编程助手能够调用外部工具。DBX 的 MCP Server 把你在 DBX 中配置的数据库连接暴露给 AI 助手，这样你可以用自然语言查询数据库，AI 自动生成并执行 SQL。
+MCP（Model Context Protocol）是让 AI 客户端调用外部工具的开放协议。DBX MCP 可以让 AI 助手使用 DBX 中已经配置好的数据库连接。
 
-```
-你："查看 orders 表最近 7 天的订单量趋势"
-
-AI 助手 → MCP Server → 你的数据库 → 返回结果
-                ↓
-         DBX 的连接配置（含密码）
+```text
+AI 助手 → DBX MCP → 你的数据库 → 返回结果
+                    ↘ DBX 桌面端（打开或展示结果）
 ```
 
 ## 快速开始
@@ -27,11 +24,12 @@ AI 助手 → MCP Server → 你的数据库 → 返回结果
     npm install -g @dbx-app/mcp-server
     ```
 
+    npm 会自动安装当前平台需要的依赖。不要使用 `--no-optional`。
   </Step>
   <Step>
     ### 配置 AI 助手
 
-    在你的工作目录创建 `.mcp.json`：
+    在项目目录创建 `.mcp.json`：
 
     ```json
     {
@@ -44,232 +42,108 @@ AI 助手 → MCP Server → 你的数据库 → 返回结果
     }
     ```
 
-    Windows 便携版需要额外设置 `DBX_DATA_DIR`，指向 `DBX.exe` 同级的 `data` 目录：
-
-    ```json
-    {
-      "mcpServers": {
-        "dbx": {
-          "command": "npx",
-          "args": ["-y", "@dbx-app/mcp-server"],
-          "env": {
-            "DBX_DATA_DIR": "D:\\DBX_x64-portable\\data"
-          }
-        }
-      }
-    }
-    ```
-
+    如果使用全局安装，可将 `command` 改为 `dbx-mcp-server`。Windows 便携版请将 `DBX_DATA_DIR` 设置为 `DBX.exe` 同级的 `data` 目录。
   </Step>
   <Step>
     ### 开始使用
 
-    在 AI 助手中直接用自然语言说：
+    在 AI 助手中直接使用自然语言：
 
     - "列出我的数据库连接"
     - "查看 local-pg 上有哪些表"
     - "查看 users 表的结构"
     - "查询最近 7 天的订单数量"
     - "打开 orders 表"（需要 DBX 运行中）
-
   </Step>
 </Steps>
 
 ## 支持的 AI 助手
 
-| 助手              | 配置方式                |
-| ----------------- | ----------------------- |
-| Claude Code       | `.mcp.json`（原生支持） |
-| Cursor            | `.cursor/mcp.json`      |
-| Windsurf          | `.windsurfrules`        |
-| VS Code + Copilot | MCP 扩展                |
+| AI 助手 | 配置方式 |
+| --- | --- |
+| Claude Code | `.mcp.json` |
+| Cursor | `.cursor/mcp.json` |
+| Windsurf | MCP 配置 |
+| VS Code + Copilot | MCP 扩展/配置 |
 
 ## 工具列表
 
-DBX MCP Server 提供以下工具，AI 助手会根据你的需求自动调用：
+DBX MCP 当前提供 10 个工具：
 
-### `dbx_list_connections`
+| 工具 | 说明 |
+| --- | --- |
+| `dbx_list_connections` | 列出当前 MCP 会话可见的连接 |
+| `dbx_add_connection` | 添加连接到本地 DBX 存储 |
+| `dbx_remove_connection` | 从本地 DBX 存储删除连接 |
+| `dbx_list_tables` | 列出表、视图或集合 |
+| `dbx_describe_table` | 返回列定义和表元数据 |
+| `dbx_get_schema_context` | 返回适合 AI 使用的紧凑 Schema 上下文 |
+| `dbx_execute_query` | 执行 SQL 或支持的 MongoDB shell 命令，最多返回 100 行 |
+| `dbx_execute_redis_command` | 执行 Redis 命令 |
+| `dbx_open_table` | 在运行中的 DBX 桌面端打开表 |
+| `dbx_execute_and_show` | 执行查询并在 DBX 中展示结果 |
 
-列出 DBX 中所有已配置的数据库连接。
+启用连接作用域后，修改连接和桌面 UI 工具会被隐藏。
 
-**示例对话：**
+## 数据库访问
 
-> "列出我的数据库连接"
+### 本地连接
 
-**返回：**
+这是默认模式。MCP 使用 DBX 中保存的连接配置。执行数据库查询时不要求 DBX 桌面端保持运行。
 
-```
-| Name     | Type     | Host      | Port | Database |
-| -------- | -------- | --------- | ---- | -------- |
-| local-pg | postgres | 127.0.0.1 | 5432 |          |
-| prod-db  | mysql    | db.example| 3306 | myapp    |
-```
+常见的本地数据库文件路径：
 
-### `dbx_list_tables`
+| 平台 | 默认路径 |
+| --- | --- |
+| macOS | `~/Library/Application Support/com.dbx.app/dbx.db` |
+| Linux | `~/.local/share/com.dbx.app/dbx.db` |
+| Windows | `%APPDATA%\com.dbx.app\dbx.db` |
 
-列出指定连接的表和视图。
+`DBX_DATA_DIR` 必须指向包含 `dbx.db` 的目录，而不是数据库文件本身。Windows 便携版通常是 `DBX.exe` 同级的 `data` 目录。
 
-| 参数              | 必填 | 说明                       |
-| ----------------- | ---- | -------------------------- |
-| `connection_name` | 是   | DBX 连接名称               |
-| `schema`          | 否   | Schema 名称（默认 public） |
+PostgreSQL、MySQL、SQLite、兼容 SQL 数据库、独立 Redis 和 MongoDB 可以直接查询。部分 SSH、集群、厂商专用以及 Agent/JDBC 连接需要先安装对应的 DBX 组件。
 
-### `dbx_describe_table`
+### Agent/JDBC 数据库
 
-获取表的列定义，AI 用它来理解你的数据结构。
+达梦、人大金仓、Oracle、DB2、Hive、Trino、Snowflake、SAP HANA 等 Agent/JDBC 数据库，需要匹配的 DBX Agent、JDBC 驱动和 JRE。请先在 DBX 中安装，再使用 MCP。
 
-| 参数              | 必填 | 说明                       |
-| ----------------- | ---- | -------------------------- |
-| `connection_name` | 是   | DBX 连接名称               |
-| `table`           | 是   | 表名                       |
-| `schema`          | 否   | Schema 名称（默认 public） |
+### DBX Web / Docker 模式
 
-**返回：**
+设置 `DBX_WEB_URL` 后，MCP 会使用部署的 DBX Web 后端，而不是读取本机连接。如果 Web 登录启用了密码保护，还要设置 `DBX_WEB_PASSWORD`，值为 Web 登录页使用的密码。
 
-```
-| Column      | Type      | Nullable | Default | Comment |
-| ----------- | --------- | -------- | ------- | ------- |
-| id (PK)     | integer   | NO       |         |         |
-| user_id     | integer   | NO       |         | 用户 ID  |
-| total       | numeric   | NO       | 0       | 订单金额 |
-| created_at  | timestamp | NO       | now()   |         |
-```
+### 桌面 UI 工具
 
-### `dbx_execute_query`
+`dbx_open_table` 和 `dbx_execute_and_show` 要求 DBX 桌面端正在运行。其他查询工具可以在 DBX 关闭时使用。
 
-执行 SQL 查询，返回结果（最多 100 行）。
+## 安全和环境变量
 
-| 参数              | 必填 | 说明         |
-| ----------------- | ---- | ------------ |
-| `connection_name` | 是   | DBX 连接名称 |
-| `sql`             | 是   | SQL 查询语句 |
+普通写入默认允许。设置 `DBX_MCP_ALLOW_WRITES=0` 可强制只读。`DROP`、`TRUNCATE`、`ALTER`、Redis 破坏性命令以及危险 MongoDB 修改默认仍会阻止，除非设置 `DBX_MCP_ALLOW_DANGEROUS_SQL=1`。
 
-### `dbx_get_schema_context`
-
-返回用于生成 SQL 的紧凑表结构上下文。
-
-| 参数              | 必填 | 说明                                 |
-| ----------------- | ---- | ------------------------------------ |
-| `connection_name` | 是   | DBX 连接名称                         |
-| `schema`          | 否   | Schema 名称                          |
-| `tables`          | 否   | 指定要包含的表名                     |
-| `max_tables`      | 否   | 最多包含多少张表，范围限制在 1 到 20 |
-
-### `dbx_add_connection`
-
-添加新的数据库连接。
-
-| 参数       | 必填 | 说明                                            |
-| ---------- | ---- | ----------------------------------------------- |
-| `name`     | 是   | 连接名称                                        |
-| `db_type`  | 是   | 数据库类型（postgres、mysql、sqlite、redis 等） |
-| `host`     | 是   | 数据库主机                                      |
-| `port`     | 是   | 数据库端口                                      |
-| `username` | 否   | 用户名                                          |
-| `password` | 否   | 密码                                            |
-| `database` | 否   | 默认数据库名                                    |
-| `ssl`      | 否   | 是否启用 SSL（默认 false）                      |
-
-**示例对话：**
-
-> "添加一个 PostgreSQL 连接，名称 prod-db，地址 db.example.com:5432"
-
-### `dbx_remove_connection`
-
-删除数据库连接。
-
-| 参数              | 必填 | 说明             |
-| ----------------- | ---- | ---------------- |
-| `connection_name` | 是   | 要删除的连接名称 |
-
-**示例对话：**
-
-> "删除 test-db 连接"
-
-### `dbx_open_table`
-
-在 DBX 桌面端打开指定表。**需要 DBX 正在运行。**
-
-| 参数              | 必填 | 说明         |
-| ----------------- | ---- | ------------ |
-| `connection_name` | 是   | DBX 连接名称 |
-| `table`           | 是   | 表名         |
-| `database`        | 否   | 数据库名     |
-| `schema`          | 否   | Schema 名称  |
-
-DBX 会自动新开一个 tab 显示数据，窗口自动置前。
-
-### `dbx_execute_and_show`
-
-在 DBX 桌面端执行 SQL 并展示结果。**需要 DBX 正在运行。**
-
-| 参数              | 必填 | 说明         |
-| ----------------- | ---- | ------------ |
-| `connection_name` | 是   | DBX 连接名称 |
-| `sql`             | 是   | SQL 查询语句 |
-| `database`        | 否   | 数据库名     |
-
-## 工作原理
-
-### 连接配置
-
-MCP Server 从 DBX 的 SQLite 数据库读取连接信息：
-
-| 平台    | 路径                                               |
-| ------- | -------------------------------------------------- |
-| macOS   | `~/Library/Application Support/com.dbx.app/dbx.db` |
-| Linux   | `~/.local/share/com.dbx.app/dbx.db`                |
-| Windows | `%APPDATA%\com.dbx.app\dbx.db`                     |
-
-Windows 便携版的数据通常在 `DBX.exe` 同级的 `data\dbx.db`。如果 MCP 列出的连接不是当前 DBX 中的最新连接，请在 MCP 配置中设置 `DBX_DATA_DIR`，值为包含 `dbx.db` 的 `data` 文件夹，例如 `D:\DBX_x64-portable\data`。不要手工复制 `dbx.db` 到默认目录，否则两个连接库会分叉。
-
-### UI 联动
-
-`dbx_open_table` 和 `dbx_execute_and_show` 通过本地 HTTP 接口与运行中的 DBX 应用通信：
-
-```
-AI 助手 → MCP Server → HTTP localhost → DBX 后端 → Tauri 事件 → 前端打开 tab
-```
-
-### 支持的数据库
-
-桌面本地模式下，MCP 查询支持 PostgreSQL、MySQL 及兼容数据库。Web 模式会通过 `DBX_WEB_URL` 转发到 DBX Web 后端。打开表等 UI 联动能力支持当前 DBX 桌面端可以打开的所有数据库类型。
-
-### SQL 安全
-
-MCP 查询执行默认非常保守：
-
-| 规则                                           | 默认行为                           |
-| ---------------------------------------------- | ---------------------------------- |
-| 空 SQL 或无法识别的 SQL                        | 阻止                               |
-| 多条 SQL 语句                                  | 允许；会逐条进行安全检查并依次执行 |
-| 非只读 SQL                                     | 阻止，除非显式允许写入             |
-| `DROP`、`TRUNCATE`、`ALTER`                    | 阻止，除非显式允许危险 SQL         |
-| 允许写入时没有 `WHERE` 的 `UPDATE` 或 `DELETE` | 阻止                               |
-
-设置 `DBX_MCP_ALLOW_WRITES=1` 可以允许写入语句。只有在受控环境并且确实需要破坏性 SQL 时，才设置 `DBX_MCP_ALLOW_DANGEROUS_SQL=1`。
-
-### 桌面模式与 Web 模式
-
-| 模式         | 如何选择           | 说明                                                     |
-| ------------ | ------------------ | -------------------------------------------------------- |
-| 桌面本地模式 | 默认               | 读取 DBX 桌面端连接存储，并可调用桌面专属 UI bridge 工具 |
-| Web 模式     | 设置 `DBX_WEB_URL` | 不读取本机桌面存储，而是把请求发给 DBX Web 后端          |
-
-对于启用了密码保护的 DBX Web 或 Docker 部署，还需要在 MCP Server 环境变量中设置 `DBX_WEB_PASSWORD`。这里填写的就是 DBX Web 登录页使用的密码，也包括首次打开 Web 页面时通过 setup 设置的密码。为了让 MCP 可用，不需要在启动 DBX Web 时额外设置 `DBX_PASSWORD`；`DBX_PASSWORD` 只是服务端环境变量覆盖。当 Web 后端要求认证但没有提供密码时，MCP 调用会在返回任何连接数据前失败。桌面本地模式不使用 `DBX_WEB_PASSWORD`。
+| 变量 | 用途 |
+| --- | --- |
+| `DBX_DATA_DIR` | 覆盖本地 DBX 数据目录 |
+| `DBX_WEB_URL` | 使用 DBX Web/Docker 后端 |
+| `DBX_WEB_PASSWORD` | 登录 DBX Web |
+| `DBX_MCP_ALLOW_WRITES` | 设置为 `0` 强制只读 |
+| `DBX_MCP_ALLOW_DANGEROUS_SQL` | 允许危险 SQL、Redis 和 MongoDB 操作 |
+| `DBX_MCP_SCOPE_CONNECTION_ID` | 限制为一个连接 ID |
+| `DBX_MCP_SCOPE_CONNECTION_NAME` | 限制为一个连接名称 |
+| `DBX_MCP_SCOPE_DATABASE` | 限制为一个数据库 |
+| `DBX_MCP_DEBUG_SQL` | 临时诊断时输出 SQL |
 
 ## 常见问题
 
 <Accordions>
-  <Accordion title="MCP Server 连不上数据库">检查 DBX 中该连接是否能正常连接。MCP Server 使用相同的连接配置和密码。确认数据库服务正在运行，网络可达。</Accordion>
-  <Accordion title="dbx_open_table 报 'DBX is not running'">需要先启动 DBX 桌面应用。UI 联动功能依赖 DBX 运行时的本地 HTTP 服务（端口 4224）。</Accordion>
-  <Accordion title="连接名称找不到">连接名称匹配不区分大小写，但需要和 DBX 中配置的名称一致。用 `dbx_list_connections` 查看所有可用名称。</Accordion>
-  <Accordion title="查询超时">MCP Server 的查询超时为 30 秒。如果查询较慢，考虑添加索引或简化查询。也可以让 AI 助手先用 `dbx_describe_table` 了解表结构，再生成优化后的查询。</Accordion>
-  <Accordion title="Docker 环境下如何使用 MCP？">把 `DBX_WEB_URL` 设置为 DBX Web 地址。如果 Web 页面需要密码，也要把 `DBX_WEB_PASSWORD` 设置为同一个 Web 登录密码；否则 MCP 会拒绝访问受保护的 Web API。</Accordion>
+  <Accordion title="npm 没有安装当前平台包">不要使用 `--no-optional`，重新安装 `@dbx-app/mcp-server`，并用 `node -p 'process.platform + "-" + process.arch'` 检查平台。Alpine Linux 默认使用 musl，目前不在 Linux 发布包支持范围内。</Accordion>
+  <Accordion title="找不到 dbx.db">将 `DBX_DATA_DIR` 设置为包含 `dbx.db` 的目录。Windows 便携版通常是 `DBX.exe` 旁边的 `data` 目录。</Accordion>
+  <Accordion title="提示 DBX 未运行">只有 `dbx_open_table` 和 `dbx_execute_and_show` 需要桌面端运行；本地查询工具可以在 DBX 关闭时执行。</Accordion>
+  <Accordion title="Agent/JDBC 数据库无法启动">在 DBX Driver Manager 中安装或更新匹配的 Agent、JDBC 驱动和 JRE。厂商专有驱动不会随 MCP 原生包发布。</Accordion>
+  <Accordion title="出现 better-sqlite3 或 Node ABI 错误">MCP 不需要 `better-sqlite3`。请先升级 `@dbx-app/mcp-server`；如果错误来自 `@dbx-app/cli`，请按照 CLI 的安装要求处理，因为它们是两个独立的包。</Accordion>
 </Accordions>
 
 ## 系统要求
 
-- [DBX](https://github.com/t8y2/dbx) 已安装并配置了至少一个数据库连接
-- Node.js 18+
-- UI 联动功能需要 DBX v0.3.9+
+- Node.js 18.18.0 或更高版本
+- 已安装 DBX，并至少配置一个数据库连接
+- Agent/JDBC 数据库需要匹配的 Agent、驱动和 JRE
+- 使用两个桌面 UI 工具时，需要保持 DBX 桌面端运行

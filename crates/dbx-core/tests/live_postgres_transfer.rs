@@ -58,6 +58,7 @@ fn postgres_test_config(id: &str, database: &str) -> ConnectionConfig {
         read_only: false,
         is_production: false,
         production_databases: vec![],
+        database_info: None,
     }
 }
 

@@ -1,4 +1,5 @@
 import { COLUMN_WIDTH_DENSITY_PRESETS, percentileValue } from "@/lib/dataGrid/dataGridColumnWidth";
+import { restoredDataGridScrollLeft } from "@/lib/dataGrid/dataGridInfiniteScroll";
 import type { ColumnWidthDensity } from "@/stores/settingsStore";
 
 export interface DataGridTransposeState {
@@ -172,6 +173,13 @@ export function nextTransposeState(showTranspose: boolean, transposeRowIndex: nu
     return { showTranspose: false, transposeRowIndex: null };
   }
   return { showTranspose: true, transposeRowIndex: requestedRowIndex };
+}
+
+export function restoreDataGridAfterTranspose(options: { scroller: Pick<HTMLElement, "scrollLeft" | "scrollWidth" | "clientWidth"> | null; scrollLeftBeforeTranspose: number; attachCanvasResizeObserver: () => void; refreshGridScrollerMetrics: () => void }) {
+  if (!options.scroller) return;
+  options.scroller.scrollLeft = restoredDataGridScrollLeft(options.scrollLeftBeforeTranspose, options.scroller.scrollWidth, options.scroller.clientWidth);
+  options.attachCanvasResizeObserver();
+  options.refreshGridScrollerMetrics();
 }
 
 export function nextContextTransposeState(options: ContextTransposeStateOptions): DataGridTransposeState {

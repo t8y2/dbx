@@ -344,6 +344,36 @@ test("leaves safe PostgreSQL column identifiers unquoted when completion inserts
   assert.equal(column?.apply, "article");
 });
 
+test("quotes PostgreSQL reserved-word column identifiers when completion inserts them", () => {
+  // Reserved words absent from the completion keyword phrase list (which has
+  // "ORDER BY" but not "order") must still be quoted as column references.
+  const reservedColumns = ["order", "do", "returning", "ilike", "window", "true"];
+  const reservedColumnsByTable = new Map<string, SqlCompletionColumn[]>([["public.bookings", reservedColumns.map((name) => ({ name, table: "bookings", schema: "public", dataType: "text" }))]]);
+  const sql = "select  from bookings";
+  const items = buildSqlCompletionItems(sql, "select ".length, {
+    tables: [{ name: "bookings", schema: "public", type: "table" }],
+    columnsByTable: reservedColumnsByTable,
+    dialect: "postgres",
+  });
+
+  for (const name of reservedColumns) {
+    const column = items.find((item) => item.type === "column" && item.label === name);
+    assert.equal(column?.apply, `"${name}"`, `expected reserved column "${name}" to be quoted`);
+  }
+});
+
+test("quotes PostgreSQL reserved-word table identifiers when completion inserts them", () => {
+  const sql = "select * from ord";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [{ name: "order", schema: "public", type: "table" }],
+    columnsByTable: new Map(),
+    dialect: "postgres",
+  });
+
+  const table = items.find((item) => item.type === "table" && item.label === "order");
+  assert.equal(table?.apply, '"order"');
+});
+
 test("suggests matching table names after FROM", () => {
   const sql = "select * from us";
   const items = buildSqlCompletionItems(sql, sql.length, {
@@ -2091,7 +2121,7 @@ test("filters data type keywords out of SELECT context", () => {
 
 // --- Qualified column names for duplicates ---
 
-test("shows qualified column names when multiple tables share column name", () => {
+test("uses row-source aliases when multiple tables share column names", () => {
   const sql = "select  from public.users u join public.orders o on u.id = o.user_id";
   const items = buildSqlCompletionItems(sql, "select ".length, {
     tables,
@@ -2099,12 +2129,12 @@ test("shows qualified column names when multiple tables share column name", () =
   });
   const columns = items.filter((item) => item.type === "column");
   assert.ok(
-    columns.some((item) => item.label === "users.id"),
-    "should show users.id",
+    columns.some((item) => item.label === "u.id" && item.apply === "u.id"),
+    "should show u.id",
   );
   assert.ok(
-    columns.some((item) => item.label === "orders.id"),
-    "should show orders.id",
+    columns.some((item) => item.label === "o.id" && item.apply === "o.id"),
+    "should show o.id",
   );
   assert.ok(
     columns.some((item) => item.label === "name"),

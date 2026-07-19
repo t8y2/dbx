@@ -200,11 +200,12 @@ type completionAssistantResponse struct {
 }
 
 type queryOptions struct {
-	SQL       string `json:"sql"`
-	Database  string `json:"database"`
-	Schema    string `json:"schema"`
-	MaxRows   int    `json:"maxRows"`
-	FetchSize int    `json:"fetchSize"`
+	SQL         string `json:"sql"`
+	Database    string `json:"database"`
+	Schema      string `json:"schema"`
+	MaxRows     int    `json:"maxRows"`
+	FetchSize   int    `json:"fetchSize"`
+	TimeoutSecs int    `json:"timeoutSecs"`
 }
 
 type queryResult struct {
@@ -355,6 +356,8 @@ type server struct {
 	activeCancelMu         sync.Mutex
 	activeCancel           context.CancelFunc
 	activeRows             map[*sql.Rows]context.CancelFunc
+	activeTimer            *time.Timer
+	activeTimedOut         bool
 }
 
 type agentSession struct {
@@ -2414,7 +2417,7 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 			HasMore:         false,
 		}, err
 	}
-	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText)
+	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText, opts.TimeoutSecs)
 	if err != nil {
 		return queryPageResult{}, err
 	}
@@ -2480,7 +2483,7 @@ func (s *server) startTableRead(opts queryOptions, pageSize int) (queryPageResul
 	if !isQuerySQL(sqlText) {
 		return queryPageResult{}, errors.New("table read requires a SELECT query")
 	}
-	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText)
+	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText, opts.TimeoutSecs)
 	if err != nil {
 		return queryPageResult{}, err
 	}
@@ -2615,7 +2618,7 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 		maxRows = defaultMaxRows
 	}
 	if isQuerySQL(sqlText) {
-		result, err := s.executeSelect(sqlText, maxRows)
+		result, err := s.executeSelect(sqlText, maxRows, opts.TimeoutSecs)
 		result.ExecutionTimeMS = time.Since(start).Milliseconds()
 		return result, err
 	}
@@ -2623,7 +2626,34 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 	if err != nil {
 		return queryResult{}, err
 	}
-	execResult, err := db.Exec(sqlText)
+	ctx, cancel := context.WithCancel(context.Background())
+	var timer *time.Timer
+	if opts.TimeoutSecs > 0 {
+		var t *time.Timer
+		t = time.AfterFunc(time.Duration(opts.TimeoutSecs)*time.Second, func() {
+			s.activeCancelMu.Lock()
+			if s.activeTimer == t {
+				cancel()
+			}
+			s.activeCancelMu.Unlock()
+		})
+		timer = t
+	}
+	s.activeCancelMu.Lock()
+	s.activeCancel = cancel
+	s.activeTimer = timer
+	s.activeCancelMu.Unlock()
+	defer func() {
+		cancel()
+		s.activeCancelMu.Lock()
+		s.activeCancel = nil
+		if s.activeTimer != nil {
+			s.activeTimer.Stop()
+			s.activeTimer = nil
+		}
+		s.activeCancelMu.Unlock()
+	}()
+	execResult, err := db.ExecContext(ctx, sqlText)
 	if err != nil {
 		return queryResult{}, err
 	}
@@ -2631,8 +2661,8 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 	return queryResult{Columns: []string{}, ColumnTypes: []string{}, Rows: [][]any{}, AffectedRows: affected, ExecutionTimeMS: time.Since(start).Milliseconds()}, nil
 }
 
-func (s *server) executeSelect(sqlText string, maxRows int) (queryResult, error) {
-	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText)
+func (s *server) executeSelect(sqlText string, maxRows int, timeoutSecs int) (queryResult, error) {
+	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText, timeoutSecs)
 	if err != nil {
 		return queryResult{}, err
 	}
@@ -2691,8 +2721,8 @@ func columnTypeNames(rows *sql.Rows) []string {
 	return result
 }
 
-func (s *server) queryRowsWithXMLTypeRewriteIfNeeded(sqlText string) (*sql.Rows, error) {
-	rows, err := s.queryRows(sqlText, nil)
+func (s *server) queryRowsWithXMLTypeRewriteIfNeeded(sqlText string, timeoutSecs int) (*sql.Rows, error) {
+	rows, err := s.queryRowsWithTimeout(sqlText, nil, timeoutSecs)
 	if err != nil {
 		return nil, err
 	}
@@ -2710,7 +2740,7 @@ func (s *server) queryRowsWithXMLTypeRewriteIfNeeded(sqlText string) (*sql.Rows,
 	// Only pay the ALL_TAB_COLUMNS rewrite cost when the result metadata shows
 	// XMLTYPE. Ordinary Oracle queries should not run dictionary probes first.
 	s.closeRows(rows)
-	return s.queryRows(rewritten, nil)
+	return s.queryRowsWithTimeout(rewritten, nil, timeoutSecs)
 }
 
 func rowsContainOracleXMLType(rows *sql.Rows) bool {
@@ -3339,22 +3369,50 @@ func (s *server) setSchema(schema string) error {
 }
 
 func (s *server) queryRows(sqlText string, args []any) (*sql.Rows, error) {
+	return s.queryRowsWithTimeout(sqlText, args, 0)
+}
+
+func (s *server) queryRowsWithTimeout(sqlText string, args []any, timeoutSecs int) (*sql.Rows, error) {
 	db, err := s.requireDB()
 	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	var timer *time.Timer
+	if timeoutSecs > 0 {
+		var t *time.Timer
+		t = time.AfterFunc(time.Duration(timeoutSecs)*time.Second, func() {
+			s.activeCancelMu.Lock()
+			if s.activeTimer == t {
+				s.activeTimedOut = true
+				cancel()
+			}
+			s.activeCancelMu.Unlock()
+		})
+		timer = t
+	}
 	s.activeCancelMu.Lock()
 	s.activeCancel = cancel
+	s.activeTimer = timer
+	s.activeTimedOut = false
 	s.activeCancelMu.Unlock()
 	rows, queryErr := db.QueryContext(ctx, sqlText, args...)
 	s.activeCancelMu.Lock()
 	s.activeCancel = nil
+	if s.activeTimer != nil {
+		s.activeTimer.Stop()
+		s.activeTimer = nil
+	}
+	timedOut := s.activeTimedOut
 	if queryErr != nil {
 		cancel()
+	} else if timedOut {
+		cancel()
+		if rows != nil {
+			rows.Close()
+		}
+		queryErr = fmt.Errorf("query timed out after %ds", timeoutSecs)
 	} else {
-		// Keep the context alive for paged reads; database/sql may continue
-		// fetching from the driver until Rows is closed or exhausted.
 		s.activeRows[rows] = cancel
 	}
 	s.activeCancelMu.Unlock()

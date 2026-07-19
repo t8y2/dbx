@@ -31,6 +31,16 @@ describe("extractSqlParameters", () => {
     expect(extractSqlParameters(sql)).toEqual(["?1", "named", "shell_name", "mybatis_name", "sql_server_name"]);
   });
 
+  it("ignores npm scoped packages in JDBCX MCP command arguments", () => {
+    const sql = '{{ mcp(cmd=npx, args=-y @modelcontextprotocol/server-everything, tool=echo): {"message":"hello"} }}';
+    expect(extractSqlParameters(sql)).toEqual([]);
+    expect(substituteSqlParameters(sql, {})).toBe(sql);
+  });
+
+  it("keeps SQL Server parameters used in division expressions", () => {
+    expect(extractSqlParameters("select @amount/2, @total / 4")).toEqual(["amount", "total"]);
+  });
+
   it("describes each placeholder syntax for the parameter dialog", () => {
     const sql = "select ? as a, :named as b, ${shell_name} as c, #{mybatis_name} as d, @sql_server_name as e";
     expect(extractSqlParameterDescriptors(sql)).toEqual([

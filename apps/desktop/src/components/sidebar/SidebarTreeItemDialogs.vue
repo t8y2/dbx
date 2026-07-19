@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { toRefs, watch } from "vue";
-import { Loader2, Clipboard, Upload } from "@lucide/vue";
+import { AlertTriangle, Check, Loader2, Clipboard, Upload } from "@lucide/vue";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -55,6 +55,19 @@ const {
   createDatabaseCollation,
   createDatabaseCollationOptionsForCharset,
   createDatabaseCollationsByCharset,
+  createDatabaseUsers,
+  createDatabaseSelectedUsers,
+  createDatabaseUsersLoading,
+  createDatabaseUserKey,
+  createDatabaseUserLabel,
+  createDatabaseUserSelected,
+  toggleCreateDatabaseUser,
+  showCreateDatabasePreviewDialog,
+  createDatabasePreviewSql,
+  createDatabaseAuthorizationResults,
+  createDatabaseAuthorizationApplying,
+  applyCreateDatabaseAuthorizationPlan,
+  createDatabaseAuthorizationStepLabel,
   confirmCreateDatabase,
   showEditDatabasePropertiesDialog,
   editDatabasePropertiesLoading,
@@ -93,6 +106,28 @@ function pasteTargetsMissing(entries: Array<{ targetName: string }>): boolean {
   return entries.every((entry) => !entry.targetName.trim());
 }
 
+function returnToCreateDatabaseDialog() {
+  showCreateDatabaseDialog.value = true;
+  showCreateDatabasePreviewDialog.value = false;
+}
+
+function updateCreateDatabasePreviewDialog(open: boolean) {
+  if (open) {
+    showCreateDatabasePreviewDialog.value = true;
+    return;
+  }
+  if (createDatabaseAuthorizationApplying.value) return;
+  if (createDatabaseAuthorizationResults.value.length === 0) {
+    returnToCreateDatabaseDialog();
+    return;
+  }
+  showCreateDatabasePreviewDialog.value = false;
+}
+
+function closeCreateDatabaseResult() {
+  showCreateDatabasePreviewDialog.value = false;
+}
+
 watch(
   [
     showDeleteConfirm,
@@ -104,6 +139,7 @@ watch(
     showDuplicateDialog,
     showPasteDialog,
     showCreateDatabaseDialog,
+    showCreateDatabasePreviewDialog,
     showEditDatabasePropertiesDialog,
     showCreateNacosNamespaceDialog,
     showEditNacosNamespaceDialog,
@@ -331,9 +367,63 @@ watch(
           </SearchableSelect>
         </div>
       </div>
+      <div v-if="createDatabaseUsersLoading || createDatabaseUsers.length > 0" class="grid gap-2">
+        <div class="flex items-center justify-between gap-2">
+          <div>
+            <div class="text-xs font-medium text-muted-foreground">{{ t("contextMenu.createDatabaseUsers") }}</div>
+            <div class="mt-1 text-[11px] text-muted-foreground">{{ t("contextMenu.createDatabaseUsersHint") }}</div>
+          </div>
+          <span class="text-[11px] text-muted-foreground">{{ t("contextMenu.createDatabaseUsersSelected", { count: createDatabaseSelectedUsers.length }) }}</span>
+        </div>
+        <div class="max-h-40 overflow-auto rounded-md border">
+          <div v-if="createDatabaseUsersLoading" class="flex items-center gap-2 p-3 text-xs text-muted-foreground">
+            <Loader2 class="h-3.5 w-3.5 animate-spin" />
+            {{ t("contextMenu.createDatabaseUsersLoading") }}
+          </div>
+          <template v-else>
+            <button v-for="user in createDatabaseUsers" :key="createDatabaseUserKey(user)" type="button" class="flex w-full items-center gap-2 border-b px-3 py-2 text-left text-xs last:border-b-0 hover:bg-muted/50" @click="toggleCreateDatabaseUser(user)">
+              <span class="flex h-3.5 w-3.5 items-center justify-center rounded border" :class="createDatabaseUserSelected(user) ? 'border-primary bg-primary text-primary-foreground' : 'border-border'">
+                <Check v-if="createDatabaseUserSelected(user)" class="h-2.5 w-2.5" />
+              </span>
+              <span class="truncate">{{ createDatabaseUserLabel(user) }}</span>
+            </button>
+          </template>
+        </div>
+      </div>
       <DialogFooter>
         <Button variant="outline" @click="showCreateDatabaseDialog = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button :disabled="!createDatabaseName.trim()" @click="confirmCreateDatabase">{{ t("dangerDialog.confirm") }}</Button>
+        <Button :disabled="!createDatabaseName.trim()" @click="confirmCreateDatabase">{{ t("contextMenu.previewCreateDatabaseSql") }}</Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+
+  <Dialog :open="showCreateDatabasePreviewDialog" @update:open="updateCreateDatabasePreviewDialog">
+    <DialogContent class="sm:max-w-[720px]">
+      <DialogHeader>
+        <DialogTitle>{{ t("contextMenu.createDatabaseSqlPreview") }}</DialogTitle>
+      </DialogHeader>
+      <pre class="max-h-[48vh] min-h-44 overflow-auto whitespace-pre-wrap rounded-md border bg-muted/30 p-3 font-mono text-xs leading-5" v-html="highlight(createDatabasePreviewSql)" />
+      <div v-if="createDatabaseAuthorizationResults.length > 0" class="grid gap-2 rounded-md border p-3">
+        <div v-for="result in createDatabaseAuthorizationResults" :key="result.step.id" class="flex items-start gap-2 text-xs">
+          <Check v-if="result.status === 'success'" class="mt-0.5 h-3.5 w-3.5 shrink-0 text-green-600" />
+          <AlertTriangle v-else-if="result.status === 'failed'" class="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
+          <span v-else class="mt-1 h-2 w-2 shrink-0 rounded-full bg-muted-foreground" />
+          <span class="min-w-0">
+            <span class="block">{{ createDatabaseAuthorizationStepLabel(result) }}</span>
+            <span v-if="result.message" class="mt-0.5 block break-all text-destructive">{{ result.message }}</span>
+            <span v-else-if="result.status === 'skipped'" class="mt-0.5 block text-muted-foreground">{{ t("contextMenu.createDatabaseStepSkipped") }}</span>
+          </span>
+        </div>
+      </div>
+      <DialogFooter>
+        <template v-if="createDatabaseAuthorizationResults.length === 0">
+          <Button variant="outline" :disabled="createDatabaseAuthorizationApplying" @click="updateCreateDatabasePreviewDialog(false)">{{ t("dangerDialog.cancel") }}</Button>
+          <Button :disabled="createDatabaseAuthorizationApplying" @click="applyCreateDatabaseAuthorizationPlan">
+            <Loader2 v-if="createDatabaseAuthorizationApplying" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
+            {{ t("contextMenu.applyCreateDatabaseSql") }}
+          </Button>
+        </template>
+        <Button v-else @click="closeCreateDatabaseResult">{{ t("contextMenu.closeCreateDatabaseResult") }}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

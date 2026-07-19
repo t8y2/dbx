@@ -9,7 +9,8 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import MetricCard from "@/components/common/MetricCard.vue";
 import MetricLineChart from "@/components/chart/MetricLineChart.vue";
 import * as api from "@/lib/backend/api";
-import { computeQps, computeRate, formatBytes, formatBytesPerSec, formatNumber, formatUptime, GLOBAL_STATUS_SQL, GLOBAL_VARIABLES_SQL, innodbBufferHitRatio, MAX_SAMPLES, parseStatusResult, statusEntries, statusNumber, type StatusSample } from "@/lib/database/mysqlServerStatus";
+import { computeQps, computeRate, formatBytes, formatBytesPerSec, formatNumber, formatRate, formatUptime, GLOBAL_STATUS_SQL, GLOBAL_VARIABLES_SQL, innodbBufferHitRatio, MAX_SAMPLES, parseStatusResult, statusEntries, statusNumber, type StatusSample } from "@/lib/database/mysqlServerStatus";
+import { useVerticalOverlayScrollbar } from "@/composables/useVerticalOverlayScrollbar";
 
 const props = defineProps<{
   connectionId: string;
@@ -26,6 +27,18 @@ const samples = ref<StatusSample[]>([]);
 const autoRefreshInterval = ref(5);
 const statusSearch = ref("");
 const showStatusTable = ref(true);
+const scrollerRef = ref<HTMLElement | null>(null);
+const scrollerContentRef = ref<HTMLElement | null>(null);
+const scrollbarTrackRef = ref<HTMLElement | null>(null);
+const {
+  hasOverflow: hasScrollbarOverflow,
+  isScrolling: isScrollbarScrolling,
+  isDragging: isScrollbarDragging,
+  thumbStyle: scrollbarThumbStyle,
+  onScroll: onScrollerScroll,
+  onTrackPointerDown: onScrollbarTrackPointerDown,
+  onThumbPointerDown: onScrollbarThumbPointerDown,
+} = useVerticalOverlayScrollbar(scrollerRef, scrollerContentRef, scrollbarTrackRef);
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 
 const connectionName = computed(() => connectionStore.getConfig(props.connectionId)?.name ?? "");
@@ -193,48 +206,106 @@ onUnmounted(stopAutoRefresh);
 
     <div v-if="error" class="border-b bg-destructive/10 px-3 py-2 text-xs text-destructive">{{ error }}</div>
 
-    <div class="flex min-h-0 flex-1 flex-col gap-3 p-3">
-      <div class="grid shrink-0 grid-cols-2 gap-3 sm:grid-cols-4">
-        <MetricCard :label="t('serverDashboard.qps')" :value="formatNumber(qps)" :icon="Gauge" />
-        <MetricCard :label="t('serverDashboard.connections')" :value="`${formatNumber(threadsConnected)}${maxConnections ? ' / ' + formatNumber(maxConnections) : ''}`" :icon="Users" />
-        <MetricCard :label="t('serverDashboard.running')" :value="formatNumber(threadsRunning)" :icon="Activity" />
-        <MetricCard :label="t('serverDashboard.trafficIn')" :value="formatBytesPerSec(rate('Bytes_received'))" :icon="ArrowDownUp" />
-        <MetricCard :label="t('serverDashboard.trafficOut')" :value="formatBytesPerSec(rate('Bytes_sent'))" :icon="ArrowDownUp" />
-        <MetricCard :label="t('serverDashboard.slowQueries')" :value="formatNumber(slowQueries)" :icon="TriangleAlert" />
-        <MetricCard :label="t('serverDashboard.uptime')" :value="formatUptime(uptimeSeconds)" :icon="Timer" />
-        <MetricCard :label="t('serverDashboard.innodbHit')" :value="innodbHit === null ? '—' : innodbHit.toFixed(2) + '%'" :icon="Database" />
-      </div>
-
-      <div class="grid shrink-0 grid-cols-1 gap-3 xl:grid-cols-2">
-        <MetricLineChart :title="t('serverDashboard.qpsChart')" :labels="chartLabels" :series="qpsSeries" :value-formatter="formatNumber" />
-        <MetricLineChart :title="t('serverDashboard.sessionsChart')" :labels="chartLabels" :series="sessionsSeries" :value-formatter="formatNumber" />
-        <MetricLineChart :title="t('serverDashboard.trafficChart')" :labels="chartLabels" :series="trafficSeries" :value-formatter="formatBytes" />
-        <MetricLineChart :title="t('serverDashboard.commandChart')" :labels="chartLabels" :series="commandSeries" :value-formatter="formatNumber" />
-      </div>
-
-      <div class="flex flex-col rounded-lg border bg-card" :class="showStatusTable ? 'min-h-0 flex-1' : 'shrink-0'">
-        <button type="button" class="flex w-full shrink-0 items-center gap-2 px-3 py-2 text-left text-xs font-medium hover:bg-accent/40" @click="showStatusTable = !showStatusTable">
-          <ChevronRight class="h-3.5 w-3.5 transition-transform" :class="{ 'rotate-90': showStatusTable }" />
-          {{ t("serverDashboard.rawStatus") }}
-          <Badge variant="secondary" class="ml-1 h-4 rounded px-1 text-[10px]">{{ statusRows.length }}</Badge>
-        </button>
-        <div v-if="showStatusTable" class="flex min-h-0 flex-1 flex-col border-t">
-          <div class="flex h-9 shrink-0 items-center gap-1.5 border-b px-3">
-            <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-            <input v-model="statusSearch" class="h-full w-full min-w-0 bg-transparent text-xs outline-none placeholder:text-muted-foreground" :placeholder="t('serverDashboard.filterStatus')" />
+    <div class="relative min-h-0 flex-1">
+      <div ref="scrollerRef" class="mysql-dashboard-scroller h-full min-h-0 overflow-y-auto" @scroll.passive="onScrollerScroll">
+        <div ref="scrollerContentRef" class="flex flex-col gap-3 p-3">
+          <div class="grid shrink-0 grid-cols-2 gap-3 sm:grid-cols-4">
+            <MetricCard :label="t('serverDashboard.qps')" :value="formatRate(qps)" :icon="Gauge" />
+            <MetricCard :label="t('serverDashboard.connections')" :value="`${formatNumber(threadsConnected)}${maxConnections ? ' / ' + formatNumber(maxConnections) : ''}`" :icon="Users" />
+            <MetricCard :label="t('serverDashboard.running')" :value="formatNumber(threadsRunning)" :icon="Activity" />
+            <MetricCard :label="t('serverDashboard.trafficIn')" :value="formatBytesPerSec(rate('Bytes_received'))" :icon="ArrowDownUp" />
+            <MetricCard :label="t('serverDashboard.trafficOut')" :value="formatBytesPerSec(rate('Bytes_sent'))" :icon="ArrowDownUp" />
+            <MetricCard :label="t('serverDashboard.slowQueries')" :value="formatNumber(slowQueries)" :icon="TriangleAlert" />
+            <MetricCard :label="t('serverDashboard.uptime')" :value="formatUptime(uptimeSeconds)" :icon="Timer" />
+            <MetricCard :label="t('serverDashboard.innodbHit')" :value="innodbHit === null ? '—' : innodbHit.toFixed(2) + '%'" :icon="Database" />
           </div>
-          <div class="min-h-0 flex-1 overflow-auto">
-            <table class="w-full border-collapse text-xs">
-              <tbody>
-                <tr v-for="row in statusRows" :key="row.name" class="border-b last:border-0 hover:bg-accent/40">
-                  <td class="whitespace-nowrap px-3 py-1 font-mono text-muted-foreground">{{ row.name }}</td>
-                  <td class="px-3 py-1 font-mono tabular-nums">{{ row.value }}</td>
-                </tr>
-              </tbody>
-            </table>
+
+          <div class="grid shrink-0 grid-cols-1 gap-3 xl:grid-cols-2">
+            <MetricLineChart :title="t('serverDashboard.qpsChart')" :labels="chartLabels" :series="qpsSeries" :value-formatter="formatRate" />
+            <MetricLineChart :title="t('serverDashboard.sessionsChart')" :labels="chartLabels" :series="sessionsSeries" :value-formatter="formatRate" />
+            <MetricLineChart :title="t('serverDashboard.trafficChart')" :labels="chartLabels" :series="trafficSeries" :value-formatter="formatBytes" />
+            <MetricLineChart :title="t('serverDashboard.commandChart')" :labels="chartLabels" :series="commandSeries" :value-formatter="formatRate" />
+          </div>
+
+          <div class="flex shrink-0 flex-col rounded-lg border bg-card">
+            <button type="button" class="flex w-full shrink-0 items-center gap-2 px-3 py-2 text-left text-xs font-medium hover:bg-accent/40" @click="showStatusTable = !showStatusTable">
+              <ChevronRight class="h-3.5 w-3.5 transition-transform" :class="{ 'rotate-90': showStatusTable }" />
+              {{ t("serverDashboard.rawStatus") }}
+              <Badge variant="secondary" class="ml-1 h-4 rounded px-1 text-[10px]">{{ statusRows.length }}</Badge>
+            </button>
+            <div v-if="showStatusTable" class="flex flex-col border-t">
+              <div class="flex h-9 shrink-0 items-center gap-1.5 border-b px-3">
+                <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <input v-model="statusSearch" class="h-full w-full min-w-0 bg-transparent text-xs outline-none placeholder:text-muted-foreground" :placeholder="t('serverDashboard.filterStatus')" />
+              </div>
+              <div class="max-h-96 overflow-auto">
+                <table class="w-full border-collapse text-xs">
+                  <tbody>
+                    <tr v-for="row in statusRows" :key="row.name" class="border-b last:border-0 hover:bg-accent/40">
+                      <td class="whitespace-nowrap px-3 py-1 font-mono text-muted-foreground">{{ row.name }}</td>
+                      <td class="px-3 py-1 font-mono tabular-nums">{{ row.value }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
         </div>
+      </div>
+
+      <div v-if="hasScrollbarOverflow" ref="scrollbarTrackRef" class="mysql-dashboard-scrollbar" :class="{ 'mysql-dashboard-scrollbar--scrolling': isScrollbarScrolling, 'mysql-dashboard-scrollbar--dragging': isScrollbarDragging }" @pointerdown="onScrollbarTrackPointerDown">
+        <div class="mysql-dashboard-scrollbar__thumb" :style="scrollbarThumbStyle" @pointerdown.stop="onScrollbarThumbPointerDown" />
       </div>
     </div>
   </div>
 </template>
+
+<style scoped>
+.mysql-dashboard-scroller {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.mysql-dashboard-scroller::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.mysql-dashboard-scrollbar {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 10;
+  width: 12px;
+  cursor: default;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.mysql-dashboard-scrollbar--scrolling,
+.mysql-dashboard-scrollbar:hover,
+.mysql-dashboard-scrollbar--dragging {
+  opacity: 1;
+}
+
+.mysql-dashboard-scrollbar__thumb {
+  position: absolute;
+  right: 2px;
+  width: 6px;
+  min-height: 24px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--foreground) 30%, transparent);
+  transition:
+    background-color 120ms ease,
+    width 120ms ease,
+    right 120ms ease;
+}
+
+.mysql-dashboard-scrollbar:hover .mysql-dashboard-scrollbar__thumb,
+.mysql-dashboard-scrollbar--dragging .mysql-dashboard-scrollbar__thumb {
+  right: 1px;
+  width: 8px;
+  background: color-mix(in oklch, var(--foreground) 48%, transparent);
+}
+</style>

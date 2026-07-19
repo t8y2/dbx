@@ -2,6 +2,7 @@ import { Cassandra, MariaSQL, MSSQL, MySQL, PLSQL, PostgreSQL, SQLite, StandardS
 import type { DatabaseType, SqlSnippet } from "@/types/database";
 import { buildMongoCompletionItemsFromContext, type MongoCompletionItem } from "@/lib/mongo/mongoCompletion";
 import { CLOUDFLARE_D1_COMMON_FUNCTION_NAMES } from "@/lib/sql/cloudflareD1";
+import type { SqlObjectNavigationType } from "@/lib/sql/sqlNavigation";
 
 const SQL_KEYWORDS = [
   "SELECT",
@@ -1156,7 +1157,7 @@ function sqlAliasKeywordWords(...sources: Array<string | undefined>): string[] {
 export interface SqlCompletionTable {
   name: string;
   schema?: string;
-  type?: "table" | "view";
+  type?: SqlObjectNavigationType;
   detail?: string;
   applyName?: string;
   boost?: number;
@@ -1175,6 +1176,7 @@ export interface SqlCompletionObject {
 export interface SqlCompletionColumn {
   name: string;
   table: string;
+  sourceAlias?: string;
   schema?: string;
   dataType?: string;
   isNullable?: boolean;
@@ -1211,6 +1213,7 @@ export interface SqlCompletionReferencedTable {
   schema?: string;
   alias?: string;
   columns?: string[];
+  columnAliases?: string[];
 }
 
 export type SqlStatementKind = "select" | "insert" | "update" | "delete" | "create" | "alter" | "drop" | "unknown";
@@ -2761,7 +2764,115 @@ function requiresPostgresIdentifierQuote(identifier: string): boolean {
   return POSTGRES_IDENTIFIER_KEYWORDS.has(identifier);
 }
 
-const POSTGRES_IDENTIFIER_KEYWORDS = new Set(SQL_KEYWORDS.map((keyword) => keyword.toLowerCase()).concat(["current_user", "session_user", "user"]));
+// PostgreSQL reserved_keyword + type_func_name_keyword categories (pg_get_keywords()
+// catcodes R and T) — identifiers matching these cannot appear as a bare column
+// reference and must be quoted. SQL_KEYWORDS alone misses most of them because it is
+// a completion phrase list ("ORDER BY", not "order").
+const POSTGRES_RESERVED_KEYWORDS = [
+  "all",
+  "analyse",
+  "analyze",
+  "and",
+  "any",
+  "array",
+  "as",
+  "asc",
+  "asymmetric",
+  "authorization",
+  "binary",
+  "both",
+  "case",
+  "cast",
+  "check",
+  "collate",
+  "collation",
+  "column",
+  "concurrently",
+  "constraint",
+  "create",
+  "cross",
+  "current_catalog",
+  "current_date",
+  "current_role",
+  "current_schema",
+  "current_time",
+  "current_timestamp",
+  "current_user",
+  "default",
+  "deferrable",
+  "desc",
+  "distinct",
+  "do",
+  "else",
+  "end",
+  "except",
+  "false",
+  "fetch",
+  "for",
+  "foreign",
+  "freeze",
+  "from",
+  "full",
+  "grant",
+  "group",
+  "having",
+  "ilike",
+  "in",
+  "initially",
+  "inner",
+  "intersect",
+  "into",
+  "is",
+  "isnull",
+  "join",
+  "lateral",
+  "leading",
+  "left",
+  "like",
+  "limit",
+  "localtime",
+  "localtimestamp",
+  "natural",
+  "not",
+  "notnull",
+  "null",
+  "offset",
+  "on",
+  "only",
+  "or",
+  "order",
+  "outer",
+  "overlaps",
+  "placing",
+  "primary",
+  "references",
+  "returning",
+  "right",
+  "select",
+  "session_user",
+  "similar",
+  "some",
+  "symmetric",
+  "system_user",
+  "table",
+  "tablesample",
+  "then",
+  "to",
+  "trailing",
+  "true",
+  "union",
+  "unique",
+  "user",
+  "using",
+  "variadic",
+  "verbose",
+  "when",
+  "where",
+  "window",
+  "with",
+];
+
+const POSTGRES_IDENTIFIER_KEYWORDS = new Set(SQL_KEYWORDS.map((keyword) => keyword.toLowerCase()).concat(POSTGRES_RESERVED_KEYWORDS));
 
 function buildTableItems(
   context: Pick<SqlCompletionContext, "prefix" | "qualifier">,
@@ -3352,9 +3463,10 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
     const qLower = q.toLowerCase();
     const qualifiedTarget = qualifiedTableTargetFromContext(context);
     const relatedTables = context.referencedTables.filter((table) => referencedTableMatchesColumnQualifier(table, q, qLower, qualifiedTarget));
-    relevantCols = allColumns.filter((column) => relatedTables.some((table) => columnMatchesReferencedTable(column, table)) || (!!qualifiedTarget && columnMatchesQualifiedTable(column, qualifiedTarget)));
+    relevantCols = relatedTables.flatMap((table) => completionColumnsForReferencedTable(table, allColumns));
+    if (relatedTables.length === 0 && qualifiedTarget) relevantCols = allColumns.filter((column) => columnMatchesQualifiedTable(column, qualifiedTarget));
   } else if (context.referencedTables.length > 0) {
-    relevantCols = allColumns.filter((column) => context.referencedTables.some((table) => columnMatchesReferencedTable(column, table)));
+    relevantCols = context.referencedTables.flatMap((table) => completionColumnsForReferencedTable(table, allColumns));
   }
 
   // Count name frequencies to detect duplicates across tables
@@ -3369,10 +3481,11 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
   for (const c of relevantCols) {
     const count = nameCount.get(c.name) || 0;
     if (count > 1) {
-      const qualifiedKey = `${c.table}.${c.name}`;
+      const qualifier = c.sourceAlias ?? c.table;
+      const qualifiedKey = `${qualifier}.${c.name}`;
       if (seen.has(qualifiedKey)) continue;
       seen.add(qualifiedKey);
-      uniqueColumns.push({ ...c, key: c.key, displayLabel: `${c.table}.${c.name}` });
+      uniqueColumns.push({ ...c, key: c.key, displayLabel: `${qualifier}.${c.name}` });
     } else {
       if (seen.has(c.name)) continue;
       seen.add(c.name);
@@ -3402,19 +3515,24 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
     .sort(compareCompletionItems);
 }
 
+function completionColumnsForReferencedTable<T extends SqlCompletionColumn & { key: string }>(table: SqlCompletionReferencedTable, columns: readonly T[]): T[] {
+  const matched = columns.filter((column) => columnMatchesReferencedTable(column, table));
+  const aliasedColumns = applyReferencedColumnAliases(table, matched);
+  if (!table.alias) return aliasedColumns;
+  return aliasedColumns.map((column) => ({ ...column, sourceAlias: table.alias }));
+}
+
+function applyReferencedColumnAliases<T extends SqlCompletionColumn>(table: SqlCompletionReferencedTable, columns: readonly T[]): T[] {
+  if (!table.columnAliases?.length) return [...columns];
+  return columns.map((column, index) => {
+    const alias = table.columnAliases?.[index];
+    return alias ? { ...column, name: alias } : column;
+  });
+}
+
 function hasMatchingReferencedColumnPrefix(context: SqlCompletionContext, columnsByTable: Map<string, SqlCompletionColumn[]>): boolean {
   if (!context.suggestColumns || !context.prefix || context.referencedTables.length === 0) return false;
-
-  for (const [key, cols] of columnsByTable.entries()) {
-    for (const column of cols) {
-      if (!matchesPrefix(column.name, context.prefix)) continue;
-      if (context.referencedTables.some((table) => columnMatchesReferencedTable({ ...column, key }, table))) {
-        return true;
-      }
-    }
-  }
-
-  return false;
+  return context.referencedTables.some((table) => columnsForReferencedTable(table, columnsByTable).some((column) => matchesPrefix(column.name, context.prefix)));
 }
 
 function qualifiedTableTargetFromContext(context: SqlCompletionContext): { schema: string; table: string } | null {
@@ -3458,7 +3576,7 @@ function buildColumnApply(column: SqlCompletionColumn & { displayLabel: string }
   if (context.qualifier || column.displayLabel === column.name || !column.displayLabel.includes(".")) {
     return quoteSqlIdentifier(column.name, dialect);
   }
-  return `${quoteSqlIdentifier(column.table, dialect)}.${quoteSqlIdentifier(column.name, dialect)}`;
+  return `${quoteSqlIdentifier(column.sourceAlias ?? column.table, dialect)}.${quoteSqlIdentifier(column.name, dialect)}`;
 }
 
 function isKeyColumn(name: string): boolean {
@@ -3510,7 +3628,7 @@ function columnsForReferencedTable(table: SqlCompletionReferencedTable, columnsB
   const keys = table.schema ? [`${table.schema}.${table.name}`, table.name] : [table.name];
   for (const key of keys) {
     const columns = columnsByTable.get(key);
-    if (columns) return columns;
+    if (columns) return applyReferencedColumnAliases(table, columns);
   }
   return [];
 }

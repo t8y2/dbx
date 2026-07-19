@@ -33,18 +33,21 @@ bench = false
 
 [features]
 default = ["duckdb-bundled", "mq-admin", "sqlite-sqlcipher"]
-duckdb-bundled = ["duckdb/bundled"]
+duckdb-bundled = ["duckdb/bundled", "duckdb/parquet"]
 mq-admin = []
 sqlite-sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
+json5 = "0.4"
 regex = "1"
 rayon = "1"
 percent-encoding = "2"
 encoding_rs = "0.8"
 log = "0.4"
+tracing = "0.1"
+tracing-subscriber = "0.3"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -56,7 +59,7 @@ deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
 tokio-postgres-rustls = "0.13"
 webpki-roots = "0.26"
 rusqlite = { version = "0.32", features = ["bundled", "load_extension", "backup", "functions", "column_decltype"] }
-mysql_async = { version = "0.36", default-features = false, features = ["default-rustls", "client_ed25519", "chrono", "rust_decimal"] }
+mysql_async = { version = "0.37", default-features = false, features = ["default-rustls", "client_ed25519", "chrono", "rust_decimal"] }
 sqlparser = { version = "0.62.0", features = ["visitor"] }
 redis = { version = "0.32.2", features = ["tokio-comp", "tls-rustls", "tls-rustls-insecure", "tokio-rustls-comp", "sentinel", "cluster-async"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"] }

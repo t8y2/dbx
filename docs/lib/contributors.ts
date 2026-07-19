@@ -65,6 +65,17 @@ function fallbackContributors(): Contributor[] {
   ];
 }
 
+export function dedupeContributors(contributors: Contributor[]): Contributor[] {
+  const seenLogins = new Set<string>();
+
+  return contributors.filter((contributor) => {
+    const normalizedLogin = contributor.login.trim().toLowerCase();
+    if (!normalizedLogin || seenLogins.has(normalizedLogin)) return false;
+    seenLogins.add(normalizedLogin);
+    return true;
+  });
+}
+
 export async function fetchContributors(): Promise<Contributor[]> {
   const token = process.env.GITHUB_TOKEN;
   const firstPage = `${GITHUB_CONTRIBUTORS_API}?per_page=100`;
@@ -81,7 +92,7 @@ export async function fetchContributors(): Promise<Contributor[]> {
 
     if (allContributors.length === 0) return fallbackContributors();
 
-    return allContributors.filter((c) => c.login && c.avatar_url && c.type !== "Bot");
+    return dedupeContributors(allContributors.filter((c) => c.login && c.avatar_url && c.type !== "Bot"));
   } catch {
     return fallbackContributors();
   }

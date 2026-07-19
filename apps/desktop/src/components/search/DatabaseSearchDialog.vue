@@ -268,8 +268,8 @@ function openResult(item: SearchResultItem) {
 
 <template>
   <Dialog v-model:open="dialogOpen">
-    <DialogScrollContent class="max-w-4xl gap-0 p-0">
-      <DialogHeader class="border-b px-5 py-4">
+    <DialogScrollContent class="flex max-h-[calc(100dvh-6rem)] min-h-0 max-w-4xl flex-col overflow-hidden gap-0 p-0">
+      <DialogHeader class="shrink-0 border-b px-5 py-4">
         <DialogTitle class="flex items-center gap-2">
           <Search class="h-5 w-5" />
           {{ t("databaseSearch.title") }}
@@ -280,7 +280,8 @@ function openResult(item: SearchResultItem) {
         </div>
       </DialogHeader>
 
-      <div class="space-y-4 px-5 py-4">
+      <!-- Keep the actions reachable while the search form and results share the available viewport. -->
+      <div class="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
         <div class="grid gap-3 md:grid-cols-[1fr_9rem_auto]">
           <div class="space-y-1.5">
             <Label class="text-xs">{{ t("databaseSearch.keyword") }}</Label>
@@ -354,7 +355,7 @@ function openResult(item: SearchResultItem) {
         </div>
       </div>
 
-      <DialogFooter class="border-t px-5 py-3">
+      <DialogFooter class="shrink-0 border-t px-5 py-3">
         <Button variant="outline" @click="dialogOpen = false">{{ t("common.close") }}</Button>
       </DialogFooter>
     </DialogScrollContent>

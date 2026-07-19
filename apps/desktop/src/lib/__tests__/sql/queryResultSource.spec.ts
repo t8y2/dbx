@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { queryResultSourceLabel } from "@/lib/sql/queryResultSource";
+import { queryResultNameFromPreamble, queryResultSourceLabel } from "@/lib/sql/queryResultSource";
+
+describe("queryResultNameFromPreamble", () => {
+  it("uses the nearest non-empty Name line comment", () => {
+    expect(queryResultNameFromPreamble("-- Name: Old name\n-- unrelated\r\n  -- NAME :  Latest name  \r\n")).toBe("Latest name");
+    expect(queryResultNameFromPreamble("-- Name: kept\n-- Name:   \n")).toBe("kept");
+  });
+
+  it("ignores unrelated, malformed, and block comments", () => {
+    expect(queryResultNameFromPreamble("-- Name without colon\n/*\n-- Name: block\n*/\n-- ordinary comment\n")).toBeUndefined();
+  });
+});
 
 describe("queryResultSourceLabel", () => {
   it("uses the current database for an unqualified table", () => {

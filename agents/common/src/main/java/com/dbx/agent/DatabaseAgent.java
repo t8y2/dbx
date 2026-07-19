@@ -4,7 +4,9 @@ import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -12,6 +14,16 @@ public interface DatabaseAgent {
     void connect(ConnectParams params);
 
     boolean testConnection(ConnectParams params);
+
+    default Map<String, Object> testConnectionWithInfo(ConnectParams params) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("ok", testConnection(params));
+        return result;
+    }
+
+    default Map<String, String> getDatabaseInfo() {
+        return Collections.emptyMap();
+    }
 
     default String getIdentifierQuote() {
         return "";
@@ -155,6 +167,7 @@ public interface DatabaseAgent {
             sql,
             schema,
             this::setSchemaSQL,
+            this::resetSchemaSQL,
             options,
             AgentExecutionContext.jdbcExecutor()::defaultResultValue
         );
@@ -178,6 +191,7 @@ public interface DatabaseAgent {
             sql,
             schema,
             this::setSchemaSQL,
+            this::resetSchemaSQL,
             options,
             AgentExecutionContext.jdbcExecutor()::defaultResultValue
         );
@@ -210,7 +224,13 @@ public interface DatabaseAgent {
         if (conn == null) {
             throw new IllegalStateException("Not connected");
         }
-        return TransactionExecutor.executeUpdateStatements(conn, statements, schema, this::setSchemaSQL);
+        return TransactionExecutor.executeUpdateStatements(
+            conn,
+            statements,
+            schema,
+            this::setSchemaSQL,
+            this::resetSchemaSQL
+        );
     }
 
     default QueryResult executeBatch(List<String> statements, String schema) {
@@ -218,11 +238,15 @@ public interface DatabaseAgent {
         if (conn == null) {
             throw new IllegalStateException("Not connected");
         }
-        return BatchExecutor.executeBatchStatements(conn, statements, schema, this::setSchemaSQL);
+        return BatchExecutor.executeBatchStatements(conn, statements, schema, this::setSchemaSQL, this::resetSchemaSQL);
     }
 
     default String setSchemaSQL(String schema) {
         return "SET SCHEMA " + JdbcIdentifiers.INSTANCE.doubleQuote(schema);
+    }
+
+    default String resetSchemaSQL() {
+        return "";
     }
 
     static String buildTableDdl(

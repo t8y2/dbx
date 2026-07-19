@@ -1,10 +1,27 @@
-import { describe, expect, it, vi } from "vitest";
+import { nextTick } from "vue";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useQuickOpen } from "@/composables/useQuickOpen";
 import { useConnectionStore } from "@/stores/connectionStore";
 
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: vi.fn(),
 }));
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
+async function flushAsyncWork(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+  await nextTick();
+}
 
 describe("useQuickOpen", () => {
   describe("fuzzyMatch function", () => {
@@ -576,6 +593,204 @@ describe("useQuickOpen", () => {
       const funcItem = filteredItems.value.find((item) => item.type === "function");
       expect(funcItem).toBeDefined();
       expect(funcItem?.label).toBe("ComputeAge");
+    });
+  });
+
+  describe("remote metadata search", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    });
+
+    function remoteSearchStore(overrides: Record<string, unknown> = {}) {
+      return {
+        connections: [{ id: "conn1", name: "MySQL", db_type: "mysql" }],
+        connectedIds: new Set(["conn1"]),
+        treeNodes: [
+          {
+            id: "conn1:app",
+            connectionId: "conn1",
+            type: "database",
+            database: "app",
+            label: "app",
+          },
+        ],
+        listCompletionTables: vi.fn().mockResolvedValue([]),
+        ...overrides,
+      };
+    }
+
+    async function runDebouncedSearch(): Promise<void> {
+      await vi.advanceTimersByTimeAsync(200);
+      await flushAsyncWork();
+    }
+
+    it("finds unloaded tables through server metadata", async () => {
+      const mockStore = remoteSearchStore({
+        listCompletionTables: vi.fn().mockResolvedValue([{ name: "orders", type: "table" }]),
+      });
+      vi.mocked(useConnectionStore).mockReturnValue(mockStore as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("ord");
+      await runDebouncedSearch();
+
+      expect(mockStore.listCompletionTables).toHaveBeenCalledWith("conn1", "app", "ord", 25, undefined, true);
+      expect(filteredItems.value).toEqual(expect.arrayContaining([expect.objectContaining({ label: "orders", type: "table", database: "app" })]));
+    });
+
+    it("deduplicates loaded and remote table results", async () => {
+      const mockStore = remoteSearchStore({
+        treeNodes: [
+          {
+            id: "conn1:app",
+            connectionId: "conn1",
+            type: "database",
+            database: "app",
+            label: "app",
+            children: [
+              {
+                id: "conn1:app:users",
+                connectionId: "conn1",
+                type: "table",
+                database: "app",
+                label: "users",
+              },
+            ],
+          },
+        ],
+        listCompletionTables: vi.fn().mockResolvedValue([{ name: "users", type: "table" }]),
+      });
+      vi.mocked(useConnectionStore).mockReturnValue(mockStore as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("users");
+      await runDebouncedSearch();
+
+      expect(filteredItems.value.filter((item) => item.label === "users")).toHaveLength(1);
+    });
+
+    it("ignores stale remote responses", async () => {
+      const alpha = deferred<Array<{ name: string; type: "table" }>>();
+      const beta = deferred<Array<{ name: string; type: "table" }>>();
+      const mockStore = remoteSearchStore({
+        listCompletionTables: vi.fn((_connectionId, _database, query) => (query === "alpha" ? alpha.promise : beta.promise)),
+      });
+      vi.mocked(useConnectionStore).mockReturnValue(mockStore as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("alpha");
+      await runDebouncedSearch();
+      setQuery("beta");
+      await runDebouncedSearch();
+
+      beta.resolve([{ name: "beta_table", type: "table" }]);
+      await flushAsyncWork();
+      expect(filteredItems.value.map((item) => item.label)).toContain("beta_table");
+
+      alpha.resolve([{ name: "alpha_table", type: "table" }]);
+      await flushAsyncWork();
+      expect(filteredItems.value.map((item) => item.label)).toContain("beta_table");
+      expect(filteredItems.value.map((item) => item.label)).not.toContain("alpha_table");
+    });
+
+    it("does not request metadata for empty or one-character queries", async () => {
+      const mockStore = remoteSearchStore();
+      vi.mocked(useConnectionStore).mockReturnValue(mockStore as any);
+
+      const { setQuery } = useQuickOpen();
+      setQuery("");
+      setQuery("a");
+      await runDebouncedSearch();
+
+      expect(mockStore.listCompletionTables).not.toHaveBeenCalled();
+    });
+
+    it("does not request metadata from disconnected contexts", async () => {
+      const mockStore = remoteSearchStore({ connectedIds: new Set<string>() });
+      vi.mocked(useConnectionStore).mockReturnValue(mockStore as any);
+
+      const { setQuery } = useQuickOpen();
+      setQuery("users");
+      await runDebouncedSearch();
+
+      expect(mockStore.listCompletionTables).not.toHaveBeenCalled();
+    });
+
+    it("keeps local results when remote metadata search fails", async () => {
+      const mockStore = remoteSearchStore({
+        treeNodes: [
+          {
+            id: "conn1:app",
+            connectionId: "conn1",
+            type: "database",
+            database: "app",
+            label: "app",
+            children: [
+              {
+                id: "conn1:app:users",
+                connectionId: "conn1",
+                type: "table",
+                database: "app",
+                label: "users",
+              },
+            ],
+          },
+        ],
+        listCompletionTables: vi.fn().mockRejectedValue(new Error("metadata unavailable")),
+      });
+      vi.mocked(useConnectionStore).mockReturnValue(mockStore as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("users");
+      await runDebouncedSearch();
+
+      expect(filteredItems.value.map((item) => item.label)).toContain("users");
+    });
+
+    it("caps requests, concurrency, and merged remote results", async () => {
+      const pending: Array<ReturnType<typeof deferred<Array<{ name: string; type: "table" }>>>> = [];
+      let callIndex = 0;
+      const listCompletionTables = vi.fn(() => {
+        const request = deferred<Array<{ name: string; type: "table" }>>();
+        pending.push(request);
+        return request.promise;
+      });
+      const mockStore = remoteSearchStore({
+        treeNodes: Array.from({ length: 12 }, (_, index) => ({
+          id: `conn1:db${index}`,
+          connectionId: "conn1",
+          type: "database",
+          database: `db${index}`,
+          label: `db${index}`,
+        })),
+        listCompletionTables,
+      });
+      vi.mocked(useConnectionStore).mockReturnValue(mockStore as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("table");
+      await vi.advanceTimersByTimeAsync(200);
+      await flushAsyncWork();
+      expect(listCompletionTables).toHaveBeenCalledTimes(2);
+
+      for (let wave = 0; wave < 4; wave++) {
+        const active = pending.slice(wave * 2, wave * 2 + 2);
+        for (const request of active) {
+          const requestIndex = callIndex++;
+          request.resolve(Array.from({ length: 30 }, (_, index) => ({ name: `table_${requestIndex}_${index}`, type: "table" })));
+        }
+        await flushAsyncWork();
+        expect(listCompletionTables.mock.calls.length).toBeLessThanOrEqual(Math.min((wave + 2) * 2, 8));
+      }
+
+      await flushAsyncWork();
+      expect(listCompletionTables).toHaveBeenCalledTimes(8);
+      expect(filteredItems.value).toHaveLength(100);
     });
   });
 });

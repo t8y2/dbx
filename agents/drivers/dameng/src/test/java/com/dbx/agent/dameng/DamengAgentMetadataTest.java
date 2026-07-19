@@ -1,6 +1,7 @@
 package com.dbx.agent.dameng;
 
 import com.dbx.agent.ColumnInfo;
+import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.TableInfo;
@@ -17,6 +18,7 @@ import java.io.StringReader;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -66,7 +68,7 @@ class DamengAgentMetadataTest {
         String allTablesSql = String.join("\n", JdbcMetadataSqlFake.statements);
         Assertions.assertTrue(tablesSql.contains("COMMENTS"), tablesSql);
         Assertions.assertTrue(allTablesSql.contains("ALL_OBJECTS"), allTablesSql);
-        Assertions.assertTrue(allTablesSql.contains("USER_MVIEWS"), allTablesSql);
+        Assertions.assertTrue(allTablesSql.contains("SYS.SYSOBJECTS materialized_view"), allTablesSql);
         Assertions.assertFalse(allTablesSql.contains("ALL_MVIEWS"), allTablesSql);
         Assertions.assertFalse(tablesSql.contains("ALL_TABLES"), tablesSql);
         Assertions.assertFalse(tablesSql.contains("ALL_VIEWS"), tablesSql);
@@ -144,6 +146,56 @@ class DamengAgentMetadataTest {
     }
 
     @Test
+    void classifiesGrantedCrossOwnerViewsWithoutSystemCatalogAccess() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, restrictedCrossOwnerMetadataConnection(sqls));
+        setConnectedUsername(agent, "LIMITED_READER");
+        MetadataListConstraints constraints = new MetadataListConstraints(
+            null,
+            20,
+            null,
+            List.of("VIEW", "MATERIALIZED_VIEW")
+        );
+
+        List<TableInfo> normalTables = agent.listTables("REPORTING");
+        List<ObjectInfo> normalObjects = agent.listObjects("REPORTING");
+        List<TableInfo> pagedTables = agent.listTables("REPORTING", constraints);
+        List<ObjectInfo> pagedObjects = agent.listObjects("REPORTING", constraints);
+
+        assertCrossOwnerTableTypes(normalTables);
+        assertCrossOwnerObjectTypes(normalObjects);
+        assertCrossOwnerTableTypes(pagedTables);
+        assertCrossOwnerObjectTypes(pagedObjects);
+        Assertions.assertTrue(sqls.stream().anyMatch(sql -> sql.contains("SYS.SYSOBJECTS materialized_view")));
+        List<String> accessibleQueries = sqls.stream()
+            .filter(sql -> sql.contains("FROM ALL_DEPENDENCIES"))
+            .toList();
+        Assertions.assertEquals(4, accessibleQueries.size(), String.join("\n", sqls));
+        Assertions.assertEquals(2, accessibleQueries.stream().filter(sql -> sql.contains("LIMIT ?")).count());
+        Assertions.assertTrue(sqls.stream().noneMatch(sql -> sql.contains("DBMS_METADATA.GET_DDL('MATERIALIZED_VIEW'")), String.join("\n", sqls));
+        Assertions.assertTrue(sqls.stream().noneMatch(sql -> sql.contains("USER_MVIEWS")), String.join("\n", sqls));
+    }
+
+    private static void assertCrossOwnerTableTypes(List<TableInfo> tables) {
+        Assertions.assertEquals("VIEW", tables.stream()
+            .filter(table -> "SALES_VIEW".equals(table.getName()))
+            .findFirst().orElseThrow().getTable_type());
+        Assertions.assertEquals("MATERIALIZED_VIEW", tables.stream()
+            .filter(table -> "SALES_MV".equals(table.getName()))
+            .findFirst().orElseThrow().getTable_type());
+    }
+
+    private static void assertCrossOwnerObjectTypes(List<ObjectInfo> objects) {
+        Assertions.assertEquals("VIEW", objects.stream()
+            .filter(object -> "SALES_VIEW".equals(object.getName()))
+            .findFirst().orElseThrow().getObject_type());
+        Assertions.assertEquals("MATERIALIZED_VIEW", objects.stream()
+            .filter(object -> "SALES_MV".equals(object.getName()))
+            .findFirst().orElseThrow().getObject_type());
+    }
+
+    @Test
     void readsMaterializedViewSourceWithDbmsMetadataType() {
         DamengAgent agent = new DamengAgent();
         List<String> params = new ArrayList<>();
@@ -157,6 +209,22 @@ class DamengAgentMetadataTest {
         Assertions.assertEquals(List.of("MATERIALIZED_VIEW", "USER_SUMMARY_MV", "APP"), params);
         Assertions.assertEquals("MATERIALIZED_VIEW", source.getObject_type());
         Assertions.assertTrue(source.getSource().contains("CREATE MATERIALIZED VIEW"), source.getSource());
+    }
+
+    @Test
+    void readsViewSourceWithDbmsMetadataType() {
+        DamengAgent agent = new DamengAgent();
+        List<String> params = new ArrayList<>();
+        TestSupport.setPrivateConnection(
+            agent,
+            objectSourceConnection(params, "CREATE VIEW \"APP\".\"V_PROCESSPLAN\" AS SELECT 1 AS ID FROM DUAL")
+        );
+
+        ObjectSource source = agent.getObjectSource("APP", "V_PROCESSPLAN", "VIEW");
+
+        Assertions.assertEquals(List.of("VIEW", "V_PROCESSPLAN", "APP"), params);
+        Assertions.assertEquals("VIEW", source.getObject_type());
+        Assertions.assertTrue(source.getSource().contains("CREATE VIEW"), source.getSource());
     }
 
     @Test
@@ -457,6 +525,15 @@ class DamengAgentMetadataTest {
                 if (sql.contains("SYSCOLUMNCOMMENTS")) {
                     return metadataStatement(List.of());
                 }
+                if (sql.contains("FROM ALL_OBJECTS o")
+                    && (sql.contains("AS TABLE_TYPE") || sql.contains("AS OBJECT_TYPE"))) {
+                    List<List<Object>> rows = new ArrayList<>();
+                    rows.add(Arrays.asList("USERS", "TABLE", "用户示例表"));
+                    if (includeMaterializedView) {
+                        rows.add(Arrays.asList("USER_SUMMARY_MV", "MATERIALIZED_VIEW", "mv comment"));
+                    }
+                    return metadataStatement(rows);
+                }
                 if (sql.contains("ALL_OBJECTS") && sql.contains("OBJECT_TYPE = 'TABLE'")) {
                     return metadataStatement(List.of(List.of("USERS", "用户示例表")));
                 }
@@ -584,6 +661,53 @@ class DamengAgentMetadataTest {
         });
     }
 
+    private static Connection restrictedCrossOwnerMetadataConnection(List<String> sqls) {
+        return proxy(Connection.class, (method, args) -> {
+            String name = method.getName();
+            if ("prepareStatement".equals(name)) {
+                String sql = (String) args[0];
+                sqls.add(sql);
+                if (sql.contains("SYS.SYSOBJECTS materialized_view")) {
+                    return failingMetadataStatement("no SYS.SYSOBJECTS privilege");
+                }
+                if (sql.contains("DBMS_METADATA.GET_DDL('MATERIALIZED_VIEW'")) {
+                    throw new AssertionError("Metadata listing must not probe materialized views one object at a time: " + sql);
+                }
+                if (sql.contains("FROM ALL_DEPENDENCIES")) {
+                    return metadataStatement(List.of(
+                        Arrays.asList("SALES_MV", "MATERIALIZED_VIEW", "materialized view"),
+                        Arrays.asList("SALES_VIEW", "VIEW", "regular view")
+                    ));
+                }
+                if (sql.contains("FROM ALL_OBJECTS o")) {
+                    return metadataStatement(List.of(
+                        Arrays.asList("SALES_MV", "VIEW", "materialized view"),
+                        Arrays.asList("SALES_VIEW", "VIEW", "regular view")
+                    ));
+                }
+            }
+            if ("close".equals(name)) {
+                return null;
+            }
+            if ("isClosed".equals(name)) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static PreparedStatement failingMetadataStatement(String message) {
+        return proxy(PreparedStatement.class, (method, args) -> {
+            if ("executeQuery".equals(method.getName())) {
+                throw new SQLException(message);
+            }
+            if ("close".equals(method.getName())) {
+                return null;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
     private static PreparedStatement metadataStatement(List<List<Object>> rows) {
         return metadataStatement(rows, null);
     }
@@ -628,6 +752,8 @@ class DamengAgentMetadataTest {
                     return value == null ? null : value.toString();
                 }
                 return switch (((String) args[0]).toUpperCase()) {
+                    case "TABLE_NAME", "OBJECT_NAME" -> string(rows, index[0], 0);
+                    case "TABLE_TYPE", "OBJECT_TYPE" -> string(rows, index[0], 1);
                     case "COLUMN_NAME" -> string(rows, index[0], 0);
                     case "DATA_TYPE" -> string(rows, index[0], 1);
                     case "NULLABLE" -> string(rows, index[0], 2);

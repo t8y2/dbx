@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useI18n } from "vue-i18n";
-import { AlertTriangle, X } from "@lucide/vue";
+import { AlertTriangle } from "@lucide/vue";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useConnectionStore } from "@/stores/connectionStore";
 
@@ -29,7 +29,14 @@ function clearError() {
 <template>
   <Popover v-if="errorMessage">
     <PopoverTrigger as-child>
-      <button type="button" class="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded text-amber-500 hover:bg-amber-500/10 hover:text-amber-600 focus:outline-none focus:ring-1 focus:ring-amber-500/40" :class="triggerClass" :title="t('connection.lastError')" @click.stop>
+      <button
+        type="button"
+        class="inline-flex h-4 w-4 shrink-0 cursor-pointer items-center justify-center rounded text-amber-500 hover:bg-amber-500/10 hover:text-amber-600 focus:outline-none focus:ring-1 focus:ring-amber-500/40"
+        :class="triggerClass"
+        :title="t('connection.errorIndicatorHint')"
+        :aria-label="t('connection.errorIndicatorHint')"
+        @click.stop
+      >
         <AlertTriangle class="h-3.5 w-3.5" />
       </button>
     </PopoverTrigger>
@@ -43,9 +50,7 @@ function clearError() {
             {{ errorMessage }}
           </div>
         </div>
-        <button type="button" class="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground" :title="t('connection.clearError')" @click="clearError">
-          <X class="h-3.5 w-3.5" />
-        </button>
+        <button type="button" class="shrink-0 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground" @click="clearError">{{ t("connection.clearError") }}</button>
       </div>
     </PopoverContent>
   </Popover>

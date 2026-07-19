@@ -7,13 +7,13 @@ pub use dbx_core::ai::*;
 
 #[tauri::command]
 pub async fn ai_test_connection(config: AiConfig) -> Result<AiTestConnectionResult, String> {
-    let config = resolve_codex_cli_config(config);
+    let config = resolve_cli_provider_config(config);
     dbx_core::ai::test_connection_core(&config).await
 }
 
 #[tauri::command]
 pub async fn ai_list_models(config: AiConfig) -> Result<Vec<AiModelInfo>, String> {
-    let config = resolve_codex_cli_config(config);
+    let config = resolve_cli_provider_config(config);
     dbx_core::ai::list_models_core(&config).await
 }
 
@@ -88,17 +88,18 @@ pub async fn ai_agent_stream(
     mode: Option<String>,
     allow_write_sql: Option<bool>,
 ) -> Result<String, String> {
-    let request = resolve_codex_cli_request(request);
-    let cancelled = dbx_core::ai::register_stream(&session_id).await;
+    let request = resolve_cli_provider_request(request);
 
     let parsed_db_type: DatabaseType =
         serde_json::from_str(&format!("\"{}\"", db_type)).map_err(|_| format!("Unknown database type: {db_type}"))?;
 
-    let cli_mcp_server_command = if matches!(request.config.provider, AiProvider::CodexCli) {
-        super::mcp::resolve_mcp_server_command().await.map(|(program, args)| CliAgentCommandSpec { program, args })
+    let cli_mcp_server_command = if is_cli_provider(&request.config.provider) {
+        let (program, args) = super::mcp::resolve_mcp_server_command().await?;
+        Some(CliAgentCommandSpec { program, args })
     } else {
         None
     };
+    let cancelled = dbx_core::ai::register_stream(&session_id).await;
     let production_database = state
         .configs
         .read()
@@ -141,25 +142,30 @@ pub async fn ai_agent_stream(
     result
 }
 
-fn resolve_codex_cli_request(mut request: AiCompletionRequest) -> AiCompletionRequest {
-    request.config = resolve_codex_cli_config(request.config);
+fn resolve_cli_provider_request(mut request: AiCompletionRequest) -> AiCompletionRequest {
+    request.config = resolve_cli_provider_config(request.config);
     request
 }
 
-fn resolve_codex_cli_config(mut config: AiConfig) -> AiConfig {
-    if !matches!(config.provider, AiProvider::CodexCli) {
-        return config;
-    }
-
-    let command = config.codex_cli_path.as_deref().map(str::trim).filter(|path| !path.is_empty()).unwrap_or("codex");
+fn resolve_cli_provider_config(mut config: AiConfig) -> AiConfig {
+    let (path_slot, default_command) = match config.provider {
+        AiProvider::CodexCli => (&mut config.codex_cli_path, "codex"),
+        AiProvider::ClaudeCodeCli => (&mut config.claude_code_cli_path, "claude"),
+        _ => return config,
+    };
+    let command = path_slot.as_deref().map(str::trim).filter(|path| !path.is_empty()).unwrap_or(default_command);
     if is_explicit_cli_path(command) {
         return config;
     }
 
     if let Some(path) = super::mcp::locate_command(command) {
-        config.codex_cli_path = Some(path);
+        *path_slot = Some(path);
     }
     config
+}
+
+fn is_cli_provider(provider: &AiProvider) -> bool {
+    matches!(provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli)
 }
 
 fn is_explicit_cli_path(command: &str) -> bool {

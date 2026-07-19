@@ -4,6 +4,7 @@ import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { Plus, Trash2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import type { EditNode, EditNodeKind } from "@/types/editor";
 
@@ -30,6 +31,7 @@ const { t } = useI18n();
 const isContainer = computed(() => props.node.kind !== "value");
 const showChildDeleteConfirm = ref(false);
 const pendingChildDeleteIdx = ref<number | null>(null);
+const emptyArrayItemType = ref<"object" | "string" | "number" | "boolean" | "null" | "array">("object");
 
 const childKeyWidth = computed(() => {
   const longest = props.node.children.reduce((max, child) => {
@@ -66,11 +68,11 @@ function fieldValueTone(value: string): string {
   return "is-string";
 }
 
-function createBlankNode(keyName: string, readonlyKey: boolean): EditNode {
+function createBlankNode(keyName: string, readonlyKey: boolean, kind: EditNodeKind = "value"): EditNode {
   return {
     key: uuid(),
     keyName,
-    kind: "value",
+    kind,
     valueText: "",
     readonlyKey,
     readonlyValue: false,
@@ -78,9 +80,32 @@ function createBlankNode(keyName: string, readonlyKey: boolean): EditNode {
   };
 }
 
+function createEmptyArrayItem(keyName: string): EditNode {
+  switch (emptyArrayItemType.value) {
+    case "object":
+    case "array":
+      return createBlankNode(keyName, true, emptyArrayItemType.value);
+    case "string":
+      return { ...createBlankNode(keyName, true), valueText: '""' };
+    case "number":
+      return { ...createBlankNode(keyName, true), valueText: "0" };
+    case "boolean":
+      return { ...createBlankNode(keyName, true), valueText: "false" };
+    case "null":
+      return { ...createBlankNode(keyName, true), valueText: "null" };
+  }
+}
+
 function addChild() {
   if (props.node.kind === "array") {
-    props.node.children.push(createBlankNode(String(props.node.children.length), true));
+    const keyName = String(props.node.children.length);
+    if (props.node.children.some((child) => child.kind === "object")) {
+      props.node.children.push(createBlankNode(keyName, true, "object"));
+    } else if (props.node.children.length === 0) {
+      props.node.children.push(createEmptyArrayItem(keyName));
+    } else {
+      props.node.children.push(createBlankNode(keyName, true));
+    }
     return;
   }
   props.node.children.push(createBlankNode("", false));
@@ -139,7 +164,23 @@ function confirmRemoveChild() {
     <div v-if="isContainer" class="json-edit-children" :style="{ '--mongo-key-width': childKeyWidth }">
       <JsonEditNode v-for="(child, idx) in node.children" :key="child.key" :node="child" :parent-kind="node.kind" :removable="!child.readonlyValue || node.kind === 'array'" @remove="requestRemoveChild(idx)" />
 
-      <Button variant="ghost" size="sm" class="json-edit-add" @click="addChild"> <Plus class="w-3 h-3 mr-1" /> {{ t("mongo.addField") }} </Button>
+      <div v-if="node.kind === 'array' && node.children.length === 0" class="json-edit-add-row">
+        <Select v-model="emptyArrayItemType">
+          <SelectTrigger class="h-8 w-28 text-xs" :aria-label="t('mongo.addField')">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent align="start">
+            <SelectItem value="object">Object</SelectItem>
+            <SelectItem value="string">{{ t("sqlParameters.kind.string") }}</SelectItem>
+            <SelectItem value="number">{{ t("sqlParameters.kind.number") }}</SelectItem>
+            <SelectItem value="boolean">{{ t("sqlParameters.kind.boolean") }}</SelectItem>
+            <SelectItem value="null">{{ t("sqlParameters.kind.null") }}</SelectItem>
+            <SelectItem value="array">Array</SelectItem>
+          </SelectContent>
+        </Select>
+        <Button variant="ghost" size="sm" class="json-edit-add" @click="addChild"> <Plus class="w-3 h-3 mr-1" /> {{ t("mongo.addField") }} </Button>
+      </div>
+      <Button v-else variant="ghost" size="sm" class="json-edit-add" @click="addChild"> <Plus class="w-3 h-3 mr-1" /> {{ t("mongo.addField") }} </Button>
 
       <div class="json-edit-close">{{ node.kind === "array" ? "]" : "}" }}<span class="json-edit-comma">,</span></div>
     </div>
@@ -305,6 +346,17 @@ function confirmRemoveChild() {
 .json-edit-add {
   margin: 6px 0 6px 2ch;
   font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+.json-edit-add-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0 6px 2ch;
+}
+
+.json-edit-add-row .json-edit-add {
+  margin: 0;
 }
 
 :global(.dark) .json-edit-key {

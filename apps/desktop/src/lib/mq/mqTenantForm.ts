@@ -33,10 +33,10 @@ export function defaultTenantConfig(clusterOptions: readonly string[]): TenantCo
 
 export function validateTenantForm(name: string | undefined, config: TenantConfig): string | undefined {
   if (!name?.trim()) {
-    return "Tenant name is required";
+    return "mqTenants.tenantNameRequired";
   }
   if (!normalizeClusterOptions(config.allowedClusters).length) {
-    return "Allowed clusters are required";
+    return "mqTenants.allowedClustersRequired";
   }
   return undefined;
 }

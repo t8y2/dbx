@@ -1,0 +1,19 @@
+services:
+  database:
+    image: docker.cnb.cool/znb/images/redis:7.4.9-alpine
+    container_name: dbx-redis-7.4
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${DB_PASSWORD:-123456}"]
+    environment:
+      # Keep the password in container env so CMD-SHELL can quote it safely.
+      REDIS_PASSWORD: "${DB_PASSWORD:-123456}"
+    ports:
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-6380}:6379"
+    volumes:
+      - data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+volumes:
+  data:

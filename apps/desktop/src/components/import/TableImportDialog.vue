@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { AlertTriangle, ArrowLeft, ArrowRight, Check, CheckCircle2, FileJson, FileSpreadsheet, FileText, FileUp, Loader2, RefreshCw, Square, Upload, X } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { autoMapImportColumns, nextTableImportWizardStep, previousTableImportWizardStep, requiredImportTargetColumns, suggestImportTargetDataTypes, validateImportMappings, type TableImportWizardStep } from "@/lib/table/tableImport";
 import { getDataTypeOptions } from "@/lib/table/tableStructureEditorState";
@@ -19,6 +20,7 @@ import * as api from "@/lib/backend/api";
 
 const { t } = useI18n();
 const store = useConnectionStore();
+const settingsStore = useSettingsStore();
 const { toast } = useToast();
 const open = defineModel<boolean>("open", { default: false });
 
@@ -667,6 +669,7 @@ async function startImport() {
         mode: targetMode.value === "create" ? "append" : importMode.value,
         createTable: targetMode.value === "create",
         batchSize: Math.max(1, Number(batchSize.value) || 500),
+        dateTimeFormat: settingsStore.editorSettings.globalDateTimeImportFormat || undefined,
       },
       (nextProgress) => {
         progress.value = nextProgress;
@@ -742,6 +745,7 @@ async function startBatchImport() {
           mode: "append",
           createTable: true,
           batchSize: Math.max(1, Number(batchSize.value) || 500),
+          dateTimeFormat: settingsStore.editorSettings.globalDateTimeImportFormat || undefined,
         },
         (nextProgress) => {
           task.rowsImported = nextProgress.rowsImported;

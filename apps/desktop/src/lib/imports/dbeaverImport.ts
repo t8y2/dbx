@@ -1,5 +1,6 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
+import { JDBCX_JDBC_DRIVER_CLASS } from "@/lib/database/jdbcxBuiltinDriver";
 
 type PartialConnection = Omit<ConnectionConfig, "id">;
 
@@ -52,6 +53,7 @@ const profileMap: Record<string, ConnectionProfile> = {
   opengauss: { dbType: "gaussdb", profile: "opengauss", label: "openGauss", port: 5432, user: "gaussdb" },
   questdb: { dbType: "questdb", profile: "questdb", label: "QuestDB", port: 8812, user: "questdb" },
   influxdb: { dbType: "influxdb", profile: "influxdb", label: "InfluxDB", port: 8086, user: "" },
+  jdbcx: { dbType: "jdbc", profile: "jdbcx", label: "JDBCX", port: 0, user: "" },
 };
 
 function normalizeKey(value: unknown) {
@@ -70,6 +72,9 @@ function getNumber(value: unknown) {
 }
 
 function inferProfile(entry: DbeaverConnectionEntry): ConnectionProfile {
+  if (/^jdbcx:/i.test(getString(entry.configuration?.url))) return profileMap.jdbcx;
+  const driverProfile = profileMap[normalizeKey(entry.driver)];
+  if (driverProfile) return driverProfile;
   const candidates = [entry.provider, entry.driver, entry.configuration?.url, entry.name].map(normalizeKey).join(" ");
   for (const [needle, profile] of Object.entries(profileMap)) {
     if (candidates.includes(needle)) return profile;
@@ -218,7 +223,7 @@ function buildConnection(entry: DbeaverConnectionEntry, credentials: ReturnType<
     ssl: false,
     oracle_connection_type: profile.dbType === "oracle" ? parsedUrl.oracleConnectionType || "service_name" : undefined,
     connection_string: profile.dbType === "jdbc" || profile.dbType === "mongodb" ? url || undefined : undefined,
-    jdbc_driver_class: profile.dbType === "jdbc" ? getString(config["driver-class"] || entry.driver) || undefined : undefined,
+    jdbc_driver_class: profile.dbType === "jdbc" ? getString(config["driver-class"] || (profile.profile === "jdbcx" ? JDBCX_JDBC_DRIVER_CLASS : entry.driver)) || undefined : undefined,
     jdbc_driver_paths: [],
   };
 

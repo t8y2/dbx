@@ -11,7 +11,6 @@ import EditorToolbar from "@/components/layout/EditorToolbar.vue";
 import ContentArea from "@/components/layout/ContentArea.vue";
 import AppDialogs from "@/components/layout/AppDialogs.vue";
 import WelcomeScreen from "@/components/layout/WelcomeScreen.vue";
-import DdlViewDialog from "@/components/objects/DdlViewDialog.vue";
 import type { ConfigTab } from "@/components/connection/ConnectionDialog.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -31,7 +30,9 @@ import { useTauriEvents } from "@/composables/useTauriEvents";
 import { useCloseActionPrompt, type AppCloseAction, type AppCloseRequestOptions } from "@/composables/useCloseActionPrompt";
 import { useVisibilityChange } from "@/composables/useVisibilityChange";
 import { useWebDavAutoUpload } from "@/composables/useWebDavAutoUpload";
+import { useScheduledDatabaseBackups } from "@/composables/useScheduledDatabaseBackups";
 import { shouldDrawDesktopWindowFrame } from "@/composables/useWindowControls";
+import { useSaveSqlFolderSelection } from "@/composables/useSaveSqlFolderSelection";
 import "@/i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
 import * as api from "@/lib/backend/api";
@@ -39,7 +40,7 @@ import { connectionRedactedNameLabel } from "@/lib/connection/connectionPresenta
 import { quickConnectionOpenTarget } from "@/lib/connection/connectionOpenTarget";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { findTreeNodeById, resolveNewQueryTarget, resolveNewQueryInitialSql } from "@/lib/sql/newQueryContext";
-import { sqlObjectNavigationTableType, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
+import { sqlObjectNavigationSourceKind, sqlObjectNavigationTableType, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { buildExecutableObjectSourceStatements, executeObjectSourceSave } from "@/lib/table/objectSourceEditor";
 import { resolveExecutableSql, resolveExecutableSqlWithBackend, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 import { uuid } from "@/lib/common/utils";
@@ -86,11 +87,13 @@ import { rankSavedSqlHistory } from "@/lib/savedSql/savedSqlHistory";
 import { initSavedSqlEditorPositions } from "@/lib/app/savedSqlEditorPosition";
 import { isSchemaAware, isSingleDatabase, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { detectDatabaseFileType } from "@/lib/database/databaseFileDetection";
+import { ensureJdbcxRuntimeDrivers } from "@/lib/database/jdbcxBuiltinDriver";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import type { HistoryEntry } from "@/lib/backend/tauri";
 import type { AiAction } from "@/lib/ai/ai";
 
@@ -104,6 +107,8 @@ const UpdateDialog = defineAsyncComponent(() => import("@/components/layout/Upda
 const CloseActionPromptDialog = defineAsyncComponent(() => import("@/components/layout/CloseActionPromptDialog.vue"));
 const LoginPage = defineAsyncComponent(() => import("@/components/auth/LoginPage.vue"));
 const QuickOpenDialog = defineAsyncComponent(() => import("@/components/quick-open/QuickOpenDialog.vue"));
+const QueryEditorDdlViewDialog = defineAsyncComponent(() => import("@/components/objects/DdlViewDialog.vue"));
+const QueryEditorObjectSourceDialog = defineAsyncComponent(() => import("@/components/objects/ObjectSourceDialog.vue"));
 
 type AiAssistantHandle = {
   triggerAction: (action: AiAction, instruction?: string) => void;
@@ -115,6 +120,7 @@ const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const savedSqlStore = useSavedSqlStore();
+connectionStore.setBeforeConnectHandler((config) => ensureJdbcxRuntimeDrivers(config, api).then(() => undefined));
 const { message: toastMessage, visible: toastVisible, toast } = useToast();
 const { isDark, themeMode, applyTheme, setThemeMode } = useTheme();
 const { checkingUpdates, updateInfo, updateCheckMessage, showUpdateDialog, isDownloadingUpdate, downloadProgress, updateReady, hasUpdateAvailable, openUrl, checkUpdates, openLatestRelease, downloadAndInstallUpdate, restartApp } = useAppUpdater();
@@ -135,6 +141,7 @@ const settingsPageTabOpen = ref(false);
 const settingsInitialTab = ref("appearance");
 const settingsInitialSection = ref<string | undefined>(undefined);
 const showQueryEditorDdlDialog = ref(false);
+const showQueryEditorObjectSourceDialog = ref(false);
 const driverStoreTabOpen = ref(false);
 const driverStoreActive = ref(false);
 const driverStoreActiveTab = ref<"agent" | "jdbc" | "storage" | "runtime">("agent");
@@ -159,16 +166,17 @@ const cursorPos = ref(0);
 const formatSqlRequest = ref<{ id: number; tabId: string } | null>(null);
 const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
 const newQueryContextSource = ref<"tab" | "sidebar">("tab");
-const queryEditorDdlTarget = ref<{ connectionId: string; database: string; schema?: string; tableName: string; objectType?: ObjectSourceKind } | null>(null);
+const queryEditorDdlTarget = ref<{ connectionId: string; database: string; catalog?: string; schema?: string; tableName: string; objectType?: ObjectSourceKind } | null>(null);
+const queryEditorObjectSourceTarget = ref<{ connectionId: string; database: string; schema?: string; name: string; objectType: ObjectSourceKind; initialEditing: boolean } | null>(null);
 const showSaveSqlDialog = ref(false);
 const saveSqlName = ref("");
-const saveSqlFolderId = ref("");
+const ROOT_SAVED_SQL_FOLDER = "__root__";
+const { selection: saveSqlFolderId, pending: saveSqlFolderCreationPending, reset: resetSaveSqlFolderSelection, invalidate: invalidateSaveSqlFolderSelection, select: selectSaveSqlFolder } = useSaveSqlFolderSelection(ROOT_SAVED_SQL_FOLDER);
 const pendingSaveAndCloseTabId = ref<string | null>(null);
 const pendingPrevActiveTabId = ref<string | null>(null);
 const pendingSaveShouldCloseTab = ref(true);
 const pendingAppCloseAction = ref<AppCloseAction | null>(null);
 const pendingCloseActionChoice = ref(false);
-const ROOT_SAVED_SQL_FOLDER = "__root__";
 
 const activeTab = computed(() => queryStore.tabs.find((t) => t.id === queryStore.activeTabId));
 
@@ -289,6 +297,7 @@ const { setupTauriListeners, cleanupTauriListeners } = useTauriEvents({
 const { showCloseActionPrompt, chooseQuit, chooseMinimize, cancelCloseActionPrompt, performCloseAction, setupCloseActionPromptListener, cleanupCloseActionPromptListener } = useCloseActionPrompt({ requestClose: requestAppClose });
 useVisibilityChange();
 useWebDavAutoUpload();
+useScheduledDatabaseBackups({ scheduler: true });
 
 const appVersion = ref("");
 const isClassicLayout = computed(() => settingsStore.editorSettings.appLayout === "classic");
@@ -302,6 +311,15 @@ function openSettings(initialTab = "appearance", initialSection?: string) {
   }
   activateSettingsPage();
 }
+
+watch(
+  () => settingsStore.settingsNavigationRequest,
+  (request) => {
+    if (!request) return;
+    openSettings(request.tab, request.section);
+    settingsStore.clearSettingsNavigationRequest(request.id);
+  },
+);
 
 function activateSettingsPage() {
   settingsPageTabOpen.value = true;
@@ -352,6 +370,12 @@ const queryEditorDdlDatabaseType = computed(() => {
 const queryEditorDdlDialect = computed(() => {
   return codeMirrorSqlDialect(queryEditorDdlDatabaseType.value);
 });
+const queryEditorObjectSourceDatabaseType = computed(() => {
+  if (!queryEditorObjectSourceTarget.value?.connectionId) return undefined;
+  return effectiveDatabaseTypeForConnection(connectionStore.getConfig(queryEditorObjectSourceTarget.value.connectionId));
+});
+const queryEditorObjectSourceDialect = computed(() => codeMirrorSqlDialect(queryEditorObjectSourceDatabaseType.value));
+const queryEditorObjectSourceFormatDialect = computed(() => sqlFormatDialectForDbType(queryEditorObjectSourceDatabaseType.value));
 const connectionStats = computed(() => ({
   total: connectionStore.connections.length,
   connected: connectionStore.connectedIds.size,
@@ -614,6 +638,7 @@ function closePendingSavedTab() {
 }
 
 function cancelPendingSaveAndClose() {
+  invalidateSaveSqlFolderSelection();
   showSaveSqlDialog.value = false;
   pendingSaveAndCloseTabId.value = null;
   pendingPrevActiveTabId.value = null;
@@ -802,7 +827,7 @@ async function handleSaveTab(tabId: string) {
   const prevActive = queryStore.activeTabId;
   queryStore.activeTabId = tabId;
   saveSqlName.value = defaultSavedSqlName(tab.title);
-  saveSqlFolderId.value = ROOT_SAVED_SQL_FOLDER;
+  resetSaveSqlFolderSelection(ROOT_SAVED_SQL_FOLDER);
   pendingSaveAndCloseTabId.value = tabId;
   pendingPrevActiveTabId.value = prevActive;
   showSaveSqlDialog.value = true;
@@ -834,7 +859,7 @@ async function openSaveSqlDialog() {
   }
 
   saveSqlName.value = defaultSavedSqlName(tab.title);
-  saveSqlFolderId.value = ROOT_SAVED_SQL_FOLDER;
+  resetSaveSqlFolderSelection(ROOT_SAVED_SQL_FOLDER);
   showSaveSqlDialog.value = true;
 }
 
@@ -877,7 +902,36 @@ async function saveActiveObjectSource(tab: QueryTab): Promise<boolean> {
   }
 }
 
+function saveSqlFolderDisplayName(id: string) {
+  if (id === ROOT_SAVED_SQL_FOLDER) return t("savedSql.rootFolder");
+  const folder = saveSqlFolders.value.find((f) => f.id === id);
+  return folder?.displayName ?? id;
+}
+
+function saveSqlFolderNormalizeCustom(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return trimmed;
+  const folder = saveSqlFolders.value.find((f) => f.displayName === trimmed);
+  return folder ? folder.id : trimmed;
+}
+
+async function handleSaveSqlFolderSelect(value: string) {
+  const isExisting = value === ROOT_SAVED_SQL_FOLDER || saveSqlFolders.value.some((f) => f.id === value);
+  if (isExisting) {
+    await selectSaveSqlFolder(value);
+    return;
+  }
+  const tab = activeTab.value;
+  if (!tab) return;
+  await selectSaveSqlFolder(
+    value,
+    async () => (await savedSqlStore.createFolder(tab.connectionId, value)).id,
+    (error: any) => toast(t("savedSql.createFolderFailed", { message: error?.message || String(error) }), 5000),
+  );
+}
+
 async function confirmSaveSqlToLibrary() {
+  if (saveSqlFolderCreationPending.value) return;
   const tab = activeTab.value;
   const name = saveSqlName.value.trim();
   if (!tab || !tab.sql.trim() || !name) return;
@@ -905,14 +959,10 @@ async function saveActiveSqlAsLocalFile() {
   const tab = activeTab.value;
   if (!tab || !canSaveSqlTab(tab) || !isTauriRuntime()) return;
   try {
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    const path = await save({
-      defaultPath: defaultSavedSqlName(tab.title),
-      filters: [{ name: "SQL", extensions: ["sql"] }],
-    });
+    const path = await api.saveExternalSqlFile(defaultSavedSqlName(tab.title), tab.sql);
     if (!path) return;
-    await api.writeExternalSqlFile(path, tab.sql);
     queryStore.linkExternalSqlPath(tab.id, path, sqlFileTitleFromPath(path));
+    invalidateSaveSqlFolderSelection();
     showSaveSqlDialog.value = false;
     closePendingSavedTab();
     toast(t("savedSql.saved"), 2000);
@@ -1121,6 +1171,28 @@ async function newQuery() {
   const conn = connectionStore.getConfig(target.connectionId);
   if (!conn) return;
   connectionStore.activeConnectionId = target.connectionId;
+  const connectionTarget = quickConnectionOpenTarget(conn);
+  if (connectionTarget.kind !== "query") {
+    try {
+      await connectionStore.ensureConnected(target.connectionId);
+      if (connectionTarget.kind === "mq-admin") {
+        queryStore.openMqAdmin(target.connectionId);
+      } else if (connectionTarget.kind === "nacos-admin") {
+        await connectionStore.loadNacosNamespaces(target.connectionId);
+        queryStore.openNacosAdmin(target.connectionId);
+      } else {
+        queryStore.createTab(target.connectionId, "", `${conn.name}:keys`, connectionTarget.kind);
+      }
+    } catch (e: any) {
+      toast(
+        t("connection.connectFailed", {
+          message: translateBackendError(t, e?.message || String(e)),
+        }),
+        5000,
+      );
+    }
+    return;
+  }
   // Prefill the editor with `SELECT * FROM <focused table>` when enabled and a
   // table context (active data/structure tab or selected table node) is available.
   // Built before createTab so the tab opens with the content directly (no flash).
@@ -1173,6 +1245,20 @@ async function openConnectionQuery(connectionId: string) {
     }
     return;
   }
+  if (initialTarget.kind === "etcd" || initialTarget.kind === "zookeeper") {
+    try {
+      await connectionStore.ensureConnected(connectionId);
+      queryStore.createTab(connectionId, "", `${connection.name}:keys`, initialTarget.kind);
+    } catch (e: any) {
+      toast(
+        t("connection.connectFailed", {
+          message: translateBackendError(t, e?.message || String(e)),
+        }),
+        5000,
+      );
+    }
+    return;
+  }
   const tabId = queryStore.createTab(connectionId, initialTarget.database);
   try {
     await connectionStore.ensureConnected(connectionId);
@@ -1204,9 +1290,22 @@ function tableTargetFromActiveTab(table: string | SqlObjectNavigationTarget) {
   const tab = activeTab.value;
   if (!tab) return null;
   const connectionId = tab.connectionId;
+  const catalog = tab.tableMeta?.catalog || tab.catalog;
+  if (typeof table !== "string") {
+    // Structured targets already separate qualifiers; reparsing would corrupt quoted object names that contain dots.
+    return {
+      connectionId,
+      database: table.database || tab.database,
+      catalog,
+      schema: table.schema || tab.schema,
+      tableName: table.name,
+      tableType: table.type ? sqlObjectNavigationTableType(table) : undefined,
+    };
+  }
+
   let database = tab.database;
-  let schema = typeof table === "string" ? tab.schema : table.schema || tab.schema;
-  const tableName = typeof table === "string" ? table : table.name;
+  let schema = tab.schema;
+  const tableName = table;
 
   const parts = tableName.split(".").filter(Boolean);
   const rawTableName = parts[parts.length - 1] || tableName;
@@ -1223,15 +1322,16 @@ function tableTargetFromActiveTab(table: string | SqlObjectNavigationTarget) {
     }
   }
 
-  return { connectionId, database, schema, tableName: rawTableName, tableType: typeof table === "string" ? undefined : sqlObjectNavigationTableType(table) };
+  return { connectionId, database, catalog, schema, tableName: rawTableName, tableType: undefined };
 }
 
 async function onClickTable(table: SqlObjectNavigationTarget) {
   const target = tableTargetFromActiveTab(table);
   if (!target) return;
-  if (table.type === "view") {
+  const objectType = sqlObjectNavigationSourceKind(table);
+  if (objectType) {
     // Definition navigation for views must not run the view query, which may be expensive or have side effects upstream.
-    queryEditorDdlTarget.value = { ...target, objectType: "VIEW" };
+    queryEditorDdlTarget.value = { ...target, objectType };
     showQueryEditorDdlDialog.value = true;
     return;
   }
@@ -1242,8 +1342,8 @@ async function onClickTable(table: SqlObjectNavigationTarget) {
   }
 }
 
-async function onViewTableData(tableName: string) {
-  const target = tableTargetFromActiveTab(tableName);
+async function onViewTableData(table: SqlObjectNavigationTarget) {
+  const target = tableTargetFromActiveTab(table);
   if (!target) return;
   try {
     await openTableTarget(target);
@@ -1252,17 +1352,39 @@ async function onViewTableData(tableName: string) {
   }
 }
 
-function onViewTableDdl(tableName: string) {
-  const target = tableTargetFromActiveTab(tableName);
+function onViewTableDdl(table: SqlObjectNavigationTarget) {
+  const target = tableTargetFromActiveTab(table);
   if (!target) return;
-  queryEditorDdlTarget.value = target;
+  queryEditorDdlTarget.value = { ...target, objectType: sqlObjectNavigationSourceKind(table) };
   showQueryEditorDdlDialog.value = true;
 }
 
-function onEditTableStructure(tableName: string) {
-  const target = tableTargetFromActiveTab(tableName);
+function onEditTableStructure(table: SqlObjectNavigationTarget) {
+  const target = tableTargetFromActiveTab(table);
+  // Keep view-like objects out of the table editor even if a stale menu dispatches this event.
+  if (!target || sqlObjectNavigationSourceKind(table)) return;
+  queryStore.openTableStructure(target.connectionId, target.database, target.schema, target.tableName, undefined, undefined, target.catalog);
+}
+
+async function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditing: boolean) {
+  const target = tableTargetFromActiveTab(table);
+  const objectType = sqlObjectNavigationSourceKind(table);
+  if (!target || !objectType) return;
+  try {
+    await connectionStore.ensureConnected(target.connectionId);
+    connectionStore.activeConnectionId = target.connectionId;
+    queryEditorObjectSourceTarget.value = { connectionId: target.connectionId, database: target.database, schema: target.schema, name: target.tableName, objectType, initialEditing };
+    showQueryEditorObjectSourceDialog.value = true;
+  } catch (e: any) {
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+  }
+}
+
+function onQueryEditorObjectSourceSaved() {
+  const target = queryEditorObjectSourceTarget.value;
   if (!target) return;
-  queryStore.openTableStructure(target.connectionId, target.database, target.schema, target.tableName);
+  connectionStore.invalidateCompletionCache(target.connectionId, target.database);
+  contentAreaRef.value?.refreshQueryEditorCompletionCache();
 }
 
 async function changeActiveConnection(connectionId: string) {
@@ -1487,14 +1609,17 @@ async function handleQuickOpenSelect(item: any) {
       tableName: item.objectName || item.tableName,
       tableType: item.type === "view" ? "VIEW" : item.type === "materialized_view" ? "MATERIALIZED_VIEW" : "TABLE",
     });
-  } else if (item.type === "procedure" || item.type === "function" || item.type === "sequence" || item.type === "package" || item.type === "package-body") {
+  } else if (item.type === "procedure" || item.type === "function" || item.type === "trigger" || item.type === "sequence" || item.type === "package" || item.type === "package-body" || item.type === "type" || item.type === "type-body") {
     // Open the object source in a source tab
     const objectTypeMap: Record<string, ObjectSourceKind> = {
       procedure: "PROCEDURE",
       function: "FUNCTION",
+      trigger: "TRIGGER",
       sequence: "SEQUENCE",
       package: "PACKAGE",
       "package-body": "PACKAGE_BODY",
+      type: "TYPE",
+      "type-body": "TYPE_BODY",
     };
 
     const objectType = objectTypeMap[item.type];
@@ -1505,7 +1630,7 @@ async function handleQuickOpenSelect(item: any) {
       const result = await api.getObjectSource(item.connectionId, item.database, schema, item.objectName || item.tableName, objectType);
       const tabId = queryStore.createTab(item.connectionId, item.database, `Source - ${item.objectName || item.tableName}`);
       queryStore.updateSql(tabId, result.source);
-      if (item.type !== "sequence") {
+      if (item.type !== "sequence" && item.type !== "trigger" && item.type !== "type" && item.type !== "type-body") {
         queryStore.setObjectSource(tabId, {
           schema,
           name: item.objectName || item.tableName,
@@ -1685,7 +1810,7 @@ function onLoginSuccess() {
 async function initApp() {
   const t0 = performance.now();
   console.log("[STARTUP] initApp begin");
-  settingsStore.initAiConfig();
+  await settingsStore.initAiConfigs();
   try {
     await settingsStore.initEditorSettings();
     console.log(`[STARTUP]   settingsStore.initEditorSettings: ${(performance.now() - t0).toFixed(0)}ms`);
@@ -2004,6 +2129,7 @@ onUnmounted(() => {
                     @view-table-data="onViewTableData"
                     @edit-table-structure="onEditTableStructure"
                     @view-table-ddl="onViewTableDdl"
+                    @open-object-source="onOpenObjectSource"
                     @open-object-table="
                       (target) =>
                         activeTab &&
@@ -2165,7 +2291,10 @@ onUnmounted(() => {
         @update:open="
           (open: boolean) => {
             showSaveSqlDialog = open;
-            if (!open && pendingSaveAndCloseTabId) cancelPendingSaveAndClose();
+            if (!open) {
+              invalidateSaveSqlFolderSelection();
+              if (pendingSaveAndCloseTabId) cancelPendingSaveAndClose();
+            }
           }
         "
       >
@@ -2180,36 +2309,59 @@ onUnmounted(() => {
             </div>
             <div class="space-y-1.5">
               <label class="text-xs font-medium text-muted-foreground">{{ t("savedSql.folder") }}</label>
-              <Select v-model="saveSqlFolderId">
-                <SelectTrigger class="h-8 w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent position="popper">
-                  <SelectItem :value="ROOT_SAVED_SQL_FOLDER">{{ t("savedSql.rootFolder") }}</SelectItem>
-                  <SelectItem v-for="folder in saveSqlFolders" :key="folder.id" :value="folder.id">
-                    {{ folder.displayName }}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
+              <SearchableSelect
+                :model-value="saveSqlFolderId"
+                :options="[ROOT_SAVED_SQL_FOLDER, ...saveSqlFolders.map((f) => f.id)]"
+                :display-name="saveSqlFolderDisplayName"
+                :normalize-custom="saveSqlFolderNormalizeCustom"
+                :placeholder="t('savedSql.folderPlaceholder')"
+                :search-placeholder="t('savedSql.searchPlaceholder')"
+                :empty-text="t('common.noResults')"
+                :disabled="saveSqlFolderCreationPending"
+                allow-custom
+                trigger-variant="outline"
+                trigger-class="h-8 w-full max-w-none text-sm"
+                content-class="w-[var(--reka-popover-trigger-width)]"
+                @update:model-value="handleSaveSqlFolderSelect"
+              >
+                <template #custom-option-label="{ value }">
+                  <span class="truncate">{{ t("savedSql.createFolderOption", { name: value }) }}</span>
+                </template>
+              </SearchableSelect>
             </div>
           </div>
           <DialogFooter>
             <Button v-if="isDesktop" variant="secondary" @click="saveActiveSqlAsLocalFile">{{ t("savedSql.saveToFile") }}</Button>
             <Button variant="outline" @click="cancelPendingSaveAndClose()">{{ t("dangerDialog.cancel") }}</Button>
-            <Button :disabled="!saveSqlName.trim()" @click="confirmSaveSqlToLibrary">{{ t("savedSql.save") }}</Button>
+            <Button :disabled="saveSqlFolderCreationPending || !saveSqlName.trim()" @click="confirmSaveSqlToLibrary">{{ t("savedSql.save") }}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <DdlViewDialog
+      <QueryEditorDdlViewDialog
         v-if="queryEditorDdlTarget"
         v-model:open="showQueryEditorDdlDialog"
         :connection-id="queryEditorDdlTarget.connectionId"
         :database="queryEditorDdlTarget.database"
+        :catalog="queryEditorDdlTarget.catalog"
         :schema="queryEditorDdlTarget.schema"
         :table-name="queryEditorDdlTarget.tableName"
         :object-type="queryEditorDdlTarget.objectType"
         :database-type="queryEditorDdlDatabaseType"
         :dialect="queryEditorDdlDialect"
+      />
+      <QueryEditorObjectSourceDialog
+        v-if="queryEditorObjectSourceTarget"
+        v-model:open="showQueryEditorObjectSourceDialog"
+        :connection-id="queryEditorObjectSourceTarget.connectionId"
+        :database="queryEditorObjectSourceTarget.database"
+        :schema="queryEditorObjectSourceTarget.schema"
+        :name="queryEditorObjectSourceTarget.name"
+        :object-type="queryEditorObjectSourceTarget.objectType"
+        :initial-editing="queryEditorObjectSourceTarget.initialEditing"
+        :database-type="queryEditorObjectSourceDatabaseType"
+        :dialect="queryEditorObjectSourceDialect"
+        :format-dialect="queryEditorObjectSourceFormatDialect"
+        @saved="onQueryEditorObjectSourceSaved"
       />
     </TooltipProvider>
   </div>

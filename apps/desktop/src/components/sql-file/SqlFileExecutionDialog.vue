@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
+import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import { useToast } from "@/composables/useToast";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
@@ -502,9 +503,10 @@ watch(
                 </SelectTrigger>
                 <SelectContent position="popper">
                   <SelectItem v-for="c in sqlConnections" :key="c.id" :value="c.id">
-                    <div class="flex items-center gap-1.5">
-                      <DatabaseIcon :db-type="c.driver_profile || c.db_type" class="w-3.5 h-3.5" />
-                      {{ c.name }}
+                    <div class="flex min-w-0 items-center gap-1.5">
+                      <DatabaseIcon :db-type="c.driver_profile || c.db_type" class="w-3.5 h-3.5 shrink-0" />
+                      <ConnectionGroupBadge :connection-id="c.id" />
+                      <span class="min-w-0 flex-1 truncate">{{ c.name }}</span>
                     </div>
                   </SelectItem>
                 </SelectContent>

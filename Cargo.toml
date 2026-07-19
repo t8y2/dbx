@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["src-tauri", "crates/dbx-core", "crates/dbx-web"]
+members = ["src-tauri", "crates/dbx-core", "crates/dbx-web", "crates/dbx-mcp", "crates/dbx-cli"]
 
 [patch.crates-io]
 tokio-postgres = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", branch = "master" }
@@ -8,8 +8,7 @@ postgres-types = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", b
 postgres-protocol = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", branch = "master" }
 # Temporary compatibility patch for MySQL accounts using the deprecated
 # sha256_password auth plugin. Remove after upstream support lands.
-mysql_async = { git = "https://github.com/t8y2/mysql_async.git", rev = "7b565fbe76a168828189f7b98fe3b1989344c54e" }
-mysql_common = { git = "https://github.com/t8y2/rust_mysql_common.git", rev = "5b30d4912ebb23728f1196b2b9eb928eebb73f92" }
+mysql_async = { git = "https://github.com/t8y2/mysql_async.git", rev = "5c1186d05e62f712e717632a5b66dd030466e9b3" }
 
 [profile.release]
 panic = "abort"

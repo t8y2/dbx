@@ -1,0 +1,23 @@
+{
+  "name": "@dbx-app/mcp-win32-x64",
+  "version": "0.4.37",
+  "description": "Precompiled DBX MCP Rust binary for win32 x64",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/t8y2/dbx",
+    "directory": "packages/mcp-win32-x64"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "bin": {
+    "dbx-mcp-native": "bin/dbx-mcp.exe"
+  },
+  "files": [
+    "bin"
+  ]
+}

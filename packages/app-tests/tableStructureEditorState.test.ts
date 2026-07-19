@@ -21,6 +21,7 @@ import {
   normalizeDataTypeParams,
   parseExtraToColumnExtra,
   rehydrateColumnDraftsFromMetadata,
+  resolveInsertColumnIndex,
   toColumnNames,
 } from "../../apps/desktop/src/lib/table/tableStructureEditorState.ts";
 import { firstStructureMetadataTab, isStructureMetadataTabSupported } from "../../apps/desktop/src/lib/table/tableMetadataCapabilities.ts";
@@ -51,6 +52,19 @@ const indexes: IndexInfo[] = [
   { name: "PRIMARY", columns: ["id"], is_unique: true, is_primary: true },
   { name: "idx_name", columns: ["name"], is_unique: false, is_primary: false },
 ];
+
+test("resolves insert index after the selected column for all databases", () => {
+  const items = [{ id: "a" }, { id: "b" }, { id: "c" }];
+
+  assert.equal(resolveInsertColumnIndex(items, null), 3);
+  assert.equal(resolveInsertColumnIndex(items, undefined), 3);
+  assert.equal(resolveInsertColumnIndex(items, "a"), 1);
+  assert.equal(resolveInsertColumnIndex(items, "b"), 2);
+  assert.equal(resolveInsertColumnIndex(items, "c"), 3);
+  assert.equal(resolveInsertColumnIndex(items, "missing"), 3);
+  assert.equal(resolveInsertColumnIndex([], "a"), 0);
+  assert.equal(resolveInsertColumnIndex([{ id: "a", markedForDrop: true }, { id: "b" }], "a"), 2);
+});
 
 test("creates editable column drafts from column metadata", () => {
   const drafts = createColumnDrafts(columns, "mysql");

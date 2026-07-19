@@ -6,6 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "postbuild": "node scripts/generate-sitemap.mjs",
+    "contributors:update": "node scripts/update-contributors.mjs",
     "start": "next start",
     "postinstall": "fumadocs-mdx"
   },

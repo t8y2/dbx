@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::fmt;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
@@ -27,63 +28,177 @@ pub struct TableCsvExportOptions {
     pub timeout_secs: Option<u64>,
 }
 
-pub(crate) fn escape_csv(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
+/// CSV 转义直写目标 buffer：包引号 + 内部 `"` 翻倍。值不含 `"` 时整段拷贝，
+/// 不做 replace 分配（逐批流式导出对每个单元格调用，是导出热路径）。
+fn push_csv_escaped_content(out: &mut String, value: &str) {
+    let mut rest = value;
+    while let Some(pos) = rest.find('"') {
+        out.push_str(&rest[..=pos]);
+        out.push('"');
+        rest = &rest[pos + 1..];
+    }
+    out.push_str(rest);
 }
 
-pub(crate) fn value_to_csv_text(value: &Value) -> String {
-    match value {
-        Value::Null => String::new(),
-        Value::Bool(v) => v.to_string(),
-        Value::Number(v) => v.to_string(),
-        Value::String(v) => v.clone(),
-        other => other.to_string(),
+pub(crate) fn push_csv_escaped(out: &mut String, value: &str) {
+    out.push('"');
+    push_csv_escaped_content(out, value);
+    out.push('"');
+}
+
+struct CsvEscapedWriter<'a>(&'a mut String);
+
+impl fmt::Write for CsvEscapedWriter<'_> {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        push_csv_escaped_content(self.0, value);
+        Ok(())
     }
+}
+
+/// 将表导出 CSV 值直接写入已有 buffer；包括 NULL 在内的值均保留分页导出的带引号旧语义。
+pub(crate) fn push_csv_text_value(out: &mut String, value: &Value) {
+    out.push('"');
+    match value {
+        Value::Null => {}
+        Value::String(value) => push_csv_escaped_content(out, value),
+        Value::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
+        Value::Number(value) => {
+            fmt::write(out, format_args!("{value}")).expect("writing a number into a String cannot fail")
+        }
+        // 数组和对象可能包含引号，通过转义 writer 格式化，避免分配中间 JSON 字符串
+        other => fmt::write(&mut CsvEscapedWriter(out), format_args!("{other}"))
+            .expect("writing JSON into a String cannot fail"),
+    }
+    out.push('"');
+}
+
+fn push_csv_value(out: &mut String, value: &Value) {
+    if value.is_null() {
+        return;
+    }
+    push_csv_text_value(out, value);
+}
+
+/// TSV 转义直写：仅含特殊字符时包引号（语义与原 escape_tsv 一致）。
+fn push_tsv_escaped(out: &mut String, value: &str) {
+    if value.contains('\t') || value.contains('\n') || value.contains('\r') || value.contains('"') {
+        push_csv_escaped(out, value);
+    } else {
+        out.push_str(value);
+    }
+}
+
+fn push_tsv_value(out: &mut String, value: &Value) {
+    match value {
+        Value::Null => {}
+        Value::String(v) => push_tsv_escaped(out, v),
+        Value::Bool(v) => out.push_str(if *v { "true" } else { "false" }),
+        Value::Number(value) => {
+            fmt::write(out, format_args!("{value}")).expect("writing a number into a String cannot fail")
+        }
+        other => push_tsv_escaped(out, &other.to_string()),
+    }
+}
+
+/// 预分配粗估：按全部行的实际单元格数求和（不假设等宽），饱和运算防溢出，
+/// 并设上限——估算只是性能提示，绝不能因病态输入放大成巨额分配
+const ROWS_CAPACITY_ESTIMATE_MAX: usize = 16 * 1024 * 1024;
+
+pub(crate) fn estimated_rows_capacity(rows: &[Vec<Value>]) -> usize {
+    let cells: usize = rows.iter().map(Vec::len).fold(0usize, usize::saturating_add);
+    cells.saturating_mul(12).min(ROWS_CAPACITY_ESTIMATE_MAX)
+}
+
+pub(crate) fn escape_csv(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    push_csv_escaped(&mut out, value);
+    out
 }
 
 fn format_csv_value(value: &Value) -> String {
-    match value {
-        Value::Null => String::new(),
-        other => escape_csv(&value_to_csv_text(other)),
-    }
+    let mut out = String::new();
+    push_csv_value(&mut out, value);
+    out
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn escape_tsv(value: &str) -> String {
-    if value.contains('\t') || value.contains('\n') || value.contains('\r') || value.contains('"') {
-        format!("\"{}\"", value.replace('"', "\"\""))
-    } else {
-        value.to_string()
+    let mut out = String::with_capacity(value.len());
+    push_tsv_escaped(&mut out, value);
+    out
+}
+
+fn push_tsv_rows(out: &mut String, rows: &[Vec<Value>]) {
+    for (row_index, row) in rows.iter().enumerate() {
+        if row_index > 0 {
+            out.push('\n');
+        }
+        for (cell_index, cell) in row.iter().enumerate() {
+            if cell_index > 0 {
+                out.push('\t');
+            }
+            push_tsv_value(out, cell);
+        }
     }
 }
 
 pub(crate) fn format_tsv_rows(rows: &[Vec<Value>]) -> String {
-    rows.iter()
-        .map(|row| row.iter().map(|cell| escape_tsv(&value_to_csv_text(cell))).collect::<Vec<_>>().join("\t"))
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut out = String::with_capacity(estimated_rows_capacity(rows));
+    push_tsv_rows(&mut out, rows);
+    out
 }
 
 pub(crate) fn format_tsv(columns: &[String], rows: &[Vec<Value>]) -> String {
-    let header = columns.iter().map(|col| escape_tsv(col)).collect::<Vec<_>>().join("\t");
-    let body = format_tsv_rows(rows);
-    format!("{header}\n{body}")
+    let mut out = String::with_capacity(
+        estimated_rows_capacity(rows).saturating_add(columns.len().saturating_mul(12)).min(ROWS_CAPACITY_ESTIMATE_MAX),
+    );
+    for (index, column) in columns.iter().enumerate() {
+        if index > 0 {
+            out.push('\t');
+        }
+        push_tsv_escaped(&mut out, column);
+    }
+    out.push('\n');
+    push_tsv_rows(&mut out, rows);
+    out
 }
 
 /// Format query-result rows as CSV text without a header row. Database NULLs
 /// use the same empty-cell representation as table-data exports. Used by the
 /// streaming query-result export for batches after the first.
+fn push_query_result_csv_rows(out: &mut String, rows: &[Vec<Value>]) {
+    for (row_index, row) in rows.iter().enumerate() {
+        if row_index > 0 {
+            out.push('\n');
+        }
+        for (cell_index, cell) in row.iter().enumerate() {
+            if cell_index > 0 {
+                out.push(',');
+            }
+            push_csv_value(out, cell);
+        }
+    }
+}
+
 pub fn format_query_result_csv_rows(rows: &[Vec<Value>]) -> String {
-    rows.iter().map(|row| row.iter().map(format_csv_value).collect::<Vec<_>>().join(",")).collect::<Vec<_>>().join("\n")
+    let mut out = String::with_capacity(estimated_rows_capacity(rows));
+    push_query_result_csv_rows(&mut out, rows);
+    out
 }
 
 fn format_csv_with_value_formatter(columns: &[String], rows: &[Vec<Value>]) -> String {
-    let header = columns.iter().map(|col| escape_csv(col)).collect::<Vec<_>>().join(",");
-    let body = rows
-        .iter()
-        .map(|row| row.iter().map(format_csv_value).collect::<Vec<_>>().join(","))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!("{header}\n{body}")
+    let mut out = String::with_capacity(
+        estimated_rows_capacity(rows).saturating_add(columns.len().saturating_mul(12)).min(ROWS_CAPACITY_ESTIMATE_MAX),
+    );
+    for (index, column) in columns.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        push_csv_escaped(&mut out, column);
+    }
+    out.push('\n');
+    push_query_result_csv_rows(&mut out, rows);
+    out
 }
 
 pub fn format_csv(columns: &[String], rows: &[Vec<Value>]) -> String {
@@ -234,6 +349,54 @@ mod tests {
             &[vec![json!(1), Value::Null], vec![json!(2), json!("line1\n\"line2\"")]],
         );
         assert_eq!(out, "id\tnote\n1\t\n2\t\"line1\n\"\"line2\"\"\"");
+    }
+
+    #[test]
+    fn capacity_estimate_sums_actual_cells_across_ragged_rows() {
+        // 不等宽行按实际单元格数求和，不得按首行宽度放大
+        let wide_first = vec![vec![serde_json::Value::Null; 1000], vec![], vec![serde_json::Value::Null]];
+        assert_eq!(super::estimated_rows_capacity(&wide_first), 1001 * 12);
+        assert!(super::estimated_rows_capacity(&[]) == 0);
+    }
+
+    #[test]
+    fn escape_tsv_matches_reference_semantics() {
+        // TSV 仅在含 \t/\n/\r/引号时包引号；逗号不触发
+        for input in ["", "plain", "with,comma", "tab\there", "line\nbreak", "cr\rhere", "quo\"te", "\t\"mix\""] {
+            let expected =
+                if input.contains('\t') || input.contains('\n') || input.contains('\r') || input.contains('"') {
+                    format!("\"{}\"", input.replace('"', "\"\""))
+                } else {
+                    input.to_string()
+                };
+            assert_eq!(super::escape_tsv(input), expected, "input: {input:?}");
+        }
+    }
+
+    #[test]
+    fn push_csv_escaped_matches_replace_reference() {
+        // 直写实现必须与原 replace 版本逐字节等价（含引号在首/尾/连续的边界）
+        for input in ["", "plain", "\"", "\"\"", "a\"b", "\"start", "end\"", "mid\"\"dle", "逗,号\n换行"] {
+            let expected = format!("\"{}\"", input.replace('"', "\"\""));
+            assert_eq!(super::escape_csv(input), expected, "input: {input:?}");
+        }
+    }
+
+    #[test]
+    fn push_csv_text_value_preserves_paginated_export_semantics() {
+        let cases = [
+            (serde_json::Value::Null, "\"\""),
+            (serde_json::json!(true), "\"true\""),
+            (serde_json::json!(42.5), "\"42.5\""),
+            (serde_json::json!("a\"b"), "\"a\"\"b\""),
+            (serde_json::json!({"key": "value"}), "\"{\"\"key\"\":\"\"value\"\"}\""),
+        ];
+
+        for (value, expected) in cases {
+            let mut out = String::from("prefix,");
+            super::push_csv_text_value(&mut out, &value);
+            assert_eq!(out, format!("prefix,{expected}"));
+        }
     }
 
     use serde_json::Value;

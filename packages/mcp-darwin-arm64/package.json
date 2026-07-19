@@ -1,0 +1,23 @@
+{
+  "name": "@dbx-app/mcp-darwin-arm64",
+  "version": "0.4.37",
+  "description": "Precompiled DBX MCP Rust binary for darwin arm64",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/t8y2/dbx",
+    "directory": "packages/mcp-darwin-arm64"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "bin": {
+    "dbx-mcp-native": "bin/dbx-mcp"
+  },
+  "files": [
+    "bin"
+  ]
+}

@@ -23,11 +23,14 @@ class PostgresLikeAgentTest {
         TestPostgresLikeAgent agent = new TestPostgresLikeAgent();
         agent.connect(new ConnectParams());
 
+        agent.listDatabases();
         agent.listSchemas();
         agent.listTables("app");
         agent.listObjects("app");
+        agent.getObjectSource("app", "refresh_orders", "FUNCTION");
         agent.getColumns("app", "orders");
         agent.listCheckConstraintsForTest("app", "orders");
+        agent.listIndexes("app", "orders");
         agent.listForeignKeys("app", "orders");
         agent.listTriggers("app", "orders");
 
@@ -35,13 +38,18 @@ class PostgresLikeAgentTest {
 
         assertFalse(sql.contains("FROM information_schema"), sql);
         assertFalse(sql.contains("JOIN information_schema"), sql);
+        assertTrue(sql.contains("pg_catalog.pg_database"), sql);
         assertTrue(sql.contains("pg_catalog.pg_namespace"), sql);
         assertTrue(sql.contains("pg_catalog.pg_class"), sql);
         assertTrue(sql.contains("pg_catalog.pg_proc"), sql);
+        assertTrue(sql.contains("pg_catalog.pg_index"), sql);
         assertTrue(sql.contains("pg_catalog.pg_attribute"), sql);
         assertTrue(sql.contains("pg_catalog.pg_constraint"), sql);
         assertTrue(sql.contains("pg_catalog.pg_get_constraintdef"), sql);
         assertTrue(sql.contains("pg_catalog.pg_trigger"), sql);
+        assertFalse(sql.contains("FROM pg_database"), sql);
+        assertFalse(sql.contains("FROM pg_proc"), sql);
+        assertFalse(sql.contains("FROM pg_index"), sql);
         assertFalse(sql.contains(" AS key "), sql);
         assertFalse(sql.contains(" key."), sql);
     }

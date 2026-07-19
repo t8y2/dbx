@@ -92,6 +92,38 @@ fn extracts_unqualified_order_by_columns_for_sqlserver_queries() {
 }
 
 #[test]
+fn sqlserver_create_proc_and_procedure_are_equivalent() {
+    for sql in ["CREATE PROC test\nAS\n", "CREATE PROCEDURE test\nAS\n", "CREATE PROC test AS SELECT 1;"] {
+        let analysis = analyze_sql_references(sql, Some("sqlserver"))
+            .unwrap_or_else(|error| panic!("SQL Server procedure declaration should analyze: {error}"));
+        assert!(analysis.tables.is_empty());
+        assert!(analysis.columns.is_empty());
+    }
+}
+
+#[test]
+fn sqlserver_create_or_alter_proc_is_supported() {
+    analyze_sql_references("CREATE OR ALTER PROC test AS SELECT 1;", Some("sqlserver"))
+        .unwrap_or_else(|error| panic!("SQL Server CREATE OR ALTER PROC should analyze: {error}"));
+}
+
+#[test]
+fn create_proc_remains_invalid_outside_sqlserver() {
+    let error = analyze_sql_references("CREATE PROC test AS SELECT 1", Some("postgres"))
+        .expect_err("PostgreSQL must not inherit SQL Server's PROC synonym");
+
+    assert!(error.contains("an object type after CREATE"));
+}
+
+#[test]
+fn sqlserver_proc_identifiers_remain_identifiers_outside_create() {
+    let analysis = analyze_sql_references("SELECT proc FROM jobs", Some("sqlserver")).unwrap();
+
+    assert_eq!(analysis.tables[0].name, "jobs");
+    assert_eq!(analysis.columns[0].name, "proc");
+}
+
+#[test]
 fn duckdb_parser_gap_queries_do_not_raise_syntax_errors() {
     for sql in ["FROM users;", "SUMMARIZE users;", "SUMMARISE users;"] {
         let analysis = analyze_sql_references(sql, Some("duckdb")).expect("duckdb parser gap query should analyze");

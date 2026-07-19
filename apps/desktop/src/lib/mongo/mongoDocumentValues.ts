@@ -1,6 +1,7 @@
 export type MongoInputValue = string | number | boolean | null;
 
 const MONGO_SHELL_DATE_PATTERN = /^(?:ISODate|new Date)\(\s*(["'])(.+)\1\s*\)$/;
+const MONGO_SHELL_NUMBER_LONG_PATTERN = /^NumberLong\(\s*(["'])(-?\d+)\1\s*\)$/;
 const LEGACY_MONGO_DATE_DISPLAY_PATTERN = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.(\d{1,3}))?$/;
 const MONGO_OBJECT_ID_PATTERN = /^[a-fA-F0-9]{24}$/;
 const MONGO_INTEGER_PATTERN = /^-?\d+$/;
@@ -24,6 +25,8 @@ export function parseMongoDocumentInputValue(raw: MongoInputValue): unknown {
 
   const shellDate = mongoShellDateToExtendedJson(trimmed);
   if (shellDate !== trimmed) return shellDate;
+  const shellNumberLong = mongoShellNumberLongToExtendedJson(trimmed);
+  if (shellNumberLong !== trimmed) return shellNumberLong;
 
   const legacyDate = legacyMongoDateDisplayToExtendedJson(trimmed);
   if (legacyDate) return legacyDate;
@@ -40,6 +43,14 @@ export function parseMongoDocumentInputValue(raw: MongoInputValue): unknown {
     return mongoShellDateToExtendedJson(JSON.parse(trimmed));
   }
   return raw;
+}
+
+export function mongoDocumentDisplayValue(value: unknown): unknown {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const object = value as Record<string, unknown>;
+    if (Object.keys(object).length === 1 && typeof object.$numberLong === "string") return `NumberLong(${JSON.stringify(object.$numberLong)})`;
+  }
+  return value;
 }
 
 function parseMongoExistingFieldInputValue(raw: Exclude<MongoInputValue, null>, originalValue: unknown): unknown {
@@ -61,6 +72,11 @@ function legacyMongoDateDisplayToExtendedJson(value: string): { $date: string } 
   if (!match) return null;
   const [, date, time, millis = "000"] = match;
   return { $date: `${date}T${time}.${millis.padEnd(3, "0")}Z` };
+}
+
+function mongoShellNumberLongToExtendedJson(value: string): unknown {
+  const match = value.match(MONGO_SHELL_NUMBER_LONG_PATTERN);
+  return match ? { $numberLong: match[2] } : value;
 }
 
 export function buildMongoUpdateDocument(changes: Map<number, MongoInputValue>, columns: string[], originalDocument?: unknown): Record<string, unknown> {
@@ -174,7 +190,7 @@ export function serializeMongoDocumentId(value: unknown): string {
 }
 
 export function mongoDocumentIdForGrid(value: unknown): MongoInputValue {
-  if (isMongoNumberLong(value)) return value.$numberLong;
+  if (isMongoExtendedJsonId(value)) return String(value.$numberLong ?? value.$oid);
   if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
   return JSON.stringify(value);
 }
@@ -184,8 +200,4 @@ function isMongoExtendedJsonId(value: unknown): value is Record<string, unknown>
   const object = value as Record<string, unknown>;
   const keys = Object.keys(object);
   return keys.length === 1 && (typeof object.$numberLong === "string" || typeof object.$oid === "string");
-}
-
-function isMongoNumberLong(value: unknown): value is { $numberLong: string } {
-  return !!value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 1 && typeof (value as Record<string, unknown>).$numberLong === "string";
 }

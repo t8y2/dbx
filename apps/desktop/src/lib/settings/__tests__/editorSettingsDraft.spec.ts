@@ -22,6 +22,7 @@ function makeSettings(overrides: Partial<EditorSettings> = {}): EditorSettings {
     confirmUnsavedSqlClose: true,
     objectBrowserViewMode: "list",
     sqlVariableSyntaxOverrides: {},
+    tabLayout: "scroll",
     ...overrides,
   };
 }
@@ -77,5 +78,54 @@ describe("editorSettingsPatchFromDraft", () => {
     const base = editorSettingsDraftFromSettings(settings);
     const patch = editorSettingsPatchFromDraft(draft, base);
     expect(patch.continueOnErrorOnBatch).toBeUndefined();
+  });
+});
+
+describe("EDITOR_SETTINGS_DRAFT_KEYS - tabLayout", () => {
+  it("includes tabLayout", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("tabLayout");
+  });
+});
+
+describe("editorSettingsDraftFromSettings - tabLayout", () => {
+  it("maps tabLayout from settings", () => {
+    expect(editorSettingsDraftFromSettings(makeSettings({ tabLayout: "wrap" })).tabLayout).toBe("wrap");
+    expect(editorSettingsDraftFromSettings(makeSettings({ tabLayout: "scroll" })).tabLayout).toBe("scroll");
+  });
+});
+
+describe("editorSettingsDraftChanged - tabLayout", () => {
+  it("detects change in tabLayout", () => {
+    const settings = makeSettings({ tabLayout: "scroll" });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    draft.tabLayout = "wrap";
+    expect(editorSettingsDraftChanged(draft, base)).toBe(true);
+  });
+
+  it("detects no change when tabLayout matches", () => {
+    const settings = makeSettings({ tabLayout: "wrap" });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    expect(editorSettingsDraftChanged(draft, base)).toBe(false);
+  });
+});
+
+describe("editorSettingsPatchFromDraft - tabLayout", () => {
+  it("includes tabLayout in patch when changed", () => {
+    const settings = makeSettings({ tabLayout: "scroll" });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    draft.tabLayout = "wrap";
+    const patch = editorSettingsPatchFromDraft(draft, base);
+    expect(patch.tabLayout).toBe("wrap");
+  });
+
+  it("omits tabLayout when unchanged", () => {
+    const settings = makeSettings({ tabLayout: "scroll" });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    const patch = editorSettingsPatchFromDraft(draft, base);
+    expect(patch.tabLayout).toBeUndefined();
   });
 });

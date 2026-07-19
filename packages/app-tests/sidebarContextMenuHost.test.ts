@@ -28,10 +28,13 @@ test("rare sidebar dialogs share module-level async wrappers with fallbacks", ()
 
 test("tree host owns sidebar data-open generations", () => {
   const treeItem = readFileSync("apps/desktop/src/components/sidebar/TreeItem.vue", "utf8");
+  const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
   const connectionTree = readFileSync("apps/desktop/src/components/sidebar/ConnectionTree.vue", "utf8");
 
   assert.doesNotMatch(treeItem, /runSidebarDataOpenImmediately/);
-  assert.match(treeItem, /emit\("open-data", node, true, openData\)/);
+  assert.doesNotMatch(treeItem, /emit\("open-data"/);
+  assert.match(runtimeHost, /emit\("open-data", node, true, "default", openData\)/);
+  assert.match(connectionTree, /<SidebarTreeRuntimeHost/);
   assert.match(connectionTree, /function openSidebarData/);
   assert.match(connectionTree, /runSidebarDataOpenImmediately/);
   assert.match(connectionTree, /createSidebarActionTarget\(node\)/);

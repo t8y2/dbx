@@ -1,5 +1,21 @@
 import type { QueryResult } from "@/types/database";
 import { mongoDocumentIdForGrid } from "@/lib/mongo/mongoDocumentValues";
+import {
+  chainedMethodCallPattern,
+  describeMongoCommandParseFailure,
+  findChainedMethodCallIndex,
+  findMatchingParen,
+  MONGO_SHELL_COMMAND_HINT,
+  normalizeJsonArgument,
+  parseCollectionMethodTarget,
+  parseMongoAggregateCommand,
+  quoteUnquotedObjectKeys,
+  splitTopLevel,
+  type MongoAggregateCommand,
+} from "@dbx-app/mongo-shell";
+
+export type { MongoAggregateCommand };
+export { describeMongoCommandParseFailure, MONGO_SHELL_COMMAND_HINT, parseMongoAggregateCommand, quoteUnquotedObjectKeys };
 
 export interface MongoFindCommand {
   collection: string;
@@ -23,11 +39,6 @@ export interface MongoCountDocumentsCommand {
   mode: "accurate" | "legacy";
 }
 
-export interface MongoAggregateCommand {
-  collection: string;
-  pipeline: string;
-}
-
 export interface MongoGetIndexesCommand {
   collection: string;
 }
@@ -48,6 +59,12 @@ export interface MongoCollectionStatsCommand {
   scale?: number;
 }
 
+export interface MongoDistinctCommand {
+  collection: string;
+  field: string;
+  filter?: string;
+}
+
 type MongoWriteKind = "insert" | "update" | "delete" | "createIndex" | "dropIndex" | "dropIndexes" | "dropCollection" | "findOneAndUpdate" | "findOneAndReplace" | "findOneAndDelete";
 
 export type MongoCommand =
@@ -56,6 +73,7 @@ export type MongoCommand =
   | MongoVersionCommand
   | ({ kind: "countDocuments" } & MongoCountDocumentsCommand)
   | ({ kind: "aggregate" } & MongoAggregateCommand)
+  | ({ kind: "distinct" } & MongoDistinctCommand)
   | ({ kind: "getIndexes" } & MongoGetIndexesCommand)
   | ({ kind: "collectionStats" } & MongoCollectionStatsCommand)
   | ({ kind: "use" } & MongoUseCommand)
@@ -71,6 +89,20 @@ export type MongoCommand =
   | { kind: "findOneAndDelete"; collection: string; filter: string; options?: string };
 
 export type MongoWriteCommand = Extract<MongoCommand, { kind: MongoWriteKind }>;
+
+export function normalizeRustMongoCommand(raw: Record<string, unknown>): MongoCommand {
+  const command = Object.fromEntries(Object.entries(raw).filter(([, value]) => value !== null)) as Record<string, any>;
+  if (command.kind === "countDocuments") {
+    const { accurate, ...rest } = command;
+    return { ...rest, kind: "countDocuments", mode: accurate ? "accurate" : "legacy" } as MongoCommand;
+  }
+  if (command.kind === "dropIndexes") {
+    const { single, indexes, ...rest } = command;
+    if (single) return { ...rest, kind: "dropIndex", index: indexes } as MongoCommand;
+    return { ...rest, kind: "dropIndexes", ...(indexes ? { indexes } : {}) } as MongoCommand;
+  }
+  return command as MongoCommand;
+}
 
 export interface ParsedMongoCommand {
   text: string;
@@ -301,9 +333,9 @@ function parseFindCountCommand(source: string): MongoCountDocumentsCommand | nul
   };
 }
 
-export function parseMongoAggregateCommand(input: string): MongoAggregateCommand | null {
+export function parseMongoDistinctCommand(input: string): MongoDistinctCommand | null {
   const source = input.trim().replace(/;$/, "").trim();
-  const target = parseCollectionMethodTarget(source, "aggregate");
+  const target = parseCollectionMethodTarget(source, "distinct");
   if (!target) return null;
 
   const openIndex = source.indexOf("(", target.methodCallIndex);
@@ -311,19 +343,23 @@ export function parseMongoAggregateCommand(input: string): MongoAggregateCommand
   if (closeIndex < 0 || source.slice(closeIndex + 1).trim()) return null;
 
   const args = splitTopLevel(source.slice(openIndex + 1, closeIndex));
-  if (args.length !== 1) return null;
-  const pipeline = normalizeJsonArgument(args[0]);
-  if (!pipeline) return null;
+  if (args.length < 1 || args.length > 2) return null;
+
+  const fieldJson = normalizeJsonArgument(args[0] ?? "");
+  if (!fieldJson) return null;
+  let field: unknown;
   try {
-    if (!Array.isArray(JSON.parse(pipeline))) return null;
+    field = JSON.parse(fieldJson);
   } catch {
     return null;
   }
+  if (typeof field !== "string" || !field.trim()) return null;
 
-  return {
-    collection: target.collection,
-    pipeline,
-  };
+  if (args.length === 1) return { collection: target.collection, field };
+
+  const filter = normalizeJsonArgument(args[1] ?? "");
+  if (!filter) return null;
+  return { collection: target.collection, field, filter };
 }
 
 export function parseMongoGetIndexesCommand(input: string): MongoGetIndexesCommand | null {
@@ -397,6 +433,16 @@ export function parseMongoWriteCommand(input: string): MongoWriteCommand | null 
     const docs = normalizeJsonArgument(args[0]);
     if (!docs) return null;
     return Array.isArray(JSON.parse(docs)) ? { kind: "insert", collection: insertMany.collection, docsJson: docs } : null;
+  }
+
+  const insert = parseCollectionMethodTarget(source, "insert");
+  if (insert) {
+    const args = parseMethodArgs(source, insert.methodCallIndex);
+    if (!args || args.length !== 1 || !args[0]?.trim()) return null;
+    const docs = normalizeJsonArgument(args[0]);
+    if (!docs) return null;
+    const value = JSON.parse(docs);
+    return value !== null && typeof value === "object" ? { kind: "insert", collection: insert.collection, docsJson: docs } : null;
   }
 
   for (const method of ["updateOne", "updateMany"] as const) {
@@ -503,6 +549,10 @@ export function parseMongoCommand(input: string): ParsedMongoCommand | null {
     (source) => {
       const aggregate = parseMongoAggregateCommand(source);
       return aggregate ? { kind: "aggregate", ...aggregate } : null;
+    },
+    (source) => {
+      const distinct = parseMongoDistinctCommand(source);
+      return distinct ? { kind: "distinct", ...distinct } : null;
     },
     (source) => {
       const getIndexes = parseMongoGetIndexesCommand(source);
@@ -633,6 +683,15 @@ export function mongoDocumentsToQueryResult(documents: unknown[], executionTimeM
   };
 }
 
+export function mongoDistinctToQueryResult(field: string, values: unknown[], executionTimeMs: number): QueryResult {
+  return {
+    columns: [field],
+    rows: values.map((value) => [toCellValue(value)]),
+    affected_rows: values.length,
+    execution_time_ms: Math.max(0, Math.round(executionTimeMs)),
+  };
+}
+
 export function mongoCountToQueryResult(total: number, executionTimeMs: number): QueryResult {
   return {
     columns: ["count"],
@@ -737,82 +796,6 @@ function parseFindTarget(source: string): { collection: string; findCallIndex: n
   return null;
 }
 
-function parseCollectionMethodTarget(source: string, method: string): { collection: string; methodCallIndex: number } | null {
-  const escapedMethod = escapeRegExp(method);
-  const direct = new RegExp(`^db\\s*\\.\\s*([A-Za-z_$][\\w$]*)\\s*\\.\\s*${escapedMethod}\\s*\\(`).exec(source);
-  if (direct) {
-    return {
-      collection: direct[1],
-      methodCallIndex: findChainedMethodCallIndex(source, method),
-    };
-  }
-
-  const getCollection = new RegExp(`^db\\s*\\.\\s*getCollection\\s*\\(\\s*(["'])(.*?)\\1\\s*\\)\\s*\\.\\s*${escapedMethod}\\s*\\(`).exec(source);
-  if (getCollection) {
-    return {
-      collection: getCollection[2],
-      methodCallIndex: findChainedMethodCallIndex(source, method),
-    };
-  }
-
-  return null;
-}
-
-function normalizeJsonArgument(value: string): string | null {
-  const trimmed = value.trim();
-  if (!trimmed) return "{}";
-  // Rewrite mongo shell constructors that are not valid JSON into the extended
-  // JSON the backend understands (mongo_driver::json_value_to_bson): ObjectId(x)
-  // -> {"$oid":x}, NumberLong(x) -> {"$numberLong":x}, and
-  // ISODate(x)/new Date(x) -> {"$date":x}. Without this a
-  // filter such as { createdAt: { $gte: ISODate("...") } } fails JSON.parse,
-  // the command is left unrecognized and falls through to the SQL executor,
-  // which rejects it with "Use MongoDB-specific commands".
-  const withExtendedJson = replaceMongoShellConstructors(trimmed);
-  const preprocessed = quoteUnquotedObjectKeys(convertSingleQuotedStrings(withExtendedJson));
-  try {
-    JSON.parse(preprocessed);
-    return preprocessed;
-  } catch {
-    return null;
-  }
-}
-
-function replaceMongoShellConstructors(source: string): string {
-  const constructor = /^(ObjectId|NumberLong|ISODate)\s*\(\s*["']([^"']+)["']\s*\)|^(ObjectId|NumberLong)\s*\(\s*(-?\d+)\s*\)|^(?:new\s+Date)\s*\(\s*["']([^"']+)["']\s*\)/;
-  let result = "";
-  let index = 0;
-  while (index < source.length) {
-    const quote = source[index];
-    if (quote === '"' || quote === "'") {
-      const start = index++;
-      while (index < source.length) {
-        if (source[index] === "\\") index += 2;
-        else if (source[index] === quote) {
-          index++;
-          break;
-        } else index++;
-      }
-      result += source.slice(start, index);
-      continue;
-    }
-    const match = source.slice(index).match(constructor);
-    if (!match) {
-      result += source[index++];
-      continue;
-    }
-    if (match[1]) {
-      result += match[1] === "ObjectId" ? `{"$oid":"${match[2]}"}` : match[1] === "NumberLong" ? `{"$numberLong":"${match[2]}"}` : `{"$date":"${match[2]}"}`;
-    } else if (match[3]) {
-      result += match[3] === "NumberLong" ? `{"$numberLong":"${match[4]}"}` : `{"$oid":"${match[4]}"}`;
-    } else {
-      result += `{"$date":"${match[5]}"}`;
-    }
-    index += match[0].length;
-  }
-  return result;
-}
-
 function parseMethodArgs(source: string, methodCallIndex: number): string[] | null {
   const openIndex = source.indexOf("(", methodCallIndex);
   const closeIndex = findMatchingParen(source, openIndex);
@@ -883,7 +866,9 @@ function splitMongoSemicolonSeparatedSegments(input: string): MongoTextRange[] {
       continue;
     }
 
-    if (char === "/" && next === "/") {
+    // `--` is a line comment too: the editor runs Mongo through its SQL language
+    // mode, which comments with `--` alongside the shell's native `//`.
+    if ((char === "/" && next === "/") || (char === "-" && next === "-")) {
       lineComment = true;
       i += 1;
       continue;
@@ -980,7 +965,9 @@ function mongoTopLevelCommandLineStarts(segment: string): number[] {
       continue;
     }
 
-    if (char === "/" && next === "/") {
+    // `--` is a line comment too: the editor runs Mongo through its SQL language
+    // mode, which comments with `--` alongside the shell's native `//`.
+    if ((char === "/" && next === "/") || (char === "-" && next === "-")) {
       lineComment = true;
       i += 1;
       continue;
@@ -1020,19 +1007,68 @@ function pushMongoSegment(segments: MongoTextRange[], source: string, from: numb
   if (trimmed) segments.push(trimmed);
 }
 
+/**
+ * Index just past the last code character in `source[start, end)`, treating
+ * quoted strings and `//` / `--` / block comments as non-code. Trailing
+ * whitespace and comments sit after the returned index; a comment marker inside
+ * a string value (`{ note: "a--b" }`) stays code, so it is never mistaken for a
+ * trailing comment and truncated away.
+ */
+function mongoCommentAwareBodyEnd(source: string, start: number, end: number): number {
+  let bodyEnd = start;
+  let quote: string | null = null;
+  let i = start;
+  while (i < end) {
+    const char = source[i] ?? "";
+    const next = source[i + 1] ?? "";
+    if (quote) {
+      if (char === "\\") {
+        i += 2;
+        bodyEnd = Math.min(i, end);
+        continue;
+      }
+      if (char === quote) quote = null;
+      i += 1;
+      bodyEnd = i;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      i += 1;
+      bodyEnd = i;
+      continue;
+    }
+    if ((char === "/" && next === "/") || (char === "-" && next === "-")) {
+      const newline = source.indexOf("\n", i + 2);
+      i = newline < 0 || newline >= end ? end : newline;
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      const close = source.indexOf("*/", i + 2);
+      i = close < 0 || close + 2 > end ? end : close + 2;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      i += 1;
+      continue;
+    }
+    i += 1;
+    bodyEnd = i;
+  }
+  return bodyEnd;
+}
+
 function trimMongoOuterComments(source: string): string {
   let value = source.trim();
+  // Leading comments sit before any string, so a simple regex is safe here.
   while (value) {
-    const next = value.replace(/^(?:\/\/[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)\s*/u, "");
+    const next = value.replace(/^(?:(?:\/\/|--)[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)\s*/u, "");
     if (next === value) break;
     value = next.trimStart();
   }
-  while (value) {
-    const next = value.replace(/\s*(?:\/\/[^\n]*|\/\*[\s\S]*?\*\/)\s*$/u, "");
-    if (next === value) break;
-    value = next.trimEnd();
-  }
-  return value.trim();
+  // Trailing comments need string awareness so a comment marker inside a string
+  // value near the end is not truncated as if it began a comment.
+  return value.slice(0, mongoCommentAwareBodyEnd(value, 0, value.length)).trim();
 }
 
 function trimMongoOuterCommentRange(source: string, from: number, to: number): MongoTextRange | null {
@@ -1046,7 +1082,7 @@ function trimMongoOuterCommentRange(source: string, from: number, to: number): M
       start += value.length - trimmed.length;
       continue;
     }
-    const next = value.replace(/^(?:\/\/[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)\s*/u, "");
+    const next = value.replace(/^(?:(?:\/\/|--)[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)\s*/u, "");
     if (next !== value) {
       start += value.length - next.length;
       continue;
@@ -1054,20 +1090,10 @@ function trimMongoOuterCommentRange(source: string, from: number, to: number): M
     break;
   }
 
-  while (start < end) {
-    const value = source.slice(start, end);
-    const trimmed = value.trimEnd();
-    if (trimmed !== value) {
-      end -= value.length - trimmed.length;
-      continue;
-    }
-    const next = value.replace(/\s*(?:\/\/[^\n]*|\/\*[\s\S]*?\*\/)\s*$/u, "");
-    if (next !== value) {
-      end -= value.length - next.length;
-      continue;
-    }
-    break;
-  }
+  // Trailing comments are found with string awareness (see mongoCommentAwareBodyEnd)
+  // so a `--`/`//` inside a trailing string value is not treated as a comment.
+  end = mongoCommentAwareBodyEnd(source, start, end);
+  while (end > start && /\s/.test(source[end - 1] ?? "")) end -= 1;
 
   if (start >= end) return null;
   return {
@@ -1075,52 +1101,6 @@ function trimMongoOuterCommentRange(source: string, from: number, to: number): M
     to: end,
     text: source.slice(start, end),
   };
-}
-
-function convertSingleQuotedStrings(source: string): string {
-  let result = "";
-  let copiedUntil = 0;
-  let quote: string | null = null;
-  let start = 0;
-  let value = "";
-  let escaped = false;
-
-  for (let i = 0; i < source.length; i += 1) {
-    const char = source[i];
-    if (!quote) {
-      if (char === "'") {
-        quote = char;
-        start = i;
-        value = "";
-        escaped = false;
-      } else if (char === '"') {
-        quote = char;
-      }
-      continue;
-    }
-
-    if (quote === '"') {
-      if (escaped) escaped = false;
-      else if (char === "\\") escaped = true;
-      else if (char === '"') quote = null;
-      continue;
-    }
-
-    if (escaped) {
-      value += char;
-      escaped = false;
-    } else if (char === "\\") {
-      escaped = true;
-    } else if (char === "'") {
-      result += source.slice(copiedUntil, start) + JSON.stringify(value);
-      copiedUntil = i + 1;
-      quote = null;
-    } else {
-      value += char;
-    }
-  }
-
-  return quote === "'" ? source : result + source.slice(copiedUntil);
 }
 
 function parseMongoDropIndexArgument(args: string[]): string | null {
@@ -1141,52 +1121,6 @@ function parseMongoDropIndexesArgument(args: string[]): string | undefined | nul
   if (typeof parsed === "string") return normalized;
   if (isNonEmptyRecord(parsed)) return normalized;
   return Array.isArray(parsed) && parsed.length > 0 && parsed.every((item) => typeof item === "string") ? normalized : null;
-}
-
-export function quoteUnquotedObjectKeys(source: string): string {
-  let result = "";
-  let quote: string | null = null;
-  let escaped = false;
-
-  for (let i = 0; i < source.length; i += 1) {
-    const char = source[i];
-    if (quote) {
-      result += char;
-      if (escaped) escaped = false;
-      else if (char === "\\") escaped = true;
-      else if (char === quote) quote = null;
-      continue;
-    }
-
-    if (char === '"' || char === "'") {
-      quote = char;
-      result += char;
-      continue;
-    }
-
-    if (/[A-Za-z_$]/.test(char) && shouldQuoteObjectKey(source, i)) {
-      let end = i + 1;
-      while (/[\w$]/.test(source[end] || "")) end += 1;
-      result += `"${source.slice(i, end)}"`;
-      i = end - 1;
-      continue;
-    }
-
-    result += char;
-  }
-
-  return result;
-}
-
-function shouldQuoteObjectKey(source: string, index: number): boolean {
-  let before = index - 1;
-  while (/\s/.test(source[before] || "")) before -= 1;
-  if (source[before] !== "{" && source[before] !== ",") return false;
-
-  let after = index + 1;
-  while (/[\w$]/.test(source[after] || "")) after += 1;
-  while (/\s/.test(source[after] || "")) after += 1;
-  return source[after] === ":";
 }
 
 function readChainedIntegerArgument(source: string, name: string, fallback: number): number | null {
@@ -1231,73 +1165,6 @@ function hasSingleEmptyChainedCall(source: string, name: string): boolean {
   const openIndex = trimmed.indexOf("(", match.index);
   const closeIndex = findMatchingParen(trimmed, openIndex);
   return closeIndex >= 0 && !trimmed.slice(openIndex + 1, closeIndex).trim() && !trimmed.slice(closeIndex + 1).trim();
-}
-
-function findChainedMethodCallIndex(source: string, name: string): number {
-  return chainedMethodCallPattern(name).exec(source)?.index ?? -1;
-}
-
-function chainedMethodCallPattern(name: string): RegExp {
-  return new RegExp(`\\.\\s*${escapeRegExp(name)}\\s*\\(`, "g");
-}
-
-function splitTopLevel(source: string): string[] {
-  const parts: string[] = [];
-  let start = 0;
-  let depth = 0;
-  let quote: string | null = null;
-  let escaped = false;
-
-  for (let i = 0; i < source.length; i += 1) {
-    const char = source[i];
-    if (quote) {
-      if (escaped) escaped = false;
-      else if (char === "\\") escaped = true;
-      else if (char === quote) quote = null;
-      continue;
-    }
-
-    if (char === '"' || char === "'") quote = char;
-    else if (char === "{" || char === "[" || char === "(") depth += 1;
-    else if (char === "}" || char === "]" || char === ")") depth -= 1;
-    else if (char === "," && depth === 0) {
-      parts.push(source.slice(start, i).trim());
-      start = i + 1;
-    }
-  }
-
-  parts.push(source.slice(start).trim());
-  return parts;
-}
-
-function findMatchingParen(source: string, openIndex: number): number {
-  if (source[openIndex] !== "(") return -1;
-  let depth = 0;
-  let quote: string | null = null;
-  let escaped = false;
-
-  for (let i = openIndex; i < source.length; i += 1) {
-    const char = source[i];
-    if (quote) {
-      if (escaped) escaped = false;
-      else if (char === "\\") escaped = true;
-      else if (char === quote) quote = null;
-      continue;
-    }
-
-    if (char === '"' || char === "'") quote = char;
-    else if (char === "(") depth += 1;
-    else if (char === ")") {
-      depth -= 1;
-      if (depth === 0) return i;
-    }
-  }
-
-  return -1;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function parseNormalizedJson(json: string): unknown {

@@ -75,7 +75,7 @@ function importConnectionIdForFolder(folder?: SavedSqlFolder) {
 }
 
 function sanitizeFileSystemSegment(name: string) {
-  return name.replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_").trim() || "untitled";
+  return name.replace(/[<>:"/\\|?*\p{Cc}]/gu, "_").trim() || "untitled";
 }
 
 function relativeImportName(baseDir: string, filePath: string) {

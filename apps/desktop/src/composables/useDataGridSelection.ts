@@ -1,5 +1,6 @@
 import { ref, computed, getCurrentScope, onScopeDispose, type ComputedRef, type Ref } from "vue";
 import { allCellsSelectionRange, extractColumnsSelection, extractSelection, isCellInSelection, normalizeSelectionRange, normalizeSelectedColumnIndexes, rowSelectionRange, type CellPosition, type CellSelectionRange, type SelectionData } from "@/lib/dataGrid/gridSelection";
+import type { DataGridRuntimeScope } from "@/lib/dataGrid/dataGridRuntime";
 
 type CellValue = string | number | boolean | null;
 
@@ -24,6 +25,7 @@ export interface UseDataGridSelectionOptions {
   gridRef: Ref<HTMLDivElement | undefined>;
   getScrollElement?: () => HTMLElement | null;
   cellFromClientPoint?: (clientX: number, clientY: number) => CellPosition | null;
+  runtimeScope?: DataGridRuntimeScope;
 }
 
 const AUTO_SCROLL_EDGE_SIZE = 40;
@@ -341,7 +343,8 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     document.addEventListener("mousemove", handleSelectionPointerMove);
   }
 
-  if (getCurrentScope()) onScopeDispose(finishCellSelection);
+  if (options.runtimeScope) options.runtimeScope.addCleanup(finishCellSelection);
+  else if (getCurrentScope()) onScopeDispose(finishCellSelection);
 
   function extendCellSelection(rowIndex: number, colIndex: number) {
     if (!isSelectingCells.value || !selectionAnchor.value) return;

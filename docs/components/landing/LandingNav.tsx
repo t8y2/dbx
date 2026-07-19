@@ -10,13 +10,14 @@ const i18n = {
     databases: "Databases",
     changelog: "Changelog",
     community: "Community",
+    contributors: "Contributors",
     drivers: "Offline Drivers",
     lang: "中文",
   },
-  cn: { home: "首页", docs: "文档", databases: "数据库", changelog: "更新日志", community: "交流群", drivers: "离线驱动", lang: "English" },
+  cn: { home: "首页", docs: "文档", databases: "数据库", changelog: "更新日志", community: "交流群", contributors: "贡献者", drivers: "离线驱动", lang: "English" },
 };
 
-export function LandingNav({ lang, active }: { lang: "en" | "cn"; active?: "home" | "databases" | "changelog" | "community" | "drivers" }) {
+export function LandingNav({ lang, active }: { lang: "en" | "cn"; active?: "home" | "databases" | "changelog" | "community" | "contributors" | "drivers" }) {
   const ref = useRef<HTMLElement>(null);
   const t = i18n[lang];
   const otherLang = lang === "cn" ? "en" : "cn";
@@ -24,6 +25,7 @@ export function LandingNav({ lang, active }: { lang: "en" | "cn"; active?: "home
     databases: `/${otherLang}/databases`,
     changelog: `/${otherLang}/changelog`,
     community: `/${otherLang}/community`,
+    contributors: `/${otherLang}/contributors`,
     drivers: `/${otherLang}/drivers`,
   };
   const langHref = langHrefMap[active ?? ""] ?? `/${otherLang}`;
@@ -63,6 +65,9 @@ export function LandingNav({ lang, active }: { lang: "en" | "cn"; active?: "home
           </Link>
           <Link href={`/${lang}/community`} className={`landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[760px]:hidden ${active === "community" ? "text-landing-ink" : "text-landing-muted"}`}>
             {t.community}
+          </Link>
+          <Link href={`/${lang}/contributors`} className={`landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[900px]:hidden ${active === "contributors" ? "text-landing-ink" : "text-landing-muted"}`}>
+            {t.contributors}
           </Link>
           <Link href={`/${lang}/drivers`} className={`landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[760px]:hidden ${active === "drivers" ? "text-landing-ink" : "text-landing-muted"}`}>
             {t.drivers}

@@ -1168,7 +1168,7 @@ export function findGeneratorKey(columnName: string, dataType: string, isAutoInc
   const isDateTime = type.includes("date") || type.includes("timestamp") || type === "time";
   const isBinary = type.includes("binary") || type.includes("blob") || type.includes("bytea");
   const isBoolType = type === "bool" || type === "boolean" || type === "bit" || type === "tinyint(1)";
-  const isBoolName = /^(is|has|had|can|did|enable|disable|allow|use|visible|deleted|active|flag)[_\-]?/i.test(columnName);
+  const isBoolName = /^(is|has|had|can|did|enable|disable|allow|use|visible|deleted|active|flag)[_-]?/i.test(columnName);
   if (isNumeric || isDateTime || isBinary) {
     if (type.includes("serial")) return "sequence";
     if (isBoolType || (isNumeric && isBoolName)) return "enum";
@@ -1388,7 +1388,7 @@ export function defaultGeneratorParams(_columnName: string, attrs: ColumnAttrs, 
     const t = attrs.dataType.toLowerCase();
     const isNum = t.includes("int") || t.includes("bool") || t.includes("decimal") || t.includes("numeric") || t.includes("float") || t.includes("double") || t === "real";
     const isBoolType = t === "bool" || t === "boolean" || t === "bit" || t === "tinyint(1)";
-    const isBoolName = /^(is|has|had|can|did|enable|disable|allow|use|visible|deleted|active|flag)[_\-]?/i.test(_columnName);
+    const isBoolName = /^(is|has|had|can|did|enable|disable|allow|use|visible|deleted|active|flag)[_-]?/i.test(_columnName);
     if (isBoolType || (isNum && isBoolName)) {
       params.values = "0\n1";
     } else if (isNum) {

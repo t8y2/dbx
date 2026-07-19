@@ -104,6 +104,7 @@ pub async fn list_objects(pool: &mysql_async::Pool, schema: &str) -> Result<Vec<
             name: get_str(row, 0),
             object_type: get_str(row, 1),
             schema: Some(schema.to_string()),
+            valid: None,
             signature: None,
             comment: None,
             created_at: None,

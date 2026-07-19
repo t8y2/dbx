@@ -5,7 +5,7 @@ import type { EditorView } from "@codemirror/view";
 import { EditorSelection } from "@codemirror/state";
 import { setSearchQuery, openSearchPanel as cmOpenSearchPanel, findNext as cmFindNext, findPrevious as cmFindPrevious, replaceNext as cmReplaceNext, replaceAll as cmReplaceAll } from "@codemirror/search";
 import { ChevronUp, ChevronDown, ChevronRight, X } from "@lucide/vue";
-import { createEditorSearchQuery } from "@/lib/editor/editorSearchQuery";
+import { collectEditorSearchMatches, createEditorSearchQuery, replaceEditorSearchMatches } from "@/lib/editor/editorSearchQuery";
 
 const props = defineProps<{
   view: EditorView | null;
@@ -25,6 +25,11 @@ const currentMatchIndex = ref(0);
 const searchInputRef = ref<HTMLInputElement>();
 const replaceInputRef = ref<HTMLInputElement>();
 const matchCountLimited = ref(false);
+
+// Scoped search: restrict find/replace to the original selection range
+let searchScopeFrom: number | null = null;
+let searchScopeTo: number | null = null;
+const inSelectionScope = ref(false);
 
 const SEARCH_UPDATE_DELAY_MS = 120;
 const DOCUMENT_SEARCH_UPDATE_DELAY_MS = 500;
@@ -57,11 +62,81 @@ function clearSearchQuery() {
   const selection = v.state.selection.main;
   v.dispatch({
     selection: EditorSelection.single(selection.head),
-    effects: setSearchQuery.of(createEditorSearchQuery({ search: "", caseSensitive: false, useRegex: false })),
+    effects: setSearchQuery.of(
+      createEditorSearchQuery({
+        search: "",
+        caseSensitive: false,
+        useRegex: false,
+      }),
+    ),
   });
   matchCount.value = 0;
   currentMatchIndex.value = 0;
   matchCountLimited.value = false;
+}
+
+/**
+ * Get replacement text for a regex match, supporting capture groups.
+ */
+function computeReplacementForMatch(v: EditorView, matchFrom: number, matchTo: number): string {
+  if (!useRegex.value) return replaceText.value;
+  const matchedText = v.state.sliceDoc(matchFrom, matchTo);
+  try {
+    const re = new RegExp(searchText.value, caseSensitive.value ? "" : "i");
+    const m = re.exec(matchedText);
+    if (!m) return replaceText.value;
+    return replaceText.value.replace(/\$(\d+|&)/g, (_, ref) => {
+      if (ref === "&") return m[0];
+      const idx = parseInt(ref, 10);
+      return idx < m.length ? (m[idx] ?? "") : `$${ref}`;
+    });
+  } catch {
+    return replaceText.value;
+  }
+}
+
+/**
+ * Collect all search matches within the scoped range.
+ */
+function collectScopedMatches(v: EditorView, limit = MATCH_COUNT_LIMIT) {
+  if (searchScopeFrom == null || searchScopeTo == null) return null;
+  const q = createEditorSearchQuery({
+    search: searchText.value,
+    caseSensitive: caseSensitive.value,
+    useRegex: useRegex.value,
+  });
+  if (!q.valid) return null;
+  return collectEditorSearchMatches(q, v.state, searchScopeFrom, searchScopeTo, limit);
+}
+
+/**
+ * Find next/previous match within the scoped range.
+ * Returns true if a match was found.
+ */
+function findInScope(direction: "next" | "prev"): boolean {
+  const v = props.view;
+  if (!v || !searchText.value || searchScopeFrom == null || searchScopeTo == null) return false;
+  const matches = collectScopedMatches(v);
+  if (!matches || matches.length === 0) return false;
+
+  const cursor = v.state.selection.main.head;
+  let target: { from: number; to: number } | null = null;
+
+  if (direction === "next") {
+    target = matches.find((m) => m.from >= cursor) ?? matches.find((m) => m.from >= searchScopeFrom!) ?? null;
+  } else {
+    const before = matches.filter((m) => m.to <= cursor);
+    target = before.length > 0 ? before[before.length - 1] : matches[matches.length - 1];
+  }
+
+  if (target) {
+    v.dispatch({
+      selection: EditorSelection.range(target.from, target.to),
+      scrollIntoView: true,
+    });
+    return true;
+  }
+  return false;
 }
 
 function updateMatchInfo(autoSelect = false) {
@@ -73,6 +148,27 @@ function updateMatchInfo(autoSelect = false) {
     return;
   }
   try {
+    // Scoped: use custom find logic
+    if (searchScopeFrom != null && searchScopeTo != null) {
+      if (autoSelect) findInScope("next");
+      const matches = collectScopedMatches(v);
+      if (!matches) {
+        matchCount.value = 0;
+        currentMatchIndex.value = 0;
+        matchCountLimited.value = false;
+        return;
+      }
+      const count = matches.length;
+      matchCount.value = count;
+      matchCountLimited.value = count >= MATCH_COUNT_LIMIT;
+      const selFrom = v.state.selection.main.from;
+      const selTo = v.state.selection.main.to;
+      const idx = matches.findIndex((m) => m.from === selFrom && m.to === selTo);
+      currentMatchIndex.value = idx >= 0 ? idx + 1 : count > 0 ? 1 : 0;
+      return;
+    }
+
+    // Full document: use CodeMirror built-in
     const q = createEditorSearchQuery({
       search: searchText.value,
       caseSensitive: caseSensitive.value,
@@ -140,8 +236,21 @@ function openSearch(): boolean {
   const v = props.view;
   if (v) {
     cmOpenSearchPanel(v);
-    const sel = v.state.sliceDoc(v.state.selection.main.from, v.state.selection.main.to);
-    if (sel && !sel.includes("\n")) searchText.value = sel;
+    const sel = v.state.selection.main;
+    const selText = v.state.sliceDoc(sel.from, sel.to);
+    if (selText && !selText.includes("\n")) {
+      searchText.value = selText;
+    }
+    // Set scope when there's a multi-line selection
+    if (!sel.empty && selText.includes("\n")) {
+      searchScopeFrom = sel.from;
+      searchScopeTo = sel.to;
+      inSelectionScope.value = true;
+    } else {
+      searchScopeFrom = null;
+      searchScopeTo = null;
+      inSelectionScope.value = false;
+    }
   }
   nextTick(() => {
     searchInputRef.value?.focus();
@@ -166,6 +275,9 @@ function closeSearch() {
   searchVisible.value = false;
   showReplace.value = false;
   clearDocumentSearchUpdate();
+  searchScopeFrom = null;
+  searchScopeTo = null;
+  inSelectionScope.value = false;
   const v = props.view;
   if (v) {
     clearSearchQuery();
@@ -177,28 +289,85 @@ function closeSearch() {
 function nextMatch() {
   const v = props.view;
   if (!v || !searchText.value) return;
-  cmFindNext(v);
+  if (searchScopeFrom != null) {
+    findInScope("next");
+  } else {
+    cmFindNext(v);
+  }
   updateMatchInfo();
 }
 
 function prevMatch() {
   const v = props.view;
   if (!v || !searchText.value) return;
-  cmFindPrevious(v);
+  if (searchScopeFrom != null) {
+    findInScope("prev");
+  } else {
+    cmFindPrevious(v);
+  }
   updateMatchInfo();
 }
 
 function doReplace() {
   const v = props.view;
   if (!v || !searchText.value) return;
-  cmReplaceNext(v);
-  updateMatchInfo();
+
+  if (searchScopeFrom != null && searchScopeTo != null) {
+    // Scoped replace: find and replace next match within scope
+    const sel = v.state.selection.main;
+    const q = createEditorSearchQuery({
+      search: searchText.value,
+      caseSensitive: caseSensitive.value,
+      useRegex: useRegex.value,
+    });
+    if (!q.valid) return;
+    const iter = q.getCursor(v.state);
+    let r = iter.next();
+    let target: { from: number; to: number } | null = null;
+    while (!r.done) {
+      if (r.value.from >= searchScopeFrom && r.value.to <= searchScopeTo && r.value.from >= sel.from) {
+        target = { from: r.value.from, to: r.value.to };
+        break;
+      }
+      r = iter.next();
+    }
+    if (target) {
+      const insertText = computeReplacementForMatch(v, target.from, target.to);
+      const tr = v.state.changeByRange((range) => {
+        if (range.from === target!.from && range.to === target!.to) {
+          return {
+            changes: { from: target!.from, to: target!.to, insert: insertText },
+            range: EditorSelection.range(target!.from, target!.from + insertText.length),
+          };
+        }
+        return { range };
+      });
+      v.dispatch(tr);
+      // Map scope through changes
+      searchScopeFrom = tr.changes.mapPos(searchScopeFrom);
+      searchScopeTo = tr.changes.mapPos(searchScopeTo);
+    } else {
+      // Wrap around to start of scope
+      findInScope("next");
+    }
+  } else {
+    cmReplaceNext(v);
+  }
+  updateMatchInfo(true);
 }
 
 function doReplaceAll() {
   const v = props.view;
   if (!v || !searchText.value) return;
-  cmReplaceAll(v);
+
+  if (searchScopeFrom != null && searchScopeTo != null) {
+    // Scoped replace all: collect matches and replace
+    const matches = collectScopedMatches(v, Number.POSITIVE_INFINITY);
+    if (!matches || matches.length === 0) return;
+    replaceEditorSearchMatches(v, matches, (match) => computeReplacementForMatch(v, match.from, match.to));
+  } else {
+    cmReplaceAll(v);
+  }
   updateMatchInfo();
 }
 
@@ -231,7 +400,12 @@ onBeforeUnmount(() => {
   }
 });
 
-defineExpose({ openSearch, openReplace, closeSearch, scheduleDocumentSearchUpdate });
+defineExpose({
+  openSearch,
+  openReplace,
+  closeSearch,
+  scheduleDocumentSearchUpdate,
+});
 </script>
 
 <template>
@@ -271,6 +445,9 @@ defineExpose({ openSearch, openReplace, closeSearch, scheduleDocumentSearchUpdat
         </div>
         <span class="min-w-[3.4rem] shrink-0 text-center text-xs" :class="searchText && matchCount === 0 ? 'text-destructive' : 'text-muted-foreground'">
           {{ searchText && matchCount > 0 ? `${currentMatchIndex}/${matchCount}${matchCountLimited ? "+" : ""}` : t("editor.search.noResults") }}
+        </span>
+        <span v-if="inSelectionScope" class="shrink-0 rounded bg-accent px-1 py-0.5 text-[10px] font-medium text-muted-foreground" :title="t('editor.search.inSelection')">
+          {{ t("editor.search.inSelection") }}
         </span>
         <button class="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" :title="t('editor.search.prevMatch')" @click="prevMatch">
           <ChevronUp class="h-4 w-4" />

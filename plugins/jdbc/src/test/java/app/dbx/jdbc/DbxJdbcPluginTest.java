@@ -19,6 +19,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.sql.Types;
@@ -28,6 +29,7 @@ import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 final class DbxJdbcPluginTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -79,6 +81,87 @@ final class DbxJdbcPluginTest {
             """);
 
         assertEquals("linkage boom", response.path("error").path("message").asText());
+    }
+
+    @Test
+    void reportsInformativeOuterMessageWhenRootCauseHasNoMessage() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("throwableMessage", Throwable.class);
+        method.setAccessible(true);
+        RuntimeException root = new RuntimeException();
+        SQLException outer = new SQLException("MCP initialization failed: Cannot run program npx", root);
+
+        assertEquals("MCP initialization failed: Cannot run program npx", method.invoke(null, outer));
+    }
+
+    @Test
+    void reportsActionableMessageForMissingJdbcxMcpRuntime() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("throwableMessage", Throwable.class);
+        method.setAccessible(true);
+        SQLException outer = new SQLException(new ClassNotFoundException("io.modelcontextprotocol.spec.McpError"));
+
+        assertEquals(
+            "Missing JDBCX MCP runtime class io.modelcontextprotocol.spec.McpError. "
+                + "Install io.github.jdbcx:io.modelcontextprotocol with the version required by the selected JDBCX runtime.",
+            method.invoke(null, outer)
+        );
+    }
+
+    @Test
+    void testConnectionAndConnectionInfoExposeH2Metadata() throws Exception {
+        JsonNode tested = request("testConnection", """
+            { "connection": %s }
+            """.formatted(CONNECTION));
+        assertDatabaseInfo(tested.path("result").path("databaseInfo"));
+
+        request("connect", """
+            { "connection": %s }
+            """.formatted(CONNECTION));
+        JsonNode connected = request("connectionInfo", """
+            { "connection": %s }
+            """.formatted(CONNECTION));
+        assertDatabaseInfo(connected.path("result").path("databaseInfo"));
+    }
+
+    @Test
+    void databaseInfoKeepsSupportedFieldsWhenOneMetadataGetterFails() throws Exception {
+        DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
+            DatabaseMetaData.class.getClassLoader(),
+            new Class<?>[]{DatabaseMetaData.class},
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getDatabaseProductName" -> "ExampleDB";
+                case "getDatabaseProductVersion" -> throw new SQLFeatureNotSupportedException("version unavailable");
+                case "storesLowerCaseIdentifiers" -> throw new UnsupportedOperationException("case unavailable");
+                case "storesUpperCaseIdentifiers" -> true;
+                case "storesMixedCaseQuotedIdentifiers" -> true;
+                case "getDriverName" -> "Example JDBC";
+                case "getDriverVersion" -> "1.2.3";
+                case "getJDBCMajorVersion" -> 4;
+                case "getJDBCMinorVersion" -> 2;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("databaseInfo", DatabaseMetaData.class);
+        method.setAccessible(true);
+
+        JsonNode info = MAPPER.valueToTree(method.invoke(null, metadata));
+
+        assertEquals("ExampleDB", info.path("productName").asText());
+        assertFalse(info.has("productVersion"));
+        assertEquals("upper", info.path("unquotedIdentifierCase").asText());
+        assertEquals("mixed", info.path("quotedIdentifierCase").asText());
+        assertEquals("Example JDBC", info.path("driverName").asText());
+        assertEquals("1.2.3", info.path("driverVersion").asText());
+        assertEquals("4.2", info.path("jdbcVersion").asText());
+    }
+
+    private static void assertDatabaseInfo(JsonNode info) {
+        assertEquals("H2", info.path("productName").asText());
+        assertFalse(info.path("productVersion").asText().isEmpty());
+        assertEquals("upper", info.path("unquotedIdentifierCase").asText());
+        assertFalse(info.has("quotedIdentifierCase"));
+        assertFalse(info.path("driverName").asText().isEmpty());
+        assertFalse(info.path("driverVersion").asText().isEmpty());
+        assertFalse(info.path("jdbcVersion").asText().isEmpty());
     }
 
     @Test
@@ -400,6 +483,64 @@ final class DbxJdbcPluginTest {
 
         assertEquals("45", properties.getProperty("loginTimeout"));
         assertEquals("45", properties.getProperty("connectTimeout"));
+    }
+
+    @Test
+    void jdbcxHighPrivilegeExtensionsAreDisabledByDefault() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "applyJdbcxExtensionSecurity",
+            JsonNode.class,
+            String.class,
+            Properties.class
+        );
+        method.setAccessible(true);
+        Properties properties = new Properties();
+        method.invoke(null, MAPPER.createObjectNode(), "jdbcx:shell:mysql://127.0.0.1:3306/test", properties);
+
+        String whitelist = properties.getProperty("jdbcx.extension.whitelist");
+        assertEquals("help,var,version", whitelist);
+        assertFalse(whitelist.contains("shell"));
+        assertFalse(whitelist.contains("script"));
+        assertFalse(whitelist.contains("web"));
+        assertFalse(whitelist.contains("mcp"));
+    }
+
+    @Test
+    void jdbcxHighPrivilegeExtensionsRequireExplicitConnectionOptIn() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "applyJdbcxExtensionSecurity",
+            JsonNode.class,
+            String.class,
+            Properties.class
+        );
+        method.setAccessible(true);
+        Properties properties = new Properties();
+        ObjectNode connection = MAPPER.createObjectNode();
+        connection.putArray("agent_java_options").add("-Ddbx.jdbcx.allowHighPrivilegeExtensions=true");
+
+        method.invoke(null, connection, "jdbcx:script:mysql://127.0.0.1:3306/test", properties);
+
+        assertFalse(properties.containsKey("jdbcx.extension.whitelist"));
+    }
+
+    @Test
+    void jdbcxHighPrivilegeExtensionChangeInvalidatesOnlyJdbcxConnections() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("connectionKey", JsonNode.class);
+        method.setAccessible(true);
+        ObjectNode jdbcxConnection = MAPPER.createObjectNode();
+        jdbcxConnection.put("connection_string", "jdbcx:mysql://127.0.0.1:3306/test");
+        String jdbcxDisabledKey = (String) method.invoke(null, jdbcxConnection);
+        jdbcxConnection.putArray("agent_java_options").add("-Ddbx.jdbcx.allowHighPrivilegeExtensions=true");
+        String jdbcxEnabledKey = (String) method.invoke(null, jdbcxConnection);
+
+        ObjectNode regularConnection = MAPPER.createObjectNode();
+        regularConnection.put("connection_string", "jdbc:mysql://127.0.0.1:3306/test");
+        String regularDefaultKey = (String) method.invoke(null, regularConnection);
+        regularConnection.putArray("agent_java_options").add("-Ddbx.jdbcx.allowHighPrivilegeExtensions=true");
+        String regularWithOptionKey = (String) method.invoke(null, regularConnection);
+
+        assertNotEquals(jdbcxDisabledKey, jdbcxEnabledKey);
+        assertEquals(regularDefaultKey, regularWithOptionKey);
     }
 
     @Test

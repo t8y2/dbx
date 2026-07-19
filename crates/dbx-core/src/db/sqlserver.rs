@@ -5,14 +5,18 @@ use crate::types::{
     TriggerInfo,
 };
 use futures::{FutureExt, TryStreamExt};
-use rust_decimal::Decimal;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
+use std::sync::{Arc as StdArc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tiberius::{AuthMethod, Client, ColumnData, Config, FromSql, QueryItem, QueryStream, SqlBrowser};
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use tokio_util::sync::CancellationToken;
+use tracing::instrument::WithSubscriber;
+use tracing::{Event, Level, Subscriber};
+use tracing_subscriber::layer::{Context as LayerContext, SubscriberExt};
+use tracing_subscriber::Layer;
 
 pub type SqlServerClient = Client<Compat<TcpStream>>;
 pub const SQLSERVER_DRIVER_PANIC_ERROR_PREFIX: &str = "SQL Server driver panic:";
@@ -201,6 +205,98 @@ fn column_types_from_metadata(metadata: &tiberius::ResultMetadata) -> Vec<String
     metadata.columns().iter().map(sqlserver_column_type_name).collect()
 }
 
+const SQLSERVER_MESSAGE_COLUMN: &str = "Message";
+// Tiberius 0.12.3 emits both user-visible INFO tokens and internal ENVCHANGE
+// tokens at the same tracing target/level. Keep only the TokenInfo callsite;
+// update this guard together with the pinned driver when Tiberius is upgraded.
+const TIBERIUS_INFO_TOKEN_EVENT_LINE: u32 = 194;
+
+#[derive(Clone, Default)]
+struct SqlServerMessageLayer {
+    messages: StdArc<StdMutex<Vec<String>>>,
+}
+
+impl<S> Layer<S> for SqlServerMessageLayer
+where
+    S: Subscriber,
+{
+    fn on_event(&self, event: &Event<'_>, _ctx: LayerContext<'_, S>) {
+        let metadata = event.metadata();
+        if metadata.level() != &Level::INFO
+            || metadata.target() != "tiberius::tds::stream::token"
+            || metadata.line() != Some(TIBERIUS_INFO_TOKEN_EVENT_LINE)
+        {
+            return;
+        }
+
+        let mut visitor = SqlServerMessageVisitor::default();
+        event.record(&mut visitor);
+        if let Some(message) = visitor.message.filter(|message| !message.trim().is_empty()) {
+            if let Ok(mut messages) = self.messages.lock() {
+                messages.push(message);
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct SqlServerMessageVisitor {
+    message: Option<String>,
+}
+
+impl tracing::field::Visit for SqlServerMessageVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.message = Some(format!("{value:?}").trim_matches('"').to_string());
+        }
+    }
+}
+
+async fn capture_sqlserver_messages<F, T>(future: F) -> (T, Vec<String>)
+where
+    F: Future<Output = T>,
+{
+    let layer = SqlServerMessageLayer::default();
+    let messages = layer.messages.clone();
+    // Tiberius consumes TDS INFO tokens internally and exposes them only as
+    // tracing events. Scope collection to this future to isolate connections.
+    let output = future.with_subscriber(tracing_subscriber::registry().with(layer)).await;
+    let messages = messages.lock().map(|messages| messages.clone()).unwrap_or_default();
+    (output, messages)
+}
+
+fn query_result_with_server_messages(mut result: QueryResult, messages: Vec<String>) -> QueryResult {
+    if messages.is_empty() || !result.columns.is_empty() || !result.rows.is_empty() {
+        return result;
+    }
+
+    result.columns = vec![SQLSERVER_MESSAGE_COLUMN.to_string()];
+    result.column_types = vec!["nvarchar".to_string()];
+    result.rows = messages.into_iter().map(|message| vec![serde_json::Value::String(message)]).collect();
+    result
+}
+
+fn server_messages_query_result(messages: Vec<String>, start: Instant) -> Option<QueryResult> {
+    if messages.is_empty() {
+        return None;
+    }
+
+    Some(query_result_with_server_messages(
+        QueryResult {
+            columns: vec![],
+            column_types: vec![],
+            column_sortables: vec![],
+            rows: vec![],
+            affected_rows: 0,
+            execution_time_ms: start.elapsed().as_millis(),
+            truncated: false,
+            session_id: None,
+            has_more: false,
+        },
+        messages,
+    ))
+}
+
 async fn collect_first_result_limited(
     mut stream: QueryStream<'_>,
     start: Instant,
@@ -256,7 +352,7 @@ pub struct SqlServerStreamExportSummary {
 }
 
 pub enum SqlServerStreamItem<'a> {
-    Columns(&'a [String]),
+    Columns { columns: &'a [String], column_types: &'a [String] },
     Row(&'a [serde_json::Value]),
 }
 
@@ -638,6 +734,7 @@ pub async fn stream_first_result_set(
     let mut stream = sqlserver_driver_result(client.query(query_sql.as_str(), &[])).await?;
     let mut active_result_index: Option<usize> = None;
     let mut columns: Vec<String> = Vec::new();
+    let mut column_types: Vec<String> = Vec::new();
     let mut columns_emitted = false;
     let mut rows_exported = 0_u64;
 
@@ -663,7 +760,8 @@ pub async fn stream_first_result_set(
                 if active_result_index.is_none() {
                     active_result_index = Some(metadata.result_index());
                     columns = columns_from_metadata(&metadata);
-                    on_item(SqlServerStreamItem::Columns(&columns))?;
+                    column_types = column_types_from_metadata(&metadata);
+                    on_item(SqlServerStreamItem::Columns { columns: &columns, column_types: &column_types })?;
                     columns_emitted = true;
                 }
             }
@@ -671,7 +769,8 @@ pub async fn stream_first_result_set(
                 if active_result_index.is_none() {
                     active_result_index = Some(row.result_index());
                     columns = row.columns().iter().map(|c| c.name().to_string()).collect();
-                    on_item(SqlServerStreamItem::Columns(&columns))?;
+                    column_types = row.columns().iter().map(sqlserver_column_type_name).collect();
+                    on_item(SqlServerStreamItem::Columns { columns: &columns, column_types: &column_types })?;
                     columns_emitted = true;
                 }
                 if Some(row.result_index()) != active_result_index {
@@ -688,12 +787,40 @@ pub async fn stream_first_result_set(
     }
 
     if !columns_emitted {
-        on_item(SqlServerStreamItem::Columns(&columns))?;
+        on_item(SqlServerStreamItem::Columns { columns: &columns, column_types: &column_types })?;
     }
     Ok(SqlServerStreamExportSummary { columns, rows_exported })
 }
 
+// rust_decimal (behind tiberius's `Decimal: FromSql`) only supports scale <= 28 and a
+// 96-bit mantissa, while SQL Server NUMERIC allows precision/scale up to 38; converting
+// such values panics and aborts the app (issue #3648). Format the raw i128 value and
+// scale manually instead.
+fn format_sqlserver_numeric(value: i128, scale: u8) -> String {
+    if scale == 0 {
+        return value.to_string();
+    }
+    let digits = value.unsigned_abs().to_string();
+    let scale = scale as usize;
+    let sign = if value < 0 { "-" } else { "" };
+    if digits.len() > scale {
+        let (int_part, frac_part) = digits.split_at(digits.len() - scale);
+        format!("{}{}.{}", sign, int_part, frac_part)
+    } else {
+        format!("{}0.{:0>width$}", sign, digits, width = scale)
+    }
+}
+
 fn sqlserver_cell_to_json(cell: &ColumnData<'static>) -> serde_json::Value {
+    if let ColumnData::Numeric(numeric) = cell {
+        return match numeric {
+            Some(n) => serde_json::Value::String(format_sqlserver_numeric(n.value(), n.scale())),
+            None => serde_json::Value::Null,
+        };
+    }
+    if let Ok(Some(v)) = <&tiberius::xml::XmlData as FromSql>::from_sql(cell) {
+        return serde_json::Value::String(v.as_ref().to_string());
+    }
     if let Ok(Some(v)) = <&str as FromSql>::from_sql(cell) {
         return serde_json::Value::String(v.to_string());
     }
@@ -712,9 +839,6 @@ fn sqlserver_cell_to_json(cell: &ColumnData<'static>) -> serde_json::Value {
     }
     if let Ok(Some(v)) = <chrono::DateTime<chrono::FixedOffset> as FromSql>::from_sql(cell) {
         return serde_json::Value::String(v.to_rfc3339());
-    }
-    if let Ok(Some(v)) = <Decimal as FromSql>::from_sql(cell) {
-        return serde_json::Value::String(v.to_string());
     }
     if let Ok(Some(v)) = <u8 as FromSql>::from_sql(cell) {
         return serde_json::Value::Number(v.into());
@@ -1303,6 +1427,7 @@ pub async fn list_objects(client: &mut SqlServerClient, schema: &str) -> Result<
             name: row.get::<&str, _>(0).unwrap_or("").to_string(),
             object_type: row.get::<&str, _>(1).unwrap_or("TABLE").to_string(),
             schema: Some(schema.to_string()),
+            valid: None,
             signature: None,
             comment: row.get::<&str, _>(4).filter(|s: &&str| !s.is_empty()).map(|s: &str| s.to_string()),
             created_at: row.get::<chrono::NaiveDateTime, _>(2).map(|value| value.to_string()),
@@ -1660,37 +1785,52 @@ pub async fn execute_query_with_max_rows(
             Ok(Some(sql)) => sql,
             Ok(None) | Err(_) => sql.to_string(),
         };
-        let stream = sqlserver_driver_result(client.query(query_sql.as_str(), &[])).await?;
-        let mut result = sqlserver_driver_result(collect_first_result_limited(stream, start, max_rows)).await?;
+        let (result, messages) = capture_sqlserver_messages(async {
+            let stream = sqlserver_driver_result(client.query(query_sql.as_str(), &[])).await?;
+            sqlserver_driver_result(collect_first_result_limited(stream, start, max_rows)).await
+        })
+        .await;
+        let mut result = query_result_with_server_messages(result?, messages);
         strip_dbx_sqlserver_row_number_column(&mut result, sql);
         Ok(result)
     } else if requires_simple_query_batch(sql) || contains_transaction_control(sql) {
-        let stream = sqlserver_driver_result(client.simple_query(sql)).await?;
-        let _ = sqlserver_driver_result(collect_result_sets_limited(stream, start, max_rows)).await?;
-        Ok(QueryResult {
-            columns: vec![],
-            column_types: Vec::new(),
-            column_sortables: vec![],
-            rows: vec![],
-            affected_rows: 0,
-            execution_time_ms: start.elapsed().as_millis(),
-            truncated: false,
-            session_id: None,
-            has_more: false,
+        let (result, messages) = capture_sqlserver_messages(async {
+            let stream = sqlserver_driver_result(client.simple_query(sql)).await?;
+            sqlserver_driver_result(collect_result_sets_limited(stream, start, max_rows)).await
         })
+        .await;
+        let _ = result?;
+        Ok(query_result_with_server_messages(
+            QueryResult {
+                columns: vec![],
+                column_types: Vec::new(),
+                column_sortables: vec![],
+                rows: vec![],
+                affected_rows: 0,
+                execution_time_ms: start.elapsed().as_millis(),
+                truncated: false,
+                session_id: None,
+                has_more: false,
+            },
+            messages,
+        ))
     } else {
-        let result = sqlserver_driver_result(client.execute(sql, &[])).await?;
-        Ok(QueryResult {
-            columns: vec![],
-            column_types: Vec::new(),
-            column_sortables: vec![],
-            rows: vec![],
-            affected_rows: result.rows_affected().iter().sum::<u64>(),
-            execution_time_ms: start.elapsed().as_millis(),
-            truncated: false,
-            session_id: None,
-            has_more: false,
-        })
+        let (result, messages) = capture_sqlserver_messages(sqlserver_driver_result(client.execute(sql, &[]))).await;
+        let result = result?;
+        Ok(query_result_with_server_messages(
+            QueryResult {
+                columns: vec![],
+                column_types: Vec::new(),
+                column_sortables: vec![],
+                rows: vec![],
+                affected_rows: result.rows_affected().iter().sum::<u64>(),
+                execution_time_ms: start.elapsed().as_millis(),
+                truncated: false,
+                session_id: None,
+                has_more: false,
+            },
+            messages,
+        ))
     }
 }
 
@@ -1705,38 +1845,65 @@ pub async fn execute_batch_with_max_rows(
 ) -> Result<Vec<QueryResult>, String> {
     let start = Instant::now();
     if sqlserver_batch_can_use_execute(sql) {
-        let result = sqlserver_driver_result(client.execute(sql, &[])).await?;
-        return Ok(vec![QueryResult {
-            columns: vec![],
-            column_types: Vec::new(),
-            column_sortables: vec![],
-            rows: vec![],
-            affected_rows: result.rows_affected().iter().sum::<u64>(),
-            execution_time_ms: start.elapsed().as_millis(),
-            truncated: false,
-            session_id: None,
-            has_more: false,
-        }]);
+        let (result, messages) = capture_sqlserver_messages(sqlserver_driver_result(client.execute(sql, &[]))).await;
+        let result = result?;
+        return Ok(vec![query_result_with_server_messages(
+            QueryResult {
+                columns: vec![],
+                column_types: Vec::new(),
+                column_sortables: vec![],
+                rows: vec![],
+                affected_rows: result.rows_affected().iter().sum::<u64>(),
+                execution_time_ms: start.elapsed().as_millis(),
+                truncated: false,
+                session_id: None,
+                has_more: false,
+            },
+            messages,
+        )]);
     }
 
     if is_single_sqlserver_select(sql) {
         if let Ok(Some(query_sql)) = sqlserver_unsafe_type_query(client, sql).await {
-            let stream = sqlserver_driver_result(client.query(query_sql.as_str(), &[])).await?;
-            return sqlserver_driver_result(collect_first_result_limited(stream, start, max_rows)).await.map(
-                |mut result| {
-                    strip_dbx_sqlserver_row_number_column(&mut result, sql);
-                    vec![result]
-                },
-            );
+            let (result, messages) = capture_sqlserver_messages(async {
+                let stream = sqlserver_driver_result(client.query(query_sql.as_str(), &[])).await?;
+                sqlserver_driver_result(collect_first_result_limited(stream, start, max_rows)).await
+            })
+            .await;
+            return result.map(|result| {
+                let mut result = query_result_with_server_messages(result, messages);
+                strip_dbx_sqlserver_row_number_column(&mut result, sql);
+                vec![result]
+            });
         }
     }
-    let stream = sqlserver_driver_result(client.simple_query(sql)).await?;
-    let mut results = sqlserver_driver_result(collect_result_sets_limited(stream, start, max_rows)).await?;
+    execute_simple_batch_with_max_rows(client, sql, max_rows).await
+}
+
+/// Execute a SQL Server batch directly through TDS simple-query mode.
+///
+/// This intentionally bypasses result-set type probing and SQL rewriting. It is
+/// required while `SHOWPLAN_XML` is enabled because any probe issued on the same
+/// session is itself affected by SHOWPLAN state.
+pub async fn execute_simple_batch_with_max_rows(
+    client: &mut SqlServerClient,
+    sql: &str,
+    max_rows: Option<usize>,
+) -> Result<Vec<QueryResult>, String> {
+    let start = Instant::now();
+    let (results, messages) = capture_sqlserver_messages(async {
+        let stream = sqlserver_driver_result(client.simple_query(sql)).await?;
+        sqlserver_driver_result(collect_result_sets_limited(stream, start, max_rows)).await
+    })
+    .await;
+    let mut results = results?;
     for result in &mut results {
         strip_dbx_sqlserver_row_number_column(result, sql);
     }
 
-    if results.is_empty() {
+    if let Some(message_result) = server_messages_query_result(messages, start) {
+        results.push(message_result);
+    } else if results.is_empty() {
         results.push(QueryResult {
             columns: vec![],
             column_types: Vec::new(),
@@ -1794,12 +1961,35 @@ fn sqlserver_batch_can_use_execute(sql: &str) -> bool {
 
 fn sqlserver_batch_may_return_result_set(sql: &str) -> bool {
     let tokens = top_level_sqlserver_tokens(sql);
-    tokens.iter().any(|token| matches!(token.text.as_str(), "SELECT" | "EXEC" | "EXECUTE" | "WITH" | "TABLE"))
+    let starts_with_cte_dml = tokens.first().is_some_and(|token| token.text == "WITH")
+        && tokens.iter().any(|token| matches!(token.text.as_str(), "INSERT" | "UPDATE" | "DELETE" | "MERGE"))
+        && crate::sql::split_sql_statements(sql).len() == 1;
+    tokens.iter().any(|token| {
+        matches!(token.text.as_str(), "SELECT" | "EXEC" | "EXECUTE" | "TABLE")
+            || (token.text == "WITH" && !starts_with_cte_dml)
+    })
 }
 
 fn sqlserver_dml_output_returns_rows(sql: &str) -> bool {
-    starts_with_executable_sql_keyword(sql, &["INSERT", "UPDATE", "DELETE", "MERGE"])
-        && first_sql_tokens(sql, 64).iter().any(|token| token.eq_ignore_ascii_case("OUTPUT"))
+    crate::sql::split_sql_statements(sql).iter().any(|statement| {
+        let tokens = top_level_sqlserver_tokens(statement);
+        let contains_dml = starts_with_executable_sql_keyword(statement, &["INSERT", "UPDATE", "DELETE", "MERGE"])
+            || (tokens.first().is_some_and(|token| token.text == "WITH")
+                && tokens.iter().any(|token| matches!(token.text.as_str(), "INSERT" | "UPDATE" | "DELETE" | "MERGE")));
+        if !contains_dml {
+            return false;
+        }
+
+        tokens.iter().enumerate().any(|(output_index, token)| {
+            if token.text != "OUTPUT" || (token.start > 0 && statement.as_bytes()[token.start - 1] == b'@') {
+                return false;
+            }
+
+            // SQL Server may combine OUTPUT ... INTO with a second OUTPUT clause.
+            // Only an OUTPUT whose rows are not routed before the next clause reaches the client.
+            !tokens[output_index + 1..].iter().take_while(|next| next.text != "OUTPUT").any(|next| next.text == "INTO")
+        })
+    })
 }
 
 fn contains_transaction_control(sql: &str) -> bool {
@@ -1826,6 +2016,9 @@ fn contains_transaction_control(sql: &str) -> bool {
 
 fn requires_simple_query_batch(sql: &str) -> bool {
     let tokens = first_sql_tokens(sql, 4);
+    if tokens.len() >= 2 && tokens[0].eq_ignore_ascii_case("SET") && tokens[1].eq_ignore_ascii_case("SHOWPLAN_XML") {
+        return true;
+    }
     if tokens.len() >= 2 && tokens[0].eq_ignore_ascii_case("CREATE") && tokens[1].eq_ignore_ascii_case("SCHEMA") {
         return true;
     }
@@ -1890,7 +2083,8 @@ fn first_sql_tokens(sql: &str, limit: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_sqlserver_unsafe_type_query, is_sqlserver_spatial_column, is_sqlserver_variant_column,
+        build_sqlserver_unsafe_type_query, capture_sqlserver_messages, format_sqlserver_numeric,
+        is_sqlserver_spatial_column, is_sqlserver_variant_column, query_result_with_server_messages,
         requires_simple_query_batch, sqlserver_batch_can_use_execute, sqlserver_cell_to_json, sqlserver_columns_sql,
         sqlserver_completion_assistant_sql, sqlserver_dml_output_returns_rows, sqlserver_hidden_schema_names,
         sqlserver_indexes_sql, sqlserver_list_objects_sql, sqlserver_list_schemas_sql, sqlserver_list_tables_sql,
@@ -1901,8 +2095,52 @@ mod tests {
         CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest, QueryResult,
     };
     use chrono::NaiveDate;
-    use std::time::Instant;
+    use std::{borrow::Cow, time::Instant};
     use tiberius::{ColumnData, IntoSql};
+
+    #[tokio::test]
+    async fn sqlserver_ignores_non_info_tiberius_events() {
+        let (_, messages) = capture_sqlserver_messages(async {
+            tracing::event!(target: "tiberius::tds::stream::token", tracing::Level::ERROR, "permission denied");
+            tracing::event!(target: "dbx_core::db::sqlserver", tracing::Level::INFO, "not a TDS token");
+        })
+        .await;
+
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn sqlserver_server_messages_fill_only_empty_results() {
+        let empty = QueryResult {
+            columns: vec![],
+            column_types: vec![],
+            column_sortables: vec![],
+            rows: vec![],
+            affected_rows: 0,
+            execution_time_ms: 1,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+        };
+        let result = query_result_with_server_messages(empty, vec!["DBCC execution completed".to_string()]);
+        assert_eq!(result.columns, vec!["Message"]);
+        assert_eq!(result.rows, vec![vec![serde_json::json!("DBCC execution completed")]]);
+
+        let select = QueryResult {
+            columns: vec!["id".to_string()],
+            column_types: vec!["int".to_string()],
+            column_sortables: vec![],
+            rows: vec![vec![serde_json::json!(1)]],
+            affected_rows: 0,
+            execution_time_ms: 1,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+        };
+        let result = query_result_with_server_messages(select, vec!["informational".to_string()]);
+        assert_eq!(result.columns, vec!["id"]);
+        assert_eq!(result.rows, vec![vec![serde_json::json!(1)]]);
+    }
 
     #[test]
     fn sqlserver_endpoint_splits_named_instance_hosts() {
@@ -1913,6 +2151,18 @@ mod tests {
         assert_eq!(
             super::sqlserver_endpoint(r" db.example.com\SQLEXPRESS "),
             super::SqlServerEndpoint { host: "db.example.com", instance_name: Some("SQLEXPRESS") }
+        );
+    }
+
+    #[test]
+    fn sqlserver_xml_cells_are_returned_as_strings() {
+        let cell = ColumnData::Xml(Some(Cow::Owned(tiberius::xml::XmlData::new(
+            "<ShowPlanXML><RelOp NodeId=\"0\" /></ShowPlanXML>",
+        ))));
+
+        assert_eq!(
+            sqlserver_cell_to_json(&cell),
+            serde_json::Value::String("<ShowPlanXML><RelOp NodeId=\"0\" /></ShowPlanXML>".to_string())
         );
     }
 
@@ -1979,6 +2229,8 @@ mod tests {
 
     #[test]
     fn sqlserver_module_definitions_require_simple_query_batch() {
+        assert!(requires_simple_query_batch("SET SHOWPLAN_XML ON;"));
+        assert!(requires_simple_query_batch("SET SHOWPLAN_XML OFF;"));
         assert!(requires_simple_query_batch("CREATE SCHEMA [analytics];"));
         assert!(requires_simple_query_batch("CREATE FUNCTION dbo.fn_demo() RETURNS INT AS BEGIN RETURN 1; END;"));
         assert!(requires_simple_query_batch("ALTER PROCEDURE dbo.usp_demo AS SELECT 1;"));
@@ -2003,6 +2255,69 @@ mod tests {
         assert!(sqlserver_batch_can_use_execute("DELETE FROM dbo.users WHERE id = 1;"));
         assert!(sqlserver_batch_can_use_execute(
             "MERGE dbo.t AS t USING dbo.s AS s ON t.id = s.id WHEN MATCHED THEN UPDATE SET name = s.name;"
+        ));
+    }
+
+    #[test]
+    fn sqlserver_cte_dml_batches_use_execute_for_affected_rows() {
+        assert!(sqlserver_batch_can_use_execute(
+            ";WITH cte AS (SELECT 1 AS id) UPDATE dbo.users SET active = 0 FROM dbo.users JOIN cte ON cte.id = users.id;"
+        ));
+        assert!(sqlserver_batch_can_use_execute(
+            "WITH a AS (SELECT 1 AS id), b AS (SELECT id FROM a) DELETE dbo.users FROM dbo.users JOIN b ON b.id = users.id;"
+        ));
+        assert!(sqlserver_batch_can_use_execute(
+            "WITH source AS (SELECT 1 AS id) MERGE dbo.users AS target USING source ON target.id = source.id WHEN MATCHED THEN UPDATE SET active = 0;"
+        ));
+        assert!(sqlserver_batch_can_use_execute(
+            "WITH cte AS (SELECT 1 AS id) UPDATE dbo.users WITH (ROWLOCK) SET note = 'SELECT OUTPUT' /* WITH SELECT OUTPUT */;"
+        ));
+        assert!(sqlserver_batch_can_use_execute(
+            "WITH cte AS (SELECT 1 AS id) UPDATE dbo.users SET active = @output WHERE id = 1;"
+        ));
+
+        assert!(!sqlserver_batch_can_use_execute("WITH cte AS (SELECT 1 AS id) SELECT * FROM cte;"));
+        assert!(!sqlserver_batch_can_use_execute("WITH cte AS (SELECT 1 AS id) (SELECT id FROM cte);"));
+        assert!(!sqlserver_batch_can_use_execute(
+            "WITH cte AS (SELECT 1 AS id) (SELECT id FROM cte) UNION (SELECT 2);"
+        ));
+        assert!(!sqlserver_batch_can_use_execute(
+            "WITH cte AS (SELECT 1 AS id) (SELECT id FROM cte); UPDATE dbo.users SET active = 0;"
+        ));
+        assert!(!sqlserver_batch_can_use_execute("WITH XMLNAMESPACES ('urn:demo' AS ns) SELECT 1 AS id;"));
+        assert!(!sqlserver_batch_can_use_execute(
+            "WITH cte AS (SELECT 1 AS id) UPDATE dbo.users SET active = 0 OUTPUT inserted.id;"
+        ));
+        assert!(!sqlserver_batch_can_use_execute(
+            "WITH cte AS (SELECT 1 AS id) DELETE dbo.users OUTPUT deleted.id FROM dbo.users JOIN cte ON cte.id = users.id;"
+        ));
+        assert!(!sqlserver_batch_can_use_execute(
+            "WITH source AS (SELECT 1 AS id) MERGE dbo.users AS target USING source ON target.id = source.id WHEN MATCHED THEN DELETE OUTPUT deleted.id;"
+        ));
+        assert!(sqlserver_batch_can_use_execute(
+            "WITH cte AS (SELECT 1 AS id) UPDATE dbo.users SET active = 0 OUTPUT inserted.id INTO dbo.audit_ids;"
+        ));
+        assert!(sqlserver_batch_can_use_execute(
+            "WITH cte AS (SELECT 1 AS id) DELETE dbo.users OUTPUT deleted.id INTO dbo.audit_ids FROM dbo.users JOIN cte ON cte.id = users.id;"
+        ));
+        assert!(sqlserver_batch_can_use_execute(
+            "WITH source AS (SELECT 1 AS id) MERGE dbo.users AS target USING source ON target.id = source.id WHEN MATCHED THEN DELETE OUTPUT deleted.id INTO dbo.audit_ids;"
+        ));
+        assert!(!sqlserver_batch_can_use_execute(
+            "WITH source AS (SELECT 1 AS id) MERGE dbo.users AS target USING source ON target.id = source.id WHEN MATCHED THEN UPDATE SET active = 0 OUTPUT inserted.id INTO dbo.audit_ids OUTPUT inserted.id;"
+        ));
+        assert!(!sqlserver_batch_can_use_execute(
+            "WITH cte AS (SELECT 1 AS id) UPDATE dbo.users SET active = 0; SELECT 1;"
+        ));
+        assert!(!sqlserver_batch_can_use_execute(
+            "WITH cte AS (SELECT 1 AS id) UPDATE dbo.users SET active = 0 OUTPUT inserted.id INTO dbo.audit_ids; SELECT 1;"
+        ));
+        assert!(!sqlserver_batch_can_use_execute(
+            "WITH cte AS (SELECT 1 AS id) INSERT INTO dbo.users(id) SELECT id FROM cte;"
+        ));
+        assert!(!sqlserver_batch_can_use_execute("RESTORE HEADERONLY FROM DISK = 'backup.bak' WITH FILE = 1;"));
+        assert!(sqlserver_batch_can_use_execute(
+            "DECLARE @output INT = 1; UPDATE dbo.users SET active = @output WHERE id = 1;"
         ));
     }
 
@@ -2035,6 +2350,18 @@ mod tests {
         assert!(!sqlserver_batch_can_use_execute("WITH cte AS (SELECT 1 AS id) SELECT * FROM cte;"));
         assert!(!sqlserver_batch_can_use_execute("UPDATE dbo.users SET active = 0 OUTPUT inserted.id WHERE id = 1;"));
         assert!(sqlserver_batch_can_use_execute(
+            "UPDATE dbo.users SET active = 0 OUTPUT inserted.id INTO dbo.audit_ids WHERE id = 1;"
+        ));
+        assert!(sqlserver_batch_can_use_execute(
+            "DELETE FROM dbo.users OUTPUT deleted.id INTO @audit_ids WHERE id = 1;"
+        ));
+        assert!(sqlserver_batch_can_use_execute(
+            "MERGE dbo.users AS target USING dbo.source AS source ON target.id = source.id WHEN MATCHED THEN DELETE OUTPUT deleted.id INTO dbo.audit_ids;"
+        ));
+        assert!(!sqlserver_batch_can_use_execute(
+            "UPDATE dbo.users SET active = 0 OUTPUT inserted.id INTO dbo.audit_ids OUTPUT inserted.id WHERE id = 1;"
+        ));
+        assert!(sqlserver_batch_can_use_execute(
             "DECLARE @id INT = 1; UPDATE dbo.users SET active = 0 WHERE id = @id;"
         ));
         assert!(sqlserver_dml_output_returns_rows("DELETE FROM dbo.users OUTPUT deleted.id WHERE id = 1;"));
@@ -2050,6 +2377,17 @@ mod tests {
         let execute_batch = source.split("pub async fn execute_batch").nth(1).unwrap();
         let execute_batch = execute_batch.split("#[cfg(test)]").next().unwrap();
         assert!(!execute_batch.contains("into_results"));
+    }
+
+    #[test]
+    fn sqlserver_explicit_simple_batch_bypasses_result_type_probing() {
+        let source = include_str!("sqlserver.rs");
+        let simple_batch = source.split("pub async fn execute_simple_batch_with_max_rows").nth(1).unwrap();
+        let simple_batch = simple_batch.split("fn strip_dbx_sqlserver_row_number_column").next().unwrap();
+
+        assert!(simple_batch.contains("client.simple_query(sql)"));
+        assert!(!simple_batch.contains("sqlserver_unsafe_type_query"));
+        assert!(!simple_batch.contains("describe_sqlserver_result_set"));
     }
 
     #[test]
@@ -2328,6 +2666,42 @@ mod tests {
     #[test]
     fn sqlserver_tinyint_cells_are_json_numbers() {
         assert_eq!(sqlserver_cell_to_json(&ColumnData::U8(Some(7))), serde_json::json!(7));
+    }
+
+    #[test]
+    fn sqlserver_numeric_cells_with_scale_over_28_do_not_panic() {
+        // NUMERIC(38, 29) with data used to abort the app: rust_decimal caps scale at 28 (issue #3648).
+        let cell = ColumnData::Numeric(Some(tiberius::numeric::Numeric::new_with_scale(5, 29)));
+        assert_eq!(sqlserver_cell_to_json(&cell), serde_json::json!("0.00000000000000000000000000005"));
+    }
+
+    #[test]
+    fn sqlserver_numeric_cells_beyond_96_bit_mantissa_do_not_panic() {
+        // Precision-38 values overflow rust_decimal's 96-bit mantissa even at low scale.
+        let value: i128 = 12_345_678_901_234_567_890_123_456_789_012_345_678;
+        let cell = ColumnData::Numeric(Some(tiberius::numeric::Numeric::new_with_scale(value, 10)));
+        assert_eq!(sqlserver_cell_to_json(&cell), serde_json::json!("1234567890123456789012345678.9012345678"));
+    }
+
+    #[test]
+    fn sqlserver_null_numeric_cells_are_json_null() {
+        assert_eq!(sqlserver_cell_to_json(&ColumnData::Numeric(None)), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn format_sqlserver_numeric_covers_sign_scale_and_padding() {
+        assert_eq!(format_sqlserver_numeric(42, 0), "42");
+        assert_eq!(format_sqlserver_numeric(-42, 0), "-42");
+        assert_eq!(format_sqlserver_numeric(12345, 2), "123.45");
+        // Trailing zeros are kept, matching the previous rust_decimal display.
+        assert_eq!(format_sqlserver_numeric(1500, 3), "1.500");
+        assert_eq!(format_sqlserver_numeric(-15, 1), "-1.5");
+        assert_eq!(format_sqlserver_numeric(-5, 2), "-0.05");
+        assert_eq!(format_sqlserver_numeric(0, 2), "0.00");
+        // digits.len() == scale must keep the leading "0." (guards `>` vs `>=` in the split).
+        assert_eq!(format_sqlserver_numeric(123, 3), "0.123");
+        // Largest scale tiberius can deliver (its decoder asserts scale < 38).
+        assert_eq!(format_sqlserver_numeric(9, 37), format!("0.{}9", "0".repeat(36)));
     }
 
     #[test]

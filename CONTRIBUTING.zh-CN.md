@@ -64,7 +64,7 @@ cd agents
 | `crates/dbx-web/` | Docker / Web HTTP 后端 |
 | `packages/cli/` | `@dbx-app/cli` |
 | `packages/mcp-server/` | `@dbx-app/mcp-server` |
-| `packages/node-core/` | Node.js bridge 与直连查询逻辑 |
+| `packages/mongo-shell/` | 桌面端内部 MongoDB 编辑器解析工具 |
 | `docs/` | 官方文档站 |
 | `examples/` | 配置与自动化示例 |
 | `agents/` | JDBC Agent 驱动工程 |

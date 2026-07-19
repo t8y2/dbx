@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_SQL_FORMATTER_SETTINGS, parseSqlFormatterConfig, serializeSqlFormatterConfig } from "@/lib/sql/sqlFormatterConfig";
+import { DEFAULT_SQL_FORMATTER_SETTINGS, parseSqlFormatterConfig, serializeSqlFormatterConfig, sqlFormatterOptions } from "@/lib/sql/sqlFormatterConfig";
 
 describe("sqlFormatterConfig shortcut storage", () => {
   it("does not serialize JSON editor shortcut settings", () => {
@@ -22,5 +22,21 @@ describe("sqlFormatterConfig shortcut storage", () => {
     );
 
     expect(result.ok).toBe(true);
+  });
+
+  it("merges DBX custom parameter types with user paramTypes", () => {
+    const options = sqlFormatterOptions({
+      paramTypes: {
+        positional: false,
+        named: ["@"],
+        custom: [{ regex: String.raw`\{\{[^}]+\}\}` }],
+      },
+    });
+
+    expect(options.paramTypes).toEqual({
+      positional: false,
+      named: ["@"],
+      custom: [{ regex: String.raw`\{\{[^}]+\}\}` }, { regex: String.raw`\$\{[^}]+\}` }, { regex: String.raw`#\{[^}]+\}` }],
+    });
   });
 });

@@ -4,7 +4,9 @@
 FROM --platform=$BUILDPLATFORM node:22-slim AS frontend
 WORKDIR /app
 RUN npm i -g pnpm
-COPY package.json pnpm-lock.yaml ./
+# Keep the workspace package available because Vite resolves it directly from source.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY packages/mongo-shell/ packages/mongo-shell/
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 COPY apps/desktop/ apps/desktop/

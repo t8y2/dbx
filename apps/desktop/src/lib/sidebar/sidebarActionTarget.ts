@@ -36,6 +36,11 @@ export function createSidebarActionTarget(node: TreeNode): SidebarActionTarget {
   return Object.freeze({ ...node, children: undefined, hiddenChildren: undefined, meta });
 }
 
+export function releaseRemovedSidebarActionTarget(node: TreeNode, removedNodeIds: readonly string[]): TreeNode {
+  if (!removedNodeIds.includes(node.id)) return node;
+  return { ...createSidebarActionTarget(node) };
+}
+
 export function createSidebarActionRequest<TPayload>(node: TreeNode, selectedNodeIds: readonly string[], payload: TPayload): SidebarActionRequest<TPayload> {
   return Object.freeze({
     target: createSidebarActionTarget(node),

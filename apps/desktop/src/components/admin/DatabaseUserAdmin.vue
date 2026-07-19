@@ -14,7 +14,19 @@ import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import type { ConnectionConfig } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
-import { grantsFromQueryResult, getDatabaseUserAdminProvider, supportsDatabaseUserAdmin, type DatabaseUserIdentity, type PrivilegeScope } from "@/lib/database/databaseUserAdmin";
+import { grantsFromQueryResult, resolveDatabaseUserAdminProviderForConnection, type DatabaseUserIdentity, type PrivilegeScope } from "@/lib/database/databaseUserAdmin";
+import {
+  authorizationPlanSql,
+  authorizationPlanStatus,
+  authorizationPrivileges,
+  buildCreateUserAuthorizationPlan,
+  executeAuthorizationPlan,
+  type AuthorizationAccountType,
+  type AuthorizationPlan,
+  type AuthorizationPreset,
+  type AuthorizationStepResult,
+  type DatabaseAuthorizationSelection,
+} from "@/lib/database/databaseAuthorizationPlan";
 
 const props = defineProps<{
   connection: ConnectionConfig;
@@ -32,6 +44,7 @@ const search = ref("");
 const loadingUsers = ref(false);
 const loadingGrants = ref(false);
 const applying = ref(false);
+const preparingCreatePlan = ref(false);
 const loadError = ref("");
 const grantError = ref("");
 
@@ -39,6 +52,8 @@ const createDialogOpen = ref(false);
 const passwordDialogOpen = ref(false);
 const sqlDialogOpen = ref(false);
 const pendingSql = ref("");
+const pendingPlan = ref<AuthorizationPlan>();
+const pendingResults = ref<AuthorizationStepResult[]>([]);
 const pendingDanger = ref(false);
 const pendingAfterApply = ref<(() => Promise<void>) | undefined>();
 
@@ -53,10 +68,23 @@ const privilegeRole = ref("");
 const grantOption = ref(false);
 const selectedPrivileges = ref<string[]>(["SELECT"]);
 const createCanLogin = ref(true);
+const createAccountType = ref<AuthorizationAccountType>("standard");
+const createDatabases = ref<string[]>([]);
+const createDatabasesLoading = ref(false);
+const createDatabaseSearch = ref("");
+const createDatabaseAuthorizations = ref<DatabaseAuthorizationSelection[]>([]);
+let createPlanRequestId = 0;
 
-const supported = computed(() => supportsDatabaseUserAdmin(props.connection.db_type));
-const provider = computed(() => getDatabaseUserAdminProvider(props.connection.db_type));
+const provider = computed(() => resolveDatabaseUserAdminProviderForConnection(props.connection));
+const supported = computed(() => provider.value !== null);
 const isPostgres = computed(() => provider.value?.dialect === "postgres");
+const canCreateUser = computed(() => !!provider.value?.createUserSql);
+const canAlterPassword = computed(() => !!provider.value?.alterPasswordSql);
+const canAlterLogin = computed(() => !!provider.value?.alterLoginSql);
+const canDropUser = computed(() => !!provider.value?.dropUserSql);
+const canGrantPrivileges = computed(() => !!provider.value?.grantPrivilegesSql);
+const canRevokePrivileges = computed(() => !!provider.value?.revokePrivilegesSql);
+const canEditPrivileges = computed(() => canGrantPrivileges.value || canRevokePrivileges.value);
 const selectedUser = computed(() => users.value.find((user) => userKey(user) === selectedUserKey.value));
 const filteredUsers = computed(() => {
   const query = search.value.trim().toLowerCase();
@@ -64,7 +92,7 @@ const filteredUsers = computed(() => {
   return users.value.filter((user) => userLabel(user).toLowerCase().includes(query));
 });
 const selectedPrivilegeSet = computed(() => new Set(selectedPrivileges.value));
-const availablePrivileges = computed(() => provider.value?.privilegesForScope(privilegeScope.value) ?? []);
+const availablePrivileges = computed(() => provider.value?.privilegesForScope?.(privilegeScope.value) ?? []);
 const hasPrivilegePicker = computed(() => privilegeScope.value !== "role");
 const loginDisableLabel = computed(() => (isPostgres.value ? t("userAdmin.disableLogin") : t("userAdmin.lock")));
 const loginEnableLabel = computed(() => (isPostgres.value ? t("userAdmin.enableLogin") : t("userAdmin.unlock")));
@@ -76,6 +104,14 @@ const selectedDetail = computed(() => {
 const grantsSqlText = computed(() => grants.value.join("\n") || t("userAdmin.noGrants"));
 const highlightedGrantsSql = computed(() => highlight(grantsSqlText.value));
 const highlightedPendingSql = computed(() => highlight(pendingSql.value));
+const createAuthorizationPrivileges = computed(() => (provider.value ? authorizationPrivileges(provider.value) : []));
+const filteredCreateDatabases = computed(() => {
+  const query = createDatabaseSearch.value.trim().toLowerCase();
+  return query ? createDatabases.value.filter((database) => database.toLowerCase().includes(query)) : createDatabases.value;
+});
+const selectedCreateDatabaseSet = computed(() => new Set(createDatabaseAuthorizations.value.map((selection) => selection.database)));
+const createDatabaseAuthorizationsValid = computed(() => createDatabaseAuthorizations.value.every((selection) => selection.preset !== "custom" || (selection.privileges?.length ?? 0) > 0));
+const pendingStatus = computed(() => (pendingResults.value.length > 0 ? authorizationPlanStatus(pendingResults.value) : undefined));
 
 function userKey(user: DatabaseUserIdentity): string {
   return `${user.user}\u0000${user.host}`;
@@ -135,7 +171,7 @@ async function loadGrants() {
     const result = await api.executeQuery(props.connection.id, "", userProvider.showGrantsSql(user), undefined, undefined, {
       maxRows: 1000,
     });
-    grants.value = grantsFromQueryResult(result);
+    grants.value = (userProvider.parseGrants ?? grantsFromQueryResult)(result);
   } catch (error: any) {
     grantError.value = error?.message || String(error);
     grants.value = [];
@@ -155,8 +191,58 @@ function togglePrivilege(privilege: string) {
   selectedPrivileges.value = Array.from(set);
 }
 
+async function openCreateUserDialog() {
+  createDialogOpen.value = true;
+  createAccountType.value = "standard";
+  createCanLogin.value = true;
+  createPassword.value = "";
+  createDatabaseSearch.value = "";
+  createDatabaseAuthorizations.value = [];
+  if (createDatabasesLoading.value) return;
+  createDatabases.value = [];
+  createDatabasesLoading.value = true;
+  try {
+    await ensureConnection();
+    createDatabases.value = (await api.listDatabases(props.connection.id)).map((database) => database.name);
+  } catch (error: any) {
+    toast(t("userAdmin.loadDatabasesFailed", { message: error?.message || String(error) }), 5000);
+  } finally {
+    createDatabasesLoading.value = false;
+  }
+}
+
+function createAuthorization(database: string): DatabaseAuthorizationSelection | undefined {
+  return createDatabaseAuthorizations.value.find((selection) => selection.database === database);
+}
+
+function toggleCreateDatabase(database: string) {
+  const existing = createAuthorization(database);
+  if (existing) {
+    createDatabaseAuthorizations.value = createDatabaseAuthorizations.value.filter((selection) => selection.database !== database);
+  } else {
+    createDatabaseAuthorizations.value = [...createDatabaseAuthorizations.value, { database, preset: "readOnly", privileges: ["SELECT"] }];
+  }
+}
+
+function updateCreateDatabasePreset(database: string, preset: unknown) {
+  const selection = createAuthorization(database);
+  if (!selection || typeof preset !== "string") return;
+  selection.preset = preset as AuthorizationPreset;
+}
+
+function toggleCreateDatabasePrivilege(database: string, privilege: string) {
+  const selection = createAuthorization(database);
+  if (!selection) return;
+  const privileges = new Set(selection.privileges ?? []);
+  if (privileges.has(privilege)) privileges.delete(privilege);
+  else privileges.add(privilege);
+  selection.privileges = Array.from(privileges);
+}
+
 function previewSql(sql: string, options: { danger?: boolean; afterApply?: () => Promise<void> } = {}) {
   pendingSql.value = sql;
+  pendingPlan.value = undefined;
+  pendingResults.value = [];
   pendingDanger.value = !!options.danger;
   pendingAfterApply.value = options.afterApply;
   sqlDialogOpen.value = true;
@@ -171,12 +257,23 @@ async function applyPendingSql() {
       database: "",
       sql: pendingSql.value,
       source: t("production.sourceAdmin"),
-      execute: () => api.executeMulti(props.connection.id, "", pendingSql.value, undefined, undefined, { maxRows: 1000 }),
+      execute: async () => {
+        if (pendingPlan.value) {
+          return executeAuthorizationPlan(pendingPlan.value, (step) => api.executeMulti(props.connection.id, step.database, step.sql, undefined, undefined, { maxRows: 1000, continueOnError: true }));
+        }
+        const queryResults = await api.executeMulti(props.connection.id, "", pendingSql.value, undefined, undefined, { maxRows: 1000, continueOnError: true });
+        const failed = queryResults.find((item) => item.execution_error === true);
+        if (failed) throw new Error(String(failed.rows[0]?.[0] ?? t("userAdmin.applyFailedUnknown")));
+        return [] as AuthorizationStepResult[];
+      },
     });
     if (!result) return;
-    toast(t("userAdmin.applySuccess"), 2500);
-    sqlDialogOpen.value = false;
-    await (pendingAfterApply.value?.() ?? Promise.resolve());
+    pendingResults.value = result;
+    const status = result.length > 0 ? authorizationPlanStatus(result) : "success";
+    toast(t(status === "success" ? "userAdmin.applySuccess" : status === "partial" ? "userAdmin.applyPartial" : "userAdmin.applyFailedSummary"), status === "success" ? 2500 : 5000);
+    const createSucceeded = !pendingPlan.value || result.some((item) => item.step.id === "create-user" && item.status === "success");
+    if (createSucceeded) await (pendingAfterApply.value?.() ?? Promise.resolve());
+    if (!pendingPlan.value) sqlDialogOpen.value = false;
     await loadUsers();
     await loadGrants();
   } catch (error: any) {
@@ -186,31 +283,89 @@ async function applyPendingSql() {
   }
 }
 
-function previewCreateUser() {
+async function previewCreateUser() {
   const userProvider = provider.value;
-  if (!userProvider) return;
-  if (!createUser.value.trim() || !createPassword.value) return;
-  previewSql(
-    userProvider.createUserSql({
+  if (!userProvider?.createUserSql || preparingCreatePlan.value) return;
+  if (!createUser.value.trim() || !createPassword.value || !createDatabaseAuthorizationsValid.value) return;
+  const requestId = ++createPlanRequestId;
+  preparingCreatePlan.value = true;
+  try {
+    const principal = {
       user: createUser.value.trim(),
       host: createHost.value.trim() || "%",
       password: createPassword.value,
       canLogin: createCanLogin.value,
-    }),
-    {
-      afterApply: async () => {
-        createDialogOpen.value = false;
-        createPassword.value = "";
-      },
-    },
-  );
+    };
+    const databases =
+      createAccountType.value === "standard" && userProvider.dialect === "postgres"
+        ? await Promise.all(
+            createDatabaseAuthorizations.value.map(async (selection) => ({
+              ...selection,
+              schemas: await api.listSchemas(props.connection.id, selection.database),
+            })),
+          )
+        : createAccountType.value === "standard"
+          ? createDatabaseAuthorizations.value
+          : [];
+    if (requestId !== createPlanRequestId || !createDialogOpen.value) return;
+    const plan = buildCreateUserAuthorizationPlan({
+      provider: userProvider,
+      principal,
+      accountType: createAccountType.value,
+      databases,
+    });
+    pendingPlan.value = plan;
+    pendingSql.value = authorizationPlanSql(plan);
+    pendingResults.value = [];
+    pendingDanger.value = createAccountType.value === "admin";
+    pendingAfterApply.value = async () => {
+      createDialogOpen.value = false;
+      createPassword.value = "";
+      selectedUserKey.value = userKey({ user: principal.user, host: isPostgres.value ? (principal.canLogin ? "LOGIN" : "ROLE") : principal.host });
+    };
+    sqlDialogOpen.value = true;
+  } catch (error: any) {
+    if (requestId === createPlanRequestId) toast(t("userAdmin.prepareAuthorizationFailed", { message: error?.message || String(error) }), 5000);
+  } finally {
+    if (requestId === createPlanRequestId) preparingCreatePlan.value = false;
+  }
+}
+
+function authorizationStepLabel(result: AuthorizationStepResult): string {
+  const step = result.step;
+  if (step.operation === "createUser") return t("userAdmin.stepCreateUser");
+  if (step.operation === "grantAdmin") return t("userAdmin.stepGrantAdmin", { user: step.subject });
+  if (step.operation === "grantDatabase") return t("userAdmin.stepGrantDatabase", { user: step.subject, database: step.targetDatabase });
+  if (step.operation === "grantCurrentObjects") {
+    return t("userAdmin.stepGrantCurrentObjects", {
+      user: step.subject,
+      database: step.targetDatabase,
+      schema: step.schema,
+      scope: authorizationObjectScopeLabel(step.objectScope),
+    });
+  }
+  if (step.operation === "grantFutureObjects") {
+    return step.owner
+      ? t("userAdmin.stepGrantFutureObjectsForOwner", { user: step.subject, database: step.targetDatabase, owner: step.owner, scope: authorizationObjectScopeLabel(step.objectScope) })
+      : t("userAdmin.stepGrantFutureObjects", { user: step.subject, database: step.targetDatabase, scope: authorizationObjectScopeLabel(step.objectScope) });
+  }
+  return step.label;
+}
+
+function authorizationObjectScopeLabel(scope: AuthorizationStepResult["step"]["objectScope"]): string {
+  if (scope === "schemas") return t("userAdmin.scopeSchemas");
+  if (scope === "tables") return t("userAdmin.scopeTables");
+  if (scope === "sequences") return t("userAdmin.scopeSequences");
+  if (scope === "functions") return t("userAdmin.scopeFunctions");
+  return "";
 }
 
 function previewPasswordChange() {
   const user = selectedUser.value;
   const userProvider = provider.value;
-  if (!user || !userProvider || !newPassword.value) return;
-  previewSql(userProvider.alterPasswordSql(user, newPassword.value), {
+  const alterPasswordSql = userProvider?.alterPasswordSql;
+  if (!user || !alterPasswordSql || !newPassword.value) return;
+  previewSql(alterPasswordSql(user, newPassword.value), {
     danger: true,
     afterApply: async () => {
       passwordDialogOpen.value = false;
@@ -222,23 +377,26 @@ function previewPasswordChange() {
 function previewDropUser() {
   const user = selectedUser.value;
   const userProvider = provider.value;
-  if (!user || !userProvider) return;
-  previewSql(userProvider.dropUserSql(user), { danger: true });
+  const dropUserSql = userProvider?.dropUserSql;
+  if (!user || !dropUserSql) return;
+  previewSql(dropUserSql(user), { danger: true });
 }
 
 function previewLoginChange(enabled: boolean) {
   const user = selectedUser.value;
   const userProvider = provider.value;
-  if (!user || !userProvider) return;
-  previewSql(userProvider.alterLoginSql(user, enabled), { danger: true });
+  const alterLoginSql = userProvider?.alterLoginSql;
+  if (!user || !alterLoginSql) return;
+  previewSql(alterLoginSql(user, enabled), { danger: true });
 }
 
 function previewGrant() {
   const user = selectedUser.value;
   const userProvider = provider.value;
-  if (!user || !userProvider || (privilegeScope.value === "role" && !privilegeRole.value.trim())) return;
+  const grantPrivilegesSql = userProvider?.grantPrivilegesSql;
+  if (!user || !grantPrivilegesSql || (privilegeScope.value === "role" && !privilegeRole.value.trim())) return;
   previewSql(
-    userProvider.grantPrivilegesSql({
+    grantPrivilegesSql({
       user,
       privileges: selectedPrivileges.value,
       database: privilegeDatabase.value,
@@ -253,9 +411,10 @@ function previewGrant() {
 function previewRevoke() {
   const user = selectedUser.value;
   const userProvider = provider.value;
-  if (!user || !userProvider || (privilegeScope.value === "role" && !privilegeRole.value.trim())) return;
+  const revokePrivilegesSql = userProvider?.revokePrivilegesSql;
+  if (!user || !revokePrivilegesSql || (privilegeScope.value === "role" && !privilegeRole.value.trim())) return;
   previewSql(
-    userProvider.revokePrivilegesSql({
+    revokePrivilegesSql({
       user,
       privileges: selectedPrivileges.value,
       database: privilegeDatabase.value,
@@ -270,13 +429,22 @@ function previewRevoke() {
 function resetPrivilegeDefaults(scope: PrivilegeScope) {
   const userProvider = provider.value;
   if (!userProvider) return;
-  selectedPrivileges.value = userProvider.defaultPrivilegesForScope(scope);
+  selectedPrivileges.value = userProvider.defaultPrivilegesForScope?.(scope) ?? [];
   if (userProvider.dialect === "postgres") {
     if (scope === "database") privilegeDatabase.value = props.connection.database || "postgres";
     if (scope === "schema" || scope === "table") privilegeDatabase.value = "public";
     if (scope === "table") privilegeTable.value = "*";
   }
 }
+
+watch(
+  () => createDialogOpen.value,
+  (open) => {
+    if (open) return;
+    createPlanRequestId += 1;
+    preparingCreatePlan.value = false;
+  },
+);
 
 watch(
   () => selectedUserKey.value,
@@ -287,6 +455,8 @@ watch(
   () => props.connection.id,
   () => {
     users.value = [];
+    createDatabases.value = [];
+    createDatabaseAuthorizations.value = [];
     selectedUserKey.value = "";
     grants.value = [];
     privilegeScope.value = provider.value?.defaultScope ?? "mysql";
@@ -296,7 +466,7 @@ watch(
 );
 
 watch(
-  () => provider.value?.dialect,
+  () => provider.value,
   () => {
     privilegeScope.value = provider.value?.defaultScope ?? "mysql";
     resetPrivilegeDefaults(privilegeScope.value);
@@ -326,7 +496,7 @@ onMounted(loadUsers);
           <RefreshCcw v-else class="h-3.5 w-3.5" />
           {{ t("grid.refresh") }}
         </Button>
-        <Button size="sm" class="h-7 gap-1.5 px-2 text-xs" :disabled="!supported" @click="createDialogOpen = true">
+        <Button v-if="canCreateUser" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="openCreateUserDialog">
           <Plus class="h-3.5 w-3.5" />
           {{ t("userAdmin.newUser") }}
         </Button>
@@ -385,27 +555,27 @@ onMounted(loadUsers);
             </Badge>
           </div>
           <div class="ml-auto flex items-center gap-1.5">
-            <Button variant="outline" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="passwordDialogOpen = true">
+            <Button v-if="canAlterPassword" variant="outline" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="passwordDialogOpen = true">
               <KeyRound class="h-3.5 w-3.5" />
               {{ t("userAdmin.changePassword") }}
             </Button>
-            <Button variant="outline" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="previewLoginChange(false)">
+            <Button v-if="canAlterLogin" variant="outline" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="previewLoginChange(false)">
               <Lock class="h-3.5 w-3.5" />
               {{ loginDisableLabel }}
             </Button>
-            <Button variant="outline" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="previewLoginChange(true)">
+            <Button v-if="canAlterLogin" variant="outline" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="previewLoginChange(true)">
               <Unlock class="h-3.5 w-3.5" />
               {{ loginEnableLabel }}
             </Button>
-            <Button variant="destructive" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="previewDropUser">
+            <Button v-if="canDropUser" variant="destructive" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="previewDropUser">
               <Trash2 class="h-3.5 w-3.5" />
               {{ t("userAdmin.dropUser") }}
             </Button>
           </div>
         </div>
 
-        <div v-if="selectedUser" class="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_320px]">
-          <section class="flex min-h-0 flex-col border-r">
+        <div v-if="selectedUser" class="grid min-h-0 flex-1" :class="canEditPrivileges ? 'grid-cols-[minmax(0,1fr)_320px]' : 'grid-cols-1'">
+          <section class="flex min-h-0 flex-col" :class="{ 'border-r': canEditPrivileges }">
             <div class="flex h-9 shrink-0 items-center gap-2 border-b bg-muted/20 px-3 text-xs font-medium">
               <ShieldCheck class="h-3.5 w-3.5" />
               {{ t("userAdmin.grants") }}
@@ -420,7 +590,7 @@ onMounted(loadUsers);
             </div>
           </section>
 
-          <aside class="flex min-h-0 flex-col bg-muted/10">
+          <aside v-if="canEditPrivileges" class="flex min-h-0 flex-col bg-muted/10">
             <div class="border-b p-3">
               <div class="text-xs font-semibold">{{ t("userAdmin.privilegeEditor") }}</div>
               <div class="mt-1 text-[11px] leading-4 text-muted-foreground">{{ t("userAdmin.privilegeHint") }}</div>
@@ -478,10 +648,10 @@ onMounted(loadUsers);
               </label>
             </div>
             <div class="flex shrink-0 items-center justify-end gap-2 border-t p-3">
-              <Button variant="outline" size="sm" class="h-7 px-2 text-xs" @click="previewRevoke">
+              <Button v-if="canRevokePrivileges" variant="outline" size="sm" class="h-7 px-2 text-xs" @click="previewRevoke">
                 {{ t("userAdmin.revoke") }}
               </Button>
-              <Button size="sm" class="h-7 px-2 text-xs" @click="previewGrant">
+              <Button v-if="canGrantPrivileges" size="sm" class="h-7 px-2 text-xs" @click="previewGrant">
                 {{ t("userAdmin.grant") }}
               </Button>
             </div>
@@ -495,11 +665,21 @@ onMounted(loadUsers);
     </div>
 
     <Dialog v-model:open="createDialogOpen">
-      <DialogContent class="max-w-sm">
+      <DialogContent class="max-w-2xl">
         <DialogHeader>
           <DialogTitle>{{ t("userAdmin.newUser") }}</DialogTitle>
         </DialogHeader>
-        <div class="space-y-3">
+        <div class="grid max-h-[70vh] gap-4 overflow-auto pr-1">
+          <div class="grid grid-cols-2 gap-2">
+            <button type="button" class="rounded-md border p-3 text-left" :class="createAccountType === 'standard' ? 'border-primary bg-primary/5' : 'hover:bg-muted/40'" @click="createAccountType = 'standard'">
+              <span class="block text-sm font-medium">{{ t("userAdmin.standardUser") }}</span>
+              <span class="mt-1 block text-xs text-muted-foreground">{{ t("userAdmin.standardUserHint") }}</span>
+            </button>
+            <button type="button" class="rounded-md border p-3 text-left" :class="createAccountType === 'admin' ? 'border-destructive bg-destructive/5' : 'hover:bg-muted/40'" @click="createAccountType = 'admin'">
+              <span class="block text-sm font-medium">{{ t("userAdmin.adminUser") }}</span>
+              <span class="mt-1 block text-xs text-muted-foreground">{{ t("userAdmin.adminUserHint") }}</span>
+            </button>
+          </div>
           <label class="block text-xs font-medium">{{ createNameLabel }}</label>
           <Input v-model="createUser" />
           <template v-if="!isPostgres">
@@ -512,10 +692,71 @@ onMounted(loadUsers);
           </label>
           <label class="block text-xs font-medium">{{ t("connection.password") }}</label>
           <PasswordInput v-model="createPassword" />
+
+          <div v-if="createAccountType === 'admin'" class="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive">
+            {{ t("userAdmin.adminUserWarning") }}
+          </div>
+
+          <div v-else class="grid gap-2">
+            <div class="flex items-center justify-between gap-3">
+              <div>
+                <div class="text-xs font-medium">{{ t("userAdmin.databaseAccess") }}</div>
+                <div class="mt-1 text-[11px] text-muted-foreground">{{ t("userAdmin.databaseAccessHint") }}</div>
+              </div>
+              <Badge variant="outline">{{ t("userAdmin.selectedDatabaseCount", { count: createDatabaseAuthorizations.length }) }}</Badge>
+            </div>
+            <div class="flex h-8 items-center gap-2 rounded-md border px-2">
+              <Search class="h-3.5 w-3.5 text-muted-foreground" />
+              <input v-model="createDatabaseSearch" class="min-w-0 flex-1 bg-transparent text-xs outline-none" :placeholder="t('userAdmin.searchDatabase')" />
+            </div>
+            <div class="max-h-64 overflow-auto rounded-md border">
+              <div v-if="createDatabasesLoading" class="flex items-center gap-2 p-3 text-xs text-muted-foreground">
+                <Loader2 class="h-3.5 w-3.5 animate-spin" />
+                {{ t("userAdmin.loadingDatabases") }}
+              </div>
+              <div v-else-if="filteredCreateDatabases.length === 0" class="p-3 text-center text-xs text-muted-foreground">{{ t("userAdmin.emptyDatabases") }}</div>
+              <div v-for="database in filteredCreateDatabases" :key="database" class="border-b p-2 last:border-b-0">
+                <div class="flex items-center gap-2">
+                  <input :checked="selectedCreateDatabaseSet.has(database)" type="checkbox" class="h-3.5 w-3.5 accent-primary" @change="toggleCreateDatabase(database)" />
+                  <button type="button" class="min-w-0 flex-1 truncate text-left text-xs font-medium" @click="toggleCreateDatabase(database)">{{ database }}</button>
+                  <Select v-if="selectedCreateDatabaseSet.has(database)" :model-value="createAuthorization(database)?.preset" @update:model-value="updateCreateDatabasePreset(database, $event)">
+                    <SelectTrigger class="h-7 w-32 text-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="readWrite">{{ t("userAdmin.presetReadWrite") }}</SelectItem>
+                      <SelectItem value="readOnly">{{ t("userAdmin.presetReadOnly") }}</SelectItem>
+                      <SelectItem value="ddl">{{ t("userAdmin.presetDdl") }}</SelectItem>
+                      <SelectItem value="dml">{{ t("userAdmin.presetDml") }}</SelectItem>
+                      <SelectItem value="custom">{{ t("userAdmin.presetCustom") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div v-if="createAuthorization(database)?.preset === 'custom'" class="mt-2 grid grid-cols-3 gap-1.5 pl-5">
+                  <button
+                    v-for="privilege in createAuthorizationPrivileges"
+                    :key="privilege"
+                    type="button"
+                    class="flex h-7 items-center gap-1.5 rounded border px-2 text-[10px]"
+                    :class="createAuthorization(database)?.privileges?.includes(privilege) ? 'border-primary bg-primary/10 text-primary' : 'bg-background'"
+                    @click="toggleCreateDatabasePrivilege(database, privilege)"
+                  >
+                    <Check v-if="createAuthorization(database)?.privileges?.includes(privilege)" class="h-3 w-3" />
+                    <span class="truncate">{{ privilege }}</span>
+                  </button>
+                  <p v-if="!createAuthorization(database)?.privileges?.length" class="col-span-3 text-[10px] text-destructive">
+                    {{ t("userAdmin.customPrivilegeRequired") }}
+                  </p>
+                </div>
+                <p v-if="isPostgres && selectedCreateDatabaseSet.has(database) && createAuthorization(database)?.preset === 'ddl'" class="mt-2 pl-5 text-[10px] text-muted-foreground">
+                  {{ t("userAdmin.postgresDdlHint") }}
+                </p>
+              </div>
+            </div>
+          </div>
         </div>
         <DialogFooter>
           <Button variant="outline" @click="createDialogOpen = false">{{ t("dangerDialog.cancel") }}</Button>
-          <Button :disabled="!createUser.trim() || !createPassword" @click="previewCreateUser">
+          <Button :disabled="!createUser.trim() || !createPassword || !createDatabaseAuthorizationsValid || preparingCreatePlan" @click="previewCreateUser">
+            <Loader2 v-if="preparingCreatePlan" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
             {{ t("userAdmin.previewSql") }}
           </Button>
         </DialogFooter>
@@ -544,12 +785,30 @@ onMounted(loadUsers);
           </DialogTitle>
         </DialogHeader>
         <pre class="max-h-[50vh] min-h-44 overflow-auto whitespace-pre-wrap rounded-md border bg-muted/30 p-3 font-mono text-xs leading-5" v-html="highlightedPendingSql" />
+        <div v-if="pendingResults.length > 0" class="grid gap-2 rounded-md border p-3">
+          <div class="text-xs font-semibold" :class="pendingStatus === 'success' ? 'text-green-600' : pendingStatus === 'partial' ? 'text-amber-600' : 'text-destructive'">
+            {{ t(pendingStatus === "success" ? "userAdmin.resultSuccess" : pendingStatus === "partial" ? "userAdmin.resultPartial" : "userAdmin.resultFailed") }}
+          </div>
+          <div v-for="result in pendingResults" :key="result.step.id" class="flex items-start gap-2 text-xs">
+            <Check v-if="result.status === 'success'" class="mt-0.5 h-3.5 w-3.5 shrink-0 text-green-600" />
+            <AlertTriangle v-else-if="result.status === 'failed'" class="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
+            <span v-else class="mt-1 h-2 w-2 shrink-0 rounded-full bg-muted-foreground" />
+            <span class="min-w-0">
+              <span class="block">{{ authorizationStepLabel(result) }}</span>
+              <span v-if="result.message" class="mt-0.5 block break-all text-destructive">{{ result.message }}</span>
+              <span v-else-if="result.status === 'skipped'" class="mt-0.5 block text-muted-foreground">{{ t("userAdmin.stepSkipped") }}</span>
+            </span>
+          </div>
+        </div>
         <DialogFooter>
-          <Button variant="outline" @click="sqlDialogOpen = false">{{ t("dangerDialog.cancel") }}</Button>
-          <Button :variant="pendingDanger ? 'destructive' : 'default'" :disabled="applying" @click="applyPendingSql">
-            <Loader2 v-if="applying" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
-            {{ t("userAdmin.applySql") }}
-          </Button>
+          <template v-if="pendingResults.length === 0">
+            <Button variant="outline" @click="sqlDialogOpen = false">{{ t("dangerDialog.cancel") }}</Button>
+            <Button :variant="pendingDanger ? 'destructive' : 'default'" :disabled="applying" @click="applyPendingSql">
+              <Loader2 v-if="applying" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
+              {{ t("userAdmin.applySql") }}
+            </Button>
+          </template>
+          <Button v-else @click="sqlDialogOpen = false">{{ t("userAdmin.closeResult") }}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

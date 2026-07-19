@@ -1,6 +1,17 @@
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import type { ConnectionConfig } from "@/types/database";
+import type { SqlCompletionTable } from "@/lib/sql/sqlCompletion";
 import { useConnectionStore } from "@/stores/connectionStore";
+
+const REMOTE_SEARCH_DEBOUNCE_MS = 180;
+const REMOTE_SEARCH_MIN_QUERY_LENGTH = 2;
+const REMOTE_SEARCH_MAX_REQUESTS = 8;
+const REMOTE_SEARCH_CONCURRENCY = 2;
+const REMOTE_SEARCH_RESULTS_PER_REQUEST = 25;
+const REMOTE_SEARCH_MAX_RESULTS = 100;
+const QUICK_OPEN_MAX_RESULTS = 200;
+
+const REMOTE_SEARCH_UNSUPPORTED_TYPES = new Set<ConnectionConfig["db_type"]>(["redis", "mongodb", "elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "neo4j", "influxdb", "etcd", "zookeeper", "mq", "nacos"]);
 
 export interface QuickOpenItem {
   id: string;
@@ -66,6 +77,11 @@ export function useQuickOpen() {
   const connectionStore = useConnectionStore();
   const searchQuery = ref("");
   const selectedIndex = ref(0);
+  const remoteItems = ref<QuickOpenItem[]>([]);
+  let remoteSearchGeneration = 0;
+  let remoteSearchTimer: ReturnType<typeof setTimeout> | undefined;
+  let activeRemoteRequests = 0;
+  const remoteRequestWaiters: Array<() => void> = [];
 
   const allItems = computed((): QuickOpenItem[] => {
     const items: QuickOpenItem[] = [];
@@ -286,6 +302,129 @@ export function useQuickOpen() {
     return undefined;
   }
 
+  function quickOpenItemKey(item: QuickOpenItem): string {
+    if (item.type === "table" || item.type === "view" || item.type === "materialized_view") {
+      return `${item.connectionId}:${item.database ?? ""}:${item.schema ?? ""}:${item.tableName ?? item.objectName ?? item.label}`.toLowerCase();
+    }
+    return item.id.toLowerCase();
+  }
+
+  function remoteTableItem(table: SqlCompletionTable, conn: ConnectionConfig, database: string): QuickOpenItem {
+    const type = table.type ?? "table";
+    const prefix = type === "materialized_view" ? "mview" : type;
+    return {
+      id: `${prefix}-${conn.id}-${database}-${table.schema || ""}-${table.name}`,
+      type,
+      label: table.name,
+      description: `${conn.name} / ${database}${table.schema ? " / " + table.schema : ""}`,
+      connectionId: conn.id,
+      database,
+      schema: table.schema,
+      ...(type === "table" ? { tableName: table.name } : { objectName: table.name }),
+      connectionName: conn.name,
+      searchText: `${conn.name} ${database} ${table.schema || ""} ${table.name}`,
+    };
+  }
+
+  function collectConnectionDatabases(nodes: any[], connectionId: string, databases: Set<string>): void {
+    for (const node of nodes) {
+      if (node.connectionId === connectionId && node.type === "database" && node.database) {
+        databases.add(node.database);
+      }
+      if (node.children) collectConnectionDatabases(node.children, connectionId, databases);
+    }
+  }
+
+  function remoteSearchContexts(): Array<{ conn: ConnectionConfig; database: string }> {
+    if (typeof connectionStore.listCompletionTables !== "function") return [];
+    const connectedIds = connectionStore.connectedIds;
+    if (!(connectedIds instanceof Set)) return [];
+
+    const databasesByConnection: Array<{ conn: ConnectionConfig; databases: string[] }> = [];
+    for (const conn of connectionStore.connections) {
+      if (!connectedIds.has(conn.id) || REMOTE_SEARCH_UNSUPPORTED_TYPES.has(conn.db_type)) continue;
+      const databases = new Set<string>();
+      collectConnectionDatabases(connectionStore.treeNodes, conn.id, databases);
+      if (conn.database?.trim()) databases.add(conn.database.trim());
+      for (const database of conn.visible_databases ?? []) {
+        if (database.trim()) databases.add(database.trim());
+      }
+      for (const database of conn.attached_databases ?? []) {
+        if (database.name.trim()) databases.add(database.name.trim());
+      }
+      if (databases.size > 0) databasesByConnection.push({ conn, databases: [...databases] });
+    }
+
+    const contexts: Array<{ conn: ConnectionConfig; database: string }> = [];
+    for (let databaseIndex = 0; contexts.length < REMOTE_SEARCH_MAX_REQUESTS; databaseIndex++) {
+      let added = false;
+      for (const { conn, databases } of databasesByConnection) {
+        const database = databases[databaseIndex];
+        if (!database) continue;
+        contexts.push({ conn, database });
+        added = true;
+        if (contexts.length >= REMOTE_SEARCH_MAX_REQUESTS) break;
+      }
+      if (!added) break;
+    }
+    return contexts;
+  }
+
+  async function acquireRemoteRequestSlot(): Promise<void> {
+    if (activeRemoteRequests < REMOTE_SEARCH_CONCURRENCY) {
+      activeRemoteRequests++;
+      return;
+    }
+    await new Promise<void>((resolve) => remoteRequestWaiters.push(resolve));
+  }
+
+  function releaseRemoteRequestSlot(): void {
+    const next = remoteRequestWaiters.shift();
+    if (next) next();
+    else activeRemoteRequests--;
+  }
+
+  async function runRemoteSearch(query: string, generation: number, contexts: Array<{ conn: ConnectionConfig; database: string }>): Promise<void> {
+    const groups = await Promise.all(
+      contexts.map(async ({ conn, database }) => {
+        await acquireRemoteRequestSlot();
+        try {
+          // A newer query may supersede queued work before it reaches the metadata API.
+          if (generation !== remoteSearchGeneration) return [];
+          const tables = await connectionStore.listCompletionTables(conn.id, database, query, REMOTE_SEARCH_RESULTS_PER_REQUEST, undefined, true);
+          return tables.slice(0, REMOTE_SEARCH_RESULTS_PER_REQUEST).map((table) => remoteTableItem(table, conn, database));
+        } catch {
+          return [];
+        } finally {
+          releaseRemoteRequestSlot();
+        }
+      }),
+    );
+
+    if (generation !== remoteSearchGeneration) return;
+    remoteItems.value = groups.flat().slice(0, REMOTE_SEARCH_MAX_RESULTS);
+  }
+
+  watch(
+    searchQuery,
+    (query) => {
+      const generation = ++remoteSearchGeneration;
+      if (remoteSearchTimer) clearTimeout(remoteSearchTimer);
+      remoteItems.value = [];
+
+      const normalizedQuery = query.trim();
+      if (normalizedQuery.length < REMOTE_SEARCH_MIN_QUERY_LENGTH) return;
+      const contexts = remoteSearchContexts();
+      if (contexts.length === 0) return;
+
+      remoteSearchTimer = setTimeout(() => {
+        remoteSearchTimer = undefined;
+        void runRemoteSearch(normalizedQuery, generation, contexts);
+      }, REMOTE_SEARCH_DEBOUNCE_MS);
+    },
+    { flush: "sync" },
+  );
+
   const filteredItems = computed((): MatchedItem[] => {
     if (!searchQuery.value.trim()) {
       return allItems.value.map((item) => ({
@@ -297,7 +436,11 @@ export function useQuickOpen() {
 
     const matched: MatchedItem[] = [];
 
-    for (const item of allItems.value) {
+    const seen = new Set<string>();
+    for (const item of [...allItems.value, ...remoteItems.value]) {
+      const key = quickOpenItemKey(item);
+      if (seen.has(key)) continue;
+      seen.add(key);
       const result = fuzzyMatch(searchQuery.value, item.searchText);
       if (result) {
         matched.push({
@@ -330,7 +473,7 @@ export function useQuickOpen() {
       return typeOrder[a.type] - typeOrder[b.type];
     });
 
-    return matched;
+    return matched.slice(0, QUICK_OPEN_MAX_RESULTS);
   });
 
   const selectedItem = computed((): MatchedItem | null => {

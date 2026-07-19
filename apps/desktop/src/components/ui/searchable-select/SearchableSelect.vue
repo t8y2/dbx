@@ -243,7 +243,7 @@ function handleKeydown(event: KeyboardEvent) {
     </PopoverTrigger>
     <PopoverContent :align="SEARCHABLE_SELECT_HELP_PANEL_ALIGN" :class="cn('w-auto max-w-[calc(100vw-1rem)] border-0 bg-transparent p-0 shadow-none ring-0', contentClass)">
       <div class="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start">
-        <div ref="listCard" :class="cn('w-52 shrink-0 rounded-md border bg-popover p-1.5 shadow-md', listClass)">
+        <div ref="listCard" :class="cn('shrink-0 rounded-md border bg-popover p-1.5 shadow-md', listClass)">
           <div class="relative rounded-sm border bg-background">
             <Search class="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
             <span v-if="!searchText" class="pointer-events-none absolute left-[25px] top-1/2 -translate-y-1/2 text-sm text-muted-foreground">{{ searchPlaceholder }}</span>

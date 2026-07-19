@@ -9,6 +9,7 @@ pub mod agent_runtime;
 pub mod agent_service;
 pub mod agent_tools;
 pub mod ai;
+pub mod ai_claude_code_cli;
 pub mod ai_cli_agent;
 pub mod ai_codex_cli;
 pub mod changelog;
@@ -30,6 +31,7 @@ pub mod history;
 pub mod jdbc;
 pub mod models;
 pub mod mongo_ops;
+pub mod mongo_shell;
 #[cfg(feature = "mq-admin")]
 pub mod mq;
 pub mod nacos;
@@ -49,6 +51,7 @@ pub mod schema;
 pub mod schema_diff;
 pub mod sql;
 pub mod sql_analysis;
+pub mod sql_diagnostics;
 pub mod sql_dialect;
 pub mod sql_editability;
 pub mod sql_file_import;
@@ -60,6 +63,8 @@ pub mod storage;
 pub mod table_export;
 pub mod table_import;
 pub mod table_structure_sql;
+pub mod task_supervisor;
+pub mod temporal_format;
 pub mod text_export;
 pub mod token_usage;
 pub mod transfer;
@@ -70,7 +75,6 @@ pub mod xlsx_export;
 pub const R2_CDN_BASE: &str = "https://dl.dbxio.com/";
 pub const GITHUB_RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/t8y2/dbx/releases/download/";
 pub const CNB_RELEASE_DOWNLOAD_PREFIX: &str = "https://cnb.cool/dbxio.com/dbx/-/releases/download/";
-pub const ATOMGIT_RELEASE_DOWNLOAD_PREFIX: &str = "https://atomgit.com/t8y2/dbx/releases/download/";
 
 #[derive(Clone, Copy, Debug, Default, serde::Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
@@ -78,22 +82,28 @@ pub enum DownloadSource {
     #[default]
     Official,
     Cnb,
-    Atomgit,
 }
 
 impl DownloadSource {
     pub fn download_candidate_urls(self, github_url: &str, r2_path: &str) -> Result<Vec<String>, String> {
         match self {
             Self::Official => Ok(download_candidate_urls(github_url, r2_path)),
-            Self::Cnb => Ok(vec![
+            Self::Cnb => Ok(mirror_download_candidate_urls(
+                github_url,
+                r2_path,
                 rewrite_github_release_url(github_url, CNB_RELEASE_DOWNLOAD_PREFIX)?,
-                format!("{R2_CDN_BASE}{r2_path}"),
-            ]),
-            Self::Atomgit => Ok(vec![
-                rewrite_github_release_url(github_url, ATOMGIT_RELEASE_DOWNLOAD_PREFIX)?,
-                format!("{R2_CDN_BASE}{r2_path}"),
-            ]),
+            )),
         }
+    }
+}
+
+fn mirror_download_candidate_urls(github_url: &str, r2_path: &str, mirror_url: String) -> Vec<String> {
+    let r2_url = format!("{R2_CDN_BASE}{r2_path}");
+    // Mutable mirror aliases can lag even when versioned release assets are healthy.
+    if github_url.ends_with("/agents-latest/agent-registry.json") {
+        vec![r2_url, mirror_url]
+    } else {
+        vec![mirror_url, r2_url]
     }
 }
 
@@ -167,20 +177,13 @@ mod tests {
     }
 
     #[test]
-    fn mirror_download_candidates_rewrite_release_urls() {
+    fn mirror_download_candidates_prefer_stable_registry_metadata() {
         let github_url = "https://github.com/t8y2/dbx/releases/download/agents-latest/agent-registry.json";
         assert_eq!(
             DownloadSource::Cnb.download_candidate_urls(github_url, "agents/agent-registry.json").unwrap(),
             vec![
+                "https://dl.dbxio.com/agents/agent-registry.json",
                 "https://cnb.cool/dbxio.com/dbx/-/releases/download/agents-latest/agent-registry.json",
-                "https://dl.dbxio.com/agents/agent-registry.json",
-            ]
-        );
-        assert_eq!(
-            DownloadSource::Atomgit.download_candidate_urls(github_url, "agents/agent-registry.json").unwrap(),
-            vec![
-                "https://atomgit.com/t8y2/dbx/releases/download/agents-latest/agent-registry.json",
-                "https://dl.dbxio.com/agents/agent-registry.json",
             ]
         );
     }

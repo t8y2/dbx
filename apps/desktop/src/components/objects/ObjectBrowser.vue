@@ -14,7 +14,6 @@ import {
   CopyPlus,
   ChevronDown,
   ChevronRight,
-  Columns3Cog,
   Download,
   Eraser,
   Eye,
@@ -80,6 +79,7 @@ import QueryEditor from "@/components/editor/QueryEditor.vue";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, type BatchTableEmptyPlanItem } from "@/lib/sidebar/batchTableEmpty";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
@@ -94,11 +94,13 @@ import {
   type ObjectBrowserSortDirection,
   type ObjectBrowserSortKey,
 } from "@/lib/table/objectBrowserRows";
-import { resolveRowClickAction, shouldDeferSingleClick, type ObjectBrowserRowAction } from "@/lib/table/objectBrowserRowAction";
+import { isSourceOnlyObjectBrowserRow, resolveRowClickAction, shouldDeferSingleClick, type ObjectBrowserRowAction } from "@/lib/table/objectBrowserRowAction";
+import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
 import { createSidePanelRequestGuard } from "@/lib/table/sidePanelRequestGuard";
 import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
+import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
 
-type ObjectFilter = "all" | "tables" | "views" | "materializedViews" | "procedures" | "functions" | "sequences" | "packages";
+type ObjectFilter = "all" | "tables" | "views" | "materializedViews" | "procedures" | "functions" | "triggers" | "sequences" | "packages" | "types";
 type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
 
 const props = defineProps<{
@@ -121,6 +123,10 @@ const { highlight } = useSqlHighlighter();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
+const refreshTooltip = computed(() => {
+  const shortcut = formatShortcut(settingsStore.editorSettings.shortcuts.refreshData);
+  return shortcut ? `${t("grid.refresh")} (${shortcut})` : t("grid.refresh");
+});
 
 const schemas = ref<string[]>([]);
 const selectedSchema = ref<string | undefined>(props.schema);
@@ -235,8 +241,10 @@ const viewCount = computed(() => rows.value.filter((row) => row.type === "VIEW")
 const materializedViewCount = computed(() => rows.value.filter((row) => row.type === "MATERIALIZED_VIEW").length);
 const procedureCount = computed(() => rows.value.filter((row) => row.type === "PROCEDURE").length);
 const functionCount = computed(() => rows.value.filter((row) => row.type === "FUNCTION").length);
+const triggerCount = computed(() => rows.value.filter((row) => row.type === "TRIGGER").length);
 const sequenceCount = computed(() => rows.value.filter((row) => row.type === "SEQUENCE").length);
 const packageCount = computed(() => rows.value.filter((row) => row.type === "PACKAGE" || row.type === "PACKAGE_BODY").length);
+const typeCount = computed(() => rows.value.filter((row) => row.type === "TYPE" || row.type === "TYPE_BODY").length);
 const canOpenStructureEditor = computed(() => supportsTableStructureEditing(tableStructureDatabaseType.value));
 const canOpenDiagram = computed(() => !!props.database && supportsSchemaDiagram(effectiveDatabaseType.value));
 const canOpenTableImport = computed(() => !!props.database && supportsTableImport(effectiveDatabaseType.value));
@@ -252,8 +260,10 @@ const objectFilters = computed<ObjectFilter[]>(() =>
       ["materializedViews", materializedViewCount.value],
       ["procedures", procedureCount.value],
       ["functions", functionCount.value],
+      ["triggers", triggerCount.value],
       ["sequences", sequenceCount.value],
       ["packages", packageCount.value],
+      ["types", typeCount.value],
     ] as Array<[ObjectFilter, number]>
   )
     .filter(([filter, count]) => filter === "all" || count > 0)
@@ -525,8 +535,10 @@ function iconFor(row: ObjectBrowserRow) {
   if (row.type === "VIEW" || row.type === "MATERIALIZED_VIEW") return Eye;
   if (row.type === "PROCEDURE") return ScrollText;
   if (row.type === "FUNCTION") return Braces;
+  if (row.type === "TRIGGER") return RotateCcw;
   if (row.type === "SEQUENCE") return ListTree;
   if (row.type === "PACKAGE" || row.type === "PACKAGE_BODY") return Package;
+  if (row.type === "TYPE" || row.type === "TYPE_BODY") return Braces;
   return Table2;
 }
 
@@ -535,9 +547,12 @@ function typeLabel(type: ObjectBrowserRow["type"]) {
   if (type === "VIEW") return t("objects.view");
   if (type === "PROCEDURE") return t("objects.procedure");
   if (type === "FUNCTION") return t("objects.function");
+  if (type === "TRIGGER") return t("objects.trigger");
   if (type === "SEQUENCE") return t("objects.sequence");
   if (type === "PACKAGE") return t("objects.package");
   if (type === "PACKAGE_BODY") return t("objects.packageBody");
+  if (type === "TYPE") return t("objects.typeDefinition");
+  if (type === "TYPE_BODY") return t("objects.typeBody");
   return t("objects.table");
 }
 
@@ -634,8 +649,10 @@ function rowMatchesObjectFilter(row: ObjectBrowserRow) {
   if (objectFilter.value === "materializedViews") return row.type === "MATERIALIZED_VIEW";
   if (objectFilter.value === "procedures") return row.type === "PROCEDURE";
   if (objectFilter.value === "functions") return row.type === "FUNCTION";
+  if (objectFilter.value === "triggers") return row.type === "TRIGGER";
   if (objectFilter.value === "sequences") return row.type === "SEQUENCE";
   if (objectFilter.value === "packages") return row.type === "PACKAGE" || row.type === "PACKAGE_BODY";
+  if (objectFilter.value === "types") return row.type === "TYPE" || row.type === "TYPE_BODY";
   return true;
 }
 
@@ -672,8 +689,10 @@ function iconClass(type: ObjectBrowserRow["type"]) {
   if (type === "VIEW" || type === "MATERIALIZED_VIEW") return "text-purple-500";
   if (type === "PROCEDURE") return "text-blue-500";
   if (type === "FUNCTION") return "text-amber-500";
+  if (type === "TRIGGER") return "text-rose-500";
   if (type === "SEQUENCE") return "text-emerald-500";
   if (type === "PACKAGE" || type === "PACKAGE_BODY") return "text-cyan-500";
+  if (type === "TYPE" || type === "TYPE_BODY") return "text-violet-500";
   return "text-green-500";
 }
 
@@ -681,8 +700,10 @@ function iconBgClass(type: ObjectBrowserRow["type"]) {
   if (type === "VIEW" || type === "MATERIALIZED_VIEW") return "object-browser-icon-bg object-browser-icon-bg-view";
   if (type === "PROCEDURE") return "object-browser-icon-bg object-browser-icon-bg-procedure";
   if (type === "FUNCTION") return "object-browser-icon-bg object-browser-icon-bg-function";
+  if (type === "TRIGGER") return "object-browser-icon-bg object-browser-icon-bg-procedure";
   if (type === "SEQUENCE") return "object-browser-icon-bg object-browser-icon-bg-sequence";
   if (type === "PACKAGE" || type === "PACKAGE_BODY") return "object-browser-icon-bg object-browser-icon-bg-package";
+  if (type === "TYPE" || type === "TYPE_BODY") return "object-browser-icon-bg object-browser-icon-bg-function";
   return "object-browser-icon-bg object-browser-icon-bg-table";
 }
 
@@ -777,11 +798,7 @@ const tableInfoTabListStyle = computed(() => ({
   gridTemplateColumns: `repeat(${tableInfoTabs.value.length}, minmax(0, 1fr))`,
 }));
 
-const filteredTableColumns = computed(() => {
-  if (!tableInfoSearchQuery.value) return tableColumns.value;
-  const q = tableInfoSearchQuery.value.toLowerCase();
-  return tableColumns.value.filter((c) => c.name.toLowerCase().includes(q) || c.data_type.toLowerCase().includes(q));
-});
+const filteredTableColumns = computed(() => filterObjectBrowserTableColumns(tableColumns.value, tableInfoSearchQuery.value));
 
 const filteredTableIndexes = computed(() => {
   if (!tableInfoSearchQuery.value) return tableIndexes.value;
@@ -1016,14 +1033,16 @@ async function openSource(row: ObjectBrowserRow) {
   try {
     const result = await api.getObjectSource(connectionId, database, schema, row.name, row.type as ObjectSourceKind);
     if (sidePanelGuard.isStale(epoch)) return;
-    sourceCanEdit.value = result.editable !== false && row.type !== "SEQUENCE";
-    const editable = await api.buildEditableObjectSource({
-      databaseType: effectiveDatabaseType.value,
-      objectType: row.type as ObjectSourceKind,
-      schema,
-      name: row.name,
-      source: result.source,
-    });
+    sourceCanEdit.value = result.editable !== false && !["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"].includes(row.type);
+    const editable = sourceCanEdit.value
+      ? await api.buildEditableObjectSource({
+          databaseType: effectiveDatabaseType.value,
+          objectType: row.type as ObjectSourceKind,
+          schema,
+          name: row.name,
+          source: result.source,
+        })
+      : result.source;
     if (sidePanelGuard.isStale(epoch)) return;
     // Viewing database source must preserve its original whitespace and comments;
     // formatting remains an explicit editor action instead of altering it on open.
@@ -2118,6 +2137,11 @@ async function reload() {
   await loadObjects();
 }
 
+function refresh(): boolean {
+  void reload();
+  return true;
+}
+
 function onSchemaChange(value: any) {
   selectedSchema.value = typeof value === "string" && value ? value : undefined;
   emit("schemaChange", selectedSchema.value);
@@ -2132,8 +2156,10 @@ function filterCount(filter: ObjectFilter) {
   if (filter === "materializedViews") return materializedViewCount.value;
   if (filter === "procedures") return procedureCount.value;
   if (filter === "functions") return functionCount.value;
+  if (filter === "triggers") return triggerCount.value;
   if (filter === "sequences") return sequenceCount.value;
   if (filter === "packages") return packageCount.value;
+  if (filter === "types") return typeCount.value;
   return rows.value.length;
 }
 
@@ -2149,11 +2175,15 @@ function filterLabel(filter: ObjectFilter) {
             ? "objects.procedures"
             : filter === "functions"
               ? "objects.functions"
-              : filter === "sequences"
-                ? "objects.sequences"
-                : filter === "packages"
-                  ? "objects.packages"
-                  : "objects.all";
+              : filter === "triggers"
+                ? "tree.triggers"
+                : filter === "sequences"
+                  ? "objects.sequences"
+                  : filter === "packages"
+                    ? "objects.packages"
+                    : filter === "types"
+                      ? "tree.types"
+                      : "objects.all";
   return `${t(key)} ${filterCount(filter)}`;
 }
 
@@ -2175,14 +2205,14 @@ function onSearchKeydown(event: KeyboardEvent) {
   search.value = "";
 }
 
-defineExpose({ focusSearch });
+defineExpose({ focusSearch, refresh });
 
 onBeforeUnmount(() => {
   stopColumnResize?.();
 });
 
 watch(
-  () => [props.connection.id, props.database, props.schema] as const,
+  [() => props.connection.id, () => props.database, () => props.schema],
   async () => {
     selectedSchema.value = props.schema;
     userHasSelectedFilter.value = false;
@@ -2337,8 +2367,7 @@ function getPackageMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   if (item.type === "TABLE") return getTableMenuItems(item);
   if (item.type === "VIEW" || item.type === "MATERIALIZED_VIEW") return getViewMenuItems(item);
-  if (item.type === "SEQUENCE") return getPackageMenuItems(item);
-  if (item.type === "PACKAGE" || item.type === "PACKAGE_BODY") return getPackageMenuItems(item);
+  if (isSourceOnlyObjectBrowserRow(item)) return getPackageMenuItems(item);
   return getProcFuncMenuItems(item);
 }
 </script>
@@ -2419,7 +2448,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         <CheckSquare v-if="settingsStore.editorSettings.objectBrowserShowCheckbox" class="h-3.5 w-3.5" />
         <Square v-else class="h-3.5 w-3.5" />
       </Button>
-      <Button variant="ghost" size="icon" class="h-7 w-7" :disabled="loadingObjects" @click="reload">
+      <Button variant="ghost" size="icon" class="h-7 w-7" :title="refreshTooltip" :disabled="loadingObjects" @click="reload">
         <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loadingObjects }" />
       </Button>
       <Button v-if="canPasteTableClipboard()" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="openPasteTableDialog">
@@ -2684,7 +2713,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               </Button>
             </div>
             <Button v-if="canOpenTableStructureEditor" variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs" :title="t('contextMenu.editStructure')" :aria-label="t('contextMenu.editStructure')" @click="openTableStructureEditor">
-              <Columns3Cog class="w-3 h-3" />
+              <PencilRuler class="w-3 h-3" />
               <span class="table-info-action-label">{{ t("contextMenu.editStructure") }}</span>
             </Button>
             <Button variant="ghost" size="icon" class="h-5 w-5" @click="closeSidePanel">
@@ -2727,6 +2756,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                   <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.columnName") }}</th>
                   <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.columnType") }}</th>
                   <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.tableInfoNullable") }}</th>
+                  <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("structureEditor.defaultValue") }}</th>
                 </tr>
               </thead>
               <tbody>
@@ -2743,6 +2773,9 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                   </td>
                   <td class="px-3 py-2 font-mono text-[11px] text-muted-foreground">{{ column.data_type }}</td>
                   <td class="px-3 py-2">{{ column.is_nullable ? "YES" : "NO" }}</td>
+                  <td data-table-info-column-default class="max-w-56 px-3 py-2 font-mono text-[11px]" :class="{ 'text-muted-foreground/70': column.column_default == null }" :title="column.column_default ?? undefined">
+                    <span class="block max-w-56 truncate">{{ tableColumnDefaultDisplayValue(column.column_default) }}</span>
+                  </td>
                 </tr>
               </tbody>
             </table>

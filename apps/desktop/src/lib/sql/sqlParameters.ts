@@ -167,7 +167,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
     }
     if (ch === "@" && isSyntaxEnabled("sqlserver")) {
       const name = readParameterName(sql, i + 1);
-      if (name && next !== "@" && sql[i - 1] !== "@" && !nativeSqlServerParameters.declared.has(name.toLowerCase()) && !nativeSqlServerParameters.ignoredStarts.has(i)) {
+      if (name && next !== "@" && sql[i - 1] !== "@" && !isJdbcxMcpScopedPackage(sql, i, i + 1 + name.length) && !nativeSqlServerParameters.declared.has(name.toLowerCase()) && !nativeSqlServerParameters.ignoredStarts.has(i)) {
         occurrences.push({
           key: name,
           name,
@@ -192,6 +192,19 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
   }
 
   return occurrences;
+}
+
+// JDBCX MCP commands accept npm scoped packages in their unquoted args value,
+// for example `args=-y @modelcontextprotocol/server-everything`. The `@scope`
+// prefix is command data, not a SQL Server-style template parameter.
+function isJdbcxMcpScopedPackage(sql: string, start: number, nameEnd: number): boolean {
+  if (sql[nameEnd] !== "/" || !/[\p{L}\p{N}_.-]/u.test(sql[nameEnd + 1] ?? "")) return false;
+
+  const blockStart = sql.lastIndexOf("{{", start);
+  if (blockStart === -1 || sql.lastIndexOf("}}", start) > blockStart) return false;
+
+  const extensionPrefix = sql.slice(blockStart + 2, start);
+  return /^\s*mcp\s*\(/i.test(extensionPrefix) && /(?:^|[,\s])args\s*=[^,]*$/i.test(extensionPrefix);
 }
 
 // Doris-style complex types use colons between field names and types; those are not bind parameters.

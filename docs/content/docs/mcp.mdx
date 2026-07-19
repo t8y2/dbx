@@ -3,18 +3,15 @@ title: MCP Integration
 description: Let AI coding agents query your databases through the Model Context Protocol.
 ---
 
-<Callout type="info">One line of config to let AI coding agents query your databases directly. Works with Claude Code, Cursor, Windsurf, and VS Code Copilot.</Callout>
+<Callout type="info">Connect your AI assistant to DBX and let it inspect schemas, query data, and open results in DBX.</Callout>
 
 ## What is MCP?
 
-MCP (Model Context Protocol) is an open protocol that lets AI coding agents call external tools. DBX's MCP Server exposes your database connections to AI agents, so you can query databases using natural language — the AI generates and executes SQL automatically.
+MCP (Model Context Protocol) lets AI clients call external tools. DBX MCP gives your AI assistant access to the database connections configured in DBX.
 
-```
-You: "Show me the order volume trend for the last 7 days"
-
-AI Agent → MCP Server → Your Database → Results
-                ↓
-         DBX connection configs (with passwords)
+```text
+AI agent → DBX MCP → your database → results
+                    ↘ DBX desktop app (open or display results)
 ```
 
 ## Quick Start
@@ -27,11 +24,12 @@ AI Agent → MCP Server → Your Database → Results
     npm install -g @dbx-app/mcp-server
     ```
 
+    npm automatically installs the package for your current platform. Do not use `--no-optional`.
   </Step>
   <Step>
     ### Configure Your AI Agent
 
-    Create `.mcp.json` in your working directory:
+    Create `.mcp.json` in your project directory:
 
     ```json
     {
@@ -44,232 +42,108 @@ AI Agent → MCP Server → Your Database → Results
     }
     ```
 
-    Windows portable builds need `DBX_DATA_DIR` set to the `data` directory next to `DBX.exe`:
-
-    ```json
-    {
-      "mcpServers": {
-        "dbx": {
-          "command": "npx",
-          "args": ["-y", "@dbx-app/mcp-server"],
-          "env": {
-            "DBX_DATA_DIR": "D:\\DBX_x64-portable\\data"
-          }
-        }
-      }
-    }
-    ```
-
+    If you installed the package globally, you can use `"command": "dbx-mcp-server"`. For Windows portable DBX, set `DBX_DATA_DIR` to the `data` directory next to `DBX.exe`.
   </Step>
   <Step>
     ### Start Using
 
-    Just ask your AI agent in natural language:
+    Ask your AI assistant in natural language:
 
     - "List my database connections"
-    - "Show the tables in my local-pg connection"
+    - "Show the tables on local-pg"
     - "Describe the users table"
-    - "Query the average salary from employees"
-    - "Open the orders table" (requires DBX running)
-
+    - "Count the orders from the last 7 days"
+    - "Open the orders table" (requires DBX to be running)
   </Step>
 </Steps>
 
 ## Supported AI Agents
 
-| Agent             | Configuration                |
-| ----------------- | ---------------------------- |
-| Claude Code       | `.mcp.json` (native support) |
-| Cursor            | `.cursor/mcp.json`           |
-| Windsurf          | `.windsurfrules`             |
-| VS Code + Copilot | MCP extension                |
+| Agent | Configuration |
+| --- | --- |
+| Claude Code | `.mcp.json` |
+| Cursor | `.cursor/mcp.json` |
+| Windsurf | MCP configuration |
+| VS Code + Copilot | MCP extension/configuration |
 
 ## Tools
 
-DBX MCP Server provides the following tools. Your AI agent calls them automatically based on your requests:
+DBX MCP currently provides 10 tools:
 
-### `dbx_list_connections`
+| Tool | Description |
+| --- | --- |
+| `dbx_list_connections` | List connections visible to the MCP session |
+| `dbx_add_connection` | Add a connection to local DBX storage |
+| `dbx_remove_connection` | Remove a connection from local DBX storage |
+| `dbx_list_tables` | List tables, views, or collections |
+| `dbx_describe_table` | Return columns and table metadata |
+| `dbx_get_schema_context` | Return compact schema context for an AI model |
+| `dbx_execute_query` | Execute SQL or a supported MongoDB shell command, returning at most 100 rows |
+| `dbx_execute_redis_command` | Execute a Redis command |
+| `dbx_open_table` | Open a table in the running DBX desktop app |
+| `dbx_execute_and_show` | Execute a query and display the result in DBX |
 
-List all database connections configured in DBX.
+Connection-scoped sessions hide connection-mutating and desktop UI tools.
 
-**Example:**
+## Database Access
 
-> "List my database connections"
+### Local connections
 
-**Response:**
+MCP uses the connections saved in DBX. DBX does not need to remain open for database queries.
 
-```
-| Name     | Type     | Host      | Port | Database |
-| -------- | -------- | --------- | ---- | -------- |
-| local-pg | postgres | 127.0.0.1 | 5432 |          |
-| prod-db  | mysql    | db.example| 3306 | myapp    |
-```
+Common local paths include:
 
-### `dbx_list_tables`
+| Platform | Default database file |
+| --- | --- |
+| macOS | `~/Library/Application Support/com.dbx.app/dbx.db` |
+| Linux | `~/.local/share/com.dbx.app/dbx.db` |
+| Windows | `%APPDATA%\com.dbx.app\dbx.db` |
 
-List tables and views for a connection.
+Set `DBX_DATA_DIR` to the directory containing `dbx.db`. Do not set it to the file itself.
 
-| Parameter         | Required | Description                   |
-| ----------------- | -------- | ----------------------------- |
-| `connection_name` | Yes      | DBX connection name           |
-| `schema`          | No       | Schema name (default: public) |
+PostgreSQL, MySQL, SQLite, compatible SQL databases, standalone Redis, and MongoDB can be queried locally. Some SSH, cluster, vendor-specific, and Agent/JDBC connections require their DBX components to be installed.
 
-### `dbx_describe_table`
+### Agent/JDBC databases
 
-Get column definitions for a table. The AI uses this to understand your data structure before generating queries.
+Dameng, Kingbase, Oracle, DB2, Hive, Trino, Snowflake, SAP HANA, and other Agent/JDBC connections require the matching DBX Agent, JDBC driver, and JRE. Install them in DBX before using MCP.
 
-| Parameter         | Required | Description                   |
-| ----------------- | -------- | ----------------------------- |
-| `connection_name` | Yes      | DBX connection name           |
-| `table`           | Yes      | Table name                    |
-| `schema`          | No       | Schema name (default: public) |
+### DBX Web and Docker mode
 
-**Response:**
+Set `DBX_WEB_URL` to use a deployed DBX Web backend instead of local connections. If the Web login is protected, also set `DBX_WEB_PASSWORD` to the same login password.
 
-```
-| Column      | Type      | Nullable | Default | Comment    |
-| ----------- | --------- | -------- | ------- | ---------- |
-| id (PK)     | integer   | NO       |         |            |
-| user_id     | integer   | NO       |         | User ID    |
-| total       | numeric   | NO       | 0       | Order total|
-| created_at  | timestamp | NO       | now()   |            |
-```
+### Desktop UI tools
 
-### `dbx_execute_query`
+`dbx_open_table` and `dbx_execute_and_show` require the DBX desktop app to be running. Other query tools can run while DBX is closed.
 
-Execute a SQL query and return results (max 100 rows).
+## Safety and Environment Variables
 
-| Parameter         | Required | Description         |
-| ----------------- | -------- | ------------------- |
-| `connection_name` | Yes      | DBX connection name |
-| `sql`             | Yes      | SQL query           |
+Writes are enabled by default. Use `DBX_MCP_ALLOW_WRITES=0` for read-only operation. Dangerous SQL such as `DROP`, `TRUNCATE`, and `ALTER`, Redis destructive commands, and dangerous MongoDB mutations remain blocked unless `DBX_MCP_ALLOW_DANGEROUS_SQL=1` is set.
 
-### `dbx_get_schema_context`
+| Variable | Purpose |
+| --- | --- |
+| `DBX_DATA_DIR` | Override the local DBX data directory |
+| `DBX_WEB_URL` | Use a DBX Web/Docker backend |
+| `DBX_WEB_PASSWORD` | Authenticate to DBX Web |
+| `DBX_MCP_ALLOW_WRITES` | Set to `0` to force read-only execution |
+| `DBX_MCP_ALLOW_DANGEROUS_SQL` | Allow dangerous SQL, Redis, and MongoDB operations |
+| `DBX_MCP_SCOPE_CONNECTION_ID` | Restrict the session to one connection ID |
+| `DBX_MCP_SCOPE_CONNECTION_NAME` | Restrict the session to one connection name |
+| `DBX_MCP_SCOPE_DATABASE` | Restrict the session to one database |
+| `DBX_MCP_DEBUG_SQL` | Include SQL in temporary diagnostics |
 
-Return compact table and column context for SQL generation.
-
-| Parameter         | Required | Description                                                  |
-| ----------------- | -------- | ------------------------------------------------------------ |
-| `connection_name` | Yes      | DBX connection name                                          |
-| `schema`          | No       | Schema name                                                  |
-| `tables`          | No       | Specific table names to include                              |
-| `max_tables`      | No       | Maximum number of tables to include; capped between 1 and 20 |
-
-### `dbx_add_connection`
-
-Add a new database connection to DBX.
-
-| Parameter  | Required | Description                                          |
-| ---------- | -------- | ---------------------------------------------------- |
-| `name`     | Yes      | Connection name                                      |
-| `db_type`  | Yes      | Database type (postgres, mysql, sqlite, redis, etc.) |
-| `host`     | Yes      | Database host                                        |
-| `port`     | Yes      | Database port                                        |
-| `username` | No       | Username                                             |
-| `password` | No       | Password                                             |
-| `database` | No       | Default database name                                |
-| `ssl`      | No       | Enable SSL (default: false)                          |
-
-**Example:**
-
-> "Add a PostgreSQL connection named prod-db on db.example.com:5432"
-
-### `dbx_remove_connection`
-
-Remove a database connection from DBX.
-
-| Parameter         | Required | Description                      |
-| ----------------- | -------- | -------------------------------- |
-| `connection_name` | Yes      | Name of the connection to remove |
-
-**Example:**
-
-> "Remove the test-db connection"
-
-### `dbx_open_table`
-
-Open a table in DBX desktop app UI. **Requires DBX to be running.**
-
-| Parameter         | Required | Description         |
-| ----------------- | -------- | ------------------- |
-| `connection_name` | Yes      | DBX connection name |
-| `table`           | Yes      | Table name          |
-| `database`        | No       | Database name       |
-| `schema`          | No       | Schema name         |
-
-DBX opens a new tab with the table data and brings the window to front.
-
-### `dbx_execute_and_show`
-
-Execute a SQL query in DBX desktop app UI. **Requires DBX to be running.**
-
-| Parameter         | Required | Description         |
-| ----------------- | -------- | ------------------- |
-| `connection_name` | Yes      | DBX connection name |
-| `sql`             | Yes      | SQL query           |
-| `database`        | No       | Database name       |
-
-## How It Works
-
-### Connection Configs
-
-The MCP Server reads DBX's SQLite database:
-
-| Platform | Path                                               |
-| -------- | -------------------------------------------------- |
-| macOS    | `~/Library/Application Support/com.dbx.app/dbx.db` |
-| Linux    | `~/.local/share/com.dbx.app/dbx.db`                |
-| Windows  | `%APPDATA%\com.dbx.app\dbx.db`                     |
-
-Windows portable builds usually store data in `data\dbx.db` next to `DBX.exe`. If MCP lists older connections than the running DBX app, set `DBX_DATA_DIR` in the MCP config to the `data` folder that contains `dbx.db`, for example `D:\DBX_x64-portable\data`. Do not copy `dbx.db` into the default directory, because that creates two diverging connection stores.
-
-### UI Integration
-
-`dbx_open_table` and `dbx_execute_and_show` communicate with the running DBX app via a local HTTP interface:
-
-```
-AI Agent → MCP Server → HTTP localhost → DBX backend → Tauri event → Frontend opens tab
-```
-
-### Supported Databases
-
-MCP query support in desktop local mode is implemented for PostgreSQL, MySQL, and compatible databases. Web mode delegates to the DBX web backend configured by `DBX_WEB_URL`. UI integration such as opening a table supports all database types that the running DBX desktop app can open.
-
-### SQL Safety
-
-MCP query execution is intentionally conservative:
-
-| Rule                                                         | Default                                                    |
-| ------------------------------------------------------------ | ---------------------------------------------------------- |
-| Empty or unrecognized SQL                                    | Blocked                                                    |
-| Multiple SQL statements                                      | Allowed; each statement is checked and executed separately |
-| Non-read SQL                                                 | Blocked unless writes are explicitly allowed               |
-| `DROP`, `TRUNCATE`, or `ALTER`                               | Blocked unless dangerous SQL is explicitly allowed         |
-| `UPDATE` or `DELETE` without `WHERE` when writes are allowed | Blocked                                                    |
-
-Set `DBX_MCP_ALLOW_WRITES=1` to allow write statements. Set `DBX_MCP_ALLOW_DANGEROUS_SQL=1` only in controlled environments where destructive SQL is expected.
-
-### Desktop And Web Mode
-
-| Mode               | How It Is Selected | Notes                                                                          |
-| ------------------ | ------------------ | ------------------------------------------------------------------------------ |
-| Desktop local mode | Default            | Reads DBX desktop connection storage and can call desktop-only UI bridge tools |
-| Web mode           | Set `DBX_WEB_URL`  | Sends requests to the DBX web backend instead of reading local desktop storage |
-
-For DBX Web or Docker deployments that have password protection enabled, also set `DBX_WEB_PASSWORD` in the MCP server environment. This is the same password used on the DBX Web login page, including the password created by the first-run setup screen. You do not need to set `DBX_PASSWORD` on the DBX Web server just for MCP; `DBX_PASSWORD` is only a server-side environment override. MCP calls fail before returning connection data when the Web backend requires authentication and no password is provided. Desktop local mode does not use `DBX_WEB_PASSWORD`.
-
-## FAQ
+## Troubleshooting
 
 <Accordions>
-  <Accordion title="MCP Server can't connect to my database">Check that the connection works in DBX first. The MCP Server uses the same config and credentials. Make sure the database is running and network-reachable.</Accordion>
-  <Accordion title="dbx_open_table says 'DBX is not running'">Start the DBX desktop app first. UI integration requires DBX's local HTTP service (port 4224).</Accordion>
-  <Accordion title="Connection name not found">Connection name matching is case-insensitive but must match the name configured in DBX. Use `dbx_list_connections` to see all available names.</Accordion>
-  <Accordion title="Query timeout">MCP Server has a 30-second query timeout. Consider adding indexes or simplifying your query. You can also ask the AI to use `dbx_describe_table` first to understand the schema, then generate an optimized query.</Accordion>
-  <Accordion title="How to use MCP with Docker?">Set `DBX_WEB_URL` to your DBX Web URL. If the Web UI requires a password, set `DBX_WEB_PASSWORD` to the same password used on the Web login page; otherwise MCP will refuse protected Web API access.</Accordion>
+  <Accordion title="The optional platform package was not installed">Reinstall without `--no-optional`, then verify the platform with `node -p 'process.platform + "-" + process.arch'`. The current platform must appear in the supported platform table.</Accordion>
+  <Accordion title="dbx.db cannot be found">Set `DBX_DATA_DIR` to the folder containing `dbx.db`. For Windows portable builds, this is normally the `data` folder beside `DBX.exe`.</Accordion>
+  <Accordion title="DBX is not running">Only `dbx_open_table` and `dbx_execute_and_show` require the desktop app. Local query tools can run without DBX open.</Accordion>
+  <Accordion title="An Agent/JDBC database cannot start">Install or update the matching DBX agent, JDBC driver, and JRE through DBX Driver Manager. Proprietary drivers are not included in the native MCP package.</Accordion>
+  <Accordion title="I see a better-sqlite3 or Node ABI error">MCP does not require `better-sqlite3`. Upgrade `@dbx-app/mcp-server`; if the error comes from `@dbx-app/cli`, follow the CLI installation requirements because it is a separate package.</Accordion>
 </Accordions>
 
 ## Requirements
 
-- [DBX](https://github.com/t8y2/dbx) installed with at least one connection configured
-- Node.js 18+
-- UI integration requires DBX v0.3.9+
+- Node.js 18.18.0 or newer
+- DBX installed with at least one connection configured
+- Matching DBX Agent, JDBC driver, and JRE for Agent/JDBC connections
+- DBX desktop app running when using the two UI tools

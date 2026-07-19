@@ -88,6 +88,11 @@ jobs:
             arch: arm64
 
     runs-on: ${{ matrix.platform }}
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      # Keep releases working until the shared S3 secrets are configured.
+      SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@v5
 
@@ -103,9 +108,35 @@ jobs:
         run: pnpm install
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: ${{ matrix.target }}
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: "v0.10.0"
+
+      - name: Configure S3 sccache
+        if: env.SCCACHE_GHA_ENABLED != 'true'
+        shell: bash
+        env:
+          CACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+          CACHE_ENDPOINT: ${{ secrets.SCCACHE_S3_ENDPOINT }}
+          CACHE_REGION: ${{ secrets.SCCACHE_S3_REGION }}
+          CACHE_KEY_PREFIX: ${{ secrets.SCCACHE_S3_KEY_PREFIX }}
+          CACHE_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
+          CACHE_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
+        run: |
+          {
+            echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
+            echo "SCCACHE_ENDPOINT=${CACHE_ENDPOINT}"
+            echo "SCCACHE_REGION=${CACHE_REGION}"
+            echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
+            echo "SCCACHE_S3_USE_SSL=true"
+            echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
+            echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+          } >> "$GITHUB_ENV"
 
       - name: Compute Rust dependency hash
         id: deps-hash
@@ -127,6 +158,8 @@ jobs:
           workspaces: "./ -> target"
           shared-key: release-${{ matrix.target }}-${{ steps.deps-hash.outputs.hash }}
           add-rust-environment-hash-key: false
+          # Release tags cannot reuse target caches across refs; sccache handles compiler outputs.
+          cache-targets: false
           cache-on-failure: true
 
       - name: Install Apple certificate (macOS)
@@ -195,6 +228,12 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: --target ${{ matrix.target }}
+
+      - name: Show sccache stats
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: ${SCCACHE_PATH} --show-stats
 
       - name: Upload Windows portable ZIP
         if: matrix.arch == 'x64' || matrix.arch == 'arm64'
@@ -381,55 +420,6 @@ jobs:
           CNB_UPLOAD_CONCURRENCY: "3"
         run: |
           node .github/scripts/sync-cnb-release.mjs \
-            --github-release "$RUNNER_TEMP/github-release/release.json" \
-            --assets-dir "$RUNNER_TEMP/release-assets"
-
-  sync-release-to-atomgit:
-    name: Sync release to AtomGit
-    needs: publish
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - name: Ensure AtomGit tag exists
-        env:
-          TAG_NAME: ${{ github.ref_name }}
-          ATOMGIT_TOKEN: ${{ secrets.ATOMGIT_TOKEN }}
-        run: |
-          set -euo pipefail
-          git fetch origin "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}" --force
-          git remote add atomgit "https://t8y2:${ATOMGIT_TOKEN}@atomgit.com/t8y2/dbx.git"
-          git push atomgit "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}" --force
-
-      - name: Download GitHub release assets
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ github.ref_name }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/github-release" "$RUNNER_TEMP/release-assets"
-          gh release view "$TAG_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --json tagName,name,body,targetCommitish,isPrerelease,isDraft,assets \
-            > "$RUNNER_TEMP/github-release/release.json"
-          gh release download "$TAG_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --dir "$RUNNER_TEMP/release-assets" \
-            --clobber
-
-      - name: Sync release assets to AtomGit
-        env:
-          ATOMGIT_TOKEN: ${{ secrets.ATOMGIT_TOKEN }}
-          ATOMGIT_REPOSITORY: "t8y2/dbx"
-          # AtomGit throttles concurrent large-asset uploads, which can expire their temporary upload URLs.
-          ATOMGIT_UPLOAD_CONCURRENCY: "1"
-        run: |
-          set -euo pipefail
-          node .github/scripts/sync-atomgit-release.mjs \
             --github-release "$RUNNER_TEMP/github-release/release.json" \
             --assets-dir "$RUNNER_TEMP/release-assets"
 

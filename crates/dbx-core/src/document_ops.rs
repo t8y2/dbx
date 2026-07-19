@@ -367,7 +367,12 @@ pub async fn find_documents_core(
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => {
-            mongo_driver::find_documents(client, database, collection, skip, limit, filter, projection, sort).await
+            // Document browser responses must retain BSON type metadata so nested filters
+            // can round-trip ObjectId, Date, and int64 values through Extended JSON.
+            mongo_driver::find_documents_extended_json(
+                client, database, collection, skip, limit, filter, projection, sort,
+            )
+            .await
         }
         PoolKind::Elasticsearch(client) => {
             let client = client.clone();
@@ -393,10 +398,21 @@ pub async fn find_documents_core(
             if let Some(projection) = projection {
                 params["projection"] = serde_json::json!(projection);
             }
-            client.mongo_find_documents(params).await
+            match client.mongo_find_documents_extended_json(params.clone()).await {
+                Ok(result) => Ok(result),
+                Err(error) if is_unknown_agent_method_error(&error, "find_documents_extended_json") => {
+                    client.mongo_find_documents(params).await
+                }
+                Err(error) => Err(error),
+            }
         }
         _ => Err("Not a MongoDB/Elasticsearch/vector connection".to_string()),
     }
+}
+
+fn is_unknown_agent_method_error(error: &str, method: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains(method) && (lower.contains("unknown method") || lower.contains("method not found"))
 }
 
 pub async fn insert_document_core(
@@ -405,6 +421,7 @@ pub async fn insert_document_core(
     database: &str,
     collection: &str,
     doc_json: &str,
+    routing: Option<&str>,
 ) -> Result<String, String> {
     ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
@@ -413,7 +430,7 @@ pub async fn insert_document_core(
         PoolKind::Elasticsearch(client) => {
             let client = client.clone();
             drop(connections);
-            elasticsearch_driver::insert_document(&client, collection, doc_json).await
+            elasticsearch_driver::insert_document(&client, collection, doc_json, routing).await
         }
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;

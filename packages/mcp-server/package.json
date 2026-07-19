@@ -1,6 +1,6 @@
 {
   "name": "@dbx-app/mcp-server",
-  "version": "0.4.29",
+  "version": "0.4.37",
   "description": "MCP server for DBX — query databases from Claude Code, Cursor, and other AI agents",
   "keywords": [
     "ai-agent",
@@ -19,32 +19,34 @@
     "directory": "packages/mcp-server"
   },
   "bin": {
-    "dbx-mcp-server": "dist/index.js",
-    "mcp-server": "dist/index.js"
+    "dbx-mcp-server": "bin/dbx-mcp-server.js",
+    "mcp-server": "bin/dbx-mcp-server.js"
   },
   "files": [
-    "dist",
+    "bin",
     "server.json"
   ],
   "type": "module",
   "scripts": {
-    "start": "tsx src/index.ts",
-    "test": "pnpm --filter @dbx-app/mcp-server build && vitest run --config vitest.config.ts",
-    "build": "pnpm --filter @dbx-app/node-core build && tsc",
-    "prepublishOnly": "tsc"
+    "start": "cargo run -p dbx-mcp --",
+    "test": "cargo build -p dbx-mcp && vitest run --config vitest.config.ts",
+    "build": "node --check bin/dbx-mcp-server.js",
+    "prepublishOnly": "node bin/dbx-mcp-server.js --verify-platform"
   },
-  "dependencies": {
-    "@dbx-app/node-core": "workspace:^",
-    "@modelcontextprotocol/sdk": "^1.12.1",
-    "zod": "^3.25.20"
+  "optionalDependencies": {
+    "@dbx-app/mcp-darwin-arm64": "0.4.37",
+    "@dbx-app/mcp-darwin-x64": "0.4.37",
+    "@dbx-app/mcp-linux-arm64-gnu": "0.4.37",
+    "@dbx-app/mcp-linux-x64-gnu": "0.4.37",
+    "@dbx-app/mcp-win32-arm64": "0.4.37",
+    "@dbx-app/mcp-win32-x64": "0.4.37"
   },
   "devDependencies": {
     "@types/node": "^22.15.21",
-    "tsx": "^4.19.4",
-    "typescript": "^5.8.3"
+    "vitest": "^4.1.8"
   },
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=18.18.0"
   },
   "mcpName": "io.github.t8y2/dbx"
 }

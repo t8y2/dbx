@@ -9,7 +9,7 @@ use reqwest::{header, Client, Method, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::ai::AiConfig;
+use crate::ai::AiConfigItem;
 use crate::connection_secrets::{
     MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY,
     MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
@@ -119,7 +119,12 @@ pub struct EncryptedSecretsBlob {
 #[serde(rename_all = "camelCase")]
 pub struct SensitiveSyncPayload {
     pub connection_secrets: Vec<ConnectionSecretSnapshot>,
-    pub ai_config: Option<AiConfig>,
+    // None = legacy snapshot (fall through to ai_config migration),
+    // Some(vec) = explicit state (empty vec means all configs were deleted)
+    pub ai_configs: Option<Vec<AiConfigItem>>,
+    /// Legacy field, used only for deserializing old data; not serialized
+    #[serde(default, skip_serializing)]
+    pub ai_config: Option<crate::ai::AiConfig>,
     /// Full tunnel profiles including their secrets.
     #[serde(default)]
     pub tunnel_profiles: Option<Vec<TransportLayerConfig>>,
@@ -664,7 +669,8 @@ async fn build_sensitive_payload(
 
     Ok(SensitiveSyncPayload {
         connection_secrets,
-        ai_config: storage.load_ai_config().await?,
+        ai_configs: Some(storage.load_ai_configs().await.unwrap_or_default()),
+        ai_config: None,
         tunnel_profiles: Some(tunnel_profiles.to_vec()),
     })
 }
@@ -784,8 +790,19 @@ async fn apply_sensitive_payload(storage: &Storage, payload: &SensitiveSyncPaylo
         }
         storage.set_secret(&secret.connection_id, &secret.key, &secret.secret).await?;
     }
-    if let Some(ai_config) = &payload.ai_config {
-        storage.save_ai_config(ai_config).await?;
+    if let Some(configs) = &payload.ai_configs {
+        // New format: save directly (empty = all configs were deleted)
+        storage.save_ai_configs(configs).await?;
+    } else if let Some(old_config) = &payload.ai_config {
+        // Legacy format: migrate then save
+        let provider_name = old_config.provider.as_str().to_string();
+        let item = AiConfigItem {
+            id: AiConfigItem::new_id(),
+            name: provider_name,
+            is_default: true,
+            config: old_config.clone(),
+        };
+        storage.save_ai_config_item(&item).await?;
     }
     if let Some(profiles) = &payload.tunnel_profiles {
         storage.save_tunnel_profiles(profiles).await?;
@@ -1024,17 +1041,44 @@ fn parent_collection_paths(remote_path: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_sync_snapshot, build_sync_snapshot, build_sync_snapshot_with_saved_secrets, decrypt_sensitive_payload,
-        encrypt_sensitive_payload, forget_webdav_sync_secrets_passphrase, gitee_snippet_payload,
-        normalized_remote_path, parent_collection_paths, resolve_webdav_sync_secrets_passphrase,
+        apply_sensitive_payload, apply_sync_snapshot, build_sync_snapshot, build_sync_snapshot_with_saved_secrets,
+        decrypt_sensitive_payload, encrypt_sensitive_payload, forget_webdav_sync_secrets_passphrase,
+        gitee_snippet_payload, normalized_remote_path, parent_collection_paths, resolve_webdav_sync_secrets_passphrase,
         save_webdav_sync_secrets_preference, scrub_connection_secrets, snippet_file_content, snippet_response_id,
         webdav_sync_secrets_status, ApplySnapshotOptions, ConnectionSecretSnapshot, SensitiveSyncPayload,
     };
+    use crate::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiConfigItem};
     use crate::connection_secrets::NACOS_AUTH_PASSWORD_KEY;
     use crate::models::connection::{
         default_redis_key_separator, ConnectionConfig, DatabaseType, SshTunnelConfig, TransportLayerConfig,
     };
     use crate::storage::Storage;
+
+    fn make_test_config(name: &str, is_default: bool) -> AiConfigItem {
+        AiConfigItem {
+            id: format!("cfg-{name}"),
+            name: name.to_string(),
+            is_default,
+            config: AiConfig {
+                provider: crate::ai::AiProvider::Openai,
+                api_key: String::new(),
+                auth_method: AiAuthMethod::Bearer,
+                endpoint: "https://api.openai.com/v1".to_string(),
+                model: "gpt-4o-mini".to_string(),
+                models: vec![],
+                api_style: AiApiStyle::Completions,
+                proxy_enabled: false,
+                proxy_url: String::new(),
+                enable_thinking: true,
+                reasoning_level: crate::ai::AiReasoningLevel::Default,
+                context_window: None,
+                codex_cli_path: None,
+                codex_cli_env: Default::default(),
+                claude_code_cli_path: None,
+                claude_code_cli_env: Default::default(),
+            },
+        }
+    }
 
     fn temp_db_path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("dbx-cloud-sync-{name}-{}.db", uuid::Uuid::new_v4()))
@@ -1099,6 +1143,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            database_info: None,
         }
     }
 
@@ -1160,6 +1205,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            database_info: None,
         }
     }
 
@@ -1269,6 +1315,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            database_info: None,
         };
         scrub_connection_secrets(&mut config);
         assert!(config.password.is_empty());
@@ -1307,6 +1354,7 @@ mod tests {
                     secret: "hop-secret".to_string(),
                 },
             ],
+            ai_configs: None,
             ai_config: None,
         };
         let encrypted = encrypt_sensitive_payload(&payload, "sync-pass").unwrap();
@@ -1325,6 +1373,7 @@ mod tests {
                 key: "password".to_string(),
                 secret: "secret".to_string(),
             }],
+            ai_configs: None,
             ai_config: None,
         };
         let encrypted = encrypt_sensitive_payload(&payload, "sync-pass").unwrap();
@@ -1474,5 +1523,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(target.load_tunnel_profiles().await.unwrap(), vec![profile]);
+    }
+
+    // ---- AI configs sync tests ----
+
+    #[tokio::test]
+    async fn sensitive_payload_ai_configs_none_falls_through_to_legacy() {
+        let storage = Storage::open(&temp_db_path("ai-cfg-none")).await.unwrap();
+
+        // No ai_configs in payload — fall through to ai_config (legacy) branch
+        let payload = SensitiveSyncPayload {
+            connection_secrets: vec![],
+            ai_configs: None,
+            ai_config: None,
+            tunnel_profiles: None,
+        };
+        apply_sensitive_payload(&storage, &payload).await.unwrap();
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert!(loaded.is_empty(), "None → no configs written");
+    }
+
+    #[tokio::test]
+    async fn sensitive_payload_ai_configs_empty_clears_table() {
+        let storage = Storage::open(&temp_db_path("ai-cfg-empty")).await.unwrap();
+
+        // Pre-populate with a config
+        let cfg = make_test_config("to-be-cleared", true);
+        storage.save_ai_config_item(&cfg).await.unwrap();
+
+        // Some([]) — explicit clear
+        let payload = SensitiveSyncPayload {
+            connection_secrets: vec![],
+            ai_configs: Some(vec![]),
+            ai_config: None,
+            tunnel_profiles: None,
+        };
+        apply_sensitive_payload(&storage, &payload).await.unwrap();
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert!(loaded.is_empty(), "Some([]) → table cleared");
+    }
+
+    #[tokio::test]
+    async fn sensitive_payload_ai_configs_some_saves_configs() {
+        let storage = Storage::open(&temp_db_path("ai-cfg-some")).await.unwrap();
+
+        let cfg = make_test_config("synced", true);
+        let payload = SensitiveSyncPayload {
+            connection_secrets: vec![],
+            ai_configs: Some(vec![cfg]),
+            ai_config: None,
+            tunnel_profiles: None,
+        };
+        apply_sensitive_payload(&storage, &payload).await.unwrap();
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "synced");
     }
 }

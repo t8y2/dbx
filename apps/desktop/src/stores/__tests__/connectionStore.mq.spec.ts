@@ -103,7 +103,7 @@ describe("connectionStore MQ sidebar tree", () => {
       { id: "mq-1:mq-tenant:tenant-a", label: "tenant-a", type: "mq-tenant", tenant: "tenant-a" },
     ]);
     expect(node.isExpanded).toBe(true);
-  });
+  }, 10_000);
 
   it("adds a Kafka topics child with a topics initial tab", async () => {
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));

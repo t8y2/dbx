@@ -23,6 +23,7 @@ pub async fn execute_query(
     result_session_id: Option<String>,
     client_session_id: Option<String>,
     timeout_secs: Option<u64>,
+    execution_mode: Option<dbx_core::query::QueryExecutionMode>,
 ) -> Result<db::QueryResult, String> {
     let execution_id = execution_id.filter(|id| !id.trim().is_empty());
     let registered_query = execution_id.as_ref().map(|id| {
@@ -48,6 +49,7 @@ pub async fn execute_query(
             client_session_id,
             timeout_secs,
             execution_id,
+            execution_mode: execution_mode.unwrap_or_default(),
             ..Default::default()
         },
     )
@@ -71,6 +73,7 @@ pub async fn execute_multi(
     timeout_secs: Option<u64>,
     use_transaction: Option<bool>,
     continue_on_error: Option<bool>,
+    execution_mode: Option<dbx_core::query::QueryExecutionMode>,
 ) -> Result<Vec<dbx_core::query::ExecuteMultiResult>, String> {
     let execution_id = execution_id.filter(|id| !id.trim().is_empty());
     let registered_query = execution_id.as_ref().map(|id| {
@@ -82,13 +85,13 @@ pub async fn execute_multi(
     let cancel_token = registered_query.as_ref().map(|query| query.token());
     let trace_id = execution_id.as_deref().unwrap_or("no-execution-id").to_string();
     let started_at = Instant::now();
+    dbx_core::sql_diagnostics::debug_sql("query:execute_multi:start", &sql);
     log::info!(
-        "[query][execute_multi:start] trace_id={} connection_id={} database={} schema={:?} sql={}",
+        "[query][execute_multi:start] trace_id={} connection_id={} database={} schema={:?}",
         trace_id,
         connection_id,
         database,
-        schema,
-        sql
+        schema
     );
 
     let result = dbx_core::query::execute_multi_core_with_options_for_client(
@@ -108,6 +111,7 @@ pub async fn execute_multi(
             execution_id,
             use_transaction,
             continue_on_error: continue_on_error.unwrap_or(false),
+            execution_mode: execution_mode.unwrap_or_default(),
         },
     )
     .await;

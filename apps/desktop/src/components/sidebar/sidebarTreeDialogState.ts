@@ -2,6 +2,8 @@ import { ref, shallowRef } from "vue";
 import type { TreeNode } from "@/types/database";
 import type { PasteTableMode } from "@/lib/table/tableClipboard";
 import { fallbackCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
+import type { DatabaseUserIdentity } from "@/lib/database/databaseUserAdmin";
+import type { AuthorizationPlan, AuthorizationStepResult } from "@/lib/database/databaseAuthorizationPlan";
 
 export type DuplicateStructureSource = TreeNode & { connectionId: string; database: string };
 type ConnectionDeleteTarget = TreeNode & { connectionId: string };
@@ -61,6 +63,14 @@ export const showCreateDatabaseDialog = ref(false);
 export const createDatabaseName = ref("");
 export const createDatabaseCharset = ref("utf8mb4");
 export const createDatabaseCollation = ref("utf8mb4_unicode_ci");
+export const createDatabaseUsers = ref<DatabaseUserIdentity[]>([]);
+export const createDatabaseSelectedUsers = ref<DatabaseUserIdentity[]>([]);
+export const createDatabaseUsersLoading = ref(false);
+export const showCreateDatabasePreviewDialog = ref(false);
+export const createDatabaseAuthorizationPlan = ref<AuthorizationPlan>();
+export const createDatabasePreviewSql = ref("");
+export const createDatabaseAuthorizationResults = ref<AuthorizationStepResult[]>([]);
+export const createDatabaseAuthorizationApplying = ref(false);
 export const showCreateNacosNamespaceDialog = ref(false);
 export const createNacosNamespaceId = ref("");
 export const createNacosNamespaceName = ref("");
@@ -115,6 +125,7 @@ const openFlags = [
   showDuplicateDialog,
   showPasteDialog,
   showCreateDatabaseDialog,
+  showCreateDatabasePreviewDialog,
   showCreateNacosNamespaceDialog,
   showEditNacosNamespaceDialog,
   showDropDatabaseConfirm,
@@ -132,6 +143,13 @@ const openFlags = [
 
 export function resetSidebarTreeDialogState() {
   for (const flag of openFlags) flag.value = false;
+  createDatabaseUsers.value = [];
+  createDatabaseSelectedUsers.value = [];
+  createDatabaseUsersLoading.value = false;
+  createDatabaseAuthorizationPlan.value = undefined;
+  createDatabasePreviewSql.value = "";
+  createDatabaseAuthorizationResults.value = [];
+  createDatabaseAuthorizationApplying.value = false;
   sidebarTreeDialogOwner.value = null;
   sidebarDangerTarget.value = null;
   sidebarFormTarget.value = null;

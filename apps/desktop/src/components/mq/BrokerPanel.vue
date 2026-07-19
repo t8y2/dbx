@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { formatError } from "@/lib/backend/errorUtils";
 import { ref, watch, onMounted, onUnmounted } from "vue";
+import { useI18n } from "vue-i18n";
 import type { ClusterInfo } from "@/types/mq";
 import { mqGetClusterInfo } from "@/lib/backend/api";
 
@@ -10,6 +11,7 @@ interface Props {
 }
 
 const props = defineProps<Props>();
+const { t } = useI18n();
 
 const clusterInfo = ref<ClusterInfo>();
 const loading = ref(false);
@@ -90,72 +92,72 @@ onUnmounted(() => {
 <template>
   <div class="broker-panel">
     <div class="panel-toolbar">
-      <h3>Broker 集群</h3>
+      <h3>{{ t("mqBroker.title") }}</h3>
       <div class="toolbar-actions">
         <label class="checkbox-label">
           <input type="checkbox" v-model="autoRefresh" />
-          自动刷新
+          {{ t("mqBroker.autoRefresh") }}
         </label>
         <select v-model.number="refreshInterval" :disabled="!autoRefresh" class="refresh-interval">
-          <option :value="5">5秒</option>
-          <option :value="10">10秒</option>
-          <option :value="30">30秒</option>
-          <option :value="60">60秒</option>
+          <option :value="5">{{ t("mqBroker.refreshInterval5s") }}</option>
+          <option :value="10">{{ t("mqBroker.refreshInterval10s") }}</option>
+          <option :value="30">{{ t("mqBroker.refreshInterval30s") }}</option>
+          <option :value="60">{{ t("mqBroker.refreshInterval60s") }}</option>
         </select>
         <button @click="refreshNow" :disabled="loading" class="btn-sm">
-          {{ loading ? "刷新中..." : "立即刷新" }}
+          {{ loading ? t("mqBroker.refreshing") : t("mqBroker.refreshNow") }}
         </button>
       </div>
     </div>
 
     <div v-if="error" class="panel-error">{{ error }}</div>
 
-    <div v-else-if="loading && !clusterInfo" class="panel-loading">加载中...</div>
+    <div v-else-if="loading && !clusterInfo" class="panel-loading">{{ t("mqBroker.loading") }}</div>
 
     <div v-else-if="clusterInfo" class="broker-content">
-      <!-- 集群概览 -->
       <div class="stats-section">
-        <h4>集群概览</h4>
+        <h4>{{ t("mqBroker.clusterOverview") }}</h4>
         <div class="stats-grid">
           <div class="stat-card">
             <div class="stat-icon">🔗</div>
             <div class="stat-content">
-              <div class="stat-label">集群 ID</div>
-              <div class="stat-value stat-value-sm">{{ clusterInfo.clusterId || "未知" }}</div>
+              <div class="stat-label">{{ t("mqBroker.clusterId") }}</div>
+              <div class="stat-value stat-value-sm">{{ clusterInfo.clusterId || t("mqBroker.unknown") }}</div>
             </div>
           </div>
           <div class="stat-card">
             <div class="stat-icon">🖥️</div>
             <div class="stat-content">
-              <div class="stat-label">Broker 数量</div>
+              <div class="stat-label">{{ t("mqBroker.brokerCount") }}</div>
               <div class="stat-value">{{ clusterInfo.brokerCount }}</div>
             </div>
           </div>
           <div class="stat-card">
             <div class="stat-icon">👑</div>
             <div class="stat-content">
-              <div class="stat-label">Controller</div>
+              <div class="stat-label">{{ t("mqBroker.controller") }}</div>
               <div class="stat-value stat-value-sm">
-                <template v-if="clusterInfo.controllerHost"> Node {{ clusterInfo.controllerId ?? "?" }} · {{ clusterInfo.controllerHost }} </template>
-                <template v-else>未知</template>
+                <template v-if="clusterInfo.controllerHost">
+                  {{ t("mqBroker.controllerNode", { id: clusterInfo.controllerId ?? "?", host: clusterInfo.controllerHost }) }}
+                </template>
+                <template v-else>{{ t("mqBroker.unknown") }}</template>
               </div>
             </div>
           </div>
         </div>
       </div>
 
-      <!-- Broker 节点列表 -->
       <div class="stats-section">
-        <h4>Broker 节点</h4>
+        <h4>{{ t("mqBroker.brokerNodes") }}</h4>
         <div v-if="clusterInfo.brokers.length" class="broker-table-wrap">
           <table class="broker-table">
             <thead>
               <tr>
-                <th>Node ID</th>
-                <th>Host</th>
-                <th>Port</th>
-                <th>Rack</th>
-                <th>角色</th>
+                <th>{{ t("mqBroker.nodeId") }}</th>
+                <th>{{ t("mqBroker.host") }}</th>
+                <th>{{ t("mqBroker.port") }}</th>
+                <th>{{ t("mqBroker.rack") }}</th>
+                <th>{{ t("mqBroker.role") }}</th>
               </tr>
             </thead>
             <tbody>
@@ -165,14 +167,14 @@ onUnmounted(() => {
                 <td>{{ broker.port }}</td>
                 <td>{{ broker.rack || "-" }}</td>
                 <td>
-                  <span v-if="broker.id === clusterInfo.controllerId" class="role-badge controller">Controller</span>
-                  <span v-else class="role-badge follower">Follower</span>
+                  <span v-if="broker.id === clusterInfo.controllerId" class="role-badge controller">{{ t("mqBroker.roleController") }}</span>
+                  <span v-else class="role-badge follower">{{ t("mqBroker.roleFollower") }}</span>
                 </td>
               </tr>
             </tbody>
           </table>
         </div>
-        <div v-else class="empty-state">暂无 Broker 节点信息</div>
+        <div v-else class="empty-state">{{ t("mqBroker.noBrokerNodes") }}</div>
       </div>
     </div>
   </div>

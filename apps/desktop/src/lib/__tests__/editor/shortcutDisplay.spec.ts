@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import { formatShortcutDisplay, shortcutDisplayKeys } from "@/lib/editor/shortcutDisplay";
 
 describe("shortcut display", () => {
+  it("shows the default mouse modifier as Option on macOS and Alt elsewhere", () => {
+    expect(formatShortcutDisplay("Alt", "MacIntel")).toBe("⌥");
+    expect(formatShortcutDisplay("Alt", "Win32")).toBe("Alt");
+  });
+
   it("uses readable modifier labels on Windows", () => {
     expect(shortcutDisplayKeys("Shift+Alt+U", "Win32")).toEqual(["Shift", "Alt", "U"]);
   });

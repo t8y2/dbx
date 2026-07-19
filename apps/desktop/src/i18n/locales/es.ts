@@ -524,6 +524,10 @@ export default withEnglishFallback({
         mixed: "Mixto",
       },
     },
+    elasticsearchDirectMode: "Conexión directa",
+    elasticsearchKibanaProxyMode: "proxy de Kibana",
+    elasticsearchKibanaHost: "host de Kibana",
+    elasticsearchKibanaBasePath: "ruta base",
   },
   editor: {
     pressToExecute: "Presiona {mod}+Enter para ejecutar",

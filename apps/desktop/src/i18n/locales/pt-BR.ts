@@ -523,6 +523,10 @@ export default withEnglishFallback({
         mixed: "Maiúsculas e minúsculas",
       },
     },
+    elasticsearchDirectMode: "Conexão Direta",
+    elasticsearchKibanaProxyMode: "Proxy do Kibana",
+    elasticsearchKibanaHost: "Host do Kibana",
+    elasticsearchKibanaBasePath: "Caminho Base",
   },
   editor: {
     pressToExecute: "Pressione {mod}+Enter para executar",

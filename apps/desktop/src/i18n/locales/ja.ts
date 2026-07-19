@@ -522,6 +522,10 @@ export default withEnglishFallback({
         mixed: "大文字小文字混在",
       },
     },
+    elasticsearchDirectMode: "直接接続",
+    elasticsearchKibanaProxyMode: "Kibana プロキシ",
+    elasticsearchKibanaHost: "Kibana ホスト",
+    elasticsearchKibanaBasePath: "ベースパス",
   },
   editor: {
     pressToExecute: "{mod}+Enter で実行",

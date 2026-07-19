@@ -523,6 +523,10 @@ export default withEnglishFallback({
         mixed: "混合大小寫",
       },
     },
+    elasticsearchDirectMode: "直接連線",
+    elasticsearchKibanaProxyMode: "Kibana 代理",
+    elasticsearchKibanaHost: "Kibana 主機",
+    elasticsearchKibanaBasePath: "基礎路徑",
   },
   editor: {
     pressToExecute: "按 {mod}+Enter 執行查詢",

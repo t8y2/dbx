@@ -66,6 +66,7 @@ import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { canTreeNodePin, canTreeNodeShowExpander } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { objectTypesForGroupNode } from "@/lib/table/tableTree";
 import { loadSidebarObjectGroup } from "@/lib/sidebar/sidebarObjectGroupRouting";
+import { mysqlObjectTemplateForGroup } from "@/lib/sidebar/mysqlObjectTemplates";
 import { buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTemplate, buildTableUpdateTemplate } from "@/lib/table/tableSqlTemplates";
 import { driverStoreFocusForInstallError } from "@/lib/connection/agentDriverInstallHint";
 import {
@@ -2808,6 +2809,16 @@ function createView() {
   });
 }
 
+function createMysqlObjectTemplate() {
+  const node = activeNode.value;
+  if (!node.connectionId || !node.database) return;
+  const template = mysqlObjectTemplateForGroup(connectionStore.getConfig(node.connectionId), node);
+  if (!template) return;
+  connectionStore.activeConnectionId = node.connectionId;
+  const tabId = queryStore.createTab(node.connectionId, node.database, t(template.titleKey), "query", node.schema);
+  queryStore.updateSql(tabId, template.sql);
+}
+
 const canExpand = computed(() =>
   canTreeNodeShowExpander({
     type: activeNode.value.type,
@@ -3967,7 +3978,8 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
   const { node, items } = context;
   // 9. Group Labels (group-columns, group-tables, etc.)
   if (isGroupLabel(node)) {
-    const hasGroupCreateAction = (node.type === "group-tables" && canCreateTable.value) || (node.type === "group-views" && !!node.connectionId && !!node.database);
+    const mysqlObjectTemplate = node.connectionId ? mysqlObjectTemplateForGroup(connectionStore.getConfig(node.connectionId), node) : null;
+    const hasGroupCreateAction = (node.type === "group-tables" && canCreateTable.value) || (node.type === "group-views" && !!node.connectionId && !!node.database) || !!mysqlObjectTemplate;
     const canLoadAllObjectGroup = node.type === "group-tables" || node.type === "group-views" || node.type === "group-materialized-views";
     if (node.type === "group-tables" && canCreateTable.value) {
       items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
@@ -3980,6 +3992,9 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
     }
     if (node.type === "group-views" && node.connectionId && node.database) {
       items.push({ label: t("contextMenu.createView"), action: createView, icon: Plus });
+    }
+    if (mysqlObjectTemplate) {
+      items.push({ label: t(mysqlObjectTemplate.titleKey), action: createMysqlObjectTemplate, icon: Plus });
     }
     if (hasGroupCreateAction) {
       items.push({ label: "", separator: true });

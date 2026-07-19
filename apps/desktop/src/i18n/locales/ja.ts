@@ -1752,6 +1752,9 @@ export default withEnglishFallback({
     dropExtension: "拡張機能を削除",
     processList: "プロセス一覧",
     serverDashboard: "サーバーダッシュボード",
+    createProcedure: "新規ストアドプロシージャ",
+    createFunction: "新規関数",
+    createTrigger: "新規トリガー",
   },
   visibleDatabases: {
     title: "表示するデータベース",

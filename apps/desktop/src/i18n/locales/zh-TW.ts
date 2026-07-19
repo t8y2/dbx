@@ -1753,6 +1753,9 @@ export default withEnglishFallback({
     dropExtension: "刪除擴展",
     processList: "處理程序清單",
     serverDashboard: "伺服器儀表板",
+    createProcedure: "新增儲存程序",
+    createFunction: "新增函數",
+    createTrigger: "新增觸發器",
   },
   visibleDatabases: {
     title: "顯示資料庫",

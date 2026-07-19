@@ -1753,6 +1753,9 @@ export default withEnglishFallback({
     dropExtension: "Remover extensão",
     processList: "Lista de Processos",
     serverDashboard: "Painel do Servidor",
+    createProcedure: "Novo procedimento armazenado",
+    createFunction: "Nova função",
+    createTrigger: "Novo gatilho",
   },
   visibleDatabases: {
     title: "Bancos de dados visíveis",

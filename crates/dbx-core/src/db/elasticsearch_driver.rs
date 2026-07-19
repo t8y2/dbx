@@ -1,5 +1,5 @@
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
-use reqwest::{Client as HttpClient, Method};
+use reqwest::{Client as HttpClient, Method, StatusCode};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashSet;
@@ -30,11 +30,20 @@ const ELASTICSEARCH_PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
 const ELASTICSEARCH_QUERY_VALUE_ENCODE_SET: &AsciiSet =
     &CONTROLS.add(b' ').add(b'"').add(b'#').add(b'%').add(b'&').add(b'+').add(b'/').add(b'=').add(b'?');
 
+const KIBANA_PROXY_STATUS_HEADER: &str = "x-console-proxy-status-code";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ElasticsearchTransportMode {
+    Direct,
+    KibanaProxy,
+}
+
 pub struct EsClient {
     http: HttpClient,
     base_url: String,
     fallback_base_urls: Vec<String>,
     auth: Option<(String, String)>,
+    transport_mode: ElasticsearchTransportMode,
 }
 
 impl EsClient {
@@ -45,6 +54,17 @@ impl EsClient {
         accept_invalid_certs: bool,
         timeout: Duration,
     ) -> Self {
+        Self::new_with_mode(url, username, password, accept_invalid_certs, timeout, ElasticsearchTransportMode::Direct)
+    }
+
+    fn new_with_mode(
+        url: &str,
+        username: Option<&str>,
+        password: Option<&str>,
+        accept_invalid_certs: bool,
+        timeout: Duration,
+        transport_mode: ElasticsearchTransportMode,
+    ) -> Self {
         let base_url = url.trim_end_matches('/').to_string();
         let auth = match (username, password) {
             (Some(u), Some(p)) if !u.is_empty() => Some((u.to_string(), p.to_string())),
@@ -53,7 +73,7 @@ impl EsClient {
         let builder = http_client_builder(timeout).danger_accept_invalid_certs(accept_invalid_certs);
         let http = builder.build().unwrap_or_else(|_| HttpClient::new());
         let fallback_base_urls = elasticsearch_base_url_fallbacks(&base_url);
-        Self { http, base_url, fallback_base_urls, auth }
+        Self { http, base_url, fallback_base_urls, auth, transport_mode }
     }
 
     pub fn from_config(
@@ -62,33 +82,51 @@ impl EsClient {
         password: Option<&str>,
         tls_enabled: bool,
         url_params: Option<&str>,
+        external_config: Option<&Value>,
         timeout: Duration,
     ) -> Self {
-        Self::new(url, username, password, elasticsearch_accept_invalid_certs(tls_enabled, url_params), timeout)
+        let kibana_base_path = elasticsearch_kibana_base_path(external_config);
+        let transport_mode = if kibana_base_path.is_some() {
+            ElasticsearchTransportMode::KibanaProxy
+        } else {
+            ElasticsearchTransportMode::Direct
+        };
+        let base_url = format!("{}{}", url.trim_end_matches('/'), kibana_base_path.as_deref().unwrap_or(""));
+        Self::new_with_mode(
+            &base_url,
+            username,
+            password,
+            elasticsearch_accept_invalid_certs(tls_enabled, url_params),
+            timeout,
+            transport_mode,
+        )
     }
 
     fn get(&self, path: &str) -> reqwest::RequestBuilder {
-        let req = self.http.get(format!("{}{}", self.base_url, path));
-        self.with_auth(req)
+        self.request(Method::GET, path)
     }
 
     fn post(&self, path: &str) -> reqwest::RequestBuilder {
-        let req = self.http.post(format!("{}{}", self.base_url, path));
-        self.with_auth(req)
+        self.request(Method::POST, path)
     }
 
     fn put(&self, path: &str) -> reqwest::RequestBuilder {
-        let req = self.http.put(format!("{}{}", self.base_url, path));
-        self.with_auth(req)
+        self.request(Method::PUT, path)
     }
 
     fn delete(&self, path: &str) -> reqwest::RequestBuilder {
-        let req = self.http.delete(format!("{}{}", self.base_url, path));
-        self.with_auth(req)
+        self.request(Method::DELETE, path)
     }
 
     fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
-        let req = self.http.request(method, format!("{}{}", self.base_url, path));
+        let req = match self.transport_mode {
+            ElasticsearchTransportMode::Direct => self.http.request(method, format!("{}{}", self.base_url, path)),
+            ElasticsearchTransportMode::KibanaProxy => self
+                .http
+                .post(format!("{}/api/console/proxy", self.base_url))
+                .query(&[("path", path), ("method", method.as_str())])
+                .header("kbn-xsrf", "true"),
+        };
         self.with_auth(req)
     }
 
@@ -99,6 +137,21 @@ impl EsClient {
             req
         }
     }
+
+    fn response_status(&self, response: &reqwest::Response) -> StatusCode {
+        if self.transport_mode == ElasticsearchTransportMode::KibanaProxy {
+            if let Some(status) = response
+                .headers()
+                .get(KIBANA_PROXY_STATUS_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u16>().ok())
+                .and_then(|value| StatusCode::from_u16(value).ok())
+            {
+                return status;
+            }
+        }
+        response.status()
+    }
 }
 
 impl Clone for EsClient {
@@ -108,8 +161,20 @@ impl Clone for EsClient {
             base_url: self.base_url.clone(),
             fallback_base_urls: self.fallback_base_urls.clone(),
             auth: self.auth.clone(),
+            transport_mode: self.transport_mode,
         }
     }
+}
+
+fn elasticsearch_kibana_base_path(external_config: Option<&Value>) -> Option<String> {
+    let config = external_config?.as_object()?;
+    let mode = config.get("mode").and_then(Value::as_str)?;
+    if !mode.eq_ignore_ascii_case("kibana") {
+        return None;
+    }
+
+    let base_path = config.get("kibanaBasePath").and_then(Value::as_str).unwrap_or("").trim().trim_matches('/');
+    Some(if base_path.is_empty() { String::new() } else { format!("/{base_path}") })
 }
 
 pub async fn test_connection(client: &mut EsClient, timeout: Duration) -> Result<(), String> {
@@ -137,8 +202,8 @@ pub async fn test_connection(client: &mut EsClient, timeout: Duration) -> Result
             }
         };
 
-        if !resp.status().is_success() {
-            let status = resp.status();
+        let status = client.response_status(&resp);
+        if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(format!("Elasticsearch error ({status}): {body}"));
         }
@@ -257,7 +322,7 @@ pub async fn list_indices(client: &EsClient) -> Result<Vec<String>, String> {
         .send()
         .await
         .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
-    if !resp.status().is_success() {
+    if !client.response_status(&resp).is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("Elasticsearch error: {body}"));
     }
@@ -270,7 +335,7 @@ pub async fn list_indices(client: &EsClient) -> Result<Vec<String>, String> {
 pub async fn get_columns(client: &EsClient, index: &str) -> Result<Vec<crate::db::ColumnInfo>, String> {
     let path = elasticsearch_index_path(index, "_mapping");
     let resp = client.get(&path).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
-    if !resp.status().is_success() {
+    if !client.response_status(&resp).is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("Elasticsearch error: {body}"));
     }
@@ -416,7 +481,7 @@ pub async fn find_documents(
     let path = elasticsearch_index_path(index, "_search");
     let resp = client.post(&path).json(&body).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
 
-    if !resp.status().is_success() {
+    if !client.response_status(&resp).is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("Elasticsearch error: {body}"));
     }
@@ -693,7 +758,7 @@ pub async fn insert_document(
     let path = elasticsearch_auto_id_document_path(index, routing.as_deref());
     let resp = client.post(&path).json(&doc).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
 
-    if !resp.status().is_success() {
+    if !client.response_status(&resp).is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("Elasticsearch error: {body}"));
     }
@@ -714,7 +779,7 @@ pub async fn update_document(
     let path = elasticsearch_document_path(index, id, routing.as_deref());
     let resp = client.put(&path).json(&doc).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
 
-    if !resp.status().is_success() {
+    if !client.response_status(&resp).is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("Elasticsearch error: {body}"));
     }
@@ -752,7 +817,7 @@ pub async fn delete_document(client: &EsClient, index: &str, id: &str, routing: 
     let path = elasticsearch_document_path(index, id, routing);
     let resp = client.delete(&path).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
 
-    if !resp.status().is_success() {
+    if !client.response_status(&resp).is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("Elasticsearch error: {body}"));
     }
@@ -949,7 +1014,7 @@ pub async fn execute_rest_query(client: &EsClient, input: &str) -> Result<crate:
     }
     let resp = builder.send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
 
-    let status = resp.status().as_u16();
+    let status = client.response_status(&resp).as_u16();
     let body = resp.text().await.map_err(|e| format!("Elasticsearch response read failed: {e}"))?;
 
     parse_elasticsearch_rest_response(status, &body, start)
@@ -981,7 +1046,7 @@ async fn execute_search_query(
     let path = elasticsearch_index_path(&query.index, "_search");
     let resp =
         client.post(&path).json(&query.body).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
-    let status = resp.status().as_u16();
+    let status = client.response_status(&resp).as_u16();
     let body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::Value::Null);
     // Capture the index's true match total before the body is consumed by the
     // parser — needed below when we report total instead of rows.len().
@@ -1258,7 +1323,7 @@ async fn execute_translated_select_star(
         .send()
         .await
         .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
-    let status = resp.status().as_u16();
+    let status = client.response_status(&resp).as_u16();
     let body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::Value::Null);
     let index_total = body.pointer("/hits/total/value").and_then(|v| v.as_u64());
 
@@ -1280,7 +1345,7 @@ async fn execute_sql_query(
     let body = serde_json::json!({ "query": query });
     let resp =
         client.post("/_sql").json(&body).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
-    let status = resp.status();
+    let status = client.response_status(&resp);
     let response_body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::Value::Null);
 
     if !status.is_success() {
@@ -1783,11 +1848,30 @@ mod tests {
             Some("secret"),
             false,
             Some("sslmode=disable"),
+            None,
             Duration::from_secs(1),
         );
 
         assert_eq!(client.base_url, "https://localhost:9200");
         assert_eq!(client.fallback_base_urls, vec!["https://127.0.0.1:9200"]);
+    }
+
+    #[test]
+    fn elasticsearch_client_from_config_enables_kibana_proxy_with_base_path() {
+        let external_config = json!({ "mode": "kibana", "kibanaBasePath": "/kibana/s/analytics/" });
+        let client = EsClient::from_config(
+            "https://localhost:5601/",
+            Some("elastic"),
+            Some("secret"),
+            false,
+            None,
+            Some(&external_config),
+            Duration::from_secs(1),
+        );
+
+        assert_eq!(client.base_url, "https://localhost:5601/kibana/s/analytics");
+        assert_eq!(client.fallback_base_urls, vec!["https://127.0.0.1:5601/kibana/s/analytics"]);
+        assert_eq!(client.transport_mode, super::ElasticsearchTransportMode::KibanaProxy);
     }
 
     #[test]
@@ -2220,6 +2304,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kibana_proxy_rewrites_method_path_and_preserves_elasticsearch_status() {
+        use std::collections::HashMap;
+        use tokio::io::AsyncWriteExt;
+
+        let response_body = r#"{"error":{"type":"index_not_found_exception"},"status":404}"#;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            let (headers, body) = request.split_once("\r\n\r\n").unwrap();
+            let request_target = headers.lines().next().unwrap().split_whitespace().nth(1).unwrap();
+            let url = reqwest::Url::parse(&format!("http://localhost{request_target}")).unwrap();
+            let query = url.query_pairs().into_owned().collect::<HashMap<_, _>>();
+
+            assert_eq!(url.path(), "/kibana/s/analytics/api/console/proxy");
+            assert_eq!(query.get("path").map(String::as_str), Some("/missing/_doc/1?refresh=true"));
+            assert_eq!(query.get("method").map(String::as_str), Some("DELETE"));
+            assert!(headers.lines().any(|line| line.eq_ignore_ascii_case("kbn-xsrf: true")), "{headers}");
+            assert!(headers.lines().any(|line| line.eq_ignore_ascii_case("authorization: Basic ZWxhc3RpYzpzZWNyZXQ=")));
+            assert_eq!(serde_json::from_str::<serde_json::Value>(body).unwrap(), json!({ "reason": "cleanup" }));
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nx-console-proxy-status-code: 404\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let external_config = json!({ "mode": "kibana", "kibanaBasePath": "/kibana/s/analytics" });
+        let client = EsClient::from_config(
+            &format!("http://{addr}"),
+            Some("elastic"),
+            Some("secret"),
+            false,
+            None,
+            Some(&external_config),
+            Duration::from_secs(1),
+        );
+        let result =
+            super::execute_rest_query(&client, "DELETE /missing/_doc/1?refresh=true\n{\"reason\":\"cleanup\"}")
+                .await
+                .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result.rows[0][0], json!(404));
+        assert_eq!(result.rows[0][1], json!(response_body));
+    }
+
+    #[tokio::test]
     async fn execute_rest_query_sends_encoded_date_math_path() {
         use tokio::io::AsyncWriteExt;
 
@@ -2417,6 +2552,58 @@ mod tests {
         let response = result.rows[0][1].as_str().unwrap();
         assert_eq!(response, response_body);
         assert_eq!(serde_json::from_str::<serde_json::Value>(response).unwrap(), body);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_KIBANA_URL pointing to a reachable Kibana instance"]
+    async fn live_kibana_proxy_supports_metadata_queries_and_document_writes() {
+        let url = std::env::var("DBX_TEST_KIBANA_URL").expect("DBX_TEST_KIBANA_URL is required");
+        let username = std::env::var("DBX_TEST_KIBANA_USERNAME").ok();
+        let password = std::env::var("DBX_TEST_KIBANA_PASSWORD").ok();
+        let base_path = std::env::var("DBX_TEST_KIBANA_BASE_PATH").unwrap_or_default();
+        let external_config = json!({ "mode": "kibana", "kibanaBasePath": base_path });
+        let mut client = EsClient::from_config(
+            &url,
+            username.as_deref(),
+            password.as_deref(),
+            false,
+            None,
+            Some(&external_config),
+            Duration::from_secs(20),
+        );
+        super::test_connection(&mut client, Duration::from_secs(20)).await.unwrap();
+
+        let index = format!("dbx-kibana-proxy-{}", uuid::Uuid::new_v4().simple());
+        let create = super::execute_rest_query(
+            &client,
+            &format!(
+                "PUT /{index}\n{{\"mappings\":{{\"properties\":{{\"name\":{{\"type\":\"keyword\"}},\"price\":{{\"type\":\"double\"}}}}}}}}"
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(create.rows[0][0], json!(200));
+
+        let id = super::insert_document(&client, &index, r#"{"name":"Notebook","price":12.5}"#, None).await.unwrap();
+        assert!(!id.is_empty());
+        assert!(super::list_indices(&client).await.unwrap().contains(&index));
+
+        let columns = super::get_columns(&client, &index).await.unwrap();
+        assert!(columns.iter().any(|column| column.name == "name" && column.data_type == "keyword"));
+        assert!(columns.iter().any(|column| column.name == "price" && column.data_type == "double"));
+
+        let documents = super::find_documents(&client, &index, 0, 10, None, None).await.unwrap();
+        assert_eq!(documents.total, 1);
+        assert_eq!(documents.documents[0]["name"], json!("Notebook"));
+
+        super::update_document(&client, &index, &id, r#"{"name":"Notebook Pro","price":15.0}"#, None).await.unwrap();
+        let sql_result = super::execute_rest_query(&client, &format!("SELECT * FROM {index} LIMIT 10")).await.unwrap();
+        let name_index = sql_result.columns.iter().position(|column| column == "name").unwrap();
+        assert_eq!(sql_result.rows[0][name_index], json!("Notebook Pro"));
+
+        super::delete_document(&client, &index, &id, None).await.unwrap();
+        let delete = super::execute_rest_query(&client, &format!("DELETE /{index}")).await.unwrap();
+        assert_eq!(delete.rows[0][0], json!(200));
     }
 
     #[test]

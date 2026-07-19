@@ -70,6 +70,7 @@ export default withEnglishFallback({
     rateLimited: "GitHub 更新检查暂时触发频率限制。你仍然可以打开下载页手动查看。",
     openRelease: "打开下载页",
     downloadAndInstall: "下载并安装",
+    activeTasksBlockUpdate: "有 {count} 个任务正在执行，请等待任务完成后再更新 DBX。",
     portableManualUpdate: "便携版不能使用应用内安装器更新。请从 release 下载便携版 ZIP，并解压覆盖当前 DBX 目录，以保留 portable.dbx 和 data。",
     downloading: "下载中 {progress}%",
     downloadFailed: "更新下载失败：{error}",

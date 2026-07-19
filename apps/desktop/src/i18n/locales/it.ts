@@ -69,6 +69,7 @@ export default withEnglishFallback({
     rateLimited: "Le verifiche degli aggiornamenti di GitHub sono temporaneamente limitate. Puoi comunque aprire la pagina delle release per verificare manualmente.",
     openRelease: "Apri Release",
     downloadAndInstall: "Scarica e Installa",
+    activeTasksBlockUpdate: "Ci sono {count} attività in esecuzione. Attendi che terminino prima di aggiornare DBX.",
     portableManualUpdate: "Le build portatili non possono utilizzare l'installer in-app. Scarica lo ZIP portatile dalla pagina delle release, quindi estrailo nella cartella DBX corrente per mantenere portable.dbx e i dati.",
     downloading: "Download in corso {progress}%",
     downloadFailed: "Download dell'aggiornamento non riuscito: {error}",

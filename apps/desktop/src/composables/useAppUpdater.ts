@@ -7,6 +7,11 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import type { UpdateDownloadSource as SettingsUpdateDownloadSource } from "@/stores/settingsStore";
 import type { UpdateDownloadProgress } from "@/lib/backend/tauri";
 import { currentLocale } from "@/i18n";
+import { shouldBlockAppUpdate } from "@/lib/app/appUpdateTaskGuard";
+
+interface UseAppUpdaterOptions {
+  getActiveTaskCount?: () => number;
+}
 
 export function shouldOpenUpdateDialog(options: { silent?: boolean }) {
   return options.silent !== true;
@@ -45,7 +50,7 @@ export async function resolveUpdaterProxy(): Promise<string | undefined> {
   }
 }
 
-export function useAppUpdater() {
+export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   const { t } = useI18n();
   const { toast } = useToast();
   const settingsStore = useSettingsStore();
@@ -57,6 +62,7 @@ export function useAppUpdater() {
   const isDownloadingUpdate = ref(false);
   const downloadProgress = ref(0);
   const updateReady = ref(false);
+  const activeTaskCount = computed(() => Math.max(0, Math.trunc(options.getActiveTaskCount?.() ?? 0)));
   const hasUpdateAvailable = computed(() => updateInfo.value?.update_available === true);
   const latestReleaseUrl = "https://github.com/t8y2/dbx/releases/latest";
 
@@ -106,12 +112,19 @@ export function useAppUpdater() {
     openUrl(url);
   }
 
+  function blockUpdateForActiveTasks(): boolean {
+    if (!shouldBlockAppUpdate(activeTaskCount.value)) return false;
+    toast(t("updates.activeTasksBlockUpdate", { count: activeTaskCount.value }), 5000);
+    return true;
+  }
+
   async function downloadAndInstallUpdate() {
     if (!isTauriRuntime() || isDownloadingUpdate.value) return;
     if (!canDownloadAndInstallUpdate(updateInfo.value, true)) {
       openLatestRelease();
       return;
     }
+    if (blockUpdateForActiveTasks()) return;
     isDownloadingUpdate.value = true;
     downloadProgress.value = 0;
     let unlisten: (() => void) | undefined;
@@ -135,6 +148,7 @@ export function useAppUpdater() {
 
   async function restartApp() {
     if (!isTauriRuntime()) return;
+    if (blockUpdateForActiveTasks()) return;
     try {
       const { relaunch } = await import("@tauri-apps/plugin-process");
       await relaunch();
@@ -151,6 +165,7 @@ export function useAppUpdater() {
     isDownloadingUpdate,
     downloadProgress,
     updateReady,
+    activeTaskCount,
     hasUpdateAvailable,
     latestReleaseUrl,
     openUrl,

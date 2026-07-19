@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { Loader2 } from "@lucide/vue";
+import { AlertTriangle, Loader2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import type { UpdateInfo } from "@/lib/backend/api";
@@ -16,6 +16,7 @@ const props = defineProps<{
   isDownloadingUpdate: boolean;
   downloadProgress: number;
   updateReady: boolean;
+  activeTaskCount: number;
 }>();
 
 const emit = defineEmits<{
@@ -102,18 +103,22 @@ watch(
         <p v-if="isDesktop && updateInfo?.update_available && updateInfo.portable_mode" class="text-xs text-muted-foreground">
           {{ t("updates.portableManualUpdate") }}
         </p>
+        <div v-if="canDownloadAndInstallUpdate(updateInfo, isDesktop) && activeTaskCount > 0" role="alert" class="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+          <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" />
+          <span>{{ t("updates.activeTasksBlockUpdate", { count: activeTaskCount }) }}</span>
+        </div>
       </div>
       <DialogFooter>
         <Button v-if="!isDownloadingUpdate && !updateReady" variant="outline" @click="open = false">{{ t("dangerDialog.cancel") }}</Button>
         <template v-if="updateInfo?.update_available">
           <Button variant="outline" @click="emit('open-latest-release')">{{ t("updates.openRelease") }}</Button>
           <template v-if="canDownloadAndInstallUpdate(updateInfo, isDesktop)">
-            <Button v-if="updateReady" @click="emit('restart')">{{ t("updates.restart") }}</Button>
+            <Button v-if="updateReady" :disabled="activeTaskCount > 0" @click="emit('restart')">{{ t("updates.restart") }}</Button>
             <Button v-else-if="isDownloadingUpdate" disabled>
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("updates.downloading", { progress: downloadProgress }) }}
             </Button>
-            <Button v-else @click="emit('download-and-install')">{{ t("updates.downloadAndInstall") }}</Button>
+            <Button v-else :disabled="activeTaskCount > 0" @click="emit('download-and-install')">{{ t("updates.downloadAndInstall") }}</Button>
           </template>
         </template>
         <Button v-else-if="updateCheckMessage" @click="emit('open-latest-release')">{{ t("updates.openRelease") }}</Button>

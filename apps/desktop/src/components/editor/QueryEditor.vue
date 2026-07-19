@@ -243,6 +243,7 @@ let vimModeComp: import("@codemirror/state").Compartment | null = null;
 let closeBracketsComp: import("@codemirror/state").Compartment | null = null;
 let sqlLanguageComp: import("@codemirror/state").Compartment | null = null;
 let sqlSemanticHighlightComp: import("@codemirror/state").Compartment | null = null;
+let sqlSignatureComp: import("@codemirror/state").Compartment | null = null;
 let codeMirrorCloseBrackets: typeof import("@codemirror/autocomplete").closeBrackets | null = null;
 let codeMirrorCloseBracketsKeymap: readonly import("@codemirror/view").KeyBinding[] | null = null;
 let readOnlyComp: import("@codemirror/state").Compartment | null = null;
@@ -2910,6 +2911,7 @@ onMounted(async () => {
   closeBracketsComp = new Compartment();
   sqlLanguageComp = new Compartment();
   sqlSemanticHighlightComp = new Compartment();
+  sqlSignatureComp = new Compartment();
   codeMirrorCloseBrackets = closeBrackets;
   codeMirrorCloseBracketsKeymap = closeBracketsKeymap;
   readOnlyComp = new Compartment();
@@ -3385,7 +3387,7 @@ onMounted(async () => {
         }),
       ),
       hoverTooltip((currentView, pos) => resolveSqlHoverTooltip(currentView, pos)),
-      buildSqlSignatureExtension(),
+      sqlSignatureComp.of(buildSqlSignatureExtension()),
       diagnosticComp.of(buildSqlDiagnosticExtension()),
       createInsertValueHintsExtension({
         isEnabled: () => settingsStore.editorSettings.showInsertValueHints && props.databaseType !== "redis" && props.databaseType !== "mongodb" && props.databaseType !== "elasticsearch",
@@ -3738,9 +3740,10 @@ watch(
 
 watch([() => props.databaseType, () => props.dialect, () => props.syntaxDialect], () => {
   executableStatementRangeCache = null;
-  if (!view.value || !sqlLanguageComp || !buildSqlLanguageExtension || !sqlSemanticHighlightComp || !buildSqlSemanticHighlightExtension) return;
+  if (!view.value || !sqlLanguageComp || !buildSqlLanguageExtension || !sqlSemanticHighlightComp || !buildSqlSemanticHighlightExtension || !sqlSignatureComp || !buildSqlSignatureExtension) return;
+  // Signature tooltips depend on the external dialect, so refresh them even when the document and selection stay unchanged.
   view.value.dispatch({
-    effects: [sqlLanguageComp.reconfigure(buildSqlLanguageExtension()), sqlSemanticHighlightComp.reconfigure(buildSqlSemanticHighlightExtension())],
+    effects: [sqlLanguageComp.reconfigure(buildSqlLanguageExtension()), sqlSemanticHighlightComp.reconfigure(buildSqlSemanticHighlightExtension()), sqlSignatureComp.reconfigure(buildSqlSignatureExtension())],
   });
 });
 

@@ -39,10 +39,16 @@ const MONGODB_PROFILES: &[AgentDriverProfile] = &[AgentDriverProfile {
 const H2_PROFILES: &[AgentDriverProfile] =
     &[AgentDriverProfile { profile: "h2-legacy", key: "h2-legacy", label: "H2 2.1 Legacy", store_visible: true }];
 
-const EXTRA_AGENT_LABELS: &[(&str, &str)] =
-    &[("kafka", "Apache Kafka"), ("sqlserver-legacy", "SQL Server legacy compatibility component")];
-const EXTRA_DRIVER_STORE_ENTRIES: &[(&str, &str)] =
-    &[("kafka", "Apache Kafka"), ("sqlserver-legacy", "SQL Server legacy compatibility component")];
+const EXTRA_AGENT_LABELS: &[(&str, &str)] = &[
+    ("kafka", "Apache Kafka"),
+    ("rocketmq", "Apache RocketMQ"),
+    ("sqlserver-legacy", "SQL Server legacy compatibility component"),
+];
+const EXTRA_DRIVER_STORE_ENTRIES: &[(&str, &str)] = &[
+    ("kafka", "Apache Kafka"),
+    ("rocketmq", "Apache RocketMQ"),
+    ("sqlserver-legacy", "SQL Server legacy compatibility component"),
+];
 
 const AGENT_CATALOG: &[AgentCatalogEntry] = &[
     AgentCatalogEntry {
@@ -301,7 +307,11 @@ pub fn entries() -> &'static [AgentCatalogEntry] {
 
 pub fn agent_key(db_type: &DatabaseType, driver_profile: Option<&str>) -> Option<&'static str> {
     if *db_type == DatabaseType::MessageQueue {
-        return (driver_profile == Some("kafka")).then_some("kafka");
+        return match driver_profile {
+            Some("kafka") => Some("kafka"),
+            Some("rocketmq") => Some("rocketmq"),
+            _ => None,
+        };
     }
     if *db_type == DatabaseType::SqlServer {
         return driver_profile

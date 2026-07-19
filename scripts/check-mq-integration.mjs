@@ -27,11 +27,16 @@ const manifest = JSON.parse(read("crates/dbx-core/assets/database-drivers.manife
 const drivers = Array.isArray(manifest) ? manifest : manifest.drivers;
 assert.ok(drivers?.some((driver) => driver.dbType === "mq"), "Driver manifest must include dbType=mq.");
 
-const mqHttp = read("apps/desktop/src/lib/mq-http.ts");
+const mqHttp = read("apps/desktop/src/lib/backend/mq-http.ts");
 assert.ok(!mqHttp.includes('post("/mq/'), "MQ HTTP client must not call unprefixed /mq paths.");
 assert.ok(mqHttp.includes('post("/api/mq/'), "MQ HTTP client must call /api/mq paths in web mode.");
+assertIncludes("apps/desktop/src/lib/backend/mq-http.ts", 'post("/api/mq/consumers/group-config/get"', "MQ HTTP client must call consumer group config get route.");
+assertIncludes("apps/desktop/src/lib/backend/mq-tauri.ts", 'invoke("mq_get_consumer_group_config"', "MQ Tauri client must invoke consumer group config command.");
+assertIncludes("crates/dbx-web/src/main.rs", '"/mq/consumers/group-config/get"', "dbx-web must register consumer group config get route.");
+assertIncludes("src-tauri/src/lib.rs", "mq_get_consumer_group_config", "Tauri must register consumer group config command.");
 
-assertIncludes("apps/desktop/src/lib/api.ts", 'mqTestConnection = forward("mqTestConnection")', "MQ frontend calls must use the shared forward() API layer.");
+assertIncludes("apps/desktop/src/lib/backend/api.ts", 'mqTestConnection = forward("mqTestConnection")', "MQ frontend calls must use the shared forward() API layer.");
+assertIncludes("apps/desktop/src/lib/backend/api.ts", 'mqGetConsumerGroupConfig = forward("mqGetConsumerGroupConfig")', "MQ frontend must forward consumer group config API.");
 assertIncludes("apps/desktop/src/components/connection/ConnectionDialog.vue", "mqAdminUrl", "Connection dialog must include MQ admin URL fields.");
 assertIncludes("apps/desktop/src/components/connection/ConnectionDialog.vue", "external_config", "Connection dialog must submit MQ external_config.");
 

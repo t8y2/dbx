@@ -12,7 +12,7 @@ interface Props {
   namespace?: string;
   topic?: TopicInfo;
   readOnly?: boolean;
-  isKafkaCluster?: boolean;
+  isFlatMqCluster?: boolean;
   supportsRateLimits?: boolean;
   supportsBacklogQuota?: boolean;
   supportsRetention?: boolean;
@@ -40,7 +40,7 @@ const retentionForm = ref<RetentionPolicy>({ ...defaultForms.retentionForm });
 
 const scope = computed<PolicyScope | null>(() => {
   if (!props.tenant || !props.namespace) return null;
-  if (props.isKafkaCluster && !props.topic) return null;
+  if (props.isFlatMqCluster && !props.topic) return null;
   if (props.topic) {
     return {
       level: "topic",
@@ -57,7 +57,7 @@ const scope = computed<PolicyScope | null>(() => {
   };
 });
 
-const scopePlaceholderMessage = computed(() => (props.isKafkaCluster ? t("mqPolicies.selectTopicFirst") : t("mqPolicies.selectNamespaceOrTopic")));
+const scopePlaceholderMessage = computed(() => (props.isFlatMqCluster ? t("mqPolicies.selectTopicFirst") : t("mqPolicies.selectNamespaceOrTopic")));
 
 const scopeLabel = computed(() => {
   const current = scope.value;

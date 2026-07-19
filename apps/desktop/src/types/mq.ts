@@ -21,6 +21,9 @@ export interface MqCapabilities {
   supportsTokenManagement: boolean;
   supportsRawAdminApi: boolean;
   supportsSendMessage?: boolean;
+  supportsMessageQuery?: boolean;
+  supportsDlq?: boolean;
+  supportsMessageTrace?: boolean;
 }
 
 export interface MqClusterInfo {
@@ -125,7 +128,15 @@ export interface TopicRef {
   topic: string;
   persistent: boolean;
   partitioned?: boolean;
+  /** RocketMQ create hint: NORMAL / DELAY / FIFO / TRANSACTION */
+  messageType?: string;
+  brokerName?: string;
+  readQueueNums?: number;
+  writeQueueNums?: number;
+  perm?: number;
 }
+
+export type RocketMqTopicMessageType = "NORMAL" | "DELAY" | "FIFO" | "TRANSACTION" | "UNSPECIFIED" | "RETRY" | "DLQ" | "SYSTEM";
 
 export interface TopicInfo {
   name: string;
@@ -133,6 +144,8 @@ export interface TopicInfo {
   partitioned: boolean;
   partitions?: number;
   persistent: boolean;
+  internal?: boolean;
+  messageType?: RocketMqTopicMessageType | string;
 }
 
 export interface ListTopicsOpts {
@@ -161,6 +174,26 @@ export interface SubscriptionInfo {
   msgRateOut: number;
   msgThroughputOut: number;
   consumers: ConsumerInfo[];
+  /** RocketMQ subscribed topics (cluster-wide listing). */
+  topics?: string[];
+  /** RocketMQ online consumer client count. */
+  onlineMembers?: number;
+  /** RocketMQ consumer group delivery type: NORMAL / FIFO / SYSTEM. */
+  consumerGroupType?: string;
+  /** RocketMQ consumer group message model: CLUSTERING / BROADCASTING. */
+  messageModel?: string;
+}
+
+export interface RocketMqConsumerGroupConfig {
+  groupName: string;
+  consumeEnable: boolean;
+  consumeFromMinEnable?: boolean;
+  consumeBroadcastEnable: boolean;
+  consumeMessageOrderly?: boolean;
+  retryQueueNums: number;
+  retryMaxTimes?: number;
+  brokerId: number;
+  whichBrokerWhenConsumeSlowly?: number;
 }
 
 export interface ConsumerInfo {
@@ -204,6 +237,8 @@ export interface BrokerNode {
   host: string;
   port: number;
   rack?: string;
+  brokerName?: string;
+  role?: string;
 }
 
 export interface PeekedMessage {

@@ -424,7 +424,16 @@ export const mqListPermissions = forward("mqListPermissions");
 export const mqIssueToken = forward("mqIssueToken");
 export const mqListTokenRecords = forward("mqListTokenRecords");
 export const mqGetBacklog = forward("mqGetBacklog");
+export const mqGetConsumerGroupConfig = forward("mqGetConsumerGroupConfig");
+export const mqAlterConsumerGroupConfig = forward("mqAlterConsumerGroupConfig");
 export const mqGetClusterInfo = forward("mqGetClusterInfo");
+export const mqGetTopicRoute = forward("mqGetTopicRoute");
+export const mqAlterTopicConfig = forward("mqAlterTopicConfig");
+export const mqSkipTopicAccumulation = forward("mqSkipTopicAccumulation");
+export const mqViewMessage = forward("mqViewMessage");
+export const mqQueryMessagesByKey = forward("mqQueryMessagesByKey");
+export const mqQueryMessagesByTopic = forward("mqQueryMessagesByTopic");
+export const mqQueryMessageTrace = forward("mqQueryMessageTrace");
 export const mqRawRequest = forward("mqRawRequest");
 export const mqSendMessage = forward("mqSendMessage");
 

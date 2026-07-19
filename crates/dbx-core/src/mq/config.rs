@@ -63,9 +63,11 @@ impl MqAdminConfig {
         let mut parsed: MqAdminConfig = serde_json::from_value(raw.clone())
             .map_err(|e| format!("Failed to parse message queue admin config: {e}"))?;
         parsed.admin_url = parsed.admin_url.trim().to_string();
-        // Kafka uses bootstrap servers from `extra` instead of an admin URL,
-        // so allow an empty admin_url for Kafka connections.
-        if parsed.admin_url.is_empty() && parsed.system_kind != MqSystemKind::Kafka {
+        // Kafka and RocketMQ use namesrv/bootstrap from `extra` instead of an admin URL.
+        if parsed.admin_url.is_empty()
+            && parsed.system_kind != MqSystemKind::Kafka
+            && parsed.system_kind != MqSystemKind::RocketMq
+        {
             return Err("Message queue admin URL is empty".to_string());
         }
         Ok(parsed)
@@ -196,6 +198,22 @@ mod tests {
         assert_eq!(mqc.system_kind, MqSystemKind::Kafka);
         assert_eq!(mqc.admin_url, "");
         assert_eq!(mqc.extra.get("bootstrapServers").and_then(|v| v.as_str()), Some("broker1:9092,broker2:9092"));
+    }
+
+    #[test]
+    fn parses_rocketmq_config_with_empty_admin_url() {
+        let cfg = connection_with_external(serde_json::json!({
+            "systemKind": "rocketmq",
+            "adminUrl": "",
+            "auth": { "kind": "none" },
+            "extra": {
+                "namesrvAddr": "127.0.0.1:9876"
+            }
+        }));
+        let mqc = MqAdminConfig::from_connection(&cfg).expect("should parse valid RocketMQ config");
+        assert_eq!(mqc.system_kind, MqSystemKind::RocketMq);
+        assert_eq!(mqc.admin_url, "");
+        assert_eq!(mqc.extra.get("namesrvAddr").and_then(|v| v.as_str()), Some("127.0.0.1:9876"));
     }
 
     #[test]

@@ -52,6 +52,15 @@ pub struct MqCapabilities {
     /// Whether the adapter supports producing messages to topics.
     #[serde(default)]
     pub supports_send_message: bool,
+    /// RocketMQ: view/query messages by msgId or key.
+    #[serde(default)]
+    pub supports_message_query: bool,
+    /// RocketMQ: dedicated dead-letter browsing.
+    #[serde(default)]
+    pub supports_dlq: bool,
+    /// RocketMQ: message trace lookup (requires broker trace topic).
+    #[serde(default)]
+    pub supports_message_trace: bool,
 }
 
 impl Default for MqCapabilities {
@@ -75,6 +84,9 @@ impl Default for MqCapabilities {
             supports_token_management: false,
             supports_raw_admin_api: false,
             supports_send_message: false,
+            supports_message_query: false,
+            supports_dlq: false,
+            supports_message_trace: false,
         }
     }
 }
@@ -252,10 +264,39 @@ pub struct TopicRef {
     /// from the partitioned topic list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partitioned: Option<bool>,
+    /// RocketMQ-only create hint: NORMAL / DELAY / FIFO / TRANSACTION.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_type: Option<String>,
+    /// RocketMQ-only: target broker name for create/delete/update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broker_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_queue_nums: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_queue_nums: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub perm: Option<u32>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+impl Default for TopicRef {
+    fn default() -> Self {
+        Self {
+            tenant: String::new(),
+            namespace: String::new(),
+            topic: String::new(),
+            persistent: true,
+            partitioned: None,
+            message_type: None,
+            broker_name: None,
+            read_queue_nums: None,
+            write_queue_nums: None,
+            perm: None,
+        }
+    }
 }
 
 impl TopicRef {
@@ -268,7 +309,7 @@ impl TopicRef {
         }
     }
 
-    /// `{tenant}/{namespace}/{topic}` — the path used by most Pulsar endpoints.
+    /// `{tenant}/{namespace}/{topic}` - the path used by most Pulsar endpoints.
     pub fn path(&self) -> String {
         format!("{}/{}/{}", self.tenant, self.namespace, self.topic)
     }
@@ -290,6 +331,12 @@ pub struct TopicInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partitions: Option<u32>,
     pub persistent: bool,
+    /// Kafka/RocketMQ internal or system topic; hidden by default in the MQ console UI.
+    #[serde(default)]
+    pub internal: bool,
+    /// RocketMQ message type from broker topic config (NORMAL, DELAY, FIFO, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -345,6 +392,10 @@ pub struct BrokerNode {
     pub host: String,
     pub port: i32,
     pub rack: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broker_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -358,6 +409,18 @@ pub struct SubscriptionInfo {
     pub msg_throughput_out: f64,
     #[serde(default)]
     pub consumers: Vec<ConsumerInfo>,
+    /// RocketMQ: subscribed topic names for this consumer group (cluster-wide listing).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub topics: Vec<String>,
+    /// RocketMQ: online consumer client count (cluster-wide listing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub online_members: Option<u32>,
+    /// RocketMQ: NORMAL / FIFO / SYSTEM (aligned with Dashboard).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_group_type: Option<String>,
+    /// RocketMQ: CLUSTERING / BROADCASTING.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -388,7 +451,7 @@ pub struct ProducerInfo {
 
 /// Where to position a cursor when creating a subscription or resetting it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ResetPosition {
     /// Earliest available message.
     Earliest,
@@ -402,7 +465,7 @@ pub enum ResetPosition {
 
 /// How many messages to skip on a subscription.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum SkipCount {
     All,
     Count { count: u32 },
@@ -483,7 +546,7 @@ impl PolicyScope {
                 namespace: namespace.clone(),
                 topic: topic.clone(),
                 persistent: *persistent,
-                partitioned: None,
+                ..Default::default()
             }),
             _ => None,
         }
@@ -571,7 +634,7 @@ pub type PermissionMap = HashMap<String, Vec<AuthAction>>;
 
 /// A raw admin REST request, proxied through the adapter to cover any endpoint
 /// the typed methods do not. The path is appended to the connection's
-/// `admin_url` base — arbitrary hosts are not allowed (SSRF guard).
+/// `admin_url` base ? arbitrary hosts are not allowed (SSRF guard).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MqRawRequest {
@@ -646,4 +709,20 @@ pub struct SendMessageResponse {
     /// Broker-assigned timestamp, if available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ResetPosition;
+
+    #[test]
+    fn reset_position_deserializes_camel_case_variant_fields() {
+        let pos: ResetPosition = serde_json::from_str(r#"{"kind":"timestamp","timestampMs":1710000000000}"#)
+            .expect("timestamp reset position");
+        assert!(matches!(pos, ResetPosition::Timestamp { timestamp_ms: 1710000000000 }));
+
+        let pos: ResetPosition = serde_json::from_str(r#"{"kind":"messageId","ledgerId":5,"entryId":9}"#)
+            .expect("message-id reset position");
+        assert!(matches!(pos, ResetPosition::MessageId { ledger_id: 5, entry_id: 9 }));
+    }
 }

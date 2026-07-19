@@ -1367,6 +1367,10 @@ pub fn run() {
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_clear_backlog,
             #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_get_consumer_group_config,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_alter_consumer_group_config,
+            #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_peek_messages,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_expire_messages,
@@ -1402,6 +1406,20 @@ pub fn run() {
             commands::mq_cmd::mq_get_backlog,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_get_cluster_info,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_get_topic_route,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_alter_topic_config,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_skip_topic_accumulation,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_view_message,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_query_messages_by_key,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_query_messages_by_topic,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_query_message_trace,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_raw_request,
             #[cfg(feature = "mq-admin")]

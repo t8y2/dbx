@@ -434,6 +434,7 @@ function tabDatabaseIconType(tab: QueryTab) {
     const externalConfig = connection.external_config as { systemKind?: unknown } | undefined;
     const systemKind = typeof externalConfig?.systemKind === "string" ? externalConfig.systemKind : "";
     if (connection.driver_profile === "kafka" || systemKind === "kafka") return "kafka";
+    if (connection.driver_profile === "rocketmq" || systemKind === "rocketmq") return "rocketmq";
     if (connection.driver_profile === "pulsar" || systemKind === "pulsar") return "pulsar";
   }
   return connection.driver_profile || connection.db_type;

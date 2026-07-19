@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { formatError } from "@/lib/backend/errorUtils";
-import { ref, watch } from "vue";
+import { ref, watch, computed } from "vue";
 import { useI18n } from "vue-i18n";
-import type { TopicRef, TopicInfo, SubscriptionInfo, ResetPosition, SkipCount, PeekedMessage } from "@/types/mq";
+import type { TopicRef, TopicInfo, SubscriptionInfo, ResetPosition, SkipCount, PeekedMessage, MqSystemKind } from "@/types/mq";
 import { mqListSubscriptions, mqCreateSubscription, mqDeleteSubscription, mqResetCursor, mqSkipMessages, mqClearBacklog, mqPeekMessages, mqExpireMessages } from "@/lib/backend/api";
+import RocketMqConsumerGroupDialogs, { type RocketMqConsumerGroupDialogKind } from "./rocketmq/RocketMqConsumerGroupDialogs.vue";
+import MqTypeFilterBar from "./shared/MqTypeFilterBar.vue";
+import { DEFAULT_ROCKETMQ_CONSUMER_GROUP_TYPE_FILTERS, matchesRocketMqConsumerGroupTypeFilters, resolveRocketMqConsumerGroupMessageModel, resolveRocketMqConsumerGroupType, ROCKETMQ_CONSUMER_GROUP_TYPES, type RocketMqConsumerGroupType } from "@/lib/mq/rocketmqConsumerGroupTypes";
 
 interface Props {
   connectionId: string;
@@ -17,6 +20,8 @@ interface Props {
   supportsClearBacklog?: boolean;
   supportsPeekMessages?: boolean;
   supportsExpireMessages?: boolean;
+  mqSystemKind?: MqSystemKind;
+  isFlatMqCluster?: boolean;
 }
 
 const props = defineProps<Props>();
@@ -55,6 +60,45 @@ const skipFormData = ref({
 });
 
 const expireSeconds = ref(3600);
+const searchKeyword = ref("");
+const activeRocketMqDialog = ref<RocketMqConsumerGroupDialogKind | null>(null);
+const consumerGroupTypeFilters = ref<Record<RocketMqConsumerGroupType, boolean>>({
+  ...DEFAULT_ROCKETMQ_CONSUMER_GROUP_TYPE_FILTERS,
+});
+
+const isRocketMqCluster = computed(() => props.mqSystemKind === "rocketmq");
+// RocketMQ consumer tab always lists cluster-wide groups (Dashboard groupList.query), regardless of breadcrumb topic.
+const isClusterWideMode = computed(() => isRocketMqCluster.value && !!props.tenant && !!props.namespace);
+const canShowPanel = computed(() => isClusterWideMode.value || !!props.topic);
+const rocketMqConsumerGroupTypeOptions = ROCKETMQ_CONSUMER_GROUP_TYPES;
+const panelTitle = computed(() => (isRocketMqCluster.value ? t("mqRocketmq.consumerGroupTitle") : t("mqSubscriptions.title")));
+const searchPlaceholder = computed(() => (isRocketMqCluster.value ? t("mqRocketmq.searchConsumerGroup") : t("mqSubscriptions.searchPlaceholder")));
+const filteredSubscriptions = computed(() => {
+  let rows = subscriptions.value;
+  if (isRocketMqCluster.value) {
+    rows = rows.filter((sub) => matchesRocketMqConsumerGroupTypeFilters(sub, consumerGroupTypeFilters.value));
+  }
+  const keyword = searchKeyword.value.trim().toLowerCase();
+  if (!keyword) return rows;
+  return rows.filter((sub) => sub.name.toLowerCase().includes(keyword));
+});
+
+function consumerGroupTypeLabel(sub: SubscriptionInfo): string {
+  const type = resolveRocketMqConsumerGroupType(sub);
+  return t(`mqSubscriptions.rocketmqGroupType.${type.toLowerCase()}`);
+}
+
+function consumerGroupTypeBadgeClass(sub: SubscriptionInfo): string {
+  const type = resolveRocketMqConsumerGroupType(sub);
+  if (type === "FIFO") return "badge badge-info";
+  if (type === "SYSTEM") return "badge badge-muted";
+  return "badge";
+}
+
+function consumerGroupModeLabel(sub: SubscriptionInfo): string {
+  const mode = resolveRocketMqConsumerGroupMessageModel(sub);
+  return t(`mqSubscriptions.rocketmqGroupMode.${mode.toLowerCase()}`);
+}
 
 function guardWritable() {
   if (props.readOnly) {
@@ -64,8 +108,29 @@ function guardWritable() {
   return true;
 }
 
-function getTopicRef(): TopicRef | null {
-  if (!props.topic || !props.tenant || !props.namespace) return null;
+function getListTopicRef(): TopicRef | null {
+  if (!props.tenant || !props.namespace) return null;
+  if (isClusterWideMode.value) {
+    return {
+      tenant: props.tenant,
+      namespace: props.namespace,
+      topic: "",
+      persistent: true,
+      partitioned: false,
+    };
+  }
+  if (!props.topic) return null;
+  return {
+    tenant: props.tenant,
+    namespace: props.namespace,
+    topic: props.topic.shortName,
+    persistent: props.topic.persistent,
+    partitioned: props.topic.partitioned,
+  };
+}
+
+function getPulsarTopicRef(): TopicRef | null {
+  if (!props.tenant || !props.namespace || !props.topic) return null;
   return {
     tenant: props.tenant,
     namespace: props.namespace,
@@ -76,7 +141,7 @@ function getTopicRef(): TopicRef | null {
 }
 
 async function loadSubscriptions() {
-  const topicRef = getTopicRef();
+  const topicRef = getListTopicRef();
   if (!topicRef) {
     subscriptions.value = [];
     return;
@@ -101,6 +166,21 @@ function openCreateDialog() {
   showCreateDialog.value = true;
 }
 
+function openRocketMqDetail(sub: SubscriptionInfo) {
+  selectedSub.value = sub;
+  activeRocketMqDialog.value = "detail";
+}
+
+function openRocketMqConfig(sub: SubscriptionInfo) {
+  if (!guardWritable()) return;
+  selectedSub.value = sub;
+  activeRocketMqDialog.value = "config";
+}
+
+function closeRocketMqDialog() {
+  activeRocketMqDialog.value = null;
+}
+
 function openResetDialog(sub: SubscriptionInfo) {
   if (!guardWritable()) return;
   selectedSub.value = sub;
@@ -121,12 +201,12 @@ function openSkipDialog(sub: SubscriptionInfo) {
   showSkipDialog.value = true;
 }
 
-async function openPeekDialog(sub: SubscriptionInfo) {
+function openPeekDialog(sub: SubscriptionInfo) {
   selectedSub.value = sub;
   peekCount.value = 5;
   peekedMessages.value = [];
   showPeekDialog.value = true;
-  await handlePeekMessages();
+  void handlePeekMessages();
 }
 
 function openExpireDialog(sub: SubscriptionInfo) {
@@ -137,13 +217,17 @@ function openExpireDialog(sub: SubscriptionInfo) {
 }
 
 function selectSubscription(sub: SubscriptionInfo) {
+  if (isRocketMqCluster.value) {
+    openRocketMqDetail(sub);
+    return;
+  }
   selectedSub.value = sub;
   emit("subscriptionSelected", sub.name);
 }
 
 async function handleCreate() {
   if (!guardWritable()) return;
-  const topicRef = getTopicRef();
+  const topicRef = getPulsarTopicRef();
   if (!formData.value.subName.trim() || !topicRef) {
     error.value = t("mqSubscriptions.subscriptionNameRequired");
     return;
@@ -165,7 +249,7 @@ async function handleCreate() {
 async function handleDelete(sub: SubscriptionInfo) {
   if (!guardWritable()) return;
   if (!confirm(t("mqSubscriptions.confirmDelete", { name: sub.name }))) return;
-  const topicRef = getTopicRef();
+  const topicRef = getListTopicRef();
   if (!topicRef) return;
   loading.value = true;
   error.value = undefined;
@@ -181,7 +265,7 @@ async function handleDelete(sub: SubscriptionInfo) {
 
 async function handleResetCursor() {
   if (!guardWritable()) return;
-  const topicRef = getTopicRef();
+  const topicRef = getPulsarTopicRef();
   if (!selectedSub.value || !topicRef) return;
   loading.value = true;
   error.value = undefined;
@@ -204,7 +288,7 @@ async function handleResetCursor() {
 
 async function handleSkipMessages() {
   if (!guardWritable()) return;
-  const topicRef = getTopicRef();
+  const topicRef = getPulsarTopicRef();
   if (!selectedSub.value || !topicRef) return;
   loading.value = true;
   error.value = undefined;
@@ -223,7 +307,7 @@ async function handleSkipMessages() {
 async function handleClearBacklog(sub: SubscriptionInfo) {
   if (!guardWritable()) return;
   if (!confirm(t("mqSubscriptions.confirmClearBacklog", { name: sub.name }))) return;
-  const topicRef = getTopicRef();
+  const topicRef = getPulsarTopicRef();
   if (!topicRef) return;
   loading.value = true;
   error.value = undefined;
@@ -238,7 +322,7 @@ async function handleClearBacklog(sub: SubscriptionInfo) {
 }
 
 async function handlePeekMessages() {
-  const topicRef = getTopicRef();
+  const topicRef = getPulsarTopicRef();
   if (!selectedSub.value || !topicRef) return;
   const count = Math.max(1, Math.min(100, Number(peekCount.value) || 1));
   peekCount.value = count;
@@ -255,7 +339,7 @@ async function handlePeekMessages() {
 
 async function handleExpireMessages() {
   if (!guardWritable()) return;
-  const topicRef = getTopicRef();
+  const topicRef = getPulsarTopicRef();
   if (!selectedSub.value || !topicRef) return;
   loading.value = true;
   error.value = undefined;
@@ -271,7 +355,7 @@ async function handleExpireMessages() {
 }
 
 watch(
-  () => props.topic,
+  () => [props.topic, props.tenant, props.namespace, props.mqSystemKind],
   () => {
     selectedSub.value = undefined;
     loadSubscriptions();
@@ -283,55 +367,94 @@ watch(
 <template>
   <div class="subscriptions-panel">
     <div class="panel-toolbar">
-      <h3>{{ t("mqSubscriptions.title") }}</h3>
-      <button v-if="supportsCreateSubscription !== false" @click="openCreateDialog" :disabled="loading || readOnly || !topic" class="btn-primary">+ {{ t("mqSubscriptions.createSubscription") }}</button>
+      <div class="toolbar-left">
+        <h3>{{ panelTitle }}</h3>
+        <input v-if="isClusterWideMode" v-model="searchKeyword" type="search" class="topic-search" :placeholder="searchPlaceholder" />
+        <span v-if="isClusterWideMode && subscriptions.length" class="topic-count"> {{ filteredSubscriptions.length }} / {{ subscriptions.length }} </span>
+      </div>
+      <div class="toolbar-actions">
+        <button v-if="isClusterWideMode" class="btn-secondary" :disabled="loading" @click="loadSubscriptions">
+          {{ loading ? t("mqSubscriptions.refreshing") : t("mqSubscriptions.refresh") }}
+        </button>
+        <button v-if="supportsCreateSubscription !== false && !isRocketMqCluster" @click="openCreateDialog" :disabled="loading || readOnly || !topic" class="btn-primary">+ {{ t("mqSubscriptions.createSubscription") }}</button>
+      </div>
     </div>
 
-    <div v-if="!topic" class="panel-placeholder">{{ t("mqSubscriptions.selectTopicFirst") }}</div>
+    <MqTypeFilterBar v-if="isRocketMqCluster && tenant && namespace" :label="t('mqSubscriptions.typeFilter')">
+      <label v-for="type in rocketMqConsumerGroupTypeOptions" :key="type" class="checkbox-label compact">
+        <input v-model="consumerGroupTypeFilters[type]" type="checkbox" />
+        {{ t(`mqSubscriptions.rocketmqGroupType.${type.toLowerCase()}`) }}
+      </label>
+    </MqTypeFilterBar>
 
-    <div v-else-if="error" class="panel-error">{{ error }}</div>
+    <div v-if="!canShowPanel" class="panel-placeholder">{{ t("mqSubscriptions.selectTopicFirst") }}</div>
 
-    <div v-else-if="loading && !subscriptions.length" class="panel-loading">{{ t("mqSubscriptions.loading") }}</div>
+    <template v-else>
+      <div v-if="error" class="panel-error">{{ error }}</div>
 
-    <div v-else-if="!subscriptions.length" class="panel-placeholder">{{ t("mqSubscriptions.noSubscriptions") }}</div>
+      <div v-else-if="loading && !subscriptions.length" class="panel-loading">{{ t("mqSubscriptions.loading") }}</div>
 
-    <div v-else class="subscriptions-table">
-      <table>
-        <thead>
-          <tr>
-            <th>{{ t("mqSubscriptions.subscriptionName") }}</th>
-            <th>{{ t("mqSubscriptions.type") }}</th>
-            <th>{{ t("mqSubscriptions.backlog") }}</th>
-            <th>{{ t("mqSubscriptions.consumeRate") }}</th>
-            <th>{{ t("mqSubscriptions.consumers") }}</th>
-            <th>{{ t("mqSubscriptions.actions") }}</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="sub in subscriptions" :key="sub.name" :class="{ selected: selectedSub?.name === sub.name }" @click="selectSubscription(sub)">
-            <td class="sub-name">{{ sub.name }}</td>
-            <td>
-              <span class="badge">{{ sub.subType }}</span>
-            </td>
-            <td>
-              <span :class="{ 'text-warning': sub.msgBacklog > 1000 }">
-                {{ sub.msgBacklog.toLocaleString() }}
-              </span>
-            </td>
-            <td>{{ t("mqSubscriptions.msgRate", { rate: sub.msgRateOut.toFixed(2) }) }}</td>
-            <td>{{ t("mqSubscriptions.consumerCount", { count: sub.consumers.length }) }}</td>
-            <td class="actions">
-              <button v-if="supportsResetCursor !== false" @click.stop="openResetDialog(sub)" :disabled="readOnly" class="btn-sm">{{ t("mqSubscriptions.resetCursor") }}</button>
-              <button v-if="supportsSkipMessages !== false" @click.stop="openSkipDialog(sub)" :disabled="readOnly" class="btn-sm">{{ t("mqSubscriptions.skipMessages") }}</button>
-              <button v-if="supportsClearBacklog !== false" @click.stop="handleClearBacklog(sub)" :disabled="readOnly" class="btn-sm">{{ t("mqSubscriptions.clearBacklog") }}</button>
-              <button v-if="supportsPeekMessages" @click.stop="openPeekDialog(sub)" class="btn-sm">{{ t("mqSubscriptions.peek") }}</button>
-              <button v-if="supportsExpireMessages !== false" @click.stop="openExpireDialog(sub)" :disabled="readOnly" class="btn-sm">{{ t("mqSubscriptions.expireMessages") }}</button>
-              <button @click.stop="handleDelete(sub)" :disabled="readOnly" class="btn-sm btn-danger">{{ t("mqSubscriptions.delete") }}</button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+      <div v-else-if="!filteredSubscriptions.length" class="panel-placeholder">
+        {{ isClusterWideMode ? t("mqSubscriptions.noConsumerGroups") : t("mqSubscriptions.noSubscriptions") }}
+      </div>
+
+      <div v-else class="subscriptions-table">
+        <table>
+          <thead>
+            <tr>
+              <th>{{ t("mqSubscriptions.subscriptionName") }}</th>
+              <th>{{ t("mqSubscriptions.type") }}</th>
+              <th v-if="isRocketMqCluster">{{ t("mqSubscriptions.mode") }}</th>
+              <th v-if="isClusterWideMode">{{ t("mqSubscriptions.subscribedTopics") }}</th>
+              <th v-if="!isClusterWideMode">{{ t("mqSubscriptions.backlog") }}</th>
+              <th v-if="!isClusterWideMode">{{ t("mqSubscriptions.consumeRate") }}</th>
+              <th>{{ t("mqSubscriptions.consumers") }}</th>
+              <th>{{ t("mqSubscriptions.actions") }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="sub in filteredSubscriptions" :key="sub.name" :class="{ selected: selectedSub?.name === sub.name }" @click="selectSubscription(sub)">
+              <td class="sub-name">{{ sub.name }}</td>
+              <td>
+                <span v-if="isRocketMqCluster" :class="consumerGroupTypeBadgeClass(sub)">{{ consumerGroupTypeLabel(sub) }}</span>
+                <span v-else class="badge">{{ sub.subType }}</span>
+              </td>
+              <td v-if="isRocketMqCluster">
+                <span class="badge badge-outline">{{ consumerGroupModeLabel(sub) }}</span>
+              </td>
+              <td v-if="isClusterWideMode" class="topics-cell">
+                <span v-if="sub.topics?.length">{{ sub.topics.join(", ") }}</span>
+                <span v-else class="text-muted">-</span>
+              </td>
+              <td v-if="!isClusterWideMode">
+                <span :class="{ 'text-warning': sub.msgBacklog > 1000 }">
+                  {{ sub.msgBacklog.toLocaleString() }}
+                </span>
+              </td>
+              <td v-if="!isClusterWideMode">{{ t("mqSubscriptions.msgRate", { rate: sub.msgRateOut.toFixed(2) }) }}</td>
+              <td>{{ isClusterWideMode ? (sub.onlineMembers ?? 0) : t("mqSubscriptions.consumerCount", { count: sub.consumers.length }) }}</td>
+              <td class="actions">
+                <template v-if="isRocketMqCluster">
+                  <button @click.stop="openRocketMqDetail(sub)" class="btn-sm">{{ t("mqSubscriptions.viewDetail") }}</button>
+                  <button @click.stop="openRocketMqConfig(sub)" :disabled="readOnly" class="btn-sm">{{ t("mqSubscriptions.editConfig") }}</button>
+                  <button @click.stop="handleDelete(sub)" :disabled="readOnly" class="btn-sm btn-danger">{{ t("mqSubscriptions.delete") }}</button>
+                </template>
+                <template v-else>
+                  <button v-if="supportsResetCursor !== false" @click.stop="openResetDialog(sub)" :disabled="readOnly || !topic" class="btn-sm">{{ t("mqSubscriptions.resetCursor") }}</button>
+                  <button v-if="supportsSkipMessages !== false" @click.stop="openSkipDialog(sub)" :disabled="readOnly" class="btn-sm">{{ t("mqSubscriptions.skipMessages") }}</button>
+                  <button v-if="supportsClearBacklog !== false" @click.stop="handleClearBacklog(sub)" :disabled="readOnly || !topic" class="btn-sm">{{ t("mqSubscriptions.clearBacklog") }}</button>
+                  <button v-if="supportsPeekMessages" @click.stop="openPeekDialog(sub)" :disabled="!topic" class="btn-sm">{{ t("mqSubscriptions.peek") }}</button>
+                  <button v-if="supportsExpireMessages !== false" @click.stop="openExpireDialog(sub)" :disabled="readOnly" class="btn-sm">{{ t("mqSubscriptions.expireMessages") }}</button>
+                  <button @click.stop="handleDelete(sub)" :disabled="readOnly" class="btn-sm btn-danger">{{ t("mqSubscriptions.delete") }}</button>
+                </template>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </template>
+
+    <RocketMqConsumerGroupDialogs v-if="isRocketMqCluster" :connection-id="connectionId" :tenant="tenant" :namespace="namespace" :group="selectedSub" :dialog="activeRocketMqDialog" :read-only="readOnly" @close="closeRocketMqDialog" @refreshed="loadSubscriptions" />
 
     <!-- Create Dialog -->
     <div v-if="showCreateDialog" class="dialog-overlay" @click="showCreateDialog = false">
@@ -372,7 +495,7 @@ watch(
     </div>
 
     <!-- Reset Cursor Dialog -->
-    <div v-if="showResetDialog" class="dialog-overlay" @click="showResetDialog = false">
+    <div v-if="!isRocketMqCluster && showResetDialog" class="dialog-overlay" @click="showResetDialog = false">
       <div class="dialog" @click.stop>
         <div class="dialog-header">
           <h3>{{ t("mqSubscriptions.resetDialogTitle", { name: selectedSub?.name }) }}</h3>
@@ -411,7 +534,7 @@ watch(
     </div>
 
     <!-- Skip Messages Dialog -->
-    <div v-if="showSkipDialog" class="dialog-overlay" @click="showSkipDialog = false">
+    <div v-if="!isRocketMqCluster && showSkipDialog" class="dialog-overlay" @click="showSkipDialog = false">
       <div class="dialog" @click.stop>
         <div class="dialog-header">
           <h3>{{ t("mqSubscriptions.skipDialogTitle", { name: selectedSub?.name }) }}</h3>
@@ -445,7 +568,7 @@ watch(
     </div>
 
     <!-- Peek Messages Dialog -->
-    <div v-if="showPeekDialog" class="dialog-overlay" @click="showPeekDialog = false">
+    <div v-if="!isRocketMqCluster && showPeekDialog" class="dialog-overlay" @click="showPeekDialog = false">
       <div class="dialog dialog-wide" @click.stop>
         <div class="dialog-header">
           <h3>{{ t("mqSubscriptions.peekDialogTitle", { name: selectedSub?.name }) }}</h3>
@@ -485,7 +608,7 @@ watch(
     </div>
 
     <!-- Expire Messages Dialog -->
-    <div v-if="showExpireDialog" class="dialog-overlay" @click="showExpireDialog = false">
+    <div v-if="!isRocketMqCluster && showExpireDialog" class="dialog-overlay" @click="showExpireDialog = false">
       <div class="dialog" @click.stop>
         <div class="dialog-header">
           <h3>{{ t("mqSubscriptions.expireDialogTitle", { name: selectedSub?.name }) }}</h3>
@@ -519,14 +642,129 @@ watch(
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--color-border);
+}
+
+.toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+
+.toolbar-left h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+
+.topic-search {
+  width: min(320px, 32vw);
+  min-width: 180px;
+  padding: 6px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-background);
+  color: var(--color-text);
+  font-size: 13px;
+}
+
+.topic-search:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px var(--color-primary-alpha);
+}
+
+.topic-count {
+  flex: 0 0 auto;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+}
+
+.btn-secondary {
+  padding: 6px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-background);
+  color: var(--color-text);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: var(--color-hover);
+}
+
+.subscription-type-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--color-border-light, var(--color-border));
+  background: var(--color-background-secondary);
+}
+
+.subscription-type-filters-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6b7280);
+  margin-right: 4px;
+}
+
+.checkbox-label.compact {
+  font-size: 12px;
+  gap: 6px;
+}
+
+.badge-outline {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+}
+
+.badge-info {
+  background: color-mix(in srgb, #3b82f6 18%, transparent);
+  color: #2563eb;
+}
+
+.badge-muted {
+  background: color-mix(in srgb, var(--color-text-secondary) 12%, transparent);
+  color: var(--color-text-secondary);
+}
+
+.topics-cell {
+  max-width: 280px;
+  word-break: break-all;
 }
 
 .panel-toolbar h3 {
   margin: 0;
   font-size: 16px;
   font-weight: 600;
+}
+
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.search-input {
+  min-width: 220px;
+  padding: 6px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  font-size: 13px;
+  background: var(--color-background);
+}
+
+.topics-cell {
+  max-width: 280px;
+  word-break: break-word;
 }
 
 .panel-placeholder,
@@ -722,13 +960,16 @@ button:disabled {
 }
 
 .form-group input[type="text"],
-.form-group input[type="number"] {
+.form-group input[type="number"],
+.form-group select.topic-select {
   width: 100%;
   padding: 8px 12px;
   border: 1px solid var(--color-border);
   border-radius: 4px;
   font-size: 14px;
   box-sizing: border-box;
+  background: var(--color-background);
+  color: var(--color-text);
 }
 
 .form-group input:disabled {

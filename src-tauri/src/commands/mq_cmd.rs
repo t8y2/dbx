@@ -247,6 +247,26 @@ pub async fn mq_clear_backlog(
 }
 
 #[tauri::command]
+pub async fn mq_get_consumer_group_config(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    group_id: String,
+) -> Result<serde_json::Value, String> {
+    dbx_core::mq::service::mq_get_consumer_group_config_core(&state, &connection_id, group_id).await
+}
+
+#[tauri::command]
+pub async fn mq_alter_consumer_group_config(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    group_id: String,
+    config: serde_json::Value,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Alter consumer group config").await?;
+    dbx_core::mq::service::mq_alter_consumer_group_config_core(&state, &connection_id, group_id, config).await
+}
+
+#[tauri::command]
 pub async fn mq_peek_messages(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -440,6 +460,79 @@ pub async fn mq_get_cluster_info(
     connection_id: String,
 ) -> Result<dbx_core::mq::ClusterInfo, String> {
     dbx_core::mq::service::mq_get_cluster_info_core(&state, &connection_id).await
+}
+
+#[tauri::command]
+pub async fn mq_get_topic_route(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    topic: dbx_core::mq::TopicRef,
+) -> Result<serde_json::Value, String> {
+    dbx_core::mq::service::mq_get_topic_route_core(&state, &connection_id, topic).await
+}
+
+#[tauri::command]
+pub async fn mq_alter_topic_config(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    topic: dbx_core::mq::TopicRef,
+    configs: serde_json::Value,
+) -> Result<(), String> {
+    dbx_core::mq::service::mq_alter_topic_config_core(&state, &connection_id, topic, configs).await
+}
+
+#[tauri::command]
+pub async fn mq_skip_topic_accumulation(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    topic: dbx_core::mq::TopicRef,
+) -> Result<serde_json::Value, String> {
+    dbx_core::mq::service::mq_skip_topic_accumulation_core(&state, &connection_id, topic).await
+}
+
+#[tauri::command]
+pub async fn mq_view_message(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    topic: dbx_core::mq::TopicRef,
+    msg_id: String,
+) -> Result<serde_json::Value, String> {
+    dbx_core::mq::service::mq_view_message_core(&state, &connection_id, topic, msg_id).await
+}
+
+#[tauri::command]
+pub async fn mq_query_messages_by_key(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    topic: dbx_core::mq::TopicRef,
+    key: String,
+    begin: i64,
+    end: i64,
+    max_num: u32,
+) -> Result<serde_json::Value, String> {
+    dbx_core::mq::service::mq_query_messages_by_key_core(&state, &connection_id, topic, key, begin, end, max_num).await
+}
+
+#[tauri::command]
+pub async fn mq_query_messages_by_topic(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    topic: dbx_core::mq::TopicRef,
+    begin: i64,
+    end: i64,
+    max_num: u32,
+) -> Result<serde_json::Value, String> {
+    dbx_core::mq::service::mq_query_messages_by_topic_core(&state, &connection_id, topic, begin, end, max_num).await
+}
+
+#[tauri::command]
+pub async fn mq_query_message_trace(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    msg_id: String,
+    trace_topic: Option<String>,
+) -> Result<serde_json::Value, String> {
+    dbx_core::mq::service::mq_query_message_trace_core(&state, &connection_id, msg_id, trace_topic).await
 }
 
 // ---- Raw request (escape hatch) ----

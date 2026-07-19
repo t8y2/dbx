@@ -3,3 +3,4 @@
 pub mod kafka;
 pub mod pulsar;
 pub mod pulsar_version;
+pub mod rocketmq;

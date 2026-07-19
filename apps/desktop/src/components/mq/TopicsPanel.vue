@@ -1,9 +1,15 @@
 <script setup lang="ts">
 import { ref, watch, computed } from "vue";
 import { useI18n } from "vue-i18n";
-import type { NamespaceRef, TopicRef, TopicInfo, ListTopicsOpts } from "@/types/mq";
-import { mqListTopics, mqCreateTopic, mqDeleteTopic, mqUpdatePartitions } from "@/lib/backend/api";
+import type { NamespaceRef, TopicRef, TopicInfo, ListTopicsOpts, MqSystemKind, RocketMqTopicMessageType } from "@/types/mq";
+import { mqListTopics, mqCreateTopic, mqDeleteTopic, mqUpdatePartitions, mqGetClusterInfo } from "@/lib/backend/api";
+import type { ClusterInfo } from "@/types/mq";
+import RocketMqTopicDialogs, { type RocketMqTopicDialogKind } from "./rocketmq/RocketMqTopicDialogs.vue";
+import SendMessagePanel from "./SendMessagePanel.vue";
+import MqTypeFilterBar from "./shared/MqTypeFilterBar.vue";
+import type { MqTab } from "@/lib/mq/mqConsoleDefaults";
 import { formatError } from "@/lib/backend/errorUtils";
+import { DEFAULT_ROCKETMQ_TOPIC_TYPE_FILTERS, isProtectedRocketMqTopic, isRocketMqBusinessMessageType, matchesRocketMqTypeFilters, resolveRocketMqMessageType, ROCKETMQ_CREATABLE_TOPIC_MESSAGE_TYPES, ROCKETMQ_TOPIC_MESSAGE_TYPES } from "@/lib/mq/rocketmqTopicTypes";
 
 interface Props {
   connectionId: string;
@@ -11,12 +17,14 @@ interface Props {
   namespace?: string;
   readOnly?: boolean;
   supportsPartitionedTopics?: boolean;
-  isKafkaCluster?: boolean;
+  isFlatMqCluster?: boolean;
+  mqSystemKind?: MqSystemKind;
 }
 
 const props = defineProps<Props>();
 const emit = defineEmits<{
   topicSelected: [topic: TopicInfo];
+  navigateTab: [payload: { tab: MqTab; topic?: TopicInfo; subscription?: string; preferDlqTopic?: boolean }];
 }>();
 
 const { t } = useI18n();
@@ -31,24 +39,96 @@ const selectedTopic = ref<TopicInfo>();
 const editingTopic = ref<TopicInfo>();
 const topicSearch = ref("");
 
+const clusterInfo = ref<ClusterInfo>();
+const activeRocketMqDialog = ref<RocketMqTopicDialogKind | null>(null);
+const rocketMqDialogTopic = ref<TopicInfo>();
+const showSendDialog = ref(false);
+const sendDialogTopic = ref<TopicInfo>();
+
+const ROCKETMQ_PERM_OPTIONS = [
+  { value: 6, labelKey: "mqTopics.permReadWrite" },
+  { value: 4, labelKey: "mqTopics.permRead" },
+  { value: 2, labelKey: "mqTopics.permWrite" },
+] as const;
+
 const formData = ref({
   topicName: "",
   persistent: true,
   partitioned: false,
   partitions: 4,
+  messageType: "NORMAL" as RocketMqTopicMessageType,
+  brokerName: "",
+  readQueueNums: 8,
+  writeQueueNums: 8,
+  perm: 6,
 });
 
 const newPartitions = ref(4);
 
 const includeNonPersistent = ref(false);
+const includeSystemTopics = ref(false);
+const messageTypeFilters = ref<Record<RocketMqTopicMessageType, boolean>>({
+  ...DEFAULT_ROCKETMQ_TOPIC_TYPE_FILTERS,
+});
+
+const isRocketMqCluster = computed(() => props.mqSystemKind === "rocketmq");
+const isKafkaCluster = computed(() => props.mqSystemKind === "kafka");
+const rocketMqTopicTypeOptions = ROCKETMQ_TOPIC_MESSAGE_TYPES;
+const rocketMqCreatableTopicTypes = ROCKETMQ_CREATABLE_TOPIC_MESSAGE_TYPES;
+const rocketMqClusterName = computed(() => clusterInfo.value?.clusterId ?? "-");
+const rocketMqBrokerOptions = computed(() => clusterInfo.value?.brokers ?? []);
+const rocketMqMasterBrokers = computed(() => rocketMqBrokerOptions.value.filter((broker) => !broker.role || broker.role === "MASTER"));
+
+const typeFilteredTopics = computed(() => {
+  let rows = topics.value;
+  if (isRocketMqCluster.value) {
+    rows = rows.filter((topic) => matchesRocketMqTypeFilters(topic, messageTypeFilters.value));
+  } else if (props.isFlatMqCluster && !includeSystemTopics.value) {
+    rows = rows.filter((topic) => !topic.internal);
+  }
+  return rows;
+});
 
 const filteredTopics = computed(() => {
   const query = topicSearch.value.trim().toLowerCase();
-  if (!query) return topics.value;
-  return topics.value.filter((topic) => {
+  if (!query) return typeFilteredTopics.value;
+  return typeFilteredTopics.value.filter((topic) => {
     return topic.name.toLowerCase().includes(query) || topic.shortName.toLowerCase().includes(query);
   });
 });
+
+const userTopicCount = computed(() => {
+  if (isRocketMqCluster.value) {
+    return topics.value.filter((topic) => isRocketMqBusinessMessageType(resolveRocketMqMessageType(topic))).length;
+  }
+  return topics.value.filter((topic) => !topic.internal).length;
+});
+
+function topicTypeLabel(topic: TopicInfo): string {
+  if (isRocketMqCluster.value) {
+    const type = resolveRocketMqMessageType(topic);
+    return t(`mqTopics.rocketmqType.${type.toLowerCase()}`);
+  }
+  if (topic.internal) return t("mqTopics.systemTopic");
+  if (topic.partitioned) return t("mqTopics.partitionedTopic");
+  return t("mqTopics.normalTopic");
+}
+
+function topicTypeBadgeClass(topic: TopicInfo): string {
+  if (isRocketMqCluster.value) {
+    const type = resolveRocketMqMessageType(topic);
+    if (type === "SYSTEM" || type === "RETRY" || type === "DLQ") return "badge-warning";
+    if (type === "DELAY" || type === "FIFO" || type === "TRANSACTION") return "badge-info";
+    return "badge-default";
+  }
+  if (topic.internal) return "badge-warning";
+  if (topic.partitioned) return "badge-info";
+  return "badge-default";
+}
+
+function isTopicProtected(topic: TopicInfo): boolean {
+  return isRocketMqCluster.value ? isProtectedRocketMqTopic(topic) : !!topic.internal;
+}
 const editingCurrentPartitions = computed(() => editingTopic.value?.partitions ?? 0);
 const canSubmitPartitionUpdate = computed(() => {
   const current = editingCurrentPartitions.value;
@@ -86,16 +166,86 @@ async function loadTopics() {
   }
 }
 
+async function loadClusterInfo() {
+  if (!isRocketMqCluster.value) return;
+  try {
+    clusterInfo.value = await mqGetClusterInfo(props.connectionId);
+  } catch (e: unknown) {
+    console.warn("[DBX] Failed to load RocketMQ cluster info:", e);
+  }
+}
+
 function openCreateDialog() {
   if (!guardWritable()) return;
   dialogError.value = undefined;
+  const defaultBroker = rocketMqMasterBrokers.value[0]?.brokerName ?? rocketMqBrokerOptions.value[0]?.brokerName ?? "";
   formData.value = {
     topicName: "",
     persistent: true,
-    partitioned: props.isKafkaCluster ?? false,
+    partitioned: props.isFlatMqCluster ?? false,
     partitions: 4,
+    messageType: "NORMAL",
+    brokerName: defaultBroker,
+    readQueueNums: 8,
+    writeQueueNums: 8,
+    perm: 6,
   };
   showCreateDialog.value = true;
+}
+
+function openRocketMqDialog(kind: RocketMqTopicDialogKind, topic: TopicInfo) {
+  rocketMqDialogTopic.value = topic;
+  activeRocketMqDialog.value = kind;
+}
+
+function closeRocketMqDialog() {
+  activeRocketMqDialog.value = null;
+  rocketMqDialogTopic.value = undefined;
+}
+
+function handleRocketMqNavigate(payload: { tab: "subscriptions" | "messages"; subscription?: string }) {
+  if (!rocketMqDialogTopic.value) return;
+  if (payload.tab === "messages") {
+    openSendDialog(rocketMqDialogTopic.value);
+    closeRocketMqDialog();
+    return;
+  }
+  emit("navigateTab", {
+    tab: payload.tab,
+    topic: rocketMqDialogTopic.value,
+    subscription: payload.subscription,
+  });
+  closeRocketMqDialog();
+}
+
+function openSendDialog(topic: TopicInfo) {
+  sendDialogTopic.value = topic;
+  showSendDialog.value = true;
+}
+
+function closeSendDialog() {
+  showSendDialog.value = false;
+  sendDialogTopic.value = undefined;
+}
+
+function navigateToMessages(topic: TopicInfo) {
+  if (isRocketMqCluster.value) {
+    openSendDialog(topic);
+    return;
+  }
+  emit("navigateTab", { tab: "messages", topic });
+}
+
+function navigateToMessageQuery(topic: TopicInfo, preferDlqTopic = false) {
+  emit("navigateTab", {
+    tab: "messages",
+    topic,
+    preferDlqTopic,
+  });
+}
+
+function isDlqTopic(topic: TopicInfo): boolean {
+  return resolveRocketMqMessageType(topic) === "DLQ";
 }
 
 function openPartitionsDialog(topic: TopicInfo) {
@@ -125,6 +275,13 @@ async function handleCreate() {
       topic: formData.value.topicName,
       persistent: formData.value.persistent,
     };
+    if (isRocketMqCluster.value) {
+      topicRef.messageType = formData.value.messageType;
+      topicRef.brokerName = formData.value.brokerName || undefined;
+      topicRef.readQueueNums = formData.value.readQueueNums;
+      topicRef.writeQueueNums = formData.value.writeQueueNums;
+      topicRef.perm = formData.value.perm;
+    }
     const partitions = props.supportsPartitionedTopics !== false && formData.value.partitioned ? formData.value.partitions : undefined;
     await mqCreateTopic(props.connectionId, topicRef, partitions);
     showCreateDialog.value = false;
@@ -212,6 +369,15 @@ watch(
   () => {
     selectedTopic.value = undefined;
     loadTopics();
+    if (isRocketMqCluster.value) void loadClusterInfo();
+  },
+  { immediate: true },
+);
+
+watch(
+  () => props.mqSystemKind,
+  () => {
+    if (isRocketMqCluster.value) void loadClusterInfo();
   },
   { immediate: true },
 );
@@ -233,9 +399,13 @@ watch(newPartitions, () => {
       <div class="toolbar-left">
         <h3>{{ t("mqTopics.title") }}</h3>
         <input v-model="topicSearch" type="search" class="topic-search" :placeholder="t('mqTopics.searchPlaceholder')" :disabled="loading && !topics.length" />
-        <span v-if="topics.length" class="topic-count">{{ filteredTopics.length }} / {{ topics.length }}</span>
-        <label class="checkbox-label">
-          <input type="checkbox" v-model="includeNonPersistent" />
+        <span v-if="topics.length" class="topic-count"> {{ filteredTopics.length }} / {{ typeFilteredTopics.length }} </span>
+        <label v-if="isKafkaCluster" class="checkbox-label">
+          <input v-model="includeSystemTopics" type="checkbox" />
+          {{ t("mqTopics.includeSystemTopics") }}
+        </label>
+        <label v-else-if="!isRocketMqCluster" class="checkbox-label">
+          <input v-model="includeNonPersistent" type="checkbox" />
           {{ t("mqTopics.includeNonPersistent") }}
         </label>
       </div>
@@ -247,6 +417,13 @@ watch(newPartitions, () => {
       </div>
     </div>
 
+    <MqTypeFilterBar v-if="isRocketMqCluster && tenant && namespace" :label="t('mqTopics.typeFilter')">
+      <label v-for="type in rocketMqTopicTypeOptions" :key="type" class="checkbox-label compact">
+        <input v-model="messageTypeFilters[type]" type="checkbox" />
+        {{ t(`mqTopics.rocketmqType.${type.toLowerCase()}`) }}
+      </label>
+    </MqTypeFilterBar>
+
     <div v-if="!tenant || !namespace" class="panel-placeholder">{{ t("mqTopics.selectTenantNamespace") }}</div>
 
     <div v-else-if="error" class="panel-error">{{ error }}</div>
@@ -255,7 +432,9 @@ watch(newPartitions, () => {
 
     <div v-else-if="!topics.length" class="panel-placeholder">{{ t("mqTopics.noTopics") }}</div>
 
-    <div v-else-if="!filteredTopics.length" class="panel-placeholder">{{ t("mqTopics.noMatches") }}</div>
+    <div v-else-if="!filteredTopics.length" class="panel-placeholder">
+      {{ isRocketMqCluster && userTopicCount === 0 ? t("mqTopics.noUserTopics") : isKafkaCluster && !includeSystemTopics && userTopicCount === 0 ? t("mqTopics.noUserTopics") : t("mqTopics.noMatches") }}
+    </div>
 
     <div v-else class="topics-table">
       <table>
@@ -263,7 +442,7 @@ watch(newPartitions, () => {
           <tr>
             <th>{{ t("mqTopics.name") }}</th>
             <th>{{ t("mqTopics.type") }}</th>
-            <th>{{ t("mqTopics.partitions") }}</th>
+            <th v-if="!isRocketMqCluster">{{ t("mqTopics.partitions") }}</th>
             <th>{{ t("mqTopics.actions") }}</th>
           </tr>
         </thead>
@@ -276,19 +455,35 @@ watch(newPartitions, () => {
               </div>
             </td>
             <td>
-              <span class="badge" :class="topic.partitioned ? 'badge-info' : 'badge-default'">
-                {{ topic.partitioned ? t("mqTopics.partitionedTopic") : t("mqTopics.normalTopic") }}
+              <span class="badge" :class="topicTypeBadgeClass(topic)">
+                {{ topicTypeLabel(topic) }}
               </span>
             </td>
-            <td>
+            <td v-if="!isRocketMqCluster">
               <span v-if="topic.partitioned">{{ topic.partitions ? t("mqTopics.partitionCount", { count: topic.partitions }) : t("mqTopics.partitionsUnknown") }}</span>
               <span v-else class="text-muted">-</span>
             </td>
-            <td class="actions">
-              <button v-if="topic.partitioned && supportsPartitionedTopics !== false" @click.stop="openPartitionsDialog(topic)" :disabled="readOnly || !topic.partitions" class="btn-sm">
-                {{ t("mqTopics.adjustPartitions") }}
-              </button>
-              <button @click.stop="handleDelete(topic)" :disabled="readOnly" class="btn-sm btn-danger">{{ t("mqTopics.delete") }}</button>
+            <td class="actions" @click.stop>
+              <template v-if="isRocketMqCluster">
+                <button class="btn-sm" @click="openRocketMqDialog('status', topic)">{{ t("mqTopics.actionStatus") }}</button>
+                <button class="btn-sm" @click="openRocketMqDialog('route', topic)">{{ t("mqTopics.actionRoute") }}</button>
+                <button class="btn-sm" @click="openRocketMqDialog('consumers', topic)">{{ t("mqTopics.actionConsumers") }}</button>
+                <button v-if="isDlqTopic(topic)" class="btn-sm" @click="navigateToMessageQuery(topic, true)">{{ t("mqRocketmq.viewDlqMessages") }}</button>
+                <template v-else>
+                  <button class="btn-sm" @click="navigateToMessageQuery(topic)">{{ t("mqRocketmq.actionMessageQuery") }}</button>
+                  <button class="btn-sm" :disabled="readOnly" @click="navigateToMessages(topic)">{{ t("mqRocketmq.actionSendMessage") }}</button>
+                </template>
+                <button class="btn-sm" @click="openRocketMqDialog('config', topic)">{{ t("mqTopics.actionConfig") }}</button>
+                <button class="btn-sm" :disabled="readOnly || isTopicProtected(topic)" @click="openRocketMqDialog('reset', topic)">{{ t("mqTopics.actionReset") }}</button>
+                <button class="btn-sm" :disabled="readOnly || isTopicProtected(topic)" @click="openRocketMqDialog('skip', topic)">{{ t("mqTopics.actionSkip") }}</button>
+                <button class="btn-sm btn-danger" :disabled="readOnly || isTopicProtected(topic)" @click="handleDelete(topic)">{{ t("mqTopics.delete") }}</button>
+              </template>
+              <template v-else>
+                <button v-if="topic.partitioned && supportsPartitionedTopics !== false && !isTopicProtected(topic)" @click="openPartitionsDialog(topic)" :disabled="readOnly || !topic.partitions" class="btn-sm">
+                  {{ t("mqTopics.adjustPartitions") }}
+                </button>
+                <button @click="handleDelete(topic)" :disabled="readOnly || isTopicProtected(topic)" class="btn-sm btn-danger">{{ t("mqTopics.delete") }}</button>
+              </template>
             </td>
           </tr>
         </tbody>
@@ -303,22 +498,60 @@ watch(newPartitions, () => {
           <button @click="showCreateDialog = false" class="btn-close">×</button>
         </div>
         <div class="dialog-body">
-          <div v-if="!isKafkaCluster" class="form-group">
+          <div v-if="!isRocketMqCluster && !isFlatMqCluster" class="form-group">
             <label>{{ t("mqTopics.tenantNamespace") }}</label>
             <input type="text" :value="`${tenant} / ${namespace}`" disabled />
+          </div>
+          <div v-if="isRocketMqCluster" class="form-group">
+            <label>{{ t("mqTopics.clusterName") }}</label>
+            <input type="text" :value="rocketMqClusterName" disabled />
+          </div>
+          <div v-if="isRocketMqCluster" class="form-group">
+            <label>{{ t("mqTopics.brokerName") }}*</label>
+            <select v-model="formData.brokerName" :disabled="readOnly">
+              <option value="">{{ t("mqTopics.allBrokers") }}</option>
+              <option v-for="broker in rocketMqMasterBrokers.length ? rocketMqMasterBrokers : rocketMqBrokerOptions" :key="broker.brokerName || broker.id" :value="broker.brokerName || ''">
+                {{ broker.brokerName || `${broker.host}:${broker.port}` }}
+              </option>
+            </select>
           </div>
           <div class="form-group">
             <label>{{ t("mqTopics.topicName") }}*</label>
             <input v-model="formData.topicName" type="text" :placeholder="t('mqTopics.topicNamePlaceholder')" :disabled="readOnly" />
           </div>
-          <div class="form-group">
+          <div v-if="isRocketMqCluster" class="form-group">
+            <label>{{ t("mqTopics.messageType") }}*</label>
+            <select v-model="formData.messageType" :disabled="readOnly">
+              <option v-for="type in rocketMqCreatableTopicTypes" :key="type" :value="type">
+                {{ t(`mqTopics.rocketmqType.${type.toLowerCase()}`) }}
+              </option>
+            </select>
+            <div class="form-hint">{{ t("mqTopics.messageTypeHint") }}</div>
+          </div>
+          <div v-if="isRocketMqCluster" class="form-row-inline">
+            <div class="form-group">
+              <label>{{ t("mqTopics.readQueues") }}*</label>
+              <input v-model.number="formData.readQueueNums" type="number" min="1" max="256" :disabled="readOnly" />
+            </div>
+            <div class="form-group">
+              <label>{{ t("mqTopics.writeQueues") }}*</label>
+              <input v-model.number="formData.writeQueueNums" type="number" min="1" max="256" :disabled="readOnly" />
+            </div>
+            <div class="form-group">
+              <label>{{ t("mqTopics.perm") }}*</label>
+              <select v-model.number="formData.perm" :disabled="readOnly">
+                <option v-for="opt in ROCKETMQ_PERM_OPTIONS" :key="opt.value" :value="opt.value">{{ t(opt.labelKey) }}</option>
+              </select>
+            </div>
+          </div>
+          <div v-if="!isRocketMqCluster" class="form-group">
             <label class="checkbox-label">
               <input type="checkbox" v-model="formData.persistent" :disabled="readOnly" />
               {{ t("mqTopics.persistentRecommended") }}
             </label>
             <div class="form-hint">{{ t("mqTopics.persistentHint") }}</div>
           </div>
-          <div v-if="supportsPartitionedTopics !== false" class="form-group">
+          <div v-if="!isRocketMqCluster && supportsPartitionedTopics !== false" class="form-group">
             <label class="checkbox-label">
               <input type="checkbox" v-model="formData.partitioned" :disabled="readOnly" />
               {{ t("mqTopics.enablePartitions") }}
@@ -363,6 +596,32 @@ watch(newPartitions, () => {
         </div>
       </div>
     </div>
+
+    <RocketMqTopicDialogs
+      v-if="isRocketMqCluster"
+      :connection-id="connectionId"
+      :tenant="tenant"
+      :namespace="namespace"
+      :topic="rocketMqDialogTopic"
+      :dialog="activeRocketMqDialog"
+      :read-only="readOnly"
+      :broker-options="rocketMqBrokerOptions"
+      @close="closeRocketMqDialog"
+      @navigate="handleRocketMqNavigate"
+      @refreshed="loadTopics"
+    />
+
+    <div v-if="showSendDialog && sendDialogTopic" class="dialog-overlay" @click="closeSendDialog">
+      <div class="dialog send-dialog" @click.stop>
+        <div class="dialog-header">
+          <h3>{{ t("mqMessages.title") }}</h3>
+          <button type="button" class="btn-close" @click="closeSendDialog">×</button>
+        </div>
+        <div class="dialog-body send-dialog-body">
+          <SendMessagePanel embedded :connection-id="connectionId" :tenant="tenant" :namespace="namespace" :topic="sendDialogTopic" :read-only="readOnly" mq-system-kind="rocketmq" :is-flat-mq-cluster="true" :supports-peek-messages="false" />
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -380,9 +639,32 @@ watch(newPartitions, () => {
 .panel-toolbar {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
+  gap: 12px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--color-border);
+}
+
+.topic-type-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--topics-border-light);
+  background: color-mix(in srgb, var(--topics-header-bg) 72%, transparent);
+}
+
+.topic-type-filters-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6b7280);
+  margin-right: 4px;
+}
+
+.checkbox-label.compact {
+  font-size: 12px;
+  gap: 6px;
 }
 
 .toolbar-left {
@@ -572,7 +854,27 @@ td {
 
 .actions {
   display: flex;
-  gap: 8px;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+  min-width: 420px;
+}
+
+.form-row-inline {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.form-group select {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  font-size: 14px;
+  box-sizing: border-box;
+  background: var(--color-background);
+  color: var(--color-text);
 }
 
 .btn-primary,
@@ -722,5 +1024,16 @@ button:disabled {
   gap: 8px;
   padding: 16px 20px;
   border-top: 1px solid var(--color-border);
+}
+
+.send-dialog {
+  width: min(760px, calc(100vw - 32px));
+  max-height: calc(100vh - 64px);
+}
+
+.send-dialog-body {
+  padding: 0;
+  max-height: calc(100vh - 140px);
+  overflow: auto;
 }
 </style>

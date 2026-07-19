@@ -39,6 +39,51 @@ pub trait MessageQueueAdmin: Send + Sync {
     async fn get_topic_stats(&self, topic: &TopicRef) -> Result<TopicStats, String>;
     async fn get_topic_internal_stats(&self, topic: &TopicRef) -> Result<serde_json::Value, String>;
 
+    async fn get_topic_route(&self, _topic: &TopicRef) -> Result<serde_json::Value, String> {
+        Err("Topic route is not supported by this MQ system".to_string())
+    }
+
+    async fn alter_topic_config(&self, _topic: &TopicRef, _configs: serde_json::Value) -> Result<(), String> {
+        Err("Alter topic config is not supported by this MQ system".to_string())
+    }
+
+    async fn skip_topic_accumulation(&self, _topic: &TopicRef) -> Result<serde_json::Value, String> {
+        Err("Skip topic accumulation is not supported by this MQ system".to_string())
+    }
+
+    async fn view_message(&self, _topic: &TopicRef, _msg_id: &str) -> Result<serde_json::Value, String> {
+        Err("View message is not supported by this MQ system".to_string())
+    }
+
+    async fn query_messages_by_key(
+        &self,
+        _topic: &TopicRef,
+        _key: &str,
+        _begin: i64,
+        _end: i64,
+        _max_num: u32,
+    ) -> Result<serde_json::Value, String> {
+        Err("Message query is not supported by this MQ system".to_string())
+    }
+
+    async fn query_messages_by_topic(
+        &self,
+        _topic: &TopicRef,
+        _begin: i64,
+        _end: i64,
+        _max_num: u32,
+    ) -> Result<serde_json::Value, String> {
+        Err("Message query is not supported by this MQ system".to_string())
+    }
+
+    async fn query_message_trace(
+        &self,
+        _msg_id: &str,
+        _trace_topic: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        Err("Message trace is not supported by this MQ system".to_string())
+    }
+
     // ---- Subscriptions ----
     async fn list_subscriptions(&self, topic: &TopicRef) -> Result<Vec<SubscriptionInfo>, String>;
     async fn create_subscription(&self, topic: &TopicRef, sub: &str, pos: ResetPosition) -> Result<(), String>;
@@ -54,6 +99,16 @@ pub trait MessageQueueAdmin: Send + Sync {
         options: PeekMessagesOptions,
     ) -> Result<Vec<PeekedMessage>, String>;
     async fn expire_messages(&self, topic: &TopicRef, sub: &str, expire_seconds: i64) -> Result<(), String>;
+
+    /// RocketMQ: read subscription group config from broker metadata.
+    async fn get_consumer_group_config(&self, _group_id: &str) -> Result<serde_json::Value, String> {
+        Err("Consumer group config is not supported by this MQ system".to_string())
+    }
+
+    /// RocketMQ: update subscription group config on brokers.
+    async fn alter_consumer_group_config(&self, _group_id: &str, _config: serde_json::Value) -> Result<(), String> {
+        Err("Consumer group config is not supported by this MQ system".to_string())
+    }
 
     // ---- Producers / consumers (runtime, read from stats) ----
     async fn list_producers(&self, topic: &TopicRef) -> Result<Vec<ProducerInfo>, String>;

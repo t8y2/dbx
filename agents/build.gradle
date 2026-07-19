@@ -4,7 +4,7 @@ plugins {
 
 def java8Projects = ['common', 'test-support'] as Set
 def infrastructureProjects = ['common', 'test-support'] as Set
-def legacyStandaloneProjects = ['mongodb', 'kafka'] as Set
+def legacyStandaloneProjects = ['mongodb', 'kafka', 'rocketmq'] as Set
 def agentProjects = subprojects.findAll { !infrastructureProjects.contains(it.name) }
 def jdbcAgentProjects = agentProjects.findAll { !legacyStandaloneProjects.contains(it.name) }
 

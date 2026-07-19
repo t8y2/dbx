@@ -134,7 +134,50 @@ describe("connectionStore MQ sidebar tree", () => {
 
     await store.refreshTreeNode(node);
 
-    expect(node.children?.map((child) => ({ label: child.label, tenant: child.mqTenant, initialTab: child.mqInitialTab }))).toEqual([{ label: "Topics", tenant: "_kafka", initialTab: "topics" }]);
+    expect(node.children?.map((child) => ({ label: child.label, tenant: child.mqTenant, initialTab: child.mqInitialTab }))).toEqual([{ label: "Topics", tenant: "_flat_mq", initialTab: "topics" }]);
+  });
+
+  it("adds a RocketMQ topics child with a topics initial tab", async () => {
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases: vi.fn().mockResolvedValue([]),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      mqListTenants: vi.fn(),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = {
+      ...kafkaConnection(),
+      name: "Apache RocketMQ",
+      driver_profile: "rocketmq",
+      driver_label: "Apache RocketMQ",
+      external_config: {
+        systemKind: "rocketmq",
+        adminUrl: "",
+        auth: { kind: "none" },
+        extra: { namesrvAddr: "127.0.0.1:9876" },
+      },
+    } as ConnectionConfig;
+    const node: TreeNode = {
+      id: connection.id,
+      label: connection.name,
+      type: "connection",
+      connectionId: connection.id,
+      isExpanded: false,
+      children: [],
+    };
+
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [node];
+
+    await store.refreshTreeNode(node);
+
+    expect(node.children?.map((child) => ({ label: child.label, tenant: child.mqTenant, initialTab: child.mqInitialTab }))).toEqual([{ label: "Topics", tenant: "_flat_mq", initialTab: "topics" }]);
   });
 
   it("detects Kafka from external config when driver profile is missing", async () => {
@@ -168,7 +211,7 @@ describe("connectionStore MQ sidebar tree", () => {
     await store.refreshTreeNode(node);
 
     expect(mqListTenants).not.toHaveBeenCalled();
-    expect(node.children?.map((child) => ({ label: child.label, tenant: child.mqTenant, initialTab: child.mqInitialTab }))).toEqual([{ label: "Topics", tenant: "_kafka", initialTab: "topics" }]);
+    expect(node.children?.map((child) => ({ label: child.label, tenant: child.mqTenant, initialTab: child.mqInitialTab }))).toEqual([{ label: "Topics", tenant: "_flat_mq", initialTab: "topics" }]);
   });
 
   it("reuses an in-flight connection attempt instead of recording stale superseded errors", async () => {

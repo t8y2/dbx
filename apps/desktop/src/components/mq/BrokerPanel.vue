@@ -1,17 +1,30 @@
 <script setup lang="ts">
 import { formatError } from "@/lib/backend/errorUtils";
-import { ref, watch, onMounted, onUnmounted } from "vue";
+import { ref, watch, onMounted, onUnmounted, computed } from "vue";
 import { useI18n } from "vue-i18n";
-import type { ClusterInfo } from "@/types/mq";
+import type { ClusterInfo, MqAdminConfig, MqSystemKind } from "@/types/mq";
 import { mqGetClusterInfo } from "@/lib/backend/api";
+import { useConnectionStore } from "@/stores/connectionStore";
 
 interface Props {
   connectionId: string;
   readOnly?: boolean;
+  mqSystemKind?: MqSystemKind;
 }
 
 const props = defineProps<Props>();
 const { t } = useI18n();
+const connectionStore = useConnectionStore();
+
+const isRocketMqCluster = computed(() => props.mqSystemKind === "rocketmq");
+const rocketmqNamesrvAddr = computed(() => {
+  if (!isRocketMqCluster.value) return undefined;
+  const config = connectionStore.getConfig(props.connectionId);
+  const external = config?.external_config as Partial<MqAdminConfig> | undefined;
+  const extra = external?.extra as Record<string, unknown> | undefined;
+  const addr = extra?.namesrvAddr ?? extra?.namesrv_addr;
+  return typeof addr === "string" && addr.trim() ? addr.trim() : undefined;
+});
 
 const clusterInfo = ref<ClusterInfo>();
 const loading = ref(false);
@@ -92,7 +105,7 @@ onUnmounted(() => {
 <template>
   <div class="broker-panel">
     <div class="panel-toolbar">
-      <h3>{{ t("mqBroker.title") }}</h3>
+      <h3>{{ isRocketMqCluster ? t("mqBroker.clusterTitle") : t("mqBroker.title") }}</h3>
       <div class="toolbar-actions">
         <label class="checkbox-label">
           <input type="checkbox" v-model="autoRefresh" />
@@ -104,7 +117,7 @@ onUnmounted(() => {
           <option :value="30">{{ t("mqBroker.refreshInterval30s") }}</option>
           <option :value="60">{{ t("mqBroker.refreshInterval60s") }}</option>
         </select>
-        <button @click="refreshNow" :disabled="loading" class="btn-sm">
+        <button @click="refreshNow" :disabled="loading" class="btn-secondary">
           {{ loading ? t("mqBroker.refreshing") : t("mqBroker.refreshNow") }}
         </button>
       </div>
@@ -119,20 +132,20 @@ onUnmounted(() => {
         <h4>{{ t("mqBroker.clusterOverview") }}</h4>
         <div class="stats-grid">
           <div class="stat-card">
-            <div class="stat-icon">🔗</div>
+            <div v-if="!isRocketMqCluster" class="stat-icon">🔗</div>
             <div class="stat-content">
               <div class="stat-label">{{ t("mqBroker.clusterId") }}</div>
               <div class="stat-value stat-value-sm">{{ clusterInfo.clusterId || t("mqBroker.unknown") }}</div>
             </div>
           </div>
           <div class="stat-card">
-            <div class="stat-icon">🖥️</div>
+            <div v-if="!isRocketMqCluster" class="stat-icon">🖥️</div>
             <div class="stat-content">
               <div class="stat-label">{{ t("mqBroker.brokerCount") }}</div>
               <div class="stat-value">{{ clusterInfo.brokerCount }}</div>
             </div>
           </div>
-          <div class="stat-card">
+          <div v-if="!isRocketMqCluster" class="stat-card">
             <div class="stat-icon">👑</div>
             <div class="stat-content">
               <div class="stat-label">{{ t("mqBroker.controller") }}</div>
@@ -142,6 +155,12 @@ onUnmounted(() => {
                 </template>
                 <template v-else>{{ t("mqBroker.unknown") }}</template>
               </div>
+            </div>
+          </div>
+          <div v-else class="stat-card">
+            <div class="stat-content">
+              <div class="stat-label">{{ t("mqRocketmq.namesrvAddr") }}</div>
+              <div class="stat-value stat-value-sm">{{ rocketmqNamesrvAddr || t("mqBroker.unknown") }}</div>
             </div>
           </div>
         </div>
@@ -154,20 +173,25 @@ onUnmounted(() => {
             <thead>
               <tr>
                 <th>{{ t("mqBroker.nodeId") }}</th>
+                <th v-if="isRocketMqCluster">{{ t("mqBroker.brokerName") }}</th>
                 <th>{{ t("mqBroker.host") }}</th>
                 <th>{{ t("mqBroker.port") }}</th>
-                <th>{{ t("mqBroker.rack") }}</th>
+                <th v-if="!isRocketMqCluster">{{ t("mqBroker.rack") }}</th>
                 <th>{{ t("mqBroker.role") }}</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="broker in clusterInfo.brokers" :key="broker.id" :class="{ 'is-controller': broker.id === clusterInfo.controllerId }">
+              <tr v-for="broker in clusterInfo.brokers" :key="`${broker.id}-${broker.host}:${broker.port}`" :class="{ 'is-controller': !isRocketMqCluster && broker.id === clusterInfo.controllerId }">
                 <td class="node-id">{{ broker.id }}</td>
+                <td v-if="isRocketMqCluster">{{ broker.brokerName || "-" }}</td>
                 <td>{{ broker.host }}</td>
                 <td>{{ broker.port }}</td>
-                <td>{{ broker.rack || "-" }}</td>
+                <td v-if="!isRocketMqCluster">{{ broker.rack || "-" }}</td>
                 <td>
-                  <span v-if="broker.id === clusterInfo.controllerId" class="role-badge controller">{{ t("mqBroker.roleController") }}</span>
+                  <span v-if="isRocketMqCluster" class="role-badge" :class="broker.role === 'MASTER' ? 'controller' : 'follower'">
+                    {{ broker.role === "MASTER" ? t("mqBroker.roleMaster") : broker.role === "SLAVE" ? t("mqBroker.roleSlave") : t("mqBroker.unknown") }}
+                  </span>
+                  <span v-else-if="broker.id === clusterInfo.controllerId" class="role-badge controller">{{ t("mqBroker.roleController") }}</span>
                   <span v-else class="role-badge follower">{{ t("mqBroker.roleFollower") }}</span>
                 </td>
               </tr>
@@ -382,5 +406,24 @@ onUnmounted(() => {
 .role-badge.follower {
   background: var(--color-background-tertiary);
   color: var(--color-text-secondary);
+}
+
+.btn-secondary {
+  padding: 6px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-background);
+  color: var(--color-text);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: var(--color-hover);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 </style>

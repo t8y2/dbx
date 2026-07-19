@@ -291,6 +291,8 @@ impl MessageQueueAdmin for PulsarAdmin {
                         partitioned: true,
                         partitions,
                         persistent,
+                        internal: false,
+                        message_type: None,
                     })
                 })
                 .buffered(PARTITION_METADATA_CONCURRENCY)
@@ -314,6 +316,8 @@ impl MessageQueueAdmin for PulsarAdmin {
                     partitioned: false,
                     partitions: None,
                     persistent,
+                    internal: false,
+                    message_type: None,
                 });
             }
         }
@@ -507,7 +511,7 @@ impl MessageQueueAdmin for PulsarAdmin {
                     namespace: namespace.clone(),
                     topic: topic.clone(),
                     persistent: *persistent,
-                    partitioned: None,
+                    ..Default::default()
                 };
                 self.profile.topic_publish_rate_path(topic_ref.domain(), &topic_ref.path())
             }
@@ -527,7 +531,7 @@ impl MessageQueueAdmin for PulsarAdmin {
                     namespace: namespace.clone(),
                     topic: topic.clone(),
                     persistent: *persistent,
-                    partitioned: None,
+                    ..Default::default()
                 };
                 self.profile.topic_dispatch_rate_path(topic_ref.domain(), &topic_ref.path())
             }
@@ -560,7 +564,7 @@ impl MessageQueueAdmin for PulsarAdmin {
                     namespace: namespace.clone(),
                     topic: topic.clone(),
                     persistent: *persistent,
-                    partitioned: None,
+                    ..Default::default()
                 };
                 self.profile.topic_backlog_quota_path(topic_ref.domain(), &topic_ref.path())
             }
@@ -585,7 +589,7 @@ impl MessageQueueAdmin for PulsarAdmin {
                     namespace: namespace.clone(),
                     topic: topic.clone(),
                     persistent: *persistent,
-                    partitioned: None,
+                    ..Default::default()
                 };
                 self.profile.topic_retention_path(topic_ref.domain(), &topic_ref.path())
             }
@@ -608,7 +612,7 @@ impl MessageQueueAdmin for PulsarAdmin {
                     namespace: namespace.clone(),
                     topic: topic.clone(),
                     persistent: *persistent,
-                    partitioned: None,
+                    ..Default::default()
                 };
                 let namespace_policies = self
                     .get_value(&self.profile.namespace_policies_path(&topic_ref.tenant, &topic_ref.namespace))
@@ -654,7 +658,7 @@ impl MessageQueueAdmin for PulsarAdmin {
                     namespace: namespace.clone(),
                     topic: topic.clone(),
                     persistent: *persistent,
-                    partitioned: None,
+                    ..Default::default()
                 };
                 self.profile.topic_permission_role_path(topic_ref.domain(), &topic_ref.path(), role)
             }
@@ -674,7 +678,7 @@ impl MessageQueueAdmin for PulsarAdmin {
                     namespace: namespace.clone(),
                     topic: topic.clone(),
                     persistent: *persistent,
-                    partitioned: None,
+                    ..Default::default()
                 };
                 self.profile.topic_permission_role_path(topic_ref.domain(), &topic_ref.path(), role)
             }
@@ -691,7 +695,7 @@ impl MessageQueueAdmin for PulsarAdmin {
                     namespace: namespace.clone(),
                     topic: topic.clone(),
                     persistent: *persistent,
-                    partitioned: None,
+                    ..Default::default()
                 };
                 self.profile.topic_permissions_path(topic_ref.domain(), &topic_ref.path())
             }
@@ -1422,6 +1426,7 @@ mod tests {
             topic: "orders".to_string(),
             persistent: true,
             partitioned: Some(true),
+            ..Default::default()
         };
         admin.create_topic(&topic, Some(3)).await.expect("create_topic should succeed");
         admin

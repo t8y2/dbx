@@ -114,6 +114,7 @@ export default withEnglishFallback({
     rootFolder: "Biblioteca SQL",
     newQuery: "Nova Consulta",
     newFolder: "Nova Pasta SQL",
+    newSubfolder: "Nova Subpasta",
     newFolderDefault: "Nova Pasta",
     renameFolder: "Renomear Pasta",
     deleteFolder: "Excluir Pasta",

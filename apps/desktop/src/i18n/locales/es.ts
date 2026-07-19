@@ -114,6 +114,7 @@ export default withEnglishFallback({
     rootFolder: "Biblioteca SQL",
     newQuery: "Nueva consulta",
     newFolder: "Nueva carpeta SQL",
+    newSubfolder: "Nueva subcarpeta",
     newFolderDefault: "Nueva carpeta",
     renameFolder: "Renombrar carpeta",
     deleteFolder: "Eliminar carpeta",

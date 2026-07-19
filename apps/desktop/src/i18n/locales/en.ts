@@ -112,6 +112,7 @@ export default {
     rootFolder: "SQL Library",
     newQuery: "New Query",
     newFolder: "New SQL Folder",
+    newSubfolder: "New Subfolder",
     newFolderDefault: "New Folder",
     renameFolder: "Rename Folder",
     deleteFolder: "Delete Folder",

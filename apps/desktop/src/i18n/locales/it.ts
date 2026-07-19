@@ -113,6 +113,7 @@ export default withEnglishFallback({
     rootFolder: "Libreria SQL",
     newQuery: "Nuova query",
     newFolder: "Nuova Cartella SQL",
+    newSubfolder: "Nuova Sottocartella",
     newFolderDefault: "Nuova Cartella",
     renameFolder: "Rinomina Cartella",
     deleteFolder: "Elimina Cartella",

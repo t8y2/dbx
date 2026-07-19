@@ -114,6 +114,7 @@ export default withEnglishFallback({
     rootFolder: "SQLライブラリ",
     newQuery: "新規クエリ",
     newFolder: "新しいSQLフォルダ",
+    newSubfolder: "新しいサブフォルダ",
     newFolderDefault: "新しいフォルダ",
     renameFolder: "フォルダ名を変更",
     deleteFolder: "フォルダを削除",

@@ -114,6 +114,7 @@ export default withEnglishFallback({
     rootFolder: "SQL 库",
     newQuery: "新建查询",
     newFolder: "新建 SQL 文件夹",
+    newSubfolder: "新建子文件夹",
     newFolderDefault: "新建文件夹",
     renameFolder: "重命名文件夹",
     deleteFolder: "删除文件夹",

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { resolveSqlCompletionTableLookupTarget } from "@/lib/sql/sqlCompletionLookupTarget";
+import { getSqlCompletionContext } from "@/lib/sql/sqlCompletion";
+import { resolveSqlCompletionRoutineLookupTarget, resolveSqlCompletionTableLookupTarget } from "@/lib/sql/sqlCompletionLookupTarget";
 
 describe("sqlCompletionLookupTarget", () => {
   it("treats qualified table completion as a database lookup for MySQL-compatible engines", () => {
@@ -73,6 +74,25 @@ describe("sqlCompletionLookupTarget", () => {
       database: "app",
       schema: "public",
       filter: "ord",
+    });
+  });
+
+  it.each([
+    ["SELECT dbo.fn_", "dbo", "fn_"],
+    ["SELECT public.st_", "public", "st_"],
+  ])("separates a routine schema from its name mask for %s", (sql, schema, mask) => {
+    const completionContext = getSqlCompletionContext(sql, sql.length);
+
+    expect(resolveSqlCompletionRoutineLookupTarget({ currentSchema: "fallback", completionContext })).toEqual({ schema, mask });
+  });
+
+  it("uses the current schema for an unqualified routine mask", () => {
+    const sql = "SELECT st_";
+    const completionContext = getSqlCompletionContext(sql, sql.length);
+
+    expect(resolveSqlCompletionRoutineLookupTarget({ currentSchema: "public", completionContext })).toEqual({
+      schema: "public",
+      mask: "st_",
     });
   });
 });

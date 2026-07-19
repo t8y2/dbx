@@ -46,6 +46,8 @@ rayon = "1"
 percent-encoding = "2"
 encoding_rs = "0.8"
 log = "0.4"
+tracing = "0.1"
+tracing-subscriber = "0.3"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 chrono = { version = "0.4", features = ["serde"] }

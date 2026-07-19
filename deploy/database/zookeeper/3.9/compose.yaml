@@ -1,0 +1,18 @@
+services:
+  database:
+    image: docker.cnb.cool/znb/images/zookeeper:3.9.5
+    container_name: dbx-zookeeper-3.9
+    ports:
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-2182}:2181"
+    volumes:
+      - data:/data
+      - datalog:/datalog
+    healthcheck:
+      test: ["CMD-SHELL", "zkServer.sh status | grep -q 'Mode: standalone'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+volumes:
+  data:
+  datalog:

@@ -285,7 +285,7 @@ describe("sqlCompletion scoped context classification", () => {
     expect(context.prefix).toBe("userc");
     expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ name: "A1User" })]));
     expect(context.suggestColumns).toBe(true);
-    expect(context.suggestRoutines).toBe(false);
+    expect(context.suggestRoutines).toBe(true);
   });
 
   it("auto-opens column completion after WHERE whitespace before LIMIT", () => {

@@ -1,0 +1,38 @@
+name: Update Contributors
+
+on:
+  schedule:
+    - cron: "23 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: contributors
+  cancel-in-progress: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v6
+      - name: Refresh contributor activity
+        working-directory: docs
+        run: pnpm contributors:update
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Commit refreshed snapshot
+        run: |
+          if git diff --quiet -- docs/data/contributors.json; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/data/contributors.json
+          git commit -m "chore(docs): refresh contributor activity"
+          git push

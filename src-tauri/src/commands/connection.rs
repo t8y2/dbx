@@ -806,6 +806,7 @@ async fn test_connection_with_info_inner(
                     Some(&config.password),
                     config.ssl,
                     config.url_params.as_deref(),
+                    config.external_config.as_ref(),
                     connect_timeout,
                 );
                 db::elasticsearch_driver::test_connection(&mut client, connect_timeout)
@@ -1121,6 +1122,7 @@ pub async fn connect_db(
                 Some(&db_config.password),
                 db_config.ssl,
                 db_config.url_params.as_deref(),
+                db_config.external_config.as_ref(),
                 connect_timeout,
             );
             db::elasticsearch_driver::test_connection(&mut client, connect_timeout).await?;

@@ -2240,6 +2240,11 @@ export const useQueryStore = defineStore("query", () => {
     if (tab) {
       tab.tableMeta = meta;
       tab.tableMetaUpdatedAt = Date.now();
+      // 只有真实元数据（columns 非空）落地才结束行标识等待；多处调用方会先写
+      // columns/primaryKeys 为空的占位身份（如 useNavigationTargets），不得
+      // 借此提前解除编辑门控。失败/中止路径不清除——标签页保持只读是安全
+      // 兜底，刷新或重开表会重新加载元数据恢复
+      if (meta.columns.length > 0) tab.tableMetaPending = false;
     }
   }
 
@@ -3827,6 +3832,9 @@ export const useQueryStore = defineStore("query", () => {
     const executionId = tab.executionId;
     if (!executionId) return false;
     tab.isCancelling = true;
+    // 单调递增、不随取消结果回退：导航流程据此判断"执行期间用户请求过停止"
+    // （isCancelling 在取消失败或查询先完成时会被清掉，无法承担这个语义）
+    tab.cancelRequestCount = (tab.cancelRequestCount ?? 0) + 1;
     const cancellationStartedAt = performance.now();
     try {
       const canceled = await withCancelQueryTimeout(api.cancelQuery(executionId));
@@ -4010,7 +4018,17 @@ export const useQueryStore = defineStore("query", () => {
     tab.querySourceColumns = snapshot.querySourceColumns;
     tab.queryEditabilityReason = snapshot.queryEditabilityReason;
     tab.mongoEditTarget = snapshot.mongoEditTarget;
-    tab.tableMeta = snapshot.tableMeta;
+    // Data tab 快照可能是延迟元数据期间落盘的空列占位身份：不得用它回滚
+    // 之后已落地的真实元数据（否则 pending 已清除而行标识又变未知，编辑
+    // 门控失效）；若恢复后确实没有真实列，重新挂起编辑门控
+    if (tab.tableMeta?.columns.length && !snapshot.tableMeta?.columns.length) {
+      // 保留当前真实元数据，忽略快照中的占位身份
+    } else {
+      tab.tableMeta = snapshot.tableMeta;
+    }
+    if (tab.mode === "data" && !tab.tableMeta?.columns.length) {
+      tab.tableMetaPending = true;
+    }
     tab.resultPageSql = snapshot.resultPageSql;
     tab.resultPageLimit = snapshot.resultPageLimit;
     tab.resultPageOffset = snapshot.resultPageOffset;

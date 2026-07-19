@@ -618,6 +618,23 @@ test("undo and redo restore pending cell edits before save", () => {
   assert.deepEqual(editor.rowDataWithChanges(result.value.rows[0], 0), [1, "Ada Lovelace"]);
 });
 
+test("typing NULL preserves the literal string value", async () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const result = computed(() => ({
+    columns: ["id", "name"],
+    rows: [[1, "Ada"] as CellValue[]],
+  }));
+  const editor = createPeopleGridEditor(result);
+
+  editor.applyCellValue(0, 1, "NULL");
+
+  assert.equal(editor.dirtyRows.value.get(0)?.get(1), "NULL");
+  assert.deepEqual(editor.rowDataWithChanges(result.value.rows[0], 0), [1, "NULL"]);
+  assert.deepEqual(await editor.previewChanges(), [`UPDATE "people" SET "name" = 'NULL' WHERE "id" = 1;`]);
+});
+
 test("setting a cell to NULL records pending SQL and supports undo and redo", async () => {
   setActivePinia(createPinia());
   installBrowserTestGlobals();

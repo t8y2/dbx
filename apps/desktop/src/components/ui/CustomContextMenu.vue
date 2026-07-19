@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, watch, onBeforeUnmount, nextTick, type Component } from "vue";
+import { ref, watch, onBeforeUnmount, onMounted, nextTick, type Component } from "vue";
 import { ChevronRight } from "@lucide/vue";
 import { shortcutDisplayKeys } from "@/lib/editor/shortcutDisplay";
+import { registerGlobalContextMenu, type ContextMenuRegistration } from "@/components/ui/customContextMenuRegistry";
 
 export interface ContextMenuItem {
   label: string;
@@ -31,24 +32,6 @@ defineSlots<{
   default(props: { onContextMenu: (event: MouseEvent) => void }): any;
 }>();
 
-// ---- module-level singleton state ----
-const openMenus = new Set<() => void>();
-let globalSetup = false;
-
-function ensureGlobalListeners() {
-  if (globalSetup) return;
-  globalSetup = true;
-  const closeAll = () => {
-    for (const c of openMenus) c();
-    openMenus.clear();
-  };
-  document.addEventListener("contextmenu", closeAll, true);
-  document.addEventListener("scroll", closeAll, true);
-  window.addEventListener("resize", closeAll);
-}
-ensureGlobalListeners();
-// -------------------------------------
-
 const show = ref(false);
 const x = ref(0);
 const y = ref(0);
@@ -62,6 +45,7 @@ const subX = ref(0);
 const subY = ref(0);
 let subCloseTimer: ReturnType<typeof setTimeout> | null = null;
 let subAnchorRect: { left: number; right: number; top: number; bottom: number } | null = null;
+let contextMenuRegistration: ContextMenuRegistration | null = null;
 
 function close() {
   activeSubIndex.value = null;
@@ -99,19 +83,22 @@ function onResize() {
 }
 
 watch(show, (val) => {
+  contextMenuRegistration?.setOpen(val);
   if (val) {
-    openMenus.add(close);
     document.addEventListener("pointerdown", onPointerDownOutside, true);
     document.addEventListener("keydown", onKeydown);
     document.addEventListener("scroll", onScroll, true);
     window.addEventListener("resize", onResize);
   } else {
-    openMenus.delete(close);
     document.removeEventListener("pointerdown", onPointerDownOutside, true);
     document.removeEventListener("keydown", onKeydown);
     document.removeEventListener("scroll", onScroll, true);
     window.removeEventListener("resize", onResize);
   }
+});
+
+onMounted(() => {
+  contextMenuRegistration = registerGlobalContextMenu(close);
 });
 
 function handleItemClick(item: ContextMenuItem) {
@@ -258,7 +245,8 @@ function shortcutKeys(shortcut?: string): string[] {
 }
 
 onBeforeUnmount(() => {
-  openMenus.delete(close);
+  contextMenuRegistration?.dispose();
+  contextMenuRegistration = null;
   document.removeEventListener("pointerdown", onPointerDownOutside, true);
   document.removeEventListener("keydown", onKeydown);
   document.removeEventListener("scroll", onScroll, true);

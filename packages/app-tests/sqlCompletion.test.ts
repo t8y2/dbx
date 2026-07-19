@@ -444,6 +444,87 @@ test("does not mix routines into an explicit table alias column completion", () 
   assert.equal(items.some((item) => item.label === "name_formatter"), false);
 });
 
+test("suggests matching database functions alongside referenced columns", () => {
+  const sql = "SELECT st_ FROM public.routes";
+  const items = buildSqlCompletionItems(sql, "SELECT st_".length, {
+    tables: [{ name: "routes", schema: "public", type: "table" }],
+    columnsByTable: new Map([
+      [
+        "public.routes",
+        [
+          { name: "start_sid", table: "routes", schema: "public", dataType: "integer" },
+          { name: "start_dept", table: "routes", schema: "public", dataType: "text" },
+        ],
+      ],
+    ]),
+    objects: [
+      { name: "st_area", schema: "public", type: "function", dataType: "double precision", comment: "Returns an area" },
+      { name: "st_x", schema: "public", type: "function", dataType: "double precision" },
+      { name: "st_refresh", schema: "public", type: "procedure" },
+    ],
+    databaseType: "postgres",
+    currentSchema: "public",
+  });
+
+  const area = items.find((item) => item.label === "st_area" && item.type === "function");
+  assert.ok(area);
+  assert.equal(area.detail, "function in public  [double precision]");
+  assert.equal(area.info, "public.st_area\nReturns an area");
+  assert.ok(items.some((item) => item.label === "start_sid" && item.type === "column"));
+  assert.equal(
+    items.some((item) => item.label === "st_refresh"),
+    false,
+  );
+  assert.equal(
+    items.some((item) => item.label === "LAST_VALUE" || item.label === "FIRST_VALUE"),
+    false,
+  );
+  assert.ok(items.findIndex((item) => item.label === "st_area" && item.type === "function") < items.findIndex((item) => item.label === "start_sid" && item.type === "column"));
+});
+
+test("keeps an exact referenced column above an exact database function", () => {
+  const sql = "SELECT st_area FROM public.routes";
+  const items = buildSqlCompletionItems(sql, "SELECT st_area".length, {
+    tables: [{ name: "routes", schema: "public", type: "table" }],
+    columnsByTable: new Map([["public.routes", [{ name: "st_area", table: "routes", schema: "public", dataType: "numeric" }]]]),
+    objects: [{ name: "st_area", schema: "public", type: "function", dataType: "double precision", boost: 2400 }],
+    databaseType: "oracle",
+    currentSchema: "public",
+  });
+
+  const exactMatches = items.filter((item) => item.label === "st_area");
+  assert.deepEqual(
+    exactMatches.map((item) => item.type),
+    ["column", "function"],
+  );
+});
+
+test("does not suggest database functions in exclusive table or column contexts", () => {
+  const input = {
+    tables: [{ name: "routes", schema: "public", type: "table" as const }],
+    columnsByTable: new Map([["public.routes", [{ name: "start_sid", table: "routes", schema: "public" }]]]),
+    objects: [{ name: "st_area", schema: "public", type: "function" as const }],
+    databaseType: "postgres" as const,
+  };
+
+  const tableSql = "SELECT * FROM st_";
+  assert.equal(
+    buildSqlCompletionItems(tableSql, tableSql.length, input).some((item) => item.label === "st_area"),
+    false,
+  );
+
+  const updateSql = "UPDATE public.routes SET st_";
+  const updateContext = getSqlCompletionContext(updateSql, updateSql.length);
+  assert.equal(updateContext.qualifier, undefined);
+  assert.equal(updateContext.contextKind, "column");
+  assert.equal(updateContext.exclusiveColumnSuggestions, true);
+  assert.equal(updateContext.suggestRoutines, false);
+  assert.equal(
+    buildSqlCompletionItems(updateSql, updateSql.length, input).some((item) => item.label === "st_area"),
+    false,
+  );
+});
+
 test("keeps explicit alias column suggestions scoped to the alias table", () => {
   const sql = "select * from public.users u join public.orders o on u.id = o.user_id where o.st";
   const items = buildSqlCompletionItems(sql, sql.length, {
@@ -1780,6 +1861,27 @@ test("returns cast signature with AS syntax", () => {
     activeParameter: 0,
     parameters: ["expression AS type"],
   });
+});
+
+test("uses dialect-specific argument order for CONVERT completion and signature help", () => {
+  const sql = "select conv";
+  const sqlServerItems = buildSqlCompletionItems(sql, sql.length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "sqlserver",
+  });
+  const mysqlItems = buildSqlCompletionItems(sql, sql.length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+
+  assert.equal(sqlServerItems.find((item) => item.label === "CONVERT")?.apply, "CONVERT(${type}, ${expression})");
+  assert.equal(mysqlItems.find((item) => item.label === "CONVERT")?.apply, "CONVERT(${expression}, ${type})");
+
+  const functionSql = "select convert(";
+  assert.deepEqual(getSqlFunctionSignatureHelp(functionSql, functionSql.length, "sqlserver")?.parameters, ["type", "expression"]);
+  assert.deepEqual(getSqlFunctionSignatureHelp(functionSql, functionSql.length, "mysql")?.parameters, ["expression", "type"]);
 });
 
 test("returns null signature help outside function calls", () => {

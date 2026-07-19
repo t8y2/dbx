@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { DEFAULT_RECIPES_ROOT, allPortMappingsDefaultToLoopback, architectureWarning, assertResetConfirmed, discoverMakeTargets, discoverRecipes, expandSmokeCommand, expectedContainerName, parseDatabaseSelection, platformForArchitecture, recipeSelector, resolveRecipe, serviceHasNamedVolume, validateRecipe, validateRenderedCompose } from './database-env.mjs';
+import { DEFAULT_RECIPES_ROOT, allPortMappingsDefaultToLoopback, architectureWarning, assertResetConfirmed, discoverMakeTargets, discoverRecipes, expandSmokeCommand, expectedContainerName, formatTable, parseDatabaseSelection, platformForArchitecture, recipeSelector, resolveRecipe, serviceHasNamedVolume, validateRecipe, validateRenderedCompose } from './database-env.mjs';
 
 const bashAvailable = spawnSync('bash', ['--version'], { stdio: 'ignore' }).status === 0;
 const zshAvailable = spawnSync('zsh', ['--version'], { stdio: 'ignore' }).status === 0;
@@ -42,6 +42,21 @@ test('accepts the compact product@version database selector', () => {
 
 test('formats a recipe as a copyable compact selector', () => {
   assert.equal(recipeSelector({ database: 'mysql', displayVersion: '8.4' }), 'mysql@8.4');
+});
+
+test('formats lists as left-aligned tables with dynamic column widths', () => {
+  assert.equal(
+    formatTable(
+      ['DATABASE', 'VERSION', 'IMAGE'],
+      [
+        ['etcd', '3.7', 'etcd:v3.7.0'],
+        ['clickhouse', '24.8', 'clickhouse-server:24.8.14.39'],
+      ],
+    ),
+    'DATABASE    VERSION  IMAGE\n'
+      + 'etcd        3.7      etcd:v3.7.0\n'
+      + 'clickhouse  24.8     clickhouse-server:24.8.14.39',
+  );
 });
 
 test('discovers all public Make targets for shell completion', () => {
@@ -125,17 +140,76 @@ test('uses the approved CNB mirror images and matching recipe versions', () => {
   );
   assert.deepEqual(recipes, {
     'clickhouse@24.8': { version: '24.8.14.39', image: 'docker.cnb.cool/znb/images/clickhouse-server:24.8.14.39', platforms: ['linux/amd64', 'linux/arm64'] },
+    'etcd@3.7': { version: '3.7.0', image: 'docker.cnb.cool/znb/images/etcd:v3.7.0', platforms: ['linux/amd64', 'linux/arm64'] },
+    'kafka@4.3': { version: '4.3.1', image: 'docker.cnb.cool/znb/images/kafka:4.3.1', platforms: ['linux/amd64', 'linux/arm64'] },
     'mariadb@10.11': { version: '10.11.11', image: 'docker.cnb.cool/znb/images/mariadb:10.11.11', platforms: ['linux/amd64', 'linux/arm64'] },
     'mongodb@5.0': { version: '5.0.5', image: 'docker.cnb.cool/znb/images/mongo:5.0.5', platforms: ['linux/amd64', 'linux/arm64'] },
     'mongodb@8.2': { version: '8.2.3', image: 'docker.cnb.cool/znb/images/mongo:8.2.3-noble', platforms: ['linux/amd64', 'linux/arm64'] },
     'mysql@5.7': { version: '5.7.44', image: 'docker.cnb.cool/znb/images/mysql:5.7.44', platforms: ['linux/amd64', 'linux/arm64'] },
     'mysql@8.4': { version: '8.4.6', image: 'docker.cnb.cool/znb/images/mysql:8.4.6', platforms: ['linux/amd64', 'linux/arm64'] },
+    'nacos@2.5': { version: '2.5.2', image: 'docker.cnb.cool/znb/images/nacos-server:v2.5.2', platforms: ['linux/amd64', 'linux/arm64'] },
+    'nacos@3.2': { version: '3.2.2', image: 'docker.cnb.cool/znb/images/nacos-server:v3.2.2', platforms: ['linux/amd64', 'linux/arm64'] },
     'postgresql@14.23': { version: '14.23', image: 'docker.cnb.cool/znb/images/postgres:14.23', platforms: ['linux/amd64', 'linux/arm64'] },
     'postgresql@17.4': { version: '17.4', image: 'docker.cnb.cool/znb/images/postgres:17.4', platforms: ['linux/amd64', 'linux/arm64'] },
+    'pulsar@4.2': { version: '4.2.3', image: 'docker.cnb.cool/znb/images/pulsar:4.2.3', platforms: ['linux/amd64', 'linux/arm64'] },
+    'qdrant@1.8': { version: '1.8.3', image: 'docker.cnb.cool/znb/images/qdrant:v1.8.3', platforms: ['linux/amd64', 'linux/arm64'] },
     'redis@3.0.7': { version: '3.0.7', image: 'docker.cnb.cool/znb/images/redis:3.0.7-alpine', platforms: ['linux/amd64'] },
     'redis@7.4': { version: '7.4.9', image: 'docker.cnb.cool/znb/images/redis:7.4.9-alpine', platforms: ['linux/amd64', 'linux/arm64'] },
+    'zookeeper@3.9': { version: '3.9.5', image: 'docker.cnb.cool/znb/images/zookeeper:3.9.5', platforms: ['linux/amd64', 'linux/arm64'] },
   });
   assert.equal(discoverRecipes().find((recipe) => recipeSelector(recipe) === 'redis@3.0.7').connection.username, undefined);
+});
+
+test('initializes both Nacos versions with the shared administrator credentials', () => {
+  for (const recipe of discoverRecipes().filter((item) => item.database === 'nacos')) {
+    assert.equal(recipe.connection.username, 'nacos');
+    assert.equal(recipe.connection.password, '123456');
+    assert.equal(recipe.connection.namespace, 'public');
+    assert.equal(recipe.bootstrap.check.expect, 'accessToken');
+    assert.equal(recipe.bootstrap.steps.length, 1);
+    assert.match(recipe.bootstrap.steps[0].command.join(' '), /administrator initialized/);
+
+    const compose = readFileSync(join(recipe.directory, 'compose.yaml'), 'utf8');
+    assert.doesNotMatch(compose, /^  initialize:/m);
+    assert.doesNotMatch(compose, /tail -f \/dev\/null/);
+    assert.deepEqual(validateRecipe(recipe), []);
+  }
+});
+
+test('configures Qdrant with the shared API key', () => {
+  const recipe = discoverRecipes().find((item) => recipeSelector(item) === 'qdrant@1.8');
+  assert.equal(recipe.connection.username, '');
+  assert.equal(recipe.connection.password, '123456');
+  assert.equal(recipe.connection.apiKey, undefined);
+});
+
+test('bootstraps etcd with the shared root credentials', () => {
+  const recipe = discoverRecipes().find((item) => recipeSelector(item) === 'etcd@3.7');
+  assert.equal(recipe.connection.username, 'root');
+  assert.equal(recipe.connection.password, '123456');
+  assert.ok(recipe.bootstrap);
+});
+
+test('bootstraps ZooKeeper with the shared Digest credentials', () => {
+  const recipe = discoverRecipes().find((item) => recipeSelector(item) === 'zookeeper@3.9');
+  assert.equal(recipe.connection.username, 'root');
+  assert.equal(recipe.connection.password, '123456');
+  assert.equal(recipe.connection.authScheme, 'digest');
+});
+
+test('keeps existing authenticated bootstrap recipes valid', () => {
+  for (const selector of ['etcd@3.7', 'zookeeper@3.9']) {
+    const recipe = discoverRecipes().find((item) => recipeSelector(item) === selector);
+    assert.deepEqual(validateRecipe(recipe), []);
+  }
+});
+
+test('marks the unauthenticated Kafka and Pulsar development recipes explicitly', () => {
+  for (const selector of ['kafka@4.3', 'pulsar@4.2']) {
+    const recipe = discoverRecipes().find((item) => recipeSelector(item) === selector);
+    assert.equal(recipe.connection.authentication, 'none');
+    assert.equal(recipe.connection.password, undefined);
+  }
 });
 
 test('start without DB prints every copyable database command', () => {
@@ -258,6 +332,13 @@ test('requires the shared default password and database name', () => {
   recipe.connection.database = 'other';
   assert.match(validateRecipe(recipe).join('; '), /connection.password must be 123456/);
   assert.match(validateRecipe(recipe).join('; '), /connection.database must be dbx/);
+});
+
+test('allows recipes that explicitly declare no authentication', () => {
+  const [recipe] = discoverRecipes(fixture('postgresql', '17.4'));
+  recipe.connection.authentication = 'none';
+  delete recipe.connection.password;
+  assert.deepEqual(validateRecipe(recipe), []);
 });
 
 test('requires every recipe port to be one greater than its database default port', () => {

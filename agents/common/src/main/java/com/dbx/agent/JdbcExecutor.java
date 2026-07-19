@@ -6,13 +6,16 @@ import java.sql.Clob;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.sql.SQLWarning;
 import java.sql.SQLXML;
 import java.sql.Statement;
 import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
@@ -104,20 +107,22 @@ public final class JdbcExecutor {
                 // Do not translate them to Connection.commit(), which requires autoCommit=false.
                 boolean hasResultSet = stmt.execute(trimmedSql);
                 long elapsed = System.currentTimeMillis() - start;
+                QueryResult result;
                 if (hasResultSet) {
                     try (ResultSet rs = stmt.getResultSet()) {
-                        return readResultSet(rs, elapsed, effectiveMaxRows, valueReader);
+                        result = readResultSet(rs, elapsed, effectiveMaxRows, valueReader);
                     }
+                } else {
+                    int updateCount = stmt.getUpdateCount();
+                    result = new QueryResult(
+                        Collections.emptyList(),
+                        Collections.emptyList(),
+                        updateCount >= 0 ? updateCount : 0,
+                        elapsed,
+                        false
+                    );
                 }
-
-                int updateCount = stmt.getUpdateCount();
-                return new QueryResult(
-                    Collections.emptyList(),
-                    Collections.emptyList(),
-                    updateCount >= 0 ? updateCount : 0,
-                    elapsed,
-                    false
-                );
+                return withStatementWarnings(result, stmt);
                 } finally {
                     activeStatements.remove(stmt);
                 }
@@ -651,6 +656,39 @@ public final class JdbcExecutor {
         if (timeoutSecs > 0) {
             stmt.setQueryTimeout(timeoutSecs);
         }
+    }
+
+    private static QueryResult withStatementWarnings(QueryResult result, Statement stmt) {
+        if (!result.getColumns().isEmpty() || !result.getRows().isEmpty()) {
+            return result;
+        }
+
+        List<List<Object>> rows = new ArrayList<>();
+        try {
+            Set<SQLWarning> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+            for (SQLWarning warning = stmt.getWarnings(); warning != null && seen.add(warning); warning = warning.getNextWarning()) {
+                String message = warning.getMessage();
+                if (message != null && !message.trim().isEmpty()) {
+                    rows.add(Collections.singletonList(message));
+                }
+            }
+            stmt.clearWarnings();
+        } catch (SQLException ignored) {
+            // Warning retrieval is advisory; a driver bug here must not turn a
+            // successfully executed statement into a query failure.
+        }
+
+        if (rows.isEmpty()) {
+            return result;
+        }
+        return new QueryResult(
+            Collections.singletonList("Message"),
+            Collections.singletonList("nvarchar"),
+            rows,
+            result.getAffected_rows(),
+            result.getExecution_time_ms(),
+            result.getTruncated()
+        );
     }
 
     private QueryResult emptyQueryResult(long start) {

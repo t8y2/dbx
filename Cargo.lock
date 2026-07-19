@@ -1918,6 +1918,8 @@ dependencies = [
  "tokio-postgres",
  "tokio-postgres-rustls",
  "tokio-util",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
  "webpki-roots 0.26.11",
  "zip 4.6.1",

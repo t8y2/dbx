@@ -34,6 +34,26 @@ describe("dataGridCellDisplayText", () => {
 });
 
 describe("coerceDataGridCellValue", () => {
+  it.each(["null", "NULL", "Null", "nUlL"])("preserves literal %s input as text", (value) => {
+    expect(
+      coerceDataGridCellValue({
+        value,
+        oldValue: null,
+        databaseType: "mysql",
+        columnInfo: { data_type: "varchar(255)" },
+      }),
+    ).toBe(value);
+
+    expect(
+      coerceDataGridCellValue({
+        value,
+        oldValue: "previous",
+        databaseType: "postgres",
+        columnInfo: { data_type: "text" },
+      }),
+    ).toBe(value);
+  });
+
   it("preserves an explicitly generated empty string for a null cell", () => {
     const options = {
       value: "",

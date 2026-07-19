@@ -9,15 +9,18 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.sql.SQLWarning;
 import java.sql.Statement;
 import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.sql.rowset.serial.SerialBlob;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class JdbcExecutorTest {
     @Test
@@ -65,6 +68,72 @@ class JdbcExecutorTest {
         assertEquals(Arrays.asList(Arrays.asList(1, "Ada"), Arrays.asList(2, "Grace")), result.getRows());
         assertEquals(1, fixture.getMetaDataCalls());
         assertEquals(2, fixture.getColumnTypeCalls());
+    }
+
+    @Test
+    void executeReturnsMultipleStatementWarningsForNoResultStatements() {
+        SQLWarning first = new SQLWarning("identity value is 443", "S0003", 7998);
+        first.setNextWarning(new SQLWarning("DBCC execution completed", "S0001", 2528));
+        AtomicInteger clearWarningsCalls = new AtomicInteger();
+
+        QueryResult result = JdbcExecutor.INSTANCE.execute(
+            executionConnection(false, -1, first, clearWarningsCalls, null, null),
+            "DBCC CHECKIDENT ('dbo.tVillage', RESEED)",
+            "",
+            schema -> ""
+        );
+
+        assertEquals(Arrays.asList("Message"), result.getColumns());
+        assertEquals(Arrays.asList("nvarchar"), result.getColumn_types());
+        assertEquals(
+            Arrays.asList(Arrays.asList("identity value is 443"), Arrays.asList("DBCC execution completed")),
+            result.getRows()
+        );
+        assertEquals(1, clearWarningsCalls.get());
+    }
+
+    @Test
+    void executeKeepsEmptyNoResultStatementsUnchangedWithoutWarnings() {
+        QueryResult result = JdbcExecutor.INSTANCE.execute(
+            executionConnection(false, 3, null, new AtomicInteger(), null, null),
+            "UPDATE people SET active = 1",
+            "",
+            schema -> ""
+        );
+
+        assertEquals(Collections.emptyList(), result.getColumns());
+        assertEquals(Collections.emptyList(), result.getRows());
+        assertEquals(3L, result.getAffected_rows());
+    }
+
+    @Test
+    void executeDoesNotReplaceOrdinaryResultSetsWithWarnings() {
+        CountingResultSetFixture fixture = countingResultSet(new Object[][]{{1, "Ada"}});
+        QueryResult result = JdbcExecutor.INSTANCE.execute(
+            executionConnection(true, -1, new SQLWarning("informational"), new AtomicInteger(), fixture.resultSet(), null),
+            "SELECT id, name FROM people",
+            "",
+            schema -> ""
+        );
+
+        assertEquals(Arrays.asList("id", "name"), result.getColumns());
+        assertEquals(Arrays.asList(Arrays.asList(1, "Ada")), result.getRows());
+    }
+
+    @Test
+    void executeStillPropagatesStatementErrors() {
+        SQLException failure = new SQLException("permission denied", "42000", 229);
+        RuntimeException thrown = assertThrows(
+            RuntimeException.class,
+            () -> JdbcExecutor.INSTANCE.execute(
+                executionConnection(false, -1, null, new AtomicInteger(), null, failure),
+                "DBCC CHECKIDENT ('dbo.tVillage', RESEED)",
+                "",
+                schema -> ""
+            )
+        );
+
+        assertEquals(failure, thrown.getCause());
     }
 
     @Test
@@ -211,6 +280,54 @@ class JdbcExecutorTest {
             ResultSet.class.getClassLoader(),
             new Class<?>[]{ResultSet.class},
             handler
+        );
+    }
+
+    private static Connection executionConnection(
+        boolean hasResultSet,
+        int updateCount,
+        SQLWarning warning,
+        AtomicInteger clearWarningsCalls,
+        ResultSet resultSet,
+        SQLException executeFailure
+    ) {
+        InvocationHandler statementHandler = (Object unused, Method method, Object[] args) -> {
+            switch (method.getName()) {
+                case "execute":
+                    if (executeFailure != null) {
+                        throw executeFailure;
+                    }
+                    return hasResultSet;
+                case "getResultSet":
+                    return resultSet;
+                case "getUpdateCount":
+                    return updateCount;
+                case "getWarnings":
+                    return warning;
+                case "clearWarnings":
+                    clearWarningsCalls.incrementAndGet();
+                    return null;
+                case "close":
+                    return null;
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        };
+        Statement statement = (Statement) Proxy.newProxyInstance(
+            Statement.class.getClassLoader(),
+            new Class<?>[]{Statement.class},
+            statementHandler
+        );
+        InvocationHandler connectionHandler = (Object unused, Method method, Object[] args) -> {
+            if (method.getName().equals("createStatement")) {
+                return statement;
+            }
+            return defaultValue(method.getReturnType());
+        };
+        return (Connection) Proxy.newProxyInstance(
+            Connection.class.getClassLoader(),
+            new Class<?>[]{Connection.class},
+            connectionHandler
         );
     }
 

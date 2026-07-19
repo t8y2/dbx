@@ -40,6 +40,12 @@ function valuesEqual(left: unknown, right: unknown): boolean {
   return left === right;
 }
 
+/** 将失效 match 编译为作用于 metadataScopeParts 结果的谓词，供缓存外的在途登记复用同一匹配语义 */
+export function metadataCacheInvalidationMatcher(match: MetadataCacheInvalidation): (scope: ReturnType<typeof metadataScopeParts>) => boolean {
+  const normalized = normalizeInvalidation(match);
+  return (scope) => Object.entries(normalized).every(([field, value]) => valuesEqual(scope[field as keyof typeof scope], value));
+}
+
 export class MetadataResultCache<T> {
   private readonly entries = new Map<string, MetadataCacheEntry<T>>();
   private readonly now: () => number;
@@ -69,11 +75,10 @@ export class MetadataResultCache<T> {
   }
 
   invalidate(match: MetadataCacheInvalidation): number {
-    const normalized = normalizeInvalidation(match);
+    const matches = metadataCacheInvalidationMatcher(match);
     let removed = 0;
     for (const [key, entry] of this.entries) {
-      const matches = Object.entries(normalized).every(([field, value]) => valuesEqual(entry.scope[field as keyof typeof entry.scope], value));
-      if (matches) {
+      if (matches(entry.scope)) {
         this.entries.delete(key);
         removed++;
       }

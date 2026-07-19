@@ -12,17 +12,46 @@ The Database Test Lab provides small, pinned Docker Compose environments for tes
 | Database | Version directory | Official Docker Hub image | CNB image used by Compose | Default host port | Container name |
 | --- | --- | --- | --- | ---: | --- |
 | ClickHouse | `clickhouse/24.8` | `clickhouse/clickhouse-server:24.8.14.39` | `docker.cnb.cool/znb/images/clickhouse-server:24.8.14.39` | `8124` | `dbx-clickhouse-24.8` |
+| etcd | `etcd/3.7` | `gcr.io/etcd-development/etcd:v3.7.0` | `docker.cnb.cool/znb/images/etcd:v3.7.0` | `2380` | `dbx-etcd-3.7` |
+| Kafka | `kafka/4.3` | `apache/kafka:4.3.1` | `docker.cnb.cool/znb/images/kafka:4.3.1` | `9093` | `dbx-kafka-4.3` |
 | MariaDB | `mariadb/10.11` | `mariadb:10.11.11` | `docker.cnb.cool/znb/images/mariadb:10.11.11` | `3307` | `dbx-mariadb-10.11` |
 | MongoDB | `mongodb/5.0` | `mongo:5.0.5` | `docker.cnb.cool/znb/images/mongo:5.0.5` | `27018` | `dbx-mongodb-5.0` |
 | MongoDB | `mongodb/8.2` | `mongo:8.2.3-noble` | `docker.cnb.cool/znb/images/mongo:8.2.3-noble` | `27018` | `dbx-mongodb-8.2` |
 | MySQL | `mysql/5.7` | `mysql:5.7.44` | `docker.cnb.cool/znb/images/mysql:5.7.44` | `3307` | `dbx-mysql-5.7` |
 | MySQL | `mysql/8.4` | `mysql:8.4.6` | `docker.cnb.cool/znb/images/mysql:8.4.6` | `3307` | `dbx-mysql-8.4` |
+| Nacos | `nacos/2.5` | `nacos/nacos-server:v2.5.2` | `docker.cnb.cool/znb/images/nacos-server:v2.5.2` | `8849` | `dbx-nacos-2.5` |
+| Nacos | `nacos/3.2` | `nacos/nacos-server:v3.2.2` | `docker.cnb.cool/znb/images/nacos-server:v3.2.2` | `8849` | `dbx-nacos-3.2` |
 | PostgreSQL | `postgresql/14.23` | `postgres:14.23` | `docker.cnb.cool/znb/images/postgres:14.23` | `5433` | `dbx-postgresql-14.23` |
 | PostgreSQL | `postgresql/17.4` | `postgres:17.4` | `docker.cnb.cool/znb/images/postgres:17.4` | `5433` | `dbx-postgresql-17.4` |
+| Pulsar | `pulsar/4.2` | `apachepulsar/pulsar:4.2.3` | `docker.cnb.cool/znb/images/pulsar:4.2.3` | `6651` | `dbx-pulsar-4.2` |
+| Qdrant | `qdrant/1.8` | `qdrant/qdrant:v1.8.3` | `docker.cnb.cool/znb/images/qdrant:v1.8.3` | `6334` | `dbx-qdrant-1.8` |
 | Redis | `redis/3.0.7` | `redis:3.0.7-alpine` | `docker.cnb.cool/znb/images/redis:3.0.7-alpine` | `6380` | `dbx-redis-3.0.7` |
 | Redis | `redis/7.4` | `redis:7.4.9-alpine` | `docker.cnb.cool/znb/images/redis:7.4.9-alpine` | `6380` | `dbx-redis-7.4` |
+| ZooKeeper | `zookeeper/3.9` | `zookeeper:3.9.5` | `docker.cnb.cool/znb/images/zookeeper:3.9.5` | `2182` | `dbx-zookeeper-3.9` |
 
 Every network recipe uses a host port one greater than the database standard port, and the recipe validator enforces that contract. The default password is `123456`, and the default database is `dbx`. Redis has no named databases, so it uses DB 0 with a `dbx:` smoke-key prefix. Compose uses the CNB image column; the Docker Hub column preserves the official upstream reference for provenance and direct pulls. Redis 3.0.7 is amd64-only; on arm64 hosts the command prints an architecture warning and Docker uses emulation. Every other recipe supports both amd64 and arm64.
+
+Nacos uses the `nacos` administrator, password `123456`, and its default `public` namespace. Its V3 recipe also exposes the web console at `http://127.0.0.1:8010`; V2 serves its console on the main `8849` port. Set `NACOS_CONSOLE_PORT`, `NACOS_GRPC_PORT`, and `NACOS_RAFT_PORT` when running an Nacos version alongside another one.
+
+```bash
+DB_PORT=8818 NACOS_CONSOLE_PORT=8010 NACOS_GRPC_PORT=9818 NACOS_RAFT_PORT=9819 make db DB=nacos@3.2
+```
+
+etcd creates the `root` user with password `123456`, grants the root role, then enables authentication. Its default client and peer ports are `2380` and `2381`. To use the upstream Docker command's ports, run:
+
+```bash
+DB_PORT=2379 ETCD_PEER_PORT=2380 make db DB=etcd@3.7
+```
+
+Qdrant uses `123456` as its administrator API key. In DBX, leave the username empty and enter the key as the password so the driver sends it in the `api-key` HTTP header. Its HTTP and gRPC ports default to `6334` and `6335`. To use the ports in the upstream Docker command, run:
+
+```bash
+DB_PORT=6333 QDRANT_GRPC_PORT=6334 make db DB=qdrant@1.8
+```
+
+ZooKeeper uses Digest credentials `root` / `123456` to protect the `/dbx` node. Its default host port is `2182`; use `DB_PORT=2181` to match the upstream Docker command. ZooKeeper's Digest ACL model protects individual nodes rather than providing a global login switch.
+
+Kafka and Pulsar are deliberately unauthenticated single-node development recipes. Kafka uses PLAINTEXT and Pulsar uses standalone mode, so do not expose either service remotely. Use `DB_PORT=9092 make db DB=kafka@4.3` for Kafka's usual port, and `DB_PORT=6650 PULSAR_WEB_PORT=8080 make db DB=pulsar@4.2` for Pulsar's usual ports.
 
 Redis 3.0.7 and Redis 7.4.9 intentionally cover the compatibility endpoints. Redis 3 predates ACLs, RESP3, Streams, and many modern commands, while Redis 7 covers the current protocol and command set. Keeping 6.2 and 7.4 together would provide less compatibility coverage for this lab.
 

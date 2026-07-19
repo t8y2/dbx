@@ -11,7 +11,6 @@ export interface CoerceDataGridCellValueOptions {
 
 export function coerceDataGridCellValue(options: CoerceDataGridCellValueOptions): GridCellValue {
   const { value, oldValue } = options;
-  if (value.toUpperCase() === "NULL") return null;
   if (value === "" && oldValue === null && !options.preserveEmptyString) return null;
   const postgresArrayValue = coercePostgresArrayValue(options);
   if (postgresArrayValue !== undefined) return postgresArrayValue;

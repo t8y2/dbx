@@ -3107,6 +3107,7 @@ mod tests {
             rows: vec![vec![serde_json::json!("2024/2/25 13:02:15")]],
             total_rows: 1,
             effective_encoding: None,
+            sheets: vec![],
         };
 
         let batches = build_import_insert_batches(

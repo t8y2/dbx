@@ -361,6 +361,7 @@ export interface EditorSettings {
   customThemes: CustomTheme[];
   activeCustomThemeId: string;
   executeMode: "all" | "current";
+  executeModeDefaultVersion: number;
   showExecutionTargetPicker: boolean;
   showStatementRunButtons: boolean;
   showCurrentStatementFrame: boolean;
@@ -496,6 +497,8 @@ export const FONT_FAMILIES: { value: string; label: string }[] = [
   { value: "monospace", label: "System Monospace" },
 ];
 
+export const EXECUTE_MODE_CURRENT_DEFAULT_VERSION = 1;
+
 export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   fontFamily: "'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', monospace",
   fontSize: 13,
@@ -505,7 +508,8 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   customThemeColors: { ...DEFAULT_CUSTOM_THEME_COLORS },
   customThemes: [...DEFAULT_CUSTOM_THEMES],
   activeCustomThemeId: "default",
-  executeMode: "all",
+  executeMode: "current",
+  executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
   showExecutionTargetPicker: false,
   showStatementRunButtons: true,
   showCurrentStatementFrame: true,
@@ -722,6 +726,9 @@ function normalizeToolbarItems(items: Partial<ToolbarItems> | undefined): Toolba
 
 export function normalizeEditorSettings(settings: Partial<EditorSettings>, existing?: EditorSettings): EditorSettings {
   const sqlSemanticDiagnosticsMode = normalizeSqlSemanticDiagnosticsMode(settings.sqlSemanticDiagnosticsMode, settings.sqlSemanticDiagnosticsEnabled);
+  const savedExecuteModeDefaultVersion = settings.executeModeDefaultVersion;
+  const executeModeDefaultVersion = typeof savedExecuteModeDefaultVersion === "number" && savedExecuteModeDefaultVersion >= EXECUTE_MODE_CURRENT_DEFAULT_VERSION ? savedExecuteModeDefaultVersion : EXECUTE_MODE_CURRENT_DEFAULT_VERSION;
+  const hasCurrentExecuteModeDefault = executeModeDefaultVersion === savedExecuteModeDefaultVersion;
   return {
     fontFamily: normalizeFontFamily(settings.fontFamily, DEFAULT_EDITOR_SETTINGS.fontFamily),
     fontSize: settings.fontSize ?? DEFAULT_EDITOR_SETTINGS.fontSize,
@@ -755,7 +762,8 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
         : [];
     })(),
     activeCustomThemeId: settings.activeCustomThemeId ?? "default",
-    executeMode: settings.executeMode ?? DEFAULT_EDITOR_SETTINGS.executeMode,
+    executeMode: hasCurrentExecuteModeDefault && (settings.executeMode === "all" || settings.executeMode === "current") ? settings.executeMode : DEFAULT_EDITOR_SETTINGS.executeMode,
+    executeModeDefaultVersion,
     showExecutionTargetPicker: settings.showExecutionTargetPicker ?? DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker,
     showStatementRunButtons: typeof settings.showStatementRunButtons === "boolean" ? settings.showStatementRunButtons : DEFAULT_EDITOR_SETTINGS.showStatementRunButtons,
     showCurrentStatementFrame: typeof settings.showCurrentStatementFrame === "boolean" ? settings.showCurrentStatementFrame : DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame,
@@ -891,10 +899,13 @@ export const useSettingsStore = defineStore("settings", () => {
     if (isEditorSettingsLoaded.value) return;
     const saved = await api.loadEditorSettings().catch(() => null);
     if (saved && typeof saved === "object" && !Array.isArray(saved)) {
-      const normalized = normalizeEditorSettings(saved as Partial<EditorSettings>);
+      const savedSettings = saved as Partial<EditorSettings>;
+      const normalized = normalizeEditorSettings(savedSettings);
       editorSettings.value = normalized;
-      if ((saved as { updateDownloadSource?: unknown }).updateDownloadSource === "atomgit") {
-        // Persist the channel migration so the removed source cannot reappear in older settings data.
+      const needsExecuteModeDefaultMigration = typeof savedSettings.executeModeDefaultVersion !== "number" || savedSettings.executeModeDefaultVersion < EXECUTE_MODE_CURRENT_DEFAULT_VERSION;
+      const savedUpdateDownloadSource = (saved as { updateDownloadSource?: unknown }).updateDownloadSource;
+      if (savedUpdateDownloadSource === "atomgit" || needsExecuteModeDefaultMigration) {
+        // Persist one-time migrations so removed or unsafe defaults cannot reappear.
         await api.saveEditorSettings(normalized).catch(() => {});
       }
       isEditorSettingsLoaded.value = true;

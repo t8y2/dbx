@@ -133,15 +133,7 @@ pub fn build_executable_object_source_statements(input: EditableObjectSourceSqlI
         return Ok(vec![executable_duckdb_view_ddl(input.schema.as_deref(), &input.name, source)]);
     }
 
-    if matches!(
-        input.database_type,
-        DatabaseType::Postgres
-            | DatabaseType::Gaussdb
-            | DatabaseType::Kwdb
-            | DatabaseType::OpenGauss
-            | DatabaseType::Questdb
-    ) && input.object_type == ObjectSourceKind::View
-    {
+    if is_postgres_like(input.database_type) && input.object_type == ObjectSourceKind::View {
         if let Some(sql) = executable_postgres_view_ddl(source) {
             return Ok(vec![sql]);
         }
@@ -190,14 +182,8 @@ pub fn build_executable_object_source_sql(input: EditableObjectSourceSqlInput) -
 /// statements.
 pub fn build_editable_object_source(input: EditableObjectSourceSqlInput) -> String {
     let source = input.source.clone();
-    if matches!(
-        input.database_type,
-        DatabaseType::Postgres
-            | DatabaseType::Gaussdb
-            | DatabaseType::Kwdb
-            | DatabaseType::OpenGauss
-            | DatabaseType::Questdb
-    ) && input.object_type == ObjectSourceKind::View
+    if is_postgres_like(input.database_type)
+        && input.object_type == ObjectSourceKind::View
         && source_starts_with_create_or_alter(&source)
     {
         // Some providers return full view DDL instead of a bare SELECT body.
@@ -1081,6 +1067,36 @@ mod tests {
         .unwrap();
 
         assert_eq!(sql, format!("{source};"));
+    }
+
+    #[test]
+    fn kingbase_view_body_opens_as_create_or_replace_view() {
+        let sql = build_editable_object_source(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Kingbase,
+            object_type: ObjectSourceKind::View,
+            schema: Some("dbx_issue3895_repro".to_string()),
+            name: "edited_view".to_string(),
+            source: "SELECT id, label FROM source_rows WHERE id >= 1".to_string(),
+        });
+
+        assert_eq!(
+            sql,
+            "CREATE OR REPLACE VIEW \"dbx_issue3895_repro\".\"edited_view\" AS\nSELECT id, label FROM source_rows WHERE id >= 1;"
+        );
+    }
+
+    #[test]
+    fn kingbase_view_create_source_saves_as_create_or_replace_view() {
+        let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Kingbase,
+            object_type: ObjectSourceKind::View,
+            schema: Some("dbx_issue3895_repro".to_string()),
+            name: "edited_view".to_string(),
+            source: "CREATE VIEW dbx_issue3895_repro.edited_view AS SELECT id, label FROM source_rows".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(sql, "CREATE OR REPLACE VIEW dbx_issue3895_repro.edited_view AS SELECT id, label FROM source_rows;");
     }
 
     #[test]

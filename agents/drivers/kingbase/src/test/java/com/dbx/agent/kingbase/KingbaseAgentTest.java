@@ -786,6 +786,8 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         Assertions.assertFalse(indexes.get(1).getIs_primary());
         Assertions.assertEquals(Arrays.asList("name", "created"), indexes.get(2).getColumns());
         Assertions.assertTrue(sql.get(0).contains("FROM SYS_CATALOG.SYS_INDEX"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("unnest(ix.indkey) WITH ORDINALITY"), sql.get(0));
+        Assertions.assertFalse(sql.get(0).contains("[pos.n]"), sql.get(0));
         Assertions.assertFalse(sql.get(0).contains("information_schema.table_constraints"), sql.get(0));
     }
 

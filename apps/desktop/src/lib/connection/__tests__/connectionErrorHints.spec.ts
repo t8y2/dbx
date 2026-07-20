@@ -17,7 +17,25 @@ function mysqlConfig(urlParams: string | undefined): ConnectionConfig {
   };
 }
 
-const t = (key: string) => (key === "connection.mysqlTlsConnectionFailureHint" ? "Set TLS Mode to Disabled." : key);
+function jdbcConfig(): ConnectionConfig {
+  return {
+    id: "jdbc-test",
+    name: "TDengine JDBC",
+    db_type: "jdbc",
+    host: "127.0.0.1",
+    port: 6041,
+    username: "root",
+    password: "",
+    database: "dbx_tdengine_demo",
+    ssl: false,
+  };
+}
+
+const t = (key: string) => {
+  if (key === "connection.mysqlTlsConnectionFailureHint") return "Set TLS Mode to Disabled.";
+  if (key === "connection.jdbcMissingRuntimeDependencyHint") return "Install from Maven or import every dependency JAR.";
+  return key;
+};
 
 describe("appendConnectionErrorHints", () => {
   it("adds a MySQL TLS hint for non-disabled TLS failures", () => {
@@ -44,5 +62,19 @@ describe("appendConnectionErrorHints", () => {
     const message = appendConnectionErrorHints(mysqlConfig("ssl-mode=preferred"), "Access denied for user root", t);
 
     expect(message).toBe("Access denied for user root");
+  });
+
+  it("adds an installation hint when a custom JDBC driver is missing a runtime dependency", () => {
+    const error = "Missing Java class com.alibaba.fastjson.JSONException. Install the required runtime dependency.";
+    const message = appendConnectionErrorHints(jdbcConfig(), error, t);
+
+    expect(message).toContain(error);
+    expect(message).toContain("Install from Maven or import every dependency JAR.");
+  });
+
+  it("does not add the JDBC dependency hint to non-JDBC connections", () => {
+    const error = "Missing Java class com.alibaba.fastjson.JSONException. Install the required runtime dependency.";
+
+    expect(appendConnectionErrorHints(mysqlConfig(undefined), error, t)).toBe(error);
   });
 });

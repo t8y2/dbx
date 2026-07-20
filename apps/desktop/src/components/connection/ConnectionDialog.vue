@@ -44,7 +44,7 @@ import { prestoSqlBuiltinDriverPaths } from "@/lib/database/prestoSqlBuiltinDriv
 import { JDBCX_DEFAULT_URL, JDBCX_DRIVER_PROFILE, JDBCX_JDBC_DRIVER_CLASS, ensureJdbcxRuntimeDrivers, isJdbcxRuntimeBundle, isJdbcxRuntimePath, jdbcxHighPrivilegeExtensionsEnabled, setJdbcxHighPrivilegeExtensionsEnabled } from "@/lib/database/jdbcxBuiltinDriver";
 import { SQLITE_DATABASE_FILE_EXTENSIONS } from "@/lib/database/databaseFileDetection";
 import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connection/connectionAttemptTimeout";
-import { appendConnectionErrorHints } from "@/lib/connection/connectionErrorHints";
+import { appendConnectionErrorHints, isJdbcMissingRuntimeDependencyError } from "@/lib/connection/connectionErrorHints";
 import { postgresTlsModeForForm } from "@/lib/connection/postgresTlsMode";
 import { normalizeKafkaBootstrapServers } from "@/lib/connection/kafkaBootstrapServers";
 import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } from "@/lib/connection/mqAuth";
@@ -438,6 +438,7 @@ function sshLayersForConfig(config: LegacyConnectionConfig): SshTunnelConfig[] {
 }
 
 const form = ref(defaultForm());
+const showJdbcDependencyDriverManagerAction = computed(() => form.value.db_type === "jdbc" && isJdbcMissingRuntimeDependencyError(connectionErrorDetail.value));
 
 function externalConfigRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? { ...(value as Record<string, unknown>) } : {};
@@ -3390,6 +3391,11 @@ async function copyConnectionErrorDetail() {
   }
 }
 
+function openJdbcDriverManagerFromError() {
+  showConnectionErrorDialog.value = false;
+  emit("openDriverStore", { target: "tab", tab: "jdbc" });
+}
+
 function resetForm() {
   editingId.value = null;
   form.value = defaultForm();
@@ -6107,6 +6113,10 @@ function openExternalUrl(url: string) {
       </div>
 
       <DialogFooter class="gap-2">
+        <Button v-if="showJdbcDependencyDriverManagerAction" variant="outline" @click="openJdbcDriverManagerFromError">
+          <FolderOpen class="mr-1.5 h-3.5 w-3.5" />
+          {{ t("toolbar.driverManager") }}
+        </Button>
         <Button variant="outline" @click="copyConnectionErrorDetail">
           <Copy class="mr-1.5 h-3.5 w-3.5" />
           复制错误

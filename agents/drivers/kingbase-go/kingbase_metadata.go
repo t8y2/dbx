@@ -16,6 +16,10 @@ import (
 
 const metadataTimeout = 15 * time.Second
 
+// Escape '_' so only Kingbase internal SYS_/XLOG_ prefixes are hidden; names
+// such as SYSTEMS and SYSLOG may be user-created schemas in MySQL mode.
+const kingbaseMySQLCompatListSchemasSQL = `SELECT schema_name FROM information_schema.schemata WHERE UPPER(schema_name) <> 'INFORMATION_SCHEMA' AND UPPER(schema_name) NOT LIKE 'SYS\_%' ESCAPE '\' AND UPPER(schema_name) NOT LIKE 'XLOG\_%' ESCAPE '\' ORDER BY schema_name`
+
 var kingbaseDataTypes = []string{
 	"bigint", "bigserial", "bit", "bit varying", "boolean", "bytea", "char", "character",
 	"character varying", "date", "decimal", "double precision", "integer", "interval", "json",
@@ -187,7 +191,7 @@ func (s *server) listSchemas(visible []string) ([]string, error) {
 	if s.mode.postgresCatalog {
 		query = "SELECT nspname FROM pg_catalog.pg_namespace WHERE nspname NOT LIKE 'pg_temp_%' AND nspname NOT LIKE 'pg_toast_temp_%' ORDER BY nspname"
 	} else if s.mode.mysqlCompat {
-		query = "SELECT schema_name FROM information_schema.schemata WHERE UPPER(schema_name) <> 'INFORMATION_SCHEMA' AND UPPER(schema_name) NOT LIKE 'SYS%' AND UPPER(schema_name) NOT LIKE 'XLOG%' ORDER BY schema_name"
+		query = kingbaseMySQLCompatListSchemasSQL
 	}
 	rows, err := s.metadataQuery(query)
 	if err != nil {

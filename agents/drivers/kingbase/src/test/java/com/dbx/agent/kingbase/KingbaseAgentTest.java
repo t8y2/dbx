@@ -146,6 +146,22 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
+    void mysqlCompatListSchemasFiltersSystemPrefixButKeepsUserSchemas() {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        agent.setMysqlCompatMode(true);
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"schema_name"},
+            new Object[][]{{"app"}, {"systems"}}
+        )));
+
+        Assertions.assertEquals(Arrays.asList("app", "systems"), agent.listSchemas());
+        Assertions.assertTrue(sql.get(0).contains("FROM information_schema.schemata"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("NOT LIKE 'SYS\\_%' ESCAPE '\\'"), sql.get(0));
+        Assertions.assertFalse(sql.get(0).contains("NOT LIKE 'SYS%'"), sql.get(0));
+    }
+
+    @Test
     void postgresCompatModeUsesPostgresCatalogForMetadata() throws Exception {
         List<String> sql = new ArrayList<>();
         KingbaseAgent agent = new KingbaseAgent();

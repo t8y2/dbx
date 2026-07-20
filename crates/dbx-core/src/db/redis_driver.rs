@@ -9,6 +9,7 @@ use redis::{
     TlsMode, Value as RedisRawValue,
 };
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use tokio::sync::{Mutex, MutexGuard};
 
 use super::json_value_for_js;
@@ -942,7 +943,77 @@ pub async fn scan_cluster_keys_page_with_options(
     count: usize,
     include_types: bool,
 ) -> Result<RedisScanResult, String> {
-    let master_nodes = cluster_master_nodes(pool).await?;
+    scan_cluster_keys_batch(pool, cursor, pattern, count, 1, include_types).await
+}
+
+pub async fn scan_cluster_keys_batch(
+    pool: &RedisClusterPool,
+    cursor: u64,
+    pattern: &str,
+    count: usize,
+    max_iterations: usize,
+    include_types: bool,
+) -> Result<RedisScanResult, String> {
+    let cached_master_nodes = unique_master_nodes(&pool.slot_ranges);
+    let master_nodes =
+        if cached_master_nodes.is_empty() { cluster_master_nodes(pool).await? } else { cached_master_nodes };
+
+    let result =
+        scan_cluster_keys_batch_on_nodes(pool, &master_nodes, cursor, pattern, count, max_iterations, include_types)
+            .await;
+
+    if result.is_ok() || pool.slot_ranges.is_empty() {
+        return result;
+    }
+
+    let refreshed_master_nodes = cluster_master_nodes(pool).await?;
+    scan_cluster_keys_batch_on_nodes(
+        pool,
+        &refreshed_master_nodes,
+        cursor,
+        pattern,
+        count,
+        max_iterations,
+        include_types,
+    )
+    .await
+}
+
+async fn scan_cluster_keys_batch_on_nodes(
+    pool: &RedisClusterPool,
+    master_nodes: &[RedisNodeEndpoint],
+    cursor: u64,
+    pattern: &str,
+    count: usize,
+    max_iterations: usize,
+    include_types: bool,
+) -> Result<RedisScanResult, String> {
+    scan_cluster_keys_batch_with(
+        master_nodes,
+        |endpoint| async move { connect_cluster_node(pool, &endpoint).await },
+        cursor,
+        pattern,
+        count,
+        max_iterations,
+        include_types,
+    )
+    .await
+}
+
+async fn scan_cluster_keys_batch_with<C, Connect, ConnectFuture>(
+    master_nodes: &[RedisNodeEndpoint],
+    mut connect_node: Connect,
+    cursor: u64,
+    pattern: &str,
+    count: usize,
+    max_iterations: usize,
+    include_types: bool,
+) -> Result<RedisScanResult, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+    Connect: FnMut(RedisNodeEndpoint) -> ConnectFuture,
+    ConnectFuture: Future<Output = Result<C, String>>,
+{
     if master_nodes.is_empty() {
         return Ok(RedisScanResult { cursor: 0, keys: Vec::new(), total_keys: 0 });
     }
@@ -952,32 +1023,48 @@ pub async fn scan_cluster_keys_page_with_options(
         node_index = 0;
     }
 
-    let total_keys = cluster_total_keys(pool, &master_nodes).await;
-    for index in node_index..master_nodes.len() {
-        let endpoint = &master_nodes[index];
-        let mut con = connect_cluster_node(pool, endpoint).await?;
-        let current_cursor = if index == node_index { node_cursor } else { 0 };
-        let result = scan_keys_page_with_options(&mut con, current_cursor, pattern, count, include_types).await?;
-        if !result.keys.is_empty() {
-            let next_cursor = if result.cursor != 0 {
-                encode_cluster_cursor(index, result.cursor)?
-            } else if index + 1 < master_nodes.len() {
-                encode_cluster_cursor(index + 1, 0)?
-            } else {
-                0
+    let mut connections: Vec<Option<C>> = std::iter::repeat_with(|| None).take(master_nodes.len()).collect();
+    let mut total_keys = 0;
+    if cursor == 0 {
+        for (index, endpoint) in master_nodes.iter().cloned().enumerate() {
+            let Ok(mut connection) = connect_node(endpoint).await else {
+                continue;
             };
-            return Ok(RedisScanResult { cursor: next_cursor, keys: result.keys, total_keys });
-        }
-        if result.cursor != 0 {
-            return Ok(RedisScanResult {
-                cursor: encode_cluster_cursor(index, result.cursor)?,
-                keys: Vec::new(),
-                total_keys,
-            });
+            total_keys += redis::cmd("DBSIZE").query_async::<u64>(&mut connection).await.unwrap_or(0);
+            connections[index] = Some(connection);
         }
     }
 
-    Ok(RedisScanResult { cursor: 0, keys: Vec::new(), total_keys })
+    let iterations = max_iterations.max(1);
+    let target_keys = count.max(1);
+    let mut current_cursor = node_cursor;
+    let mut all_keys = Vec::new();
+
+    for _ in 0..iterations {
+        if connections[node_index].is_none() {
+            connections[node_index] = Some(connect_node(master_nodes[node_index].clone()).await?);
+        }
+        let connection = connections[node_index].as_mut().ok_or("Redis cluster node connection unavailable")?;
+        let page = scan_keys_batch_inner(connection, current_cursor, pattern, count, 1, include_types, false).await?;
+        all_keys.extend(page.keys);
+
+        let next_cursor = if page.cursor != 0 {
+            current_cursor = page.cursor;
+            encode_cluster_cursor(node_index, current_cursor)?
+        } else if node_index + 1 < master_nodes.len() {
+            node_index += 1;
+            current_cursor = 0;
+            encode_cluster_cursor(node_index, 0)?
+        } else {
+            0
+        };
+
+        if next_cursor == 0 || all_keys.len() >= target_keys {
+            return Ok(RedisScanResult { cursor: next_cursor, keys: all_keys, total_keys });
+        }
+    }
+
+    Ok(RedisScanResult { cursor: encode_cluster_cursor(node_index, current_cursor)?, keys: all_keys, total_keys })
 }
 
 pub async fn scan_cluster_values_page(
@@ -1786,8 +1873,24 @@ pub async fn scan_keys_batch<C>(
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
+    scan_keys_batch_inner(con, cursor, pattern, count, max_iterations, include_types, true).await
+}
+
+async fn scan_keys_batch_inner<C>(
+    con: &mut C,
+    cursor: u64,
+    pattern: &str,
+    count: usize,
+    max_iterations: usize,
+    include_types: bool,
+    include_total_keys: bool,
+) -> Result<RedisScanResult, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
     let iterations = max_iterations.max(1);
-    let total_keys: u64 = if cursor == 0 { redis::cmd("DBSIZE").query_async(con).await.unwrap_or(0) } else { 0 };
+    let total_keys: u64 =
+        if include_total_keys && cursor == 0 { redis::cmd("DBSIZE").query_async(con).await.unwrap_or(0) } else { 0 };
 
     let is_exact_match = !pattern.contains('*') && !pattern.contains('?') && !pattern.contains('[');
     if cursor == 0 && is_exact_match && !pattern.is_empty() {
@@ -2718,7 +2821,14 @@ fn parse_scan_members(raw: RedisRawValue) -> Result<(u64, Vec<RedisSetItem>), St
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
+    use std::{
+        collections::{HashMap, VecDeque},
+        future::ready,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex as StdMutex,
+        },
+    };
 
     use super::{
         classify_command, connection_info, decode_cluster_cursor, encode_cluster_cursor, is_redis_json_type,
@@ -2772,6 +2882,43 @@ mod tests {
         fn get_db(&self) -> i64 {
             0
         }
+    }
+
+    struct TrackedRedisConnection {
+        responses: VecDeque<redis::RedisResult<RedisRawValue>>,
+        commands: Arc<StdMutex<Vec<String>>>,
+    }
+
+    impl TrackedRedisConnection {
+        fn new(responses: Vec<RedisRawValue>, commands: Arc<StdMutex<Vec<String>>>) -> Self {
+            Self { responses: responses.into_iter().map(Ok).collect(), commands }
+        }
+    }
+
+    impl ConnectionLike for TrackedRedisConnection {
+        fn req_packed_command<'a>(&'a mut self, cmd: &'a Cmd) -> RedisFuture<'a, RedisRawValue> {
+            self.commands.lock().unwrap().push(String::from_utf8_lossy(&cmd.get_packed_command()).into_owned());
+            let response = self.responses.pop_front().unwrap_or(Ok(RedisRawValue::Nil));
+            Box::pin(async move { response })
+        }
+
+        fn req_packed_commands<'a>(
+            &'a mut self,
+            _cmd: &'a Pipeline,
+            _offset: usize,
+            _count: usize,
+        ) -> RedisFuture<'a, Vec<RedisRawValue>> {
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+
+        fn get_db(&self) -> i64 {
+            0
+        }
+    }
+
+    fn tracked_command_count(commands: &Arc<StdMutex<Vec<String>>>, command: &str) -> usize {
+        let needle = format!("\r\n{command}\r\n");
+        commands.lock().unwrap().iter().filter(|packed| packed.contains(&needle)).count()
     }
 
     fn bulk(value: &str) -> RedisRawValue {
@@ -3036,6 +3183,107 @@ mod tests {
         assert_eq!(result.keys[0].key_display, key);
         assert_eq!(result.keys[0].key_raw, redis_key_bytes_to_raw(key.as_bytes()));
         assert_eq!(con.command_count("SCAN"), 2);
+    }
+
+    #[tokio::test]
+    async fn cluster_key_batch_reuses_node_connections_across_scan_iterations() {
+        let masters = vec![
+            RedisNodeEndpoint { host: "node-a".to_string(), port: 7000 },
+            RedisNodeEndpoint { host: "node-b".to_string(), port: 7001 },
+            RedisNodeEndpoint { host: "node-c".to_string(), port: 7002 },
+        ];
+        let logs: Vec<_> = (0..masters.len()).map(|_| Arc::new(StdMutex::new(Vec::new()))).collect();
+        let mut connections = HashMap::from([
+            (
+                masters[0].clone(),
+                TrackedRedisConnection::new(
+                    vec![RedisRawValue::Int(100), scan_response("7", vec![]), scan_response("0", vec![])],
+                    logs[0].clone(),
+                ),
+            ),
+            (
+                masters[1].clone(),
+                TrackedRedisConnection::new(
+                    vec![
+                        RedisRawValue::Int(200),
+                        scan_response("9", vec![]),
+                        scan_response("0", vec!["membership:saas:base:token:match"]),
+                    ],
+                    logs[1].clone(),
+                ),
+            ),
+            (masters[2].clone(), TrackedRedisConnection::new(vec![RedisRawValue::Int(300)], logs[2].clone())),
+        ]);
+        let connect_count = Arc::new(AtomicUsize::new(0));
+        let connector_count = connect_count.clone();
+
+        let result = super::scan_cluster_keys_batch_with(
+            &masters,
+            move |endpoint| {
+                connector_count.fetch_add(1, Ordering::Relaxed);
+                ready(connections.remove(&endpoint).ok_or_else(|| format!("unexpected reconnect to {}", endpoint.host)))
+            },
+            0,
+            "membership:saas:base:token:*",
+            1000,
+            4,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.total_keys, 600);
+        assert_eq!(result.keys.len(), 1);
+        assert_eq!(result.cursor, encode_cluster_cursor(2, 0).unwrap());
+        assert_eq!(connect_count.load(Ordering::Relaxed), 3);
+        assert_eq!(logs.iter().map(|log| tracked_command_count(log, "DBSIZE")).sum::<usize>(), 3);
+        assert_eq!(logs.iter().map(|log| tracked_command_count(log, "SCAN")).sum::<usize>(), 4);
+    }
+
+    #[tokio::test]
+    async fn cluster_key_batch_continuation_skips_dbsize_and_advances_masters() {
+        let masters = vec![
+            RedisNodeEndpoint { host: "node-a".to_string(), port: 7000 },
+            RedisNodeEndpoint { host: "node-b".to_string(), port: 7001 },
+            RedisNodeEndpoint { host: "node-c".to_string(), port: 7002 },
+        ];
+        let logs: Vec<_> = (0..masters.len()).map(|_| Arc::new(StdMutex::new(Vec::new()))).collect();
+        let mut connections = HashMap::from([
+            (masters[1].clone(), TrackedRedisConnection::new(vec![scan_response("0", vec![])], logs[1].clone())),
+            (
+                masters[2].clone(),
+                TrackedRedisConnection::new(
+                    vec![scan_response("0", vec!["membership:saas:base:token:last"])],
+                    logs[2].clone(),
+                ),
+            ),
+        ]);
+        let connect_count = Arc::new(AtomicUsize::new(0));
+        let connector_count = connect_count.clone();
+
+        let result = super::scan_cluster_keys_batch_with(
+            &masters,
+            move |endpoint| {
+                connector_count.fetch_add(1, Ordering::Relaxed);
+                ready(
+                    connections.remove(&endpoint).ok_or_else(|| format!("unexpected connection to {}", endpoint.host)),
+                )
+            },
+            encode_cluster_cursor(1, 7).unwrap(),
+            "membership:saas:base:token:*",
+            1000,
+            2,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.cursor, 0);
+        assert_eq!(result.total_keys, 0);
+        assert_eq!(result.keys.len(), 1);
+        assert_eq!(connect_count.load(Ordering::Relaxed), 2);
+        assert_eq!(logs.iter().map(|log| tracked_command_count(log, "DBSIZE")).sum::<usize>(), 0);
+        assert_eq!(logs.iter().map(|log| tracked_command_count(log, "SCAN")).sum::<usize>(), 2);
     }
 
     #[tokio::test]

@@ -187,7 +187,7 @@ func (s *server) listSchemas(visible []string) ([]string, error) {
 	if s.mode.postgresCatalog {
 		query = "SELECT nspname FROM pg_catalog.pg_namespace WHERE nspname NOT LIKE 'pg_temp_%' AND nspname NOT LIKE 'pg_toast_temp_%' ORDER BY nspname"
 	} else if s.mode.mysqlCompat {
-		query = "SELECT schema_name FROM information_schema.schemata WHERE UPPER(schema_name) <> 'INFORMATION_SCHEMA' AND UPPER(schema_name) NOT LIKE 'SYS%' AND UPPER(schema_name) NOT LIKE 'XLOG%' ORDER BY schema_name"
+		query = "SELECT schema_name FROM information_schema.schemata WHERE UPPER(schema_name) <> 'INFORMATION_SCHEMA' AND (UPPER(schema_name) = 'SYSTEM' OR UPPER(schema_name) NOT LIKE 'SYS%') AND UPPER(schema_name) NOT LIKE 'XLOG%' ORDER BY schema_name"
 	}
 	rows, err := s.metadataQuery(query)
 	if err != nil {

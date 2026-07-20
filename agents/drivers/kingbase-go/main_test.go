@@ -23,6 +23,7 @@ var expressionFallbackState atomic.Pointer[fallbackDriverState]
 type fakeDriverState struct {
 	queryArgs int
 	queryCtx  context.Context
+	query     string
 	rowCount  int
 }
 
@@ -60,10 +61,11 @@ func (fakeConn) Close() error { return nil }
 
 func (fakeConn) Begin() (driver.Tx, error) { return nil, driver.ErrSkip }
 
-func (fakeConn) QueryContext(ctx context.Context, _ string, args []driver.NamedValue) (driver.Rows, error) {
+func (fakeConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	state := testDriverState.Load()
 	state.queryArgs = len(args)
 	state.queryCtx = ctx
+	state.query = query
 	return &fakeRows{count: state.rowCount}, nil
 }
 
@@ -205,6 +207,20 @@ func TestMetadataNormalizationHelpers(t *testing.T) {
 	}
 	if boundedVarcharLength("text") != nil {
 		t.Fatal("unbounded type returned a length")
+	}
+}
+
+func TestMySQLCompatSchemasKeepSystemAndFilterOtherSysSchemas(t *testing.T) {
+	db, state := openFakeDB(t, 1)
+	server := newServer()
+	server.db = db
+	server.mode.mysqlCompat = true
+
+	if _, err := server.listSchemas(nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(state.query, "UPPER(schema_name) = 'SYSTEM'") || !strings.Contains(state.query, "UPPER(schema_name) NOT LIKE 'SYS%'") {
+		t.Fatalf("unexpected schema query: %s", state.query)
 	}
 }
 

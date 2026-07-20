@@ -167,7 +167,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
                 ? "SELECT schema_name " +
                     "FROM information_schema.schemata " +
                     "WHERE UPPER(schema_name) <> 'INFORMATION_SCHEMA' " +
-                    "AND UPPER(schema_name) NOT LIKE 'SYS%' " +
+                    "AND (UPPER(schema_name) = 'SYSTEM' OR UPPER(schema_name) NOT LIKE 'SYS%') " +
                     "AND UPPER(schema_name) NOT LIKE 'XLOG%' " +
                     "ORDER BY schema_name"
                 : "SELECT nspname AS schema_name " +

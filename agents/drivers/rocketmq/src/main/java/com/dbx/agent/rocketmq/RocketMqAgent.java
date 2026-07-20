@@ -15,6 +15,7 @@ import org.apache.rocketmq.common.MixAll;
 import org.apache.rocketmq.common.PlainAccessConfig;
 import org.apache.rocketmq.common.TopicConfig;
 import org.apache.rocketmq.common.message.Message;
+import org.apache.rocketmq.common.message.MessageConst;
 import org.apache.rocketmq.common.message.MessageExt;
 import org.apache.rocketmq.common.message.MessageQueue;
 import org.apache.rocketmq.remoting.RPCHook;
@@ -216,6 +217,28 @@ public final class RocketMqAgent {
         adminClient = admin;
         try {
             return listTopics(params);
+        } finally {
+            adminClient = previous;
+        }
+    }
+
+    /** Test hook: send via an existing producer instance. */
+    static Object sendMessageForTest(DefaultMQProducer activeProducer, JsonObject params) throws Exception {
+        DefaultMQProducer previous = producer;
+        producer = activeProducer;
+        try {
+            return sendMessage(params);
+        } finally {
+            producer = previous;
+        }
+    }
+
+    /** Test hook: peek messages with an existing admin client. */
+    static Object peekMessagesForTest(DefaultMQAdminExt admin, JsonObject params) throws Exception {
+        DefaultMQAdminExt previous = adminClient;
+        adminClient = admin;
+        try {
+            return peekMessages(params);
         } finally {
             adminClient = previous;
         }
@@ -1520,7 +1543,13 @@ public final class RocketMqAgent {
         Message message = tag.isBlank() ? new Message(topic, payload) : new Message(topic, tag, payload);
         if (key != null && !key.isBlank()) {
             message.setKeys(key);
+        } else if (params.has("headers") && params.get("headers").isJsonObject()) {
+            String headerKey = stringOrEmpty(params.getAsJsonObject("headers"), "KEYS");
+            if (!headerKey.isBlank()) {
+                message.setKeys(headerKey);
+            }
         }
+        applySendHeaders(message, params);
         if (partition != null) {
             message.setWaitStoreMsgOK(true);
         }
@@ -2089,21 +2118,135 @@ public final class RocketMqAgent {
         if (!explicit.isBlank()) {
             return explicit;
         }
-        int colon = brokerAddr.lastIndexOf(':');
-        if (colon <= 0) {
+        String brokerHost = parseHostFromSocketAddress(brokerAddr);
+        String brokerPort = parsePortFromSocketAddress(brokerAddr);
+        if (brokerPort.isBlank()) {
             return brokerAddr;
         }
-        String brokerHost = brokerAddr.substring(0, colon);
-        String brokerPort = brokerAddr.substring(colon + 1);
         if (!isLikelyUnreachableBrokerHost(brokerHost)) {
             return brokerAddr;
         }
-        String namesrv = namesrvAddr(conn);
-        String namesrvHost = namesrv.contains(":") ? namesrv.substring(0, namesrv.lastIndexOf(':')) : namesrv;
-        if (namesrvHost.isBlank()) {
-            namesrvHost = "127.0.0.1";
+        String namesrvHost = primaryNamesrvHost(conn);
+        return formatSocketAddress(namesrvHost, brokerPort);
+    }
+
+    /**
+     * Copy non-system UI headers onto the message as user properties so SQL92 filters work.
+     * TAGS/KEYS are applied via tag/keys APIs and must not be duplicated here.
+     */
+    static void applySendHeaders(Message message, JsonObject params) {
+        if (!params.has("headers") || !params.get("headers").isJsonObject()) {
+            return;
         }
-        return namesrvHost + ":" + brokerPort;
+        JsonObject headers = params.getAsJsonObject("headers");
+        for (Map.Entry<String, JsonElement> entry : headers.entrySet()) {
+            String key = entry.getKey();
+            if (key == null || key.isBlank() || entry.getValue() == null || entry.getValue().isJsonNull()) {
+                continue;
+            }
+            if (MessageConst.PROPERTY_TAGS.equals(key) || MessageConst.PROPERTY_KEYS.equals(key)) {
+                continue;
+            }
+            if (isRocketMqSystemMessageProperty(key)) {
+                continue;
+            }
+            String value = entry.getValue().getAsString();
+            if (value.isBlank()) {
+                continue;
+            }
+            message.putUserProperty(key, value);
+        }
+    }
+
+    private static boolean isRocketMqSystemMessageProperty(String key) {
+        return MessageConst.STRING_HASH_SET.contains(key);
+    }
+
+    /** Host part of a single {@code host:port} or {@code [ipv6]:port} socket address. */
+    static String parseHostFromSocketAddress(String hostPort) {
+        if (hostPort == null) {
+            return "";
+        }
+        String trimmed = hostPort.trim();
+        if (trimmed.isEmpty()) {
+            return "";
+        }
+        if (trimmed.startsWith("[")) {
+            int close = trimmed.indexOf(']');
+            if (close > 0) {
+                return trimmed.substring(1, close);
+            }
+        }
+        int colon = trimmed.lastIndexOf(':');
+        if (colon <= 0) {
+            return trimmed;
+        }
+        String portPart = trimmed.substring(colon + 1);
+        if (isNumericPort(portPart)) {
+            return trimmed.substring(0, colon);
+        }
+        return trimmed;
+    }
+
+    static String parsePortFromSocketAddress(String hostPort) {
+        if (hostPort == null) {
+            return "";
+        }
+        String trimmed = hostPort.trim();
+        if (trimmed.isEmpty()) {
+            return "";
+        }
+        if (trimmed.startsWith("[")) {
+            int close = trimmed.indexOf(']');
+            if (close > 0 && close + 1 < trimmed.length() && trimmed.charAt(close + 1) == ':') {
+                return trimmed.substring(close + 2);
+            }
+            return "";
+        }
+        int colon = trimmed.lastIndexOf(':');
+        if (colon <= 0 || colon >= trimmed.length() - 1) {
+            return "";
+        }
+        return trimmed.substring(colon + 1);
+    }
+
+    static String formatSocketAddress(String host, String port) {
+        if (host == null || host.isBlank()) {
+            return port == null ? "" : port;
+        }
+        if (port == null || port.isBlank()) {
+            return host;
+        }
+        if (host.indexOf(':') >= 0) {
+            return "[" + host + "]:" + port;
+        }
+        return host + ":" + port;
+    }
+
+    /**
+     * First reachable NameServer host for Docker broker remap. When auto-remap is wrong,
+     * set {@code broker_addr} / {@code brokerAddr} on the connection explicitly.
+     */
+    static String primaryNamesrvHost(JsonObject conn) {
+        for (String entry : resolveNameServerAddrSet(conn)) {
+            String host = parseHostFromSocketAddress(entry);
+            if (!host.isBlank()) {
+                return host;
+            }
+        }
+        return "127.0.0.1";
+    }
+
+    private static boolean isNumericPort(String portPart) {
+        if (portPart == null || portPart.isEmpty()) {
+            return false;
+        }
+        for (int i = 0; i < portPart.length(); i++) {
+            if (!Character.isDigit(portPart.charAt(i))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static boolean isLikelyUnreachableBrokerHost(String host) {
@@ -2141,11 +2284,13 @@ public final class RocketMqAgent {
     }
 
     private static Map<String, Object> brokerNode(int id, String brokerName, long brokerId, String addr) {
-        String[] parts = addr.split(":");
+        String host = parseHostFromSocketAddress(addr);
+        String portText = parsePortFromSocketAddress(addr);
+        int port = portText.isBlank() ? 0 : Integer.parseInt(portText);
         Map<String, Object> node = new LinkedHashMap<>();
         node.put("id", id);
-        node.put("host", parts[0]);
-        node.put("port", parts.length > 1 ? Integer.parseInt(parts[1]) : 0);
+        node.put("host", host);
+        node.put("port", port);
         node.put("rack", null);
         node.put("brokerName", brokerName);
         node.put("brokerId", brokerId);

@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.apache.rocketmq.client.exception.MQClientException;
 import org.apache.rocketmq.common.TopicConfig;
 import org.apache.rocketmq.common.MixAll;
+import org.apache.rocketmq.common.message.Message;
 import org.apache.rocketmq.remoting.protocol.subscription.SubscriptionGroupConfig;
 import org.apache.rocketmq.remoting.protocol.admin.TopicStatsTable;
 import org.apache.rocketmq.remoting.protocol.admin.TopicOffset;
@@ -22,6 +23,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 
 class RocketMqAgentTest {
@@ -116,6 +118,61 @@ class RocketMqAgentTest {
         assertEquals("127.0.0.1:10911", RocketMqAgent.remapBrokerAddrForClient("172.18.0.3:10911", conn));
         assertEquals("127.0.0.1:10911", RocketMqAgent.remapBrokerAddrForClient("10.0.0.5:10911", conn));
         assertEquals("broker.example.com:10911", RocketMqAgent.remapBrokerAddrForClient("broker.example.com:10911", conn));
+    }
+
+    @Test
+    void remapBrokerAddrUsesFirstNamesrvHostWhenMultipleConfigured() {
+        JsonObject conn = JsonParser.parseString("""
+            {"namesrv_addr":"ns1:9876;ns2:9876"}
+            """).getAsJsonObject();
+        assertEquals("ns1:10911", RocketMqAgent.remapBrokerAddrForClient("172.18.0.3:10911", conn));
+    }
+
+    @Test
+    void remapBrokerAddrSupportsIpv6NamesrvHost() {
+        JsonObject conn = JsonParser.parseString("""
+            {"namesrv_addr":"[2001:db8::1]:9876"}
+            """).getAsJsonObject();
+        assertEquals("[2001:db8::1]:10911", RocketMqAgent.remapBrokerAddrForClient("10.0.0.5:10911", conn));
+        assertEquals("[::1]:10911", RocketMqAgent.remapBrokerAddrForClient("172.18.0.2:10911", JsonParser.parseString("""
+            {"namesrv_addr":"[::1]:9876"}
+            """).getAsJsonObject()));
+    }
+
+    @Test
+    void remapBrokerAddrHonorsExplicitBrokerAddress() {
+        JsonObject conn = JsonParser.parseString("""
+            {"namesrv_addr":"127.0.0.1:9876","broker_addr":"published.example.com:10911"}
+            """).getAsJsonObject();
+        assertEquals("published.example.com:10911", RocketMqAgent.remapBrokerAddrForClient("172.18.0.3:10911", conn));
+    }
+
+    @Test
+    void parseHostFromSocketAddressHandlesIpv6AndPorts() {
+        assertEquals("127.0.0.1", RocketMqAgent.parseHostFromSocketAddress("127.0.0.1:9876"));
+        assertEquals("2001:db8::1", RocketMqAgent.parseHostFromSocketAddress("[2001:db8::1]:9876"));
+        assertEquals("::1", RocketMqAgent.parseHostFromSocketAddress("[::1]:9876"));
+    }
+
+    @Test
+    void applySendHeadersSetsUserPropertiesAndSkipsSystemKeys() {
+        Message message = new Message("TopicA", "tag-a", "body".getBytes());
+        JsonObject params = JsonParser.parseString("""
+            {"headers":{"TAGS":"tag-a","KEYS":"k1","Region":"Hangzhou","color":"blue"}}
+            """).getAsJsonObject();
+        RocketMqAgent.applySendHeaders(message, params);
+        assertEquals("Hangzhou", message.getProperty("Region"));
+        assertEquals("blue", message.getProperty("color"));
+        assertEquals("tag-a", message.getTags());
+        assertEquals(null, message.getProperty("KEYS"));
+    }
+
+    @Test
+    void paginateReturnsSecondPageAfter200Topics() {
+        List<Integer> items = IntStream.range(0, 201).boxed().toList();
+        assertEquals(200, RocketMqAgent.paginate(items, 0, 200).size());
+        assertEquals(1, RocketMqAgent.paginate(items, 200, 200).size());
+        assertEquals(200, RocketMqAgent.paginate(items, 200, 200).get(0));
     }
 
     @Test

@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { buildSqlParserErrorDiagnostic, buildSqlSemanticDiagnostics, areSqlSemanticDiagnosticsEqual, isSqlSemanticDiagnosticInputContext, shouldRunSqlSemanticDiagnostics, sqlSemanticDiagnosticRangesForViewport } from "../../apps/desktop/src/lib/sql/semantic/diagnostics.ts";
+import { sqlReferenceAnalysisDialectFor } from "../../apps/desktop/src/lib/sql/semantic/dialect.ts";
 import type { SqlReferenceAnalysis } from "../../apps/desktop/src/types/database.ts";
 
 const span = (startColumn: number, endColumn: number) => ({
@@ -288,6 +289,13 @@ test("builds a syntax diagnostic from parser errors with line and column", () =>
 
   assert.equal(diagnostic?.message, "Expected: end of statement, found: FOM at Line: 1, Column: 10");
   assert.deepEqual(diagnostic?.span, span(10, 12));
+});
+
+test("uses MySQL reference parsing only for Kingbase connections that report backtick identifiers", () => {
+  assert.equal(sqlReferenceAnalysisDialectFor({ databaseType: "kingbase", identifierQuote: "`", fallbackDialect: "postgres" }), "mysql");
+  assert.equal(sqlReferenceAnalysisDialectFor({ databaseType: "kingbase", identifierQuote: '"', fallbackDialect: "postgres" }), "postgres");
+  assert.equal(sqlReferenceAnalysisDialectFor({ databaseType: "kingbase", fallbackDialect: "postgres" }), "postgres");
+  assert.equal(sqlReferenceAnalysisDialectFor({ databaseType: "postgres", identifierQuote: "`", fallbackDialect: "postgres" }), "postgres");
 });
 
 test("compares diagnostics by severity message and span", () => {

@@ -73,6 +73,7 @@ import { usesLocalOnlyEditorCompletionMetadata, usesOnDemandOnlyEditorColumnMeta
 import { queryContextObjectActions, queryContextObjectRoute, queryTableCandidateAtSqlPosition, resolveQueryContextCandidateDatabase, resolveQueryContextObjectTarget, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
 import * as api from "@/lib/backend/api";
 import { areSqlSemanticDiagnosticsEqual, buildSqlParserErrorDiagnostic, buildSqlSemanticDiagnostics, isSqlSemanticDiagnosticInputContext, shouldRunSqlSemanticDiagnostics, sqlSemanticDiagnosticRangesForViewport, tableReferenceKey, type SqlSemanticDiagnostic } from "@/lib/sql/semantic/diagnostics";
+import { sqlReferenceAnalysisDialectFor } from "@/lib/sql/semantic/dialect";
 import { buildRedisSyntaxDiagnostics, shouldRunRedisDiagnostics } from "@/lib/redis/redisSyntaxDiagnostics";
 import { buildRedisCompletionItemsFromContext, getRedisCompletionContext, getRedisCompletionResultValidFor, shouldAutoOpenRedisCompletion, takesKeyArgument, type RedisCompletionItem } from "@/lib/redis/redisCompletion";
 import type { SqlCompletionColumn, SqlCompletionForeignKey, SqlCompletionItem, SqlCompletionObject, SqlCompletionReferencedTable, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
@@ -1860,7 +1861,14 @@ async function refreshSemanticDiagnostics(options: { preserveOutsideRanges?: boo
   const nextDiagnostics: SqlSemanticDiagnostic[] = [];
   for (const range of diagnosticRanges) {
     try {
-      const analysis = await api.analyzeSqlReferences(range.sql, props.formatDialect ?? props.dialect ?? "generic");
+      const analysis = await api.analyzeSqlReferences(
+        range.sql,
+        sqlReferenceAnalysisDialectFor({
+          databaseType: props.databaseType,
+          identifierQuote: connectionStore.connectionIdentifierQuote(props.connectionId),
+          fallbackDialect: props.formatDialect ?? props.dialect ?? "generic",
+        }),
+      );
       if (runId !== semanticDiagnosticRunId) return;
 
       const semanticCursor = Math.max(0, Math.min(currentView.state.selection.main.head - range.from, range.sql.length));

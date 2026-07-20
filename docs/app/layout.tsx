@@ -88,6 +88,12 @@ export default function RootLayout({ children }: { children: ReactNode }) {
     <html suppressHydrationWarning>
       <head>
         <script
+          defer
+          src="https://analytics.unihub.top/script.js"
+          data-website-id="69afbe68-e06e-4fa8-84cd-e47d6d44baf0"
+          data-domains="dbxio.com,www.dbxio.com"
+        />
+        <script
           type="application/ld+json"
           dangerouslySetInnerHTML={{ __html: JSON.stringify(WEBSITE_SCHEMA) }}
         />

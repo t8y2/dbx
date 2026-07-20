@@ -66,63 +66,6 @@ fn normalize_public_base_path(value: Option<String>) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{normalize_public_base_path, web_agent_dir_from_env, web_compression_predicate, XLSX_CONTENT_TYPE};
-    use axum::body::Body;
-    use axum::http::header::CONTENT_TYPE;
-    use axum::http::Response;
-    use tower_http::compression::predicate::Predicate;
-
-    fn compression_response(content_type: &str) -> Response<Body> {
-        Response::builder().header(CONTENT_TYPE, content_type).body(Body::from(vec![b'x'; 64])).unwrap()
-    }
-
-    #[test]
-    fn web_compression_skips_streams_and_precompressed_exports() {
-        let predicate = web_compression_predicate();
-
-        assert!(predicate.should_compress(&compression_response("application/json")));
-        assert!(!predicate.should_compress(&compression_response("text/event-stream")));
-        assert!(!predicate.should_compress(&compression_response(XLSX_CONTENT_TYPE)));
-    }
-
-    #[test]
-    fn normalize_public_base_path_defaults_to_root() {
-        assert_eq!(normalize_public_base_path(None), "/");
-        assert_eq!(normalize_public_base_path(Some("".to_string())), "/");
-        assert_eq!(normalize_public_base_path(Some("/".to_string())), "/");
-    }
-
-    #[test]
-    fn normalize_public_base_path_trims_and_preserves_segments() {
-        assert_eq!(normalize_public_base_path(Some("dbx".to_string())), "/dbx");
-        assert_eq!(normalize_public_base_path(Some("/dbx/".to_string())), "/dbx");
-        assert_eq!(normalize_public_base_path(Some("/tools/dbx/?v=1".to_string())), "/tools/dbx");
-    }
-
-    #[test]
-    #[should_panic(expected = "DBX_PUBLIC_BASE_PATH contains invalid characters")]
-    fn normalize_public_base_path_rejects_invalid_characters() {
-        normalize_public_base_path(Some("/dbx admin".to_string()));
-    }
-
-    #[test]
-    fn web_agent_dir_defaults_under_data_dir() {
-        let data_dir = std::path::PathBuf::from("/app/data");
-        assert_eq!(web_agent_dir_from_env(&data_dir, None), data_dir.join("agents"));
-    }
-
-    #[test]
-    fn web_agent_dir_uses_explicit_env_override() {
-        let data_dir = std::path::PathBuf::from("/app/data");
-        assert_eq!(
-            web_agent_dir_from_env(&data_dir, Some("/custom/agents".to_string())),
-            std::path::PathBuf::from("/custom/agents")
-        );
-    }
-}
-
 #[cfg(feature = "mq-admin")]
 fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
     router
@@ -372,7 +315,6 @@ async fn main() {
         .route("/query/build-search-result-where", post(routes::query::build_search_result_where))
         .route("/query/build-rename-object-sql", post(routes::query::build_rename_object_sql))
         .route("/query/build-create-database-sql", post(routes::query::build_create_database_sql))
-        .route("/query/build-duckdb-attach-database-sql", post(routes::query::build_duckdb_attach_database_sql))
         .route("/query/build-sqlite-attach-database-sql", post(routes::query::build_sqlite_attach_database_sql))
         .route("/query/build-drop-object-sql", post(routes::query::build_drop_object_sql))
         .route("/query/build-drop-table-sql", post(routes::query::build_drop_table_sql))
@@ -641,6 +583,11 @@ async fn main() {
         .route("/cloud-sync/snippet/upload", post(routes::cloud_sync::snippet_sync_upload))
         .route("/cloud-sync/snippet/download", post(routes::cloud_sync::snippet_sync_download));
 
+    // Do not expose DuckDB-only handlers from builds that intentionally omit bundled DuckDB.
+    #[cfg(feature = "duckdb-bundled")]
+    let api =
+        api.route("/query/build-duckdb-attach-database-sql", post(routes::query::build_duckdb_attach_database_sql));
+
     let api = add_mq_routes(api)
         .layer(middleware::from_fn_with_state(web_state.clone(), auth::auth_middleware))
         .with_state(web_state.clone());
@@ -689,4 +636,61 @@ async fn main() {
         .await
         .expect("Server error");
     shutdown_state.shutdown_background_tasks(std::time::Duration::from_secs(3)).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_public_base_path, web_agent_dir_from_env, web_compression_predicate, XLSX_CONTENT_TYPE};
+    use axum::body::Body;
+    use axum::http::header::CONTENT_TYPE;
+    use axum::http::Response;
+    use tower_http::compression::predicate::Predicate;
+
+    fn compression_response(content_type: &str) -> Response<Body> {
+        Response::builder().header(CONTENT_TYPE, content_type).body(Body::from(vec![b'x'; 64])).unwrap()
+    }
+
+    #[test]
+    fn web_compression_skips_streams_and_precompressed_exports() {
+        let predicate = web_compression_predicate();
+
+        assert!(predicate.should_compress(&compression_response("application/json")));
+        assert!(!predicate.should_compress(&compression_response("text/event-stream")));
+        assert!(!predicate.should_compress(&compression_response(XLSX_CONTENT_TYPE)));
+    }
+
+    #[test]
+    fn normalize_public_base_path_defaults_to_root() {
+        assert_eq!(normalize_public_base_path(None), "/");
+        assert_eq!(normalize_public_base_path(Some("".to_string())), "/");
+        assert_eq!(normalize_public_base_path(Some("/".to_string())), "/");
+    }
+
+    #[test]
+    fn normalize_public_base_path_trims_and_preserves_segments() {
+        assert_eq!(normalize_public_base_path(Some("dbx".to_string())), "/dbx");
+        assert_eq!(normalize_public_base_path(Some("/dbx/".to_string())), "/dbx");
+        assert_eq!(normalize_public_base_path(Some("/tools/dbx/?v=1".to_string())), "/tools/dbx");
+    }
+
+    #[test]
+    #[should_panic(expected = "DBX_PUBLIC_BASE_PATH contains invalid characters")]
+    fn normalize_public_base_path_rejects_invalid_characters() {
+        normalize_public_base_path(Some("/dbx admin".to_string()));
+    }
+
+    #[test]
+    fn web_agent_dir_defaults_under_data_dir() {
+        let data_dir = std::path::PathBuf::from("/app/data");
+        assert_eq!(web_agent_dir_from_env(&data_dir, None), data_dir.join("agents"));
+    }
+
+    #[test]
+    fn web_agent_dir_uses_explicit_env_override() {
+        let data_dir = std::path::PathBuf::from("/app/data");
+        assert_eq!(
+            web_agent_dir_from_env(&data_dir, Some("/custom/agents".to_string())),
+            std::path::PathBuf::from("/custom/agents")
+        );
+    }
 }

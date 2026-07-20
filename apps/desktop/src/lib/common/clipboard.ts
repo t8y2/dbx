@@ -119,7 +119,7 @@ export async function copyToClipboard(text: string, env: ClipboardEnvironment = 
       await writeText(text);
       return;
     } catch {
-      // Fall through to Web Clipboard / legacy copy when the native plugin is unavailable.
+      // Preserve Web Clipboard and legacy copy compatibility when native writes fail.
     }
   }
 

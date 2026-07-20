@@ -158,7 +158,7 @@ fn effective_row_limit(format: &str, request: &QueryResultExportRequest) -> Opti
 }
 
 fn xlsx_hard_limit_active(format: &str, request: &QueryResultExportRequest) -> bool {
-    format == "xlsx" && request.row_limit.map_or(true, |limit| limit > XLSX_MAX_DATA_ROWS)
+    format == "xlsx" && request.row_limit.is_none_or(|limit| limit > XLSX_MAX_DATA_ROWS)
 }
 
 fn format_text_export_header(format: &str, columns: &[String]) -> String {

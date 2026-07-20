@@ -15,6 +15,7 @@ export interface SqlSemanticDiagnosticSchema {
   missingTables?: Set<string>;
   loadedColumnTables?: Set<string>;
   sql?: string;
+  databaseType?: DatabaseType;
 }
 
 export interface SqlSemanticDiagnosticVisibleRange {
@@ -52,6 +53,7 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
   }
 
   for (const table of tables) {
+    if (isSqlVirtualTableReference(table, schema.databaseType)) continue;
     if (!schema.missingTables?.has(tableReferenceKey(table))) continue;
     diagnostics.push({
       span: trimSqlTextSpanWhitespace(schema.sql, table.span),
@@ -80,6 +82,10 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
   }
 
   return diagnostics;
+}
+
+export function isSqlVirtualTableReference(table: { name: string; schema?: string | null }, databaseType?: DatabaseType): boolean {
+  return databaseType === "mysql" && !table.schema && normalizeName(table.name) === "dual";
 }
 
 function trimSqlTextSpanWhitespace(sql: string | undefined, span: SqlTextSpan): SqlTextSpan {

@@ -474,19 +474,19 @@ pub(crate) fn pg_value_to_json_classified(row: &Row, idx: usize, col_type: PgCol
     }
 }
 
+/// Serialize a pgvector `vector` component with f32 shortest round-trip decimal text.
+///
+/// Casting through `f64` (or fixed fractional rounding) either expands binary noise or
+/// truncates remaining single-precision digits; formatting via `f32` display keeps the
+/// full float4 value that pgvector stores.
+fn pg_vector_element_number(v: f32) -> serde_json::Value {
+    v.to_string().parse().map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
+}
+
 fn pg_vector_value_to_json(row: &Row, idx: usize) -> serde_json::Value {
     if let Ok(PgRawBytes(raw)) = row.try_get::<_, PgRawBytes>(idx) {
         if let Some(floats) = decode_pgvector_bytes(&raw) {
-            return serde_json::Value::Array(
-                floats
-                    .into_iter()
-                    .map(|v| {
-                        serde_json::Number::from_f64((v as f64 * 1_000_000.0).round() / 1_000_000.0)
-                            .map(serde_json::Value::Number)
-                            .unwrap_or(serde_json::Value::Null)
-                    })
-                    .collect(),
-            );
+            return serde_json::Value::Array(floats.into_iter().map(pg_vector_element_number).collect());
         }
     }
     serde_json::Value::Null
@@ -3662,6 +3662,57 @@ mod tests {
         ];
 
         assert_eq!(decode_tsvector_bytes(&raw).as_deref(), Some("'back\\\\slash':3B 'o''clock':1,2A"));
+    }
+
+    fn encode_pgvector_bytes(values: &[f32]) -> Vec<u8> {
+        let dims = u16::try_from(values.len()).expect("dim fits u16");
+        let mut raw = Vec::with_capacity(4 + values.len() * 4);
+        raw.extend_from_slice(&dims.to_be_bytes());
+        raw.extend_from_slice(&0u16.to_be_bytes());
+        for value in values {
+            raw.extend_from_slice(&value.to_be_bytes());
+        }
+        raw
+    }
+
+    #[test]
+    fn decodes_pgvector_binary_output() {
+        let values = [0.1f32, -2.5f32, 1.2345679e-5f32];
+        let decoded = decode_pgvector_bytes(&encode_pgvector_bytes(&values)).expect("decode vector");
+        assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn pgvector_element_number_round_trips_full_f32_precision() {
+        let values = [0.1f32, 0.12345679f32, 1.2345679e-5f32, -0.00012345679f32, 1.2345678f32, 1e20f32];
+
+        for value in values {
+            let json = pg_vector_element_number(value);
+            let text = json.to_string();
+            let restored: f32 = text.parse().expect("json number parses as f32");
+            let rounded_six = ((value as f64 * 1_000_000.0).round() / 1_000_000.0) as f32;
+
+            // Display text must recover the exact stored float4 bits.
+            assert_eq!(restored, value, "lost f32 precision for {value} -> {text}");
+            // Fixed 6-decimal rounding is what caused #3931; reject that path when it differs.
+            if rounded_six != value {
+                assert_ne!(restored, rounded_six, "still clamped to 6 decimals for {value}");
+            }
+        }
+    }
+
+    #[test]
+    fn pgvector_binary_to_json_preserves_component_precision() {
+        let values = [0.12345679f32, 1.2345679e-5f32, -2.5f32];
+        let decoded = decode_pgvector_bytes(&encode_pgvector_bytes(&values)).expect("decode vector");
+        let json = serde_json::Value::Array(decoded.into_iter().map(pg_vector_element_number).collect());
+        let arr = json.as_array().expect("vector json array");
+
+        assert_eq!(arr.len(), values.len());
+        for (component, expected) in arr.iter().zip(values) {
+            let restored: f32 = component.to_string().parse().expect("component parses as f32");
+            assert_eq!(restored, expected);
+        }
     }
 
     fn decode_hex(hex: &str) -> Vec<u8> {

@@ -2584,7 +2584,7 @@ test("data tab execution preserves pagination offset metadata", async () => {
   }
 });
 
-test("data tab default pagination is independent from query result page size", async () => {
+test("data tab default pagination uses the dedicated table-open page size", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());
   const connectionStore = useConnectionStore();
@@ -2594,7 +2594,7 @@ test("data tab default pagination is independent from query result page size", a
   let executeBody: any;
   let preparedPagination = false;
 
-  settingsStore.updateEditorSettings({ pageSize: 1000 });
+  settingsStore.updateEditorSettings({ pageSize: 1000, tableOpenPageSize: 500 });
   connectionStore.addEphemeralConnection(conn("conn-1"));
   const tabId = store.createTab("conn-1", "db", "users", "data", "public");
   const tab = store.tabs.find((item) => item.id === tabId);
@@ -2617,12 +2617,12 @@ test("data tab default pagination is independent from query result page size", a
   });
 
   try {
-    await store.executeTabSql(tabId, 'SELECT * FROM "users" LIMIT 100;');
+    await store.executeTabSql(tabId, 'SELECT * FROM "users" LIMIT 500;');
 
     assert.equal(preparedPagination, false);
-    assert.equal(executeBody.maxRows, 100);
-    assert.equal(executeBody.fetchSize, 100);
-    assert.equal(tab.resultPageLimit, 100);
+    assert.equal(executeBody.maxRows, 500);
+    assert.equal(executeBody.fetchSize, 500);
+    assert.equal(tab.resultPageLimit, 500);
     assert.equal(tab.resultPageOffset, 0);
   } finally {
     globalThis.fetch = originalFetch;

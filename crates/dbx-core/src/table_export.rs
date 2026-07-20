@@ -547,7 +547,7 @@ async fn try_export_native_table_stream(
                     let row_csv = format_csv_rows(&[formatted]);
                     write!(file, "\n{row_csv}").map_err(|e| format!("Failed to write CSV rows: {e}"))?;
                     rows_exported += 1;
-                    if rows_exported % progress_interval == 0 {
+                    if rows_exported.is_multiple_of(progress_interval) {
                         on_progress(TableExportProgress {
                             export_id: request.export_id.clone(),
                             table_name: request.table_name.clone(),
@@ -591,7 +591,7 @@ async fn try_export_native_table_stream(
                     let row_tsv = format_tsv_rows(&[formatted]);
                     write!(file, "\n{row_tsv}").map_err(|e| format!("Failed to write TXT rows: {e}"))?;
                     rows_exported += 1;
-                    if rows_exported % progress_interval == 0 {
+                    if rows_exported.is_multiple_of(progress_interval) {
                         on_progress(TableExportProgress {
                             export_id: request.export_id.clone(),
                             table_name: request.table_name.clone(),
@@ -636,7 +636,7 @@ async fn try_export_native_table_stream(
                     );
                     writer.write_row(&formatted).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                     rows_exported += 1;
-                    if rows_exported % progress_interval == 0 {
+                    if rows_exported.is_multiple_of(progress_interval) {
                         on_progress(TableExportProgress {
                             export_id: request.export_id.clone(),
                             table_name: request.table_name.clone(),
@@ -691,7 +691,7 @@ async fn try_export_native_table_stream(
                     write_json_row_object(&mut file, col_names, &formatted)?;
                     is_first_row = false;
                     rows_exported += 1;
-                    if rows_exported % progress_interval == 0 {
+                    if rows_exported.is_multiple_of(progress_interval) {
                         on_progress(TableExportProgress {
                             export_id: request.export_id.clone(),
                             table_name: request.table_name.clone(),
@@ -742,7 +742,7 @@ async fn try_export_native_table_stream(
                         wrote_rows = true;
                     }
                     rows_exported += 1;
-                    if rows_exported % progress_interval == 0 {
+                    if rows_exported.is_multiple_of(progress_interval) {
                         on_progress(TableExportProgress {
                             export_id: request.export_id.clone(),
                             table_name: request.table_name.clone(),
@@ -808,7 +808,7 @@ async fn try_export_native_table_stream(
                         flush_pending(&mut file, &mut pending_rows)?;
                     }
                     rows_exported += 1;
-                    if rows_exported % progress_interval == 0 {
+                    if rows_exported.is_multiple_of(progress_interval) {
                         on_progress(TableExportProgress {
                             export_id: request.export_id.clone(),
                             table_name: request.table_name.clone(),
@@ -839,7 +839,7 @@ async fn try_export_native_table_stream(
     match stream_result {
         Ok(false) => Ok(false),
         Ok(true) => {
-            if rows_exported % progress_interval != 0 {
+            if !rows_exported.is_multiple_of(progress_interval) {
                 on_progress(TableExportProgress {
                     export_id: request.export_id.clone(),
                     table_name: request.table_name.clone(),

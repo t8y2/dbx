@@ -7,7 +7,7 @@ import { registerGlobalContextMenu, type ContextMenuRegistration } from "@/compo
 export interface ContextMenuItem {
   label: string;
   action?: () => void;
-  disabled?: boolean;
+  disabled?: boolean | (() => boolean);
   separator?: boolean;
   icon?: Component;
   iconClass?: string;
@@ -102,14 +102,14 @@ onMounted(() => {
 });
 
 function handleItemClick(item: ContextMenuItem) {
-  if (item.disabled) return;
+  if (itemIsDisabled(item)) return;
   if (item.children?.length) return; // submenu trigger — do nothing on click
   close();
   item.action?.();
 }
 
 function handleSubItemClick(item: ContextMenuItem) {
-  if (item.disabled) return;
+  if (itemIsDisabled(item)) return;
   close();
   item.action?.();
 }
@@ -143,7 +143,7 @@ function onItemMouseEnter(index: number, event: MouseEvent) {
   lastMouseX = event.clientX;
   lastMouseY = event.clientY;
   const item = activeItems.value[index];
-  if (!item?.children?.length || item.disabled) {
+  if (!item?.children?.length || itemIsDisabled(item)) {
     // Moving to an item without children — close submenu immediately, no delay needed
     activeSubIndex.value = null;
     return;
@@ -240,6 +240,10 @@ function itemButtonClass(variant?: "default" | "destructive") {
   ];
 }
 
+function itemIsDisabled(item: ContextMenuItem): boolean {
+  return typeof item.disabled === "function" ? item.disabled() : !!item.disabled;
+}
+
 function shortcutKeys(shortcut?: string): string[] {
   return shortcutDisplayKeys(shortcut);
 }
@@ -264,7 +268,7 @@ onBeforeUnmount(() => {
           <div v-if="item.separator" class="-mx-1 my-1 flex items-center px-1">
             <div class="h-px flex-1 bg-border/70" />
           </div>
-          <button v-else :disabled="item.disabled" :class="[...itemButtonClass(item.variant), activeSubIndex === index ? 'bg-accent text-accent-foreground' : '']" @click="handleItemClick(item)" @mouseenter="(e) => onItemMouseEnter(index, e)" @mouseleave="onItemMouseLeave">
+          <button v-else :disabled="itemIsDisabled(item)" :class="[...itemButtonClass(item.variant), activeSubIndex === index ? 'bg-accent text-accent-foreground' : '']" @click="handleItemClick(item)" @mouseenter="(e) => onItemMouseEnter(index, e)" @mouseleave="onItemMouseLeave">
             <span class="flex size-4 shrink-0 items-center justify-center">
               <component :is="item.icon" v-if="item.icon" :class="['size-4', item.iconClass]" />
             </span>
@@ -293,7 +297,7 @@ onBeforeUnmount(() => {
           <div v-if="child.separator" class="-mx-1 my-1 flex items-center px-1">
             <div class="h-px flex-1 bg-border/70" />
           </div>
-          <button v-else :disabled="child.disabled" :class="itemButtonClass(child.variant)" @click="handleSubItemClick(child)">
+          <button v-else :disabled="itemIsDisabled(child)" :class="itemButtonClass(child.variant)" @click="handleSubItemClick(child)">
             <span class="flex size-4 shrink-0 items-center justify-center">
               <component :is="child.icon" v-if="child.icon" :class="['size-4', child.iconClass]" />
             </span>

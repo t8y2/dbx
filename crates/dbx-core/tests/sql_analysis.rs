@@ -56,6 +56,15 @@ fn extracts_mysql_quoted_table_references() {
 }
 
 #[test]
+fn extracts_mysql_qualified_backtick_table_references() {
+    let analysis = analyze_sql_references("SELECT * FROM `core`.`products` LIMIT 100;", Some("mysql")).unwrap();
+
+    assert_eq!(analysis.tables.len(), 1);
+    assert_eq!(analysis.tables[0].schema.as_deref(), Some("core"));
+    assert_eq!(analysis.tables[0].name, "products");
+}
+
+#[test]
 fn extracts_mysql_single_quoted_table_references() {
     let analysis = analyze_sql_references("SELECT * FROM 't_10001' LIMIT 100", Some("mysql")).unwrap();
 

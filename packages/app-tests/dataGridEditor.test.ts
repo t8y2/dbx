@@ -1184,6 +1184,11 @@ test("single-statement table data save uses auto-commit and records a failed his
   assert.equal(historyEntry.rollback_sql, undefined);
   assert.equal(historyEntry.affected_rows, undefined);
   assert.equal(historyEntry.sql, `UPDATE "pp_questions" SET "title" = 'New title' WHERE "id" = 1;`);
+  const details = JSON.parse(String(historyEntry.details_json));
+  assert.equal(details.statement_count, 1);
+  assert.equal(details.rollback_statement_count, 0);
+  assert.equal("statements" in details, false);
+  assert.equal("rollback_statements" in details, false);
 });
 
 test("multi-statement table data save remains transactional", async () => {

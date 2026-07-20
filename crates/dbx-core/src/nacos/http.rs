@@ -1063,7 +1063,9 @@ fn push_optional(params: &mut Vec<(String, String)>, key: &str, value: Option<St
     }
 }
 
-fn build_publish_forms(req: NacosConfigUpsert, namespace: String) -> (Vec<(String, String)>, Vec<(String, String)>) {
+type NacosForm = Vec<(String, String)>;
+
+fn build_publish_forms(req: NacosConfigUpsert, namespace: String) -> (NacosForm, NacosForm) {
     let mut v3_form = vec![
         ("dataId".to_string(), req.data_id.clone()),
         ("groupName".to_string(), req.group.clone()),

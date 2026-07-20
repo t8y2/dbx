@@ -290,57 +290,6 @@ fn find_config_by_name<'a>(
     configs.iter().find(|c| c.name.eq_ignore_ascii_case(name))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{resolve_mongo_database, resolve_mongo_target_values, write_port_file};
-
-    #[test]
-    fn writes_bridge_port_file_to_resolved_data_dir() {
-        let root = std::env::temp_dir().join(format!(
-            "dbx-mcp-bridge-port-test-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        let default_data_dir = root.join("default-app-data");
-        let resolved_data_dir = root.join("resolved-data");
-        std::fs::create_dir_all(&default_data_dir).unwrap();
-
-        let port_file = write_port_file(&resolved_data_dir, 49152).unwrap();
-
-        assert_eq!(port_file, resolved_data_dir.join("mcp-bridge-port"));
-        assert_eq!(std::fs::read_to_string(port_file).unwrap(), "49152");
-        assert!(!default_data_dir.join("mcp-bridge-port").exists());
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn mongo_database_uses_configured_default_for_missing_or_blank_request() {
-        let configured = Some("sample_db".to_string());
-
-        assert_eq!(resolve_mongo_database(None, configured.clone()), "sample_db");
-        assert_eq!(resolve_mongo_database(Some(String::new()), configured.clone()), "sample_db");
-        assert_eq!(resolve_mongo_database(Some("  ".to_string()), configured), "sample_db");
-    }
-
-    #[test]
-    fn mongo_database_preserves_explicit_target() {
-        assert_eq!(resolve_mongo_database(Some("admin".to_string()), Some("sample_db".to_string())), "admin");
-    }
-
-    #[test]
-    fn mongo_target_keeps_connection_id_separate_from_database() {
-        assert_eq!(
-            resolve_mongo_target_values(
-                "connection-id".to_string(),
-                Some("sample_db".to_string()),
-                Some("default_db".to_string()),
-            ),
-            ("connection-id".to_string(), "sample_db".to_string())
-        );
-    }
-}
-
 async fn respond(stream: &mut tokio::net::TcpStream, status: &str, body: &str) {
     let resp = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n{body}", body.len());
     let _ = stream.write_all(resp.as_bytes()).await;
@@ -967,5 +916,56 @@ async fn handle_execute_query_data(state: &Arc<AppState>, body: &str, stream: &m
     {
         Ok(result) => respond_json(stream, &result).await,
         Err(e) => respond_error(stream, "500 Internal Server Error", &e).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_mongo_database, resolve_mongo_target_values, write_port_file};
+
+    #[test]
+    fn writes_bridge_port_file_to_resolved_data_dir() {
+        let root = std::env::temp_dir().join(format!(
+            "dbx-mcp-bridge-port-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let default_data_dir = root.join("default-app-data");
+        let resolved_data_dir = root.join("resolved-data");
+        std::fs::create_dir_all(&default_data_dir).unwrap();
+
+        let port_file = write_port_file(&resolved_data_dir, 49152).unwrap();
+
+        assert_eq!(port_file, resolved_data_dir.join("mcp-bridge-port"));
+        assert_eq!(std::fs::read_to_string(port_file).unwrap(), "49152");
+        assert!(!default_data_dir.join("mcp-bridge-port").exists());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mongo_database_uses_configured_default_for_missing_or_blank_request() {
+        let configured = Some("sample_db".to_string());
+
+        assert_eq!(resolve_mongo_database(None, configured.clone()), "sample_db");
+        assert_eq!(resolve_mongo_database(Some(String::new()), configured.clone()), "sample_db");
+        assert_eq!(resolve_mongo_database(Some("  ".to_string()), configured), "sample_db");
+    }
+
+    #[test]
+    fn mongo_database_preserves_explicit_target() {
+        assert_eq!(resolve_mongo_database(Some("admin".to_string()), Some("sample_db".to_string())), "admin");
+    }
+
+    #[test]
+    fn mongo_target_keeps_connection_id_separate_from_database() {
+        assert_eq!(
+            resolve_mongo_target_values(
+                "connection-id".to_string(),
+                Some("sample_db".to_string()),
+                Some("default_db".to_string()),
+            ),
+            ("connection-id".to_string(), "sample_db".to_string())
+        );
     }
 }

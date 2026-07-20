@@ -161,7 +161,7 @@ impl MessageQueueAdmin for PulsarAdmin {
 
     async fn list_tenants(&self) -> Result<Vec<TenantInfo>, String> {
         let names: Vec<String> = self.get_json(&self.profile.tenants_path()).await?;
-        stream::iter(names.into_iter())
+        stream::iter(names)
             .map(|name| async move {
                 match self.get_tenant(&name).await {
                     Ok(tenant) => Ok(tenant),
@@ -214,7 +214,7 @@ impl MessageQueueAdmin for PulsarAdmin {
     async fn list_namespaces(&self, tenant: &str) -> Result<Vec<NamespaceInfo>, String> {
         // Returns fully-qualified `tenant/namespace` strings.
         let names: Vec<String> = self.get_json(&self.profile.namespaces_path(tenant)).await?;
-        stream::iter(names.into_iter())
+        stream::iter(names)
             .map(|full| async move {
                 let namespace = full.rsplit('/').next().unwrap_or(&full).to_string();
                 let admin_roles = match self.namespace_admin_roles(tenant, &namespace).await {
@@ -282,7 +282,7 @@ impl MessageQueueAdmin for PulsarAdmin {
             };
             let partitioned_set: std::collections::HashSet<String> = partitioned.iter().cloned().collect();
             let domain = if persistent { "persistent" } else { "non-persistent" };
-            let partitioned_topics = stream::iter(partitioned.into_iter())
+            let partitioned_topics = stream::iter(partitioned)
                 .map(|full| async move {
                     let partitions = self.partition_count_for_topic(domain, &full).await?;
                     Ok::<_, String>(TopicInfo {

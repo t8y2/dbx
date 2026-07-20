@@ -1126,8 +1126,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       inserted_rows: snapshot.newRows.length,
       updated_rows: snapshot.dirtyRows.size,
       deleted_rows: snapshot.deletedRows.size,
-      statements,
-      rollback_statements: success ? rollbackStatements : [],
+      statement_count: statements.length,
+      rollback_statement_count: success ? rollbackStatements.length : 0,
       error: success ? undefined : historyResult?.error,
     };
     await historyStore.add({

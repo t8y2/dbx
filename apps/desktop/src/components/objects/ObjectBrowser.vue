@@ -84,12 +84,14 @@ import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, 
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   buildObjectBrowserRows,
-  filterObjectBrowserRows,
+  countObjectBrowserRowsByFilter,
   formatObjectBrowserBytes,
   formatObjectBrowserCount,
   formatObjectBrowserTimestamp,
   initialObjectBrowserSortDirection,
   sortObjectBrowserRows,
+  summarizeObjectBrowserSearch,
+  type ObjectBrowserFilter,
   type ObjectBrowserRow,
   type ObjectBrowserSortDirection,
   type ObjectBrowserSortKey,
@@ -100,7 +102,7 @@ import { createSidePanelRequestGuard } from "@/lib/table/sidePanelRequestGuard";
 import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
 
-type ObjectFilter = "all" | "tables" | "views" | "materializedViews" | "procedures" | "functions" | "triggers" | "sequences" | "packages" | "types";
+type ObjectFilter = ObjectBrowserFilter;
 type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
 
 const props = defineProps<{
@@ -236,15 +238,9 @@ const { addTask: addExportTask } = useExportTracker();
 const needsSchema = computed(() => isSchemaAware(props.connection.db_type) && !connectionUsesDatabaseObjectTreeMode(props.connection));
 const canDropTargetCascade = computed(() => dropTarget.value?.type === "TABLE" && supportsDropTableCascade(effectiveDatabaseType.value));
 const canTruncateTargetCascade = computed(() => !!truncateTarget.value && supportsTruncateTableCascade(effectiveDatabaseType.value));
-const tableCount = computed(() => rows.value.filter((row) => row.type === "TABLE").length);
-const viewCount = computed(() => rows.value.filter((row) => row.type === "VIEW").length);
-const materializedViewCount = computed(() => rows.value.filter((row) => row.type === "MATERIALIZED_VIEW").length);
-const procedureCount = computed(() => rows.value.filter((row) => row.type === "PROCEDURE").length);
-const functionCount = computed(() => rows.value.filter((row) => row.type === "FUNCTION").length);
-const triggerCount = computed(() => rows.value.filter((row) => row.type === "TRIGGER").length);
-const sequenceCount = computed(() => rows.value.filter((row) => row.type === "SEQUENCE").length);
-const packageCount = computed(() => rows.value.filter((row) => row.type === "PACKAGE" || row.type === "PACKAGE_BODY").length);
-const typeCount = computed(() => rows.value.filter((row) => row.type === "TYPE" || row.type === "TYPE_BODY").length);
+const objectCounts = computed(() => countObjectBrowserRowsByFilter(rows.value));
+// Count direct search matches once; partition parents rendered only for context must not inflate badges.
+const objectSearchSummary = computed(() => summarizeObjectBrowserSearch(rows.value, search.value));
 const canOpenStructureEditor = computed(() => supportsTableStructureEditing(tableStructureDatabaseType.value));
 const canOpenDiagram = computed(() => !!props.database && supportsSchemaDiagram(effectiveDatabaseType.value));
 const canOpenTableImport = computed(() => !!props.database && supportsTableImport(effectiveDatabaseType.value));
@@ -254,16 +250,16 @@ const sourceFormatDialect = computed<SqlFormatDialect>(() => sqlFormatDialectFor
 const objectFilters = computed<ObjectFilter[]>(() =>
   (
     [
-      ["all", rows.value.length],
-      ["tables", tableCount.value],
-      ["views", viewCount.value],
-      ["materializedViews", materializedViewCount.value],
-      ["procedures", procedureCount.value],
-      ["functions", functionCount.value],
-      ["triggers", triggerCount.value],
-      ["sequences", sequenceCount.value],
-      ["packages", packageCount.value],
-      ["types", typeCount.value],
+      ["all", objectCounts.value.all],
+      ["tables", objectCounts.value.tables],
+      ["views", objectCounts.value.views],
+      ["materializedViews", objectCounts.value.materializedViews],
+      ["procedures", objectCounts.value.procedures],
+      ["functions", objectCounts.value.functions],
+      ["triggers", objectCounts.value.triggers],
+      ["sequences", objectCounts.value.sequences],
+      ["packages", objectCounts.value.packages],
+      ["types", objectCounts.value.types],
     ] as Array<[ObjectFilter, number]>
   )
     .filter(([filter, count]) => filter === "all" || count > 0)
@@ -643,24 +639,28 @@ function resetObjectColumnWidth(key: ObjectBrowserColumnKey, width: number, even
   };
 }
 
-function rowMatchesObjectFilter(row: ObjectBrowserRow) {
-  if (objectFilter.value === "tables") return row.type === "TABLE";
-  if (objectFilter.value === "views") return row.type === "VIEW";
-  if (objectFilter.value === "materializedViews") return row.type === "MATERIALIZED_VIEW";
-  if (objectFilter.value === "procedures") return row.type === "PROCEDURE";
-  if (objectFilter.value === "functions") return row.type === "FUNCTION";
-  if (objectFilter.value === "triggers") return row.type === "TRIGGER";
-  if (objectFilter.value === "sequences") return row.type === "SEQUENCE";
-  if (objectFilter.value === "packages") return row.type === "PACKAGE" || row.type === "PACKAGE_BODY";
-  if (objectFilter.value === "types") return row.type === "TYPE" || row.type === "TYPE_BODY";
+function rowMatchesFilter(row: ObjectBrowserRow, filter: ObjectFilter) {
+  if (filter === "tables") return row.type === "TABLE";
+  if (filter === "views") return row.type === "VIEW";
+  if (filter === "materializedViews") return row.type === "MATERIALIZED_VIEW";
+  if (filter === "procedures") return row.type === "PROCEDURE";
+  if (filter === "functions") return row.type === "FUNCTION";
+  if (filter === "triggers") return row.type === "TRIGGER";
+  if (filter === "sequences") return row.type === "SEQUENCE";
+  if (filter === "packages") return row.type === "PACKAGE" || row.type === "PACKAGE_BODY";
+  if (filter === "types") return row.type === "TYPE" || row.type === "TYPE_BODY";
   return true;
+}
+
+function rowMatchesObjectFilter(row: ObjectBrowserRow) {
+  return rowMatchesFilter(row, objectFilter.value);
 }
 
 function groupedFilteredRows() {
   const query = search.value.trim();
   const candidateRows = rows.value.filter(rowMatchesObjectFilter);
   const candidateIds = new Set(candidateRows.map((row) => row.id));
-  const matchingRows = filterObjectBrowserRows(candidateRows, query);
+  const matchingRows = objectSearchSummary.value.matchingRows.filter(rowMatchesObjectFilter);
   const matchingIds = new Set(matchingRows.map((row) => row.id));
   const parentIdsWithMatchingPartitions = new Set(matchingRows.flatMap((row) => (row.partitionParentId ? [row.partitionParentId] : [])));
   const rootRows = candidateRows.filter((row) => {
@@ -2088,7 +2088,7 @@ async function loadObjects() {
   } finally {
     if (id === loadId) {
       loadingObjects.value = false;
-      if (!userHasSelectedFilter.value && tableCount.value > 0) {
+      if (!userHasSelectedFilter.value && objectCounts.value.tables > 0) {
         // The default table filter is a presentation choice, not a user query
         // change, so preserve the tab's saved scroll offset across remounts.
         preserveObjectFilterScrollOnce = objectFilter.value !== "tables";
@@ -2151,16 +2151,7 @@ function onSchemaChange(value: any) {
 }
 
 function filterCount(filter: ObjectFilter) {
-  if (filter === "tables") return tableCount.value;
-  if (filter === "views") return viewCount.value;
-  if (filter === "materializedViews") return materializedViewCount.value;
-  if (filter === "procedures") return procedureCount.value;
-  if (filter === "functions") return functionCount.value;
-  if (filter === "triggers") return triggerCount.value;
-  if (filter === "sequences") return sequenceCount.value;
-  if (filter === "packages") return packageCount.value;
-  if (filter === "types") return typeCount.value;
-  return rows.value.length;
+  return objectSearchSummary.value.counts[filter];
 }
 
 function filterLabel(filter: ObjectFilter) {

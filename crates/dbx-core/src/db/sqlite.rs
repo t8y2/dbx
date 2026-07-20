@@ -1400,7 +1400,7 @@ fn sqlite_completion_tables(
     if type_filters.is_empty() {
         type_filters.extend(["table", "view"]);
     }
-    let placeholders = std::iter::repeat("?").take(type_filters.len()).collect::<Vec<_>>().join(", ");
+    let placeholders = std::iter::repeat_n("?", type_filters.len()).collect::<Vec<_>>().join(", ");
     let sql = format!(
         "SELECT name, type FROM {}.sqlite_master WHERE type IN ({}) AND name NOT LIKE 'sqlite_%' AND {} ORDER BY name LIMIT ?",
         sqlite_quote_ident(&schema),

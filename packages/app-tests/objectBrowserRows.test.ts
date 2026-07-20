@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildObjectBrowserRows, filterObjectBrowserRows, formatObjectBrowserBytes, formatObjectBrowserCount, formatObjectBrowserTimestamp, sortObjectBrowserRows } from "../../apps/desktop/src/lib/table/objectBrowserRows.ts";
+import { buildObjectBrowserRows, filterObjectBrowserRows, formatObjectBrowserBytes, formatObjectBrowserCount, formatObjectBrowserTimestamp, sortObjectBrowserRows, summarizeObjectBrowserSearch } from "../../apps/desktop/src/lib/table/objectBrowserRows.ts";
 
 test("builds unique row ids for overloaded routines with the same visible name", () => {
   const rows = buildObjectBrowserRows({
@@ -130,6 +130,79 @@ test("object browser search supports slash-delimited regular expression queries"
   );
 });
 
+test("object browser search summary aligns all and type counts with matches", () => {
+  const rows = buildObjectBrowserRows({
+    objects: [
+      { name: "sales_report", object_type: "TABLE", schema: "public" },
+      { name: "sales_report_view", object_type: "VIEW", schema: "public" },
+      { name: "sales_report_refresh", object_type: "PROCEDURE", schema: "public" },
+      { name: "users", object_type: "TABLE", schema: "public" },
+    ],
+    database: "app",
+    fallbackSchema: "public",
+  });
+
+  const summary = summarizeObjectBrowserSearch(rows, "sales_report");
+
+  assert.equal(summary.counts.all, 3);
+  assert.equal(summary.counts.tables, 1);
+  assert.equal(summary.counts.views, 1);
+  assert.equal(summary.counts.procedures, 1);
+  assert.equal(summary.counts.functions, 0);
+});
+
+test("object browser search summary preserves empty, case-insensitive, and regex searches", () => {
+  const rows = buildObjectBrowserRows({
+    objects: [
+      { name: "Sales_Report", object_type: "TABLE", schema: "public" },
+      { name: "sales_archive", object_type: "VIEW", schema: "public" },
+      { name: "users", object_type: "TABLE", schema: "public" },
+    ],
+    database: "app",
+    fallbackSchema: "public",
+  });
+
+  assert.equal(summarizeObjectBrowserSearch(rows, "   ").counts.all, 3);
+  assert.deepEqual(
+    summarizeObjectBrowserSearch(rows, "SALES_REPORT").matchingRows.map((row) => row.name),
+    ["Sales_Report"],
+  );
+  assert.deepEqual(
+    summarizeObjectBrowserSearch(rows, "/^sales_(report|archive)$/i").matchingRows.map((row) => row.name),
+    ["Sales_Report", "sales_archive"],
+  );
+});
+
+test("object browser search summary scans large collections only once for every filter count", () => {
+  const rowCount = 2_000;
+  let nameReads = 0;
+  const rows = buildObjectBrowserRows({
+    objects: Array.from({ length: rowCount }, (_, index) => ({
+      name: index % 2 === 0 ? `target_${index}` : `other_${index}`,
+      object_type: index % 3 === 0 ? "VIEW" : "TABLE",
+      schema: "public",
+    })),
+    database: "app",
+    fallbackSchema: "public",
+  });
+  for (const row of rows) {
+    const name = row.name;
+    Object.defineProperty(row, "name", {
+      configurable: true,
+      get() {
+        nameReads++;
+        return name;
+      },
+    });
+  }
+
+  const summary = summarizeObjectBrowserSearch(rows, "target_");
+
+  assert.equal(summary.counts.all, rowCount / 2);
+  assert.equal(summary.counts.tables + summary.counts.views, rowCount / 2);
+  assert.equal(nameReads, rowCount);
+});
+
 test("object browser rows preserve table timestamps and sort recent updates first", () => {
   const rows = buildObjectBrowserRows({
     objects: [
@@ -252,6 +325,14 @@ test("object browser rows mark partition-like tables when their parent table exi
     ["order_data_p20220802", "order_data_p20220803"],
   );
   assert.equal(rows.find((row) => row.name === "audit_p20220802")?.partitionParentId, undefined);
+
+  const partitionSummary = summarizeObjectBrowserSearch(rows, "p20220803");
+  assert.deepEqual(
+    partitionSummary.matchingRows.map((row) => row.name),
+    ["order_data_p20220803"],
+  );
+  assert.equal(partitionSummary.counts.all, 1);
+  assert.equal(partitionSummary.matchingRows[0].partitionParentId, parent?.id);
 });
 
 test("object browser rows use explicit partition metadata before name heuristics", () => {

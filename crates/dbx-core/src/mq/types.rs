@@ -31,6 +31,7 @@ impl MqSystemKind {
 /// features are hidden rather than failing at call time.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(Default)]
 pub struct MqCapabilities {
     pub supports_tenants: bool,
     pub supports_namespaces: bool,

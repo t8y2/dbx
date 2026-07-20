@@ -1063,10 +1063,10 @@ fn merge_missing_tunnel_profile_secrets(profile: &mut TransportLayerConfig, prev
                 current.password = previous.password.clone();
             }
         }
-        (TransportLayerConfig::HttpTunnel(current), TransportLayerConfig::HttpTunnel(previous)) => {
-            if current.token.is_empty() {
-                current.token = previous.token.clone();
-            }
+        (TransportLayerConfig::HttpTunnel(current), TransportLayerConfig::HttpTunnel(previous))
+            if current.token.is_empty() =>
+        {
+            current.token = previous.token.clone();
         }
         _ => {}
     }
@@ -3246,7 +3246,7 @@ mod tests {
         let storage = Storage::open(&path).await.unwrap();
 
         let original = mq_connection("pulsar", "existing-token");
-        storage.save_connections(&[original.clone()]).await.unwrap();
+        storage.save_connections(std::slice::from_ref(&original)).await.unwrap();
 
         let mut metadata = original;
         metadata.name = "Pulsar renamed".to_string();

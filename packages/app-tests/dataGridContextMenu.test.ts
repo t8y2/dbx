@@ -23,6 +23,12 @@ test("set NULL applies a real null value only to editable selections", () => {
   assert.doesNotMatch(handler, /fillSelectionWithValue\(["'](?:NULL)?["']\)/);
 });
 
+test("column-header context menus prefetch prepared copy statements", () => {
+  const handler = dataGridSource.match(/function onHeaderContext\([^]*?\n\}/)?.[0] ?? "";
+
+  assert.match(handler, /void prefetchCopyStatements\(\);/);
+});
+
 test("editable cell selections expose generation after bulk edit", () => {
   const icon = {};
   const action = () => {};

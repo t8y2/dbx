@@ -395,9 +395,9 @@ impl SqlStatementSplitter {
                     self.buffer.push(ch);
                 }
                 ';' if !self.in_single_quote && !self.in_double_quote && !self.in_backtick => {
-                    if self.options.profile.supports_custom_delimiter_commands && self.on_delimiter_line() {
-                        self.buffer.push(ch);
-                    } else if self.custom_delimiter.is_some() {
+                    if (self.options.profile.supports_custom_delimiter_commands && self.on_delimiter_line())
+                        || self.custom_delimiter.is_some()
+                    {
                         self.buffer.push(ch);
                     } else if self.options.profile.supports_mysql_routine_blocks
                         && starts_with_mysql_routine_block(&self.buffer)
@@ -1567,6 +1567,7 @@ fn parse_insert_values_tail(tail: &str) -> Option<String> {
     }
 }
 
+#[derive(Default)]
 struct SqlScanner {
     profile: SqlDialectProfile,
     in_single_quote: bool,
@@ -1609,9 +1610,7 @@ impl SqlScanner {
         }
 
         if !self.in_single_quote && !self.in_double_quote && !self.in_backtick {
-            if ch == '-' && next == Some('-') {
-                self.in_line_comment = true;
-            } else if self.profile.supports_hash_line_comments && ch == '#' {
+            if (ch == '-' && next == Some('-')) || (self.profile.supports_hash_line_comments && ch == '#') {
                 self.in_line_comment = true;
             } else if ch == '/' && next == Some('*') {
                 self.in_block_comment = true;
@@ -1644,21 +1643,6 @@ impl SqlScanner {
             || self.in_line_comment
             || self.in_block_comment
             || self.dollar_quote_tag.is_some()
-    }
-}
-
-impl Default for SqlScanner {
-    fn default() -> Self {
-        Self {
-            profile: SqlDialectProfile::default(),
-            in_single_quote: false,
-            in_double_quote: false,
-            in_backtick: false,
-            in_line_comment: false,
-            in_block_comment: false,
-            dollar_quote_tag: None,
-            previous: None,
-        }
     }
 }
 

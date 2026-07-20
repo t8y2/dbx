@@ -23,6 +23,8 @@ export type ObjectBrowserRow = {
 
 export type ObjectBrowserSortKey = "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
 export type ObjectBrowserSortDirection = "asc" | "desc";
+export type ObjectBrowserFilter = "all" | "tables" | "views" | "materializedViews" | "procedures" | "functions" | "triggers" | "sequences" | "packages" | "types";
+export type ObjectBrowserFilterCounts = Record<ObjectBrowserFilter, number>;
 
 export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type"] {
   const value = type.toUpperCase();
@@ -123,6 +125,40 @@ export function filterObjectBrowserRows(rows: ObjectBrowserRow[], query: string)
     return rows.filter((row) => [row.displayName, row.name, row.type, row.comment].filter(Boolean).some((value) => regex.test(String(value))));
   }
   return rows.filter((row) => [row.displayName, row.name, row.type, row.comment].filter(Boolean).some((value) => String(value).toLowerCase().includes(q)));
+}
+
+export function countObjectBrowserRowsByFilter(rows: ObjectBrowserRow[]): ObjectBrowserFilterCounts {
+  const counts: ObjectBrowserFilterCounts = {
+    all: rows.length,
+    tables: 0,
+    views: 0,
+    materializedViews: 0,
+    procedures: 0,
+    functions: 0,
+    triggers: 0,
+    sequences: 0,
+    packages: 0,
+    types: 0,
+  };
+
+  for (const row of rows) {
+    if (row.type === "TABLE") counts.tables++;
+    else if (row.type === "VIEW") counts.views++;
+    else if (row.type === "MATERIALIZED_VIEW") counts.materializedViews++;
+    else if (row.type === "PROCEDURE") counts.procedures++;
+    else if (row.type === "FUNCTION") counts.functions++;
+    else if (row.type === "TRIGGER") counts.triggers++;
+    else if (row.type === "SEQUENCE") counts.sequences++;
+    else if (row.type === "PACKAGE" || row.type === "PACKAGE_BODY") counts.packages++;
+    else if (row.type === "TYPE" || row.type === "TYPE_BODY") counts.types++;
+  }
+
+  return counts;
+}
+
+export function summarizeObjectBrowserSearch(rows: ObjectBrowserRow[], query: string): { matchingRows: ObjectBrowserRow[]; counts: ObjectBrowserFilterCounts } {
+  const matchingRows = filterObjectBrowserRows(rows, query);
+  return { matchingRows, counts: countObjectBrowserRowsByFilter(matchingRows) };
 }
 
 export function sortObjectBrowserRows(rows: ObjectBrowserRow[], key: ObjectBrowserSortKey, direction: ObjectBrowserSortDirection): ObjectBrowserRow[] {

@@ -25,9 +25,11 @@ use crate::nacos::port::NacosAdmin;
 pub use crate::nacos::config::{NacosAdminConfig as NacosConfig, NacosAuthConfig};
 pub use crate::nacos::types::*;
 
+type NacosAdminEntry = (NacosAdminConfig, Arc<dyn NacosAdmin>);
+
 #[derive(Default)]
 pub struct NacosAdminRegistry {
-    instances: RwLock<HashMap<String, (NacosAdminConfig, Arc<dyn NacosAdmin>)>>,
+    instances: RwLock<HashMap<String, NacosAdminEntry>>,
     build_locks: RwLock<HashMap<String, Arc<Mutex<()>>>>,
 }
 

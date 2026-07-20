@@ -19,6 +19,7 @@ import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useToast } from "@/composables/useToast";
 import { useTheme } from "@/composables/useTheme";
 import { useAppUpdater } from "@/composables/useAppUpdater";
+import { useExportTracker } from "@/composables/useExportTracker";
 import { useFileDrop } from "@/composables/useFileDrop";
 import { usePanelResize } from "@/composables/usePanelResize";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
@@ -84,6 +85,7 @@ import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStor
 import { apiUrl, webPath } from "@/lib/common/webPath";
 import { APP_FONT_SANS_CSS_VAR, DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
 import { rankSavedSqlHistory } from "@/lib/savedSql/savedSqlHistory";
+import { countActiveUpdateBlockingTasks } from "@/lib/app/appUpdateTaskGuard";
 import { initSavedSqlEditorPositions } from "@/lib/app/savedSqlEditorPosition";
 import { isSchemaAware, isSingleDatabase, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -123,7 +125,29 @@ const savedSqlStore = useSavedSqlStore();
 connectionStore.setBeforeConnectHandler((config) => ensureJdbcxRuntimeDrivers(config, api).then(() => undefined));
 const { message: toastMessage, visible: toastVisible, toast } = useToast();
 const { isDark, themeMode, applyTheme, setThemeMode } = useTheme();
-const { checkingUpdates, updateInfo, updateCheckMessage, showUpdateDialog, isDownloadingUpdate, downloadProgress, updateReady, hasUpdateAvailable, openUrl, checkUpdates, openLatestRelease, downloadAndInstallUpdate, restartApp } = useAppUpdater();
+const { activeCount: activeBackgroundTaskCount } = useExportTracker();
+const trackedUpdateTaskCount = computed(() => countActiveUpdateBlockingTasks(activeBackgroundTaskCount.value, queryStore.tabs));
+const {
+  checkingUpdates,
+  updateInfo,
+  updateCheckMessage,
+  showUpdateDialog,
+  isDownloadingUpdate,
+  downloadProgress,
+  updateDownloaded,
+  isInstallingUpdate,
+  updateReady,
+  activeTaskCount: activeUpdateTaskCount,
+  hasUpdateAvailable,
+  openUrl,
+  checkUpdates,
+  openLatestRelease,
+  downloadAndInstallUpdate,
+  installDownloadedUpdate,
+  restartApp,
+} = useAppUpdater({
+  getActiveTaskCount: () => trackedUpdateTaskCount.value,
+});
 const { setupFileDrop } = useFileDrop();
 
 const isDesktop = isTauriRuntime();
@@ -2270,9 +2294,13 @@ onUnmounted(() => {
           :update-check-message="updateCheckMessage"
           :is-downloading-update="isDownloadingUpdate"
           :download-progress="downloadProgress"
+          :update-downloaded="updateDownloaded"
+          :is-installing-update="isInstallingUpdate"
           :update-ready="updateReady"
+          :active-task-count="activeUpdateTaskCount"
           @open-latest-release="openLatestRelease"
           @download-and-install="downloadAndInstallUpdate"
+          @install-downloaded="installDownloadedUpdate"
           @restart="restartApp"
         />
         <CloseActionPromptDialog v-if="isDesktop && showCloseActionPrompt" :open="showCloseActionPrompt" @update:open="handleCloseActionPromptOpenChange" @quit="chooseQuit" @minimize="chooseMinimize" />

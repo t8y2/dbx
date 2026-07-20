@@ -774,12 +774,10 @@ fn command_may_target_first_key(argv: &[String]) -> bool {
     if argv.len() < 2 {
         return false;
     }
-    match argv[0].to_ascii_uppercase().as_str() {
-        "PING" | "INFO" | "DBSIZE" | "TIME" | "ROLE" | "CLUSTER" | "CLIENT" | "COMMAND" | "HELLO" | "AUTH" | "QUIT" => {
-            false
-        }
-        _ => true,
-    }
+    !matches!(
+        argv[0].to_ascii_uppercase().as_str(),
+        "PING" | "INFO" | "DBSIZE" | "TIME" | "ROLE" | "CLUSTER" | "CLIENT" | "COMMAND" | "HELLO" | "AUTH" | "QUIT"
+    )
 }
 
 pub async fn redis_load_more_in_db_core(

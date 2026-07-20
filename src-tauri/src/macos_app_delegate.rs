@@ -1,7 +1,4 @@
-use std::{
-    ffi::CStr,
-    sync::{Once, OnceLock},
-};
+use std::sync::{Once, OnceLock};
 
 use objc2::{
     ffi,
@@ -19,9 +16,7 @@ static INSTALL_DOCK_QUIT_HANDLER: Once = Once::new();
 pub(crate) fn install_dock_quit_handler(app: &AppHandle) {
     let _ = APP_HANDLE.set(app.clone());
     INSTALL_DOCK_QUIT_HANDLER.call_once(|| {
-        let Some(delegate_class) =
-            AnyClass::get(CStr::from_bytes_with_nul(b"TaoAppDelegateParent\0").expect("valid class name"))
-        else {
+        let Some(delegate_class) = AnyClass::get(c"TaoAppDelegateParent") else {
             eprintln!("[WARN] failed to install macOS Dock quit handler: TaoAppDelegateParent not found");
             return;
         };
@@ -32,7 +27,7 @@ pub(crate) fn install_dock_quit_handler(app: &AppHandle) {
                     as extern "C-unwind" fn(&AnyObject, Sel, &AnyObject) -> NSApplicationTerminateReply,
             )
         };
-        let method_types = CStr::from_bytes_with_nul(b"Q@:@\0").expect("valid Objective-C method type encoding");
+        let method_types = c"Q@:@";
 
         // Tao's app delegate does not implement applicationShouldTerminate:, so Dock Quit can
         // bypass Tauri's ExitRequested event. Add the method to Tao's registered delegate class

@@ -436,7 +436,7 @@ mod tests {
         let first = state.mq_registry.get_or_build(&initial).await.unwrap();
 
         let updated = mq_config("mq-conn", "http://127.0.0.1:8081");
-        save_connection_configs(&state, &[updated.clone()]).await.unwrap();
+        save_connection_configs(&state, std::slice::from_ref(&updated)).await.unwrap();
 
         let cached_admin_url = state
             .configs
@@ -465,7 +465,7 @@ mod tests {
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let initial = mq_config("mq-conn", "http://127.0.0.1:8080");
         let updated = mq_config("mq-conn", "http://127.0.0.1:8081");
-        state.storage.save_connections(&[updated.clone()]).await.unwrap();
+        state.storage.save_connections(std::slice::from_ref(&updated)).await.unwrap();
         state.configs.write().await.insert(initial.id.clone(), initial.clone());
         state.connections.write().await.insert(initial.id.clone(), PoolKind::MessageQueue);
 
@@ -503,7 +503,7 @@ mod tests {
         }
         let stale = state.mq_registry.get_or_build(&removed).await.unwrap();
 
-        save_connection_configs(&state, &[kept.clone()]).await.unwrap();
+        save_connection_configs(&state, std::slice::from_ref(&kept)).await.unwrap();
 
         let configs = state.configs.read().await;
         assert!(configs.contains_key(&kept.id));
@@ -532,7 +532,7 @@ mod tests {
         }
         state.connections.write().await.insert(removed.id.clone(), PoolKind::MessageQueue);
 
-        save_connection_configs(&state, &[kept.clone()]).await.unwrap();
+        save_connection_configs(&state, std::slice::from_ref(&kept)).await.unwrap();
 
         assert!(!state.connections.read().await.contains_key(&removed.id));
 
@@ -987,6 +987,8 @@ async fn test_connection_with_info_inner(
                 let mqc = state.mq_admin_config_for_connection(connection_id, &config).await?;
                 let agent_launch = dbx_core::mq::service::resolve_mq_agent_launch_spec(&mqc, &state);
                 let adapter = match state.mq_registry.get_or_build_config(connection_id, mqc, agent_launch).await {
+                let kafka_launch = dbx_core::mq::service::resolve_kafka_launch_spec(&mqc, state);
+                let adapter = match state.mq_registry.get_or_build_config(connection_id, mqc, kafka_launch).await {
                     Ok(adapter) => adapter,
                     Err(err) => {
                         state.mq_registry.drop_connection(connection_id).await;

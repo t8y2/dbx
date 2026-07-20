@@ -1,9 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { normalizeDesktopSettings, normalizeEditorSettings } from "@/stores/settingsStore";
+import { EXECUTE_MODE_CURRENT_DEFAULT_VERSION, normalizeDesktopSettings, normalizeEditorSettings } from "@/stores/settingsStore";
 import { createPinia, setActivePinia } from "pinia";
 import type { AiConfigItem } from "@/types/ai";
 
 describe("normalizeEditorSettings", () => {
+  it("defaults SQL execution to the current statement and migrates legacy execute-all settings", () => {
+    expect(normalizeEditorSettings({}).executeMode).toBe("current");
+    expect(normalizeEditorSettings({ executeMode: "all" }).executeMode).toBe("current");
+    expect(normalizeEditorSettings({ executeMode: "all", executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION }).executeMode).toBe("all");
+  });
+
   it("enables automatic table aliases by default", () => {
     expect(normalizeEditorSettings({}).autoAliasTables).toBe(true);
   });

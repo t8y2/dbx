@@ -183,6 +183,7 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
   }
 
   function handleKeydown(event: KeyboardEvent): "accept" | "apply" | "dismiss" | "navigate" | undefined {
+    if (event.isComposing || event.key === "Process" || event.keyCode === 229) return undefined;
     if (dropdownOpen.value && event.key === "Escape") {
       event.preventDefault();
       dismiss();

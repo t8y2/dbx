@@ -1878,7 +1878,7 @@ export const useQueryStore = defineStore("query", () => {
     const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : tableMeta.primaryKeys;
     const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableDataIdentifier(effectiveDbType, tab.resultSortColumn, identifierQuote)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
     const orderBy = tab.orderByInput?.trim() || sortOrder;
-    const limit = tab.resultPageLimit ?? tableOpenPageLimit();
+    const limit = tab.resultPageLimit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
     const offset = tab.resultPageOffset ?? 0;
     const refreshPreparationId = uuid();
 
@@ -2449,6 +2449,7 @@ export const useQueryStore = defineStore("query", () => {
       if (sources.length !== 1 || analysis.distinct) return unchanged;
 
       const loaded = await loadEditableQuerySource(tab, analysis, sources[0]!, conn, databaseType, traceId, elapsed);
+      if (loaded.tableMeta.columns.length === 0) return unchanged;
       if (loaded.tableMeta.tableType?.toUpperCase().includes("VIEW")) return unchanged;
       const metadataAnalysis = expandStarProjectionColumnsForSource(bindColumnsForSource(databaseType, loaded.analysis, loaded.source, loaded.tableMeta.columns), loaded.source, loaded.tableMeta.columns);
       const declaredPrimaryKeys = loaded.tableMeta.columns.filter((column) => column.is_primary_key).map((column) => column.name);
@@ -3306,7 +3307,7 @@ export const useQueryStore = defineStore("query", () => {
         countSql = plan.countSql;
         useAgentResultSession = plan.useAgentResultSession;
       } else if (tab.mode === "data") {
-        pageLimit = options?.pagination?.limit ?? tableOpenPageLimit();
+        pageLimit = options?.pagination?.limit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
         pageOffset = options?.pagination?.offset ?? 0;
       }
 
@@ -4125,7 +4126,7 @@ export const useQueryStore = defineStore("query", () => {
       pagination:
         tab.mode === "data"
           ? {
-              limit: tab.resultPageLimit ?? tableOpenPageLimit(),
+              limit: tab.resultPageLimit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize),
               offset: tab.resultPageOffset ?? 0,
             }
           : undefined,

@@ -407,7 +407,7 @@ fn append_sql_target_safety_text(chars: &[char], result: &mut SqlTargetSafetyTex
             continue;
         }
         if ch == '/' && next == Some('*') {
-            if let Some((body, close_index)) = mysql_executable_comment_body(&chars, index) {
+            if let Some((body, close_index)) = mysql_executable_comment_body(chars, index) {
                 result.text.push(' ');
                 let body_chars: Vec<char> = body.chars().collect();
                 append_sql_target_safety_text(&body_chars, result);
@@ -423,7 +423,7 @@ fn append_sql_target_safety_text(chars: &[char], result: &mut SqlTargetSafetyTex
             }
             continue;
         }
-        if let Some((tag, tag_len)) = dollar_quote_tag_at(&chars, index) {
+        if let Some((tag, tag_len)) = dollar_quote_tag_at(chars, index) {
             index += tag_len;
             while index + tag_len <= chars.len() && !chars[index..index + tag_len].iter().collect::<String>().eq(&tag) {
                 index += 1;
@@ -433,7 +433,7 @@ fn append_sql_target_safety_text(chars: &[char], result: &mut SqlTargetSafetyTex
             continue;
         }
         if ch == '\'' {
-            index = skip_string_literal(&chars, index, '\'', '\'');
+            index = skip_string_literal(chars, index, '\'', '\'');
             result.text.push(' ');
             continue;
         }

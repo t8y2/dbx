@@ -2,7 +2,7 @@ import { computed, ref, type ComputedRef, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import * as api from "@/lib/backend/api";
-import { formatSelectionAsCsv, formatSelectionAsJson, formatSelectionAsSqlInList, formatSelectionAsTsv, type CellSelectionRange, type SelectionData } from "@/lib/dataGrid/gridSelection";
+import { formatSelectionAsCsv, formatSelectionAsJson, formatSelectionAsSqlInList, formatSelectionAsTsv, type CellSelectionMatrix, type CellSelectionRange, type SelectionData } from "@/lib/dataGrid/gridSelection";
 import { useToast } from "@/composables/useToast";
 import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import { tryStartExclusiveActivation, type ActionActivationGuard } from "@/lib/connection/actionActivation";
@@ -69,6 +69,7 @@ export interface UseDataGridExportOptions {
   exportBatchSize: ComputedRef<number>;
   hasCellSelection: ComputedRef<boolean>;
   selectedCells: ComputedRef<SelectionData>;
+  selectedCellMatrix?: ComputedRef<CellSelectionMatrix | null>;
   selectedRange: ComputedRef<CellSelectionRange | null>;
   contextCell: Ref<{ rowId: number; rowIndex: number; col: number } | null> | ComputedRef<{ rowId: number; rowIndex: number; col: number } | null>;
   getRowItem: (rowId: number) => RowItem | undefined;
@@ -118,6 +119,13 @@ interface CopyStatementCache {
   promise?: Promise<string | undefined>;
 }
 
+interface CopyInsertData {
+  columns: string[];
+  sourceColumns?: Array<string | undefined>;
+  columnTypes?: Array<string | undefined>;
+  rows: RowItem[];
+}
+
 export function useDataGridExport(options: UseDataGridExportOptions) {
   const { t } = useI18n();
   const { toast } = useToast();
@@ -141,6 +149,18 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     ready: false,
   });
   const copyRowInsertWithoutPrimaryKeysRowByRowCache = ref<CopyStatementCache>({
+    key: "",
+    text: "",
+    loading: false,
+    ready: false,
+  });
+  const copySelectionInsertCache = ref<CopyStatementCache>({
+    key: "",
+    text: "",
+    loading: false,
+    ready: false,
+  });
+  const copySelectionInsertRowByRowCache = ref<CopyStatementCache>({
     key: "",
     text: "",
     loading: false,
@@ -171,6 +191,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     exportBatchSize,
     hasCellSelection,
     selectedCells,
+    selectedCellMatrix: selectedCellMatrixOption,
     selectedRange,
     contextCell,
     getRowItem,
@@ -187,6 +208,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     exportProgressState,
     exportCancelHandler,
   } = options;
+  const selectedCellMatrix = selectedCellMatrixOption ?? computed<CellSelectionMatrix | null>(() => null);
 
   async function copyText(text: string) {
     try {
@@ -287,17 +309,55 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   function insertCopyKey(excludePrimaryKeys: boolean, insertMode: DataGridCopyInsertMode): string {
-    const eligibleRows = insertEligibleRows();
-    const rows = copyStatementRowsKey(eligibleRows);
-    const originalMongoDocuments = eligibleRows.map((item) => (item.sourceIndex === undefined ? undefined : options.mongoDocuments?.value?.[item.sourceIndex]));
+    return copyInsertKey(
+      {
+        columns: columns.value,
+        sourceColumns: sourceColumns.value,
+        columnTypes: columnTypes.value?.map((type) => type ?? undefined),
+        rows: insertEligibleRows(),
+      },
+      excludePrimaryKeys,
+      insertMode,
+    );
+  }
+
+  function selectionInsertData(): CopyInsertData | null {
+    const matrix = selectedCellMatrix.value;
+    if (!matrix) return null;
+    const selectedRows = matrix.rowIndexes.map((rowIndex) => displayItems.value[rowIndex]).filter((item): item is RowItem => !!item && !item.isDraft);
+    if (selectedRows.length !== matrix.rowIndexes.length) return null;
+    const selectedColumns = matrix.columnIndexes.map((columnIndex) => columns.value[columnIndex]).filter((column): column is string => column !== undefined);
+    if (selectedColumns.length !== matrix.columnIndexes.length) return null;
+    const selectedSourceColumns = sourceColumns.value?.length === columns.value.length ? matrix.columnIndexes.map((columnIndex) => sourceColumns.value?.[columnIndex]) : undefined;
+    const selectedColumnTypes = columnTypes.value?.length === columns.value.length ? matrix.columnIndexes.map((columnIndex) => columnTypes.value?.[columnIndex] ?? undefined) : undefined;
+    return {
+      columns: selectedColumns,
+      sourceColumns: selectedSourceColumns,
+      columnTypes: selectedColumnTypes,
+      rows: selectedRows.map((item) => ({
+        ...item,
+        data: matrix.columnIndexes.map((columnIndex) => item.data[columnIndex] ?? null),
+        isDirtyCol: matrix.columnIndexes.map((columnIndex) => item.isDirtyCol[columnIndex] ?? false),
+      })),
+    };
+  }
+
+  function selectionInsertCopyKey(insertMode: DataGridCopyInsertMode): string {
+    const data = selectionInsertData();
+    return data ? copyInsertKey(data, false, insertMode) : "";
+  }
+
+  function copyInsertKey(data: CopyInsertData, excludePrimaryKeys: boolean, insertMode: DataGridCopyInsertMode): string {
+    const rows = copyStatementRowsKey(data.rows);
+    const originalMongoDocuments = data.rows.map((item) => (item.sourceIndex === undefined ? undefined : options.mongoDocuments?.value?.[item.sourceIndex]));
     return JSON.stringify({
       databaseType: databaseType.value ?? null,
       schema: tableMeta.value?.schema ?? null,
       tableName: tableMeta.value?.tableName ?? null,
       copyInsertTargetLabel: copyInsertTargetLabel?.value ?? null,
-      columns: columns.value,
-      columnTypes: columnTypes.value ?? null,
-      sourceColumns: sourceColumns.value ?? null,
+      columns: data.columns,
+      columnTypes: data.columnTypes ?? null,
+      sourceColumns: data.sourceColumns ?? null,
       excludePrimaryKeys,
       insertMode,
       rows,
@@ -331,8 +391,43 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     }
   }
 
+  function selectionInsertCopyCache(insertMode: DataGridCopyInsertMode): CopyStatementCache {
+    return insertMode === "row-by-row" ? copySelectionInsertRowByRowCache.value : copySelectionInsertCache.value;
+  }
+
+  function setSelectionInsertCopyCache(insertMode: DataGridCopyInsertMode, cache: CopyStatementCache) {
+    if (insertMode === "row-by-row") copySelectionInsertRowByRowCache.value = cache;
+    else copySelectionInsertCache.value = cache;
+  }
+
   function setUpdateCopyCache(cache: CopyStatementCache) {
     copyRowUpdateCache.value = cache;
+  }
+
+  async function buildCopyInsertStatement(data: CopyInsertData, excludePrimaryKeys: boolean, insertMode: DataGridCopyInsertMode): Promise<string | undefined> {
+    if (databaseType.value === "mongodb") {
+      return formatMongoCopyInsertStatement(
+        buildMongoCopyInsertStatement({
+          collection: copyInsertTargetLabel?.value || tableMeta.value?.tableName || "collection",
+          columns: data.columns,
+          sourceColumns: data.sourceColumns,
+          rows: data.rows,
+          mongoDocuments: options.mongoDocuments?.value,
+          excludePrimaryKeys,
+          insertMode,
+        }),
+      );
+    }
+    return buildDataGridCopyInsertStatement({
+      databaseType: databaseType.value,
+      tableMeta: tableMeta.value,
+      columns: data.columns,
+      columnTypes: data.columnTypes,
+      sourceColumns: data.sourceColumns,
+      rows: data.rows.map((item) => item.data),
+      excludePrimaryKeys,
+      insertMode,
+    });
   }
 
   async function prefetchRowAsInsertStatement(excludePrimaryKeys: boolean, insertMode: DataGridCopyInsertMode = "merged") {
@@ -359,30 +454,14 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     if (current.ready && current.key === key) return current.text;
     if (current.loading && current.key === key && current.promise) return current.promise;
 
+    const data: CopyInsertData = {
+      columns: columns.value,
+      sourceColumns: sourceColumns.value,
+      columnTypes: columnTypes.value?.map((type) => type ?? undefined),
+      rows,
+    };
     const promise = Promise.resolve().then(async () => {
-      const statement =
-        databaseType.value === "mongodb"
-          ? formatMongoCopyInsertStatement(
-              buildMongoCopyInsertStatement({
-                collection: copyInsertTargetLabel?.value || tableMeta.value?.tableName || "collection",
-                columns: columns.value,
-                sourceColumns: sourceColumns.value,
-                rows,
-                mongoDocuments: options.mongoDocuments?.value,
-                excludePrimaryKeys,
-                insertMode,
-              }),
-            )
-          : await buildDataGridCopyInsertStatement({
-              databaseType: databaseType.value,
-              tableMeta: tableMeta.value,
-              columns: columns.value,
-              columnTypes: columnTypes.value,
-              sourceColumns: sourceColumns.value,
-              rows: rows.map((item) => item.data),
-              excludePrimaryKeys,
-              insertMode,
-            });
+      const statement = await buildCopyInsertStatement(data, excludePrimaryKeys, insertMode);
       const latest = insertCopyCache(excludePrimaryKeys, insertMode);
       if (latest.key !== key || latest.promise !== promise) return undefined;
       setInsertCopyCache(excludePrimaryKeys, insertMode, {
@@ -433,6 +512,78 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       toast(t("grid.copyFailed", { message: error?.message || String(error) }), 5000);
       return false;
     }
+  }
+
+  async function prefetchSelectionAsInsertStatement(insertMode: DataGridCopyInsertMode = "merged") {
+    try {
+      await prepareSelectionAsInsertStatement(insertMode);
+    } catch (error: any) {
+      toast(t("grid.copyFailed", { message: error?.message || String(error) }), 5000);
+    }
+  }
+
+  async function prepareSelectionAsInsertStatement(insertMode: DataGridCopyInsertMode = "merged"): Promise<string | undefined> {
+    const data = selectionInsertData();
+    if (!data) {
+      setSelectionInsertCopyCache(insertMode, {
+        key: "",
+        text: "",
+        loading: false,
+        ready: false,
+      });
+      return;
+    }
+    const key = selectionInsertCopyKey(insertMode);
+    const current = selectionInsertCopyCache(insertMode);
+    if (current.ready && current.key === key) return current.text;
+    if (current.loading && current.key === key && current.promise) return current.promise;
+
+    const promise = Promise.resolve().then(async () => {
+      const statement = await buildCopyInsertStatement(data, false, insertMode);
+      const latest = selectionInsertCopyCache(insertMode);
+      if (latest.key !== key || latest.promise !== promise) return undefined;
+      setSelectionInsertCopyCache(insertMode, {
+        key,
+        text: statement ?? "",
+        loading: false,
+        ready: !!statement,
+      });
+      return statement;
+    });
+
+    setSelectionInsertCopyCache(insertMode, {
+      key,
+      text: "",
+      loading: true,
+      ready: false,
+      promise,
+    });
+
+    try {
+      return await promise;
+    } catch (error) {
+      const latest = selectionInsertCopyCache(insertMode);
+      if (latest.key === key && latest.promise === promise) {
+        setSelectionInsertCopyCache(insertMode, {
+          key,
+          text: "",
+          loading: false,
+          ready: false,
+        });
+      }
+      throw error;
+    }
+  }
+
+  function canCopyPreparedSelectionInsert(insertMode: DataGridCopyInsertMode = "merged"): boolean {
+    const cache = selectionInsertCopyCache(insertMode);
+    return cache.ready && cache.key === selectionInsertCopyKey(insertMode);
+  }
+
+  function copySelectionAsInsert(insertMode: DataGridCopyInsertMode = "merged"): boolean {
+    if (!canCopyPreparedSelectionInsert(insertMode)) return false;
+    void copyText(selectionInsertCopyCache(insertMode).text);
+    return true;
   }
 
   async function prefetchRowAsUpdateStatement() {
@@ -651,12 +802,17 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return saveColumns.some((column) => column && !primaryKeySet.has(normalizeColumnName(column)));
   });
 
-  function insertableCopyColumnCount(excludePrimaryKeys: boolean): number {
+  function insertableCopyColumnCount(excludePrimaryKeys: boolean, copyColumns = effectiveColumns(sourceColumns.value, columns.value)): number {
     const primaryKeySet = new Set((tableMeta.value?.primaryKeys ?? []).map(normalizeColumnName));
-    return effectiveColumns(sourceColumns.value, columns.value).filter((column): column is string => !!column && !isCopyInsertOmittedColumn(databaseType.value, column, tableMeta.value) && (!excludePrimaryKeys || !primaryKeySet.has(normalizeColumnName(column)))).length;
+    return copyColumns.filter((column): column is string => !!column && !isCopyInsertOmittedColumn(databaseType.value, column, tableMeta.value) && (!excludePrimaryKeys || !primaryKeySet.has(normalizeColumnName(column)))).length;
   }
 
   const canCopyRowAsInsert = computed(() => insertEligibleRows().length > 0 && insertableCopyColumnCount(false) > 0);
+  const selectionInsertRowCount = computed(() => selectionInsertData()?.rows.length ?? 0);
+  const canCopySelectionAsInsert = computed(() => {
+    const data = selectionInsertData();
+    return !!data?.rows.length && insertableCopyColumnCount(false, effectiveColumns(data.sourceColumns, data.columns)) > 0;
+  });
 
   const canCopyRowAsInsertWithoutPrimaryKeys = computed(() => {
     if (!tableMeta.value?.primaryKeys.length) return false;
@@ -1302,6 +1458,11 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     copySelectionCsv,
     copySelectionJson,
     copySelectionSqlInList,
+    copySelectionAsInsert,
+    prefetchSelectionAsInsertStatement,
+    canCopyPreparedSelectionInsert,
+    canCopySelectionAsInsert,
+    selectionInsertRowCount,
     copySelectedRowsTsv,
     copySelectedRowsTsvWithHeaders,
     copyColumnNames,

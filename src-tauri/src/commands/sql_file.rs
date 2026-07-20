@@ -239,7 +239,6 @@ mod execution_tests {
     }
 
     #[test]
-    #[test]
     fn duplicate_execution_id_is_rejected_without_replacing_token() {
         let mut executions = HashMap::new();
         let original = CancellationToken::new();

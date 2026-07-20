@@ -101,7 +101,20 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
     const ch = sql[i];
     const next = sql[i + 1];
 
-    if (ch === "'" || ch === '"' || ch === "`") {
+    if (ch === "'" || ch === '"') {
+      // Exact quoted braced placeholders only (`'${name}'` / `"#{name}"`).
+      // Do not scan inside arbitrary quoted text — that path needs dialect-specific
+      // escaping contracts (see PR #3666) and must not change skipQuoted semantics.
+      const quoted = tryReadQuotedBracedPlaceholder(sql, i, ch as "'" | '"', isSyntaxEnabled);
+      if (quoted) {
+        occurrences.push(quoted);
+        i = quoted.end;
+        continue;
+      }
+      i = skipQuoted(sql, i, ch);
+      continue;
+    }
+    if (ch === "`") {
       i = skipQuoted(sql, i, ch);
       continue;
     }
@@ -733,6 +746,56 @@ function readParameterName(sql: string, start: number): string {
   let i = start + 1;
   while (i < sql.length && PARAMETER_NAME_CHAR_RE.test(sql[i])) i += 1;
   return sql.slice(start, i);
+}
+
+/** Match only unprefixed quote + exact `${name}`/`#{name}` + same quote. Leaves skipQuoted unchanged. */
+function tryReadQuotedBracedPlaceholder(sql: string, start: number, quote: "'" | '"', isSyntaxEnabled: (syntax: SqlParameterSyntax) => boolean): ParameterOccurrence | null {
+  if (sql[start] !== quote) return null;
+  // Reject E'...', U&'...', B'...', X'...', N'...' — replacing the quoted span would leave the
+  // prefix attached to a typed literal (e.g. E'${path}' → E'C:\new', B'${flag}' → BTRUE).
+  if (hasSqlStringLiteralPrefix(sql, start)) return null;
+
+  const open = sql.slice(start + 1, start + 3);
+  let syntax: SqlParameterSyntax | null = null;
+  if (open === "${") syntax = "shell";
+  else if (open === "#{") syntax = "mybatis";
+  else return null;
+  if (!isSyntaxEnabled(syntax)) return null;
+
+  const nameStart = start + 3;
+  const closeBrace = sql.indexOf("}", nameStart);
+  if (closeBrace === -1 || sql[closeBrace + 1] !== quote) return null;
+
+  const name = sql.slice(nameStart, closeBrace).trim();
+  if (!PARAMETER_NAME_RE.test(name)) return null;
+
+  const end = closeBrace + 2;
+  // The closing quote must be a real string terminator under the same rules as skipQuoted
+  // (doubled quotes / backslash escapes). Otherwise '${value}''suffix' would match '${value}'.
+  if (skipQuoted(sql, start, quote) !== end) return null;
+
+  return {
+    key: name,
+    name,
+    syntax,
+    token: sql.slice(start, end),
+    start,
+    end,
+  };
+}
+
+/** True when `quoteStart` opens a prefixed literal such as E'...', U&'...', or MySQL _charset'...'. */
+function hasSqlStringLiteralPrefix(sql: string, quoteStart: number): boolean {
+  if (quoteStart <= 0) return false;
+
+  if (quoteStart >= 2 && sql[quoteStart - 1] === "&" && (sql[quoteStart - 2] === "U" || sql[quoteStart - 2] === "u") && !PARAMETER_NAME_CHAR_RE.test(sql[quoteStart - 3] ?? "")) {
+    return true;
+  }
+
+  // SQL dialects attach word-like introducers directly to the quote. Reject the
+  // whole category so typed replacement cannot leave invalid prefixes such as
+  // `_utf8mb4TRUE`, and so future introducers do not require another allowlist.
+  return PARAMETER_NAME_CHAR_RE.test(sql[quoteStart - 1]);
 }
 
 function skipQuoted(sql: string, start: number, quote: string): number {

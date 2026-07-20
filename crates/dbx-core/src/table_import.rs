@@ -2085,9 +2085,7 @@ where
             pending_rows.push(delimited_record_to_row(&record, columns.len(), config));
         }
 
-        let mut source_row_number = config.row_range.data_start_row;
-        for record in reader.records() {
-            source_row_number += 1;
+        for (source_row_number, record) in (config.row_range.data_start_row.saturating_add(1)..).zip(reader.records()) {
             if config.row_range.last_data_row.is_some_and(|last| source_row_number > last) {
                 break;
             }

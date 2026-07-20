@@ -1,11 +1,12 @@
-import { test } from "vitest";
+import { test, vi } from "vitest";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createPinia, setActivePinia } from "pinia";
 import { DEFAULT_SQL_FORMATTER_SETTINGS } from "../../apps/desktop/src/lib/sql/sqlFormatterConfig.ts";
 import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS } from "../../apps/desktop/src/lib/table/tableColumnTemplates.ts";
 import { DEFAULT_UI_FONT_FAMILY, SYSTEM_UI_FONT_FAMILY } from "../../apps/desktop/src/lib/app/appFonts.ts";
 import { tableOpenPageLimit } from "../../apps/desktop/src/lib/table/tableOpenPageLimit.ts";
-import { AI_PROVIDER_PRESETS, DEFAULT_EDITOR_SETTINGS, normalizeAiConfig, normalizeEditorSettings, useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
+import { AI_PROVIDER_PRESETS, DEFAULT_EDITOR_SETTINGS, EXECUTE_MODE_CURRENT_DEFAULT_VERSION, normalizeAiConfig, normalizeEditorSettings, useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
 
 const OLD_FONT_SIZE_KEY = "dbx-query-editor-font-size";
 
@@ -48,8 +49,51 @@ test("normalizes saved query result page size", () => {
   assert.equal(normalizeEditorSettings({ pageSize: 0 }).pageSize, 100);
 });
 
-test("uses dedicated default row limit for table opens", () => {
+test("normalizes the dedicated default row limit for table opens", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.tableOpenPageSize, 100);
+  assert.equal(normalizeEditorSettings({ tableOpenPageSize: 1000 }).tableOpenPageSize, 1000);
+  assert.equal(normalizeEditorSettings({ tableOpenPageSize: 200000 }).tableOpenPageSize, 100000);
+  assert.equal(normalizeEditorSettings({ tableOpenPageSize: 0 }).tableOpenPageSize, 100);
   assert.equal(tableOpenPageLimit(), 100);
+  assert.equal(tableOpenPageLimit(1000), 1000);
+  assert.equal(tableOpenPageLimit(0), 100);
+});
+
+test("migrates legacy execute-all settings to current once and preserves later explicit choices", async () => {
+  await withMockLocalStorage({ "dbx-app-state:editor_settings": JSON.stringify({ executeMode: "all" }) }, async () => {
+    setActivePinia(createPinia());
+    const migratedStore = useSettingsStore();
+    await migratedStore.initEditorSettings();
+
+    assert.equal(migratedStore.editorSettings.executeMode, "current");
+    let saved = JSON.parse(localStorage.getItem("dbx-app-state:editor_settings") || "{}");
+    assert.equal(saved.executeMode, "current");
+    assert.equal(saved.executeModeDefaultVersion, EXECUTE_MODE_CURRENT_DEFAULT_VERSION);
+
+    migratedStore.updateEditorSettings({ executeMode: "all" });
+    assert.equal(migratedStore.editorSettings.executeMode, "all");
+    await vi.waitFor(() => {
+      saved = JSON.parse(localStorage.getItem("dbx-app-state:editor_settings") || "{}");
+      assert.equal(saved.executeMode, "all");
+    });
+    assert.equal(saved.executeModeDefaultVersion, EXECUTE_MODE_CURRENT_DEFAULT_VERSION);
+
+    setActivePinia(createPinia());
+    const reloadedStore = useSettingsStore();
+    await reloadedStore.initEditorSettings();
+    assert.equal(reloadedStore.editorSettings.executeMode, "all");
+  });
+});
+
+test("shows the table-open page size control in the Data settings tab", () => {
+  const source = readFileSync("apps/desktop/src/components/editor/EditorSettingsDialog.vue", "utf8");
+  const dataSectionStart = source.indexOf("activeSettingsTab === 'data'");
+  const nextSectionStart = source.indexOf("activeSettingsTab === 'shortcuts'", dataSectionStart);
+  const control = source.indexOf('id="table-open-page-size"');
+
+  assert.ok(dataSectionStart >= 0);
+  assert.ok(nextSectionStart > dataSectionStart);
+  assert.ok(control > dataSectionStart && control < nextSectionStart);
 });
 
 test("defaults export batch size to 2000 rows", () => {

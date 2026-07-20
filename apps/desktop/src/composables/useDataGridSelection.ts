@@ -1,5 +1,5 @@
 import { ref, computed, getCurrentScope, onScopeDispose, type ComputedRef, type Ref } from "vue";
-import { allCellsSelectionRange, extractColumnsSelection, extractSelection, isCellInSelection, normalizeSelectionRange, normalizeSelectedColumnIndexes, rowSelectionRange, type CellPosition, type CellSelectionRange, type SelectionData } from "@/lib/dataGrid/gridSelection";
+import { allCellsSelectionRange, extractColumnsSelection, extractSelection, isCellInSelection, normalizeSelectionRange, normalizeSelectedColumnIndexes, rowSelectionRange, type CellPosition, type CellSelectionMatrix, type CellSelectionRange, type SelectionData } from "@/lib/dataGrid/gridSelection";
 import type { DataGridRuntimeScope } from "@/lib/dataGrid/dataGridRuntime";
 
 type CellValue = string | number | boolean | null;
@@ -84,6 +84,53 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
       startCol: range.startCol,
       endCol: range.endCol,
     });
+  });
+
+  function buildCellSelectionMatrix(rowIndexes: number[], columnIndexes: number[]): CellSelectionMatrix | null {
+    const normalizedRows = normalizeSelectedColumnIndexes(rowIndexes).filter((index) => index < displayItems.value.length && !displayItems.value[index]?.isDraft);
+    const normalizedColumns = normalizeSelectedColumnIndexes(columnIndexes).filter((index) => index < columns.value.length);
+    if (normalizedRows.length === 0 || normalizedColumns.length === 0) return null;
+    return {
+      rowIndexes: normalizedRows,
+      columnIndexes: normalizedColumns,
+      columns: normalizedColumns.map((index) => columns.value[index]),
+      rows: normalizedRows.map((rowIndex) => normalizedColumns.map((columnIndex) => displayItems.value[rowIndex]?.data[columnIndex] ?? null)),
+    };
+  }
+
+  const selectedCellMatrix = computed<CellSelectionMatrix | null>(() => {
+    if (hasColumnSelection.value) {
+      return buildCellSelectionMatrix(
+        displayItems.value.map((_, index) => index),
+        [...selectedColumnIndexes.value],
+      );
+    }
+
+    if (selectedCellKeys.value.size > 0) {
+      const columnsByRow = new Map<number, number[]>();
+      for (const key of selectedCellKeys.value) {
+        const position = parseCellKey(key);
+        if (!position || position.rowIndex >= displayItems.value.length || position.colIndex >= columns.value.length || displayItems.value[position.rowIndex]?.isDraft) continue;
+        const selectedColumns = columnsByRow.get(position.rowIndex) ?? [];
+        selectedColumns.push(position.colIndex);
+        columnsByRow.set(position.rowIndex, selectedColumns);
+      }
+      const rowIndexes = [...columnsByRow.keys()].sort((a, b) => a - b);
+      const columnIndexes = normalizeSelectedColumnIndexes(columnsByRow.get(rowIndexes[0]) ?? []);
+      if (rowIndexes.length === 0 || columnIndexes.length === 0) return null;
+      const hasConsistentColumns = rowIndexes.every((rowIndex) => {
+        const rowColumns = normalizeSelectedColumnIndexes(columnsByRow.get(rowIndex) ?? []);
+        return rowColumns.length === columnIndexes.length && rowColumns.every((columnIndex, index) => columnIndex === columnIndexes[index]);
+      });
+      return hasConsistentColumns ? buildCellSelectionMatrix(rowIndexes, columnIndexes) : null;
+    }
+
+    const range = selectedRange.value;
+    if (!range) return null;
+    return buildCellSelectionMatrix(
+      Array.from({ length: range.endRow - range.startRow + 1 }, (_, index) => range.startRow + index),
+      Array.from({ length: range.endCol - range.startCol + 1 }, (_, index) => range.startCol + index),
+    );
   });
 
   const selectedCellCount = computed(() => selectedCells.value.rows.reduce((count, row) => count + row.length, 0));
@@ -407,6 +454,7 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     isSelectingCells,
     selectedRange,
     selectedCells,
+    selectedCellMatrix,
     selectedCellCount,
     hasCellSelection,
     isSelectingAll,

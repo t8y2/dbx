@@ -630,6 +630,8 @@ fn default_permissions() -> dbx_core::agent_tools::AgentSqlPermissions {
     }
 }
 
+// CallToolResult is the transport-native error payload; boxing it would complicate every MCP call site.
+#[allow(clippy::result_large_err)]
 fn validate_mongo_command(
     connection: &dbx_core::models::connection::ConnectionConfig,
     database: &str,

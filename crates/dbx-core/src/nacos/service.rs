@@ -129,7 +129,7 @@ pub async fn nacos_raw_request_core(
     req: NacosRawRequest,
 ) -> Result<NacosRawResponse, String> {
     crate::nacos::http::validate_raw_api_path(&req.path)?;
-    if req.method.to_ascii_uppercase() != "GET" {
+    if !req.method.eq_ignore_ascii_case("GET") {
         ensure_connection_writable(state, conn_id, "Run mutating Nacos raw request").await?;
     }
     let admin = get_admin(state, conn_id).await?;

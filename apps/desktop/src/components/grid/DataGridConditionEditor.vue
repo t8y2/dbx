@@ -44,12 +44,14 @@ const overlayRef = ref<HTMLTextAreaElement>();
 const controlRef = ref<HTMLDivElement>();
 const dropdownRef = ref<HTMLDivElement>();
 const expanded = ref(false);
+const composing = ref(false);
 const expandedRect = ref({ left: 0, top: 0, width: 0, controlsTop: 0, inputTop: 0, prefix: 0, suffix: 28 });
 const expandedHeight = ref(56);
 const suggestionPosition = ref({ left: 0, top: 0, width: 180 });
 const historyPreview = ref<{ value: string; left: number; top: number; maxWidth: number; arrowTop: number; side: "left" | "right" } | null>(null);
 let collapseTimer: ReturnType<typeof setTimeout> | undefined;
 let resizeObserver: ResizeObserver | undefined;
+let expandAfterComposition = false;
 
 const editor = useDataGridConditionEditor({
   kind: props.kind,
@@ -146,6 +148,12 @@ function resizeEditor(forceExpand = false) {
   void nextTick(() => {
     const input = inputRef.value;
     if (!input) return;
+    // Expanding swaps focus to a teleported overlay textarea; doing that mid-IME
+    // composition truncates unfinished pinyin. Defer until composition ends.
+    if (composing.value && !expanded.value) {
+      expandAfterComposition = true;
+      return;
+    }
     const focused = document.activeElement === input || document.activeElement === overlayRef.value;
     const nextExpanded = focused && shouldExpand(input) && (forceExpand || expanded.value);
     if (nextExpanded) {
@@ -154,16 +162,27 @@ function resizeEditor(forceExpand = false) {
     }
     expanded.value = nextExpanded;
     updateSuggestionPosition();
-    if (nextExpanded && document.activeElement === input) {
+    if (nextExpanded && document.activeElement === input && !composing.value) {
       void nextTick(() => {
         const overlay = overlayRef.value;
-        if (!overlay) return;
+        if (!overlay || composing.value) return;
         const start = input.selectionStart;
         overlay.focus();
         overlay.setSelectionRange(start, start);
       });
     }
   });
+}
+
+function onCompositionStart() {
+  composing.value = true;
+}
+
+function onCompositionEnd() {
+  composing.value = false;
+  if (!expandAfterComposition) return;
+  expandAfterComposition = false;
+  resizeEditor(true);
 }
 
 function focus(select = false) {
@@ -284,6 +303,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (collapseTimer) clearTimeout(collapseTimer);
+  expandAfterComposition = false;
   resizeObserver?.disconnect();
   window.removeEventListener("resize", onViewportResize);
   window.visualViewport?.removeEventListener("resize", onViewportResize);
@@ -323,6 +343,8 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
           @focus="resizeEditor(true)"
           @blur="scheduleCollapse"
           @click="resizeEditor(true)"
+          @compositionstart="onCompositionStart"
+          @compositionend="onCompositionEnd"
           @input="onInput"
           @keydown="onKeydown"
         />
@@ -351,6 +373,8 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
           class="data-grid-topbar-condition-input data-grid-topbar-condition-input--expanded absolute resize-none outline-none"
           :class="[props.kind === 'where' ? 'data-grid-topbar-condition-input--where' : 'data-grid-topbar-condition-input--order', { 'data-grid-topbar-condition-input--compact': props.compact }]"
           @blur="scheduleCollapse"
+          @compositionstart="onCompositionStart"
+          @compositionend="onCompositionEnd"
           @input="onInput"
           @keydown="onKeydown"
         />

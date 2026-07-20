@@ -139,7 +139,7 @@ export async function loadTableMetadata(request: TableMetadataRequest): Promise<
       scope,
       async () => {
         const columns = await api.getColumns(request.connectionId, request.database, request.schema ?? "", request.tableName, request.catalog);
-        const indexes = await api.listIndexes(request.connectionId, request.database, request.schema ?? "", request.tableName, request.catalog).catch((): IndexInfo[] => []);
+        const indexes = columns.length > 0 ? await api.listIndexes(request.connectionId, request.database, request.schema ?? "", request.tableName, request.catalog).catch((): IndexInfo[] => []) : [];
         const primaryKeys = editableRowIdentifierColumns(request.databaseType as DatabaseType, columns, indexes, request.tableType);
         return {
           schema: request.schema || undefined,

@@ -56,7 +56,8 @@ import {
   type QueryEditorTableReferenceDropDetail,
   type QueryEditorTableReferencePayload,
 } from "@/lib/editor/queryEditorTableDrop";
-import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, createRunStatementButtonDom, loadEditorTheme, editorFontTheme, sqlCompletionTheme, sqlSemanticHighlightTheme } from "@/lib/editor/editorThemes";
+import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, loadEditorTheme, editorFontTheme, sqlCompletionTheme, sqlSemanticHighlightTheme } from "@/lib/editor/editorThemes";
+import { createStatementGutterMarkerDom, shouldShowStatementGutter } from "@/lib/editor/codemirrorStatementGutter";
 import { clampEditorFontSize, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
 import { normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
@@ -72,7 +73,18 @@ import { metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
 import { usesLocalOnlyEditorCompletionMetadata, usesOnDemandOnlyEditorColumnMetadata } from "@/lib/metadata/completionMetadataPolicy";
 import { queryContextObjectActions, queryContextObjectRoute, queryTableCandidateAtSqlPosition, resolveQueryContextCandidateDatabase, resolveQueryContextObjectTarget, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
 import * as api from "@/lib/backend/api";
-import { areSqlSemanticDiagnosticsEqual, buildSqlParserErrorDiagnostic, buildSqlSemanticDiagnostics, isSqlSemanticDiagnosticInputContext, shouldRunSqlSemanticDiagnostics, sqlSemanticDiagnosticRangesForViewport, tableReferenceKey, type SqlSemanticDiagnostic } from "@/lib/sql/semantic/diagnostics";
+import {
+  areSqlSemanticDiagnosticsEqual,
+  buildSqlParserErrorDiagnostic,
+  buildSqlSemanticDiagnostics,
+  isSqlSemanticDiagnosticInputContext,
+  isSqlVirtualTableReference,
+  shouldRunSqlSemanticDiagnostics,
+  sqlSemanticDiagnosticRangesForViewport,
+  tableReferenceKey,
+  type SqlSemanticDiagnostic,
+} from "@/lib/sql/semantic/diagnostics";
+import { sqlReferenceAnalysisDialectFor } from "@/lib/sql/semantic/dialect";
 import { buildRedisSyntaxDiagnostics, shouldRunRedisDiagnostics } from "@/lib/redis/redisSyntaxDiagnostics";
 import { buildRedisCompletionItemsFromContext, getRedisCompletionContext, getRedisCompletionResultValidFor, shouldAutoOpenRedisCompletion, takesKeyArgument, type RedisCompletionItem } from "@/lib/redis/redisCompletion";
 import type { SqlCompletionColumn, SqlCompletionForeignKey, SqlCompletionItem, SqlCompletionObject, SqlCompletionReferencedTable, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
@@ -250,7 +262,6 @@ let codeMirrorCloseBrackets: typeof import("@codemirror/autocomplete").closeBrac
 let codeMirrorCloseBracketsKeymap: readonly import("@codemirror/view").KeyBinding[] | null = null;
 let readOnlyComp: import("@codemirror/state").Compartment | null = null;
 let runGutterComp: import("@codemirror/state").Compartment | null = null;
-let statementExecutionGutterComp: import("@codemirror/state").Compartment | null = null;
 let runKeymapComp: import("@codemirror/state").Compartment | null = null;
 let completionComp: import("@codemirror/state").Compartment | null = null;
 let diagnosticComp: import("@codemirror/state").Compartment | null = null;
@@ -299,7 +310,6 @@ let setStatementExecutionMarkersEffect: import("@codemirror/state").StateEffectT
 let previewRangeComp: import("@codemirror/state").Compartment | null = null;
 let buildPreviewRangeExtension: (() => import("@codemirror/state").Extension) | null = null;
 let buildResultSourceRangeExtension: (() => import("@codemirror/state").Extension) | null = null;
-let buildStatementExecutionMarkersExtension: (() => import("@codemirror/state").Extension) | null = null;
 let buildRunStatementGutterExtension: (() => import("@codemirror/state").Extension) | null = null;
 let indentComp: import("@codemirror/state").Compartment | null = null;
 let codeMirrorIndentUnit: typeof import("@codemirror/language").indentUnit | null = null;
@@ -311,6 +321,11 @@ let editorIsActive = true;
 let tableReferenceDropListenerRegistered = false;
 let imeCompositionActive = false;
 let pendingImeModelEmit = false;
+
+function runStatementGutterExtension(markers = props.statementExecutionMarkers ?? []): import("@codemirror/state").Extension {
+  const showRunButtons = !props.hideExecutionControls && settingsStore.editorSettings.showStatementRunButtons;
+  return shouldShowStatementGutter(showRunButtons, markers.length) ? (buildRunStatementGutterExtension?.() ?? []) : [];
+}
 
 type SelectionCaseMode = "upper" | "lower";
 let executableStatementRangeCache: ExecutableStatementRangeCache | null = null;
@@ -1399,6 +1414,10 @@ function completionMetadataTarget(table: { name: string; schema?: string | null 
   return { database: props.database, schema: table.schema ?? props.schema };
 }
 
+function isVirtualCompletionTableReference(table: { name: string; schema?: string | null }): boolean {
+  return isSqlVirtualTableReference(table, props.databaseType);
+}
+
 function completionQualifiedTableTarget(completionContext: ReturnType<typeof getSqlCompletionContext>): { name: string; schema: string } | null {
   if (!completionContext.suggestColumns) return null;
   const parts = completionContext.qualifierParts ?? completionContext.qualifier?.split(".").filter(Boolean) ?? [];
@@ -1429,6 +1448,7 @@ async function findExactSemanticDiagnosticTable(table: SqlTableReference): Promi
 }
 
 async function ensureColumnsForTable(table: { name: string; schema?: string | null }): Promise<boolean> {
+  if (isVirtualCompletionTableReference(table)) return false;
   const cacheKey = completionCacheKey(table);
   if (cachedColumnsByTable.has(cacheKey)) return true;
   if (!props.connectionId || props.database == null) return false;
@@ -1446,6 +1466,7 @@ function isMissingTableMetadataError(error: unknown) {
 }
 
 async function ensureForeignKeysForTable(table: { name: string; schema?: string | null }) {
+  if (isVirtualCompletionTableReference(table)) return;
   const cacheKey = completionCacheKey(table);
   if (cachedForeignKeysByTable.has(cacheKey) || !props.connectionId || props.database == null) return;
   const target = completionMetadataTarget(table);
@@ -1753,7 +1774,7 @@ async function enrichSemanticDiagnosticTables(tables: SqlTableReference[]): Prom
   const enriched: SqlTableReference[] = [];
   const missingTables = new Set<string>();
   for (const table of tables) {
-    if (isStatementLocalSemanticTable(table)) {
+    if (isStatementLocalSemanticTable(table) || isSqlVirtualTableReference(table, props.databaseType)) {
       enriched.push(table);
       continue;
     }
@@ -1773,7 +1794,7 @@ async function ensureColumnsForSemanticDiagnostics(tables: SqlTableReference[]):
   const seen = new Set<string>();
   const targets: SqlTableReference[] = [];
   for (const table of tables) {
-    if (isStatementLocalSemanticTable(table)) continue;
+    if (isStatementLocalSemanticTable(table) || isSqlVirtualTableReference(table, props.databaseType)) continue;
     const tableWithInlineColumns = table as SqlTableReference & {
       columns?: string[];
     };
@@ -1860,7 +1881,14 @@ async function refreshSemanticDiagnostics(options: { preserveOutsideRanges?: boo
   const nextDiagnostics: SqlSemanticDiagnostic[] = [];
   for (const range of diagnosticRanges) {
     try {
-      const analysis = await api.analyzeSqlReferences(range.sql, props.formatDialect ?? props.dialect ?? "generic");
+      const analysis = await api.analyzeSqlReferences(
+        range.sql,
+        sqlReferenceAnalysisDialectFor({
+          databaseType: props.databaseType,
+          identifierQuote: connectionStore.connectionIdentifierQuote(props.connectionId),
+          fallbackDialect: props.formatDialect ?? props.dialect ?? "generic",
+        }),
+      );
       if (runId !== semanticDiagnosticRunId) return;
 
       const semanticCursor = Math.max(0, Math.min(currentView.state.selection.main.head - range.from, range.sql.length));
@@ -1888,6 +1916,7 @@ async function refreshSemanticDiagnostics(options: { preserveOutsideRanges?: boo
             missingTables,
             loadedColumnTables: loadedColumnsByTable,
             sql: range.sql,
+            databaseType: props.databaseType,
           }),
           range,
           sql,
@@ -2429,6 +2458,7 @@ function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getS
 
   const cteDefs = extractCteDefinitions(fullDoc);
   for (const refTable of completionContext.referencedTables) {
+    if (isVirtualCompletionTableReference(refTable)) continue;
     const cteDef = cteDefs.find((c) => c.name.toLowerCase() === refTable.name.toLowerCase());
     if (cteDef) {
       columnsByTable.set(
@@ -2547,6 +2577,7 @@ function scheduleCompletionMetadataRefresh(completionContext: ReturnType<typeof 
   }
   if (!onDemandOnlyColumns && !tableNameCompletion) {
     for (const refTable of completionContext.referencedTables) {
+      if (isVirtualCompletionTableReference(refTable)) continue;
       if (refTable.columns && refTable.columns.length > 0) continue;
       const cacheKey = refTable.schema ? `${refTable.schema}.${refTable.name}` : refTable.name;
       if (cacheKey === qualifiedColumnCacheKey) continue;
@@ -2749,7 +2780,7 @@ async function performAsyncCompletionWithResult(epoch: number, completionContext
     }
     return rt;
   });
-  const unresolvedRefs = refs.filter((rt) => !rt.schema && !rt.columns);
+  const unresolvedRefs = refs.filter((rt) => !rt.schema && !rt.columns && !isVirtualCompletionTableReference(rt));
   if (!localOnlyMetadata && unresolvedRefs.length > 0) {
     const lookupGroups = await Promise.all(unresolvedRefs.map((rt) => connectionStore.listCompletionTables(props.connectionId!, props.database!, rt.name, 20, props.schema, false, props.schema)));
     if (epoch !== completionEpoch) return null;
@@ -2788,6 +2819,7 @@ async function performAsyncCompletionWithResult(epoch: number, completionContext
   if (shouldFetchColumnsForCompletion) {
     await Promise.all(
       refs.map(async (refTable) => {
+        if (isVirtualCompletionTableReference(refTable)) return;
         if (refTable.columns && refTable.columns.length > 0) return;
         const cacheKey = refTable.schema ? `${refTable.schema}.${refTable.name}` : refTable.name;
         if (cachedColumnsByTable.has(cacheKey)) return;
@@ -2975,7 +3007,6 @@ onMounted(async () => {
   codeMirrorCloseBracketsKeymap = closeBracketsKeymap;
   readOnlyComp = new Compartment();
   runGutterComp = new Compartment();
-  statementExecutionGutterComp = new Compartment();
   runKeymapComp = new Compartment();
   completionComp = new Compartment();
   diagnosticComp = new Compartment();
@@ -3110,23 +3141,35 @@ onMounted(async () => {
     return field;
   };
 
-  class StatementExecutionStatusMarker extends GutterMarker {
+  class StatementExecutionStateMarker extends GutterMarker {
     constructor(readonly marker: StatementExecutionMarker) {
       super();
     }
 
     eq(other: import("@codemirror/view").GutterMarker): boolean {
-      return other instanceof StatementExecutionStatusMarker && other.marker.status === this.marker.status && other.marker.successCount === this.marker.successCount && other.marker.errorCount === this.marker.errorCount;
+      return other instanceof StatementExecutionStateMarker && other.marker.status === this.marker.status && other.marker.successCount === this.marker.successCount && other.marker.errorCount === this.marker.errorCount;
+    }
+  }
+
+  class StatementGutterMarker extends GutterMarker {
+    constructor(
+      readonly canExecute: boolean,
+      readonly marker?: StatementExecutionMarker,
+    ) {
+      super();
+    }
+
+    eq(other: import("@codemirror/view").GutterMarker): boolean {
+      return other instanceof StatementGutterMarker && other.canExecute === this.canExecute && other.marker?.status === this.marker?.status && other.marker?.successCount === this.marker?.successCount && other.marker?.errorCount === this.marker?.errorCount;
     }
 
     toDOM() {
-      const element = document.createElement("span");
-      const title = statementExecutionMarkerTitle(this.marker);
-      element.className = `cm-statement-execution-marker cm-statement-execution-marker--${this.marker.status}`;
-      element.title = title;
-      element.setAttribute("aria-label", title);
-      element.appendChild(createStatementExecutionStatusIconDom(this.marker.status));
-      return element;
+      return createStatementGutterMarkerDom({
+        canExecute: this.canExecute,
+        executeLabel: t("editor.contextMenu.executeCurrent"),
+        status: this.marker?.status,
+        statusLabel: this.marker ? statementExecutionMarkerTitle(this.marker) : undefined,
+      });
     }
   }
 
@@ -3137,34 +3180,14 @@ onMounted(async () => {
     return parts.join(", ");
   }
 
-  function createStatementExecutionStatusIconDom(status: StatementExecutionMarker["status"]) {
-    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    svg.setAttribute("viewBox", "0 0 24 24");
-    svg.setAttribute("fill", "none");
-    svg.setAttribute("stroke", "currentColor");
-    svg.setAttribute("stroke-width", "2");
-    svg.setAttribute("stroke-linecap", "round");
-    svg.setAttribute("stroke-linejoin", "round");
-    svg.setAttribute("aria-hidden", "true");
-
-    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-    circle.setAttribute("cx", "12");
-    circle.setAttribute("cy", "12");
-    circle.setAttribute("r", "10");
-    const mark = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    mark.setAttribute("d", status === "error" ? "m15 9-6 6m0-6 6 6" : "m9 12 2 2 4-4");
-    svg.append(circle, mark);
-
-    return svg;
-  }
-
   setStatementExecutionMarkersEffect = StateEffect.define<StatementExecutionMarker[]>();
-  buildStatementExecutionMarkersExtension = () => {
+  buildRunStatementGutterExtension = () => {
     const effectType = setStatementExecutionMarkersEffect!;
+    const showRunButtons = !props.hideExecutionControls && settingsStore.editorSettings.showStatementRunButtons;
     const markersForState = (state: import("@codemirror/state").EditorState, markers: readonly StatementExecutionMarker[]) => {
       const ranges = markers.map((marker) => {
         const from = Math.max(0, Math.min(marker.from, state.doc.length));
-        return new StatementExecutionStatusMarker(marker).range(state.doc.lineAt(from).from);
+        return new StatementExecutionStateMarker(marker).range(state.doc.lineAt(from).from);
       });
       return RangeSet.of(ranges, true);
     };
@@ -3182,13 +3205,22 @@ onMounted(async () => {
       },
       provide: (field) =>
         gutter({
-          class: "cm-statement-execution-gutter",
+          class: "cm-run-statement-gutter",
           markers: (currentView) => currentView.state.field(field),
+          lineMarker(currentView, line, markers) {
+            const executionMarker = markers.find((marker) => marker instanceof StatementExecutionStateMarker)?.marker;
+            const canExecute = showRunButtons && !!executableStatementRangeStartingAt(currentView, line.from);
+            return canExecute || executionMarker ? new StatementGutterMarker(canExecute, executionMarker) : null;
+          },
+          domEventHandlers: showRunButtons
+            ? {
+                mousedown: executeSqlStatementFromGutter,
+              }
+            : {},
         }),
     });
     return field;
   };
-
   buildSqlSignatureExtension = () =>
     showTooltip.compute(["doc", "selection"], (currentState) => {
       const signature = getSqlFunctionSignatureHelp(currentState.doc.toString(), currentState.selection.main.head, props.databaseType);
@@ -3261,26 +3293,6 @@ onMounted(async () => {
   if (initialSettings.vimModeEnabled) {
     await ensureCodeMirrorVim();
   }
-
-  class RunStatementGutterMarker extends GutterMarker {
-    toDOM() {
-      return createRunStatementButtonDom("Execute statement");
-    }
-  }
-
-  const executableStatementMarker = new RunStatementGutterMarker();
-  buildRunStatementGutterExtension = () =>
-    settingsStore.editorSettings.showStatementRunButtons
-      ? gutter({
-          class: "cm-run-statement-gutter",
-          lineMarker(currentView, line) {
-            return executableStatementRangeStartingAt(currentView, line.from) ? executableStatementMarker : null;
-          },
-          domEventHandlers: {
-            mousedown: executeSqlStatementFromGutter,
-          },
-        })
-      : [];
 
   const currentStatementFrameHighlighter = ViewPlugin.fromClass(
     class {
@@ -3384,7 +3396,7 @@ onMounted(async () => {
           return { dom };
         },
       }),
-      runGutterComp.of(props.hideExecutionControls ? [] : buildRunStatementGutterExtension()),
+      runGutterComp.of(runStatementGutterExtension()),
       lineNumbers({
         domEventHandlers: {
           mousedown: selectSqlLineFromGutter,
@@ -3455,7 +3467,6 @@ onMounted(async () => {
       }),
       previewRangeComp.of(buildPreviewRangeExtension()),
       buildResultSourceRangeExtension(),
-      statementExecutionGutterComp.of(buildStatementExecutionMarkersExtension()),
       Prec.highest(
         keymap.of([
           { key: "'", run: handleSqlSingleQuote },
@@ -3771,6 +3782,15 @@ watch(
 );
 
 watch(
+  () => props.statementExecutionMarkers?.length ?? 0,
+  () => {
+    if (!view.value || !runGutterComp) return;
+    // Remove the compartment entirely when controls and markers are absent so the editor keeps no empty gutter width.
+    view.value.dispatch({ effects: runGutterComp.reconfigure(runStatementGutterExtension()) });
+  },
+);
+
+watch(
   () => props.connectionId,
   () => {
     refreshCompletionCache();
@@ -3846,7 +3866,7 @@ watch(
         wordWrapComp.reconfigure(props.forceWordWrap || ss.wordWrap ? editorViewModule.EditorView.lineWrapping : []),
         vimModeComp.reconfigure(vimModeExtension(settingsStore.editorSettings.vimModeEnabled)),
         closeBracketsComp.reconfigure(closeBracketsExtension(settingsStore.editorSettings.autoCloseBrackets)),
-        runGutterComp.reconfigure(props.hideExecutionControls ? [] : (buildRunStatementGutterExtension?.() ?? [])),
+        runGutterComp.reconfigure(runStatementGutterExtension()),
         runKeymapComp.reconfigure(runKeymapExtension(editorViewModule.keymap)),
       ],
     });
@@ -4153,19 +4173,6 @@ defineExpose({
   padding: 0 5px;
 }
 
-:deep(.cm-statement-execution-gutter) {
-  min-width: 34px;
-}
-
-:deep(.cm-statement-execution-gutter .cm-gutterElement) {
-  align-items: center;
-  box-sizing: border-box;
-  display: flex;
-  justify-content: center;
-  min-width: 34px;
-  padding: 0 5px;
-}
-
 :deep(.cm-statement-execution-marker) {
   display: inline-flex;
   align-items: center;
@@ -4213,6 +4220,7 @@ defineExpose({
 }
 
 :deep(.cm-run-statement-marker) {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -4254,12 +4262,41 @@ defineExpose({
   color: rgb(167 243 208);
 }
 
-:deep(.cm-run-statement-marker svg) {
+:deep(.cm-run-statement-marker > svg) {
   display: block;
   width: min(14px, 70%);
   height: min(14px, 70%);
   pointer-events: none;
   flex-shrink: 0;
+}
+
+:deep(.cm-statement-execution-badge) {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: min(9px, 45%);
+  height: min(9px, 45%);
+  border-radius: 9999px;
+  color: white;
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.9);
+  pointer-events: none;
+}
+
+:deep(.cm-statement-execution-badge--success) {
+  background: rgb(5 150 105);
+}
+
+:deep(.cm-statement-execution-badge--error) {
+  background: rgb(220 38 38);
+}
+
+:deep(.cm-statement-execution-badge svg) {
+  display: block;
+  width: 75%;
+  height: 75%;
 }
 
 :deep(.cm-foldMarker-svg) {

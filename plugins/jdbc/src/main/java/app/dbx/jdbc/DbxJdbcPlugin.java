@@ -1319,6 +1319,17 @@ public final class DbxJdbcPlugin {
         if (usePrestoInformationSchemaTables(connection)) {
             return prestoListTables(conn, database, schema, filter, limit, offset, objectTypes);
         }
+        if (isKingbaseUrl(optionalText(connection, "connection_string"))) {
+            return filterMetadataNodes(
+                (ArrayNode) kingbaseListTables(conn, schema, false),
+                filter,
+                limit,
+                offset,
+                objectTypes,
+                "table_type",
+                true
+            );
+        }
         DatabaseMetaData meta = conn.getMetaData();
         String[] types = constrainedJdbcTableTypes(jdbcTableTypes(meta), objectTypes);
         if (types.length == 0) {
@@ -1358,16 +1369,22 @@ public final class DbxJdbcPlugin {
         if (usePrestoInformationSchemaTables(connection)) {
             return prestoListObjects(conn, database, schema, filter, limit, offset, objectTypes);
         }
+        boolean kingbase = isKingbaseUrl(optionalText(connection, "connection_string"));
+        if (kingbase) {
+            result.addAll((ArrayNode) kingbaseListTables(conn, schema, true));
+        }
         DatabaseMetaData meta = conn.getMetaData();
         JdbcDriverQuirks quirks = driverQuirks(connection);
         String catalog = metadataCatalog(database, quirks);
         String schemaPattern = resolveSchemaPattern(meta, database, schema, quirks);
 
-        String[] tableTypes = constrainedJdbcTableTypes(jdbcTableTypes(meta), objectTypes);
-        if (tableTypes.length > 0) {
-            appendTableObjects(result, meta, catalog, schemaPattern, schema, tableTypes);
-            if (result.isEmpty() && catalog != null) {
-                appendTableObjects(result, meta, null, schemaPattern, schema, tableTypes);
+        if (!kingbase) {
+            String[] tableTypes = constrainedJdbcTableTypes(jdbcTableTypes(meta), objectTypes);
+            if (tableTypes.length > 0) {
+                appendTableObjects(result, meta, catalog, schemaPattern, schema, tableTypes);
+                if (result.isEmpty() && catalog != null) {
+                    appendTableObjects(result, meta, null, schemaPattern, schema, tableTypes);
+                }
             }
         }
 
@@ -1880,9 +1897,192 @@ public final class DbxJdbcPlugin {
         };
     }
 
+    private static JsonNode kingbaseListTables(Connection conn, String schema, boolean objectNodes) throws SQLException {
+        ArrayNode result = MAPPER.createArrayNode();
+        String effectiveSchema = kingbaseEffectiveSchema(conn, schema);
+        KingbaseTableCatalogMode catalogMode = kingbaseTableCatalogMode(conn);
+        String sql = switch (catalogMode) {
+            case SYS_CATALOG -> kingbaseCastSafeTablesSql();
+            case POSTGRES_CATALOG -> kingbasePostgresTablesSql();
+            case INFORMATION_SCHEMA -> kingbaseCompatibilityTablesSql();
+        };
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, effectiveSchema);
+            if (catalogMode == KingbaseTableCatalogMode.SYS_CATALOG) {
+                ps.setString(2, effectiveSchema);
+                ps.setString(3, effectiveSchema);
+            }
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String tableName = rs.getString("table_name");
+                    String tableType = normalizeInformationSchemaTableType(rs.getString("table_type"));
+                    ObjectNode item = MAPPER.createObjectNode();
+                    item.put("name", tableName);
+                    if (objectNodes) {
+                        item.put("object_type", tableType);
+                        item.put("schema", effectiveSchema);
+                    } else {
+                        item.put("table_type", tableType);
+                    }
+                    putNullable(item, "comment", rs.getString("remarks"));
+                    result.add(item);
+                }
+            }
+        }
+        return result;
+    }
+
+    private enum KingbaseTableCatalogMode {
+        SYS_CATALOG,
+        POSTGRES_CATALOG,
+        INFORMATION_SCHEMA
+    }
+
+    private static KingbaseTableCatalogMode kingbaseTableCatalogMode(Connection conn) {
+        if (!kingbaseCatalogExists(conn, "sys_catalog.sys_namespace")) {
+            return kingbaseCatalogExists(conn, "pg_catalog.pg_namespace")
+                ? KingbaseTableCatalogMode.POSTGRES_CATALOG
+                : KingbaseTableCatalogMode.INFORMATION_SCHEMA;
+        }
+        return kingbaseMysqlCompatibilityMode(conn)
+            ? KingbaseTableCatalogMode.INFORMATION_SCHEMA
+            : KingbaseTableCatalogMode.SYS_CATALOG;
+    }
+
+    private static boolean kingbaseMysqlCompatibilityMode(Connection conn) {
+        try (Statement statement = conn.createStatement();
+             ResultSet rs = statement.executeQuery(
+                 "SELECT setting FROM sys_catalog.sys_settings WHERE LOWER(name) = 'database_mode'"
+             )) {
+            if (rs.next()) {
+                return "mysql".equalsIgnoreCase(rs.getString(1));
+            }
+        } catch (Exception ignored) {
+            // Older Kingbase versions do not expose database_mode.
+        }
+        try (Statement statement = conn.createStatement();
+             ResultSet rs = statement.executeQuery(
+                 "SELECT 1 FROM sys_catalog.sys_settings WHERE LOWER(name) = 'sql_mode'"
+             )) {
+            return rs.next();
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private static boolean kingbaseCatalogExists(Connection conn, String catalog) {
+        try (Statement statement = conn.createStatement();
+             ResultSet ignored = statement.executeQuery("SELECT 1 FROM " + catalog + " WHERE 1 = 0")) {
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private static String kingbaseCompatibilityTablesSql() {
+        return """
+            SELECT CAST(table_name AS varchar(256)) AS table_name,
+                CASE UPPER(CAST(table_type AS varchar(64)))
+                    WHEN 'VIEW' THEN 'VIEW'
+                    WHEN 'MATERIALIZED VIEW' THEN 'MATERIALIZED_VIEW'
+                    ELSE 'TABLE'
+                END AS table_type,
+                NULL AS remarks
+            FROM information_schema.tables
+            WHERE CAST(table_schema AS varchar(256)) = ?
+                AND UPPER(CAST(table_type AS varchar(64))) IN ('BASE TABLE', 'TABLE', 'VIEW', 'MATERIALIZED VIEW')
+            ORDER BY CAST(table_name AS varchar(256))
+            """;
+    }
+
+    private static String kingbasePostgresTablesSql() {
+        return """
+            SELECT CAST(c.relname AS varchar(256)) AS table_name,
+                CASE c.relkind
+                    WHEN 'v' THEN 'VIEW'
+                    WHEN 'm' THEN 'MATERIALIZED_VIEW'
+                    WHEN 'f' THEN 'FOREIGN TABLE'
+                    ELSE 'TABLE'
+                END AS table_type,
+                CAST(obj_description(c.oid) AS varchar(4000)) AS remarks
+            FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = ?
+                AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+            ORDER BY c.relname
+            """;
+    }
+
+    private static String kingbaseCastSafeTablesSql() {
+        return """
+            SELECT table_name, table_type, remarks
+            FROM (
+                SELECT CAST(c.relname AS varchar(256)) AS table_name,
+                    'TABLE' AS table_type,
+                    CAST(d.description AS varchar(4000)) AS remarks
+                FROM sys_catalog.sys_class c
+                JOIN sys_catalog.sys_namespace n
+                    ON CAST(n.oid AS varchar(64)) = CAST(c.relnamespace AS varchar(64))
+                LEFT JOIN sys_catalog.sys_description d
+                    ON CAST(d.objoid AS varchar(64)) = CAST(c.oid AS varchar(64)) AND d.objsubid = 0
+                WHERE CAST(n.nspname AS varchar(256)) = ?
+                    AND (
+                        EXISTS (
+                            SELECT 1 FROM sys_catalog.sys_tables t
+                            WHERE CAST(t.schemaname AS varchar(256)) = CAST(n.nspname AS varchar(256))
+                                AND CAST(t.tablename AS varchar(256)) = CAST(c.relname AS varchar(256))
+                        )
+                        OR EXISTS (
+                            SELECT 1 FROM sys_catalog.sys_foreign_table ft
+                            WHERE CAST(ft.ftrelid AS varchar(64)) = CAST(c.oid AS varchar(64))
+                        )
+                    )
+                UNION ALL
+                SELECT CAST(v.viewname AS varchar(256)) AS table_name,
+                    'VIEW' AS table_type,
+                    CAST(d.description AS varchar(4000)) AS remarks
+                FROM sys_catalog.sys_views v
+                JOIN sys_catalog.sys_namespace n
+                    ON CAST(n.nspname AS varchar(256)) = CAST(v.schemaname AS varchar(256))
+                JOIN sys_catalog.sys_class c
+                    ON CAST(c.relnamespace AS varchar(64)) = CAST(n.oid AS varchar(64))
+                    AND CAST(c.relname AS varchar(256)) = CAST(v.viewname AS varchar(256))
+                LEFT JOIN sys_catalog.sys_description d
+                    ON CAST(d.objoid AS varchar(64)) = CAST(c.oid AS varchar(64)) AND d.objsubid = 0
+                WHERE CAST(v.schemaname AS varchar(256)) = ?
+                UNION ALL
+                SELECT CAST(mv.matviewname AS varchar(256)) AS table_name,
+                    'MATERIALIZED_VIEW' AS table_type,
+                    CAST(d.description AS varchar(4000)) AS remarks
+                FROM sys_catalog.sys_matviews mv
+                JOIN sys_catalog.sys_namespace n
+                    ON CAST(n.nspname AS varchar(256)) = CAST(mv.schemaname AS varchar(256))
+                JOIN sys_catalog.sys_class c
+                    ON CAST(c.relnamespace AS varchar(64)) = CAST(n.oid AS varchar(64))
+                    AND CAST(c.relname AS varchar(256)) = CAST(mv.matviewname AS varchar(256))
+                LEFT JOIN sys_catalog.sys_description d
+                    ON CAST(d.objoid AS varchar(64)) = CAST(c.oid AS varchar(64)) AND d.objsubid = 0
+                WHERE CAST(mv.schemaname AS varchar(256)) = ?
+            ) metadata_tables
+            ORDER BY table_name
+            """;
+    }
+
+    private static String kingbaseEffectiveSchema(Connection conn, String schema) {
+        String effectiveSchema = emptyToNull(schema);
+        if (effectiveSchema != null) {
+            return effectiveSchema;
+        }
+        try {
+            effectiveSchema = emptyToNull(conn.getSchema());
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+        }
+        return effectiveSchema == null ? "PUBLIC" : effectiveSchema;
+    }
+
     private static JsonNode kingbaseGetColumns(Connection conn, String schema, String table) throws SQLException {
         ArrayNode result = MAPPER.createArrayNode();
-        String effectiveSchema = emptyToNull(schema) == null ? "PUBLIC" : schema;
+        String effectiveSchema = kingbaseEffectiveSchema(conn, schema);
         Set<String> primaryKeys = kingbasePrimaryKeys(conn, effectiveSchema, table);
         String sql = "SELECT a.attname AS column_name, " +
             "format_type(a.atttypid, a.atttypmod) AS data_type, " +

@@ -2316,7 +2316,8 @@ fn build_column_predicate(
     } else if use_binary_text_comparison && uses_mysql_binary_text_predicate(database_type, value, column_info) {
         format!("BINARY {ident} = {}", format_grid_sql_literal(value, database_type, column_info))
     } else {
-        format!("{ident} = {}", format_grid_sql_literal(value, database_type, column_info))
+        let literal = format_grid_sql_literal(value, database_type, column_info);
+        format!("{ident} = {}", mysql_json_predicate_literal(literal, database_type, column_info))
     }
 }
 
@@ -2334,7 +2335,22 @@ fn build_save_column_predicate(
     } else if use_binary_text_comparison && uses_mysql_binary_text_predicate(database_type, value, column_info) {
         format!("BINARY {ident} = {}", format_grid_save_sql_literal(value, database_type, column_info))
     } else {
-        format!("{ident} = {}", format_grid_save_sql_literal(value, database_type, column_info))
+        let literal = format_grid_save_sql_literal(value, database_type, column_info);
+        format!("{ident} = {}", mysql_json_predicate_literal(literal, database_type, column_info))
+    }
+}
+
+fn mysql_json_predicate_literal(
+    literal: String,
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+) -> String {
+    if database_type == Some(DatabaseType::Mysql)
+        && column_info.is_some_and(|column| column.data_type.trim().eq_ignore_ascii_case("json"))
+    {
+        format!("CAST({literal} AS JSON)")
+    } else {
+        literal
     }
 }
 
@@ -4530,6 +4546,60 @@ mod tests {
         assert_eq!(result.statements.len(), 2);
         assert_eq!(result.rollback_statements.len(), 2);
         assert!(result.statements.iter().all(|statement| !statement.contains(" OR ")));
+    }
+
+    #[test]
+    fn casts_keyless_mysql_json_row_predicates() {
+        let options = DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app".to_string()),
+                table_name: "documents".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("payload", "JSON", false, None), column("note", "varchar(32)", true, None)]),
+            },
+            columns: vec!["payload".to_string(), "note".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(r#"{"name":"before"}"#), json!("row-a")]],
+            dirty_rows: vec![(0, vec![(0, json!(r#"{"name":"after"}"#))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        };
+
+        let update = prepare_data_grid_save(options.clone());
+        assert_eq!(update.validation_error, None);
+        assert_eq!(
+            update.statements,
+            vec![
+                r#"UPDATE `app`.`documents` SET `payload` = '{"name":"after"}' WHERE `payload` = CAST('{"name":"before"}' AS JSON) AND BINARY `note` = 'row-a';"#
+            ]
+        );
+        assert_eq!(
+            update.rollback_statements,
+            vec![
+                r#"UPDATE `app`.`documents` SET `payload` = '{"name":"before"}' WHERE `payload` = CAST('{"name":"after"}' AS JSON) AND BINARY `note` = 'row-a' AND `payload` = CAST('{"name":"after"}' AS JSON);"#
+            ]
+        );
+
+        let delete = prepare_data_grid_save(DataGridSaveStatementOptions {
+            dirty_rows: vec![],
+            deleted_rows: vec![0],
+            ..options
+        });
+        assert_eq!(delete.validation_error, None);
+        assert_eq!(
+            delete.statements,
+            vec![
+                r#"DELETE FROM `app`.`documents` WHERE `payload` = CAST('{"name":"before"}' AS JSON) AND BINARY `note` = 'row-a';"#
+            ]
+        );
+        assert_eq!(
+            delete.rollback_statements,
+            vec![r#"INSERT INTO `app`.`documents` (`payload`, `note`) VALUES ('{"name":"before"}', 'row-a');"#]
+        );
     }
 
     #[test]

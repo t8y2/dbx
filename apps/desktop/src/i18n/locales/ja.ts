@@ -527,6 +527,7 @@ export default withEnglishFallback({
     elasticsearchKibanaProxyMode: "Kibana プロキシ",
     elasticsearchKibanaHost: "Kibana ホスト",
     elasticsearchKibanaBasePath: "ベースパス",
+    jdbcMissingRuntimeDependencyHint: "現在のJDBCドライバーには実行依存関係が不足しています。「ドライバ管理」でMaven座標を使用してインストールするか、ドライバーとすべての依存JARを一度にインポートしてください。",
   },
   editor: {
     pressToExecute: "{mod}+Enter で実行",

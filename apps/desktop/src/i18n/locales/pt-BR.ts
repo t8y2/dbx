@@ -528,6 +528,7 @@ export default withEnglishFallback({
     elasticsearchKibanaProxyMode: "Proxy do Kibana",
     elasticsearchKibanaHost: "Host do Kibana",
     elasticsearchKibanaBasePath: "Caminho Base",
+    jdbcMissingRuntimeDependencyHint: "O driver JDBC atual está sem dependências de execução. Por favor, instale-o usando as coordenadas Maven no 'Gerenciamento de Drivers' ou importe o driver e todos os JARs de dependência de uma só vez.",
   },
   editor: {
     pressToExecute: "Pressione {mod}+Enter para executar",

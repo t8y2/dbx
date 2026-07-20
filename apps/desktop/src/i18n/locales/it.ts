@@ -527,6 +527,7 @@ export default withEnglishFallback({
     elasticsearchKibanaProxyMode: "Proxy Kibana",
     elasticsearchKibanaHost: "Host Kibana",
     elasticsearchKibanaBasePath: "Percorso base",
+    jdbcMissingRuntimeDependencyHint: "Il driver JDBC corrente manca di dipendenze runtime. Installare utilizzando le coordinate Maven in 'Gestione driver', o importare il driver e tutti i JAR delle dipendenze in una volta.",
   },
   editor: {
     pressToExecute: "Premi {mod}+Enter per eseguire",

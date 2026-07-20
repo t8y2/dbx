@@ -528,6 +528,7 @@ export default withEnglishFallback({
     elasticsearchKibanaProxyMode: "Kibana 代理",
     elasticsearchKibanaHost: "Kibana 主機",
     elasticsearchKibanaBasePath: "基礎路徑",
+    jdbcMissingRuntimeDependencyHint: "目前 JDBC 驅動缺少執行依賴。請在「驅動管理」中使用 Maven 座標安裝，或一次匯入驅動及全部依賴 JAR。",
   },
   editor: {
     pressToExecute: "按 {mod}+Enter 執行查詢",

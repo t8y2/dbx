@@ -108,7 +108,7 @@ import ChangelogPanel from "@/components/settings/ChangelogPanel.vue";
 import ScheduledDatabaseBackupSettings from "@/components/backup/ScheduledDatabaseBackupSettings.vue";
 import SqlFormatterSettingsPanel from "./SqlFormatterSettingsPanel.vue";
 import { APP_THEME_PALETTES, type AppThemeAppearance, type AppThemeMode, type AppThemePalette } from "@/lib/app/appTheme";
-import { editorSettingsDraftChanged, editorSettingsDraftFromSettings, editorSettingsPatchFromDraft, type EditorSettingsDraft } from "@/lib/settings/editorSettingsDraft";
+import { editorSettingsDraftChanged, editorSettingsDraftFromSettings, editorSettingsPatchFromDraft, normalizeTableOpenPageSizeDraft, type EditorSettingsDraft } from "@/lib/settings/editorSettingsDraft";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
@@ -304,6 +304,10 @@ const editTableColumnTemplateRows = ref<TableColumnTemplateGridRow[]>(tableColum
 const editTableColumnTemplateDatabaseType = ref<DatabaseType>(TABLE_COLUMN_TEMPLATE_DATABASE_TYPES[0] ?? "mysql");
 const editSqlVariableSyntaxOverrides = ref<SqlVariableSyntaxOverrides>(normalizeSqlVariableSyntaxOverrides(settingsStore.editorSettings.sqlVariableSyntaxOverrides));
 const editSqlVariableSyntaxDatabaseType = ref<DatabaseType>(SQL_VARIABLE_SYNTAX_DATABASE_TYPES[0] ?? "mysql");
+
+function updateTableOpenPageSizeDraft(value: string | number) {
+  editTableOpenPageSize.value = normalizeTableOpenPageSizeDraft(value);
+}
 
 function sqlVariableSyntaxToggle(key: keyof SqlVariableSyntaxToggles): boolean {
   return editSqlVariableSyntaxOverrides.value[editSqlVariableSyntaxDatabaseType.value]?.[key] ?? true;
@@ -3835,21 +3839,7 @@ onUnmounted(cleanupPreviewEditor);
                       {{ t("settings.tableOpenPageSizeDescription") }}
                     </p>
                   </div>
-                  <Input
-                    id="table-open-page-size"
-                    type="number"
-                    inputmode="numeric"
-                    class="h-7 w-24 px-2 text-right text-xs tabular-nums"
-                    :min="MIN_RESULT_PAGE_SIZE"
-                    :max="MAX_RESULT_PAGE_SIZE"
-                    :model-value="editTableOpenPageSize"
-                    @update:model-value="
-                      (value: string | number) => {
-                        const nextValue = typeof value === 'string' ? parseInt(value, 10) : value;
-                        if (!isNaN(nextValue)) editTableOpenPageSize = nextValue;
-                      }
-                    "
-                  />
+                  <Input id="table-open-page-size" type="number" inputmode="numeric" class="h-7 w-24 px-2 text-right text-xs tabular-nums" :min="MIN_RESULT_PAGE_SIZE" :max="MAX_RESULT_PAGE_SIZE" :model-value="editTableOpenPageSize" @update:model-value="updateTableOpenPageSizeDraft" />
                 </div>
               </div>
 

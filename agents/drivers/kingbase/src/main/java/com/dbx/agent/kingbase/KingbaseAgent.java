@@ -29,6 +29,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public final class KingbaseAgent extends PostgresLikeAgent {
     private static final int TRIGGER_TYPE_BEFORE = 1 << 1;
@@ -48,6 +50,10 @@ public final class KingbaseAgent extends PostgresLikeAgent {
     private static final String KINGBASE_VIEW_SCHEMA = "CAST(v.schemaname AS varchar(256))";
     private static final String KINGBASE_MATVIEW_NAME = "CAST(mv.matviewname AS varchar(256))";
     private static final String KINGBASE_MATVIEW_SCHEMA = "CAST(mv.schemaname AS varchar(256))";
+    private static final Pattern BOUNDED_VARCHAR_TYPE = Pattern.compile(
+        "^(?:varchar|character\\s+varying)\\s*\\(\\s*(\\d+)\\s*\\)$",
+        Pattern.CASE_INSENSITIVE
+    );
     private boolean postgresCatalogMode;
     private boolean sqlServerIdentityCatalogMode;
 
@@ -572,6 +578,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
             List<ColumnInfo> result = new ArrayList<>();
             String sql = "SELECT ic.column_name, ic.data_type, ic.is_nullable, ic.column_default, " +
                 "ic.numeric_precision, ic.numeric_scale, ic.character_maximum_length, " +
+                "format_type(a.atttypid, a.atttypmod) AS catalog_data_type, " +
                 "d.description AS column_comment " +
                 "FROM information_schema.columns ic " +
                 // information_schema preserves MySQL-compatible type metadata but does not expose comments.
@@ -587,9 +594,19 @@ public final class KingbaseAgent extends PostgresLikeAgent {
                 try (ResultSet rs = stmt.executeQuery(sql)) {
                     while (rs.next()) {
                         String columnName = rs.getString("column_name");
+                        String dataType = rs.getString("data_type");
+                        Integer characterLength = intObject(rs, "character_maximum_length");
+                        String catalogDataType = rs.getString("catalog_data_type");
+                        Integer catalogCharacterLength = boundedCharacterLength(catalogDataType);
+                        if ("varchar".equalsIgnoreCase(dataType)
+                            && (characterLength == null || characterLength <= 0)
+                            && catalogCharacterLength != null) {
+                            dataType = catalogDataType;
+                            characterLength = catalogCharacterLength;
+                        }
                         result.add(new ColumnInfo(
                             columnName,
-                            rs.getString("data_type"),
+                            dataType,
                             "YES".equalsIgnoreCase(coalesce(rs.getString("is_nullable"))),
                             rs.getString("column_default"),
                             primaryKeys.contains(columnName),
@@ -597,13 +614,25 @@ public final class KingbaseAgent extends PostgresLikeAgent {
                             rs.getString("column_comment"),
                             intObject(rs, "numeric_precision"),
                             intObject(rs, "numeric_scale"),
-                            intObject(rs, "character_maximum_length")
+                            characterLength
                         ));
                     }
                 }
             }
             return result;
         });
+    }
+
+    private static Integer boundedCharacterLength(String dataType) {
+        if (dataType == null) return null;
+        Matcher match = BOUNDED_VARCHAR_TYPE.matcher(dataType.trim());
+        if (!match.matches()) return null;
+        try {
+            int length = Integer.parseInt(match.group(1));
+            return length > 0 ? length : null;
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
     }
 
     @Override

@@ -556,7 +556,7 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
-    void mysqlCompatGetColumnsKeepsInformationSchemaPath() {
+    void mysqlCompatGetColumnsRestoresBoundedCatalogCharacterTypes() {
         List<String> sql = new ArrayList<>();
         KingbaseAgent agent = new KingbaseAgent();
         agent.setMysqlCompatMode(true);
@@ -574,9 +574,14 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
                     "numeric_precision",
                     "numeric_scale",
                     "character_maximum_length",
+                    "catalog_data_type",
                     "column_comment"
                 },
-                new Object[][]{{"id", "int", "NO", null, 32, 0, null, "identifier"}}
+                new Object[][]{
+                    {"id", "int", "NO", null, 32, 0, null, "integer", "identifier"},
+                    {"name", "varchar", "YES", null, null, null, -1, "character varying(64)", null},
+                    {"notes", "varchar", "YES", null, null, null, -1, "varchar", null}
+                }
             )
         ));
 
@@ -584,9 +589,26 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
 
         Assertions.assertEquals("int", columns.get(0).getData_type());
         Assertions.assertEquals("identifier", columns.get(0).getComment());
+        Assertions.assertEquals("character varying(64)", columns.get(1).getData_type());
+        Assertions.assertEquals(Integer.valueOf(64), columns.get(1).getCharacter_maximum_length());
+        Assertions.assertEquals("varchar", columns.get(2).getData_type());
+        Assertions.assertEquals(Integer.valueOf(-1), columns.get(2).getCharacter_maximum_length());
         Assertions.assertTrue(sql.get(1).contains("FROM information_schema.columns"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("format_type(a.atttypid, a.atttypmod) AS catalog_data_type"), sql.get(1));
         Assertions.assertTrue(sql.get(1).contains("LEFT JOIN sys_catalog.sys_description"), sql.get(1));
         Assertions.assertNull(columns.get(0).getExtra());
+
+        String ddl = DdlBuilder.buildTableDdl(
+            "PUBLIC",
+            "orders",
+            columns,
+            Collections.emptyList(),
+            Collections.emptyList(),
+            true
+        );
+        Assertions.assertTrue(ddl.contains("`name` character varying(64)"), ddl);
+        Assertions.assertTrue(ddl.contains("`notes` varchar"), ddl);
+        Assertions.assertFalse(ddl.contains("varchar(-1)"), ddl);
     }
 
     @Test

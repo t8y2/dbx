@@ -39,6 +39,5 @@
   "etcd": "0.1.20",
   "zookeeper": "0.1.10",
   "kafka": "0.1.4",
-  "rocketmq": "0.1.0",
   "sqlserver-legacy": "0.1.3"
 }

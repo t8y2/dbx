@@ -784,7 +784,7 @@ function tryReadQuotedBracedPlaceholder(sql: string, start: number, quote: "'" |
   };
 }
 
-/** True when `quoteStart` opens a prefixed literal such as E'...', U&'...', B'...', X'...', or N'...'. */
+/** True when `quoteStart` opens a prefixed literal such as E'...', U&'...', or MySQL _charset'...'. */
 function hasSqlStringLiteralPrefix(sql: string, quoteStart: number): boolean {
   if (quoteStart <= 0) return false;
 
@@ -792,12 +792,10 @@ function hasSqlStringLiteralPrefix(sql: string, quoteStart: number): boolean {
     return true;
   }
 
-  const prev = sql[quoteStart - 1];
-  if ((prev === "E" || prev === "e" || prev === "B" || prev === "b" || prev === "X" || prev === "x" || prev === "N" || prev === "n") && !PARAMETER_NAME_CHAR_RE.test(sql[quoteStart - 2] ?? "")) {
-    return true;
-  }
-
-  return false;
+  // SQL dialects attach word-like introducers directly to the quote. Reject the
+  // whole category so typed replacement cannot leave invalid prefixes such as
+  // `_utf8mb4TRUE`, and so future introducers do not require another allowlist.
+  return PARAMETER_NAME_CHAR_RE.test(sql[quoteStart - 1]);
 }
 
 function skipQuoted(sql: string, start: number, quote: string): number {

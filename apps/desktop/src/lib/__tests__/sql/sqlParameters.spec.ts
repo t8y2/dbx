@@ -327,6 +327,19 @@ describe("substituteSqlParameters", () => {
     ).toBe("select E'${path}' as a, U&'${unicode}' as b, B'${flag}' as c, X'${hex}' as d, N'${national}' as e, 'ok' as f");
   });
 
+  it("ignores MySQL character-set introducers before quoted placeholders", () => {
+    const sql = "select _utf8mb4'${flag}' as a, _binary'#{amount}' as b, _custom_charset'${name}' as c, '${plain}' as d";
+    expect(extractSqlParameters(sql)).toEqual(["plain"]);
+    expect(
+      substituteSqlParameters(sql, {
+        flag: { kind: "boolean", value: "true" },
+        amount: { kind: "number", value: "12" },
+        name: { kind: "string", value: "ignored" },
+        plain: { kind: "string", value: "ok" },
+      }),
+    ).toBe("select _utf8mb4'${flag}' as a, _binary'#{amount}' as b, _custom_charset'${name}' as c, 'ok' as d");
+  });
+
   it("ignores doubled-quote continuations that are not exact quoted placeholders", () => {
     const single = "select '${value}''suffix' as a, ${real}";
     expect(extractSqlParameters(single)).toEqual(["real"]);

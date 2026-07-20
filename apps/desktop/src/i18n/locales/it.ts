@@ -5005,6 +5005,7 @@ export default withEnglishFallback({
     searchHint: "Cerca prima il messaggio, poi fai clic su 'Visualizza traccia consumo'",
     viewTrace: "Visualizza traccia consumo",
     detailTitle: "Dettagli traccia consumo",
-    traceTopicRouteMissing: "Il Topic di traccia non ha informazioni di instradamento sul NameServer (CODE: 17).\n\nCause comuni:\n1. Il Broker non ha abilitato la traccia messaggi: imposta traceTopicEnable=true in broker.conf e riavvia il Broker\n2. Producer/Consumer non hanno abilitato la traccia: setEnableTrace(true)\n3. È stato utilizzato un Topic di traccia personalizzato, seleziona il Topic di traccia corretto sopra.",
+    traceTopicRouteMissing:
+      "Il Topic di traccia non ha informazioni di instradamento sul NameServer (CODE: 17).\n\nCause comuni:\n1. Il Broker non ha abilitato la traccia messaggi: imposta traceTopicEnable=true in broker.conf e riavvia il Broker\n2. Producer/Consumer non hanno abilitato la traccia: setEnableTrace(true)\n3. È stato utilizzato un Topic di traccia personalizzato, seleziona il Topic di traccia corretto sopra.",
   },
 });

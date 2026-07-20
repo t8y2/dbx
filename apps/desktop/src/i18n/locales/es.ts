@@ -5007,6 +5007,7 @@ export default withEnglishFallback({
     searchHint: "Primero busque el mensaje, luego haga clic en «Ver traza de consumo»",
     viewTrace: "Ver traza de consumo",
     detailTitle: "Detalles de la traza de consumo",
-    traceTopicRouteMissing: "El Topic de trazas no tiene información de ruta en NameServer (CODE: 17).\n\nCausas comunes:\n1. Broker no tiene habilitada la traza de mensajes: configure traceTopicEnable=true en broker.conf y reinicie el Broker\n2. Producer/Consumer no tiene habilitada la traza: setEnableTrace(true)\n3. Se utilizó un Topic de trazas personalizado, seleccione el Topic de trazas correcto arriba.",
+    traceTopicRouteMissing:
+      "El Topic de trazas no tiene información de ruta en NameServer (CODE: 17).\n\nCausas comunes:\n1. Broker no tiene habilitada la traza de mensajes: configure traceTopicEnable=true en broker.conf y reinicie el Broker\n2. Producer/Consumer no tiene habilitada la traza: setEnableTrace(true)\n3. Se utilizó un Topic de trazas personalizado, seleccione el Topic de trazas correcto arriba.",
   },
 });

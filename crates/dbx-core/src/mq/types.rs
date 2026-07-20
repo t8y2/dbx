@@ -29,9 +29,8 @@ impl MqSystemKind {
 /// Capability flags. The frontend reads these to show/hide functionality, and
 /// the adapter computes them from the detected server version so unsupported
 /// features are hidden rather than failing at call time.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[derive(Default)]
 pub struct MqCapabilities {
     pub supports_tenants: bool,
     pub supports_namespaces: bool,
@@ -62,34 +61,6 @@ pub struct MqCapabilities {
     /// RocketMQ: message trace lookup (requires broker trace topic).
     #[serde(default)]
     pub supports_message_trace: bool,
-}
-
-impl Default for MqCapabilities {
-    fn default() -> Self {
-        Self {
-            supports_tenants: false,
-            supports_namespaces: false,
-            supports_partitioned_topics: false,
-            supports_subscriptions: false,
-            supports_create_subscription: false,
-            supports_reset_cursor: false,
-            supports_skip_messages: false,
-            supports_clear_backlog: false,
-            supports_peek_messages: false,
-            supports_expire_messages: false,
-            supports_rate_limits: false,
-            supports_backlog_quota: false,
-            supports_retention: false,
-            supports_permissions: false,
-            supports_geo_replication: false,
-            supports_token_management: false,
-            supports_raw_admin_api: false,
-            supports_send_message: false,
-            supports_message_query: false,
-            supports_dlq: false,
-            supports_message_trace: false,
-        }
-    }
 }
 
 /// Result of a connectivity test, including the detected server version and how

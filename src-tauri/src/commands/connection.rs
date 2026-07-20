@@ -987,8 +987,6 @@ async fn test_connection_with_info_inner(
                 let mqc = state.mq_admin_config_for_connection(connection_id, &config).await?;
                 let agent_launch = dbx_core::mq::service::resolve_mq_agent_launch_spec(&mqc, &state);
                 let adapter = match state.mq_registry.get_or_build_config(connection_id, mqc, agent_launch).await {
-                let kafka_launch = dbx_core::mq::service::resolve_kafka_launch_spec(&mqc, state);
-                let adapter = match state.mq_registry.get_or_build_config(connection_id, mqc, kafka_launch).await {
                     Ok(adapter) => adapter,
                     Err(err) => {
                         state.mq_registry.drop_connection(connection_id).await;

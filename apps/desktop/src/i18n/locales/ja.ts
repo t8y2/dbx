@@ -5006,6 +5006,7 @@ export default withEnglishFallback({
     searchHint: "まずメッセージを検索し、その後「消費トレースを表示」をクリックしてください",
     viewTrace: "消費トレースを表示",
     detailTitle: "消費トレース詳細",
-    traceTopicRouteMissing: "トレース Topic が NameServer にルート情報がありません (CODE: 17)。\n\n一般的な原因:\n1. Broker でメッセージトレースが有効になっていない: broker.conf で traceTopicEnable=true を設定し Broker を再起動\n2. Producer/Consumer でトレースが有効になっていない: setEnableTrace(true)\n3. カスタムトレース Topic を使用している場合は、上で正しいトレース Topic を選択してください",
+    traceTopicRouteMissing:
+      "トレース Topic が NameServer にルート情報がありません (CODE: 17)。\n\n一般的な原因:\n1. Broker でメッセージトレースが有効になっていない: broker.conf で traceTopicEnable=true を設定し Broker を再起動\n2. Producer/Consumer でトレースが有効になっていない: setEnableTrace(true)\n3. カスタムトレース Topic を使用している場合は、上で正しいトレース Topic を選択してください",
   },
 });

@@ -193,8 +193,9 @@ impl MessageQueueAdmin for RocketMqAdmin {
             }
 
             let total = result.get("total").and_then(|v| v.as_u64()).unwrap_or(offset as u64 + page_len as u64);
+            let fetch_next = topic_list_should_fetch_next(offset, page_len, total);
             offset = offset.saturating_add(page_len as u32);
-            if page_len == 0 || offset as u64 >= total {
+            if !fetch_next {
                 break;
             }
         }
@@ -729,10 +730,11 @@ fn topic_info_from_agent_value(t: &serde_json::Value) -> TopicInfo {
 }
 
 /// Whether another Agent topic list page should be requested after consuming `page_len` rows.
-fn topic_list_should_fetch_next(offset: usize, page_len: usize, total: u64) -> bool {
-    page_len > 0 && ((offset + page_len) as u64) < total
+fn topic_list_should_fetch_next(offset: u32, page_len: usize, total: u64) -> bool {
+    page_len > 0 && u64::from(offset) + (page_len as u64) < total
 }
 
+#[cfg(test)]
 fn topic_infos_from_agent_pages(pages: &[serde_json::Value]) -> Vec<TopicInfo> {
     let mut all = Vec::new();
     let mut offset: u32 = 0;
@@ -791,14 +793,14 @@ fn build_connection_params(cfg: &MqAdminConfig) -> serde_json::Value {
     let extra = &cfg.extra;
     let access_key = extra_str(extra, "accessKey")
         .or_else(|| extra_str(extra, "access_key"))
-        .or_else(|| match &cfg.auth {
+        .or(match &cfg.auth {
             MqAuth::Basic { username, .. } => Some(username.as_str()),
             _ => None,
         })
         .unwrap_or("");
     let secret_key = extra_str(extra, "secretKey")
         .or_else(|| extra_str(extra, "secret_key"))
-        .or_else(|| match &cfg.auth {
+        .or(match &cfg.auth {
             MqAuth::Basic { password, .. } => Some(password.as_str()),
             _ => None,
         })
@@ -842,6 +844,7 @@ fn reset_cursor_params(topic: &TopicRef, sub: &str, pos: ResetPosition) -> Resul
     }
 }
 
+#[cfg(test)]
 fn rocketmq_subscription_for_topic(
     group_id: &str,
     topic: &str,

@@ -56,7 +56,8 @@ import {
   type QueryEditorTableReferenceDropDetail,
   type QueryEditorTableReferencePayload,
 } from "@/lib/editor/queryEditorTableDrop";
-import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, createRunStatementButtonDom, loadEditorTheme, editorFontTheme, sqlCompletionTheme, sqlSemanticHighlightTheme } from "@/lib/editor/editorThemes";
+import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, loadEditorTheme, editorFontTheme, sqlCompletionTheme, sqlSemanticHighlightTheme } from "@/lib/editor/editorThemes";
+import { createStatementGutterMarkerDom } from "@/lib/editor/codemirrorStatementGutter";
 import { clampEditorFontSize, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
 import { normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
@@ -261,7 +262,6 @@ let codeMirrorCloseBrackets: typeof import("@codemirror/autocomplete").closeBrac
 let codeMirrorCloseBracketsKeymap: readonly import("@codemirror/view").KeyBinding[] | null = null;
 let readOnlyComp: import("@codemirror/state").Compartment | null = null;
 let runGutterComp: import("@codemirror/state").Compartment | null = null;
-let statementExecutionGutterComp: import("@codemirror/state").Compartment | null = null;
 let runKeymapComp: import("@codemirror/state").Compartment | null = null;
 let completionComp: import("@codemirror/state").Compartment | null = null;
 let diagnosticComp: import("@codemirror/state").Compartment | null = null;
@@ -310,8 +310,6 @@ let setStatementExecutionMarkersEffect: import("@codemirror/state").StateEffectT
 let previewRangeComp: import("@codemirror/state").Compartment | null = null;
 let buildPreviewRangeExtension: (() => import("@codemirror/state").Extension) | null = null;
 let buildResultSourceRangeExtension: (() => import("@codemirror/state").Extension) | null = null;
-let buildStatementExecutionMarkersExtension: (() => import("@codemirror/state").Extension) | null = null;
-let statementExecutionGutterMounted = false;
 let buildRunStatementGutterExtension: (() => import("@codemirror/state").Extension) | null = null;
 let indentComp: import("@codemirror/state").Compartment | null = null;
 let codeMirrorIndentUnit: typeof import("@codemirror/language").indentUnit | null = null;
@@ -3004,7 +3002,6 @@ onMounted(async () => {
   codeMirrorCloseBracketsKeymap = closeBracketsKeymap;
   readOnlyComp = new Compartment();
   runGutterComp = new Compartment();
-  statementExecutionGutterComp = new Compartment();
   runKeymapComp = new Compartment();
   completionComp = new Compartment();
   diagnosticComp = new Compartment();
@@ -3139,23 +3136,35 @@ onMounted(async () => {
     return field;
   };
 
-  class StatementExecutionStatusMarker extends GutterMarker {
+  class StatementExecutionStateMarker extends GutterMarker {
     constructor(readonly marker: StatementExecutionMarker) {
       super();
     }
 
     eq(other: import("@codemirror/view").GutterMarker): boolean {
-      return other instanceof StatementExecutionStatusMarker && other.marker.status === this.marker.status && other.marker.successCount === this.marker.successCount && other.marker.errorCount === this.marker.errorCount;
+      return other instanceof StatementExecutionStateMarker && other.marker.status === this.marker.status && other.marker.successCount === this.marker.successCount && other.marker.errorCount === this.marker.errorCount;
+    }
+  }
+
+  class StatementGutterMarker extends GutterMarker {
+    constructor(
+      readonly canExecute: boolean,
+      readonly marker?: StatementExecutionMarker,
+    ) {
+      super();
+    }
+
+    eq(other: import("@codemirror/view").GutterMarker): boolean {
+      return other instanceof StatementGutterMarker && other.canExecute === this.canExecute && other.marker?.status === this.marker?.status && other.marker?.successCount === this.marker?.successCount && other.marker?.errorCount === this.marker?.errorCount;
     }
 
     toDOM() {
-      const element = document.createElement("span");
-      const title = statementExecutionMarkerTitle(this.marker);
-      element.className = `cm-statement-execution-marker cm-statement-execution-marker--${this.marker.status}`;
-      element.title = title;
-      element.setAttribute("aria-label", title);
-      element.appendChild(createStatementExecutionStatusIconDom(this.marker.status));
-      return element;
+      return createStatementGutterMarkerDom({
+        canExecute: this.canExecute,
+        executeLabel: t("editor.contextMenu.executeCurrent"),
+        status: this.marker?.status,
+        statusLabel: this.marker ? statementExecutionMarkerTitle(this.marker) : undefined,
+      });
     }
   }
 
@@ -3166,34 +3175,14 @@ onMounted(async () => {
     return parts.join(", ");
   }
 
-  function createStatementExecutionStatusIconDom(status: StatementExecutionMarker["status"]) {
-    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    svg.setAttribute("viewBox", "0 0 24 24");
-    svg.setAttribute("fill", "none");
-    svg.setAttribute("stroke", "currentColor");
-    svg.setAttribute("stroke-width", "2");
-    svg.setAttribute("stroke-linecap", "round");
-    svg.setAttribute("stroke-linejoin", "round");
-    svg.setAttribute("aria-hidden", "true");
-
-    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-    circle.setAttribute("cx", "12");
-    circle.setAttribute("cy", "12");
-    circle.setAttribute("r", "10");
-    const mark = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    mark.setAttribute("d", status === "error" ? "m15 9-6 6m0-6 6 6" : "m9 12 2 2 4-4");
-    svg.append(circle, mark);
-
-    return svg;
-  }
-
   setStatementExecutionMarkersEffect = StateEffect.define<StatementExecutionMarker[]>();
-  buildStatementExecutionMarkersExtension = () => {
+  buildRunStatementGutterExtension = () => {
     const effectType = setStatementExecutionMarkersEffect!;
+    const showRunButtons = !props.hideExecutionControls && settingsStore.editorSettings.showStatementRunButtons;
     const markersForState = (state: import("@codemirror/state").EditorState, markers: readonly StatementExecutionMarker[]) => {
       const ranges = markers.map((marker) => {
         const from = Math.max(0, Math.min(marker.from, state.doc.length));
-        return new StatementExecutionStatusMarker(marker).range(state.doc.lineAt(from).from);
+        return new StatementExecutionStateMarker(marker).range(state.doc.lineAt(from).from);
       });
       return RangeSet.of(ranges, true);
     };
@@ -3211,14 +3200,22 @@ onMounted(async () => {
       },
       provide: (field) =>
         gutter({
-          class: "cm-statement-execution-gutter",
+          class: "cm-run-statement-gutter",
           markers: (currentView) => currentView.state.field(field),
+          lineMarker(currentView, line, markers) {
+            const executionMarker = markers.find((marker) => marker instanceof StatementExecutionStateMarker)?.marker;
+            const canExecute = showRunButtons && !!executableStatementRangeStartingAt(currentView, line.from);
+            return canExecute || executionMarker ? new StatementGutterMarker(canExecute, executionMarker) : null;
+          },
+          domEventHandlers: showRunButtons
+            ? {
+                mousedown: executeSqlStatementFromGutter,
+              }
+            : {},
         }),
     });
     return field;
   };
-  statementExecutionGutterMounted = (props.statementExecutionMarkers?.length ?? 0) > 0;
-
   buildSqlSignatureExtension = () =>
     showTooltip.compute(["doc", "selection"], (currentState) => {
       const signature = getSqlFunctionSignatureHelp(currentState.doc.toString(), currentState.selection.main.head, props.databaseType);
@@ -3291,26 +3288,6 @@ onMounted(async () => {
   if (initialSettings.vimModeEnabled) {
     await ensureCodeMirrorVim();
   }
-
-  class RunStatementGutterMarker extends GutterMarker {
-    toDOM() {
-      return createRunStatementButtonDom("Execute statement");
-    }
-  }
-
-  const executableStatementMarker = new RunStatementGutterMarker();
-  buildRunStatementGutterExtension = () =>
-    settingsStore.editorSettings.showStatementRunButtons
-      ? gutter({
-          class: "cm-run-statement-gutter",
-          lineMarker(currentView, line) {
-            return executableStatementRangeStartingAt(currentView, line.from) ? executableStatementMarker : null;
-          },
-          domEventHandlers: {
-            mousedown: executeSqlStatementFromGutter,
-          },
-        })
-      : [];
 
   const currentStatementFrameHighlighter = ViewPlugin.fromClass(
     class {
@@ -3414,7 +3391,7 @@ onMounted(async () => {
           return { dom };
         },
       }),
-      runGutterComp.of(props.hideExecutionControls ? [] : buildRunStatementGutterExtension()),
+      runGutterComp.of(buildRunStatementGutterExtension()),
       lineNumbers({
         domEventHandlers: {
           mousedown: selectSqlLineFromGutter,
@@ -3485,7 +3462,6 @@ onMounted(async () => {
       }),
       previewRangeComp.of(buildPreviewRangeExtension()),
       buildResultSourceRangeExtension(),
-      statementExecutionGutterComp.of(statementExecutionGutterMounted ? buildStatementExecutionMarkersExtension() : []),
       Prec.highest(
         keymap.of([
           { key: "'", run: handleSqlSingleQuote },
@@ -3792,22 +3768,7 @@ watch(
 watch(
   () => props.statementExecutionMarkers ?? [],
   (markers) => {
-    if (!view.value || !statementExecutionGutterComp || !buildStatementExecutionMarkersExtension || !setStatementExecutionMarkersEffect) return;
-    if (markers.length === 0) {
-      if (!statementExecutionGutterMounted) return;
-      view.value.dispatch({
-        effects: statementExecutionGutterComp.reconfigure([]),
-      });
-      statementExecutionGutterMounted = false;
-      return;
-    }
-    if (!statementExecutionGutterMounted) {
-      view.value.dispatch({
-        effects: statementExecutionGutterComp.reconfigure(buildStatementExecutionMarkersExtension()),
-      });
-      statementExecutionGutterMounted = true;
-      return;
-    }
+    if (!view.value || !setStatementExecutionMarkersEffect) return;
     view.value.dispatch({
       effects: setStatementExecutionMarkersEffect.of(markers),
     });
@@ -3891,7 +3852,7 @@ watch(
         wordWrapComp.reconfigure(props.forceWordWrap || ss.wordWrap ? editorViewModule.EditorView.lineWrapping : []),
         vimModeComp.reconfigure(vimModeExtension(settingsStore.editorSettings.vimModeEnabled)),
         closeBracketsComp.reconfigure(closeBracketsExtension(settingsStore.editorSettings.autoCloseBrackets)),
-        runGutterComp.reconfigure(props.hideExecutionControls ? [] : (buildRunStatementGutterExtension?.() ?? [])),
+        runGutterComp.reconfigure(buildRunStatementGutterExtension?.() ?? []),
         runKeymapComp.reconfigure(runKeymapExtension(editorViewModule.keymap)),
       ],
     });
@@ -4198,19 +4159,6 @@ defineExpose({
   padding: 0 5px;
 }
 
-:deep(.cm-statement-execution-gutter) {
-  min-width: 34px;
-}
-
-:deep(.cm-statement-execution-gutter .cm-gutterElement) {
-  align-items: center;
-  box-sizing: border-box;
-  display: flex;
-  justify-content: center;
-  min-width: 34px;
-  padding: 0 5px;
-}
-
 :deep(.cm-statement-execution-marker) {
   display: inline-flex;
   align-items: center;
@@ -4258,6 +4206,7 @@ defineExpose({
 }
 
 :deep(.cm-run-statement-marker) {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -4299,12 +4248,41 @@ defineExpose({
   color: rgb(167 243 208);
 }
 
-:deep(.cm-run-statement-marker svg) {
+:deep(.cm-run-statement-marker > svg) {
   display: block;
   width: min(14px, 70%);
   height: min(14px, 70%);
   pointer-events: none;
   flex-shrink: 0;
+}
+
+:deep(.cm-statement-execution-badge) {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: min(9px, 45%);
+  height: min(9px, 45%);
+  border-radius: 9999px;
+  color: white;
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.9);
+  pointer-events: none;
+}
+
+:deep(.cm-statement-execution-badge--success) {
+  background: rgb(5 150 105);
+}
+
+:deep(.cm-statement-execution-badge--error) {
+  background: rgb(220 38 38);
+}
+
+:deep(.cm-statement-execution-badge svg) {
+  display: block;
+  width: 75%;
+  height: 75%;
 }
 
 :deep(.cm-foldMarker-svg) {

@@ -790,6 +790,7 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
       margin: "0",
       outline: "none",
       padding: "0",
+      position: "relative",
       transition: "color 0.15s, background-color 0.15s",
       userSelect: "none",
       verticalAlign: "middle",
@@ -805,12 +806,37 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
       background: "rgb(16 185 129 / 0.2)",
       color: "rgb(6 95 70)",
     },
-    "&.cm-editor .cm-run-statement-marker svg": {
+    "&.cm-editor .cm-run-statement-marker > svg": {
       display: "block",
       flexShrink: "0",
       height: "min(14px, 70%)",
       pointerEvents: "none",
       width: "min(14px, 70%)",
+    },
+    ".cm-statement-execution-badge": {
+      alignItems: "center",
+      borderRadius: "9999px",
+      bottom: "-1px",
+      boxShadow: "0 0 0 1px rgb(255 255 255 / 0.9)",
+      color: "white",
+      display: "inline-flex",
+      height: "min(9px, 45%)",
+      justifyContent: "center",
+      pointerEvents: "none",
+      position: "absolute",
+      right: "-1px",
+      width: "min(9px, 45%)",
+    },
+    ".cm-statement-execution-badge--success": {
+      background: "rgb(5 150 105)",
+    },
+    ".cm-statement-execution-badge--error": {
+      background: "rgb(220 38 38)",
+    },
+    ".cm-statement-execution-badge svg": {
+      display: "block",
+      height: "75%",
+      width: "75%",
     },
     "&.cm-editor.cm-focused .cm-run-statement-marker:focus-visible": {
       outline: "1px solid var(--ring)",

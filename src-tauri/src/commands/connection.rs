@@ -985,7 +985,7 @@ async fn test_connection_with_info_inner(
             #[cfg(feature = "mq-admin")]
             DatabaseType::MessageQueue => {
                 let mqc = state.mq_admin_config_for_connection(connection_id, &config).await?;
-                let agent_launch = dbx_core::mq::service::resolve_mq_agent_launch_spec(&mqc, &state);
+                let agent_launch = dbx_core::mq::service::resolve_mq_agent_launch_spec(&mqc, state);
                 let adapter = match state.mq_registry.get_or_build_config(connection_id, mqc, agent_launch).await {
                     Ok(adapter) => adapter,
                     Err(err) => {

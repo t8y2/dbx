@@ -1915,7 +1915,7 @@ async fn list_tables_once(
         try_sqlserver!(connections, &pool_key, list_tables, schema, filter, limit, offset);
         if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
             let is_oracle = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle);
-            let use_oracle_agent_paging = db_config.as_ref().is_some_and(is_default_oracle_agent_config);
+            let use_agent_table_paging = db_config.as_ref().is_some_and(supports_agent_table_paging);
             let filter_locally_after_oracle_comments =
                 is_oracle && filter.is_some_and(|filter| !filter.trim().is_empty());
             let timeout_duration = agent_metadata_timeout(db_config.as_ref());
@@ -1925,14 +1925,14 @@ async fn list_tables_once(
             let agent_filter = if filter_locally_after_oracle_comments { None } else { filter };
             let agent_limit = if filter_locally_after_oracle_comments {
                 None
-            } else if use_oracle_agent_paging {
+            } else if use_agent_table_paging {
                 limit
             } else {
                 None
             };
             let agent_offset = if filter_locally_after_oracle_comments {
                 None
-            } else if use_oracle_agent_paging {
+            } else if use_agent_table_paging {
                 offset
             } else {
                 None
@@ -1962,7 +1962,7 @@ async fn list_tables_once(
                     }
                     let final_offset = if filter_locally_after_oracle_comments {
                         offset
-                    } else if oracle_agent_paging_likely_applied(use_oracle_agent_paging, limit, tables.len()) {
+                    } else if agent_paging_likely_applied(use_agent_table_paging, limit, tables.len()) {
                         Some(0)
                     } else {
                         offset
@@ -2597,12 +2597,23 @@ mod tests {
     }
 
     #[test]
-    fn oracle_agent_paging_detection_avoids_double_offset_only_when_page_sized() {
-        assert!(super::oracle_agent_paging_likely_applied(true, Some(500), 500));
-        assert!(super::oracle_agent_paging_likely_applied(true, Some(500), 120));
-        assert!(!super::oracle_agent_paging_likely_applied(true, Some(500), 501));
-        assert!(!super::oracle_agent_paging_likely_applied(false, Some(500), 120));
-        assert!(!super::oracle_agent_paging_likely_applied(true, None, 120));
+    fn agent_table_paging_supports_tdengine_and_default_oracle_only() {
+        assert!(super::supports_agent_table_paging(&test_connection_config(DatabaseType::Tdengine)));
+        assert!(super::supports_agent_table_paging(&test_connection_config(DatabaseType::Oracle)));
+        assert!(!super::supports_agent_table_paging(&test_connection_config(DatabaseType::Dameng)));
+
+        let mut legacy_oracle = test_connection_config(DatabaseType::Oracle);
+        legacy_oracle.driver_profile = Some("oracle-legacy".to_string());
+        assert!(!super::supports_agent_table_paging(&legacy_oracle));
+    }
+
+    #[test]
+    fn agent_paging_detection_avoids_double_offset_only_when_page_sized() {
+        assert!(super::agent_paging_likely_applied(true, Some(500), 500));
+        assert!(super::agent_paging_likely_applied(true, Some(500), 120));
+        assert!(!super::agent_paging_likely_applied(true, Some(500), 501));
+        assert!(!super::agent_paging_likely_applied(false, Some(500), 120));
+        assert!(!super::agent_paging_likely_applied(true, None, 120));
     }
 
     #[test]
@@ -3516,7 +3527,7 @@ pub async fn list_objects_core(
             .await
             .map(|outcome| {
                 let final_offset = if outcome.paging_applied
-                    || oracle_agent_paging_likely_applied(use_oracle_agent_paging, limit, outcome.objects.len())
+                    || agent_paging_likely_applied(use_oracle_agent_paging, limit, outcome.objects.len())
                 {
                     Some(0)
                 } else {
@@ -4960,7 +4971,12 @@ fn is_default_oracle_agent_config(config: &ConnectionConfig) -> bool {
         && !matches!(config.driver_profile.as_deref(), Some("oracle-legacy" | "oracle-10g"))
 }
 
-fn oracle_agent_paging_likely_applied(enabled: bool, limit: Option<usize>, returned_len: usize) -> bool {
+fn supports_agent_table_paging(config: &ConnectionConfig) -> bool {
+    // Keep paging opt-in until each legacy agent is known to apply metadata constraints server-side.
+    matches!(config.db_type, DatabaseType::Tdengine) || is_default_oracle_agent_config(config)
+}
+
+fn agent_paging_likely_applied(enabled: bool, limit: Option<usize>, returned_len: usize) -> bool {
     enabled && limit.is_some_and(|limit| returned_len <= limit)
 }
 

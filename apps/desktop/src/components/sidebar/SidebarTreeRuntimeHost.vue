@@ -91,6 +91,7 @@ import { dataTabOpenModeFromTreeClick, type DataTabOpenMode } from "@/lib/sideba
 import { isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
 import { canRefreshDataTableFromSingleActivationDoubleClick, dataTableDoubleClickAction } from "@/lib/tabs/dataTabActivation";
 import { attachedDatabaseNameFromPath, buildCreateDatabaseSql, buildDuckDbAttachDatabaseSql, buildSqliteAttachDatabaseSql, supportsCreateDatabaseCharset, uniqueAttachedDatabaseName } from "@/lib/database/createDatabaseSql";
+import { appendCreateDatabaseErrorHint } from "@/lib/database/createDatabaseErrorHints";
 import { SQLITE_DATABASE_FILE_EXTENSIONS } from "@/lib/database/databaseFileDetection";
 import {
   buildCreateSchemaSql,
@@ -2572,24 +2573,30 @@ async function applyCreateDatabaseAuthorizationPlan() {
   if (!node.connectionId || !plan || createDatabaseAuthorizationApplying.value) return;
   createDatabaseAuthorizationApplying.value = true;
   try {
+    const config = connectionStore.getConfig(node.connectionId);
     const results = await executeWithProductionSqlGuard({
-      connection: connectionStore.getConfig(node.connectionId),
+      connection: config,
       database: "",
       sql: createDatabasePreviewSql.value,
       source: t("production.sourceSidebar"),
       execute: () => executeAuthorizationPlan(plan, (step) => api.executeMulti(node.connectionId!, step.database, step.sql, undefined, undefined, { maxRows: 1000, continueOnError: true })),
     });
     if (!results) return;
-    createDatabaseAuthorizationResults.value = results;
-    const created = results.some((result) => result.step.id === "create-database" && result.status === "success");
-    const status = authorizationPlanStatus(results);
+    const displayResults = results.map((result) => ({
+      ...result,
+      message: result.message && result.step.operation === "createDatabase" ? appendCreateDatabaseErrorHint(config?.db_type, result.message, t) : result.message,
+    }));
+    createDatabaseAuthorizationResults.value = displayResults;
+    const created = displayResults.some((result) => result.step.id === "create-database" && result.status === "success");
+    const status = authorizationPlanStatus(displayResults);
     if (created) {
       await connectionStore.ensureVisibleDatabase(node.connectionId, name);
       await connectionStore.loadDatabases(node.connectionId, { force: true });
     }
     toast(t(status === "success" ? "contextMenu.createDatabaseSuccess" : status === "partial" ? "contextMenu.createDatabasePartial" : "contextMenu.createDatabaseFailed", { name }), status === "success" ? 3000 : 5000);
   } catch (error: any) {
-    toast(t("contextMenu.tableOperationFailed", { message: error?.message || String(error) }), 5000);
+    const message = appendCreateDatabaseErrorHint(connectionStore.getConfig(node.connectionId)?.db_type, error?.message || String(error), t);
+    toast(t("contextMenu.tableOperationFailed", { message }), 8000);
   } finally {
     createDatabaseAuthorizationApplying.value = false;
   }

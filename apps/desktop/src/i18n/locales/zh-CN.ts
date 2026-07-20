@@ -1784,6 +1784,7 @@ export default withEnglishFallback({
     confirmDropDatabaseTitle: "删除数据库",
     confirmDropDatabaseMessage: "确定要删除数据库「{name}」吗？这将永久删除该数据库及其所有数据。",
     createDatabaseSuccess: "数据库「{name}」已创建",
+    mysqlCreateDatabasePermissionHint: "当前 MySQL 账号没有创建此数据库的权限。账号名为 root 也不代表拥有管理员权限，请使用具备 GRANT OPTION 的管理员账号授予 CREATE 权限后重试。",
     createDatabasePartial: "数据库「{name}」已创建，但部分用户授权失败",
     createDatabaseFailed: "数据库「{name}」创建失败",
     createDatabaseUsers: "关联用户授权",

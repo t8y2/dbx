@@ -1784,6 +1784,7 @@ export default {
     confirmDropDatabaseTitle: "Drop Database",
     confirmDropDatabaseMessage: 'Are you sure you want to drop database "{name}"? This will permanently delete the database and all its data.',
     createDatabaseSuccess: 'Database "{name}" created',
+    mysqlCreateDatabasePermissionHint: "The current MySQL account cannot create this database. An account named root does not necessarily have administrator privileges. Use an administrator account with GRANT OPTION to grant CREATE permission, then try again.",
     createDatabasePartial: 'Database "{name}" was created, but some grants failed',
     createDatabaseFailed: 'Database "{name}" could not be created',
     createDatabaseUsers: "Grant access to users",

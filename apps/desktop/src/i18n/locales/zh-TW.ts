@@ -1719,6 +1719,7 @@ export default withEnglishFallback({
     confirmDropDatabaseTitle: "刪除資料庫",
     confirmDropDatabaseMessage: "確定要刪除資料庫「{name}」嗎？這將永久刪除該資料庫及其所有資料。",
     createDatabaseSuccess: "資料庫「{name}」已建立",
+    mysqlCreateDatabasePermissionHint: "目前的 MySQL 帳號沒有建立此資料庫的權限。帳號名稱為 root 也不代表擁有管理員權限，請使用具備 GRANT OPTION 的管理員帳號授予 CREATE 權限後再試。",
     createDatabasePartial: "資料庫「{name}」已建立，但部分使用者授權失敗",
     createDatabaseFailed: "資料庫「{name}」建立失敗",
     createDatabaseUsers: "關聯使用者授權",

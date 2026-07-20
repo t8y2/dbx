@@ -1714,6 +1714,7 @@ export default withEnglishFallback({
     confirmDropDatabaseTitle: "データベースを削除",
     confirmDropDatabaseMessage: "本当にデータベース「{name}」をドロップ（削除）しますか？データベースとすべてのデータが永久に削除されます。",
     createDatabaseSuccess: "データベース「{name}」を作成しました",
+    mysqlCreateDatabasePermissionHint: "現在の MySQL アカウントには、このデータベースを作成する権限がありません。root という名前のアカウントでも管理者権限があるとは限りません。GRANT OPTION を持つ管理者アカウントで CREATE 権限を付与してから、もう一度お試しください。",
     createDatabasePartial: "データベース「{name}」は作成されましたが、一部のユーザー権限付与に失敗しました",
     createDatabaseFailed: "データベース「{name}」を作成できませんでした",
     createDatabaseUsers: "アクセスを付与するユーザー",

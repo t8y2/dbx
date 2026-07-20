@@ -1717,6 +1717,7 @@ export default withEnglishFallback({
     confirmDropDatabaseTitle: "Elimina Database",
     confirmDropDatabaseMessage: 'Sei sicuro di voler eliminare il database "{name}"? Questa operazione eliminerà permanentemente il database e tutti i suoi dati.',
     createDatabaseSuccess: 'Database "{name}" creato',
+    mysqlCreateDatabasePermissionHint: "L'account MySQL corrente non può creare questo database. Un account denominato root non dispone necessariamente dei privilegi di amministratore. Usa un account amministratore con GRANT OPTION per concedere il privilegio CREATE, quindi riprova.",
     createDatabasePartial: 'Il database "{name}" è stato creato, ma alcune concessioni non sono riuscite',
     createDatabaseFailed: 'Impossibile creare il database "{name}"',
     createDatabaseUsers: "Concedi accesso agli utenti",

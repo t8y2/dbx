@@ -3566,6 +3566,8 @@ export default {
     debugLogsClear: "Clear logs",
     tableStructureSection: "Table Structure",
     dataGridDisplay: "Data grid display",
+    tableOpenPageSize: "Default rows per page when opening tables",
+    tableOpenPageSizeDescription: "Rows loaded per page when opening a new table. Changing rows per page in a table updates this default for future table tabs.",
     showColumnCommentsInHeader: "Show column comments under names",
     showColumnCommentsInHeaderDescription: "Display table column comments directly below grid column names.",
     showColumnTypesInHeader: "Show column types under names",

@@ -3339,6 +3339,8 @@ export default withEnglishFallback({
     debugLogsClear: "ログをクリア",
     tableStructureSection: "テーブル構造",
     dataGridDisplay: "データグリッド表示",
+    tableOpenPageSize: "テーブルを開くときのデフォルト行数",
+    tableOpenPageSizeDescription: "新しいテーブルを開くときに 1 ページあたり読み込む行数です。テーブルで行数を変更すると、今後のテーブルタブのデフォルトも更新されます。",
     showColumnCommentsInHeader: "列名の下にコメントを表示",
     showColumnCommentsInHeaderDescription: "グリッド列名の直下にテーブル列コメントを表示します。",
     showColumnTypesInHeader: "列名の下にデータ型を表示",

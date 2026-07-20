@@ -3556,6 +3556,8 @@ export default withEnglishFallback({
     debugLogsClear: "清空日志",
     tableStructureSection: "表结构",
     dataGridDisplay: "数据表格显示",
+    tableOpenPageSize: "打开表默认每页行数",
+    tableOpenPageSizeDescription: "新打开数据表时每页加载的行数。在表数据页修改每页行数后，也会更新后续新建表标签页的默认值。",
     showColumnCommentsInHeader: "在字段名下方显示注释",
     showColumnCommentsInHeaderDescription: "把表字段注释直接显示在结果表头字段名下方。",
     showColumnTypesInHeader: "在字段名下方显示数据类型",

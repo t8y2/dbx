@@ -6,6 +6,7 @@ function makeSettings(overrides: Partial<EditorSettings> = {}): EditorSettings {
   return {
     autoCalculateTotalRows: false,
     pageSize: 100,
+    tableOpenPageSize: 100,
     sqlEngine: "desktop",
     tabSize: 2,
     keywordCase: "upper",
@@ -30,6 +31,10 @@ function makeSettings(overrides: Partial<EditorSettings> = {}): EditorSettings {
 describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
   it("includes continueOnErrorOnBatch", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("continueOnErrorOnBatch");
+  });
+
+  it("includes the table-open page size", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("tableOpenPageSize");
   });
 });
 

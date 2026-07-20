@@ -3156,6 +3156,8 @@ export default withEnglishFallback({
     debugLogsClear: "清空日誌",
     tableStructureSection: "表結構",
     dataGridDisplay: "資料表格顯示",
+    tableOpenPageSize: "開啟資料表預設每頁列數",
+    tableOpenPageSizeDescription: "新開啟資料表時每頁載入的列數。在資料表頁面調整每頁列數後，也會更新後續新建資料表分頁的預設值。",
     showColumnCommentsInHeader: "在欄位名稱下方顯示註解",
     showColumnCommentsInHeaderDescription: "直接在資料表格欄位名稱下方顯示資料表欄位註解。",
     showColumnTypesInHeader: "在欄位名稱下方顯示資料類型",

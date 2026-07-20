@@ -3344,6 +3344,8 @@ export default withEnglishFallback({
     debugLogsClear: "Limpar logs",
     tableStructureSection: "Estrutura da tabela",
     dataGridDisplay: "Exibição da grade de dados",
+    tableOpenPageSize: "Linhas padrão por página ao abrir tabelas",
+    tableOpenPageSizeDescription: "Linhas carregadas por página ao abrir uma nova tabela. Alterar as linhas por página atualiza esse padrão para futuras abas de tabelas.",
     showColumnCommentsInHeader: "Mostrar comentários de coluna sob os nomes",
     showColumnCommentsInHeaderDescription: "Exibir comentários de colunas da tabela diretamente abaixo dos nomes das colunas da grade.",
     showColumnTypesInHeader: "Mostrar tipos de coluna sob os nomes",

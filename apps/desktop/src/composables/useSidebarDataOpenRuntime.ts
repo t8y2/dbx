@@ -266,7 +266,7 @@ export function useSidebarDataOpenRuntime() {
       logPhase("ensure-connected", { tabId });
       if (!config) throw new Error("Connection config not found");
 
-      const limit = tableOpenPageLimit();
+      const limit = tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
       const shouldRefreshTableMeta = !cachedTableMeta;
       // Dameng metadata calls must remain serialized behind the table query.
       const deferTableMetaRefresh = effectiveDbType === "dameng";

@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   getColumns: vi.fn(),
   listIndexes: vi.fn(),
   ensureConnected: vi.fn(),
+  tableOpenPageSize: 100,
   tabs: [] as QueryTab[],
   setTableMeta: vi.fn(),
 }));
@@ -58,6 +59,10 @@ vi.mock("@/stores/queryStore", () => ({
   }),
 }));
 
+vi.mock("@/stores/settingsStore", () => ({
+  useSettingsStore: () => ({ editorSettings: { tableOpenPageSize: mocks.tableOpenPageSize } }),
+}));
+
 vi.mock("@/composables/useToast", () => ({
   useToast: () => ({ toast: vi.fn() }),
 }));
@@ -92,6 +97,7 @@ describe("useDataGridActions", () => {
     clearTableMetadataCache();
     vi.clearAllMocks();
     mocks.tabs.length = 0;
+    mocks.tableOpenPageSize = 100;
     mocks.getConfig.mockReturnValue({ id: "postgres-1", db_type: "postgres" });
     mocks.buildTableSelectSql.mockResolvedValue("SELECT * FROM public.users LIMIT 100 OFFSET 0");
     mocks.buildSortedQuerySql.mockResolvedValue({ ok: true, sql: "SELECT sorted" });
@@ -100,7 +106,9 @@ describe("useDataGridActions", () => {
     mocks.listIndexes.mockResolvedValue([]);
   });
 
-  it("uses the table-data default when toolbar reload has no saved pagination", async () => {
+  it("uses the configured table-data default when toolbar reload has no saved pagination", async () => {
+    mocks.tableOpenPageSize = 250;
+    mocks.buildTableSelectSql.mockResolvedValueOnce("SELECT * FROM public.users LIMIT 250 OFFSET 0");
     const tab = tableDataTab();
     const actions = useDataGridActions(computed(() => tab));
 
@@ -108,11 +116,11 @@ describe("useDataGridActions", () => {
 
     expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(
       expect.objectContaining({
-        limit: 100,
+        limit: 250,
         offset: 0,
       }),
     );
-    expect(mocks.executeTabSql).toHaveBeenCalledWith("tab-1", "SELECT * FROM public.users LIMIT 100 OFFSET 0", expect.objectContaining({ pagination: { limit: 100, offset: 0 } }));
+    expect(mocks.executeTabSql).toHaveBeenCalledWith("tab-1", "SELECT * FROM public.users LIMIT 250 OFFSET 0", expect.objectContaining({ pagination: { limit: 250, offset: 0 } }));
     expect(mocks.executeTabSql.mock.calls[0]?.[2]).not.toHaveProperty("preserveTotalRowCountDuringExecution");
   });
 

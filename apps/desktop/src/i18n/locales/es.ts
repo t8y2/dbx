@@ -3344,6 +3344,8 @@ export default withEnglishFallback({
     debugLogsClear: "Borrar logs",
     tableStructureSection: "Estructura de tabla",
     dataGridDisplay: "Visualización de la tabla",
+    tableOpenPageSize: "Filas predeterminadas por página al abrir tablas",
+    tableOpenPageSizeDescription: "Filas cargadas por página al abrir una tabla nueva. Cambiar las filas por página actualiza este valor para futuras pestañas de tablas.",
     showColumnCommentsInHeader: "Mostrar comentarios bajo los nombres",
     showColumnCommentsInHeaderDescription: "Muestra los comentarios de columnas directamente debajo del nombre de la columna.",
     showColumnTypesInHeader: "Mostrar tipos de columna bajo los nombres",

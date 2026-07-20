@@ -28,7 +28,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
   const settingsStore = useSettingsStore();
-  const pageLimit = tableOpenPageLimit();
+  const pageLimit = tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
 
   connectionStore.activeConnectionId = target.connectionId;
   const config = connectionStore.getConfig(target.connectionId);

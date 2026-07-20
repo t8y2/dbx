@@ -3342,6 +3342,8 @@ export default withEnglishFallback({
     debugLogsClear: "Cancella log",
     tableStructureSection: "Struttura tabella",
     dataGridDisplay: "Visualizzazione griglia dati",
+    tableOpenPageSize: "Righe predefinite per pagina all'apertura delle tabelle",
+    tableOpenPageSizeDescription: "Righe caricate per pagina quando si apre una nuova tabella. La modifica delle righe per pagina aggiorna questo valore per le future schede tabella.",
     showColumnCommentsInHeader: "Mostra i commenti delle colonne sotto i nomi",
     showColumnCommentsInHeaderDescription: "Visualizza i commenti delle colonne della tabella direttamente sotto i nomi delle colonne nella griglia.",
     showColumnTypesInHeader: "Mostra i tipi di colonna sotto i nomi",

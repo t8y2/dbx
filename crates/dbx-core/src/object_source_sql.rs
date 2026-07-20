@@ -371,7 +371,9 @@ fn executable_postgres_view_ddl(source: &str) -> Option<String> {
         return Some(ensure_semicolon(trimmed));
     }
 
-    let create_view = Regex::new(r"(?i)^CREATE\s+((?:(?:TEMP|TEMPORARY)\s+)?(?:RECURSIVE\s+)?VIEW\s+)").unwrap();
+    // Kingbase extends PostgreSQL's prefix with FORCE after the optional RECURSIVE modifier.
+    let create_view =
+        Regex::new(r"(?i)^CREATE\s+((?:(?:TEMP|TEMPORARY)\s+)?(?:RECURSIVE\s+)?(?:FORCE\s+)?VIEW\s+)").unwrap();
     if create_view.is_match(executable) {
         let replaced = create_view.replace(executable, "CREATE OR REPLACE $1");
         return Some(ensure_semicolon(&format!("{}{}", &trimmed[..statement_start], replaced)));
@@ -619,8 +621,27 @@ fn sql_block_comment_end(source: &str, start: usize) -> Option<usize> {
     if !source[start..].starts_with("/*") {
         return None;
     }
-    let rest = &source[start + 2..];
-    Some(start + 2 + rest.find("*/").map(|index| index + 2).unwrap_or(rest.len()))
+
+    // PostgreSQL and Kingbase default to nested SQL block comments, so match the outer terminator.
+    let mut depth = 1;
+    let mut index = start + 2;
+    while index < source.len() {
+        if source[index..].starts_with("/*") {
+            depth += 1;
+            index += 2;
+        } else if source[index..].starts_with("*/") {
+            depth -= 1;
+            index += 2;
+            if depth == 0 {
+                return Some(index);
+            }
+        } else {
+            index += source[index..].chars().next().unwrap().len_utf8();
+        }
+    }
+
+    // Preserve the existing safe behavior: an unclosed leading comment consumes the remaining source.
+    Some(source.len())
 }
 
 fn read_quoted_sql_identifier(source: &str, start: usize) -> Option<(usize, String)> {
@@ -1120,6 +1141,66 @@ mod tests {
     }
 
     #[test]
+    fn kingbase_view_create_force_source_saves_as_create_or_replace_force_view() {
+        let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Kingbase,
+            object_type: ObjectSourceKind::View,
+            schema: Some("app".to_string()),
+            name: "edited_view".to_string(),
+            source: "CREATE FORCE VIEW app.edited_view AS SELECT id FROM source_rows".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(sql, "CREATE OR REPLACE FORCE VIEW app.edited_view AS SELECT id FROM source_rows;");
+    }
+
+    #[test]
+    fn kingbase_view_create_recursive_force_source_preserves_modifier_order() {
+        let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Kingbase,
+            object_type: ObjectSourceKind::View,
+            schema: Some("app".to_string()),
+            name: "edited_view".to_string(),
+            source: "CREATE RECURSIVE FORCE VIEW app.edited_view AS SELECT id FROM source_rows".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(sql, "CREATE OR REPLACE RECURSIVE FORCE VIEW app.edited_view AS SELECT id FROM source_rows;");
+    }
+
+    #[test]
+    fn kingbase_view_create_temporary_recursive_force_source_preserves_legal_modifiers() {
+        let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Kingbase,
+            object_type: ObjectSourceKind::View,
+            schema: Some("app".to_string()),
+            name: "edited_view".to_string(),
+            source: "CREATE TEMPORARY RECURSIVE FORCE VIEW app.edited_view AS SELECT id FROM source_rows".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            sql,
+            "CREATE OR REPLACE TEMPORARY RECURSIVE FORCE VIEW app.edited_view AS SELECT id FROM source_rows;"
+        );
+    }
+
+    #[test]
+    fn kingbase_view_create_or_replace_force_source_saves_without_rewrapping() {
+        let source = "CREATE OR REPLACE FORCE VIEW app.edited_view AS SELECT id FROM source_rows";
+        let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Kingbase,
+            object_type: ObjectSourceKind::View,
+            schema: Some("app".to_string()),
+            name: "edited_view".to_string(),
+            source: source.to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(sql, format!("{source};"));
+    }
+
+    #[test]
     fn kingbase_view_create_source_preserves_leading_line_comment() {
         let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
             database_type: DatabaseType::Kingbase,
@@ -1149,6 +1230,58 @@ mod tests {
             sql,
             "/* CREATE VIEW in this comment is ignored */\nCREATE OR REPLACE VIEW app.edited_view AS SELECT id FROM source_rows;"
         );
+    }
+
+    #[test]
+    fn kingbase_view_create_source_preserves_leading_nested_block_comment() {
+        let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Kingbase,
+            object_type: ObjectSourceKind::View,
+            schema: Some("app".to_string()),
+            name: "edited_view".to_string(),
+            source: "/* outer /* nested */ comment */\nCREATE FORCE VIEW app.edited_view AS SELECT id FROM source_rows"
+                .to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            sql,
+            "/* outer /* nested */ comment */\nCREATE OR REPLACE FORCE VIEW app.edited_view AS SELECT id FROM source_rows;"
+        );
+    }
+
+    #[test]
+    fn kingbase_view_create_source_preserves_leading_multi_level_block_comment() {
+        let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Kingbase,
+            object_type: ObjectSourceKind::View,
+            schema: Some("app".to_string()),
+            name: "edited_view".to_string(),
+            source:
+                "/* level 1 /* level 2 /* level 3 */ level 2 */ level 1 */\nCREATE VIEW app.edited_view AS SELECT id FROM source_rows"
+                    .to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            sql,
+            "/* level 1 /* level 2 /* level 3 */ level 2 */ level 1 */\nCREATE OR REPLACE VIEW app.edited_view AS SELECT id FROM source_rows;"
+        );
+    }
+
+    #[test]
+    fn kingbase_view_unclosed_leading_block_comment_keeps_safe_body_fallback() {
+        let source = "/* unclosed comment\nCREATE FORCE VIEW app.edited_view AS SELECT id FROM source_rows";
+        let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Kingbase,
+            object_type: ObjectSourceKind::View,
+            schema: Some("app".to_string()),
+            name: "edited_view".to_string(),
+            source: source.to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(sql, format!("CREATE OR REPLACE VIEW \"app\".\"edited_view\" AS\n{source};"));
     }
 
     #[test]

@@ -1,0 +1,17 @@
+{
+  "database": "zookeeper",
+  "name": "ZooKeeper",
+  "version": "3.9.5",
+  "displayVersion": "3.9",
+  "image": "docker.cnb.cool/znb/images/zookeeper:3.9.5",
+  "platforms": ["linux/amd64", "linux/arm64"],
+  "service": "database",
+  "defaultPort": 2181,
+  "connection": { "host": "127.0.0.1", "port": 2182, "username": "root", "password": "123456", "database": "dbx", "authScheme": "digest" },
+  "bootstrap": {
+    "check": { "command": ["sh", "-ec", "printf 'addauth digest root:%s\\nget /dbx\\nquit\\n' \"$1\" | zkCli.sh -server 127.0.0.1:2181", "sh", "${DB_PASSWORD}"], "expect": "DBX smoke" },
+    "steps": [{ "name": "create Digest-protected smoke node", "command": ["sh", "-ec", "printf 'addauth digest root:%s\\ncreate /dbx \"DBX smoke\" auth:root:%s:cdrwa\\nquit\\n' \"$1\" \"$1\" | zkCli.sh -server 127.0.0.1:2181", "sh", "${DB_PASSWORD}"], "expect": "Created /dbx" }]
+  },
+  "shell": ["zkCli.sh", "-server", "127.0.0.1:2181"],
+  "smoke": { "steps": [{ "name": "reject anonymous access to protected node", "command": ["sh", "-ec", "printf 'get /dbx\\nquit\\n' | zkCli.sh -server 127.0.0.1:2181 || true"], "expect": "Insufficient permission" }, { "name": "read protected node with Digest credentials", "command": ["sh", "-ec", "printf 'addauth digest root:%s\\nget /dbx\\nquit\\n' \"$1\" | zkCli.sh -server 127.0.0.1:2181", "sh", "${DB_PASSWORD}"], "expect": "DBX smoke" }] }
+}

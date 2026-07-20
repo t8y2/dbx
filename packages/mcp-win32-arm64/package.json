@@ -1,6 +1,6 @@
 {
   "name": "@dbx-app/mcp-win32-arm64",
-  "version": "0.4.37",
+  "version": "0.4.38",
   "description": "Precompiled DBX MCP Rust binary for win32 arm64",
   "license": "Apache-2.0",
   "repository": {

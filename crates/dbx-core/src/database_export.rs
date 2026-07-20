@@ -13,6 +13,7 @@ use crate::transfer::{
     selected_columns_include_identity_extras, wrap_dameng_identity_insert_sql,
     wrap_dameng_identity_insert_sql_for_table,
 };
+use crate::types::ObjectSourceKind;
 
 static EXPORT_CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashSet::new()));
@@ -1758,8 +1759,13 @@ pub async fn export_database_sql_core(
             .await
             {
                 Ok(obj_source) => {
-                    let source =
-                        build_export_object_source_sql(db_type, crate::db::ObjectSourceKind::View, &obj_source.source);
+                    let source = build_database_export_object_source_sql(
+                        db_type,
+                        &ObjectSourceKind::View,
+                        view_name,
+                        &obj_source.source,
+                        request.drop_table_if_exists,
+                    );
                     if !source.is_empty() {
                         writeln!(file, "{source}\n").map_err(|e| format!("Failed to write file: {e}"))?;
                     }
@@ -1803,10 +1809,12 @@ pub async fn export_database_sql_core(
             .await
             {
                 Ok(obj_source) => {
-                    let source = build_export_object_source_sql(
+                    let source = build_database_export_object_source_sql(
                         db_type,
-                        crate::db::ObjectSourceKind::Procedure,
+                        &ObjectSourceKind::Procedure,
+                        proc_name,
                         &obj_source.source,
+                        request.drop_table_if_exists,
                     );
                     if !source.is_empty() {
                         writeln!(file, "{source}\n").map_err(|e| format!("Failed to write file: {e}"))?;
@@ -1855,10 +1863,12 @@ pub async fn export_database_sql_core(
             .await
             {
                 Ok(obj_source) => {
-                    let source = build_export_object_source_sql(
+                    let source = build_database_export_object_source_sql(
                         db_type,
-                        crate::db::ObjectSourceKind::Function,
+                        &ObjectSourceKind::Function,
+                        func_name,
                         &obj_source.source,
+                        request.drop_table_if_exists,
                     );
                     if !source.is_empty() {
                         writeln!(file, "{source}\n").map_err(|e| format!("Failed to write file: {e}"))?;
@@ -1915,19 +1925,42 @@ fn drop_table_if_exists_sql(table_name: &str, schema: &str, db_type: &DatabaseTy
     format!("DROP TABLE IF EXISTS {};", crate::transfer::qualified_table(table_name, schema, db_type))
 }
 
+fn build_database_export_object_source_sql(
+    database_type: DatabaseType,
+    object_type: &ObjectSourceKind,
+    object_name: &str,
+    source: &str,
+    drop_if_exists: bool,
+) -> String {
+    let source = build_export_object_source_sql(database_type, object_type.clone(), source);
+    if source.is_empty() || !drop_if_exists || database_type != DatabaseType::Mysql {
+        return source;
+    }
+
+    let object_type = match object_type {
+        ObjectSourceKind::View => "VIEW",
+        ObjectSourceKind::Procedure => "PROCEDURE",
+        ObjectSourceKind::Function => "FUNCTION",
+        _ => return source,
+    };
+    let object_name = quote_identifier(object_name, &DatabaseType::Mysql);
+    format!("DROP {object_type} IF EXISTS {object_name};\n{source}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::concurrent_metadata_prefetch_allowed;
     use super::{
-        build_database_sql_export, build_export_insert_statements, drop_table_if_exists_sql, filter_export_table_infos,
-        format_export_sql_literal, generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl,
-        generate_postgres_sequence_owner_ddl, generate_postgres_sequence_setval_sql,
-        is_postgres_extension_member_routine, normalize_export_table_ddl, record_export_error,
-        BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, ExportedTableSql, PostgresExportExtension,
-        PostgresExportSequence, PostgresExtensionMembers, DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
+        build_database_export_object_source_sql, build_database_sql_export, build_export_insert_statements,
+        drop_table_if_exists_sql, filter_export_table_infos, format_export_sql_literal,
+        generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl, generate_postgres_sequence_owner_ddl,
+        generate_postgres_sequence_setval_sql, is_postgres_extension_member_routine, normalize_export_table_ddl,
+        record_export_error, BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, ExportedTableSql,
+        PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers, DATABASE_EXPORT_INSERT_BATCH_SIZE,
+        DATABASE_EXPORT_ROW_LIMIT,
     };
     use crate::models::connection::DatabaseType;
-    use crate::types::{ObjectInfo, TableInfo};
+    use crate::types::{ObjectInfo, ObjectSourceKind, TableInfo};
     use serde_json::{json, Value};
 
     fn table(name: &str, table_type: &str) -> TableInfo {
@@ -2046,6 +2079,67 @@ mod tests {
         let sql = drop_table_if_exists_sql("users", "", &DatabaseType::Postgres);
 
         assert_eq!(sql, "DROP TABLE IF EXISTS \"users\";");
+    }
+
+    #[test]
+    fn mysql_export_adds_drop_if_exists_for_views_and_escapes_names() {
+        let sql = build_database_export_object_source_sql(
+            DatabaseType::Mysql,
+            &ObjectSourceKind::View,
+            "active`rows",
+            "CREATE VIEW `active``rows` AS SELECT 1",
+            true,
+        );
+
+        assert_eq!(sql, "DROP VIEW IF EXISTS `active``rows`;\nCREATE VIEW `active``rows` AS SELECT 1;");
+    }
+
+    #[test]
+    fn mysql_export_adds_drop_if_exists_before_delimited_routines() {
+        let procedure = build_database_export_object_source_sql(
+            DatabaseType::Mysql,
+            &ObjectSourceKind::Procedure,
+            "refresh_cache",
+            "CREATE PROCEDURE `refresh_cache`() BEGIN SELECT 1; END",
+            true,
+        );
+        let function = build_database_export_object_source_sql(
+            DatabaseType::Mysql,
+            &ObjectSourceKind::Function,
+            "active_count",
+            "CREATE FUNCTION `active_count`() RETURNS INT RETURN 1",
+            true,
+        );
+
+        assert_eq!(
+            procedure,
+            "DROP PROCEDURE IF EXISTS `refresh_cache`;\nDELIMITER //\nCREATE PROCEDURE `refresh_cache`() BEGIN SELECT 1; END//\nDELIMITER ;"
+        );
+        assert_eq!(
+            function,
+            "DROP FUNCTION IF EXISTS `active_count`;\nDELIMITER //\nCREATE FUNCTION `active_count`() RETURNS INT RETURN 1//\nDELIMITER ;"
+        );
+    }
+
+    #[test]
+    fn object_drop_option_does_not_change_disabled_or_non_mysql_exports() {
+        let mysql_without_drop = build_database_export_object_source_sql(
+            DatabaseType::Mysql,
+            &ObjectSourceKind::View,
+            "active_rows",
+            "CREATE VIEW `active_rows` AS SELECT 1",
+            false,
+        );
+        let postgres_with_drop = build_database_export_object_source_sql(
+            DatabaseType::Postgres,
+            &ObjectSourceKind::View,
+            "active_rows",
+            "CREATE VIEW active_rows AS SELECT 1",
+            true,
+        );
+
+        assert_eq!(mysql_without_drop, "CREATE VIEW `active_rows` AS SELECT 1;");
+        assert_eq!(postgres_with_drop, "CREATE VIEW active_rows AS SELECT 1;");
     }
 
     #[test]

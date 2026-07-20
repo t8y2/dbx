@@ -143,6 +143,12 @@ pub struct BuildDuckDbAttachDatabaseSqlRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BuildSqliteAttachDatabaseSqlRequest {
+    pub options: dbx_core::db_admin_sql::SqliteAttachDatabaseSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BuildDropObjectSqlRequest {
     pub options: dbx_core::db_admin_sql::DropObjectSqlOptions,
 }
@@ -595,6 +601,10 @@ pub async fn build_create_database_sql(
 
 pub async fn build_duckdb_attach_database_sql(Json(req): Json<BuildDuckDbAttachDatabaseSqlRequest>) -> Json<String> {
     Json(dbx_core::db_admin_sql::build_duckdb_attach_database_sql(req.options))
+}
+
+pub async fn build_sqlite_attach_database_sql(Json(req): Json<BuildSqliteAttachDatabaseSqlRequest>) -> Json<String> {
+    Json(dbx_core::db_admin_sql::build_sqlite_attach_database_sql(req.options))
 }
 
 pub async fn build_drop_object_sql(Json(req): Json<BuildDropObjectSqlRequest>) -> Json<String> {

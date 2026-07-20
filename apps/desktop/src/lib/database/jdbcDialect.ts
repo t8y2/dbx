@@ -101,6 +101,7 @@ export function connectionObjectTreeNodeSchema(connection: JdbcDialectConnection
   if (connectionUsesDatabaseObjectTreeMode(connection)) return undefined;
   if (schema) return schema;
   const type = effectiveDatabaseTypeForConnection(connection);
+  if (type === "sqlite") return database;
   return isSchemaAware(type) ? database : undefined;
 }
 

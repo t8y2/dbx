@@ -32,6 +32,19 @@ export function recipeSelector(recipe) {
   return `${recipe.database}@${recipe.displayVersion}`;
 }
 
+export function formatTable(headers, rows) {
+  const widths = headers.map((header, index) => Math.max(
+    header.length,
+    ...rows.map((row) => String(row[index] ?? '').length),
+  ));
+  const renderRow = (row) => row.map((value, index) => {
+    const text = String(value ?? '');
+    return index === row.length - 1 ? text : text.padEnd(widths[index]);
+  }).join('  ');
+
+  return [headers, ...rows].map(renderRow).join('\n');
+}
+
 export function discoverMakeTargets(makefilePath = DEFAULT_MAKEFILE_PATH) {
   if (!existsSync(makefilePath)) return [];
   const source = readFileSync(makefilePath, 'utf8').replace(/\\\r?\n/g, ' ');
@@ -118,7 +131,9 @@ export function validateRecipe(recipe) {
   } else if (recipe.connection?.port !== recipe.defaultPort + 1) {
     errors.push('connection.port must be defaultPort + 1');
   }
-  if (recipe.connection?.password !== DEFAULT_PASSWORD) errors.push(`connection.password must be ${DEFAULT_PASSWORD}`);
+  if (recipe.connection?.authentication === 'none') {
+    if (recipe.connection.password !== undefined) errors.push('unauthenticated recipes must not declare connection.password');
+  } else if (recipe.connection?.password !== DEFAULT_PASSWORD) errors.push(`connection.password must be ${DEFAULT_PASSWORD}`);
   if (recipe.database === 'redis' ? recipe.connection?.database !== 0 : recipe.connection?.database !== DEFAULT_DATABASE) {
     errors.push(`connection.database must be ${recipe.database === 'redis' ? '0 for Redis' : DEFAULT_DATABASE}`);
   }
@@ -159,6 +174,17 @@ export function validateRecipe(recipe) {
     if (typeof step.expect !== 'string' || step.expect.length === 0) errors.push('every smoke step needs an expected output');
   }
   if (!Array.isArray(recipe.shell) || recipe.shell.length === 0) errors.push('shell must be a non-empty command array');
+  if (recipe.bootstrap !== undefined) {
+    if (!recipe.bootstrap || typeof recipe.bootstrap !== 'object') errors.push('bootstrap must be an object');
+    if (!recipe.bootstrap?.check || !Array.isArray(recipe.bootstrap.check.command) || recipe.bootstrap.check.command.length === 0 || typeof recipe.bootstrap.check.expect !== 'string' || recipe.bootstrap.check.expect.length === 0) {
+      errors.push('bootstrap.check needs a command and expected output');
+    }
+    if (!Array.isArray(recipe.bootstrap?.steps) || recipe.bootstrap.steps.length === 0) errors.push('bootstrap.steps must not be empty');
+    for (const step of recipe.bootstrap?.steps ?? []) {
+      if (!step.name || !Array.isArray(step.command) || step.command.length === 0) errors.push('every bootstrap step needs a name and command');
+      if (typeof step.expect !== 'string' || step.expect.length === 0) errors.push('every bootstrap step needs an expected output');
+    }
+  }
   return errors;
 }
 
@@ -249,12 +275,33 @@ function runCompose(recipe, args, options) {
   return run('docker', composeArgs(recipe, ...args), options);
 }
 
+function tryRunCompose(recipe, args) {
+  const result = spawnSync('docker', composeArgs(recipe, ...args), { cwd: REPO_ROOT, env: process.env, encoding: 'utf8', stdio: 'pipe' });
+  if (result.error) throw result.error;
+  return { ok: result.status === 0, output: `${result.stdout ?? ''}${result.stderr ?? ''}` };
+}
+
 export function expandSmokeCommand(command, recipe, environment = process.env) {
   const values = {
     DB_PASSWORD: environment.DB_PASSWORD || recipe.connection.password,
     DB_PORT: environment.DB_PORT || String(recipe.connection.port),
   };
   return command.map((value) => value.replace(/\$\{(DB_PASSWORD|DB_PORT)\}/g, (_, name) => values[name]));
+}
+
+function ensureBootstrap(recipe) {
+  if (!recipe.bootstrap) return;
+  // Keep one-shot setup synchronous after Compose health checks so --wait cannot return before credentials exist.
+  const checkCommand = expandSmokeCommand(recipe.bootstrap.check.command, recipe);
+  const check = tryRunCompose(recipe, ['exec', '-T', recipe.service, ...checkCommand]);
+  if (check.ok && check.output.includes(recipe.bootstrap.check.expect)) return;
+
+  for (const step of recipe.bootstrap.steps) {
+    const command = expandSmokeCommand(step.command, recipe);
+    const output = runCompose(recipe, ['exec', '-T', recipe.service, ...command], { capture: true });
+    if (!output.includes(step.expect)) throw new Error(`Bootstrap check did not contain expected text: ${step.expect}\n${output}`);
+    console.log(`OK   ${step.name}`);
+  }
 }
 
 function printConnection(recipe) {
@@ -321,8 +368,10 @@ export function main(argv = process.argv.slice(2)) {
   const recipes = discoverRecipes();
 
   if (command === 'list') {
-    console.log('DATABASE\tVERSION\tIMAGE\tPLATFORMS');
-    for (const recipe of recipes) console.log(`${recipe.database}\t${recipe.displayVersion}\t${recipe.image}\t${recipe.platforms.join(',')}`);
+    console.log(formatTable(
+      ['DATABASE', 'VERSION', 'IMAGE', 'PLATFORMS'],
+      recipes.map((recipe) => [recipe.database, recipe.displayVersion, recipe.image, recipe.platforms.join(',')]),
+    ));
     return;
   }
   if (command === 'quick-start') return printQuickStart(recipes);
@@ -349,6 +398,7 @@ export function main(argv = process.argv.slice(2)) {
     case 'start':
     case 'up':
       runCompose(recipe, ['up', '-d', '--wait']);
+      ensureBootstrap(recipe);
       printConnection(recipe);
       break;
     case 'status':
@@ -362,6 +412,7 @@ export function main(argv = process.argv.slice(2)) {
       break;
     case 'verify':
       runCompose(recipe, ['up', '-d', '--wait']);
+      ensureBootstrap(recipe);
       for (const step of recipe.smoke.steps) {
         const command = expandSmokeCommand(step.command, recipe);
         const output = runCompose(recipe, ['exec', '-T', recipe.service, ...command], { capture: true });

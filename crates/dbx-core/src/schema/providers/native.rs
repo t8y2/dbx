@@ -234,7 +234,7 @@ pub(in crate::schema) async fn table_ddl(
             }
         }
         PoolKind::Postgres(p) => super::super::pg_ddl(p, schema, table).await,
-        PoolKind::Sqlite(p) => super::super::sqlite_ddl(p, table).await,
+        PoolKind::Sqlite(p) => super::super::sqlite_ddl(p, schema, table).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::table_ddl(client, table).await,
         PoolKind::Turso(client) => db::turso_driver::table_ddl(client, table).await,
         _ => Err("DDL not supported for this database type".to_string()),
@@ -262,7 +262,11 @@ pub(in crate::schema) async fn object_source(
         }
         PoolKind::Sqlite(pool) => {
             let source = super::super::first_string_cell(
-                db::sqlite::execute_query(pool, &super::super::sqlite_object_source_sql(name, object_type)).await?,
+                db::sqlite::execute_query(
+                    pool,
+                    &super::super::sqlite_object_source_sql(schema, name, object_type),
+                )
+                .await?,
             )?;
             Ok(Some(source))
         }

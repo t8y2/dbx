@@ -2,7 +2,13 @@ import { describe, expect, it } from "vitest";
 import { connectionNamespaceCreationTarget, databaseNodeNamespaceCreationTarget } from "@/lib/database/databaseNamespaceCreation";
 import { editableDatabasePropertyGroups, editableSchemaPropertyGroups } from "@/lib/database/databasePropertyEditing";
 import { buildGetDatabaseCommentSql } from "@/lib/database/dbAdminSql";
-import { supportsSqlInListPaste, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+import { isSchemaAware, supportsSqlInListPaste, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+
+describe("schema awareness", () => {
+  it("keeps SQLite database aliases separate from schema-capable databases", () => {
+    expect(isSchemaAware("sqlite")).toBe(false);
+  });
+});
 
 describe("supportsTransaction", () => {
   it("returns true for supported database types", () => {
@@ -105,13 +111,20 @@ describe("database namespace creation", () => {
   it("keeps non-database creation flows explicit", () => {
     expect(connectionNamespaceCreationTarget({ db_type: "dameng" })).toBe("schema");
     expect(connectionNamespaceCreationTarget({ db_type: "duckdb" })).toBe("attach");
+    expect(connectionNamespaceCreationTarget({ db_type: "sqlite" })).toBe("attach");
     expect(connectionNamespaceCreationTarget({ db_type: "mongodb" })).toBe("special");
     expect(connectionNamespaceCreationTarget({ db_type: "mongodb", driver_profile: "mongodb-legacy" })).toBeNull();
   });
 
+  it("hides persistent SQLite attachment for memory and SQLCipher connections", () => {
+    expect(connectionNamespaceCreationTarget({ db_type: "sqlite", host: ":memory:", password: "" })).toBeNull();
+    expect(connectionNamespaceCreationTarget({ db_type: "sqlite", host: "/tmp/main.sqlite", password: "secret" })).toBeNull();
+    expect(connectionNamespaceCreationTarget({ db_type: "sqlite", host: "/tmp/main.sqlite", password: "" })).toBe("attach");
+  });
+
   it("hides creation for read-only, file-only, and unknown generic targets", () => {
     expect(connectionNamespaceCreationTarget({ db_type: "mysql", read_only: true })).toBeNull();
-    expect(connectionNamespaceCreationTarget({ db_type: "sqlite" })).toBeNull();
+    expect(connectionNamespaceCreationTarget({ db_type: "sqlite", read_only: true })).toBeNull();
     expect(connectionNamespaceCreationTarget({ db_type: "jdbc" })).toBeNull();
     expect(connectionNamespaceCreationTarget({ db_type: "oracle" })).toBeNull();
   });

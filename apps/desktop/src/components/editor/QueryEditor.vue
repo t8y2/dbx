@@ -15,6 +15,7 @@ import { buildExecutionCandidates, hasMultipleExecutionTargets, supportsExecutio
 import { executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, executableStatementRangeStartingAt as executableStatementRangeStartingAtLine, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
 import { currentStatementFrameRangeTo, visualSqlColumnsWithInlineHints } from "@/lib/sql/currentStatementFrame";
 import { expandToSqlStatementWindow, parseInsertValueHints } from "@/lib/sql/insertValueHints";
+import { insertValueHintColumnNames } from "@/lib/sql/insertValueHintColumns";
 import { formatSqlText, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { blankLineDeletionChanges, replaceSelectedEditorText } from "@/lib/editor/queryEditorTextEdits";
 import { buildSqlInConditionFromPasteSource, insertTextForSqlInCondition } from "@/lib/sql/sqlInListPaste";
@@ -41,7 +42,7 @@ import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import { mergeSqlSemanticReferenceAnalysis, resolveSqlSemanticNavigationTarget } from "@/lib/sql/semantic/references";
 import { buildElasticsearchCompletionItemsFromContext, getElasticsearchCompletionContext, getElasticsearchCompletionResultValidFor, shouldAutoOpenElasticsearchCompletion, type ElasticsearchCompletionItem } from "@/lib/elasticsearch/elasticsearchCompletion";
 import { buildMongoCompletionItemsFromContext, getMongoCompletionContext, getMongoCompletionResultValidFor, mongoCompletionNeedsCollections, mongoCompletionNeedsFields, shouldAutoOpenMongoCompletion, type MongoCompletionItem } from "@/lib/mongo/mongoCompletion";
-import { resolveSqlCompletionTableLookupTarget } from "@/lib/sql/sqlCompletionLookupTarget";
+import { resolveSqlCompletionRoutineLookupTarget, resolveSqlCompletionTableLookupTarget } from "@/lib/sql/sqlCompletionLookupTarget";
 import { extractIdentifierDetailsAt, isSqlKeyword, matchTable, mergeSqlObjectNavigationType, splitQualifiedIdentifier, sqlObjectHoverDetail, sqlObjectNavigationTarget, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { lineColumnToOffset, parseSqlErrorLocation } from "@/lib/sql/sqlDiagnostics";
 import {
@@ -67,6 +68,7 @@ import { sqlSemanticTableNameSpansForSyntaxTree } from "@/lib/editor/codemirrorS
 import { startsQueryEditorRectangularSelection } from "@/lib/editor/queryEditorPointerSelection";
 import type { StatementExecutionMarker } from "@/lib/tabs/tabPresentation";
 import { isSchemaAware, isSingleDatabase, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
+import { metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
 import { usesLocalOnlyEditorCompletionMetadata, usesOnDemandOnlyEditorColumnMetadata } from "@/lib/metadata/completionMetadataPolicy";
 import { queryContextObjectActions, queryContextObjectRoute, queryTableCandidateAtSqlPosition, resolveQueryContextCandidateDatabase, resolveQueryContextObjectTarget, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
 import * as api from "@/lib/backend/api";
@@ -74,7 +76,7 @@ import { areSqlSemanticDiagnosticsEqual, buildSqlParserErrorDiagnostic, buildSql
 import { buildRedisSyntaxDiagnostics, shouldRunRedisDiagnostics } from "@/lib/redis/redisSyntaxDiagnostics";
 import { buildRedisCompletionItemsFromContext, getRedisCompletionContext, getRedisCompletionResultValidFor, shouldAutoOpenRedisCompletion, takesKeyArgument, type RedisCompletionItem } from "@/lib/redis/redisCompletion";
 import type { SqlCompletionColumn, SqlCompletionForeignKey, SqlCompletionItem, SqlCompletionObject, SqlCompletionReferencedTable, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
-import type { DatabaseType, SqlReferenceAnalysis, SqlTableReference, SqlTextSpan } from "@/types/database";
+import type { CompletionAssistantObjectKind, DatabaseType, SqlReferenceAnalysis, SqlTableReference, SqlTextSpan } from "@/types/database";
 
 const props = defineProps<{
   modelValue: string;
@@ -243,6 +245,7 @@ let vimModeComp: import("@codemirror/state").Compartment | null = null;
 let closeBracketsComp: import("@codemirror/state").Compartment | null = null;
 let sqlLanguageComp: import("@codemirror/state").Compartment | null = null;
 let sqlSemanticHighlightComp: import("@codemirror/state").Compartment | null = null;
+let sqlSignatureComp: import("@codemirror/state").Compartment | null = null;
 let codeMirrorCloseBrackets: typeof import("@codemirror/autocomplete").closeBrackets | null = null;
 let codeMirrorCloseBracketsKeymap: readonly import("@codemirror/view").KeyBinding[] | null = null;
 let readOnlyComp: import("@codemirror/state").Compartment | null = null;
@@ -328,6 +331,7 @@ let cachedTables: SqlCompletionTable[] = [];
 let cachedCompletionObjects: SqlCompletionObject[] = [];
 // Persistent column cache keyed by "schema.table" or "table"
 const cachedColumnsByTable = new Map<string, SqlCompletionColumn[]>();
+const cachedInsertValueHintColumnsByTable = new Map<string, string[]>();
 const cachedForeignKeysByTable = new Map<string, SqlCompletionForeignKey[]>();
 const loadedColumnsByTable = new Set<string>();
 
@@ -1331,6 +1335,7 @@ function insertHintMetadataTarget(table: { name: string; schema?: string | null;
 
 function getInsertValueHintTableColumns(table: string, schema?: string, database?: string): string[] | undefined {
   const cacheKey = insertHintCacheKey({ name: table, schema, database });
+  if (props.databaseType === "sqlserver") return cachedInsertValueHintColumnsByTable.get(cacheKey);
   const cached = cachedColumnsByTable.get(cacheKey);
   if (!cached) return undefined;
   return cached.map((column) => column.name);
@@ -1340,14 +1345,25 @@ function requestInsertValueHintTableColumns(table: string, schema?: string, data
   if (!props.connectionId || props.database == null) return;
   if (props.databaseType === "redis" || props.databaseType === "mongodb" || props.databaseType === "elasticsearch") return;
   const cacheKey = insertHintCacheKey({ name: table, schema, database });
-  if (cachedColumnsByTable.has(cacheKey) || pendingInsertValueHintColumnLoads.has(cacheKey)) return;
+  const hasCachedColumns = props.databaseType === "sqlserver" ? cachedInsertValueHintColumnsByTable.has(cacheKey) : cachedColumnsByTable.has(cacheKey);
+  if (hasCachedColumns || pendingInsertValueHintColumnLoads.has(cacheKey)) return;
   const target = insertHintMetadataTarget({ name: table, schema, database });
   if (!target) return;
   pendingInsertValueHintColumnLoads.add(cacheKey);
-  void connectionStore
-    .listCompletionColumns(props.connectionId, target.database, table, target.schema)
-    .then((columns) => {
-      cachedColumnsByTable.set(cacheKey, columns);
+  const connectionId = props.connectionId;
+  const databaseType = props.databaseType;
+  const loadColumns = async () => {
+    if (databaseType === "sqlserver") {
+      const querySchema = metadataSchemaForConnection(connectionStore.getConfig(connectionId), target.database, target.schema);
+      const columns = await api.getSqlServerColumnMetadata(connectionId, target.database, querySchema, table);
+      cachedInsertValueHintColumnsByTable.set(cacheKey, insertValueHintColumnNames(databaseType, columns));
+      return;
+    }
+    const columns = await connectionStore.listCompletionColumns(connectionId, target.database, table, target.schema);
+    cachedColumnsByTable.set(cacheKey, columns);
+  };
+  void loadColumns()
+    .then(() => {
       loadedColumnsByTable.add(cacheKey.toLowerCase());
       if (view.value) requestInsertValueHintsRefresh(view.value);
     })
@@ -2277,12 +2293,12 @@ async function provideSqlCompletions(context: CompletionContext) {
     const shouldResolveAsyncCompletion = tableNameCompletion || shouldResolveColumnCompletion;
     const localResult = buildLocalSqlCompletionResult(completionContext, fullDoc, position);
     if (localResult) {
-      scheduleCompletionMetadataRefresh(completionContext);
+      scheduleCompletionMetadataRefresh(completionContext, fullDoc, position);
       const hasLocalColumnResult = localResult.options.some((option) => option.type === "column");
       if ((!explicit || typedActivation) && (!shouldResolveColumnCompletion || hasLocalColumnResult)) return localResult;
     }
     if ((!explicit || typedActivation) && !shouldResolveAsyncCompletion) {
-      scheduleCompletionMetadataRefresh(completionContext);
+      scheduleCompletionMetadataRefresh(completionContext, fullDoc, position);
       return null;
     }
 
@@ -2464,7 +2480,7 @@ function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getS
   return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position));
 }
 
-function scheduleCompletionMetadataRefresh(completionContext: ReturnType<typeof getSqlCompletionContext>) {
+function scheduleCompletionMetadataRefresh(completionContext: ReturnType<typeof getSqlCompletionContext>, fullDoc: string, position: number) {
   if (!props.connectionId || props.database == null) return;
   const localOnlyMetadata = usesLocalOnlyCompletionMetadata();
   const onDemandOnlyColumns = usesOnDemandOnlyCompletionColumns();
@@ -2493,7 +2509,10 @@ function scheduleCompletionMetadataRefresh(completionContext: ReturnType<typeof 
   if (!localOnlyMetadata && shouldLoadCompletionObjects(completionContext)) {
     void listCompletionObjectsForContext(completionContext)
       .then((objects) => {
-        cachedCompletionObjects = mergeCompletionObjects(cachedCompletionObjects, objects);
+        const merged = mergeCompletionObjects(cachedCompletionObjects, objects);
+        const changed = completionObjectsDiffer(cachedCompletionObjects, merged);
+        cachedCompletionObjects = merged;
+        if (changed) refreshActiveSqlCompletion(fullDoc, position, completionContext);
       })
       .catch(() => {});
   }
@@ -2608,16 +2627,27 @@ function lookupLocalCompletionObjectsForContext(completionContext: ReturnType<ty
   if (props.databaseType === "oracle") {
     return connectionStore.lookupLocalCompletionObjects(props.connectionId, props.database, completionContext.prefix, MAX_COMPLETION_TABLES);
   }
-  return connectionStore.lookupLocalCompletionObjects(props.connectionId, props.database, completionContext.qualifier || completionContext.prefix, MAX_COMPLETION_TABLES, completionContext.qualifier && !completionContext.exclusiveColumnSuggestions ? completionContext.qualifier : props.schema);
+  const target = resolveSqlCompletionRoutineLookupTarget({ currentSchema: props.schema, completionContext });
+  return connectionStore.lookupLocalCompletionObjects(props.connectionId, props.database, target.mask, MAX_COMPLETION_TABLES, target.schema);
 }
 
 async function listCompletionObjectsForContext(completionContext: ReturnType<typeof getSqlCompletionContext>): Promise<SqlCompletionObject[]> {
   if (!props.connectionId || props.database == null) return [];
+  const objectKinds = completionObjectKindsForContext(completionContext);
   if (props.databaseType !== "oracle") {
-    return connectionStore.listCompletionObjects(props.connectionId, props.database, completionContext.qualifier || completionContext.prefix, MAX_COMPLETION_TABLES, props.schema);
+    const target = resolveSqlCompletionRoutineLookupTarget({ currentSchema: props.schema, completionContext });
+    return connectionStore.listCompletionObjects(props.connectionId, props.database, target.mask, MAX_COMPLETION_TABLES, target.schema, undefined, false, props.schema, objectKinds);
   }
-  const groups = await Promise.all(oracleRoutineCompletionTargets(completionContext).map((target) => connectionStore.listCompletionObjects(props.connectionId!, props.database!, completionContext.prefix, MAX_COMPLETION_TABLES, target.schema, target.parentName, target.globalSearch, props.schema)));
+  const groups = await Promise.all(
+    oracleRoutineCompletionTargets(completionContext).map((target) => connectionStore.listCompletionObjects(props.connectionId!, props.database!, completionContext.prefix, MAX_COMPLETION_TABLES, target.schema, target.parentName, target.globalSearch, props.schema, objectKinds)),
+  );
   return groups.reduce((objects, group) => mergeCompletionObjects(objects, group), [] as SqlCompletionObject[]);
+}
+
+function completionObjectKindsForContext(completionContext: ReturnType<typeof getSqlCompletionContext>): CompletionAssistantObjectKind[] {
+  if (completionContext.contextKind === "exec") return ["procedure"];
+  if (completionContext.suggestColumns && completionContext.referencedTables.length > 0 && !completionContext.qualifier) return ["function"];
+  return ["routine"];
 }
 
 async function performAsyncCompletionWithResult(epoch: number, completionContext: ReturnType<typeof getSqlCompletionContext>, fullDoc: string, position: number) {
@@ -2875,10 +2905,40 @@ function mergeCompletionObjects(existing: SqlCompletionObject[], incoming: SqlCo
   return merged;
 }
 
+function completionObjectsDiffer(existing: SqlCompletionObject[], incoming: SqlCompletionObject[]): boolean {
+  if (existing.length !== incoming.length) return true;
+  return existing.some((object, index) => {
+    const other = incoming[index];
+    return (
+      !other ||
+      object.name !== other.name ||
+      object.schema !== other.schema ||
+      object.type !== other.type ||
+      object.parentSchema !== other.parentSchema ||
+      object.parentName !== other.parentName ||
+      object.dataType !== other.dataType ||
+      object.signature !== other.signature ||
+      object.comment !== other.comment ||
+      object.applyName !== other.applyName ||
+      object.boost !== other.boost
+    );
+  });
+}
+
+function refreshActiveSqlCompletion(fullDoc: string, position: number, completionContext: ReturnType<typeof getSqlCompletionContext>) {
+  const currentView = view.value;
+  if (!currentView || codeMirrorCompletionStatus?.(currentView.state) !== "active") return;
+  if (currentView.state.doc.toString() !== fullDoc || currentView.state.selection.main.head !== position) return;
+  const currentContext = getSqlCompletionContext(fullDoc, position);
+  if (currentContext.prefix !== completionContext.prefix || currentContext.contextKind !== completionContext.contextKind) return;
+  scheduleSqlCompletionStart(currentView);
+}
+
 function refreshCompletionCache() {
   cachedTables = [];
   cachedCompletionObjects = [];
   cachedColumnsByTable.clear();
+  cachedInsertValueHintColumnsByTable.clear();
   loadedColumnsByTable.clear();
   cachedForeignKeysByTable.clear();
 }
@@ -2910,6 +2970,7 @@ onMounted(async () => {
   closeBracketsComp = new Compartment();
   sqlLanguageComp = new Compartment();
   sqlSemanticHighlightComp = new Compartment();
+  sqlSignatureComp = new Compartment();
   codeMirrorCloseBrackets = closeBrackets;
   codeMirrorCloseBracketsKeymap = closeBracketsKeymap;
   readOnlyComp = new Compartment();
@@ -3130,7 +3191,7 @@ onMounted(async () => {
 
   buildSqlSignatureExtension = () =>
     showTooltip.compute(["doc", "selection"], (currentState) => {
-      const signature = getSqlFunctionSignatureHelp(currentState.doc.toString(), currentState.selection.main.head);
+      const signature = getSqlFunctionSignatureHelp(currentState.doc.toString(), currentState.selection.main.head, props.databaseType);
       if (!signature) return null;
       return {
         pos: currentState.selection.main.head,
@@ -3385,7 +3446,7 @@ onMounted(async () => {
         }),
       ),
       hoverTooltip((currentView, pos) => resolveSqlHoverTooltip(currentView, pos)),
-      buildSqlSignatureExtension(),
+      sqlSignatureComp.of(buildSqlSignatureExtension()),
       diagnosticComp.of(buildSqlDiagnosticExtension()),
       createInsertValueHintsExtension({
         isEnabled: () => settingsStore.editorSettings.showInsertValueHints && props.databaseType !== "redis" && props.databaseType !== "mongodb" && props.databaseType !== "elasticsearch",
@@ -3738,9 +3799,10 @@ watch(
 
 watch([() => props.databaseType, () => props.dialect, () => props.syntaxDialect], () => {
   executableStatementRangeCache = null;
-  if (!view.value || !sqlLanguageComp || !buildSqlLanguageExtension || !sqlSemanticHighlightComp || !buildSqlSemanticHighlightExtension) return;
+  if (!view.value || !sqlLanguageComp || !buildSqlLanguageExtension || !sqlSemanticHighlightComp || !buildSqlSemanticHighlightExtension || !sqlSignatureComp || !buildSqlSignatureExtension) return;
+  // Signature tooltips depend on the external dialect, so refresh them even when the document and selection stay unchanged.
   view.value.dispatch({
-    effects: [sqlLanguageComp.reconfigure(buildSqlLanguageExtension()), sqlSemanticHighlightComp.reconfigure(buildSqlSemanticHighlightExtension())],
+    effects: [sqlLanguageComp.reconfigure(buildSqlLanguageExtension()), sqlSemanticHighlightComp.reconfigure(buildSqlSemanticHighlightExtension()), sqlSignatureComp.reconfigure(buildSqlSignatureExtension())],
   });
 });
 

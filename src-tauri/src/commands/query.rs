@@ -351,6 +351,13 @@ pub fn build_duckdb_attach_database_sql(
 }
 
 #[tauri::command]
+pub fn build_sqlite_attach_database_sql(
+    options: dbx_core::db_admin_sql::SqliteAttachDatabaseSqlOptions,
+) -> Result<String, String> {
+    Ok(dbx_core::db_admin_sql::build_sqlite_attach_database_sql(options))
+}
+
+#[tauri::command]
 pub fn build_drop_object_sql(options: dbx_core::db_admin_sql::DropObjectSqlOptions) -> Result<String, String> {
     Ok(dbx_core::db_admin_sql::build_drop_object_sql(options))
 }

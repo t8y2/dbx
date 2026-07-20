@@ -66,6 +66,7 @@ import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { canTreeNodePin, canTreeNodeShowExpander } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { objectTypesForGroupNode } from "@/lib/table/tableTree";
 import { loadSidebarObjectGroup } from "@/lib/sidebar/sidebarObjectGroupRouting";
+import { mysqlObjectTemplateForGroup } from "@/lib/sidebar/mysqlObjectTemplates";
 import { buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTemplate, buildTableUpdateTemplate } from "@/lib/table/tableSqlTemplates";
 import { driverStoreFocusForInstallError } from "@/lib/connection/agentDriverInstallHint";
 import {
@@ -89,7 +90,8 @@ import { copyNameForTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTree
 import { dataTabOpenModeFromTreeClick, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
 import { canRefreshDataTableFromSingleActivationDoubleClick, dataTableDoubleClickAction } from "@/lib/tabs/dataTabActivation";
-import { buildCreateDatabaseSql, buildDuckDbAttachDatabaseSql, duckDbAttachedDatabaseNameFromPath, supportsCreateDatabaseCharset, uniqueDuckDbAttachedDatabaseName } from "@/lib/database/createDatabaseSql";
+import { attachedDatabaseNameFromPath, buildCreateDatabaseSql, buildDuckDbAttachDatabaseSql, buildSqliteAttachDatabaseSql, supportsCreateDatabaseCharset, uniqueAttachedDatabaseName } from "@/lib/database/createDatabaseSql";
+import { SQLITE_DATABASE_FILE_EXTENSIONS } from "@/lib/database/databaseFileDetection";
 import {
   buildCreateSchemaSql,
   buildDropDatabaseSql,
@@ -2003,7 +2005,12 @@ const canEditNacosNamespace = computed(() => {
 
 const isDuckDbConnection = computed(() => {
   const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
-  return activeNode.value.type === "connection" && connectionNamespaceCreationTarget(config) === "attach";
+  return activeNode.value.type === "connection" && config?.db_type === "duckdb" && connectionNamespaceCreationTarget(config) === "attach";
+});
+
+const isSqliteAttachConnection = computed(() => {
+  const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
+  return activeNode.value.type === "connection" && config?.db_type === "sqlite" && connectionNamespaceCreationTarget(config) === "attach";
 });
 
 const isConnectionSchemaCreation = computed(() => {
@@ -2285,6 +2292,10 @@ async function openCreateDatabase() {
     await createDuckDbAttachedDatabaseFile();
     return;
   }
+  if (isSqliteAttachConnection.value) {
+    await attachSqliteDatabaseFile();
+    return;
+  }
   openCreateDatabaseDialog();
 }
 
@@ -2374,6 +2385,7 @@ function openConnectionNamespaceCreation() {
 
 function connectionNamespaceCreationLabel() {
   if (isDuckDbConnection.value) return t("contextMenu.createDuckDbFile");
+  if (isSqliteAttachConnection.value) return t("contextMenu.attachSqliteDatabase");
   if (isConnectionSchemaCreation.value) return t("contextMenu.createSchema");
   return t("contextMenu.createDatabase");
 }
@@ -2447,12 +2459,13 @@ async function createDuckDbAttachedDatabaseFile() {
     const path = ensureDuckDbFileExtension(selectedPath);
     await connectionStore.ensureConnected(node.connectionId);
     const existingDatabases = await api.listDatabases(node.connectionId);
-    const name = uniqueDuckDbAttachedDatabaseName(
-      duckDbAttachedDatabaseNameFromPath(path),
+    const name = uniqueAttachedDatabaseName(
+      attachedDatabaseNameFromPath(path, "duckdb_database"),
       existingDatabases.map((database) => database.name),
     );
     const sql = await buildDuckDbAttachDatabaseSql(path, name);
-    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: "" });
+    const executionResult = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: "" });
+    if (executionResult === undefined) return;
 
     const config = connectionStore.getConfig(node.connectionId);
     if (config) {
@@ -2465,6 +2478,51 @@ async function createDuckDbAttachedDatabaseFile() {
     await connectionStore.loadDatabases(node.connectionId, { force: true });
     connectionStore.selectedTreeNodeId = `${node.connectionId}:${name}`;
     toast(t("contextMenu.createDuckDbFileSuccess", { name }), 3000);
+  } catch (e: any) {
+    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+async function attachSqliteDatabaseFile() {
+  const node = activeNode.value;
+  if (!node.connectionId) return;
+  if (!isTauriRuntime()) {
+    toast(t("contextMenu.attachSqliteDatabaseDesktopOnly"), 4000);
+    return;
+  }
+
+  try {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      title: t("contextMenu.attachSqliteDatabase"),
+      multiple: false,
+      filters: [{ name: "SQLite", extensions: SQLITE_DATABASE_FILE_EXTENSIONS }],
+    });
+    const path = Array.isArray(selected) ? selected[0] : selected;
+    if (!path || typeof path !== "string") return;
+
+    await connectionStore.ensureConnected(node.connectionId);
+    const existingDatabases = await api.listDatabases(node.connectionId);
+    const name = uniqueAttachedDatabaseName(
+      attachedDatabaseNameFromPath(path, "sqlite_database"),
+      existingDatabases.map((database) => database.name),
+      ["main", "temp"],
+    );
+    const sql = await buildSqliteAttachDatabaseSql(path, name);
+    const executionResult = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: "" });
+    if (executionResult === undefined) return;
+
+    const config = connectionStore.getConfig(node.connectionId);
+    if (config) {
+      await connectionStore.updateConnection({
+        ...config,
+        attached_databases: [...(config.attached_databases ?? []), { name, path }],
+      });
+    }
+    await connectionStore.ensureVisibleDatabase(node.connectionId, name);
+    await connectionStore.loadDatabases(node.connectionId, { force: true });
+    connectionStore.selectedTreeNodeId = `${node.connectionId}:${name}`;
+    toast(t("contextMenu.attachSqliteDatabaseSuccess", { name }), 3000);
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
@@ -2806,6 +2864,16 @@ function createView() {
     name: viewName,
     objectType: "VIEW",
   });
+}
+
+function createMysqlObjectTemplate() {
+  const node = activeNode.value;
+  if (!node.connectionId || !node.database) return;
+  const template = mysqlObjectTemplateForGroup(connectionStore.getConfig(node.connectionId), node);
+  if (!template) return;
+  connectionStore.activeConnectionId = node.connectionId;
+  const tabId = queryStore.createTab(node.connectionId, node.database, t(template.titleKey), "query", node.schema);
+  queryStore.updateSql(tabId, template.sql);
 }
 
 const canExpand = computed(() =>
@@ -3967,7 +4035,8 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
   const { node, items } = context;
   // 9. Group Labels (group-columns, group-tables, etc.)
   if (isGroupLabel(node)) {
-    const hasGroupCreateAction = (node.type === "group-tables" && canCreateTable.value) || (node.type === "group-views" && !!node.connectionId && !!node.database);
+    const mysqlObjectTemplate = node.connectionId ? mysqlObjectTemplateForGroup(connectionStore.getConfig(node.connectionId), node) : null;
+    const hasGroupCreateAction = (node.type === "group-tables" && canCreateTable.value) || (node.type === "group-views" && !!node.connectionId && !!node.database) || !!mysqlObjectTemplate;
     const canLoadAllObjectGroup = node.type === "group-tables" || node.type === "group-views" || node.type === "group-materialized-views";
     if (node.type === "group-tables" && canCreateTable.value) {
       items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
@@ -3980,6 +4049,9 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
     }
     if (node.type === "group-views" && node.connectionId && node.database) {
       items.push({ label: t("contextMenu.createView"), action: createView, icon: Plus });
+    }
+    if (mysqlObjectTemplate) {
+      items.push({ label: t(mysqlObjectTemplate.titleKey), action: createMysqlObjectTemplate, icon: Plus });
     }
     if (hasGroupCreateAction) {
       items.push({ label: "", separator: true });

@@ -67,6 +67,84 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
 
 #[tokio::test]
 #[ignore = "requires DBX_LIVE_SQLSERVER_HOST/PORT/USER/PASSWORD pointing at a writable SQL Server database"]
+async fn live_sqlserver_column_metadata_marks_non_positional_insert_columns() {
+    let database = std::env::var("DBX_LIVE_SQLSERVER_DATABASE").unwrap_or_else(|_| "tempdb".to_string());
+    let host = std::env::var("DBX_LIVE_SQLSERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("DBX_LIVE_SQLSERVER_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(1433);
+    let user = std::env::var("DBX_LIVE_SQLSERVER_USER").unwrap_or_else(|_| "sa".to_string());
+    let password = std::env::var("DBX_LIVE_SQLSERVER_PASSWORD").expect("DBX_LIVE_SQLSERVER_PASSWORD");
+    let mut client =
+        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some(&database), None, Duration::from_secs(10))
+            .await
+            .expect("connect SQL Server");
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let computed_table = format!("dbx_insert_computed_{suffix}");
+    let temporal_table = format!("dbx_insert_temporal_{suffix}");
+    let history_table = format!("dbx_insert_history_{suffix}");
+    let create_computed = format!(
+        "CREATE TABLE dbo.[{computed_table}] (id int IDENTITY(1,1) NOT NULL, quantity int NOT NULL, doubled AS quantity * 2, note nvarchar(40) NOT NULL)"
+    );
+    let create_temporal = format!(
+        "CREATE TABLE dbo.[{temporal_table}] (\
+         id int IDENTITY(1,1) NOT NULL PRIMARY KEY, \
+         note nvarchar(40) NOT NULL, \
+         valid_from datetime2 GENERATED ALWAYS AS ROW START HIDDEN NOT NULL DEFAULT SYSUTCDATETIME(), \
+         valid_to datetime2 GENERATED ALWAYS AS ROW END HIDDEN NOT NULL DEFAULT CONVERT(datetime2, '9999-12-31 23:59:59.9999999'), \
+         PERIOD FOR SYSTEM_TIME (valid_from, valid_to)\
+         ) WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = dbo.[{history_table}]))"
+    );
+
+    dbx_core::db::sqlserver::execute_query(&mut client, &create_computed).await.expect("create computed table");
+    dbx_core::db::sqlserver::execute_query(&mut client, &create_temporal).await.expect("create temporal table");
+    dbx_core::db::sqlserver::execute_query(
+        &mut client,
+        &format!("INSERT INTO dbo.[{computed_table}] VALUES (3, N'normal')"),
+    )
+    .await
+    .expect("insert while omitting identity and computed columns");
+    dbx_core::db::sqlserver::execute_query(
+        &mut client,
+        &format!("INSERT INTO dbo.[{temporal_table}] VALUES (N'temporal')"),
+    )
+    .await
+    .expect("insert while omitting identity and hidden temporal columns");
+
+    let computed = dbx_core::db::sqlserver::get_column_metadata(&mut client, "dbo", &computed_table)
+        .await
+        .expect("read computed metadata");
+    let temporal = dbx_core::db::sqlserver::get_column_metadata(&mut client, "dbo", &temporal_table)
+        .await
+        .expect("read temporal metadata");
+
+    dbx_core::db::sqlserver::execute_query(
+        &mut client,
+        &format!("ALTER TABLE dbo.[{temporal_table}] SET (SYSTEM_VERSIONING = OFF)"),
+    )
+    .await
+    .expect("disable system versioning");
+    dbx_core::db::sqlserver::execute_query(
+        &mut client,
+        &format!("DROP TABLE dbo.[{temporal_table}], dbo.[{history_table}], dbo.[{computed_table}]"),
+    )
+    .await
+    .expect("drop metadata probe tables");
+
+    let identity = computed.iter().find(|metadata| metadata.column.name == "id").expect("identity column");
+    let quantity = computed.iter().find(|metadata| metadata.column.name == "quantity").expect("normal column");
+    let doubled = computed.iter().find(|metadata| metadata.column.name == "doubled").expect("computed column");
+    let valid_from = temporal.iter().find(|metadata| metadata.column.name == "valid_from").expect("row start column");
+    let valid_to = temporal.iter().find(|metadata| metadata.column.name == "valid_to").expect("row end column");
+
+    assert!(identity.is_identity);
+    assert!(!quantity.is_identity && !quantity.is_computed && !quantity.is_hidden);
+    assert!(doubled.is_computed);
+    assert!(valid_from.is_hidden && valid_from.generated_always_type == 1);
+    assert!(valid_to.is_hidden && valid_to.generated_always_type == 2);
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQLSERVER_HOST/PORT/USER/PASSWORD pointing at a writable SQL Server database"]
 async fn live_sqlserver_execute_query_creates_schema() {
     let database = std::env::var("DBX_LIVE_SQLSERVER_DATABASE").unwrap_or_else(|_| "tempdb".to_string());
     let host = std::env::var("DBX_LIVE_SQLSERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());

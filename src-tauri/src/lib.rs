@@ -1117,6 +1117,7 @@ pub fn run() {
             commands::schema::list_schema_infos,
             commands::schema::list_data_types,
             commands::schema::get_columns,
+            commands::schema::get_sqlserver_column_metadata,
             commands::schema::list_indexes,
             commands::schema::list_foreign_keys,
             commands::schema::list_triggers,
@@ -1165,6 +1166,7 @@ pub fn run() {
             commands::query::build_create_database_sql,
             #[cfg(feature = "duckdb-bundled")]
             commands::query::build_duckdb_attach_database_sql,
+            commands::query::build_sqlite_attach_database_sql,
             commands::query::build_drop_object_sql,
             commands::query::build_drop_table_sql,
             commands::query::build_drop_table_child_object_sql,

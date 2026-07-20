@@ -162,6 +162,16 @@ describe("useNavigationTargets openTableTarget", () => {
     expect(mocks.tabs[0]?.tableMetaPending).toBe(true);
   });
 
+  it("uses the SQLite attached database as the table namespace when a target omits schema", async () => {
+    mocks.databaseType = "sqlite";
+
+    await useNavigationTargets(dialogs).openLineageTarget({ connectionId: "connection-1", database: "analytics", tableName: "events" });
+
+    expect(mocks.tabs[0]?.schema).toBe("analytics");
+    expect(mocks.tabs[0]?.tableMeta?.schema).toBe("analytics");
+    expect(mocks.getColumns.mock.calls.some(([connectionId, database, schema, tableName]) => connectionId === "connection-1" && database === "analytics" && schema === "analytics" && tableName === "events")).toBe(true);
+  });
+
   it("does not let a stale navigation land metadata over a newer target on a reused tab", async () => {
     // A 的 getColumns 挂起；B 复用同一 tab 后 A 才返回
     const columnGates = new Map<string, (columns: unknown[]) => void>();

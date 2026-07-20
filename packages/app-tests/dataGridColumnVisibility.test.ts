@@ -97,6 +97,22 @@ test("finds columns where every row is NULL", () => {
   assert.deepEqual(indexes, [1, 2]);
 });
 
+test("all-null scan handles sparse, ragged and non-candidate columns", () => {
+  // 前缀多 null 但尾行非 null 的列必须被剔除；availableIndexes 之外的列不参与
+  const rows = [
+    [null, 1, null, null],
+    [null, null, null, null],
+    [null, null, 2, null],
+  ];
+  assert.deepEqual(allNullColumnIndexes(rows, [0, 1, 2]), [0]);
+  // 不等宽行：短行缺失的单元格为 undefined ≠ null，剔除该列（与原实现一致）
+  assert.deepEqual(allNullColumnIndexes([[null, null], [null]], [0, 1]), [0]);
+  // 全部候选都非 null：提前收敛返回空
+  assert.deepEqual(allNullColumnIndexes([[1, 2]], [0, 1]), []);
+  // 乱序候选：返回顺序保持 availableIndexes 原序
+  assert.deepEqual(allNullColumnIndexes([[null, 1, null]], [2, 0]), [2, 0]);
+});
+
 test("does not treat empty results as all-null columns", () => {
   assert.deepEqual(allNullColumnIndexes([], [0, 1, 2]), []);
 });

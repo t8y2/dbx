@@ -35,6 +35,37 @@ function semanticCompletion(markedSql: string, input: Partial<SqlCompletionProvi
 }
 
 describe("semantic SQL completion candidates", () => {
+  it("keeps matching functions available in column expressions", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([
+      [
+        "routes",
+        [
+          { name: "start_sid", table: "routes" },
+          { name: "start_dept", table: "routes" },
+        ],
+      ],
+    ]);
+
+    const { context, items } = semanticCompletion(
+      "SELECT * FROM routes WHERE st_|",
+      {
+        columnsByTable,
+        objects: [
+          { name: "st_area", type: "function", dataType: "double precision" },
+          { name: "st_refresh", type: "procedure" },
+        ],
+      },
+      { databaseType: "postgres", dialect: "postgres" },
+    );
+
+    expect(context.contextKind).toBe("column");
+    expect(context.suggestColumns).toBe(true);
+    expect(context.suggestRoutines).toBe(true);
+    expect(context.exclusiveRoutineSuggestions).toBe(false);
+    expect(items.some((item) => item.label === "st_area" && item.type === "function")).toBe(true);
+    expect(items.some((item) => item.label === "st_refresh")).toBe(false);
+  });
+
   it("keeps alias-qualified column completion scoped to one row source", () => {
     const columnsByTable = new Map<string, SqlCompletionColumn[]>([
       ["users", ["id", "name", "email"].map((name) => ({ name, table: "users" }))],

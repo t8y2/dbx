@@ -1,6 +1,6 @@
 {
   "name": "@dbx-app/mcp-linux-arm64-gnu",
-  "version": "0.4.37",
+  "version": "0.4.38",
   "description": "Precompiled DBX MCP Rust binary for linux arm64",
   "license": "Apache-2.0",
   "repository": {

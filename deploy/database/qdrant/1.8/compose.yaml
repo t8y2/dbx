@@ -1,0 +1,19 @@
+services:
+  database:
+    image: docker.cnb.cool/znb/images/qdrant:v1.8.3
+    container_name: dbx-qdrant-1.8
+    ports:
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-6334}:6333"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${QDRANT_GRPC_PORT:-6335}:6334"
+    environment:
+      QDRANT__SERVICE__API_KEY: "${DB_PASSWORD:-123456}"
+    volumes:
+      - data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/6333'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+volumes:
+  data:

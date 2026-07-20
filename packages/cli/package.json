@@ -1,6 +1,6 @@
 {
   "name": "@dbx-app/cli",
-  "version": "0.4.37",
+  "version": "0.4.38",
   "description": "Command line interface for DBX database connections, schema, and safe queries",
   "keywords": [
     "ai-agent",
@@ -34,12 +34,12 @@
     "prepublishOnly": "node --check bin/dbx.js"
   },
   "optionalDependencies": {
-    "@dbx-app/cli-darwin-arm64": "0.4.37",
-    "@dbx-app/cli-darwin-x64": "0.4.37",
-    "@dbx-app/cli-linux-arm64-gnu": "0.4.37",
-    "@dbx-app/cli-linux-x64-gnu": "0.4.37",
-    "@dbx-app/cli-win32-arm64": "0.4.37",
-    "@dbx-app/cli-win32-x64": "0.4.37"
+    "@dbx-app/cli-darwin-arm64": "0.4.38",
+    "@dbx-app/cli-darwin-x64": "0.4.38",
+    "@dbx-app/cli-linux-arm64-gnu": "0.4.38",
+    "@dbx-app/cli-linux-x64-gnu": "0.4.38",
+    "@dbx-app/cli-win32-arm64": "0.4.38",
+    "@dbx-app/cli-win32-x64": "0.4.38"
   },
   "engines": {
     "node": ">=18.18.0"

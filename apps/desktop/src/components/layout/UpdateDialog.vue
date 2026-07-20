@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { AlertTriangle, Loader2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
@@ -32,6 +32,8 @@ const { t } = useI18n();
 const isDesktop = isTauriRuntime();
 
 const renderedNotes = ref("");
+// Keep a downloaded package retryable after install errors; only active transitions must trap the dialog.
+const isCloseBlocked = computed(() => props.isDownloadingUpdate || props.isInstallingUpdate || props.updateReady);
 
 function handleReleaseNotesClick(event: MouseEvent) {
   const target = event.target as HTMLElement;
@@ -66,14 +68,15 @@ watch(
   <Dialog v-model:open="open">
     <DialogContent
       class="sm:max-w-[520px]"
+      :show-close-button="!isCloseBlocked"
       @interact-outside="
         (e: Event) => {
-          if (isDownloadingUpdate || updateDownloaded || isInstallingUpdate || updateReady) e.preventDefault();
+          if (isCloseBlocked) e.preventDefault();
         }
       "
       @escape-key-down="
         (e: Event) => {
-          if (isDownloadingUpdate || updateDownloaded || isInstallingUpdate || updateReady) e.preventDefault();
+          if (isCloseBlocked) e.preventDefault();
         }
       "
     >
@@ -112,7 +115,7 @@ watch(
         </div>
       </div>
       <DialogFooter>
-        <Button v-if="!isDownloadingUpdate && !updateDownloaded && !isInstallingUpdate && !updateReady" variant="outline" @click="open = false">{{ t("dangerDialog.cancel") }}</Button>
+        <Button v-if="!isCloseBlocked" variant="outline" @click="open = false">{{ t("dangerDialog.cancel") }}</Button>
         <template v-if="updateInfo?.update_available">
           <Button variant="outline" @click="emit('open-latest-release')">{{ t("updates.openRelease") }}</Button>
           <template v-if="canDownloadAndInstallUpdate(updateInfo, isDesktop)">

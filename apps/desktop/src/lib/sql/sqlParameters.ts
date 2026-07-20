@@ -748,9 +748,13 @@ function readParameterName(sql: string, start: number): string {
   return sql.slice(start, i);
 }
 
-/** Match only quote + exact `${name}`/`#{name}` + same quote. Leaves skipQuoted unchanged. */
+/** Match only unprefixed quote + exact `${name}`/`#{name}` + same quote. Leaves skipQuoted unchanged. */
 function tryReadQuotedBracedPlaceholder(sql: string, start: number, quote: "'" | '"', isSyntaxEnabled: (syntax: SqlParameterSyntax) => boolean): ParameterOccurrence | null {
   if (sql[start] !== quote) return null;
+  // Reject E'...', U&'...', B'...', X'...', N'...' — replacing the quoted span would leave the
+  // prefix attached to a typed literal (e.g. E'${path}' → E'C:\new', B'${flag}' → BTRUE).
+  if (hasSqlStringLiteralPrefix(sql, start)) return null;
+
   const open = sql.slice(start + 1, start + 3);
   let syntax: SqlParameterSyntax | null = null;
   if (open === "${") syntax = "shell";
@@ -766,6 +770,10 @@ function tryReadQuotedBracedPlaceholder(sql: string, start: number, quote: "'" |
   if (!PARAMETER_NAME_RE.test(name)) return null;
 
   const end = closeBrace + 2;
+  // The closing quote must be a real string terminator under the same rules as skipQuoted
+  // (doubled quotes / backslash escapes). Otherwise '${value}''suffix' would match '${value}'.
+  if (skipQuoted(sql, start, quote) !== end) return null;
+
   return {
     key: name,
     name,
@@ -774,6 +782,22 @@ function tryReadQuotedBracedPlaceholder(sql: string, start: number, quote: "'" |
     start,
     end,
   };
+}
+
+/** True when `quoteStart` opens a prefixed literal such as E'...', U&'...', B'...', X'...', or N'...'. */
+function hasSqlStringLiteralPrefix(sql: string, quoteStart: number): boolean {
+  if (quoteStart <= 0) return false;
+
+  if (quoteStart >= 2 && sql[quoteStart - 1] === "&" && (sql[quoteStart - 2] === "U" || sql[quoteStart - 2] === "u") && !PARAMETER_NAME_CHAR_RE.test(sql[quoteStart - 3] ?? "")) {
+    return true;
+  }
+
+  const prev = sql[quoteStart - 1];
+  if ((prev === "E" || prev === "e" || prev === "B" || prev === "b" || prev === "X" || prev === "x" || prev === "N" || prev === "n") && !PARAMETER_NAME_CHAR_RE.test(sql[quoteStart - 2] ?? "")) {
+    return true;
+  }
+
+  return false;
 }
 
 function skipQuoted(sql: string, start: number, quote: string): number {

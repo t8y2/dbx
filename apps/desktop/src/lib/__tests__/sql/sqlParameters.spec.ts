@@ -315,6 +315,28 @@ describe("substituteSqlParameters", () => {
     expect(substituteSqlParameters(sql, { real: { kind: "number", value: "1" }, date: { kind: "string", value: "x" }, id: { kind: "number", value: "2" } })).toBe("select 'prefix${date}' as a, \"x#{id}y\" as b, 1");
   });
 
+  it("ignores prefixed string literals such as E/U&/B/X/N quotes", () => {
+    const sql = "select E'${path}' as a, U&'${unicode}' as b, B'${flag}' as c, X'${hex}' as d, N'${national}' as e, '${plain}' as f";
+    expect(extractSqlParameters(sql)).toEqual(["plain"]);
+    expect(
+      substituteSqlParameters(sql, {
+        path: { kind: "string", value: "C:\\new" },
+        flag: { kind: "boolean", value: "true" },
+        plain: { kind: "string", value: "ok" },
+      }),
+    ).toBe("select E'${path}' as a, U&'${unicode}' as b, B'${flag}' as c, X'${hex}' as d, N'${national}' as e, 'ok' as f");
+  });
+
+  it("ignores doubled-quote continuations that are not exact quoted placeholders", () => {
+    const single = "select '${value}''suffix' as a, ${real}";
+    expect(extractSqlParameters(single)).toEqual(["real"]);
+    expect(substituteSqlParameters(single, { value: { kind: "boolean", value: "true" }, real: { kind: "number", value: "1" } })).toBe("select '${value}''suffix' as a, 1");
+
+    const double = 'select "${value}""suffix" as a, ${real}';
+    expect(extractSqlParameters(double)).toEqual(["real"]);
+    expect(substituteSqlParameters(double, { value: { kind: "boolean", value: "true" }, real: { kind: "number", value: "2" } })).toBe('select "${value}""suffix" as a, 2');
+  });
+
   it("escapes string values and supports null and raw SQL", () => {
     const sql = "select ${name}, ${empty_value}, ${expression}";
     expect(

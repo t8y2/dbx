@@ -1427,6 +1427,8 @@ pub fn run() {
             commands::mq_cmd::mq_send_message,
             commands::history::save_history,
             commands::history::load_history,
+            commands::history::search_history,
+            commands::history::load_history_connection_options,
             commands::history::clear_history,
             commands::history::delete_history_entry,
             commands::mcp::check_mcp_server_status,

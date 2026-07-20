@@ -2044,12 +2044,56 @@ export interface HistoryEntry {
   details_json?: string | null;
 }
 
+export interface HistoryConnectionFilter {
+  connection_id: string;
+  connection_name: string;
+}
+
+export interface HistoryDatabaseFilter extends HistoryConnectionFilter {
+  database: string;
+}
+
+export interface HistoryCursor {
+  executed_at: string;
+  id: string;
+}
+
+export interface HistorySearchRequest {
+  search_text: string;
+  connections: HistoryConnectionFilter[];
+  databases: HistoryDatabaseFilter[];
+  activity_kind?: string;
+  success?: boolean;
+  started_at?: string;
+  ended_at?: string;
+  cursor?: HistoryCursor;
+  limit: number;
+}
+
+export interface HistorySearchResult {
+  entries: HistoryEntry[];
+  next_cursor?: HistoryCursor | null;
+  total: number;
+}
+
+export interface HistoryConnectionOption extends HistoryConnectionFilter {
+  databases: string[];
+}
+
 export async function saveHistory(entry: HistoryEntry): Promise<void> {
   return invoke("save_history", { entry });
 }
 
 export async function loadHistory(limit: number, offset: number, activityKind?: string): Promise<HistoryEntry[]> {
   return invoke("load_history", { limit, offset, activityKind: activityKind ?? null });
+}
+
+export async function searchHistory(request: HistorySearchRequest): Promise<HistorySearchResult> {
+  return invoke("search_history", { request });
+}
+
+export async function loadHistoryConnectionOptions(): Promise<HistoryConnectionOption[]> {
+  return invoke("load_history_connection_options");
 }
 
 export async function loadRedisHistory(limit = 100, offset = 0): Promise<HistoryEntry[]> {

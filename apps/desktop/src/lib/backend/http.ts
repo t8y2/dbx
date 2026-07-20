@@ -78,6 +78,9 @@ import type {
   MongoCollectionStatsResult,
   MongoGridFsBucketInfo,
   HistoryEntry,
+  HistorySearchRequest,
+  HistorySearchResult,
+  HistoryConnectionOption,
   SqlFileRequest,
   SqlFilePreview,
   SqlFileProgress,
@@ -2243,6 +2246,14 @@ export async function saveHistory(entry: HistoryEntry): Promise<void> {
 
 export async function loadHistory(limit: number, offset: number, activityKind?: string): Promise<HistoryEntry[]> {
   return get(`/api/history?${qs({ limit, offset, activity_kind: activityKind })}`);
+}
+
+export async function searchHistory(request: HistorySearchRequest): Promise<HistorySearchResult> {
+  return post("/api/history/search", request);
+}
+
+export async function loadHistoryConnectionOptions(): Promise<HistoryConnectionOption[]> {
+  return get("/api/history/options");
 }
 
 export async function loadRedisHistory(limit = 100, offset = 0): Promise<HistoryEntry[]> {

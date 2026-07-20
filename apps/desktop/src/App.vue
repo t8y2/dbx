@@ -2237,7 +2237,7 @@ onUnmounted(() => {
 
           <div v-if="showHistory" :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'" :style="{ width: historyWidth + 'px' }">
             <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startHistoryResize" />
-            <QueryHistory @restore="restoreHistorySql" @analyze-ai="analyzeHistoryWithAi" @close="showHistory = false" />
+            <QueryHistory :current-connection-id="activeTab?.connectionId" :current-database="activeTab?.database" @restore="restoreHistorySql" @analyze-ai="analyzeHistoryWithAi" @close="showHistory = false" />
           </div>
 
           <div v-if="showSqlLibraryPanel" :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'" :style="{ width: sqlLibraryWidth + 'px' }">

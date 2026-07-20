@@ -484,6 +484,8 @@ async fn main() {
         // History
         .route("/history", get(routes::history::load_history).delete(routes::history::clear_history))
         .route("/history/save", post(routes::history::save_history))
+        .route("/history/search", post(routes::history::search_history))
+        .route("/history/options", get(routes::history::load_history_connection_options))
         .route("/history/{id}", delete(routes::history::delete_history_entry))
         // Saved SQL
         .route(

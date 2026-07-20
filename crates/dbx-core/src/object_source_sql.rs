@@ -354,26 +354,46 @@ fn mysql_routine_script_delimiter(source: &str) -> &'static str {
 }
 
 fn source_starts_with_create_or_alter(source: &str) -> bool {
-    Regex::new(r"(?i)^\s*(?:CREATE|ALTER)\s+").unwrap().is_match(source)
+    let executable = &source[leading_sql_statement_start(source)..];
+    Regex::new(r"(?i)^(?:CREATE|ALTER)\s+").unwrap().is_match(executable)
 }
 
 fn source_starts_with_alter(source: &str) -> bool {
-    Regex::new(r"(?i)^\s*ALTER\s+").unwrap().is_match(source)
+    let executable = &source[leading_sql_statement_start(source)..];
+    Regex::new(r"(?i)^ALTER\s+").unwrap().is_match(executable)
 }
 
 fn executable_postgres_view_ddl(source: &str) -> Option<String> {
     let trimmed = source.trim();
-    if Regex::new(r"(?i)^CREATE\s+OR\s+REPLACE\s+").unwrap().is_match(trimmed) {
+    let statement_start = leading_sql_statement_start(trimmed);
+    let executable = &trimmed[statement_start..];
+    if Regex::new(r"(?i)^CREATE\s+OR\s+REPLACE\s+").unwrap().is_match(executable) {
         return Some(ensure_semicolon(trimmed));
     }
 
     let create_view = Regex::new(r"(?i)^CREATE\s+((?:(?:TEMP|TEMPORARY)\s+)?(?:RECURSIVE\s+)?VIEW\s+)").unwrap();
-    if create_view.is_match(trimmed) {
-        let replaced = create_view.replace(trimmed, "CREATE OR REPLACE $1");
-        return Some(ensure_semicolon(replaced.as_ref()));
+    if create_view.is_match(executable) {
+        let replaced = create_view.replace(executable, "CREATE OR REPLACE $1");
+        return Some(ensure_semicolon(&format!("{}{}", &trimmed[..statement_start], replaced)));
     }
 
     None
+}
+
+fn leading_sql_statement_start(source: &str) -> usize {
+    let mut index = 0;
+    loop {
+        index = skip_sql_whitespace(source, index);
+        if let Some(end) = sql_line_comment_end(source, index) {
+            index = end;
+            continue;
+        }
+        if let Some(end) = sql_block_comment_end(source, index) {
+            index = end;
+            continue;
+        }
+        return index;
+    }
 }
 
 fn executable_oracle_view_ddl(schema: Option<&str>, name: &str, source: &str) -> String {
@@ -1097,6 +1117,38 @@ mod tests {
         .unwrap();
 
         assert_eq!(sql, "CREATE OR REPLACE VIEW dbx_issue3895_repro.edited_view AS SELECT id, label FROM source_rows;");
+    }
+
+    #[test]
+    fn kingbase_view_create_source_preserves_leading_line_comment() {
+        let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Kingbase,
+            object_type: ObjectSourceKind::View,
+            schema: Some("app".to_string()),
+            name: "edited_view".to_string(),
+            source: "-- keep this note\nCREATE VIEW app.edited_view AS SELECT id FROM source_rows".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(sql, "-- keep this note\nCREATE OR REPLACE VIEW app.edited_view AS SELECT id FROM source_rows;");
+    }
+
+    #[test]
+    fn kingbase_view_create_source_preserves_leading_block_comment() {
+        let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Kingbase,
+            object_type: ObjectSourceKind::View,
+            schema: Some("app".to_string()),
+            name: "edited_view".to_string(),
+            source: "/* CREATE VIEW in this comment is ignored */\nCREATE VIEW app.edited_view AS SELECT id FROM source_rows"
+                .to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            sql,
+            "/* CREATE VIEW in this comment is ignored */\nCREATE OR REPLACE VIEW app.edited_view AS SELECT id FROM source_rows;"
+        );
     }
 
     #[test]

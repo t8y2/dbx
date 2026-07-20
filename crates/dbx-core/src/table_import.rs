@@ -2600,7 +2600,7 @@ mod tests {
         assert_eq!(xlsx_cell_value(&CellValue::Empty), serde_json::Value::Null);
         assert_eq!(xlsx_cell_value(&CellValue::String("hello".into())), serde_json::json!("hello"));
         assert_eq!(xlsx_cell_value(&CellValue::Int(42)), serde_json::json!(42));
-        assert_eq!(xlsx_cell_value(&CellValue::Float(3.14)), serde_json::json!(3.14));
+        assert_eq!(xlsx_cell_value(&CellValue::Float(1.5)), serde_json::json!(1.5));
         assert_eq!(xlsx_cell_value(&CellValue::Bool(true)), serde_json::json!(true));
         assert_eq!(xlsx_cell_value(&CellValue::Error("#REF!".into())), serde_json::json!("#REF!"));
         assert_eq!(xlsx_cell_label(&CellValue::Int(42)), "42");
@@ -2667,7 +2667,7 @@ mod tests {
             &["amount", "qty"],
             &[
                 vec![serde_json::json!(42.5), serde_json::json!(100.25)],
-                vec![serde_json::json!(3.14), serde_json::json!(2958465.5)],
+                vec![serde_json::json!(1.5), serde_json::json!(2958465.5)],
             ],
         );
         let parsed =
@@ -2677,7 +2677,7 @@ mod tests {
         // 42.5 should be a number, NOT "1900-02-11 12:00:00"
         assert_eq!(parsed.rows[0][0], serde_json::json!(42.5));
         assert_eq!(parsed.rows[0][1], serde_json::json!(100.25));
-        assert_eq!(parsed.rows[1][0], serde_json::json!(3.14));
+        assert_eq!(parsed.rows[1][0], serde_json::json!(1.5));
         assert_eq!(parsed.rows[1][1], serde_json::json!(2958465.5));
         let _ = std::fs::remove_file(path);
     }

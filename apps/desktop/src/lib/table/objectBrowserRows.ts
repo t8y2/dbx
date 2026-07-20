@@ -40,13 +40,13 @@ export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type
   return "TABLE";
 }
 
-export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; database: string; fallbackSchema: string; needsSchema: boolean }): ObjectBrowserRow[] {
+export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; database: string; fallbackSchema: string; rowSchema?: string }): ObjectBrowserRow[] {
   const seen = new Map<string, number>();
   const rows = options.objects.flatMap((object) => {
     const name = normalizeDatabaseObjectName(object.name);
     if (!name) return [];
     const objectSchema = object.schema ? normalizeDatabaseObjectName(object.schema) : undefined;
-    const schema = objectSchema || (options.needsSchema ? options.fallbackSchema : undefined);
+    const schema = objectSchema || options.rowSchema;
     const type = normalizeObjectBrowserType(object.object_type);
     const signature = routineSignatureForDisplay(type, object.signature);
     const displayName = signature === undefined ? name : `${name}(${signature})`;

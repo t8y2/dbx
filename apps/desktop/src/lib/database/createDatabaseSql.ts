@@ -26,18 +26,22 @@ export function buildDuckDbAttachDatabaseSql(path: string, name: string): Promis
   return api.buildDuckDbAttachDatabaseSql(path, name);
 }
 
-export function duckDbAttachedDatabaseNameFromPath(path: string): string {
+export function buildSqliteAttachDatabaseSql(path: string, name: string): Promise<string> {
+  return api.buildSqliteAttachDatabaseSql(path, name);
+}
+
+export function attachedDatabaseNameFromPath(path: string, fallbackName = "database"): string {
   const fileName = path.split(/[\\/]/).pop() ?? "";
   const withoutExtension = fileName.replace(/\.[^.\\/]+$/, "");
   const normalized = withoutExtension
     .trim()
     .replace(/[^\p{L}\p{N}_]+/gu, "_")
     .replace(/^_+|_+$/g, "");
-  return normalized || "duckdb_database";
+  return normalized || fallbackName;
 }
 
-export function uniqueDuckDbAttachedDatabaseName(baseName: string, existingNames: string[]): string {
-  const existing = new Set(existingNames.map((name) => name.toLowerCase()));
+export function uniqueAttachedDatabaseName(baseName: string, existingNames: string[], reservedNames: string[] = []): string {
+  const existing = new Set([...existingNames, ...reservedNames].map((name) => name.toLowerCase()));
   if (!existing.has(baseName.toLowerCase())) return baseName;
   for (let index = 2; index < Number.MAX_SAFE_INTEGER; index++) {
     const candidate = `${baseName}_${index}`;

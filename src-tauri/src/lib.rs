@@ -1166,6 +1166,7 @@ pub fn run() {
             commands::query::build_create_database_sql,
             #[cfg(feature = "duckdb-bundled")]
             commands::query::build_duckdb_attach_database_sql,
+            commands::query::build_sqlite_attach_database_sql,
             commands::query::build_drop_object_sql,
             commands::query::build_drop_table_sql,
             commands::query::build_drop_table_child_object_sql,

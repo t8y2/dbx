@@ -10,6 +10,7 @@ pub(super) fn qualified_table(dialect: StructureDialect, schema: Option<&str>, t
             | StructureDialect::SqlServer
             | StructureDialect::H2
             | StructureDialect::Informix
+            | StructureDialect::Sqlite
     ) && schema.is_some_and(|schema| !schema.trim().is_empty())
     {
         return format!("{}.{}", quote_ident(dialect, schema.unwrap()), quote_ident(dialect, table_name));

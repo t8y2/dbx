@@ -364,6 +364,7 @@ async fn main() {
         .route("/query/build-rename-object-sql", post(routes::query::build_rename_object_sql))
         .route("/query/build-create-database-sql", post(routes::query::build_create_database_sql))
         .route("/query/build-duckdb-attach-database-sql", post(routes::query::build_duckdb_attach_database_sql))
+        .route("/query/build-sqlite-attach-database-sql", post(routes::query::build_sqlite_attach_database_sql))
         .route("/query/build-drop-object-sql", post(routes::query::build_drop_object_sql))
         .route("/query/build-drop-table-sql", post(routes::query::build_drop_table_sql))
         .route("/query/build-drop-table-child-object-sql", post(routes::query::build_drop_table_child_object_sql))

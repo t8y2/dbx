@@ -193,6 +193,7 @@ export const buildSearchResultWhere = forward("buildSearchResultWhere");
 export const buildRenameObjectSql = forward("buildRenameObjectSql");
 export const buildCreateDatabaseSql = forward("buildCreateDatabaseSql");
 export const buildDuckDbAttachDatabaseSql = forward("buildDuckDbAttachDatabaseSql");
+export const buildSqliteAttachDatabaseSql = forward("buildSqliteAttachDatabaseSql");
 export const buildDropObjectSql = forward("buildDropObjectSql");
 export const buildDropTableSql = forward("buildDropTableSql");
 export const buildDropTableChildObjectSql = forward("buildDropTableChildObjectSql");

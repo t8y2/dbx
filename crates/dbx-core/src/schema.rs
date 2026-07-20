@@ -4938,7 +4938,7 @@ pub async fn get_table_ddl_core(
             }
         }
         PoolKind::Postgres(p) => pg_ddl(p, schema, table).await,
-        PoolKind::Sqlite(p) => sqlite_ddl(p, table).await,
+        PoolKind::Sqlite(p) => sqlite_ddl(p, schema, table).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::table_ddl(client, table).await,
         PoolKind::CloudflareD1(client) => db::cloudflare_d1_driver::table_ddl(client, table).await,
         _ => Err("DDL not supported for this database type".to_string()),
@@ -5220,9 +5220,10 @@ pub fn oracle_object_source_sql(schema: &str, name: &str, kind: &db::ObjectSourc
     }
 }
 
-pub fn sqlite_object_source_sql(name: &str, kind: &db::ObjectSourceKind) -> String {
+pub fn sqlite_object_source_sql(schema: &str, name: &str, kind: &db::ObjectSourceKind) -> String {
     format!(
-        "SELECT sql FROM sqlite_master WHERE type = {} AND name = {}",
+        "SELECT sql FROM {}.sqlite_master WHERE type = {} AND name = {}",
+        db::sqlite::sqlite_quote_schema_ident(schema),
         sql_string(sqlite_object_type(kind)),
         sql_string(name)
     )
@@ -5381,7 +5382,7 @@ async fn get_object_source_once(
                 }
                 PoolKind::Postgres(pool) => postgres_object_source(pool, schema, name, &object_type, signature).await?,
                 PoolKind::Sqlite(pool) => first_string_cell(
-                    db::sqlite::execute_query(pool, &sqlite_object_source_sql(name, &object_type)).await?,
+                    db::sqlite::execute_query(pool, &sqlite_object_source_sql(schema, name, &object_type)).await?,
                 )?,
                 #[cfg(feature = "duckdb-bundled")]
                 PoolKind::DuckDb(con) => {
@@ -6209,15 +6210,14 @@ fn ensure_display_ddl_terminated(sql: String) -> String {
     }
 }
 
-pub async fn sqlite_ddl(pool: &db::sqlite::SqliteHandle, table: &str) -> Result<String, String> {
+pub async fn sqlite_ddl(pool: &db::sqlite::SqliteHandle, schema: &str, table: &str) -> Result<String, String> {
     let pool = pool.clone();
+    let schema = db::sqlite::sqlite_quote_schema_ident(schema);
     let table = table.to_string();
     tokio::task::spawn_blocking(move || {
         pool.with_connection(|conn| {
-            conn.query_row("SELECT sql FROM sqlite_master WHERE type='table' AND name=?1", [table], |row| {
-                row.get::<_, String>(0)
-            })
-            .map_err(|e| e.to_string())
+            let sql = format!("SELECT sql FROM {}.sqlite_master WHERE type='table' AND name=?1", schema);
+            conn.query_row(&sql, [table], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())
         })
     })
     .await

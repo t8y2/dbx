@@ -131,7 +131,11 @@ pub(super) fn build_drop_index_sql(
     }
     if matches!(
         dialect,
-        StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::Dameng | StructureDialect::Informix
+        StructureDialect::Postgres
+            | StructureDialect::Oracle
+            | StructureDialect::Dameng
+            | StructureDialect::Informix
+            | StructureDialect::Sqlite
     ) && schema.is_some_and(|schema| !schema.trim().is_empty())
     {
         return format!("DROP INDEX {}.{};", quote_ident(dialect, schema.unwrap()), quote_ident(dialect, index_name));
@@ -200,15 +204,22 @@ pub(super) fn build_create_index_statements(
     let supports_where = capabilities.index_filter
         && matches!(dialect, StructureDialect::Postgres | StructureDialect::SqlServer | StructureDialect::Sqlite);
     let where_clause = if !filter.is_empty() && supports_where { format!(" WHERE {filter}") } else { String::new() };
+    let index_name = if dialect == StructureDialect::Sqlite && schema.is_some_and(|schema| !schema.trim().is_empty()) {
+        format!("{}.{}", quote_ident(dialect, schema.unwrap()), quote_ident(dialect, &name))
+    } else {
+        quote_ident(dialect, &name)
+    };
+    // SQLite assigns an index to the database named by the qualified index.
+    // Its CREATE INDEX grammar does not allow a qualified table name.
+    let create_table =
+        if dialect == StructureDialect::Sqlite { quote_ident(dialect, table_name) } else { table.to_string() };
     let create_sql = if dialect == StructureDialect::Postgres {
         format!(
-            "CREATE {unique}{type_prefix}INDEX {} ON {table}{using_clause} ({cols}){include_clause}{where_clause};",
-            quote_ident(dialect, &name)
+            "CREATE {unique}{type_prefix}INDEX {index_name} ON {create_table}{using_clause} ({cols}){include_clause}{where_clause};"
         )
     } else {
         format!(
-            "CREATE {unique}{type_prefix}INDEX {}{using_clause} ON {table} ({cols}){include_clause}{where_clause}{comment_clause};",
-            quote_ident(dialect, &name)
+            "CREATE {unique}{type_prefix}INDEX {index_name}{using_clause} ON {create_table} ({cols}){include_clause}{where_clause}{comment_clause};"
         )
     };
     let mut statements = vec![create_sql];

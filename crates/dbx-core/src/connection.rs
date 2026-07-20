@@ -1167,6 +1167,12 @@ impl AppState {
                 PoolKind::Postgres(pg_pool)
             }
             DatabaseType::Sqlite => {
+                let sqlite_path = expand_tilde(&db_config.host);
+                db::sqlite::validate_persistent_attachments(
+                    &sqlite_path,
+                    &db_config.password,
+                    !db_config.attached_databases.is_empty(),
+                )?;
                 let extensions = db::sqlite::sqlite_extension_specs_from_url_params(db_config.url_params.as_deref())
                     .into_iter()
                     .map(|mut extension| {
@@ -1174,14 +1180,16 @@ impl AppState {
                         extension
                     })
                     .collect();
-                PoolKind::Sqlite(
-                    db::sqlite::connect_path_with_cipher_key_and_extensions(
-                        &expand_tilde(&db_config.host),
-                        &db_config.password,
-                        extensions,
-                    )
-                    .await?,
+                let pool = db::sqlite::connect_path_with_cipher_key_and_extensions(
+                    &sqlite_path,
+                    &db_config.password,
+                    extensions,
                 )
+                .await?;
+                for attached in &db_config.attached_databases {
+                    db::sqlite::attach_database(&pool, &attached.name, &expand_tilde(&attached.path))?;
+                }
+                PoolKind::Sqlite(pool)
             }
             DatabaseType::Rqlite => {
                 let client = db::rqlite_driver::RqliteClient::new(
@@ -4665,6 +4673,41 @@ mod tests {
         let error = state.test_duckdb_connection_config(&config).await.expect_err("invalid attach must fail");
 
         assert!(error.to_ascii_lowercase().contains("attach"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn sqlite_connection_restores_attached_databases() {
+        let (state, dir) = test_app_state().await;
+        let main_path = dir.join("main.sqlite");
+        let attached_path = dir.join("analytics.sqlite");
+        drop(db::sqlite::connect_path_create_if_missing(main_path.to_str().unwrap()).await.unwrap());
+        let attached = db::sqlite::connect_path_create_if_missing(attached_path.to_str().unwrap()).await.unwrap();
+        db::sqlite::execute_query(&attached, "CREATE TABLE events(id INTEGER PRIMARY KEY);").await.unwrap();
+        drop(attached);
+
+        let mut config = mysql_config(None);
+        config.id = "sqlite-conn".to_string();
+        config.name = "SQLite".to_string();
+        config.db_type = DatabaseType::Sqlite;
+        config.host = main_path.to_string_lossy().to_string();
+        config.port = 0;
+        config.password.clear();
+        config.attached_databases.push(AttachedDatabaseConfig {
+            name: "analytics".to_string(),
+            path: attached_path.to_string_lossy().to_string(),
+        });
+        state.configs.write().await.insert(config.id.clone(), config);
+
+        state.get_or_create_pool("sqlite-conn", None).await.unwrap();
+        let databases = schema::list_databases_core(&state, "sqlite-conn").await.unwrap();
+        assert!(databases.iter().any(|database| database.name == "analytics"));
+        let tables = schema::list_tables_core(&state, "sqlite-conn", "analytics", "analytics", None, None, None, None)
+            .await
+            .unwrap();
+        assert!(tables.iter().any(|table| table.name == "events"));
+
+        state.connections.write().await.clear();
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -940,6 +940,10 @@ export async function buildDuckDbAttachDatabaseSql(path: string, name: string): 
   return invoke("build_duckdb_attach_database_sql", { options: { path, name } });
 }
 
+export async function buildSqliteAttachDatabaseSql(path: string, name: string): Promise<string> {
+  return invoke("build_sqlite_attach_database_sql", { options: { path, name } });
+}
+
 export async function buildDropObjectSql(options: DropObjectSqlOptions): Promise<string> {
   return invoke("build_drop_object_sql", { options });
 }

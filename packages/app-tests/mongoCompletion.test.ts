@@ -3,7 +3,7 @@ import { test } from "vitest";
 import { buildMongoCompletionItems, getMongoCompletionContext, inferMongoCompletionFields, shouldAutoOpenMongoCompletion } from "../../apps/desktop/src/lib/mongo/mongoCompletion.ts";
 import { ACCUMULATORS, EXPRESSION_OPERATORS, PIPELINE_STAGES, PUSH_MODIFIERS, QUERY_OPERATORS, STAGE_OPTION_KEYS, UPDATE_OPERATORS, VALUE_SNIPPETS } from "../../apps/desktop/src/lib/mongo/mongoCompletionTables.ts";
 
-const collections = ["users", "user_events", "order-items"];
+const collections = ["users", "user_events", "order-items", "audit.logs"];
 const fields = [
   { name: "_id", type: "object" },
   { name: "name", type: "string" },
@@ -40,6 +40,27 @@ test("uses getCollection apply text for unsafe collection names", () => {
   assert.equal(item?.apply, 'getCollection("order-items")');
 });
 
+test("continues dotted collection names after a direct db prefix", () => {
+  const items = buildMongoCompletionItems("db.audit.", "db.audit.".length, { collections });
+  const dottedCollection = items.find((candidate) => candidate.label === "audit.logs");
+
+  assert.equal(dottedCollection?.apply, 'getCollection("audit.logs")');
+  assert.equal(getMongoCompletionContext("db.audit.", "db.audit.".length).from, "db.".length);
+});
+
+test("keeps direct collection method completion while resolving dotted names", () => {
+  const item = buildMongoCompletionItems("db.users.fi", "db.users.fi".length, { collections }).find((candidate) => candidate.label === "find");
+
+  assert.equal(item?.apply, "users.find({})");
+});
+
+test("suggests dotted names inside getCollection", () => {
+  const text = 'db.getCollection("audit.';
+  const item = buildMongoCompletionItems(text, text.length, { collections }).find((candidate) => candidate.label === "audit.logs");
+
+  assert.equal(item?.apply, '"audit.logs"');
+});
+
 test("suggests collection methods after direct and getCollection references", () => {
   assert.ok(labels("db.users.").includes("find"));
   assert.ok(labels('db.getCollection("users").ag').includes("aggregate"));
@@ -51,7 +72,7 @@ test("suggests collection stats methods after a collection reference", () => {
     assert.ok(methodLabels.includes(method), `expected completion to include ${method}`);
   }
   const item = buildMongoCompletionItems("db.users.stat", "db.users.stat".length).find((candidate) => candidate.label === "stats");
-  assert.equal(item?.apply, "stats()");
+  assert.equal(item?.apply, "users.stats()");
 });
 
 test("suggests cursor methods after find result chains", () => {
@@ -292,7 +313,7 @@ test("suggests only helpers the shell parser accepts", () => {
 
 test("completes both arguments of distinct", () => {
   const method = buildMongoCompletionItems("db.users.dist", "db.users.dist".length).find((item) => item.label === "distinct");
-  assert.equal(method?.apply, 'distinct("${field}")');
+  assert.equal(method?.apply, 'users.distinct("${field}")');
 
   // First argument names a field, so it is completed as a quoted path.
   const fieldArg = buildMongoCompletionItems('db.users.distinct("pro', 'db.users.distinct("pro'.length, { fields });

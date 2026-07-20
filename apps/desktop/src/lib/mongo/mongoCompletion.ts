@@ -10,7 +10,7 @@ import { ACCUMULATORS, COMMON_OPERATORS, EXPRESSION_OPERATORS, PIPELINE_STAGES, 
  * the editor turns into "no popup" — deliberately better than falling back to
  * `root` and showing unrelated `db.…` snippets mid-document.
  */
-export type MongoCompletionMode = "none" | "root" | "collection" | "collectionRef" | "method" | "cursorMethod" | "field" | "fieldPath" | "fieldRef" | "value" | "queryOperator" | "updateOperator" | "pushModifier" | "expression" | "accumulator" | "stage" | "stageOption";
+export type MongoCompletionMode = "none" | "root" | "collection" | "collectionOrMethod" | "collectionRef" | "method" | "cursorMethod" | "field" | "fieldPath" | "fieldRef" | "value" | "queryOperator" | "updateOperator" | "pushModifier" | "expression" | "accumulator" | "stage" | "stageOption";
 
 export interface MongoCompletionField {
   name: string;
@@ -150,8 +150,18 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
 
   if (beforeCursor.endsWith("db.")) return { mode: "collection", prefix: "", from: safeCursor, collection };
 
+  const getCollectionPrefix = matchGetCollectionPrefix(beforeCursor);
+  if (getCollectionPrefix) return { mode: "collectionRef", prefix: getCollectionPrefix.prefix, from: getCollectionPrefix.from, collection };
+
   const collectionPrefix = matchDbCollectionPrefix(beforeCursor);
-  if (collectionPrefix) return { mode: "collection", prefix: collectionPrefix.prefix, from: collectionPrefix.from, collection };
+  if (collectionPrefix) {
+    return {
+      mode: collectionPrefix.prefix.includes(".") ? "collectionOrMethod" : "collection",
+      prefix: collectionPrefix.prefix,
+      from: collectionPrefix.from,
+      collection,
+    };
+  }
 
   if (isAfterCollectionDot(beforeCursor)) {
     const methodPrefix = readMethodPrefix(beforeCursor);
@@ -190,6 +200,8 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
       return rootItems(prefix);
     case "collection":
       return collectionItems(prefix, collections);
+    case "collectionOrMethod":
+      return collectionOrMethodItems(prefix, collections);
     case "collectionRef":
       return collectionRefItems(prefix, collections);
     case "method":
@@ -230,7 +242,7 @@ export function mongoCompletionNeedsFields(mode: MongoCompletionMode): boolean {
 
 /** Modes whose items are built from the database's collection names. */
 export function mongoCompletionNeedsCollections(mode: MongoCompletionMode): boolean {
-  return mode === "collection" || mode === "collectionRef";
+  return mode === "collection" || mode === "collectionOrMethod" || mode === "collectionRef";
 }
 
 export function shouldAutoOpenMongoCompletion(text: string, cursor: number): boolean {
@@ -563,16 +575,7 @@ function rootItems(prefix: string): MongoCompletionItem[] {
 }
 
 function collectionItems(prefix: string, collections: string[]): MongoCompletionItem[] {
-  const names = collections
-    .filter((collection) => matchesFuzzyPrefix(collection, prefix))
-    .slice(0, 100)
-    .map((collection) => ({
-      label: collection,
-      type: "table" as const,
-      detail: "collection",
-      apply: needsGetCollectionSyntax(collection) ? `getCollection("${escapeDoubleQuoted(collection)}")` : collection,
-      boost: startsWithPrefix(collection, prefix) ? 120 : 90,
-    }));
+  const names = collectionNameItems(prefix, collections);
   const methods = DATABASE_METHODS.filter((method) => matchesFuzzyPrefix(method.label, prefix)).map((method) => ({
     label: method.label,
     type: "function" as const,
@@ -581,6 +584,33 @@ function collectionItems(prefix: string, collections: string[]): MongoCompletion
     boost: startsWithPrefix(method.label, prefix) ? 110 : 80,
   }));
   return [...names, ...methods];
+}
+
+function collectionNameItems(prefix: string, collections: string[], boost = 120): MongoCompletionItem[] {
+  return collections
+    .filter((collection) => matchesFuzzyPrefix(collection, prefix))
+    .slice(0, 100)
+    .map((collection) => ({
+      label: collection,
+      type: "table" as const,
+      detail: "collection",
+      apply: needsGetCollectionSyntax(collection) ? `getCollection("${escapeDoubleQuoted(collection)}")` : collection,
+      boost: startsWithPrefix(collection, prefix) ? boost : boost - 30,
+    }));
+}
+
+function collectionOrMethodItems(prefix: string, collections: string[]): MongoCompletionItem[] {
+  const dot = prefix.lastIndexOf(".");
+  const collection = prefix.slice(0, dot);
+  const methodPrefix = prefix.slice(dot + 1);
+  const collectionRef = needsGetCollectionSyntax(collection) && collections.includes(collection) ? `getCollection("${escapeDoubleQuoted(collection)}")` : collection;
+  const methods = methodItems(methodPrefix).map((item) => ({
+    ...item,
+    apply: `${collectionRef}.${item.apply}`,
+    boost: Math.min(item.boost, 110),
+  }));
+
+  return dedupeAndSort([...collectionNameItems(prefix, collections, 150), ...methods]);
 }
 
 function collectionRefItems(prefix: string, collections: string[]): MongoCompletionItem[] {
@@ -709,7 +739,14 @@ function readMethodPrefix(beforeCursor: string): { prefix: string; from: number 
 }
 
 function matchDbCollectionPrefix(beforeCursor: string): { prefix: string; from: number } | null {
-  const match = /(?:^|[\s;(])db\.([A-Za-z_][\w$-]*)$/.exec(beforeCursor);
+  const match = /(?:^|[\s;(])db\.([A-Za-z_][\w$-]*(?:\.[\w$-]*)*)$/.exec(beforeCursor);
+  if (!match) return null;
+  const prefix = match[1] ?? "";
+  return { prefix, from: beforeCursor.length - prefix.length };
+}
+
+function matchGetCollectionPrefix(beforeCursor: string): { prefix: string; from: number } | null {
+  const match = /(?:^|[\s;(])db\.getCollection\(\s*(["'][^"'\\]*)$/.exec(beforeCursor);
   if (!match) return null;
   const prefix = match[1] ?? "";
   return { prefix, from: beforeCursor.length - prefix.length };

@@ -26,6 +26,8 @@ pub(crate) const DBX_NEO4J_ELEMENT_ID_COLUMN: &str = "__DBX_ELEMENT_ID";
 pub(crate) const DBX_TDENGINE_TBNAME_COLUMN: &str = "tbname";
 const DATA_GRID_COLUMN_DISTINCT_VALUES_DEFAULT_LIMIT: usize = 1000;
 const DATA_GRID_COLUMN_DISTINCT_VALUES_MAX_LIMIT: usize = 1000;
+const MYSQL_DATA_GRID_BATCH_MAX_ROWS: usize = 500;
+const MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1075,6 +1077,9 @@ fn build_data_grid_save_statements(options: &DataGridSaveStatementOptions) -> Ve
     let primary_key_set: Vec<String> =
         options.table_meta.primary_keys.iter().map(|primary_key| normalize_column_name(primary_key)).collect();
 
+    let batch_mysql_writes = supports_mysql_data_grid_batch(options);
+    let mut update_sets: Option<String> = None;
+    let mut update_predicates = Vec::new();
     for (row_index, changes) in &options.dirty_rows {
         let Some(row) = options.rows.get(*row_index) else {
             continue;
@@ -1110,12 +1115,29 @@ fn build_data_grid_save_statements(options: &DataGridSaveStatementOptions) -> Ve
             column_info,
             options.identifier_quote.as_deref(),
         );
-        statements.push(data_grid_statement(
-            options.database_type,
-            data_grid_update_sql(options.database_type, &table, &sets, &where_clause),
-        ));
+        if batch_mysql_writes {
+            if update_sets.as_deref().is_some_and(|current| current != sets) {
+                let current_sets = update_sets.take().unwrap_or_default();
+                push_mysql_predicate_batches(
+                    &mut statements,
+                    &format!("UPDATE {table} SET {current_sets} WHERE "),
+                    std::mem::take(&mut update_predicates),
+                );
+            }
+            update_sets = Some(sets);
+            update_predicates.push(where_clause);
+        } else {
+            statements.push(data_grid_statement(
+                options.database_type,
+                data_grid_update_sql(options.database_type, &table, &sets, &where_clause),
+            ));
+        }
+    }
+    if let Some(sets) = update_sets {
+        push_mysql_predicate_batches(&mut statements, &format!("UPDATE {table} SET {sets} WHERE "), update_predicates);
     }
 
+    let mut delete_predicates = Vec::new();
     for row_index in &options.deleted_rows {
         let Some(row) = options.rows.get(*row_index) else {
             continue;
@@ -1128,10 +1150,17 @@ fn build_data_grid_save_statements(options: &DataGridSaveStatementOptions) -> Ve
             column_info,
             options.identifier_quote.as_deref(),
         );
-        statements.push(data_grid_statement(
-            options.database_type,
-            data_grid_delete_sql(options.database_type, &table, &where_clause),
-        ));
+        if batch_mysql_writes {
+            delete_predicates.push(where_clause);
+        } else {
+            statements.push(data_grid_statement(
+                options.database_type,
+                data_grid_delete_sql(options.database_type, &table, &where_clause),
+            ));
+        }
+    }
+    if !delete_predicates.is_empty() {
+        push_mysql_predicate_batches(&mut statements, &format!("DELETE FROM {table} WHERE "), delete_predicates);
     }
 
     for row in &options.new_rows {
@@ -1229,6 +1258,9 @@ fn build_data_grid_rollback_statements(options: &DataGridSaveStatementOptions) -
         }
     }
 
+    let batch_mysql_writes = supports_mysql_data_grid_batch(options);
+    let mut deleted_insert_columns: Option<String> = None;
+    let mut deleted_insert_values = Vec::new();
     for row_index in &options.deleted_rows {
         let Some(row) = options.rows.get(*row_index) else {
             continue;
@@ -1263,10 +1295,27 @@ fn build_data_grid_rollback_statements(options: &DataGridSaveStatementOptions) -
             })
             .collect::<Vec<_>>()
             .join(", ");
-        statements.push(data_grid_statement(
-            options.database_type,
-            format!("INSERT INTO {table} ({columns}) VALUES ({values})"),
-        ));
+        if batch_mysql_writes {
+            if deleted_insert_columns.as_deref().is_some_and(|current| current != columns) {
+                let current_columns = deleted_insert_columns.take().unwrap_or_default();
+                push_mysql_values_insert_batches(
+                    &mut statements,
+                    &table,
+                    &current_columns,
+                    std::mem::take(&mut deleted_insert_values),
+                );
+            }
+            deleted_insert_columns = Some(columns);
+            deleted_insert_values.push(format!("({values})"));
+        } else {
+            statements.push(data_grid_statement(
+                options.database_type,
+                format!("INSERT INTO {table} ({columns}) VALUES ({values})"),
+            ));
+        }
+    }
+    if let Some(columns) = deleted_insert_columns {
+        push_mysql_values_insert_batches(&mut statements, &table, &columns, deleted_insert_values);
     }
 
     for (row_index, changes) in &options.dirty_rows {
@@ -1340,6 +1389,93 @@ fn build_data_grid_rollback_statements(options: &DataGridSaveStatementOptions) -
     }
 
     statements
+}
+
+fn supports_mysql_data_grid_batch(options: &DataGridSaveStatementOptions) -> bool {
+    // Keyless rows use full-row predicates, which are too wide and ambiguous to combine safely.
+    options.database_type == Some(DatabaseType::Mysql) && !options.table_meta.primary_keys.is_empty()
+}
+
+fn push_mysql_predicate_batches(statements: &mut Vec<String>, prefix: &str, predicates: Vec<String>) {
+    push_mysql_joined_batches(statements, prefix, predicates, " OR ", true);
+}
+
+fn push_mysql_values_insert_batches(
+    statements: &mut Vec<String>,
+    table: &str,
+    columns: &str,
+    value_tuples: Vec<String>,
+) {
+    push_mysql_joined_batches(
+        statements,
+        &format!("INSERT INTO {table} ({columns}) VALUES "),
+        value_tuples,
+        ", ",
+        false,
+    );
+}
+
+fn push_mysql_joined_batches(
+    statements: &mut Vec<String>,
+    prefix: &str,
+    parts: Vec<String>,
+    separator: &str,
+    wrap_multiple_parts: bool,
+) {
+    let mut batch = Vec::new();
+    for part in parts {
+        let next_len = joined_batch_sql_len(prefix, &batch, &part, separator, wrap_multiple_parts);
+        if !batch.is_empty()
+            && (batch.len() >= MYSQL_DATA_GRID_BATCH_MAX_ROWS || next_len > MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES)
+        {
+            push_mysql_joined_batch_statement(
+                statements,
+                prefix,
+                std::mem::take(&mut batch),
+                separator,
+                wrap_multiple_parts,
+            );
+        }
+        batch.push(part);
+    }
+    if !batch.is_empty() {
+        push_mysql_joined_batch_statement(statements, prefix, batch, separator, wrap_multiple_parts);
+    }
+}
+
+fn joined_batch_sql_len(
+    prefix: &str,
+    current: &[String],
+    next: &str,
+    separator: &str,
+    wrap_multiple_parts: bool,
+) -> usize {
+    let part_bytes = |part: &str| part.len() + usize::from(wrap_multiple_parts) * 2;
+    if current.is_empty() {
+        return prefix.len() + next.len() + 1;
+    }
+    let current_bytes = if current.len() == 1 && wrap_multiple_parts {
+        current[0].len()
+    } else {
+        current.iter().map(|part| part_bytes(part)).sum::<usize>() + separator.len() * current.len().saturating_sub(1)
+    };
+    let existing_adjustment = if current.len() == 1 && wrap_multiple_parts { 2 } else { 0 };
+    prefix.len() + current_bytes + existing_adjustment + separator.len() + part_bytes(next) + 1
+}
+
+fn push_mysql_joined_batch_statement(
+    statements: &mut Vec<String>,
+    prefix: &str,
+    parts: Vec<String>,
+    separator: &str,
+    wrap_multiple_parts: bool,
+) {
+    let body = if parts.len() == 1 || !wrap_multiple_parts {
+        parts.join(separator)
+    } else {
+        parts.into_iter().map(|part| format!("({part})")).collect::<Vec<_>>().join(separator)
+    };
+    statements.push(format!("{prefix}{body};"));
 }
 
 fn build_mysql_insert_rollback_where(
@@ -2672,6 +2808,27 @@ mod tests {
             is_primary_key: false,
             column_default: None,
             extra: extra.map(ToString::to_string),
+        }
+    }
+
+    fn mysql_people_save_options(row_count: usize) -> DataGridSaveStatementOptions {
+        DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app".to_string()),
+                table_name: "people".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "bigint", false, None), column("status", "varchar(32)", true, None)]),
+            },
+            columns: vec!["id".to_string(), "status".to_string()],
+            source_columns: None,
+            rows: (1..=row_count).map(|id| vec![json!(id), json!("active")]).collect(),
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![],
         }
     }
 
@@ -4280,6 +4437,99 @@ mod tests {
                 "DELETE FROM \"APP\".\"TASK_STATUS\" WHERE \"TASK_NAME\" = 'task-2' AND \"STATUS\" IS NULL;",
             ]
         );
+    }
+
+    #[test]
+    fn batches_mysql_updates_with_identical_values() {
+        let mut options = mysql_people_save_options(3);
+        options.dirty_rows =
+            vec![(0, vec![(1, Value::Null)]), (1, vec![(1, Value::Null)]), (2, vec![(1, Value::Null)])];
+
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec!["UPDATE `app`.`people` SET `status` = NULL WHERE (`id` = 1) OR (`id` = 2) OR (`id` = 3);"]
+        );
+        assert_eq!(result.rollback_statements.len(), 3);
+    }
+
+    #[test]
+    fn preserves_mysql_update_order_across_different_values() {
+        let mut options = mysql_people_save_options(3);
+        options.dirty_rows =
+            vec![(0, vec![(1, Value::Null)]), (1, vec![(1, json!("archived"))]), (2, vec![(1, Value::Null)])];
+
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE `app`.`people` SET `status` = NULL WHERE `id` = 1;",
+                "UPDATE `app`.`people` SET `status` = 'archived' WHERE `id` = 2;",
+                "UPDATE `app`.`people` SET `status` = NULL WHERE `id` = 3;",
+            ]
+        );
+    }
+
+    #[test]
+    fn batches_mysql_deletes_and_deleted_row_rollbacks() {
+        let mut options = mysql_people_save_options(3);
+        options.deleted_rows = vec![0, 1, 2];
+
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["DELETE FROM `app`.`people` WHERE (`id` = 1) OR (`id` = 2) OR (`id` = 3);"]);
+        assert_eq!(
+            result.rollback_statements,
+            vec!["INSERT INTO `app`.`people` (`id`, `status`) VALUES (1, 'active'), (2, 'active'), (3, 'active');"]
+        );
+    }
+
+    #[test]
+    fn chunks_large_mysql_data_grid_batches() {
+        let mut options = mysql_people_save_options(MYSQL_DATA_GRID_BATCH_MAX_ROWS + 1);
+        options.deleted_rows = (0..options.rows.len()).collect();
+
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(result.statements.len(), 2);
+        assert!(result.statements[0].contains("(`id` = 500)"));
+        assert_eq!(result.statements[1], "DELETE FROM `app`.`people` WHERE `id` = 501;");
+        assert_eq!(result.rollback_statements.len(), 2);
+        assert!(result.rollback_statements[0].contains("(500, 'active')"));
+        assert_eq!(
+            result.rollback_statements[1],
+            "INSERT INTO `app`.`people` (`id`, `status`) VALUES (501, 'active');"
+        );
+    }
+
+    #[test]
+    fn mysql_data_grid_batch_respects_target_sql_size() {
+        let mut options = mysql_people_save_options(2);
+        options.rows[0][0] = json!("a".repeat(MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES / 2));
+        options.rows[1][0] = json!("b".repeat(MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES / 2));
+        options.deleted_rows = vec![0, 1];
+
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(result.statements.len(), 2);
+        assert!(result.statements.iter().all(|statement| statement.len() <= MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES));
+    }
+
+    #[test]
+    fn keeps_keyless_mysql_writes_row_by_row() {
+        let mut options = mysql_people_save_options(2);
+        options.table_meta.primary_keys.clear();
+        options.deleted_rows = vec![0, 1];
+
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(result.statements.len(), 2);
+        assert_eq!(result.rollback_statements.len(), 2);
+        assert!(result.statements.iter().all(|statement| !statement.contains(" OR ")));
     }
 
     #[test]

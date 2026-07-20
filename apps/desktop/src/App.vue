@@ -134,6 +134,8 @@ const {
   showUpdateDialog,
   isDownloadingUpdate,
   downloadProgress,
+  updateDownloaded,
+  isInstallingUpdate,
   updateReady,
   activeTaskCount: activeUpdateTaskCount,
   hasUpdateAvailable,
@@ -141,6 +143,7 @@ const {
   checkUpdates,
   openLatestRelease,
   downloadAndInstallUpdate,
+  installDownloadedUpdate,
   restartApp,
 } = useAppUpdater({
   getActiveTaskCount: () => trackedUpdateTaskCount.value,
@@ -2291,10 +2294,13 @@ onUnmounted(() => {
           :update-check-message="updateCheckMessage"
           :is-downloading-update="isDownloadingUpdate"
           :download-progress="downloadProgress"
+          :update-downloaded="updateDownloaded"
+          :is-installing-update="isInstallingUpdate"
           :update-ready="updateReady"
           :active-task-count="activeUpdateTaskCount"
           @open-latest-release="openLatestRelease"
           @download-and-install="downloadAndInstallUpdate"
+          @install-downloaded="installDownloadedUpdate"
           @restart="restartApp"
         />
         <CloseActionPromptDialog v-if="isDesktop && showCloseActionPrompt" :open="showCloseActionPrompt" @update:open="handleCloseActionPromptOpenChange" @quit="chooseQuit" @minimize="chooseMinimize" />

@@ -72,6 +72,8 @@ export default {
     portableManualUpdate: "Portable builds cannot use the in-app installer. Download the portable ZIP from the release page, then extract it over the current DBX folder to keep portable.dbx and data.",
     downloading: "Downloading {progress}%",
     downloadFailed: "Update download failed: {error}",
+    installing: "Installing update...",
+    installFailed: "Update installation failed: {error}",
     restart: "Exit & Restart",
     restartFailed: "Failed to restart app: {error}",
     exitAndUpdate: "Exit & Update",

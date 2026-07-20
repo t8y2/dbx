@@ -8,6 +8,7 @@ import type { UpdateDownloadSource as SettingsUpdateDownloadSource } from "@/sto
 import type { UpdateDownloadProgress } from "@/lib/backend/tauri";
 import { currentLocale } from "@/i18n";
 import { shouldBlockAppUpdate } from "@/lib/app/appUpdateTaskGuard";
+import { downloadAndInstallUpdateWhenIdle, installDownloadedUpdateWhenIdle } from "@/lib/app/appUpdateInstallFlow";
 
 interface UseAppUpdaterOptions {
   getActiveTaskCount?: () => number;
@@ -61,6 +62,8 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   const showUpdateDialog = ref(false);
   const isDownloadingUpdate = ref(false);
   const downloadProgress = ref(0);
+  const updateDownloaded = ref(false);
+  const isInstallingUpdate = ref(false);
   const updateReady = ref(false);
   const activeTaskCount = computed(() => Math.max(0, Math.trunc(options.getActiveTaskCount?.() ?? 0)));
   const hasUpdateAvailable = computed(() => updateInfo.value?.update_available === true);
@@ -119,7 +122,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   }
 
   async function downloadAndInstallUpdate() {
-    if (!isTauriRuntime() || isDownloadingUpdate.value) return;
+    if (!isTauriRuntime() || isDownloadingUpdate.value || isInstallingUpdate.value || updateDownloaded.value || updateReady.value) return;
     if (!canDownloadAndInstallUpdate(updateInfo.value, true)) {
       openLatestRelease();
       return;
@@ -129,20 +132,61 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     downloadProgress.value = 0;
     let unlisten: (() => void) | undefined;
     const latestVersion = updateInfo.value?.latest_version;
+    let failureMessageKey = "updates.downloadFailed";
     try {
       const { listen } = await import("@tauri-apps/api/event");
       unlisten = await listen<UpdateDownloadProgress>("update-download-progress", (event) => {
         const total = event.payload.total ?? 0;
         downloadProgress.value = total > 0 ? Math.round((event.payload.downloaded / total) * 100) : 0;
       });
-      await api.downloadAndInstallUpdate(normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource), latestVersion);
-      downloadProgress.value = 100;
-      updateReady.value = true;
+      const result = await downloadAndInstallUpdateWhenIdle({
+        getActiveTaskCount: () => activeTaskCount.value,
+        download: async () => {
+          try {
+            await api.downloadUpdate(normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource), latestVersion);
+            downloadProgress.value = 100;
+            updateDownloaded.value = true;
+          } finally {
+            isDownloadingUpdate.value = false;
+          }
+        },
+        install: async () => {
+          failureMessageKey = "updates.installFailed";
+          await installPendingUpdate();
+        },
+      });
+      if (result === "blocked" || result === "downloaded") {
+        blockUpdateForActiveTasks();
+      }
     } catch (e: any) {
-      toast(t("updates.downloadFailed", { error: e?.message || String(e) }), 5000);
+      toast(t(failureMessageKey, { error: e?.message || String(e) }), 5000);
     } finally {
       unlisten?.();
       isDownloadingUpdate.value = false;
+    }
+  }
+
+  async function installPendingUpdate() {
+    isInstallingUpdate.value = true;
+    try {
+      await api.installDownloadedUpdate();
+      updateDownloaded.value = false;
+      updateReady.value = true;
+    } finally {
+      isInstallingUpdate.value = false;
+    }
+  }
+
+  async function installDownloadedUpdate() {
+    if (!isTauriRuntime() || isDownloadingUpdate.value || isInstallingUpdate.value || !updateDownloaded.value) return;
+    try {
+      const installed = await installDownloadedUpdateWhenIdle({
+        getActiveTaskCount: () => activeTaskCount.value,
+        install: installPendingUpdate,
+      });
+      if (!installed) blockUpdateForActiveTasks();
+    } catch (e: any) {
+      toast(t("updates.installFailed", { error: e?.message || String(e) }), 5000);
     }
   }
 
@@ -164,6 +208,8 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     showUpdateDialog,
     isDownloadingUpdate,
     downloadProgress,
+    updateDownloaded,
+    isInstallingUpdate,
     updateReady,
     activeTaskCount,
     hasUpdateAvailable,
@@ -173,6 +219,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     formatUpdateError,
     openLatestRelease,
     downloadAndInstallUpdate,
+    installDownloadedUpdate,
     restartApp,
   };
 }

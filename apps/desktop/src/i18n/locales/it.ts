@@ -73,6 +73,8 @@ export default withEnglishFallback({
     portableManualUpdate: "Le build portatili non possono utilizzare l'installer in-app. Scarica lo ZIP portatile dalla pagina delle release, quindi estrailo nella cartella DBX corrente per mantenere portable.dbx e i dati.",
     downloading: "Download in corso {progress}%",
     downloadFailed: "Download dell'aggiornamento non riuscito: {error}",
+    installing: "Installazione dell'aggiornamento...",
+    installFailed: "Installazione dell'aggiornamento non riuscita: {error}",
     restart: "Esci e Riavvia",
     restartFailed: "Impossibile riavviare l'app: {error}",
     exitAndUpdate: "Esci e Aggiorna",

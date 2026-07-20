@@ -74,6 +74,8 @@ export default withEnglishFallback({
     portableManualUpdate: "Versões portáteis não podem usar o instalador interno. Baixe o ZIP portátil da página de lançamento e extraia-o sobre a pasta atual do DBX para manter o portable.dbx e os dados.",
     downloading: "Baixando {progress}%",
     downloadFailed: "Falha ao baixar a atualização: {error}",
+    installing: "Instalando atualização...",
+    installFailed: "Falha ao instalar a atualização: {error}",
     restart: "Sair e Reiniciar",
     restartFailed: "Falha ao reiniciar o aplicativo: {error}",
     exitAndUpdate: "Sair e Atualizar",

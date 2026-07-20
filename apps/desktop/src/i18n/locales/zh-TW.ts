@@ -74,6 +74,8 @@ export default withEnglishFallback({
     portableManualUpdate: "可攜版無法使用應用程式內建安裝器更新。請從發行頁下載可攜版 ZIP，並解壓縮覆蓋目前的 DBX 目錄，以保留 portable.dbx 和 data。",
     downloading: "下載中 {progress}%",
     downloadFailed: "更新下載失敗：{error}",
+    installing: "正在安裝更新...",
+    installFailed: "更新安裝失敗：{error}",
     restart: "結束並重新啟動",
     restartFailed: "重新啟動應用程式失敗：{error}",
     exitAndUpdate: "結束並更新",

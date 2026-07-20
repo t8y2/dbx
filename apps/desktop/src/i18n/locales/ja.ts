@@ -74,6 +74,8 @@ export default withEnglishFallback({
     portableManualUpdate: "ポータブル版はアプリ内インストーラーを使用できません。リリースページからポータブルZIPをダウンロードし、現在のDBXフォルダに上書き展開してください。portable.dbxとデータは保持されます。",
     downloading: "ダウンロード中 {progress}%",
     downloadFailed: "アップデートのダウンロードに失敗しました: {error}",
+    installing: "アップデートをインストール中...",
+    installFailed: "アップデートのインストールに失敗しました: {error}",
     restart: "終了して再起動",
     restartFailed: "アプリの再起動に失敗しました: {error}",
     exitAndUpdate: "終了してアップデート",

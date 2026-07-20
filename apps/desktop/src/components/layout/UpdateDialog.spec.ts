@@ -11,7 +11,16 @@ vi.mock("@/lib/backend/tauriRuntime", () => ({
 
 const mountedApps: App[] = [];
 
-async function mountDialog(activeTaskCount: number) {
+async function mountDialog(
+  activeTaskCount: number,
+  state: Partial<{
+    isDownloadingUpdate: boolean;
+    downloadProgress: number;
+    updateDownloaded: boolean;
+    isInstallingUpdate: boolean;
+    updateReady: boolean;
+  }> = {},
+) {
   const container = document.createElement("div");
   document.body.append(container);
   const app = createApp(UpdateDialog, {
@@ -29,8 +38,11 @@ async function mountDialog(activeTaskCount: number) {
     updateCheckMessage: "",
     isDownloadingUpdate: false,
     downloadProgress: 0,
+    updateDownloaded: false,
+    isInstallingUpdate: false,
     updateReady: false,
     activeTaskCount,
+    ...state,
   });
   mountedApps.push(app);
   app.use(i18n);
@@ -41,6 +53,10 @@ async function mountDialog(activeTaskCount: number) {
 
 function downloadButton(): HTMLButtonElement | undefined {
   return Array.from(document.body.querySelectorAll("button")).find((button) => button.textContent?.includes("Download & Install"));
+}
+
+function installDownloadedButton(): HTMLButtonElement | undefined {
+  return Array.from(document.body.querySelectorAll("button")).find((button) => button.textContent?.includes("Exit & Update"));
 }
 
 afterEach(() => {
@@ -61,5 +77,18 @@ describe("UpdateDialog active task guard", () => {
 
     expect(document.body.querySelector('[role="alert"]')).toBeNull();
     expect(downloadButton()?.disabled).toBe(false);
+  });
+
+  it("retains the downloaded update and enables installation only after tasks finish", async () => {
+    await mountDialog(1, { updateDownloaded: true, downloadProgress: 100 });
+
+    expect(downloadButton()).toBeUndefined();
+    expect(installDownloadedButton()?.disabled).toBe(true);
+
+    for (const app of mountedApps.splice(0)) app.unmount();
+    document.body.innerHTML = "";
+    await mountDialog(0, { updateDownloaded: true, downloadProgress: 100 });
+
+    expect(installDownloadedButton()?.disabled).toBe(false);
   });
 });

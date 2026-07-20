@@ -1635,8 +1635,8 @@ impl AppState {
                 // connectivity via the mq_registry and insert a marker so this
                 // connection_id is recognized as valid.
                 let mqc = self.mq_admin_config_for_connection(connection_id, &config).await?;
-                let kafka_launch = crate::mq::service::resolve_kafka_launch_spec(&mqc, self);
-                let adapter = match self.mq_registry.get_or_build_config(connection_id, mqc, kafka_launch).await {
+                let agent_launch = crate::mq::service::resolve_mq_agent_launch_spec(&mqc, self);
+                let adapter = match self.mq_registry.get_or_build_config(connection_id, mqc, agent_launch).await {
                     Ok(adapter) => adapter,
                     Err(err) => {
                         self.mq_registry.drop_connection(connection_id).await;

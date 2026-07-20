@@ -53,6 +53,7 @@ import type { ConnectionConfig, ObjectSourceKind, QueryTab } from "@/types/datab
 import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
 import {
   isBrowserReloadShortcut,
+  isCloseOtherTabsShortcut,
   isCloseTabShortcut,
   isExecuteSqlShortcut,
   isFocusSearchShortcut,
@@ -183,6 +184,7 @@ const aiPanelReady = ref(false);
 const { sidebarWidth, aiPanelWidth, historyWidth, sqlLibraryWidth, sqlFilePanelWidth, startSidebarResize, startAiPanelResize, startHistoryResize, startSqlLibraryResize, startSqlFilePanelResize } = usePanelResize();
 const aiAssistantRef = ref<AiAssistantHandle | null>(null);
 const appSidebarRef = ref<InstanceType<typeof AppSidebar> | null>(null);
+const appTabBarRef = ref<InstanceType<typeof AppTabBar> | null>(null);
 const contentAreaRef = ref<InstanceType<typeof ContentArea> | null>(null);
 
 const selectedSql = ref("");
@@ -1760,6 +1762,12 @@ function handleKeydown(e: KeyboardEvent) {
     }
     return;
   }
+  if (isCloseOtherTabsShortcut(e, shortcuts)) {
+    e.preventDefault();
+    e.stopPropagation();
+    appTabBarRef.value?.closeOtherActiveTabs();
+    return;
+  }
   if (isCloseTabShortcut(e, shortcuts)) {
     e.preventDefault();
     if (showSettingsPage.value) {
@@ -2051,6 +2059,7 @@ onUnmounted(() => {
           <div :class="isClassicLayout ? 'flex-1 min-w-0 overflow-hidden' : 'flex-1 min-w-0 overflow-hidden rounded-md border border-border/80 bg-background'">
             <div class="h-full flex flex-col min-w-0">
               <AppTabBar
+                ref="appTabBarRef"
                 :driver-store-open="driverStoreTabOpen"
                 :driver-store-active="driverStoreActive"
                 :settings-page-open="settingsPageTabOpen"

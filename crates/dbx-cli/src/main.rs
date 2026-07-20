@@ -838,7 +838,11 @@ fn usage() -> &'static str {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use dbx_core::{agent_events::ToolResult, agent_tools::AgentSqlPermissions, storage::Storage};
+    use dbx_core::{
+        agent_events::ToolResult,
+        agent_tools::AgentSqlPermissions,
+        storage::{McpGlobalPolicy, Storage},
+    };
     use dbx_mcp::{backend::new_connection_config, mongo::MongoCommand};
 
     struct MongoBackend {
@@ -867,6 +871,10 @@ mod tests {
 
     #[async_trait]
     impl DbxBackend for MongoBackend {
+        async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
+            Ok(McpGlobalPolicy::default())
+        }
+
         async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
             Ok(vec![self.connection.clone()])
         }
@@ -902,8 +910,12 @@ mod tests {
             })
         }
 
-        async fn save_connections(&self, _connections: &[ConnectionConfig]) -> Result<(), String> {
-            Ok(())
+        async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
+            Ok(config)
+        }
+
+        async fn remove_connection_for_mcp(&self, _connection_id: &str) -> Result<bool, String> {
+            Ok(true)
         }
     }
 

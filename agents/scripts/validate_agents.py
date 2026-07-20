@@ -11,7 +11,7 @@ SOURCE_GLOBS = ("*/src/main/**/*.java", "drivers/*/src/main/**/*.java")
 KOTLIN_FILE_SUFFIXES = (".kt", ".kts")
 KOTLIN_SCAN_EXCLUDED_PARTS = {".git", ".gradle", "build"}
 DEFAULT_AGENT_JRE_KEY = "21"
-NON_JDBC_AGENT_MODULES = {"mongodb", "etcd", "zookeeper", "kafka"}
+NON_JDBC_AGENT_MODULES = {"mongodb", "etcd", "zookeeper", "kafka", "rocketmq"}
 NATIVE_ONLY_AGENT_MODULES = {
     "oracle": "drivers/oracle-go",
     "xugu": "drivers/xugu",

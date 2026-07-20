@@ -598,25 +598,15 @@ export function evaluateMongoWriteSafety(command: MongoWriteCommand, options: Mo
   if (!options.allowWrites) {
     return {
       allowed: false,
-      reason: "MCP MongoDB execution is read-only by default. Set DBX_MCP_ALLOW_WRITES=1 to allow write commands.",
+      reason: "MCP MongoDB execution is read-only under the current DBX policy.",
     };
   }
-  if (!options.allowDangerous && (command.kind === "update" || command.kind === "delete" || command.kind === "findOneAndUpdate" || command.kind === "findOneAndReplace" || command.kind === "findOneAndDelete") && isEmptyJsonObject(command.filter)) {
+  const filter = mongoWriteFilter(command);
+  const highRisk = filter !== null ? mongoFilterIsEffectivelyUnbounded(filter) : command.kind !== "insert";
+  if (!options.allowDangerous && highRisk) {
     return {
       allowed: false,
-      reason: "MongoDB update/delete commands must include a non-empty filter unless DBX_MCP_ALLOW_DANGEROUS_SQL=1 is set.",
-    };
-  }
-  if (!options.allowDangerous && mongoDropIndexesRequiresDangerous(command)) {
-    return {
-      allowed: false,
-      reason: "MongoDB dropIndexes() without a specific single index requires DBX_MCP_ALLOW_DANGEROUS_SQL=1.",
-    };
-  }
-  if (!options.allowDangerous && command.kind === "dropCollection") {
-    return {
-      allowed: false,
-      reason: "MongoDB drop() requires DBX_MCP_ALLOW_DANGEROUS_SQL=1.",
+      reason: `MongoDB ${command.kind} requires high-risk operations to be enabled in DBX MCP settings.`,
     };
   }
   return { allowed: true };
@@ -643,13 +633,13 @@ export function evaluateMongoAggregateSafety(command: MongoAggregateCommand, opt
   if (!options.allowWrites) {
     return {
       allowed: false,
-      reason: `MongoDB aggregate stage "${writeStage}" writes data. Set DBX_MCP_ALLOW_WRITES=1 to allow write commands.`,
+      reason: `MongoDB aggregate stage "${writeStage}" is blocked by the current DBX MCP read-only policy.`,
     };
   }
   if (!options.allowDangerous) {
     return {
       allowed: false,
-      reason: `MongoDB aggregate stage "${writeStage}" is dangerous. Set DBX_MCP_ALLOW_DANGEROUS_SQL=1 to allow it.`,
+      reason: `MongoDB aggregate stage "${writeStage}" requires high-risk operations to be enabled in DBX MCP settings.`,
     };
   }
   return { allowed: true };
@@ -1179,17 +1169,164 @@ function isNonEmptyRecord(value: unknown): value is Record<string, unknown> {
   return isRecord(value) && Object.keys(value).length > 0;
 }
 
-function isEmptyJsonObject(json: string): boolean {
-  const parsed = parseNormalizedJson(json);
-  return isRecord(parsed) && Object.keys(parsed).length === 0;
+function mongoWriteFilter(command: MongoWriteCommand): string | null {
+  switch (command.kind) {
+    case "update":
+    case "delete":
+    case "findOneAndUpdate":
+    case "findOneAndReplace":
+    case "findOneAndDelete":
+      return command.filter;
+    default:
+      return null;
+  }
 }
 
-function mongoDropIndexesRequiresDangerous(command: MongoWriteCommand): boolean {
-  if (command.kind !== "dropIndexes") return false;
-  if (!command.indexes) return true;
-  const parsed = parseNormalizedJson(command.indexes);
-  if (parsed === "*") return true;
-  return Array.isArray(parsed) && parsed.length > 1;
+function mongoFilterIsEffectivelyUnbounded(json: string): boolean {
+  const parsed = parseNormalizedJson(json);
+  return !isRecord(parsed) || mongoFilterContainsOpaqueLogic(parsed) || mongoFilterObjectIsUnbounded(parsed);
+}
+
+function mongoFilterContainsOpaqueLogic(filter: Record<string, unknown>): boolean {
+  return Object.entries(filter).some(([key, value]) => {
+    if (key === "$comment") return false;
+    if (key === "$where" || key === "$expr" || key === "$nor") return true;
+    if (key === "$and" || key === "$or") {
+      if (!Array.isArray(value) || value.length === 0 || value.some((clause) => !isRecord(clause))) return true;
+      if (value.some((clause) => mongoFilterContainsOpaqueLogic(clause as Record<string, unknown>))) return true;
+      if (key === "$or" && value.some((clause) => isRecord(clause) && Object.prototype.hasOwnProperty.call(clause, "$and"))) return true;
+      return key === "$or" && mongoOrHasComplementaryFieldClauses(value);
+    }
+    return key.startsWith("$") || mongoFieldPredicateContainsOpaqueLogic(value);
+  });
+}
+
+const MONGO_SAFE_FIELD_OPERATORS = new Set(["$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in", "$nin", "$exists"]);
+
+function mongoFieldPredicateContainsOpaqueLogic(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (mongoExtendedJsonScalarLiteralIsValid(value)) return false;
+  const keys = Object.keys(value);
+  if (!keys.some((key) => key.startsWith("$"))) return false;
+  return keys.some((key) => !key.startsWith("$") || !MONGO_SAFE_FIELD_OPERATORS.has(key));
+}
+
+interface MongoPureFieldPredicate {
+  field: string;
+  operator: string;
+  operand: unknown;
+}
+
+function mongoOrHasComplementaryFieldClauses(clauses: unknown[]): boolean {
+  const predicates = clauses.map(mongoPureFieldPredicate).filter((value): value is MongoPureFieldPredicate => value !== null);
+  return predicates.some((predicate, index) => predicates.slice(index + 1).some((other) => mongoFieldPredicatesAreComplementary(predicate, other)));
+}
+
+function mongoPureFieldPredicate(value: unknown): MongoPureFieldPredicate | null {
+  if (!isRecord(value)) return null;
+  const entries = Object.entries(value).filter(([key]) => key !== "$comment");
+  if (entries.length !== 1) return null;
+  const [field, predicate] = entries[0]!;
+  if (field === "$and" && Array.isArray(predicate)) {
+    const boundedClauses = predicate.filter((clause) => isRecord(clause) && !mongoFilterObjectIsUnbounded(clause));
+    return boundedClauses.length === 1 ? mongoPureFieldPredicate(boundedClauses[0]) : null;
+  }
+  if (field === "$or" && Array.isArray(predicate) && predicate.length === 1) {
+    return mongoPureFieldPredicate(predicate[0]);
+  }
+  if (field.startsWith("$")) return null;
+  if (!isRecord(predicate) || mongoExtendedJsonScalarLiteralIsValid(predicate) || !Object.keys(predicate).some((key) => key.startsWith("$"))) {
+    return { field, operator: "$eq", operand: predicate };
+  }
+  const operators = Object.entries(predicate);
+  if (operators.length !== 1 || !MONGO_SAFE_FIELD_OPERATORS.has(operators[0]![0])) return null;
+  return { field, operator: operators[0]![0], operand: operators[0]![1] };
+}
+
+function mongoFieldPredicatesAreComplementary(left: MongoPureFieldPredicate, right: MongoPureFieldPredicate): boolean {
+  if (left.field !== right.field) return false;
+  if (left.operator === "$exists" && right.operator === "$exists") {
+    return typeof left.operand === "boolean" && typeof right.operand === "boolean" && left.operand !== right.operand;
+  }
+  const pair = `${left.operator}/${right.operator}`;
+  if (pair === "$in/$nin" || pair === "$nin/$in") return mongoJsonSetsEqual(left.operand, right.operand);
+  if (!["$eq/$ne", "$ne/$eq", "$gt/$lte", "$lte/$gt", "$gte/$lt", "$lt/$gte"].includes(pair)) return false;
+  return mongoJsonValuesEqual(left.operand, right.operand);
+}
+
+function mongoJsonSetsEqual(left: unknown, right: unknown): boolean {
+  if (!Array.isArray(left) || !Array.isArray(right)) return false;
+  return left.every((value) => right.some((other) => mongoJsonValuesEqual(value, other))) && right.every((value) => left.some((other) => mongoJsonValuesEqual(value, other)));
+}
+
+function mongoJsonValuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => mongoJsonValuesEqual(value, right[index]));
+  }
+  if (!isRecord(left) || !isRecord(right)) return false;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return leftKeys.length === rightKeys.length && leftKeys.every((key, index) => key === rightKeys[index] && mongoJsonValuesEqual(left[key], right[key]));
+}
+
+function mongoExtendedJsonScalarLiteralIsValid(value: Record<string, unknown>): boolean {
+  const entries = Object.entries(value);
+  if (entries.length !== 1) return false;
+  const [key, scalar] = entries[0]!;
+  if (key === "$oid") return typeof scalar === "string" && /^[0-9a-fA-F]{24}$/.test(scalar);
+  if (key === "$numberLong") return typeof scalar === "string" && mongoInt64StringIsValid(scalar);
+  return key === "$date" && typeof scalar === "string" && mongoRfc3339DateIsValid(scalar);
+}
+
+function mongoInt64StringIsValid(value: string): boolean {
+  if (!/^-?\d+$/.test(value)) return false;
+  try {
+    const parsed = BigInt(value);
+    return parsed >= -9223372036854775808n && parsed <= 9223372036854775807n;
+  } catch {
+    return false;
+  }
+}
+
+function mongoRfc3339DateIsValid(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/.exec(value);
+  if (!match) return false;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, offsetHourText, offsetMinuteText] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1] ?? 0;
+  return day >= 1 && day <= daysInMonth && Number(hourText) <= 23 && Number(minuteText) <= 59 && Number(secondText) <= 59 && (offsetHourText === undefined || (Number(offsetHourText) <= 23 && Number(offsetMinuteText) <= 59));
+}
+
+function mongoFilterObjectIsUnbounded(filter: Record<string, unknown>): boolean {
+  const entries = Object.entries(filter);
+  if (entries.length === 0) return true;
+  if (entries.some(([key]) => key === "$where" || key === "$expr")) return true;
+
+  return entries.every(([key, value]) => {
+    if (key === "$comment") return true;
+    if (key === "$and") {
+      return !Array.isArray(value) || value.every((clause) => !isRecord(clause) || mongoFilterObjectIsUnbounded(clause));
+    }
+    if (key === "$or") {
+      return !Array.isArray(value) || value.length === 0 || value.some((clause) => !isRecord(clause) || mongoFilterObjectIsUnbounded(clause));
+    }
+    if (key === "$nor") return true;
+    if (mongoFieldPredicateIsEmptyNin(value)) return true;
+    if (key === "_id" && mongoFieldPredicateIsExistsTrue(value)) return true;
+    return key.startsWith("$");
+  });
+}
+
+function mongoFieldPredicateIsEmptyNin(value: unknown): boolean {
+  return isRecord(value) && Object.keys(value).length === 1 && Array.isArray(value.$nin) && value.$nin.length === 0;
+}
+
+function mongoFieldPredicateIsExistsTrue(value: unknown): boolean {
+  return isRecord(value) && Object.keys(value).length === 1 && value.$exists === true;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

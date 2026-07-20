@@ -509,6 +509,14 @@ const ORACLE_SQL_TYPES = [
   "XMLTYPE",
 ];
 
+const ORACLE_SYSTEM_VALUE_NAMES = ["SYSDATE", "SYSTIMESTAMP", "CURRENT_DATE", "CURRENT_TIMESTAMP", "LOCALTIMESTAMP", "SESSIONTIMEZONE", "DBTIMEZONE", "USER", "UID"] as const;
+
+const ORACLE_SYSTEM_VALUE_NAME_SET = new Set<string>(ORACLE_SYSTEM_VALUE_NAMES);
+
+export function isOracleSystemValueName(name: string, databaseType?: DatabaseType): boolean {
+  return isOracleLikeDatabase(databaseType) && ORACLE_SYSTEM_VALUE_NAME_SET.has(name.toUpperCase());
+}
+
 const NON_ORACLE_COMPLETION_WORDS = new Set(["BIGSERIAL", "BOOLEAN", "ELSEIF", "LIMIT", "LOCALTIME", "SERIAL", "STRING", "TEXT", "TIME", "USE"]);
 
 const ORACLE_SQL_KEYWORDS = Array.from(
@@ -1350,6 +1358,9 @@ class SqlCompletionProvider {
       if (!preferReferencedColumns || context.suggestRoutines) {
         const functionItems = buildFunctionSnippetItems(context.prefix, getFunctionDescriptions(this.t), this.databaseType);
         this.items.push(...(preferReferencedColumns ? functionItems.filter((item) => item.label.toLowerCase().startsWith(context.prefix.toLowerCase())) : functionItems));
+        if (isOracleLikeDatabase(this.databaseType)) {
+          this.items.push(...buildOracleSystemValueItems(context.prefix, this.input.keywordCase));
+        }
       }
     }
 
@@ -4023,6 +4034,19 @@ function buildFunctionSnippetItems(prefix: string, functionDescriptions: Map<str
   }
 
   return items;
+}
+
+function buildOracleSystemValueItems(prefix: string, keywordCase?: SqlKeywordCase): SqlCompletionItem[] {
+  return ORACLE_SYSTEM_VALUE_NAMES.filter((name) => matchesPrefix(name, prefix)).map((name) => {
+    const label = applySqlKeywordCase(name, keywordCase);
+    return {
+      label,
+      type: "function" as const,
+      detail: "Oracle system value",
+      apply: label,
+      boost: computeBoost(name, prefix) + 300,
+    };
+  });
 }
 
 function mongoCompletionItemToSqlCompletionItem(item: MongoCompletionItem): SqlCompletionItem {

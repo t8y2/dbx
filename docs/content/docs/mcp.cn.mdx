@@ -42,7 +42,7 @@ AI 助手 → DBX MCP → 你的数据库 → 返回结果
     }
     ```
 
-    如果使用全局安装，可将 `command` 改为 `dbx-mcp-server`。Windows 便携版请将 `DBX_DATA_DIR` 设置为 `DBX.exe` 同级的 `data` 目录。
+    如果使用全局安装，可将 `command` 改为 `dbx-mcp-server`。连接 allowlist 和执行权限统一在 **DBX 设置 → MCP** 中管理，常规客户端配置不需要权限环境变量。Windows 便携版请将 `DBX_DATA_DIR` 设置为 `DBX.exe` 同级的 `data` 目录。
   </Step>
   <Step>
     ### 开始使用
@@ -73,8 +73,8 @@ DBX MCP 当前提供 10 个工具：
 | 工具 | 说明 |
 | --- | --- |
 | `dbx_list_connections` | 列出当前 MCP 会话可见的连接 |
-| `dbx_add_connection` | 添加连接到本地 DBX 存储 |
-| `dbx_remove_connection` | 从本地 DBX 存储删除连接 |
+| `dbx_add_connection` | 添加连接到 DBX 存储 |
+| `dbx_remove_connection` | 从 DBX 存储删除连接 |
 | `dbx_list_tables` | 列出表、视图或集合 |
 | `dbx_describe_table` | 返回列定义和表元数据 |
 | `dbx_get_schema_context` | 返回适合 AI 使用的紧凑 Schema 上下文 |
@@ -117,16 +117,26 @@ Oracle、人大金仓和虚谷需要匹配的 DBX 原生 Agent，但不需要 JR
 
 ## 安全和环境变量
 
-普通写入默认允许。设置 `DBX_MCP_ALLOW_WRITES=0` 可强制只读。`DROP`、`TRUNCATE`、`ALTER`、Redis 破坏性命令以及危险 MongoDB 修改默认仍会阻止，除非设置 `DBX_MCP_ALLOW_DANGEROUS_SQL=1`。
+DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时重新读取：
+
+| 权限模式 | 允许的操作 |
+| --- | --- |
+| 只读 | 查询和元数据读取 |
+| 数据读写 | 普通插入、带有效过滤条件的更新/删除、范围明确的 MongoDB 修改和普通 Redis 写入 |
+| 完全访问 | 额外允许大范围更新/删除、DDL、`TRUNCATE`、MongoDB 破坏性操作和 Redis `FLUSH*` |
+
+`WHERE TRUE`、`WHERE 1 = 1`、`_id: {$exists: true}` 或不透明 MongoDB 过滤器仍按高风险处理。连接自身只读、生产库保护、数据库账号权限和 MCP 连接 allowlist 在任何模式下都是权限上限。
+
+新版 Server 不允许 `DBX_MCP_ALLOW_WRITES` 或 `DBX_MCP_ALLOW_DANGEROUS_SQL` 放宽 DBX 中央策略。为兼容升级，在中央策略首次保存前，旧配置中的 `DBX_MCP_ALLOW_WRITES=0`（或 `false`）仍会保持 MCP 只读；策略保存后仅以中央策略为准，并忽略旧权限变量。旧连接 scope 变量只能进一步收窄 DBX allowlist。
 
 | 变量 | 用途 |
 | --- | --- |
 | `DBX_DATA_DIR` | 覆盖本地 DBX 数据目录 |
 | `DBX_WEB_URL` | 使用 DBX Web/Docker 后端 |
 | `DBX_WEB_PASSWORD` | 登录 DBX Web |
-| `DBX_MCP_ALLOW_WRITES` | 设置为 `0` 强制只读 |
-| `DBX_MCP_ALLOW_DANGEROUS_SQL` | 允许危险 SQL、Redis 和 MongoDB 操作 |
-| `DBX_MCP_SCOPE_CONNECTION_ID` | 限制为一个连接 ID |
+| `DBX_MCP_ALLOW_WRITES` | 仅用于升级兼容：`0`/`false` 使尚未配置的策略保持只读 |
+| `DBX_MCP_SCOPE_CONNECTION_ID` | 兼容旧配置：限制为一个连接 ID |
+| `DBX_MCP_SCOPE_CONNECTION_IDS` | 兼容旧配置：限制为多个连接 ID |
 | `DBX_MCP_SCOPE_CONNECTION_NAME` | 限制为一个连接名称 |
 | `DBX_MCP_SCOPE_DATABASE` | 限制为一个数据库 |
 | `DBX_MCP_DEBUG_SQL` | 临时诊断时输出 SQL |

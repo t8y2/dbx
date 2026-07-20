@@ -14,6 +14,10 @@ describe("driverStoreFocusForInstallError", () => {
       target: "driver",
       driver: "kafka",
     });
+    expect(driverStoreFocusForInstallError("rocketmq driver is not installed. Please install it from the Driver Manager.", "mq", "rocketmq")).toEqual({
+      target: "driver",
+      driver: "rocketmq",
+    });
   });
 
   it("focuses the JRE section for missing JRE errors", () => {

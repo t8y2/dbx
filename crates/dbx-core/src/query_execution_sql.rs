@@ -474,7 +474,7 @@ fn has_extra_statement_after_semicolon(sql: &str) -> bool {
     stripped.split(';').skip(1).any(|part| !part.trim().is_empty())
 }
 
-fn strip_sql_comments(sql: &str) -> String {
+pub(crate) fn strip_sql_comments(sql: &str) -> String {
     let mut output = String::with_capacity(sql.len());
     let mut chars = sql.chars().peekable();
     let mut in_line_comment = false;

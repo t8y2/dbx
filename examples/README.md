@@ -25,6 +25,8 @@ npm install -g @dbx-app/cli
 npm install -g @dbx-app/mcp-server
 ```
 
+MCP connection access and execution permissions are configured centrally in **DBX Settings → MCP**. The client examples intentionally contain no permission or connection-scope environment variables.
+
 ## Suggested Learning Path
 
 1. Read [Getting Started](https://dbxio.com/en/docs/getting-started)

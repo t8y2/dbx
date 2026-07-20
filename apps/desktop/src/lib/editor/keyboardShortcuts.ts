@@ -3,6 +3,7 @@ import { normalizeShortcutSettings, type ShortcutActionId, type ShortcutSettings
 
 export interface ShortcutLikeEvent {
   key: string;
+  code?: string;
   metaKey?: boolean;
   ctrlKey?: boolean;
   altKey?: boolean;
@@ -14,6 +15,18 @@ function normalizeKey(key: string): string {
   if (key === " ") return "Space";
   if (key === "+" || key === "Plus") return "Plus";
   return key.length === 1 ? key.toLowerCase() : key;
+}
+
+function matchesShortcutKey(event: ShortcutLikeEvent, key: string, platform = globalThis.navigator?.platform || ""): boolean {
+  if (normalizeKey(event.key) === normalizeKey(key)) return true;
+  // KeyboardEvent.code 回退：event.key 随布局/修饰键变形时按物理键位匹配
+  // （macOS Option+字母 → 变形字符如 ⌥W="∑"；俄文等非拉丁布局 → "Ц"）。
+  // 仅限 Alt 组合键场景
+  if (!event.altKey || !/^Key[A-Z]$/.test(event.code ?? "") || !/^[A-Z]$/i.test(key)) return false;
+  // 非 macOS 的 Ctrl+Alt 是 AltGr 特征：用户可能在输入字符（如波兰语
+  // AltGr+W → "ł"），按 code 强制匹配会让全局快捷键在打字时误触发
+  if (!isMacShortcutPlatform(platform) && event.ctrlKey) return false;
+  return event.code!.slice(3).toLowerCase() === key.toLowerCase();
 }
 
 function shortcutKeyName(key: string): string | null {
@@ -64,7 +77,7 @@ export function matchesModifierOnlyShortcut(event: Omit<ShortcutLikeEvent, "key"
   return false;
 }
 
-export function matchesShortcut(event: ShortcutLikeEvent, shortcut: string): boolean {
+export function matchesShortcut(event: ShortcutLikeEvent, shortcut: string, platform = globalThis.navigator?.platform || ""): boolean {
   if (event.isComposing || !shortcut) return false;
   const parts = parseShortcutParts(shortcut);
   const key = parts[parts.length - 1] ?? "";
@@ -82,7 +95,7 @@ export function matchesShortcut(event: ShortcutLikeEvent, shortcut: string): boo
 
   if (!!event.altKey !== modifiers.has("Alt")) return false;
   if (!!event.shiftKey !== modifiers.has("Shift")) return false;
-  return normalizeKey(event.key) === normalizeKey(key);
+  return matchesShortcutKey(event, key, platform);
 }
 
 function actionShortcut(actionId: ShortcutActionId, shortcuts?: Partial<ShortcutSettings>): string {
@@ -97,6 +110,10 @@ export function isExecuteSqlShortcut(event: ShortcutLikeEvent, shortcuts?: Parti
 
 export function isCloseTabShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("closeTab", shortcuts));
+}
+
+export function isCloseOtherTabsShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  return matchesShortcut(event, actionShortcut("closeOtherTabs", shortcuts), platform);
 }
 
 export function isSendSelectionToAiShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {

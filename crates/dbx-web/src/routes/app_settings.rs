@@ -5,6 +5,7 @@ use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use axum::extract::State;
 use axum::Json;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use dbx_core::storage::{McpGlobalPolicy, McpGlobalPolicyState};
 use pbkdf2::pbkdf2_hmac;
 use serde::Deserialize;
 use sha2::Sha256;
@@ -47,6 +48,20 @@ pub async fn save_pinned_tree_node_ids(
     Json(body): Json<SavePinnedTreeNodeIdsRequest>,
 ) -> Result<Json<()>, AppError> {
     state.app.storage.save_pinned_tree_node_ids(&body.ids).await.map_err(AppError)?;
+    Ok(Json(()))
+}
+
+pub async fn load_mcp_global_policy(
+    State(state): State<Arc<WebState>>,
+) -> Result<Json<McpGlobalPolicyState>, AppError> {
+    state.app.storage.load_mcp_global_policy().await.map(Json).map_err(AppError)
+}
+
+pub async fn save_mcp_global_policy(
+    State(state): State<Arc<WebState>>,
+    Json(policy): Json<McpGlobalPolicy>,
+) -> Result<Json<()>, AppError> {
+    state.app.storage.save_mcp_global_policy(&policy).await.map_err(AppError)?;
     Ok(Json(()))
 }
 

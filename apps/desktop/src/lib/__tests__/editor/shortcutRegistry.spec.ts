@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_SHORTCUT_SETTINGS, SHORTCUT_DEFINITIONS, findShortcutConflict, formatShortcut, normalizeModifierOnlyShortcut, normalizeShortcutSettings, shortcutToCodeMirrorKey, type ShortcutActionId } from "@/lib/editor/shortcutRegistry";
+import { closeOtherTabsDefaultShortcut, DEFAULT_SHORTCUT_SETTINGS, SHORTCUT_DEFINITIONS, findShortcutConflict, formatShortcut, normalizeModifierOnlyShortcut, normalizeShortcutSettings, shortcutToCodeMirrorKey, type ShortcutActionId } from "@/lib/editor/shortcutRegistry";
 
 describe("shortcutRegistry editor actions", () => {
   const formatterEditorActionIds: ShortcutActionId[] = [
@@ -28,6 +28,20 @@ describe("shortcutRegistry editor actions", () => {
     expect(definition).toMatchObject({ scope: "sidebar", defaultShortcut: "Alt", inputKind: "modifier-only" });
     expect(DEFAULT_SHORTCUT_SETTINGS.openDataInNewTab).toBe("Alt");
     expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.openDataInNewTab, "MacIntel")).toBe("Alt");
+  });
+
+  it("resolves the close-other-tabs default per platform and heals cross-platform synced defaults", () => {
+    // 本测试环境（darwin）：默认应为 macOS 组合
+    expect(DEFAULT_SHORTCUT_SETTINGS.closeOtherTabs).toBe(closeOtherTabsDefaultShortcut());
+    expect(closeOtherTabsDefaultShortcut("MacIntel")).toBe("Alt+Mod+W");
+    // Windows/Linux 不含 Ctrl+Alt（AltGr）也不含 Ctrl+Shift+W（浏览器关窗保留键）
+    expect(closeOtherTabsDefaultShortcut("Win32")).toBe("Shift+Alt+W");
+    expect(closeOtherTabsDefaultShortcut("Linux x86_64")).toBe("Shift+Alt+W");
+    // 云同步把另一平台的默认值带过来：视为未自定义，按本机平台还原
+    expect(normalizeShortcutSettings({ closeOtherTabs: "Alt+Mod+W" }).closeOtherTabs).toBe(closeOtherTabsDefaultShortcut());
+    expect(normalizeShortcutSettings({ closeOtherTabs: "Shift+Alt+W" }).closeOtherTabs).toBe(closeOtherTabsDefaultShortcut());
+    // 用户真正自定义的组合原样保留
+    expect(normalizeShortcutSettings({ closeOtherTabs: "Shift+Mod+O" }).closeOtherTabs).toBe("Shift+Mod+O");
   });
 
   it("normalizes custom, cleared, and invalid modifier-only shortcuts", () => {

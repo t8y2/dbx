@@ -605,14 +605,16 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
                     "column_comment",
                     "numeric_precision",
                     "numeric_scale",
-                    "character_maximum_length",
-                    "identity_seed",
-                    "identity_increment"
+                    "character_maximum_length"
                 },
                 new Object[][]{
-                    {"id", "int", false, null, null, 32, 0, null, "1", "1"},
-                    {"name", "character varying", true, null, null, null, null, 64, null, null}
+                    {"id", "int", false, null, null, 32, 0, null},
+                    {"name", "character varying", true, null, null, null, null, 64}
                 }
+            ),
+            resultSet(
+                new String[]{"column_name", "identity_seed", "identity_increment"},
+                new Object[][]{{"id", "1", "1"}}
             )
         ));
 
@@ -620,7 +622,26 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
 
         Assertions.assertEquals("identity(1,1)", columns.get(0).getExtra());
         Assertions.assertNull(columns.get(1).getExtra());
-        Assertions.assertTrue(sql.get(1).contains("LEFT JOIN sys.identity_columns"), sql.get(1));
+        Assertions.assertFalse(sql.get(1).contains("sys.identity_columns"), sql.get(1));
+        Assertions.assertTrue(sql.get(2).contains("FROM sys.identity_columns"), sql.get(2));
+    }
+
+    @Test
+    void sqlServerCompatGetColumnsIgnoresBrokenIdentityCatalog() throws Exception {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        setSqlServerIdentityCatalogMode(agent, true);
+        TestSupport.setPrivateConnection(agent, sqlServerIdentityFailureConnection(sql));
+
+        List<ColumnInfo> columns = agent.getColumns("dbo", "orders");
+
+        Assertions.assertEquals(2, columns.size());
+        Assertions.assertEquals("id", columns.get(0).getName());
+        Assertions.assertTrue(columns.get(0).getIs_primary_key());
+        Assertions.assertNull(columns.get(0).getExtra());
+        Assertions.assertFalse(sql.get(1).contains("sys.identity_columns"), sql.get(1));
+        Assertions.assertTrue(sql.get(2).contains("FROM sys.identity_columns"), sql.get(2));
+        Assertions.assertFalse(isSqlServerIdentityCatalogMode(agent));
     }
 
     @Test
@@ -748,6 +769,45 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
 
     private static Connection preparedConnectionWithFailure(List<String> sql, String failingSqlFragment, ResultSet fallback) {
         return preparedConnectionWithFailures(sql, List.of(failingSqlFragment), fallback);
+    }
+
+    private static Connection sqlServerIdentityFailureConnection(List<String> sql) {
+        return proxy(Connection.class, (method, args) -> {
+            if ("createStatement".equals(method.getName())) {
+                return proxy(Statement.class, (statementMethod, statementArgs) -> {
+                    if ("executeQuery".equals(statementMethod.getName())) {
+                        String query = String.valueOf(statementArgs[0]);
+                        sql.add(query);
+                        if (query.contains("FROM sys.identity_columns")) {
+                            throw new SQLException("ERROR: cannot open file base/14465/t48_3852767: No such file or directory");
+                        }
+                        if (query.contains("information_schema.table_constraints")) {
+                            return resultSet(new String[]{"column_name"}, new Object[][]{{"id"}});
+                        }
+                        return resultSet(
+                            new String[]{
+                                "column_name",
+                                "data_type",
+                                "is_nullable",
+                                "column_default",
+                                "column_comment",
+                                "numeric_precision",
+                                "numeric_scale",
+                                "character_maximum_length"
+                            },
+                            new Object[][]{
+                                {"id", "int", false, null, null, 32, 0, null},
+                                {"name", "character varying", false, null, null, null, null, 64}
+                            }
+                        );
+                    }
+                    if ("close".equals(statementMethod.getName())) return null;
+                    return defaultValue(statementMethod.getReturnType());
+                });
+            }
+            if ("isClosed".equals(method.getName())) return false;
+            return defaultValue(method.getReturnType());
+        });
     }
 
     private static Connection preparedConnectionWithMetadataFailure(

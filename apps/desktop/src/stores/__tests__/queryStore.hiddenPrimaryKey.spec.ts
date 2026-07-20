@@ -173,6 +173,40 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.queryEditabilityReason).toBeUndefined();
   });
 
+  it("does not check Oracle ROWID eligibility when query metadata returns no columns", async () => {
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([]);
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: undefined,
+        tableName: "aa",
+        selectStar: true,
+        columns: [],
+      },
+    });
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["Error"],
+        rows: [["ORA-00942: table or view does not exist"]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+        execution_error: true,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query");
+
+    await store.executeTabSql(tabId, "SELECT * FROM aa");
+
+    expect(getColumns).toHaveBeenCalledWith("oracle-1", "ORCL", "", "AA", undefined);
+    expect(listIndexes).not.toHaveBeenCalled();
+    expect(listObjects).not.toHaveBeenCalled();
+    expect(executeMulti).toHaveBeenCalledWith("oracle-1", "ORCL", "SELECT * FROM aa", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+  });
+
   it("keeps a keyless Oracle query editable when its WHERE clause reads another table", async () => {
     getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
     getColumns.mockResolvedValue([

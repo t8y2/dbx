@@ -2449,6 +2449,7 @@ export const useQueryStore = defineStore("query", () => {
       if (sources.length !== 1 || analysis.distinct) return unchanged;
 
       const loaded = await loadEditableQuerySource(tab, analysis, sources[0]!, conn, databaseType, traceId, elapsed);
+      if (loaded.tableMeta.columns.length === 0) return unchanged;
       if (loaded.tableMeta.tableType?.toUpperCase().includes("VIEW")) return unchanged;
       const metadataAnalysis = expandStarProjectionColumnsForSource(bindColumnsForSource(databaseType, loaded.analysis, loaded.source, loaded.tableMeta.columns), loaded.source, loaded.tableMeta.columns);
       const declaredPrimaryKeys = loaded.tableMeta.columns.filter((column) => column.is_primary_key).map((column) => column.name);

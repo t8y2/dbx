@@ -676,6 +676,7 @@ html.theme-vscode {
   --dbx-editor-toolbar: rgb(246 246 246);
   --dbx-gutter: rgb(229 229 229);
   --dbx-sidebar-header: rgb(236 236 236);
+  --dbx-tab-outline: rgb(178 178 178);
 }
 
 html.theme-vscode.dark {
@@ -716,6 +717,7 @@ html.theme-vscode.dark {
   --dbx-editor-toolbar: rgb(37 37 38);
   --dbx-gutter: rgb(27 27 28);
   --dbx-sidebar-header: rgb(45 45 48);
+  --dbx-tab-outline: rgb(92 92 92);
 }
 
 html.theme-idea {
@@ -1872,6 +1874,9 @@ body.dbx-table-reference-dragging * {
 :is(.theme-soft, .theme-graphite, .theme-cobalt, .theme-sage, .theme-amber, .theme-blush, .theme-vscode, .theme-idea, .theme-xcode, .theme-jetbrains, .theme-cursor, .theme-claude) .app-layout-classic > .min-w-0,
 :is(.theme-soft, .theme-graphite, .theme-cobalt, .theme-sage, .theme-amber, .theme-blush, .theme-vscode, .theme-idea, .theme-xcode, .theme-jetbrains, .theme-cursor, .theme-claude) .app-layout-classic > .flex-1 {
   background: var(--dbx-content);
+}
+html.theme-vscode .app-tab-scroll.wrap-mode .app-tab-pill[data-active-tab="false"] {
+  border-color: var(--dbx-tab-outline);
 }
 .app-layout-classic .panel-resize-handle {
   width: 3px;

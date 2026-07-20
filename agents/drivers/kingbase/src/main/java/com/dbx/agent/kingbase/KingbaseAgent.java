@@ -668,8 +668,8 @@ public final class KingbaseAgent extends PostgresLikeAgent {
                 "JOIN SYS_CATALOG.SYS_CLASS i ON i.oid = ix.indexrelid " +
                 "JOIN SYS_CATALOG.SYS_NAMESPACE n ON n.oid = t.relnamespace " +
                 "JOIN SYS_CATALOG.SYS_AM am ON am.oid = i.relam " +
-                "JOIN generate_series(1, 64) AS pos(n) ON pos.n <= array_length(string_to_array(ix.indkey::text, ' '), 1) " +
-                "JOIN SYS_CATALOG.SYS_ATTRIBUTE a ON a.attrelid = t.oid AND a.attnum = (string_to_array(ix.indkey::text, ' '))[pos.n]::int2 " +
+                "JOIN unnest(ix.indkey) WITH ORDINALITY AS pos(attnum, n) ON true " +
+                "JOIN SYS_CATALOG.SYS_ATTRIBUTE a ON a.attrelid = t.oid AND a.attnum = pos.attnum " +
                 "WHERE n.nspname = " + sqlString(effectiveSchema(schema)) +
                 " AND t.relname = " + sqlString(table) + " " +
                 "ORDER BY i.relname, pos.n";

@@ -1330,20 +1330,161 @@ pub fn parse_command_argv(command_text: &str) -> Result<Vec<String>, String> {
 }
 
 pub fn classify_command(command: &str) -> RedisCommandSafety {
+    // Read access is an explicit allowlist. Commands added by a newer Redis
+    // version, module, or proxy remain high-risk until DBX reviews them.
     match command.to_ascii_uppercase().as_str() {
-        "KEYS" | "FLUSHALL" | "SHUTDOWN" | "CONFIG" | "SAVE" | "BGSAVE" | "SLAVEOF" | "REPLICAOF" | "MIGRATE"
-        | "MODULE" | "SCRIPT" | "EVAL" | "EVALSHA" => RedisCommandSafety::Blocked,
+        "BITCOUNT"
+        | "BITFIELD_RO"
+        | "BITPOS"
+        | "COMMAND"
+        | "DBSIZE"
+        | "DUMP"
+        | "ECHO"
+        | "EXISTS"
+        | "EXPIRETIME"
+        | "GEODIST"
+        | "GEOHASH"
+        | "GEOPOS"
+        | "GEORADIUS_RO"
+        | "GEORADIUSBYMEMBER_RO"
+        | "GEOSEARCH"
+        | "GET"
+        | "GETBIT"
+        | "GETRANGE"
+        | "HEXISTS"
+        | "HGET"
+        | "HGETALL"
+        | "HKEYS"
+        | "HLEN"
+        | "HMGET"
+        | "HRANDFIELD"
+        | "HSCAN"
+        | "HSTRLEN"
+        | "HVALS"
+        | "INFO"
+        | "LASTSAVE"
+        | "LCS"
+        | "LINDEX"
+        | "LLEN"
+        | "LPOS"
+        | "LRANGE"
+        | "MGET"
+        | "OBJECT"
+        | "PEXPIRETIME"
+        | "PFCOUNT"
+        | "PING"
+        | "PTTL"
+        | "PUBSUB"
+        | "RANDOMKEY"
+        | "ROLE"
+        | "SCAN"
+        | "SCARD"
+        | "SDIFF"
+        | "SINTER"
+        | "SINTERCARD"
+        | "SISMEMBER"
+        | "SMEMBERS"
+        | "SMISMEMBER"
+        | "SORT_RO"
+        | "SRANDMEMBER"
+        | "SSCAN"
+        | "STRLEN"
+        | "SUNION"
+        | "TIME"
+        | "TTL"
+        | "TYPE"
+        | "WAIT"
+        | "WAITAOF"
+        | "XINFO"
+        | "XLEN"
+        | "XPENDING"
+        | "XRANGE"
+        | "XREAD"
+        | "XREVRANGE"
+        | "ZCARD"
+        | "ZCOUNT"
+        | "ZDIFF"
+        | "ZINTER"
+        | "ZINTERCARD"
+        | "ZLEXCOUNT"
+        | "ZMSCORE"
+        | "ZRANDMEMBER"
+        | "ZRANGE"
+        | "ZRANGEBYLEX"
+        | "ZRANGEBYSCORE"
+        | "ZRANK"
+        | "ZREVRANGE"
+        | "ZREVRANGEBYLEX"
+        | "ZREVRANGEBYSCORE"
+        | "ZREVRANK"
+        | "ZSCAN"
+        | "ZSCORE"
+        | "ZUNION"
+        | "BF.CARD"
+        | "BF.EXISTS"
+        | "BF.INFO"
+        | "BF.MEXISTS"
+        | "CF.COUNT"
+        | "CF.EXISTS"
+        | "CF.INFO"
+        | "CF.MEXISTS"
+        | "CMS.INFO"
+        | "CMS.QUERY"
+        | "FT._LIST"
+        | "FT.AGGREGATE"
+        | "FT.DICTDUMP"
+        | "FT.EXPLAIN"
+        | "FT.EXPLAINCLI"
+        | "FT.INFO"
+        | "FT.PROFILE"
+        | "FT.SEARCH"
+        | "FT.SPELLCHECK"
+        | "FT.SYNDUMP"
+        | "FT.TAGVALS"
+        | "GRAPH.RO_QUERY"
+        | "JSON.ARRINDEX"
+        | "JSON.ARRLEN"
+        | "JSON.GET"
+        | "JSON.MGET"
+        | "JSON.OBJKEYS"
+        | "JSON.OBJLEN"
+        | "JSON.RESP"
+        | "JSON.STRLEN"
+        | "JSON.TYPE"
+        | "TDIGEST.BYRANK"
+        | "TDIGEST.BYREVRANK"
+        | "TDIGEST.CDF"
+        | "TDIGEST.INFO"
+        | "TDIGEST.MAX"
+        | "TDIGEST.MIN"
+        | "TDIGEST.QUANTILE"
+        | "TDIGEST.RANK"
+        | "TDIGEST.REVRANK"
+        | "TDIGEST.TRIMMED_MEAN"
+        | "TOPK.INFO"
+        | "TOPK.LIST"
+        | "TOPK.QUERY"
+        | "TS.GET"
+        | "TS.INFO"
+        | "TS.MGET"
+        | "TS.MRANGE"
+        | "TS.QUERYINDEX"
+        | "TS.RANGE" => RedisCommandSafety::Allowed,
         "DEL" | "UNLINK" | "EXPIRE" | "EXPIREAT" | "PEXPIRE" | "PEXPIREAT" | "RENAME" | "RENAMENX" | "GETDEL"
-        | "HDEL" | "LPOP" | "RPOP" | "LREM" | "LTRIM" | "SPOP" | "SREM" | "ZREM" | "ZPOPMAX" | "ZPOPMIN" | "ZMPOP"
+        | "HDEL" | "JSON.ARRPOP" | "JSON.ARRTRIM" | "JSON.CLEAR" | "JSON.DEL" | "JSON.FORGET" | "BLMOVE" | "BLMPOP"
+        | "BLPOP" | "BRPOP" | "BRPOPLPUSH" | "LPOP" | "LMOVE" | "LMPOP" | "RPOP" | "RPOPLPUSH" | "LREM" | "LTRIM"
+        | "SPOP" | "SREM" | "ZREM" | "ZPOPMAX" | "ZPOPMIN" | "ZMPOP" | "BZMPOP" | "BZPOPMAX" | "BZPOPMIN"
         | "ZREMRANGEBYLEX" | "ZREMRANGEBYRANK" | "ZREMRANGEBYSCORE" | "XDEL" | "XTRIM" | "MOVE" | "SORT"
         | "SDIFFSTORE" | "SINTERSTORE" | "SUNIONSTORE" | "ZDIFFSTORE" | "ZINTERSTORE" | "ZRANGESTORE"
-        | "ZUNIONSTORE" | "PFMERGE" | "GEOSEARCHSTORE" | "FLUSHDB" => RedisCommandSafety::Confirm,
+        | "ZUNIONSTORE" | "PFMERGE" | "GEOSEARCHSTORE" => RedisCommandSafety::Confirm,
         "APPEND" | "BITFIELD" | "BITOP" | "COPY" | "DECR" | "DECRBY" | "GEOADD" | "GEORADIUS" | "GEORADIUSBYMEMBER"
-        | "GETSET" | "INCR" | "INCRBY" | "INCRBYFLOAT" | "SET" | "SETEX" | "PSETEX" | "SETNX" | "SETRANGE" | "MSET"
-        | "MSETNX" | "PERSIST" | "HSET" | "HMSET" | "HINCRBY" | "HINCRBYFLOAT" | "HSETNX" | "LINSERT" | "LSET"
-        | "LMOVE" | "LPUSH" | "LPUSHX" | "PFADD" | "RPUSH" | "RPUSHX" | "RESTORE" | "SADD" | "ZADD" | "ZINCRBY"
-        | "SETBIT" | "XADD" | "XACK" | "XAUTOCLAIM" | "XCLAIM" | "XSETID" => RedisCommandSafety::Write,
-        _ => RedisCommandSafety::Allowed,
+        | "GETEX" | "GETSET" | "INCR" | "INCRBY" | "INCRBYFLOAT" | "SET" | "SETEX" | "PSETEX" | "SETNX"
+        | "SETRANGE" | "MSET" | "MSETNX" | "PERSIST" | "HSET" | "HMSET" | "HINCRBY" | "HINCRBYFLOAT" | "HSETNX"
+        | "JSON.ARRAPPEND" | "JSON.ARRINSERT" | "JSON.MERGE" | "JSON.MSET" | "JSON.NUMINCRBY" | "JSON.NUMMULTBY"
+        | "JSON.SET" | "JSON.STRAPPEND" | "JSON.TOGGLE" | "LINSERT" | "LSET" | "LPUSH" | "LPUSHX" | "PFADD"
+        | "RPUSH" | "RPUSHX" | "RESTORE" | "SADD" | "ZADD" | "ZINCRBY" | "SETBIT" | "SPUBLISH" | "PUBLISH"
+        | "TOUCH" | "XADD" | "XACK" | "XAUTOCLAIM" | "XCLAIM" | "XREADGROUP" | "XSETID" => RedisCommandSafety::Write,
+        _ => RedisCommandSafety::Blocked,
     }
 }
 
@@ -2972,8 +3113,28 @@ mod tests {
     }
 
     #[test]
+    fn parses_quoted_and_escaped_command_names_before_classification() {
+        for command_text in [r#""JSON.SET" user:1 $ {}"#, r#"JSON\.SET user:1 $ {}"#] {
+            let argv = parse_command_argv(command_text).unwrap();
+            assert_eq!(classify_command(&argv[0]), RedisCommandSafety::Write);
+        }
+    }
+
+    #[test]
     fn rejects_empty_command_text() {
         assert_eq!(parse_command_argv("   ").unwrap_err(), "Redis command is empty");
+    }
+
+    #[tokio::test]
+    async fn raw_command_execution_fails_closed_before_sending_invalid_or_unknown_commands() {
+        let mut con = FakeRedisConnection::new(Vec::new());
+
+        let unknown = super::execute_command(&mut con, "VENDOR.WRITE key value", false).await.unwrap_err();
+        assert!(unknown.contains("blocked for safety"));
+
+        let malformed = super::execute_command(&mut con, r#"GET "unterminated"#, true).await.unwrap_err();
+        assert_eq!(malformed, "Redis command has an unterminated quote");
+        assert!(con.commands.is_empty());
     }
 
     #[test]
@@ -3040,13 +3201,20 @@ mod tests {
     #[test]
     fn classifies_safe_confirmed_and_blocked_commands() {
         assert_eq!(classify_command("GET"), RedisCommandSafety::Allowed);
+        assert_eq!(classify_command("JSON.GET"), RedisCommandSafety::Allowed);
         assert_eq!(classify_command("set"), RedisCommandSafety::Write);
         assert_eq!(classify_command("hset"), RedisCommandSafety::Write);
+        assert_eq!(classify_command("JSON.SET"), RedisCommandSafety::Write);
+        assert_eq!(classify_command("GETEX"), RedisCommandSafety::Write);
+        assert_eq!(classify_command("XREADGROUP"), RedisCommandSafety::Write);
         assert_eq!(classify_command("del"), RedisCommandSafety::Confirm);
-        assert_eq!(classify_command("flushdb"), RedisCommandSafety::Confirm);
+        assert_eq!(classify_command("flushdb"), RedisCommandSafety::Blocked);
         assert_eq!(classify_command("KEYS"), RedisCommandSafety::Blocked);
         assert_eq!(classify_command("flushall"), RedisCommandSafety::Blocked);
         assert_eq!(classify_command("eval"), RedisCommandSafety::Blocked);
+        assert_eq!(classify_command("FCALL"), RedisCommandSafety::Blocked);
+        assert_eq!(classify_command("XGROUP"), RedisCommandSafety::Blocked);
+        assert_eq!(classify_command("VENDOR.WRITE"), RedisCommandSafety::Blocked);
     }
 
     #[test]

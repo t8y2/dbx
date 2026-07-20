@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::Json;
 use serde::Deserialize;
 
@@ -518,14 +519,41 @@ pub async fn flush_db(
 
 pub async fn execute_command(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Json(req): Json<RedisCommandRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    super::mcp_policy::ensure_scope(&state, &headers, &req.connection_id).await?;
+    let argv = dbx_core::db::redis_driver::parse_command_argv(&req.command)
+        .map_err(|error| AppError(format!("Invalid Redis command: {error}")))?;
+    let cmd_name = argv[0].to_ascii_uppercase();
+    let safety = dbx_core::db::redis_driver::classify_command(&cmd_name);
+    let is_mcp_request = super::mcp_policy::is_mcp_request(&headers);
+    let centrally_approved_high_risk =
+        is_mcp_request && safety == dbx_core::db::redis_driver::RedisCommandSafety::Blocked;
+    if safety != dbx_core::db::redis_driver::RedisCommandSafety::Allowed {
+        if centrally_approved_high_risk {
+            super::mcp_policy::ensure_dangerous_write(
+                &state,
+                &headers,
+                &req.connection_id,
+                &req.db.to_string(),
+                &format!("Redis command '{cmd_name}'"),
+            )
+            .await?;
+        } else {
+            super::mcp_policy::ensure_write(
+                &state,
+                &headers,
+                &req.connection_id,
+                &req.db.to_string(),
+                &format!("Redis command '{cmd_name}'"),
+            )
+            .await?;
+        }
+    }
     // In read-only mode, only allow safe read commands
     if let Some(name) = dbx_core::query::connection_readonly_name(&state.app, &req.connection_id).await {
-        let cmd_name = req.command.split_whitespace().next().unwrap_or("");
-        if dbx_core::db::redis_driver::classify_command(cmd_name)
-            != dbx_core::db::redis_driver::RedisCommandSafety::Allowed
-        {
+        if safety != dbx_core::db::redis_driver::RedisCommandSafety::Allowed {
             return Err(AppError(format!(
                 "Read-only mode: connection '{}' has read-only protection enabled. Command '{}' blocked.",
                 name, cmd_name
@@ -537,7 +565,7 @@ pub async fn execute_command(
         &req.connection_id,
         req.db,
         &req.command,
-        req.skip_safety_check.unwrap_or(false),
+        if is_mcp_request { centrally_approved_high_risk } else { req.skip_safety_check.unwrap_or(false) },
     )
     .await
     .map_err(AppError)?;

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { EXECUTE_MODE_CURRENT_DEFAULT_VERSION, normalizeDesktopSettings, normalizeEditorSettings } from "@/stores/settingsStore";
+import { EXECUTE_MODE_CURRENT_DEFAULT_VERSION, normalizeDesktopSettings, normalizeEditorSettings, normalizeMcpGlobalPolicy } from "@/stores/settingsStore";
 import { createPinia, setActivePinia } from "pinia";
 import type { AiConfigItem } from "@/types/ai";
 
@@ -135,6 +135,37 @@ describe("normalizeDesktopSettings", () => {
   });
 });
 
+describe("normalizeMcpGlobalPolicy", () => {
+  it("defaults to all connections with writes allowed", () => {
+    expect(normalizeMcpGlobalPolicy(undefined)).toEqual({
+      readOnly: false,
+      allowDangerousSql: false,
+      allowedConnectionIds: null,
+      configured: false,
+    });
+  });
+
+  it("normalizes and deduplicates an explicit connection allowlist", () => {
+    expect(
+      normalizeMcpGlobalPolicy({
+        readOnly: true,
+        allowDangerousSql: true,
+        allowedConnectionIds: [" connection-1 ", "connection-1", "", "connection-2"],
+        configured: true,
+      }),
+    ).toEqual({
+      readOnly: true,
+      allowDangerousSql: true,
+      allowedConnectionIds: ["connection-1", "connection-2"],
+      configured: true,
+    });
+  });
+
+  it("preserves an empty allowlist as deny all", () => {
+    expect(normalizeMcpGlobalPolicy({ allowedConnectionIds: [] }).allowedConnectionIds).toEqual([]);
+  });
+});
+
 describe("normalizeEditorSettings - continueOnErrorOnBatch", () => {
   it("defaults continueOnErrorOnBatch to false", () => {
     expect(normalizeEditorSettings({}).continueOnErrorOnBatch).toBe(false);
@@ -185,6 +216,46 @@ function makeTestConfig(overrides: Partial<AiConfigItem> & { id: string }): AiCo
     ...overrides,
   } as AiConfigItem;
 }
+
+describe("settingsStore MCP policy persistence", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    setActivePinia(createPinia());
+  });
+
+  it("rolls an optimistic policy update back when persistence fails", async () => {
+    let rejectSave!: (reason?: unknown) => void;
+    const saveMcpGlobalPolicy = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectSave = reject;
+        }),
+    );
+    vi.doMock("@/lib/backend/api", () => ({ saveMcpGlobalPolicy }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    const previous = {
+      readOnly: true,
+      allowDangerousSql: false,
+      allowedConnectionIds: ["connection-1"],
+      configured: true,
+    };
+    store.mcpGlobalPolicy = previous;
+
+    const update = store.updateMcpGlobalPolicy({ readOnly: false, allowedConnectionIds: [] });
+    expect(store.mcpGlobalPolicy).toEqual({
+      readOnly: false,
+      allowDangerousSql: false,
+      allowedConnectionIds: [],
+      configured: true,
+    });
+
+    rejectSave(new Error("save failed"));
+    await expect(update).rejects.toThrow("save failed");
+    expect(store.mcpGlobalPolicy).toEqual(previous);
+  });
+});
 
 // --- activeModel lifecycle tests ---
 

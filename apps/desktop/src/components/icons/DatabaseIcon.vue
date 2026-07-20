@@ -88,6 +88,7 @@ const assetIcons: Record<string, string> = {
   mq: "pulsar",
   pulsar: "pulsar",
   kafka: "kafka",
+  rocketmq: "rocketmq",
   nacos: "nacos.png",
   iris: "iris.png",
   influxdb: "influxdb",

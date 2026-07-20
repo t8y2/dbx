@@ -24,6 +24,7 @@ const STORAGE_DB_FILE_NAME: &str = "dbx.db";
 const APP_STATE_EDITOR_SETTINGS_KEY: &str = "editor_settings";
 const APP_STATE_OPEN_TABS_KEY: &str = "open_tabs";
 const APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY: &str = "saved_sql_editor_positions";
+const MCP_GLOBAL_POLICY_KEY: &str = "mcp_global_policy";
 const USER_DATA_TABLES: &[&str] = &[
     "connections",
     "connection_secrets",
@@ -163,6 +164,34 @@ pub struct DesktopSettings {
     pub agent_store_dir: Option<String>,
     #[serde(default = "default_sidebar_table_page_size")]
     pub sidebar_table_page_size: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct McpGlobalPolicy {
+    pub read_only: bool,
+    #[serde(default)]
+    pub allow_dangerous_sql: bool,
+    pub allowed_connection_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpGlobalPolicyState {
+    pub configured: bool,
+    pub read_only: bool,
+    pub allow_dangerous_sql: bool,
+    pub allowed_connection_ids: Option<Vec<String>>,
+}
+
+impl McpGlobalPolicyState {
+    pub fn policy(&self) -> McpGlobalPolicy {
+        McpGlobalPolicy {
+            read_only: self.read_only,
+            allow_dangerous_sql: self.allow_dangerous_sql,
+            allowed_connection_ids: self.allowed_connection_ids.clone(),
+        }
+    }
 }
 
 fn default_sidebar_table_page_size() -> usize {
@@ -1088,7 +1117,7 @@ impl Storage {
         };
         match serde_json::from_str::<serde_json::Value>(&json).map_err(|e| e.to_string())? {
             serde_json::Value::Object(map) => Ok(map),
-            _ => Ok(serde_json::Map::new()),
+            _ => Err("app settings JSON must be an object".to_string()),
         }
     }
 
@@ -1096,8 +1125,23 @@ impl Storage {
         &self,
         settings: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<(), String> {
-        let json = serde_json::Value::Object(settings.clone()).to_string();
+        let mut settings = settings.clone();
         self.with_conn(move |conn| {
+            // The dedicated policy writer is the only owner of this key. Keep
+            // its latest value across overlapping legacy settings saves.
+            let current: Option<String> = conn
+                .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
+                .optional()
+                .map_err(|e| e.to_string())?;
+            settings.remove(MCP_GLOBAL_POLICY_KEY);
+            if let Some(current) = current {
+                let current = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&current)
+                    .map_err(|e| format!("invalid app settings JSON: {e}"))?;
+                if let Some(policy) = current.get(MCP_GLOBAL_POLICY_KEY) {
+                    settings.insert(MCP_GLOBAL_POLICY_KEY.to_string(), policy.clone());
+                }
+            }
+            let json = serde_json::Value::Object(settings).to_string();
             conn.execute("INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)", [json])
                 .map(|_| ())
                 .map_err(|e| e.to_string())
@@ -1114,6 +1158,68 @@ impl Storage {
     pub async fn load_password_hash(&self) -> Result<Option<String>, String> {
         let settings = self.load_app_settings_json().await?;
         Ok(settings.get("password_hash").and_then(|v| v.as_str()).map(|s| s.to_string()))
+    }
+
+    pub async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicyState, String> {
+        let result = self
+            .with_conn(|conn| {
+                let json: Option<String> = conn
+                    .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
+                    .optional()
+                    .map_err(|e| e.to_string())?;
+                let Some(json) = json else {
+                    let policy = McpGlobalPolicy::default();
+                    return Ok(McpGlobalPolicyState {
+                        configured: false,
+                        read_only: policy.read_only,
+                        allow_dangerous_sql: policy.allow_dangerous_sql,
+                        allowed_connection_ids: policy.allowed_connection_ids,
+                    });
+                };
+                let settings = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
+                    .map_err(|e| format!("invalid app settings JSON: {e}"))?;
+                let Some(value) = settings.get(MCP_GLOBAL_POLICY_KEY) else {
+                    let policy = McpGlobalPolicy::default();
+                    return Ok(McpGlobalPolicyState {
+                        configured: false,
+                        read_only: policy.read_only,
+                        allow_dangerous_sql: policy.allow_dangerous_sql,
+                        allowed_connection_ids: policy.allowed_connection_ids,
+                    });
+                };
+                let policy = serde_json::from_value::<McpGlobalPolicy>(value.clone())
+                    .map_err(|e| format!("invalid MCP policy: {e}"))?;
+                Ok(McpGlobalPolicyState {
+                    configured: true,
+                    read_only: policy.read_only,
+                    allow_dangerous_sql: policy.allow_dangerous_sql,
+                    allowed_connection_ids: policy.allowed_connection_ids,
+                })
+            })
+            .await;
+        result.map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))
+    }
+
+    pub async fn save_mcp_global_policy(&self, policy: &McpGlobalPolicy) -> Result<(), String> {
+        let policy = serde_json::to_value(policy).map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
+        self.with_conn(move |conn| {
+            let current: Option<String> = conn
+                .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
+                .optional()
+                .map_err(|e| e.to_string())?;
+            let mut settings = match current {
+                Some(json) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
+                    .map_err(|e| format!("invalid app settings JSON: {e}"))?,
+                None => serde_json::Map::new(),
+            };
+            settings.insert(MCP_GLOBAL_POLICY_KEY.to_string(), policy);
+            let json = serde_json::to_string(&settings).map_err(|e| e.to_string())?;
+            conn.execute("INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)", [json])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))
     }
 
     pub async fn save_desktop_settings(&self, desktop_settings: &DesktopSettings) -> Result<(), String> {
@@ -1456,6 +1562,121 @@ impl Storage {
 
 // Connections
 
+fn load_mcp_global_policy_in_tx(tx: &rusqlite::Transaction<'_>) -> Result<McpGlobalPolicy, String> {
+    let settings_json: Option<String> = tx
+        .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
+        .optional()
+        .map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
+    Ok(match settings_json {
+        Some(json) => {
+            let settings = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
+                .map_err(|e| format!("MCP_POLICY_UNAVAILABLE: invalid app settings JSON: {e}"))?;
+            match settings.get(MCP_GLOBAL_POLICY_KEY) {
+                Some(value) => serde_json::from_value::<McpGlobalPolicy>(value.clone())
+                    .map_err(|e| format!("MCP_POLICY_UNAVAILABLE: invalid MCP policy: {e}"))?,
+                None => McpGlobalPolicy::default(),
+            }
+        }
+        None => McpGlobalPolicy::default(),
+    })
+}
+
+fn ensure_mcp_connection_change_allowed_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    target_connection_id: Option<&str>,
+) -> Result<(), String> {
+    let policy = load_mcp_global_policy_in_tx(tx)?;
+    if policy.read_only {
+        return Err(
+            "MCP_READ_ONLY: DBX global MCP read-only mode is enabled. Connection changes are blocked.".to_string()
+        );
+    }
+    if let Some(connection_id) = target_connection_id {
+        if policy.allowed_connection_ids.as_ref().is_some_and(|ids| !ids.iter().any(|id| id == connection_id)) {
+            return Err(format!(
+                "CONNECTION_OUT_OF_SCOPE: connection '{connection_id}' is not allowed by the current DBX MCP policy"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn persist_connection_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionConfig) -> Result<(), String> {
+    let config = config.clone().canonicalized();
+    let config_id = config.id.clone();
+    let mut sanitized = config.clone();
+    sanitized.password = String::new();
+    scrub_transport_layer_secrets(&mut sanitized);
+    sanitized.redis_sentinel_password = String::new();
+    sanitized.connection_string = None;
+    sanitized.init_script = None;
+    scrub_mq_auth_secrets(&mut sanitized);
+    scrub_mq_token_signing_secret(&mut sanitized);
+    scrub_nacos_auth_secrets(&mut sanitized);
+    let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
+
+    tx.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", params![config_id, json])
+        .map_err(|e| e.to_string())?;
+
+    persist_secret_in_tx(tx, &config.id, "password", &config.password)?;
+    delete_secret_prefix_in_tx(tx, &config.id, TRANSPORT_LAYER_SECRET_PREFIX)?;
+    for (index, layer) in config.transport_layers.iter().enumerate() {
+        match layer {
+            TransportLayerConfig::Ssh(ssh) => {
+                persist_secret_in_tx(tx, &config.id, &transport_layer_ssh_password_key(index, layer), &ssh.password)?;
+                persist_secret_in_tx(
+                    tx,
+                    &config.id,
+                    &transport_layer_ssh_key_passphrase_key(index, layer),
+                    &ssh.key_passphrase,
+                )?;
+            }
+            TransportLayerConfig::Proxy(proxy) => {
+                persist_secret_in_tx(
+                    tx,
+                    &config.id,
+                    &transport_layer_proxy_password_key(index, layer),
+                    &proxy.password,
+                )?;
+            }
+            TransportLayerConfig::HttpTunnel(http) => {
+                persist_secret_in_tx(
+                    tx,
+                    &config.id,
+                    &transport_layer_http_tunnel_token_key(index, layer),
+                    &http.token,
+                )?;
+            }
+        }
+    }
+    persist_secret_in_tx(tx, &config.id, "redis_sentinel_password", &config.redis_sentinel_password)?;
+    persist_secret_in_tx(tx, &config.id, "ssh_password", "")?;
+    persist_secret_in_tx(tx, &config.id, "ssh_key_passphrase", "")?;
+    persist_secret_in_tx(tx, &config.id, "proxy_password", "")?;
+    delete_secret_prefix_in_tx(tx, &config.id, SSH_TUNNEL_SECRET_PREFIX)?;
+    if let Some(cs) = &config.connection_string {
+        persist_secret_in_tx(tx, &config.id, "connection_string", cs)?;
+    } else {
+        tx.execute(
+            "DELETE FROM connection_secrets WHERE connection_id = ?1 AND key = ?2",
+            params![config.id, "connection_string"],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if let Some(script) = &config.init_script {
+        persist_secret_in_tx(tx, &config.id, "init_script", script)?;
+    } else {
+        tx.execute(
+            "DELETE FROM connection_secrets WHERE connection_id = ?1 AND key = ?2",
+            params![config.id, "init_script"],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    persist_mq_auth_secrets_in_tx(tx, &config)?;
+    persist_mq_token_signing_secret_in_tx(tx, &config)?;
+    persist_nacos_auth_secrets_in_tx(tx, &config)
+}
+
 impl Storage {
     pub async fn save_connection_metadata_preserving_secrets(
         &self,
@@ -1505,84 +1726,7 @@ impl Storage {
             tx.execute("DELETE FROM connections", []).map_err(|e| e.to_string())?;
 
             for config in &configs {
-                let config = config.canonicalized();
-                let config_id = config.id.clone();
-                let mut sanitized = config.clone();
-                sanitized.password = String::new();
-                scrub_transport_layer_secrets(&mut sanitized);
-                sanitized.redis_sentinel_password = String::new();
-                sanitized.connection_string = None;
-                sanitized.init_script = None;
-                scrub_mq_auth_secrets(&mut sanitized);
-                scrub_mq_token_signing_secret(&mut sanitized);
-                scrub_nacos_auth_secrets(&mut sanitized);
-                let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
-
-                tx.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", params![config_id, json])
-                    .map_err(|e| e.to_string())?;
-
-                persist_secret_in_tx(&tx, &config.id, "password", &config.password)?;
-                delete_secret_prefix_in_tx(&tx, &config.id, TRANSPORT_LAYER_SECRET_PREFIX)?;
-                for (index, layer) in config.transport_layers.iter().enumerate() {
-                    match layer {
-                        TransportLayerConfig::Ssh(ssh) => {
-                            persist_secret_in_tx(
-                                &tx,
-                                &config.id,
-                                &transport_layer_ssh_password_key(index, layer),
-                                &ssh.password,
-                            )?;
-                            persist_secret_in_tx(
-                                &tx,
-                                &config.id,
-                                &transport_layer_ssh_key_passphrase_key(index, layer),
-                                &ssh.key_passphrase,
-                            )?;
-                        }
-                        TransportLayerConfig::Proxy(proxy) => {
-                            persist_secret_in_tx(
-                                &tx,
-                                &config.id,
-                                &transport_layer_proxy_password_key(index, layer),
-                                &proxy.password,
-                            )?;
-                        }
-                        TransportLayerConfig::HttpTunnel(http) => {
-                            persist_secret_in_tx(
-                                &tx,
-                                &config.id,
-                                &transport_layer_http_tunnel_token_key(index, layer),
-                                &http.token,
-                            )?;
-                        }
-                    }
-                }
-                persist_secret_in_tx(&tx, &config.id, "redis_sentinel_password", &config.redis_sentinel_password)?;
-                persist_secret_in_tx(&tx, &config.id, "ssh_password", "")?;
-                persist_secret_in_tx(&tx, &config.id, "ssh_key_passphrase", "")?;
-                persist_secret_in_tx(&tx, &config.id, "proxy_password", "")?;
-                delete_secret_prefix_in_tx(&tx, &config.id, SSH_TUNNEL_SECRET_PREFIX)?;
-                if let Some(cs) = &config.connection_string {
-                    persist_secret_in_tx(&tx, &config.id, "connection_string", cs)?;
-                } else {
-                    tx.execute(
-                        "DELETE FROM connection_secrets WHERE connection_id = ?1 AND key = ?2",
-                        params![config.id, "connection_string"],
-                    )
-                    .map_err(|e| e.to_string())?;
-                }
-                if let Some(script) = &config.init_script {
-                    persist_secret_in_tx(&tx, &config.id, "init_script", script)?;
-                } else {
-                    tx.execute(
-                        "DELETE FROM connection_secrets WHERE connection_id = ?1 AND key = ?2",
-                        params![config.id, "init_script"],
-                    )
-                    .map_err(|e| e.to_string())?;
-                }
-                persist_mq_auth_secrets_in_tx(&tx, &config)?;
-                persist_mq_token_signing_secret_in_tx(&tx, &config)?;
-                persist_nacos_auth_secrets_in_tx(&tx, &config)?;
+                persist_connection_in_tx(&tx, config)?;
             }
 
             if configs.is_empty() {
@@ -1595,6 +1739,35 @@ impl Storage {
             }
 
             tx.commit().map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
+        let config = config.canonicalized();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            ensure_mcp_connection_change_allowed_in_tx(&tx, None)?;
+            persist_connection_in_tx(&tx, &config)?;
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(config)
+        })
+        .await
+    }
+
+    pub async fn remove_connection_for_mcp(&self, connection_id: &str) -> Result<bool, String> {
+        let connection_id = connection_id.to_string();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            ensure_mcp_connection_change_allowed_in_tx(&tx, Some(&connection_id))?;
+            let removed =
+                tx.execute("DELETE FROM connections WHERE id = ?1", [&connection_id]).map_err(|e| e.to_string())? > 0;
+            if removed {
+                tx.execute("DELETE FROM connection_secrets WHERE connection_id = ?1", [&connection_id])
+                    .map_err(|e| e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(removed)
         })
         .await
     }
@@ -2864,7 +3037,10 @@ fn map_from_sql_err(err: serde_json::Error) -> rusqlite::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{maybe_import_user_data_db, DataDbImportResult, DesktopIconTheme, DesktopSettings, Storage};
+    use super::{
+        maybe_import_user_data_db, DataDbImportResult, DesktopIconTheme, DesktopSettings, McpGlobalPolicy,
+        McpGlobalPolicyState, Storage, MCP_GLOBAL_POLICY_KEY,
+    };
     use crate::connection_secrets::{
         MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
     };
@@ -3380,6 +3556,169 @@ mod tests {
         let storage = Storage::open(&path).await.unwrap();
 
         assert_eq!(storage.load_desktop_settings().await.unwrap(), DesktopSettings::default());
+    }
+
+    #[tokio::test]
+    async fn mcp_global_policy_defaults_unconfigured_and_roundtrips_atomically() {
+        let path = temp_db_path("mcp-global-policy");
+        let storage = Storage::open(&path).await.unwrap();
+
+        assert_eq!(
+            storage.load_mcp_global_policy().await.unwrap(),
+            McpGlobalPolicyState {
+                configured: false,
+                read_only: false,
+                allow_dangerous_sql: false,
+                allowed_connection_ids: None,
+            }
+        );
+
+        storage.save_password_hash("preserved").await.unwrap();
+        storage
+            .save_mcp_global_policy(&McpGlobalPolicy {
+                read_only: true,
+                allow_dangerous_sql: true,
+                allowed_connection_ids: Some(vec!["conn-1".to_string(), "conn-2".to_string()]),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            storage.load_mcp_global_policy().await.unwrap(),
+            McpGlobalPolicyState {
+                configured: true,
+                read_only: true,
+                allow_dangerous_sql: true,
+                allowed_connection_ids: Some(vec!["conn-1".to_string(), "conn-2".to_string()]),
+            }
+        );
+        assert_eq!(storage.load_password_hash().await.unwrap().as_deref(), Some("preserved"));
+        let settings = storage.load_app_settings_json().await.unwrap();
+        assert_eq!(settings[MCP_GLOBAL_POLICY_KEY]["readOnly"], true);
+        assert_eq!(settings[MCP_GLOBAL_POLICY_KEY]["allowDangerousSql"], true);
+        assert_eq!(settings[MCP_GLOBAL_POLICY_KEY]["allowedConnectionIds"][0], "conn-1");
+        assert!(settings[MCP_GLOBAL_POLICY_KEY].get("configured").is_none());
+
+        storage.save_desktop_settings(&DesktopSettings::default()).await.unwrap();
+        assert!(storage.load_mcp_global_policy().await.unwrap().read_only);
+    }
+
+    #[tokio::test]
+    async fn mcp_global_policy_fails_closed_on_malformed_settings() {
+        let path = temp_db_path("mcp-global-policy-malformed");
+        let storage = Storage::open(&path).await.unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)",
+                    [r#"{"mcp_global_policy":{"readOnly":"yes","allowedConnectionIds":null}}"#],
+                )
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap();
+
+        let error = storage.load_mcp_global_policy().await.unwrap_err();
+        assert!(error.starts_with("MCP_POLICY_UNAVAILABLE:"));
+    }
+
+    #[tokio::test]
+    async fn malformed_app_settings_cannot_be_silently_replaced_by_an_unrelated_save() {
+        let path = temp_db_path("mcp-global-policy-invalid-settings-shape");
+        let storage = Storage::open(&path).await.unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute("INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)", ["[]"])
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap();
+
+        assert!(storage.load_mcp_global_policy().await.unwrap_err().starts_with("MCP_POLICY_UNAVAILABLE:"));
+        assert!(storage.save_password_hash("must-not-reset-policy").await.is_err());
+        let raw = storage
+            .with_conn(|conn| {
+                conn.query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get::<_, String>(0))
+                    .map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap();
+        assert_eq!(raw, "[]");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn mcp_global_policy_defaults_dangerous_sql_to_disabled_for_existing_settings() {
+        let path = temp_db_path("mcp-global-policy-existing");
+        let storage = Storage::open(&path).await.unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)",
+                    [r#"{"mcp_global_policy":{"readOnly":false,"allowedConnectionIds":null}}"#],
+                )
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap();
+
+        let policy = storage.load_mcp_global_policy().await.unwrap();
+        assert!(policy.configured);
+        assert!(!policy.allow_dangerous_sql);
+    }
+
+    #[tokio::test]
+    async fn mcp_connection_mutations_are_atomic_and_recheck_policy() {
+        let path = temp_db_path("mcp-connection-mutation-guard");
+        let storage = Storage::open(&path).await.unwrap();
+        let kept = mq_connection("kept", "kept-token");
+        let removed = mq_connection("removed", "removed-token");
+        storage.save_connections(&[kept.clone(), removed.clone()]).await.unwrap();
+
+        storage
+            .save_mcp_global_policy(&McpGlobalPolicy {
+                read_only: false,
+                allow_dangerous_sql: false,
+                allowed_connection_ids: Some(vec![kept.id.clone()]),
+            })
+            .await
+            .unwrap();
+        let error = storage.remove_connection_for_mcp(&removed.id).await.unwrap_err();
+        assert!(error.starts_with("CONNECTION_OUT_OF_SCOPE:"));
+
+        let mut concurrently_updated = removed.clone();
+        concurrently_updated.host = "updated-by-web-ui".to_string();
+        storage.save_connections(&[kept.clone(), concurrently_updated.clone()]).await.unwrap();
+        let added = mq_connection("added", "added-token");
+        storage.add_connection_for_mcp(added.clone()).await.unwrap();
+        let after_add = storage.load_connections().await.unwrap();
+        assert_eq!(after_add.len(), 3);
+        assert_eq!(
+            after_add.iter().find(|config| config.id == concurrently_updated.id).map(|config| config.host.as_str()),
+            Some("updated-by-web-ui")
+        );
+
+        storage
+            .save_mcp_global_policy(&McpGlobalPolicy {
+                read_only: true,
+                allow_dangerous_sql: false,
+                allowed_connection_ids: None,
+            })
+            .await
+            .unwrap();
+        let error = storage.remove_connection_for_mcp(&kept.id).await.unwrap_err();
+        assert!(error.starts_with("MCP_READ_ONLY:"));
+        assert_eq!(storage.load_connections().await.unwrap().len(), 3);
+
+        // Non-MCP callers remain governed by the ordinary DBX UI permissions.
+        storage.save_connections(std::slice::from_ref(&kept)).await.unwrap();
+        assert_eq!(storage.load_connections().await.unwrap()[0].id, kept.id);
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

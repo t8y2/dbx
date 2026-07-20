@@ -4,6 +4,7 @@ import {
   eventToShortcut,
   isBrowserReloadShortcut,
   isCancelSearchShortcut,
+  isCloseOtherTabsShortcut,
   isCloseTabShortcut,
   isCopySidebarSelectionShortcut,
   isExecuteSqlShortcut,
@@ -24,6 +25,7 @@ import {
   isToggleTransposeShortcut,
   isZoomInShortcut,
   isZoomOutShortcut,
+  matchesShortcut,
   switchToTabIndexFromShortcut,
 } from "../../apps/desktop/src/lib/editor/keyboardShortcuts.ts";
 import { shortcutToCodeMirrorKey } from "../../apps/desktop/src/lib/editor/shortcutRegistry.ts";
@@ -133,6 +135,33 @@ test("matches Cmd+W for closing query tabs", () => {
 
 test("ignores Ctrl+W for closing query tabs", () => {
   assert.equal(isCloseTabShortcut({ key: "w", ctrlKey: true }), false);
+});
+
+test("matches platform shortcuts for closing other tabs", () => {
+  // macOS 默认 ⌥⌘W：Option 会把 event.key 变形（⌥W → "∑"），按 code 回退匹配。
+  // 平台默认集合内的值会被 normalize 按本机平台还原（云同步自愈），因此
+  // 默认组合的匹配行为用 matchesShortcut 直接断言，自定义组合走完整入口
+  assert.equal(matchesShortcut({ key: "∑", code: "KeyW", altKey: true, metaKey: true }, "Alt+Mod+W", "MacIntel"), true);
+  assert.equal(matchesShortcut({ key: "w", metaKey: true }, "Alt+Mod+W", "MacIntel"), false);
+  // Windows/Linux 默认 Shift+Alt+W（不含 Ctrl+Alt 避开 AltGr；不含 Ctrl+Shift+W 避开浏览器关窗保留键）
+  assert.equal(matchesShortcut({ key: "W", altKey: true, shiftKey: true }, "Shift+Alt+W", "Win32"), true);
+  assert.equal(matchesShortcut({ key: "w", altKey: true }, "Shift+Alt+W", "Win32"), false);
+  // 非拉丁布局（俄文 Ц 在物理 KeyW 上）：无 Ctrl 的 Alt 组合按 code 回退匹配，默认键不失效
+  assert.equal(matchesShortcut({ key: "Ц", code: "KeyW", altKey: true, shiftKey: true }, "Shift+Alt+W", "Win32"), true);
+  // 用户自定义组合（非平台默认集合）经完整入口匹配
+  assert.equal(isCloseOtherTabsShortcut({ key: "o", ctrlKey: true, shiftKey: true }, { closeOtherTabs: "Shift+Mod+O" }, "Win32"), true);
+});
+
+test("altgr character input never triggers close other tabs on windows layouts", () => {
+  // 波兰语等布局：AltGr+W（= Ctrl+Alt+W）产生字符 "ł"，event.key 不是 "w"。
+  // 即使用户自定义了 Alt+Mod+W，code 回退在非 macOS 平台禁用，不得按物理
+  // KeyW 强制匹配——否则用户输入文本会误触发关闭其他标签页
+  assert.equal(matchesShortcut({ key: "ł", code: "KeyW", altKey: true, ctrlKey: true }, "Alt+Mod+W", "Win32"), false);
+  assert.equal(matchesShortcut({ key: "ę", code: "KeyE", altKey: true, ctrlKey: true }, "Alt+Mod+E", "Linux x86_64"), false);
+  // 显式按下字母本身（key 就是 "w"）仍正常匹配自定义组合
+  assert.equal(matchesShortcut({ key: "w", altKey: true, ctrlKey: true }, "Alt+Mod+W", "Win32"), true);
+  // 经完整入口：非平台默认集合的自定义组合在 AltGr 布局下同样不误触发
+  assert.equal(isCloseOtherTabsShortcut({ key: "ę", code: "KeyE", altKey: true, ctrlKey: true }, { closeOtherTabs: "Alt+Mod+E" }, "Win32"), false);
 });
 
 test("matches Ctrl+F for focusing search", () => {

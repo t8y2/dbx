@@ -25,7 +25,11 @@ test("responds to initialize when invoked through an npm-style symlink", async (
   try {
     child = spawn(process.execPath, [bin.path], {
       cwd: packageDir,
-      env: { ...process.env, DBX_MCP_BINARY: rustBinary },
+      env: {
+        ...process.env,
+        DBX_MCP_BINARY: rustBinary,
+        DBX_DATA_DIR: bin.dir,
+      },
     });
 
     const responsePromise = readJsonRpcResponse(child, 5000);

@@ -21,7 +21,7 @@ use crate::mq::config::MqAdminConfig;
 use crate::mq::port::MessageQueueAdmin;
 use crate::mq::types::*;
 
-/// Kafka capabilities — no tenants/namespaces, supports topics, consumer groups,
+/// Kafka capabilities - no tenants/namespaces, supports topics, consumer groups,
 /// ACLs, retention, and message production.
 const KAFKA_CAPABILITIES: MqCapabilities = MqCapabilities {
     supports_tenants: false,
@@ -42,6 +42,9 @@ const KAFKA_CAPABILITIES: MqCapabilities = MqCapabilities {
     supports_token_management: false,
     supports_raw_admin_api: false,
     supports_send_message: true,
+    supports_message_query: false,
+    supports_dlq: false,
+    supports_message_trace: false,
 };
 
 pub struct KafkaAdmin {
@@ -180,6 +183,8 @@ impl MessageQueueAdmin for KafkaAdmin {
                     partitioned: partitions.map(|p| p > 1).unwrap_or(false),
                     partitions,
                     persistent: true,
+                    internal: t.get("internal").and_then(|v| v.as_bool()).unwrap_or(false),
+                    message_type: None,
                 }
             })
             .collect())
@@ -584,6 +589,7 @@ impl MessageQueueAdmin for KafkaAdmin {
                             host: node.get("host")?.as_str()?.to_string(),
                             port: node.get("port")?.as_i64()? as i32,
                             rack: node.get("rack").and_then(|v| v.as_str()).map(String::from),
+                            ..Default::default()
                         })
                     })
                     .collect()
@@ -733,6 +739,7 @@ fn kafka_subscription_for_topic(
         msg_rate_out: 0.0,
         msg_throughput_out: 0.0,
         consumers: Vec::new(),
+        ..Default::default()
     })
 }
 
@@ -833,6 +840,8 @@ mod tests {
             topic: "events".to_string(),
             persistent: true,
             partitioned: None,
+            message_type: None,
+            ..TopicRef::default()
         };
 
         let params = reset_cursor_params(&topic, "group-a", ResetPosition::Timestamp { timestamp_ms: 1710000000000 })
@@ -852,6 +861,8 @@ mod tests {
             topic: "events".to_string(),
             persistent: true,
             partitioned: None,
+            message_type: None,
+            ..TopicRef::default()
         };
 
         let err = reset_cursor_params(&topic, "group-a", ResetPosition::MessageId { ledger_id: 1, entry_id: 2 })

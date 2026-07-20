@@ -168,6 +168,21 @@ pub(crate) struct SubscriptionReq {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct ConsumerGroupConfigReq {
+    connection_id: String,
+    group_id: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AlterConsumerGroupConfigReq {
+    connection_id: String,
+    group_id: String,
+    config: serde_json::Value,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct PeekMessagesReq {
     connection_id: String,
     topic: dbx_core::mq::TopicRef,
@@ -519,6 +534,32 @@ pub async fn clear_backlog(
     Ok(Json(()))
 }
 
+pub async fn get_consumer_group_config(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<ConsumerGroupConfigReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result = dbx_core::mq::service::mq_get_consumer_group_config_core(&state.app, &req.connection_id, req.group_id)
+        .await
+        .map_err(AppError)?;
+    Ok(Json(result))
+}
+
+pub async fn alter_consumer_group_config(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<AlterConsumerGroupConfigReq>,
+) -> Result<Json<()>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Alter consumer group config").await?;
+    dbx_core::mq::service::mq_alter_consumer_group_config_core(
+        &state.app,
+        &req.connection_id,
+        req.group_id,
+        req.config,
+    )
+    .await
+    .map_err(AppError)?;
+    Ok(Json(()))
+}
+
 pub async fn peek_messages(
     State(state): State<Arc<WebState>>,
     Json(req): Json<PeekMessagesReq>,
@@ -718,6 +759,139 @@ pub async fn get_cluster_info(
 ) -> Result<Json<dbx_core::mq::ClusterInfo>, AppError> {
     let result =
         dbx_core::mq::service::mq_get_cluster_info_core(&state.app, &req.connection_id).await.map_err(AppError)?;
+    Ok(Json(result))
+}
+
+pub async fn get_topic_route(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<TopicReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result = dbx_core::mq::service::mq_get_topic_route_core(&state.app, &req.connection_id, req.topic)
+        .await
+        .map_err(AppError)?;
+    Ok(Json(result))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AlterTopicConfigReq {
+    connection_id: String,
+    topic: dbx_core::mq::TopicRef,
+    configs: serde_json::Value,
+}
+
+pub async fn alter_topic_config(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<AlterTopicConfigReq>,
+) -> Result<Json<()>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Alter topic config").await?;
+    dbx_core::mq::service::mq_alter_topic_config_core(&state.app, &req.connection_id, req.topic, req.configs)
+        .await
+        .map_err(AppError)?;
+    Ok(Json(()))
+}
+
+pub async fn skip_topic_accumulation(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<TopicReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Skip topic accumulation").await?;
+    let result = dbx_core::mq::service::mq_skip_topic_accumulation_core(&state.app, &req.connection_id, req.topic)
+        .await
+        .map_err(AppError)?;
+    Ok(Json(result))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ViewMessageReq {
+    connection_id: String,
+    topic: dbx_core::mq::TopicRef,
+    msg_id: String,
+}
+
+pub async fn view_message(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<ViewMessageReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result = dbx_core::mq::service::mq_view_message_core(&state.app, &req.connection_id, req.topic, req.msg_id)
+        .await
+        .map_err(AppError)?;
+    Ok(Json(result))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct QueryMessagesByKeyReq {
+    connection_id: String,
+    topic: dbx_core::mq::TopicRef,
+    key: String,
+    begin: i64,
+    end: i64,
+    max_num: u32,
+}
+
+pub async fn query_messages_by_key(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<QueryMessagesByKeyReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result = dbx_core::mq::service::mq_query_messages_by_key_core(
+        &state.app,
+        &req.connection_id,
+        req.topic,
+        req.key,
+        req.begin,
+        req.end,
+        req.max_num,
+    )
+    .await
+    .map_err(AppError)?;
+    Ok(Json(result))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct QueryMessagesByTopicReq {
+    connection_id: String,
+    topic: dbx_core::mq::TopicRef,
+    begin: i64,
+    end: i64,
+    max_num: u32,
+}
+
+pub async fn query_messages_by_topic(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<QueryMessagesByTopicReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result = dbx_core::mq::service::mq_query_messages_by_topic_core(
+        &state.app,
+        &req.connection_id,
+        req.topic,
+        req.begin,
+        req.end,
+        req.max_num,
+    )
+    .await
+    .map_err(AppError)?;
+    Ok(Json(result))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct QueryMessageTraceReq {
+    connection_id: String,
+    msg_id: String,
+    trace_topic: Option<String>,
+}
+
+pub async fn query_message_trace(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<QueryMessageTraceReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result =
+        dbx_core::mq::service::mq_query_message_trace_core(&state.app, &req.connection_id, req.msg_id, req.trace_topic)
+            .await
+            .map_err(AppError)?;
     Ok(Json(result))
 }
 

@@ -34,6 +34,13 @@ export interface DesktopSettings {
   sidebar_table_page_size?: number | null;
 }
 
+export interface McpGlobalPolicy {
+  readOnly: boolean;
+  allowDangerousSql: boolean;
+  allowedConnectionIds: string[] | null;
+  configured: boolean;
+}
+
 export type DesktopIconTheme = "default" | "black";
 
 export type InterfaceLayout = "separated" | "classic";
@@ -62,6 +69,23 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   agent_store_dir: null,
   sidebar_table_page_size: DEFAULT_SIDEBAR_TABLE_PAGE_SIZE,
 };
+
+export const DEFAULT_MCP_GLOBAL_POLICY: McpGlobalPolicy = {
+  readOnly: false,
+  allowDangerousSql: false,
+  allowedConnectionIds: null,
+  configured: false,
+};
+
+export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null | undefined): McpGlobalPolicy {
+  const allowedConnectionIds = policy?.allowedConnectionIds === null || policy?.allowedConnectionIds === undefined ? null : [...new Set(policy.allowedConnectionIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))];
+  return {
+    readOnly: policy?.readOnly === true,
+    allowDangerousSql: policy?.allowDangerousSql === true,
+    allowedConnectionIds,
+    configured: policy?.configured === true,
+  };
+}
 
 export function normalizeDesktopSettings(settings: Partial<DesktopSettings> | null | undefined): DesktopSettings {
   const iconTheme = settings?.icon_theme === "black" ? "black" : DEFAULT_DESKTOP_SETTINGS.icon_theme;
@@ -878,7 +902,9 @@ export const useSettingsStore = defineStore("settings", () => {
   const isAiConfigLoaded = ref(false);
   const aiConfigs = ref<AiConfigItem[]>([]);
   const desktopSettings = ref<DesktopSettings>({ ...DEFAULT_DESKTOP_SETTINGS });
+  const mcpGlobalPolicy = ref<McpGlobalPolicy>({ ...DEFAULT_MCP_GLOBAL_POLICY });
   const isDesktopSettingsLoaded = ref(false);
+  const isMcpGlobalPolicyLoaded = ref(false);
   const isEditorSettingsLoaded = ref(false);
 
   const editorSettings = ref<EditorSettings>(normalizeEditorSettings({}));
@@ -947,6 +973,32 @@ export const useSettingsStore = defineStore("settings", () => {
     } catch (error) {
       desktopSettings.value = previous;
       setDebugLoggingEnabled(previous.debug_logging_enabled);
+      throw error;
+    }
+  }
+
+  async function initMcpGlobalPolicy(force = false) {
+    if (isMcpGlobalPolicyLoaded.value && !force) return;
+    mcpGlobalPolicy.value = normalizeMcpGlobalPolicy(await api.loadMcpGlobalPolicy());
+    isMcpGlobalPolicyLoaded.value = true;
+  }
+
+  async function updateMcpGlobalPolicy(partial: Partial<Omit<McpGlobalPolicy, "configured">>) {
+    const previous = mcpGlobalPolicy.value;
+    const next = normalizeMcpGlobalPolicy({
+      ...previous,
+      ...partial,
+      configured: true,
+    });
+    mcpGlobalPolicy.value = next;
+    try {
+      await api.saveMcpGlobalPolicy({
+        readOnly: next.readOnly,
+        allowDangerousSql: next.allowDangerousSql,
+        allowedConnectionIds: next.allowedConnectionIds,
+      });
+    } catch (error) {
+      mcpGlobalPolicy.value = previous;
       throw error;
     }
   }
@@ -1219,10 +1271,13 @@ export const useSettingsStore = defineStore("settings", () => {
     isEditorSettingsLoaded,
     editorSettings,
     desktopSettings,
+    mcpGlobalPolicy,
     initEditorSettings,
     updateEditorSettings,
     initDesktopSettings,
     updateDesktopSettings,
+    initMcpGlobalPolicy,
+    updateMcpGlobalPolicy,
     updateColumnFormatter,
     upsertCustomColumnFormatter,
     deleteCustomColumnFormatter,

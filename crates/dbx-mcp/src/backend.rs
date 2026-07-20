@@ -7,7 +7,7 @@ use dbx_core::{
     connection::AppState,
     db::{redis_driver::RedisCommandResult, ColumnInfo, TableInfo},
     models::connection::{ConnectionConfig, DatabaseType},
-    storage::Storage,
+    storage::{McpGlobalPolicy, McpGlobalPolicyState, Storage},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -42,8 +42,34 @@ impl From<&ConnectionConfig> for ConnectionSummary {
     }
 }
 
+fn legacy_mcp_allow_writes() -> Option<bool> {
+    match std::env::var("DBX_MCP_ALLOW_WRITES").ok()?.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" => Some(true),
+        "0" | "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn effective_mcp_policy(state: McpGlobalPolicyState) -> McpGlobalPolicy {
+    effective_mcp_policy_with_legacy_allow_writes(state, legacy_mcp_allow_writes())
+}
+
+fn effective_mcp_policy_with_legacy_allow_writes(
+    state: McpGlobalPolicyState,
+    legacy_allow_writes: Option<bool>,
+) -> McpGlobalPolicy {
+    let configured = state.configured;
+    let mut policy = state.policy();
+    if !configured && legacy_allow_writes == Some(false) {
+        policy.read_only = true;
+    }
+    policy
+}
+
 #[async_trait]
 pub trait DbxBackend: Send + Sync {
+    async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String>;
+
     async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String>;
     async fn execute_agent_tool(
         &self,
@@ -64,7 +90,8 @@ pub trait DbxBackend: Send + Sync {
         let _ = (connection, database, sql, max_rows, timeout_secs);
         Err("SQL queries are not supported by this backend.".to_string())
     }
-    async fn save_connections(&self, connections: &[ConnectionConfig]) -> Result<(), String>;
+    async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String>;
+    async fn remove_connection_for_mcp(&self, connection_id: &str) -> Result<bool, String>;
     async fn list_tables(
         &self,
         connection: &ConnectionConfig,
@@ -202,7 +229,10 @@ impl WebBackend {
         let mut retried = false;
         loop {
             let cookie = self.auth.lock().await.session_cookie.clone();
-            let mut request = self.client.request(method.clone(), format!("{}{}", self.base_url, path));
+            let mut request = self
+                .client
+                .request(method.clone(), format!("{}{}", self.base_url, path))
+                .header("x-dbx-mcp-request", "1");
             if let Some(cookie) = cookie {
                 request = request.header(reqwest::header::COOKIE, format!("dbx_session={cookie}"));
             }
@@ -250,6 +280,10 @@ impl LocalBackend {
 
 #[async_trait]
 impl DbxBackend for LocalBackend {
+    async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
+        self.state.storage.load_mcp_global_policy().await.map(effective_mcp_policy)
+    }
+
     async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
         self.state.storage.load_connections().await
     }
@@ -286,11 +320,18 @@ impl DbxBackend for LocalBackend {
         .await
     }
 
-    async fn save_connections(&self, connections: &[ConnectionConfig]) -> Result<(), String> {
-        self.state.storage.save_connections(connections).await?;
-        *self.state.configs.write().await =
-            connections.iter().cloned().map(|config| (config.id.clone(), config)).collect();
-        Ok(())
+    async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
+        let config = self.state.storage.add_connection_for_mcp(config).await?;
+        self.state.configs.write().await.insert(config.id.clone(), config.clone());
+        Ok(config)
+    }
+
+    async fn remove_connection_for_mcp(&self, connection_id: &str) -> Result<bool, String> {
+        let removed = self.state.storage.remove_connection_for_mcp(connection_id).await?;
+        if removed {
+            self.state.configs.write().await.remove(connection_id);
+        }
+        Ok(removed)
     }
 
     async fn list_tables(
@@ -571,6 +612,15 @@ impl DbxBackend for LocalBackend {
 
 #[async_trait]
 impl DbxBackend for WebBackend {
+    async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
+        self.request(reqwest::Method::GET, "/api/app-settings/mcp-policy", None)
+            .await?
+            .json::<McpGlobalPolicyState>()
+            .await
+            .map(effective_mcp_policy)
+            .map_err(|error| format!("Invalid MCP policy response: {error}"))
+    }
+
     async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
         self.request(reqwest::Method::GET, "/api/connection/list", None)
             .await?
@@ -643,8 +693,24 @@ impl DbxBackend for WebBackend {
         .map_err(|error| format!("Invalid query response: {error}"))
     }
 
-    async fn save_connections(&self, _connections: &[ConnectionConfig]) -> Result<(), String> {
-        Err("Connection changes are unavailable in DBX Web mode.".to_string())
+    async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
+        self.request(reqwest::Method::POST, "/api/connection/mcp/add", Some(json!({ "config": config })))
+            .await?
+            .json()
+            .await
+            .map_err(|error| format!("Invalid MCP connection response: {error}"))
+    }
+
+    async fn remove_connection_for_mcp(&self, connection_id: &str) -> Result<bool, String> {
+        self.request(
+            reqwest::Method::POST,
+            "/api/connection/mcp/remove",
+            Some(json!({ "connectionId": connection_id })),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|error| format!("Invalid MCP connection response: {error}"))
     }
 
     async fn list_tables(
@@ -1323,6 +1389,18 @@ pub fn new_connection_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn policy_state(configured: bool, read_only: bool) -> McpGlobalPolicyState {
+        McpGlobalPolicyState { configured, read_only, allow_dangerous_sql: false, allowed_connection_ids: None }
+    }
+
+    #[test]
+    fn legacy_read_only_only_restricts_an_unconfigured_policy() {
+        assert!(effective_mcp_policy_with_legacy_allow_writes(policy_state(false, false), Some(false)).read_only);
+        assert!(!effective_mcp_policy_with_legacy_allow_writes(policy_state(false, false), Some(true)).read_only);
+        assert!(!effective_mcp_policy_with_legacy_allow_writes(policy_state(true, false), Some(false)).read_only);
+        assert!(effective_mcp_policy_with_legacy_allow_writes(policy_state(true, true), Some(true)).read_only);
+    }
 
     #[test]
     fn parses_database_type_using_dbx_protocol_names() {

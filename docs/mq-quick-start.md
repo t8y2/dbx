@@ -2,7 +2,7 @@
 
 ## 概述
 
-该功能为 DBX 增加了消息队列（Message Queue）管理能力，首批支持 **Apache Pulsar** 的管理操作。架构保留 Kafka、RocketMQ 扩展点，但在适配器完成前 UI 只允许创建 Pulsar 连接。
+该功能为 DBX 增加了消息队列（Message Queue）管理能力，支持 **Apache Pulsar**、**Apache Kafka** 与 **Apache RocketMQ**。三种系统在连接对话框中为独立顶层入口；控制台复用 `MqAdminConsole` 壳层，按 `systemKind` 与 capabilities 展示可用面板。
 
 ## 功能特性
 
@@ -17,9 +17,10 @@
 - ✅ **监控统计**：消息速率、吞吐量、积压大小
 - ✅ **Raw Admin API**：直接发送自定义管理请求（逃生通道）
 
-### 前端 UI（Pulsar 首期核心可用）
-- ✅ 连接配置、控制台入口、租户/命名空间/主题/订阅/监控/生产者消费者/策略/权限/Raw API 面板
-- ⚠️ 后续扩展：完整 i18n、Kafka/RocketMQ 适配器、高级 typed policy（最大生产者/消费者数、TTL、deduplication）
+### 前端 UI
+- ✅ 连接配置、控制台入口、租户/命名空间/主题/订阅/监控/生产者消费者/策略/权限/Raw API 面板（按 MQ 类型与 capabilities 显示）
+- ✅ Kafka / RocketMQ：无 tenant/namespace，使用 `_flat_mq` 合成上下文
+- ⚠️ 后续扩展：高级 typed policy（最大生产者/消费者数、TTL、deduplication）、RocketMQ ACL 2.0
 
 ## 架构设计
 
@@ -375,29 +376,62 @@ cargo check --package dbx-web --features mq-admin
 
 ## 后续扩展
 
-### 添加新的 MQ 系统（如 Kafka）
+### 添加新的 MQ 系统
 
-当前版本仅在架构和类型层预留 Kafka/RocketMQ；前端连接对话框不会提供这些选项。新增适配器并完成验证后，再开放 UI 选择。
+Kafka 与 RocketMQ 已实现 Java Agent + Rust 适配器模式。新增 MQ 系统时：
+
+1. 在 `agents/drivers/<name>/` 实现 JSON-RPC Agent（参考 `kafka` / `rocketmq`）
+2. 在 `crates/dbx-core/src/mq/adapters/` 实现 `MessageQueueAdmin`
+3. 在 `build_adapter()`、`agent_catalog`、`database-drivers.manifest.json` 注册
+4. 在前端连接对话框增加独立顶层入口（不要在内层 `mqSystem` 下拉合并类型）
+
+### RocketMQ 连接示例
+
+```json
+{
+  "db_type": "mq",
+  "driver_profile": "rocketmq",
+  "driver_label": "Apache RocketMQ",
+  "external_config": {
+    "systemKind": "rocketmq",
+    "adminUrl": "",
+    "auth": { "kind": "basic", "username": "accessKey", "password": "secretKey" },
+    "extra": {
+      "namesrvAddr": "127.0.0.1:9876",
+      "clusterName": "DefaultCluster"
+    }
+  }
+}
+```
+
+Agent 构建与安装：
+
+```bash
+cd agents
+./gradlew :rocketmq:shadowJar
+# 将 shadow JAR 安装到 DBX 数据目录 agents/drivers/rocketmq/agent.jar
+```
+
+Docker 快速启动（NameServer 9876 + Broker 10911，仅用于本地验证）：
+
+```bash
+docker run -d --name dbx-rocketmq-namesrv -p 9876:9876 apache/rocketmq:5.3.1 sh mqnamesrv
+docker run -d --name dbx-rocketmq-broker -p 10911:10911 \
+  -e NAMESRV_ADDR=host.docker.internal:9876 \
+  apache/rocketmq:5.3.1 sh mqbroker -n host.docker.internal:9876
+```
+
+### Kafka 适配器参考
 
 1. 实现 `MessageQueueAdmin` trait：
 ```rust
 // crates/dbx-core/src/mq/adapters/kafka.rs
-pub struct KafkaAdapter {
-    config: Arc<ConnectionConfig>,
-    client: KafkaAdminClient,
-}
+pub struct KafkaAdmin { /* ... */ }
 
 #[async_trait]
-impl MessageQueueAdmin for KafkaAdapter {
-    async fn test_connection(&self) -> Result<MqClusterInfo, String> {
-        // Kafka 特定的连接测试
-    }
-    
-    async fn list_topics(&self, ns: &NamespaceRef, opts: ListTopicsOpts) -> Result<Vec<TopicInfo>, String> {
-        // Kafka 使用不同的 topic 模型，适配到统一接口
-    }
-    
-    // ... 实现其他方法
+impl MessageQueueAdmin for KafkaAdmin {
+    async fn test_connection(&self) -> Result<MqClusterInfo, String> { /* ... */ }
+    async fn list_topics(&self, ns: &NamespaceRef, opts: ListTopicsOpts) -> Result<Vec<TopicInfo>, String> { /* ... */ }
 }
 ```
 
@@ -405,10 +439,8 @@ impl MessageQueueAdmin for KafkaAdapter {
 ```rust
 match mq_config.system_kind {
     MqSystemKind::Pulsar => { /* ... */ }
-    MqSystemKind::Kafka => {
-        Ok(Arc::new(KafkaAdapter::new(config.clone()).await?))
-    }
-    // ...
+    MqSystemKind::Kafka => { /* ... */ }
+    MqSystemKind::RocketMq => { /* ... */ }
 }
 ```
 

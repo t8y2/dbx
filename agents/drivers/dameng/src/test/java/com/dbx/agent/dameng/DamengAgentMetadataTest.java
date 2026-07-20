@@ -113,6 +113,20 @@ class DamengAgentMetadataTest {
     }
 
     @Test
+    void listSchemasFallsBackToAllUsersWithoutSysObjectsPrivilege() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, restrictedSchemaConnection(sqls));
+
+        List<String> schemas = agent.listSchemas();
+
+        Assertions.assertEquals(List.of("APP", "REPORTING"), schemas);
+        Assertions.assertEquals(2, sqls.size(), String.join("\n", sqls));
+        Assertions.assertTrue(sqls.get(0).contains("SYS.SYSOBJECTS"), sqls.get(0));
+        Assertions.assertTrue(sqls.get(1).contains("ALL_USERS"), sqls.get(1));
+    }
+
+    @Test
     void mapsMaterializedViewsFromMetadata() {
         DamengAgent agent = new DamengAgent();
         TestSupport.setPrivateConnection(agent, metadataConnection("id comment", null, true));
@@ -685,6 +699,30 @@ class DamengAgentMetadataTest {
                         Arrays.asList("SALES_VIEW", "VIEW", "regular view")
                     ));
                 }
+            }
+            if ("close".equals(name)) {
+                return null;
+            }
+            if ("isClosed".equals(name)) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Connection restrictedSchemaConnection(List<String> sqls) {
+        return proxy(Connection.class, (method, args) -> {
+            String name = method.getName();
+            if ("prepareStatement".equals(name)) {
+                String sql = (String) args[0];
+                sqls.add(sql);
+                if (sql.contains("SYS.SYSOBJECTS")) {
+                    return failingMetadataStatement("no SYS.SYSOBJECTS privilege");
+                }
+                if (sql.contains("ALL_USERS")) {
+                    return metadataStatement(List.of(List.of("APP"), List.of("REPORTING")));
+                }
+                throw new AssertionError("Unexpected SQL: " + sql);
             }
             if ("close".equals(name)) {
                 return null;

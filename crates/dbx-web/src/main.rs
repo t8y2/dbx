@@ -85,12 +85,21 @@ fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
         .route("/mq/topics/update-partitions", post(routes::mq::update_partitions))
         .route("/mq/topics/stats", post(routes::mq::get_topic_stats))
         .route("/mq/topics/internal-stats", post(routes::mq::get_topic_internal_stats))
+        .route("/mq/topics/route", post(routes::mq::get_topic_route))
+        .route("/mq/topics/alter-config", post(routes::mq::alter_topic_config))
+        .route("/mq/topics/skip-accumulation", post(routes::mq::skip_topic_accumulation))
+        .route("/mq/messages/view", post(routes::mq::view_message))
+        .route("/mq/messages/query-by-key", post(routes::mq::query_messages_by_key))
+        .route("/mq/messages/query-by-topic", post(routes::mq::query_messages_by_topic))
+        .route("/mq/messages/trace", post(routes::mq::query_message_trace))
         .route("/mq/subscriptions/list", post(routes::mq::list_subscriptions))
         .route("/mq/subscriptions/create", post(routes::mq::create_subscription))
         .route("/mq/subscriptions/delete", post(routes::mq::delete_subscription))
         .route("/mq/subscriptions/skip-messages", post(routes::mq::skip_messages))
         .route("/mq/subscriptions/reset-cursor", post(routes::mq::reset_cursor))
         .route("/mq/subscriptions/clear-backlog", post(routes::mq::clear_backlog))
+        .route("/mq/consumers/group-config/get", post(routes::mq::get_consumer_group_config))
+        .route("/mq/consumers/group-config/alter", post(routes::mq::alter_consumer_group_config))
         .route("/mq/subscriptions/peek-messages", post(routes::mq::peek_messages))
         .route("/mq/subscriptions/expire-messages", post(routes::mq::expire_messages))
         .route("/mq/producers/list", post(routes::mq::list_producers))
@@ -198,6 +207,8 @@ async fn main() {
         .route("/connection/close-database", post(routes::connection::close_database_connection))
         .route("/connection/save", post(routes::connection::save_connections))
         .route("/connection/list", get(routes::connection::load_connections))
+        .route("/connection/mcp/add", post(routes::connection::mcp_add_connection))
+        .route("/connection/mcp/remove", post(routes::connection::mcp_remove_connection))
         .route("/plugins", get(routes::plugins::list_plugins))
         // JDBC
         .route("/jdbc/drivers", get(routes::jdbc::list_jdbc_drivers).post(routes::jdbc::import_jdbc_drivers))
@@ -549,6 +560,10 @@ async fn main() {
         .route(
             "/app-settings/pinned-tree-node-ids",
             get(routes::app_settings::load_pinned_tree_node_ids).post(routes::app_settings::save_pinned_tree_node_ids),
+        )
+        .route(
+            "/app-settings/mcp-policy",
+            get(routes::app_settings::load_mcp_global_policy).put(routes::app_settings::save_mcp_global_policy),
         )
         .route("/app-settings/config/decrypt", post(routes::app_settings::decrypt_config))
         // Cloud sync

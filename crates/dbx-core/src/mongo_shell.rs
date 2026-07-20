@@ -86,6 +86,17 @@ impl MongoCommand {
             _ => false,
         }
     }
+
+    pub fn has_effectively_unbounded_filter(&self) -> bool {
+        match self {
+            Self::Update { filter, .. }
+            | Self::Delete { filter, .. }
+            | Self::FindOneAndUpdate { filter, .. }
+            | Self::FindOneAndReplace { filter, .. }
+            | Self::FindOneAndDelete { filter, .. } => mongo_filter_is_effectively_unbounded(filter),
+            _ => false,
+        }
+    }
 }
 
 pub fn validate_safety(
@@ -97,7 +108,7 @@ pub fn validate_safety(
     if command.is_mutating() && !allow_writes {
         return Err(MongoSafetyError::WritesDisabled);
     }
-    if command.has_empty_filter() && !allow_dangerous {
+    if command.has_effectively_unbounded_filter() && !allow_dangerous {
         return Err(MongoSafetyError::EmptyFilter);
     }
     if command.is_dangerous() && !allow_dangerous {
@@ -107,6 +118,207 @@ pub fn validate_safety(
         return Err(MongoSafetyError::ProductionWrite);
     }
     Ok(())
+}
+
+pub fn mongo_filter_is_effectively_unbounded(filter_json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(filter_json)
+        .ok()
+        .as_ref()
+        .is_none_or(|value| mongo_filter_contains_opaque_logic(value) || mongo_filter_value_is_unbounded(value))
+}
+
+fn mongo_filter_contains_opaque_logic(value: &serde_json::Value) -> bool {
+    let Some(filter) = value.as_object() else {
+        return true;
+    };
+    filter.iter().any(|(key, value)| match key.as_str() {
+        "$comment" => false,
+        "$where" | "$expr" | "$nor" => true,
+        "$and" | "$or" => {
+            let Some(clauses) = value.as_array() else {
+                return true;
+            };
+            clauses.is_empty()
+                || clauses.iter().any(|clause| !clause.is_object() || mongo_filter_contains_opaque_logic(clause))
+                || (key == "$or"
+                    && clauses
+                        .iter()
+                        .any(|clause| clause.as_object().is_some_and(|document| document.contains_key("$and"))))
+                || (key == "$or" && mongo_or_has_complementary_field_clauses(clauses))
+        }
+        _ => key.starts_with('$') || mongo_field_predicate_contains_opaque_logic(value),
+    })
+}
+
+fn mongo_field_predicate_contains_opaque_logic(value: &serde_json::Value) -> bool {
+    let Some(predicate) = value.as_object() else {
+        return false;
+    };
+    if mongo_extended_json_scalar_literal_is_valid(value) {
+        return false;
+    }
+    let has_operator = predicate.keys().any(|key| key.starts_with('$'));
+    has_operator
+        && predicate.keys().any(|key| {
+            !matches!(key.as_str(), "$eq" | "$ne" | "$gt" | "$gte" | "$lt" | "$lte" | "$in" | "$nin" | "$exists")
+        })
+}
+
+fn mongo_extended_json_scalar_literal_is_valid(value: &serde_json::Value) -> bool {
+    let Some(wrapper) = value.as_object().filter(|wrapper| wrapper.len() == 1) else {
+        return false;
+    };
+    if let Some(value) = wrapper.get("$oid").and_then(serde_json::Value::as_str) {
+        return value.len() == 24 && value.bytes().all(|byte| byte.is_ascii_hexdigit());
+    }
+    if let Some(value) = wrapper.get("$numberLong").and_then(serde_json::Value::as_str) {
+        return value.parse::<i64>().is_ok();
+    }
+    wrapper
+        .get("$date")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MongoFieldOperator {
+    Eq,
+    Ne,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+    In,
+    Nin,
+    Exists,
+}
+
+struct MongoPureFieldPredicate<'a> {
+    field: &'a str,
+    operator: MongoFieldOperator,
+    operand: &'a serde_json::Value,
+}
+
+fn mongo_or_has_complementary_field_clauses(clauses: &[serde_json::Value]) -> bool {
+    clauses.iter().enumerate().any(|(index, clause)| {
+        let Some(predicate) = mongo_pure_field_predicate(clause) else {
+            return false;
+        };
+        clauses[index + 1..]
+            .iter()
+            .filter_map(mongo_pure_field_predicate)
+            .any(|other| mongo_field_predicates_are_complementary(&predicate, &other))
+    })
+}
+
+fn mongo_pure_field_predicate(value: &serde_json::Value) -> Option<MongoPureFieldPredicate<'_>> {
+    let filter = value.as_object()?;
+    let mut entries = filter.iter().filter(|(key, _)| key.as_str() != "$comment");
+    let (field, predicate) = entries.next()?;
+    if entries.next().is_some() {
+        return None;
+    }
+    if field == "$and" {
+        let clauses = predicate.as_array()?;
+        let mut bounded = clauses.iter().filter(|clause| !mongo_filter_value_is_unbounded(clause));
+        let clause = bounded.next()?;
+        if bounded.next().is_some() {
+            return None;
+        }
+        return mongo_pure_field_predicate(clause);
+    }
+    if field == "$or" {
+        let clauses = predicate.as_array()?;
+        return (clauses.len() == 1).then(|| mongo_pure_field_predicate(&clauses[0])).flatten();
+    }
+    if field.starts_with('$') {
+        return None;
+    }
+    let Some(operator_document) = predicate.as_object() else {
+        return Some(MongoPureFieldPredicate { field, operator: MongoFieldOperator::Eq, operand: predicate });
+    };
+    if mongo_extended_json_scalar_literal_is_valid(predicate)
+        || !operator_document.keys().any(|key| key.starts_with('$'))
+    {
+        return Some(MongoPureFieldPredicate { field, operator: MongoFieldOperator::Eq, operand: predicate });
+    }
+    let mut operators = operator_document.iter();
+    let (operator, operand) = operators.next()?;
+    if operators.next().is_some() {
+        return None;
+    }
+    let operator = match operator.as_str() {
+        "$eq" => MongoFieldOperator::Eq,
+        "$ne" => MongoFieldOperator::Ne,
+        "$gt" => MongoFieldOperator::Gt,
+        "$gte" => MongoFieldOperator::Gte,
+        "$lt" => MongoFieldOperator::Lt,
+        "$lte" => MongoFieldOperator::Lte,
+        "$in" => MongoFieldOperator::In,
+        "$nin" => MongoFieldOperator::Nin,
+        "$exists" => MongoFieldOperator::Exists,
+        _ => return None,
+    };
+    Some(MongoPureFieldPredicate { field, operator, operand })
+}
+
+fn mongo_field_predicates_are_complementary(
+    left: &MongoPureFieldPredicate<'_>,
+    right: &MongoPureFieldPredicate<'_>,
+) -> bool {
+    if left.field != right.field {
+        return false;
+    }
+    use MongoFieldOperator::{Eq, Exists, Gt, Gte, In, Lt, Lte, Ne, Nin};
+    match (left.operator, right.operator) {
+        (Exists, Exists) => {
+            left.operand.as_bool().zip(right.operand.as_bool()).is_some_and(|(left, right)| left != right)
+        }
+        (In, Nin) | (Nin, In) => mongo_json_sets_equal(left.operand, right.operand),
+        (Eq, Ne) | (Ne, Eq) | (Gt, Lte) | (Lte, Gt) | (Gte, Lt) | (Lt, Gte) => left.operand == right.operand,
+        _ => false,
+    }
+}
+
+fn mongo_json_sets_equal(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    let (Some(left), Some(right)) = (left.as_array(), right.as_array()) else {
+        return false;
+    };
+    left.iter().all(|value| right.contains(value)) && right.iter().all(|value| left.contains(value))
+}
+
+fn mongo_filter_value_is_unbounded(value: &serde_json::Value) -> bool {
+    let Some(filter) = value.as_object() else {
+        return true;
+    };
+    if filter.is_empty() || filter.contains_key("$where") || filter.contains_key("$expr") {
+        return true;
+    }
+    filter.iter().all(|(key, value)| match key.as_str() {
+        "$comment" => true,
+        "$and" => value
+            .as_array()
+            .is_none_or(|clauses| clauses.is_empty() || clauses.iter().all(mongo_filter_value_is_unbounded)),
+        "$or" => value
+            .as_array()
+            .is_none_or(|clauses| clauses.is_empty() || clauses.iter().any(mongo_filter_value_is_unbounded)),
+        "$nor" => true,
+        _ if mongo_field_predicate_is_empty_nin(value) => true,
+        "_id" if mongo_field_predicate_is_exists_true(value) => true,
+        _ => key.starts_with('$'),
+    })
+}
+
+fn mongo_field_predicate_is_empty_nin(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(|predicate| {
+        predicate.len() == 1 && predicate.get("$nin").and_then(serde_json::Value::as_array).is_some_and(Vec::is_empty)
+    })
+}
+
+fn mongo_field_predicate_is_exists_true(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(|predicate| {
+        predicate.len() == 1 && predicate.get("$exists").and_then(serde_json::Value::as_bool) == Some(true)
+    })
 }
 
 pub fn parse(input: &str) -> Result<MongoCommand, String> {
@@ -596,6 +808,33 @@ mod tests {
         assert!(aggregate.is_dangerous());
         let update = parse("db.projects.updateMany({}, {$set: {active: false}})").unwrap();
         assert!(update.has_empty_filter());
+    }
+
+    #[test]
+    fn treats_effectively_unbounded_write_filters_as_dangerous() {
+        for command in [
+            r#"db.items.deleteMany({_id: {$exists: true}})"#,
+            r#"db.items.deleteMany({id: {$nin: []}})"#,
+            r#"db.items.deleteMany({$expr: true})"#,
+            r#"db.items.deleteMany({$or: [{id: 1}, {id: {$ne: 1}}]})"#,
+        ] {
+            let command = parse(command).unwrap();
+            assert!(command.has_effectively_unbounded_filter(), "{command:?}");
+            assert_eq!(
+                validate_safety(&command, true, false, false),
+                Err(MongoSafetyError::EmptyFilter),
+                "{command:?}"
+            );
+        }
+
+        for command in [
+            r#"db.items.deleteMany({_id: ObjectId('507f1f77bcf86cd799439011')})"#,
+            r#"db.items.updateMany({tenant_id: 7}, {$set: {active: false}})"#,
+        ] {
+            let command = parse(command).unwrap();
+            assert!(!command.has_effectively_unbounded_filter(), "{command:?}");
+            assert_eq!(validate_safety(&command, true, false, false), Ok(()), "{command:?}");
+        }
     }
 
     #[test]

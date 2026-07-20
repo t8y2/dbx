@@ -192,6 +192,16 @@ func TestBuildDSNConvertsDBXJDBCURL(t *testing.T) {
 	}
 }
 
+func TestKingbaseListIndexesQuerySupportsSQLServerMode(t *testing.T) {
+	query := kingbaseListIndexesQuery("sys_catalog", "sys", "public", "orders")
+	if !strings.Contains(query, "unnest(ix.indkey) WITH ORDINALITY") {
+		t.Fatalf("index query should preserve index column order without array subscripts: %s", query)
+	}
+	if strings.Contains(query, "[pos.n]") {
+		t.Fatalf("index query should not use dynamic array subscripts in SQL Server mode: %s", query)
+	}
+}
+
 func TestMetadataNormalizationHelpers(t *testing.T) {
 	if normalizeTableType("BASE TABLE") != "TABLE" {
 		t.Fatal("BASE TABLE was not normalized")

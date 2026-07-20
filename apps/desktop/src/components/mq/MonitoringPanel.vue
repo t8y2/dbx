@@ -8,7 +8,7 @@ import { LineChart } from "echarts/charts";
 import { GridComponent, LegendComponent, TooltipComponent } from "echarts/components";
 import VChart from "vue-echarts";
 import { Activity, AlertTriangle, BarChart3, Boxes, CheckCircle2, Database, Download, Gauge, Hash, HardDrive, Layers3, Loader2, Package, RadioTower, RefreshCw, Send, ShieldCheck, Table2, Upload, Users } from "@lucide/vue";
-import type { TopicRef, TopicInfo, TopicStats, BacklogStats, PeekedMessage } from "@/types/mq";
+import type { MqSystemKind, TopicRef, TopicInfo, TopicStats, BacklogStats, PeekedMessage } from "@/types/mq";
 import { mqGetTopicStats, mqGetBacklog, mqPeekMessages } from "@/lib/backend/api";
 
 use([CanvasRenderer, LineChart, GridComponent, LegendComponent, TooltipComponent]);
@@ -18,6 +18,7 @@ interface Props {
   topic?: TopicInfo;
   tenant?: string;
   namespace?: string;
+  mqSystemKind?: MqSystemKind;
 }
 
 interface MetricPoint {
@@ -42,6 +43,14 @@ interface PartitionStatsRow {
   producerCount: number;
   subscriptionCount: number;
   raw: Record<string, unknown>;
+}
+
+interface RocketMqPartitionStatsRow {
+  partition: number;
+  brokerName: string;
+  beginOffset: number;
+  endOffset: number;
+  messageCount: number;
 }
 
 interface KafkaPartitionStatsRow {
@@ -75,7 +84,19 @@ const MAX_HISTORY_POINTS = 60;
 
 const partitionRows = computed(() => extractPartitionRows(stats.value?.raw));
 const kafkaPartitionRows = computed(() => extractKafkaPartitionRows(stats.value?.raw));
-const isKafkaStats = computed(() => isKafkaStatsPayload(stats.value?.raw));
+const rocketMqPartitionRows = computed(() => extractRocketMqPartitionRows(stats.value?.raw));
+const isRocketMqStats = computed(() => props.mqSystemKind === "rocketmq" && rocketMqPartitionRows.value.length > 0);
+const isKafkaStats = computed(() => props.mqSystemKind === "kafka" && kafkaPartitionRows.value.length > 0);
+const rocketMqOverview = computed(() => {
+  const raw = objectRecord(stats.value?.raw);
+  const rows = rocketMqPartitionRows.value;
+  const totalMessages = numberField(raw.totalMessages) ?? rows.reduce((sum, row) => sum + row.messageCount, 0);
+  return {
+    queueCount: numberField(raw.partitions) ?? rows.length,
+    totalMessages,
+    brokerCount: new Set(rows.map((row) => row.brokerName).filter(Boolean)).size,
+  };
+});
 const kafkaOverview = computed(() => {
   const raw = objectRecord(stats.value?.raw);
   const rows = kafkaPartitionRows.value;
@@ -178,7 +199,7 @@ async function loadStats(options: { skipWhenHidden?: boolean } = {}) {
   try {
     const statsData = await mqGetTopicStats(props.connectionId, topicRef);
 
-    if (isKafkaStatsPayload(statsData.raw)) {
+    if (props.mqSystemKind === "rocketmq" || (props.mqSystemKind === "kafka" && isKafkaStatsPayload(statsData.raw))) {
       stats.value = statsData;
       backlog.value = undefined;
       appendHistoryPoint(statsData);
@@ -217,6 +238,11 @@ function parseKafkaMessageSql(sql: string): { topic: string; partition?: number;
   return { topic, partition, offset, limit };
 }
 
+function flatMqMonitorGroupName(): string {
+  if (props.mqSystemKind === "rocketmq") return "__dbx_rocketmq_monitor__";
+  return "__dbx_kafka_monitor__";
+}
+
 async function runKafkaMessageSql() {
   if (!props.tenant || !props.namespace) return;
   kafkaMessageLoading.value = true;
@@ -236,7 +262,7 @@ async function runKafkaMessageSql() {
         persistent: selected?.persistent ?? true,
         partitioned: selected?.partitioned,
       },
-      "__dbx_kafka_monitor__",
+      flatMqMonitorGroupName(),
       parsed.limit,
       options,
     );
@@ -309,6 +335,18 @@ function extractPartitionRows(raw: unknown): PartitionStatsRow[] {
   });
 }
 
+function extractRocketMqPartitionRows(raw: unknown): RocketMqPartitionStatsRow[] {
+  return arrayObjects(objectRecord(raw).partitionStats)
+    .map((body) => ({
+      partition: numberField(body.partition) ?? 0,
+      brokerName: stringField(body.brokerName),
+      beginOffset: numberField(body.beginOffset) ?? 0,
+      endOffset: numberField(body.endOffset) ?? 0,
+      messageCount: numberField(body.messageCount) ?? 0,
+    }))
+    .sort((a, b) => a.partition - b.partition || a.brokerName.localeCompare(b.brokerName));
+}
+
 function extractKafkaPartitionRows(raw: unknown): KafkaPartitionStatsRow[] {
   return arrayObjects(objectRecord(raw).partitionStats)
     .map((body) => ({
@@ -324,6 +362,7 @@ function extractKafkaPartitionRows(raw: unknown): KafkaPartitionStatsRow[] {
 }
 
 function isKafkaStatsPayload(raw: unknown): boolean {
+  if (props.mqSystemKind === "rocketmq") return false;
   const root = objectRecord(raw);
   return Array.isArray(root.partitionStats) || (numberField(root.partitions) !== undefined && numberField(root.replicationFactor) !== undefined && numberField(root.totalMessages) !== undefined);
 }
@@ -491,6 +530,62 @@ onUnmounted(() => {
       <span>{{ t("mqMonitoring.loadingStats") }}</span>
       <div class="loading-skeleton-grid" aria-hidden="true">
         <div v-for="item in 4" :key="item" class="loading-skeleton-card"></div>
+      </div>
+    </div>
+
+    <div v-else-if="stats && isRocketMqStats" class="stats-container">
+      <div class="stats-section">
+        <h4>{{ t("mqMonitoring.rocketmqTopicOverview") }}</h4>
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-icon"><Layers3 :size="21" /></div>
+            <div class="stat-content">
+              <div class="stat-label">{{ t("mqMonitoring.queueCount") }}</div>
+              <div class="stat-value">{{ rocketMqOverview.queueCount }}</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon"><Hash :size="21" /></div>
+            <div class="stat-content">
+              <div class="stat-label">{{ t("mqMonitoring.messageCount") }}</div>
+              <div class="stat-value">{{ formatNumber(rocketMqOverview.totalMessages) }}</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon"><HardDrive :size="21" /></div>
+            <div class="stat-content">
+              <div class="stat-label">{{ t("mqMonitoring.brokerCount") }}</div>
+              <div class="stat-value">{{ rocketMqOverview.brokerCount }}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="stats-section">
+        <h4>{{ t("mqMonitoring.rocketmqQueueDetails") }}</h4>
+        <div v-if="rocketMqPartitionRows.length" class="partition-table-wrap">
+          <table class="partition-table">
+            <thead>
+              <tr>
+                <th>{{ t("mqMonitoring.tableQueue") }}</th>
+                <th>{{ t("mqMonitoring.tableBroker") }}</th>
+                <th>{{ t("mqMonitoring.tableBeginOffset") }}</th>
+                <th>{{ t("mqMonitoring.tableLogEndOffset") }}</th>
+                <th>{{ t("mqMonitoring.tableMessageCount") }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in rocketMqPartitionRows" :key="`${row.brokerName}-${row.partition}`">
+                <td>{{ row.partition }}</td>
+                <td>{{ row.brokerName || "-" }}</td>
+                <td>{{ formatNumber(row.beginOffset) }}</td>
+                <td>{{ formatNumber(row.endOffset) }}</td>
+                <td>{{ formatNumber(row.messageCount) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-else class="empty-state compact">{{ t("mqMonitoring.noRocketMqQueueMetrics") }}</div>
       </div>
     </div>
 

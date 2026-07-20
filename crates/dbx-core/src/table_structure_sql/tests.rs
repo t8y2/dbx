@@ -1204,6 +1204,31 @@ fn builds_postgres_create_table_with_comments_and_index() {
 }
 
 #[test]
+fn create_table_trims_table_name_whitespace_for_all_statements() {
+    let mut id = column("id");
+    id.data_type = "integer".to_string();
+    let idx = index("idx_users_id", &["id"]);
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "  users  ".to_string(),
+        columns: vec![id],
+        indexes: vec![idx],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["CREATE TABLE `users` (\n  `id` integer\n);", "CREATE INDEX `idx_users_id` ON `users` (`id`);",]
+    );
+}
+
+#[test]
 fn warns_for_sqlite_unsafe_column_changes() {
     let mut col = column("name");
     col.data_type = "text".to_string();

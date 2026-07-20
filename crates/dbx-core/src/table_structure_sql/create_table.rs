@@ -10,9 +10,10 @@ use super::types::{TableStructureSqlOptions, TableStructureSqlResult};
 use super::util::{clean, format_default_for_sql, normalize_default, qualified_table, quote_ident, quote_string};
 use super::validation::{validate_columns, validate_dameng_identity};
 
-pub fn build_create_table_sql(options: TableStructureSqlOptions) -> TableStructureSqlResult {
+pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStructureSqlResult {
+    options.table_name = clean(&options.table_name);
     let mut warnings = Vec::new();
-    if clean(&options.table_name).is_empty() {
+    if options.table_name.is_empty() {
         warnings.push("Table name is required.".to_string());
     }
     let active_columns: Vec<_> = options.columns.iter().filter(|column| !column.marked_for_drop).collect();

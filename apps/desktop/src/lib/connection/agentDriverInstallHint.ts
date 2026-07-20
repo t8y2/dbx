@@ -12,7 +12,11 @@ export function agentDriverInstallKey(dbType: DatabaseType | undefined, driverPr
   if (dbType === "mongodb") return "mongodb";
   if (dbType === "dameng") return "dameng";
   if (dbType === "gbase") return driverProfile === "gbase8s" ? "gbase8s" : "gbase8a";
-  if (dbType === "mq") return driverProfile === "kafka" ? "kafka" : undefined;
+  if (dbType === "mq") {
+    if (driverProfile === "kafka") return "kafka";
+    if (driverProfile === "rocketmq") return "rocketmq";
+    return undefined;
+  }
   return driverProfile && driverProfile !== dbType ? driverProfile : dbType;
 }
 

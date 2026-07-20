@@ -1046,6 +1046,8 @@ pub fn run() {
             commands::app_settings::get_driver_store_path,
             commands::app_settings::load_pinned_tree_node_ids,
             commands::app_settings::save_pinned_tree_node_ids,
+            commands::app_settings::load_mcp_global_policy,
+            commands::app_settings::save_mcp_global_policy,
             commands::app_settings::load_editor_settings,
             commands::app_settings::save_editor_settings,
             commands::app_settings::load_open_tabs_state,
@@ -1366,6 +1368,10 @@ pub fn run() {
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_clear_backlog,
             #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_get_consumer_group_config,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_alter_consumer_group_config,
+            #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_peek_messages,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_expire_messages,
@@ -1401,6 +1407,20 @@ pub fn run() {
             commands::mq_cmd::mq_get_backlog,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_get_cluster_info,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_get_topic_route,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_alter_topic_config,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_skip_topic_accumulation,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_view_message,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_query_messages_by_key,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_query_messages_by_topic,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_query_message_trace,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_raw_request,
             #[cfg(feature = "mq-admin")]

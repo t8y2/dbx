@@ -116,10 +116,11 @@ function sidebarObjectGroupPageSize(): number {
   return typeof size === "number" && size > 0 ? size : 500;
 }
 
-function isKafkaMqConnection(config: ConnectionConfig | undefined): boolean {
+function isFlatMqConnection(config: ConnectionConfig | undefined): boolean {
   if (!config || config.db_type !== "mq") return false;
-  if (config.driver_profile === "kafka") return true;
-  return (config.external_config as Partial<MqAdminConfig> | undefined)?.systemKind === "kafka";
+  if (config.driver_profile === "kafka" || config.driver_profile === "rocketmq") return true;
+  const kind = (config.external_config as Partial<MqAdminConfig> | undefined)?.systemKind;
+  return kind === "kafka" || kind === "rocketmq";
 }
 
 type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip";
@@ -2538,16 +2539,16 @@ export const useConnectionStore = defineStore("connection", () => {
       if (useCachedChildren(node, options)) return;
 
       const config = getConfig(connectionId);
-      if (isKafkaMqConnection(config)) {
-        // Kafka has no tenant/namespace concept. Create a synthetic child
+      if (isFlatMqConnection(config)) {
+        // Kafka/RocketMQ have no tenant/namespace concept. Create a synthetic child
         // that opens the MQ admin console directly when clicked.
         setChildren(node, [
           {
-            id: schemaCacheKey(connectionId, "mq-tenant", "_kafka"),
+            id: schemaCacheKey(connectionId, "mq-tenant", "_flat_mq"),
             label: "Topics",
             type: "mq-tenant" as const,
             connectionId,
-            mqTenant: "_kafka",
+            mqTenant: "_flat_mq",
             mqInitialTab: "topics",
           },
         ]);

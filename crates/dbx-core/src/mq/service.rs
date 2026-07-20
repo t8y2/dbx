@@ -21,8 +21,8 @@ const MAX_PEEK_MESSAGES: u32 = 100;
 pub async fn mq_test_connection_core(state: &AppState, conn_id: &str) -> Result<MqClusterInfo, String> {
     let cfg = state.configs.read().await.get(conn_id).cloned().ok_or("Connection not found")?;
     let mqc = state.mq_admin_config_for_connection(conn_id, &cfg).await?;
-    let kafka_launch = resolve_kafka_launch_spec(&mqc, state);
-    let adapter = match state.mq_registry.get_or_build_config(conn_id, mqc, kafka_launch).await {
+    let agent_launch = resolve_mq_agent_launch_spec(&mqc, state);
+    let adapter = match state.mq_registry.get_or_build_config(conn_id, mqc, agent_launch).await {
         Ok(adapter) => adapter,
         Err(err) => {
             state.mq_registry.drop_connection(conn_id).await;
@@ -242,6 +242,26 @@ pub async fn mq_clear_backlog_core(
     ensure_connection_writable(state, conn_id, "Clear backlog").await?;
     let adapter = get_adapter(state, conn_id).await?;
     adapter.clear_backlog(&topic, &sub).await
+}
+
+pub async fn mq_get_consumer_group_config_core(
+    state: &AppState,
+    conn_id: &str,
+    group_id: String,
+) -> Result<serde_json::Value, String> {
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.get_consumer_group_config(&group_id).await
+}
+
+pub async fn mq_alter_consumer_group_config_core(
+    state: &AppState,
+    conn_id: &str,
+    group_id: String,
+    config: serde_json::Value,
+) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Alter consumer group config").await?;
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.alter_consumer_group_config(&group_id, config).await
 }
 
 pub async fn mq_peek_messages_core(
@@ -467,6 +487,81 @@ pub async fn mq_get_cluster_info_core(state: &AppState, conn_id: &str) -> Result
     adapter.get_cluster_info().await
 }
 
+pub async fn mq_get_topic_route_core(
+    state: &AppState,
+    conn_id: &str,
+    topic: TopicRef,
+) -> Result<serde_json::Value, String> {
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.get_topic_route(&topic).await
+}
+
+pub async fn mq_alter_topic_config_core(
+    state: &AppState,
+    conn_id: &str,
+    topic: TopicRef,
+    configs: serde_json::Value,
+) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Alter topic config").await?;
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.alter_topic_config(&topic, configs).await
+}
+
+pub async fn mq_skip_topic_accumulation_core(
+    state: &AppState,
+    conn_id: &str,
+    topic: TopicRef,
+) -> Result<serde_json::Value, String> {
+    ensure_connection_writable(state, conn_id, "Skip topic accumulation").await?;
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.skip_topic_accumulation(&topic).await
+}
+
+pub async fn mq_view_message_core(
+    state: &AppState,
+    conn_id: &str,
+    topic: TopicRef,
+    msg_id: String,
+) -> Result<serde_json::Value, String> {
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.view_message(&topic, &msg_id).await
+}
+
+pub async fn mq_query_messages_by_key_core(
+    state: &AppState,
+    conn_id: &str,
+    topic: TopicRef,
+    key: String,
+    begin: i64,
+    end: i64,
+    max_num: u32,
+) -> Result<serde_json::Value, String> {
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.query_messages_by_key(&topic, &key, begin, end, max_num).await
+}
+
+pub async fn mq_query_messages_by_topic_core(
+    state: &AppState,
+    conn_id: &str,
+    topic: TopicRef,
+    begin: i64,
+    end: i64,
+    max_num: u32,
+) -> Result<serde_json::Value, String> {
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.query_messages_by_topic(&topic, begin, end, max_num).await
+}
+
+pub async fn mq_query_message_trace_core(
+    state: &AppState,
+    conn_id: &str,
+    msg_id: String,
+    trace_topic: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.query_message_trace(&msg_id, trace_topic.as_deref()).await
+}
+
 // ---- Raw request (escape hatch) ----
 
 pub async fn mq_raw_request_core(state: &AppState, conn_id: &str, req: MqRawRequest) -> Result<MqRawResponse, String> {
@@ -500,29 +595,36 @@ async fn get_adapter(
 ) -> Result<std::sync::Arc<dyn crate::mq::port::MessageQueueAdmin>, String> {
     let cfg = state.configs.read().await.get(conn_id).cloned().ok_or("Connection not found")?;
     let mqc = state.mq_admin_config_for_connection(conn_id, &cfg).await?;
-    let kafka_launch = resolve_kafka_launch_spec(&mqc, state);
-    state.mq_registry.get_or_build_config(conn_id, mqc, kafka_launch).await
+    let agent_launch = resolve_mq_agent_launch_spec(&mqc, state);
+    state.mq_registry.get_or_build_config(conn_id, mqc, agent_launch).await
 }
 
-/// Resolve the Kafka agent launch spec if the config targets Kafka.
-/// Returns `None` for non-Kafka systems so the registry skips agent resolution.
-pub fn resolve_kafka_launch_spec(mqc: &MqAdminConfig, state: &AppState) -> Option<AgentLaunchSpec> {
-    if mqc.system_kind != MqSystemKind::Kafka {
-        return None;
-    }
+/// Resolve the MQ agent launch spec for agent-backed systems (Kafka, RocketMQ).
+/// Returns `None` for native REST systems so the registry skips agent resolution.
+pub fn resolve_mq_agent_launch_spec(mqc: &MqAdminConfig, state: &AppState) -> Option<AgentLaunchSpec> {
+    let agent_key = match mqc.system_kind {
+        MqSystemKind::Kafka => "kafka",
+        MqSystemKind::RocketMq => "rocketmq",
+        _ => return None,
+    };
     let agent_state = state.agent_manager.load_state();
     let jre_key = agent_state
         .installed_drivers
-        .get("kafka")
+        .get(agent_key)
         .map(|driver| driver.jre.as_str())
         .unwrap_or(crate::agent_manager::DEFAULT_JRE_KEY);
-    match state.agent_manager.resolve_agent_launch_spec(&agent_state, "kafka", jre_key) {
+    match state.agent_manager.resolve_agent_launch_spec(&agent_state, agent_key, jre_key) {
         Ok(launch) => Some(launch),
         Err(err) => {
-            log::warn!("Failed to resolve Kafka agent launch spec: {err}");
+            log::warn!("Failed to resolve {agent_key} agent launch spec: {err}");
             None
         }
     }
+}
+
+#[deprecated(note = "use resolve_mq_agent_launch_spec")]
+pub fn resolve_kafka_launch_spec(mqc: &MqAdminConfig, state: &AppState) -> Option<AgentLaunchSpec> {
+    resolve_mq_agent_launch_spec(mqc, state)
 }
 
 async fn ensure_connection_writable(state: &AppState, conn_id: &str, operation: &str) -> Result<(), String> {
@@ -640,6 +742,8 @@ mod tests {
                 topic: "orders".to_string(),
                 persistent: true,
                 partitioned: None,
+                message_type: None,
+                ..TopicRef::default()
             },
             None,
         )
@@ -682,6 +786,8 @@ mod tests {
                 topic: "orders".to_string(),
                 persistent: true,
                 partitioned: None,
+                message_type: None,
+                ..TopicRef::default()
             },
             "sub-a".to_string(),
             101,

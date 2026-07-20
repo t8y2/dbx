@@ -123,18 +123,6 @@ function isFlatMqConnection(config: ConnectionConfig | undefined): boolean {
   return kind === "kafka" || kind === "rocketmq";
 }
 
-function isKafkaMqConnection(config: ConnectionConfig | undefined): boolean {
-  if (!config || config.db_type !== "mq") return false;
-  if (config.driver_profile === "kafka") return true;
-  return (config.external_config as Partial<MqAdminConfig> | undefined)?.systemKind === "kafka";
-}
-
-function isRocketMqConnection(config: ConnectionConfig | undefined): boolean {
-  if (!config || config.db_type !== "mq") return false;
-  if (config.driver_profile === "rocketmq") return true;
-  return (config.external_config as Partial<MqAdminConfig> | undefined)?.systemKind === "rocketmq";
-}
-
 type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip";
 
 interface LocateTableTarget {

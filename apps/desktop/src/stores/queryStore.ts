@@ -1054,6 +1054,27 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
+  function showExecutedQueryResults(connectionId: string, database: string, sql: string, queryResults: QueryResult[]) {
+    const id = createTab(connectionId, database, undefined, "query", undefined, sql);
+    const tab = tabs.value.find((item) => item.id === id);
+    if (!tab) return id;
+
+    const results = markQueryResultsRowsRaw(queryResults);
+    const firstDataResult = results.findIndex((result) => result.columns.length > 0);
+    const activeIndex = firstDataResult >= 0 ? firstDataResult : 0;
+    tab.lastExecutedSql = sql;
+    tab.resultBaseSql = sql;
+    tab.results = results.length > 1 ? results : undefined;
+    tab.activeResultIndex = results.length > 1 ? activeIndex : undefined;
+    tab.result = results[activeIndex];
+    tab.isExecuting = false;
+    tab.isCancelling = false;
+    tab.executionId = undefined;
+    tab.queryExecutionStartedAt = undefined;
+    if (tab.result) touchResult(tab);
+    return id;
+  }
+
   function refreshExternalSqlFileTitles() {
     const externalTabs = tabs.value.filter((tab) => tab.mode === "query" && tab.externalSqlPath);
     const titles = externalSqlFileDisplayTitles(externalTabs.map((tab) => tab.externalSqlPath!));
@@ -4338,6 +4359,7 @@ export const useQueryStore = defineStore("query", () => {
     hasDirtyTabs,
     isConfirmingAppClose,
     createTab,
+    showExecutedQueryResults,
     switchTab,
     closeTab,
     forceClosePendingTab,

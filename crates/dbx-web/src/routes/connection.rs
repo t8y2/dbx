@@ -51,6 +51,18 @@ pub struct SaveConnectionsRequest {
     pub configs: Vec<ConnectionConfig>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpAddConnectionRequest {
+    pub config: ConnectionConfig,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpRemoveConnectionRequest {
+    pub connection_id: String,
+}
+
 fn is_connection_info_capability_unsupported(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     error.contains("connectioninfo")
@@ -259,6 +271,31 @@ pub async fn save_connections(
     Ok(Json(()))
 }
 
+pub async fn mcp_add_connection(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<McpAddConnectionRequest>,
+) -> Result<Json<ConnectionConfig>, AppError> {
+    let saved = state.app.storage.add_connection_for_mcp(body.config).await.map_err(AppError)?;
+    state.app.configs.write().await.insert(saved.id.clone(), saved.clone());
+    Ok(Json(saved))
+}
+
+pub async fn mcp_remove_connection(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<McpRemoveConnectionRequest>,
+) -> Result<Json<bool>, AppError> {
+    let connection_id = body.connection_id;
+    let removed = state.app.storage.remove_connection_for_mcp(&connection_id).await.map_err(AppError)?;
+    if removed {
+        state.app.configs.write().await.remove(&connection_id);
+        state.app.remove_connection_pools_detached(&connection_id).await;
+        state.app.nacos_registry.drop_connection(&connection_id).await;
+        #[cfg(feature = "mq-admin")]
+        state.app.mq_registry.drop_connection(&connection_id).await;
+    }
+    Ok(Json(removed))
+}
+
 pub async fn load_connections(State(state): State<Arc<WebState>>) -> Result<Json<Vec<ConnectionConfig>>, AppError> {
     let configs = state.app.storage.load_connections().await.map_err(AppError)?;
     let sync = sync_connection_configs(&state, &configs).await;
@@ -349,9 +386,10 @@ async fn remove_connection_pools_for_connection_ids(state: &WebState, connection
 #[cfg(test)]
 mod tests {
     use super::{
-        connect_db, connection_final_proxy_port, disconnect_db, load_connections, save_connection_database_info,
-        save_connections, test_connection, test_connection_with_info, ConnectRequest, DisconnectRequest,
-        SaveConnectionDatabaseInfoRequest, SaveConnectionsRequest,
+        connect_db, connection_final_proxy_port, disconnect_db, load_connections, mcp_add_connection,
+        mcp_remove_connection, save_connection_database_info, save_connections, test_connection,
+        test_connection_with_info, ConnectRequest, DisconnectRequest, McpAddConnectionRequest,
+        McpRemoveConnectionRequest, SaveConnectionDatabaseInfoRequest, SaveConnectionsRequest,
     };
     use crate::state::{LoginRateLimit, WebState};
     use axum::extract::State;
@@ -361,7 +399,7 @@ mod tests {
         AttachedDatabaseConfig, ConnectionConfig, DatabaseConnectionInfo, DatabaseType, ProxyTunnelConfig, ProxyType,
         TransportLayerConfig,
     };
-    use dbx_core::storage::Storage;
+    use dbx_core::storage::{McpGlobalPolicy, Storage};
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     #[cfg(feature = "mq-admin")]
@@ -580,6 +618,97 @@ mod tests {
 
         let configs = state.app.configs.read().await;
         assert_eq!(configs.get("sqlite-conn").map(|c| c.host.as_str()), Some(config.host.as_str()));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn mcp_connection_routes_preserve_unrelated_concurrent_changes() {
+        let (state, dir) = test_web_state().await;
+        let mut existing = sqlite_config("existing", &dir.join("before.db").to_string_lossy());
+        state.app.storage.save_connections(std::slice::from_ref(&existing)).await.unwrap();
+        state
+            .app
+            .storage
+            .save_mcp_global_policy(&McpGlobalPolicy {
+                read_only: false,
+                allow_dangerous_sql: false,
+                allowed_connection_ids: Some(vec![existing.id.clone()]),
+            })
+            .await
+            .unwrap();
+
+        // Simulate a Web UI edit after the MCP client last observed the list.
+        existing.host = dir.join("after.db").to_string_lossy().into_owned();
+        state.app.storage.save_connections(std::slice::from_ref(&existing)).await.unwrap();
+        let added = sqlite_config("added", &dir.join("added.db").to_string_lossy());
+        let result =
+            mcp_add_connection(State(state.clone()), Json(McpAddConnectionRequest { config: added.clone() })).await;
+        assert!(result.is_ok());
+
+        let persisted = state.app.storage.load_connections().await.unwrap();
+        assert_eq!(persisted.len(), 2);
+        assert_eq!(
+            persisted.iter().find(|config| config.id == existing.id).map(|config| config.host.as_str()),
+            Some(existing.host.as_str())
+        );
+        assert!(persisted.iter().any(|config| config.id == added.id));
+        assert!(state.app.configs.read().await.contains_key(&added.id));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn mcp_connection_routes_recheck_read_only_and_allowlist_in_the_mutation_transaction() {
+        let (state, dir) = test_web_state().await;
+        let kept = sqlite_config("kept", &dir.join("kept.db").to_string_lossy());
+        let removed = sqlite_config("removed", &dir.join("removed.db").to_string_lossy());
+        state.app.storage.save_connections(&[kept.clone(), removed.clone()]).await.unwrap();
+        state
+            .app
+            .storage
+            .save_mcp_global_policy(&McpGlobalPolicy {
+                read_only: false,
+                allow_dangerous_sql: false,
+                allowed_connection_ids: Some(vec![removed.id.clone()]),
+            })
+            .await
+            .unwrap();
+
+        let removed_result = mcp_remove_connection(
+            State(state.clone()),
+            Json(McpRemoveConnectionRequest { connection_id: removed.id.clone() }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{}", error.0));
+        assert!(removed_result.0);
+        assert_eq!(state.app.storage.load_connections().await.unwrap()[0].id, kept.id);
+
+        let scope_error = mcp_remove_connection(
+            State(state.clone()),
+            Json(McpRemoveConnectionRequest { connection_id: kept.id.clone() }),
+        )
+        .await
+        .unwrap_err();
+        assert!(scope_error.0.starts_with("CONNECTION_OUT_OF_SCOPE:"));
+
+        state
+            .app
+            .storage
+            .save_mcp_global_policy(&McpGlobalPolicy {
+                read_only: true,
+                allow_dangerous_sql: false,
+                allowed_connection_ids: None,
+            })
+            .await
+            .unwrap();
+        let read_only_error = mcp_add_connection(
+            State(state.clone()),
+            Json(McpAddConnectionRequest { config: sqlite_config("new", &dir.join("new.db").to_string_lossy()) }),
+        )
+        .await
+        .unwrap_err();
+        assert!(read_only_error.0.starts_with("MCP_READ_ONLY:"));
 
         let _ = std::fs::remove_dir_all(dir);
     }

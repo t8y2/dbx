@@ -3,7 +3,8 @@ use tauri::State;
 
 use crate::commands::connection::{ensure_connection_writable, AppState};
 use dbx_core::db::redis_driver::{
-    RedisCollectionPage, RedisCommandResult, RedisCommandSafety, RedisDatabaseInfo, RedisScanResult, RedisValue,
+    classify_command, parse_command_argv, RedisCollectionPage, RedisCommandResult, RedisCommandSafety,
+    RedisDatabaseInfo, RedisScanResult, RedisValue,
 };
 
 #[tauri::command]
@@ -295,10 +296,12 @@ pub async fn redis_execute_command(
     command: String,
     skip_safety_check: Option<bool>,
 ) -> Result<RedisCommandResult, String> {
+    let argv = parse_command_argv(&command).map_err(|error| format!("Invalid Redis command: {error}"))?;
+    let cmd_name = argv[0].to_ascii_uppercase();
+    let safety = classify_command(&cmd_name);
     // In read-only mode, only allow safe read commands through the raw command interface
     if let Some(name) = dbx_core::query::connection_readonly_name(&state, &connection_id).await {
-        let cmd_name = command.split_whitespace().next().unwrap_or("");
-        if dbx_core::db::redis_driver::classify_command(cmd_name) != RedisCommandSafety::Allowed {
+        if safety != RedisCommandSafety::Allowed {
             return Err(format!(
                 "Read-only mode: connection '{}' has read-only protection enabled. Command '{}' blocked.",
                 name, cmd_name

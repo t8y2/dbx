@@ -948,6 +948,7 @@ mod tests {
             persistent: true,
             partitioned: None,
             message_type: None,
+            ..TopicRef::default()
         };
 
         let params = reset_cursor_params(&topic, "group-a", ResetPosition::Timestamp { timestamp_ms: 1710000000000 })

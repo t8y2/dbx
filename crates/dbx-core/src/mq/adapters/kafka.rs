@@ -841,6 +841,7 @@ mod tests {
             persistent: true,
             partitioned: None,
             message_type: None,
+            ..TopicRef::default()
         };
 
         let params = reset_cursor_params(&topic, "group-a", ResetPosition::Timestamp { timestamp_ms: 1710000000000 })
@@ -861,6 +862,7 @@ mod tests {
             persistent: true,
             partitioned: None,
             message_type: None,
+            ..TopicRef::default()
         };
 
         let err = reset_cursor_params(&topic, "group-a", ResetPosition::MessageId { ledger_id: 1, entry_id: 2 })

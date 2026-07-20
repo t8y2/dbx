@@ -743,6 +743,7 @@ mod tests {
                 persistent: true,
                 partitioned: None,
                 message_type: None,
+                ..TopicRef::default()
             },
             None,
         )
@@ -786,6 +787,7 @@ mod tests {
                 persistent: true,
                 partitioned: None,
                 message_type: None,
+                ..TopicRef::default()
             },
             "sub-a".to_string(),
             101,
